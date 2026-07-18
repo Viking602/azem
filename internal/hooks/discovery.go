@@ -177,10 +177,6 @@ func (r *Registry) load(path string, options Options, seen map[string]bool) {
 				if h.Timeout > 0 {
 					timeout = time.Duration(h.Timeout * float64(time.Second))
 				}
-				if timeout > 10*time.Minute {
-					r.diag(path, event, fmt.Errorf("timeout exceeds 600 seconds"))
-					continue
-				}
 				policy := h.FailurePolicy
 				if policy == "" {
 					policy = options.FailurePolicy

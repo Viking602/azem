@@ -79,7 +79,7 @@ func TestDiscoveryRegistersEveryClaudeEventAndAzemExtension(t *testing.T) {
 
 func TestClaudeCommandOptionsAndPermissionCondition(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	settings := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo ok","if":"Bash(git *)","shell":"bash","timeout":600,"statusMessage":"Checking git","once":true,"async":true}]}]}}`
+	settings := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo ok","if":"Bash(git *)","shell":"bash","timeout":86400,"statusMessage":"Checking git","once":true,"async":true}]}]}}`
 	if err := os.WriteFile(path, []byte(settings), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestClaudeCommandOptionsAndPermissionCondition(t *testing.T) {
 		t.Fatalf("commands = %#v", commands)
 	}
 	command := commands[0]
-	if command.Shell != "bash" || command.Timeout != 10*time.Minute || command.StatusMessage != "Checking git" || !command.Once || !command.Async || command.AsyncRewake {
+	if command.Shell != "bash" || command.Timeout != 24*time.Hour || command.StatusMessage != "Checking git" || !command.Once || !command.Async || command.AsyncRewake {
 		t.Fatalf("command options = %#v", command)
 	}
 	if !command.MatchesCondition(Envelope{ToolName: "coding.shell", ToolInput: json.RawMessage(`{"command":"git status"}`)}) {
