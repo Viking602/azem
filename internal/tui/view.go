@@ -436,10 +436,10 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 }
 
 func (m AppModel) renderUserMessage(content string, width int) []string {
-	textWidth := max(1, width-7)
+	textWidth := max(1, width-2)
 	lines := make([]string, 0)
 	for _, line := range wrapText(content, textWidth) {
-		lines = append(lines, "    "+m.theme.UserAccent.Render("│")+"  "+m.theme.User.Render(line))
+		lines = append(lines, m.theme.UserAccent.Render("▌")+" "+m.theme.User.Render(line))
 	}
 	return lines
 }
