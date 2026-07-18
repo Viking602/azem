@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -116,7 +119,7 @@ func (s *retryingStream) Recv() (hyprovider.Event, error) {
 		if event.Kind == hyprovider.EventError && event.Err != nil {
 			cause = event.Err
 		}
-		if !isConnectionReset(cause) {
+		if !isRetryableProviderTransport(cause) {
 			if recvErr == nil && event.Kind != hyprovider.EventError && event.Kind != hyprovider.EventDone {
 				s.emitted = true
 			}
@@ -158,8 +161,8 @@ func openProviderStream(ctx context.Context, open func() (hyprovider.Stream, err
 		if err == nil {
 			return stream, retries, nil
 		}
-		if !isConnectionReset(err) || retries >= maxProviderStreamRetries {
-			if isConnectionReset(err) {
+		if !isRetryableProviderTransport(err) || retries >= maxProviderStreamRetries {
+			if isRetryableProviderTransport(err) {
 				err = fmt.Errorf("provider stream failed after %d retries: %w", maxProviderStreamRetries, err)
 			}
 			return nil, retries, err
@@ -197,18 +200,42 @@ func streamFailure(event hyprovider.Event, err error) (hyprovider.Event, error) 
 	return hyprovider.Event{}, err
 }
 
-func isConnectionReset(err error) bool {
+func isRetryableProviderTransport(err error) bool {
 	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	var apiError *responses.APIError
 	if errors.As(err, &apiError) && apiError.Kind != responses.ErrorServer && apiError.Kind != responses.ErrorStream {
 		return false
 	}
+	if apiError != nil && apiError.Kind == responses.ErrorStream && strings.EqualFold(strings.TrimSpace(apiError.Message), "EOF") {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var urlError *url.Error
+	if errors.As(err, &urlError) && urlError.Err != nil && isRetryableProviderTransport(urlError.Err) {
+		return true
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
+		return true
+	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "upstream connection reset") ||
 		strings.Contains(message, "connection reset by peer") ||
-		strings.Contains(message, "connection reset")
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "tls: bad record mac") ||
+		strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "broken pipe") ||
+		strings.Contains(message, "server closed idle connection") ||
+		strings.Contains(message, "client connection lost") ||
+		strings.Contains(message, "connection aborted") ||
+		strings.Contains(message, "use of closed network connection")
 }
 
 func providerStreamRetryDelay(attempt int) time.Duration {

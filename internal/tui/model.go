@@ -10,7 +10,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/provider/catalog"
+	"github.com/Viking602/azem/internal/session"
 )
 
 type BlockKind string
@@ -20,10 +22,24 @@ const (
 	BlockThinking  BlockKind = "thinking"
 	BlockAssistant BlockKind = "assistant"
 	BlockTool      BlockKind = "tool"
+	BlockApproval  BlockKind = "approval"
 	BlockAgent     BlockKind = "agent"
 	BlockDiff      BlockKind = "diff"
+	BlockHook      BlockKind = "hook"
 	BlockError     BlockKind = "error"
 )
+
+type HookRunView struct {
+	Key        string
+	Event      string
+	Name       string
+	Source     string
+	State      string
+	DurationMS int64
+	Reason     string
+	Output     string
+	Truncated  bool
+}
 
 type Block struct {
 	ID         string
@@ -36,6 +52,7 @@ type Block struct {
 	Collapsed  bool
 	State      string
 	Orphaned   bool
+	Hooks      []HookRunView
 }
 
 type transcriptBlockLayout struct {
@@ -60,12 +77,14 @@ const (
 	OverlayProvider    Overlay = "provider"
 	OverlayModel       Overlay = "model"
 	OverlaySkills      Overlay = "skills"
+	OverlayLanguage    Overlay = "language"
 	OverlayReasoning   Overlay = "reasoning"
 	OverlaySessions    Overlay = "sessions"
 	OverlayApproval    Overlay = "approval"
 	OverlayCancel      Overlay = "cancel"
 	OverlayDiff        Overlay = "diff"
 	OverlayAgents      Overlay = "agents"
+	OverlayTodos       Overlay = "todos"
 	OverlayAgentDetail Overlay = "agent_detail"
 	OverlayAgentTypes  Overlay = "agent_types"
 	OverlayPersonas    Overlay = "personas"
@@ -120,6 +139,7 @@ type AgentCatalogView struct {
 }
 
 type SkillCatalogView = app.SkillCatalogEntry
+type TodoView = session.TodoList
 
 type MCPView struct {
 	Name      string `json:"name"`
@@ -192,6 +212,7 @@ type AppModel struct {
 	runtime             Runtime
 	initialCmd          tea.Cmd
 	theme               Theme
+	catalog             i18n.Catalog
 	composer            textarea.Model
 	modelSearch         textinput.Model
 	commandCursor       int
@@ -225,6 +246,8 @@ type AppModel struct {
 	actionBusy          bool
 	actionCancel        func()
 	agents              []AgentView
+	todo                TodoView
+	todoHideCompleted   bool
 	detailAgentID       string
 	agentTypes          []AgentCatalogView
 	personas            []AgentCatalogView
@@ -243,9 +266,10 @@ type AppModel struct {
 
 func NewModel(runtime Runtime, workspace string, provider string, model string, reasoning string, mode string, initialSessionID ...string) AppModel {
 	theme := DefaultTheme()
+	catalog := i18n.Must(i18n.DefaultLanguage)
 	composer := textarea.New()
 	composer.Prompt = "› "
-	composer.Placeholder = "Describe the change or investigation"
+	composer.Placeholder = catalog.T("composer.placeholder")
 	composer.ShowLineNumbers = false
 	composer.CharLimit = 64 * 1024
 	composer.DynamicHeight = true
@@ -254,6 +278,7 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	composer.MaxContentHeight = 32
 	composer.SetHeight(1)
 	composer.SetWidth(76)
+	composer.SetVirtualCursor(false)
 	styles := composer.Styles()
 	styles.Focused.Text = theme.Assistant
 	styles.Focused.Prompt = theme.Header
@@ -261,10 +286,12 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	styles.Blurred.Text = theme.Muted
 	styles.Blurred.Prompt = theme.Muted
 	styles.Blurred.Placeholder = theme.Muted
+	styles.Cursor.Color = theme.Cursor.GetForeground()
+	styles.Cursor.Shape = tea.CursorBar
 	composer.SetStyles(styles)
 	modelSearch := textinput.New()
-	modelSearch.Prompt = "SEARCH › "
-	modelSearch.Placeholder = "provider or model"
+	modelSearch.Prompt = catalog.T("search.prompt")
+	modelSearch.Placeholder = catalog.T("search.placeholder")
 	modelSearch.CharLimit = 128
 	modelSearch.SetWidth(64)
 	searchStyles := modelSearch.Styles()
@@ -274,6 +301,8 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	searchStyles.Blurred.Text = theme.Muted
 	searchStyles.Blurred.Prompt = theme.Muted
 	searchStyles.Blurred.Placeholder = theme.Muted
+	searchStyles.Cursor.Color = theme.Cursor.GetForeground()
+	searchStyles.Cursor.Shape = tea.CursorBar
 	modelSearch.SetStyles(searchStyles)
 	focus := composer.Focus()
 	sessionID := "default"
@@ -281,13 +310,45 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 		sessionID = initialSessionID[0]
 	}
 	return AppModel{
-		runtime: runtime, initialCmd: focus, theme: theme, composer: composer, modelSearch: modelSearch,
+		runtime: runtime, initialCmd: focus, theme: theme, catalog: catalog, composer: composer, modelSearch: modelSearch,
 		width: 80, height: 24, sessionID: sessionID, provider: provider, model: model,
 		reasoning: reasoning, agentMode: mode, workspace: workspace, status: "Ready", approvalMode: ApprovalModePrompt,
 		focus: focusComposer, transcriptCursor: -1, transcriptLayout: &transcriptLayoutCache{},
 		auth: make(map[string]AuthView), modelsByProvider: make(map[string][]ModelChoice),
 		reducedMotion: os.Getenv("AZEM_REDUCED_MOTION") == "1" || os.Getenv("REDUCED_MOTION") == "1",
 	}
+}
+
+// SetLanguage changes only presentation strings; runtime and persisted states remain stable English values.
+func (m *AppModel) SetLanguage(language string) error {
+	catalog, err := i18n.New(language)
+	if err != nil {
+		return err
+	}
+	m.catalog = catalog
+	m.composer.Placeholder = catalog.T("composer.placeholder")
+	m.modelSearch.Prompt = catalog.T("search.prompt")
+	m.modelSearch.Placeholder = catalog.T("search.placeholder")
+	if m.transcriptLayout != nil {
+		m.transcriptLayout.initialized = false
+	}
+	return nil
+}
+
+func (m AppModel) tr(key string, args ...map[string]string) string { return m.catalog.T(key, args...) }
+
+func (m AppModel) displayState(state string) string {
+	keys := map[string]string{
+		"Ready": "status.ready", "Starting": "status.starting", "Running": "status.running",
+		"Awaiting approval": "status.awaiting_approval", "Reviewing approval": "status.reviewing_approval",
+		"Cancelling": "status.cancelling", "Failed": "status.failed", "Recovery attention": "status.recovery_attention",
+		"completed": "status.completed", "denied": "status.denied", "streaming": "status.streaming",
+		"failed": "status.failed", "running": "status.running",
+	}
+	if key := keys[state]; key != "" {
+		return m.tr(key)
+	}
+	return state
 }
 
 func (m AppModel) Init() tea.Cmd {
@@ -314,6 +375,14 @@ func (m *AppModel) openOverlay(overlay Overlay) {
 	if overlay == OverlayReasoning {
 		for index, level := range m.reasoningLevels() {
 			if level == m.reasoning {
+				m.overlayCursor = index
+				break
+			}
+		}
+	}
+	if overlay == OverlayLanguage {
+		for index, language := range i18n.Languages() {
+			if language == m.catalog.Language() {
 				m.overlayCursor = index
 				break
 			}

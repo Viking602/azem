@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,89 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// UpdateDefault atomically updates one persisted UI default while preserving
+// unrelated YAML fields and comments in the user's configuration file.
+func UpdateDefault(path, key, value string) error {
+	if key != "language" && key != "approval_mode" {
+		return fmt.Errorf("unsupported default %q", key)
+	}
+	var document yaml.Node
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		document = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
+	} else if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("decode config for update: %w", err)
+	}
+	root := document.Content[0]
+	defaults := mappingValue(root, "defaults")
+	if defaults == nil {
+		defaults = &yaml.Node{Kind: yaml.MappingNode}
+		root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "defaults"}, defaults)
+	}
+	setMappingScalar(defaults, key, value)
+
+	var encoded bytes.Buffer
+	encoder := yaml.NewEncoder(&encoded)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&document); err != nil {
+		return fmt.Errorf("encode config update: %w", err)
+	}
+	_ = encoder.Close()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
+	if err != nil {
+		return fmt.Errorf("create config update: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err == nil {
+		_, err = temporary.Write(encoded.Bytes())
+	}
+	closeErr := temporary.Close()
+	if err != nil {
+		return fmt.Errorf("write config update: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close config update: %w", closeErr)
+	}
+	if err := os.Rename(temporaryName, path); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+	return nil
+}
+
+func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	return nil
+}
+
+func setMappingScalar(mapping *yaml.Node, key, value string) {
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			mapping.Content[index+1].Kind = yaml.ScalarNode
+			mapping.Content[index+1].Tag = "!!str"
+			mapping.Content[index+1].Value = value
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
+	)
+}
 
 func Load(path string, startupWorkspace string) (Config, error) {
 	cfg := Default()
@@ -50,6 +134,12 @@ func Load(path string, startupWorkspace string) (Config, error) {
 			directory = filepath.Join(configDir, directory)
 		}
 		cfg.Skills.AdditionalDirs[i] = filepath.Clean(directory)
+	}
+	for i, hookPath := range cfg.Hooks.AdditionalPaths {
+		if !filepath.IsAbs(hookPath) {
+			hookPath = filepath.Join(configDir, hookPath)
+		}
+		cfg.Hooks.AdditionalPaths[i] = filepath.Clean(hookPath)
 	}
 	explicitRoles := make(map[string]bool)
 	for name, role := range cfg.Agents.Subagents.Roles {

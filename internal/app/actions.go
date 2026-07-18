@@ -16,6 +16,8 @@ import (
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
+	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -38,6 +40,7 @@ const (
 	ActionCompact          ActionKind = "compact"
 	ActionResolveApproval  ActionKind = "resolve_approval"
 	ActionSetApprovalMode  ActionKind = "set_approval_mode"
+	ActionSetLanguage      ActionKind = "set_language"
 	ActionReconcileAttempt ActionKind = "reconcile_attempt"
 	ActionInspectAgent     ActionKind = "inspect_agent"
 	ActionListAgentTypes   ActionKind = "list_agent_types"
@@ -82,6 +85,26 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		return s.emitSkillCatalog(ctx, "reloaded")
 	case ActionSetApprovalMode:
 		return s.setApprovalMode(ctx, ApprovalMode(action.Target))
+	case ActionSetLanguage:
+		if action.Target != "en" && action.Target != "zh-CN" {
+			return fmt.Errorf("invalid language %q", action.Target)
+		}
+		if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(s.currentSession, ""), func(e *hooks.Envelope) {
+			e.Source, e.FilePath = "user_settings", s.configPath
+		}); err != nil {
+			return err
+		}
+		if s.configPath != "" {
+			if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+				return config.UpdateDefault(s.configPath, "language", action.Target)
+			}); err != nil {
+				return err
+			}
+		}
+		s.mu.Lock()
+		s.cfg.Defaults.Language = action.Target
+		s.mu.Unlock()
+		return nil
 	case ActionResolveApproval:
 		if s.coding == nil {
 			return fmt.Errorf("coding runtime is unavailable")
@@ -150,6 +173,9 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if s.sessions == nil {
 			return fmt.Errorf("session store is unavailable")
 		}
+		if err := s.dispatchLifecycle(ctx, hooks.PreCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) { e.Trigger = "manual" }); err != nil {
+			return err
+		}
 		projection, err := s.sessions.Compact(ctx, action.Target)
 		if err != nil {
 			return err
@@ -158,9 +184,17 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if err != nil {
 			return err
 		}
+		todo, err := s.sessions.LoadTodo(ctx, action.Target)
+		if err != nil {
+			return err
+		}
 		s.emit(ctx, Event{
 			Kind: EventSessionLoaded, SessionID: action.Target, State: "compacted",
-			Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, action.Target),
+			Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, action.Target), Todo: &todo,
+		})
+		_ = s.dispatchLifecycle(ctx, hooks.PostCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) {
+			e.Trigger = "manual"
+			e.CompactSummary = fmt.Sprintf("Session compacted to %d persisted blocks.", len(projection.Blocks))
 		})
 		return nil
 	case ActionLogin:
@@ -304,6 +338,12 @@ func (s *Service) createSession(ctx context.Context, title string) error {
 		Reasoning: s.cfg.Defaults.Reasoning, AgentMode: s.cfg.Defaults.AgentMode,
 	}}
 	s.emit(ctx, Event{Kind: EventSessionLoaded, SessionID: id, State: "new", Data: sessionProjectionData(projection, "[]")})
+	if err := s.switchSessionHooks(ctx, id, "clear", projection.Session.ModelID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.currentSession = id
+	s.mu.Unlock()
 	return nil
 }
 
@@ -322,10 +362,20 @@ func (s *Service) emitSession(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	todo, err := s.sessions.LoadTodo(ctx, id)
+	if err != nil {
+		return err
+	}
 	s.emit(ctx, Event{
 		Kind: EventSessionLoaded, SessionID: id, State: "loaded",
-		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, id),
+		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo,
 	})
+	if err := s.switchSessionHooks(ctx, id, "resume", projection.Session.ModelID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.currentSession = id
+	s.mu.Unlock()
 	return nil
 }
 

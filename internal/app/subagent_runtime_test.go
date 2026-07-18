@@ -379,13 +379,13 @@ func TestDecodeSubagentSpawnInputTracksPresenceAndDefaults(t *testing.T) {
 
 	explicit, err := decodeSubagentSpawnInput(json.RawMessage(`{
 		"prompt":"verify","description":"run checks","subagent_type":"verify","background":false,
-		"capability_mode":"execute","isolation":"none","cwd":"./nested","model":"model"
+		"capability_mode":"execute","isolation":"none","cwd":"./nested","model":"model","todo_item_id":"item-1"
 	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !explicit.SubagentTypeSet || explicit.SubagentType != "verify" || !explicit.BackgroundSet || explicit.Background ||
-		!explicit.CapabilityModeSet || explicit.IsolationSet || explicit.Isolation != "none" || !explicit.CWDSet || !explicit.ModelSet {
+		!explicit.CapabilityModeSet || explicit.IsolationSet || explicit.Isolation != "none" || !explicit.CWDSet || !explicit.ModelSet || explicit.TodoItemID != "item-1" {
 		t.Fatalf("explicit input = %#v", explicit)
 	}
 
@@ -412,6 +412,50 @@ func TestDecodeSubagentSpawnInputTracksPresenceAndDefaults(t *testing.T) {
 
 	if _, err := decodeSubagentSpawnInput(json.RawMessage(`{"prompt":"x","description":"x","cwd":"nested","isolation":"worktree"}`)); err == nil {
 		t.Fatal("fresh cwd/worktree combination was accepted")
+	}
+}
+
+func TestSubagentTodoBindingPreservesStatusAndEmitsSnapshot(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	sessions := session.NewService(providerStore.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Todo"}); err != nil {
+		t.Fatal(err)
+	}
+	initialized, err := sessions.UpdateTodo(ctx, "session", 0, func(todo *session.TodoList) error {
+		todo.Goal = "delegate"
+		todo.Phases = []session.TodoPhase{{Title: "Research", Items: []session.TodoItem{{Content: "inspect", Status: session.TodoInProgress}}}}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, config.Default())
+	host.sessions = sessions
+	parent := subagentParentRuntime{SessionID: "session", Host: host}
+	itemID := initialized.Phases[0].Items[0].ID
+	revision, err := prepareSubagentTodoBinding(ctx, parent, itemID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := commitSubagentTodoBinding(ctx, parent, itemID, "subagent-1", revision); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := sessions.LoadTodo(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := updated.Phases[0].Items[0]
+	if item.SubagentRunID != "subagent-1" || item.Status != session.TodoInProgress || updated.Revision != initialized.Revision+1 {
+		t.Fatalf("bound todo=%+v", updated)
+	}
+	event, err := host.NextEvent(ctx)
+	if err != nil || event.Kind != EventTodoUpdated || event.Todo == nil || event.Todo.Revision != updated.Revision {
+		t.Fatalf("todo event=%+v err=%v", event, err)
 	}
 }
 

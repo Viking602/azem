@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,6 +16,81 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 	if _, err := Load(path, root); err == nil {
 		t.Fatal("Load accepted an unknown field")
+	}
+}
+
+func TestHooksConfigDefaultsAndLoad(t *testing.T) {
+	cfg := Default()
+	if !cfg.Hooks.Enabled || cfg.Hooks.TrustProject || !cfg.Hooks.ClaudeCompatibility || cfg.Hooks.DefaultTimeoutParsed != 5*time.Second || cfg.Hooks.FailurePolicy != "open" {
+		t.Fatalf("hook defaults = %#v", cfg.Hooks)
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nhooks:\n  default_timeout: 2s\n  failure_policy: closed\n  additional_paths: [hooks]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Hooks.DefaultTimeoutParsed != 2*time.Second || cfg.Hooks.AdditionalPaths[0] != filepath.Join(root, "hooks") {
+		t.Fatalf("loaded hooks = %#v", cfg.Hooks)
+	}
+	cfg.Hooks.FailurePolicy = "unsafe"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("invalid hook failure policy accepted")
+	}
+}
+
+func TestLanguageDefaultAndValidation(t *testing.T) {
+	cfg := Default()
+	if cfg.Defaults.Language != "en" {
+		t.Fatalf("language = %q", cfg.Defaults.Language)
+	}
+	if cfg.Defaults.ApprovalMode != "prompt" {
+		t.Fatalf("approval mode = %q", cfg.Defaults.ApprovalMode)
+	}
+	cfg.Defaults.Language = "zh-CN"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Defaults.Language = "zh"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unsupported language accepted")
+	}
+	cfg = Default()
+	cfg.Defaults.ApprovalMode = "unsafe"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unsupported approval mode accepted")
+	}
+}
+
+func TestUpdateDefaultPersistsSelectionsAndPreservesConfig(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# keep this comment\nversion: 1\ndefaults:\n  provider: grok\nworkspace:\n  allow_write: true\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateDefault(path, "language", "zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateDefault(path, "approval_mode", "yolo"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# keep this comment") {
+		t.Fatalf("config comment was lost:\n%s", data)
+	}
+	cfg, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Defaults.Language != "zh-CN" || cfg.Defaults.ApprovalMode != "yolo" || cfg.Defaults.Provider != "grok" || !cfg.Workspace.AllowWrite {
+		t.Fatalf("persisted config = %#v", cfg)
 	}
 }
 

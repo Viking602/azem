@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/recovery"
@@ -112,6 +114,25 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 		return BootstrapResult{}, err
 	}
 	service := NewService(ctx, cfg)
+	sources := hookSources(cfg.Hooks, configDir, homeDir, paths.Workspace)
+	hookOptions := hooks.Options{Sources: sources, DefaultTimeout: cfg.Hooks.DefaultTimeoutParsed, FailurePolicy: hooks.FailurePolicy(cfg.Hooks.FailurePolicy)}
+	registry := hooks.Discover(hookOptions)
+	service.AttachHooks(hooks.Dispatcher{Registry: registry, Runner: hooks.Runner{Workspace: paths.Workspace}})
+	service.hookOptions = hookOptions
+	for _, source := range sources {
+		if filepath.Ext(source.Path) != ".json" {
+			continue
+		}
+		kind := "user_settings"
+		if strings.HasPrefix(filepath.Clean(source.Path), filepath.Clean(paths.Workspace)+string(filepath.Separator)) {
+			kind = "project_settings"
+		}
+		if strings.HasSuffix(source.Path, "settings.local.json") {
+			kind = "local_settings"
+		}
+		service.ensureHookWatcher().watchConfig(source.Path, kind)
+	}
+	service.SetConfigPath(paths.ConfigFile)
 	service.AttachDurable(sessions, coding)
 	service.AttachAuth(authentication, modelCatalog)
 	service.AttachSkills(skillCatalog)
@@ -119,7 +140,7 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 		return config.ResolveReference(reference, os.LookupEnv, authservice.LookupKeyringSecret)
 	}, mcpruntime.Options{Sink: func(event mcpruntime.Event) {
 		service.emit(service.ctx, Event{Kind: EventMCPState, State: string(event.State), Text: event.Error, Data: map[string]string{"server": event.Server, "state": string(event.State), "error": event.Error}})
-	}})
+	}, Elicitation: service.handleMCPElicitation})
 	service.AttachAgentExtensions(manager, subagentRuns)
 	var teamResumer recovery.TeamResumer
 	if os.Getenv("AZEM_FAKE_PROVIDER") != "1" {
@@ -138,6 +159,21 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	}
 	service.AttachRecovery(recoverySummary)
 	service.AttachReconcileResolver(store)
+	if err := service.dispatchLifecycle(ctx, hooks.Setup, service.hookMetadata(startupSessionID, ""), func(e *hooks.Envelope) { e.Trigger = "init" }); err != nil {
+		_ = store.Close(ctx)
+		return BootstrapResult{}, err
+	}
+	for _, entry := range skillCatalog.Snapshot().Entries {
+		if entry.Eager && !entry.Bundled {
+			service.emitInstructionsLoaded(ctx, entry.SourcePath, instructionMemoryType(entry.SourcePath, homeDir, paths.Workspace), "session_start")
+		}
+	}
+	for _, role := range cfg.Agents.Subagents.Roles {
+		service.emitInstructionsLoaded(ctx, role.InstructionsFile, instructionMemoryType(role.InstructionsFile, homeDir, paths.Workspace), "session_start")
+	}
+	for _, persona := range cfg.Agents.Subagents.Personas {
+		service.emitInstructionsLoaded(ctx, persona.InstructionsFile, instructionMemoryType(persona.InstructionsFile, homeDir, paths.Workspace), "session_start")
+	}
 	service.wg.Add(1)
 	go func() {
 		defer service.wg.Done()
@@ -145,12 +181,26 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 		_ = service.emitMCPSnapshot(service.ctx)
 	}()
 	service.Bootstrap()
+	for _, diagnostic := range registry.Diagnostics {
+		service.emitHookEvent(Event{Kind: EventHookDiagnostic, State: "failed", Text: diagnostic.Message, Data: map[string]string{"event": string(diagnostic.Event), "source": diagnostic.Source, "reason": diagnostic.Message}})
+	}
 	service.wg.Add(1)
 	go func() {
 		defer service.wg.Done()
 		service.emitAuthCatalog(service.ctx)
 	}()
 	return BootstrapResult{Config: cfg, Paths: paths, SessionID: startupSessionID, Service: service}, nil
+}
+
+func instructionMemoryType(path, homeDir, workspace string) string {
+	path = filepath.Clean(path)
+	if relative, err := filepath.Rel(workspace, path); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "Project"
+	}
+	if relative, err := filepath.Rel(homeDir, path); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "User"
+	}
+	return "Managed"
 }
 
 func directoryOf(path string) string {

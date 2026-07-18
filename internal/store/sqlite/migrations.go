@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -144,6 +144,13 @@ var migrations = []string{
 	UPDATE subagent_runs SET state='completed' WHERE state='succeeded';
 	CREATE INDEX IF NOT EXISTS subagent_runs_session_started ON subagent_runs(session_id, started_at);
 	CREATE INDEX IF NOT EXISTS subagent_runs_parent_state ON subagent_runs(parent_run_id, state);`,
+	`CREATE TABLE session_todos (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+		goal TEXT NOT NULL DEFAULT '',
+		revision INTEGER NOT NULL DEFAULT 0,
+		phases BLOB NOT NULL DEFAULT '[]',
+		updated_at INTEGER NOT NULL
+	);`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

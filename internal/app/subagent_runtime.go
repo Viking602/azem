@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -67,6 +69,7 @@ type activeSubagent struct {
 	run                 agentservice.SubagentRun
 	profile             effectiveSubagentProfile
 	prompt              string
+	privateContext      string
 	parent              subagentParentRuntime
 	ctx                 context.Context
 	cancel              context.CancelFunc
@@ -130,6 +133,10 @@ func (r *subagentRuntime) Drivers(parent subagentParentRuntime) ([]tool.Driver, 
 }
 
 func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, parent subagentParentRuntime) (agentservice.SubagentRun, error) {
+	return r.spawn(input, parent, nil)
+}
+
+func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentRuntime, beforeEnqueue func(agentservice.SubagentRun) error) (agentservice.SubagentRun, error) {
 	var profile effectiveSubagentProfile
 	var err error
 	if input.ResumeFrom != "" {
@@ -152,8 +159,28 @@ func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, par
 		CapabilityMode: profile.CapabilityMode, RequestedIsolation: profile.RequestedIsolation, Isolation: profile.Isolation,
 		CWD: profile.CWD, Background: input.Background, StartedAt: now,
 	}
+	if parent.Host != nil {
+		metadata := hooks.Metadata{SessionID: run.SessionID, RunID: run.ParentRunID, AgentID: run.ID, AgentType: run.Type, ParentRunID: run.ParentRunID, ParentToolCallID: run.ParentToolCallID, CWD: run.CWD}
+		if err := parent.Host.dispatchLifecycle(parent.Host.ctx, hooks.TaskCreated, metadata, func(e *hooks.Envelope) {
+			e.TaskID, e.TaskSubject, e.TaskDescription = run.ID, run.Description, input.Prompt
+		}); err != nil {
+			return run, err
+		}
+	}
 	if err := r.store.Create(r.ctx, run); err != nil {
 		return agentservice.SubagentRun{}, fmt.Errorf("create subagent task: %w", err)
+	}
+	if beforeEnqueue != nil {
+		if err := beforeEnqueue(run); err != nil {
+			run.State = agentservice.SubagentFailed
+			run.Summary = "failed before enqueue"
+			run.Error = err.Error()
+			run.FinishedAt = time.Now().UTC()
+			if saveErr := r.store.Save(r.ctx, run); saveErr != nil {
+				return run, errors.Join(err, fmt.Errorf("persist failed subagent: %w", saveErr))
+			}
+			return run, err
+		}
 	}
 	childCtx, cancel := context.WithCancel(r.ctx)
 	active := &activeSubagent{
@@ -167,7 +194,6 @@ func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, par
 	}
 	r.mu.Unlock()
 	r.emitState(run, "initializing")
-
 	r.mu.Lock()
 	active.run.State = agentservice.SubagentQueued
 	active.run.Summary = "queued"
@@ -176,6 +202,33 @@ func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, par
 	if err := r.store.Save(r.ctx, queued); err != nil {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("persist queued subagent: %w", err)})
 		return r.snapshot(id, parent.SessionID).Run, nil
+	}
+	if parent.Host != nil {
+		metadata := hooks.Metadata{SessionID: queued.SessionID, RunID: queued.ParentRunID, AgentID: queued.ID, AgentType: queued.Type, ParentRunID: queued.ParentRunID, ParentToolCallID: queued.ParentToolCallID, CWD: queued.CWD}
+		decision := parent.Host.hooks.Dispatch(parent.Host.ctx, hooks.Envelope{
+			SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID, AgentType: metadata.AgentType,
+			ParentRunID: metadata.ParentRunID, ParentToolCallID: metadata.ParentToolCallID, CWD: metadata.CWD,
+			HookEventName: hooks.SubagentStart, Trigger: string(queued.State), TaskID: queued.ID,
+			TaskSubject: queued.Description, TaskDescription: input.Prompt,
+		})
+		if decision.PreventContinuation {
+			err := fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, decision.StopReason)
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
+			return r.snapshot(id, parent.SessionID).Run, err
+		}
+		var additional []string
+		for _, hookRun := range decision.Runs {
+			if text := strings.TrimSpace(hookRun.Output.HookSpecificOutput.AdditionalContext); text != "" {
+				additional = append(additional, text)
+			}
+		}
+		if len(additional) > 0 {
+			r.mu.Lock()
+			if current := r.active[id]; current != nil {
+				current.privateContext = strings.Join(additional, "\n")
+			}
+			r.mu.Unlock()
+		}
 	}
 	r.mu.Lock()
 	if current := r.active[id]; current != nil && !current.terminalizing {
@@ -353,7 +406,12 @@ func (r *subagentRuntime) execute(id string) {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: panicErr})
 	}()
 	if profile.RequestedIsolation == "worktree" {
-		prepared := prepareSubagentWorktree(ctx, profile.CWD, r.worktreeRoot, id)
+		oldCWD := profile.CWD
+		prepared, prepareErr := r.prepareWorktree(ctx, parent, profile, id)
+		if prepareErr != nil {
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: prepareErr})
+			return
+		}
 		profile.CWD = prepared.CWD
 		profile.Isolation = prepared.Isolation
 		profile.WorktreeRepoRoot = prepared.RepoRoot
@@ -373,6 +431,10 @@ func (r *subagentRuntime) execute(id string) {
 		active.run.WorktreePath = prepared.Path
 		active.run.Warning = appendWarning(active.run.Warning, prepared.Warning)
 		r.mu.Unlock()
+		if parent.Host != nil && prepared.CWD != oldCWD {
+			metadata := hooks.Metadata{SessionID: active.run.SessionID, RunID: active.run.ParentRunID, AgentID: id, AgentType: profile.Type, ParentRunID: active.run.ParentRunID, ParentToolCallID: parentToolCallID, CWD: prepared.CWD}
+			_ = parent.Host.dispatchLifecycle(ctx, hooks.CwdChanged, metadata, func(e *hooks.Envelope) { e.OldCWD, e.NewCWD = oldCWD, prepared.CWD })
+		}
 	}
 
 	var err error
@@ -395,11 +457,18 @@ func (r *subagentRuntime) execute(id string) {
 		if !allowed[definition.Name] {
 			continue
 		}
-		governed = append(governed, &governedAgentTool{
+		governedDriver := &governedAgentTool{
 			definition: definition, driver: driver, coding: parent.Coding, run: childRun, host: parent.Host,
 			sessionID: parent.SessionID, agentID: id, agentType: profile.Type, parentToolCallID: parentToolCallID,
 			streamRunID: childRun.RunID, update: func(update tool.Update) { r.handleToolUpdate(id, update) },
-		})
+		}
+		metadata := hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type,
+			ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD}
+		dispatcher := hooks.Dispatcher{}
+		if parent.Host != nil {
+			dispatcher = parent.Host.hooks
+		}
+		governed = append(governed, hooks.WrapDriver(dispatcher, metadata, governedDriver))
 		toolNames = append(toolNames, definition.Name)
 	}
 	skillSnapshot := parent.Coding.SkillSnapshot()
@@ -409,14 +478,45 @@ func (r *subagentRuntime) execute(id string) {
 		Instructions: instructions, Model: profile.Model, Tools: toolNames,
 		LoopPolicy: hyagent.LoopPolicy{MaxIterations: r.cfg.Budget.MaxTurns, MaxWallClock: r.cfg.Budget.MaxWallClockDuration},
 	}
+	contextManager := subagentTurnContext{instructions: instructions, privateContext: active.privateContext, seed: profile.Seed}
+	if parent.Host != nil {
+		contextManager.compactHooks = parent.Host.autoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
+	}
 	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
 		Skills:    skillSnapshot.Registry,
-		Providers: hyprovider.Single(parent.Driver), Tools: tool.NewBus(governed...), ContextManager: subagentTurnContext{instructions: instructions, seed: profile.Seed},
+		Providers: hyprovider.Single(parent.Driver), Tools: tool.NewBus(governed...), ContextManager: contextManager,
 	})
 	if err != nil {
 		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", err)
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("build child engine: %w", err)})
 		return
+	}
+	if parent.Host != nil {
+		metadata := hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD}
+		taskCompleted := hyagent.NewOutputGuardrail("claude-task-completed-hook", func(guardCtx context.Context, input hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
+			decision := parent.Host.hooks.Dispatch(guardCtx, hooks.Envelope{
+				SessionID: parent.SessionID, AgentID: id, AgentType: profile.Type, CWD: profile.CWD,
+				HookEventName: hooks.TaskCompleted, TaskID: id, TaskSubject: active.run.Description,
+				TaskDescription: prompt, LastAssistantMessage: strings.TrimSpace(input.Output.Text),
+			})
+			if decision.PreventContinuation {
+				return hyagent.OutputGuardrailResult{}, fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, decision.StopReason)
+			}
+			if !decision.Denied {
+				return hyagent.AllowOutput(), nil
+			}
+			reason := firstNonempty(strings.TrimSpace(decision.Reason), "A TaskCompleted hook requested more work before completion.")
+			return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, message.NewText(message.RoleUser, reason)), nil
+		})
+		engine.OutputGuardrails = append(engine.OutputGuardrails, parent.Host.stopHookGuardrail(metadata, hooks.SubagentStop, func(input hyagent.OutputGuardrailInput) string {
+			messages := append(append([]message.Message(nil), input.Messages...), input.Output)
+			transcript, marshalErr := json.Marshal(messages)
+			if marshalErr != nil {
+				return ""
+			}
+			path, _ := writeSubagentHookTranscript(r.worktreeRoot, id, transcript)
+			return path
+		}), taskCompleted)
 	}
 
 	r.mu.Lock()
@@ -463,6 +563,7 @@ func (r *subagentRuntime) execute(id string) {
 	if result.Failure != nil {
 		runErr = result.Failure
 	}
+	stopHookRan := runErr == nil && ctx.Err() == nil && parent.Host != nil
 	completionCtx, completionCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if completeErr := parent.Coding.CompleteRun(completionCtx, childRun, result.Text, runErr); completeErr != nil {
 		if runErr == nil {
@@ -479,13 +580,14 @@ func (r *subagentRuntime) execute(id string) {
 	} else if runErr != nil {
 		state = agentservice.SubagentFailed
 	}
-	r.terminalize(id, terminalRequest{state: state, err: runErr, result: &result})
+	r.terminalize(id, terminalRequest{state: state, err: runErr, result: &result, stopHookRan: stopHookRan})
 }
 
 type terminalRequest struct {
-	state  agentservice.SubagentState
-	err    error
-	result *hyagent.Result
+	state       agentservice.SubagentState
+	err         error
+	result      *hyagent.Result
+	stopHookRan bool
 }
 
 func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
@@ -542,7 +644,25 @@ func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
 	activity := active.activity
 	worktreeRepoRoot := active.profile.WorktreeRepoRoot
 	r.mu.Unlock()
+	agentTranscriptPath, transcriptWriteErr := writeSubagentHookTranscript(r.worktreeRoot, run.ID, run.Transcript)
+	if transcriptWriteErr != nil {
+		run.Warning = appendWarning(run.Warning, "write hook transcript: "+transcriptWriteErr.Error())
+	}
+	if parentHost != nil && !request.stopHookRan {
+		metadata := hooks.Metadata{SessionID: run.SessionID, RunID: run.ChildRunID, AgentID: run.ID, AgentType: run.Type, ParentRunID: run.ParentRunID, ParentToolCallID: run.ParentToolCallID, CWD: run.CWD}
+		if err := parentHost.dispatchLifecycle(parentHost.ctx, hooks.SubagentStop, metadata, func(e *hooks.Envelope) {
+			e.Trigger, e.StopHookActive, e.LastAssistantMessage = string(run.State), false, run.Output
+			e.AgentTranscriptPath = agentTranscriptPath
+		}); err != nil && run.State == agentservice.SubagentCompleted {
+			run.State, run.Error = agentservice.SubagentFailed, fmt.Sprintf("subagent stop blocked: %v", err)
+		}
+	}
+	removedWorktree := run.WorktreePath
 	finalizeSubagentWorktree(&run, worktreeRepoRoot)
+	if parentHost != nil && removedWorktree != "" && run.WorktreePath == "" {
+		metadata := hooks.Metadata{SessionID: run.SessionID, RunID: run.ChildRunID, AgentID: run.ID, AgentType: run.Type, ParentRunID: run.ParentRunID, ParentToolCallID: run.ParentToolCallID, CWD: run.CWD}
+		_ = parentHost.dispatchLifecycle(parentHost.ctx, hooks.WorktreeRemove, metadata, func(e *hooks.Envelope) { e.WorktreePath = removedWorktree })
+	}
 	run.Summary = subagentSummary(run)
 
 	saveCtx, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -577,6 +697,65 @@ func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
 	r.mu.Unlock()
 	r.emitStateTo(parentHost, run, activity)
 	r.maybeAutoWake(parentHost, run)
+}
+
+func writeSubagentHookTranscript(worktreeRoot, id string, transcript json.RawMessage) (string, error) {
+	if strings.TrimSpace(worktreeRoot) == "" || strings.TrimSpace(id) == "" {
+		return "", nil
+	}
+	directory := filepath.Join(filepath.Dir(worktreeRoot), "hook-transcripts")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(id))
+	path := filepath.Join(directory, fmt.Sprintf("%x.jsonl", digest[:12]))
+	var messages []json.RawMessage
+	if len(transcript) > 0 {
+		if err := json.Unmarshal(transcript, &messages); err != nil {
+			return "", err
+		}
+	}
+	var output bytes.Buffer
+	for _, item := range messages {
+		output.Write(item)
+		output.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, output.Bytes(), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (r *subagentRuntime) prepareWorktree(ctx context.Context, parent subagentParentRuntime, profile effectiveSubagentProfile, id string) (preparedSubagentWorktree, error) {
+	if parent.Host != nil {
+		metadata := hooks.Metadata{SessionID: parent.SessionID, RunID: parent.ParentRunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, CWD: profile.CWD}
+		envelope := hooks.Envelope{SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID, AgentType: metadata.AgentType, ParentRunID: metadata.ParentRunID, CWD: metadata.CWD, HookEventName: hooks.WorktreeCreate, Name: id}
+		decision := parent.Host.hooks.Dispatch(ctx, envelope)
+		if decision.PreventContinuation {
+			return preparedSubagentWorktree{}, fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, decision.StopReason)
+		}
+		if decision.Denied {
+			return preparedSubagentWorktree{}, fmt.Errorf("worktree creation blocked by hook: %s", decision.Reason)
+		}
+		if len(decision.Runs) > 0 {
+			for _, run := range decision.Runs {
+				if run.Failure != nil || run.ExitCode != 0 {
+					return preparedSubagentWorktree{}, fmt.Errorf("worktree hook %q failed", run.Name)
+				}
+				path := strings.TrimSpace(run.Output.HookSpecificOutput.WorktreePath)
+				if path == "" {
+					path = strings.TrimSpace(run.Stdout)
+				}
+				if filepath.IsAbs(path) {
+					if info, err := os.Stat(path); err == nil && info.IsDir() {
+						return preparedSubagentWorktree{CWD: path, Path: path, Isolation: "worktree"}, nil
+					}
+				}
+			}
+			return preparedSubagentWorktree{}, fmt.Errorf("worktree hook returned no valid absolute directory")
+		}
+	}
+	return prepareSubagentWorktree(ctx, profile.CWD, r.worktreeRoot, id), nil
 }
 
 func (r *subagentRuntime) AutoWakePending(sessionID string) {
@@ -945,6 +1124,9 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		event.ToolCallID = frame.ToolResult.ToolCallID
 		event.Text = frame.ToolResult.Content
 		event.Data = childFrameData(frame.Source, parentToolCallID, map[string]string{"name": frame.ToolResult.Name})
+		if len(frame.ToolResult.Structured) > 0 {
+			event.Data["structured"] = string(frame.ToolResult.Structured)
+		}
 		if frame.ToolResult.IsError {
 			event.State = "failed"
 		} else {
@@ -1086,14 +1268,21 @@ func (r *subagentRuntime) parentDone(id string) <-chan struct{} {
 }
 
 type subagentTurnContext struct {
-	instructions string
-	seed         []message.Message
+	instructions   string
+	privateContext string
+	seed           []message.Message
+	compactHooks   func(context.Context, []message.Message, []message.Message, error) error
 }
 
 func (c subagentTurnContext) Build(_ context.Context, task api.Task) ([]message.Message, error) {
 	messages := make([]message.Message, 0, len(c.seed)+2)
 	if instructions := strings.TrimSpace(c.instructions); instructions != "" {
 		messages = append(messages, message.NewText(message.RoleSystem, instructions))
+	}
+	if privateContext := strings.TrimSpace(c.privateContext); privateContext != "" {
+		value := message.NewText(message.RoleSystem, "[Trusted SubagentStart hook context]\n"+privateContext)
+		value.Visibility = message.VisibilityPrivate
+		messages = append(messages, value)
 	}
 	for _, seeded := range c.seed {
 		if seeded.Role != message.RoleSystem {
@@ -1106,20 +1295,37 @@ func (c subagentTurnContext) Build(_ context.Context, task api.Task) ([]message.
 	return messages, nil
 }
 
-func (subagentTurnContext) Compact(_ context.Context, history []message.Message) ([]message.Message, error) {
+func (c subagentTurnContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	if c.compactHooks != nil {
+		if err := c.compactHooks(ctx, history, nil, nil); err != nil {
+			return history, err
+		}
+	}
 	const recentMessages = 20
-	if len(history) <= recentMessages+1 {
+	prefixEnd := 0
+	for prefixEnd < len(history) && history[prefixEnd].Role == message.RoleSystem {
+		prefixEnd++
+	}
+	if len(history) <= recentMessages+prefixEnd {
+		if c.compactHooks != nil {
+			_ = c.compactHooks(ctx, history, history, nil)
+		}
 		return history, nil
 	}
 	start := len(history) - recentMessages
-	for start > 1 && history[start].Role != message.RoleUser {
+	if start < prefixEnd {
+		start = prefixEnd
+	}
+	for start > prefixEnd && history[start].Role != message.RoleUser {
 		start--
 	}
-	compacted := make([]message.Message, 0, len(history)-start+1)
-	if history[0].Role == message.RoleSystem {
-		compacted = append(compacted, history[0])
+	compacted := make([]message.Message, 0, len(history)-start+prefixEnd)
+	compacted = append(compacted, history[:prefixEnd]...)
+	compacted = append(compacted, history[start:]...)
+	if c.compactHooks != nil {
+		_ = c.compactHooks(ctx, history, compacted, nil)
 	}
-	return append(compacted, history[start:]...), nil
+	return compacted, nil
 }
 
 func effectiveSubagentTools(roleTools []string, capability string) map[string]bool {
@@ -1409,6 +1615,7 @@ func resolveSubagentCWD(workspaceRoot, requested string) (string, error) {
 type subagentSpawnInput struct {
 	Prompt            string
 	Description       string
+	TodoItemID        string
 	SubagentType      string
 	SubagentTypeSet   bool
 	Background        bool
@@ -1438,7 +1645,8 @@ func (d *subagentSpawnDriver) Definition() tool.Definition {
 			Type: "object", Required: []string{"prompt", "description"}, AdditionalProperties: &additional,
 			Properties: map[string]tool.Schema{
 				"prompt": {Type: "string"}, "description": {Type: "string"}, "subagent_type": {Type: "string"},
-				"background": {Type: "boolean"}, "capability_mode": {Type: "string", Enum: []string{"read-only", "read-write", "execute", "all"}},
+				"todo_item_id": {Type: "string"},
+				"background":   {Type: "boolean"}, "capability_mode": {Type: "string", Enum: []string{"read-only", "read-write", "execute", "all"}},
 				"isolation": {Type: "string", Enum: []string{"none", "worktree"}}, "resume_from": {Type: "string"},
 				"cwd": {Type: "string"}, "model": {Type: "string"},
 			},
@@ -1453,7 +1661,17 @@ func (d *subagentSpawnDriver) Execute(ctx context.Context, call tool.Call, _ too
 		return subagentToolError(call, err), nil
 	}
 	input.parentToolCallID = call.ID
-	run, err := d.runtime.Spawn(ctx, input, d.parent)
+	todoRevision, err := prepareSubagentTodoBinding(ctx, d.parent, input.TodoItemID)
+	if err != nil {
+		return subagentToolError(call, err), nil
+	}
+	var beforeEnqueue func(agentservice.SubagentRun) error
+	if input.TodoItemID != "" {
+		beforeEnqueue = func(run agentservice.SubagentRun) error {
+			return commitSubagentTodoBinding(ctx, d.parent, input.TodoItemID, run.ID, todoRevision)
+		}
+	}
+	run, err := d.runtime.spawn(input, d.parent, beforeEnqueue)
 	if err != nil {
 		return subagentToolError(call, err), nil
 	}
@@ -1492,6 +1710,59 @@ func (d *subagentSpawnDriver) Execute(ctx context.Context, call tool.Call, _ too
 		_ = d.runtime.store.SetCompletionDelivered(d.runtime.ctx, run.ID, true)
 	}
 	return subagentJSONResult(call, foregroundSubagentResult(snapshot)), nil
+}
+
+func prepareSubagentTodoBinding(ctx context.Context, parent subagentParentRuntime, itemID string) (int64, error) {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return 0, nil
+	}
+	if parent.Host == nil || parent.Host.sessions == nil {
+		return 0, fmt.Errorf("todo store is unavailable")
+	}
+	todo, err := parent.Host.sessions.LoadTodo(ctx, parent.SessionID)
+	if err != nil {
+		return 0, err
+	}
+	for _, phase := range todo.Phases {
+		for _, item := range phase.Items {
+			if item.ID != itemID {
+				continue
+			}
+			if item.Status != session.TodoPending && item.Status != session.TodoInProgress {
+				return 0, fmt.Errorf("todo item %q is closed", itemID)
+			}
+			if item.SubagentRunID != "" {
+				return 0, fmt.Errorf("todo item %q is already assigned", itemID)
+			}
+			return todo.Revision, nil
+		}
+	}
+	return 0, fmt.Errorf("todo item %q not found", itemID)
+}
+
+func commitSubagentTodoBinding(ctx context.Context, parent subagentParentRuntime, itemID, runID string, expectedRevision int64) error {
+	updated, err := parent.Host.sessions.UpdateTodo(ctx, parent.SessionID, expectedRevision, func(todo *session.TodoList) error {
+		for pi := range todo.Phases {
+			for ii := range todo.Phases[pi].Items {
+				item := &todo.Phases[pi].Items[ii]
+				if item.ID == itemID {
+					if item.SubagentRunID != "" {
+						return fmt.Errorf("todo item %q is already assigned", itemID)
+					}
+					item.SubagentRunID = runID
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("todo item %q not found", itemID)
+	})
+	if err != nil {
+		return err
+	}
+	snapshot := updated.Clone()
+	parent.Host.emitTodoUpdated(parent.SessionID, snapshot)
+	return nil
 }
 
 func (r *subagentRuntime) demote(sessionID, id, warning string) {
@@ -1614,6 +1885,7 @@ func decodeSubagentSpawnInput(arguments json.RawMessage) (subagentSpawnInput, er
 		set    *bool
 	}{
 		{key: "subagent_type", target: &input.SubagentType, set: &input.SubagentTypeSet},
+		{key: "todo_item_id", target: &input.TodoItemID},
 		{key: "capability_mode", target: &input.CapabilityMode, set: &input.CapabilityModeSet},
 		{key: "isolation", target: &input.Isolation, set: &input.IsolationSet},
 		{key: "resume_from", target: &input.ResumeFrom},

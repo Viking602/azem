@@ -57,9 +57,10 @@ type DialFunc func(context.Context, string, config.MCPServerConfig, map[string]s
 type SleepFunc func(context.Context, time.Duration) error
 
 type Options struct {
-	Dial  DialFunc
-	Sleep SleepFunc
-	Sink  func(Event)
+	Dial        DialFunc
+	Sleep       SleepFunc
+	Sink        func(Event)
+	Elicitation func(context.Context, string, mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error)
 }
 
 type Manager struct {
@@ -93,7 +94,9 @@ func NewManager(servers map[string]config.MCPServerConfig, version string, resol
 		resolve = resolveEnvironmentReference
 	}
 	if options.Dial == nil {
-		options.Dial = defaultDial
+		options.Dial = func(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header) (mcpcontract.Client, error) {
+			return defaultDial(ctx, name, serverConfig, environment, headers, options.Elicitation)
+		}
 	}
 	if options.Sleep == nil {
 		options.Sleep = sleepContext
@@ -455,7 +458,13 @@ func (d *remoteDriver) Execute(ctx context.Context, call tool.Call, sink tool.Up
 	return result, nil
 }
 
-func defaultDial(ctx context.Context, _ string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header) (mcpcontract.Client, error) {
+func defaultDial(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header, elicitation func(context.Context, string, mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error)) (mcpcontract.Client, error) {
+	clientOptions := mcpclient.Options{}
+	if elicitation != nil {
+		clientOptions.ElicitationHandler = func(handlerCtx context.Context, request mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error) {
+			return elicitation(handlerCtx, name, request)
+		}
+	}
 	switch serverConfig.Transport {
 	case "stdio":
 		keys := make([]string, 0, len(environment))
@@ -467,12 +476,12 @@ func defaultDial(ctx context.Context, _ string, serverConfig config.MCPServerCon
 		for _, key := range keys {
 			env = append(env, key+"="+environment[key])
 		}
-		return mcpclient.DialStdio(ctx, mcpclient.StdioConfig{
+		return mcpclient.DialStdioWithOptions(ctx, mcpclient.StdioConfig{
 			Command: serverConfig.Command, Args: append([]string(nil), serverConfig.Args...),
 			Dir: serverConfig.CWD, Env: env, InheritEnv: serverConfig.InheritEnv,
-		})
+		}, clientOptions)
 	case "streamable_http":
-		return mcpclient.New(mcpclient.NewHTTPTransport(serverConfig.URL, headers)), nil
+		return mcpclient.NewWithOptions(mcpclient.NewHTTPTransport(serverConfig.URL, headers), clientOptions), nil
 	default:
 		return nil, fmt.Errorf("unsupported MCP transport %q", serverConfig.Transport)
 	}

@@ -8,19 +8,25 @@ import (
 )
 
 type Theme struct {
-	Header    lipgloss.Style
-	Border    lipgloss.Style
-	User      lipgloss.Style
-	Assistant lipgloss.Style
-	Thinking  lipgloss.Style
-	Tool      lipgloss.Style
-	Diff      lipgloss.Style
-	Error     lipgloss.Style
-	Muted     lipgloss.Style
-	Status    lipgloss.Style
-	Success   lipgloss.Style
-	Warning   lipgloss.Style
-	Selected  lipgloss.Style
+	Header        lipgloss.Style
+	Border        lipgloss.Style
+	User          lipgloss.Style
+	Assistant     lipgloss.Style
+	Thinking      lipgloss.Style
+	Tool          lipgloss.Style
+	Diff          lipgloss.Style
+	DiffAdd       lipgloss.Style
+	DiffDel       lipgloss.Style
+	Error         lipgloss.Style
+	Muted         lipgloss.Style
+	Status        lipgloss.Style
+	Success       lipgloss.Style
+	Warning       lipgloss.Style
+	ApprovalAsk   lipgloss.Style
+	ApprovalSmart lipgloss.Style
+	FullAccess    lipgloss.Style
+	Cursor        lipgloss.Style
+	Selected      lipgloss.Style
 }
 
 func DefaultTheme() Theme {
@@ -30,23 +36,31 @@ func DefaultTheme() Theme {
 	secondary := adaptiveColor("#4a5965", "240", "4", "#9aabb8", "110", "4")
 	warning := adaptiveColor("#805719", "94", "3", "#d5a65b", "179", "3")
 	danger := adaptiveColor("#8a3434", "124", "1", "#d67b78", "174", "1")
+	blue := adaptiveColor("#285f8a", "25", "4", "#79b8e8", "110", "4")
+	cursor := adaptiveColor("#6d4aff", "99", "5", "#a78bfa", "141", "5")
 	success := adaptiveColor("#3d6c31", "22", "2", "#91b477", "107", "2")
 	selection := adaptiveColor("#dce9e3", "254", "7", "#27332d", "236", "0")
 
 	return Theme{
-		Header:    lipgloss.NewStyle().Bold(true).Foreground(accent),
-		Border:    lipgloss.NewStyle().Foreground(muted),
-		User:      lipgloss.NewStyle().Bold(true).Foreground(text),
-		Assistant: lipgloss.NewStyle().Foreground(text),
-		Thinking:  lipgloss.NewStyle().Foreground(secondary),
-		Tool:      lipgloss.NewStyle().Foreground(warning),
-		Diff:      lipgloss.NewStyle().Foreground(accent),
-		Error:     lipgloss.NewStyle().Bold(true).Foreground(danger),
-		Muted:     lipgloss.NewStyle().Foreground(muted),
-		Status:    lipgloss.NewStyle().Bold(true).Foreground(accent),
-		Success:   lipgloss.NewStyle().Foreground(success),
-		Warning:   lipgloss.NewStyle().Foreground(warning),
-		Selected:  lipgloss.NewStyle().Bold(true).Foreground(text).Background(selection),
+		Header:        lipgloss.NewStyle().Bold(true).Foreground(accent),
+		Border:        lipgloss.NewStyle().Foreground(muted),
+		User:          lipgloss.NewStyle().Bold(true).Foreground(text),
+		Assistant:     lipgloss.NewStyle().Foreground(text),
+		Thinking:      lipgloss.NewStyle().Foreground(secondary),
+		Tool:          lipgloss.NewStyle().Foreground(warning),
+		Diff:          lipgloss.NewStyle().Foreground(accent),
+		DiffAdd:       lipgloss.NewStyle().Foreground(success),
+		DiffDel:       lipgloss.NewStyle().Foreground(danger),
+		Error:         lipgloss.NewStyle().Bold(true).Foreground(danger),
+		Muted:         lipgloss.NewStyle().Foreground(muted),
+		Status:        lipgloss.NewStyle().Bold(true).Foreground(accent),
+		Success:       lipgloss.NewStyle().Foreground(success),
+		Warning:       lipgloss.NewStyle().Foreground(warning),
+		ApprovalAsk:   lipgloss.NewStyle().Bold(true).Foreground(warning),
+		ApprovalSmart: lipgloss.NewStyle().Bold(true).Foreground(blue),
+		FullAccess:    lipgloss.NewStyle().Bold(true).Foreground(danger),
+		Cursor:        lipgloss.NewStyle().Foreground(cursor),
+		Selected:      lipgloss.NewStyle().Bold(true).Foreground(text).Background(selection),
 	}
 }
 

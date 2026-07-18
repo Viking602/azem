@@ -215,6 +215,75 @@ func TestTurnContextBuildsPriorConversationBeforeCurrentRequest(t *testing.T) {
 	}
 }
 
+func TestTurnContextRefreshesTodoReminderAfterMutation(t *testing.T) {
+	latest := session.TodoList{
+		Goal: "ship todo", Revision: 2,
+		Phases: []session.TodoPhase{{ID: "phase-1", Title: "Build", Items: []session.TodoItem{
+			{ID: "item-1", Content: "finished", Status: session.TodoCompleted},
+			{ID: "item-2", Content: "verify", Status: session.TodoInProgress},
+		}}},
+	}
+	manager := turnContext{loadTodo: func(context.Context) (session.TodoList, error) { return latest, nil }}
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "system rules"),
+		message.NewText(message.RoleSystem, todoReminder(session.TodoList{Goal: "ship todo", Revision: 1})),
+		message.NewText(message.RoleUser, "continue"),
+	}
+	refreshed, err := manager.CompactTo(context.Background(), history, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reminders := 0
+	for _, current := range refreshed {
+		if strings.HasPrefix(current.Text, todoReminderPrefix) {
+			reminders++
+			if !strings.Contains(current.Text, "revision=2") || !strings.Contains(current.Text, "item-2:in_progress:verify") || strings.Contains(current.Text, "revision=1") {
+				t.Fatalf("stale todo reminder: %q", current.Text)
+			}
+		}
+	}
+	if reminders != 1 {
+		t.Fatalf("todo reminders=%d, want 1: %+v", reminders, refreshed)
+	}
+}
+
+func TestTurnContextCompactPreservesFullSystemPrefixAndFreshTodo(t *testing.T) {
+	latest := session.TodoList{Goal: "ship", Revision: 4, Phases: []session.TodoPhase{{
+		ID: "phase", Title: "Build", Items: []session.TodoItem{{ID: "current", Content: "verify", Status: session.TodoInProgress}},
+	}}}
+	manager := turnContext{loadTodo: func(context.Context) (session.TodoList, error) { return latest, nil }}
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "system rules"),
+		message.NewText(message.RoleSystem, todoReminder(session.TodoList{Goal: "ship", Revision: 1})),
+	}
+	for index := 0; index < 20; index++ {
+		role := message.RoleUser
+		if index%2 == 1 {
+			role = message.RoleAssistant
+		}
+		history = append(history, message.NewText(role, fmt.Sprintf("message %d", index)))
+	}
+	compacted, err := manager.Compact(context.Background(), history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compacted) >= len(history) || compacted[0].Text != "system rules" {
+		t.Fatalf("unexpected compacted history: %+v", compacted)
+	}
+	reminders := 0
+	for _, current := range compacted {
+		if strings.HasPrefix(current.Text, todoReminderPrefix) {
+			reminders++
+			if !strings.Contains(current.Text, "revision=4") {
+				t.Fatalf("stale compact reminder: %q", current.Text)
+			}
+		}
+	}
+	if reminders != 1 {
+		t.Fatalf("todo reminder count=%d", reminders)
+	}
+}
+
 func TestTurnContextCompactToFitsTargetAndPreservesLatestRequest(t *testing.T) {
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
