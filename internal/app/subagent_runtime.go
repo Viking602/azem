@@ -945,6 +945,9 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		event.ToolCallID = frame.ToolResult.ToolCallID
 		event.Text = frame.ToolResult.Content
 		event.Data = childFrameData(frame.Source, parentToolCallID, map[string]string{"name": frame.ToolResult.Name})
+		if len(frame.ToolResult.Structured) > 0 {
+			event.Data["structured"] = string(frame.ToolResult.Structured)
+		}
 		if frame.ToolResult.IsError {
 			event.State = "failed"
 		} else {

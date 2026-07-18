@@ -353,6 +353,34 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	}
 
 	switch block.Kind {
+	case BlockApproval:
+		indicator := stateMark(block.State)
+		if block.State == "running" {
+			indicator = "◆"
+			if !m.reducedMotion {
+				frames := [...]string{"◇", "◈", "◆", "◈"}
+				indicator = frames[m.animationFrame%len(frames)]
+			}
+		}
+		header := fmt.Sprintf("  %s %s APPROVAL · %s", selector, indicator, title)
+		if state != "" {
+			header += "  " + state
+		}
+		header = padOrTrim(header, width+2)
+		style := m.stateStyle(block.State)
+		if selected {
+			header = m.theme.Selected.Render(header)
+		} else {
+			header = style.Bold(true).Render(header)
+		}
+		lines := []string{header}
+		if block.Collapsed {
+			return lines
+		}
+		for _, line := range wrapText(block.Content, max(4, width-4)) {
+			lines = append(lines, m.theme.Muted.Render("      │ "+line))
+		}
+		return lines
 	case BlockTool, BlockAgent, BlockDiff, BlockError:
 		toggle := "▾"
 		if block.Collapsed {
@@ -377,6 +405,10 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 		}
 		lines := []string{header}
 		if block.Collapsed {
+			return lines
+		}
+		if block.Kind == BlockDiff {
+			lines = append(lines, m.renderDiffContent(block.Content, max(4, width-4))...)
 			return lines
 		}
 		for _, line := range wrapText(block.Content, max(4, width-4)) {
@@ -404,6 +436,25 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	default:
 		return renderProseBlock(m.theme.Assistant, "AZEM", block.Content, width)
 	}
+}
+
+func (m AppModel) renderDiffContent(content string, width int) []string {
+	lines := make([]string, 0)
+	for _, source := range strings.Split(content, "\n") {
+		style := m.theme.Assistant
+		switch {
+		case strings.HasPrefix(source, "+"):
+			style = m.theme.DiffAdd
+		case strings.HasPrefix(source, "-"):
+			style = m.theme.DiffDel
+		case strings.HasPrefix(source, "@@"):
+			style = m.theme.Diff
+		}
+		for _, line := range wrapText(source, width) {
+			lines = append(lines, style.Render("      │ "+line))
+		}
+	}
+	return lines
 }
 
 func toolDisplayName(name string) string {
@@ -1351,11 +1402,11 @@ func (m AppModel) selectedDiff() (Block, bool) {
 
 func (m AppModel) stateStyle(state string) lipgloss.Style {
 	switch strings.ToLower(state) {
-	case "ready", "completed", "succeeded", "active", "selected", "current", "eager", "available":
+	case "ready", "completed", "approved", "succeeded", "active", "selected", "current", "eager", "available":
 		return m.theme.Success
 	case "failed", "error", "degraded", "denied", "cancelled", "disabled", "application stopped":
 		return m.theme.Error
-	case "running", "starting", "streaming", "connecting", "queued", "cancelling", "awaiting approval", "a", "shift+a", "d":
+	case "running", "reviewing", "starting", "streaming", "connecting", "queued", "cancelling", "awaiting approval", "a", "shift+a", "d":
 		return m.theme.Warning
 	default:
 		return m.theme.Muted

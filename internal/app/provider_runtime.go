@@ -1135,7 +1135,8 @@ func (s *Service) emitAutomaticApprovalResolved(event Event, state, risk, author
 		ToolCallID: event.ToolCallID, ApprovalID: event.ApprovalID, State: state, Text: text,
 		Data: map[string]string{
 			"reviewer": codex.ApprovalReviewerModel, "risk": risk, "user_authorization": authorization,
-			"rationale": rationale, "error_kind": errorKind,
+			"rationale": rationale, "error_kind": errorKind, "tool": event.Data["tool"],
+			"target": event.Data["target"], "effect": event.Data["effect"],
 		},
 	})
 }
@@ -1368,6 +1369,9 @@ func (s *Service) providerStreamSink(sessionID, runID string) stream.Sink {
 					state = "failed"
 				}
 				data["name"] = frame.ToolResult.Name
+				if len(frame.ToolResult.Structured) > 0 {
+					data["structured"] = string(frame.ToolResult.Structured)
+				}
 				s.emit(ctx, Event{Kind: EventToolFinished, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolResult.ToolCallID, State: state, Text: frame.ToolResult.Content, Data: data})
 			}
 		case stream.FrameDone:

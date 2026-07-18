@@ -15,6 +15,8 @@ type Theme struct {
 	Thinking  lipgloss.Style
 	Tool      lipgloss.Style
 	Diff      lipgloss.Style
+	DiffAdd   lipgloss.Style
+	DiffDel   lipgloss.Style
 	Error     lipgloss.Style
 	Muted     lipgloss.Style
 	Status    lipgloss.Style
@@ -41,6 +43,8 @@ func DefaultTheme() Theme {
 		Thinking:  lipgloss.NewStyle().Foreground(secondary),
 		Tool:      lipgloss.NewStyle().Foreground(warning),
 		Diff:      lipgloss.NewStyle().Foreground(accent),
+		DiffAdd:   lipgloss.NewStyle().Foreground(success),
+		DiffDel:   lipgloss.NewStyle().Foreground(danger),
 		Error:     lipgloss.NewStyle().Bold(true).Foreground(danger),
 		Muted:     lipgloss.NewStyle().Foreground(muted),
 		Status:    lipgloss.NewStyle().Bold(true).Foreground(accent),

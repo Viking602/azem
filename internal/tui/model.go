@@ -20,6 +20,7 @@ const (
 	BlockThinking  BlockKind = "thinking"
 	BlockAssistant BlockKind = "assistant"
 	BlockTool      BlockKind = "tool"
+	BlockApproval  BlockKind = "approval"
 	BlockAgent     BlockKind = "agent"
 	BlockDiff      BlockKind = "diff"
 	BlockError     BlockKind = "error"

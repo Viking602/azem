@@ -3,8 +3,11 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/chatgpt"
+	"github.com/Viking602/azem/internal/provider/responses"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -46,6 +50,66 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 		t.Fatalf("requests=%d, want initial request plus five retries", requests.Load())
 	}
 }
+
+func TestOpenProviderStreamRetriesTLSBadRecordMACFiveTimesThenSucceeds(t *testing.T) {
+	attempts := 0
+	want := &stubProviderStream{}
+	open := func() (hyprovider.Stream, error) {
+		attempts++
+		if attempts <= maxProviderStreamRetries {
+			return nil, &url.Error{Op: "Post", URL: DefaultEndpoint, Err: errors.New("remote error: tls: bad record MAC")}
+		}
+		return want, nil
+	}
+	stream, retries, err := openProviderStream(context.Background(), open, func(int) time.Duration { return 0 }, 0)
+	if err != nil || stream != want {
+		t.Fatalf("stream=%T retries=%d error=%v", stream, retries, err)
+	}
+	if attempts != 6 || retries != maxProviderStreamRetries {
+		t.Fatalf("attempts=%d retries=%d, want 6 attempts and 5 retries", attempts, retries)
+	}
+}
+
+func TestOpenProviderStreamStopsAfterFiveTLSBadRecordMACRetries(t *testing.T) {
+	attempts := 0
+	open := func() (hyprovider.Stream, error) {
+		attempts++
+		return nil, &url.Error{Op: "Post", URL: DefaultEndpoint, Err: errors.New("remote error: tls: bad record MAC")}
+	}
+	stream, retries, err := openProviderStream(context.Background(), open, func(int) time.Duration { return 0 }, 0)
+	if stream != nil || err == nil || !strings.Contains(err.Error(), "failed after 5 retries") {
+		t.Fatalf("stream=%T retries=%d error=%v", stream, retries, err)
+	}
+	if attempts != 6 || retries != maxProviderStreamRetries {
+		t.Fatalf("attempts=%d retries=%d, want 6 attempts and 5 retries", attempts, retries)
+	}
+}
+
+func TestRetryableProviderTransportRejectsDeterministicErrors(t *testing.T) {
+	for _, err := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		io.EOF,
+		&responses.APIError{Kind: responses.ErrorInvalidRequest, StatusCode: http.StatusBadRequest, Message: "max_output_tokens is not supported"},
+		errors.New("x509: certificate signed by unknown authority"),
+	} {
+		if isRetryableProviderTransport(err) {
+			t.Fatalf("deterministic error was classified retryable: %v", err)
+		}
+	}
+}
+
+func TestRetryableProviderTransportRetriesUnexpectedStreamEOF(t *testing.T) {
+	err := &responses.APIError{Kind: responses.ErrorStream, Message: "EOF"}
+	if !isRetryableProviderTransport(err) {
+		t.Fatalf("unexpected stream EOF was not classified retryable: %v", err)
+	}
+}
+
+type stubProviderStream struct{}
+
+func (*stubProviderStream) Recv() (hyprovider.Event, error) { return hyprovider.Event{}, nil }
+func (*stubProviderStream) Close() error                    { return nil }
 
 func TestDriverStopsAfterFiveConnectionResetRetries(t *testing.T) {
 	var requests atomic.Int32

@@ -52,6 +52,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.animationFrame++
+		if m.transcriptLayout != nil {
+			m.transcriptLayout.initialized = false
+		}
 		return m, nextAnimationFrame()
 	case startTurnResultMsg:
 		if msg.Err != nil {
@@ -696,17 +699,21 @@ func (m *AppModel) queueApproval(event app.Event) {
 	}
 	if event.State == "reviewing" {
 		id := "approval:" + approval.ApprovalID
+		title := "Reviewing action"
+		content := approvalActionSummary(approval.Tool, approval.Target)
 		for index := range m.transcript {
 			if m.transcript[index].ID == id {
-				m.transcript[index].Content = "Reviewing " + first(approval.Action, approval.Tool)
+				m.transcript[index].Kind = BlockApproval
+				m.transcript[index].Title = title
+				m.transcript[index].Content = content
 				m.transcript[index].State = "running"
 				m.status = "Reviewing approval"
 				return
 			}
 		}
 		m.transcript = append(m.transcript, Block{
-			ID: id, Kind: BlockTool, RunID: event.RunID, ToolCallID: event.ToolCallID,
-			Title: "Automatic approval", Content: "Reviewing " + first(approval.Action, approval.Tool), State: "running",
+			ID: id, Kind: BlockApproval, RunID: event.RunID, ToolCallID: event.ToolCallID,
+			Title: title, Content: content, State: "running",
 		})
 		m.status = "Reviewing approval"
 		return
@@ -776,26 +783,27 @@ func (m *AppModel) resolveApproval(event app.Event) {
 
 func (m *AppModel) resolveAutomaticApproval(event app.Event) {
 	id := "approval:" + first(event.ApprovalID, event.ToolCallID)
-	label := strings.TrimPrefix(event.State, "auto_")
+	label := "Review failed"
 	state := "failed"
-	if event.State == "auto_approved" {
+	switch event.State {
+	case "auto_approved":
+		label = "Allowed"
 		state = "completed"
+	case "auto_denied":
+		label = "Denied"
+		state = "denied"
+	case "auto_timed_out":
+		label = "Timed out"
 	}
-	content := ""
+	content := approvalActionSummary(event.Data["tool"], event.Data["target"])
 	if risk := event.Data["risk"]; risk != "" {
-		content = "Risk: " + risk
+		content = joinToolSummary(content, "Risk: "+risk)
 	}
 	if rationale := strings.TrimSpace(event.Data["rationale"]); rationale != "" {
-		if content != "" {
-			content += "\n"
-		}
-		content += "Rationale: " + rationale
+		content = joinToolSummary(content, "Rationale: "+rationale)
 	} else if event.State == "auto_failed" || event.State == "auto_timed_out" {
 		if detail := strings.TrimSpace(event.Text); detail != "" {
-			if content != "" {
-				content += "\n"
-			}
-			content += "Failure: " + detail
+			content = joinToolSummary(content, "Failure: "+detail)
 		}
 	}
 	if content == "" {
@@ -805,15 +813,27 @@ func (m *AppModel) resolveAutomaticApproval(event app.Event) {
 		if m.transcript[index].ID != id {
 			continue
 		}
-		m.transcript[index].Title = "Automatic approval · " + label
+		m.transcript[index].Kind = BlockApproval
+		m.transcript[index].Title = label
 		m.transcript[index].Content = content
 		m.transcript[index].State = state
 		return
 	}
 	m.transcript = append(m.transcript, Block{
-		ID: id, Kind: BlockTool, RunID: event.RunID, ToolCallID: event.ToolCallID,
-		Title: "Automatic approval · " + label, Content: content, State: state,
+		ID: id, Kind: BlockApproval, RunID: event.RunID, ToolCallID: event.ToolCallID,
+		Title: label, Content: content, State: state,
 	})
+}
+
+func approvalActionSummary(toolName, target string) string {
+	action := toolDisplayName(toolName)
+	if action == "" {
+		action = "Requested action"
+	}
+	if target != "" && target != "workspace" {
+		return action + " · " + target
+	}
+	return action
 }
 
 func (m AppModel) submit() (tea.Model, tea.Cmd) {
@@ -1152,7 +1172,7 @@ func (m *AppModel) finishRun(runID string, status string) {
 	}
 	for index := range m.transcript {
 		block := &m.transcript[index]
-		if block.Kind != BlockTool || block.RunID != runID || toolStateTerminal(block.State) {
+		if (block.Kind != BlockTool && block.Kind != BlockApproval) || block.RunID != runID || toolStateTerminal(block.State) {
 			continue
 		}
 		block.State = fallbackState
@@ -1336,7 +1356,7 @@ func (m *AppModel) updateTool(event app.Event) {
 	}
 	index := -1
 	for candidate := len(m.transcript) - 1; candidate >= 0; candidate-- {
-		if m.transcript[candidate].Kind == BlockTool && m.transcript[candidate].ID == id {
+		if (m.transcript[candidate].Kind == BlockTool || m.transcript[candidate].Kind == BlockDiff) && m.transcript[candidate].ID == id {
 			index = candidate
 			break
 		}
@@ -1371,11 +1391,17 @@ func (m *AppModel) updateTool(event app.Event) {
 		state := terminalToolState(event.State)
 		if index == -1 {
 			content := event.Text
+			kind := BlockTool
+			title := first(event.Data["name"], event.Data["tool"], "Tool")
 			if state == "completed" {
-				content = summarizeToolResult(first(event.Data["name"], event.Data["tool"]), event.Data["arguments"], event.Text)
+				if diffTitle, diff, ok := summarizeFileChange(title, event.Data["arguments"], event.Data["structured"], event.Text); ok {
+					kind, title, content = BlockDiff, diffTitle, diff
+				} else {
+					content = summarizeToolResult(title, event.Data["arguments"], event.Text)
+				}
 			}
 			m.transcript = append(m.transcript, Block{
-				ID: id, Kind: BlockTool, RunID: event.RunID, Title: first(event.Data["name"], event.Data["tool"], "Tool"),
+				ID: id, Kind: kind, RunID: event.RunID, Title: title,
 				Arguments: event.Data["arguments"], Content: content, State: state,
 			})
 			return
@@ -1393,11 +1419,138 @@ func (m *AppModel) updateTool(event app.Event) {
 		block.State = state
 		block.Orphaned = false
 		if state == "completed" {
-			block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text)
+			if title, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
+				block.Kind, block.Title, block.Content = BlockDiff, title, diff
+			} else {
+				block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text)
+			}
 		} else {
-			appendBlockContent(block, event.Text)
+			block.Content = joinToolSummary(summarizeToolArguments(block.Title, block.Arguments), summarizeToolFailure(block.Title, event.Text))
 		}
 	}
+}
+
+type fileChangeSection struct {
+	Path             string `json:"path"`
+	FirstChangedLine int    `json:"firstChangedLine"`
+	Diff             string `json:"diff"`
+}
+
+func summarizeFileChange(name, arguments, structured, output string) (string, string, bool) {
+	type editResult struct {
+		Sections []fileChangeSection `json:"sections"`
+	}
+
+	var sections []fileChangeSection
+	switch name {
+	case "coding.edit_hashline":
+		var result editResult
+		if json.Unmarshal([]byte(structured), &result) == nil {
+			sections = result.Sections
+		}
+		if len(sections) == 0 {
+			sections = parseCompactEditOutput(output)
+		}
+	case "coding.write_file":
+		var input struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		}
+		if json.Unmarshal([]byte(arguments), &input) != nil || input.Path == "" {
+			return "", "", false
+		}
+		lines := strings.Split(input.Content, "\n")
+		if input.Content == "" {
+			lines = nil
+		} else if strings.HasSuffix(input.Content, "\n") {
+			lines = lines[:len(lines)-1]
+		}
+		for index := range lines {
+			lines[index] = "+" + lines[index]
+		}
+		sections = []fileChangeSection{{Path: input.Path, FirstChangedLine: 1, Diff: strings.Join(lines, "\n")}}
+	default:
+		return "", "", false
+	}
+	if len(sections) == 0 {
+		return "", "", false
+	}
+
+	added, deleted := 0, 0
+	chunks := make([]string, 0, len(sections))
+	for _, section := range sections {
+		if section.Path == "" {
+			continue
+		}
+		for _, line := range strings.Split(section.Diff, "\n") {
+			if strings.HasPrefix(line, "+") {
+				added++
+			} else if strings.HasPrefix(line, "-") {
+				deleted++
+			}
+		}
+		header := "@@ " + section.Path
+		if section.FirstChangedLine > 0 {
+			header += fmt.Sprintf(":%d", section.FirstChangedLine)
+		}
+		header += " @@"
+		body := section.Diff
+		if body == "" {
+			body = "(empty file)"
+		}
+		chunks = append(chunks, header+"\n"+body)
+	}
+	if len(chunks) == 0 {
+		return "", "", false
+	}
+	title := sections[0].Path
+	if len(sections) > 1 {
+		title = fmt.Sprintf("%d files", len(sections))
+	}
+	title += fmt.Sprintf("  +%d/-%d", added, deleted)
+	return title, strings.Join(chunks, "\n\n"), true
+}
+
+func parseCompactEditOutput(output string) []fileChangeSection {
+	var result []fileChangeSection
+	var current *fileChangeSection
+	var diffLines []string
+	inDiff := false
+	flush := func() {
+		if current == nil {
+			return
+		}
+		current.Diff = strings.Trim(strings.Join(diffLines, "\n"), "\n")
+		if current.Path != "" && current.Diff != "" {
+			result = append(result, *current)
+		}
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "¶") {
+			flush()
+			path := strings.TrimPrefix(strings.SplitN(line, "#", 2)[0], "¶")
+			current = &fileChangeSection{Path: path}
+			diffLines = nil
+			inDiff = false
+			continue
+		}
+		if current == nil {
+			continue
+		}
+		if value, ok := strings.CutPrefix(line, "firstChangedLine: "); ok {
+			current.FirstChangedLine, _ = strconv.Atoi(strings.TrimSpace(value))
+			continue
+		}
+		if line == "--- compact diff ---" {
+			inDiff = true
+			continue
+		}
+		if inDiff {
+			diffLines = append(diffLines, line)
+		}
+	}
+	flush()
+	return result
 }
 
 func summarizeToolArguments(name, arguments string) string {
@@ -1417,6 +1570,20 @@ func summarizeToolArguments(name, arguments string) string {
 		return int(value)
 	}
 	switch name {
+	case "coding.edit_hashline":
+		return summarizeEditArguments(stringField("input"), fields["dryRun"] == true)
+	case "coding.write_file":
+		if path := stringField("path"); path != "" {
+			content, _ := fields["content"].(string)
+			lines := 0
+			if content != "" {
+				lines = strings.Count(content, "\n") + 1
+				if strings.HasSuffix(content, "\n") {
+					lines--
+				}
+			}
+			return fmt.Sprintf("Create %s · %d lines", path, lines)
+		}
 	case "coding.read_file":
 		path := stringField("path")
 		start, end := intField("startLine"), intField("endLine")
@@ -1447,6 +1614,65 @@ func summarizeToolArguments(name, arguments string) string {
 		return strings.Join(lines[:min(4, len(lines))], "\n")
 	}
 	return compactAgentActivity(arguments)
+}
+
+func summarizeEditArguments(input string, dryRun bool) string {
+	paths := make([]string, 0, 2)
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(input, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "¶") {
+			continue
+		}
+		path := strings.TrimPrefix(strings.SplitN(line, "#", 2)[0], "¶")
+		if path != "" && !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	action := "Edit"
+	if dryRun {
+		action = "Preview"
+	}
+	switch len(paths) {
+	case 0:
+		return action + " file changes"
+	case 1:
+		return action + " " + paths[0]
+	default:
+		return fmt.Sprintf("%s %d files · %s", action, len(paths), strings.Join(paths[:min(3, len(paths))], ", "))
+	}
+}
+
+func summarizeToolFailure(name, output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return "Tool failed"
+	}
+	if summary, ok := summarizeJSONOutput(output); ok {
+		output = summary
+	}
+	for _, prefix := range []string{name + " failed:", name + " rejected:"} {
+		if detail, found := strings.CutPrefix(output, prefix); found {
+			output = strings.TrimSpace(detail)
+			break
+		}
+	}
+	runes := []rune(output)
+	if len(runes) > 600 {
+		output = string(runes[:599]) + "…"
+	}
+	return output
+}
+
+func joinToolSummary(summary, detail string) string {
+	if summary == "" {
+		return detail
+	}
+	if detail == "" || detail == summary {
+		return summary
+	}
+	return summary + "\n" + detail
 }
 
 func summarizeToolResult(name, arguments, output string) string {
@@ -1733,23 +1959,37 @@ func appendAgentViewDelta(blocks *[]Block, kind BlockKind, runID, title, content
 func upsertAgentTool(blocks *[]Block, event app.Event, state string) {
 	for index := len(*blocks) - 1; index >= 0; index-- {
 		block := &(*blocks)[index]
-		if block.Kind != BlockTool || block.ToolCallID != event.ToolCallID {
+		if (block.Kind != BlockTool && block.Kind != BlockDiff) || block.ToolCallID != event.ToolCallID {
 			continue
 		}
 		if event.Kind == app.EventToolFinished || !toolStateTerminal(block.State) {
 			block.State = state
 			if event.Kind == app.EventToolFinished && state == "completed" {
-				block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text)
+				if title, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
+					block.Kind, block.Title, block.Content = BlockDiff, title, diff
+				} else {
+					block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text)
+				}
+			} else if event.Kind == app.EventToolFinished {
+				block.Content = joinToolSummary(summarizeToolArguments(block.Title, block.Arguments), summarizeToolFailure(block.Title, event.Text))
 			} else {
 				appendBlockContent(block, event.Text)
 			}
 		}
 		return
 	}
+	name := first(event.Data["name"], "Tool")
 	content := first(event.Data["arguments"], event.Text)
+	kind := BlockTool
+	title := name
+	if event.Kind == app.EventToolFinished && state == "completed" {
+		if diffTitle, diff, ok := summarizeFileChange(name, event.Data["arguments"], event.Data["structured"], event.Text); ok {
+			kind, title, content = BlockDiff, diffTitle, diff
+		}
+	}
 	*blocks = append(*blocks, Block{
-		ID: event.ToolCallID, Kind: BlockTool, RunID: event.RunID, ToolCallID: event.ToolCallID,
-		Title: first(event.Data["name"], "Tool"), Arguments: event.Data["arguments"], Content: content, State: state,
+		ID: event.ToolCallID, Kind: kind, RunID: event.RunID, ToolCallID: event.ToolCallID,
+		Title: title, Arguments: event.Data["arguments"], Content: content, State: state,
 	})
 }
 
@@ -1778,16 +2018,41 @@ func (m *AppModel) updateAgentDetail(event app.Event) {
 func agentTranscriptBlocks(blocks []app.AgentTranscriptBlock) []Block {
 	result := make([]Block, 0, len(blocks))
 	for _, block := range blocks {
-		content := block.Content
-		if block.Kind == string(BlockTool) && terminalToolState(block.State) == "completed" {
-			content = summarizeToolResult(block.Title, "", block.Content)
+		kind := BlockKind(block.Kind)
+		content, arguments := block.Content, ""
+		if block.Kind == string(BlockTool) {
+			arguments, content = splitAgentToolContent(block.Content)
+			switch block.State {
+			case "completed":
+				if title, diff, ok := summarizeFileChange(block.Title, arguments, "", content); ok {
+					kind, block.Title, content = BlockDiff, title, diff
+				} else {
+					content = summarizeToolResult(block.Title, arguments, content)
+				}
+			case "failed", "cancelled":
+				content = joinToolSummary(summarizeToolArguments(block.Title, arguments), summarizeToolFailure(block.Title, content))
+			default:
+				content = summarizeToolArguments(block.Title, arguments)
+			}
 		}
 		result = append(result, Block{
-			ID: block.ID, Kind: BlockKind(block.Kind), RunID: block.RunID, ToolCallID: block.ToolCallID,
-			Title: block.Title, Content: content, State: block.State,
+			ID: block.ID, Kind: kind, RunID: block.RunID, ToolCallID: block.ToolCallID,
+			Title: block.Title, Arguments: arguments, Content: content, State: block.State,
 		})
 	}
 	return result
+}
+
+func splitAgentToolContent(content string) (string, string) {
+	arguments, rest, found := strings.Cut(content, "\n")
+	if !found || !json.Valid([]byte(arguments)) {
+		return "", content
+	}
+	var object map[string]any
+	if json.Unmarshal([]byte(arguments), &object) != nil {
+		return "", content
+	}
+	return arguments, rest
 }
 
 func agentCatalogViews(entries []app.AgentCatalogEntry) []AgentCatalogView {

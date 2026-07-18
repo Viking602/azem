@@ -475,21 +475,22 @@ func TestAutomaticApprovalEventsRenderReviewingAndResolvedTranscriptStates(t *te
 		data       map[string]string
 		text       string
 		blockState string
+		title      string
 		want       string
 	}{
 		{
-			state: "auto_approved", blockState: "completed", want: "Rationale: bounded write",
+			state: "auto_approved", blockState: "completed", title: "Allowed", want: "Rationale: bounded write",
 			data: map[string]string{"risk": "low", "rationale": "bounded write"},
 		},
 		{
-			state: "auto_denied", blockState: "failed", want: "Risk: high",
+			state: "auto_denied", blockState: "denied", title: "Denied", want: "Risk: high",
 			data: map[string]string{"risk": "high", "rationale": "target not authorized"},
 		},
 		{
-			state: "auto_failed", blockState: "failed", text: "Automatic review failed (parse)", want: "Failure: Automatic review failed (parse)",
+			state: "auto_failed", blockState: "failed", title: "Review failed", text: "Automatic review failed (parse)", want: "Failure: Automatic review failed (parse)",
 			data: map[string]string{"risk": "medium"},
 		},
-		{state: "auto_timed_out", blockState: "failed", text: "Automatic review timed out", want: "timed out"},
+		{state: "auto_timed_out", blockState: "failed", title: "Timed out", text: "Automatic review timed out", want: "timed out"},
 	}
 	for _, test := range tests {
 		t.Run(test.state, func(t *testing.T) {
@@ -503,7 +504,7 @@ func TestAutomaticApprovalEventsRenderReviewingAndResolvedTranscriptStates(t *te
 			})
 			if model.status != "Reviewing approval" || model.overlay != OverlayNone ||
 				len(model.pendingApprovals) != 0 || len(model.transcript) != 1 ||
-				model.transcript[0].State != "running" {
+				model.transcript[0].Kind != BlockApproval || model.transcript[0].State != "running" {
 				t.Fatalf("reviewing projection=%+v", model)
 			}
 			model.applyEvent(app.Event{
@@ -512,12 +513,57 @@ func TestAutomaticApprovalEventsRenderReviewingAndResolvedTranscriptStates(t *te
 				Text: test.text, Data: test.data,
 			})
 			block := model.transcript[0]
-			if model.status != "Running" || block.State != test.blockState ||
-				!strings.Contains(block.Title, strings.TrimPrefix(test.state, "auto_")) ||
+			if model.status != "Running" || block.Kind != BlockApproval || block.State != test.blockState ||
+				block.Title != test.title ||
 				!strings.Contains(block.Content, test.want) {
 				t.Fatalf("resolved projection: status=%q block=%+v", model.status, block)
 			}
 		})
+	}
+}
+
+func TestAutomaticApprovalAndEditUseSeparateAnimatedBlocks(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.runID = "run-1"
+	model.status = "Running"
+	model.applyEvent(app.Event{
+		Kind: app.EventApprovalRequested, SessionID: "default", RunID: "run-1",
+		ToolCallID: "edit-1", ApprovalID: "approval-1", State: "reviewing",
+		Data: map[string]string{
+			"tool": "coding.edit_hashline", "target": "README.md",
+			"action": strings.Repeat("raw patch ", 500),
+		},
+	})
+	before := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 80), "\n"))
+	model.animationFrame++
+	animated := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 80), "\n"))
+	if before == animated || strings.Contains(before, "raw patch") || !strings.Contains(before, "Edit File · README.md") {
+		t.Fatalf("approval animation/summary before=%q after=%q", before, animated)
+	}
+
+	model.applyEvent(app.Event{
+		Kind: app.EventApprovalResolved, SessionID: "default", RunID: "run-1",
+		ToolCallID: "edit-1", ApprovalID: "approval-1", State: "auto_approved",
+		Data: map[string]string{
+			"tool": "coding.edit_hashline", "target": "README.md", "risk": "low", "rationale": "bounded edit",
+		},
+	})
+	model.applyEvent(app.Event{
+		Kind: app.EventToolStarted, SessionID: "default", RunID: "run-1", ToolCallID: "edit-1",
+		Data: map[string]string{"name": "coding.edit_hashline", "arguments": `{"input":"¶README.md#ABCD\nreplace 1:\n+new"}`},
+	})
+	model.applyEvent(app.Event{
+		Kind: app.EventToolFinished, SessionID: "default", RunID: "run-1", ToolCallID: "edit-1", State: "completed",
+		Data: map[string]string{
+			"name":       "coding.edit_hashline",
+			"structured": `{"sections":[{"path":"README.md","firstChangedLine":1,"diff":"-old\n+new"}]}`,
+		},
+	})
+	if len(model.transcript) != 2 {
+		t.Fatalf("approval and edit were not separated: %#v", model.transcript)
+	}
+	if approval, edit := model.transcript[0], model.transcript[1]; approval.Kind != BlockApproval || approval.State != "completed" || edit.Kind != BlockDiff || edit.State != "completed" {
+		t.Fatalf("approval/edit lifecycle collided: approval=%#v edit=%#v", approval, edit)
 	}
 }
 
@@ -693,6 +739,102 @@ func TestReadAndSkillToolResultsUseDisplaySummaries(t *testing.T) {
 	}
 	if got := summarizeToolArguments("coding.search", `{"query":"SessionGrants","regexp":true,"glob":"internal/**/*.go"}`); strings.ContainsAny(got, "{}") || !strings.Contains(got, "query: SessionGrants") {
 		t.Fatalf("generic running arguments were not parsed: %q", got)
+	}
+	editArguments := `{"dryRun":true,"input":"¶README.md#720F\nreplace 1-2:\n+` + strings.Repeat("long content ", 200) + `"}`
+	if got := summarizeToolArguments("coding.edit_hashline", editArguments); got != "Preview README.md" {
+		t.Fatalf("edit arguments exposed raw patch: %q", got)
+	}
+	if got := summarizeToolArguments("coding.write_file", `{"path":"new.go","content":"package main\n\n"}`); got != "Create new.go · 2 lines" {
+		t.Fatalf("write arguments exposed file content: %q", got)
+	}
+}
+
+func TestFailedEditReplacesRawPatchWithTargetAndError(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	arguments := `{"dryRun":true,"input":"¶README.md#720F\nreplace 1:\n+` + strings.Repeat("README body ", 200) + `"}`
+	model.updateTool(app.Event{
+		Kind: app.EventToolStarted, RunID: "run", ToolCallID: "edit", Data: map[string]string{
+			"name": "coding.edit_hashline", "arguments": arguments,
+		},
+	})
+	model.updateTool(app.Event{
+		Kind: app.EventToolFinished, RunID: "run", ToolCallID: "edit", State: "failed",
+		Text: "coding.edit_hashline failed: invalid replace range", Data: map[string]string{"name": "coding.edit_hashline"},
+	})
+	block := model.transcript[0]
+	if block.Content != "Preview README.md\ninvalid replace range" {
+		t.Fatalf("failed edit content = %q", block.Content)
+	}
+	if strings.Contains(block.Content, "README body") || len(block.Content) > 200 {
+		t.Fatalf("failed edit exposed raw patch: %q", block.Content)
+	}
+}
+
+func TestPersistedFailedAgentEditHidesRawPatch(t *testing.T) {
+	arguments := `{"dryRun":false,"input":"¶internal/app.go#ABCD\nreplace 1:\n+` + strings.Repeat("source ", 200) + `"}`
+	blocks := agentTranscriptBlocks([]app.AgentTranscriptBlock{{
+		ID: "edit", Kind: "tool", ToolCallID: "edit", Title: "coding.edit_hashline", State: "failed",
+		Content: arguments + "\ncoding.edit_hashline failed: stale tag; re-read the file",
+	}})
+	if len(blocks) != 1 || blocks[0].Content != "Edit internal/app.go\nstale tag; re-read the file" {
+		t.Fatalf("persisted failed edit = %#v", blocks)
+	}
+}
+
+func TestFileChangesBecomeInlineDiffBlocks(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.updateTool(app.Event{
+		Kind: app.EventToolStarted, RunID: "run", ToolCallID: "edit", Data: map[string]string{
+			"name": "coding.edit_hashline", "arguments": `{"input":"patch"}`,
+		},
+	})
+	model.updateTool(app.Event{
+		Kind: app.EventToolFinished, RunID: "run", ToolCallID: "edit", State: "completed",
+		Data: map[string]string{
+			"name":       "coding.edit_hashline",
+			"structured": `{"sections":[{"path":"internal/app.go","firstChangedLine":12,"diff":"-old value\n+new value"}]}`,
+		},
+	})
+	edit := model.transcript[0]
+	if edit.Kind != BlockDiff || edit.Title != "internal/app.go  +1/-1" {
+		t.Fatalf("edit block = %#v", edit)
+	}
+	if edit.Content != "@@ internal/app.go:12 @@\n-old value\n+new value" {
+		t.Fatalf("edit diff = %q", edit.Content)
+	}
+
+	model.updateTool(app.Event{
+		Kind: app.EventToolStarted, RunID: "run", ToolCallID: "write", Data: map[string]string{
+			"name": "coding.write_file", "arguments": `{"path":"new.go","content":"package main\n\nfunc main() {}\n"}`,
+		},
+	})
+	model.updateTool(app.Event{
+		Kind: app.EventToolFinished, RunID: "run", ToolCallID: "write", State: "completed",
+		Text: "¶new.go#1234\ncreated new.go", Data: map[string]string{"name": "coding.write_file"},
+	})
+	created := model.transcript[1]
+	if created.Kind != BlockDiff || created.Title != "new.go  +3/-0" {
+		t.Fatalf("write block = %#v", created)
+	}
+	for _, line := range []string{"@@ new.go:1 @@", "+package main", "+", "+func main() {}"} {
+		if !strings.Contains(created.Content, line) {
+			t.Fatalf("write diff missing %q: %q", line, created.Content)
+		}
+	}
+}
+
+func TestCompactEditOutputFallbackBecomesDiff(t *testing.T) {
+	title, diff, ok := summarizeFileChange(
+		"coding.edit_hashline",
+		"",
+		"",
+		"¶foo.go#abcd\nupdated foo.go\nfirstChangedLine: 4\n\n--- compact diff ---\n-\treturn a-b\n+\treturn a + b",
+	)
+	if !ok || title != "foo.go  +1/-1" {
+		t.Fatalf("fallback title = %q, ok=%v", title, ok)
+	}
+	if diff != "@@ foo.go:4 @@\n-\treturn a-b\n+\treturn a + b" {
+		t.Fatalf("fallback diff = %q", diff)
 	}
 }
 
