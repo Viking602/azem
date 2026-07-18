@@ -380,16 +380,15 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 			lines = append(lines, m.theme.Muted.Render("      │ "+line))
 		}
 		return lines
-	case BlockTool, BlockAgent, BlockDiff, BlockHook, BlockError:
+	case BlockHook:
+		return m.renderHookPrompt(block, selected, width)
+	case BlockTool, BlockAgent, BlockDiff, BlockError:
 		toggle := "▾"
 		if block.Collapsed {
 			toggle = "▸"
 		}
 		kind := m.tr("block." + string(block.Kind))
 		header := fmt.Sprintf("  %s %s %s · %s", selector, toggle, kind, title)
-		if len(block.Hooks) > 0 && block.Kind != BlockHook {
-			header += fmt.Sprintf(" · %s %d %s", hookSummaryMark(block.Hooks), len(block.Hooks), m.tr("hook.summary"))
-		}
 		if state != "" {
 			header += "  " + state
 		}
@@ -411,13 +410,11 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 		}
 		if block.Kind == BlockDiff {
 			lines = append(lines, m.renderDiffContent(block.Content, max(4, width-4))...)
-			lines = append(lines, m.renderHookLines(block.Hooks, width)...)
 			return lines
 		}
 		for _, line := range wrapText(block.Content, max(4, width-4)) {
 			lines = append(lines, m.theme.Assistant.Render("      │ "+line))
 		}
-		lines = append(lines, m.renderHookLines(block.Hooks, width)...)
 		return lines
 	case BlockUser:
 		return renderProseBlock(m.theme.User, m.tr("block.user")+" · "+title, block.Content, width)
@@ -442,25 +439,10 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	}
 }
 
-func hookSummaryMark(hooks []HookRunView) string {
-	mark := "✓"
-	for _, hook := range hooks {
-		if hook.State == "failed" {
-			return "!"
-		}
-		if hook.State == "blocked" {
-			mark = "!"
-		} else if hook.State == "running" && mark == "✓" {
-			mark = "◆"
-		}
-	}
-	return mark
-}
-
-func (m AppModel) renderHookLines(hooks []HookRunView, width int) []string {
-	lines := make([]string, 0, len(hooks)*2)
+func (m AppModel) renderHookPrompt(block Block, selected bool, width int) []string {
+	lines := make([]string, 0, len(block.Hooks)*2)
 	contentWidth := max(4, width-8)
-	for _, hook := range hooks {
+	for _, hook := range block.Hooks {
 		mark := stateMark(hook.State)
 		if hook.State == "running" {
 			mark = "•"
@@ -469,12 +451,20 @@ func (m AppModel) renderHookLines(hooks []HookRunView, width int) []string {
 				mark = string(frames[m.animationFrame%len(frames)])
 			}
 		}
-		duration := ""
-		if hook.DurationMS > 0 {
-			duration = fmt.Sprintf(" · %dms", hook.DurationMS)
+		name := ""
+		if hook.Name != "" && hook.Name != "hook" {
+			name = " · " + hook.Name
 		}
-		label := fmt.Sprintf("      %s %s %s · %s%s", mark, m.tr("hook.label"), hook.Name, hook.Event, duration)
-		lines = append(lines, m.stateStyle(hook.State).Render(padOrTrim(label, width+2)))
+		label := padOrTrim(fmt.Sprintf("    %s %s · %s%s", mark, m.tr("hook.label"), hook.Event, name), width+2)
+		style := m.theme.Muted
+		if hook.State == "failed" || hook.State == "blocked" {
+			style = m.stateStyle(hook.State)
+		}
+		if selected {
+			lines = append(lines, m.theme.Selected.Render(label))
+		} else {
+			lines = append(lines, style.Render(label))
+		}
 		if (hook.State == "failed" || hook.State == "blocked") && first(hook.Reason, hook.Output) != "" {
 			for _, line := range wrapText(first(hook.Reason, hook.Output), contentWidth) {
 				lines = append(lines, m.stateStyle(hook.State).Render(padOrTrim("      │ "+line, width+2)))
@@ -1091,6 +1081,10 @@ func (m AppModel) renderAgentDetailOverlay(width, height int) string {
 			content = append(content, "No child transcript yet.")
 		} else {
 			for _, block := range agent.Blocks {
+				if block.Kind == BlockHook {
+					content = append(content, m.renderHookPrompt(block, false, max(4, innerWidth-2))...)
+					continue
+				}
 				title := first(block.Title, string(block.Kind))
 				if block.Kind == BlockTool {
 					title = m.toolDisplayName(title)
@@ -1098,9 +1092,6 @@ func (m AppModel) renderAgentDetailOverlay(width, height int) string {
 				content = append(content, fmt.Sprintf("%s · %s", strings.ToUpper(title), strings.ToUpper(first(block.State, "completed"))))
 				for _, line := range wrapText(block.Content, max(4, innerWidth-4)) {
 					content = append(content, "  "+line)
-				}
-				for _, line := range m.renderHookLines(block.Hooks, max(4, innerWidth-2)) {
-					content = append(content, line)
 				}
 			}
 		}

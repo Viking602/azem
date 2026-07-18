@@ -1849,18 +1849,19 @@ func TestTranscriptLayoutCacheReusesStableRender(t *testing.T) {
 	}
 }
 
-func TestHookEventsAttachUpsertSanitizeAndAnimate(t *testing.T) {
+func TestHookEventsUseTransientDedicatedPrompt(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.runID = "run"
 	model.applyEvent(app.Event{Kind: app.EventToolStarted, RunID: "run", ToolCallID: "tool-1", Data: map[string]string{"name": "test"}})
 	started := app.Event{Kind: app.EventHookStarted, AgentID: "main", ToolCallID: "tool-1", Data: map[string]string{
 		"event": "PostToolUse", "name": "lint", "source": "/secret/hooks/lint.sh",
 	}}
 	model.applyEvent(started)
-	if len(model.transcript) != 1 || len(model.transcript[0].Hooks) != 1 || model.transcript[0].Hooks[0].State != "running" {
-		t.Fatalf("started hook not attached: %#v", model.transcript)
+	if len(model.transcript) != 2 || model.transcript[1].Kind != BlockHook || len(model.transcript[1].Hooks) != 1 || model.transcript[1].Hooks[0].State != "running" {
+		t.Fatalf("started hook lacks dedicated prompt: %#v", model.transcript)
 	}
-	if model.transcript[0].Hooks[0].Source != "lint.sh" || !model.hasRunningHooks() {
-		t.Fatalf("hook source/running state = %#v", model.transcript[0].Hooks[0])
+	if len(model.transcript[0].Hooks) != 0 || model.transcript[1].Hooks[0].Source != "lint.sh" || !model.hasRunningHooks() {
+		t.Fatalf("hook was attached to tool or lost state: %#v", model.transcript)
 	}
 	updated, command := model.Update(animationTickMsg{})
 	model = updated.(AppModel)
@@ -1874,10 +1875,10 @@ func TestHookEventsAttachUpsertSanitizeAndAnimate(t *testing.T) {
 	finished.Data["reason"] = "policy denied"
 	finished.Data["stdout"] = `{"decision":"deny","command":"secret"}`
 	model.applyEvent(finished)
-	if len(model.transcript[0].Hooks) != 1 || model.transcript[0].Hooks[0].State != "blocked" || model.transcript[0].Hooks[0].Output != "policy denied" {
-		t.Fatalf("finished hook was not replaced/sanitized: %#v", model.transcript[0].Hooks)
+	if len(model.transcript[1].Hooks) != 1 || model.transcript[1].Hooks[0].State != "blocked" || model.transcript[1].Hooks[0].Output != "policy denied" {
+		t.Fatalf("finished hook was not replaced/sanitized: %#v", model.transcript[1].Hooks)
 	}
-	if strings.Contains(model.transcript[0].Hooks[0].Output, "decision") {
+	if strings.Contains(model.transcript[1].Hooks[0].Output, "decision") {
 		t.Fatal("control JSON leaked into hook output")
 	}
 	updated, command = model.Update(animationTickMsg{})
@@ -1895,8 +1896,16 @@ func TestHookEventsAttachUpsertSanitizeAndAnimate(t *testing.T) {
 
 	model.applyEvent(app.Event{Kind: app.EventToolFinished, RunID: "run", ToolCallID: "tool-2", State: "completed", Data: map[string]string{"name": "test"}})
 	model.applyEvent(app.Event{Kind: app.EventHookFinished, AgentID: "main", ToolCallID: "tool-2", State: "completed", Data: map[string]string{"event": "PostToolUse", "name": "audit"}})
-	if len(model.transcript) != 2 || len(model.transcript[1].Hooks) != 1 || model.transcript[1].Hooks[0].Name != "audit" {
-		t.Fatalf("finish-only tool hook not attached: %#v", model.transcript)
+	if len(model.transcript) != 3 || model.transcript[2].Kind != BlockTool {
+		t.Fatalf("successful finish-only hook left transcript clutter: %#v", model.transcript)
+	}
+
+	success := app.Event{Kind: app.EventHookStarted, Data: map[string]string{"event": "Stop", "name": "notify"}}
+	model.applyEvent(success)
+	success.Kind, success.State = app.EventHookFinished, "completed"
+	model.applyEvent(success)
+	if model.transcript[len(model.transcript)-1].Kind == BlockHook {
+		t.Fatalf("successful hook prompt did not disappear: %#v", model.transcript)
 	}
 }
 
@@ -1904,22 +1913,16 @@ func TestAgentAndLifecycleHooksRenderNarrowAndReducedMotion(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.agents = []AgentView{{ID: "agent-1", Blocks: []Block{{Kind: BlockTool, ToolCallID: "agent-tool", Title: "search"}}}}
 	model.applyEvent(app.Event{Kind: app.EventHookStarted, AgentID: "agent-1", ToolCallID: "agent-tool", Data: map[string]string{"event": "PreToolUse", "name": "guard"}})
-	if len(model.agents[0].Blocks[0].Hooks) != 1 {
-		t.Fatalf("agent hook not attached: %#v", model.agents[0].Blocks)
+	if len(model.agents[0].Blocks) != 2 || model.agents[0].Blocks[1].Kind != BlockHook || len(model.agents[0].Blocks[0].Hooks) != 0 {
+		t.Fatalf("agent hook lacks dedicated prompt: %#v", model.agents[0].Blocks)
 	}
 	model.applyEvent(app.Event{Kind: app.EventHookStarted, Data: map[string]string{"event": "SessionStart", "name": "setup"}})
 	if len(model.transcript) != 1 || model.transcript[0].Kind != BlockHook {
 		t.Fatalf("lifecycle hook did not create a block: %#v", model.transcript)
 	}
 	model.reducedMotion = true
-	tool := model.agents[0].Blocks[0]
-	tool.Collapsed = true
-	header := ansi.Strip(strings.Join(model.renderBlock(tool, 0, 40), "\n"))
-	if !strings.Contains(header, model.tr("hook.summary")) {
-		t.Fatalf("collapsed header lacks hook summary: %q", header)
-	}
-	tool.Collapsed = false
-	rendered := ansi.Strip(strings.Join(model.renderBlock(tool, 0, 24), "\n"))
+	prompt := model.agents[0].Blocks[1]
+	rendered := ansi.Strip(strings.Join(model.renderBlock(prompt, 0, 24), "\n"))
 	if !strings.Contains(rendered, "•") {
 		t.Fatalf("reduced-motion hook lacks static mark: %q", rendered)
 	}

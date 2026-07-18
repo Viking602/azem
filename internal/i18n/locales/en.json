@@ -38,7 +38,6 @@
   "block.error": "ERROR",
   "block.hook": "HOOK",
   "hook.label": "Hook",
-  "hook.summary": "hooks",
   "block.user": "USER",
   "block.thinking": "THINKING",
   "tool.read_file": "Read File",

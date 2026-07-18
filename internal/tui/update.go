@@ -2053,27 +2053,24 @@ func (m *AppModel) hasRunningHooks() bool {
 
 func (m *AppModel) updateHooks(blocks *[]Block, event app.Event) {
 	hook := hookRunFromEvent(event)
-	if event.ToolCallID != "" {
-		for i := len(*blocks) - 1; i >= 0; i-- {
-			block := &(*blocks)[i]
-			if (block.Kind == BlockTool || block.Kind == BlockDiff) && block.ToolCallID == event.ToolCallID {
-				upsertHookRun(&block.Hooks, hook, event.Kind)
-				m.invalidateTranscriptLayout()
-				return
-			}
-		}
-	}
 	if event.Kind == app.EventHookDiagnostic {
 		*blocks = append(*blocks, Block{ID: event.ToolCallID, Kind: BlockHook, RunID: event.RunID, Title: hook.Event, State: "failed", Hooks: []HookRunView{hook}})
 	} else if event.Kind == app.EventHookFinished {
 		for i := len(*blocks) - 1; i >= 0; i-- {
 			if (*blocks)[i].Kind == BlockHook && upsertMatchingHook(&(*blocks)[i].Hooks, hook) {
+				if hook.State == "completed" {
+					*blocks = append((*blocks)[:i], (*blocks)[i+1:]...)
+					m.invalidateTranscriptLayout()
+					return
+				}
 				(*blocks)[i].State = hook.State
 				m.invalidateTranscriptLayout()
 				return
 			}
 		}
-		*blocks = append(*blocks, Block{Kind: BlockHook, RunID: event.RunID, Title: hook.Event, State: hook.State, Collapsed: hook.State == "completed", Hooks: []HookRunView{hook}})
+		if hook.State != "completed" {
+			*blocks = append(*blocks, Block{Kind: BlockHook, RunID: event.RunID, Title: hook.Event, State: hook.State, Hooks: []HookRunView{hook}})
+		}
 	} else {
 		*blocks = append(*blocks, Block{Kind: BlockHook, RunID: event.RunID, Title: hook.Event, State: "running", Hooks: []HookRunView{hook}})
 	}
@@ -2129,13 +2126,6 @@ func compactHookText(value string, lines, bytes int) string {
 		value = strings.ToValidUTF8(value, "") + "…"
 	}
 	return value
-}
-
-func upsertHookRun(hooks *[]HookRunView, hook HookRunView, kind app.EventKind) {
-	if kind == app.EventHookFinished && upsertMatchingHook(hooks, hook) {
-		return
-	}
-	*hooks = append(*hooks, hook)
 }
 
 func upsertMatchingHook(hooks *[]HookRunView, hook HookRunView) bool {
