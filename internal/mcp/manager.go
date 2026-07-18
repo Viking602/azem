@@ -1,0 +1,565 @@
+package mcp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+
+	"github.com/Viking602/go-hydaelyn/message"
+	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/go-hydaelyn/tool/kit"
+	mcpclient "github.com/Viking602/go-hydaelyn/transport/mcp/client"
+	"github.com/Viking602/go-hydaelyn/transport/mcpcontract"
+
+	"github.com/Viking602/azem/internal/config"
+)
+
+type State string
+
+const (
+	StateDisabled   State = "disabled"
+	StateConnecting State = "connecting"
+	StateReady      State = "ready"
+	StateDegraded   State = "degraded"
+	StateStopped    State = "stopped"
+)
+
+type Event struct {
+	Server string
+	State  State
+	Error  string
+	At     time.Time
+}
+
+type Diagnostic struct {
+	Server string
+	Tool   string
+	Error  string
+}
+
+type ServerSnapshot struct {
+	Name        string
+	State       State
+	ToolCount   int
+	Diagnostics []Diagnostic
+	LastError   string
+}
+
+type SecretResolver func(context.Context, string) (string, error)
+type DialFunc func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error)
+type SleepFunc func(context.Context, time.Duration) error
+
+type Options struct {
+	Dial  DialFunc
+	Sleep SleepFunc
+	Sink  func(Event)
+}
+
+type Manager struct {
+	mu      sync.RWMutex
+	config  map[string]config.MCPServerConfig
+	version string
+	resolve SecretResolver
+	dial    DialFunc
+	sleep   SleepFunc
+	sink    func(Event)
+	servers map[string]*server
+	closed  bool
+}
+
+type server struct {
+	state       State
+	client      mcpcontract.Client
+	tools       []tool.Driver
+	diagnostics []Diagnostic
+	lastError   string
+}
+
+func NewManager(servers map[string]config.MCPServerConfig, version string, resolve SecretResolver, options Options) *Manager {
+	copied := make(map[string]config.MCPServerConfig, len(servers))
+	states := make(map[string]*server, len(servers))
+	for name, serverConfig := range servers {
+		copied[name] = serverConfig
+		states[name] = &server{state: StateDisabled}
+	}
+	if resolve == nil {
+		resolve = resolveEnvironmentReference
+	}
+	if options.Dial == nil {
+		options.Dial = defaultDial
+	}
+	if options.Sleep == nil {
+		options.Sleep = sleepContext
+	}
+	return &Manager{config: copied, version: version, resolve: resolve, dial: options.Dial, sleep: options.Sleep, sink: options.Sink, servers: states}
+}
+
+func (m *Manager) Start(ctx context.Context) error {
+	names := m.names()
+	var startErr error
+	for _, name := range names {
+		serverConfig := m.config[name]
+		if !serverConfig.Enabled {
+			m.transition(name, StateDisabled, nil)
+			continue
+		}
+		if err := m.connectWithRetry(ctx, name); err != nil {
+			startErr = errors.Join(startErr, fmt.Errorf("mcp %s: %w", name, err))
+		}
+	}
+	return startErr
+}
+
+func (m *Manager) Reconnect(ctx context.Context, name string) error {
+	serverConfig, ok := m.config[name]
+	if !ok {
+		return fmt.Errorf("mcp server %q not found", name)
+	}
+	if !serverConfig.Enabled {
+		m.transition(name, StateDisabled, nil)
+		return fmt.Errorf("mcp server %q is disabled", name)
+	}
+	m.closeClient(name)
+	return m.connectWithRetry(ctx, name)
+}
+
+func (m *Manager) Refresh(ctx context.Context, name string) error {
+	m.mu.RLock()
+	current := m.servers[name]
+	var client mcpcontract.Client
+	if current != nil {
+		client = current.client
+	}
+	m.mu.RUnlock()
+	if client == nil {
+		return fmt.Errorf("mcp server %q is not connected", name)
+	}
+	m.transition(name, StateConnecting, nil)
+	serverConfig := m.config[name]
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout(serverConfig))
+	defer cancel()
+	drivers, diagnostics, err := m.importTools(callCtx, name, serverConfig, client)
+	if err != nil {
+		m.transition(name, StateDegraded, err)
+		return err
+	}
+	m.mu.Lock()
+	current = m.servers[name]
+	current.tools = drivers
+	current.diagnostics = diagnostics
+	m.mu.Unlock()
+	m.transition(name, StateReady, nil)
+	return nil
+}
+
+// Snapshot returns a copy of the currently ready tool catalog. A caller keeps
+// this slice for one agent turn; later refreshes never mutate it.
+func (m *Manager) Snapshot() []tool.Driver {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	drivers := make([]tool.Driver, 0)
+	for _, current := range m.servers {
+		if current.state == StateReady {
+			drivers = append(drivers, current.tools...)
+		}
+	}
+	sort.Slice(drivers, func(i, j int) bool { return drivers[i].Definition().Name < drivers[j].Definition().Name })
+	return append([]tool.Driver(nil), drivers...)
+}
+
+func (m *Manager) Servers() []ServerSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names := make([]string, 0, len(m.servers))
+	for name := range m.servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]ServerSnapshot, 0, len(names))
+	for _, name := range names {
+		current := m.servers[name]
+		result = append(result, ServerSnapshot{
+			Name: name, State: current.state, ToolCount: len(current.tools),
+			Diagnostics: append([]Diagnostic(nil), current.diagnostics...), LastError: current.lastError,
+		})
+	}
+	return result
+}
+
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closed = true
+	names := make([]string, 0, len(m.servers))
+	clients := make([]mcpcontract.Client, 0, len(m.servers))
+	for name, current := range m.servers {
+		names = append(names, name)
+		if current.client != nil {
+			clients = append(clients, current.client)
+			current.client = nil
+		}
+		current.tools = nil
+	}
+	m.mu.Unlock()
+	var closeErr error
+	for _, client := range clients {
+		closeErr = errors.Join(closeErr, client.Close())
+	}
+	for _, name := range names {
+		m.transition(name, StateStopped, nil)
+	}
+	return closeErr
+}
+
+func (m *Manager) connectWithRetry(ctx context.Context, name string) error {
+	delays := []time.Duration{time.Second, 4 * time.Second, 16 * time.Second}
+	var lastErr error
+	for attempt := 0; attempt <= len(delays); attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		m.transition(name, StateConnecting, nil)
+		if err := m.connectOnce(ctx, name); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			m.transition(name, StateDegraded, err)
+		}
+		if attempt < len(delays) {
+			if err := m.sleep(ctx, delays[attempt]); err != nil {
+				return err
+			}
+		}
+	}
+	return lastErr
+}
+
+func (m *Manager) connectOnce(ctx context.Context, name string) error {
+	serverConfig := m.config[name]
+	environment, err := m.resolveMap(ctx, serverConfig.Env)
+	if err != nil {
+		return fmt.Errorf("resolve environment: %w", err)
+	}
+	headerValues, err := m.resolveMap(ctx, serverConfig.Headers)
+	if err != nil {
+		return fmt.Errorf("resolve headers: %w", err)
+	}
+	headers := make(http.Header, len(headerValues))
+	for key, value := range headerValues {
+		headers.Set(key, value)
+	}
+	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout(serverConfig))
+	defer cancel()
+	client, err := m.dial(connectCtx, name, serverConfig, environment, headers)
+	if err != nil {
+		return err
+	}
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = client.Close()
+		}
+	}()
+	if _, err := client.Initialize(connectCtx, "azem", m.version); err != nil {
+		return fmt.Errorf("initialize: %w", err)
+	}
+	drivers, diagnostics, err := m.importTools(connectCtx, name, serverConfig, client)
+	if err != nil {
+		return fmt.Errorf("import tools: %w", err)
+	}
+	m.mu.Lock()
+	current := m.servers[name]
+	old := current.client
+	current.client = client
+	current.tools = drivers
+	current.diagnostics = diagnostics
+	current.lastError = ""
+	m.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	initialized = true
+	m.transition(name, StateReady, nil)
+	return nil
+}
+
+func (m *Manager) importTools(ctx context.Context, name string, serverConfig config.MCPServerConfig, client mcpcontract.Client) ([]tool.Driver, []Diagnostic, error) {
+	imported, err := kit.ImportMCPTools(ctx, client)
+	if err != nil {
+		return nil, nil, err
+	}
+	seen := make(map[string]bool, len(imported))
+	drivers := make([]tool.Driver, 0, len(imported))
+	diagnostics := make([]Diagnostic, 0)
+	for _, remote := range imported {
+		definition := remote.Definition()
+		original := strings.TrimSpace(definition.Name)
+		normalized := normalizeToolName(original)
+		if original == "" || normalized == "" {
+			diagnostics = append(diagnostics, Diagnostic{Server: name, Tool: original, Error: "tool name is empty after normalization"})
+			continue
+		}
+		visible := "mcp__" + name + "__" + normalized
+		if seen[visible] {
+			diagnostics = append(diagnostics, Diagnostic{Server: name, Tool: original, Error: "normalized tool name conflicts with another tool"})
+			continue
+		}
+		if err := validateSchema(definition.InputSchema, 0); err != nil {
+			diagnostics = append(diagnostics, Diagnostic{Server: name, Tool: original, Error: "invalid input schema: " + err.Error()})
+			continue
+		}
+		seen[visible] = true
+		override, overridden := serverConfig.ToolOverrides[original]
+		definition.Name = visible
+		definition.Origin = "mcp:" + name
+		definition.EffectType = tool.EffectExternalSideEffect
+		definition.RequiresApproval = true
+		definition.RequiresActionTask = true
+		definition.RiskLevel = "high"
+		definition.Security.RequiresApproval = true
+		definition.Security.RiskLevel = "high"
+		definition.Idempotent = false
+		definition.Timeout = callTimeout(serverConfig)
+		if overridden {
+			definition.EffectType = tool.EffectType(override.Effect)
+			definition.RequiresApproval = override.Approval != "never"
+			definition.Security.RequiresApproval = definition.RequiresApproval
+			if definition.EffectType == tool.EffectReadOnly {
+				definition.RequiresActionTask = false
+				definition.RiskLevel = "low"
+				definition.Security.RiskLevel = "low"
+			}
+		}
+		drivers = append(drivers, &remoteDriver{
+			manager: m, server: name, inner: remote, original: original, definition: definition,
+			semaphore: make(chan struct{}, max(1, serverConfig.MaxConcurrency)), timeout: callTimeout(serverConfig),
+		})
+	}
+	sort.Slice(drivers, func(i, j int) bool { return drivers[i].Definition().Name < drivers[j].Definition().Name })
+	return drivers, diagnostics, nil
+}
+
+func (m *Manager) resolveMap(ctx context.Context, references map[string]string) (map[string]string, error) {
+	resolved := make(map[string]string, len(references))
+	keys := make([]string, 0, len(references))
+	for key := range references {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value, err := m.resolve(ctx, references[key])
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
+		}
+		resolved[key] = value
+	}
+	return resolved, nil
+}
+
+func (m *Manager) transition(name string, state State, cause error) {
+	m.mu.Lock()
+	current := m.servers[name]
+	if current == nil {
+		m.mu.Unlock()
+		return
+	}
+	current.state = state
+	if cause != nil {
+		current.lastError = cause.Error()
+	} else if state == StateReady {
+		current.lastError = ""
+	}
+	sink := m.sink
+	event := Event{Server: name, State: state, At: time.Now().UTC()}
+	if cause != nil {
+		event.Error = cause.Error()
+	}
+	m.mu.Unlock()
+	if sink != nil {
+		sink(event)
+	}
+}
+
+func (m *Manager) degrade(name string, cause error) {
+	m.transition(name, StateDegraded, cause)
+}
+
+func (m *Manager) closeClient(name string) {
+	m.mu.Lock()
+	current := m.servers[name]
+	var client mcpcontract.Client
+	if current != nil {
+		client = current.client
+		current.client = nil
+		current.tools = nil
+	}
+	m.mu.Unlock()
+	if client != nil {
+		_ = client.Close()
+	}
+}
+
+func (m *Manager) names() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names := make([]string, 0, len(m.config))
+	for name := range m.config {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+type remoteDriver struct {
+	manager    *Manager
+	server     string
+	inner      tool.Driver
+	original   string
+	definition tool.Definition
+	semaphore  chan struct{}
+	timeout    time.Duration
+}
+
+func (d *remoteDriver) Definition() tool.Definition { return d.definition }
+
+func (d *remoteDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	select {
+	case d.semaphore <- struct{}{}:
+		defer func() { <-d.semaphore }()
+	case <-ctx.Done():
+		return tool.Result{}, ctx.Err()
+	}
+	callCtx, cancel := context.WithTimeout(ctx, d.timeout)
+	defer cancel()
+	remoteCall := call
+	remoteCall.Name = d.original
+	result, err := d.inner.Execute(callCtx, remoteCall, sink)
+	result.Name = d.definition.Name
+	if err != nil {
+		d.manager.degrade(d.server, err)
+		return result, err
+	}
+	if result.IsError {
+		d.manager.degrade(d.server, fmt.Errorf("remote tool %s returned an error", d.original))
+	}
+	return result, nil
+}
+
+func defaultDial(ctx context.Context, _ string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header) (mcpcontract.Client, error) {
+	switch serverConfig.Transport {
+	case "stdio":
+		keys := make([]string, 0, len(environment))
+		for key := range environment {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		env := make([]string, 0, len(keys))
+		for _, key := range keys {
+			env = append(env, key+"="+environment[key])
+		}
+		return mcpclient.DialStdio(ctx, mcpclient.StdioConfig{
+			Command: serverConfig.Command, Args: append([]string(nil), serverConfig.Args...),
+			Dir: serverConfig.CWD, Env: env, InheritEnv: serverConfig.InheritEnv,
+		})
+	case "streamable_http":
+		return mcpclient.New(mcpclient.NewHTTPTransport(serverConfig.URL, headers)), nil
+	default:
+		return nil, fmt.Errorf("unsupported MCP transport %q", serverConfig.Transport)
+	}
+}
+
+func normalizeToolName(name string) string {
+	var builder strings.Builder
+	lastUnderscore := false
+	for _, r := range strings.TrimSpace(name) {
+		valid := unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-'
+		if valid && r <= unicode.MaxASCII {
+			builder.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			builder.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	return strings.Trim(builder.String(), "_")
+}
+
+func validateSchema(schema message.JSONSchema, depth int) error {
+	if depth > 32 {
+		return fmt.Errorf("schema nesting exceeds 32 levels")
+	}
+	switch schema.Type {
+	case "", "object", "array", "string", "number", "integer", "boolean", "null":
+	default:
+		return fmt.Errorf("unsupported type %q", schema.Type)
+	}
+	if schema.Type == "array" && schema.Items == nil {
+		return fmt.Errorf("array schema is missing items")
+	}
+	if schema.Items != nil {
+		if err := validateSchema(*schema.Items, depth+1); err != nil {
+			return err
+		}
+	}
+	for property, child := range schema.Properties {
+		if strings.TrimSpace(property) == "" {
+			return fmt.Errorf("property name is empty")
+		}
+		if err := validateSchema(child, depth+1); err != nil {
+			return fmt.Errorf("property %s: %w", property, err)
+		}
+	}
+	for _, required := range schema.Required {
+		if _, ok := schema.Properties[required]; !ok {
+			return fmt.Errorf("required property %q is not defined", required)
+		}
+	}
+	return nil
+}
+
+func connectTimeout(serverConfig config.MCPServerConfig) time.Duration {
+	if serverConfig.ConnectDuration > 0 {
+		return serverConfig.ConnectDuration
+	}
+	if parsed, err := time.ParseDuration(serverConfig.ConnectTimeout); err == nil && parsed > 0 {
+		return parsed
+	}
+	return 30 * time.Second
+}
+
+func callTimeout(serverConfig config.MCPServerConfig) time.Duration {
+	if serverConfig.CallDuration > 0 {
+		return serverConfig.CallDuration
+	}
+	if parsed, err := time.ParseDuration(serverConfig.CallTimeout); err == nil && parsed > 0 {
+		return parsed
+	}
+	return 60 * time.Second
+}
+
+func resolveEnvironmentReference(_ context.Context, reference string) (string, error) {
+	return config.ResolveReference(reference, os.LookupEnv, nil)
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}

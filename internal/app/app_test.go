@@ -1,0 +1,531 @@
+package app
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	agentservice "github.com/Viking602/azem/internal/agent"
+	authservice "github.com/Viking602/azem/internal/auth"
+	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/session"
+	"github.com/Viking602/azem/internal/skills"
+	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
+)
+
+func TestFakeTurnStreamsAndFinishes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := config.Default()
+	cfg.Workspace.Root = t.TempDir()
+	service := NewService(ctx, cfg)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+		defer shutdownCancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+
+	runID, err := service.StartTurn("stream me")
+	if err != nil {
+		t.Fatalf("start turn: %v", err)
+	}
+	var output strings.Builder
+	for {
+		eventCtx, eventCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		event, err := service.NextEvent(eventCtx)
+		eventCancel()
+		if err != nil {
+			t.Fatalf("next event: %v", err)
+		}
+		if event.RunID != runID {
+			t.Fatalf("event run ID = %q, want %q", event.RunID, runID)
+		}
+		switch event.Kind {
+		case EventTextDelta:
+			output.WriteString(event.Text)
+		case EventRunFinished:
+			if got, want := output.String(), "Deterministic probe response: stream me"; got != want {
+				t.Fatalf("output = %q, want %q", got, want)
+			}
+			return
+		}
+	}
+}
+
+func TestFakeTurnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := config.Default()
+	cfg.Workspace.Root = t.TempDir()
+	service := NewService(ctx, cfg)
+	runID, err := service.StartTurn(strings.Repeat("long ", 100))
+	if err != nil {
+		t.Fatalf("start turn: %v", err)
+	}
+	if !service.CancelActive() {
+		t.Fatal("CancelActive returned false")
+	}
+	deadline, deadlineCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer deadlineCancel()
+	for {
+		event, err := service.NextEvent(deadline)
+		if err != nil {
+			t.Fatalf("next event: %v", err)
+		}
+		if event.RunID == runID && event.Kind == EventRunCancelled {
+			break
+		}
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	defer shutdownCancel()
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+}
+
+func TestShutdownStopsAdmissionCancelsWorkersAndIsIdempotent(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace.Root = t.TempDir()
+	service := NewService(context.Background(), cfg)
+	if _, err := service.StartTurn(strings.Repeat("work ", 100)); err != nil {
+		t.Fatal(err)
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("second shutdown: %v", err)
+	}
+	if _, err := service.StartTurn("late"); err == nil || !strings.Contains(err.Error(), "shutting down") {
+		t.Fatalf("late StartTurn error = %v", err)
+	}
+	for {
+		eventCtx, eventCancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := service.NextEvent(eventCtx)
+		eventCancel()
+		if err != nil {
+			if _, ok := err.(ioEOF); !ok {
+				t.Fatalf("closed event stream error = %T %v", err, err)
+			}
+			break
+		}
+	}
+}
+
+func TestNewSessionStaysEphemeralUntilFirstTurn(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB())
+	cfg := config.Default()
+	cfg.Workspace.Root = t.TempDir()
+	service := NewService(ctx, cfg)
+	service.AttachDurable(sessions, nil)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		if err := store.Close(shutdownCtx); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "legacy-empty", Title: "Legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionNewSession}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventSessionLoaded || event.State != "new" || event.SessionID == "" || event.SessionID == "default" {
+		t.Fatalf("new-session event = %+v", event)
+	}
+	var count int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE id=?`, event.SessionID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("blank session was persisted before its first turn: count=%d", count)
+	}
+	listed, err := sessions.List(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("session list exposed empty rows: %+v", listed)
+	}
+
+	runID, err := service.StartConfiguredTurn(TurnRequest{
+		SessionID: event.SessionID, Prompt: "First durable conversation", Provider: "chatgpt",
+		Model: "model", Reasoning: "high", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTerminalRun(t, service, runID)
+	projection, err := sessions.LoadProjection(ctx, event.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Session.Title != "First durable conversation" || len(projection.Blocks) != 2 {
+		t.Fatalf("materialized projection = %+v", projection)
+	}
+	listed, err = sessions.List(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != event.SessionID {
+		t.Fatalf("materialized session list = %+v", listed)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionResumeSession, Target: event.SessionID}); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Kind != EventSessionLoaded || resumed.State != "loaded" || resumed.SessionID != event.SessionID || resumed.Data["blocks"] == "[]" {
+		t.Fatalf("resume event = %+v", resumed)
+	}
+}
+
+func TestBootstrapUsesFreshUnpersistedSessionEachLaunch(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("AZEM_FAKE_PROVIDER", "1")
+	configFile := filepath.Join(root, "azem.yaml")
+	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: file\n  import_codex: false\n  import_grok: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	launch := func() (string, string) {
+		boot, err := Bootstrap(context.Background(), root, configFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := boot.Service.Shutdown(shutdownCtx); err != nil {
+			t.Fatal(err)
+		}
+		probe, err := sqlitestore.Open(context.Background(), boot.Paths.Database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer probe.Close(context.Background())
+		var count int
+		if err := probe.DB().QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("empty launch persisted %d sessions", count)
+		}
+		return boot.SessionID, boot.Paths.Database
+	}
+
+	firstID, firstDatabase := launch()
+	secondID, secondDatabase := launch()
+	if firstID == "" || secondID == "" || firstID == "default" || firstID == secondID {
+		t.Fatalf("startup session IDs first=%q second=%q", firstID, secondID)
+	}
+	if firstDatabase != secondDatabase {
+		t.Fatalf("launch databases differ: %q != %q", firstDatabase, secondDatabase)
+	}
+}
+
+func TestBootstrapRoutesLegacyCredentialReference(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("AZEM_FAKE_PROVIDER", "1")
+	configFile := filepath.Join(root, "azem.yaml")
+	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: sqlite\n  import_codex: false\n  import_grok: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := Bootstrap(ctx, root, configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := first.Service.Shutdown(shutdownCtx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+
+	legacyStore, err := authservice.NewFileStore(filepath.Join(first.Paths.StateDir, "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := authservice.Credential{Provider: "grok", AccountID: "legacy-account", AccessToken: "legacy-access"}
+	reference, err := legacyStore.Put(ctx, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe, err := sqlitestore.Open(ctx, first.Paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().UnixNano()
+	if _, err := probe.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
+		want.AccountID, want.Provider, reference, "active", now, now); err != nil {
+		probe.Close(ctx)
+		t.Fatal(err)
+	}
+	if err := probe.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := Bootstrap(ctx, root, configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := restarted.Service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	}()
+	got, err := restarted.Service.Authentication().Credential(ctx, want.Provider, want.AccountID)
+	if err != nil {
+		t.Fatalf("load legacy referenced credential after restart: %v", err)
+	}
+	if got.AccessToken != want.AccessToken {
+		t.Fatalf("legacy access token = %q, want %q", got.AccessToken, want.AccessToken)
+	}
+}
+
+func TestActiveSkillPreflightBeforeDurableRun(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := sqlitestore.Open(ctx, filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	skillRoot := filepath.Join(root, "skills")
+	for name, description := range map[string]string{"demo": "Demo skill", "hidden": "Hidden skill"} {
+		directory := filepath.Join(skillRoot, name)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		content := "---\nname: " + name + "\ndescription: " + description + "\n---\nBODY\n"
+		if err := os.WriteFile(filepath.Join(directory, "SKILL.md"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	skillCatalog, err := skills.Load(skills.LoadOptions{Config: config.SkillsConfig{
+		Enabled:        true,
+		AdditionalDirs: []string{skillRoot},
+		Disabled:       []string{"hidden"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coding, err := agentservice.NewService(store, workspace, agentservice.WithSkills(skillCatalog))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB())
+	cfg := config.Default()
+	cfg.Workspace.Root = workspace
+	service := NewService(ctx, cfg)
+	service.AttachDurable(sessions, coding)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		if err := store.Close(shutdownCtx); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	tests := []struct {
+		name      string
+		agentMode string
+		active    string
+		wantError string
+		sessionID string
+	}{
+		{name: "team", agentMode: "team", active: "demo", wantError: "active skills require single-agent mode", sessionID: "team-active"},
+		{name: "unknown", agentMode: "single", active: "missing", wantError: `skill: skill not registered: missing`, sessionID: "unknown-active"},
+		{name: "disabled", agentMode: "single", active: "hidden", wantError: `skill: skill not registered: hidden`, sessionID: "disabled-active"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := service.StartConfiguredTurn(TurnRequest{
+				SessionID:    test.sessionID,
+				Prompt:       "inspect parser",
+				AgentMode:    test.agentMode,
+				ActiveSkills: []string{test.active},
+			})
+			if err == nil || err.Error() != test.wantError {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+			var count int
+			if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE id=?`, test.sessionID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("preflight failure persisted %d sessions", count)
+			}
+		})
+	}
+}
+
+func TestSkillCatalogActionsAndAtomicReload(t *testing.T) {
+	root := t.TempDir()
+	skillRoot := filepath.Join(root, "skills")
+	skillDir := filepath.Join(skillRoot, "demo")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	definitionPath := filepath.Join(skillDir, "SKILL.md")
+	if err := os.WriteFile(definitionPath, []byte("---\nname: demo\ndescription: old description\n---\nBODY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := skills.Load(skills.LoadOptions{Config: config.SkillsConfig{
+		Enabled:        true,
+		AdditionalDirs: []string{skillRoot, filepath.Join(root, "missing-explicit")},
+		Eager:          []string{"demo"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), config.Default())
+	service.AttachSkills(catalog)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionListSkills}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.Kind != EventSkillCatalog || listed.State != "listed" {
+		t.Fatalf("list event = %+v", listed)
+	}
+	entry, ok := skillEventEntry(listed.SkillCatalog, "demo")
+	if !ok || entry.Description != "old description" || !entry.Eager {
+		t.Fatalf("demo list entry = %+v, found=%v", entry, ok)
+	}
+	if len(listed.SkillDiagnostics) == 0 {
+		t.Fatal("explicit missing directory diagnostic was omitted")
+	}
+	cloned := listed.Clone()
+	listed.SkillCatalog[0].Name = "mutated"
+	listed.SkillDiagnostics[0].Message = "mutated"
+	if cloned.SkillCatalog[0].Name == "mutated" || cloned.SkillDiagnostics[0].Message == "mutated" {
+		t.Fatal("Event.Clone shared skill catalog slices")
+	}
+
+	if err := os.WriteFile(definitionPath, []byte("---\nname: demo\ndescription: new description\n---\nBODY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionReloadSkills}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok = skillEventEntry(reloaded.SkillCatalog, "demo")
+	if reloaded.State != "reloaded" || !ok || entry.Description != "new description" {
+		t.Fatalf("reload event = %+v", reloaded)
+	}
+
+	if err := os.Remove(definitionPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionReloadSkills}); err == nil {
+		t.Fatal("reload succeeded after eager skill disappeared")
+	}
+	noEventCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if event, err := service.NextEvent(noEventCtx); err == nil {
+		t.Fatalf("failed reload emitted event %+v", event)
+	}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionListSkills}); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok = skillEventEntry(retained.SkillCatalog, "demo")
+	if !ok || entry.Description != "new description" {
+		t.Fatalf("failed reload did not retain old snapshot: %+v", retained)
+	}
+
+	unavailable := NewService(context.Background(), config.Default())
+	if err := unavailable.ExecuteAction(context.Background(), Action{Kind: ActionListSkills}); err == nil || err.Error() != "skills are unavailable" {
+		t.Fatalf("unavailable list error = %v", err)
+	}
+	if err := unavailable.ExecuteAction(context.Background(), Action{Kind: ActionReloadSkills}); err == nil || err.Error() != "skills are unavailable" {
+		t.Fatalf("unavailable reload error = %v", err)
+	}
+}
+
+func skillEventEntry(entries []SkillCatalogEntry, name string) (SkillCatalogEntry, bool) {
+	for _, entry := range entries {
+		if entry.Name == name {
+			return entry, true
+		}
+	}
+	return SkillCatalogEntry{}, false
+}
+
+func waitForTerminalRun(t *testing.T, service *Service, runID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		event, err := service.NextEvent(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.RunID != runID {
+			continue
+		}
+		if event.Kind == EventRunFinished {
+			return
+		}
+		if event.Kind == EventRunFailed || event.Kind == EventRunCancelled {
+			t.Fatalf("run %s ended as %s: %s", runID, event.Kind, event.Text)
+		}
+	}
+}

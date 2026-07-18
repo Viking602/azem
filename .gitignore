@@ -1,0 +1,26 @@
+# Build outputs
+/azem
+/bin/
+/dist/
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Runtime data and logs
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+
+# Local configuration and secrets
+.env
+.env.*
+config.local.yaml
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store

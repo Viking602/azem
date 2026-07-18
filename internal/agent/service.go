@@ -1,0 +1,629 @@
+package agent
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/Viking602/azem/internal/skills"
+	"github.com/Viking602/go-hydaelyn"
+	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/go-hydaelyn/coding"
+	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/go-hydaelyn/worker"
+)
+
+const mainAgentID = "azem-main"
+
+type Service struct {
+	runner             *hydaelyn.Runner
+	store              api.StoreProvider
+	workspace          coding.Workspace
+	tools              *tool.Bus
+	policy             *ApprovalPolicy
+	allowWrite         bool
+	shellPolicy        string
+	allowNetwork       string
+	teamMaxConcurrency int
+	teamMaxTicks       int
+	skills             *skills.Catalog
+}
+
+type Run struct {
+	RunID        string
+	Goal         string
+	TaskID       string
+	LeaseID      string
+	TaskVersion  int
+	HolderID     string
+	pending      map[string]PendingApproval
+	approvedOnce map[string]string
+}
+
+type PendingApproval struct {
+	Request    api.ApprovalRequest
+	Token      api.ResumeToken
+	Call       tool.Call
+	Scope      invocationScope
+	Effect     string
+	Replayable bool
+}
+
+type ExecutionResult struct {
+	Result   tool.Result
+	Approval *PendingApproval
+	Executed bool
+}
+
+type ApprovalMode string
+
+const (
+	ApprovalOnce    ApprovalMode = "approved_once"
+	ApprovalSession ApprovalMode = "approved_session"
+	ApprovalDenied  ApprovalMode = "denied"
+)
+
+type serviceOptions struct {
+	allowWrite         bool
+	shellPolicy        string
+	network            string
+	teamMaxConcurrency int
+	teamMaxTicks       int
+	skills             *skills.Catalog
+}
+
+type ServiceOption func(*serviceOptions)
+
+func WithWorkspacePolicy(allowWrite bool, shellPolicy, allowNetwork string) ServiceOption {
+	return func(options *serviceOptions) {
+		options.allowWrite = allowWrite
+		options.shellPolicy = shellPolicy
+		options.network = allowNetwork
+	}
+}
+
+func WithTeamLimits(maxConcurrency, maxTicks int) ServiceOption {
+	return func(options *serviceOptions) {
+		if maxConcurrency > 0 {
+			options.teamMaxConcurrency = maxConcurrency
+		}
+		if maxTicks > 0 {
+			options.teamMaxTicks = maxTicks
+		}
+	}
+}
+
+func WithSkills(catalog *skills.Catalog) ServiceOption {
+	return func(options *serviceOptions) {
+		options.skills = catalog
+	}
+}
+
+func NewService(store api.StoreProvider, workspaceRoot string, options ...ServiceOption) (*Service, error) {
+	settings := serviceOptions{allowWrite: true, shellPolicy: "prompt", network: "prompt", teamMaxConcurrency: 2, teamMaxTicks: 12}
+	for _, option := range options {
+		if option != nil {
+			option(&settings)
+		}
+	}
+	policy := NewApprovalPolicy()
+	runner, err := hydaelyn.NewProduction(api.Config{StoreProvider: store, PolicyEngine: policy})
+	if err != nil {
+		return nil, err
+	}
+	runner.RegisterAgent(api.AgentProfile{ID: mainAgentID, Role: "coding"})
+	workspace := coding.NewLocalWorkspace(workspaceRoot)
+	service := &Service{
+		runner: runner, store: store, workspace: workspace, policy: policy,
+		allowWrite: settings.allowWrite, shellPolicy: settings.shellPolicy, allowNetwork: settings.network,
+		teamMaxConcurrency: settings.teamMaxConcurrency, teamMaxTicks: settings.teamMaxTicks,
+		skills: settings.skills,
+	}
+	drivers, err := service.WorkspaceDrivers(context.Background(), workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	service.tools = tool.NewBus(drivers...)
+	return service, nil
+}
+
+func (s *Service) Runner() *hydaelyn.Runner { return s.runner }
+
+func (s *Service) SkillSnapshot() skills.Snapshot {
+	if s == nil || s.skills == nil {
+		return skills.Snapshot{}
+	}
+	return s.skills.Snapshot()
+}
+
+func (s *Service) StartRun(ctx context.Context, request string) (*Run, error) {
+	runID, err := newID("run")
+	if err != nil {
+		return nil, err
+	}
+	rootID, err := newID("root")
+	if err != nil {
+		return nil, err
+	}
+	run, root, err := s.runner.StartRun(ctx, api.StartRunCommand{RunID: runID, RootTaskID: rootID, Request: request})
+	if err != nil {
+		return nil, err
+	}
+	for _, status := range []api.RunStatus{
+		api.RunStatusPlanning,
+		api.RunStatusValidating,
+		api.RunStatusRouting,
+		api.RunStatusDispatching,
+		api.RunStatusRunning,
+	} {
+		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: run.ID, To: status}); err != nil {
+			return nil, fmt.Errorf("start coding run %s: %w", status, err)
+		}
+	}
+	taskID, err := newID("task")
+	if err != nil {
+		return nil, err
+	}
+	task, err := s.runner.CreateTask(ctx, api.CreateTaskCommand{
+		RunID: run.ID, TaskID: taskID, ParentTaskID: root.ID, Type: api.TaskTypeWorker,
+		Goal: request, OwnerAgentID: mainAgentID, AssignedAgentID: mainAgentID, AllowsAction: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	envelope, err := s.dispatchTask(ctx, api.DispatchTaskCommand{RunID: run.ID, TaskID: task.ID, TargetAgentID: mainAgentID})
+	if err != nil {
+		return nil, err
+	}
+	lease, acquired, err := s.runner.AcquireTaskExecution(ctx, api.AcquireTaskExecutionCommand{
+		RunID: run.ID, TaskID: task.ID, EnvelopeID: envelope.ID, HolderType: api.HolderAgent, HolderID: mainAgentID, TTL: 10 * time.Minute,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, fmt.Errorf("acquire coding task lease: no lease granted")
+	}
+	return &Run{
+		RunID: run.ID, Goal: request, TaskID: task.ID, LeaseID: lease.ID, TaskVersion: task.Version, HolderID: mainAgentID,
+		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string),
+	}, nil
+}
+
+func (s *Service) dispatchTask(ctx context.Context, command api.DispatchTaskCommand) (api.TaskEnvelope, error) {
+	for {
+		envelope, err := s.runner.DispatchTask(ctx, command)
+		if err == nil {
+			return envelope, nil
+		}
+		if !errors.Is(err, api.ErrIdempotencyConflict) {
+			return api.TaskEnvelope{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return api.TaskEnvelope{}, err
+		}
+	}
+}
+
+func (s *Service) ExecuteTool(ctx context.Context, run *Run, call tool.Call, sink tool.UpdateSink) (ExecutionResult, error) {
+	if run == nil {
+		return ExecutionResult{}, fmt.Errorf("run is nil")
+	}
+	driver, ok := s.tools.Driver(call.Name)
+	if !ok {
+		return ExecutionResult{}, fmt.Errorf("%w: %s", tool.ErrToolNotFound, call.Name)
+	}
+	return s.ExecuteDriver(ctx, run, driver, call, sink)
+}
+
+// ExecuteDriver applies the same approval policy and durable action-attempt
+// boundary used by built-in coding tools to a turn-scoped external driver.
+func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Driver, call tool.Call, sink tool.UpdateSink) (ExecutionResult, error) {
+	if run == nil {
+		return ExecutionResult{}, fmt.Errorf("run is nil")
+	}
+	if driver == nil {
+		return ExecutionResult{}, fmt.Errorf("tool driver is nil")
+	}
+	definition := driver.Definition()
+	if call.Name != definition.Name {
+		return ExecutionResult{}, fmt.Errorf("tool call %q does not match driver %q", call.Name, definition.Name)
+	}
+	scope := scopeForCall(definition, call)
+	needsApproval := definition.RequiresApproval || definition.Security.RequiresApproval || definition.RequiresActionTask || definition.EffectType == tool.EffectWrite || definition.EffectType == tool.EffectExternalSideEffect
+	if definition.Metadata["approval"] == "allow" {
+		needsApproval = definition.Metadata["network"] == "prompt" && toolCallRequestsNetwork(call.Arguments)
+	}
+	if needsApproval && !s.policy.sessionGranted(scope.Fingerprint) && run.approvedOnce[call.ID] != scope.Fingerprint {
+		if pending, found := run.pending[call.ID]; found && pending.Scope.Fingerprint == scope.Fingerprint {
+			return ExecutionResult{Approval: &pending}, nil
+		}
+		approval, token, err := s.runner.RequestApproval(ctx, api.RequestApprovalCommand{
+			RunID: run.RunID, TaskID: run.TaskID, ActionID: call.ID, RequesterAgentID: run.HolderID,
+			Reason: fmt.Sprintf("%s requests %s", run.HolderID, call.Name), RiskSummary: scope.Risk + " · " + scope.Target,
+			RequestedAction: summarizeArguments(call.Arguments),
+		})
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		pending := PendingApproval{Request: approval, Token: token, Call: call, Scope: scope, Effect: string(definition.EffectType), Replayable: definition.Idempotent || definition.Security.Idempotent}
+		run.pending[call.ID] = pending
+		return ExecutionResult{Approval: &pending}, nil
+	}
+
+	delete(run.approvedOnce, call.ID)
+	governed := worker.GovernedToolBus{
+		Runner: s.runner, Bus: tool.NewBus(driver), RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID,
+		HolderType: api.HolderAgent, HolderID: run.HolderID, TaskVersion: run.TaskVersion,
+	}
+	result, err := governed.Execute(withAuthorizedInvocation(ctx, scope), call, sink)
+	if err != nil {
+		return ExecutionResult{Result: result}, err
+	}
+	return ExecutionResult{Result: result, Executed: true}, nil
+}
+
+func (s *Service) ResolveApproval(ctx context.Context, run *Run, callID string, mode ApprovalMode, decidedBy string) error {
+	pending, ok := run.pending[callID]
+	if !ok {
+		return api.ErrNotFound
+	}
+	decision := "approved"
+	if mode == ApprovalDenied {
+		decision = "rejected"
+	}
+	if mode != ApprovalOnce && mode != ApprovalSession && mode != ApprovalDenied {
+		return fmt.Errorf("invalid approval mode %q", mode)
+	}
+	if strings.TrimSpace(decidedBy) == "" {
+		return fmt.Errorf("approval decider is empty")
+	}
+	if err := s.runner.DecideApproval(ctx, api.DecideApprovalCommand{
+		RunID: run.RunID, ApprovalID: pending.Request.ApprovalID, DecidedBy: decidedBy, Decision: decision,
+	}); err != nil {
+		return err
+	}
+	delete(run.pending, callID)
+	switch mode {
+	case ApprovalOnce:
+		run.approvedOnce[callID] = pending.Scope.Fingerprint
+	case ApprovalSession:
+		s.policy.GrantSession(pending.Scope.Fingerprint)
+	}
+	return nil
+}
+
+func (s *Service) ResolveRecoveredApproval(ctx context.Context, runID, approvalID, tokenID, decision string) error {
+	switch decision {
+	case "once", "session", "approved", "approve":
+		decision = "approved"
+	case "denied", "deny", "rejected", "reject":
+		decision = "rejected"
+	default:
+		return fmt.Errorf("invalid approval decision %q", decision)
+	}
+	if err := s.runner.DecideApproval(ctx, api.DecideApprovalCommand{
+		RunID: runID, ApprovalID: approvalID, DecidedBy: "user", Decision: decision,
+	}); err != nil {
+		return err
+	}
+	if tokenID != "" {
+		if _, err := s.runner.RecoverResumeToken(ctx, api.RecoverResumeTokenCommand{TokenID: tokenID}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) ToolDefinitions() []tool.Definition {
+	return s.tools.Definitions()
+}
+
+func (s *Service) ToolDrivers() []tool.Driver {
+	definitions := s.tools.Definitions()
+	drivers := make([]tool.Driver, 0, len(definitions))
+	for _, definition := range definitions {
+		if driver, ok := s.tools.Driver(definition.Name); ok {
+			drivers = append(drivers, driver)
+		}
+	}
+	return drivers
+}
+
+func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Driver, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil, fmt.Errorf("workspace root is empty")
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace root: %w", err)
+	}
+	workspace := coding.NewLocalWorkspace(absoluteRoot)
+	candidates := coding.NewToolSet(workspace)
+	isGitRepo := workspaceIsGitRepo(ctx, absoluteRoot)
+	drivers := make([]tool.Driver, 0, len(candidates)+1)
+	for _, driver := range candidates {
+		definition := driver.Definition()
+		if definition.Name == coding.ToolGitDiff && !isGitRepo {
+			continue
+		}
+		if !s.allowWrite && definition.EffectType == tool.EffectWrite {
+			continue
+		}
+		drivers = append(drivers, driver)
+	}
+	if s.shellPolicy != "deny" {
+		drivers = append(drivers, newShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork))
+	}
+	return drivers, nil
+}
+
+func workspaceIsGitRepo(ctx context.Context, root string) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	output, err := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--is-inside-work-tree").Output()
+	return err == nil && strings.TrimSpace(string(output)) == "true"
+}
+
+// ExecuteTeamDriver records a side-effect attempt for a TeamRunner worker
+// before invoking the raw driver. Hydaelyn v0.10.1 drops Task.AllowsAction
+// while materializing multi-agent dispatches, so the adapter restores that
+// durable task capability before crossing the side-effect boundary.
+func (s *Service) ExecuteTeamDriver(ctx context.Context, runID string, driver tool.Driver, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	if s == nil || s.runner == nil || s.store == nil || driver == nil {
+		return tool.Result{}, fmt.Errorf("team tool runtime is unavailable")
+	}
+	if strings.TrimSpace(runID) == "" {
+		return tool.Result{}, fmt.Errorf("team tool run ID is missing")
+	}
+	ctx = withAuthorizedInvocation(ctx, scopeForCall(driver.Definition(), call))
+	task, lease, err := s.enableTeamTaskActions(ctx, runID)
+	if err != nil {
+		return tool.Result{}, err
+	}
+	attemptID, err := newID("attempt")
+	if err != nil {
+		return tool.Result{}, err
+	}
+	attempt, err := s.runner.StartActionAttempt(ctx, api.StartActionAttemptCommand{
+		AttemptID:      attemptID,
+		ActionID:       call.ID,
+		RunID:          runID,
+		TaskID:         task.ID,
+		LeaseID:        lease.ID,
+		HolderType:     lease.HolderType,
+		HolderID:       lease.HolderID,
+		TaskVersion:    task.Version,
+		ToolName:       call.Name,
+		IdempotencyKey: call.ID,
+		InputHash:      fmt.Sprintf("%x", sha256.Sum256(call.Arguments)),
+	})
+	if err != nil {
+		return tool.Result{}, err
+	}
+	if attempt.AttemptID != attemptID || attempt.RequiresReconcile || attempt.Status != api.ActionAttemptRunning {
+		return tool.Result{}, hydaelyn.ErrActionReconcileRequired
+	}
+	result, executeErr := driver.Execute(ctx, call, sink)
+	status := api.ActionAttemptSucceeded
+	requiresReconcile := false
+	switch {
+	case executeErr != nil:
+		status = api.ActionAttemptUnknown
+		requiresReconcile = true
+	case result.IsError:
+		status = api.ActionAttemptFailed
+	}
+	_, completeErr := s.runner.CompleteActionAttempt(context.WithoutCancel(ctx), api.CompleteActionAttemptCommand{
+		RunID:             runID,
+		TaskID:            task.ID,
+		LeaseID:           lease.ID,
+		HolderType:        lease.HolderType,
+		HolderID:          lease.HolderID,
+		TaskVersion:       task.Version,
+		AttemptID:         attempt.AttemptID,
+		Status:            status,
+		RequiresReconcile: requiresReconcile,
+	})
+	if executeErr != nil || completeErr != nil {
+		return result, errors.Join(executeErr, completeErr)
+	}
+	return result, nil
+}
+
+func (s *Service) enableTeamTaskActions(ctx context.Context, runID string) (api.Task, api.TaskExecutionLease, error) {
+	uow, err := s.store.Begin(ctx)
+	if err != nil {
+		return api.Task{}, api.TaskExecutionLease{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = uow.Rollback(context.WithoutCancel(ctx))
+		}
+	}()
+	tasks, err := uow.Tasks().ListTasks(ctx, runID)
+	if err != nil {
+		return api.Task{}, api.TaskExecutionLease{}, err
+	}
+	var task api.Task
+	var lease api.TaskExecutionLease
+	for _, candidate := range tasks {
+		candidateLease, found, loadErr := uow.Leases().ActiveLeaseForTask(ctx, runID, candidate.ID)
+		if loadErr != nil {
+			return api.Task{}, api.TaskExecutionLease{}, loadErr
+		}
+		if !found || candidateLease.Status != api.LeaseStatusActive || !candidateLease.ExpiresAt.After(time.Now()) || candidateLease.HolderType != api.HolderAgent {
+			continue
+		}
+		if task.ID != "" {
+			return api.Task{}, api.TaskExecutionLease{}, fmt.Errorf("team run %q has multiple active agent tasks", runID)
+		}
+		task, lease = candidate, candidateLease
+	}
+	if task.ID == "" {
+		return api.Task{}, api.TaskExecutionLease{}, api.ErrLeaseNotActive
+	}
+	if !task.AllowsAction {
+		task.AllowsAction = true
+		if err := uow.Tasks().SaveTask(ctx, task); err != nil {
+			return api.Task{}, api.TaskExecutionLease{}, err
+		}
+	}
+	if err := uow.Commit(ctx); err != nil {
+		return api.Task{}, api.TaskExecutionLease{}, err
+	}
+	committed = true
+	return task, lease, nil
+}
+
+func (s *Service) CompleteRun(ctx context.Context, run *Run, summary string, failure error) error {
+	if run == nil {
+		return fmt.Errorf("run is nil")
+	}
+	status := api.ReportStatusSuccess
+	target := api.RunStatusCompleted
+	kind := ""
+	if failure != nil {
+		status = api.ReportStatusFailed
+		target = api.RunStatusFailed
+		kind = "agent_error"
+		if summary == "" {
+			summary = failure.Error()
+		}
+	}
+	if err := s.runner.SubmitTypedReport(ctx, api.SubmitTypedReportCommand{
+		RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID, HolderType: api.HolderAgent,
+		HolderID: run.HolderID, TaskVersion: run.TaskVersion,
+		Report: api.TypedReport{Status: status, Summary: summary, Kind: kind},
+	}); err != nil {
+		return fmt.Errorf("submit run report: %w", err)
+	}
+	projection, err := s.runner.Recover(ctx, run.RunID)
+	if err != nil {
+		return fmt.Errorf("project reported run: %w", err)
+	}
+	if projection.Run.Status == target {
+		return nil
+	}
+	if target == api.RunStatusCompleted {
+		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: run.RunID, To: api.RunStatusComposingResponse}); err != nil {
+			return fmt.Errorf("compose run response from %s: %w", projection.Run.Status, err)
+		}
+	}
+	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: run.RunID, To: target}); err != nil {
+		return fmt.Errorf("finish run: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) Recover(ctx context.Context, runID string) (api.Projection, error) {
+	return s.runner.Recover(ctx, runID)
+}
+
+func (s *Service) Checkpoint(ctx context.Context) error {
+	if checkpointer, ok := s.store.(interface{ Checkpoint(context.Context) error }); ok {
+		return checkpointer.Checkpoint(ctx)
+	}
+	return nil
+}
+
+func toolCallRequestsNetwork(arguments json.RawMessage) bool {
+	var object struct {
+		Network bool `json:"network"`
+	}
+	return json.Unmarshal(arguments, &object) == nil && object.Network
+}
+
+func (s *Service) Close(ctx context.Context) error {
+	if closer, ok := s.store.(api.ProviderCloser); ok {
+		return closer.Close(ctx)
+	}
+	return nil
+}
+
+func scopeForCall(definition tool.Definition, call tool.Call) invocationScope {
+	target := normalizedTarget(call.Arguments)
+	if target == "" {
+		target = "workspace"
+	}
+	risk := definition.RiskLevel
+	if risk == "" {
+		risk = definition.Security.RiskLevel
+	}
+	if risk == "" {
+		risk = "medium"
+	}
+	digest := sha256.Sum256([]byte(call.Name + "\x00" + target + "\x00" + risk))
+	return invocationScope{Fingerprint: hex.EncodeToString(digest[:]), Target: target, Risk: risk}
+}
+
+func normalizedTarget(arguments json.RawMessage) string {
+	var object map[string]any
+	if json.Unmarshal(arguments, &object) != nil {
+		return ""
+	}
+	for _, key := range []string{"path", "cwd", "command"} {
+		if value, ok := object[key].(string); ok && value != "" {
+			return filepath.Clean(value)
+		}
+	}
+	for _, key := range []string{"input", "patch"} {
+		patch, ok := object[key].(string)
+		if !ok {
+			continue
+		}
+		for _, line := range strings.Split(patch, "\n") {
+			switch {
+			case strings.HasPrefix(line, "¶"):
+				if marker := strings.LastIndex(line, "#"); marker > 1 {
+					return filepath.Clean(line[len("¶"):marker])
+				}
+			case strings.HasPrefix(line, "["):
+				if marker := strings.LastIndex(line, "#"); marker > 1 {
+					return filepath.Clean(line[1:marker])
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func summarizeArguments(arguments json.RawMessage) string {
+	var object map[string]any
+	if json.Unmarshal(arguments, &object) != nil {
+		return "invalid tool arguments"
+	}
+	for key := range object {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "authorization") || strings.Contains(lower, "header") || strings.Contains(lower, "env") {
+			object[key] = "[REDACTED]"
+		}
+	}
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return "tool arguments"
+	}
+	if len(encoded) > 16*1024 {
+		return string(encoded[:16*1024]) + "…"
+	}
+	return string(encoded)
+}
+
+func newID(prefix string) (string, error) {
+	var value [12]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return prefix + "_" + hex.EncodeToString(value[:]), nil
+}
