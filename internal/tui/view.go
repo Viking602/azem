@@ -417,7 +417,7 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 		}
 		return lines
 	case BlockUser:
-		return renderProseBlock(m.theme.User, m.tr("block.user")+" · "+title, block.Content, width)
+		return m.renderUserMessage(block.Content, width)
 	case BlockThinking:
 		label := m.tr("block.thinking")
 		if state != "" {
@@ -437,6 +437,22 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	default:
 		return renderProseBlock(m.theme.Assistant, "AZEM", block.Content, width)
 	}
+}
+
+func (m AppModel) renderUserMessage(content string, width int) []string {
+	cardWidth := max(8, width)
+	textWidth := max(1, cardWidth-9)
+	blank := "  " + m.theme.UserSurface.Render(strings.Repeat(" ", cardWidth-2))
+	lines := []string{blank}
+	for _, line := range wrapText(content, textWidth) {
+		row := m.theme.UserSurface.Render("  ") +
+			m.theme.UserAccent.Render("│") +
+			m.theme.UserSurface.Render("  ") +
+			m.theme.User.Render(padOrTrim(line, textWidth)) +
+			m.theme.UserSurface.Render("  ")
+		lines = append(lines, "  "+row)
+	}
+	return append(lines, blank)
 }
 
 func (m AppModel) renderHookPrompt(block Block, selected bool, width int) []string {

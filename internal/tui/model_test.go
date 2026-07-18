@@ -37,6 +37,21 @@ func TestTextInputsUseBarCursors(t *testing.T) {
 	}
 }
 
+func TestSentUserMessageUsesAccentCardWithoutSenderLabel(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	block := Block{Kind: BlockUser, Title: "You", Content: "为 hooks 单独设计一个提示，不要太明显"}
+	lines := model.renderBlock(block, 0, 28)
+	plain := ansi.Strip(strings.Join(lines, "\n"))
+	if len(lines) < 4 || !strings.Contains(plain, "│") || strings.Contains(plain, model.tr("block.user")) || strings.Contains(plain, "You") {
+		t.Fatalf("sent message did not render as an unlabeled accent card:\n%s", plain)
+	}
+	for _, line := range lines {
+		if width := ansi.StringWidth(line); width != 28 {
+			t.Fatalf("sent message width = %d, want 28: %q", width, ansi.Strip(line))
+		}
+	}
+}
+
 type configuredTurnRuntime struct {
 	inertRuntime
 	request app.TurnRequest

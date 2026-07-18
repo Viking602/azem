@@ -11,6 +11,8 @@ type Theme struct {
 	Header        lipgloss.Style
 	Border        lipgloss.Style
 	User          lipgloss.Style
+	UserAccent    lipgloss.Style
+	UserSurface   lipgloss.Style
 	Assistant     lipgloss.Style
 	Thinking      lipgloss.Style
 	Tool          lipgloss.Style
@@ -40,11 +42,15 @@ func DefaultTheme() Theme {
 	cursor := adaptiveColor("#6d4aff", "99", "5", "#a78bfa", "141", "5")
 	success := adaptiveColor("#3d6c31", "22", "2", "#91b477", "107", "2")
 	selection := adaptiveColor("#dce9e3", "254", "7", "#27332d", "236", "0")
+	userAccent := adaptiveColor("#176f5b", "29", "6", "#62d6b5", "79", "6")
+	userSurface := adaptiveColor("#e8f1ed", "255", "7", "#171a18", "233", "0")
 
 	return Theme{
 		Header:        lipgloss.NewStyle().Bold(true).Foreground(accent),
 		Border:        lipgloss.NewStyle().Foreground(muted),
-		User:          lipgloss.NewStyle().Bold(true).Foreground(text),
+		User:          lipgloss.NewStyle().Foreground(userAccent).Background(userSurface),
+		UserAccent:    lipgloss.NewStyle().Bold(true).Foreground(userAccent).Background(userSurface),
+		UserSurface:   lipgloss.NewStyle().Background(userSurface),
 		Assistant:     lipgloss.NewStyle().Foreground(text),
 		Thinking:      lipgloss.NewStyle().Foreground(secondary),
 		Tool:          lipgloss.NewStyle().Foreground(warning),
