@@ -42,13 +42,25 @@ func TestSentUserMessageUsesAccentCardWithoutSenderLabel(t *testing.T) {
 	block := Block{Kind: BlockUser, Title: "You", Content: "为 hooks 单独设计一个提示，不要太明显"}
 	lines := model.renderBlock(block, 0, 28)
 	plain := ansi.Strip(strings.Join(lines, "\n"))
-	if len(lines) < 4 || !strings.Contains(plain, "│") || strings.Contains(plain, model.tr("block.user")) || strings.Contains(plain, "You") {
+	if len(lines) < 2 || !strings.Contains(plain, "│") || strings.Contains(plain, model.tr("block.user")) || strings.Contains(plain, "You") {
 		t.Fatalf("sent message did not render as an unlabeled accent card:\n%s", plain)
 	}
 	for _, line := range lines {
-		if width := ansi.StringWidth(line); width != 28 {
-			t.Fatalf("sent message width = %d, want 28: %q", width, ansi.Strip(line))
+		if strings.Contains(line, "\x1b[48;") {
+			t.Fatalf("sent message contains a background color: %q", line)
 		}
+		if width := ansi.StringWidth(line); width > 28 {
+			t.Fatalf("sent message width = %d, exceeds 28: %q", width, ansi.Strip(line))
+		}
+	}
+}
+
+func TestAssistantMessageOmitsGeneratingHeader(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	block := Block{Kind: BlockAssistant, Content: "Hi! How can I help?", State: "streaming"}
+	plain := ansi.Strip(strings.Join(model.renderBlock(block, 0, 40), "\n"))
+	if strings.Contains(plain, "AZEM") || strings.Contains(plain, model.tr("state.streaming")) || !strings.Contains(plain, block.Content) {
+		t.Fatalf("assistant response contains a redundant generating header: %q", plain)
 	}
 }
 

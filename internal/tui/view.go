@@ -426,33 +426,22 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 		content := strings.ReplaceAll(block.Content, "****", "**\n\n**")
 		return renderMarkdownBlock(m.theme.Thinking, label, content, width)
 	case BlockAssistant:
-		label := "AZEM"
-		if state != "" && state != "COMPLETED" {
-			label += " · " + state
-		}
 		if state == "STREAMING" && !strings.Contains(block.Content, "\n") {
-			return renderProseBlock(m.theme.Assistant, label, block.Content, width)
+			return renderProseBlock(m.theme.Assistant, "", block.Content, width)
 		}
-		return renderMarkdownBlock(m.theme.Assistant, label, block.Content, width)
+		return renderMarkdownBlock(m.theme.Assistant, "", block.Content, width)
 	default:
 		return renderProseBlock(m.theme.Assistant, "AZEM", block.Content, width)
 	}
 }
 
 func (m AppModel) renderUserMessage(content string, width int) []string {
-	cardWidth := max(8, width)
-	textWidth := max(1, cardWidth-9)
-	blank := "  " + m.theme.UserSurface.Render(strings.Repeat(" ", cardWidth-2))
-	lines := []string{blank}
+	textWidth := max(1, width-7)
+	lines := make([]string, 0)
 	for _, line := range wrapText(content, textWidth) {
-		row := m.theme.UserSurface.Render("  ") +
-			m.theme.UserAccent.Render("│") +
-			m.theme.UserSurface.Render("  ") +
-			m.theme.User.Render(padOrTrim(line, textWidth)) +
-			m.theme.UserSurface.Render("  ")
-		lines = append(lines, "  "+row)
+		lines = append(lines, "    "+m.theme.UserAccent.Render("│")+"  "+m.theme.User.Render(line))
 	}
-	return append(lines, blank)
+	return lines
 }
 
 func (m AppModel) renderHookPrompt(block Block, selected bool, width int) []string {
@@ -554,7 +543,10 @@ func (m AppModel) toolDisplayName(name string) string {
 }
 
 func renderProseBlock(style lipgloss.Style, label string, content string, width int) []string {
-	lines := []string{style.Bold(true).Render("  " + label)}
+	lines := make([]string, 0)
+	if label != "" {
+		lines = append(lines, style.Bold(true).Render("  "+label))
+	}
 	for _, line := range wrapText(content, max(4, width-2)) {
 		lines = append(lines, style.Render("  "+line))
 	}
@@ -574,7 +566,10 @@ var markdownRendererCache = struct {
 }
 
 func renderMarkdownBlock(style lipgloss.Style, label string, content string, width int) []string {
-	lines := []string{style.Bold(true).Render("  " + label)}
+	lines := make([]string, 0)
+	if label != "" {
+		lines = append(lines, style.Bold(true).Render("  "+label))
+	}
 	rendered, err := renderTerminalMarkdown(content, max(4, width-2))
 	if err != nil {
 		for _, line := range wrapText(content, max(4, width-2)) {
