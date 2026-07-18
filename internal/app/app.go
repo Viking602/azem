@@ -15,6 +15,7 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/recovery"
@@ -25,42 +26,63 @@ import (
 var ErrRunActive = errors.New("a run is already active")
 
 type Service struct {
-	cfg               config.Config
-	events            chan Event
-	ctx               context.Context
-	cancel            context.CancelFunc
-	mu                sync.Mutex
-	activeRun         string
-	activeSession     string
-	activeEnd         context.CancelFunc
-	wg                sync.WaitGroup
-	shuttingDown      bool
-	shutdownOnce      sync.Once
-	shutdownDone      chan struct{}
-	shutdownErr       error
-	sessions          *session.Service
-	coding            *agentservice.Service
-	providers         *ProviderRuntime
-	liveApprovals     map[string]*liveApproval
-	teamApprovals     map[string]struct{}
-	approvalMode      ApprovalMode
-	autoReviewDenials map[string]*autoReviewDenialTracker
-	mcp               *mcpruntime.Manager
-	subagentStore     agentservice.SubagentRunStore
-	authentication    *authservice.Service
-	catalog           *catalog.Service
-	recovery          recovery.Summary
-	reconciler        ReconcileResolver
-	skillCatalog      *skills.Catalog
+	cfg                config.Config
+	configPath         string
+	events             chan Event
+	ctx                context.Context
+	cancel             context.CancelFunc
+	mu                 sync.Mutex
+	activeRun          string
+	activeSession      string
+	currentSession     string
+	hookSessions       map[string]struct{}
+	hookInitialUsers   map[string]string
+	hookInitialContext map[string]string
+	hookAsyncContext   map[string][]string
+	activeEnd          context.CancelFunc
+	wg                 sync.WaitGroup
+	hookWG             sync.WaitGroup
+	shuttingDown       bool
+	shutdownOnce       sync.Once
+	shutdownDone       chan struct{}
+	shutdownErr        error
+	sessions           *session.Service
+	coding             *agentservice.Service
+	providers          *ProviderRuntime
+	liveApprovals      map[string]*liveApproval
+	teamApprovals      map[string]struct{}
+	approvalMode       ApprovalMode
+	autoReviewDenials  map[string]*autoReviewDenialTracker
+	mcp                *mcpruntime.Manager
+	subagentStore      agentservice.SubagentRunStore
+	authentication     *authservice.Service
+	catalog            *catalog.Service
+	recovery           recovery.Summary
+	reconciler         ReconcileResolver
+	skillCatalog       *skills.Catalog
+	hooks              hooks.Dispatcher
+	hookOptions        hooks.Options
+	hookWatcher        *hookWatcher
 }
 
 func NewService(parent context.Context, cfg config.Config) *Service {
 	ctx, cancel := context.WithCancel(parent)
+	approvalMode := ApprovalMode(cfg.Defaults.ApprovalMode)
+	if approvalMode != ApprovalModePrompt && approvalMode != ApprovalModeAutoReview && approvalMode != ApprovalModeYolo {
+		approvalMode = ApprovalModePrompt
+	}
 	return &Service{
 		cfg: cfg, events: make(chan Event, 256), ctx: ctx, cancel: cancel,
 		shutdownDone: make(chan struct{}), liveApprovals: make(map[string]*liveApproval),
 		teamApprovals: make(map[string]struct{}), autoReviewDenials: make(map[string]*autoReviewDenialTracker),
-		approvalMode: ApprovalModePrompt,
+		hookSessions: make(map[string]struct{}), hookInitialUsers: make(map[string]string), hookInitialContext: make(map[string]string), hookAsyncContext: make(map[string][]string), approvalMode: approvalMode,
+	}
+}
+
+func (s *Service) SetConfigPath(path string) {
+	s.configPath = path
+	if path != "" {
+		s.ensureHookWatcher().watchConfig(path, "user_settings")
 	}
 }
 
@@ -259,6 +281,12 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	s.activeSession = request.SessionID
 	s.activeEnd = cancel
 	s.mu.Unlock()
+	sessionSource := "startup"
+	if s.sessions != nil {
+		if _, loadErr := s.sessions.LoadSession(s.ctx, request.SessionID); loadErr == nil {
+			sessionSource = "resume"
+		}
+	}
 	if err := s.materializeTurnSession(s.ctx, request); err != nil {
 		cancel()
 		s.clearRun("starting")
@@ -272,6 +300,36 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 			return "", err
 		}
 		request.History = append([]session.Block(nil), projection.Blocks...)
+		transcript := append([]session.Block(nil), projection.Blocks...)
+		transcript = append(transcript, session.Block{Kind: "user", Content: request.Prompt, State: "submitted"})
+		writeSessionHookTranscript(request.SessionID, transcript)
+		request.Todo, err = s.sessions.LoadTodo(s.ctx, request.SessionID)
+		if err != nil {
+			cancel()
+			s.clearRun("starting")
+			return "", err
+		}
+	}
+	if s.sessions == nil {
+		writeSessionHookTranscript(request.SessionID, []session.Block{{Kind: "user", Content: request.Prompt, State: "submitted"}})
+	}
+	if err := s.switchSessionHooks(runCtx, request.SessionID, sessionSource, request.Model); err != nil {
+		cancel()
+		s.clearRun("starting")
+		return "", err
+	}
+	s.mu.Lock()
+	s.currentSession = request.SessionID
+	s.mu.Unlock()
+	privateContext, initialUser, err := s.promptHookContext(runCtx, s.hookMetadata(request.SessionID, ""), request.Prompt)
+	if err != nil {
+		cancel()
+		s.clearRun("starting")
+		return "", err
+	}
+	request.privateContext = privateContext
+	if initialUser != "" {
+		request.History = append(request.History, session.Block{Kind: "user", Title: "SessionStart hook", Content: initialUser, State: "hook"})
 	}
 
 	if s.providers == nil {
@@ -415,6 +473,7 @@ func (s *Service) shutdown() {
 	defer close(s.shutdownDone)
 	s.mu.Lock()
 	s.shuttingDown = true
+	sessionID := firstNonempty(s.activeSession, s.currentSession)
 	if s.activeEnd != nil {
 		s.activeEnd()
 	}
@@ -426,8 +485,14 @@ func (s *Service) shutdown() {
 		}
 	}
 	subagentShutdownCancel()
+	if sessionID != "" {
+		hookCtx, hookCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		s.endSessionHooks(hookCtx, sessionID, "prompt_input_exit")
+		hookCancel()
+	}
 	s.cancel()
 	s.wg.Wait()
+	s.hookWG.Wait()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -470,18 +535,25 @@ func (s *Service) runFakeTurn(ctx context.Context, sessionID string, runID strin
 			if s.sessions != nil && streamed.Len() > 0 {
 				_ = s.sessions.AppendBlock(s.ctx, sessionID, session.Block{Kind: "assistant", RunID: runID, Title: "Azem", Content: streamed.String(), State: "cancelled"})
 			}
+			s.observeStop(sessionID, runID, hooks.StopFailure, "cancelled", ctx.Err(), streamed.String())
 			s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
 			return
 		case <-timer.C:
 		}
 		if !s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, Text: text, State: "streaming"}) {
+			s.observeStop(sessionID, runID, hooks.StopFailure, "cancelled", context.Canceled, streamed.String())
 			s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
 			return
 		}
 		streamed.WriteString(text)
 	}
+	if err := s.observeStop(sessionID, runID, hooks.Stop, "completed", nil, streamed.String()); err != nil {
+		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "stop_hook_blocked", Text: err.Error()})
+		return
+	}
 	if s.sessions != nil {
 		if err := s.sessions.AppendBlock(ctx, sessionID, session.Block{Kind: "assistant", RunID: runID, Title: "Azem", Content: streamed.String(), State: "completed"}); err != nil {
+			s.observeStop(sessionID, runID, hooks.StopFailure, "persist_failed", err, streamed.String())
 			s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 			return
 		}

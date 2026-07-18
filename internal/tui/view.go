@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,27 +14,13 @@ import (
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/Viking602/azem/internal/i18n"
+	"github.com/Viking602/azem/internal/session"
 )
 
-type paletteOption struct {
-	ID     string
-	Label  string
-	Detail string
-}
-
-var commandPaletteOptions = []paletteOption{
-	{ID: "login", Label: "Sign in", Detail: "ChatGPT or Grok subscription"},
-	{ID: "provider", Label: "Choose provider", Detail: "Switch between ChatGPT and Grok"},
-	{ID: "models", Label: "Choose model", Detail: "Configured provider catalogs"},
-	{ID: "skills", Label: "Skills", Detail: "Discover, inspect, and reload Agent Skills"},
-	{ID: "reasoning", Label: "Reasoning effort", Detail: "Minimal through xhigh"},
-	{ID: "sessions", Label: "Resume session", Detail: "Choose saved work"},
-	{ID: "new", Label: "New session", Detail: "Start with a clean transcript"},
-	{ID: "agents", Label: "Agents", Detail: "Team and supervised children"},
-	{ID: "mcp", Label: "MCP servers", Detail: "Connections and imported tools"},
-	{ID: "cancel", Label: "Cancel run", Detail: "Stop the active run"},
-	{ID: "help", Label: "Keyboard help", Detail: "Shortcuts and commands"},
-	{ID: "quit", Label: "Quit Azem", Detail: "Close the application"},
+var commandPaletteOptions = []string{
+	"login", "provider", "models", "skills", "reasoning", "sessions", "new", "agents", "mcp", "cancel", "help", "quit",
 }
 
 type overlayOption struct {
@@ -112,11 +99,23 @@ func (m AppModel) View() tea.View {
 		sections = append(sections, m.renderStatus(width))
 	}
 	view := tea.NewView(fitViewport(strings.Join(sections, "\n"), width, height))
+	if cursor := m.composer.Cursor(); cursor != nil {
+		cursor.Position.Y += composerOffsetY(layout)
+		view.Cursor = cursor
+	}
 	view.AltScreen = true
 	view.ReportFocus = true
 	view.MouseMode = tea.MouseModeCellMotion
 	view.WindowTitle = "Azem"
 	return view
+}
+
+func composerOffsetY(layout viewLayout) int {
+	offset := layout.bodyHeight + layout.suggestionHeight
+	if layout.showChrome {
+		offset += 3 // header and the separators above and below the body
+	}
+	return offset
 }
 
 type viewLayout struct {
@@ -237,7 +236,7 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 	for index, block := range m.transcript {
 		selected := m.focus == focusTranscript && m.transcriptCursor == index
 		layout := &cache.blocks[index]
-		if !cache.initialized || layout.block != block || layout.selected != selected {
+		if !cache.initialized || !reflect.DeepEqual(layout.block, block) || layout.selected != selected {
 			layout.block = block
 			layout.selected = selected
 			layout.lines = m.renderBlock(block, index, contentWidth)
@@ -252,9 +251,9 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 	lines := make([]string, 0, lineCount+len(cache.blocks))
 	if len(cache.blocks) == 0 {
 		lines = append(lines,
-			m.theme.Muted.Render("  READY FOR A TASK"),
-			m.theme.Assistant.Render("  Describe what to inspect, change, or verify."),
-			m.theme.Muted.Render("  Enter submits. Ctrl+J adds a line. Ctrl+P opens commands."),
+			m.theme.Muted.Render("  "+m.tr("empty.title")),
+			m.theme.Assistant.Render("  "+m.tr("empty.body")),
+			m.theme.Muted.Render("  "+m.tr("empty.help")),
 		)
 	}
 	for _, block := range cache.blocks {
@@ -282,7 +281,7 @@ func (m AppModel) transcriptOffsetLimit(lineCount int, height int) int {
 
 func (m AppModel) renderTranscriptFooter(width int, maxOffset int, offset int) string {
 	if m.isRunning() {
-		label := strings.ToUpper(m.status)
+		label := strings.ToUpper(m.displayState(m.status))
 		detail := "Azem is generating"
 		switch m.status {
 		case "Starting":
@@ -343,9 +342,9 @@ func (m *AppModel) scrollTranscript(delta int) {
 func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	title := first(block.Title, string(block.Kind))
 	if block.Kind == BlockTool {
-		title = toolDisplayName(title)
+		title = m.toolDisplayName(title)
 	}
-	state := strings.ToUpper(block.State)
+	state := strings.ToUpper(m.displayState(block.State))
 	selected := m.focus == focusTranscript && m.transcriptCursor == index
 	selector := " "
 	if selected {
@@ -362,7 +361,7 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 				indicator = frames[m.animationFrame%len(frames)]
 			}
 		}
-		header := fmt.Sprintf("  %s %s APPROVAL · %s", selector, indicator, title)
+		header := fmt.Sprintf("  %s %s %s · %s", selector, indicator, m.tr("block.approval"), title)
 		if state != "" {
 			header += "  " + state
 		}
@@ -381,13 +380,16 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 			lines = append(lines, m.theme.Muted.Render("      │ "+line))
 		}
 		return lines
-	case BlockTool, BlockAgent, BlockDiff, BlockError:
+	case BlockTool, BlockAgent, BlockDiff, BlockHook, BlockError:
 		toggle := "▾"
 		if block.Collapsed {
 			toggle = "▸"
 		}
-		kind := strings.ToUpper(string(block.Kind))
+		kind := m.tr("block." + string(block.Kind))
 		header := fmt.Sprintf("  %s %s %s · %s", selector, toggle, kind, title)
+		if len(block.Hooks) > 0 && block.Kind != BlockHook {
+			header += fmt.Sprintf(" · %s %d %s", hookSummaryMark(block.Hooks), len(block.Hooks), m.tr("hook.summary"))
+		}
 		if state != "" {
 			header += "  " + state
 		}
@@ -409,16 +411,18 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 		}
 		if block.Kind == BlockDiff {
 			lines = append(lines, m.renderDiffContent(block.Content, max(4, width-4))...)
+			lines = append(lines, m.renderHookLines(block.Hooks, width)...)
 			return lines
 		}
 		for _, line := range wrapText(block.Content, max(4, width-4)) {
 			lines = append(lines, m.theme.Assistant.Render("      │ "+line))
 		}
+		lines = append(lines, m.renderHookLines(block.Hooks, width)...)
 		return lines
 	case BlockUser:
-		return renderProseBlock(m.theme.User, "USER · "+title, block.Content, width)
+		return renderProseBlock(m.theme.User, m.tr("block.user")+" · "+title, block.Content, width)
 	case BlockThinking:
-		label := "THINKING"
+		label := m.tr("block.thinking")
 		if state != "" {
 			label += " · " + state
 		}
@@ -436,6 +440,48 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	default:
 		return renderProseBlock(m.theme.Assistant, "AZEM", block.Content, width)
 	}
+}
+
+func hookSummaryMark(hooks []HookRunView) string {
+	mark := "✓"
+	for _, hook := range hooks {
+		if hook.State == "failed" {
+			return "!"
+		}
+		if hook.State == "blocked" {
+			mark = "!"
+		} else if hook.State == "running" && mark == "✓" {
+			mark = "◆"
+		}
+	}
+	return mark
+}
+
+func (m AppModel) renderHookLines(hooks []HookRunView, width int) []string {
+	lines := make([]string, 0, len(hooks)*2)
+	contentWidth := max(4, width-8)
+	for _, hook := range hooks {
+		mark := stateMark(hook.State)
+		if hook.State == "running" {
+			mark = "•"
+			if !m.reducedMotion {
+				frames := []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+				mark = string(frames[m.animationFrame%len(frames)])
+			}
+		}
+		duration := ""
+		if hook.DurationMS > 0 {
+			duration = fmt.Sprintf(" · %dms", hook.DurationMS)
+		}
+		label := fmt.Sprintf("      %s %s %s · %s%s", mark, m.tr("hook.label"), hook.Name, hook.Event, duration)
+		lines = append(lines, m.stateStyle(hook.State).Render(padOrTrim(label, width+2)))
+		if (hook.State == "failed" || hook.State == "blocked") && first(hook.Reason, hook.Output) != "" {
+			for _, line := range wrapText(first(hook.Reason, hook.Output), contentWidth) {
+				lines = append(lines, m.stateStyle(hook.State).Render(padOrTrim("      │ "+line, width+2)))
+			}
+		}
+	}
+	return lines
 }
 
 func (m AppModel) renderDiffContent(content string, width int) []string {
@@ -486,6 +532,19 @@ func toolDisplayName(name string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func (m AppModel) toolDisplayName(name string) string {
+	keys := map[string]string{
+		"coding.read_file": "tool.read_file", "coding.write_file": "tool.write_file", "coding.edit_hashline": "tool.edit_file",
+		"coding.search": "tool.search", "coding.list_files": "tool.list_files", "coding.shell": "tool.shell",
+		"coding.go_test": "tool.go_test", "coding.gofmt": "tool.gofmt", "coding.git_diff": "tool.git_diff",
+		"hydaelyn_activate_skill": "tool.activate_skill", "subagent.spawn": "tool.spawn",
+	}
+	if key := keys[name]; key != "" {
+		return m.tr(key)
+	}
+	return toolDisplayName(name)
 }
 
 func renderProseBlock(style lipgloss.Style, label string, content string, width int) []string {
@@ -556,9 +615,29 @@ func (m AppModel) renderContextRail(width int, height int) string {
 		m.theme.Muted.Render(padOrTrim("  RUN CONTEXT", width)),
 		m.theme.Border.Render(padOrTrim("  "+strings.Repeat("─", max(0, width-4)), width)),
 	}
+	todoHeader := "  TODO"
+	if completed, total := todoProgress(m.todo); total > 0 {
+		todoHeader = fmt.Sprintf("  TODO  %d/%d", completed, total)
+	}
+	rows = append(rows, m.theme.Header.Render(padOrTrim(todoHeader, width)))
+	todoRows, more := m.todoSummaryRows(4)
+	if len(todoRows) == 0 {
+		rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.no_todos"), width)))
+	}
+	for _, row := range todoRows {
+		style := m.stateStyle(string(row.status))
+		if row.status == session.TodoCompleted || row.status == session.TodoCancelled {
+			style = style.Strikethrough(true)
+		}
+		rows = append(rows, style.Render(padOrTrim("  "+row.text, width)))
+	}
+	if more > 0 {
+		rows = append(rows, m.theme.Muted.Render(padOrTrim(fmt.Sprintf("  +%d more", more), width)))
+	}
+	rows = append(rows, "")
 	rows = append(rows, m.theme.Header.Render(padOrTrim(fmt.Sprintf("  AGENTS  %d", len(activeAgents)), width)))
 	if len(activeAgents) == 0 {
-		rows = append(rows, m.theme.Muted.Render(padOrTrim("  No active child runs", width)))
+		rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.no_agents"), width)))
 	} else {
 		for index, agent := range activeAgents {
 			if index == 4 {
@@ -571,7 +650,7 @@ func (m AppModel) renderContextRail(width int, height int) string {
 	}
 	rows = append(rows, "", m.theme.Header.Render(padOrTrim(fmt.Sprintf("  MCP  %d", len(m.mcpServers)), width)))
 	if len(m.mcpServers) == 0 {
-		rows = append(rows, m.theme.Muted.Render(padOrTrim("  No connections", width)))
+		rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.no_connections"), width)))
 	} else {
 		for index, server := range m.mcpServers {
 			if index == 4 {
@@ -588,6 +667,64 @@ func (m AppModel) renderContextRail(width int, height int) string {
 	return strings.Join(rows[:height], "\n")
 }
 
+type todoSummaryRow struct {
+	text   string
+	status session.TodoStatus
+}
+
+func todoProgress(todo session.TodoList) (completed int, total int) {
+	for _, phase := range todo.Phases {
+		for _, item := range phase.Items {
+			if item.Status == session.TodoCancelled {
+				continue
+			}
+			total++
+			if item.Status == session.TodoCompleted {
+				completed++
+			}
+		}
+	}
+	return completed, total
+}
+
+func (m AppModel) todoSummaryRows(limit int) ([]todoSummaryRow, int) {
+	var current, pending, closed []todoSummaryRow
+	for _, p := range m.todo.Phases {
+		for _, item := range p.Items {
+			row := todoSummaryRow{text: todoMark(item.Status, m.animationFrame) + "  " + item.Content, status: item.Status}
+			switch item.Status {
+			case "in_progress":
+				current = append(current, row)
+			case "pending":
+				pending = append(pending, row)
+			case "completed", "cancelled":
+				closed = append(closed, row)
+			}
+		}
+	}
+	for left, right := 0, len(closed)-1; left < right; left, right = left+1, right-1 {
+		closed[left], closed[right] = closed[right], closed[left]
+	}
+	all := append(append(current, pending...), closed...)
+	if len(all) > limit {
+		return all[:limit], len(all) - limit
+	}
+	return all, 0
+}
+
+func todoMark(status session.TodoStatus, frame int) string {
+	switch status {
+	case session.TodoCompleted:
+		return "✓"
+	case session.TodoCancelled:
+		return "×"
+	case session.TodoInProgress:
+		return []string{"◐", "◓", "◑", "◒"}[frame%4]
+	default:
+		return "○"
+	}
+}
+
 func (m AppModel) activeAgents() []AgentView {
 	active := make([]AgentView, 0, len(m.agents))
 	for _, agent := range m.agents {
@@ -602,9 +739,9 @@ func (m AppModel) activeAgents() []AgentView {
 func (m AppModel) renderModelStatus(width int) string {
 	model := m.provider + "/" + first(m.model, "no model")
 	if width >= 64 && m.reasoning != "" {
-		model += " · THINK " + m.reasoning
+		model += " · " + m.tr("footer.reasoning") + " " + m.reasoning
 	}
-	left := m.theme.Header.Render(" MODEL ") + m.theme.Muted.Render(model)
+	left := m.theme.Header.Render(" "+m.tr("footer.model")+" ") + m.theme.Muted.Render(model)
 	if width < 32 {
 		return padStyledLine(left, width)
 	}
@@ -624,10 +761,12 @@ func (m AppModel) renderContextUsage(width int) string {
 	used := max(0, m.usage.InputTokens+m.usage.OutputTokens)
 	limit := m.usage.ContextLimit
 	if limit <= 0 {
-		return truncateStyledFallback(m.theme.Muted.Render("CTX unavailable"), width)
+		return truncateStyledFallback(m.theme.Muted.Render(m.tr("footer.context")+" "+m.tr("footer.unavailable")), width)
 	}
 	percentage := float64(used) * 100 / float64(limit)
-	cache := "CACHE --"
+	contextLabel := m.tr("footer.context")
+	cacheLabel := m.tr("footer.cache")
+	cache := cacheLabel + " --"
 	cacheRate := 0.0
 	mainInput := m.usage.MainCacheInput
 	mainCached := min(max(0, m.usage.MainCachedInput), mainInput)
@@ -639,7 +778,7 @@ func (m AppModel) renderContextUsage(width int) string {
 	}
 	if mainReported && mainInput > 0 {
 		cacheRate = float64(mainCached) * 100 / float64(mainInput)
-		cache = fmt.Sprintf("CACHE %s/%s · %.1f%%", formatTokens(mainCached), formatTokens(mainInput), cacheRate)
+		cache = fmt.Sprintf("%s %s/%s · %.1f%%", cacheLabel, formatTokens(mainCached), formatTokens(mainInput), cacheRate)
 	}
 	allInput := m.usage.CacheInputTokens
 	allCached := min(max(0, m.usage.CachedInputTokens), allInput)
@@ -649,25 +788,25 @@ func (m AppModel) renderContextUsage(width int) string {
 	}
 	hasChildUsage := allInput > mainInput
 	if hasChildUsage && mainReported && mainInput > 0 {
-		cache = fmt.Sprintf("CACHE MAIN %s/%s · %.1f%% · ALL %.1f%%", formatTokens(mainCached), formatTokens(mainInput), cacheRate, allRate)
+		cache = fmt.Sprintf("%s %s %s/%s · %.1f%% · %s %.1f%%", cacheLabel, m.tr("footer.main"), formatTokens(mainCached), formatTokens(mainInput), cacheRate, m.tr("footer.all"), allRate)
 	}
 	compactCache := "--"
 	if mainReported && mainInput > 0 {
 		compactCache = fmt.Sprintf("%.0f%%", cacheRate)
 	}
-	cacheRateOnly := "CACHE --"
+	cacheRateOnly := cacheLabel + " --"
 	if mainReported && mainInput > 0 {
-		cacheRateOnly = fmt.Sprintf("CACHE %.1f%%", cacheRate)
+		cacheRateOnly = fmt.Sprintf("%s %.1f%%", cacheLabel, cacheRate)
 	}
 	if hasChildUsage && mainReported && mainInput > 0 {
-		cacheRateOnly = fmt.Sprintf("CACHE M%.1f%% A%.1f%%", cacheRate, allRate)
+		cacheRateOnly = fmt.Sprintf("%s M%.1f%% A%.1f%%", cacheLabel, cacheRate, allRate)
 		compactCache = fmt.Sprintf("M%.0f/A%.0f%%", cacheRate, allRate)
 	}
 	candidates := []string{
-		fmt.Sprintf("CTX %s %s / %s · %.1f%% · %s", contextProgressBar(used, limit, 10), formatTokens(used), formatTokens(limit), percentage, cache),
-		fmt.Sprintf("CTX %s/%s · %.1f%% · %s", formatTokens(used), formatTokens(limit), percentage, cacheRateOnly),
-		fmt.Sprintf("CTX %s/%s %.0f%% C%s", formatTokens(used), formatTokens(limit), percentage, compactCache),
-		fmt.Sprintf("CTX %.0f%%", percentage),
+		fmt.Sprintf("%s %s %s / %s · %.1f%% · %s", contextLabel, contextProgressBar(used, limit, 10), formatTokens(used), formatTokens(limit), percentage, cache),
+		fmt.Sprintf("%s %s/%s · %.1f%% · %s", contextLabel, formatTokens(used), formatTokens(limit), percentage, cacheRateOnly),
+		fmt.Sprintf("%s %s/%s %.0f%% C%s", contextLabel, formatTokens(used), formatTokens(limit), percentage, compactCache),
+		fmt.Sprintf("%s %.0f%%", contextLabel, percentage),
 	}
 	text := candidates[len(candidates)-1]
 	for _, candidate := range candidates {
@@ -697,18 +836,18 @@ func contextProgressBar(used int, limit int, width int) string {
 }
 
 func (m AppModel) renderStatus(width int) string {
-	statusText := stateMark(m.status) + " " + m.status
+	statusText := stateMark(m.status) + " " + m.displayState(m.status)
 	status := m.stateStyle(m.status).Bold(true).Render(" " + statusText)
 	switch m.approvalMode {
 	case ApprovalModeYolo:
-		status += m.theme.Error.Bold(true).Render(" · APPROVAL YOLO")
+		status += m.theme.FullAccess.Render(" · ⚠ " + m.tr("status.approval.yolo"))
 	case ApprovalModeAutoReview:
-		status += m.theme.Assistant.Bold(true).Render(" · APPROVAL AUTO")
+		status += m.theme.ApprovalSmart.Render(" · ⛨ " + m.tr("status.approval.auto"))
 	default:
-		status += m.theme.Muted.Render(" · APPROVAL ASK")
+		status += m.theme.ApprovalAsk.Render(" · ☝︎ " + m.tr("status.approval.ask"))
 	}
 	if m.actionBusy {
-		status += m.theme.Warning.Render(" · WORKING")
+		status += m.theme.Warning.Render(" · " + m.tr("status.working"))
 	} else if m.errorBanner != "" {
 		errorInTranscript := false
 		for index := len(m.transcript) - 1; index >= 0; index-- {
@@ -723,15 +862,15 @@ func (m AppModel) renderStatus(width int) string {
 		}
 		status += m.theme.Error.Render(" · " + m.errorBanner)
 	}
-	helpText := "Shift+Tab approval  Ctrl+R reasoning  Ctrl+P commands  ? help"
+	helpText := strings.Join([]string{m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("footer.help.commands"), m.tr("status.help")}, "  ")
 	if width < 112 {
-		helpText = "Shift+Tab approval  Ctrl+R reasoning  ? help"
+		helpText = strings.Join([]string{m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("status.help")}, "  ")
 	}
 	if width < 86 {
-		helpText = "Shift+Tab approval  ? help"
+		helpText = strings.Join([]string{m.tr("footer.help.approval"), m.tr("status.help")}, "  ")
 	}
 	if width < 64 {
-		helpText = "? help"
+		helpText = m.tr("status.help")
 	}
 	return joinSides(status, m.theme.Muted.Render(helpText+" "), width)
 }
@@ -870,7 +1009,16 @@ func (m AppModel) renderOverlay(width int, height int) string {
 			text = " › " + strings.TrimLeft(text, " ")
 		}
 		style := m.stateStyle(option.State)
-		rows = append(rows, m.boxRow(text, innerWidth, style, selected))
+		if selected {
+			style = m.theme.Selected
+		}
+		if m.overlay == OverlayTodos && option.State == string(session.TodoCompleted) {
+			style = style.Strikethrough(true)
+		}
+		if m.overlay == OverlayTodos && option.State == string(session.TodoCancelled) {
+			style = style.Strikethrough(true)
+		}
+		rows = append(rows, m.boxRow(text, innerWidth, style, false))
 	}
 	for len(rows) < innerHeight-1 {
 		rows = append(rows, m.boxRow("", innerWidth, m.theme.Assistant, false))
@@ -945,11 +1093,14 @@ func (m AppModel) renderAgentDetailOverlay(width, height int) string {
 			for _, block := range agent.Blocks {
 				title := first(block.Title, string(block.Kind))
 				if block.Kind == BlockTool {
-					title = toolDisplayName(title)
+					title = m.toolDisplayName(title)
 				}
 				content = append(content, fmt.Sprintf("%s · %s", strings.ToUpper(title), strings.ToUpper(first(block.State, "completed"))))
 				for _, line := range wrapText(block.Content, max(4, innerWidth-4)) {
 					content = append(content, "  "+line)
+				}
+				for _, line := range m.renderHookLines(block.Hooks, max(4, innerWidth-2)) {
+					content = append(content, line)
 				}
 			}
 		}
@@ -1017,7 +1168,7 @@ func (m AppModel) overlayHeading() (string, string) {
 	case OverlayHelp:
 		return "Keyboard help", "Every action remains keyboard reachable"
 	case OverlayCommand:
-		return "Command palette", "Choose an action"
+		return m.tr("overlay.command.title"), m.tr("overlay.command.subtitle")
 	case OverlayProvider:
 		if m.overlayPurpose == "login" {
 			return "Sign in", "Choose a subscription provider"
@@ -1031,18 +1182,22 @@ func (m AppModel) overlayHeading() (string, string) {
 		return "Model", fmt.Sprintf("%d configured provider catalogs", count)
 	case OverlaySkills:
 		return "Skills", "Reload affects new turns only"
+	case OverlayLanguage:
+		return m.tr("overlay.language.title"), m.tr("overlay.language.subtitle")
 	case OverlayReasoning:
 		return "Thinking level", m.provider + "/" + first(m.model, "no model") + " · applied to the next turn"
 	case OverlaySessions:
 		return "Resume session", "Choose a saved conversation"
 	case OverlayApproval:
-		return "Approval required", "Review the action before it runs"
+		return m.tr("overlay.approval.title"), m.tr("overlay.approval.subtitle")
 	case OverlayCancel:
 		return "Cancel run", "Choose whether child tasks should continue"
 	case OverlayDiff:
 		return "Diff", "Proposed workspace change"
 	case OverlayAgents:
 		return "Agents", strings.ToUpper(m.agentMode) + " mode"
+	case OverlayTodos:
+		return m.tr("overlay.todos.title"), m.tr("overlay.todos.subtitle")
 	case OverlayAgentDetail:
 		return "Task detail", "Live child transcript and execution metadata"
 	case OverlayAgentTypes:
@@ -1062,6 +1217,13 @@ func (m AppModel) overlayHeading() (string, string) {
 
 func (m AppModel) overlayDescription() []string {
 	switch m.overlay {
+	case OverlayTodos:
+		if len(m.todo.Phases) == 0 {
+			return []string{m.tr("overlay.todos.empty")}
+		}
+		if m.todo.Goal != "" {
+			return []string{m.todo.Goal}
+		}
 	case OverlayHelp:
 		return []string{
 			"Enter submit · Ctrl+J newline · Esc close or cancel",
@@ -1081,13 +1243,13 @@ func (m AppModel) overlayDescription() []string {
 	case OverlayModel:
 		if len(m.modelPickerEntries()) == 0 {
 			if query := strings.TrimSpace(m.modelSearch.Value()); query != "" {
-				return []string{fmt.Sprintf("No models match %q.", query)}
+				return []string{m.tr("overlay.models.no_match", map[string]string{"query": strconv.Quote(query)})}
 			}
-			return []string{"No models loaded. Sign in, then refresh the provider catalogs."}
+			return []string{m.tr("overlay.models.empty")}
 		}
 	case OverlaySkills:
 		if len(m.skills) == 0 {
-			return []string{"No skills are available. Check skills.enabled and configured skill directories."}
+			return []string{m.tr("overlay.skills.empty")}
 		}
 		warnings := make([]string, 0, min(4, len(m.skillDiagnostics)))
 		for index, diagnostic := range m.skillDiagnostics {
@@ -1107,17 +1269,17 @@ func (m AppModel) overlayDescription() []string {
 		}
 	case OverlaySessions:
 		if len(m.sessions) == 0 {
-			return []string{"No saved sessions are available."}
+			return []string{m.tr("overlay.sessions.empty")}
 		}
 		return []string{"Use Up/Down to choose, Enter to resume, Esc to close."}
 	case OverlayApproval:
 		if m.approval == nil {
-			return []string{"This approval request has already been resolved."}
+			return []string{m.tr("overlay.approval.resolved")}
 		}
 		return []string{
-			"Tool: " + first(m.approval.Tool, "unknown"),
-			"Target: " + first(m.approval.Target, "workspace"),
-			"Risk: " + first(m.approval.Risk, "unspecified") + " · Effect: " + first(m.approval.Effect, "unspecified"),
+			m.tr("overlay.approval.tool", map[string]string{"name": m.toolDisplayName(first(m.approval.Tool, "unknown"))}),
+			m.tr("overlay.approval.target", map[string]string{"name": first(m.approval.Target, "workspace")}),
+			m.tr("overlay.approval.risk", map[string]string{"risk": first(m.approval.Risk, "unspecified"), "effect": first(m.approval.Effect, "unspecified")}),
 			first(m.approval.Action, m.approval.Diff),
 		}
 	case OverlayCancel:
@@ -1126,14 +1288,14 @@ func (m AppModel) overlayDescription() []string {
 		if block, ok := m.selectedDiff(); ok {
 			return strings.Split(block.Content, "\n")
 		}
-		return []string{"No diff is selected."}
+		return []string{m.tr("overlay.diff.empty")}
 	case OverlayAgents:
 		if len(m.agents) == 0 {
-			return []string{"No child agents are active or recorded for this session."}
+			return []string{m.tr("overlay.agents.empty")}
 		}
 	case OverlayMCP:
 		if len(m.mcpServers) == 0 {
-			return []string{"No MCP servers are configured or connected."}
+			return []string{m.tr("overlay.mcp.empty")}
 		}
 	case OverlayRecovery:
 		if len(m.recovery) == 0 {
@@ -1148,10 +1310,29 @@ func (m AppModel) overlayDescription() []string {
 
 func (m AppModel) overlayOptions() []overlayOption {
 	switch m.overlay {
+	case OverlayTodos:
+		options := []overlayOption{}
+		for _, phase := range m.todo.Phases {
+			for _, item := range phase.Items {
+				if m.todoHideCompleted && item.Status == session.TodoCompleted {
+					continue
+				}
+				detail := string(item.Status) + " · " + item.ID
+				if item.SubagentRunID != "" {
+					for _, agent := range m.agents {
+						if agent.ID == item.SubagentRunID {
+							detail += " · agent " + agent.State
+						}
+					}
+				}
+				options = append(options, overlayOption{Group: phase.Title, Label: todoMark(item.Status, m.animationFrame) + "  " + item.Content, Detail: detail, State: string(item.Status)})
+			}
+		}
+		return options
 	case OverlayCommand:
 		options := make([]overlayOption, 0, len(commandPaletteOptions))
-		for _, option := range commandPaletteOptions {
-			options = append(options, overlayOption{Label: option.Label, Detail: option.Detail})
+		for _, id := range commandPaletteOptions {
+			options = append(options, overlayOption{Label: m.tr("command_palette." + id + ".label"), Detail: m.tr("command_palette." + id + ".detail")})
 		}
 		return options
 	case OverlayProvider:
@@ -1223,6 +1404,22 @@ func (m AppModel) overlayOptions() []overlayOption {
 			})
 		}
 		return options
+	case OverlayLanguage:
+		languages := i18n.Languages()
+		options := make([]overlayOption, 0, len(languages))
+		for _, language := range languages {
+			locale, err := i18n.New(language)
+			label := language
+			if err == nil {
+				label = locale.T("language.name")
+			}
+			state := ""
+			if language == m.catalog.Language() {
+				state = "selected"
+			}
+			options = append(options, overlayOption{Label: label, Detail: language, State: state})
+		}
+		return options
 	case OverlayReasoning:
 		levels := m.reasoningLevels()
 		options := make([]overlayOption, 0, len(levels))
@@ -1250,9 +1447,9 @@ func (m AppModel) overlayOptions() []overlayOption {
 		return options
 	case OverlayApproval:
 		return []overlayOption{
-			{Label: "Approve once", Detail: "Only this exact invocation", State: "a"},
-			{Label: "Approve for session", Detail: "Matching scope until exit", State: "shift+a"},
-			{Label: "Deny", Detail: "Return a denied tool result", State: "d"},
+			{Label: m.tr("overlay.approval.once"), Detail: m.tr("overlay.approval.once_detail"), State: "a"},
+			{Label: m.tr("overlay.approval.session"), Detail: m.tr("overlay.approval.session_detail"), State: "shift+a"},
+			{Label: m.tr("overlay.approval.deny"), Detail: m.tr("overlay.approval.deny_detail"), State: "d"},
 		}
 	case OverlayCancel:
 		return []overlayOption{
@@ -1345,6 +1542,8 @@ func (m AppModel) overlayFooter() string {
 		return "↑/↓ choose scope · Enter cancel · Esc keep running"
 	case OverlayAgents:
 		return "↑/↓ select · Enter detail · X cancel child · Esc close"
+	case OverlayTodos:
+		return "↑/↓ select · H hide completed · Esc close"
 	case OverlayAgentDetail:
 		return "↑/↓ scroll · Esc return to tasks"
 	case OverlayAgentTypes, OverlayPersonas:
@@ -1404,9 +1603,9 @@ func (m AppModel) stateStyle(state string) lipgloss.Style {
 	switch strings.ToLower(state) {
 	case "ready", "completed", "approved", "succeeded", "active", "selected", "current", "eager", "available":
 		return m.theme.Success
-	case "failed", "error", "degraded", "denied", "cancelled", "disabled", "application stopped":
+	case "failed", "error", "degraded", "denied", "cancelled", "disabled", "application stopped", "recovery attention":
 		return m.theme.Error
-	case "running", "reviewing", "starting", "streaming", "connecting", "queued", "cancelling", "awaiting approval", "a", "shift+a", "d":
+	case "running", "reviewing", "starting", "streaming", "connecting", "queued", "cancelling", "awaiting approval", "blocked", "a", "shift+a", "d":
 		return m.theme.Warning
 	default:
 		return m.theme.Muted
@@ -1417,7 +1616,7 @@ func stateMark(state string) string {
 	switch strings.ToLower(state) {
 	case "ready", "completed", "succeeded", "active", "selected", "current":
 		return "✓"
-	case "failed", "error", "degraded", "denied", "application stopped":
+	case "failed", "error", "degraded", "denied", "blocked", "application stopped", "recovery attention":
 		return "!"
 	case "cancelled", "cancelling":
 		return "×"
@@ -1425,8 +1624,6 @@ func stateMark(state string) string {
 		return "?"
 	case "running", "starting", "streaming", "connecting", "queued":
 		return "◆"
-	case "recovered":
-		return "↺"
 	default:
 		return "○"
 	}

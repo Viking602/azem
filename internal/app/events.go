@@ -1,12 +1,16 @@
 package app
 
-import "time"
+import (
+	"github.com/Viking602/azem/internal/session"
+	"time"
+)
 
 type EventKind string
 
 const (
 	EventBootstrapDone     EventKind = "bootstrap_done"
 	EventSessionLoaded     EventKind = "session_loaded"
+	EventTodoUpdated       EventKind = "todo_updated"
 	EventRunStarted        EventKind = "run_started"
 	EventContextUsage      EventKind = "context_usage"
 	EventAgentState        EventKind = "agent_state"
@@ -28,6 +32,9 @@ const (
 	EventRunFinished       EventKind = "run_finished"
 	EventRunFailed         EventKind = "run_failed"
 	EventRunCancelled      EventKind = "run_cancelled"
+	EventHookStarted       EventKind = "hook_started"
+	EventHookFinished      EventKind = "hook_finished"
+	EventHookDiagnostic    EventKind = "hook_diagnostic"
 )
 
 type AgentStatePayload struct {
@@ -112,6 +119,7 @@ type Event struct {
 	AgentSnapshots   []AgentSnapshotPayload
 	SkillCatalog     []SkillCatalogEntry
 	SkillDiagnostics []SkillDiagnostic
+	Todo             *session.TodoList
 	At               time.Time
 }
 
@@ -141,6 +149,10 @@ func (e Event) Clone() Event {
 	}
 	if e.SkillDiagnostics != nil {
 		cloned.SkillDiagnostics = append([]SkillDiagnostic(nil), e.SkillDiagnostics...)
+	}
+	if e.Todo != nil {
+		todo := e.Todo.Clone()
+		cloned.Todo = &todo
 	}
 	return cloned
 }

@@ -16,6 +16,31 @@ import (
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
+func TestUIPreferencesPersistAndRestore(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	cfg := config.Default()
+	service := NewService(context.Background(), cfg)
+	service.SetConfigPath(configPath)
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetLanguage, Target: "zh-CN"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetApprovalMode, Target: string(ApprovalModeYolo)}); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := config.Load(configPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Defaults.Language != "zh-CN" || persisted.Defaults.ApprovalMode != "yolo" {
+		t.Fatalf("persisted defaults = %#v", persisted.Defaults)
+	}
+	restarted := NewService(context.Background(), persisted)
+	if restarted.approvalMode != ApprovalModeYolo {
+		t.Fatalf("restored approval mode = %q", restarted.approvalMode)
+	}
+}
+
 func TestFakeTurnStreamsAndFinishes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

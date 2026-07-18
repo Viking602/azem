@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/session"
 )
 
 type inertRuntime struct{}
@@ -21,6 +22,20 @@ func (inertRuntime) NextEvent(context.Context) (app.Event, error) {
 }
 func (inertRuntime) StartTurn(string) (string, error) { return "run_test", nil }
 func (inertRuntime) CancelActive() bool               { return true }
+
+func TestTextInputsUseBarCursors(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if model.composer.VirtualCursor() || model.composer.Styles().Cursor.Shape != tea.CursorBar {
+		t.Fatalf("composer cursor = virtual:%v shape:%v, want real bar", model.composer.VirtualCursor(), model.composer.Styles().Cursor.Shape)
+	}
+	if model.modelSearch.Styles().Cursor.Shape != tea.CursorBar {
+		t.Fatalf("search cursor = %v, want bar", model.modelSearch.Styles().Cursor.Shape)
+	}
+	view := model.View()
+	if view.Cursor == nil || view.Cursor.Shape != tea.CursorBar {
+		t.Fatalf("view cursor = %#v, want visible bar", view.Cursor)
+	}
+}
 
 type configuredTurnRuntime struct {
 	inertRuntime
@@ -382,7 +397,7 @@ func TestApprovalOverlayExecutesExplicitDecision(t *testing.T) {
 func TestShiftTabTogglesPromptAndYoloApprovalModes(t *testing.T) {
 	runtime := &recordedRuntime{}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
-	if status := ansi.Strip(model.renderStatus(120)); !strings.Contains(status, "APPROVAL ASK") {
+	if status := ansi.Strip(model.renderStatus(120)); !strings.Contains(status, "☝︎ ASK") {
 		t.Fatalf("initial approval mode is not visible: %q", status)
 	}
 
@@ -400,7 +415,7 @@ func TestShiftTabTogglesPromptAndYoloApprovalModes(t *testing.T) {
 	if len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionSetApprovalMode || runtime.actions[0].Target != "yolo" {
 		t.Fatalf("yolo action = %#v", runtime.actions)
 	}
-	if status := ansi.Strip(model.renderStatus(120)); !strings.Contains(status, "APPROVAL YOLO") {
+	if status := ansi.Strip(model.renderStatus(120)); !strings.Contains(status, "⚠ FULL ACCESS") {
 		t.Fatalf("yolo approval mode is not visible: %q", status)
 	}
 
@@ -447,7 +462,7 @@ func TestShiftTabIncludesAutomaticReviewOnlyWhenChatGPTCapabilityIsAvailable(t *
 	if target := shiftTab(); target != "auto_review" {
 		t.Fatalf("first capable mode=%q", target)
 	}
-	if status := ansi.Strip(model.renderStatus(120)); !strings.Contains(status, "APPROVAL AUTO") {
+	if status := ansi.Strip(model.renderStatus(120)); !strings.Contains(status, "⛨ SMART") {
 		t.Fatalf("automatic approval mode is not visible: %q", status)
 	}
 	if target := shiftTab(); target != "yolo" {
@@ -461,7 +476,7 @@ func TestShiftTabIncludesAutomaticReviewOnlyWhenChatGPTCapabilityIsAvailable(t *
 		Kind: app.EventApprovalMode, State: "prompt",
 		Data: map[string]string{"auto_review_available": "false"},
 	})
-	if model.autoReviewAvailable || strings.Contains(ansi.Strip(model.renderStatus(120)), "APPROVAL AUTO") {
+	if model.autoReviewAvailable || strings.Contains(ansi.Strip(model.renderStatus(120)), "⛨ SMART") {
 		t.Fatalf("automatic mode remained visible after capability loss: %+v", model)
 	}
 	if target := shiftTab(); target != "yolo" {
@@ -709,8 +724,11 @@ func TestReadAndSkillToolResultsUseDisplaySummaries(t *testing.T) {
 		Kind: app.EventToolFinished, RunID: "run", ToolCallID: "skill", State: "completed",
 		Text: "Active Hydaelyn skills:\n--- skill: verify ---\nSECRET SKILL BODY", Data: map[string]string{"name": "hydaelyn_activate_skill"},
 	})
-	if got := model.transcript[1].Content; got != "Loaded skill verify" {
+	if got := model.transcript[1].Content; got != "Skill: verify\nStatus: Loaded" {
 		t.Fatalf("skill display summary = %q", got)
+	}
+	if strings.Contains(model.transcript[1].Content, "SECRET") {
+		t.Fatal("skill body leaked into transcript")
 	}
 
 	model.updateTool(app.Event{
@@ -1392,8 +1410,18 @@ func TestRecoveredApprovalResolutionReturnsToIdleState(t *testing.T) {
 	}
 	updated, _ = model.Update(cmd())
 	model = updated.(AppModel)
-	if model.status != "Recovered" || model.overlay != OverlayNone || model.approval != nil || len(model.recovery) != 0 {
+	if model.status != "Ready" || model.overlay != OverlayNone || model.approval != nil || len(model.recovery) != 0 {
 		t.Fatalf("resolved recovery state = status:%q overlay:%q approval:%+v recovery:%+v", model.status, model.overlay, model.approval, model.recovery)
+	}
+}
+
+func TestAutomaticRecoveryWithoutPendingWorkRemainsReady(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.applyEvent(app.Event{Kind: app.EventRecoveryState, State: "attention_required", Data: map[string]string{
+		"runs": "1", "items": `[]`,
+	}})
+	if model.status != "Ready" || model.overlay != OverlayNone {
+		t.Fatalf("automatic recovery should remain idle: status=%q overlay=%q", model.status, model.overlay)
 	}
 }
 
@@ -1636,6 +1664,9 @@ func TestSessionReloadRebuildsTypedTasksWithoutDuplicateLifecycleCards(t *testin
 	if len(model.transcript) != 1 || model.transcript[0].ID != "child-1" || model.transcript[0].ToolCallID != "spawn-1" {
 		t.Fatalf("reloaded lifecycle blocks = %#v", model.transcript)
 	}
+	if model.status != "Ready" {
+		t.Fatalf("reloaded session status = %q, want Ready", model.status)
+	}
 	model.applyEvent(app.Event{
 		Kind: app.EventAgentState, SessionID: "reloaded", AgentID: "child-1", State: "completed", Text: "still done",
 		Agent: &app.AgentStatePayload{Type: "review", ParentRunID: "parent", ParentToolCallID: "spawn-1"},
@@ -1818,6 +1849,101 @@ func TestTranscriptLayoutCacheReusesStableRender(t *testing.T) {
 	}
 }
 
+func TestHookEventsAttachUpsertSanitizeAndAnimate(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.applyEvent(app.Event{Kind: app.EventToolStarted, RunID: "run", ToolCallID: "tool-1", Data: map[string]string{"name": "test"}})
+	started := app.Event{Kind: app.EventHookStarted, AgentID: "main", ToolCallID: "tool-1", Data: map[string]string{
+		"event": "PostToolUse", "name": "lint", "source": "/secret/hooks/lint.sh",
+	}}
+	model.applyEvent(started)
+	if len(model.transcript) != 1 || len(model.transcript[0].Hooks) != 1 || model.transcript[0].Hooks[0].State != "running" {
+		t.Fatalf("started hook not attached: %#v", model.transcript)
+	}
+	if model.transcript[0].Hooks[0].Source != "lint.sh" || !model.hasRunningHooks() {
+		t.Fatalf("hook source/running state = %#v", model.transcript[0].Hooks[0])
+	}
+	updated, command := model.Update(animationTickMsg{})
+	model = updated.(AppModel)
+	if command == nil {
+		t.Fatal("hook-only animation did not continue")
+	}
+	finished := started
+	finished.Kind = app.EventHookFinished
+	finished.State = "blocked"
+	finished.Data["durationMS"] = "17"
+	finished.Data["reason"] = "policy denied"
+	finished.Data["stdout"] = `{"decision":"deny","command":"secret"}`
+	model.applyEvent(finished)
+	if len(model.transcript[0].Hooks) != 1 || model.transcript[0].Hooks[0].State != "blocked" || model.transcript[0].Hooks[0].Output != "policy denied" {
+		t.Fatalf("finished hook was not replaced/sanitized: %#v", model.transcript[0].Hooks)
+	}
+	if strings.Contains(model.transcript[0].Hooks[0].Output, "decision") {
+		t.Fatal("control JSON leaked into hook output")
+	}
+	updated, command = model.Update(animationTickMsg{})
+	model = updated.(AppModel)
+	if command != nil || model.hasRunningHooks() {
+		t.Fatal("animation continued after the hook finished")
+	}
+
+	plain := hookRunFromEvent(app.Event{Kind: app.EventHookFinished, Data: map[string]string{
+		"event": "Stop", "name": "report", "stdout": "one\ntwo\nthree\nfour",
+	}})
+	if plain.Output != "one\ntwo\nthree" {
+		t.Fatalf("plain output was not line-clipped: %q", plain.Output)
+	}
+
+	model.applyEvent(app.Event{Kind: app.EventToolFinished, RunID: "run", ToolCallID: "tool-2", State: "completed", Data: map[string]string{"name": "test"}})
+	model.applyEvent(app.Event{Kind: app.EventHookFinished, AgentID: "main", ToolCallID: "tool-2", State: "completed", Data: map[string]string{"event": "PostToolUse", "name": "audit"}})
+	if len(model.transcript) != 2 || len(model.transcript[1].Hooks) != 1 || model.transcript[1].Hooks[0].Name != "audit" {
+		t.Fatalf("finish-only tool hook not attached: %#v", model.transcript)
+	}
+}
+
+func TestAgentAndLifecycleHooksRenderNarrowAndReducedMotion(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.agents = []AgentView{{ID: "agent-1", Blocks: []Block{{Kind: BlockTool, ToolCallID: "agent-tool", Title: "search"}}}}
+	model.applyEvent(app.Event{Kind: app.EventHookStarted, AgentID: "agent-1", ToolCallID: "agent-tool", Data: map[string]string{"event": "PreToolUse", "name": "guard"}})
+	if len(model.agents[0].Blocks[0].Hooks) != 1 {
+		t.Fatalf("agent hook not attached: %#v", model.agents[0].Blocks)
+	}
+	model.applyEvent(app.Event{Kind: app.EventHookStarted, Data: map[string]string{"event": "SessionStart", "name": "setup"}})
+	if len(model.transcript) != 1 || model.transcript[0].Kind != BlockHook {
+		t.Fatalf("lifecycle hook did not create a block: %#v", model.transcript)
+	}
+	model.reducedMotion = true
+	tool := model.agents[0].Blocks[0]
+	tool.Collapsed = true
+	header := ansi.Strip(strings.Join(model.renderBlock(tool, 0, 40), "\n"))
+	if !strings.Contains(header, model.tr("hook.summary")) {
+		t.Fatalf("collapsed header lacks hook summary: %q", header)
+	}
+	tool.Collapsed = false
+	rendered := ansi.Strip(strings.Join(model.renderBlock(tool, 0, 24), "\n"))
+	if !strings.Contains(rendered, "•") {
+		t.Fatalf("reduced-motion hook lacks static mark: %q", rendered)
+	}
+	for _, line := range strings.Split(rendered, "\n") {
+		if ansi.StringWidth(line) > 26 {
+			t.Fatalf("narrow hook line width %d: %q", ansi.StringWidth(line), line)
+		}
+	}
+}
+
+func TestHookDiagnosticReasonRendersOnce(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.applyEvent(app.Event{Kind: app.EventHookDiagnostic, Data: map[string]string{
+		"event": "TypoEvent", "source": "/tmp/settings.json", "reason": "unknown event",
+	}})
+	if len(model.transcript) != 1 || model.transcript[0].Content != "" {
+		t.Fatalf("diagnostic block = %#v", model.transcript)
+	}
+	rendered := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 60), "\n"))
+	if strings.Count(rendered, "unknown event") != 1 {
+		t.Fatalf("diagnostic reason rendered more than once:\n%s", rendered)
+	}
+}
+
 func BenchmarkLongTranscriptScroll(b *testing.B) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
@@ -1967,7 +2093,7 @@ func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 	paletteModel := NewModel(paletteRuntime, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	paletteModel.openOverlay(OverlayCommand)
 	for index, option := range commandPaletteOptions {
-		if option.ID == "skills" {
+		if option == "skills" {
 			paletteModel.overlayCursor = index
 			break
 		}
@@ -2010,6 +2136,102 @@ func TestThinkingSegmentsKeepMarkdownBoundaries(t *testing.T) {
 	}
 }
 
+func TestZhCNCoreTUIRendering(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if err := model.SetLanguage("zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+
+	skill := summarizeToolResult("hydaelyn_activate_skill", `{"name":"verify"}`, `{}`, model.catalog)
+	if skill != "技能：verify\n状态：已加载" {
+		t.Fatalf("localized skill result = %q", skill)
+	}
+	if got := model.approvalActionSummary("coding.edit_hashline", "internal/tui/view.go"); got != "编辑文件 · internal/tui/view.go" {
+		t.Fatalf("localized approval summary = %q", got)
+	}
+	model.runID = "run-zh"
+	model.status = "Running"
+	model.applyEvent(app.Event{
+		Kind: app.EventApprovalRequested, RunID: "run-zh", ToolCallID: "edit-zh", ApprovalID: "approval-zh", State: "reviewing",
+		Data: map[string]string{"tool": "coding.edit_hashline", "target": "README.md"},
+	})
+	model.applyEvent(app.Event{
+		Kind: app.EventApprovalResolved, RunID: "run-zh", ToolCallID: "edit-zh", ApprovalID: "approval-zh", State: "auto_approved",
+		Data: map[string]string{"tool": "coding.edit_hashline", "target": "README.md", "risk": "low", "rationale": "bounded edit"},
+	})
+	approval := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 40), "\n"))
+	for _, wanted := range []string{"已允许", "已完成", "风险：low", "理由：bounded edit"} {
+		if !strings.Contains(approval, wanted) {
+			t.Fatalf("localized approval missing %q:\n%s", wanted, approval)
+		}
+	}
+
+	model.openOverlay(OverlayCommand)
+	content := ansi.Strip(model.renderOverlay(40, 20))
+	if !strings.Contains(content, "命令面板") || !strings.Contains(content, "登录") || !strings.Contains(content, "选择提供商") {
+		t.Fatalf("localized command palette missing:\n%s", content)
+	}
+	for lineNumber, line := range strings.Split(model.renderOverlay(40, 20), "\n") {
+		if width := ansi.StringWidth(line); width > 40 {
+			t.Fatalf("command palette line %d width = %d, want <= 40: %q", lineNumber+1, width, ansi.Strip(line))
+		}
+	}
+}
+
+func TestLanguageCommandSwitchesImmediatelyAndAcceptsTypoAlias(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, cmd := model.executeCommand(Command{Name: "language"})
+	model = updated.(AppModel)
+	if cmd != nil || model.overlay != OverlayLanguage || model.overlayOptionCount() != 2 {
+		t.Fatalf("language picker = overlay:%q count:%d cmd:%v", model.overlay, model.overlayOptionCount(), cmd != nil)
+	}
+	picker := ansi.Strip(model.renderOverlay(50, 16))
+	for _, wanted := range []string{"INTERFACE LANGUAGE", "English", "简体中文", "en", "zh-CN", "SELECTED"} {
+		if !strings.Contains(picker, wanted) {
+			t.Fatalf("language picker missing %q:\n%s", wanted, picker)
+		}
+	}
+	model.overlayCursor = 1
+	updated, cmd = model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil || model.overlay != OverlayNone || model.catalog.Language() != "en" {
+		t.Fatalf("language picker selection = overlay:%q language:%q cmd:%v", model.overlay, model.catalog.Language(), cmd != nil)
+	}
+	result := cmd().(actionResultMsg)
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if model.catalog.Language() != "zh-CN" || len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionSetLanguage || runtime.actions[0].Target != "zh-CN" {
+		t.Fatalf("persisted language selection = language:%q actions:%#v", model.catalog.Language(), runtime.actions)
+	}
+
+	command, ok, err := ParseCommand("/langauge zh-CN")
+	if err != nil || !ok || command.Name != "language" {
+		t.Fatalf("language alias parse = %#v, %v, %v", command, ok, err)
+	}
+	updated, cmd = model.executeCommand(command)
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("language command did not persist selection")
+	}
+	result = cmd().(actionResultMsg)
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if model.catalog.Language() != "zh-CN" || model.composer.Placeholder != "描述要更改、检查或验证的内容" {
+		t.Fatalf("language switch = language:%q placeholder:%q cmd:%v", model.catalog.Language(), model.composer.Placeholder, cmd != nil)
+	}
+	model.composer.SetValue("/lang")
+	suggestions := model.visibleCommandSuggestions()
+	if len(suggestions) == 0 || suggestions[0].Name != "language" || suggestions[0].Detail != "切换界面语言" {
+		t.Fatalf("localized language suggestion = %#v", suggestions)
+	}
+	updated, _ = model.executeCommand(Command{Name: "language", Args: []string{"de"}})
+	model = updated.(AppModel)
+	if model.errorBanner != "语言必须是 en 或 zh-CN" || model.catalog.Language() != "zh-CN" {
+		t.Fatalf("invalid language = banner:%q language:%q", model.errorBanner, model.catalog.Language())
+	}
+}
+
 func TestFooterPrioritizesReadableRuntimeState(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-5.6-sol", "high", "single")
 	model.status = "Failed"
@@ -2032,5 +2254,72 @@ func TestFooterPrioritizesReadableRuntimeState(t *testing.T) {
 		if !strings.Contains(footer, "CTX") || !strings.Contains(footer, "50") {
 			t.Fatalf("model footer lost complete context/cache signal at width %d: %q", width, footer)
 		}
+	}
+}
+
+func TestTodoOverlayNavigationStaleEventsAndBoundedRendering(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.todo = session.TodoList{Goal: "Ship", Revision: 3, Phases: []session.TodoPhase{{
+		ID: "phase-1", Title: "Build", Items: []session.TodoItem{
+			{ID: "done", Content: "Analyze", Status: session.TodoCompleted},
+			{ID: "current", Content: "Implement", Status: session.TodoInProgress},
+			{ID: "next", Content: "Verify", Status: session.TodoPending},
+		},
+	}}}
+	model.openOverlay(OverlayTodos)
+	if model.overlayOptionCount() != 3 {
+		t.Fatalf("todo option count=%d", model.overlayOptionCount())
+	}
+	updated, _ := model.updateOverlayKey("down")
+	model = updated.(AppModel)
+	if model.overlayCursor != 1 {
+		t.Fatalf("todo cursor=%d, want 1", model.overlayCursor)
+	}
+	updated, _ = model.updateOverlayKey("h")
+	model = updated.(AppModel)
+	if !model.todoHideCompleted || model.overlayOptionCount() != 2 {
+		t.Fatalf("hidden todo options=%d hide=%v", model.overlayOptionCount(), model.todoHideCompleted)
+	}
+
+	model.applyEvent(app.Event{Kind: app.EventTodoUpdated, Todo: &session.TodoList{Revision: 2}})
+	if model.todo.Revision != 3 {
+		t.Fatalf("stale todo event regressed revision to %d", model.todo.Revision)
+	}
+	model.todoHideCompleted = false
+	for _, size := range [][2]int{{20, 8}, {40, 12}, {80, 24}, {120, 40}} {
+		rendered := model.renderOverlay(size[0], size[1])
+		lines := strings.Split(rendered, "\n")
+		if len(lines) != size[1] {
+			t.Fatalf("todo overlay height=%d, want %d at %v", len(lines), size[1], size)
+		}
+		for lineNumber, line := range lines {
+			if width := ansi.StringWidth(line); width > size[0] {
+				t.Fatalf("todo overlay line %d width=%d, want <=%d", lineNumber+1, width, size[0])
+			}
+		}
+	}
+	if rendered := model.renderOverlay(80, 24); !strings.Contains(rendered, ";9m") {
+		t.Fatalf("completed todo is not rendered with strikethrough: %q", rendered)
+	}
+	if rail := model.renderContextRail(31, 16); !strings.Contains(rail, ";9m") {
+		t.Fatalf("completed rail todo is not rendered with strikethrough: %q", rail)
+	}
+}
+
+func TestTodoRailShowsProgressInsteadOfInternalRevision(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-5.6-sol", "high", "single")
+	emptyRail := ansi.Strip(model.renderContextRail(31, 16))
+	if strings.Contains(emptyRail, "r0") || strings.TrimSpace(strings.Split(emptyRail, "\n")[2]) != "TODO" {
+		t.Fatalf("empty todo header should hide revision: %q", emptyRail)
+	}
+
+	model.todo = session.TodoList{Revision: 9, Phases: []session.TodoPhase{{Items: []session.TodoItem{
+		{Content: "done", Status: session.TodoCompleted},
+		{Content: "working", Status: session.TodoInProgress},
+		{Content: "cancelled", Status: session.TodoCancelled},
+	}}}}
+	rail := ansi.Strip(model.renderContextRail(31, 16))
+	if strings.Contains(rail, "r9") || !strings.Contains(rail, "TODO  1/2") {
+		t.Fatalf("todo header should show user-facing progress: %q", rail)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/i18n"
+	"github.com/Viking602/azem/internal/session"
 )
 
 func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -40,13 +43,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case appEventMsg:
 		m.applyEvent(msg.Event)
 		commands := []tea.Cmd{waitForAppEvent(m.runtime)}
-		if m.isRunning() && !m.reducedMotion && !m.animationActive {
+		if (m.isRunning() || m.hasRunningHooks()) && !m.reducedMotion && !m.animationActive {
 			m.animationActive = true
 			commands = append(commands, nextAnimationFrame())
 		}
 		return m, tea.Batch(commands...)
 	case animationTickMsg:
-		if !m.isRunning() || m.reducedMotion {
+		if (!m.isRunning() && !m.hasRunningHooks()) || m.reducedMotion {
 			m.animationActive = false
 			m.animationFrame = 0
 			return m, nil
@@ -230,7 +233,11 @@ func (m AppModel) visibleCommandSuggestions() []SlashCommand {
 	if m.overlay != OverlayNone || m.focus != focusComposer || m.actionBusy || m.isRunning() {
 		return nil
 	}
-	return commandSuggestions(m.composer.Value())
+	suggestions := commandSuggestions(m.composer.Value())
+	for index := range suggestions {
+		suggestions[index].Detail = m.tr("slash." + suggestions[index].Name + ".detail")
+	}
+	return suggestions
 }
 
 func (m *AppModel) moveCommandCursor(delta int, count int) {
@@ -319,6 +326,11 @@ func (m AppModel) updateOverlayKeyMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 }
 
 func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
+	if m.overlay == OverlayTodos && key == "h" {
+		m.todoHideCompleted = !m.todoHideCompleted
+		m.overlayCursor = 0
+		return m, nil
+	}
 	if m.overlay == OverlayAgentDetail {
 		switch key {
 		case "esc":
@@ -445,6 +457,10 @@ func (m AppModel) overlayOptionCount() int {
 		return len(m.modelPickerEntries())
 	case OverlaySkills:
 		return len(m.skills)
+	case OverlayLanguage:
+		return len(i18n.Languages())
+	case OverlayTodos:
+		return len(m.overlayOptions())
 	case OverlayReasoning:
 		return len(m.reasoningLevels())
 	case OverlaySessions:
@@ -494,6 +510,13 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 			m.switchProvider(entry.Provider)
 			m.selectModel(entry.Model.ID)
 			return m, m.closeOverlay()
+		}
+	case OverlayLanguage:
+		languages := i18n.Languages()
+		if m.overlayCursor >= 0 && m.overlayCursor < len(languages) {
+			language := languages[m.overlayCursor]
+			_ = m.closeOverlay()
+			return m.beginAction(Action{Kind: ActionSetLanguage, Target: language})
 		}
 	case OverlayReasoning:
 		if m.isRunning() {
@@ -549,7 +572,7 @@ func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
 	if m.overlayCursor < 0 || m.overlayCursor >= len(commandPaletteOptions) {
 		return m, nil
 	}
-	switch commandPaletteOptions[m.overlayCursor].ID {
+	switch commandPaletteOptions[m.overlayCursor] {
 	case "login":
 		m.openOverlay(OverlayProvider)
 		m.overlayPurpose = "login"
@@ -635,6 +658,10 @@ func (m *AppModel) applyActionResult(action Action) {
 	switch action.Kind {
 	case ActionSetApprovalMode:
 		m.approvalMode = ApprovalMode(action.Target)
+	case ActionSetLanguage:
+		if err := m.SetLanguage(action.Target); err != nil {
+			m.errorBanner = err.Error()
+		}
 	case ActionResolveApproval:
 		recovered := m.runID == ""
 		m.approval = nil
@@ -653,7 +680,7 @@ func (m *AppModel) applyActionResult(action Action) {
 			m.status = "Recovery attention"
 			break
 		}
-		m.status = "Recovered"
+		m.status = "Ready"
 		if m.overlay == OverlayRecovery {
 			_ = m.closeOverlay()
 		}
@@ -699,8 +726,8 @@ func (m *AppModel) queueApproval(event app.Event) {
 	}
 	if event.State == "reviewing" {
 		id := "approval:" + approval.ApprovalID
-		title := "Reviewing action"
-		content := approvalActionSummary(approval.Tool, approval.Target)
+		title := m.tr("approval.reviewing")
+		content := m.approvalActionSummary(approval.Tool, approval.Target)
 		for index := range m.transcript {
 			if m.transcript[index].ID == id {
 				m.transcript[index].Kind = BlockApproval
@@ -783,27 +810,27 @@ func (m *AppModel) resolveApproval(event app.Event) {
 
 func (m *AppModel) resolveAutomaticApproval(event app.Event) {
 	id := "approval:" + first(event.ApprovalID, event.ToolCallID)
-	label := "Review failed"
+	label := m.tr("approval.failed")
 	state := "failed"
 	switch event.State {
 	case "auto_approved":
-		label = "Allowed"
+		label = m.tr("approval.allowed")
 		state = "completed"
 	case "auto_denied":
-		label = "Denied"
+		label = m.tr("approval.denied")
 		state = "denied"
 	case "auto_timed_out":
-		label = "Timed out"
+		label = m.tr("approval.timed_out")
 	}
-	content := approvalActionSummary(event.Data["tool"], event.Data["target"])
+	content := m.approvalActionSummary(event.Data["tool"], event.Data["target"])
 	if risk := event.Data["risk"]; risk != "" {
-		content = joinToolSummary(content, "Risk: "+risk)
+		content = joinToolSummary(content, m.tr("approval.risk", map[string]string{"risk": risk}))
 	}
 	if rationale := strings.TrimSpace(event.Data["rationale"]); rationale != "" {
-		content = joinToolSummary(content, "Rationale: "+rationale)
+		content = joinToolSummary(content, m.tr("approval.rationale", map[string]string{"rationale": rationale}))
 	} else if event.State == "auto_failed" || event.State == "auto_timed_out" {
 		if detail := strings.TrimSpace(event.Text); detail != "" {
-			content = joinToolSummary(content, "Failure: "+detail)
+			content = joinToolSummary(content, m.tr("approval.failure", map[string]string{"failure": detail}))
 		}
 	}
 	if content == "" {
@@ -825,10 +852,10 @@ func (m *AppModel) resolveAutomaticApproval(event app.Event) {
 	})
 }
 
-func approvalActionSummary(toolName, target string) string {
-	action := toolDisplayName(toolName)
+func (m AppModel) approvalActionSummary(toolName, target string) string {
+	action := m.toolDisplayName(toolName)
 	if action == "" {
-		action = "Requested action"
+		action = m.tr("approval.requested_action")
 	}
 	if target != "" && target != "workspace" {
 		return action + " · " + target
@@ -863,6 +890,30 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 
 func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 	switch command.Name {
+	case "language":
+		if len(command.Args) == 0 {
+			m.openOverlay(OverlayLanguage)
+			break
+		}
+		if len(command.Args) != 1 {
+			m.errorBanner = m.tr("language.usage")
+			break
+		}
+		language := strings.ToLower(command.Args[0])
+		valid := true
+		switch language {
+		case "en":
+			language = "en"
+		case "zh-cn", "zh_cn", "zh", "cn":
+			language = "zh-CN"
+		default:
+			m.errorBanner = m.tr("language.unsupported")
+			valid = false
+		}
+		if !valid {
+			break
+		}
+		return m.beginAction(Action{Kind: ActionSetLanguage, Target: language})
 	case "help":
 		m.openOverlay(OverlayHelp)
 	case "quit":
@@ -1019,6 +1070,12 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		return m.beginAction(Action{Kind: ActionCancelAgent, Target: command.Args[1]})
+	case "todo", "todos":
+		if len(command.Args) != 0 {
+			m.errorBanner = "usage: /todos"
+			break
+		}
+		m.openOverlay(OverlayTodos)
 	case "agent-types":
 		if len(command.Args) != 0 {
 			m.errorBanner = "usage: /agent-types"
@@ -1061,9 +1118,10 @@ func (m *AppModel) applyEvent(event app.Event) {
 	if event.Kind != app.EventSessionLoaded && event.SessionID != "" && event.SessionID != m.sessionID {
 		return
 	}
-	if event.AgentID != "" {
+	if event.AgentID != "" && event.AgentID != "main" {
 		switch event.Kind {
-		case app.EventThinkingDelta, app.EventTextDelta, app.EventToolStarted, app.EventToolUpdate, app.EventToolFinished:
+		case app.EventThinkingDelta, app.EventTextDelta, app.EventToolStarted, app.EventToolUpdate, app.EventToolFinished,
+			app.EventHookStarted, app.EventHookFinished, app.EventHookDiagnostic:
 			m.updateAgentStream(event)
 			return
 		}
@@ -1079,6 +1137,10 @@ func (m *AppModel) applyEvent(event app.Event) {
 		m.status = "Ready"
 	case app.EventSessionLoaded:
 		m.loadSessionEvent(event)
+	case app.EventTodoUpdated:
+		if event.Todo != nil && event.Todo.Revision >= m.todo.Revision {
+			m.todo = event.Todo.Clone()
+		}
 	case app.EventRunStarted:
 		m.resetTurnUsage()
 		m.runID = event.RunID
@@ -1096,6 +1158,8 @@ func (m *AppModel) applyEvent(event app.Event) {
 		m.appendDelta(BlockAssistant, event.RunID, "Azem", event.Text)
 	case app.EventToolStarted, app.EventToolUpdate, app.EventToolFinished:
 		m.updateTool(event)
+	case app.EventHookStarted, app.EventHookFinished, app.EventHookDiagnostic:
+		m.updateHooks(&m.transcript, event)
 	case app.EventDiffReady:
 		block := Block{ID: event.ToolCallID, Kind: BlockDiff, RunID: event.RunID, Title: first(event.Data["path"], "Diff"), Content: event.Text, State: first(event.State, "ready")}
 		m.transcript = append(m.transcript, block)
@@ -1140,6 +1204,9 @@ func (m *AppModel) applyEvent(event app.Event) {
 }
 
 func (m AppModel) acceptRunEvent(event app.Event) bool {
+	if event.Kind == app.EventHookStarted || event.Kind == app.EventHookFinished || event.Kind == app.EventHookDiagnostic {
+		return true
+	}
 	if event.AgentID != "" {
 		switch event.Kind {
 		case app.EventAgentState, app.EventAgentDetail, app.EventApprovalRequested, app.EventApprovalResolved:
@@ -1152,7 +1219,10 @@ func (m AppModel) acceptRunEvent(event app.Event) bool {
 	if event.Kind == app.EventRunStarted {
 		return m.isRunning() && (m.runID == "" || m.runID == event.RunID)
 	}
-	if event.Kind == app.EventToolFinished && event.RunID == m.lastRunID {
+	if (event.Kind == app.EventToolFinished || event.Kind == app.EventHookFinished) && event.RunID == m.lastRunID {
+		if event.Kind == app.EventHookFinished {
+			return true
+		}
 		return m.hasOrphanedTool(event.RunID, event.ToolCallID)
 	}
 	return m.runID != "" && event.RunID == m.runID
@@ -1262,6 +1332,11 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	if event.SessionID != "" {
 		m.sessionID = event.SessionID
 	}
+	if event.Todo != nil {
+		m.todo = event.Todo.Clone()
+	} else {
+		m.todo = TodoView{}
+	}
 	m.transcript = make([]Block, 0, len(recovered))
 	m.transcriptTop = 0
 	for _, block := range recovered {
@@ -1291,9 +1366,6 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	if sessions := event.Data["sessions"]; sessions != "" {
 		_ = json.Unmarshal([]byte(sessions), &m.sessions)
 	}
-	if len(recovered) > 0 || m.lastRunID != "" {
-		m.status = "Recovered"
-	}
 }
 
 func (m *AppModel) loadRecoveryEvent(event app.Event) {
@@ -1316,9 +1388,6 @@ func (m *AppModel) loadRecoveryEvent(event app.Event) {
 		m.status = "Recovery attention"
 		m.openOverlay(OverlayRecovery)
 		return
-	}
-	if event.Data["runs"] != "0" {
-		m.status = "Recovered"
 	}
 }
 
@@ -1366,9 +1435,12 @@ func (m *AppModel) updateTool(event app.Event) {
 		if index == -1 {
 			arguments := event.Data["arguments"]
 			name := first(event.Data["name"], event.Data["tool"], "Tool")
+			if name == "todo" {
+				arguments = ""
+			}
 			m.transcript = append(m.transcript, Block{
-				ID: id, Kind: BlockTool, RunID: event.RunID, Title: name,
-				Arguments: arguments, Content: first(event.Text, summarizeToolArguments(name, arguments)), State: "running",
+				ID: id, Kind: BlockTool, RunID: event.RunID, ToolCallID: id, Title: name,
+				Arguments: arguments, Content: first(event.Text, map[bool]string{true: "Todo / progress", false: summarizeToolArguments(name, arguments)}[name == "todo"]), State: "running",
 			})
 			return
 		}
@@ -1397,11 +1469,11 @@ func (m *AppModel) updateTool(event app.Event) {
 				if diffTitle, diff, ok := summarizeFileChange(title, event.Data["arguments"], event.Data["structured"], event.Text); ok {
 					kind, title, content = BlockDiff, diffTitle, diff
 				} else {
-					content = summarizeToolResult(title, event.Data["arguments"], event.Text)
+					content = summarizeToolResult(title, event.Data["arguments"], event.Text, m.catalog)
 				}
 			}
 			m.transcript = append(m.transcript, Block{
-				ID: id, Kind: kind, RunID: event.RunID, Title: title,
+				ID: id, Kind: kind, RunID: event.RunID, ToolCallID: id, Title: title,
 				Arguments: event.Data["arguments"], Content: content, State: state,
 			})
 			return
@@ -1422,7 +1494,7 @@ func (m *AppModel) updateTool(event app.Event) {
 			if title, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
 				block.Kind, block.Title, block.Content = BlockDiff, title, diff
 			} else {
-				block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text)
+				block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text, m.catalog)
 			}
 		} else {
 			block.Content = joinToolSummary(summarizeToolArguments(block.Title, block.Arguments), summarizeToolFailure(block.Title, event.Text))
@@ -1675,13 +1747,39 @@ func joinToolSummary(summary, detail string) string {
 	return summary + "\n" + detail
 }
 
-func summarizeToolResult(name, arguments, output string) string {
+func summarizeToolResult(name, arguments, output string, catalogs ...i18n.Catalog) string {
 	switch name {
+	case "todo":
+		var todo session.TodoList
+		if json.Unmarshal([]byte(output), &todo) == nil {
+			total, completed, current := 0, 0, ""
+			for _, phase := range todo.Phases {
+				for _, item := range phase.Items {
+					total++
+					if item.Status == session.TodoCompleted {
+						completed++
+					}
+					if item.Status == session.TodoInProgress {
+						current = item.Content
+					}
+				}
+			}
+			summary := fmt.Sprintf("Todo updated · %d/%d", completed, total)
+			if current != "" {
+				summary += "\nCurrent: " + current
+			}
+			return summary
+		}
+		return "Todo updated"
 	case "coding.read_file":
 		return summarizeReadFile(arguments, output)
 	case "coding.list_files":
 		return summarizeListOutput(output, 8)
 	case "hydaelyn_activate_skill":
+		catalog := i18n.Must(i18n.DefaultLanguage)
+		if len(catalogs) > 0 {
+			catalog = catalogs[0]
+		}
 		var input struct {
 			Name string `json:"name"`
 		}
@@ -1694,13 +1792,14 @@ func summarizeToolResult(name, arguments, output string) string {
 				}
 			}
 		}
-		if input.Name != "" {
-			if strings.HasPrefix(output, "Skill already active:") {
-				return strings.TrimSpace(output)
-			}
-			return "Loaded skill " + input.Name
+		if input.Name == "" {
+			input.Name = catalog.T("skill.unknown")
 		}
-		return "Loaded skill"
+		status := "skill.status.loaded"
+		if strings.Contains(strings.ToLower(output), "already active") {
+			status = "skill.status.active"
+		}
+		return catalog.T("skill.name", map[string]string{"name": input.Name}) + "\n" + catalog.T(status)
 	default:
 		if summary, ok := summarizeJSONOutput(output); ok {
 			return summary
@@ -1919,15 +2018,134 @@ func (m *AppModel) updateAgentStream(event app.Event) {
 		appendAgentViewDelta(&agent.Blocks, BlockAssistant, event.RunID, "Assistant", event.Text)
 	case app.EventToolStarted:
 		agent.Activity = first(event.Data["name"], event.Text, "tool")
-		upsertAgentTool(&agent.Blocks, event, "running")
+		upsertAgentTool(&agent.Blocks, event, "running", m.catalog)
 	case app.EventToolUpdate:
 		agent.Activity = first(event.Data["name"], event.Text, "tool update")
-		upsertAgentTool(&agent.Blocks, event, "running")
+		upsertAgentTool(&agent.Blocks, event, "running", m.catalog)
 	case app.EventToolFinished:
 		agent.Activity = first(event.Data["name"], "tool finished")
-		upsertAgentTool(&agent.Blocks, event, terminalToolState(event.State))
+		upsertAgentTool(&agent.Blocks, event, terminalToolState(event.State), m.catalog)
+	case app.EventHookStarted, app.EventHookFinished, app.EventHookDiagnostic:
+		m.updateHooks(&agent.Blocks, event)
 
 	}
+}
+
+func (m *AppModel) hasRunningHooks() bool {
+	for _, block := range m.transcript {
+		for _, hook := range block.Hooks {
+			if hook.State == "running" {
+				return true
+			}
+		}
+	}
+	for _, agent := range m.agents {
+		for _, block := range agent.Blocks {
+			for _, hook := range block.Hooks {
+				if hook.State == "running" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (m *AppModel) updateHooks(blocks *[]Block, event app.Event) {
+	hook := hookRunFromEvent(event)
+	if event.ToolCallID != "" {
+		for i := len(*blocks) - 1; i >= 0; i-- {
+			block := &(*blocks)[i]
+			if (block.Kind == BlockTool || block.Kind == BlockDiff) && block.ToolCallID == event.ToolCallID {
+				upsertHookRun(&block.Hooks, hook, event.Kind)
+				m.invalidateTranscriptLayout()
+				return
+			}
+		}
+	}
+	if event.Kind == app.EventHookDiagnostic {
+		*blocks = append(*blocks, Block{ID: event.ToolCallID, Kind: BlockHook, RunID: event.RunID, Title: hook.Event, State: "failed", Hooks: []HookRunView{hook}})
+	} else if event.Kind == app.EventHookFinished {
+		for i := len(*blocks) - 1; i >= 0; i-- {
+			if (*blocks)[i].Kind == BlockHook && upsertMatchingHook(&(*blocks)[i].Hooks, hook) {
+				(*blocks)[i].State = hook.State
+				m.invalidateTranscriptLayout()
+				return
+			}
+		}
+		*blocks = append(*blocks, Block{Kind: BlockHook, RunID: event.RunID, Title: hook.Event, State: hook.State, Collapsed: hook.State == "completed", Hooks: []HookRunView{hook}})
+	} else {
+		*blocks = append(*blocks, Block{Kind: BlockHook, RunID: event.RunID, Title: hook.Event, State: "running", Hooks: []HookRunView{hook}})
+	}
+	m.invalidateTranscriptLayout()
+}
+
+func (m *AppModel) invalidateTranscriptLayout() {
+	if m.transcriptLayout != nil {
+		m.transcriptLayout.initialized = false
+	}
+}
+
+func hookRunFromEvent(event app.Event) HookRunView {
+	d := event.Data
+	h := HookRunView{Event: d["event"], Name: first(d["name"], "hook"), Source: filepath.Base(d["source"]), State: "running"}
+	h.Key = h.Event + "\x00" + h.Name + "\x00" + h.Source
+	h.DurationMS, _ = strconv.ParseInt(d["durationMS"], 10, 64)
+	h.Truncated, _ = strconv.ParseBool(d["stdoutTruncated"])
+	stderrTruncated, _ := strconv.ParseBool(d["stderrTruncated"])
+	h.Truncated = h.Truncated || stderrTruncated
+	if event.Kind == app.EventHookDiagnostic {
+		h.State = "failed"
+		h.Reason = compactHookText(first(d["reason"], event.Text), 3, 2048)
+		return h
+	}
+	if event.Kind == app.EventHookFinished {
+		h.State = first(event.State, d["state"], "completed")
+		if h.State != "blocked" && h.State != "failed" && d["exitCode"] != "" && d["exitCode"] != "0" {
+			h.State = "failed"
+		}
+		h.Reason = compactHookText(d["reason"], 3, 2048)
+		stdout := strings.TrimSpace(d["stdout"])
+		if strings.HasPrefix(stdout, "{") {
+			stdout = ""
+		}
+		if h.State == "failed" || h.State == "blocked" {
+			h.Output = compactHookText(first(h.Reason, d["stderr"], stdout), 3, 2048)
+		} else {
+			h.Output = compactHookText(stdout, 3, 2048)
+		}
+	}
+	return h
+}
+
+func compactHookText(value string, lines, bytes int) string {
+	parts := strings.Split(strings.TrimSpace(value), "\n")
+	if len(parts) > lines {
+		parts = parts[:lines]
+	}
+	value = strings.Join(parts, "\n")
+	if len(value) > bytes {
+		value = string([]byte(value)[:bytes])
+		value = strings.ToValidUTF8(value, "") + "…"
+	}
+	return value
+}
+
+func upsertHookRun(hooks *[]HookRunView, hook HookRunView, kind app.EventKind) {
+	if kind == app.EventHookFinished && upsertMatchingHook(hooks, hook) {
+		return
+	}
+	*hooks = append(*hooks, hook)
+}
+
+func upsertMatchingHook(hooks *[]HookRunView, hook HookRunView) bool {
+	for i := len(*hooks) - 1; i >= 0; i-- {
+		if (*hooks)[i].Key == hook.Key && (*hooks)[i].State == "running" {
+			(*hooks)[i] = hook
+			return true
+		}
+	}
+	return false
 }
 
 func compactAgentActivity(value string) string {
@@ -1956,7 +2174,7 @@ func appendAgentViewDelta(blocks *[]Block, kind BlockKind, runID, title, content
 	})
 }
 
-func upsertAgentTool(blocks *[]Block, event app.Event, state string) {
+func upsertAgentTool(blocks *[]Block, event app.Event, state string, catalog i18n.Catalog) {
 	for index := len(*blocks) - 1; index >= 0; index-- {
 		block := &(*blocks)[index]
 		if (block.Kind != BlockTool && block.Kind != BlockDiff) || block.ToolCallID != event.ToolCallID {
@@ -1968,7 +2186,7 @@ func upsertAgentTool(blocks *[]Block, event app.Event, state string) {
 				if title, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
 					block.Kind, block.Title, block.Content = BlockDiff, title, diff
 				} else {
-					block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text)
+					block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text, catalog)
 				}
 			} else if event.Kind == app.EventToolFinished {
 				block.Content = joinToolSummary(summarizeToolArguments(block.Title, block.Arguments), summarizeToolFailure(block.Title, event.Text))
@@ -1998,7 +2216,7 @@ func (m *AppModel) updateAgentDetail(event app.Event) {
 	case "detail":
 		for index := range m.agents {
 			if m.agents[index].ID == event.AgentID {
-				m.agents[index].Blocks = agentTranscriptBlocks(event.AgentBlocks)
+				m.agents[index].Blocks = agentTranscriptBlocks(event.AgentBlocks, m.catalog)
 				m.detailAgentID = event.AgentID
 				m.openOverlay(OverlayAgentDetail)
 				return
@@ -2015,7 +2233,11 @@ func (m *AppModel) updateAgentDetail(event app.Event) {
 	}
 }
 
-func agentTranscriptBlocks(blocks []app.AgentTranscriptBlock) []Block {
+func agentTranscriptBlocks(blocks []app.AgentTranscriptBlock, catalogs ...i18n.Catalog) []Block {
+	catalog := i18n.Must(i18n.DefaultLanguage)
+	if len(catalogs) > 0 {
+		catalog = catalogs[0]
+	}
 	result := make([]Block, 0, len(blocks))
 	for _, block := range blocks {
 		kind := BlockKind(block.Kind)
@@ -2027,7 +2249,7 @@ func agentTranscriptBlocks(blocks []app.AgentTranscriptBlock) []Block {
 				if title, diff, ok := summarizeFileChange(block.Title, arguments, "", content); ok {
 					kind, block.Title, content = BlockDiff, title, diff
 				} else {
-					content = summarizeToolResult(block.Title, arguments, content)
+					content = summarizeToolResult(block.Title, arguments, content, catalog)
 				}
 			case "failed", "cancelled":
 				content = joinToolSummary(summarizeToolArguments(block.Title, arguments), summarizeToolFailure(block.Title, content))

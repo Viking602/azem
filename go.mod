@@ -13,7 +13,7 @@ require (
 require (
 	charm.land/glamour/v2 v2.0.1
 	github.com/BurntSushi/toml v1.6.0
-	github.com/Viking602/go-hydaelyn v0.11.6
+	github.com/Viking602/go-hydaelyn v0.11.9
 	github.com/creack/pty v1.1.24
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/zalando/go-keyring v0.2.8

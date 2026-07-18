@@ -38,6 +38,7 @@ const (
 	ActionCompact          = app.ActionCompact
 	ActionResolveApproval  = app.ActionResolveApproval
 	ActionSetApprovalMode  = app.ActionSetApprovalMode
+	ActionSetLanguage      = app.ActionSetLanguage
 	ActionReconcileAttempt = app.ActionReconcileAttempt
 	ActionInspectAgent     = app.ActionInspectAgent
 	ActionListAgentTypes   = app.ActionListAgentTypes
@@ -68,26 +69,17 @@ type SlashCommand struct {
 }
 
 var slashCommands = []SlashCommand{
-	{Name: "models", Usage: "/models", Detail: "Search and choose the active model"},
-	{Name: "skills", Usage: "/skills [reload]", Detail: "Inspect or reload Agent Skills"},
-	{Name: "skill", Usage: "/skill <name> [instruction]", Detail: "Run one turn with an active Agent Skill"},
-	{Name: "provider", Usage: "/provider [chatgpt|grok]", Detail: "Switch the active provider"},
-	{Name: "reasoning", Usage: "/reasoning [level]", Detail: "Set reasoning effort"},
-	{Name: "login", Usage: "/login [chatgpt|grok]", Detail: "Sign in to a subscription provider"},
-	{Name: "logout", Usage: "/logout [chatgpt|grok]", Detail: "Sign out of a provider"},
-	{Name: "team", Usage: "/team on|off", Detail: "Toggle coding-team mode"},
-	{Name: "agents", Usage: "/agents [cancel <id>]", Detail: "Inspect or cancel child agents"},
-	{Name: "agent-types", Usage: "/agent-types", Detail: "Inspect configured child agent types"},
-	{Name: "personas", Usage: "/personas", Detail: "Inspect configured child personas"},
-	{Name: "new", Usage: "/new", Detail: "Start a new session"},
-	{Name: "sessions", Usage: "/sessions", Detail: "List saved sessions"},
-	{Name: "resume", Usage: "/resume", Detail: "Choose a saved session"},
-	{Name: "compact", Usage: "/compact", Detail: "Compact the current session"},
-	{Name: "mcp", Usage: "/mcp [refresh|reconnect <server>]", Detail: "Inspect or update MCP servers"},
-	{Name: "reconcile", Usage: "/reconcile <attempt-id> <result>", Detail: "Resolve an unknown side effect"},
-	{Name: "cancel", Usage: "/cancel", Detail: "Cancel the active run"},
-	{Name: "help", Usage: "/help", Detail: "Open keyboard and command help"},
-	{Name: "quit", Usage: "/quit", Detail: "Quit Azem"},
+	{Name: "models", Usage: "/models"},
+	{Name: "skills", Usage: "/skills [reload]"}, {Name: "skill", Usage: "/skill <name> [instruction]"},
+	{Name: "provider", Usage: "/provider [chatgpt|grok]"}, {Name: "reasoning", Usage: "/reasoning [level]"},
+	{Name: "login", Usage: "/login [chatgpt|grok]"}, {Name: "logout", Usage: "/logout [chatgpt|grok]"},
+	{Name: "team", Usage: "/team on|off"}, {Name: "agents", Usage: "/agents [cancel <id>]"},
+	{Name: "todos", Usage: "/todos"}, {Name: "todo", Usage: "/todo"},
+	{Name: "agent-types", Usage: "/agent-types"}, {Name: "personas", Usage: "/personas"},
+	{Name: "new", Usage: "/new"}, {Name: "sessions", Usage: "/sessions"}, {Name: "resume", Usage: "/resume"},
+	{Name: "compact", Usage: "/compact"}, {Name: "mcp", Usage: "/mcp [refresh|reconnect <server>]"},
+	{Name: "reconcile", Usage: "/reconcile <attempt-id> <result>"}, {Name: "cancel", Usage: "/cancel"},
+	{Name: "language", Usage: "/language <en|zh-CN>"}, {Name: "help", Usage: "/help"}, {Name: "quit", Usage: "/quit"},
 }
 
 type scoredSlashCommand struct {
@@ -176,7 +168,11 @@ func ParseCommand(input string) (Command, bool, error) {
 	if len(fields) == 0 {
 		return Command{}, true, fmt.Errorf("empty command")
 	}
-	return Command{Name: strings.ToLower(fields[0]), Args: fields[1:]}, true, nil
+	name := strings.ToLower(fields[0])
+	if name == "langauge" {
+		name = "language"
+	}
+	return Command{Name: name, Args: fields[1:]}, true, nil
 }
 
 func waitForAppEvent(runtime Runtime) tea.Cmd {

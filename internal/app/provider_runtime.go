@@ -21,6 +21,7 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
@@ -38,18 +39,38 @@ type TurnRequest struct {
 	AgentMode        string
 	DisableSubagents bool
 	ActiveSkills     []string
+	Todo             session.TodoList
+	privateContext   string
 }
 
 type turnContext struct {
 	instructions        string
+	privateContext      string
 	history             []session.Block
 	reportContextTokens func(context.Context, int)
+	compactHooks        func(context.Context, []message.Message, []message.Message, error) error
+	todo                session.TodoList
+	loadTodo            func(context.Context) (session.TodoList, error)
 }
 
-func (c turnContext) Build(_ context.Context, task api.Task) ([]message.Message, error) {
+func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
 	messages := make([]message.Message, 0, len(c.history)+2)
 	if text := strings.TrimSpace(c.instructions); text != "" {
 		messages = append(messages, message.NewText(message.RoleSystem, text))
+	}
+	if text := strings.TrimSpace(c.privateContext); text != "" {
+		value := message.NewText(message.RoleSystem, "[Trusted private hook context]\n"+text)
+		value.Visibility = message.VisibilityPrivate
+		messages = append(messages, value)
+	}
+	todo, err := c.currentTodo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if reminder := todoReminder(todo); reminder != "" {
+		value := message.NewText(message.RoleSystem, reminder)
+		value.Visibility = message.VisibilityPrivate
+		messages = append(messages, value)
 	}
 	for _, block := range c.history {
 		text := strings.TrimSpace(block.Content)
@@ -68,24 +89,111 @@ func (c turnContext) Build(_ context.Context, task api.Task) ([]message.Message,
 	return messages, nil
 }
 
-func (turnContext) Compact(_ context.Context, history []message.Message) ([]message.Message, error) {
+const todoReminderPrefix = "[Session Todo private reminder]"
+
+func (c turnContext) currentTodo(ctx context.Context) (session.TodoList, error) {
+	if c.loadTodo != nil {
+		return c.loadTodo(ctx)
+	}
+	return c.todo.Clone(), nil
+}
+
+func todoReminder(todo session.TodoList) string {
+	if strings.TrimSpace(todo.Goal) == "" && len(todo.Phases) == 0 {
+		return ""
+	}
+	var open []string
+	closed := 0
+	for _, phase := range todo.Phases {
+		for _, item := range phase.Items {
+			switch item.Status {
+			case session.TodoPending, session.TodoInProgress:
+				open = append(open, fmt.Sprintf("%s:%s:%s", item.ID, item.Status, item.Content))
+			default:
+				closed++
+			}
+		}
+	}
+	return fmt.Sprintf("%s goal=%q revision=%d open=[%s] closed=%d. Use the todo tool with expected_revision for updates.", todoReminderPrefix, todo.Goal, todo.Revision, strings.Join(open, "; "), closed)
+}
+
+func (c turnContext) refreshTodoReminder(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	todo, err := c.currentTodo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	refreshed := make([]message.Message, 0, len(history)+1)
+	insertAt := 0
+	for _, current := range history {
+		if current.Role == message.RoleSystem && strings.HasPrefix(current.Text, todoReminderPrefix) {
+			continue
+		}
+		refreshed = append(refreshed, current)
+		if current.Role == message.RoleSystem {
+			insertAt = len(refreshed)
+		}
+	}
+	if reminder := todoReminder(todo); reminder != "" {
+		value := message.NewText(message.RoleSystem, reminder)
+		value.Visibility = message.VisibilityPrivate
+		refreshed = append(refreshed, message.Message{})
+		copy(refreshed[insertAt+1:], refreshed[insertAt:])
+		refreshed[insertAt] = value
+	}
+	return refreshed, nil
+}
+
+func (c turnContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	if c.compactHooks != nil {
+		if err := c.compactHooks(ctx, history, nil, nil); err != nil {
+			return history, err
+		}
+	}
+	var err error
+	history, err = c.refreshTodoReminder(ctx, history)
+	if err != nil {
+		return nil, err
+	}
 	const recentMessages = 16
-	if len(history) <= recentMessages+1 {
+	prefixEnd := 0
+	for prefixEnd < len(history) && history[prefixEnd].Role == message.RoleSystem {
+		prefixEnd++
+	}
+	if len(history) <= recentMessages+prefixEnd {
+		if c.compactHooks != nil {
+			_ = c.compactHooks(ctx, history, history, nil)
+		}
 		return history, nil
 	}
 	start := len(history) - recentMessages
-	for start > 1 && history[start].Role != message.RoleUser {
+	if start < prefixEnd {
+		start = prefixEnd
+	}
+	for start > prefixEnd && history[start].Role != message.RoleUser {
 		start--
 	}
-	compacted := make([]message.Message, 0, len(history)-start+1)
-	if history[0].Role == message.RoleSystem {
-		compacted = append(compacted, history[0])
-	}
+	compacted := make([]message.Message, 0, len(history)-start+prefixEnd)
+	compacted = append(compacted, history[:prefixEnd]...)
 	compacted = append(compacted, history[start:]...)
+	if c.compactHooks != nil {
+		_ = c.compactHooks(ctx, history, compacted, nil)
+	}
 	return compacted, nil
 }
 
-func (c turnContext) CompactTo(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, error) {
+func (c turnContext) CompactTo(ctx context.Context, history []message.Message, targetTokens int) (result []message.Message, resultErr error) {
+	original := history
+	if c.compactHooks != nil {
+		if err := c.compactHooks(ctx, history, nil, nil); err != nil {
+			return history, err
+		}
+		defer func() { _ = c.compactHooks(ctx, original, result, resultErr) }()
+	}
+	var err error
+	history, err = c.refreshTodoReminder(ctx, history)
+	if err != nil {
+		return nil, err
+	}
 	report := func(prepared []message.Message) []message.Message {
 		if c.reportContextTokens != nil {
 			c.reportContextTokens(ctx, estimateContextTokens(prepared))
@@ -356,17 +464,26 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
-	drivers := make([]tool.Driver, 0, len(workspaceDrivers)+8)
+	drivers := make([]tool.Driver, 0, len(workspaceDrivers)+9)
 	toolNames := make([]string, 0, len(workspaceDrivers)+8)
 	for _, workspaceDriver := range workspaceDrivers {
 		definition := workspaceDriver.Definition()
-		drivers = append(drivers, &governedAgentTool{definition: definition, driver: workspaceDriver, coding: r.coding, run: run, host: host, sessionID: request.SessionID})
+		governed := &governedAgentTool{definition: definition, driver: workspaceDriver, coding: r.coding, run: run, host: host, sessionID: request.SessionID}
+		metadata := hooks.Metadata{SessionID: request.SessionID, RunID: run.RunID, AgentID: "main", AgentType: "main", CWD: r.cfg.Workspace.Root}
+		drivers = append(drivers, wrapHookDriver(host, metadata, governed))
 		toolNames = append(toolNames, definition.Name)
+	}
+	if host != nil && host.sessions != nil {
+		drivers = append(drivers, wrapHookDriver(host, host.hookMetadata(request.SessionID, run.RunID), &todoDriver{sessionID: request.SessionID, store: host.sessions, emit: func(event Event) bool {
+			return host.emitTodoUpdated(request.SessionID, *event.Todo)
+		}}))
+		toolNames = append(toolNames, "todo")
 	}
 	if manager != nil {
 		for _, external := range manager.Snapshot() {
 			definition := external.Definition()
-			drivers = append(drivers, &governedAgentTool{definition: definition, driver: external, coding: r.coding, run: run, host: host, sessionID: request.SessionID})
+			governed := &governedAgentTool{definition: definition, driver: external, coding: r.coding, run: run, host: host, sessionID: request.SessionID}
+			drivers = append(drivers, wrapHookDriver(host, host.hookMetadata(request.SessionID, run.RunID), governed))
 			toolNames = append(toolNames, definition.Name)
 		}
 	}
@@ -382,7 +499,8 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		}
 		for _, external := range subagentDrivers {
 			definition := external.Definition()
-			drivers = append(drivers, &governedAgentTool{definition: definition, driver: external, coding: r.coding, run: run, host: host, sessionID: request.SessionID})
+			governed := &governedAgentTool{definition: definition, driver: external, coding: r.coding, run: run, host: host, sessionID: request.SessionID}
+			drivers = append(drivers, wrapHookDriver(host, host.hookMetadata(request.SessionID, run.RunID), governed))
 			toolNames = append(toolNames, definition.Name)
 		}
 	}
@@ -401,8 +519,14 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 			ContextTokenTarget:  contextTarget,
 		},
 	}
-	contextManager := turnContext{instructions: instructions, history: request.History}
+	contextManager := turnContext{instructions: instructions, privateContext: request.privateContext, history: request.History, todo: request.Todo}
 	if host != nil {
+		contextManager.compactHooks = host.autoCompactHooks(host.hookMetadata(request.SessionID, run.RunID))
+		if host.sessions != nil {
+			contextManager.loadTodo = func(ctx context.Context) (session.TodoList, error) {
+				return host.sessions.LoadTodo(ctx, request.SessionID)
+			}
+		}
 		contextManager.reportContextTokens = func(_ context.Context, tokens int) {
 			host.emit(host.ctx, Event{Kind: EventContextUsage, SessionID: request.SessionID, RunID: run.RunID, State: "estimated", Data: map[string]string{
 				"inputTokens": fmt.Sprint(tokens), "outputTokens": "0", "totalTokens": fmt.Sprint(tokens), "cacheStatus": "pending",
@@ -418,6 +542,13 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
+	}
+	if host != nil {
+		metadata := host.hookMetadata(request.SessionID, run.RunID)
+		engine.OutputGuardrails = append(engine.OutputGuardrails, host.stopHookGuardrail(metadata, hooks.Stop, func(input hyagent.OutputGuardrailInput) string {
+			messages := append(append([]message.Message(nil), input.Messages...), input.Output)
+			return writeSessionHookTranscript(request.SessionID, messages)
+		}))
 	}
 	_ = account
 	return run, engine, nil
@@ -555,12 +686,13 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 		return err
 	}
 	request := TurnRequest{
-		SessionID: firstNonempty(run.Metadata["session_id"], "default"),
-		Prompt:    run.Request,
-		Provider:  firstNonempty(run.Metadata["provider"], r.cfg.Defaults.Provider),
-		Model:     firstNonempty(run.Metadata["model"], r.cfg.Defaults.Model),
-		Reasoning: firstNonempty(run.Metadata["reasoning"], r.cfg.Defaults.Reasoning),
-		AgentMode: "team",
+		SessionID:      firstNonempty(run.Metadata["session_id"], "default"),
+		Prompt:         run.Request,
+		Provider:       firstNonempty(run.Metadata["provider"], r.cfg.Defaults.Provider),
+		Model:          firstNonempty(run.Metadata["model"], r.cfg.Defaults.Model),
+		Reasoning:      firstNonempty(run.Metadata["reasoning"], r.cfg.Defaults.Reasoning),
+		AgentMode:      "team",
+		privateContext: run.Metadata["hook_private_context"],
 	}
 	modelID, resolver, err := r.TeamResolver(context.Background(), request)
 	if err != nil {
@@ -583,7 +715,7 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 	host.activeEnd = cancel
 	host.mu.Unlock()
 	host.wg.Add(1)
-	go host.runResumedProviderTeam(runCtx, request.SessionID, runID, request.Prompt, modelID, resolver)
+	go host.runResumedProviderTeam(runCtx, request.SessionID, runID, request.Prompt, modelID, request.privateContext, resolver)
 	return nil
 }
 
@@ -682,7 +814,13 @@ func (d *governedAgentTool) Execute(ctx context.Context, call tool.Call, sink to
 		}
 		return nil
 	}
-	execution, err := d.execute(ctx, call, updates)
+	var execution agentservice.ExecutionResult
+	var err error
+	if hooks.PreToolPermissionFromContext(ctx) == "ask" && d.driver != nil {
+		execution, err = d.coding.ExecuteDriver(ctx, d.run, approvalRequiredDriver{inner: d.driver}, call, updates)
+	} else {
+		execution, err = d.execute(ctx, call, updates)
+	}
 	if err != nil {
 		return execution.Result, err
 	}
@@ -697,9 +835,16 @@ func (d *governedAgentTool) Execute(ctx context.Context, call tool.Call, sink to
 		return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: err.Error(), IsError: true}, err
 	}
 	if resolution.Mode == agentservice.ApprovalDenied {
+		if resolution.Prevent {
+			return tool.Result{ToolCallID: call.ID, Name: call.Name, IsError: true, Content: "Hook prevented continuation"}, hooks.ErrPreventContinuation
+		}
+		message := firstNonempty(resolution.DenialMessage, "Denied by user")
+		if resolution.Retry {
+			message += " PermissionDenied hook permits retrying this tool request."
+		}
 		return tool.Result{
 			ToolCallID: call.ID, Name: call.Name,
-			Content: firstNonempty(resolution.DenialMessage, "Denied by user"), IsError: true,
+			Content: message, IsError: true,
 		}, nil
 	}
 	execution, err = d.execute(ctx, call, updates)
@@ -758,6 +903,80 @@ func teamApprovalReviewRequest(goal, runID string, call tool.Call, definition to
 type approvalResolution struct {
 	Mode          agentservice.ApprovalMode
 	DenialMessage string
+	Retry         bool
+	Prevent       bool
+}
+
+type permissionHookDecision struct {
+	behavior  string
+	message   string
+	interrupt bool
+	name      string
+}
+
+func (s *Service) permissionHook(ctx context.Context, metadata hooks.Metadata, call tool.Call) permissionHookDecision {
+	s.mu.Lock()
+	mode := claudePermissionMode(s.approvalMode)
+	s.mu.Unlock()
+	result := s.hooks.Dispatch(ctx, hooks.Envelope{
+		SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID, AgentType: metadata.AgentType,
+		ParentRunID: metadata.ParentRunID, ParentToolCallID: metadata.ParentToolCallID, CWD: metadata.CWD,
+		HookEventName: hooks.PermissionRequest, ToolCallID: call.ID, ToolUseID: call.ID, ToolName: call.Name,
+		ToolInput: call.Arguments, PermissionMode: mode,
+	})
+	if result.PreventContinuation {
+		return permissionHookDecision{behavior: "deny", message: result.StopReason, interrupt: true, name: "continue:false"}
+	}
+	if result.Denied {
+		name := "unknown"
+		if len(result.Runs) > 0 {
+			name = result.Runs[len(result.Runs)-1].Name
+		}
+		return permissionHookDecision{behavior: "deny", message: result.Reason, interrupt: true, name: name}
+	}
+	var allowed permissionHookDecision
+	for _, run := range result.Runs {
+		decision := run.Output.HookSpecificOutput.Decision
+		behavior := strings.ToLower(strings.TrimSpace(decision.Behavior))
+		if behavior == "" || behavior == "ask" {
+			continue
+		}
+		if behavior == "allow" && len(decision.UpdatedInput) > 0 && string(decision.UpdatedInput) != string(call.Arguments) {
+			return permissionHookDecision{behavior: "deny", message: "PermissionRequest updatedInput is not supported because the modified input has not passed approval policy validation", interrupt: true, name: run.Name}
+		}
+		if behavior == "allow" && decision.UpdatedPermissions != nil {
+			return permissionHookDecision{behavior: "deny", message: "PermissionRequest updatedPermissions is not supported by this permission store", interrupt: true, name: run.Name}
+		}
+		if behavior == "deny" {
+			return permissionHookDecision{behavior: behavior, message: decision.Message, interrupt: decision.Interrupt, name: run.Name}
+		}
+		if behavior == "allow" && allowed.behavior == "" {
+			allowed = permissionHookDecision{behavior: behavior, message: decision.Message, interrupt: decision.Interrupt, name: run.Name}
+		}
+	}
+	return allowed
+}
+
+func claudePermissionMode(mode ApprovalMode) string {
+	if mode == ApprovalModeYolo {
+		return "bypassPermissions"
+	}
+	return "default"
+}
+
+func (s *Service) observePermissionDenied(ctx context.Context, metadata hooks.Metadata, call tool.Call, reason string, interrupt bool) (bool, bool) {
+	result := s.hooks.Dispatch(ctx, hooks.Envelope{SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID,
+		AgentType: metadata.AgentType, CWD: metadata.CWD, HookEventName: hooks.PermissionDenied,
+		ToolCallID: call.ID, ToolUseID: call.ID, ToolName: call.Name, ToolInput: call.Arguments, Reason: reason, IsInterrupt: interrupt})
+	if result.PreventContinuation {
+		return false, true
+	}
+	for _, run := range result.Runs {
+		if run.Output.HookSpecificOutput.Retry {
+			return true, false
+		}
+	}
+	return false, false
 }
 
 type autoReviewDenialTracker struct {
@@ -789,6 +1008,19 @@ type teamApprovalDriver struct {
 	goal      string
 }
 
+type approvalRequiredDriver struct{ inner tool.Driver }
+
+func (d approvalRequiredDriver) Definition() tool.Definition {
+	definition := d.inner.Definition()
+	definition.RequiresApproval = true
+	definition.Security.RequiresApproval = true
+	return definition
+}
+
+func (d approvalRequiredDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	return d.inner.Execute(ctx, call, sink)
+}
+
 func (d *teamApprovalDriver) Definition() tool.Definition {
 	definition := d.inner.Definition()
 	if teamToolHasSideEffect(definition) {
@@ -804,15 +1036,22 @@ func (d *teamApprovalDriver) Definition() tool.Definition {
 
 func (d *teamApprovalDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
 	definition := d.inner.Definition()
-	if teamToolRequiresApproval(definition, call) {
+	if hooks.PreToolPermissionFromContext(ctx) == "ask" || teamToolRequiresApproval(definition, call) {
 		resolution, err := d.host.awaitTeamApproval(ctx, d.sessionID, d.runID, d.goal, call, definition)
 		if err != nil {
 			return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: err.Error(), IsError: true}, err
 		}
 		if resolution.Mode == agentservice.ApprovalDenied {
+			if resolution.Prevent {
+				return tool.Result{ToolCallID: call.ID, Name: call.Name, IsError: true, Content: "Hook prevented continuation"}, hooks.ErrPreventContinuation
+			}
+			message := firstNonempty(resolution.DenialMessage, "Denied by user")
+			if resolution.Retry {
+				message += " PermissionDenied hook permits retrying this tool request."
+			}
 			return tool.Result{
 				ToolCallID: call.ID, Name: call.Name,
-				Content: firstNonempty(resolution.DenialMessage, "Denied by user"), IsError: true,
+				Content: message, IsError: true,
 			}, nil
 		}
 	}
@@ -827,9 +1066,16 @@ func (s *Service) teamToolBus(ctx context.Context, sessionID, runID, goal string
 	if err != nil {
 		return nil, err
 	}
+	if s.sessions != nil {
+		drivers = append(drivers, &todoDriver{sessionID: sessionID, store: s.sessions, emit: func(event Event) bool {
+			return s.emitTodoUpdated(sessionID, *event.Todo)
+		}})
+	}
 	governed := make([]tool.Driver, 0, len(drivers))
 	for _, driver := range drivers {
-		governed = append(governed, &teamApprovalDriver{inner: driver, host: s, sessionID: sessionID, runID: runID, goal: goal})
+		approval := &teamApprovalDriver{inner: driver, host: s, sessionID: sessionID, runID: runID, goal: goal}
+		metadata := hooks.Metadata{SessionID: sessionID, RunID: runID, AgentID: "team", AgentType: "team", CWD: s.cfg.Workspace.Root}
+		governed = append(governed, hooks.WrapDriver(s.hooks, metadata, approval))
 	}
 	return tool.NewBus(governed...), nil
 }
@@ -890,6 +1136,23 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 			"action": action, "agent_type": "team",
 		},
 	}
+	metadata := hooks.Metadata{SessionID: sessionID, RunID: runID, AgentID: "team", AgentType: "team", CWD: s.cfg.Workspace.Root}
+	hookDecision := s.permissionHook(ctx, metadata, call)
+	if hookDecision.behavior == "allow" || hookDecision.behavior == "deny" {
+		resolvedMode := agentservice.ApprovalOnce
+		if hookDecision.behavior == "deny" {
+			resolvedMode = agentservice.ApprovalDenied
+		}
+		if err := s.recordTeamApprovalDecision(ctx, event, request, resolvedMode, "hook:"+hookDecision.name); err != nil {
+			return approvalResolution{}, err
+		}
+		if resolvedMode == agentservice.ApprovalDenied {
+			message := firstNonempty(hookDecision.message, "Denied by permission hook")
+			retry, prevent := s.observePermissionDenied(ctx, metadata, call, message, hookDecision.interrupt)
+			return approvalResolution{Mode: resolvedMode, DenialMessage: message, Retry: retry, Prevent: prevent}, nil
+		}
+		return approvalResolution{Mode: resolvedMode}, nil
+	}
 	s.mu.Lock()
 	mode := s.approvalMode
 	if mode == ApprovalModeYolo {
@@ -902,9 +1165,13 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 	}
 	if mode == ApprovalModeAutoReview {
 		s.mu.Unlock()
-		return s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
+		resolution, approvalErr := s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
 			return s.recordTeamApprovalDecision(decisionCtx, event, request, mode, decidedBy)
 		})
+		if approvalErr == nil && resolution.Mode == agentservice.ApprovalDenied {
+			resolution.Retry, resolution.Prevent = s.observePermissionDenied(ctx, metadata, call, resolution.DenialMessage, false)
+		}
+		return resolution, approvalErr
 	}
 	live := &liveApproval{
 		approvalID: approvalID, agentType: "team", runID: runID, callID: call.ID,
@@ -918,11 +1185,16 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 	s.mu.Unlock()
 	defer s.finishLiveApproval(live)
 	event.State = "pending"
+	s.notifyHook(s.ctx, metadata, "permission_prompt", "Approval required", action)
 	s.emit(s.ctx, event)
 	select {
 	case <-ctx.Done():
 		return approvalResolution{}, ctx.Err()
 	case resolvedMode := <-live.decision:
+		if resolvedMode == agentservice.ApprovalDenied {
+			retry, prevent := s.observePermissionDenied(ctx, metadata, call, "Denied by user", false)
+			return approvalResolution{Mode: resolvedMode, Retry: retry, Prevent: prevent}, nil
+		}
 		return approvalResolution{Mode: resolvedMode}, nil
 	}
 }
@@ -963,6 +1235,26 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 			"effect": pending.Effect, "action": pending.Request.RequestedAction, "agent_type": agentType,
 		},
 	}
+	metadata := hooks.Metadata{SessionID: sessionID, RunID: run.RunID, AgentID: agentID, AgentType: agentType, CWD: s.cfg.Workspace.Root}
+	hookDecision := s.permissionHook(ctx, metadata, call)
+	if hookDecision.behavior == "allow" || hookDecision.behavior == "deny" {
+		resolvedMode := agentservice.ApprovalOnce
+		if hookDecision.behavior == "deny" {
+			resolvedMode = agentservice.ApprovalDenied
+		}
+		if s.coding == nil {
+			return approvalResolution{}, fmt.Errorf("coding runtime is unavailable")
+		}
+		if err := s.coding.ResolveApproval(ctx, run, call.ID, resolvedMode, "hook:"+hookDecision.name); err != nil {
+			return approvalResolution{}, err
+		}
+		if resolvedMode == agentservice.ApprovalDenied {
+			message := firstNonempty(hookDecision.message, "Denied by permission hook")
+			retry, prevent := s.observePermissionDenied(ctx, metadata, call, message, hookDecision.interrupt)
+			return approvalResolution{Mode: resolvedMode, DenialMessage: message, Retry: retry, Prevent: prevent}, nil
+		}
+		return approvalResolution{Mode: resolvedMode}, nil
+	}
 	s.mu.Lock()
 	mode := s.approvalMode
 	if mode == ApprovalModeYolo {
@@ -977,12 +1269,16 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 	}
 	if mode == ApprovalModeAutoReview {
 		s.mu.Unlock()
-		return s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
+		resolution, approvalErr := s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
 			if s.coding == nil {
 				return fmt.Errorf("coding runtime is unavailable")
 			}
 			return s.coding.ResolveApproval(decisionCtx, run, call.ID, mode, decidedBy)
 		})
+		if approvalErr == nil && resolution.Mode == agentservice.ApprovalDenied {
+			resolution.Retry, resolution.Prevent = s.observePermissionDenied(ctx, metadata, call, resolution.DenialMessage, false)
+		}
+		return resolution, approvalErr
 	}
 	live := &liveApproval{
 		approvalID: approvalID, agentID: agentID, agentType: agentType, run: run, runID: run.RunID,
@@ -996,11 +1292,16 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 	s.mu.Unlock()
 	defer s.finishLiveApproval(live)
 	event.State = "pending"
+	s.notifyHook(s.ctx, metadata, "permission_prompt", "Approval required", pending.Request.RequestedAction)
 	s.emit(s.ctx, event)
 	select {
 	case <-ctx.Done():
 		return approvalResolution{}, ctx.Err()
 	case resolvedMode := <-live.decision:
+		if resolvedMode == agentservice.ApprovalDenied {
+			retry, prevent := s.observePermissionDenied(ctx, metadata, call, "Denied by user", false)
+			return approvalResolution{Mode: resolvedMode, Retry: retry, Prevent: prevent}, nil
+		}
 		return approvalResolution{Mode: resolvedMode}, nil
 	}
 }
@@ -1218,9 +1519,17 @@ func (s *Service) setApprovalMode(ctx context.Context, mode ApprovalMode) error 
 		}
 	}
 	s.mu.Lock()
+	previousMode := s.approvalMode
 	s.approvalMode = mode
 	if mode == ApprovalModePrompt || mode == ApprovalModeAutoReview {
 		s.mu.Unlock()
+		if err := s.persistApprovalMode(mode); err != nil {
+			s.mu.Lock()
+			s.approvalMode = previousMode
+			s.mu.Unlock()
+			s.emitApprovalMode(s.ctx)
+			return err
+		}
 		s.emitApprovalMode(s.ctx)
 		return nil
 	}
@@ -1253,9 +1562,33 @@ func (s *Service) setApprovalMode(ctx context.Context, mode ApprovalMode) error 
 			s.approvalMode = ApprovalModePrompt
 		}
 		s.mu.Unlock()
+	} else if persistErr := s.persistApprovalMode(mode); persistErr != nil {
+		s.mu.Lock()
+		s.approvalMode = previousMode
+		s.mu.Unlock()
+		err = persistErr
 	}
 	s.emitApprovalMode(s.ctx)
 	return err
+}
+
+func (s *Service) persistApprovalMode(mode ApprovalMode) error {
+	if err := s.dispatchLifecycle(s.ctx, hooks.ConfigChange, s.hookMetadata(s.currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateDefault(s.configPath, "approval_mode", string(mode))
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.cfg.Defaults.ApprovalMode = string(mode)
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Service) resolveLiveApproval(ctx context.Context, approvalID, decision, decidedBy string) (bool, error) {
@@ -1445,15 +1778,18 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		}
 	}
 	if ctx.Err() != nil {
+		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "cancelled", ctx.Err())
 		s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: request.SessionID, RunID: run.RunID, State: "cancelled"})
 		return
 	}
 	if runErr != nil {
+		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "failed", runErr)
 		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: runErr.Error()})
 		return
 	}
 	if s.sessions != nil && strings.TrimSpace(result.Text) != "" {
 		if err := s.sessions.AppendBlock(ctx, request.SessionID, session.Block{Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: result.Text, State: "completed"}); err != nil {
+			s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "persist_failed", err)
 			s.emit(ctx, Event{Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
 			return
 		}
@@ -1462,17 +1798,25 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 }
 
 func teamPrompt(request TurnRequest) string {
-	if len(request.History) == 0 {
+	reminder := todoReminder(request.Todo)
+	if len(request.History) == 0 && reminder == "" {
 		return request.Prompt
 	}
 	var context strings.Builder
-	context.WriteString("Continue this coding session using the prior conversation as context.\n\n")
+	if len(request.History) > 0 {
+		context.WriteString("Continue this coding session using the prior conversation as context.\n\n")
+	}
 	for _, block := range request.History {
 		text := strings.TrimSpace(block.Content)
 		if text == "" {
 			continue
 		}
 		fmt.Fprintf(&context, "%s: %s\n", firstNonempty(block.Title, block.Kind), text)
+	}
+	if reminder != "" {
+		context.WriteString("\n")
+		context.WriteString(reminder)
+		context.WriteString("\n")
 	}
 	context.WriteString("\nCurrent request: ")
 	context.WriteString(request.Prompt)
@@ -1489,12 +1833,13 @@ func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runI
 		s.finishProviderTeam(ctx, request.SessionID, runID, agentservice.TeamExecution{}, toolErr)
 		return
 	}
-	execution, err := s.coding.StartTeamWithIDAndToolsMetadata(ctx, runID, goal, models, resolver, toolBus, map[string]string{
-		"session_id": request.SessionID,
-		"provider":   request.Provider,
-		"model":      modelID,
-		"reasoning":  request.Reasoning,
-	}, func(state multiagent.TeamState) {
+	execution, err := s.coding.StartTeamWithIDAndToolsMetadataHooks(ctx, runID, goal, models, resolver, toolBus, map[string]string{
+		"session_id":           request.SessionID,
+		"provider":             request.Provider,
+		"model":                modelID,
+		"reasoning":            request.Reasoning,
+		"hook_private_context": request.privateContext,
+	}, s.teamHooks(request.SessionID, runID, request.privateContext), func(state multiagent.TeamState) {
 		for _, instance := range state.Instances {
 			s.emit(ctx, Event{
 				Kind: EventAgentState, SessionID: request.SessionID, RunID: runID, AgentID: instance.ID, State: string(instance.State),
@@ -1506,7 +1851,7 @@ func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runI
 	s.finishProviderTeam(ctx, request.SessionID, runID, execution, err)
 }
 
-func (s *Service) runResumedProviderTeam(ctx context.Context, sessionID, runID, goal, modelID string, resolver hyprovider.Resolver) {
+func (s *Service) runResumedProviderTeam(ctx context.Context, sessionID, runID, goal, modelID, privateContext string, resolver hyprovider.Resolver) {
 	defer s.wg.Done()
 	defer s.clearRun(runID)
 	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: sessionID, RunID: runID, State: "resuming"})
@@ -1516,7 +1861,7 @@ func (s *Service) runResumedProviderTeam(ctx context.Context, sessionID, runID, 
 		s.finishProviderTeam(ctx, sessionID, runID, agentservice.TeamExecution{}, toolErr)
 		return
 	}
-	execution, err := s.coding.ResumeTeamWithTools(ctx, runID, models, resolver, toolBus, func(state multiagent.TeamState) {
+	execution, err := s.coding.ResumeTeamWithToolsHooks(ctx, runID, models, resolver, toolBus, s.teamHooks(sessionID, runID, privateContext), func(state multiagent.TeamState) {
 		for _, instance := range state.Instances {
 			s.emit(ctx, Event{
 				Kind: EventAgentState, SessionID: sessionID, RunID: runID, AgentID: instance.ID, State: string(instance.State),
@@ -1528,23 +1873,127 @@ func (s *Service) runResumedProviderTeam(ctx context.Context, sessionID, runID, 
 	s.finishProviderTeam(ctx, sessionID, runID, execution, err)
 }
 
+func (s *Service) teamHooks(sessionID, parentRunID, rootContext string) agentservice.TeamHooks {
+	beforeTask := func(ctx context.Context, dispatch multiagent.Dispatch, class multiagent.AgentClass) error {
+		metadata := hooks.Metadata{SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To, AgentType: class.Name, ParentRunID: parentRunID, CWD: s.cfg.Workspace.Root}
+		return s.dispatchLifecycle(ctx, hooks.TaskCreated, metadata, func(e *hooks.Envelope) {
+			e.TaskID, e.TaskSubject = dispatch.Task.ID, dispatch.Task.Goal
+		})
+	}
+	prepare := func(ctx context.Context, engine hyagent.Engine, dispatch multiagent.Dispatch, class multiagent.AgentClass) (hyagent.Engine, error) {
+		metadata := hooks.Metadata{SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To, AgentType: class.Name, ParentRunID: parentRunID, CWD: s.cfg.Workspace.Root}
+		decision := s.hooks.Dispatch(ctx, hooks.Envelope{SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To,
+			AgentType: class.Name, ParentRunID: parentRunID, CWD: metadata.CWD, HookEventName: hooks.SubagentStart})
+		if decision.PreventContinuation {
+			return engine, fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, decision.StopReason)
+		}
+		var additional []string
+		for _, run := range decision.Runs {
+			if text := strings.TrimSpace(run.Output.HookSpecificOutput.AdditionalContext); text != "" {
+				additional = append(additional, text)
+			}
+		}
+		contextParts := append([]string{strings.TrimSpace(rootContext)}, additional...)
+		contextText := strings.TrimSpace(strings.Join(contextParts, "\n"))
+		if contextText != "" {
+			engine.ContextBuilder = teamHookContext{inner: engine.ContextBuilder, additional: contextText}
+		}
+		return engine, nil
+	}
+	decorate := func(engine hyagent.Engine, dispatch multiagent.Dispatch, class multiagent.AgentClass) hyagent.Engine {
+		metadata := hooks.Metadata{SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To,
+			AgentType: class.Name, ParentRunID: parentRunID, CWD: s.cfg.Workspace.Root}
+		taskGuardrail := func(event hooks.Event, defaultReason string, add func(*hooks.Envelope)) hyagent.OutputGuardrail {
+			return hyagent.NewOutputGuardrail("claude-"+strings.ToLower(string(event))+"-hook", func(ctx context.Context, input hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
+				envelope := hooks.Envelope{SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID,
+					AgentType: metadata.AgentType, ParentRunID: metadata.ParentRunID, CWD: metadata.CWD, HookEventName: event,
+					LastAssistantMessage: strings.TrimSpace(input.Output.Text)}
+				add(&envelope)
+				decision := s.hooks.Dispatch(ctx, envelope)
+				if decision.PreventContinuation {
+					return hyagent.OutputGuardrailResult{}, fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, decision.StopReason)
+				}
+				if !decision.Denied {
+					return hyagent.AllowOutput(), nil
+				}
+				return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true},
+					message.NewText(message.RoleUser, firstNonempty(strings.TrimSpace(decision.Reason), defaultReason))), nil
+			})
+		}
+		guardrails := []hyagent.OutputGuardrail{
+			s.stopHookGuardrail(metadata, hooks.SubagentStop, func(input hyagent.OutputGuardrailInput) string {
+				transcript, err := json.Marshal(append(append([]message.Message(nil), input.Messages...), input.Output))
+				if err != nil {
+					return ""
+				}
+				path, _ := writeSubagentHookTranscript(s.cfg.Workspace.Root, dispatch.To, transcript)
+				return path
+			}),
+			taskGuardrail(hooks.TaskCompleted, "A TaskCompleted hook requested more work before completion.", func(e *hooks.Envelope) {
+				e.TaskID, e.TaskSubject = dispatch.Task.ID, dispatch.Task.Goal
+			}),
+			taskGuardrail(hooks.TeammateIdle, "A TeammateIdle hook requested that this teammate continue working.", func(e *hooks.Envelope) {
+				e.TeammateName, e.TeamName = firstNonempty(class.Name, dispatch.To), parentRunID
+			}),
+		}
+		if class.Name == agentservice.ReporterClass {
+			guardrails = append(guardrails, s.stopHookGuardrail(s.hookMetadata(sessionID, parentRunID), hooks.Stop, func(input hyagent.OutputGuardrailInput) string {
+				return writeSessionHookTranscript(sessionID, append(append([]message.Message(nil), input.Messages...), input.Output))
+			}))
+		}
+		engine.OutputGuardrails = append(engine.OutputGuardrails, guardrails...)
+		return engine
+	}
+	return agentservice.TeamHooks{BeforeTask: beforeTask, PrepareEngine: prepare, DecorateEngine: decorate}
+}
+
+type teamHookContext struct {
+	inner      hyagent.ContextManager
+	additional string
+}
+
+func (c teamHookContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
+	messages, err := c.inner.Build(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	value := message.NewText(message.RoleSystem, "[Trusted SubagentStart hook context]\n"+c.additional)
+	value.Visibility = message.VisibilityPrivate
+	return append([]message.Message{value}, messages...), nil
+}
+
+func (c teamHookContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	return c.inner.Compact(ctx, history)
+}
+
+func (c teamHookContext) CompactTo(ctx context.Context, history []message.Message, target int) ([]message.Message, error) {
+	if targeter, ok := c.inner.(hyagent.TargetContextManager); ok {
+		return targeter.CompactTo(ctx, history, target)
+	}
+	return c.inner.Compact(ctx, history)
+}
+
 func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID string, execution agentservice.TeamExecution, err error) {
 	if ctx.Err() != nil {
+		s.observeStop(sessionID, runID, hooks.StopFailure, "cancelled", ctx.Err())
 		s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
 		return
 	}
 	if err != nil {
+		s.observeStop(sessionID, runID, hooks.StopFailure, "failed", err)
 		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 		return
 	}
 	answer := teamAnswer(execution.Result.State)
 	if strings.TrimSpace(answer) == "" {
+		s.observeStop(sessionID, runID, hooks.StopFailure, "empty_answer", errors.New("coding team completed without a reporter answer"))
 		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: "coding team completed without a reporter answer"})
 		return
 	}
 	s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: answer})
 	if s.sessions != nil {
 		if err := s.sessions.AppendBlock(ctx, sessionID, session.Block{Kind: "assistant", RunID: runID, Title: "Azem team", Content: answer, State: "completed"}); err != nil {
+			s.observeStop(sessionID, runID, hooks.StopFailure, "persist_failed", err)
 			s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 			return
 		}

@@ -28,6 +28,13 @@ type TeamExecution struct {
 	Result multiagent.DriveResult
 }
 
+type TeamEngineDecorator func(hyagent.Engine, multiagent.Dispatch, multiagent.AgentClass) hyagent.Engine
+type TeamHooks struct {
+	BeforeTask     func(context.Context, multiagent.Dispatch, multiagent.AgentClass) error
+	PrepareEngine  func(context.Context, hyagent.Engine, multiagent.Dispatch, multiagent.AgentClass) (hyagent.Engine, error)
+	DecorateEngine TeamEngineDecorator
+}
+
 func (s *Service) StartTeam(ctx context.Context, prompt string, models TeamModels, providers provider.Resolver) (TeamExecution, error) {
 	runID, err := newID("team")
 	if err != nil {
@@ -54,6 +61,10 @@ func (s *Service) StartTeamWithIDAndTools(ctx context.Context, runID, prompt str
 // StartTeamWithIDAndToolsMetadata persists the product routing metadata needed
 // to rebuild the provider and governed tools after a process restart.
 func (s *Service) StartTeamWithIDAndToolsMetadata(ctx context.Context, runID, prompt string, models TeamModels, providers provider.Resolver, tools *tool.Bus, metadata map[string]string, afterTick func(multiagent.TeamState)) (TeamExecution, error) {
+	return s.StartTeamWithIDAndToolsMetadataHooks(ctx, runID, prompt, models, providers, tools, metadata, TeamHooks{}, afterTick)
+}
+
+func (s *Service) StartTeamWithIDAndToolsMetadataHooks(ctx context.Context, runID, prompt string, models TeamModels, providers provider.Resolver, tools *tool.Bus, metadata map[string]string, hooks TeamHooks, afterTick func(multiagent.TeamState)) (TeamExecution, error) {
 	if s == nil || s.runner == nil {
 		return TeamExecution{}, fmt.Errorf("coding team: service is not initialized")
 	}
@@ -75,7 +86,7 @@ func (s *Service) StartTeamWithIDAndToolsMetadata(ctx context.Context, runID, pr
 	if err != nil {
 		return TeamExecution{}, err
 	}
-	teamRunner, err := s.codingTeamRunner(prompt, models, providers, tools, afterTick)
+	teamRunner, err := s.codingTeamRunner(prompt, models, providers, tools, hooks, afterTick)
 	if err != nil {
 		return TeamExecution{}, err
 	}
@@ -94,6 +105,10 @@ func (s *Service) ResumeTeam(ctx context.Context, runID string, models TeamModel
 // ResumeTeamWithTools resumes a durable team checkpoint using a newly bound
 // provider resolver and the current process's governed tool drivers.
 func (s *Service) ResumeTeamWithTools(ctx context.Context, runID string, models TeamModels, providers provider.Resolver, tools *tool.Bus, afterTick func(multiagent.TeamState)) (TeamExecution, error) {
+	return s.ResumeTeamWithToolsHooks(ctx, runID, models, providers, tools, TeamHooks{}, afterTick)
+}
+
+func (s *Service) ResumeTeamWithToolsHooks(ctx context.Context, runID string, models TeamModels, providers provider.Resolver, tools *tool.Bus, hooks TeamHooks, afterTick func(multiagent.TeamState)) (TeamExecution, error) {
 	if s == nil || s.runner == nil {
 		return TeamExecution{}, fmt.Errorf("coding team: service is not initialized")
 	}
@@ -101,7 +116,7 @@ func (s *Service) ResumeTeamWithTools(ctx context.Context, runID string, models 
 	if err != nil {
 		return TeamExecution{}, err
 	}
-	teamRunner, err := s.codingTeamRunner(run.Request, models, providers, tools, afterTick)
+	teamRunner, err := s.codingTeamRunner(run.Request, models, providers, tools, hooks, afterTick)
 	if err != nil {
 		return TeamExecution{}, err
 	}
@@ -109,7 +124,7 @@ func (s *Service) ResumeTeamWithTools(ctx context.Context, runID string, models 
 	return TeamExecution{RunID: runID, Result: result}, err
 }
 
-func (s *Service) codingTeamRunner(prompt string, models TeamModels, providers provider.Resolver, tools *tool.Bus, afterTick func(multiagent.TeamState)) (worker.TeamRunner, error) {
+func (s *Service) codingTeamRunner(prompt string, models TeamModels, providers provider.Resolver, tools *tool.Bus, hooks TeamHooks, afterTick func(multiagent.TeamState)) (worker.TeamRunner, error) {
 	classes, err := CodingTeamClasses(models)
 	if err != nil {
 		return worker.TeamRunner{}, err
@@ -141,9 +156,10 @@ func (s *Service) codingTeamRunner(prompt string, models TeamModels, providers p
 	}
 	team.WithScheduler(CodingScheduler{Prompt: prompt, Classes: byName})
 	return worker.TeamRunner{
-		Runner:    s.runner,
-		Team:      *team,
-		BuildDeps: hyagent.BuildDeps{Providers: providers, Tools: tools, Skills: skillSnapshot.Registry},
+		Runner:     s.runner,
+		Team:       *team,
+		BuildDeps:  hyagent.BuildDeps{Providers: providers, Tools: tools, Skills: skillSnapshot.Registry},
+		BeforeTask: hooks.BeforeTask, PrepareEngine: hooks.PrepareEngine, DecorateEngine: hooks.DecorateEngine,
 		Options: multiagent.DriveOptions{MaxConcurrency: s.teamMaxConcurrency, MaxTicks: s.teamMaxTicks, AfterTick: func(_ context.Context, state multiagent.TeamState) error {
 			if afterTick != nil {
 				afterTick(state)
@@ -178,15 +194,15 @@ func CodingTeamClasses(models TeamModels) ([]multiagent.AgentClass, error) {
 		{
 			Name: PlannerClass, Model: models.Planner,
 			Description:  "Plan a coding task without modifying the workspace.",
-			Instructions: `Analyze the coding request. Inspect the workspace with read-only tools when needed. Do not edit files. Return exactly one JSON object with only these fields: {"plan":["step"],"risks":["risk"],"acceptance_criteria":["criterion"]}. Every field is required and every value is an array of strings.`,
-			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff},
+			Instructions: `Analyze the coding request. Inspect the workspace with read-only tools when needed. For a multi-step request, call todo view, then initialize or update the durable phased todo list before returning the plan. Do not edit files. Return exactly one JSON object with only these fields: {"plan":["step"],"risks":["risk"],"acceptance_criteria":["criterion"]}. Every field is required and every value is an array of strings.`,
+			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, "todo"},
 			InputSchema:  inputSchema, OutputSchema: plannerOutput, LoopPolicy: loop,
 		},
 		{
 			Name: ImplementerClass, Model: models.Implementer,
 			Description:  "Implement and verify the approved coding plan.",
-			Instructions: `Implement the request using the supplied plan or review feedback. Use governed tools; never bypass approvals. Verify the changed behavior. Return exactly one JSON object with only these fields: {"summary":"result","evidence":["evidence"],"files_changed":["path"]}. summary and evidence are required; files_changed is optional. Do not add status or other fields.`,
-			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, coding.ToolEditHashline, coding.ToolWriteFile, coding.ToolGofmt, coding.ToolGoTest, ToolShell},
+			Instructions: `Implement the request using the supplied plan or review feedback. Use governed tools; never bypass approvals. Keep the durable todo list current as work is started and completed. Verify the changed behavior. Return exactly one JSON object with only these fields: {"summary":"result","evidence":["evidence"],"files_changed":["path"]}. summary and evidence are required; files_changed is optional. Do not add status or other fields.`,
+			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, coding.ToolEditHashline, coding.ToolWriteFile, coding.ToolGofmt, coding.ToolGoTest, ToolShell, "todo"},
 			InputSchema:  inputSchema, OutputSchema: implementerOutput, LoopPolicy: loop,
 		},
 		{

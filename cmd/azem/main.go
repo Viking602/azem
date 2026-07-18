@@ -57,6 +57,9 @@ func run() error {
 		boot.Config.Defaults.AgentMode,
 		boot.SessionID,
 	)
+	if err := model.SetLanguage(boot.Config.Defaults.Language); err != nil {
+		return err
+	}
 	program := tea.NewProgram(model, tea.WithoutSignalHandler())
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)

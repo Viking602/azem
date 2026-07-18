@@ -23,14 +23,27 @@ type Config struct {
 	Agents    AgentsConfig    `yaml:"agents"`
 	MCP       MCPConfig       `yaml:"mcp"`
 	Skills    SkillsConfig    `yaml:"skills"`
+	Hooks     HooksConfig     `yaml:"hooks"`
+}
+
+type HooksConfig struct {
+	Enabled              bool          `yaml:"enabled"`
+	TrustProject         bool          `yaml:"trust_project"`
+	ClaudeCompatibility  bool          `yaml:"claude_compatibility"`
+	DefaultTimeout       string        `yaml:"default_timeout"`
+	DefaultTimeoutParsed time.Duration `yaml:"-"`
+	FailurePolicy        string        `yaml:"failure_policy"`
+	AdditionalPaths      []string      `yaml:"additional_paths,omitempty"`
 }
 
 type DefaultsConfig struct {
-	Provider  string `yaml:"provider"`
-	Model     string `yaml:"model"`
-	Reasoning string `yaml:"reasoning"`
-	AgentMode string `yaml:"agent_mode"`
-	Theme     string `yaml:"theme"`
+	Provider     string `yaml:"provider"`
+	Model        string `yaml:"model"`
+	Reasoning    string `yaml:"reasoning"`
+	AgentMode    string `yaml:"agent_mode"`
+	Theme        string `yaml:"theme"`
+	Language     string `yaml:"language"`
+	ApprovalMode string `yaml:"approval_mode"`
 }
 
 type WorkspaceConfig struct {
@@ -177,7 +190,7 @@ func Default() Config {
 	return Config{
 		Version: CurrentVersion,
 		Defaults: DefaultsConfig{
-			Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single", Theme: "system",
+			Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single", Theme: "system", Language: "en", ApprovalMode: "prompt",
 		},
 		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt"},
 		Auth:      AuthConfig{Store: "sqlite", ImportCodex: true, ImportGrok: true},
@@ -199,7 +212,11 @@ func Default() Config {
 			},
 		},
 		Skills: SkillsConfig{Enabled: true, TrustProject: true},
-		MCP:    MCPConfig{Servers: map[string]MCPServerConfig{}},
+		Hooks: HooksConfig{
+			Enabled: true, ClaudeCompatibility: true, DefaultTimeout: "5s",
+			DefaultTimeoutParsed: 5 * time.Second, FailurePolicy: "open",
+		},
+		MCP: MCPConfig{Servers: map[string]MCPServerConfig{}},
 	}
 }
 
@@ -243,8 +260,22 @@ func (c *Config) Validate() error {
 	if err := c.validateSkills(); err != nil {
 		return err
 	}
+	timeout, err := time.ParseDuration(c.Hooks.DefaultTimeout)
+	if err != nil || timeout <= 0 {
+		return fmt.Errorf("hooks.default_timeout must be a positive duration")
+	}
+	c.Hooks.DefaultTimeoutParsed = timeout
+	if c.Hooks.FailurePolicy != "open" && c.Hooks.FailurePolicy != "closed" {
+		return fmt.Errorf("hooks.failure_policy must be open or closed")
+	}
 	if c.Defaults.AgentMode != "single" && c.Defaults.AgentMode != "team" {
 		return fmt.Errorf("defaults.agent_mode must be single or team")
+	}
+	if c.Defaults.Language != "en" && c.Defaults.Language != "zh-CN" {
+		return fmt.Errorf("defaults.language must be en or zh-CN")
+	}
+	if c.Defaults.ApprovalMode != "prompt" && c.Defaults.ApprovalMode != "auto_review" && c.Defaults.ApprovalMode != "yolo" {
+		return fmt.Errorf("defaults.approval_mode must be prompt, auto_review, or yolo")
 	}
 	if c.Auth.Store != "sqlite" && c.Auth.Store != "keyring" && c.Auth.Store != "file" {
 		return fmt.Errorf("auth.store must be sqlite, keyring, or file")
