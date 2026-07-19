@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -151,6 +151,23 @@ var migrations = []string{
 		phases BLOB NOT NULL DEFAULT '[]',
 		updated_at INTEGER NOT NULL
 	);`,
+	`CREATE TABLE memories (
+		memory_rowid INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, content TEXT NOT NULL, anchor TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
+		provenance TEXT NOT NULL CHECK(provenance IN ('manual','runtime')),
+		status TEXT NOT NULL CHECK(status IN ('active','forgotten')), importance INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+	);
+	CREATE INDEX memories_scope_recent ON memories(anchor,status,updated_at DESC);
+	CREATE VIRTUAL TABLE memories_fts USING fts5(content, content='memories', content_rowid='memory_rowid');
+	CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,content) VALUES(new.memory_rowid,new.content); END;
+	CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts,rowid,content) VALUES('delete',old.memory_rowid,old.content); END;
+	CREATE TRIGGER memories_au AFTER UPDATE OF content ON memories BEGIN INSERT INTO memories_fts(memories_fts,rowid,content) VALUES('delete',old.memory_rowid,old.content); INSERT INTO memories_fts(rowid,content) VALUES(new.memory_rowid,new.content); END;
+	CREATE TABLE recaps (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, anchor TEXT NOT NULL,
+		covered_boundary TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 1,
+		goal TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', open_items TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL
+	);
+	CREATE INDEX recaps_anchor_updated ON recaps(anchor,updated_at DESC);`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

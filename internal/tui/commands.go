@@ -48,6 +48,10 @@ const (
 	ActionReconnectMCP     = app.ActionReconnectMCP
 	ActionListSkills       = app.ActionListSkills
 	ActionReloadSkills     = app.ActionReloadSkills
+	ActionListMemories     = app.ActionListMemories
+	ActionRemember         = app.ActionRemember
+	ActionForgetMemory     = app.ActionForgetMemory
+	ActionShowRecap        = app.ActionShowRecap
 )
 
 type (
@@ -78,6 +82,8 @@ var slashCommands = []SlashCommand{
 	{Name: "agent-types", Usage: "/agent-types"}, {Name: "personas", Usage: "/personas"},
 	{Name: "new", Usage: "/new"}, {Name: "sessions", Usage: "/sessions"}, {Name: "resume", Usage: "/resume"},
 	{Name: "compact", Usage: "/compact"}, {Name: "mcp", Usage: "/mcp [refresh|reconnect <server>]"},
+	{Name: "memory", Usage: "/memory [query]"}, {Name: "remember", Usage: "/remember <text>"},
+	{Name: "forget", Usage: "/forget <memory-id>"}, {Name: "recap", Usage: "/recap"},
 	{Name: "reconcile", Usage: "/reconcile <attempt-id> <result>"}, {Name: "cancel", Usage: "/cancel"},
 	{Name: "language", Usage: "/language <en|zh-CN>"}, {Name: "help", Usage: "/help"}, {Name: "quit", Usage: "/quit"},
 }

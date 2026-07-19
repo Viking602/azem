@@ -71,3 +71,32 @@ func TestMigrationV3PreservesV2SubagentRuns(t *testing.T) {
 		t.Fatalf("migrated defaults = output:%q transcript:%q tools:%q background:%d delivered:%d", output, transcript, toolsUsed, background, completionDelivered)
 	}
 }
+
+func TestMigrationV5CreatesMemoryAndRecapStores(t *testing.T) {
+	ctx := context.Background()
+	provider, err := Open(ctx, filepath.Join(t.TempDir(), "azem.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	for _, table := range []string{"memories", "memories_fts", "recaps"} {
+		var found string
+		if err := provider.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE name=?`, table).Scan(&found); err != nil {
+			t.Fatalf("missing migrated table %s: %v", table, err)
+		}
+	}
+	if _, err := provider.db.ExecContext(ctx, `INSERT INTO memories(id,content,anchor,provenance,status,created_at,updated_at) VALUES('m','searchable evidence','/workspace','manual','active',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := provider.db.QueryRowContext(ctx, `SELECT count(*) FROM memories_fts WHERE memories_fts MATCH 'searchable'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("FTS trigger count=%d err=%v", count, err)
+	}
+	if _, err := provider.db.ExecContext(ctx, `VACUUM`); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if err := provider.db.QueryRowContext(ctx, `SELECT m.id FROM memories_fts f JOIN memories m ON m.memory_rowid=f.rowid WHERE memories_fts MATCH 'searchable'`).Scan(&id); err != nil || id != "m" {
+		t.Fatalf("FTS mapping after VACUUM id=%q err=%v", id, err)
+	}
+}

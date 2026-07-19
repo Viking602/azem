@@ -12,6 +12,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -888,6 +890,61 @@ func TestCompactEditOutputFallbackBecomesDiff(t *testing.T) {
 	}
 	if diff != "@@ foo.go:4 @@\n-\treturn a-b\n+\treturn a + b" {
 		t.Fatalf("fallback diff = %q", diff)
+	}
+}
+
+func TestDiffRendererSeparatesFilesHunksAndLineNumbers(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	content := strings.Join([]string{
+		"@@ internal/app.go:12 @@",
+		"-old value",
+		"+new value",
+		" unchanged",
+		"",
+		"@@ internal/tui/view.go:40 @@",
+		"+new row",
+	}, "\n")
+	plain := ansi.Strip(strings.Join(model.renderDiffContent(content, 72), "\n"))
+	for _, wanted := range []string{
+		"M internal/app.go  +1 -1",
+		"@@ line 12 @@",
+		"12    - old value",
+		"   12 + new value",
+		"13 13   unchanged",
+		"A internal/tui/view.go  +1 -0",
+		"@@ line 40 @@",
+	} {
+		if !strings.Contains(plain, wanted) {
+			t.Fatalf("rendered diff omitted %q:\n%s", wanted, plain)
+		}
+	}
+}
+
+func TestDiffRendererParsesUnifiedDiffAndDegradesOnNarrowScreens(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	content := strings.Join([]string{
+		"diff --git a/main.go b/main.go",
+		"--- a/main.go",
+		"+++ b/main.go",
+		"@@ -7,2 +7,2 @@ func main() {",
+		"-\toldCall()",
+		"+\tnewCall()",
+		" }",
+	}, "\n")
+	files, ok := parseDiffView(content)
+	if !ok || len(files) != 1 || files[0].Path != "main.go" || files[0].Added != 1 || files[0].Deleted != 1 {
+		t.Fatalf("parsed unified diff = %#v, ok=%v", files, ok)
+	}
+	rows := model.renderDiffContent(content, 24)
+	plain := ansi.Strip(strings.Join(rows, "\n"))
+	if !strings.Contains(plain, "│ - ") || !strings.Contains(plain, "oldCall()") ||
+		!strings.Contains(plain, "│ + ") || !strings.Contains(plain, "newCall()") {
+		t.Fatalf("narrow diff lost change markers:\n%s", plain)
+	}
+	for index, row := range rows {
+		if width := ansi.StringWidth(row); width > 24 {
+			t.Fatalf("narrow diff row %d width=%d, want <=24: %q", index, width, ansi.Strip(row))
+		}
 	}
 }
 
@@ -1811,6 +1868,49 @@ func TestTranscriptSupportsMouseAndKeyboardScrolling(t *testing.T) {
 	}
 }
 
+func TestTranscriptScrollDoesNotFollowNewStreamingContent(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model = updated.(AppModel)
+	model.status = "Running"
+	model.runID = "run-1"
+	model.transcript = []Block{{Kind: BlockAssistant, RunID: "run-1", Title: "Azem", Content: strings.Repeat("older content ", 80), State: "running"}}
+	model.scrollTranscript(4)
+	width, height := model.transcriptViewportSize()
+	before := ansi.Strip(model.renderTranscript(width, height))
+
+	updated, _ = model.Update(appEventMsg{Event: app.Event{Kind: app.EventTextDelta, RunID: "run-1", Text: strings.Repeat("new content ", 20)}})
+	model = updated.(AppModel)
+	after := ansi.Strip(model.renderTranscript(width, height))
+	if after != before {
+		t.Fatalf("streaming content moved a transcript scrolled into history:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestTranscriptNarrowViewportUsesRenderedVisualLineCount(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 8, Height: 8})
+	model = updated.(AppModel)
+	model.transcript = []Block{{Kind: BlockAssistant, Title: "Azem", Content: "abcdefghijklmnopqrstuvwxyz", State: "completed"}}
+	width, height := model.transcriptViewportSize()
+	lineCount := len(model.transcriptLines(max(1, width-4)))
+	want := model.transcriptOffsetLimit(lineCount, height)
+	if got := model.transcriptMaxOffset(); got != want {
+		t.Fatalf("narrow transcript max offset = %d, want rendered visual-line offset %d", got, want)
+	}
+}
+
+func TestMouseWheelScrollsOverlayWithoutChangingTranscriptOffset(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.overlay = OverlayAgentDetail
+	model.transcriptTop = 7
+	updated, _ := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	model = updated.(AppModel)
+	if model.overlayScroll != 1 || model.transcriptTop != 7 {
+		t.Fatalf("wheel scroll state = overlay:%d transcript:%d", model.overlayScroll, model.transcriptTop)
+	}
+}
+
 func TestAssistantMarkdownRendersWithoutSourceMarkers(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	block := Block{
@@ -2359,5 +2459,61 @@ func TestTodoRailShowsProgressInsteadOfInternalRevision(t *testing.T) {
 	rail := ansi.Strip(model.renderContextRail(31, 16))
 	if strings.Contains(rail, "r9") || !strings.Contains(rail, "TODO  1/2") {
 		t.Fatalf("todo header should show user-facing progress: %q", rail)
+	}
+}
+
+func TestMemoryAndRecapCommandsAndOverlays(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single", "session-1")
+	runCommand := func(command Command) {
+		updated, cmd := model.executeCommand(command)
+		model = updated.(AppModel)
+		if cmd == nil {
+			t.Fatalf("/%s did not start an action: %s", command.Name, model.errorBanner)
+		}
+		updated, _ = model.Update(cmd())
+		model = updated.(AppModel)
+	}
+
+	runCommand(Command{Name: "memory", Args: []string{"cache", "policy"}})
+	runCommand(Command{Name: "remember", Args: []string{"Use", "workspace", "scope"}})
+	runCommand(Command{Name: "forget", Args: []string{"mem_123"}})
+	runCommand(Command{Name: "recap"})
+	wantKinds := []ActionKind{ActionListMemories, ActionRemember, ActionForgetMemory, ActionShowRecap}
+	if len(runtime.actions) != len(wantKinds) {
+		t.Fatalf("memory actions = %#v", runtime.actions)
+	}
+	for index, kind := range wantKinds {
+		if runtime.actions[index].Kind != kind || runtime.actions[index].SessionID != "session-1" {
+			t.Fatalf("action %d = %#v, want %s for session-1", index, runtime.actions[index], kind)
+		}
+	}
+	if runtime.actions[0].Target != "cache policy" || runtime.actions[1].Target != "Use workspace scope" {
+		t.Fatalf("command arguments were not preserved: %#v", runtime.actions)
+	}
+
+	now := time.Now()
+	model.applyEvent(app.Event{Kind: app.EventMemoryState, State: "listed", Memories: []memory.Memory{{
+		ID: "mem_123", Content: "Use workspace-scoped native memory", Provenance: "manual", Importance: 50, UpdatedAt: now,
+	}}})
+	if model.overlay != OverlayMemory || model.overlayOptionCount() != 1 {
+		t.Fatalf("memory overlay = %q count=%d", model.overlay, model.overlayOptionCount())
+	}
+	plain := ansi.Strip(model.renderOverlay(64, 16))
+	if !strings.Contains(plain, "mem_123") || !strings.Contains(plain, "workspace-scoped") {
+		t.Fatalf("memory overlay omitted evidence identity/content:\n%s", plain)
+	}
+
+	model.applyEvent(app.Event{Kind: app.EventRecapState, State: "loaded", Recap: &recap.Recap{
+		SessionID: "session-1", Goal: "Implement native memory", Summary: "Storage is complete", OpenItems: "Verify TUI", CoveredBoundary: "run-7", Revision: 2,
+	}})
+	if model.overlay != OverlayRecap || model.recap == nil {
+		t.Fatalf("recap overlay = %q recap=%#v", model.overlay, model.recap)
+	}
+	plain = ansi.Strip(model.renderOverlay(64, 16))
+	for _, wanted := range []string{"Implement native memory", "Storage is complete", "Verify TUI", "run-7"} {
+		if !strings.Contains(plain, wanted) {
+			t.Fatalf("recap overlay omitted %q:\n%s", wanted, plain)
+		}
 	}
 }

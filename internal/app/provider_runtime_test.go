@@ -18,8 +18,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	hyagent "github.com/Viking602/go-hydaelyn/agent"
 	"github.com/Viking602/go-hydaelyn/api"
 	"github.com/Viking602/go-hydaelyn/message"
+	"github.com/Viking602/go-hydaelyn/multiagent"
 	"github.com/Viking602/go-hydaelyn/stream"
 	"github.com/Viking602/go-hydaelyn/tool"
 
@@ -28,6 +30,7 @@ import (
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
 	"github.com/Viking602/azem/internal/session"
@@ -212,6 +215,53 @@ func TestTurnContextBuildsPriorConversationBeforeCurrentRequest(t *testing.T) {
 		messages[2].Role != message.RoleAssistant || messages[2].Text != "first answer" ||
 		messages[3].Role != message.RoleUser || messages[3].Text != "follow-up request" {
 		t.Fatalf("messages=%+v", messages)
+	}
+}
+
+func TestTurnContextInjectsHistoricalEvidenceAsPrivateSystemContext(t *testing.T) {
+	contextManager := turnContext{
+		instructions:      "system rules",
+		privateContext:    "trusted hook context",
+		historicalContext: `{"memories":[{"Content":"use sqlite"}]}`,
+		history:           []session.Block{{Kind: "assistant", Content: "prior answer"}},
+	}
+	messages, err := contextManager.Build(context.Background(), api.Task{Goal: "current request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 6 || messages[2].Role != message.RoleSystem || messages[2].Visibility != message.VisibilityPrivate ||
+		!strings.Contains(messages[2].Text, "untrusted JSON data") || messages[4].Role != message.RoleUser ||
+		messages[4].Visibility != message.VisibilityPrivate || !strings.Contains(messages[4].Text, `"Content":"use sqlite"`) ||
+		messages[5].Text != "current request" {
+		t.Fatalf("historical context ordering/visibility = %+v", messages)
+	}
+}
+
+func TestTeamHistoricalEvidenceIsPlannerOnlyAndNotSystemData(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	hooks := service.teamHooks("session-1", "run-1", "", `{"memories":[{"Content":"planner evidence"}]}`)
+	for _, className := range []string{agentservice.PlannerClass, agentservice.ImplementerClass} {
+		engine := hyagent.Engine{ContextBuilder: turnContext{instructions: "system rules"}}
+		prepared, err := hooks.PrepareEngine(context.Background(), engine, multiagent.Dispatch{Task: api.Task{RunID: "run-1"}}, multiagent.AgentClass{Name: className})
+		if err != nil {
+			t.Fatal(err)
+		}
+		messages, err := prepared.ContextBuilder.Build(context.Background(), api.Task{Goal: "current task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, current := range messages {
+			if strings.Contains(current.Text, "planner evidence") {
+				found = true
+				if current.Role == message.RoleSystem || current.Visibility != message.VisibilityPrivate {
+					t.Fatalf("%s historical data authority/visibility = %+v", className, current)
+				}
+			}
+		}
+		if found != (className == agentservice.PlannerClass) {
+			t.Fatalf("%s historical evidence found=%v", className, found)
+		}
 	}
 }
 
@@ -1082,6 +1132,48 @@ func TestAutoReviewTeamDecisionWritesDurableAudit(t *testing.T) {
 	}
 	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != codex.ApprovalReviewerModel {
 		t.Fatalf("team durable decider=%q", decider)
+	}
+}
+
+func TestAutoReviewDoesNotInvokeInteractivePermissionHooks(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX shell command")
+	}
+	var reviews atomic.Int32
+	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, _ *http.Request) {
+		reviews.Add(1)
+		writeAutomaticReview(writer, `{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized write"}`, true)
+	})
+	hookPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(hookPath, []byte(`{"hooks":{"PermissionRequest":[{"matcher":"*","hooks":[{"name":"interactive-bridge","type":"command","command":"printf 'interactive permission hook ran' >&2; exit 2"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	harness.host.AttachHooks(hooks.Dispatcher{
+		Registry: hooks.Discover(hooks.Options{Sources: []hooks.Source{{Path: hookPath, Trusted: true}}}),
+	})
+
+	call := tool.Call{ID: "hook-skip", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"reviewed.txt"}`)}
+	pending := prepareAutomaticApproval(t, harness, call)
+	resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+	if err != nil || resolution.Mode != agentservice.ApprovalOnce {
+		t.Fatalf("automatic approval was intercepted by interactive hook: resolution=%+v error=%v", resolution, err)
+	}
+	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	if resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved); resolved.State != "auto_approved" {
+		t.Fatalf("automatic resolution=%+v", resolved)
+	}
+
+	teamCall := tool.Call{ID: "team-hook-skip", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"team-reviewed.txt"}`)}
+	resolution, err = harness.host.awaitTeamApproval(context.Background(), "session", harness.run.RunID, "team goal", teamCall, harness.driver.Definition())
+	if err != nil || resolution.Mode != agentservice.ApprovalOnce {
+		t.Fatalf("team automatic approval was intercepted by interactive hook: resolution=%+v error=%v", resolution, err)
+	}
+	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	if resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved); resolved.State != "auto_approved" {
+		t.Fatalf("team automatic resolution=%+v", resolved)
+	}
+	if reviews.Load() != 2 {
+		t.Fatalf("automatic reviewer calls=%d, want 2", reviews.Load())
 	}
 }
 

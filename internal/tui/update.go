@@ -15,6 +15,7 @@ import (
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/i18n"
+	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -29,6 +30,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.MouseWheelMsg:
 		if m.overlay != OverlayNone {
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				return m.updateOverlayKey("up")
+			case tea.MouseWheelDown:
+				return m.updateOverlayKey("down")
+			}
 			return m, nil
 		}
 		switch msg.Button {
@@ -41,7 +48,15 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	case appEventMsg:
+		previousMaxOffset := 0
+		if m.transcriptTop > 0 {
+			previousMaxOffset = m.transcriptMaxOffset()
+		}
 		m.applyEvent(msg.Event)
+		if m.transcriptTop > 0 {
+			currentMaxOffset := m.transcriptMaxOffset()
+			m.transcriptTop = min(currentMaxOffset, max(0, m.transcriptTop+currentMaxOffset-previousMaxOffset))
+		}
 		commands := []tea.Cmd{waitForAppEvent(m.runtime)}
 		if (m.isRunning() || m.hasRunningHooks()) && !m.reducedMotion && !m.animationActive {
 			m.animationActive = true
@@ -461,6 +476,8 @@ func (m AppModel) overlayOptionCount() int {
 		return len(i18n.Languages())
 	case OverlayTodos:
 		return len(m.overlayOptions())
+	case OverlayMemory:
+		return len(m.memories)
 	case OverlayReasoning:
 		return len(m.reasoningLevels())
 	case OverlaySessions:
@@ -1060,6 +1077,27 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		return m.beginAction(Action{Kind: ActionListSessions})
 	case "compact":
 		return m.beginAction(Action{Kind: ActionCompact, Target: m.sessionID})
+	case "memory":
+		return m.beginAction(Action{Kind: ActionListMemories, Target: strings.Join(command.Args, " ")})
+	case "remember":
+		content := strings.TrimSpace(strings.Join(command.Args, " "))
+		if content == "" {
+			m.errorBanner = m.tr("memory.remember_usage")
+			break
+		}
+		return m.beginAction(Action{Kind: ActionRemember, Target: content})
+	case "forget":
+		if len(command.Args) != 1 {
+			m.errorBanner = m.tr("memory.forget_usage")
+			break
+		}
+		return m.beginAction(Action{Kind: ActionForgetMemory, Target: command.Args[0]})
+	case "recap":
+		if len(command.Args) != 0 {
+			m.errorBanner = m.tr("recap.usage")
+			break
+		}
+		return m.beginAction(Action{Kind: ActionShowRecap})
 	case "agents":
 		if len(command.Args) == 0 {
 			m.openOverlay(OverlayAgents)
@@ -1179,6 +1217,30 @@ func (m *AppModel) applyEvent(event app.Event) {
 		m.skills = append([]SkillCatalogView(nil), event.SkillCatalog...)
 		m.skillDiagnostics = append([]app.SkillDiagnostic(nil), event.SkillDiagnostics...)
 		m.openOverlay(OverlaySkills)
+	case app.EventMemoryState:
+		switch event.State {
+		case "forgotten":
+			for index := range m.memories {
+				if m.memories[index].ID == event.Text {
+					m.memories = append(m.memories[:index], m.memories[index+1:]...)
+					break
+				}
+			}
+		default:
+			m.memories = append([]memory.Memory(nil), event.Memories...)
+		}
+		m.openOverlay(OverlayMemory)
+	case app.EventRecapState:
+		if event.State == "failed" {
+			m.errorBanner = m.tr("recap.persist_failed") + ": " + event.Text
+			break
+		}
+		m.recap = nil
+		if event.Recap != nil {
+			value := *event.Recap
+			m.recap = &value
+		}
+		m.openOverlay(OverlayRecap)
 	case app.EventAuthState:
 		m.updateAuth(event)
 	case app.EventMCPState:

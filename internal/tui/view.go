@@ -331,7 +331,7 @@ func (m AppModel) transcriptViewportSize() (int, int) {
 
 func (m AppModel) transcriptMaxOffset() int {
 	width, height := m.transcriptViewportSize()
-	lineCount := len(m.transcriptLines(max(10, width-4)))
+	lineCount := len(m.transcriptLines(max(1, width-4)))
 	return m.transcriptOffsetLimit(lineCount, height)
 }
 
@@ -409,7 +409,7 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 			return lines
 		}
 		if block.Kind == BlockDiff {
-			lines = append(lines, m.renderDiffContent(block.Content, max(4, width-4))...)
+			lines = append(lines, m.renderDiffContent(block.Content, width+2)...)
 			return lines
 		}
 		for _, line := range wrapText(block.Content, max(4, width-4)) {
@@ -480,22 +480,220 @@ func (m AppModel) renderHookPrompt(block Block, selected bool, width int) []stri
 }
 
 func (m AppModel) renderDiffContent(content string, width int) []string {
-	lines := make([]string, 0)
-	for _, source := range strings.Split(content, "\n") {
-		style := m.theme.Assistant
-		switch {
-		case strings.HasPrefix(source, "+"):
-			style = m.theme.DiffAdd
-		case strings.HasPrefix(source, "-"):
-			style = m.theme.DiffDel
-		case strings.HasPrefix(source, "@@"):
-			style = m.theme.Diff
+	return m.renderDiffRows(content, width, "      │ ")
+}
+
+type diffLineKind uint8
+
+const (
+	diffContext diffLineKind = iota
+	diffAdded
+	diffDeleted
+	diffMeta
+)
+
+type diffViewLine struct {
+	Kind    diffLineKind
+	Text    string
+	OldLine int
+	NewLine int
+}
+
+type diffViewHunk struct {
+	Header string
+	Lines  []diffViewLine
+}
+
+type diffViewFile struct {
+	Path    string
+	Added   int
+	Deleted int
+	Hunks   []diffViewHunk
+}
+
+func (m AppModel) renderDiffRows(content string, width int, prefix string) []string {
+	files, ok := parseDiffView(content)
+	if !ok {
+		rows := make([]string, 0)
+		for _, source := range strings.Split(content, "\n") {
+			for _, line := range wrapText(source, max(1, width-ansi.StringWidth(prefix))) {
+				rows = append(rows, m.theme.Assistant.Render(prefix+line))
+			}
 		}
-		for _, line := range wrapText(source, width) {
-			lines = append(lines, style.Render("      │ "+line))
+		return rows
+	}
+
+	rows := make([]string, 0)
+	for fileIndex, file := range files {
+		if fileIndex > 0 {
+			rows = append(rows, prefix)
+		}
+		status := "M"
+		if file.Added > 0 && file.Deleted == 0 {
+			status = "A"
+		} else if file.Deleted > 0 && file.Added == 0 {
+			status = "D"
+		}
+		header := fmt.Sprintf("%s %s  +%d -%d", status, file.Path, file.Added, file.Deleted)
+		rows = append(rows, m.theme.Diff.Bold(true).Render(prefix+padOrTrim(header, max(1, width-ansi.StringWidth(prefix)))))
+		rows = append(rows, prefix)
+		for _, hunk := range file.Hunks {
+			rows = append(rows, m.theme.Diff.Render(prefix+padOrTrim(hunk.Header, max(1, width-ansi.StringWidth(prefix)))))
+			maxLine := 0
+			for _, line := range hunk.Lines {
+				maxLine = max(maxLine, line.OldLine, line.NewLine)
+			}
+			gutterWidth := len(strconv.Itoa(max(1, maxLine)))
+			showNumbers := width-ansi.StringWidth(prefix) >= 30
+			for _, line := range hunk.Lines {
+				mark := " "
+				style := m.theme.Assistant
+				switch line.Kind {
+				case diffAdded:
+					mark, style = "+", m.theme.DiffAdd
+				case diffDeleted:
+					mark, style = "-", m.theme.DiffDel
+				case diffMeta:
+					mark, style = "·", m.theme.Muted
+				}
+				gutter := mark + " "
+				if showNumbers {
+					oldNumber, newNumber := "", ""
+					if line.OldLine > 0 {
+						oldNumber = strconv.Itoa(line.OldLine)
+					}
+					if line.NewLine > 0 {
+						newNumber = strconv.Itoa(line.NewLine)
+					}
+					gutter = fmt.Sprintf("%*s %*s %s ", gutterWidth, oldNumber, gutterWidth, newNumber, mark)
+				}
+				textWidth := max(1, width-ansi.StringWidth(prefix)-ansi.StringWidth(gutter))
+				wrapped := wrapText(line.Text, textWidth)
+				for index, text := range wrapped {
+					lineGutter := gutter
+					if index > 0 {
+						lineGutter = strings.Repeat(" ", ansi.StringWidth(gutter)-2) + "· "
+					}
+					rows = append(rows, style.Render(prefix+lineGutter+text))
+				}
+			}
 		}
 	}
-	return lines
+	return rows
+}
+
+func parseDiffView(content string) ([]diffViewFile, bool) {
+	sourceLines := strings.Split(content, "\n")
+	files := make([]diffViewFile, 0)
+	var file *diffViewFile
+	var hunk *diffViewHunk
+	oldLine, newLine := 1, 1
+	recognized := false
+	startFile := func(path string) {
+		path = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(path), "a/"), "b/")
+		if path == "" || path == "/dev/null" {
+			path = "workspace change"
+		}
+		files = append(files, diffViewFile{Path: path})
+		file = &files[len(files)-1]
+		hunk = nil
+	}
+	startHunk := func(header string, oldStart, newStart int) {
+		if file == nil {
+			startFile("workspace change")
+		}
+		file.Hunks = append(file.Hunks, diffViewHunk{Header: header})
+		hunk = &file.Hunks[len(file.Hunks)-1]
+		oldLine, newLine = max(1, oldStart), max(1, newStart)
+	}
+
+	for index, source := range sourceLines {
+		if strings.HasPrefix(source, "diff --git ") {
+			fields := strings.Fields(source)
+			if len(fields) >= 4 {
+				startFile(fields[3])
+				recognized = true
+			}
+			continue
+		}
+		if strings.HasPrefix(source, "+++ ") {
+			if file == nil {
+				startFile(strings.TrimSpace(strings.TrimPrefix(source, "+++ ")))
+			}
+			recognized = true
+			continue
+		}
+		if strings.HasPrefix(source, "--- ") || strings.HasPrefix(source, "index ") || strings.HasPrefix(source, "new file mode ") || strings.HasPrefix(source, "deleted file mode ") {
+			recognized = true
+			continue
+		}
+		if strings.HasPrefix(source, "@@ ") {
+			if oldStart, newStart, ok := unifiedHunkStarts(source); ok {
+				startHunk(source, oldStart, newStart)
+				recognized = true
+				continue
+			}
+			if path, line, ok := compactDiffHeader(source); ok {
+				startFile(path)
+				startHunk(fmt.Sprintf("@@ line %d @@", line), line, line)
+				recognized = true
+				continue
+			}
+		}
+		if !recognized {
+			continue
+		}
+		if source == "" && (index == len(sourceLines)-1 || index+1 < len(sourceLines) && strings.HasPrefix(sourceLines[index+1], "@@ ")) {
+			continue
+		}
+		if hunk == nil {
+			startHunk("@@ change @@", 1, 1)
+		}
+		line := diffViewLine{Kind: diffContext, Text: source, OldLine: oldLine, NewLine: newLine}
+		switch {
+		case strings.HasPrefix(source, "+"):
+			line.Kind, line.Text, line.OldLine = diffAdded, strings.TrimPrefix(source, "+"), 0
+			file.Added++
+			newLine++
+		case strings.HasPrefix(source, "-"):
+			line.Kind, line.Text, line.NewLine = diffDeleted, strings.TrimPrefix(source, "-"), 0
+			file.Deleted++
+			oldLine++
+		case strings.HasPrefix(source, "\\ No newline"):
+			line.Kind, line.Text, line.OldLine, line.NewLine = diffMeta, source, 0, 0
+		default:
+			line.Text = strings.TrimPrefix(source, " ")
+			oldLine++
+			newLine++
+		}
+		hunk.Lines = append(hunk.Lines, line)
+	}
+	return files, recognized && len(files) > 0
+}
+
+func compactDiffHeader(source string) (string, int, bool) {
+	value := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(source, "@@ "), "@@"))
+	separator := strings.LastIndex(value, ":")
+	if separator < 1 {
+		return "", 0, false
+	}
+	line, err := strconv.Atoi(value[separator+1:])
+	return value[:separator], line, err == nil && line > 0
+}
+
+func unifiedHunkStarts(source string) (int, int, bool) {
+	fields := strings.Fields(source)
+	if len(fields) < 3 || !strings.HasPrefix(fields[1], "-") || !strings.HasPrefix(fields[2], "+") {
+		return 0, 0, false
+	}
+	parseStart := func(value string) (int, error) {
+		value = strings.TrimLeft(value, "+-")
+		value, _, _ = strings.Cut(value, ",")
+		return strconv.Atoi(value)
+	}
+	oldStart, oldErr := parseStart(fields[1])
+	newStart, newErr := parseStart(fields[2])
+	return oldStart, newStart, oldErr == nil && newErr == nil
 }
 
 func toolDisplayName(name string) string {
@@ -931,7 +1129,7 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		return m.renderAgentDetailOverlay(width, height)
 	}
 	maxBoxWidth := 82
-	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills {
+	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap {
 		maxBoxWidth = 110
 	}
 	boxWidth := min(maxBoxWidth, max(3, width-2))
@@ -952,8 +1150,17 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		contentRows = 1
 	}
 	descriptionLines := make([]string, 0)
-	for _, line := range description {
-		descriptionLines = append(descriptionLines, wrapText(line, max(4, innerWidth-4))...)
+	diffDescription := false
+	if m.overlay == OverlayDiff {
+		if block, ok := m.selectedDiff(); ok {
+			descriptionLines = m.renderDiffRows(block.Content, max(4, innerWidth-2), " ")
+			diffDescription = true
+		}
+	}
+	if !diffDescription {
+		for _, line := range description {
+			descriptionLines = append(descriptionLines, wrapText(line, max(4, innerWidth-4))...)
+		}
 	}
 	maxDescription := max(0, contentRows-1)
 	if len(options) == 0 {
@@ -987,7 +1194,11 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	}
 	rows = append(rows, m.boxRow(" "+strings.Repeat("─", max(0, innerWidth-2)), innerWidth, m.theme.Border, false))
 	for _, line := range descriptionLines {
-		rows = append(rows, m.boxRow(" "+line, innerWidth, m.theme.Assistant, false))
+		if diffDescription {
+			rows = append(rows, m.boxRow(line, innerWidth, lipgloss.NewStyle(), false))
+		} else {
+			rows = append(rows, m.boxRow(" "+line, innerWidth, m.theme.Assistant, false))
+		}
 	}
 	if stickyGroup != "" {
 		rows = append(rows, m.boxRow(" "+strings.ToUpper(providerDisplayName(stickyGroup)), innerWidth, m.theme.Header, false))
@@ -1200,6 +1411,10 @@ func (m AppModel) overlayHeading() (string, string) {
 		return "Agents", strings.ToUpper(m.agentMode) + " mode"
 	case OverlayTodos:
 		return m.tr("overlay.todos.title"), m.tr("overlay.todos.subtitle")
+	case OverlayMemory:
+		return m.tr("overlay.memory.title"), m.tr("overlay.memory.subtitle")
+	case OverlayRecap:
+		return m.tr("overlay.recap.title"), m.tr("overlay.recap.subtitle")
 	case OverlayAgentDetail:
 		return "Task detail", "Live child transcript and execution metadata"
 	case OverlayAgentTypes:
@@ -1225,6 +1440,20 @@ func (m AppModel) overlayDescription() []string {
 		}
 		if m.todo.Goal != "" {
 			return []string{m.todo.Goal}
+		}
+	case OverlayMemory:
+		if len(m.memories) == 0 {
+			return []string{m.tr("overlay.memory.empty")}
+		}
+	case OverlayRecap:
+		if m.recap == nil {
+			return []string{m.tr("overlay.recap.empty")}
+		}
+		return []string{
+			m.tr("overlay.recap.goal") + ": " + first(m.recap.Goal, "—"),
+			m.tr("overlay.recap.summary") + ": " + first(m.recap.Summary, "—"),
+			m.tr("overlay.recap.open_items") + ": " + first(m.recap.OpenItems, "—"),
+			fmt.Sprintf("%s: %s · r%d", m.tr("overlay.recap.boundary"), first(m.recap.CoveredBoundary, "—"), m.recap.Revision),
 		}
 	case OverlayHelp:
 		return []string{
@@ -1312,6 +1541,16 @@ func (m AppModel) overlayDescription() []string {
 
 func (m AppModel) overlayOptions() []overlayOption {
 	switch m.overlay {
+	case OverlayMemory:
+		options := make([]overlayOption, 0, len(m.memories))
+		for _, item := range m.memories {
+			options = append(options, overlayOption{
+				Label:  compactAgentActivity(item.Content),
+				Detail: item.ID + " · " + item.Provenance + " · " + item.UpdatedAt.Local().Format("2006-01-02 15:04"),
+				State:  fmt.Sprintf("%d", item.Importance),
+			})
+		}
+		return options
 	case OverlayTodos:
 		options := []overlayOption{}
 		for _, phase := range m.todo.Phases {
@@ -1546,6 +1785,10 @@ func (m AppModel) overlayFooter() string {
 		return "↑/↓ select · Enter detail · X cancel child · Esc close"
 	case OverlayTodos:
 		return "↑/↓ select · H hide completed · Esc close"
+	case OverlayMemory:
+		return m.tr("overlay.memory.footer")
+	case OverlayRecap:
+		return m.tr("overlay.recap.footer")
 	case OverlayAgentDetail:
 		return "↑/↓ scroll · Esc return to tasks"
 	case OverlayAgentTypes, OverlayPersonas:

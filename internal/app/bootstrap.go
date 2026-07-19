@@ -14,7 +14,9 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
+	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/provider/catalog"
+	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
@@ -134,6 +136,7 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	}
 	service.SetConfigPath(paths.ConfigFile)
 	service.AttachDurable(sessions, coding)
+	service.AttachMemory(memory.NewService(store.DB(), cfg.Workspace.Root), recap.NewService(store.DB(), cfg.Workspace.Root))
 	service.AttachAuth(authentication, modelCatalog)
 	service.AttachSkills(skillCatalog)
 	manager := mcpruntime.NewManager(cfg.MCP.Servers, fmt.Sprintf("azem/%d", config.CurrentVersion), func(_ context.Context, reference string) (string, error) {

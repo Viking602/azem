@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -50,6 +52,10 @@ const (
 	ActionReconnectMCP     ActionKind = "reconnect_mcp"
 	ActionListSkills       ActionKind = "list_skills"
 	ActionReloadSkills     ActionKind = "reload_skills"
+	ActionListMemories     ActionKind = "list_memories"
+	ActionRemember         ActionKind = "remember"
+	ActionForgetMemory     ActionKind = "forget_memory"
+	ActionShowRecap        ActionKind = "show_recap"
 )
 
 type Action struct {
@@ -73,6 +79,49 @@ func (s *Service) AttachReconcileResolver(resolver ReconcileResolver) {
 
 func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	switch action.Kind {
+	case ActionListMemories:
+		if s.memory == nil {
+			return fmt.Errorf("memory is unavailable")
+		}
+		items, err := s.memory.List(ctx, action.Target, 20)
+		if err != nil {
+			return err
+		}
+		s.emit(ctx, Event{Kind: EventMemoryState, State: "listed", Memories: items})
+		return nil
+	case ActionRemember:
+		if s.memory == nil {
+			return fmt.Errorf("memory is unavailable")
+		}
+		item, err := s.memory.Remember(ctx, action.Target, action.SessionID, "manual", 50)
+		if err != nil {
+			return err
+		}
+		s.emit(ctx, Event{Kind: EventMemoryState, SessionID: action.SessionID, State: "remembered", Memories: []memory.Memory{item}})
+		return nil
+	case ActionForgetMemory:
+		if s.memory == nil {
+			return fmt.Errorf("memory is unavailable")
+		}
+		if err := s.memory.Forget(ctx, action.Target); err != nil {
+			return err
+		}
+		s.emit(ctx, Event{Kind: EventMemoryState, State: "forgotten", Text: action.Target})
+		return nil
+	case ActionShowRecap:
+		if s.recap == nil {
+			return fmt.Errorf("recap is unavailable")
+		}
+		item, err := s.recap.Load(ctx, action.SessionID)
+		if errors.Is(err, sql.ErrNoRows) {
+			s.emit(ctx, Event{Kind: EventRecapState, SessionID: action.SessionID, State: "empty"})
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		s.emit(ctx, Event{Kind: EventRecapState, SessionID: action.SessionID, State: "loaded", Recap: &item})
+		return nil
 	case ActionListSkills:
 		return s.emitSkillCatalog(ctx, "listed")
 	case ActionReloadSkills:

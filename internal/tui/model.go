@@ -11,7 +11,9 @@ import (
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/i18n"
+	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/provider/catalog"
+	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -85,6 +87,8 @@ const (
 	OverlayDiff        Overlay = "diff"
 	OverlayAgents      Overlay = "agents"
 	OverlayTodos       Overlay = "todos"
+	OverlayMemory      Overlay = "memory"
+	OverlayRecap       Overlay = "recap"
 	OverlayAgentDetail Overlay = "agent_detail"
 	OverlayAgentTypes  Overlay = "agent_types"
 	OverlayPersonas    Overlay = "personas"
@@ -248,6 +252,8 @@ type AppModel struct {
 	agents              []AgentView
 	todo                TodoView
 	todoHideCompleted   bool
+	memories            []memory.Memory
+	recap               *recap.Recap
 	detailAgentID       string
 	agentTypes          []AgentCatalogView
 	personas            []AgentCatalogView

@@ -30,22 +30,24 @@ import (
 )
 
 type TurnRequest struct {
-	SessionID        string
-	Prompt           string
-	Provider         string
-	Model            string
-	History          []session.Block
-	Reasoning        string
-	AgentMode        string
-	DisableSubagents bool
-	ActiveSkills     []string
-	Todo             session.TodoList
-	privateContext   string
+	SessionID         string
+	Prompt            string
+	Provider          string
+	Model             string
+	History           []session.Block
+	Reasoning         string
+	AgentMode         string
+	DisableSubagents  bool
+	ActiveSkills      []string
+	Todo              session.TodoList
+	privateContext    string
+	historicalContext string
 }
 
 type turnContext struct {
 	instructions        string
 	privateContext      string
+	historicalContext   string
 	history             []session.Block
 	reportContextTokens func(context.Context, int)
 	compactHooks        func(context.Context, []message.Message, []message.Message, error) error
@@ -72,6 +74,12 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 		value.Visibility = message.VisibilityPrivate
 		messages = append(messages, value)
 	}
+	historical := strings.TrimSpace(c.historicalContext)
+	if historical != "" {
+		policy := message.NewText(message.RoleSystem, historicalEvidencePolicy)
+		policy.Visibility = message.VisibilityPrivate
+		messages = append(messages, policy)
+	}
 	for _, block := range c.history {
 		text := strings.TrimSpace(block.Content)
 		if text == "" {
@@ -82,6 +90,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 			role = message.RoleUser
 		}
 		messages = append(messages, message.NewText(role, text))
+	}
+	if historical != "" {
+		data := message.NewText(message.RoleUser, "<historical-evidence-json>\n"+historical+"\n</historical-evidence-json>")
+		data.Visibility = message.VisibilityPrivate
+		messages = append(messages, data)
 	}
 	if goal := strings.TrimSpace(task.Goal); goal != "" {
 		messages = append(messages, message.NewText(message.RoleUser, goal))
@@ -519,7 +532,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 			ContextTokenTarget:  contextTarget,
 		},
 	}
-	contextManager := turnContext{instructions: instructions, privateContext: request.privateContext, history: request.History, todo: request.Todo}
+	contextManager := turnContext{instructions: instructions, privateContext: request.privateContext, historicalContext: request.historicalContext, history: request.History, todo: request.Todo}
 	if host != nil {
 		contextManager.compactHooks = host.autoCompactHooks(host.hookMetadata(request.SessionID, run.RunID))
 		if host.sessions != nil {
@@ -715,7 +728,9 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 	host.activeEnd = cancel
 	host.mu.Unlock()
 	host.wg.Add(1)
-	go host.runResumedProviderTeam(runCtx, request.SessionID, runID, request.Prompt, modelID, request.privateContext, resolver)
+	originalPrompt := firstNonempty(run.Metadata["original_prompt"], request.Prompt)
+	historicalContext := host.loadHistoricalContext(host.ctx, request.SessionID, originalPrompt)
+	go host.runResumedProviderTeam(runCtx, request.SessionID, runID, request.Prompt, originalPrompt, modelID, request.privateContext, historicalContext, resolver)
 	return nil
 }
 
@@ -1137,6 +1152,25 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 		},
 	}
 	metadata := hooks.Metadata{SessionID: sessionID, RunID: runID, AgentID: "team", AgentType: "team", CWD: s.cfg.Workspace.Root}
+	s.mu.Lock()
+	mode := s.approvalMode
+	_, granted := s.teamApprovals[fingerprint]
+	s.mu.Unlock()
+	if mode == ApprovalModeYolo {
+		return approvalResolution{Mode: agentservice.ApprovalOnce}, nil
+	}
+	if granted {
+		return approvalResolution{Mode: agentservice.ApprovalSession}, nil
+	}
+	if mode == ApprovalModeAutoReview {
+		resolution, approvalErr := s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
+			return s.recordTeamApprovalDecision(decisionCtx, event, request, mode, decidedBy)
+		})
+		if approvalErr == nil && resolution.Mode == agentservice.ApprovalDenied {
+			resolution.Retry, resolution.Prevent = s.observePermissionDenied(ctx, metadata, call, resolution.DenialMessage, false)
+		}
+		return resolution, approvalErr
+	}
 	hookDecision := s.permissionHook(ctx, metadata, call)
 	if hookDecision.behavior == "allow" || hookDecision.behavior == "deny" {
 		resolvedMode := agentservice.ApprovalOnce
@@ -1153,30 +1187,11 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 		}
 		return approvalResolution{Mode: resolvedMode}, nil
 	}
-	s.mu.Lock()
-	mode := s.approvalMode
-	if mode == ApprovalModeYolo {
-		s.mu.Unlock()
-		return approvalResolution{Mode: agentservice.ApprovalOnce}, nil
-	}
-	if _, granted := s.teamApprovals[fingerprint]; granted {
-		s.mu.Unlock()
-		return approvalResolution{Mode: agentservice.ApprovalSession}, nil
-	}
-	if mode == ApprovalModeAutoReview {
-		s.mu.Unlock()
-		resolution, approvalErr := s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
-			return s.recordTeamApprovalDecision(decisionCtx, event, request, mode, decidedBy)
-		})
-		if approvalErr == nil && resolution.Mode == agentservice.ApprovalDenied {
-			resolution.Retry, resolution.Prevent = s.observePermissionDenied(ctx, metadata, call, resolution.DenialMessage, false)
-		}
-		return resolution, approvalErr
-	}
 	live := &liveApproval{
 		approvalID: approvalID, agentType: "team", runID: runID, callID: call.ID,
 		sessionID: sessionID, fingerprint: fingerprint, decision: make(chan agentservice.ApprovalMode, 1),
 	}
+	s.mu.Lock()
 	if _, exists := s.liveApprovals[approvalID]; exists {
 		s.mu.Unlock()
 		return approvalResolution{}, fmt.Errorf("approval ID collision")
@@ -1236,6 +1251,30 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 		},
 	}
 	metadata := hooks.Metadata{SessionID: sessionID, RunID: run.RunID, AgentID: agentID, AgentType: agentType, CWD: s.cfg.Workspace.Root}
+	s.mu.Lock()
+	mode := s.approvalMode
+	s.mu.Unlock()
+	if mode == ApprovalModeYolo {
+		if s.coding == nil {
+			return approvalResolution{}, fmt.Errorf("coding runtime is unavailable")
+		}
+		if err := s.coding.ResolveApproval(ctx, run, call.ID, agentservice.ApprovalOnce, "approval-mode:yolo"); err != nil {
+			return approvalResolution{}, err
+		}
+		return approvalResolution{Mode: agentservice.ApprovalOnce}, nil
+	}
+	if mode == ApprovalModeAutoReview {
+		resolution, approvalErr := s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
+			if s.coding == nil {
+				return fmt.Errorf("coding runtime is unavailable")
+			}
+			return s.coding.ResolveApproval(decisionCtx, run, call.ID, mode, decidedBy)
+		})
+		if approvalErr == nil && resolution.Mode == agentservice.ApprovalDenied {
+			resolution.Retry, resolution.Prevent = s.observePermissionDenied(ctx, metadata, call, resolution.DenialMessage, false)
+		}
+		return resolution, approvalErr
+	}
 	hookDecision := s.permissionHook(ctx, metadata, call)
 	if hookDecision.behavior == "allow" || hookDecision.behavior == "deny" {
 		resolvedMode := agentservice.ApprovalOnce
@@ -1255,35 +1294,11 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 		}
 		return approvalResolution{Mode: resolvedMode}, nil
 	}
-	s.mu.Lock()
-	mode := s.approvalMode
-	if mode == ApprovalModeYolo {
-		s.mu.Unlock()
-		if s.coding == nil {
-			return approvalResolution{}, fmt.Errorf("coding runtime is unavailable")
-		}
-		if err := s.coding.ResolveApproval(ctx, run, call.ID, agentservice.ApprovalOnce, "approval-mode:yolo"); err != nil {
-			return approvalResolution{}, err
-		}
-		return approvalResolution{Mode: agentservice.ApprovalOnce}, nil
-	}
-	if mode == ApprovalModeAutoReview {
-		s.mu.Unlock()
-		resolution, approvalErr := s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
-			if s.coding == nil {
-				return fmt.Errorf("coding runtime is unavailable")
-			}
-			return s.coding.ResolveApproval(decisionCtx, run, call.ID, mode, decidedBy)
-		})
-		if approvalErr == nil && resolution.Mode == agentservice.ApprovalDenied {
-			resolution.Retry, resolution.Prevent = s.observePermissionDenied(ctx, metadata, call, resolution.DenialMessage, false)
-		}
-		return resolution, approvalErr
-	}
 	live := &liveApproval{
 		approvalID: approvalID, agentID: agentID, agentType: agentType, run: run, runID: run.RunID,
 		callID: call.ID, sessionID: sessionID, decision: make(chan agentservice.ApprovalMode, 1),
 	}
+	s.mu.Lock()
 	if _, exists := s.liveApprovals[approvalID]; exists {
 		s.mu.Unlock()
 		return approvalResolution{}, fmt.Errorf("approval ID collision")
@@ -1794,6 +1809,9 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			return
 		}
 	}
+	if err := s.persistRecap(ctx, request.SessionID, run.RunID, request.Prompt, result.Text, request.Todo); err != nil {
+		s.emit(ctx, Event{Kind: EventRecapState, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
+	}
 	s.emit(ctx, Event{Kind: EventRunFinished, SessionID: request.SessionID, RunID: run.RunID, State: "completed"})
 }
 
@@ -1830,7 +1848,7 @@ func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runI
 	models := agentservice.TeamModels{Planner: modelID, Implementer: modelID, Reviewer: modelID, Reporter: modelID}
 	toolBus, toolErr := s.teamToolBus(ctx, request.SessionID, runID, goal)
 	if toolErr != nil {
-		s.finishProviderTeam(ctx, request.SessionID, runID, agentservice.TeamExecution{}, toolErr)
+		s.finishProviderTeam(ctx, request.SessionID, runID, request.Prompt, request.Todo, agentservice.TeamExecution{}, toolErr)
 		return
 	}
 	execution, err := s.coding.StartTeamWithIDAndToolsMetadataHooks(ctx, runID, goal, models, resolver, toolBus, map[string]string{
@@ -1838,8 +1856,9 @@ func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runI
 		"provider":             request.Provider,
 		"model":                modelID,
 		"reasoning":            request.Reasoning,
+		"original_prompt":      request.Prompt,
 		"hook_private_context": request.privateContext,
-	}, s.teamHooks(request.SessionID, runID, request.privateContext), func(state multiagent.TeamState) {
+	}, s.teamHooks(request.SessionID, runID, request.privateContext, request.historicalContext), func(state multiagent.TeamState) {
 		for _, instance := range state.Instances {
 			s.emit(ctx, Event{
 				Kind: EventAgentState, SessionID: request.SessionID, RunID: runID, AgentID: instance.ID, State: string(instance.State),
@@ -1848,20 +1867,20 @@ func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runI
 			})
 		}
 	})
-	s.finishProviderTeam(ctx, request.SessionID, runID, execution, err)
+	s.finishProviderTeam(ctx, request.SessionID, runID, request.Prompt, request.Todo, execution, err)
 }
 
-func (s *Service) runResumedProviderTeam(ctx context.Context, sessionID, runID, goal, modelID, privateContext string, resolver hyprovider.Resolver) {
+func (s *Service) runResumedProviderTeam(ctx context.Context, sessionID, runID, durableGoal, recapGoal, modelID, privateContext, historicalContext string, resolver hyprovider.Resolver) {
 	defer s.wg.Done()
 	defer s.clearRun(runID)
 	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: sessionID, RunID: runID, State: "resuming"})
 	models := agentservice.TeamModels{Planner: modelID, Implementer: modelID, Reviewer: modelID, Reporter: modelID}
-	toolBus, toolErr := s.teamToolBus(ctx, sessionID, runID, goal)
+	toolBus, toolErr := s.teamToolBus(ctx, sessionID, runID, durableGoal)
 	if toolErr != nil {
-		s.finishProviderTeam(ctx, sessionID, runID, agentservice.TeamExecution{}, toolErr)
+		s.finishProviderTeam(ctx, sessionID, runID, recapGoal, session.TodoList{}, agentservice.TeamExecution{}, toolErr)
 		return
 	}
-	execution, err := s.coding.ResumeTeamWithToolsHooks(ctx, runID, models, resolver, toolBus, s.teamHooks(sessionID, runID, privateContext), func(state multiagent.TeamState) {
+	execution, err := s.coding.ResumeTeamWithToolsHooks(ctx, runID, models, resolver, toolBus, s.teamHooks(sessionID, runID, privateContext, historicalContext), func(state multiagent.TeamState) {
 		for _, instance := range state.Instances {
 			s.emit(ctx, Event{
 				Kind: EventAgentState, SessionID: sessionID, RunID: runID, AgentID: instance.ID, State: string(instance.State),
@@ -1870,10 +1889,10 @@ func (s *Service) runResumedProviderTeam(ctx context.Context, sessionID, runID, 
 			})
 		}
 	})
-	s.finishProviderTeam(ctx, sessionID, runID, execution, err)
+	s.finishProviderTeam(ctx, sessionID, runID, recapGoal, session.TodoList{}, execution, err)
 }
 
-func (s *Service) teamHooks(sessionID, parentRunID, rootContext string) agentservice.TeamHooks {
+func (s *Service) teamHooks(sessionID, parentRunID, rootContext, historicalContext string) agentservice.TeamHooks {
 	beforeTask := func(ctx context.Context, dispatch multiagent.Dispatch, class multiagent.AgentClass) error {
 		metadata := hooks.Metadata{SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To, AgentType: class.Name, ParentRunID: parentRunID, CWD: s.cfg.Workspace.Root}
 		return s.dispatchLifecycle(ctx, hooks.TaskCreated, metadata, func(e *hooks.Envelope) {
@@ -1895,8 +1914,12 @@ func (s *Service) teamHooks(sessionID, parentRunID, rootContext string) agentser
 		}
 		contextParts := append([]string{strings.TrimSpace(rootContext)}, additional...)
 		contextText := strings.TrimSpace(strings.Join(contextParts, "\n"))
-		if contextText != "" {
-			engine.ContextBuilder = teamHookContext{inner: engine.ContextBuilder, additional: contextText}
+		historical := ""
+		if class.Name == agentservice.PlannerClass {
+			historical = historicalContext
+		}
+		if contextText != "" || historical != "" {
+			engine.ContextBuilder = teamHookContext{inner: engine.ContextBuilder, additional: contextText, historical: historical}
 		}
 		return engine, nil
 	}
@@ -1950,6 +1973,7 @@ func (s *Service) teamHooks(sessionID, parentRunID, rootContext string) agentser
 type teamHookContext struct {
 	inner      hyagent.ContextManager
 	additional string
+	historical string
 }
 
 func (c teamHookContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
@@ -1957,9 +1981,31 @@ func (c teamHookContext) Build(ctx context.Context, task api.Task) ([]message.Me
 	if err != nil {
 		return nil, err
 	}
-	value := message.NewText(message.RoleSystem, "[Trusted SubagentStart hook context]\n"+c.additional)
-	value.Visibility = message.VisibilityPrivate
-	return append([]message.Message{value}, messages...), nil
+	prefix := make([]message.Message, 0, 2)
+	if c.additional != "" {
+		value := message.NewText(message.RoleSystem, "[Trusted SubagentStart hook context]\n"+c.additional)
+		value.Visibility = message.VisibilityPrivate
+		prefix = append(prefix, value)
+	}
+	if c.historical != "" {
+		policy := message.NewText(message.RoleSystem, historicalEvidencePolicy)
+		policy.Visibility = message.VisibilityPrivate
+		prefix = append(prefix, policy)
+	}
+	result := append(prefix, messages...)
+	if c.historical == "" {
+		return result, nil
+	}
+	insertAt := 0
+	for insertAt < len(result) && result[insertAt].Role == message.RoleSystem {
+		insertAt++
+	}
+	data := message.NewText(message.RoleUser, "<historical-evidence-json>\n"+c.historical+"\n</historical-evidence-json>")
+	data.Visibility = message.VisibilityPrivate
+	result = append(result, message.Message{})
+	copy(result[insertAt+1:], result[insertAt:])
+	result[insertAt] = data
+	return result, nil
 }
 
 func (c teamHookContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
@@ -1973,7 +2019,7 @@ func (c teamHookContext) CompactTo(ctx context.Context, history []message.Messag
 	return c.inner.Compact(ctx, history)
 }
 
-func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID string, execution agentservice.TeamExecution, err error) {
+func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID, goal string, todo session.TodoList, execution agentservice.TeamExecution, err error) {
 	if ctx.Err() != nil {
 		s.observeStop(sessionID, runID, hooks.StopFailure, "cancelled", ctx.Err())
 		s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
@@ -1997,6 +2043,9 @@ func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID strin
 			s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 			return
 		}
+	}
+	if err := s.persistRecap(ctx, sessionID, runID, goal, answer, todo); err != nil {
+		s.emit(ctx, Event{Kind: EventRecapState, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 	}
 	s.emit(ctx, Event{Kind: EventRunFinished, SessionID: sessionID, RunID: runID, State: "completed"})
 }
