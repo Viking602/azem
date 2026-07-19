@@ -213,7 +213,7 @@ func Default() Config {
 		},
 		Skills: SkillsConfig{Enabled: true, TrustProject: true},
 		Hooks: HooksConfig{
-			Enabled: true, ClaudeCompatibility: true, DefaultTimeout: "5s",
+			Enabled: true, ClaudeCompatibility: false, DefaultTimeout: "5s",
 			DefaultTimeoutParsed: 5 * time.Second, FailurePolicy: "open",
 		},
 		MCP: MCPConfig{Servers: map[string]MCPServerConfig{}},
