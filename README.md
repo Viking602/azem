@@ -92,7 +92,7 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
-- Persistent conversations with session resume and context compaction
+- Persistent conversations with session resume, context compaction, and a visible per-session recap status line
 - Durable action attempts and reconciliation of unknown side effects after interruption
 - Retry handling for transient ChatGPT transport failures before output is emitted
 - MCP server discovery, reconnect, concurrency controls, and per-tool policies
@@ -182,6 +182,10 @@ Without `-config`, Azem reads `azem/config.yaml` from the operating system's use
 | `/sessions` | List saved sessions |
 | `/resume` | Resume a saved session |
 | `/compact` | Compact the current session context |
+| `/memory [query]` | Search workspace-native memory |
+| `/remember <text>` | Save explicit evidence to workspace memory |
+| `/forget <memory-id>` | Remove one workspace memory |
+| `/recap` | Inspect the current session continuity recap |
 | `/mcp [refresh\|reconnect <server>]` | Inspect or update MCP servers |
 | `/reconcile <attempt-id> <result>` | Reconcile an unknown side effect |
 | `/cancel` | Cancel the active run |
@@ -222,6 +226,7 @@ agents:
   main:
     max_tokens: 0          # 0 means unbounded
     max_tool_calls: 0      # 0 means unbounded
+    max_wall_clock: 0s     # 0s means unbounded; e.g. 45m sets a per-turn limit
   team:
     max_concurrency: 2
     max_ticks: 12

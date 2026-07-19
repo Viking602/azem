@@ -11,7 +11,7 @@ import (
 )
 
 var commandPaletteOptions = []string{
-	"login", "provider", "models", "skills", "reasoning", "sessions", "new", "agents", "mcp", "cancel", "help", "quit",
+	"login", "provider", "models", "skills", "reasoning", "sessions", "new", "recap", "agents", "mcp", "cancel", "help", "quit",
 }
 
 type overlayOption struct {
@@ -68,7 +68,12 @@ func (m AppModel) View() tea.View {
 	header := m.renderHeader(width)
 	composer := m.composer.View()
 	suggestions := m.visibleCommandSuggestions()
-	layout := measureViewLayout(height, strings.Count(composer, "\n")+1, len(suggestions))
+	recapStatus := m.visibleRecapStatus(width, height)
+	recapRows := 0
+	if recapStatus != "" {
+		recapRows = 1
+	}
+	layout := measureViewLayout(height, strings.Count(composer, "\n")+1, len(suggestions), recapRows)
 	sections := make([]string, 0, 8)
 	if layout.showChrome {
 		sections = append(sections, header, m.theme.Border.Render(strings.Repeat("─", width)))
@@ -81,6 +86,9 @@ func (m AppModel) View() tea.View {
 	}
 	if layout.suggestionHeight > 0 {
 		sections = append(sections, m.renderCommandSuggestions(width, layout.suggestionHeight, suggestions))
+	}
+	if recapStatus != "" {
+		sections = append(sections, recapStatus)
 	}
 	sections = append(sections, fitViewport(composer, width, layout.composerHeight))
 	if layout.showModelStatus {
@@ -99,10 +107,10 @@ func (m AppModel) View() tea.View {
 	view.MouseMode = tea.MouseModeCellMotion
 	view.WindowTitle = "Azem"
 	return view
-}
 
+}
 func composerOffsetY(layout viewLayout) int {
-	offset := layout.bodyHeight + layout.suggestionHeight
+	offset := layout.bodyHeight + layout.suggestionHeight + layout.recapRows
 	if layout.showChrome {
 		offset += 3 // header and the separators above and below the body
 	}
@@ -113,12 +121,13 @@ type viewLayout struct {
 	bodyHeight       int
 	composerHeight   int
 	suggestionHeight int
+	recapRows        int
 	showChrome       bool
 	showModelStatus  bool
 	showStatus       bool
 }
 
-func measureViewLayout(height, composerHeight, suggestionCount int) viewLayout {
+func measureViewLayout(height, composerHeight, suggestionCount, recapRows int) viewLayout {
 	height = max(1, height)
 	layout := viewLayout{
 		showChrome:      height >= 6,
@@ -135,6 +144,8 @@ func measureViewLayout(height, composerHeight, suggestionCount int) viewLayout {
 	if layout.showStatus {
 		fixedHeight++
 	}
+	layout.recapRows = min(max(0, recapRows), 1)
+	fixedHeight += layout.recapRows
 	available := max(1, height-fixedHeight)
 	layout.composerHeight = 1
 	if available > 1 {
@@ -209,7 +220,11 @@ func (m AppModel) renderTranscript(width int, height int) string {
 func (m AppModel) transcriptBounds() (left int, top int, width int, height int) {
 	width = max(1, m.width)
 	composer := m.composer.View()
-	layout := measureViewLayout(max(1, m.height), strings.Count(composer, "\n")+1, len(m.visibleCommandSuggestions()))
+	recapRows := 0
+	if m.visibleRecapStatus(width, max(1, m.height)) != "" {
+		recapRows = 1
+	}
+	layout := measureViewLayout(max(1, m.height), strings.Count(composer, "\n")+1, len(m.visibleCommandSuggestions()), recapRows)
 	if layout.showChrome {
 		top = 2
 	}
@@ -407,7 +422,11 @@ func (m AppModel) transcriptViewportSize() (int, int) {
 	height := max(1, m.height)
 	composer := m.composer.View()
 	suggestions := m.visibleCommandSuggestions()
-	layout := measureViewLayout(height, strings.Count(composer, "\n")+1, len(suggestions))
+	recapRows := 0
+	if m.visibleRecapStatus(width, height) != "" {
+		recapRows = 1
+	}
+	layout := measureViewLayout(height, strings.Count(composer, "\n")+1, len(suggestions), recapRows)
 	bodyHeight := layout.bodyHeight
 	if width >= 104 && bodyHeight >= 16 {
 		width -= min(31, width/3) + 1

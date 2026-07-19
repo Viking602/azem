@@ -121,7 +121,7 @@ func TestLoadResolvesRelativeWorkspaceFromConfigDirectory(t *testing.T) {
 func TestLoadOverridesMainAgentBudgets(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
-	contents := "version: 1\nagents:\n  main:\n    max_tokens: 750000\n    max_tool_calls: 256\n"
+	contents := "version: 1\nagents:\n  main:\n    max_tokens: 750000\n    max_tool_calls: 256\n    max_wall_clock: 45m\n"
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +134,9 @@ func TestLoadOverridesMainAgentBudgets(t *testing.T) {
 	}
 	if cfg.Agents.Main.MaxToolCalls != 256 {
 		t.Fatalf("main agent max tool calls = %d, want 256", cfg.Agents.Main.MaxToolCalls)
+	}
+	if cfg.Agents.Main.MaxWallClockDuration != 45*time.Minute {
+		t.Fatalf("main agent max wall clock = %s, want 45m", cfg.Agents.Main.MaxWallClockDuration)
 	}
 }
 
@@ -193,7 +196,7 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Agents.Main.MaxTokens != 0 || cfg.Agents.Main.MaxToolCalls != 0 {
+	if cfg.Agents.Main.MaxTokens != 0 || cfg.Agents.Main.MaxToolCalls != 0 || cfg.Agents.Main.MaxWallClockDuration != 0 {
 		t.Fatalf("main agent budget = %#v", cfg.Agents.Main)
 	}
 	subagents := cfg.Agents.Subagents
@@ -240,6 +243,16 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid.Agents.Main.MaxToolCalls = -1
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("negative main-agent tool-call budget was accepted")
+	}
+	invalid = Default()
+	invalid.Agents.Main.MaxWallClock = "invalid"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("invalid main-agent wall-clock budget was accepted")
+	}
+	invalid = Default()
+	invalid.Agents.Main.MaxWallClock = "-1s"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative main-agent wall-clock budget was accepted")
 	}
 }
 

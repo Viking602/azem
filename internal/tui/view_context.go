@@ -158,6 +158,36 @@ func (m AppModel) activeAgents() []AgentView {
 	return active
 }
 
+func (m AppModel) renderRecapStatus(width int) string {
+	if width <= 0 || m.recap == nil || m.isRunning() {
+		return ""
+	}
+	text := first(strings.TrimSpace(m.recap.Summary), strings.TrimSpace(m.recap.Goal), strings.TrimSpace(m.recap.OpenItems))
+	if text == "" {
+		return ""
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	const maxRecapWidth = 280
+	if ansi.StringWidth(text) > maxRecapWidth {
+		text = ansi.Truncate(text, maxRecapWidth, "…")
+	}
+	prefix := m.tr("recap.status_prefix")
+	suffix := m.tr("recap.status_hint")
+	full := fmt.Sprintf("  ※ %s: %s  · %s", prefix, text, suffix)
+	compact := fmt.Sprintf("  ※ %s: %s", prefix, text)
+	if ansi.StringWidth(full) <= width {
+		return m.theme.Muted.Italic(true).Render(padOrTrim(full, width))
+	}
+	return m.theme.Muted.Italic(true).Render(padOrTrim(compact, width))
+}
+
+func (m AppModel) visibleRecapStatus(width, height int) string {
+	if height < 4 {
+		return ""
+	}
+	return m.renderRecapStatus(width)
+}
+
 func (m AppModel) renderModelStatus(width int) string {
 	model := m.provider + "/" + first(m.model, "no model")
 	if width >= 64 && m.reasoning != "" {

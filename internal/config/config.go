@@ -84,11 +84,14 @@ type AgentsConfig struct {
 
 type MainAgentConfig struct {
 	// MaxTokens limits cumulative provider-reported spend for one user turn.
-	// Zero leaves it unbounded; context capacity, iterations, and wall-clock
-	// duration still bound execution independently.
+	// Zero leaves it unbounded; context capacity and other configured budgets
+	// still bound execution independently.
 	MaxTokens int64 `yaml:"max_tokens"`
 	// MaxToolCalls limits tool calls in one user turn. Zero is unbounded.
 	MaxToolCalls int `yaml:"max_tool_calls"`
+	// MaxWallClock limits the total duration of one user turn. Zero is unbounded.
+	MaxWallClock         string        `yaml:"max_wall_clock"`
+	MaxWallClockDuration time.Duration `yaml:"-"`
 }
 
 type SkillsConfig struct {
@@ -202,7 +205,7 @@ func Default() Config {
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
 		},
 		Agents: AgentsConfig{
-			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0},
+			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
 			Team: TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
 			Subagents: SubagentConfig{
 				Enabled: true, MaxDepth: 1, MaxConcurrency: 2, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
@@ -305,6 +308,11 @@ func (c *Config) Validate() error {
 	if c.Agents.Main.MaxToolCalls < 0 {
 		return fmt.Errorf("agents.main.max_tool_calls must be non-negative (zero is unbounded)")
 	}
+	mainWallClock, err := time.ParseDuration(c.Agents.Main.MaxWallClock)
+	if err != nil || mainWallClock < 0 {
+		return fmt.Errorf("agents.main.max_wall_clock must be a non-negative duration (zero is unbounded)")
+	}
+	c.Agents.Main.MaxWallClockDuration = mainWallClock
 	if c.Agents.Team.MaxConcurrency < 1 || c.Agents.Team.MaxTicks < 1 {
 		return fmt.Errorf("agents.team limits must be positive")
 	}

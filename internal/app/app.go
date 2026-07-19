@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -97,6 +98,19 @@ func (s *Service) AttachDurable(sessions *session.Service, coding *agentservice.
 
 func (s *Service) AttachMemory(memoryService *memory.Service, recapService *recap.Service) {
 	s.memory, s.recap = memoryService, recapService
+}
+func (s *Service) loadRecap(ctx context.Context, sessionID string) (*recap.Recap, error) {
+	if s.recap == nil {
+		return nil, nil
+	}
+	value, err := s.recap.Load(ctx, sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 func (s *Service) AttachAuth(authentication *authservice.Service, modelCatalog *catalog.Service) {
@@ -297,8 +311,12 @@ func (s *Service) persistRecap(ctx context.Context, sessionID, runID, goal, summ
 		}
 		todo = current
 	}
-	_, err := s.recap.Upsert(ctx, recap.Recap{SessionID: sessionID, CoveredBoundary: runID, Goal: goal, Summary: summary, OpenItems: todoReminder(todo)})
-	return err
+	saved, err := s.recap.Upsert(ctx, recap.Recap{SessionID: sessionID, CoveredBoundary: runID, Goal: goal, Summary: summary, OpenItems: todoReminder(todo)})
+	if err != nil {
+		return err
+	}
+	s.emit(ctx, Event{Kind: EventRecapState, SessionID: sessionID, RunID: runID, State: "updated", Recap: &saved})
+	return nil
 }
 
 func limitRunes(value string, limit int) string {

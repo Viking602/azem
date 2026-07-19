@@ -92,7 +92,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	task := api.Task{
 		ID: run.TaskID, RunID: run.RunID, Type: api.TaskTypeWorker, Goal: request.Prompt,
 		Budget: &api.TaskBudget{
-			MaxTokens: s.cfg.Agents.Main.MaxTokens, MaxWallClock: 20 * time.Minute,
+			MaxTokens: s.cfg.Agents.Main.MaxTokens, MaxWallClock: s.cfg.Agents.Main.MaxWallClockDuration,
 			MaxToolCalls: s.cfg.Agents.Main.MaxToolCalls,
 		},
 	}

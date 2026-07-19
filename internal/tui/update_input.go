@@ -650,6 +650,8 @@ func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
 		return m.beginAction(Action{Kind: ActionListSessions})
 	case "new":
 		return m.beginAction(Action{Kind: ActionNewSession})
+	case "recap":
+		return m.beginAction(Action{Kind: ActionShowRecap})
 	case "agents":
 		m.openOverlay(OverlayAgents)
 	case "agent-types":
