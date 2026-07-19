@@ -1135,6 +1135,48 @@ func TestAutoReviewTeamDecisionWritesDurableAudit(t *testing.T) {
 	}
 }
 
+func TestAutoReviewTeamDenyFallsBackToUserApproval(t *testing.T) {
+	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writeAutomaticReview(writer, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"team action needs confirmation"}`, true)
+	})
+	call := tool.Call{ID: "team-deny", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"team.txt"}`)}
+	type approvalResult struct {
+		resolution approvalResolution
+		err        error
+	}
+	result := make(chan approvalResult, 1)
+	go func() {
+		resolution, err := harness.host.awaitTeamApproval(
+			context.Background(), "session", harness.run.RunID, "team user goal", call, harness.driver.Definition(),
+		)
+		result <- approvalResult{resolution: resolution, err: err}
+	}()
+	reviewing := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	if reviewing.State != "reviewing" {
+		t.Fatalf("team reviewing event=%+v", reviewing)
+	}
+	denied := nextApprovalEvent(t, harness.host, EventApprovalResolved)
+	if denied.State != "auto_denied" {
+		t.Fatalf("team automatic denial=%+v", denied)
+	}
+	prompt := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	if prompt.State != "pending" || prompt.ApprovalID != reviewing.ApprovalID {
+		t.Fatalf("team manual fallback=%+v", prompt)
+	}
+	if err := harness.host.ExecuteAction(context.Background(), Action{
+		Kind: ActionResolveApproval, Target: prompt.ApprovalID, Decision: "once",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outcome := <-result
+	if outcome.err != nil || outcome.resolution.Mode != agentservice.ApprovalOnce {
+		t.Fatalf("team user approval=%+v error=%v", outcome.resolution, outcome.err)
+	}
+	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != "user" {
+		t.Fatalf("team durable decider=%q", decider)
+	}
+}
+
 func TestAutoReviewDoesNotInvokeInteractivePermissionHooks(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("POSIX shell command")
@@ -1177,25 +1219,23 @@ func TestAutoReviewDoesNotInvokeInteractivePermissionHooks(t *testing.T) {
 	}
 }
 
-func TestAutoReviewDenyAndMalformedFailureStayDistinctAndDoNotExecute(t *testing.T) {
+func TestAutoReviewDenyFallsBackToUserWhileMalformedFailureStaysClosed(t *testing.T) {
 	tests := []struct {
-		name        string
-		output      string
-		wantState   string
-		wantDecider string
-		wantText    string
-		errorKind   string
+		name       string
+		output     string
+		wantState  string
+		wantText   string
+		errorKind  string
+		promptUser bool
 	}{
 		{
 			name:      "explicit deny",
 			output:    `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"target is not authorized"}`,
-			wantState: "auto_denied", wantDecider: codex.ApprovalReviewerModel,
-			wantText: "Denied by automatic review", errorKind: "",
+			wantState: "auto_denied", wantText: "Denied by automatic review", errorKind: "", promptUser: true,
 		},
 		{
 			name: "malformed output", output: `{`,
-			wantState: "auto_failed", wantDecider: "system:auto-review-failure",
-			wantText: "Automatic review failed", errorKind: "parse",
+			wantState: "auto_failed", wantText: "Automatic review failed", errorKind: "parse",
 		},
 	}
 	for _, test := range tests {
@@ -1205,29 +1245,55 @@ func TestAutoReviewDenyAndMalformedFailureStayDistinctAndDoNotExecute(t *testing
 			})
 			call := tool.Call{ID: "denied-1", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"blocked.txt"}`)}
 			pending := prepareAutomaticApproval(t, harness, call)
-			resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
-			if err != nil || resolution.Mode != agentservice.ApprovalDenied {
-				t.Fatalf("automatic rejection=%+v error=%v", resolution, err)
+			type approvalResult struct {
+				resolution approvalResolution
+				err        error
 			}
-			if !strings.Contains(resolution.DenialMessage, test.wantText) || strings.Contains(resolution.DenialMessage, "Denied by user") {
-				t.Fatalf("denial message=%q", resolution.DenialMessage)
+			result := make(chan approvalResult, 1)
+			go func() {
+				resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+				result <- approvalResult{resolution: resolution, err: err}
+			}()
+			reviewing := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+			if reviewing.State != "reviewing" {
+				t.Fatalf("reviewing event=%+v", reviewing)
 			}
-			if test.wantState == "auto_denied" && !strings.Contains(resolution.DenialMessage, "materially safer alternative") {
-				t.Fatalf("explicit denial omitted anti-circumvention guidance: %q", resolution.DenialMessage)
-			}
-			_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
 			resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved)
 			if resolved.State != test.wantState || resolved.Data["error_kind"] != test.errorKind {
 				t.Fatalf("resolved event=%+v", resolved)
+			}
+			if !strings.Contains(resolved.Text, test.wantText) {
+				t.Fatalf("automatic resolution text=%q", resolved.Text)
 			}
 			if test.wantState == "auto_failed" && (resolved.Data["risk"] != "high" ||
 				!strings.Contains(resolved.Data["rationale"], "Automatic approval review failed (parse)")) {
 				t.Fatalf("fail-closed review omitted diagnostic assessment: %+v", resolved)
 			}
-			if harness.driver.executions.Load() != 0 {
-				t.Fatalf("denied tool executed %d times", harness.driver.executions.Load())
+			if test.promptUser {
+				prompt := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+				if prompt.State != "pending" || prompt.ApprovalID != reviewing.ApprovalID {
+					t.Fatalf("manual fallback event=%+v", prompt)
+				}
+				if err := harness.host.ExecuteAction(context.Background(), Action{
+					Kind: ActionResolveApproval, Target: prompt.ApprovalID, Decision: "once",
+				}); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != test.wantDecider {
+			outcome := <-result
+			wantMode := agentservice.ApprovalDenied
+			wantDecider := "system:auto-review-failure"
+			if test.promptUser {
+				wantMode = agentservice.ApprovalOnce
+				wantDecider = "user"
+			}
+			if outcome.err != nil || outcome.resolution.Mode != wantMode {
+				t.Fatalf("approval outcome=%+v error=%v", outcome.resolution, outcome.err)
+			}
+			if harness.driver.executions.Load() != 0 {
+				t.Fatalf("approval flow executed tool prematurely %d times", harness.driver.executions.Load())
+			}
+			if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != wantDecider {
 				t.Fatalf("durable decider=%q", decider)
 			}
 		})
@@ -1402,24 +1468,39 @@ func TestAutoReviewDenialTrackerThresholdsIsolationAndCleanup(t *testing.T) {
 	}
 }
 
-func TestAutoReviewThirdExplicitDenyReturnsTypedRunError(t *testing.T) {
+func TestAutoReviewRepeatedDenialsStillRequireUserDecision(t *testing.T) {
 	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, _ *http.Request) {
 		writeAutomaticReview(writer, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"not authorized"}`, true)
 	})
 	for attempt := 1; attempt <= 3; attempt++ {
 		call := tool.Call{ID: fmt.Sprintf("deny-%d", attempt), Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"blocked.txt"}`)}
 		pending := prepareAutomaticApproval(t, harness, call)
-		_, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
-		_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
-		_ = nextApprovalEvent(t, harness.host, EventApprovalResolved)
-		if attempt < 3 && err != nil {
-			t.Fatalf("early denial termination at %d: %v", attempt, err)
+		type approvalResult struct {
+			resolution approvalResolution
+			err        error
 		}
-		if attempt == 3 {
-			var limit *AutoReviewDenialLimitError
-			if !errors.As(err, &limit) || limit.RunID != harness.run.RunID {
-				t.Fatalf("third denial error=%v", err)
-			}
+		result := make(chan approvalResult, 1)
+		go func() {
+			resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+			result <- approvalResult{resolution: resolution, err: err}
+		}()
+		reviewing := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+		denied := nextApprovalEvent(t, harness.host, EventApprovalResolved)
+		prompt := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+		if prompt.State != "pending" || prompt.ApprovalID != reviewing.ApprovalID {
+			t.Fatalf("manual fallback %d=%+v", attempt, prompt)
+		}
+		if attempt == 3 && !strings.Contains(denied.Text, "Repeated automatic denials") {
+			t.Fatalf("repeated-denial warning missing: %+v", denied)
+		}
+		if err := harness.host.ExecuteAction(context.Background(), Action{
+			Kind: ActionResolveApproval, Target: prompt.ApprovalID, Decision: "deny",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		outcome := <-result
+		if outcome.err != nil || outcome.resolution.Mode != agentservice.ApprovalDenied {
+			t.Fatalf("user denial %d=%+v error=%v", attempt, outcome.resolution, outcome.err)
 		}
 	}
 	if harness.driver.executions.Load() != 0 {

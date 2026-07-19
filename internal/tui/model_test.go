@@ -611,6 +611,32 @@ func TestAutomaticApprovalEventsRenderReviewingAndResolvedTranscriptStates(t *te
 	}
 }
 
+func TestAutomaticDenialFallsBackToInteractiveApprovalOverlay(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.runID = "run-1"
+	model.status = "Running"
+	request := app.Event{
+		Kind: app.EventApprovalRequested, SessionID: "default", RunID: "run-1",
+		ToolCallID: "call-1", ApprovalID: "approval-1",
+		Data: map[string]string{"tool": "coding.write_file", "target": "config.yaml", "action": "write config"},
+	}
+	reviewing := request
+	reviewing.State = "reviewing"
+	model.applyEvent(reviewing)
+	model.applyEvent(app.Event{
+		Kind: app.EventApprovalResolved, SessionID: "default", RunID: "run-1",
+		ToolCallID: "call-1", ApprovalID: "approval-1", State: "auto_denied",
+		Data: map[string]string{"tool": "coding.write_file", "target": "config.yaml", "risk": "high", "rationale": "needs confirmation"},
+	})
+	request.State = "pending"
+	model.applyEvent(request)
+
+	if model.status != "Awaiting approval" || model.overlay != OverlayApproval || model.approval == nil ||
+		model.approval.ApprovalID != "approval-1" || len(model.pendingApprovals) != 1 {
+		t.Fatalf("automatic denial did not open user approval: status=%q overlay=%q approval=%+v pending=%+v", model.status, model.overlay, model.approval, model.pendingApprovals)
+	}
+}
+
 func TestAutomaticApprovalAndEditUseSeparateAnimatedBlocks(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.runID = "run-1"

@@ -15,9 +15,12 @@ func TestResolvePathsUsesDotConfigForDefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(home, ".config", "azem", "config.yaml")
-	if paths.ConfigFile != want {
+	directory := filepath.Join(home, ".config", "azem")
+	if want := filepath.Join(directory, "config.yaml"); paths.ConfigFile != want {
 		t.Fatalf("config file = %q, want %q", paths.ConfigFile, want)
+	}
+	if want := filepath.Join(directory, "azem.db"); paths.Database != want {
+		t.Fatalf("database = %q, want %q", paths.Database, want)
 	}
 }
 
@@ -31,5 +34,8 @@ func TestResolvePathsHonorsXDGConfigHome(t *testing.T) {
 	}
 	if want := filepath.Join(root, "azem", "config.yaml"); paths.ConfigFile != want {
 		t.Fatalf("config file = %q, want %q", paths.ConfigFile, want)
+	}
+	if want := filepath.Join(root, "azem", "azem.db"); paths.Database != want {
+		t.Fatalf("database = %q, want %q", paths.Database, want)
 	}
 }

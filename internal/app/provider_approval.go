@@ -138,10 +138,11 @@ func teamApprovalReviewRequest(goal, runID string, call tool.Call, definition to
 }
 
 type approvalResolution struct {
-	Mode          agentservice.ApprovalMode
-	DenialMessage string
-	Retry         bool
-	Prevent       bool
+	Mode              agentservice.ApprovalMode
+	DenialMessage     string
+	NeedsUserApproval bool
+	Retry             bool
+	Prevent           bool
 }
 
 type permissionHookDecision struct {
@@ -390,12 +391,14 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 		resolution, approvalErr := s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
 			return s.recordTeamApprovalDecision(decisionCtx, event, request, mode, decidedBy)
 		})
-		if approvalErr == nil && resolution.Mode == agentservice.ApprovalDenied {
-			resolution.Retry, resolution.Prevent = s.observePermissionDenied(ctx, metadata, call, resolution.DenialMessage, false)
+		if approvalErr != nil || !resolution.NeedsUserApproval {
+			return resolution, approvalErr
 		}
-		return resolution, approvalErr
 	}
-	hookDecision := s.permissionHook(ctx, metadata, call)
+	hookDecision := permissionHookDecision{}
+	if mode != ApprovalModeAutoReview {
+		hookDecision = s.permissionHook(ctx, metadata, call)
+	}
 	if hookDecision.behavior == "allow" || hookDecision.behavior == "deny" {
 		resolvedMode := agentservice.ApprovalOnce
 		if hookDecision.behavior == "deny" {
@@ -413,7 +416,7 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 	}
 	live := &liveApproval{
 		approvalID: approvalID, agentType: "team", runID: runID, callID: call.ID,
-		sessionID: sessionID, fingerprint: fingerprint, decision: make(chan agentservice.ApprovalMode, 1),
+		sessionID: sessionID, fingerprint: fingerprint, request: request, decision: make(chan agentservice.ApprovalMode, 1),
 	}
 	s.mu.Lock()
 	if _, exists := s.liveApprovals[approvalID]; exists {
@@ -494,12 +497,14 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 			}
 			return s.coding.ResolveApproval(decisionCtx, run, call.ID, mode, decidedBy)
 		})
-		if approvalErr == nil && resolution.Mode == agentservice.ApprovalDenied {
-			resolution.Retry, resolution.Prevent = s.observePermissionDenied(ctx, metadata, call, resolution.DenialMessage, false)
+		if approvalErr != nil || !resolution.NeedsUserApproval {
+			return resolution, approvalErr
 		}
-		return resolution, approvalErr
 	}
-	hookDecision := s.permissionHook(ctx, metadata, call)
+	hookDecision := permissionHookDecision{}
+	if mode != ApprovalModeAutoReview {
+		hookDecision = s.permissionHook(ctx, metadata, call)
+	}
 	if hookDecision.behavior == "allow" || hookDecision.behavior == "deny" {
 		resolvedMode := agentservice.ApprovalOnce
 		if hookDecision.behavior == "deny" {
@@ -638,8 +643,8 @@ func (s *Service) automaticApproval(
 	}
 
 	rationale := boundedReviewText(assessment.Rationale, 600)
-	decisionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	if assessment.Outcome == "allow" {
+		decisionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		decisionErr := decide(decisionCtx, agentservice.ApprovalOnce, codex.ApprovalReviewerModel)
 		cancel()
 		s.recordAutoReview(event.RunID, false)
@@ -653,20 +658,14 @@ func (s *Service) automaticApproval(
 		return approvalResolution{Mode: agentservice.ApprovalOnce}, nil
 	}
 
-	decisionErr := decide(decisionCtx, agentservice.ApprovalDenied, codex.ApprovalReviewerModel)
-	cancel()
 	limitErr := s.recordAutoReview(event.RunID, true)
 	message := "Denied by automatic review: " + rationale +
-		"\nDo not retry the same outcome through a variant or workaround. Choose a materially safer alternative or ask the user."
-	if decisionErr != nil {
-		s.emitAutomaticApprovalResolved(event, "auto_failed", assessment.RiskLevel, assessment.UserAuthorization, rationale, "decision", "Automatic review denial could not be recorded; action did not run.")
-		return approvalResolution{}, fmt.Errorf("record automatic denial: %w", decisionErr)
+		"\nUser confirmation is required before this action can run."
+	if limitErr != nil {
+		message += "\nRepeated automatic denials were detected; automatic execution remains paused for user review."
 	}
 	s.emitAutomaticApprovalResolved(event, "auto_denied", assessment.RiskLevel, assessment.UserAuthorization, rationale, "", message)
-	if limitErr != nil {
-		return approvalResolution{}, limitErr
-	}
-	return approvalResolution{Mode: agentservice.ApprovalDenied, DenialMessage: message}, nil
+	return approvalResolution{NeedsUserApproval: true, DenialMessage: message}, nil
 }
 
 func (s *Service) emitAutomaticApprovalResolved(event Event, state, risk, authorization, rationale, errorKind, text string) {
@@ -854,6 +853,16 @@ func (s *Service) resolveLiveApproval(ctx context.Context, approvalID, decision,
 
 	if live.run != nil {
 		if err := s.coding.ResolveApproval(ctx, live.run, live.callID, mode, decidedBy); err != nil {
+			s.mu.Lock()
+			if current := s.liveApprovals[approvalID]; current == live {
+				live.resolving = false
+			}
+			s.mu.Unlock()
+			return true, err
+		}
+	} else if live.request.ToolName != "" && s.coding != nil {
+		event := Event{RunID: live.runID, ToolCallID: live.callID, ApprovalID: live.approvalID}
+		if err := s.recordTeamApprovalDecision(ctx, event, live.request, mode, decidedBy); err != nil {
 			s.mu.Lock()
 			if current := s.liveApprovals[approvalID]; current == live {
 				live.resolving = false

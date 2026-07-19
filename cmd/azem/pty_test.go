@@ -252,7 +252,7 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 func seedPendingEditApproval(t *testing.T, workspace string) {
 	t.Helper()
 	ctx := context.Background()
-	database := filepath.Join(workspace, "data", "azem", "azem.db")
+	database := filepath.Join(workspace, "config", "azem", "azem.db")
 	store, err := sqlitestore.Open(ctx, database)
 	if err != nil {
 		t.Fatal(err)

@@ -55,7 +55,7 @@ func ResolvePaths(startupWorkspace string) (Paths, error) {
 		ConfigDir:  configDir,
 		ConfigFile: filepath.Join(configDir, "config.yaml"),
 		DataDir:    dataDir,
-		Database:   filepath.Join(dataDir, "azem.db"),
+		Database:   filepath.Join(configDir, "azem.db"),
 		StateDir:   stateDir,
 		LogFile:    filepath.Join(stateDir, "azem.log"),
 		Workspace:  workspace,

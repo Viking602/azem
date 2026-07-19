@@ -48,6 +48,7 @@ type liveApproval struct {
 	sessionID   string
 	runID       string
 	fingerprint string
+	request     approvalReviewRequest
 	decision    chan agentservice.ApprovalMode
 	resolving   bool
 	resolved    bool
