@@ -380,6 +380,88 @@ func TestCompleteRunPersistsTerminalState(t *testing.T) {
 	}
 }
 
+func TestRunLeaseHeartbeatKeepsLongRunReportable(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const leaseTTL = 120 * time.Millisecond
+	service, err := NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.runLeaseTTL = leaseTTL
+	service.runHeartbeatInterval = 20 * time.Millisecond
+	defer service.Close(ctx)
+	run, err := service.StartRun(ctx, "long running task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initialExpiry int64
+	if err := store.DB().QueryRowContext(ctx, `SELECT expires_at FROM leases WHERE id=?`, run.LeaseID).Scan(&initialExpiry); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		var version int
+		var extendedExpiry int64
+		if err := store.DB().QueryRowContext(ctx, `SELECT version,expires_at FROM leases WHERE id=?`, run.LeaseID).Scan(&version, &extendedExpiry); err != nil {
+			t.Fatal(err)
+		}
+		if version > 1 && extendedExpiry > initialExpiry {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run lease was not renewed before its initial expiry")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if wait := time.Until(time.Unix(0, initialExpiry).Add(20 * time.Millisecond)); wait > 0 {
+		time.Sleep(wait)
+	}
+	if err := service.CompleteRun(ctx, run, "done", nil); err != nil {
+		t.Fatalf("complete run after initial lease expiry: %v", err)
+	}
+	projection, err := service.Recover(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Run.Status != api.RunStatusCompleted {
+		t.Fatalf("run status = %q, want completed", projection.Run.Status)
+	}
+}
+
+func TestCompleteRunPersistsProviderFailureAfterLeaseRefresh(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.runLeaseTTL = time.Second
+	service.runHeartbeatInterval = 50 * time.Millisecond
+	defer service.Close(ctx)
+	run, err := service.StartRun(ctx, "provider failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := fmt.Errorf("provider connection failed")
+	if err := service.CompleteRun(ctx, run, "", failure); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.Recover(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Run.Status != api.RunStatusFailed {
+		t.Fatalf("run status = %q, want failed", projection.Run.Status)
+	}
+}
+
 func executeRead(t *testing.T, ctx context.Context, service *Service, run *Run, id string, path string) coding.ReadFileToolResult {
 	t.Helper()
 	arguments, _ := json.Marshal(map[string]string{"path": path})

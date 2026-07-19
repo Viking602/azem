@@ -21,19 +21,19 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 
 func TestHooksConfigDefaultsAndLoad(t *testing.T) {
 	cfg := Default()
-	if !cfg.Hooks.Enabled || cfg.Hooks.TrustProject || !cfg.Hooks.ClaudeCompatibility || cfg.Hooks.DefaultTimeoutParsed != 5*time.Second || cfg.Hooks.FailurePolicy != "open" {
+	if !cfg.Hooks.Enabled || cfg.Hooks.TrustProject || cfg.Hooks.ClaudeCompatibility || cfg.Hooks.DefaultTimeoutParsed != 5*time.Second || cfg.Hooks.FailurePolicy != "open" {
 		t.Fatalf("hook defaults = %#v", cfg.Hooks)
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(path, []byte("version: 1\nhooks:\n  default_timeout: 2s\n  failure_policy: closed\n  additional_paths: [hooks]\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("version: 1\nhooks:\n  claude_compatibility: true\n  default_timeout: 2s\n  failure_policy: closed\n  additional_paths: [hooks]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Hooks.DefaultTimeoutParsed != 2*time.Second || cfg.Hooks.AdditionalPaths[0] != filepath.Join(root, "hooks") {
+	if !cfg.Hooks.ClaudeCompatibility || cfg.Hooks.DefaultTimeoutParsed != 2*time.Second || cfg.Hooks.AdditionalPaths[0] != filepath.Join(root, "hooks") {
 		t.Fatalf("loaded hooks = %#v", cfg.Hooks)
 	}
 	cfg.Hooks.FailurePolicy = "unsafe"
@@ -201,7 +201,7 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		subagents.AwaitDuration != 10*time.Minute || !subagents.AutoWake {
 		t.Fatalf("subagent defaults = %#v", subagents)
 	}
-	if subagents.Budget.MaxTokens != 128_000 || subagents.Budget.MaxToolCalls != 64 ||
+	if subagents.Budget.MaxTokens != 0 || subagents.Budget.MaxToolCalls != 64 ||
 		subagents.Budget.MaxTurns != 32 || subagents.Budget.MaxWallClockDuration != 20*time.Minute {
 		t.Fatalf("subagent budget = %#v", subagents.Budget)
 	}
@@ -220,6 +220,11 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid.Agents.Subagents.AwaitTimeout = "30m"
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("await timeout beyond wall-clock budget was accepted")
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.Budget.MaxTokens = -1
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative subagent token budget was accepted")
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.Budget.MaxToolCalls = 0

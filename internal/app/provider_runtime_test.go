@@ -18,8 +18,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	hyagent "github.com/Viking602/go-hydaelyn/agent"
 	"github.com/Viking602/go-hydaelyn/api"
 	"github.com/Viking602/go-hydaelyn/message"
+	"github.com/Viking602/go-hydaelyn/multiagent"
 	"github.com/Viking602/go-hydaelyn/stream"
 	"github.com/Viking602/go-hydaelyn/tool"
 
@@ -28,6 +30,7 @@ import (
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
 	"github.com/Viking602/azem/internal/session"
@@ -212,6 +215,53 @@ func TestTurnContextBuildsPriorConversationBeforeCurrentRequest(t *testing.T) {
 		messages[2].Role != message.RoleAssistant || messages[2].Text != "first answer" ||
 		messages[3].Role != message.RoleUser || messages[3].Text != "follow-up request" {
 		t.Fatalf("messages=%+v", messages)
+	}
+}
+
+func TestTurnContextInjectsHistoricalEvidenceAsPrivateSystemContext(t *testing.T) {
+	contextManager := turnContext{
+		instructions:      "system rules",
+		privateContext:    "trusted hook context",
+		historicalContext: `{"memories":[{"Content":"use sqlite"}]}`,
+		history:           []session.Block{{Kind: "assistant", Content: "prior answer"}},
+	}
+	messages, err := contextManager.Build(context.Background(), api.Task{Goal: "current request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 6 || messages[2].Role != message.RoleSystem || messages[2].Visibility != message.VisibilityPrivate ||
+		!strings.Contains(messages[2].Text, "untrusted JSON data") || messages[4].Role != message.RoleUser ||
+		messages[4].Visibility != message.VisibilityPrivate || !strings.Contains(messages[4].Text, `"Content":"use sqlite"`) ||
+		messages[5].Text != "current request" {
+		t.Fatalf("historical context ordering/visibility = %+v", messages)
+	}
+}
+
+func TestTeamHistoricalEvidenceIsPlannerOnlyAndNotSystemData(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	hooks := service.teamHooks("session-1", "run-1", "", `{"memories":[{"Content":"planner evidence"}]}`)
+	for _, className := range []string{agentservice.PlannerClass, agentservice.ImplementerClass} {
+		engine := hyagent.Engine{ContextBuilder: turnContext{instructions: "system rules"}}
+		prepared, err := hooks.PrepareEngine(context.Background(), engine, multiagent.Dispatch{Task: api.Task{RunID: "run-1"}}, multiagent.AgentClass{Name: className})
+		if err != nil {
+			t.Fatal(err)
+		}
+		messages, err := prepared.ContextBuilder.Build(context.Background(), api.Task{Goal: "current task"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, current := range messages {
+			if strings.Contains(current.Text, "planner evidence") {
+				found = true
+				if current.Role == message.RoleSystem || current.Visibility != message.VisibilityPrivate {
+					t.Fatalf("%s historical data authority/visibility = %+v", className, current)
+				}
+			}
+		}
+		if found != (className == agentservice.PlannerClass) {
+			t.Fatalf("%s historical evidence found=%v", className, found)
+		}
 	}
 }
 
@@ -1085,25 +1135,107 @@ func TestAutoReviewTeamDecisionWritesDurableAudit(t *testing.T) {
 	}
 }
 
-func TestAutoReviewDenyAndMalformedFailureStayDistinctAndDoNotExecute(t *testing.T) {
+func TestAutoReviewTeamDenyFallsBackToUserApproval(t *testing.T) {
+	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writeAutomaticReview(writer, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"team action needs confirmation"}`, true)
+	})
+	call := tool.Call{ID: "team-deny", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"team.txt"}`)}
+	type approvalResult struct {
+		resolution approvalResolution
+		err        error
+	}
+	result := make(chan approvalResult, 1)
+	go func() {
+		resolution, err := harness.host.awaitTeamApproval(
+			context.Background(), "session", harness.run.RunID, "team user goal", call, harness.driver.Definition(),
+		)
+		result <- approvalResult{resolution: resolution, err: err}
+	}()
+	reviewing := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	if reviewing.State != "reviewing" {
+		t.Fatalf("team reviewing event=%+v", reviewing)
+	}
+	denied := nextApprovalEvent(t, harness.host, EventApprovalResolved)
+	if denied.State != "auto_denied" {
+		t.Fatalf("team automatic denial=%+v", denied)
+	}
+	prompt := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	if prompt.State != "pending" || prompt.ApprovalID != reviewing.ApprovalID {
+		t.Fatalf("team manual fallback=%+v", prompt)
+	}
+	if err := harness.host.ExecuteAction(context.Background(), Action{
+		Kind: ActionResolveApproval, Target: prompt.ApprovalID, Decision: "once",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outcome := <-result
+	if outcome.err != nil || outcome.resolution.Mode != agentservice.ApprovalOnce {
+		t.Fatalf("team user approval=%+v error=%v", outcome.resolution, outcome.err)
+	}
+	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != "user" {
+		t.Fatalf("team durable decider=%q", decider)
+	}
+}
+
+func TestAutoReviewDoesNotInvokeInteractivePermissionHooks(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX shell command")
+	}
+	var reviews atomic.Int32
+	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, _ *http.Request) {
+		reviews.Add(1)
+		writeAutomaticReview(writer, `{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized write"}`, true)
+	})
+	hookPath := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(hookPath, []byte(`{"hooks":{"PermissionRequest":[{"matcher":"*","hooks":[{"name":"interactive-bridge","type":"command","command":"printf 'interactive permission hook ran' >&2; exit 2"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	harness.host.AttachHooks(hooks.Dispatcher{
+		Registry: hooks.Discover(hooks.Options{Sources: []hooks.Source{{Path: hookPath, Trusted: true}}}),
+	})
+
+	call := tool.Call{ID: "hook-skip", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"reviewed.txt"}`)}
+	pending := prepareAutomaticApproval(t, harness, call)
+	resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+	if err != nil || resolution.Mode != agentservice.ApprovalOnce {
+		t.Fatalf("automatic approval was intercepted by interactive hook: resolution=%+v error=%v", resolution, err)
+	}
+	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	if resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved); resolved.State != "auto_approved" {
+		t.Fatalf("automatic resolution=%+v", resolved)
+	}
+
+	teamCall := tool.Call{ID: "team-hook-skip", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"team-reviewed.txt"}`)}
+	resolution, err = harness.host.awaitTeamApproval(context.Background(), "session", harness.run.RunID, "team goal", teamCall, harness.driver.Definition())
+	if err != nil || resolution.Mode != agentservice.ApprovalOnce {
+		t.Fatalf("team automatic approval was intercepted by interactive hook: resolution=%+v error=%v", resolution, err)
+	}
+	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	if resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved); resolved.State != "auto_approved" {
+		t.Fatalf("team automatic resolution=%+v", resolved)
+	}
+	if reviews.Load() != 2 {
+		t.Fatalf("automatic reviewer calls=%d, want 2", reviews.Load())
+	}
+}
+
+func TestAutoReviewDenyFallsBackToUserWhileMalformedFailureStaysClosed(t *testing.T) {
 	tests := []struct {
-		name        string
-		output      string
-		wantState   string
-		wantDecider string
-		wantText    string
-		errorKind   string
+		name       string
+		output     string
+		wantState  string
+		wantText   string
+		errorKind  string
+		promptUser bool
 	}{
 		{
 			name:      "explicit deny",
 			output:    `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"target is not authorized"}`,
-			wantState: "auto_denied", wantDecider: codex.ApprovalReviewerModel,
-			wantText: "Denied by automatic review", errorKind: "",
+			wantState: "auto_denied", wantText: "Denied by automatic review", errorKind: "", promptUser: true,
 		},
 		{
 			name: "malformed output", output: `{`,
-			wantState: "auto_failed", wantDecider: "system:auto-review-failure",
-			wantText: "Automatic review failed", errorKind: "parse",
+			wantState: "auto_failed", wantText: "Automatic review failed", errorKind: "parse",
 		},
 	}
 	for _, test := range tests {
@@ -1113,29 +1245,55 @@ func TestAutoReviewDenyAndMalformedFailureStayDistinctAndDoNotExecute(t *testing
 			})
 			call := tool.Call{ID: "denied-1", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"blocked.txt"}`)}
 			pending := prepareAutomaticApproval(t, harness, call)
-			resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
-			if err != nil || resolution.Mode != agentservice.ApprovalDenied {
-				t.Fatalf("automatic rejection=%+v error=%v", resolution, err)
+			type approvalResult struct {
+				resolution approvalResolution
+				err        error
 			}
-			if !strings.Contains(resolution.DenialMessage, test.wantText) || strings.Contains(resolution.DenialMessage, "Denied by user") {
-				t.Fatalf("denial message=%q", resolution.DenialMessage)
+			result := make(chan approvalResult, 1)
+			go func() {
+				resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+				result <- approvalResult{resolution: resolution, err: err}
+			}()
+			reviewing := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+			if reviewing.State != "reviewing" {
+				t.Fatalf("reviewing event=%+v", reviewing)
 			}
-			if test.wantState == "auto_denied" && !strings.Contains(resolution.DenialMessage, "materially safer alternative") {
-				t.Fatalf("explicit denial omitted anti-circumvention guidance: %q", resolution.DenialMessage)
-			}
-			_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
 			resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved)
 			if resolved.State != test.wantState || resolved.Data["error_kind"] != test.errorKind {
 				t.Fatalf("resolved event=%+v", resolved)
+			}
+			if !strings.Contains(resolved.Text, test.wantText) {
+				t.Fatalf("automatic resolution text=%q", resolved.Text)
 			}
 			if test.wantState == "auto_failed" && (resolved.Data["risk"] != "high" ||
 				!strings.Contains(resolved.Data["rationale"], "Automatic approval review failed (parse)")) {
 				t.Fatalf("fail-closed review omitted diagnostic assessment: %+v", resolved)
 			}
-			if harness.driver.executions.Load() != 0 {
-				t.Fatalf("denied tool executed %d times", harness.driver.executions.Load())
+			if test.promptUser {
+				prompt := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+				if prompt.State != "pending" || prompt.ApprovalID != reviewing.ApprovalID {
+					t.Fatalf("manual fallback event=%+v", prompt)
+				}
+				if err := harness.host.ExecuteAction(context.Background(), Action{
+					Kind: ActionResolveApproval, Target: prompt.ApprovalID, Decision: "once",
+				}); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != test.wantDecider {
+			outcome := <-result
+			wantMode := agentservice.ApprovalDenied
+			wantDecider := "system:auto-review-failure"
+			if test.promptUser {
+				wantMode = agentservice.ApprovalOnce
+				wantDecider = "user"
+			}
+			if outcome.err != nil || outcome.resolution.Mode != wantMode {
+				t.Fatalf("approval outcome=%+v error=%v", outcome.resolution, outcome.err)
+			}
+			if harness.driver.executions.Load() != 0 {
+				t.Fatalf("approval flow executed tool prematurely %d times", harness.driver.executions.Load())
+			}
+			if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != wantDecider {
 				t.Fatalf("durable decider=%q", decider)
 			}
 		})
@@ -1310,24 +1468,39 @@ func TestAutoReviewDenialTrackerThresholdsIsolationAndCleanup(t *testing.T) {
 	}
 }
 
-func TestAutoReviewThirdExplicitDenyReturnsTypedRunError(t *testing.T) {
+func TestAutoReviewRepeatedDenialsStillRequireUserDecision(t *testing.T) {
 	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, _ *http.Request) {
 		writeAutomaticReview(writer, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"not authorized"}`, true)
 	})
 	for attempt := 1; attempt <= 3; attempt++ {
 		call := tool.Call{ID: fmt.Sprintf("deny-%d", attempt), Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"blocked.txt"}`)}
 		pending := prepareAutomaticApproval(t, harness, call)
-		_, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
-		_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
-		_ = nextApprovalEvent(t, harness.host, EventApprovalResolved)
-		if attempt < 3 && err != nil {
-			t.Fatalf("early denial termination at %d: %v", attempt, err)
+		type approvalResult struct {
+			resolution approvalResolution
+			err        error
 		}
-		if attempt == 3 {
-			var limit *AutoReviewDenialLimitError
-			if !errors.As(err, &limit) || limit.RunID != harness.run.RunID {
-				t.Fatalf("third denial error=%v", err)
-			}
+		result := make(chan approvalResult, 1)
+		go func() {
+			resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+			result <- approvalResult{resolution: resolution, err: err}
+		}()
+		reviewing := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+		denied := nextApprovalEvent(t, harness.host, EventApprovalResolved)
+		prompt := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+		if prompt.State != "pending" || prompt.ApprovalID != reviewing.ApprovalID {
+			t.Fatalf("manual fallback %d=%+v", attempt, prompt)
+		}
+		if attempt == 3 && !strings.Contains(denied.Text, "Repeated automatic denials") {
+			t.Fatalf("repeated-denial warning missing: %+v", denied)
+		}
+		if err := harness.host.ExecuteAction(context.Background(), Action{
+			Kind: ActionResolveApproval, Target: prompt.ApprovalID, Decision: "deny",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		outcome := <-result
+		if outcome.err != nil || outcome.resolution.Mode != agentservice.ApprovalDenied {
+			t.Fatalf("user denial %d=%+v error=%v", attempt, outcome.resolution, outcome.err)
 		}
 	}
 	if harness.driver.executions.Load() != 0 {
@@ -1438,4 +1611,279 @@ func durableApprovalDecider(t *testing.T, coding *agentservice.Service, runID st
 	}
 	t.Fatalf("run %s has no durable approval decision", runID)
 	return ""
+}
+
+func TestTurnContextBuildReplaysCompatibleHistoryAndAppendsDynamicTail(t *testing.T) {
+	saved := []message.Message{
+		message.NewText(message.RoleSystem, mainInstructions),
+		{
+			Role: message.RoleSystem, Text: "saved skill catalog",
+			Metadata: map[string]string{"hydaelyn.skill.context": "catalog"},
+		},
+		message.NewText(message.RoleUser, "old request"),
+		{
+			Role: message.RoleAssistant, Text: "old answer",
+			ProviderState: json.RawMessage(`[{"type":"reasoning","id":"reasoning-1"}]`),
+		},
+	}
+	manager := turnContext{
+		instructions: mainInstructions, providerID: "chatgpt", modelID: "gpt-test",
+		modelHistory: session.ModelHistory{
+			ProviderID: "chatgpt", ModelID: "gpt-test",
+			InstructionFingerprint: mainInstructionFingerprint, Messages: saved,
+		},
+		history: []session.Block{
+			{Kind: "user", Content: "old request"},
+			{Kind: "assistant", Content: "old answer"},
+			{Kind: "user", Content: "current hook user", State: "hook"},
+		},
+		persistedHistory:  2,
+		privateContext:    "current trusted hook",
+		historicalContext: `{"memories":["current evidence"]}`,
+		todo:              session.TodoList{Goal: "current todo", Revision: 3},
+	}
+	got, err := manager.Build(context.Background(), api.Task{Goal: "new request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(saved)+6 || !reflect.DeepEqual(got[:len(saved)], saved) {
+		t.Fatalf("saved prefix changed:\n got=%#v\nwant=%#v", got, saved)
+	}
+	tail := got[len(saved):]
+	if tail[0].Role != message.RoleSystem || tail[0].Visibility != message.VisibilityPrivate ||
+		!strings.Contains(tail[0].Text, "current trusted hook") {
+		t.Fatalf("private hook tail = %#v", tail[0])
+	}
+	if tail[1].Role != message.RoleSystem || tail[1].Visibility != message.VisibilityPrivate ||
+		!strings.HasPrefix(tail[1].Text, todoReminderPrefix) {
+		t.Fatalf("todo tail = %#v", tail[1])
+	}
+	if tail[2].Text != historicalEvidencePolicy || tail[2].Visibility != message.VisibilityPrivate {
+		t.Fatalf("historical policy tail = %#v", tail[2])
+	}
+	if tail[3].Role != message.RoleUser || tail[3].Text != "current hook user" {
+		t.Fatalf("hook user tail = %#v", tail[3])
+	}
+	if tail[4].Role != message.RoleUser || tail[4].Visibility != message.VisibilityPrivate ||
+		!strings.Contains(tail[4].Text, "current evidence") {
+		t.Fatalf("historical data tail = %#v", tail[4])
+	}
+	if tail[5].Role != message.RoleUser || tail[5].Text != "new request" {
+		t.Fatalf("goal tail = %#v", tail[5])
+	}
+}
+
+func TestTurnContextBuildFallsBackWhenModelHistoryScopeDiffers(t *testing.T) {
+	manager := turnContext{
+		instructions: mainInstructions, providerID: "chatgpt", modelID: "gpt-new",
+		modelHistory: session.ModelHistory{
+			ProviderID: "chatgpt", ModelID: "gpt-old",
+			InstructionFingerprint: mainInstructionFingerprint,
+			Messages: []message.Message{{
+				Role: message.RoleAssistant, Text: "stale answer",
+				ProviderState: json.RawMessage(`[{"type":"reasoning","id":"stale"}]`),
+			}},
+		},
+		history: []session.Block{
+			{Kind: "user", Content: "visible request"},
+			{Kind: "assistant", Content: "visible answer"},
+		},
+		persistedHistory: 2,
+	}
+	got, err := manager.Build(context.Background(), api.Task{Goal: "switched request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 || got[0].Role != message.RoleSystem || got[0].Text != mainInstructions ||
+		got[1].Role != message.RoleUser || got[1].Text != "visible request" ||
+		got[2].Role != message.RoleAssistant || got[2].Text != "visible answer" ||
+		got[3].Role != message.RoleUser || got[3].Text != "switched request" {
+		t.Fatalf("fallback messages = %#v", got)
+	}
+	for _, current := range got {
+		if len(current.ProviderState) != 0 || current.Text == "stale answer" {
+			t.Fatalf("stale exact state leaked into fallback: %#v", current)
+		}
+	}
+}
+
+func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	hooks := service.teamHooks("session-1", "team-parent", "", "")
+	base := hyagent.Engine{ExtraBody: map[string]any{"parallel_tool_calls": false}}
+	prepare := func(runID string) hyagent.Engine {
+		t.Helper()
+		prepared, err := hooks.PrepareEngine(context.Background(), base, multiagent.Dispatch{
+			Task: api.Task{RunID: runID}, To: "implementer",
+		}, multiagent.AgentClass{Name: agentservice.ImplementerClass})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prepared.ExtraBody["parallel_tool_calls"] != false {
+			t.Fatalf("existing provider option lost: %#v", prepared.ExtraBody)
+		}
+		return prepared
+	}
+	first := prepare("child-run-1")
+	repeated := prepare("child-run-1")
+	second := prepare("child-run-2")
+	if first.ExtraBody["prompt_cache_key"] != "child-run-1" ||
+		repeated.ExtraBody["prompt_cache_key"] != "child-run-1" ||
+		second.ExtraBody["prompt_cache_key"] != "child-run-2" {
+		t.Fatalf("team cache keys first=%#v repeated=%#v second=%#v", first.ExtraBody, repeated.ExtraBody, second.ExtraBody)
+	}
+	if _, mutated := base.ExtraBody["prompt_cache_key"]; mutated {
+		t.Fatalf("base engine ExtraBody mutated: %#v", base.ExtraBody)
+	}
+}
+
+func TestMainTurnsKeepSerializedPrefixStableAndAppendRawOutputAndNewTail(t *testing.T) {
+	const firstOutput = `[{"type":"reasoning","id":"rs_first","encrypted_content":"opaque"},{"type":"message","id":"msg_first","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}]`
+	const secondOutput = `[{"type":"message","id":"msg_second","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}]`
+	type capturedRequest struct {
+		PromptCacheKey string            `json:"prompt_cache_key"`
+		Instructions   string            `json:"instructions"`
+		Input          []json.RawMessage `json:"input"`
+	}
+	var captured []capturedRequest
+	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, body string, writer http.ResponseWriter) {
+		var request capturedRequest
+		if err := json.Unmarshal([]byte(body), &request); err != nil {
+			t.Errorf("decode captured request %d: %v", call, err)
+		}
+		captured = append(captured, request)
+		switch call {
+		case 1:
+			_, _ = fmt.Fprint(writer, `data: {"type":"response.output_text.delta","delta":"first answer"}`+"\n\n")
+			_, _ = fmt.Fprint(writer, `data: {"type":"response.completed","response":{"status":"completed","output":`+firstOutput+`}}`+"\n\n")
+		case 2:
+			_, _ = fmt.Fprint(writer, `data: {"type":"response.output_text.delta","delta":"second answer"}`+"\n\n")
+			_, _ = fmt.Fprint(writer, `data: {"type":"response.completed","response":{"status":"completed","output":`+secondOutput+`}}`+"\n\n")
+		default:
+			t.Errorf("unexpected provider request %d", call)
+		}
+	})
+	ctx := context.Background()
+	sessions := harness.service.sessions
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "cache-session", Title: "Cache", ProviderID: "chatgpt", ModelID: "gpt-skill", Reasoning: "minimal", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.UpdateTodo(ctx, "cache-session", 0, func(todo *session.TodoList) error {
+		todo.Goal = "first todo"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	firstRun, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "cache-session", Prompt: "first request", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, firstRun)
+	if _, err := sessions.UpdateTodo(ctx, "cache-session", 1, func(todo *session.TodoList) error {
+		todo.Goal = "second todo"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secondRun, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "cache-session", Prompt: "second request", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, secondRun)
+
+	if len(captured) != 2 || captured[0].PromptCacheKey != "cache-session" ||
+		captured[1].PromptCacheKey != "cache-session" || captured[0].Instructions != captured[1].Instructions {
+		t.Fatalf("captured cache requests = %#v", captured)
+	}
+	var rawOutput []json.RawMessage
+	if err := json.Unmarshal([]byte(firstOutput), &rawOutput); err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := append(append([]json.RawMessage(nil), captured[0].Input...), rawOutput...)
+	if len(captured[1].Input) <= len(wantPrefix) || !reflect.DeepEqual(captured[1].Input[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("second input did not preserve first request plus raw output:\nfirst=%s\nsecond=%s", captured[0].Input, captured[1].Input)
+	}
+	tailJSON, err := json.Marshal(captured[1].Input[len(wantPrefix):])
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail := string(tailJSON)
+	if !strings.Contains(tail, "second todo") || !strings.Contains(tail, "second request") ||
+		strings.Contains(tail, "first todo") || strings.Contains(tail, "first request") {
+		t.Fatalf("second dynamic tail = %s", tail)
+	}
+	projection, err := sessions.LoadProjection(ctx, "cache-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.ModelHistory.ProviderID != "chatgpt" || projection.ModelHistory.ModelID != "gpt-skill" ||
+		projection.ModelHistory.InstructionFingerprint != mainInstructionFingerprint ||
+		len(projection.ModelHistory.Messages) == 0 ||
+		string(projection.ModelHistory.Messages[len(projection.ModelHistory.Messages)-1].ProviderState) != secondOutput {
+		t.Fatalf("persisted exact history = %#v", projection.ModelHistory)
+	}
+}
+
+func TestMainTurnReplacesMismatchedSnapshotOnlyAfterSuccessfulFallback(t *testing.T) {
+	const freshOutput = `[{"type":"message","id":"fresh_message","role":"assistant","content":[{"type":"output_text","text":"fresh answer"}]}]`
+	var capturedBody string
+	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, body string, writer http.ResponseWriter) {
+		if call != 1 {
+			t.Errorf("unexpected provider request %d", call)
+		}
+		capturedBody = body
+		_, _ = fmt.Fprint(writer, `data: {"type":"response.output_text.delta","delta":"fresh answer"}`+"\n\n")
+		_, _ = fmt.Fprint(writer, `data: {"type":"response.completed","response":{"status":"completed","output":`+freshOutput+`}}`+"\n\n")
+	})
+	ctx := context.Background()
+	sessions := harness.service.sessions
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "mismatch-session", Title: "Mismatch", ProviderID: "chatgpt", ModelID: "gpt-skill", Reasoning: "minimal", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.AppendBlock(ctx, "mismatch-session", session.Block{Kind: "user", RunID: "old-run", Content: "visible request"}); err != nil {
+		t.Fatal(err)
+	}
+	stale := session.ModelHistory{
+		ProviderID: "chatgpt", ModelID: "different-model", InstructionFingerprint: mainInstructionFingerprint,
+		Messages: []message.Message{{
+			Role: message.RoleAssistant, Text: "stale hidden answer",
+			ProviderState: json.RawMessage(`[{"type":"reasoning","id":"stale_reasoning"}]`),
+		}},
+	}
+	if err := sessions.CompleteTurn(ctx, "mismatch-session", session.Block{
+		Kind: "assistant", RunID: "old-run", Content: "visible answer",
+	}, stale); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "mismatch-session", Prompt: "follow up", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, runID)
+	if !strings.Contains(capturedBody, "visible request") || !strings.Contains(capturedBody, "visible answer") ||
+		strings.Contains(capturedBody, "stale hidden answer") || strings.Contains(capturedBody, "stale_reasoning") {
+		t.Fatalf("mismatch fallback request = %s", capturedBody)
+	}
+	projection, err := sessions.LoadProjection(ctx, "mismatch-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := projection.ModelHistory
+	if got.ModelID != "gpt-skill" || got.InstructionFingerprint != mainInstructionFingerprint ||
+		len(got.Messages) == 0 || string(got.Messages[len(got.Messages)-1].ProviderState) != freshOutput {
+		t.Fatalf("replacement snapshot = %#v", got)
+	}
 }

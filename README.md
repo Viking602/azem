@@ -312,7 +312,7 @@ Azem follows operating-system user-directory conventions and creates an `azem` s
 | Data | Location |
 |---|---|
 | Configuration | `azem/config.yaml` under the user configuration directory |
-| Database | `azem/azem.db` under the user data directory |
+| Database | `azem/azem.db` under the user configuration directory |
 | Runtime state | `azem/` under the user cache or state directory |
 
 On Linux, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` override the corresponding base directories.

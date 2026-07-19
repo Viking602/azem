@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Viking602/azem/internal/skills"
@@ -23,29 +24,44 @@ import (
 
 const mainAgentID = "azem-main"
 
+const (
+	defaultRunLeaseTTL               = 10 * time.Minute
+	defaultRunLeaseHeartbeatInterval = 30 * time.Second
+)
+
 type Service struct {
-	runner             *hydaelyn.Runner
-	store              api.StoreProvider
-	workspace          coding.Workspace
-	tools              *tool.Bus
-	policy             *ApprovalPolicy
-	allowWrite         bool
-	shellPolicy        string
-	allowNetwork       string
-	teamMaxConcurrency int
-	teamMaxTicks       int
-	skills             *skills.Catalog
+	runner               *hydaelyn.Runner
+	store                api.StoreProvider
+	workspace            coding.Workspace
+	tools                *tool.Bus
+	policy               *ApprovalPolicy
+	allowWrite           bool
+	shellPolicy          string
+	allowNetwork         string
+	teamMaxConcurrency   int
+	teamMaxTicks         int
+	skills               *skills.Catalog
+	runLeaseTTL          time.Duration
+	runHeartbeatInterval time.Duration
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	wg                   sync.WaitGroup
 }
 
 type Run struct {
-	RunID        string
-	Goal         string
-	TaskID       string
-	LeaseID      string
-	TaskVersion  int
-	HolderID     string
-	pending      map[string]PendingApproval
-	approvedOnce map[string]string
+	RunID           string
+	Goal            string
+	TaskID          string
+	LeaseID         string
+	TaskVersion     int
+	HolderID        string
+	pending         map[string]PendingApproval
+	approvedOnce    map[string]string
+	leaseCancel     context.CancelFunc
+	leaseParentStop func() bool
+	leaseDone       <-chan error
+	leaseStopOnce   sync.Once
+	leaseErr        error
 }
 
 type PendingApproval struct {
@@ -121,14 +137,17 @@ func NewService(store api.StoreProvider, workspaceRoot string, options ...Servic
 	}
 	runner.RegisterAgent(api.AgentProfile{ID: mainAgentID, Role: "coding"})
 	workspace := coding.NewLocalWorkspace(workspaceRoot)
+	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 	service := &Service{
 		runner: runner, store: store, workspace: workspace, policy: policy,
 		allowWrite: settings.allowWrite, shellPolicy: settings.shellPolicy, allowNetwork: settings.network,
 		teamMaxConcurrency: settings.teamMaxConcurrency, teamMaxTicks: settings.teamMaxTicks,
-		skills: settings.skills,
+		skills: settings.skills, runLeaseTTL: defaultRunLeaseTTL, runHeartbeatInterval: defaultRunLeaseHeartbeatInterval,
+		ctx: serviceCtx, cancel: serviceCancel,
 	}
 	drivers, err := service.WorkspaceDrivers(context.Background(), workspaceRoot)
 	if err != nil {
+		serviceCancel()
 		return nil, err
 	}
 	service.tools = tool.NewBus(drivers...)
@@ -184,7 +203,7 @@ func (s *Service) StartRun(ctx context.Context, request string) (*Run, error) {
 		return nil, err
 	}
 	lease, acquired, err := s.runner.AcquireTaskExecution(ctx, api.AcquireTaskExecutionCommand{
-		RunID: run.ID, TaskID: task.ID, EnvelopeID: envelope.ID, HolderType: api.HolderAgent, HolderID: mainAgentID, TTL: 10 * time.Minute,
+		RunID: run.ID, TaskID: task.ID, EnvelopeID: envelope.ID, HolderType: api.HolderAgent, HolderID: mainAgentID, TTL: s.runLeaseTTL,
 	})
 	if err != nil {
 		return nil, err
@@ -192,10 +211,66 @@ func (s *Service) StartRun(ctx context.Context, request string) (*Run, error) {
 	if !acquired {
 		return nil, fmt.Errorf("acquire coding task lease: no lease granted")
 	}
-	return &Run{
+	tracked := &Run{
 		RunID: run.ID, Goal: request, TaskID: task.ID, LeaseID: lease.ID, TaskVersion: task.Version, HolderID: mainAgentID,
 		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string),
-	}, nil
+	}
+	s.startRunLeaseHeartbeat(ctx, tracked)
+	return tracked, nil
+}
+
+func (s *Service) startRunLeaseHeartbeat(parent context.Context, run *Run) {
+	heartbeatCtx, cancel := context.WithCancel(s.ctx)
+	done := make(chan error, 1)
+	run.leaseCancel = cancel
+	run.leaseParentStop = context.AfterFunc(parent, cancel)
+	run.leaseDone = done
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(s.runHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				done <- nil
+				return
+			case <-ticker.C:
+			}
+			timeout := min(s.runHeartbeatInterval, 5*time.Second)
+			beatCtx, beatCancel := context.WithTimeout(heartbeatCtx, timeout)
+			err := s.runner.HeartbeatTaskExecution(beatCtx, api.HeartbeatTaskExecutionCommand{
+				LeaseID: run.LeaseID, HolderID: run.HolderID, TTL: s.runLeaseTTL,
+			})
+			beatCancel()
+			if err == nil {
+				continue
+			}
+			if heartbeatCtx.Err() != nil {
+				done <- nil
+				return
+			}
+			if errors.Is(err, api.ErrLeaseNotActive) || errors.Is(err, api.ErrLeaseHolderMismatch) {
+				done <- fmt.Errorf("maintain run lease: %w", err)
+				return
+			}
+		}
+	}()
+}
+
+func (run *Run) stopRunLeaseHeartbeat() error {
+	run.leaseStopOnce.Do(func() {
+		if run.leaseParentStop != nil {
+			run.leaseParentStop()
+		}
+		if run.leaseCancel != nil {
+			run.leaseCancel()
+		}
+		if run.leaseDone != nil {
+			run.leaseErr = <-run.leaseDone
+		}
+	})
+	return run.leaseErr
 }
 
 func (s *Service) dispatchTask(ctx context.Context, command api.DispatchTaskCommand) (api.TaskEnvelope, error) {
@@ -491,6 +566,14 @@ func (s *Service) CompleteRun(ctx context.Context, run *Run, summary string, fai
 	if run == nil {
 		return fmt.Errorf("run is nil")
 	}
+	if err := run.stopRunLeaseHeartbeat(); err != nil {
+		return err
+	}
+	if err := s.runner.HeartbeatTaskExecution(ctx, api.HeartbeatTaskExecutionCommand{
+		LeaseID: run.LeaseID, HolderID: run.HolderID, TTL: s.runLeaseTTL,
+	}); err != nil {
+		return fmt.Errorf("refresh run lease before report: %w", err)
+	}
 	status := api.ReportStatusSuccess
 	target := api.RunStatusCompleted
 	kind := ""
@@ -546,6 +629,17 @@ func toolCallRequestsNetwork(arguments json.RawMessage) bool {
 }
 
 func (s *Service) Close(ctx context.Context) error {
+	s.cancel()
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+	}
 	if closer, ok := s.store.(api.ProviderCloser); ok {
 		return closer.Close(ctx)
 	}

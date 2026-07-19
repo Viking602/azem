@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Viking602/go-hydaelyn/message"
@@ -20,7 +21,7 @@ func TestBuildMapsHistoryToolsReasoningAndFormat(t *testing.T) {
 		},
 		Tools:          []message.ToolDefinition{{Name: "read_file", Description: "read", InputSchema: message.JSONSchema{Type: "object", Properties: map[string]message.JSONSchema{"path": {Type: "string"}}, Required: []string{"path"}, AdditionalProperties: &additional}}},
 		Metadata:       map[string]string{"reasoning_effort": "high", "run_id": "run-1", "secret": "omit"},
-		ExtraBody:      map[string]any{"max_output_tokens": 2048, "parallel_tool_calls": false},
+		ExtraBody:      map[string]any{"max_output_tokens": 2048, "parallel_tool_calls": false, "prompt_cache_key": "session-1"},
 		ResponseFormat: &hyprovider.ResponseFormat{Type: "json_schema", Name: "result", Strict: true, Schema: &message.JSONSchema{Type: "object"}},
 	}
 	data, err := Build(request, BuildOptions{IncludeEncryptedReasoning: true, DefaultParallelTools: true})
@@ -31,7 +32,8 @@ func TestBuildMapsHistoryToolsReasoningAndFormat(t *testing.T) {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["model"] != "gpt-test" || payload["instructions"] != "system rules" || payload["store"] != false || payload["stream"] != true {
+	if payload["model"] != "gpt-test" || payload["prompt_cache_key"] != "session-1" ||
+		payload["instructions"] != "system rules" || payload["store"] != false || payload["stream"] != true {
 		t.Fatalf("base payload=%s", data)
 	}
 	if payload["parallel_tool_calls"] != false || payload["max_output_tokens"] != float64(2048) {
@@ -59,5 +61,130 @@ func TestBuildRejectsMalformedToolHistory(t *testing.T) {
 	_, err := Build(hyprovider.Request{Model: "gpt", Messages: []message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "call", Name: "bad", Arguments: json.RawMessage(`{"x":`)}}}}}, BuildOptions{})
 	if err == nil {
 		t.Fatal("malformed historical tool call accepted")
+	}
+}
+
+func TestBuildKeepsPrivateSystemMessagesInConversationPosition(t *testing.T) {
+	private := message.NewText(message.RoleSystem, "current trusted context")
+	private.Visibility = message.VisibilityPrivate
+	data, err := Build(hyprovider.Request{
+		Model: "gpt-test",
+		Messages: []message.Message{
+			message.NewText(message.RoleSystem, "stable rules"),
+			message.NewText(message.RoleUser, "old request"),
+			private,
+			message.NewText(message.RoleUser, "new request"),
+		},
+	}, BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Instructions string            `json:"instructions"`
+		Input        []json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Instructions != "stable rules" || len(payload.Input) != 3 {
+		t.Fatalf("payload = %s", data)
+	}
+	var roles []string
+	for _, raw := range payload.Input {
+		var item struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil {
+			t.Fatal(err)
+		}
+		roles = append(roles, item.Role)
+		if item.Role == "developer" && (len(item.Content) != 1 || item.Content[0].Type != "input_text" || item.Content[0].Text != private.Text) {
+			t.Fatalf("private developer item = %s", raw)
+		}
+	}
+	if got := strings.Join(roles, ","); got != "user,developer,user" {
+		t.Fatalf("input roles = %s; payload=%s", got, data)
+	}
+}
+
+func TestBuildReplaysAssistantProviderStateWithoutSyntheticDuplicates(t *testing.T) {
+	state := json.RawMessage(`[{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"},{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"raw answer"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}]`)
+	data, err := Build(hyprovider.Request{
+		Model: "gpt-test",
+		Messages: []message.Message{
+			message.NewText(message.RoleUser, "inspect"),
+			{
+				Role: message.RoleAssistant, Text: "normalized text must not be serialized",
+				ProviderState: state,
+				ToolCalls: []message.ToolCall{{
+					ID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{"q":"normalized"}`),
+				}},
+			},
+			message.NewToolResult(message.ToolResult{ToolCallID: "call_1", Name: "lookup", Content: "result"}),
+		},
+	}, BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	var want []json.RawMessage
+	if err := json.Unmarshal(state, &want); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Input) != len(want)+2 {
+		t.Fatalf("input count = %d; payload=%s", len(payload.Input), data)
+	}
+	for index := range want {
+		if string(payload.Input[index+1]) != string(want[index]) {
+			t.Fatalf("raw item %d = %s, want %s", index, payload.Input[index+1], want[index])
+		}
+	}
+	if strings.Contains(string(data), "normalized text must not be serialized") || strings.Contains(string(data), "normalized") {
+		t.Fatalf("synthetic assistant data duplicated provider state: %s", data)
+	}
+}
+
+func TestBuildRejectsMalformedAssistantProviderState(t *testing.T) {
+	_, err := Build(hyprovider.Request{
+		Model: "gpt-test",
+		Messages: []message.Message{{
+			Role: message.RoleAssistant, ProviderState: json.RawMessage(`{"type":"reasoning"}`),
+		}},
+	}, BuildOptions{})
+	if err == nil || !strings.Contains(err.Error(), "must be a JSON array") {
+		t.Fatalf("malformed provider state error = %v", err)
+	}
+}
+
+func TestBuildOmitsSyntheticFunctionItemIDWithoutProviderMapping(t *testing.T) {
+	data, err := Build(hyprovider.Request{
+		Model: "gpt-test",
+		Messages: []message.Message{{
+			Role: message.RoleAssistant,
+			ToolCalls: []message.ToolCall{{
+				ID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{"q":"x"}`),
+			}},
+		}},
+	}, BuildOptions{ToolCallItemID: func(string) string { return "" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Input) != 1 || payload.Input[0]["call_id"] != "call_1" || payload.Input[0]["id"] != nil {
+		t.Fatalf("synthetic function input = %s", data)
 	}
 }

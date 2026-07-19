@@ -12,6 +12,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -34,6 +36,41 @@ func TestTextInputsUseBarCursors(t *testing.T) {
 	view := model.View()
 	if view.Cursor == nil || view.Cursor.Shape != tea.CursorBar {
 		t.Fatalf("view cursor = %#v, want visible bar", view.Cursor)
+	}
+}
+
+func TestSentUserMessageUsesAccentCardWithoutSenderLabel(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	block := Block{Kind: BlockUser, Title: "You", Content: "为 hooks 单独设计一个提示，不要太明显"}
+	lines := model.renderBlock(block, 0, 28)
+	plain := ansi.Strip(strings.Join(lines, "\n"))
+	if len(lines) < 2 || !strings.Contains(plain, "▌") || strings.Contains(plain, model.tr("block.user")) || strings.Contains(plain, "You") {
+		t.Fatalf("sent message did not render as an unlabeled accent card:\n%s", plain)
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "\x1b[48;") {
+			t.Fatalf("sent message contains a background color: %q", line)
+		}
+		if width := ansi.StringWidth(line); width > 28 {
+			t.Fatalf("sent message width = %d, exceeds 28: %q", width, ansi.Strip(line))
+		}
+	}
+}
+
+func TestAssistantMessageOmitsGeneratingHeader(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	block := Block{Kind: BlockAssistant, Content: "Hi! How can I help?", State: "streaming"}
+	assistantLines := model.renderBlock(block, 0, 40)
+	plain := ansi.Strip(strings.Join(assistantLines, "\n"))
+	if strings.Contains(plain, "AZEM") || strings.Contains(plain, model.tr("state.streaming")) || !strings.Contains(plain, block.Content) {
+		t.Fatalf("assistant response contains a redundant generating header: %q", plain)
+	}
+	userLine := ansi.Strip(model.renderBlock(Block{Kind: BlockUser, Content: "hi"}, 0, 40)[0])
+	assistantLine := ansi.Strip(assistantLines[0])
+	userColumn := ansi.StringWidth(strings.SplitN(userLine, "hi", 2)[0])
+	assistantColumn := ansi.StringWidth(strings.SplitN(assistantLine, "Hi", 2)[0])
+	if userColumn != assistantColumn {
+		t.Fatalf("user and assistant text are not aligned: user=%q assistant=%q", userLine, ansi.Strip(assistantLines[0]))
 	}
 }
 
@@ -337,6 +374,43 @@ func TestWideLayoutAddsAgentAndMCPContextRail(t *testing.T) {
 	}
 }
 
+func TestRunningSubagentAnimatesInContextRail(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "team")
+	updated, _ := model.Update(appEventMsg{Event: app.Event{
+		Kind: app.EventAgentState, AgentID: "child-1", State: "running",
+		Agent: &app.AgentStatePayload{Type: "general-purpose"},
+	}})
+	model = updated.(AppModel)
+	if !model.animationActive || !model.hasRunningAgents() {
+		t.Fatalf("running subagent did not start animation: active=%v agents=%#v", model.animationActive, model.agents)
+	}
+	before := ansi.Strip(model.renderContextRail(32, 16))
+	model.animationFrame++
+	after := ansi.Strip(model.renderContextRail(32, 16))
+	if before == after || !strings.Contains(before, "◇ general-purpose") || !strings.Contains(after, "◈ general-purpose") {
+		t.Fatalf("subagent indicator did not animate:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	model.reducedMotion = true
+	if mark := model.agentStateMark("running"); mark != "◆" {
+		t.Fatalf("reduced-motion subagent mark=%q", mark)
+	}
+}
+
+func TestReviewingApprovalUsesSmartApprovalColor(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if got, want := model.stateStyle("Reviewing approval").GetForeground(), model.theme.ApprovalSmart.GetForeground(); got != want {
+		t.Fatalf("reviewing approval color=%v, want smart approval color=%v", got, want)
+	}
+	model.status = "Reviewing approval"
+	model.transcript = []Block{{Kind: BlockApproval, State: "reviewing", Title: "Reviewing"}}
+	before := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 64), "\n"))
+	model.animationFrame++
+	after := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 64), "\n"))
+	if before == after {
+		t.Fatalf("reviewing approval indicator did not animate: %q", before)
+	}
+}
+
 func TestTranscriptCardsAreKeyboardExpandable(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.transcript = []Block{{ID: "call-1", Kind: BlockTool, Title: "coding.read_file", Content: "result", State: "completed"}}
@@ -519,7 +593,7 @@ func TestAutomaticApprovalEventsRenderReviewingAndResolvedTranscriptStates(t *te
 			})
 			if model.status != "Reviewing approval" || model.overlay != OverlayNone ||
 				len(model.pendingApprovals) != 0 || len(model.transcript) != 1 ||
-				model.transcript[0].Kind != BlockApproval || model.transcript[0].State != "running" {
+				model.transcript[0].Kind != BlockApproval || model.transcript[0].State != "reviewing" {
 				t.Fatalf("reviewing projection=%+v", model)
 			}
 			model.applyEvent(app.Event{
@@ -534,6 +608,32 @@ func TestAutomaticApprovalEventsRenderReviewingAndResolvedTranscriptStates(t *te
 				t.Fatalf("resolved projection: status=%q block=%+v", model.status, block)
 			}
 		})
+	}
+}
+
+func TestAutomaticDenialFallsBackToInteractiveApprovalOverlay(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.runID = "run-1"
+	model.status = "Running"
+	request := app.Event{
+		Kind: app.EventApprovalRequested, SessionID: "default", RunID: "run-1",
+		ToolCallID: "call-1", ApprovalID: "approval-1",
+		Data: map[string]string{"tool": "coding.write_file", "target": "config.yaml", "action": "write config"},
+	}
+	reviewing := request
+	reviewing.State = "reviewing"
+	model.applyEvent(reviewing)
+	model.applyEvent(app.Event{
+		Kind: app.EventApprovalResolved, SessionID: "default", RunID: "run-1",
+		ToolCallID: "call-1", ApprovalID: "approval-1", State: "auto_denied",
+		Data: map[string]string{"tool": "coding.write_file", "target": "config.yaml", "risk": "high", "rationale": "needs confirmation"},
+	})
+	request.State = "pending"
+	model.applyEvent(request)
+
+	if model.status != "Awaiting approval" || model.overlay != OverlayApproval || model.approval == nil ||
+		model.approval.ApprovalID != "approval-1" || len(model.pendingApprovals) != 1 {
+		t.Fatalf("automatic denial did not open user approval: status=%q overlay=%q approval=%+v pending=%+v", model.status, model.overlay, model.approval, model.pendingApprovals)
 	}
 }
 
@@ -744,6 +844,18 @@ func TestReadAndSkillToolResultsUseDisplaySummaries(t *testing.T) {
 		t.Fatalf("JSON display summary = %q", got)
 	}
 
+	subagentOutput := `{"tasks":[{"description":"分析整体架构","status":"failed","type":"explore","elapsed_ms":40457,"tool_calls":33,"turns":5,"tokens_used":143698,"error":"agent loop budget exhausted: max tokens"},{"description":"分析测试与质量","status":"completed","type":"explore","elapsed_ms":12000,"tool_calls":7,"turns":2,"tokens_used":12400,"output":"Found concrete evidence."}]}`
+	subagentSummary := summarizeToolResult("subagent.get_output", "", subagentOutput)
+	for _, wanted := range []string{
+		"[1] 分析整体架构", "Failed · explore · 33 tools · 5 turns · 143K tokens · 40.5s",
+		"Error: agent loop budget exhausted: max tokens", "[2] 分析测试与质量",
+		"Completed · explore · 7 tools · 2 turns · 12K tokens · 12.0s", "Output: Found concrete evidence.",
+	} {
+		if !strings.Contains(subagentSummary, wanted) {
+			t.Fatalf("subagent summary omitted %q:\n%s", wanted, subagentSummary)
+		}
+	}
+
 	files := strings.Join([]string{"1.go", "2.go", "3.go", "4.go", "5.go", "6.go", "7.go", "8.go", "9.go", "10.go"}, "\n")
 	if got := summarizeToolResult("coding.list_files", "", files); got != "1.go\n2.go\n3.go\n4.go\n5.go\n6.go\n7.go\n8.go\n… 2 more entries (10 total)" {
 		t.Fatalf("list display summary = %q", got)
@@ -853,6 +965,102 @@ func TestCompactEditOutputFallbackBecomesDiff(t *testing.T) {
 	}
 	if diff != "@@ foo.go:4 @@\n-\treturn a-b\n+\treturn a + b" {
 		t.Fatalf("fallback diff = %q", diff)
+	}
+}
+
+func TestDiffRendererSeparatesFilesHunksAndLineNumbers(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	content := strings.Join([]string{
+		"@@ internal/app.go:12 @@",
+		"-old value",
+		"+new value",
+		" unchanged",
+		"",
+		"@@ internal/tui/view.go:40 @@",
+		"+new row",
+	}, "\n")
+	plain := ansi.Strip(strings.Join(model.renderDiffContent(content, 72), "\n"))
+	for _, wanted := range []string{
+		"M internal/app.go  +1 -1",
+		"@@ line 12 @@",
+		"12    - old value",
+		"   12 + new value",
+		"13 13   unchanged",
+		"A internal/tui/view.go  +1 -0",
+		"@@ line 40 @@",
+	} {
+		if !strings.Contains(plain, wanted) {
+			t.Fatalf("rendered diff omitted %q:\n%s", wanted, plain)
+		}
+	}
+}
+
+func TestGitDiffToolUsesAccessibleFullRowChangeStyling(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if model.theme.DiffAdd.GetBackground() == nil || model.theme.DiffDel.GetBackground() == nil ||
+		model.theme.DiffHunk.GetBackground() == nil {
+		t.Fatal("diff change hierarchy is missing background colors")
+	}
+	if fmt.Sprint(model.theme.DiffAdd.GetBackground()) == fmt.Sprint(model.theme.DiffDel.GetBackground()) {
+		t.Fatal("added and deleted rows use the same background color")
+	}
+	block := Block{
+		Kind: BlockTool, Title: "coding.git_diff", State: "completed",
+		Content: "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -7 +7 @@\n-\toldCall()\n+\tnewCall()",
+	}
+	directRows := model.renderDiffContent(block.Content, 74)
+	if len(directRows) == 0 {
+		t.Fatalf("Git diff content produced no rows: files=%#v", func() []diffViewFile {
+			files, _ := parseDiffView(block.Content)
+			return files
+		}())
+	}
+	rows := model.renderBlock(block, 0, 72)
+	plainRows := make([]string, len(rows))
+	for index, row := range rows {
+		plainRows[index] = ansi.Strip(row)
+	}
+	plain := strings.Join(plainRows, "\n")
+	for _, wanted := range []string{"M main.go  +1 -1", "@@ -7 +7 @@", "7   - ", "  7 + ", "oldCall()", "newCall()"} {
+		if !strings.Contains(plain, wanted) {
+			t.Fatalf("Git diff tool omitted %q:\n%s", wanted, plain)
+		}
+	}
+	for _, row := range rows {
+		text := ansi.Strip(row)
+		if strings.Contains(text, "oldCall()") || strings.Contains(text, "newCall()") || strings.Contains(text, "@@ line 7 @@") {
+			if width := ansi.StringWidth(row); width != 74 {
+				t.Fatalf("styled diff row width=%d, want 74: %q", width, text)
+			}
+		}
+	}
+}
+
+func TestDiffRendererParsesUnifiedDiffAndDegradesOnNarrowScreens(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	content := strings.Join([]string{
+		"diff --git a/main.go b/main.go",
+		"--- a/main.go",
+		"+++ b/main.go",
+		"@@ -7,2 +7,2 @@ func main() {",
+		"-\toldCall()",
+		"+\tnewCall()",
+		" }",
+	}, "\n")
+	files, ok := parseDiffView(content)
+	if !ok || len(files) != 1 || files[0].Path != "main.go" || files[0].Added != 1 || files[0].Deleted != 1 {
+		t.Fatalf("parsed unified diff = %#v, ok=%v", files, ok)
+	}
+	rows := model.renderDiffContent(content, 24)
+	plain := ansi.Strip(strings.Join(rows, "\n"))
+	if !strings.Contains(plain, "│ - ") || !strings.Contains(plain, "oldCall()") ||
+		!strings.Contains(plain, "│ + ") || !strings.Contains(plain, "newCall()") {
+		t.Fatalf("narrow diff lost change markers:\n%s", plain)
+	}
+	for index, row := range rows {
+		if width := ansi.StringWidth(row); width > 24 {
+			t.Fatalf("narrow diff row %d width=%d, want <=24: %q", index, width, ansi.Strip(row))
+		}
 	}
 }
 
@@ -1752,9 +1960,6 @@ func TestTranscriptSupportsMouseAndKeyboardScrolling(t *testing.T) {
 	if !strings.Contains(latest, "message 23") {
 		t.Fatalf("latest transcript is not anchored to the bottom:\n%s", latest)
 	}
-	if view := model.View(); view.MouseMode != tea.MouseModeCellMotion {
-		t.Fatalf("transcript view mouse mode = %v", view.MouseMode)
-	}
 	updated, _ = model.Update(tea.MouseWheelMsg{X: 2, Y: 3, Button: tea.MouseWheelUp})
 	model = updated.(AppModel)
 	if model.transcriptTop == 0 {
@@ -1776,20 +1981,164 @@ func TestTranscriptSupportsMouseAndKeyboardScrolling(t *testing.T) {
 	}
 }
 
+func TestTranscriptDragSelectionClampsToConversationPaneAndCopies(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model = updated.(AppModel)
+	model.transcript = []Block{{Kind: BlockAssistant, Content: "dialogue only\nsecond dialogue line", State: "completed"}}
+	if view := model.View(); view.MouseMode != tea.MouseModeCellMotion {
+		t.Fatalf("default view mouse mode = %v", view.MouseMode)
+	}
+	if status := ansi.Strip(model.renderStatus(140)); !strings.Contains(status, "Drag copy") {
+		t.Fatalf("drag selection gesture is not visible in status: %q", status)
+	}
+	_, top, transcriptWidth, transcriptHeight := model.transcriptBounds()
+	lines := strings.Split(ansi.Strip(model.renderTranscript(transcriptWidth, transcriptHeight)), "\n")
+	row := -1
+	column := 0
+	for index, line := range lines {
+		if offset := strings.Index(line, "dialogue only"); offset >= 0 {
+			row, column = index, offset
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatalf("dialogue fixture was not rendered:\n%s", strings.Join(lines, "\n"))
+	}
+
+	var copied string
+	previousClipboard := writeClipboard
+	writeClipboard = func(text string) error {
+		copied = text
+		return nil
+	}
+	t.Cleanup(func() { writeClipboard = previousClipboard })
+	updated, _ = model.Update(tea.MouseClickMsg{X: column, Y: top + row, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	updated, _ = model.Update(tea.MouseMotionMsg{X: 119, Y: top + row, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	updated, command := model.Update(tea.MouseReleaseMsg{X: 119, Y: top + row, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.transcriptSelection == nil || model.transcriptSelection.endX != transcriptWidth-1 {
+		t.Fatalf("selection escaped transcript width %d: %#v", transcriptWidth, model.transcriptSelection)
+	}
+	if command == nil {
+		t.Fatal("selection release did not copy")
+	}
+	command()
+	if !strings.Contains(copied, "dialogue only") || strings.Contains(copied, "RUN CONTEXT") || strings.Contains(copied, "TODO") {
+		t.Fatalf("copied selection crossed into context rail: %q", copied)
+	}
+}
+
+func TestTranscriptSelectionBackgroundSurvivesNestedMarkdownStyles(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	styled := model.theme.Assistant.Render("plain ") + model.theme.DiffAdd.Render("inline code") + model.theme.Assistant.Render(" tail")
+	width := ansi.StringWidth(styled)
+	model.transcriptSelection = &transcriptSelection{startX: 0, startY: 0, endX: width - 1, endY: 0}
+
+	highlighted := model.highlightTranscriptSelection([]string{styled}, width)[0]
+	wanted := model.theme.Selected.Render(ansi.Strip(styled))
+	if !strings.Contains(highlighted, wanted) {
+		t.Fatalf("nested ANSI styles interrupted selection background:\nwant segment: %q\ngot:          %q", wanted, highlighted)
+	}
+}
+
+func TestTranscriptScrollStopsFollowingStreamingTail(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model = updated.(AppModel)
+	model.status = "Running"
+	model.runID = "run-1"
+	model.transcript = []Block{{Kind: BlockAssistant, RunID: "run-1", Title: "Azem", Content: strings.Repeat("older content ", 80), State: "running"}}
+	model.scrollTranscript(4)
+	width, height := model.transcriptViewportSize()
+	before := ansi.Strip(model.renderTranscript(width, height))
+
+	updated, _ = model.Update(appEventMsg{Event: app.Event{Kind: app.EventTextDelta, RunID: "run-1", Text: strings.Repeat("new content ", 20)}})
+	model = updated.(AppModel)
+	after := ansi.Strip(model.renderTranscript(width, height))
+	if after != before {
+		t.Fatalf("streaming content moved a transcript scrolled into history:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestTranscriptOldestPositionStaysPinnedDuringStreaming(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model = updated.(AppModel)
+	model.status = "Running"
+	model.runID = "run-1"
+	model.transcript = []Block{{Kind: BlockAssistant, RunID: "run-1", Title: "Azem", Content: strings.Repeat("oldest content ", 80), State: "running"}}
+	model.transcriptTop = model.transcriptMaxOffset()
+
+	updated, _ = model.Update(appEventMsg{Event: app.Event{Kind: app.EventTextDelta, RunID: "run-1", Text: strings.Repeat("new content ", 20)}})
+	model = updated.(AppModel)
+	if want := model.transcriptMaxOffset(); model.transcriptTop != want {
+		t.Fatalf("oldest position offset = %d, want new maximum %d", model.transcriptTop, want)
+	}
+}
+
+func TestTranscriptBodyDoesNotJumpWhenLongFinalAnswerCompletes(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model = updated.(AppModel)
+	model.status = "Running"
+	model.runID = "run-1"
+	model.transcript = []Block{{
+		Kind: BlockAssistant, RunID: "run-1", Title: "Azem",
+		Content: strings.Repeat("final answer line\n", 40), State: "streaming",
+	}}
+	model.scrollTranscript(5)
+	width, height := model.transcriptViewportSize()
+	before := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
+
+	updated, _ = model.Update(appEventMsg{Event: app.Event{Kind: app.EventRunFinished, RunID: "run-1"}})
+	model = updated.(AppModel)
+	after := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
+	if got, want := strings.Join(after[:height-1], "\n"), strings.Join(before[:height-1], "\n"); got != want {
+		t.Fatalf("finalization shifted the transcript body:\nbefore:\n%s\nafter:\n%s", want, got)
+	}
+}
+
+func TestTranscriptNarrowViewportUsesRenderedVisualLineCount(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 8, Height: 8})
+	model = updated.(AppModel)
+	model.transcript = []Block{{Kind: BlockAssistant, Title: "Azem", Content: "abcdefghijklmnopqrstuvwxyz", State: "completed"}}
+	width, height := model.transcriptViewportSize()
+	lineCount := len(model.transcriptLines(max(1, width-4)))
+	want := model.transcriptOffsetLimit(lineCount, height)
+	if got := model.transcriptMaxOffset(); got != want {
+		t.Fatalf("narrow transcript max offset = %d, want rendered visual-line offset %d", got, want)
+	}
+}
+
+func TestMouseWheelScrollsOverlayWithoutChangingTranscriptOffset(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.overlay = OverlayAgentDetail
+	model.transcriptTop = 7
+	updated, _ := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	model = updated.(AppModel)
+	if model.overlayScroll != 1 || model.transcriptTop != 7 {
+		t.Fatalf("wheel scroll state = overlay:%d transcript:%d", model.overlayScroll, model.transcriptTop)
+	}
+}
+
 func TestAssistantMarkdownRendersWithoutSourceMarkers(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	block := Block{
 		Kind:    BlockAssistant,
-		Content: "# Design\n\n**Bold finding** with `inline code`.\n\n- first item\n- second item",
+		Content: "# Design\n\n## Plan\n\n### Soon\n\n**Bold finding** with `inline code`.\n\n- first item\n- second item\n\n---",
 		State:   "completed",
 	}
 	rendered := ansi.Strip(strings.Join(model.renderBlock(block, 0, 72), "\n"))
-	for _, marker := range []string{"# Design", "**Bold finding**", "`inline code`"} {
+	for _, marker := range []string{"# Design", "## Plan", "### Soon", "**Bold finding**", "`inline code`", "--------"} {
 		if strings.Contains(rendered, marker) {
 			t.Fatalf("rendered markdown still contains source marker %q:\n%s", marker, rendered)
 		}
 	}
-	for _, wanted := range []string{"Design", "Bold finding", "inline code", "first item", "second item"} {
+	for _, wanted := range []string{"Design", "Plan", "Soon", "Bold finding", "inline code", "first item", "second item", "──────"} {
 		if !strings.Contains(rendered, wanted) {
 			t.Fatalf("rendered markdown missing %q:\n%s", wanted, rendered)
 		}
@@ -1847,20 +2196,30 @@ func TestTranscriptLayoutCacheReusesStableRender(t *testing.T) {
 	if output := ansi.Strip(strings.Join(updated, "\n")); !strings.Contains(output, "Updated") || strings.Contains(output, "Cached") {
 		t.Fatalf("updated transcript layout is stale:\n%s", output)
 	}
+
+	stable := model.transcriptLines(72)
+	model.status = "Running"
+	model.runID = "run-1"
+	model.animationFrame++
+	afterAnimation := model.transcriptLines(72)
+	if &stable[0] != &afterAnimation[0] {
+		t.Fatal("animation frame rerendered a transcript block without an animated indicator")
+	}
 }
 
-func TestHookEventsAttachUpsertSanitizeAndAnimate(t *testing.T) {
+func TestHookEventsUseTransientDedicatedPrompt(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.runID = "run"
 	model.applyEvent(app.Event{Kind: app.EventToolStarted, RunID: "run", ToolCallID: "tool-1", Data: map[string]string{"name": "test"}})
 	started := app.Event{Kind: app.EventHookStarted, AgentID: "main", ToolCallID: "tool-1", Data: map[string]string{
 		"event": "PostToolUse", "name": "lint", "source": "/secret/hooks/lint.sh",
 	}}
 	model.applyEvent(started)
-	if len(model.transcript) != 1 || len(model.transcript[0].Hooks) != 1 || model.transcript[0].Hooks[0].State != "running" {
-		t.Fatalf("started hook not attached: %#v", model.transcript)
+	if len(model.transcript) != 2 || model.transcript[1].Kind != BlockHook || len(model.transcript[1].Hooks) != 1 || model.transcript[1].Hooks[0].State != "running" {
+		t.Fatalf("started hook lacks dedicated prompt: %#v", model.transcript)
 	}
-	if model.transcript[0].Hooks[0].Source != "lint.sh" || !model.hasRunningHooks() {
-		t.Fatalf("hook source/running state = %#v", model.transcript[0].Hooks[0])
+	if len(model.transcript[0].Hooks) != 0 || model.transcript[1].Hooks[0].Source != "lint.sh" || !model.hasRunningHooks() {
+		t.Fatalf("hook was attached to tool or lost state: %#v", model.transcript)
 	}
 	updated, command := model.Update(animationTickMsg{})
 	model = updated.(AppModel)
@@ -1874,10 +2233,10 @@ func TestHookEventsAttachUpsertSanitizeAndAnimate(t *testing.T) {
 	finished.Data["reason"] = "policy denied"
 	finished.Data["stdout"] = `{"decision":"deny","command":"secret"}`
 	model.applyEvent(finished)
-	if len(model.transcript[0].Hooks) != 1 || model.transcript[0].Hooks[0].State != "blocked" || model.transcript[0].Hooks[0].Output != "policy denied" {
-		t.Fatalf("finished hook was not replaced/sanitized: %#v", model.transcript[0].Hooks)
+	if len(model.transcript[1].Hooks) != 1 || model.transcript[1].Hooks[0].State != "blocked" || model.transcript[1].Hooks[0].Output != "policy denied" {
+		t.Fatalf("finished hook was not replaced/sanitized: %#v", model.transcript[1].Hooks)
 	}
-	if strings.Contains(model.transcript[0].Hooks[0].Output, "decision") {
+	if strings.Contains(model.transcript[1].Hooks[0].Output, "decision") {
 		t.Fatal("control JSON leaked into hook output")
 	}
 	updated, command = model.Update(animationTickMsg{})
@@ -1895,8 +2254,16 @@ func TestHookEventsAttachUpsertSanitizeAndAnimate(t *testing.T) {
 
 	model.applyEvent(app.Event{Kind: app.EventToolFinished, RunID: "run", ToolCallID: "tool-2", State: "completed", Data: map[string]string{"name": "test"}})
 	model.applyEvent(app.Event{Kind: app.EventHookFinished, AgentID: "main", ToolCallID: "tool-2", State: "completed", Data: map[string]string{"event": "PostToolUse", "name": "audit"}})
-	if len(model.transcript) != 2 || len(model.transcript[1].Hooks) != 1 || model.transcript[1].Hooks[0].Name != "audit" {
-		t.Fatalf("finish-only tool hook not attached: %#v", model.transcript)
+	if len(model.transcript) != 3 || model.transcript[2].Kind != BlockTool {
+		t.Fatalf("successful finish-only hook left transcript clutter: %#v", model.transcript)
+	}
+
+	success := app.Event{Kind: app.EventHookStarted, Data: map[string]string{"event": "Stop", "name": "notify"}}
+	model.applyEvent(success)
+	success.Kind, success.State = app.EventHookFinished, "completed"
+	model.applyEvent(success)
+	if model.transcript[len(model.transcript)-1].Kind == BlockHook {
+		t.Fatalf("successful hook prompt did not disappear: %#v", model.transcript)
 	}
 }
 
@@ -1904,22 +2271,16 @@ func TestAgentAndLifecycleHooksRenderNarrowAndReducedMotion(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.agents = []AgentView{{ID: "agent-1", Blocks: []Block{{Kind: BlockTool, ToolCallID: "agent-tool", Title: "search"}}}}
 	model.applyEvent(app.Event{Kind: app.EventHookStarted, AgentID: "agent-1", ToolCallID: "agent-tool", Data: map[string]string{"event": "PreToolUse", "name": "guard"}})
-	if len(model.agents[0].Blocks[0].Hooks) != 1 {
-		t.Fatalf("agent hook not attached: %#v", model.agents[0].Blocks)
+	if len(model.agents[0].Blocks) != 2 || model.agents[0].Blocks[1].Kind != BlockHook || len(model.agents[0].Blocks[0].Hooks) != 0 {
+		t.Fatalf("agent hook lacks dedicated prompt: %#v", model.agents[0].Blocks)
 	}
 	model.applyEvent(app.Event{Kind: app.EventHookStarted, Data: map[string]string{"event": "SessionStart", "name": "setup"}})
 	if len(model.transcript) != 1 || model.transcript[0].Kind != BlockHook {
 		t.Fatalf("lifecycle hook did not create a block: %#v", model.transcript)
 	}
 	model.reducedMotion = true
-	tool := model.agents[0].Blocks[0]
-	tool.Collapsed = true
-	header := ansi.Strip(strings.Join(model.renderBlock(tool, 0, 40), "\n"))
-	if !strings.Contains(header, model.tr("hook.summary")) {
-		t.Fatalf("collapsed header lacks hook summary: %q", header)
-	}
-	tool.Collapsed = false
-	rendered := ansi.Strip(strings.Join(model.renderBlock(tool, 0, 24), "\n"))
+	prompt := model.agents[0].Blocks[1]
+	rendered := ansi.Strip(strings.Join(model.renderBlock(prompt, 0, 24), "\n"))
 	if !strings.Contains(rendered, "•") {
 		t.Fatalf("reduced-motion hook lacks static mark: %q", rendered)
 	}
@@ -2321,5 +2682,93 @@ func TestTodoRailShowsProgressInsteadOfInternalRevision(t *testing.T) {
 	rail := ansi.Strip(model.renderContextRail(31, 16))
 	if strings.Contains(rail, "r9") || !strings.Contains(rail, "TODO  1/2") {
 		t.Fatalf("todo header should show user-facing progress: %q", rail)
+	}
+}
+
+func TestTodoRowsAreNumberedAndBoundRunningSubagentsAnimate(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.todo = session.TodoList{Phases: []session.TodoPhase{{Title: "Work", Items: []session.TodoItem{
+		{ID: "main", Content: "Main task", Status: session.TodoInProgress},
+		{ID: "delegated", Content: "Delegated task", Status: session.TodoPending, SubagentRunID: "child-1"},
+		{ID: "next", Content: "Next task", Status: session.TodoPending},
+	}}}}
+	model.agents = []AgentView{{ID: "child-1", State: "running"}}
+
+	before := ansi.Strip(model.renderContextRail(40, 16))
+	for _, wanted := range []string{"◐  1. Main task", "◐  2. Delegated task", "○  3. Next task"} {
+		if !strings.Contains(before, wanted) {
+			t.Fatalf("numbered todo rail omitted %q:\n%s", wanted, before)
+		}
+	}
+	model.animationFrame++
+	after := ansi.Strip(model.renderContextRail(40, 16))
+	for _, wanted := range []string{"◓  1. Main task", "◓  2. Delegated task"} {
+		if !strings.Contains(after, wanted) {
+			t.Fatalf("running todo did not animate as %q:\n%s", wanted, after)
+		}
+	}
+
+	model.openOverlay(OverlayTodos)
+	overlay := ansi.Strip(model.renderOverlay(80, 24))
+	for _, wanted := range []string{"1. Main task", "2. Delegated task", "3. Next task"} {
+		if !strings.Contains(overlay, wanted) {
+			t.Fatalf("numbered todo overlay omitted %q:\n%s", wanted, overlay)
+		}
+	}
+}
+
+func TestMemoryAndRecapCommandsAndOverlays(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single", "session-1")
+	runCommand := func(command Command) {
+		updated, cmd := model.executeCommand(command)
+		model = updated.(AppModel)
+		if cmd == nil {
+			t.Fatalf("/%s did not start an action: %s", command.Name, model.errorBanner)
+		}
+		updated, _ = model.Update(cmd())
+		model = updated.(AppModel)
+	}
+
+	runCommand(Command{Name: "memory", Args: []string{"cache", "policy"}})
+	runCommand(Command{Name: "remember", Args: []string{"Use", "workspace", "scope"}})
+	runCommand(Command{Name: "forget", Args: []string{"mem_123"}})
+	runCommand(Command{Name: "recap"})
+	wantKinds := []ActionKind{ActionListMemories, ActionRemember, ActionForgetMemory, ActionShowRecap}
+	if len(runtime.actions) != len(wantKinds) {
+		t.Fatalf("memory actions = %#v", runtime.actions)
+	}
+	for index, kind := range wantKinds {
+		if runtime.actions[index].Kind != kind || runtime.actions[index].SessionID != "session-1" {
+			t.Fatalf("action %d = %#v, want %s for session-1", index, runtime.actions[index], kind)
+		}
+	}
+	if runtime.actions[0].Target != "cache policy" || runtime.actions[1].Target != "Use workspace scope" {
+		t.Fatalf("command arguments were not preserved: %#v", runtime.actions)
+	}
+
+	now := time.Now()
+	model.applyEvent(app.Event{Kind: app.EventMemoryState, State: "listed", Memories: []memory.Memory{{
+		ID: "mem_123", Content: "Use workspace-scoped native memory", Provenance: "manual", Importance: 50, UpdatedAt: now,
+	}}})
+	if model.overlay != OverlayMemory || model.overlayOptionCount() != 1 {
+		t.Fatalf("memory overlay = %q count=%d", model.overlay, model.overlayOptionCount())
+	}
+	plain := ansi.Strip(model.renderOverlay(64, 16))
+	if !strings.Contains(plain, "mem_123") || !strings.Contains(plain, "workspace-scoped") {
+		t.Fatalf("memory overlay omitted evidence identity/content:\n%s", plain)
+	}
+
+	model.applyEvent(app.Event{Kind: app.EventRecapState, State: "loaded", Recap: &recap.Recap{
+		SessionID: "session-1", Goal: "Implement native memory", Summary: "Storage is complete", OpenItems: "Verify TUI", CoveredBoundary: "run-7", Revision: 2,
+	}})
+	if model.overlay != OverlayRecap || model.recap == nil {
+		t.Fatalf("recap overlay = %q recap=%#v", model.overlay, model.recap)
+	}
+	plain = ansi.Strip(model.renderOverlay(64, 16))
+	for _, wanted := range []string{"Implement native memory", "Storage is complete", "Verify TUI", "run-7"} {
+		if !strings.Contains(plain, wanted) {
+			t.Fatalf("recap overlay omitted %q:\n%s", wanted, plain)
+		}
 	}
 }

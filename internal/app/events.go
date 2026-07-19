@@ -1,6 +1,8 @@
 package app
 
 import (
+	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
 	"time"
 )
@@ -35,6 +37,8 @@ const (
 	EventHookStarted       EventKind = "hook_started"
 	EventHookFinished      EventKind = "hook_finished"
 	EventHookDiagnostic    EventKind = "hook_diagnostic"
+	EventMemoryState       EventKind = "memory_state"
+	EventRecapState        EventKind = "recap_state"
 )
 
 type AgentStatePayload struct {
@@ -120,6 +124,8 @@ type Event struct {
 	SkillCatalog     []SkillCatalogEntry
 	SkillDiagnostics []SkillDiagnostic
 	Todo             *session.TodoList
+	Memories         []memory.Memory
+	Recap            *recap.Recap
 	At               time.Time
 }
 
@@ -153,6 +159,13 @@ func (e Event) Clone() Event {
 	if e.Todo != nil {
 		todo := e.Todo.Clone()
 		cloned.Todo = &todo
+	}
+	if e.Memories != nil {
+		cloned.Memories = append([]memory.Memory(nil), e.Memories...)
+	}
+	if e.Recap != nil {
+		value := *e.Recap
+		cloned.Recap = &value
 	}
 	return cloned
 }

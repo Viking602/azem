@@ -126,3 +126,83 @@ func TestStreamMapsTopLevelProviderErrorDetails(t *testing.T) {
 		t.Fatalf("top-level provider diagnostic was lost: %q", got)
 	}
 }
+
+func TestStreamAttachesTerminalOutputAsProviderState(t *testing.T) {
+	const output = `[{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"},{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"answer"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}]`
+	payload := `data: {"type":"response.completed","response":{"status":"completed","output":` + output + `,"usage":{"input_tokens":10,"output_tokens":3,"total_tokens":13}}}` + "\n\n"
+	body := &chunkBody{chunks: [][]byte{[]byte(payload)}}
+	ctx, cancel := context.WithCancel(context.Background())
+	event, err := NewStream(ctx, cancel, body).Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != hyprovider.EventDone || string(event.ProviderState) != output {
+		t.Fatalf("terminal event = %#v", event)
+	}
+}
+
+func TestStreamRejectsMalformedTerminalOutput(t *testing.T) {
+	payload := `data: {"type":"response.completed","response":{"status":"completed","output":{"type":"message"}}}` + "\n\n"
+	body := &chunkBody{chunks: [][]byte{[]byte(payload)}}
+	ctx, cancel := context.WithCancel(context.Background())
+	event, err := NewStream(ctx, cancel, body).Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var apiError *APIError
+	if event.Kind != hyprovider.EventError || !errors.As(event.Err, &apiError) ||
+		!strings.Contains(apiError.Message, "must be a JSON array") {
+		t.Fatalf("malformed output event = %#v", event)
+	}
+}
+
+func TestStreamAllowsOmittedTerminalOutputForSyntheticFallback(t *testing.T) {
+	payload := `data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"
+	body := &chunkBody{chunks: [][]byte{[]byte(payload)}}
+	ctx, cancel := context.WithCancel(context.Background())
+	event, err := NewStream(ctx, cancel, body).Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != hyprovider.EventDone || len(event.ProviderState) != 0 {
+		t.Fatalf("omitted output event = %#v", event)
+	}
+}
+
+func TestStreamFallsBackWhenTerminalOutputOmitsStreamedItems(t *testing.T) {
+	t.Run("tool call", func(t *testing.T) {
+		payload := strings.Join([]string{
+			`data: {"type":"response.output_item.done","item":{"type":"function_call","id":"item-1","call_id":"call-1","name":"lookup","arguments":"{\"q\":\"x\"}"}}`,
+			`data: {"type":"response.completed","response":{"status":"completed","output":[]}}`,
+		}, "\n\n") + "\n\n"
+		body := &chunkBody{chunks: [][]byte{[]byte(payload)}}
+		ctx, cancel := context.WithCancel(context.Background())
+		stream := NewStream(ctx, cancel, body)
+		toolEvent, err := stream.Recv()
+		if err != nil || toolEvent.Kind != hyprovider.EventToolCall {
+			t.Fatalf("tool event=%#v error=%v", toolEvent, err)
+		}
+		done, err := stream.Recv()
+		if err != nil || done.Kind != hyprovider.EventDone || len(done.ProviderState) != 0 {
+			t.Fatalf("done event=%#v error=%v", done, err)
+		}
+	})
+
+	t.Run("assistant text", func(t *testing.T) {
+		payload := strings.Join([]string{
+			`data: {"type":"response.output_text.delta","delta":"answer"}`,
+			`data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","id":"rs_1"}]}}`,
+		}, "\n\n") + "\n\n"
+		body := &chunkBody{chunks: [][]byte{[]byte(payload)}}
+		ctx, cancel := context.WithCancel(context.Background())
+		stream := NewStream(ctx, cancel, body)
+		textEvent, err := stream.Recv()
+		if err != nil || textEvent.Kind != hyprovider.EventTextDelta {
+			t.Fatalf("text event=%#v error=%v", textEvent, err)
+		}
+		done, err := stream.Recv()
+		if err != nil || done.Kind != hyprovider.EventDone || len(done.ProviderState) != 0 {
+			t.Fatalf("done event=%#v error=%v", done, err)
+		}
+	})
+}

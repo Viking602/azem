@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 4
+const schemaVersion = 7
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -151,20 +151,79 @@ var migrations = []string{
 		phases BLOB NOT NULL DEFAULT '[]',
 		updated_at INTEGER NOT NULL
 	);`,
+	`CREATE TABLE memories (
+		memory_rowid INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, content TEXT NOT NULL, anchor TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
+		provenance TEXT NOT NULL CHECK(provenance IN ('manual','runtime')),
+		status TEXT NOT NULL CHECK(status IN ('active','forgotten')), importance INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+	);
+	CREATE INDEX memories_scope_recent ON memories(anchor,status,updated_at DESC);
+	CREATE VIRTUAL TABLE memories_fts USING fts5(content, content='memories', content_rowid='memory_rowid');
+	CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN INSERT INTO memories_fts(rowid,content) VALUES(new.memory_rowid,new.content); END;
+	CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN INSERT INTO memories_fts(memories_fts,rowid,content) VALUES('delete',old.memory_rowid,old.content); END;
+	CREATE TRIGGER memories_au AFTER UPDATE OF content ON memories BEGIN INSERT INTO memories_fts(memories_fts,rowid,content) VALUES('delete',old.memory_rowid,old.content); INSERT INTO memories_fts(rowid,content) VALUES(new.memory_rowid,new.content); END;
+	CREATE TABLE recaps (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, anchor TEXT NOT NULL,
+		covered_boundary TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 1,
+		goal TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', open_items TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL
+	);
+	CREATE INDEX recaps_anchor_updated ON recaps(anchor,updated_at DESC);`,
+	`CREATE TABLE IF NOT EXISTS session_projections (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+		last_run_id TEXT NOT NULL DEFAULT '',
+		blocks BLOB NOT NULL DEFAULT '[]',
+		updated_at INTEGER NOT NULL
+	);
+	ALTER TABLE session_projections ADD COLUMN model_history BLOB NOT NULL DEFAULT '{}';`,
+	`CREATE TABLE IF NOT EXISTS sessions (
+		id TEXT PRIMARY KEY,
+		title TEXT NOT NULL DEFAULT '',
+		provider_id TEXT NOT NULL DEFAULT '',
+		model_id TEXT NOT NULL DEFAULT '',
+		reasoning TEXT NOT NULL DEFAULT '',
+		agent_mode TEXT NOT NULL DEFAULT 'single',
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	);
+	CREATE TABLE session_blocks (
+		session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+		sequence INTEGER NOT NULL,
+		kind TEXT NOT NULL,
+		run_id TEXT NOT NULL DEFAULT '',
+		agent_id TEXT NOT NULL DEFAULT '',
+		data BLOB NOT NULL,
+		PRIMARY KEY(session_id, sequence)
+	);
+	CREATE INDEX session_blocks_run ON session_blocks(session_id, run_id, sequence);
+	CREATE UNIQUE INDEX session_blocks_agent ON session_blocks(session_id, agent_id)
+		WHERE kind='agent' AND agent_id<>'';
+	INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data)
+		SELECT p.session_id, CAST(j.key AS INTEGER),
+			COALESCE(json_extract(j.value,'$.kind'),''),
+			COALESCE(json_extract(j.value,'$.runId'),''),
+			COALESCE(json_extract(j.value,'$.agentId'),''),
+			CAST(j.value AS BLOB)
+		FROM session_projections p, json_each(p.blocks) j;
+	UPDATE session_projections SET blocks='[]';`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
-	var version int
-	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
-		return fmt.Errorf("read schema version: %w", err)
-	}
-	if version > schemaVersion {
-		return fmt.Errorf("database schema %d is newer than supported schema %d", version, schemaVersion)
-	}
-	for version < schemaVersion {
+	for {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			return fmt.Errorf("begin migration %d: %w", version+1, err)
+			return fmt.Errorf("begin schema migration: %w", err)
+		}
+		var version int
+		if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("read schema version: %w", err)
+		}
+		if version > schemaVersion {
+			_ = tx.Rollback()
+			return fmt.Errorf("database schema %d is newer than supported schema %d", version, schemaVersion)
+		}
+		if version == schemaVersion {
+			return tx.Rollback()
 		}
 		next := version + 1
 		if _, err := tx.ExecContext(ctx, migrations[next-1]); err != nil {
@@ -182,7 +241,13 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit migration %d: %w", next, err)
 		}
-		version = next
 	}
-	return nil
+}
+
+func currentSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var version int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return version, nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,12 +24,17 @@ func Open(ctx context.Context, path string) (*Provider, error) {
 		return nil, fmt.Errorf("sqlite path is empty")
 	}
 	memory := path == ":memory:"
+	existed := false
 	if !memory {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
-		if err := backupExisting(path); err != nil {
-			return nil, err
+		info, err := os.Stat(path)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("inspect database: %w", err)
+		}
+		if err == nil && info.Size() > 0 {
+			existed = true
 		}
 	}
 	dsn := sqliteDSN(path, memory)
@@ -51,14 +55,36 @@ func Open(ctx context.Context, path string) (*Provider, error) {
 	for _, pragma := range []string{
 		`PRAGMA foreign_keys = ON`,
 		`PRAGMA busy_timeout = 5000`,
-		`PRAGMA journal_mode = WAL`,
 	} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("configure sqlite: %w", err)
 		}
 	}
-	if err := migrate(ctx, db); err != nil {
+	upgrade := func() error {
+		if _, err := db.ExecContext(ctx, `PRAGMA journal_mode = WAL`); err != nil {
+			return fmt.Errorf("configure sqlite journal: %w", err)
+		}
+		version, err := currentSchemaVersion(ctx, db)
+		if err != nil {
+			return err
+		}
+		if version > schemaVersion {
+			return fmt.Errorf("database schema %d is newer than supported schema %d", version, schemaVersion)
+		}
+		if existed && version < schemaVersion {
+			if err := backupDatabase(ctx, db, path); err != nil {
+				return err
+			}
+		}
+		return migrate(ctx, db)
+	}
+	if !memory {
+		err = withDatabaseUpgradeLock(ctx, path, upgrade)
+	} else {
+		err = upgrade()
+	}
+	if err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -110,34 +136,31 @@ func sqliteDSN(path string, memory bool) string {
 	return "file:" + filepath.ToSlash(path) + "?" + pragmas
 }
 
-func backupExisting(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("inspect database: %w", err)
-	}
-	if info.Size() == 0 {
-		return nil
-	}
-	source, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open database backup source: %w", err)
-	}
-	defer source.Close()
+func backupDatabase(ctx context.Context, db *sql.DB, path string) error {
 	backupPath := path + ".bak"
-	target, err := os.OpenFile(backupPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	temporary, err := os.CreateTemp(filepath.Dir(path), filepath.Base(backupPath)+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("create database backup: %w", err)
+		return fmt.Errorf("create database backup temporary path: %w", err)
 	}
-	_, copyErr := io.Copy(target, source)
-	closeErr := target.Close()
-	if copyErr != nil {
-		return fmt.Errorf("copy database backup: %w", copyErr)
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close database backup temporary path: %w", err)
 	}
-	if closeErr != nil {
-		return fmt.Errorf("close database backup: %w", closeErr)
+	if err := os.Remove(temporaryPath); err != nil {
+		return fmt.Errorf("prepare database backup temporary path: %w", err)
+	}
+	defer os.Remove(temporaryPath)
+	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, temporaryPath); err != nil {
+		return fmt.Errorf("create consistent database backup: %w", err)
+	}
+	if err := os.Chmod(temporaryPath, 0o600); err != nil {
+		return fmt.Errorf("protect database backup: %w", err)
+	}
+	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("replace database backup: %w", err)
+	}
+	if err := os.Rename(temporaryPath, backupPath); err != nil {
+		return fmt.Errorf("publish database backup: %w", err)
 	}
 	return nil
 }

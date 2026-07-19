@@ -119,6 +119,9 @@ type SubagentConfig struct {
 }
 
 type SubagentBudgetConfig struct {
+	// MaxTokens limits cumulative provider-reported spend for one subagent run.
+	// Zero leaves it unbounded; context capacity, turns, tool calls, and
+	// wall-clock duration still bound execution independently.
 	MaxTokens            int           `yaml:"max_tokens"`
 	MaxToolCalls         int           `yaml:"max_tool_calls"`
 	MaxTurns             int           `yaml:"max_turns"`
@@ -206,14 +209,14 @@ func Default() Config {
 				Toggle: map[string]bool{}, Models: map[string]string{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
-					MaxTokens: 128_000, MaxToolCalls: 64, MaxTurns: 32,
+					MaxTokens: 0, MaxToolCalls: 64, MaxTurns: 32,
 					MaxWallClock: "20m", MaxWallClockDuration: 20 * time.Minute,
 				},
 			},
 		},
 		Skills: SkillsConfig{Enabled: true, TrustProject: true},
 		Hooks: HooksConfig{
-			Enabled: true, ClaudeCompatibility: true, DefaultTimeout: "5s",
+			Enabled: true, ClaudeCompatibility: false, DefaultTimeout: "5s",
 			DefaultTimeoutParsed: 5 * time.Second, FailurePolicy: "open",
 		},
 		MCP: MCPConfig{Servers: map[string]MCPServerConfig{}},
@@ -427,8 +430,11 @@ func (c *Config) validateSubagents() error {
 	if err != nil || wallClock <= 0 {
 		return fmt.Errorf("agents.subagents.budget.max_wall_clock must be a positive duration")
 	}
-	if subagents.Budget.MaxTokens < 1 || subagents.Budget.MaxToolCalls < 1 || subagents.Budget.MaxTurns < 1 {
-		return fmt.Errorf("agents.subagents budget limits must be positive")
+	if subagents.Budget.MaxTokens < 0 {
+		return fmt.Errorf("agents.subagents.budget.max_tokens must be non-negative (zero is unbounded)")
+	}
+	if subagents.Budget.MaxToolCalls < 1 || subagents.Budget.MaxTurns < 1 {
+		return fmt.Errorf("agents.subagents tool-call and turn budgets must be positive")
 	}
 	if await > wallClock {
 		return fmt.Errorf("agents.subagents.await_timeout must not exceed budget.max_wall_clock")

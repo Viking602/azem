@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
+	"github.com/Viking602/go-hydaelyn/message"
 )
 
 func TestCompactSummarizesOlderBlocksAndKeepsRecent(t *testing.T) {
@@ -149,5 +150,171 @@ func TestAgentBlockUpsertAfterCompactionDoesNotDuplicate(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("agent block count after compaction = %d: %#v", count, projection.Blocks)
+	}
+}
+
+func TestCompleteTurnStoresAssistantBlockAndModelHistoryTogether(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "completion.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model"}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.ModelHistory.ProviderID != "" || len(projection.ModelHistory.Messages) != 0 {
+		t.Fatalf("new projection history = %#v", projection.ModelHistory)
+	}
+	if err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "request"}); err != nil {
+		t.Fatal(err)
+	}
+	history := ModelHistory{
+		ProviderID: "chatgpt", ModelID: "gpt-test", InstructionFingerprint: "fingerprint",
+		Messages: []message.Message{
+			message.NewText(message.RoleSystem, "rules"),
+			message.NewText(message.RoleUser, "request"),
+			message.NewText(message.RoleAssistant, "answer"),
+		},
+	}
+	if err := service.CompleteTurn(ctx, "session", Block{Kind: "assistant", RunID: "run-1", Content: "answer"}, history); err != nil {
+		t.Fatal(err)
+	}
+	projection, err = service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 2 || projection.Blocks[1].Content != "answer" || projection.LastRunID != "run-1" {
+		t.Fatalf("completed blocks = %#v", projection.Blocks)
+	}
+	got := projection.ModelHistory
+	if got.ProviderID != history.ProviderID || got.ModelID != history.ModelID ||
+		got.InstructionFingerprint != history.InstructionFingerprint || len(got.Messages) != 3 ||
+		got.Messages[2].Role != message.RoleAssistant || got.Messages[2].Text != "answer" {
+		t.Fatalf("completed model history = %#v", got)
+	}
+	compacted, err := service.Compact(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compacted.ModelHistory.ProviderID != "" || len(compacted.ModelHistory.Messages) != 0 {
+		t.Fatalf("compact retained provider model history = %#v", compacted.ModelHistory)
+	}
+}
+
+func TestSessionBlocksUseRowsWithoutRewritingProjectionJSON(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "blocks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Rows"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, block := range []Block{
+		{Kind: "user", RunID: "run-1", Content: "request"},
+		{Kind: "assistant", RunID: "run-1", Content: "first "},
+		{Kind: "assistant", RunID: "run-1", Content: "second"},
+	} {
+		if err := service.AppendBlock(ctx, "session", block); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var legacy string
+	var rowCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT CAST(blocks AS TEXT) FROM session_projections WHERE session_id='session'`).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM session_blocks WHERE session_id='session'`).Scan(&rowCount); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy != "[]" || rowCount != 2 || len(projection.Blocks) != 2 || projection.Blocks[1].Content != "first second" {
+		t.Fatalf("row projection legacy=%q rows=%d blocks=%#v", legacy, rowCount, projection.Blocks)
+	}
+}
+
+func TestBlockMutationsInvalidateExactProviderHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "History"}); err != nil {
+		t.Fatal(err)
+	}
+	history := ModelHistory{ProviderID: "chatgpt", ModelID: "model", Messages: []message.Message{message.NewText(message.RoleAssistant, "raw")}}
+	if err := service.CompleteTurn(ctx, "session", Block{Kind: "assistant", RunID: "run-1", Content: "answer"}, history); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.UpsertAgentBlock(ctx, "session", "child", Block{RunID: "run-1", Content: "child state"}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.ModelHistory.Messages) != 0 {
+		t.Fatalf("agent mutation retained stale provider history = %#v", projection.ModelHistory)
+	}
+	if err := service.CompleteTurn(ctx, "session", Block{Kind: "assistant", RunID: "run-2", Content: "next"}, history); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-3", Content: "failed turn"}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err = service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.ModelHistory.Messages) != 0 {
+		t.Fatalf("append retained stale provider history = %#v", projection.ModelHistory)
+	}
+}
+
+func TestCompleteTurnRollsBackBlockAndModelHistoryOnSessionUpdateFailure(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "completion-rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "request"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `CREATE TRIGGER fail_session_update
+		BEFORE UPDATE ON sessions BEGIN SELECT RAISE(FAIL, 'injected session update failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	err = service.CompleteTurn(ctx, "session", Block{Kind: "assistant", RunID: "run-1", Content: "answer"}, ModelHistory{
+		ProviderID: "chatgpt", ModelID: "gpt-test", InstructionFingerprint: "fingerprint",
+		Messages: []message.Message{message.NewText(message.RoleAssistant, "answer")},
+	})
+	if err == nil {
+		t.Fatal("completion unexpectedly succeeded")
+	}
+	projection, loadErr := service.LoadProjection(ctx, "session")
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if len(projection.Blocks) != 1 || projection.Blocks[0].Kind != "user" ||
+		projection.LastRunID != "run-1" || len(projection.ModelHistory.Messages) != 0 {
+		t.Fatalf("rolled back projection = %#v", projection)
 	}
 }

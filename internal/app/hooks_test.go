@@ -24,8 +24,6 @@ func TestHookSourcesExcludeUntrustedProjectPaths(t *testing.T) {
 	sources := hookSources(cfg, "/config", "/home", "/work")
 	want := map[string]bool{
 		filepath.Join("/config", "hooks"): true, "/trusted/extra": true,
-		filepath.Join("/home", ".claude", "settings.json"):       true,
-		filepath.Join("/home", ".claude", "settings.local.json"): true,
 	}
 	if len(sources) != len(want) {
 		t.Fatalf("sources = %#v", sources)
@@ -35,8 +33,12 @@ func TestHookSourcesExcludeUntrustedProjectPaths(t *testing.T) {
 			t.Fatalf("unexpected source %#v", source)
 		}
 	}
+	cfg.ClaudeCompatibility = true
+	if got := hookSources(cfg, "/config", "/home", "/work"); len(got) != len(want)+2 {
+		t.Fatalf("Claude-compatible user sources require explicit opt-in: %#v", got)
+	}
 	cfg.TrustProject = true
-	if got := hookSources(cfg, "/config", "/home", "/work"); len(got) != len(want)+3 {
+	if got := hookSources(cfg, "/config", "/home", "/work"); len(got) != len(want)+5 {
 		t.Fatalf("trusted project sources = %#v", got)
 	}
 	cfg.Enabled = false
