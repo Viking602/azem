@@ -90,6 +90,36 @@ func TestHistoricalEvidenceIsBoundedStructuredDataAndExcludedFromTeamPrompt(t *t
 	}
 }
 
+func TestPersistRecapEmitsVisibleUpdatedEvent(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	workspace := t.TempDir()
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1"}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	service.AttachMemory(nil, recap.NewService(store.DB(), workspace))
+	if err := service.persistRecap(ctx, "session-1", "run-1", "Expose recap", "Recap is visible", session.TodoList{}); err != nil {
+		t.Fatal(err)
+	}
+	eventCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	event, err := service.NextEvent(eventCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventRecapState || event.State != "updated" || event.SessionID != "session-1" ||
+		event.Recap == nil || event.Recap.Summary != "Recap is visible" || event.Recap.Revision != 1 {
+		t.Fatalf("recap update event = %#v", event)
+	}
+}
+
 func TestFakeTurnStreamsAndFinishes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -274,6 +304,37 @@ func TestNewSessionStaysEphemeralUntilFirstTurn(t *testing.T) {
 	}
 	if resumed.Kind != EventSessionLoaded || resumed.State != "loaded" || resumed.SessionID != event.SessionID || resumed.Data["blocks"] == "[]" {
 		t.Fatalf("resume event = %+v", resumed)
+	}
+}
+
+func TestResumeSessionIncludesPersistedRecap(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	workspace := t.TempDir()
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1"}); err != nil {
+		t.Fatal(err)
+	}
+	recapService := recap.NewService(store.DB(), workspace)
+	if _, err := recapService.Upsert(ctx, recap.Recap{SessionID: "session-1", Summary: "Resume this context"}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	service.AttachMemory(nil, recapService)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionResumeSession, Target: "session-1"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventSessionLoaded || event.Recap == nil || event.Recap.Summary != "Resume this context" {
+		t.Fatalf("resume event recap = %#v", event)
 	}
 }
 

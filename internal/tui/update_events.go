@@ -7,6 +7,7 @@ import (
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/recap"
 )
 
 func (m *AppModel) applyEvent(event app.Event) {
@@ -32,6 +33,9 @@ func (m *AppModel) applyEvent(event app.Event) {
 		m.status = "Ready"
 	case app.EventSessionLoaded:
 		m.loadSessionEvent(event)
+		if event.State != "list" {
+			m.recap = cloneRecap(event.Recap)
+		}
 	case app.EventTodoUpdated:
 		if event.Todo != nil && event.Todo.Revision >= m.todo.Revision {
 			m.todo = event.Todo.Clone()
@@ -92,12 +96,10 @@ func (m *AppModel) applyEvent(event app.Event) {
 			m.errorBanner = m.tr("recap.persist_failed") + ": " + event.Text
 			break
 		}
-		m.recap = nil
-		if event.Recap != nil {
-			value := *event.Recap
-			m.recap = &value
+		m.recap = cloneRecap(event.Recap)
+		if event.State != "updated" {
+			m.openOverlay(OverlayRecap)
 		}
-		m.openOverlay(OverlayRecap)
 	case app.EventAuthState:
 		m.updateAuth(event)
 	case app.EventMCPState:
@@ -122,7 +124,18 @@ func (m *AppModel) applyEvent(event app.Event) {
 	}
 }
 
+func cloneRecap(value *recap.Recap) *recap.Recap {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 func (m AppModel) acceptRunEvent(event app.Event) bool {
+	if event.Kind == app.EventRecapState {
+		return true
+	}
 	if event.Kind == app.EventHookStarted || event.Kind == app.EventHookFinished || event.Kind == app.EventHookDiagnostic {
 		return true
 	}

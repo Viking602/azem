@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -109,18 +108,15 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		s.emit(ctx, Event{Kind: EventMemoryState, State: "forgotten", Text: action.Target})
 		return nil
 	case ActionShowRecap:
-		if s.recap == nil {
-			return fmt.Errorf("recap is unavailable")
-		}
-		item, err := s.recap.Load(ctx, action.SessionID)
-		if errors.Is(err, sql.ErrNoRows) {
-			s.emit(ctx, Event{Kind: EventRecapState, SessionID: action.SessionID, State: "empty"})
-			return nil
-		}
+		item, err := s.loadRecap(ctx, action.SessionID)
 		if err != nil {
 			return err
 		}
-		s.emit(ctx, Event{Kind: EventRecapState, SessionID: action.SessionID, State: "loaded", Recap: &item})
+		state := "loaded"
+		if item == nil {
+			state = "empty"
+		}
+		s.emit(ctx, Event{Kind: EventRecapState, SessionID: action.SessionID, State: state, Recap: item})
 		return nil
 	case ActionListSkills:
 		return s.emitSkillCatalog(ctx, "listed")
@@ -251,9 +247,13 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if err != nil {
 			return err
 		}
+		currentRecap, err := s.loadRecap(ctx, action.Target)
+		if err != nil {
+			return err
+		}
 		s.emit(ctx, Event{
 			Kind: EventSessionLoaded, SessionID: action.Target, State: "compacted",
-			Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, action.Target), Todo: &todo,
+			Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, action.Target), Todo: &todo, Recap: currentRecap,
 		})
 		_ = s.dispatchLifecycle(ctx, hooks.PostCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) {
 			e.Trigger = "manual"
@@ -429,9 +429,13 @@ func (s *Service) emitSession(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	currentRecap, err := s.loadRecap(ctx, id)
+	if err != nil {
+		return err
+	}
 	s.emit(ctx, Event{
 		Kind: EventSessionLoaded, SessionID: id, State: "loaded",
-		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo,
+		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,
 	})
 	if err := s.switchSessionHooks(ctx, id, "resume", projection.Session.ModelID); err != nil {
 		return err

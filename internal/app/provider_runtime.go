@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/auth"
@@ -158,7 +157,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		ExtraBody:       map[string]any{"prompt_cache_key": request.SessionID},
 		LoopPolicy: hyagent.LoopPolicy{
 			UnlimitedIterations: true,
-			MaxWallClock:        20 * time.Minute,
+			MaxWallClock:        r.cfg.Agents.Main.MaxWallClockDuration,
 			ContextTokenTarget:  contextTarget,
 		},
 	}

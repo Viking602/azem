@@ -2772,3 +2772,83 @@ func TestMemoryAndRecapCommandsAndOverlays(t *testing.T) {
 		}
 	}
 }
+
+func TestRecapUpdateIsVisibleWhenIdleAndResumesWithSession(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single", "session-1")
+	value := recap.Recap{
+		SessionID: "session-1", Goal: "Ship visible recap", Summary: "Recap now stays visible near the composer",
+		OpenItems: "Verify the overlay", CoveredBoundary: "run-9", Revision: 3,
+	}
+	model.status = "Running"
+	model.runID = "run-9"
+	model.applyEvent(app.Event{Kind: app.EventRecapState, SessionID: "session-1", RunID: "run-9", State: "updated", Recap: &value})
+	if model.overlay != OverlayNone || model.recap == nil {
+		t.Fatalf("background recap update interrupted the UI: overlay=%q recap=%#v", model.overlay, model.recap)
+	}
+	if view := ansi.Strip(model.View().Content); strings.Contains(view, "※ recap:") {
+		t.Fatalf("recap should not displace live run status:\n%s", view)
+	}
+	model.applyEvent(app.Event{Kind: app.EventRunFinished, SessionID: "session-1", RunID: "run-9", State: "completed"})
+	view := ansi.Strip(model.View().Content)
+	for _, wanted := range []string{"※ recap:", "Recap now stays visible near the composer", "/recap for details"} {
+		if !strings.Contains(view, wanted) {
+			t.Fatalf("visible recap status omitted %q:\n%s", wanted, view)
+		}
+	}
+	if lines := strings.Count(view, "\n") + 1; lines != model.height {
+		t.Fatalf("recap status escaped viewport: got %d lines, want %d", lines, model.height)
+	}
+
+	model.applyEvent(app.Event{
+		Kind: app.EventSessionLoaded, SessionID: "session-2", State: "loaded", Recap: &recap.Recap{
+			SessionID: "session-2", Summary: "Resumed continuity", Revision: 1,
+		}, Data: map[string]string{"blocks": "[]"},
+	})
+	if model.sessionID != "session-2" || model.recap == nil || model.recap.Summary != "Resumed continuity" {
+		t.Fatalf("resumed recap was not restored: session=%q recap=%#v", model.sessionID, model.recap)
+	}
+}
+
+func TestRecapStatusUsesOMPSingleLinePreviewBudget(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.width = 360
+	model.recap = &recap.Recap{Summary: strings.Repeat("context ", 80)}
+	status := strings.TrimRight(ansi.Strip(model.renderRecapStatus(model.width)), " ")
+	if strings.Contains(status, "\n") || ansi.StringWidth(status) > 320 || !strings.Contains(status, "…") {
+		t.Fatalf("recap preview was not bounded to one concise line: width=%d value=%q", ansi.StringWidth(status), status)
+	}
+}
+
+func TestRecapStatusYieldsToTinyViewport(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.recap = &recap.Recap{Summary: "Keep the transcript usable"}
+	model.width = 24
+	model.height = 2
+	view := ansi.Strip(model.View().Content)
+	if strings.Contains(view, "recap") || strings.Count(view, "\n")+1 != model.height {
+		t.Fatalf("tiny viewport should omit recap status:\n%s", view)
+	}
+}
+
+func TestRecapCommandPaletteOpensRecap(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single", "session-1")
+	model.openOverlay(OverlayCommand)
+	for index, option := range commandPaletteOptions {
+		if option == "recap" {
+			model.overlayCursor = index
+			break
+		}
+	}
+	updated, cmd := model.activatePaletteOption()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("recap command-palette item did not start an action")
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(AppModel)
+	if len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionShowRecap || runtime.actions[0].SessionID != "session-1" {
+		t.Fatalf("recap palette actions = %#v", runtime.actions)
+	}
+}
