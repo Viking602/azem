@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -105,6 +106,13 @@ func TestCompactEventRetainsTodoSnapshot(t *testing.T) {
 	}
 	service := NewService(ctx, config.Default())
 	service.sessions = sessions
+	service.activeRun = "run-1"
+	service.activeSession = "session-1"
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionCompact, Target: "session-1"}); !errors.Is(err, ErrRunActive) {
+		t.Fatalf("compact during active run error = %v", err)
+	}
+	service.activeRun = ""
+	service.activeSession = ""
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionCompact, Target: "session-1"}); err != nil {
 		t.Fatal(err)
 	}

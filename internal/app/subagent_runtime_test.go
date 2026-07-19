@@ -33,6 +33,7 @@ import (
 
 func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 	var calls atomic.Int32
+	var cacheKeys sync.Map
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer access" || request.Header.Get("ChatGPT-Account-ID") != "acct" {
 			t.Errorf("provider auth headers missing")
@@ -47,6 +48,11 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 				t.Errorf("read provider request: %v", err)
 			}
 			call := calls.Add(1)
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Errorf("decode provider request %d: %v", call, err)
+			}
+			cacheKeys.Store(call, fmt.Sprint(payload["prompt_cache_key"]))
 			if call == 2 {
 				requestBody := string(body)
 				if !strings.Contains(requestBody, "demo catalog") || !strings.Contains(requestBody, "demo") {
@@ -61,17 +67,24 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 			case 1:
 				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"delegate-1\",\"name\":\"subagent.spawn\",\"arguments\":\"{\\\"prompt\\\":\\\"inspect the workspace\\\",\\\"description\\\":\\\"inspect workspace\\\",\\\"subagent_type\\\":\\\"explore\\\",\\\"background\\\":false}\"}}\n\n")
 			case 2:
-				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Found concrete evidence.\"}\n\n")
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"child-item-1\",\"call_id\":\"child-read-1\",\"name\":\"coding_read_file\",\"arguments\":\"{\\\"path\\\":\\\"missing.txt\\\"}\"}}\n\n")
 			case 3:
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Found concrete evidence.\"}\n\n")
+			case 4:
 				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Delegation complete.\"}\n\n")
 			default:
 				t.Errorf("unexpected response call %d", call)
 			}
-			cachedTokens := 0
+			inputTokens, totalTokens, cachedTokens := 10, 15, 0
 			if call == 2 {
+				// A child run may legitimately spend more than the old 128K
+				// cumulative default and still have room in its model context.
+				inputTokens, totalTokens = 149_995, 150_000
+			}
+			if call == 3 {
 				cachedTokens = 6
 			}
-			_, _ = fmt.Fprintf(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-%d\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15,\"input_tokens_details\":{\"cached_tokens\":%d}}}}\n\n", calls.Load(), cachedTokens)
+			_, _ = fmt.Fprintf(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-%d\",\"status\":\"completed\",\"usage\":{\"input_tokens\":%d,\"output_tokens\":5,\"total_tokens\":%d,\"input_tokens_details\":{\"cached_tokens\":%d}}}}\n\n", calls.Load(), inputTokens, totalTokens, cachedTokens)
 		default:
 			writer.WriteHeader(http.StatusNotFound)
 		}
@@ -190,7 +203,7 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 	}
 
 finished:
-	if calls.Load() != 3 || answer != "Delegation complete." || childID == "" || !typedStates ||
+	if calls.Load() != 4 || answer != "Delegation complete." || childID == "" || !typedStates ||
 		!states["initializing"] || !states["queued"] || !states["running"] || !states["completed"] {
 		t.Fatalf("subagent calls=%d answer=%q id=%q typed=%v states=%v tool_results=%v", calls.Load(), answer, childID, typedStates, states, toolResults)
 	}
@@ -202,12 +215,25 @@ finished:
 	if childUsage.RunID != runID || childUsage.Data["cachedInputTokens"] != "6" || childUsage.Data["inputTokens"] != "10" {
 		t.Fatalf("child cache usage event = %+v", childUsage)
 	}
+	firstKey, _ := cacheKeys.Load(int32(1))
+	firstChildKey, _ := cacheKeys.Load(int32(2))
+	secondChildKey, _ := cacheKeys.Load(int32(3))
+	finalKey, _ := cacheKeys.Load(int32(4))
+	if firstKey != "default" || finalKey != "default" ||
+		firstChildKey == nil || firstChildKey == "" || firstChildKey == "default" ||
+		firstChildKey != secondChildKey {
+		t.Fatalf("prompt cache keys: first=%v child-first=%v child-second=%v final=%v",
+			firstKey, firstChildKey, secondChildKey, finalKey)
+	}
 	runs, err := subagentStore.List(ctx, "default")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(runs) != 1 || runs[0].ID != childID || runs[0].State != agentservice.SubagentCompleted || runs[0].ParentRunID != runID {
 		t.Fatalf("durable subagent runs=%+v", runs)
+	}
+	if runs[0].TokensUsed <= 128_000 {
+		t.Fatalf("completed child token usage = %d, want proof it continued beyond the old 128K limit", runs[0].TokensUsed)
 	}
 	projection, err := sessions.LoadProjection(ctx, "default")
 	if err != nil {
@@ -1524,5 +1550,32 @@ func TestSubagentCoordinatorTerminalizesProviderFailureAndPanic(t *testing.T) {
 				t.Fatalf("child coding run status = %q", projection.Run.Status)
 			}
 		})
+	}
+}
+
+func TestSubagentTurnContextCompactsToModelTarget(t *testing.T) {
+	contextManager := subagentTurnContext{}
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "stable rules"),
+		message.NewText(message.RoleUser, "old request"),
+		message.NewText(message.RoleAssistant, strings.Repeat("old evidence ", 2_000)),
+		message.NewText(message.RoleUser, "latest request"),
+	}
+	compacted, err := contextManager.CompactTo(context.Background(), history, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens := estimateContextTokens(compacted); tokens > 300 {
+		t.Fatalf("compacted context estimate = %d, want <= 300", tokens)
+	}
+	if compacted[len(compacted)-1].Role != message.RoleUser || compacted[len(compacted)-1].Text != "latest request" {
+		t.Fatalf("compacted context lost latest request: %#v", compacted)
+	}
+	foundSummary := false
+	for _, current := range compacted {
+		foundSummary = foundSummary || current.Kind == message.KindCompactionSummary
+	}
+	if !foundSummary {
+		t.Fatalf("compacted context omitted the compaction marker: %#v", compacted)
 	}
 }

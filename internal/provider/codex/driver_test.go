@@ -355,6 +355,59 @@ func TestDriverRoundTripsDistinctFunctionItemID(t *testing.T) {
 	}
 }
 
+func TestDriverAlignsPromptCacheBodyHeadersAndPrefersProviderState(t *testing.T) {
+	const state = `[{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"},{"type":"function_call","id":"provider_item","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}]`
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			PromptCacheKey string            `json:"prompt_cache_key"`
+			Input          []json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if body.PromptCacheKey != "session-cache-key" ||
+			request.Header.Get("conversation_id") != body.PromptCacheKey ||
+			request.Header.Get("session_id") != body.PromptCacheKey {
+			t.Errorf("cache routing body=%q conversation=%q session=%q", body.PromptCacheKey,
+				request.Header.Get("conversation_id"), request.Header.Get("session_id"))
+		}
+		if len(body.Input) != 4 || !strings.Contains(string(body.Input[1]), `"id":"rs_1"`) ||
+			!strings.Contains(string(body.Input[2]), `"id":"provider_item"`) ||
+			strings.Contains(string(body.Input[2]), "stale_item") {
+			t.Errorf("provider state replay input=%s", body.Input)
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte(`data: {"type":"response.completed","response":{"status":"completed","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	driver := newTestDriver(t, server.URL)
+	driver.recordToolItemID("call_1", "stale_item")
+	stream, err := driver.Stream(context.Background(), hyprovider.Request{
+		Model: "gpt-test",
+		Messages: []message.Message{
+			message.NewText(message.RoleUser, "inspect"),
+			{
+				Role: message.RoleAssistant, Text: "normalized",
+				ProviderState: json.RawMessage(state),
+				ToolCalls: []message.ToolCall{{
+					ID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{"q":"normalized"}`),
+				}},
+			},
+			message.NewToolResult(message.ToolResult{ToolCallID: "call_1", Name: "lookup", Content: "result"}),
+		},
+		ExtraBody: map[string]any{"prompt_cache_key": " session-cache-key "},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := stream.Recv()
+	_ = stream.Close()
+	if err != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("terminal event=%#v error=%v", event, err)
+	}
+}
+
 func TestDriverCancellationAbortsSSERead(t *testing.T) {
 	started := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

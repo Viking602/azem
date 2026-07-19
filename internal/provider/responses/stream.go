@@ -20,16 +20,17 @@ const maxSSEFrameBytes = 4 << 20
 var errSSEFrameTooLarge = errors.New("provider SSE frame exceeds 4 MiB")
 
 type Stream struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	body      io.ReadCloser
-	reader    *frameReader
-	builders  map[string]*toolBuilder
-	emitted   map[string]bool
-	completed bool
-	terminal  bool
-	toolUse   bool
-	closeOnce sync.Once
+	ctx        context.Context
+	cancel     context.CancelFunc
+	body       io.ReadCloser
+	reader     *frameReader
+	builders   map[string]*toolBuilder
+	emitted    map[string]bool
+	completed  bool
+	terminal   bool
+	toolUse    bool
+	textOutput bool
+	closeOnce  sync.Once
 }
 
 type toolBuilder struct {
@@ -64,7 +65,8 @@ type streamItem struct {
 }
 
 type completedResponse struct {
-	Status string `json:"status"`
+	Output json.RawMessage `json:"output"`
+	Status string          `json:"status"`
 	Usage  struct {
 		InputTokens        int `json:"input_tokens"`
 		OutputTokens       int `json:"output_tokens"`
@@ -151,6 +153,7 @@ func (s *Stream) Close() error {
 func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool, bool) {
 	switch event.Type {
 	case "response.output_text.delta":
+		s.textOutput = true
 		if event.Delta != "" {
 			return hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: event.Delta}, true, false
 		}
@@ -200,6 +203,13 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 		if response.Status != "" && response.Status != "completed" {
 			return s.errorEvent(streamError(raw)), true, true
 		}
+		providerState, err := completedProviderState(response.Output)
+		if err != nil {
+			return s.errorEvent(err), true, true
+		}
+		if len(providerState) > 0 && !s.providerStateComplete(providerState) {
+			providerState = nil
+		}
 		if s.hasIncompleteTool() {
 			return s.errorEvent(&APIError{Kind: ErrorStream, Message: "response completed with an unfinished tool call"}), true, true
 		}
@@ -212,11 +222,55 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 			InputTokens: response.Usage.InputTokens, CachedInputTokens: response.Usage.InputTokensDetails.CachedTokens,
 			OutputTokens: response.Usage.OutputTokens, TotalTokens: response.Usage.TotalTokens,
 		}
-		return hyprovider.Event{Kind: hyprovider.EventDone, StopReason: reason, Usage: usage}, true, false
+		return hyprovider.Event{
+			Kind: hyprovider.EventDone, StopReason: reason, Usage: usage, ProviderState: providerState,
+		}, true, false
 	case "response.failed", "response.incomplete", "error":
 		return s.errorEvent(streamError(raw)), true, true
 	}
 	return hyprovider.Event{}, false, false
+}
+
+func completedProviderState(output json.RawMessage) (json.RawMessage, error) {
+	if len(output) == 0 {
+		return nil, nil
+	}
+	trimmed := bytes.TrimSpace(output)
+	if len(trimmed) < 2 || trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
+		return nil, &APIError{Kind: ErrorStream, Message: "response.completed output must be a JSON array"}
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(trimmed, &items); err != nil {
+		return nil, &APIError{Kind: ErrorStream, Message: "invalid response.completed output"}
+	}
+	return append(json.RawMessage(nil), trimmed...), nil
+}
+
+func (s *Stream) providerStateComplete(state json.RawMessage) bool {
+	var items []streamItem
+	if err := json.Unmarshal(state, &items); err != nil {
+		return false
+	}
+	hasMessage := false
+	toolIDs := make(map[string]bool)
+	for _, item := range items {
+		if item.Type == "message" {
+			hasMessage = true
+		}
+		if isToolItem(item.Type) {
+			toolIDs[item.ID] = true
+			toolIDs[item.CallID] = true
+		}
+	}
+	if s.textOutput && !hasMessage {
+		return false
+	}
+	for id, emitted := range s.emitted {
+		if emitted && !toolIDs[id] {
+			return false
+		}
+	}
+	return len(items) > 0
 }
 
 func (s *Stream) hasIncompleteTool() bool {

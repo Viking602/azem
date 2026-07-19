@@ -54,6 +54,7 @@ func (d *Driver) Metadata() hyprovider.Metadata {
 }
 
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	cacheKey := promptCacheKey(request)
 	request, reverseNames := mapToolNames(request)
 	payload, err := responses.Build(request, responses.BuildOptions{
 		IncludeEncryptedReasoning: true, DefaultParallelTools: true, ToolCallItemID: d.toolItemID,
@@ -63,7 +64,7 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 		return nil, err
 	}
 	open := func() (hyprovider.Stream, error) {
-		return d.openStream(ctx, payload, reverseNames)
+		return d.openStream(ctx, payload, reverseNames, cacheKey)
 	}
 	stream, retries, err := openProviderStream(ctx, open, d.retryDelay, 0)
 	if err != nil {
@@ -72,7 +73,7 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 	return &retryingStream{ctx: ctx, current: stream, open: open, delay: d.retryDelay, retries: retries}, nil
 }
 
-func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames map[string]string) (hyprovider.Stream, error) {
+func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames map[string]string, cacheKey string) (hyprovider.Stream, error) {
 	streamContext, cancel := context.WithCancel(ctx)
 	response, err := d.auth.DoStreamWithRefresh(streamContext, "chatgpt", d.accountID, func(auth.Credential) (*http.Request, error) {
 		httpRequest, err := http.NewRequest(http.MethodPost, d.endpoint, bytes.NewReader(payload))
@@ -84,6 +85,10 @@ func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames ma
 		httpRequest.Header.Set("OpenAI-Beta", "responses=experimental")
 		httpRequest.Header.Set("originator", "codex_cli_rs")
 		httpRequest.Header.Set("User-Agent", "azem/1")
+		if cacheKey != "" {
+			httpRequest.Header.Set("conversation_id", cacheKey)
+			httpRequest.Header.Set("session_id", cacheKey)
+		}
 		return httpRequest, nil
 	})
 	if err != nil {
@@ -95,6 +100,11 @@ func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames ma
 		return nil, err
 	}
 	return &toolNameStream{inner: stream, reverse: reverseNames, recordItemID: d.recordToolItemID}, nil
+}
+
+func promptCacheKey(request hyprovider.Request) string {
+	value, _ := request.ExtraBody["prompt_cache_key"].(string)
+	return strings.TrimSpace(value)
 }
 
 const maxProviderStreamRetries = 5

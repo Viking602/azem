@@ -18,6 +18,7 @@ type Theme struct {
 	Diff          lipgloss.Style
 	DiffAdd       lipgloss.Style
 	DiffDel       lipgloss.Style
+	DiffHunk      lipgloss.Style
 	Error         lipgloss.Style
 	Muted         lipgloss.Style
 	Status        lipgloss.Style
@@ -42,6 +43,9 @@ func DefaultTheme() Theme {
 	success := adaptiveColor("#3d6c31", "22", "2", "#91b477", "107", "2")
 	selection := adaptiveColor("#dce9e3", "254", "7", "#27332d", "236", "0")
 	userAccent := adaptiveColor("#176f5b", "29", "6", "#62d6b5", "79", "6")
+	diffAddBackground := adaptiveColor("#e6f4ea", "194", "7", "#183325", "22", "0")
+	diffDelBackground := adaptiveColor("#fce8e8", "224", "7", "#3a2023", "52", "0")
+	diffHunkBackground := adaptiveColor("#e7f1f5", "195", "7", "#1d3037", "236", "0")
 
 	return Theme{
 		Header:        lipgloss.NewStyle().Bold(true).Foreground(accent),
@@ -52,8 +56,9 @@ func DefaultTheme() Theme {
 		Thinking:      lipgloss.NewStyle().Foreground(secondary),
 		Tool:          lipgloss.NewStyle().Foreground(warning),
 		Diff:          lipgloss.NewStyle().Foreground(accent),
-		DiffAdd:       lipgloss.NewStyle().Foreground(success),
-		DiffDel:       lipgloss.NewStyle().Foreground(danger),
+		DiffAdd:       lipgloss.NewStyle().Foreground(success).Background(diffAddBackground),
+		DiffDel:       lipgloss.NewStyle().Foreground(danger).Background(diffDelBackground),
+		DiffHunk:      lipgloss.NewStyle().Bold(true).Foreground(accent).Background(diffHunkBackground),
 		Error:         lipgloss.NewStyle().Bold(true).Foreground(danger),
 		Muted:         lipgloss.NewStyle().Foreground(muted),
 		Status:        lipgloss.NewStyle().Bold(true).Foreground(accent),

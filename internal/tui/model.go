@@ -58,9 +58,10 @@ type Block struct {
 }
 
 type transcriptBlockLayout struct {
-	block    Block
-	selected bool
-	lines    []string
+	block          Block
+	selected       bool
+	animationFrame int
+	lines          []string
 }
 
 type transcriptLayoutCache struct {
@@ -68,6 +69,13 @@ type transcriptLayoutCache struct {
 	initialized  bool
 	blocks       []transcriptBlockLayout
 	lines        []string
+}
+
+type transcriptSelection struct {
+	startX int
+	startY int
+	endX   int
+	endY   int
 }
 
 type Overlay string
@@ -229,6 +237,7 @@ type AppModel struct {
 	transcriptLayout    *transcriptLayoutCache
 	transcriptTop       int
 	transcriptCursor    int
+	transcriptSelection *transcriptSelection
 	focus               focusArea
 	overlay             Overlay
 	overlayCursor       int

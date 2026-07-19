@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Viking602/go-hydaelyn/message"
 )
 
 type Session struct {
@@ -32,11 +34,22 @@ type Block struct {
 	Collapsed        bool   `json:"collapsed,omitempty"`
 }
 
+// ModelHistory is a replaceable provider-resume checkpoint, not the durable
+// conversation record. CompleteTurn installs it atomically; any independent
+// transcript mutation and explicit compaction invalidates it.
+type ModelHistory struct {
+	ProviderID             string            `json:"providerId,omitempty"`
+	ModelID                string            `json:"modelId,omitempty"`
+	InstructionFingerprint string            `json:"instructionFingerprint,omitempty"`
+	Messages               []message.Message `json:"messages,omitempty"`
+}
+
 type Projection struct {
-	Session   Session
-	LastRunID string
-	Blocks    []Block
-	UpdatedAt time.Time
+	Session      Session
+	LastRunID    string
+	Blocks       []Block
+	ModelHistory ModelHistory
+	UpdatedAt    time.Time
 }
 
 type Service struct {
@@ -101,18 +114,36 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	if err != nil {
 		return Projection{}, err
 	}
-	var data []byte
+	var blocksData, historyData []byte
 	var runID string
 	var updated int64
-	err = s.db.QueryRowContext(ctx, `SELECT last_run_id,blocks,updated_at FROM session_projections WHERE session_id=?`, id).Scan(&runID, &data, &updated)
+	err = s.db.QueryRowContext(ctx, `SELECT last_run_id,blocks,model_history,updated_at FROM session_projections WHERE session_id=?`, id).Scan(
+		&runID, &blocksData, &historyData, &updated,
+	)
 	if err != nil {
 		return Projection{}, fmt.Errorf("load projection: %w", err)
 	}
 	var blocks []Block
-	if err := json.Unmarshal(data, &blocks); err != nil {
+	if err := json.Unmarshal(blocksData, &blocks); err != nil {
 		return Projection{}, fmt.Errorf("decode projection: %w", err)
 	}
-	return Projection{Session: value, LastRunID: runID, Blocks: blocks, UpdatedAt: time.Unix(0, updated).UTC()}, nil
+	var history ModelHistory
+	if err := json.Unmarshal(historyData, &history); err != nil {
+		return Projection{}, fmt.Errorf("decode model history: %w", err)
+	}
+	blocks, err = loadSessionBlocks(ctx, s.db, id)
+	if err != nil {
+		return Projection{}, err
+	}
+	if len(blocks) == 0 && string(blocksData) != "[]" {
+		if err := json.Unmarshal(blocksData, &blocks); err != nil {
+			return Projection{}, fmt.Errorf("decode legacy projection: %w", err)
+		}
+	}
+	return Projection{
+		Session: value, LastRunID: runID, Blocks: blocks, ModelHistory: history,
+		UpdatedAt: time.Unix(0, updated).UTC(),
+	}, nil
 }
 
 func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block) error {
@@ -121,30 +152,35 @@ func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block
 		return err
 	}
 	defer tx.Rollback()
-	var data []byte
-	if err := tx.QueryRowContext(ctx, `SELECT blocks FROM session_projections WHERE session_id=?`, sessionID).Scan(&data); err != nil {
-		return fmt.Errorf("load projection for append: %w", err)
-	}
-	var blocks []Block
-	if err := json.Unmarshal(data, &blocks); err != nil {
-		return err
-	}
-	if len(blocks) > 0 && block.Kind == "assistant" {
-		last := &blocks[len(blocks)-1]
-		if last.Kind == block.Kind && last.RunID == block.RunID {
-			last.Content += block.Content
-		} else {
-			blocks = append(blocks, block)
-		}
-	} else {
-		blocks = append(blocks, block)
-	}
-	encoded, err := json.Marshal(blocks)
-	if err != nil {
+	if err := appendSessionBlock(ctx, tx, sessionID, block); err != nil {
 		return err
 	}
 	now := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET last_run_id=?,blocks=?,updated_at=? WHERE session_id=?`, block.RunID, encoded, now, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET last_run_id=?,model_history='{}',updated_at=? WHERE session_id=?`, block.RunID, now, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Block, history ModelHistory) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := appendSessionBlock(ctx, tx, sessionID, block); err != nil {
+		return err
+	}
+	encodedHistory, err := json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("encode model history: %w", err)
+	}
+	now := time.Now().UTC().UnixNano()
+	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET last_run_id=?,model_history=?,updated_at=? WHERE session_id=?`,
+		block.RunID, encodedHistory, now, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
@@ -164,31 +200,26 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 		return err
 	}
 	defer tx.Rollback()
-	var data []byte
-	if err := tx.QueryRowContext(ctx, `SELECT blocks FROM session_projections WHERE session_id=?`, sessionID).Scan(&data); err != nil {
-		return fmt.Errorf("load projection for agent upsert: %w", err)
-	}
-	var blocks []Block
-	if err := json.Unmarshal(data, &blocks); err != nil {
-		return fmt.Errorf("decode projection for agent upsert: %w", err)
-	}
-	replaced := false
-	for index := range blocks {
-		if blocks[index].Kind == "agent" && blocks[index].AgentID == agentID {
-			blocks[index] = block
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		blocks = append(blocks, block)
-	}
-	encoded, err := json.Marshal(blocks)
+	encoded, err := json.Marshal(block)
 	if err != nil {
 		return err
 	}
+	result, err := tx.ExecContext(ctx, `UPDATE session_blocks SET run_id=?,data=? WHERE session_id=? AND kind='agent' AND agent_id=?`,
+		block.RunID, encoded, sessionID, agentID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		if err := insertSessionBlock(ctx, tx, sessionID, block, encoded); err != nil {
+			return err
+		}
+	}
 	now := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET blocks=?,updated_at=? WHERE session_id=?`, encoded, now, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history='{}',updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
@@ -202,8 +233,36 @@ func (s *Service) Compact(ctx context.Context, sessionID string) (Projection, er
 	if err != nil {
 		return Projection{}, err
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Projection{}, err
+	}
+	defer tx.Rollback()
+	projection.Blocks, err = loadSessionBlocks(ctx, tx, sessionID)
+	if err != nil {
+		return Projection{}, err
+	}
+	var historyData []byte
+	if err := tx.QueryRowContext(ctx, `SELECT model_history FROM session_projections WHERE session_id=?`, sessionID).Scan(&historyData); err != nil {
+		return Projection{}, err
+	}
+	if err := json.Unmarshal(historyData, &projection.ModelHistory); err != nil {
+		return Projection{}, fmt.Errorf("decode model history for compaction: %w", err)
+	}
 	const keepRecent = 4
 	if len(projection.Blocks) <= keepRecent+1 {
+		now := time.Now().UTC().UnixNano()
+		if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history='{}',updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
+			return Projection{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
+			return Projection{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Projection{}, err
+		}
+		projection.ModelHistory = ModelHistory{}
+		projection.UpdatedAt = time.Unix(0, now).UTC()
 		return projection, nil
 	}
 	older := projection.Blocks[:len(projection.Blocks)-keepRecent]
@@ -221,17 +280,20 @@ func (s *Service) Compact(ctx context.Context, sessionID string) (Projection, er
 	}
 	compacted := []Block{{Kind: "assistant", Title: "Compacted history", Content: summary.String(), State: "compacted", Collapsed: true}}
 	compacted = append(compacted, projection.Blocks[len(projection.Blocks)-keepRecent:]...)
-	encoded, err := json.Marshal(compacted)
-	if err != nil {
-		return Projection{}, err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Projection{}, err
-	}
-	defer tx.Rollback()
 	now := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET blocks=?,updated_at=? WHERE session_id=?`, encoded, now, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_blocks WHERE session_id=?`, sessionID); err != nil {
+		return Projection{}, err
+	}
+	for _, block := range compacted {
+		encoded, err := json.Marshal(block)
+		if err != nil {
+			return Projection{}, err
+		}
+		if err := insertSessionBlock(ctx, tx, sessionID, block, encoded); err != nil {
+			return Projection{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history='{}',updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
 		return Projection{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
@@ -241,8 +303,70 @@ func (s *Service) Compact(ctx context.Context, sessionID string) (Projection, er
 		return Projection{}, err
 	}
 	projection.Blocks = compacted
+	projection.ModelHistory = ModelHistory{}
 	projection.UpdatedAt = time.Unix(0, now).UTC()
 	return projection, nil
+}
+
+type sessionBlockQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func loadSessionBlocks(ctx context.Context, queryer sessionBlockQueryer, sessionID string) ([]Block, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT data FROM session_blocks WHERE session_id=? ORDER BY sequence`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("load session blocks: %w", err)
+	}
+	defer rows.Close()
+	blocks := make([]Block, 0)
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var block Block
+		if err := json.Unmarshal(data, &block); err != nil {
+			return nil, fmt.Errorf("decode session block: %w", err)
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks, rows.Err()
+}
+
+func appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block) error {
+	var sequence int
+	var data []byte
+	err := tx.QueryRowContext(ctx, `SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence DESC LIMIT 1`, sessionID).Scan(&sequence, &data)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("load latest session block: %w", err)
+	}
+	if err == nil && block.Kind == "assistant" {
+		var previous Block
+		if err := json.Unmarshal(data, &previous); err != nil {
+			return fmt.Errorf("decode latest session block: %w", err)
+		}
+		if previous.Kind == block.Kind && previous.RunID == block.RunID {
+			previous.Content += block.Content
+			encoded, err := json.Marshal(previous)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE session_blocks SET data=? WHERE session_id=? AND sequence=?`, encoded, sessionID, sequence)
+			return err
+		}
+	}
+	encoded, err := json.Marshal(block)
+	if err != nil {
+		return err
+	}
+	return insertSessionBlock(ctx, tx, sessionID, block, encoded)
+}
+
+func insertSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block, encoded []byte) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data)
+		SELECT ?,COALESCE(MAX(sequence)+1,0),?,?,?,? FROM session_blocks WHERE session_id=?`,
+		sessionID, block.Kind, block.RunID, block.AgentID, encoded, sessionID)
+	return err
 }
 
 func firstSessionValue(values ...string) string {
@@ -257,7 +381,7 @@ func firstSessionValue(values ...string) string {
 func (s *Service) List(ctx context.Context, limit int) ([]Session, error) {
 	query := `SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at
 		FROM sessions s JOIN session_projections p ON p.session_id=s.id
-		WHERE p.last_run_id<>'' OR CAST(p.blocks AS TEXT)<>'[]'
+		WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) OR CAST(p.blocks AS TEXT)<>'[]'
 		ORDER BY s.updated_at DESC`
 	args := []any{}
 	if limit > 0 {

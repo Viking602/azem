@@ -818,6 +818,18 @@ func TestReadAndSkillToolResultsUseDisplaySummaries(t *testing.T) {
 		t.Fatalf("JSON display summary = %q", got)
 	}
 
+	subagentOutput := `{"tasks":[{"description":"分析整体架构","status":"failed","type":"explore","elapsed_ms":40457,"tool_calls":33,"turns":5,"tokens_used":143698,"error":"agent loop budget exhausted: max tokens"},{"description":"分析测试与质量","status":"completed","type":"explore","elapsed_ms":12000,"tool_calls":7,"turns":2,"tokens_used":12400,"output":"Found concrete evidence."}]}`
+	subagentSummary := summarizeToolResult("subagent.get_output", "", subagentOutput)
+	for _, wanted := range []string{
+		"[1] 分析整体架构", "Failed · explore · 33 tools · 5 turns · 143K tokens · 40.5s",
+		"Error: agent loop budget exhausted: max tokens", "[2] 分析测试与质量",
+		"Completed · explore · 7 tools · 2 turns · 12K tokens · 12.0s", "Output: Found concrete evidence.",
+	} {
+		if !strings.Contains(subagentSummary, wanted) {
+			t.Fatalf("subagent summary omitted %q:\n%s", wanted, subagentSummary)
+		}
+	}
+
 	files := strings.Join([]string{"1.go", "2.go", "3.go", "4.go", "5.go", "6.go", "7.go", "8.go", "9.go", "10.go"}, "\n")
 	if got := summarizeToolResult("coding.list_files", "", files); got != "1.go\n2.go\n3.go\n4.go\n5.go\n6.go\n7.go\n8.go\n… 2 more entries (10 total)" {
 		t.Fatalf("list display summary = %q", got)
@@ -953,6 +965,47 @@ func TestDiffRendererSeparatesFilesHunksAndLineNumbers(t *testing.T) {
 	} {
 		if !strings.Contains(plain, wanted) {
 			t.Fatalf("rendered diff omitted %q:\n%s", wanted, plain)
+		}
+	}
+}
+
+func TestGitDiffToolUsesAccessibleFullRowChangeStyling(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if model.theme.DiffAdd.GetBackground() == nil || model.theme.DiffDel.GetBackground() == nil ||
+		model.theme.DiffHunk.GetBackground() == nil {
+		t.Fatal("diff change hierarchy is missing background colors")
+	}
+	if fmt.Sprint(model.theme.DiffAdd.GetBackground()) == fmt.Sprint(model.theme.DiffDel.GetBackground()) {
+		t.Fatal("added and deleted rows use the same background color")
+	}
+	block := Block{
+		Kind: BlockTool, Title: "coding.git_diff", State: "completed",
+		Content: "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -7 +7 @@\n-\toldCall()\n+\tnewCall()",
+	}
+	directRows := model.renderDiffContent(block.Content, 74)
+	if len(directRows) == 0 {
+		t.Fatalf("Git diff content produced no rows: files=%#v", func() []diffViewFile {
+			files, _ := parseDiffView(block.Content)
+			return files
+		}())
+	}
+	rows := model.renderBlock(block, 0, 72)
+	plainRows := make([]string, len(rows))
+	for index, row := range rows {
+		plainRows[index] = ansi.Strip(row)
+	}
+	plain := strings.Join(plainRows, "\n")
+	for _, wanted := range []string{"M main.go  +1 -1", "@@ -7 +7 @@", "7   - ", "  7 + ", "oldCall()", "newCall()"} {
+		if !strings.Contains(plain, wanted) {
+			t.Fatalf("Git diff tool omitted %q:\n%s", wanted, plain)
+		}
+	}
+	for _, row := range rows {
+		text := ansi.Strip(row)
+		if strings.Contains(text, "oldCall()") || strings.Contains(text, "newCall()") || strings.Contains(text, "@@ line 7 @@") {
+			if width := ansi.StringWidth(row); width != 74 {
+				t.Fatalf("styled diff row width=%d, want 74: %q", width, text)
+			}
 		}
 	}
 }
@@ -1881,9 +1934,6 @@ func TestTranscriptSupportsMouseAndKeyboardScrolling(t *testing.T) {
 	if !strings.Contains(latest, "message 23") {
 		t.Fatalf("latest transcript is not anchored to the bottom:\n%s", latest)
 	}
-	if view := model.View(); view.MouseMode != tea.MouseModeCellMotion {
-		t.Fatalf("transcript view mouse mode = %v", view.MouseMode)
-	}
 	updated, _ = model.Update(tea.MouseWheelMsg{X: 2, Y: 3, Button: tea.MouseWheelUp})
 	model = updated.(AppModel)
 	if model.transcriptTop == 0 {
@@ -1905,7 +1955,70 @@ func TestTranscriptSupportsMouseAndKeyboardScrolling(t *testing.T) {
 	}
 }
 
-func TestTranscriptScrollDoesNotFollowNewStreamingContent(t *testing.T) {
+func TestTranscriptDragSelectionClampsToConversationPaneAndCopies(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model = updated.(AppModel)
+	model.transcript = []Block{{Kind: BlockAssistant, Content: "dialogue only\nsecond dialogue line", State: "completed"}}
+	if view := model.View(); view.MouseMode != tea.MouseModeCellMotion {
+		t.Fatalf("default view mouse mode = %v", view.MouseMode)
+	}
+	if status := ansi.Strip(model.renderStatus(140)); !strings.Contains(status, "Drag copy") {
+		t.Fatalf("drag selection gesture is not visible in status: %q", status)
+	}
+	_, top, transcriptWidth, transcriptHeight := model.transcriptBounds()
+	lines := strings.Split(ansi.Strip(model.renderTranscript(transcriptWidth, transcriptHeight)), "\n")
+	row := -1
+	column := 0
+	for index, line := range lines {
+		if offset := strings.Index(line, "dialogue only"); offset >= 0 {
+			row, column = index, offset
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatalf("dialogue fixture was not rendered:\n%s", strings.Join(lines, "\n"))
+	}
+
+	var copied string
+	previousClipboard := writeClipboard
+	writeClipboard = func(text string) error {
+		copied = text
+		return nil
+	}
+	t.Cleanup(func() { writeClipboard = previousClipboard })
+	updated, _ = model.Update(tea.MouseClickMsg{X: column, Y: top + row, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	updated, _ = model.Update(tea.MouseMotionMsg{X: 119, Y: top + row, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	updated, command := model.Update(tea.MouseReleaseMsg{X: 119, Y: top + row, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.transcriptSelection == nil || model.transcriptSelection.endX != transcriptWidth-1 {
+		t.Fatalf("selection escaped transcript width %d: %#v", transcriptWidth, model.transcriptSelection)
+	}
+	if command == nil {
+		t.Fatal("selection release did not copy")
+	}
+	command()
+	if !strings.Contains(copied, "dialogue only") || strings.Contains(copied, "RUN CONTEXT") || strings.Contains(copied, "TODO") {
+		t.Fatalf("copied selection crossed into context rail: %q", copied)
+	}
+}
+
+func TestTranscriptSelectionBackgroundSurvivesNestedMarkdownStyles(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	styled := model.theme.Assistant.Render("plain ") + model.theme.DiffAdd.Render("inline code") + model.theme.Assistant.Render(" tail")
+	width := ansi.StringWidth(styled)
+	model.transcriptSelection = &transcriptSelection{startX: 0, startY: 0, endX: width - 1, endY: 0}
+
+	highlighted := model.highlightTranscriptSelection([]string{styled}, width)[0]
+	wanted := model.theme.Selected.Render(ansi.Strip(styled))
+	if !strings.Contains(highlighted, wanted) {
+		t.Fatalf("nested ANSI styles interrupted selection background:\nwant segment: %q\ngot:          %q", wanted, highlighted)
+	}
+}
+
+func TestTranscriptScrollStopsFollowingStreamingTail(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
 	model = updated.(AppModel)
@@ -1921,6 +2034,44 @@ func TestTranscriptScrollDoesNotFollowNewStreamingContent(t *testing.T) {
 	after := ansi.Strip(model.renderTranscript(width, height))
 	if after != before {
 		t.Fatalf("streaming content moved a transcript scrolled into history:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestTranscriptOldestPositionStaysPinnedDuringStreaming(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model = updated.(AppModel)
+	model.status = "Running"
+	model.runID = "run-1"
+	model.transcript = []Block{{Kind: BlockAssistant, RunID: "run-1", Title: "Azem", Content: strings.Repeat("oldest content ", 80), State: "running"}}
+	model.transcriptTop = model.transcriptMaxOffset()
+
+	updated, _ = model.Update(appEventMsg{Event: app.Event{Kind: app.EventTextDelta, RunID: "run-1", Text: strings.Repeat("new content ", 20)}})
+	model = updated.(AppModel)
+	if want := model.transcriptMaxOffset(); model.transcriptTop != want {
+		t.Fatalf("oldest position offset = %d, want new maximum %d", model.transcriptTop, want)
+	}
+}
+
+func TestTranscriptBodyDoesNotJumpWhenLongFinalAnswerCompletes(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	model = updated.(AppModel)
+	model.status = "Running"
+	model.runID = "run-1"
+	model.transcript = []Block{{
+		Kind: BlockAssistant, RunID: "run-1", Title: "Azem",
+		Content: strings.Repeat("final answer line\n", 40), State: "streaming",
+	}}
+	model.scrollTranscript(5)
+	width, height := model.transcriptViewportSize()
+	before := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
+
+	updated, _ = model.Update(appEventMsg{Event: app.Event{Kind: app.EventRunFinished, RunID: "run-1"}})
+	model = updated.(AppModel)
+	after := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
+	if got, want := strings.Join(after[:height-1], "\n"), strings.Join(before[:height-1], "\n"); got != want {
+		t.Fatalf("finalization shifted the transcript body:\nbefore:\n%s\nafter:\n%s", want, got)
 	}
 }
 
@@ -1952,16 +2103,16 @@ func TestAssistantMarkdownRendersWithoutSourceMarkers(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	block := Block{
 		Kind:    BlockAssistant,
-		Content: "# Design\n\n**Bold finding** with `inline code`.\n\n- first item\n- second item",
+		Content: "# Design\n\n## Plan\n\n### Soon\n\n**Bold finding** with `inline code`.\n\n- first item\n- second item\n\n---",
 		State:   "completed",
 	}
 	rendered := ansi.Strip(strings.Join(model.renderBlock(block, 0, 72), "\n"))
-	for _, marker := range []string{"# Design", "**Bold finding**", "`inline code`"} {
+	for _, marker := range []string{"# Design", "## Plan", "### Soon", "**Bold finding**", "`inline code`", "--------"} {
 		if strings.Contains(rendered, marker) {
 			t.Fatalf("rendered markdown still contains source marker %q:\n%s", marker, rendered)
 		}
 	}
-	for _, wanted := range []string{"Design", "Bold finding", "inline code", "first item", "second item"} {
+	for _, wanted := range []string{"Design", "Plan", "Soon", "Bold finding", "inline code", "first item", "second item", "──────"} {
 		if !strings.Contains(rendered, wanted) {
 			t.Fatalf("rendered markdown missing %q:\n%s", wanted, rendered)
 		}
@@ -2018,6 +2169,15 @@ func TestTranscriptLayoutCacheReusesStableRender(t *testing.T) {
 	}
 	if output := ansi.Strip(strings.Join(updated, "\n")); !strings.Contains(output, "Updated") || strings.Contains(output, "Cached") {
 		t.Fatalf("updated transcript layout is stale:\n%s", output)
+	}
+
+	stable := model.transcriptLines(72)
+	model.status = "Running"
+	model.runID = "run-1"
+	model.animationFrame++
+	afterAnimation := model.transcriptLines(72)
+	if &stable[0] != &afterAnimation[0] {
+		t.Fatal("animation frame rerendered a transcript block without an animated indicator")
 	}
 }
 
@@ -2496,6 +2656,38 @@ func TestTodoRailShowsProgressInsteadOfInternalRevision(t *testing.T) {
 	rail := ansi.Strip(model.renderContextRail(31, 16))
 	if strings.Contains(rail, "r9") || !strings.Contains(rail, "TODO  1/2") {
 		t.Fatalf("todo header should show user-facing progress: %q", rail)
+	}
+}
+
+func TestTodoRowsAreNumberedAndBoundRunningSubagentsAnimate(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.todo = session.TodoList{Phases: []session.TodoPhase{{Title: "Work", Items: []session.TodoItem{
+		{ID: "main", Content: "Main task", Status: session.TodoInProgress},
+		{ID: "delegated", Content: "Delegated task", Status: session.TodoPending, SubagentRunID: "child-1"},
+		{ID: "next", Content: "Next task", Status: session.TodoPending},
+	}}}}
+	model.agents = []AgentView{{ID: "child-1", State: "running"}}
+
+	before := ansi.Strip(model.renderContextRail(40, 16))
+	for _, wanted := range []string{"◐  1. Main task", "◐  2. Delegated task", "○  3. Next task"} {
+		if !strings.Contains(before, wanted) {
+			t.Fatalf("numbered todo rail omitted %q:\n%s", wanted, before)
+		}
+	}
+	model.animationFrame++
+	after := ansi.Strip(model.renderContextRail(40, 16))
+	for _, wanted := range []string{"◓  1. Main task", "◓  2. Delegated task"} {
+		if !strings.Contains(after, wanted) {
+			t.Fatalf("running todo did not animate as %q:\n%s", wanted, after)
+		}
+	}
+
+	model.openOverlay(OverlayTodos)
+	overlay := ansi.Strip(model.renderOverlay(80, 24))
+	for _, wanted := range []string{"1. Main task", "2. Delegated task", "3. Next task"} {
+		if !strings.Contains(overlay, wanted) {
+			t.Fatalf("numbered todo overlay omitted %q:\n%s", wanted, overlay)
+		}
 	}
 }
 

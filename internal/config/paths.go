@@ -18,11 +18,16 @@ type Paths struct {
 }
 
 func ResolvePaths(startupWorkspace string) (Paths, error) {
-	configRoot, err := os.UserConfigDir()
+	platformConfigRoot, err := os.UserConfigDir()
 	if err != nil {
 		return Paths{}, fmt.Errorf("resolve user config directory: %w", err)
 	}
-	dataRoot, err := userDataDir(configRoot)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Paths{}, fmt.Errorf("resolve user home directory: %w", err)
+	}
+	configRoot := filepath.Join(home, ".config")
+	dataRoot, err := userDataDir(platformConfigRoot)
 	if err != nil {
 		return Paths{}, fmt.Errorf("resolve user data directory: %w", err)
 	}

@@ -222,6 +222,20 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if s.sessions == nil {
 			return fmt.Errorf("session store is unavailable")
 		}
+		const compactReservation = "maintenance:compact"
+		s.mu.Lock()
+		if s.shuttingDown {
+			s.mu.Unlock()
+			return fmt.Errorf("application is shutting down")
+		}
+		if s.activeRun != "" {
+			s.mu.Unlock()
+			return ErrRunActive
+		}
+		s.activeRun = compactReservation
+		s.activeSession = action.Target
+		s.mu.Unlock()
+		defer s.clearRun(compactReservation)
 		if err := s.dispatchLifecycle(ctx, hooks.PreCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) { e.Trigger = "manual" }); err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -19,6 +20,7 @@ type BuildOptions struct {
 
 type wireRequest struct {
 	Model             string            `json:"model"`
+	PromptCacheKey    string            `json:"prompt_cache_key,omitempty"`
 	Instructions      string            `json:"instructions,omitempty"`
 	Input             []any             `json:"input"`
 	Tools             []any             `json:"tools,omitempty"`
@@ -59,7 +61,8 @@ func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
 	}
 	maxOutput := intExtra(request, "max_output_tokens")
 	wire := wireRequest{
-		Model: request.Model, Instructions: instructions, Input: input, Tools: tools,
+		Model: request.Model, PromptCacheKey: strings.TrimSpace(stringExtra(request, "prompt_cache_key")),
+		Instructions: instructions, Input: input, Tools: tools,
 		ParallelToolCalls: parallel, Reasoning: reasoning, MaxOutputTokens: maxOutput,
 		Store: false, Stream: true, Metadata: sanitizedMetadata(request.Metadata),
 	}
@@ -89,7 +92,12 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string) 
 	for _, current := range messages {
 		switch current.Role {
 		case message.RoleSystem:
-			if current.Text != "" {
+			if current.Text == "" {
+				continue
+			}
+			if current.Visibility == message.VisibilityPrivate {
+				input = append(input, wireMessage("developer", "input_text", current.Text))
+			} else {
 				instructions = append(instructions, current.Text)
 			}
 		case message.RoleTool:
@@ -102,6 +110,16 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string) 
 			}
 			input = append(input, map[string]any{"type": "function_call_output", "call_id": current.ToolResult.ToolCallID, "output": output})
 		case message.RoleAssistant:
+			if len(current.ProviderState) > 0 {
+				items, err := decodeProviderState(current.ProviderState)
+				if err != nil {
+					return "", nil, err
+				}
+				for _, item := range items {
+					input = append(input, item)
+				}
+				continue
+			}
 			if current.Text != "" {
 				input = append(input, wireMessage("assistant", "output_text", current.Text))
 			}
@@ -113,13 +131,15 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string) 
 				if !json.Valid(arguments) {
 					return "", nil, fmt.Errorf("assistant tool call %q has invalid JSON arguments", call.ID)
 				}
-				itemID := call.ID
+				item := map[string]any{
+					"type": "function_call", "call_id": call.ID, "name": call.Name, "arguments": string(arguments),
+				}
 				if toolCallItemID != nil {
 					if resolved := toolCallItemID(call.ID); resolved != "" {
-						itemID = resolved
+						item["id"] = resolved
 					}
 				}
-				input = append(input, map[string]any{"type": "function_call", "id": itemID, "call_id": call.ID, "name": call.Name, "arguments": string(arguments)})
+				input = append(input, item)
 			}
 		case message.RoleUser, message.RoleCustom:
 			if current.Text != "" {
@@ -130,6 +150,18 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string) 
 		}
 	}
 	return strings.Join(instructions, "\n\n"), input, nil
+}
+
+func decodeProviderState(state json.RawMessage) ([]json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(state)
+	if len(trimmed) < 2 || trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
+		return nil, fmt.Errorf("responses provider state must be a JSON array")
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(trimmed, &items); err != nil {
+		return nil, fmt.Errorf("decode responses provider state: %w", err)
+	}
+	return items, nil
 }
 
 func wireMessage(role string, contentType string, text string) map[string]any {

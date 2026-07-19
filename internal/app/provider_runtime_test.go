@@ -1531,3 +1531,278 @@ func durableApprovalDecider(t *testing.T, coding *agentservice.Service, runID st
 	t.Fatalf("run %s has no durable approval decision", runID)
 	return ""
 }
+
+func TestTurnContextBuildReplaysCompatibleHistoryAndAppendsDynamicTail(t *testing.T) {
+	saved := []message.Message{
+		message.NewText(message.RoleSystem, mainInstructions),
+		{
+			Role: message.RoleSystem, Text: "saved skill catalog",
+			Metadata: map[string]string{"hydaelyn.skill.context": "catalog"},
+		},
+		message.NewText(message.RoleUser, "old request"),
+		{
+			Role: message.RoleAssistant, Text: "old answer",
+			ProviderState: json.RawMessage(`[{"type":"reasoning","id":"reasoning-1"}]`),
+		},
+	}
+	manager := turnContext{
+		instructions: mainInstructions, providerID: "chatgpt", modelID: "gpt-test",
+		modelHistory: session.ModelHistory{
+			ProviderID: "chatgpt", ModelID: "gpt-test",
+			InstructionFingerprint: mainInstructionFingerprint, Messages: saved,
+		},
+		history: []session.Block{
+			{Kind: "user", Content: "old request"},
+			{Kind: "assistant", Content: "old answer"},
+			{Kind: "user", Content: "current hook user", State: "hook"},
+		},
+		persistedHistory:  2,
+		privateContext:    "current trusted hook",
+		historicalContext: `{"memories":["current evidence"]}`,
+		todo:              session.TodoList{Goal: "current todo", Revision: 3},
+	}
+	got, err := manager.Build(context.Background(), api.Task{Goal: "new request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(saved)+6 || !reflect.DeepEqual(got[:len(saved)], saved) {
+		t.Fatalf("saved prefix changed:\n got=%#v\nwant=%#v", got, saved)
+	}
+	tail := got[len(saved):]
+	if tail[0].Role != message.RoleSystem || tail[0].Visibility != message.VisibilityPrivate ||
+		!strings.Contains(tail[0].Text, "current trusted hook") {
+		t.Fatalf("private hook tail = %#v", tail[0])
+	}
+	if tail[1].Role != message.RoleSystem || tail[1].Visibility != message.VisibilityPrivate ||
+		!strings.HasPrefix(tail[1].Text, todoReminderPrefix) {
+		t.Fatalf("todo tail = %#v", tail[1])
+	}
+	if tail[2].Text != historicalEvidencePolicy || tail[2].Visibility != message.VisibilityPrivate {
+		t.Fatalf("historical policy tail = %#v", tail[2])
+	}
+	if tail[3].Role != message.RoleUser || tail[3].Text != "current hook user" {
+		t.Fatalf("hook user tail = %#v", tail[3])
+	}
+	if tail[4].Role != message.RoleUser || tail[4].Visibility != message.VisibilityPrivate ||
+		!strings.Contains(tail[4].Text, "current evidence") {
+		t.Fatalf("historical data tail = %#v", tail[4])
+	}
+	if tail[5].Role != message.RoleUser || tail[5].Text != "new request" {
+		t.Fatalf("goal tail = %#v", tail[5])
+	}
+}
+
+func TestTurnContextBuildFallsBackWhenModelHistoryScopeDiffers(t *testing.T) {
+	manager := turnContext{
+		instructions: mainInstructions, providerID: "chatgpt", modelID: "gpt-new",
+		modelHistory: session.ModelHistory{
+			ProviderID: "chatgpt", ModelID: "gpt-old",
+			InstructionFingerprint: mainInstructionFingerprint,
+			Messages: []message.Message{{
+				Role: message.RoleAssistant, Text: "stale answer",
+				ProviderState: json.RawMessage(`[{"type":"reasoning","id":"stale"}]`),
+			}},
+		},
+		history: []session.Block{
+			{Kind: "user", Content: "visible request"},
+			{Kind: "assistant", Content: "visible answer"},
+		},
+		persistedHistory: 2,
+	}
+	got, err := manager.Build(context.Background(), api.Task{Goal: "switched request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 || got[0].Role != message.RoleSystem || got[0].Text != mainInstructions ||
+		got[1].Role != message.RoleUser || got[1].Text != "visible request" ||
+		got[2].Role != message.RoleAssistant || got[2].Text != "visible answer" ||
+		got[3].Role != message.RoleUser || got[3].Text != "switched request" {
+		t.Fatalf("fallback messages = %#v", got)
+	}
+	for _, current := range got {
+		if len(current.ProviderState) != 0 || current.Text == "stale answer" {
+			t.Fatalf("stale exact state leaked into fallback: %#v", current)
+		}
+	}
+}
+
+func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	hooks := service.teamHooks("session-1", "team-parent", "", "")
+	base := hyagent.Engine{ExtraBody: map[string]any{"parallel_tool_calls": false}}
+	prepare := func(runID string) hyagent.Engine {
+		t.Helper()
+		prepared, err := hooks.PrepareEngine(context.Background(), base, multiagent.Dispatch{
+			Task: api.Task{RunID: runID}, To: "implementer",
+		}, multiagent.AgentClass{Name: agentservice.ImplementerClass})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prepared.ExtraBody["parallel_tool_calls"] != false {
+			t.Fatalf("existing provider option lost: %#v", prepared.ExtraBody)
+		}
+		return prepared
+	}
+	first := prepare("child-run-1")
+	repeated := prepare("child-run-1")
+	second := prepare("child-run-2")
+	if first.ExtraBody["prompt_cache_key"] != "child-run-1" ||
+		repeated.ExtraBody["prompt_cache_key"] != "child-run-1" ||
+		second.ExtraBody["prompt_cache_key"] != "child-run-2" {
+		t.Fatalf("team cache keys first=%#v repeated=%#v second=%#v", first.ExtraBody, repeated.ExtraBody, second.ExtraBody)
+	}
+	if _, mutated := base.ExtraBody["prompt_cache_key"]; mutated {
+		t.Fatalf("base engine ExtraBody mutated: %#v", base.ExtraBody)
+	}
+}
+
+func TestMainTurnsKeepSerializedPrefixStableAndAppendRawOutputAndNewTail(t *testing.T) {
+	const firstOutput = `[{"type":"reasoning","id":"rs_first","encrypted_content":"opaque"},{"type":"message","id":"msg_first","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}]`
+	const secondOutput = `[{"type":"message","id":"msg_second","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}]`
+	type capturedRequest struct {
+		PromptCacheKey string            `json:"prompt_cache_key"`
+		Instructions   string            `json:"instructions"`
+		Input          []json.RawMessage `json:"input"`
+	}
+	var captured []capturedRequest
+	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, body string, writer http.ResponseWriter) {
+		var request capturedRequest
+		if err := json.Unmarshal([]byte(body), &request); err != nil {
+			t.Errorf("decode captured request %d: %v", call, err)
+		}
+		captured = append(captured, request)
+		switch call {
+		case 1:
+			_, _ = fmt.Fprint(writer, `data: {"type":"response.output_text.delta","delta":"first answer"}`+"\n\n")
+			_, _ = fmt.Fprint(writer, `data: {"type":"response.completed","response":{"status":"completed","output":`+firstOutput+`}}`+"\n\n")
+		case 2:
+			_, _ = fmt.Fprint(writer, `data: {"type":"response.output_text.delta","delta":"second answer"}`+"\n\n")
+			_, _ = fmt.Fprint(writer, `data: {"type":"response.completed","response":{"status":"completed","output":`+secondOutput+`}}`+"\n\n")
+		default:
+			t.Errorf("unexpected provider request %d", call)
+		}
+	})
+	ctx := context.Background()
+	sessions := harness.service.sessions
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "cache-session", Title: "Cache", ProviderID: "chatgpt", ModelID: "gpt-skill", Reasoning: "minimal", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.UpdateTodo(ctx, "cache-session", 0, func(todo *session.TodoList) error {
+		todo.Goal = "first todo"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	firstRun, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "cache-session", Prompt: "first request", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, firstRun)
+	if _, err := sessions.UpdateTodo(ctx, "cache-session", 1, func(todo *session.TodoList) error {
+		todo.Goal = "second todo"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secondRun, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "cache-session", Prompt: "second request", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, secondRun)
+
+	if len(captured) != 2 || captured[0].PromptCacheKey != "cache-session" ||
+		captured[1].PromptCacheKey != "cache-session" || captured[0].Instructions != captured[1].Instructions {
+		t.Fatalf("captured cache requests = %#v", captured)
+	}
+	var rawOutput []json.RawMessage
+	if err := json.Unmarshal([]byte(firstOutput), &rawOutput); err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := append(append([]json.RawMessage(nil), captured[0].Input...), rawOutput...)
+	if len(captured[1].Input) <= len(wantPrefix) || !reflect.DeepEqual(captured[1].Input[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("second input did not preserve first request plus raw output:\nfirst=%s\nsecond=%s", captured[0].Input, captured[1].Input)
+	}
+	tailJSON, err := json.Marshal(captured[1].Input[len(wantPrefix):])
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail := string(tailJSON)
+	if !strings.Contains(tail, "second todo") || !strings.Contains(tail, "second request") ||
+		strings.Contains(tail, "first todo") || strings.Contains(tail, "first request") {
+		t.Fatalf("second dynamic tail = %s", tail)
+	}
+	projection, err := sessions.LoadProjection(ctx, "cache-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.ModelHistory.ProviderID != "chatgpt" || projection.ModelHistory.ModelID != "gpt-skill" ||
+		projection.ModelHistory.InstructionFingerprint != mainInstructionFingerprint ||
+		len(projection.ModelHistory.Messages) == 0 ||
+		string(projection.ModelHistory.Messages[len(projection.ModelHistory.Messages)-1].ProviderState) != secondOutput {
+		t.Fatalf("persisted exact history = %#v", projection.ModelHistory)
+	}
+}
+
+func TestMainTurnReplacesMismatchedSnapshotOnlyAfterSuccessfulFallback(t *testing.T) {
+	const freshOutput = `[{"type":"message","id":"fresh_message","role":"assistant","content":[{"type":"output_text","text":"fresh answer"}]}]`
+	var capturedBody string
+	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, body string, writer http.ResponseWriter) {
+		if call != 1 {
+			t.Errorf("unexpected provider request %d", call)
+		}
+		capturedBody = body
+		_, _ = fmt.Fprint(writer, `data: {"type":"response.output_text.delta","delta":"fresh answer"}`+"\n\n")
+		_, _ = fmt.Fprint(writer, `data: {"type":"response.completed","response":{"status":"completed","output":`+freshOutput+`}}`+"\n\n")
+	})
+	ctx := context.Background()
+	sessions := harness.service.sessions
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "mismatch-session", Title: "Mismatch", ProviderID: "chatgpt", ModelID: "gpt-skill", Reasoning: "minimal", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.AppendBlock(ctx, "mismatch-session", session.Block{Kind: "user", RunID: "old-run", Content: "visible request"}); err != nil {
+		t.Fatal(err)
+	}
+	stale := session.ModelHistory{
+		ProviderID: "chatgpt", ModelID: "different-model", InstructionFingerprint: mainInstructionFingerprint,
+		Messages: []message.Message{{
+			Role: message.RoleAssistant, Text: "stale hidden answer",
+			ProviderState: json.RawMessage(`[{"type":"reasoning","id":"stale_reasoning"}]`),
+		}},
+	}
+	if err := sessions.CompleteTurn(ctx, "mismatch-session", session.Block{
+		Kind: "assistant", RunID: "old-run", Content: "visible answer",
+	}, stale); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "mismatch-session", Prompt: "follow up", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, runID)
+	if !strings.Contains(capturedBody, "visible request") || !strings.Contains(capturedBody, "visible answer") ||
+		strings.Contains(capturedBody, "stale hidden answer") || strings.Contains(capturedBody, "stale_reasoning") {
+		t.Fatalf("mismatch fallback request = %s", capturedBody)
+	}
+	projection, err := sessions.LoadProjection(ctx, "mismatch-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := projection.ModelHistory
+	if got.ModelID != "gpt-skill" || got.InstructionFingerprint != mainInstructionFingerprint ||
+		len(got.Messages) == 0 || string(got.Messages[len(got.Messages)-1].ProviderState) != freshOutput {
+		t.Fatalf("replacement snapshot = %#v", got)
+	}
+}

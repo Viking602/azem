@@ -201,7 +201,7 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		subagents.AwaitDuration != 10*time.Minute || !subagents.AutoWake {
 		t.Fatalf("subagent defaults = %#v", subagents)
 	}
-	if subagents.Budget.MaxTokens != 128_000 || subagents.Budget.MaxToolCalls != 64 ||
+	if subagents.Budget.MaxTokens != 0 || subagents.Budget.MaxToolCalls != 64 ||
 		subagents.Budget.MaxTurns != 32 || subagents.Budget.MaxWallClockDuration != 20*time.Minute {
 		t.Fatalf("subagent budget = %#v", subagents.Budget)
 	}
@@ -220,6 +220,11 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid.Agents.Subagents.AwaitTimeout = "30m"
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("await timeout beyond wall-clock budget was accepted")
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.Budget.MaxTokens = -1
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative subagent token budget was accepted")
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.Budget.MaxToolCalls = 0

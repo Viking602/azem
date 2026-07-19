@@ -387,6 +387,8 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 			return "", err
 		}
 		request.History = append([]session.Block(nil), projection.Blocks...)
+		request.modelHistory = projection.ModelHistory
+		request.persistedHistory = len(projection.Blocks)
 		transcript := append([]session.Block(nil), projection.Blocks...)
 		transcript = append(transcript, session.Block{Kind: "user", Content: request.Prompt, State: "submitted"})
 		writeSessionHookTranscript(request.SessionID, transcript)
