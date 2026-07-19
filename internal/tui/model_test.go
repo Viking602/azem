@@ -374,6 +374,43 @@ func TestWideLayoutAddsAgentAndMCPContextRail(t *testing.T) {
 	}
 }
 
+func TestRunningSubagentAnimatesInContextRail(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "team")
+	updated, _ := model.Update(appEventMsg{Event: app.Event{
+		Kind: app.EventAgentState, AgentID: "child-1", State: "running",
+		Agent: &app.AgentStatePayload{Type: "general-purpose"},
+	}})
+	model = updated.(AppModel)
+	if !model.animationActive || !model.hasRunningAgents() {
+		t.Fatalf("running subagent did not start animation: active=%v agents=%#v", model.animationActive, model.agents)
+	}
+	before := ansi.Strip(model.renderContextRail(32, 16))
+	model.animationFrame++
+	after := ansi.Strip(model.renderContextRail(32, 16))
+	if before == after || !strings.Contains(before, "◇ general-purpose") || !strings.Contains(after, "◈ general-purpose") {
+		t.Fatalf("subagent indicator did not animate:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	model.reducedMotion = true
+	if mark := model.agentStateMark("running"); mark != "◆" {
+		t.Fatalf("reduced-motion subagent mark=%q", mark)
+	}
+}
+
+func TestReviewingApprovalUsesSmartApprovalColor(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if got, want := model.stateStyle("Reviewing approval").GetForeground(), model.theme.ApprovalSmart.GetForeground(); got != want {
+		t.Fatalf("reviewing approval color=%v, want smart approval color=%v", got, want)
+	}
+	model.status = "Reviewing approval"
+	model.transcript = []Block{{Kind: BlockApproval, State: "reviewing", Title: "Reviewing"}}
+	before := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 64), "\n"))
+	model.animationFrame++
+	after := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 64), "\n"))
+	if before == after {
+		t.Fatalf("reviewing approval indicator did not animate: %q", before)
+	}
+}
+
 func TestTranscriptCardsAreKeyboardExpandable(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.transcript = []Block{{ID: "call-1", Kind: BlockTool, Title: "coding.read_file", Content: "result", State: "completed"}}
@@ -556,7 +593,7 @@ func TestAutomaticApprovalEventsRenderReviewingAndResolvedTranscriptStates(t *te
 			})
 			if model.status != "Reviewing approval" || model.overlay != OverlayNone ||
 				len(model.pendingApprovals) != 0 || len(model.transcript) != 1 ||
-				model.transcript[0].Kind != BlockApproval || model.transcript[0].State != "running" {
+				model.transcript[0].Kind != BlockApproval || model.transcript[0].State != "reviewing" {
 				t.Fatalf("reviewing projection=%+v", model)
 			}
 			model.applyEvent(app.Event{

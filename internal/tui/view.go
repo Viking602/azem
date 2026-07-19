@@ -302,7 +302,11 @@ func (m AppModel) renderTranscriptFooter(width int, maxOffset int, offset int) s
 		if offset > 0 {
 			text += fmt.Sprintf("  · ↑ %d lines · Ctrl+End latest", offset)
 		}
-		return m.theme.Selected.Render(padOrTrim(text, width))
+		style := m.theme.Selected
+		if m.status == "Reviewing approval" {
+			style = style.Foreground(m.theme.ApprovalSmart.GetForeground())
+		}
+		return style.Render(padOrTrim(text, width))
 	}
 	if offset > 0 {
 		return m.theme.Muted.Render(padOrTrim(
@@ -354,7 +358,7 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	switch block.Kind {
 	case BlockApproval:
 		indicator := stateMark(block.State)
-		if block.State == "running" {
+		if block.State == "running" || block.State == "reviewing" {
 			indicator = "◆"
 			if !m.reducedMotion {
 				frames := [...]string{"◇", "◈", "◆", "◈"}
@@ -843,7 +847,7 @@ func (m AppModel) renderContextRail(width int, height int) string {
 				rows = append(rows, m.theme.Muted.Render(padOrTrim(fmt.Sprintf("  +%d more", len(activeAgents)-index), width)))
 				break
 			}
-			row := fmt.Sprintf("  %s %s", stateMark(agent.State), first(agent.Role, agent.ID))
+			row := fmt.Sprintf("  %s %s", m.agentStateMark(agent.State), first(agent.Role, agent.ID))
 			rows = append(rows, m.stateStyle(agent.State).Render(padOrTrim(row, width)))
 		}
 	}
@@ -1850,7 +1854,9 @@ func (m AppModel) stateStyle(state string) lipgloss.Style {
 		return m.theme.Success
 	case "failed", "error", "degraded", "denied", "cancelled", "disabled", "application stopped", "recovery attention":
 		return m.theme.Error
-	case "running", "reviewing", "starting", "streaming", "connecting", "queued", "cancelling", "awaiting approval", "blocked", "a", "shift+a", "d":
+	case "reviewing", "reviewing approval":
+		return m.theme.ApprovalSmart
+	case "running", "starting", "streaming", "connecting", "queued", "cancelling", "awaiting approval", "blocked", "a", "shift+a", "d":
 		return m.theme.Warning
 	default:
 		return m.theme.Muted
@@ -1871,6 +1877,19 @@ func stateMark(state string) string {
 		return "◆"
 	default:
 		return "○"
+	}
+}
+
+func (m AppModel) agentStateMark(state string) string {
+	switch strings.ToLower(state) {
+	case "initializing", "running", "cancelling":
+		if m.reducedMotion {
+			return "◆"
+		}
+		frames := [...]string{"◇", "◈", "◆", "◈"}
+		return frames[m.animationFrame%len(frames)]
+	default:
+		return stateMark(state)
 	}
 }
 

@@ -58,13 +58,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcriptTop = min(currentMaxOffset, max(0, m.transcriptTop+currentMaxOffset-previousMaxOffset))
 		}
 		commands := []tea.Cmd{waitForAppEvent(m.runtime)}
-		if (m.isRunning() || m.hasRunningHooks()) && !m.reducedMotion && !m.animationActive {
+		if (m.isRunning() || m.hasRunningHooks() || m.hasRunningAgents()) && !m.reducedMotion && !m.animationActive {
 			m.animationActive = true
 			commands = append(commands, nextAnimationFrame())
 		}
 		return m, tea.Batch(commands...)
 	case animationTickMsg:
-		if (!m.isRunning() && !m.hasRunningHooks()) || m.reducedMotion {
+		if (!m.isRunning() && !m.hasRunningHooks() && !m.hasRunningAgents()) || m.reducedMotion {
 			m.animationActive = false
 			m.animationFrame = 0
 			return m, nil
@@ -750,14 +750,14 @@ func (m *AppModel) queueApproval(event app.Event) {
 				m.transcript[index].Kind = BlockApproval
 				m.transcript[index].Title = title
 				m.transcript[index].Content = content
-				m.transcript[index].State = "running"
+				m.transcript[index].State = "reviewing"
 				m.status = "Reviewing approval"
 				return
 			}
 		}
 		m.transcript = append(m.transcript, Block{
 			ID: id, Kind: BlockApproval, RunID: event.RunID, ToolCallID: event.ToolCallID,
-			Title: title, Content: content, State: "running",
+			Title: title, Content: content, State: "reviewing",
 		})
 		m.status = "Reviewing approval"
 		return
@@ -2108,6 +2108,16 @@ func (m *AppModel) hasRunningHooks() bool {
 					return true
 				}
 			}
+		}
+	}
+	return false
+}
+
+func (m AppModel) hasRunningAgents() bool {
+	for _, agent := range m.agents {
+		switch strings.ToLower(agent.State) {
+		case "initializing", "running", "cancelling":
+			return true
 		}
 	}
 	return false
