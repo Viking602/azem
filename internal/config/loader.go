@@ -68,6 +68,147 @@ func UpdateDefault(path, key, value string) error {
 	return nil
 }
 
+// UpdateModelRoute atomically updates a nested model route while preserving
+// unrelated YAML fields and comments. Supported scopes are "compaction" and
+// "subagent"; role is required only for the latter.
+func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
+	keys := []string{"agents"}
+	switch scope {
+	case "compaction":
+		if role != "" {
+			return fmt.Errorf("role is not valid for compaction route")
+		}
+		keys = append(keys, "compaction")
+	case "subagent":
+		if strings.TrimSpace(role) == "" {
+			return fmt.Errorf("role is required for subagent route")
+		}
+		keys = append(keys, "subagents", "routes", role)
+	default:
+		return fmt.Errorf("unsupported model route scope %q", scope)
+	}
+	if err := validateModelRoute(strings.Join(keys, "."), route); err != nil {
+		return err
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		mapping := ensureMappingPath(root, keys...)
+		for key, value := range map[string]string{"provider": route.Provider, "model": route.Model, "reasoning": route.Reasoning} {
+			if strings.TrimSpace(value) == "" {
+				deleteMappingValue(mapping, key)
+			} else {
+				setMappingScalar(mapping, key, value)
+			}
+		}
+		if scope == "subagent" {
+			subagents := ensureMappingPath(root, "agents", "subagents")
+			models := mappingValue(subagents, "models")
+			if models != nil {
+				deleteMappingValue(models, role)
+			}
+		}
+	})
+}
+
+// ResetModelRoute clears a persisted route. For subagents it also removes the
+// legacy models override so that reloading cannot restore the cleared model.
+func ResetModelRoute(path, scope, role string) error {
+	if scope != "subagent" {
+		return UpdateModelRoute(path, scope, role, ModelRouteConfig{})
+	}
+	if strings.TrimSpace(role) == "" {
+		return fmt.Errorf("role is required for subagent route")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		subagents := ensureMappingPath(root, "agents", "subagents")
+		routes := mappingValue(subagents, "routes")
+		if routes != nil {
+			deleteMappingValue(routes, role)
+		}
+		if roles := mappingValue(subagents, "roles"); roles != nil {
+			if mapping := mappingValue(roles, role); mapping != nil {
+				for _, key := range []string{"provider", "model", "reasoning"} {
+					deleteMappingValue(mapping, key)
+				}
+			}
+		}
+		models := mappingValue(subagents, "models")
+		if models != nil {
+			deleteMappingValue(models, role)
+		}
+	})
+}
+
+func updateYAML(path string, update func(*yaml.Node)) error {
+	var document yaml.Node
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		document = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
+	} else if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("decode config for update: %w", err)
+	}
+	update(document.Content[0])
+	var encoded bytes.Buffer
+	encoder := yaml.NewEncoder(&encoded)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&document); err != nil {
+		return fmt.Errorf("encode config update: %w", err)
+	}
+	_ = encoder.Close()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
+	if err != nil {
+		return fmt.Errorf("create config update: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err == nil {
+		_, err = temporary.Write(encoded.Bytes())
+	}
+	closeErr := temporary.Close()
+	if err != nil {
+		return fmt.Errorf("write config update: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close config update: %w", closeErr)
+	}
+	if err := os.Rename(temporaryName, path); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+	return nil
+}
+
+func ensureMappingPath(root *yaml.Node, keys ...string) *yaml.Node {
+	current := root
+	for _, key := range keys {
+		next := mappingValue(current, key)
+		if next == nil {
+			next = &yaml.Node{Kind: yaml.MappingNode}
+			current.Content = append(current.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: key}, next)
+		} else if next.Kind != yaml.MappingNode {
+			next.Kind = yaml.MappingNode
+			next.Tag = "!!map"
+			next.Value = ""
+			next.Content = nil
+		}
+		current = next
+	}
+	return current
+}
+
+func deleteMappingValue(mapping *yaml.Node, key string) {
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			mapping.Content = append(mapping.Content[:index], mapping.Content[index+2:]...)
+			return
+		}
+	}
+}
+
 func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
 	if mapping == nil || mapping.Kind != yaml.MappingNode {
 		return nil

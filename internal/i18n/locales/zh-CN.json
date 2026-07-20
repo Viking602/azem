@@ -131,6 +131,7 @@
   "command_palette.login.label": "登录", "command_palette.login.detail": "ChatGPT 或 Grok 订阅",
   "command_palette.provider.label": "选择提供商", "command_palette.provider.detail": "切换 ChatGPT 和 Grok",
   "command_palette.models.label": "选择模型", "command_palette.models.detail": "已配置的提供商目录",
+	"command_palette.model-routing.label": "模型路由", "command_palette.model-routing.detail": "配置压缩和子代理模型",
   "command_palette.skills.label": "技能", "command_palette.skills.detail": "发现、查看并重新加载代理技能",
   "command_palette.reasoning.label": "推理强度", "command_palette.reasoning.detail": "从 minimal 到 xhigh",
   "command_palette.sessions.label": "恢复会话", "command_palette.sessions.detail": "选择已保存的工作",
@@ -141,11 +142,15 @@
   "command_palette.cancel.label": "取消运行", "command_palette.cancel.detail": "停止当前运行",
   "command_palette.help.label": "键盘帮助", "command_palette.help.detail": "快捷键和命令",
   "command_palette.quit.label": "退出 Azem", "command_palette.quit.detail": "关闭应用程序",
-  "slash.models.detail": "搜索并选择当前模型", "slash.skills.detail": "查看或重新加载代理技能", "slash.skill.detail": "使用已激活的代理技能运行一轮",
+  "slash.models.detail": "搜索并选择当前模型", "slash.model-routing.detail": "配置压缩和子代理模型路由", "slash.skills.detail": "查看或重新加载代理技能", "slash.skill.detail": "使用已激活的代理技能运行一轮",
   "slash.provider.detail": "切换当前提供商", "slash.reasoning.detail": "设置推理强度", "slash.login.detail": "登录订阅提供商", "slash.logout.detail": "退出提供商",
   "slash.team.detail": "切换编码团队模式", "slash.agents.detail": "查看或取消子代理", "slash.agent-types.detail": "查看已配置的子代理类型", "slash.personas.detail": "查看已配置的子代理角色",
   "slash.todos.detail": "查看会话待办列表", "slash.todo.detail": "查看会话待办列表",
   "slash.new.detail": "开始新会话", "slash.sessions.detail": "列出已保存的会话", "slash.resume.detail": "选择已保存的会话", "slash.compact.detail": "压缩当前会话",
   "slash.memory.detail": "搜索工作区原生记忆", "slash.remember.detail": "将明确证据保存到工作区记忆", "slash.forget.detail": "遗忘一条工作区记忆", "slash.recap.detail": "查看当前会话连续性回顾",
-  "slash.mcp.detail": "查看或更新 MCP 服务器", "slash.reconcile.detail": "处理未知的副作用", "slash.cancel.detail": "取消当前运行", "slash.language.detail": "切换界面语言", "slash.help.detail": "打开键盘和命令帮助", "slash.quit.detail": "退出 Azem"
+  "slash.mcp.detail": "查看或更新 MCP 服务器", "slash.reconcile.detail": "处理未知的副作用", "slash.cancel.detail": "取消当前运行", "slash.language.detail": "切换界面语言", "slash.help.detail": "打开键盘和命令帮助", "slash.quit.detail": "退出 Azem",
+	"overlay.model_routes.title": "模型路由", "overlay.model_routes.subtitle": "压缩与子代理覆盖配置",
+	"overlay.model_routes.description": "选择路由以配置其提供商、模型和推理强度。",
+	"overlay.model_routes.compaction": "压缩", "overlay.model_routes.inherit_active": "继承当前代理", "overlay.model_routes.inherit_parent": "继承父代理",
+	"overlay.model_routes.reasoning_title": "路由推理强度", "overlay.model_routes.footer": "↑/↓ 导航 · Enter 配置 · R 重置为继承 · Esc 关闭", "overlay.model_routes.footer_short": "↑/↓ · Enter · R 重置 · Esc"
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/i18n"
+	"github.com/Viking602/azem/internal/provider/catalog"
 )
 
 var writeClipboard = clipboard.WriteAll
@@ -127,6 +128,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.actionBusy = false
 		if msg.Err != nil {
+			if msg.Action.Kind == ActionSetModelRoute || msg.Action.Kind == ActionResetModelRoute {
+				m.pendingModelRoute = nil
+				if len(m.modelRoutes) > 0 {
+					m.openOverlay(OverlayModelRoutes)
+				}
+			}
 			if errors.Is(msg.Err, context.Canceled) {
 				m.status = "Ready"
 				m.errorBanner = "Action cancelled"
@@ -437,6 +444,13 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if key == "esc" {
+		if (m.overlay == OverlayModel || m.overlay == OverlayReasoning) && m.pendingModelRoute != nil {
+			m.modelSearch.Reset()
+			m.modelSearch.Blur()
+			m.pendingModelRoute = nil
+			m.openOverlay(OverlayModelRoutes)
+			return m, nil
+		}
 		if m.overlay == OverlayCancel {
 			m.status = "Running"
 		}
@@ -533,6 +547,10 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 			return m.beginAction(Action{Kind: ActionRefreshMCP, Target: m.mcpServers[m.overlayCursor].Name})
 		}
 	case "R":
+		if m.overlay == OverlayModelRoutes && m.overlayCursor < len(m.modelRoutes) {
+			entry := m.modelRoutes[m.overlayCursor]
+			return m.beginAction(Action{Kind: ActionResetModelRoute, Route: &entry})
+		}
 		if m.overlay == OverlayMCP && m.overlayCursor < len(m.mcpServers) {
 			return m.beginAction(Action{Kind: ActionReconnectMCP, Target: m.mcpServers[m.overlayCursor].Name})
 		}
@@ -563,6 +581,8 @@ func (m AppModel) overlayOptionCount() int {
 		return 2
 	case OverlayModel:
 		return len(m.modelPickerEntries())
+	case OverlayModelRoutes:
+		return len(m.modelRoutes)
 	case OverlaySkills:
 		return len(m.skills)
 	case OverlayLanguage:
@@ -610,6 +630,24 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 		m.switchProvider(provider)
 		return m, m.closeOverlay()
 	case OverlayModel:
+		if m.pendingModelRoute != nil {
+			entries := m.modelPickerEntries()
+			if m.overlayCursor >= len(entries) {
+				return m, nil
+			}
+			entry := entries[m.overlayCursor]
+			m.pendingModelRoute.Provider = entry.Provider
+			m.pendingModelRoute.Model = entry.Model.ID
+			levels := catalog.AvailableReasoningLevels(entry.Provider, entry.Model)
+			if len(levels) == 0 {
+				return m.savePendingModelRoute("")
+			}
+			if !contains(levels, m.pendingModelRoute.Reasoning) {
+				m.pendingModelRoute.Reasoning = catalog.PreferredReasoningLevel(entry.Provider, entry.Model)
+			}
+			m.openOverlay(OverlayReasoning)
+			return m, nil
+		}
 		if m.isRunning() {
 			m.errorBanner = "model can only change while idle"
 			return m, nil
@@ -629,6 +667,13 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 			return m.beginAction(Action{Kind: ActionSetLanguage, Target: language})
 		}
 	case OverlayReasoning:
+		if m.pendingModelRoute != nil {
+			levels := m.reasoningLevels()
+			if m.overlayCursor < len(levels) {
+				return m.savePendingModelRoute(levels[m.overlayCursor])
+			}
+			return m, nil
+		}
 		if m.isRunning() {
 			m.errorBanner = "reasoning can only change while idle"
 			return m, nil
@@ -674,8 +719,25 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 		return m, nil
 	case OverlayDiff:
 		return m, m.closeOverlay()
+	case OverlayModelRoutes:
+		if m.overlayCursor < len(m.modelRoutes) {
+			entry := m.modelRoutes[m.overlayCursor]
+			m.pendingModelRoute = &pendingModelRoute{Entry: entry, Provider: entry.Route.Provider, Model: entry.Route.Model, Reasoning: entry.Route.Reasoning}
+			m.openOverlay(OverlayModel)
+		}
 	}
 	return m, nil
+}
+
+func (m AppModel) savePendingModelRoute(reasoning string) (tea.Model, tea.Cmd) {
+	pending := m.pendingModelRoute
+	if pending == nil {
+		return m, nil
+	}
+	pending.Reasoning = reasoning
+	entry := pending.Entry
+	entry.Route.Provider, entry.Route.Model, entry.Route.Reasoning = pending.Provider, pending.Model, reasoning
+	return m.beginAction(Action{Kind: ActionSetModelRoute, Route: &entry})
 }
 
 func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
@@ -690,6 +752,8 @@ func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
 		m.openOverlay(OverlayProvider)
 	case "models":
 		m.openOverlay(OverlayModel)
+	case "model-routing":
+		return m.beginAction(Action{Kind: ActionListModelRoutes})
 	case "skills":
 		return m.beginAction(Action{Kind: ActionListSkills})
 	case "reasoning":
@@ -1036,6 +1100,8 @@ func (m AppModel) canGuideActiveRun() bool {
 
 func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 	switch command.Name {
+	case "model-routing":
+		return m.beginAction(Action{Kind: ActionListModelRoutes})
 	case "language":
 		if len(command.Args) == 0 {
 			m.openOverlay(OverlayLanguage)

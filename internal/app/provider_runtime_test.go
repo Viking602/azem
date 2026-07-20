@@ -551,6 +551,43 @@ func TestCompactionUsageIsChargedToNextMainProviderTurn(t *testing.T) {
 	}
 }
 
+func TestLazyCompactionRouteUsesIndependentDriverAndSharedUsage(t *testing.T) {
+	active := &compactionTestDriver{streams: [][]hyprovider.Event{{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{TotalTokens: 20}}}}}
+	compact := &compactionTestDriver{streams: [][]hyprovider.Event{{
+		{Kind: hyprovider.EventTextDelta, Text: "summary"},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete, Usage: hyprovider.Usage{TotalTokens: 10}},
+	}}}
+	resolveCalls := 0
+	meter := &compactionUsageMeter{}
+	summarize := lazyCompactionSummarizer(func(_ context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
+		resolveCalls++
+		if provider != "grok" || model != "summary-model" || reasoning != "high" {
+			t.Fatalf("resolved route = %s/%s/%s", provider, model, reasoning)
+		}
+		return model, 8_000, compact, nil
+	}, config.ModelRouteConfig{Provider: "grok", Model: "summary-model", Reasoning: "high"}, "chatgpt", "main-model", "low", meter)
+	if resolveCalls != 0 {
+		t.Fatal("compaction driver resolved eagerly")
+	}
+	if _, err := summarize(context.Background(), "history"); err != nil {
+		t.Fatal(err)
+	}
+	if resolveCalls != 1 || len(compact.requests) != 1 || compact.requests[0].Model != "summary-model" {
+		t.Fatalf("resolve calls=%d requests=%#v", resolveCalls, compact.requests)
+	}
+	stream, err := (&compactionUsageDriver{inner: active, meter: meter}).Stream(context.Background(), hyprovider.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Usage.TotalTokens != 30 {
+		t.Fatalf("shared usage = %#v", done.Usage)
+	}
+}
+
 func TestCompactionSummarizerBoundsOversizedInput(t *testing.T) {
 	inner := &compactionTestDriver{streams: [][]hyprovider.Event{{
 		{Kind: hyprovider.EventTextDelta, Text: "## Objective\n- continue"},

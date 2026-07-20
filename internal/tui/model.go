@@ -94,6 +94,7 @@ const (
 	OverlayCommand     Overlay = "command"
 	OverlayProvider    Overlay = "provider"
 	OverlayModel       Overlay = "model"
+	OverlayModelRoutes Overlay = "model_routes"
 	OverlaySkills      Overlay = "skills"
 	OverlayLanguage    Overlay = "language"
 	OverlayReasoning   Overlay = "reasoning"
@@ -173,6 +174,13 @@ type ModelChoice = catalog.Model
 type modelPickerEntry struct {
 	Provider string
 	Model    ModelChoice
+}
+
+type pendingModelRoute struct {
+	Entry     app.ModelRouteEntry
+	Provider  string
+	Model     string
+	Reasoning string
 }
 
 type SessionChoice struct {
@@ -280,6 +288,8 @@ type AppModel struct {
 	mcpServers          []MCPView
 	models              []ModelChoice
 	modelsByProvider    map[string][]ModelChoice
+	modelRoutes         []app.ModelRouteEntry
+	pendingModelRoute   *pendingModelRoute
 	sessions            []SessionChoice
 	recovery            []RecoveryView
 	auth                map[string]AuthView
@@ -392,16 +402,24 @@ func (m *AppModel) openOverlay(overlay Overlay) {
 	if overlay == OverlayModel {
 		m.modelSearch.Reset()
 		_ = m.modelSearch.Focus()
+		provider, model := m.provider, m.model
+		if m.pendingModelRoute != nil {
+			provider, model = m.pendingModelRoute.Provider, m.pendingModelRoute.Model
+		}
 		for index, entry := range m.modelPickerEntries() {
-			if entry.Provider == m.provider && entry.Model.ID == m.model {
+			if entry.Provider == provider && entry.Model.ID == model {
 				m.overlayCursor = index
 				break
 			}
 		}
 	}
 	if overlay == OverlayReasoning {
+		reasoning := m.reasoning
+		if m.pendingModelRoute != nil {
+			reasoning = m.pendingModelRoute.Reasoning
+		}
 		for index, level := range m.reasoningLevels() {
-			if level == m.reasoning {
+			if level == reasoning {
 				m.overlayCursor = index
 				break
 			}
@@ -523,8 +541,17 @@ func (m AppModel) modelCatalogCount() int {
 }
 
 func (m AppModel) selectedModelChoice() (ModelChoice, bool) {
+	provider, model := m.provider, m.model
+	if m.pendingModelRoute != nil {
+		provider, model = m.pendingModelRoute.Provider, m.pendingModelRoute.Model
+	}
+	for _, choice := range m.modelsByProvider[provider] {
+		if choice.ID == model {
+			return choice, true
+		}
+	}
 	for _, choice := range m.models {
-		if choice.ID == m.model {
+		if choice.ID == model {
 			return choice, true
 		}
 	}
@@ -532,8 +559,12 @@ func (m AppModel) selectedModelChoice() (ModelChoice, bool) {
 }
 
 func (m AppModel) reasoningLevels() []string {
+	provider := m.provider
+	if m.pendingModelRoute != nil {
+		provider = m.pendingModelRoute.Provider
+	}
 	if choice, ok := m.selectedModelChoice(); ok {
-		return catalog.AvailableReasoningLevels(m.provider, choice)
+		return catalog.AvailableReasoningLevels(provider, choice)
 	}
 	return catalog.AvailableReasoningLevels("", ModelChoice{SupportsReasoning: true})
 }

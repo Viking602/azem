@@ -35,7 +35,7 @@ func TestSQLSubagentRunStoreRoundTrip(t *testing.T) {
 	run := SubagentRun{
 		ID: "child-1", SessionID: "session", ParentRunID: "parent-run", ParentAgentID: "parent-agent",
 		ParentToolCallID: "parent-call", ChildRunID: "child-run", Description: "inspect workspace", Type: "explore",
-		State: SubagentRunning, Summary: "reading files", Model: "model", Reasoning: "high",
+		State: SubagentRunning, Summary: "reading files", Provider: "grok", Model: "model", Reasoning: "high",
 		CapabilityMode: "read-only", RequestedIsolation: "worktree", Isolation: "none", CWD: "/workspace",
 		Background: true, Output: "partial", Warning: "shared fallback", Transcript: json.RawMessage(`[{"role":"user","text":"inspect"}]`),
 		ToolCalls: 2, Turns: 3, TokensUsed: 42, ToolsUsed: []string{"coding.read_file", "coding.search"},

@@ -131,6 +131,7 @@
   "command_palette.login.label": "Sign in", "command_palette.login.detail": "ChatGPT or Grok subscription",
   "command_palette.provider.label": "Choose provider", "command_palette.provider.detail": "Switch between ChatGPT and Grok",
   "command_palette.models.label": "Choose model", "command_palette.models.detail": "Configured provider catalogs",
+  "command_palette.model-routing.label": "Model routing", "command_palette.model-routing.detail": "Configure compaction and subagent models",
   "command_palette.skills.label": "Skills", "command_palette.skills.detail": "Discover, inspect, and reload Agent Skills",
   "command_palette.reasoning.label": "Reasoning effort", "command_palette.reasoning.detail": "Minimal through xhigh",
   "command_palette.sessions.label": "Resume session", "command_palette.sessions.detail": "Choose saved work",
@@ -141,11 +142,15 @@
   "command_palette.cancel.label": "Cancel run", "command_palette.cancel.detail": "Stop the active run",
   "command_palette.help.label": "Keyboard help", "command_palette.help.detail": "Shortcuts and commands",
   "command_palette.quit.label": "Quit Azem", "command_palette.quit.detail": "Close the application",
-  "slash.models.detail": "Search and choose the active model", "slash.skills.detail": "Inspect or reload Agent Skills", "slash.skill.detail": "Run one turn with an active Agent Skill",
+  "slash.models.detail": "Search and choose the active model", "slash.model-routing.detail": "Configure compaction and subagent model routing", "slash.skills.detail": "Inspect or reload Agent Skills", "slash.skill.detail": "Run one turn with an active Agent Skill",
   "slash.provider.detail": "Switch the active provider", "slash.reasoning.detail": "Set reasoning effort", "slash.login.detail": "Sign in to a subscription provider", "slash.logout.detail": "Sign out of a provider",
   "slash.team.detail": "Toggle coding-team mode", "slash.agents.detail": "Inspect or cancel child agents", "slash.agent-types.detail": "Inspect configured child agent types", "slash.personas.detail": "Inspect configured child personas",
   "slash.todos.detail": "Inspect the session todo list", "slash.todo.detail": "Inspect the session todo list",
   "slash.new.detail": "Start a new session", "slash.sessions.detail": "List saved sessions", "slash.resume.detail": "Choose a saved session", "slash.compact.detail": "Compact the current session",
   "slash.memory.detail": "Search native workspace memory", "slash.remember.detail": "Save explicit evidence to workspace memory", "slash.forget.detail": "Forget one workspace memory", "slash.recap.detail": "Show current session continuity recap",
-  "slash.mcp.detail": "Inspect or update MCP servers", "slash.reconcile.detail": "Resolve an unknown side effect", "slash.cancel.detail": "Cancel the active run", "slash.language.detail": "Switch the interface language", "slash.help.detail": "Open keyboard and command help", "slash.quit.detail": "Quit Azem"
+  "slash.mcp.detail": "Inspect or update MCP servers", "slash.reconcile.detail": "Resolve an unknown side effect", "slash.cancel.detail": "Cancel the active run", "slash.language.detail": "Switch the interface language", "slash.help.detail": "Open keyboard and command help", "slash.quit.detail": "Quit Azem",
+  "overlay.model_routes.title": "Model routing", "overlay.model_routes.subtitle": "Compaction and subagent overrides",
+  "overlay.model_routes.description": "Choose a route to configure its provider, model, and reasoning effort.",
+  "overlay.model_routes.compaction": "Compaction", "overlay.model_routes.inherit_active": "Inherit from active agent", "overlay.model_routes.inherit_parent": "Inherit from parent agent",
+  "overlay.model_routes.reasoning_title": "Route reasoning", "overlay.model_routes.footer": "↑/↓ Navigate · Enter Configure · R Reset to inherit · Esc Close", "overlay.model_routes.footer_short": "↑/↓ · Enter · R Reset · Esc"
 }

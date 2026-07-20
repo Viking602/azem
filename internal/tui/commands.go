@@ -52,6 +52,9 @@ const (
 	ActionRemember         = app.ActionRemember
 	ActionForgetMemory     = app.ActionForgetMemory
 	ActionShowRecap        = app.ActionShowRecap
+	ActionListModelRoutes  = app.ActionListModelRoutes
+	ActionSetModelRoute    = app.ActionSetModelRoute
+	ActionResetModelRoute  = app.ActionResetModelRoute
 )
 
 type (
@@ -74,6 +77,7 @@ type SlashCommand struct {
 
 var slashCommands = []SlashCommand{
 	{Name: "models", Usage: "/models"},
+	{Name: "model-routing", Usage: "/model-routing"},
 	{Name: "skills", Usage: "/skills [reload]"}, {Name: "skill", Usage: "/skill <name> [instruction]"},
 	{Name: "provider", Usage: "/provider [chatgpt|grok]"}, {Name: "reasoning", Usage: "/reasoning [level]"},
 	{Name: "login", Usage: "/login [chatgpt|grok]"}, {Name: "logout", Usage: "/logout [chatgpt|grok]"},

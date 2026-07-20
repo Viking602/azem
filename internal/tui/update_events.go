@@ -74,6 +74,22 @@ func (m *AppModel) applyEvent(event app.Event) {
 		}
 	case app.EventModelCatalog:
 		m.loadModels(event)
+	case app.EventModelRoutes:
+		cursorScope, cursorRole := "", ""
+		if m.pendingModelRoute != nil {
+			cursorScope, cursorRole = m.pendingModelRoute.Entry.Scope, m.pendingModelRoute.Entry.Role
+		} else if m.overlay == OverlayModelRoutes && m.overlayCursor < len(m.modelRoutes) {
+			cursorScope, cursorRole = m.modelRoutes[m.overlayCursor].Scope, m.modelRoutes[m.overlayCursor].Role
+		}
+		m.modelRoutes = append([]app.ModelRouteEntry(nil), event.ModelRoutes...)
+		m.pendingModelRoute = nil
+		m.openOverlay(OverlayModelRoutes)
+		for index, entry := range m.modelRoutes {
+			if entry.Scope == cursorScope && entry.Role == cursorRole {
+				m.overlayCursor = index
+				break
+			}
+		}
 	case app.EventSkillCatalog:
 		m.skills = append([]SkillCatalogView(nil), event.SkillCatalog...)
 		m.skillDiagnostics = append([]app.SkillDiagnostic(nil), event.SkillDiagnostics...)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -642,6 +643,76 @@ func skillEventEntry(entries []SkillCatalogEntry, name string) (SkillCatalogEntr
 		}
 	}
 	return SkillCatalogEntry{}, false
+}
+
+func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "summary"}
+	cfg.Agents.Subagents.Roles = map[string]config.SubagentRoleConfig{
+		"zeta":  {Description: "Zeta", Provider: "grok", Model: "z-model"},
+		"alpha": {Description: "Alpha", Provider: "chatgpt", Model: "a-model"},
+		"off":   {Description: "Disabled"},
+	}
+	cfg.Agents.Subagents.Toggle = map[string]bool{"off": false}
+	service := NewService(context.Background(), cfg)
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionListModelRoutes}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{event.ModelRoutes[0].Scope, event.ModelRoutes[1].Role, event.ModelRoutes[2].Role, event.ModelRoutes[3].Role}; !reflect.DeepEqual(got, []string{"compaction", "alpha", "off", "zeta"}) {
+		t.Fatalf("route order = %v", got)
+	}
+	clone := event.Clone()
+	clone.ModelRoutes[0].Route.Model = "changed"
+	if event.ModelRoutes[0].Route.Model != "summary" {
+		t.Fatal("event clone mutated source routes")
+	}
+}
+
+func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents.Subagents.Roles = map[string]config.SubagentRoleConfig{
+		"explore": {Description: "Explore", Provider: "grok", Model: "grok-4", Reasoning: "high"},
+	}
+	cfg.Agents.Subagents.Models = map[string]string{"explore": "legacy"}
+	service := NewService(context.Background(), cfg)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("agents:\n  subagents:\n    models:\n      explore: legacy\n    roles:\n      explore:\n        description: Explore\n        provider: grok\n        model: grok-4\n        reasoning: high\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service.SetConfigPath(path)
+	entry := &ModelRouteEntry{Scope: "subagent", Role: "explore"}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionResetModelRoute, Route: entry}); err != nil {
+		t.Fatal(err)
+	}
+	routes := service.modelRouteEntries()
+	if routes[1].Route != (config.ModelRouteConfig{}) {
+		t.Fatalf("route not reset: %+v", routes[1])
+	}
+	service.mu.Lock()
+	_, legacyExists := service.cfg.Agents.Subagents.Models["explore"]
+	service.mu.Unlock()
+	if legacyExists {
+		t.Fatal("legacy override remained in memory")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "explore: legacy") || strings.Contains(string(data), "provider: grok") {
+		t.Fatalf("route reset was not persisted:\n%s", data)
+	}
+
+	invalid := &ModelRouteEntry{Scope: "subagent", Role: "explore", Route: config.ModelRouteConfig{Provider: "chatgpt"}}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetModelRoute, Route: invalid}); err == nil {
+		t.Fatal("incomplete route unexpectedly succeeded")
+	}
+	if got := service.modelRouteEntries()[1].Route; got != (config.ModelRouteConfig{}) {
+		t.Fatalf("validation failure mutated route: %+v", got)
+	}
 }
 
 func waitForTerminalRun(t *testing.T, service *Service, runID string) {

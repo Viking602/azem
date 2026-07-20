@@ -31,17 +31,20 @@ const (
 )
 
 type subagentParentRuntime struct {
-	SessionID          string
-	ParentRunID        string
-	ParentAgentID      string
-	ProviderID         string
-	ModelID            string
-	Reasoning          string
-	ContextTokenTarget int
-	WorkspaceRoot      string
-	Driver             hyprovider.Driver
-	Coding             *agentservice.Service
-	Host               *Service
+	SessionID               string
+	ParentRunID             string
+	ParentAgentID           string
+	ProviderID              string
+	ModelID                 string
+	Reasoning               string
+	ContextTokenTarget      int
+	WorkspaceRoot           string
+	Driver                  hyprovider.Driver
+	ResolveDriver           func(context.Context, string, string, string) (string, int, hyprovider.Driver, error)
+	CompactionRoute         config.ModelRouteConfig
+	CompactionRouteSnapshot func() config.ModelRouteConfig
+	Coding                  *agentservice.Service
+	Host                    *Service
 }
 
 type effectiveSubagentProfile struct {
@@ -51,6 +54,7 @@ type effectiveSubagentProfile struct {
 	Inputs             []config.SubagentContractItem
 	Outputs            []config.SubagentContractItem
 	Seed               []message.Message
+	Provider           string
 	Model              string
 	Reasoning          string
 	CapabilityMode     string
@@ -106,6 +110,7 @@ func newSubagentRuntime(parent context.Context, cfg config.SubagentConfig, store
 	if cfg.MaxConcurrency < 1 {
 		return nil, fmt.Errorf("subagent runtime: max concurrency must be positive")
 	}
+	cfg = cloneSubagentConfig(cfg)
 	ctx, cancel := context.WithCancel(parent)
 	return &subagentRuntime{
 		cfg: cfg, store: store, worktreeRoot: worktreeRoot, ctx: ctx, cancel: cancel,
@@ -115,7 +120,10 @@ func newSubagentRuntime(parent context.Context, cfg config.SubagentConfig, store
 }
 
 func (r *subagentRuntime) Drivers(parent subagentParentRuntime) ([]tool.Driver, error) {
-	if !r.cfg.Enabled {
+	r.mu.Lock()
+	enabled := r.cfg.Enabled
+	r.mu.Unlock()
+	if !enabled {
 		return nil, nil
 	}
 	if parent.Coding == nil || parent.Driver == nil || parent.SessionID == "" || parent.ParentRunID == "" {
@@ -126,6 +134,20 @@ func (r *subagentRuntime) Drivers(parent subagentParentRuntime) ([]tool.Driver, 
 		&subagentGetOutputDriver{runtime: r, sessionID: parent.SessionID},
 		&subagentKillDriver{runtime: r, sessionID: parent.SessionID},
 	}, nil
+}
+
+func (r *subagentRuntime) updateModelRoute(roleName string, route config.ModelRouteConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	role := r.cfg.Roles[roleName]
+	role.Provider, role.Model, role.Reasoning = route.Provider, route.Model, route.Reasoning
+	r.cfg.Roles[roleName] = role
+	delete(r.cfg.Models, roleName)
+	if route == (config.ModelRouteConfig{}) {
+		delete(r.cfg.Routes, roleName)
+	} else {
+		r.cfg.Routes[roleName] = route
+	}
 }
 
 func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, parent subagentParentRuntime) (agentservice.SubagentRun, error) {
@@ -143,6 +165,9 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	if err != nil {
 		return agentservice.SubagentRun{}, err
 	}
+	if parent.CompactionRouteSnapshot != nil {
+		parent.CompactionRoute = parent.CompactionRouteSnapshot()
+	}
 	id, err := newSubagentID()
 	if err != nil {
 		return agentservice.SubagentRun{}, err
@@ -151,7 +176,7 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	run := agentservice.SubagentRun{
 		ID: id, SessionID: parent.SessionID, ParentRunID: parent.ParentRunID, ParentAgentID: parent.ParentAgentID,
 		ParentToolCallID: input.parentToolCallID, Description: input.Description, Type: profile.Type,
-		State: agentservice.SubagentInitializing, Summary: "initializing", Model: profile.Model, Reasoning: profile.Reasoning,
+		State: agentservice.SubagentInitializing, Summary: "initializing", Provider: profile.Provider, Model: profile.Model, Reasoning: profile.Reasoning,
 		CapabilityMode: profile.CapabilityMode, RequestedIsolation: profile.RequestedIsolation, Isolation: profile.Isolation,
 		CWD: profile.CWD, Background: input.Background, StartedAt: now,
 	}
@@ -241,27 +266,37 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 }
 
 func (r *subagentRuntime) resolveProfile(input subagentSpawnInput, parent subagentParentRuntime) (effectiveSubagentProfile, error) {
-	if !r.cfg.Enabled {
+	r.mu.Lock()
+	cfg := r.cfg
+	cfg.Roles = cloneSubagentRoles(r.cfg.Roles)
+	cfg.Personas = cloneSubagentPersonas(r.cfg.Personas)
+	cfg.Toggle = cloneBoolMap(r.cfg.Toggle)
+	r.mu.Unlock()
+	if !cfg.Enabled {
 		return effectiveSubagentProfile{}, fmt.Errorf("subagents are disabled")
 	}
-	role, ok := r.cfg.Roles[input.SubagentType]
+	role, ok := cfg.Roles[input.SubagentType]
 	if !ok {
-		return effectiveSubagentProfile{}, fmt.Errorf("unknown subagent type %q (available: %s)", input.SubagentType, strings.Join(sortedRoleNames(r.cfg.Roles, r.cfg.Toggle), ", "))
+		return effectiveSubagentProfile{}, fmt.Errorf("unknown subagent type %q (available: %s)", input.SubagentType, strings.Join(sortedRoleNames(cfg.Roles, cfg.Toggle), ", "))
 	}
-	if enabled, configured := r.cfg.Toggle[input.SubagentType]; configured && !enabled {
+	if enabled, configured := cfg.Toggle[input.SubagentType]; configured && !enabled {
 		return effectiveSubagentProfile{}, fmt.Errorf("subagent type %q is disabled", input.SubagentType)
 	}
 	persona := config.SubagentPersonaConfig{}
 	if role.Persona != "" {
 		var found bool
-		persona, found = r.cfg.Personas[role.Persona]
+		persona, found = cfg.Personas[role.Persona]
 		if !found {
 			return effectiveSubagentProfile{}, fmt.Errorf("subagent type %q references unknown persona %q", input.SubagentType, role.Persona)
 		}
 	}
-	model := firstNonempty(input.Model, role.Model, persona.Model, parent.ModelID)
-	if !providerHasModel(parent.Driver, model) {
-		return effectiveSubagentProfile{}, fmt.Errorf("model %q is not available from provider %s", model, parent.ProviderID)
+	provider, model := parent.ProviderID, parent.ModelID
+	if input.Model != "" {
+		model = input.Model
+	} else if role.Model != "" {
+		provider, model = firstNonempty(role.Provider, parent.ProviderID), role.Model
+	} else if persona.Model != "" {
+		provider, model = firstNonempty(persona.Provider, parent.ProviderID), persona.Model
 	}
 	capability := firstNonempty(input.CapabilityMode, role.CapabilityMode, "read-only")
 	isolation := firstNonempty(input.Isolation, role.Isolation, persona.Isolation, "none")
@@ -287,9 +322,59 @@ func (r *subagentRuntime) resolveProfile(input subagentSpawnInput, parent subage
 		Type: input.SubagentType, Persona: role.Persona,
 		Instructions: instructions,
 		Inputs:       append([]config.SubagentContractItem(nil), persona.Inputs...), Outputs: append([]config.SubagentContractItem(nil), persona.Outputs...),
-		Model: model, Reasoning: firstNonempty(role.Reasoning, persona.Reasoning, parent.Reasoning), CapabilityMode: capability,
+		Provider: provider, Model: model, Reasoning: firstNonempty(role.Reasoning, persona.Reasoning, parent.Reasoning), CapabilityMode: capability,
 		RequestedIsolation: isolation, Isolation: "none", CWD: cwd, Tools: append([]string(nil), role.Tools...),
 	}, nil
+}
+
+func cloneSubagentRoles(source map[string]config.SubagentRoleConfig) map[string]config.SubagentRoleConfig {
+	result := make(map[string]config.SubagentRoleConfig, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneSubagentConfig(source config.SubagentConfig) config.SubagentConfig {
+	cloned := source
+	cloned.Toggle = cloneBoolMap(source.Toggle)
+	cloned.Models = cloneStringMap(source.Models)
+	cloned.Routes = cloneModelRouteMap(source.Routes)
+	cloned.Roles = cloneSubagentRoles(source.Roles)
+	cloned.Personas = cloneSubagentPersonas(source.Personas)
+	return cloned
+}
+
+func cloneModelRouteMap(source map[string]config.ModelRouteConfig) map[string]config.ModelRouteConfig {
+	result := make(map[string]config.ModelRouteConfig, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneStringMap(source map[string]string) map[string]string {
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneSubagentPersonas(source map[string]config.SubagentPersonaConfig) map[string]config.SubagentPersonaConfig {
+	result := make(map[string]config.SubagentPersonaConfig, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func cloneBoolMap(source map[string]bool) map[string]bool {
+	result := make(map[string]bool, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
 }
 
 func (r *subagentRuntime) resolveResumeProfile(sourceID string, parent subagentParentRuntime) (effectiveSubagentProfile, error) {
@@ -320,6 +405,7 @@ func (r *subagentRuntime) resolveResumeProfile(sourceID string, parent subagentP
 		cwd = parent.WorkspaceRoot
 	}
 	profile.Model = source.Model
+	profile.Provider = firstNonempty(source.Provider, parent.ProviderID)
 	profile.Reasoning = source.Reasoning
 	profile.CapabilityMode = source.CapabilityMode
 	profile.RequestedIsolation = source.RequestedIsolation
@@ -434,6 +520,25 @@ func (r *subagentRuntime) execute(id string) {
 	}
 
 	var err error
+	childModel := profile.Model
+	contextTarget := parent.ContextTokenTarget
+	childDriver := parent.Driver
+	if parent.ResolveDriver != nil {
+		childModel, contextWindow, resolvedDriver, resolveErr := parent.ResolveDriver(ctx, profile.Provider, profile.Model, profile.Reasoning)
+		if resolveErr != nil {
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("resolve subagent provider: %w", resolveErr)})
+			return
+		}
+		childDriver = resolvedDriver
+		contextTarget, err = modelContextTokenTarget(childModel, contextWindow)
+		if err != nil {
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
+			return
+		}
+	} else if profile.Provider != parent.ProviderID || !providerHasModel(parent.Driver, profile.Model) {
+		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("model %q is not available from provider %s", profile.Model, profile.Provider)})
+		return
+	}
 	childRun, err = parent.Coding.StartRun(ctx, prompt)
 	if err != nil {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("start child run: %w", err)})
@@ -473,20 +578,23 @@ func (r *subagentRuntime) execute(id string) {
 	instructions := renderSubagentInstructions(profile)
 	spec := hyagent.Spec{
 		Skills: skillSnapshot.Eager, AvailableSkills: skillSnapshot.Available,
-		Instructions: instructions, Model: profile.Model, Tools: toolNames,
+		Instructions: instructions, Model: childModel, Tools: toolNames,
 		LoopPolicy: hyagent.LoopPolicy{
 			MaxIterations: r.cfg.Budget.MaxTurns, MaxWallClock: r.cfg.Budget.MaxWallClockDuration,
-			ContextTokenTarget: parent.ContextTokenTarget,
+			ContextTokenTarget: contextTarget,
 		},
 		ExtraBody: map[string]any{"prompt_cache_key": childRun.RunID},
 	}
-	contextManager := subagentTurnContext{instructions: instructions, privateContext: active.privateContext, seed: profile.Seed}
+	meter := &compactionUsageMeter{}
+	meteredDriver := &compactionUsageDriver{inner: childDriver, meter: meter}
+	contextManager := subagentTurnContext{instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
+		summarize: lazyCompactionSummarizer(parent.ResolveDriver, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, meter)}
 	if parent.Host != nil {
 		contextManager.compactHooks = parent.Host.autoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
 	}
 	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
 		Skills:    skillSnapshot.Registry,
-		Providers: hyprovider.Single(parent.Driver), Tools: tool.NewBus(governed...), ContextManager: contextManager,
+		Providers: hyprovider.Single(meteredDriver), Tools: tool.NewBus(governed...), ContextManager: contextManager,
 	})
 	if err != nil {
 		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", err)

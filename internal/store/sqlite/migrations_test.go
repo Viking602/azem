@@ -153,7 +153,42 @@ func TestMigrationV7MovesProjectionBlocksIntoAppendOnlyRows(t *testing.T) {
 	if err := provider.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 7 || gotBlocks != "[]" || modelHistory != "{}" || sequence != 0 || kind != "user" || runID != "run-1" || data != blocks[1:len(blocks)-1] {
+	if version != schemaVersion || gotBlocks != "[]" || modelHistory != "{}" || sequence != 0 || kind != "user" || runID != "run-1" || data != blocks[1:len(blocks)-1] {
 		t.Fatalf("migration result version=%d blocks=%q model_history=%q row=%d/%q/%q/%q", version, gotBlocks, modelHistory, sequence, kind, runID, data)
+	}
+}
+
+func TestMigrationV8AddsSubagentProviderWithLegacyDefault(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "azem.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 7; version++ {
+		if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
+			t.Fatalf("apply migration %d: %v", version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO subagent_runs(id,session_id,parent_run_id,subagent_type,state,started_at) VALUES('legacy','session','parent','explore','completed',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version = 7`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	var got string
+	if err := provider.db.QueryRowContext(ctx, `SELECT provider FROM subagent_runs WHERE id='legacy'`).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("legacy provider = %q, want empty inherit value", got)
 	}
 }

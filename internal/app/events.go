@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
@@ -39,7 +40,15 @@ const (
 	EventHookDiagnostic    EventKind = "hook_diagnostic"
 	EventMemoryState       EventKind = "memory_state"
 	EventRecapState        EventKind = "recap_state"
+	EventModelRoutes       EventKind = "model_routes"
 )
+
+type ModelRouteEntry struct {
+	Scope string
+	Role  string
+	Label string
+	Route config.ModelRouteConfig
+}
 
 type AgentStatePayload struct {
 	Type               string
@@ -126,6 +135,7 @@ type Event struct {
 	Todo             *session.TodoList
 	Memories         []memory.Memory
 	Recap            *recap.Recap
+	ModelRoutes      []ModelRouteEntry
 	At               time.Time
 }
 
@@ -166,6 +176,9 @@ func (e Event) Clone() Event {
 	if e.Recap != nil {
 		value := *e.Recap
 		cloned.Recap = &value
+	}
+	if e.ModelRoutes != nil {
+		cloned.ModelRoutes = append([]ModelRouteEntry(nil), e.ModelRoutes...)
 	}
 	return cloned
 }
