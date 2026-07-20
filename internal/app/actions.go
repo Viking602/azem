@@ -235,7 +235,21 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if err := s.dispatchLifecycle(ctx, hooks.PreCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) { e.Trigger = "manual" }); err != nil {
 			return err
 		}
-		projection, err := s.sessions.Compact(ctx, action.Target)
+		projection, err := s.sessions.LoadProjection(ctx, action.Target)
+		if err != nil {
+			return err
+		}
+		if s.providers != nil && len(projection.Blocks) > 5 {
+			plan, changed, prepareErr := s.providers.PrepareManualCompaction(ctx, projection)
+			if prepareErr != nil {
+				return prepareErr
+			}
+			if changed {
+				projection, err = s.sessions.CompactWithSummary(ctx, action.Target, plan)
+			}
+		} else {
+			projection, err = s.sessions.Compact(ctx, action.Target)
+		}
 		if err != nil {
 			return err
 		}

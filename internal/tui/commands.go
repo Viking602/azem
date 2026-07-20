@@ -178,6 +178,16 @@ func ParseCommand(input string) (Command, bool, error) {
 	if name == "langauge" {
 		name = "language"
 	}
+	known := false
+	for _, command := range slashCommands {
+		if command.Name == name {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return Command{}, false, nil
+	}
 	return Command{Name: name, Args: fields[1:]}, true, nil
 }
 

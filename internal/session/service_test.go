@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -49,6 +50,86 @@ func TestCompactSummarizesOlderBlocksAndKeepsRecent(t *testing.T) {
 	}
 	if len(reloaded.Blocks) != 5 || reloaded.Blocks[0].Content != projection.Blocks[0].Content || reloaded.LastRunID != "run-7" {
 		t.Fatalf("reloaded projection=%+v", reloaded)
+	}
+}
+
+func TestCompactWithSummaryPersistsMatchingModelHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "summary.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model"}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 8; index++ {
+		kind := "user"
+		if index%2 == 1 {
+			kind = "assistant"
+		}
+		if err := service.AppendBlock(ctx, "session", Block{Kind: kind, Content: fmt.Sprintf("message %d", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary := "[Untrusted historical record]\n## Objective\n- ship the fix"
+	history := ModelHistory{
+		ProviderID: "chatgpt", ModelID: "model", InstructionFingerprint: "fingerprint",
+		Messages: []message.Message{message.NewText(message.RoleSystem, "rules"), message.NewText(message.RoleAssistant, summary)},
+	}
+	before, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.CompactWithSummary(ctx, "session", CompactionPlan{
+		Summary: summary, ModelHistory: history, ExpectedUpdatedAt: before.UpdatedAt, TailStart: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 5 || projection.Blocks[0].Content != summary {
+		t.Fatalf("compacted blocks = %#v", projection.Blocks)
+	}
+	if projection.ModelHistory.ProviderID != "chatgpt" || len(projection.ModelHistory.Messages) != 2 {
+		t.Fatalf("compacted model history = %#v", projection.ModelHistory)
+	}
+	reloaded, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Blocks[0].Content != summary || reloaded.ModelHistory.InstructionFingerprint != "fingerprint" {
+		t.Fatalf("reloaded compaction = %#v %#v", reloaded.Blocks, reloaded.ModelHistory)
+	}
+}
+
+func TestCompleteTurnPersistsModelHistoryWithoutEmptyAssistantBlock(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "tool-only.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "use the tool"}); err != nil {
+		t.Fatal(err)
+	}
+	history := ModelHistory{ProviderID: "chatgpt", ModelID: "model", Messages: []message.Message{
+		message.NewText(message.RoleUser, "use the tool"),
+		message.NewText(message.RoleAssistant, "tool completed without final text"),
+	}}
+	if err := service.CompleteTurn(ctx, "session", Block{Kind: "assistant", RunID: "run"}, history); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 1 || len(projection.ModelHistory.Messages) != 2 || projection.LastRunID != "run" {
+		t.Fatalf("tool-only completion = %#v", projection)
 	}
 }
 
@@ -202,8 +283,46 @@ func TestCompleteTurnStoresAssistantBlockAndModelHistoryTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compacted.ModelHistory.ProviderID != "" || len(compacted.ModelHistory.Messages) != 0 {
-		t.Fatalf("compact retained provider model history = %#v", compacted.ModelHistory)
+	if compacted.ModelHistory.ProviderID != history.ProviderID || len(compacted.ModelHistory.Messages) != len(history.Messages) {
+		t.Fatalf("no-op compact changed provider model history = %#v", compacted.ModelHistory)
+	}
+}
+
+func TestCompactWithSummaryRejectsStaleProjectionWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "stale-summary.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 6; index++ {
+		if err := service.AppendBlock(ctx, "session", Block{Kind: "user", Content: fmt.Sprintf("message %d", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AppendBlock(ctx, "session", Block{Kind: "assistant", Content: "concurrent update"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.CompactWithSummary(ctx, "session", CompactionPlan{
+		Summary: "stale summary", ExpectedUpdatedAt: stale.UpdatedAt, TailStart: 2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "projection changed") {
+		t.Fatalf("stale compaction error = %v", err)
+	}
+	current, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Blocks) != 7 || current.Blocks[6].Content != "concurrent update" {
+		t.Fatalf("stale compaction mutated blocks = %#v", current.Blocks)
 	}
 }
 

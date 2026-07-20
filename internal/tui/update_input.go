@@ -26,6 +26,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.composer.SetWidth(max(1, m.width-4))
 		m.modelSearch.SetWidth(max(1, min(64, m.width-12)))
 		m.transcriptTop = min(m.transcriptTop, m.transcriptMaxOffset())
+		if m.overlay == OverlayRecap {
+			m.overlayScroll = min(m.overlayScroll, m.recapScrollLimit())
+		}
 		return m, nil
 	case tea.MouseClickMsg:
 		return m.startTranscriptSelection(msg.Mouse())
@@ -38,8 +41,16 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.overlay != OverlayNone {
 			switch msg.Button {
 			case tea.MouseWheelUp:
+				if m.overlay == OverlayRecap {
+					m.scrollRecap(-3)
+					return m, nil
+				}
 				return m.updateOverlayKey("up")
 			case tea.MouseWheelDown:
+				if m.overlay == OverlayRecap {
+					m.scrollRecap(3)
+					return m, nil
+				}
 				return m.updateOverlayKey("down")
 			}
 			return m, nil
@@ -90,6 +101,17 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: "Run rejected", Content: msg.Err.Error(), State: "failed"})
 		} else if (m.status == "Starting" || m.status == "Running" || m.status == "Cancelling") && (m.runID == "" || m.runID == msg.RunID) {
 			m.runID = msg.RunID
+		}
+		return m, nil
+	case guidanceResultMsg:
+		if msg.Err != nil {
+			m.errorBanner = msg.Err.Error()
+			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: "Guidance rejected", Content: msg.Err.Error(), State: "failed"})
+			if m.composer.Value() == "" {
+				m.composer.SetValue(msg.Text)
+			}
+		} else {
+			m.transcript = append(m.transcript, Block{Kind: BlockUser, RunID: msg.RunID, Title: "Guidance", Content: msg.Text, State: "guidance"})
 		}
 		return m, nil
 	case cancelResultMsg:
@@ -239,9 +261,13 @@ func (m AppModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "enter":
-		if !m.isRunning() && !m.actionBusy {
-			return m.submit()
+		if m.actionBusy {
+			return m, nil
 		}
+		if m.isRunning() && !m.canGuideActiveRun() {
+			return m, nil
+		}
+		return m.submit()
 	}
 
 	previous := m.composer.Value()
@@ -419,6 +445,28 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 	}
 	if m.actionBusy {
 		return m, nil
+	}
+	if m.overlay == OverlayRecap {
+		switch key {
+		case "up", "k":
+			m.scrollRecap(-1)
+			return m, nil
+		case "down", "j":
+			m.scrollRecap(1)
+			return m, nil
+		case "pgup":
+			m.scrollRecap(-max(1, m.height/3))
+			return m, nil
+		case "pgdown":
+			m.scrollRecap(max(1, m.height/3))
+			return m, nil
+		case "home":
+			m.overlayScroll = 0
+			return m, nil
+		case "end":
+			m.overlayScroll = m.recapScrollLimit()
+			return m, nil
+		}
 	}
 	count := m.overlayOptionCount()
 	if count == 0 {
@@ -941,6 +989,15 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 		}
 		return m.executeCommand(command)
 	}
+	if m.canGuideActiveRun() {
+		m.composer.Reset()
+		m.commandCursor = 0
+		m.errorBanner = ""
+		return m, guideActiveTurn(m.runtime, m.sessionID, m.runID, input)
+	}
+	if m.isRunning() {
+		return m, nil
+	}
 	m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: "You", Content: input})
 	m.composer.Reset()
 	m.commandCursor = 0
@@ -950,6 +1007,31 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 	m.resetTurnUsage()
 	m.transcriptTop = 0
 	return m, startTurn(m.runtime, app.TurnRequest{SessionID: m.sessionID, Prompt: input, Provider: m.provider, Model: m.model, Reasoning: m.reasoning, AgentMode: m.agentMode})
+}
+
+type guidanceResultMsg struct {
+	RunID string
+	Text  string
+	Err   error
+}
+
+func guideActiveTurn(runtime Runtime, sessionID, runID, text string) tea.Cmd {
+	return func() tea.Msg {
+		guided, ok := runtime.(interface {
+			GuideActiveTurn(string, string, string) error
+		})
+		if !ok {
+			return guidanceResultMsg{RunID: runID, Text: text, Err: fmt.Errorf("active-run guidance is unsupported")}
+		}
+		return guidanceResultMsg{RunID: runID, Text: text, Err: guided.GuideActiveTurn(sessionID, runID, text)}
+	}
+}
+
+func (m AppModel) canGuideActiveRun() bool {
+	if m.agentMode != "single" || m.runID == "" {
+		return false
+	}
+	return m.status == "Running" || m.status == "Awaiting approval" || m.status == "Reviewing approval"
 }
 
 func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {

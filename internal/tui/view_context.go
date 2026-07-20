@@ -158,18 +158,25 @@ func (m AppModel) activeAgents() []AgentView {
 	return active
 }
 
+const (
+	recapStatusMaxWords     = 40
+	recapStatusMaxWidth     = 120
+	recapStatusMaxSentences = 2
+)
+
 func (m AppModel) renderRecapStatus(width int) string {
 	if width <= 0 || m.recap == nil || m.isRunning() {
 		return ""
 	}
-	text := first(strings.TrimSpace(m.recap.Summary), strings.TrimSpace(m.recap.Goal), strings.TrimSpace(m.recap.OpenItems))
+	text := ""
+	for _, candidate := range []string{m.recap.Summary, m.recap.Goal, m.recap.OpenItems} {
+		text = recapStatusPreview(candidate)
+		if text != "" {
+			break
+		}
+	}
 	if text == "" {
 		return ""
-	}
-	text = strings.Join(strings.Fields(text), " ")
-	const maxRecapWidth = 280
-	if ansi.StringWidth(text) > maxRecapWidth {
-		text = ansi.Truncate(text, maxRecapWidth, "…")
 	}
 	prefix := m.tr("recap.status_prefix")
 	suffix := m.tr("recap.status_hint")
@@ -182,10 +189,69 @@ func (m AppModel) renderRecapStatus(width int) string {
 }
 
 func (m AppModel) visibleRecapStatus(width, height int) string {
-	if height < 4 {
+	if height < 4 || strings.TrimSpace(m.composer.Value()) != "" {
 		return ""
 	}
 	return m.renderRecapStatus(width)
+}
+
+func recapStatusPreview(value string) string {
+	value = plainRecapText(value)
+	if value == "" {
+		return ""
+	}
+	value = firstRecapSentences(value, recapStatusMaxSentences)
+	words := strings.Fields(value)
+	if len(words) > recapStatusMaxWords {
+		value = strings.Join(words[:recapStatusMaxWords], " ") + "…"
+	}
+	if ansi.StringWidth(value) > recapStatusMaxWidth {
+		value = ansi.Truncate(value, recapStatusMaxWidth, "…")
+	}
+	return value
+}
+
+func plainRecapText(value string) string {
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	cleaned := make([]string, 0, len(lines))
+	inCodeBlock := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "```") {
+			inCodeBlock = !inCodeBlock
+			continue
+		}
+		if line == "" || inCodeBlock || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimLeft(line, ">"))
+		for _, marker := range []string{"- ", "* ", "+ "} {
+			line = strings.TrimPrefix(line, marker)
+		}
+		if line != "" {
+			cleaned = append(cleaned, line)
+		}
+	}
+	value = strings.Join(cleaned, " ")
+	value = strings.NewReplacer("**", "", "__", "", "~~", "", "`", "").Replace(value)
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func firstRecapSentences(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	sentences := 0
+	for index, current := range value {
+		switch current {
+		case '.', '!', '?', '。', '！', '？':
+			sentences++
+			if sentences == limit {
+				return strings.TrimSpace(value[:index+len(string(current))])
+			}
+		}
+	}
+	return strings.TrimSpace(value)
 }
 
 func (m AppModel) renderModelStatus(width int) string {

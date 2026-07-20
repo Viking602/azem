@@ -76,12 +76,22 @@ func TestAssistantMessageOmitsGeneratingHeader(t *testing.T) {
 
 type configuredTurnRuntime struct {
 	inertRuntime
-	request app.TurnRequest
+	request     app.TurnRequest
+	guidance    []string
+	guidanceErr error
 }
 
 func (r *configuredTurnRuntime) StartConfiguredTurn(request app.TurnRequest) (string, error) {
 	r.request = request
 	return "run_configured", nil
+}
+
+func (r *configuredTurnRuntime) GuideActiveTurn(_, _ string, text string) error {
+	if r.guidanceErr != nil {
+		return r.guidanceErr
+	}
+	r.guidance = append(r.guidance, text)
+	return nil
 }
 
 type skillCommandRuntime struct {
@@ -196,6 +206,77 @@ func TestCtrlCCancelsHangingActionAndRestoresSubmission(t *testing.T) {
 	}
 }
 
+func TestEnterSubmitsGuidanceWhileRunIsActive(t *testing.T) {
+	runtime := &configuredTurnRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status = "Running"
+	model.runID = "run-active"
+	model.composer.SetValue("先修复滚动，再处理样式")
+
+	updated, cmd := model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(AppModel)
+	if cmd == nil || model.composer.Value() != "" || model.status != "Running" {
+		t.Fatalf("guidance submission = cmd:%v composer:%q status:%q", cmd != nil, model.composer.Value(), model.status)
+	}
+	result, ok := cmd().(guidanceResultMsg)
+	if !ok || result.Err != nil {
+		t.Fatalf("guidance result = %#v", result)
+	}
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.guidance) != 1 || runtime.guidance[0] != "先修复滚动，再处理样式" {
+		t.Fatalf("runtime guidance = %#v", runtime.guidance)
+	}
+	if last := model.transcript[len(model.transcript)-1]; last.Kind != BlockUser || last.State != "guidance" || last.RunID != "run-active" {
+		t.Fatalf("guidance transcript block = %#v", last)
+	}
+}
+
+func TestGuidanceIsNotSubmittedBeforeRunStartsOrInTeamMode(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status string
+		runID  string
+		mode   string
+	}{
+		{name: "starting", status: "Starting", mode: "single"},
+		{name: "team", status: "Running", runID: "team-active", mode: "team"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &configuredTurnRuntime{}
+			model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", test.mode)
+			model.status, model.runID = test.status, test.runID
+			model.composer.SetValue("do not lose this")
+			updated, cmd := model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+			model = updated.(AppModel)
+			if cmd != nil || model.composer.Value() != "do not lose this" || len(runtime.guidance) != 0 {
+				t.Fatalf("blocked guidance = cmd:%v composer:%q guidance:%#v", cmd != nil, model.composer.Value(), runtime.guidance)
+			}
+		})
+	}
+}
+
+func TestRejectedGuidanceRestoresComposerWithoutAddingUserBlock(t *testing.T) {
+	runtime := &configuredTurnRuntime{guidanceErr: errors.New("run is finishing")}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status, model.runID = "Running", "run-active"
+	model.composer.SetValue("keep this guidance")
+
+	updated, cmd := model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(AppModel)
+	result := cmd().(guidanceResultMsg)
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if model.composer.Value() != "keep this guidance" || len(runtime.guidance) != 0 {
+		t.Fatalf("rejected guidance = composer:%q runtime:%#v", model.composer.Value(), runtime.guidance)
+	}
+	for _, block := range model.transcript {
+		if block.Kind == BlockUser {
+			t.Fatalf("rejected guidance left a user block: %#v", model.transcript)
+		}
+	}
+}
+
 func TestEscapeCancelsHangingOverlayAction(t *testing.T) {
 	runtime := &blockingActionRuntime{started: make(chan struct{}), release: make(chan struct{})}
 	defer close(runtime.release)
@@ -264,6 +345,37 @@ func TestSlashCommandFuzzyRanking(t *testing.T) {
 	}
 	if matches = commandSuggestions("/"); len(matches) != len(slashCommands) {
 		t.Fatalf("root command count = %d, want %d", len(matches), len(slashCommands))
+	}
+}
+
+func TestAbsoluteTargetDirectoryIsNotParsedAsSlashCommand(t *testing.T) {
+	for _, input := range []string{
+		"/Users/viking/agents_dev/oh-my-pi",
+		"/tmp",
+		"/workspace 请检查这个目录",
+	} {
+		if command, ok, err := ParseCommand(input); err != nil || ok {
+			t.Fatalf("ParseCommand(%q) = command:%#v ok:%v err:%v, want ordinary input", input, command, ok, err)
+		}
+	}
+
+	command, ok, err := ParseCommand("/models")
+	if err != nil || !ok || command.Name != "models" {
+		t.Fatalf("registered command parse = command:%#v ok:%v err:%v", command, ok, err)
+	}
+
+	runtime := &configuredTurnRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	target := "/Users/viking/agents_dev/oh-my-pi"
+	model.composer.SetValue(target)
+	updated, cmd := model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("absolute target directory did not start a turn")
+	}
+	cmd()
+	if runtime.request.Prompt != target || model.errorBanner != "" {
+		t.Fatalf("absolute target submission = prompt:%q error:%q", runtime.request.Prompt, model.errorBanner)
 	}
 }
 
@@ -2125,6 +2237,35 @@ func TestMouseWheelScrollsOverlayWithoutChangingTranscriptOffset(t *testing.T) {
 	}
 }
 
+func TestRecapMouseWheelMatchesTranscriptScrollStep(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.overlay = OverlayRecap
+	model.recap = &recap.Recap{Summary: strings.Repeat("long recap line\n", 40)}
+	model.transcriptTop = 7
+	updated, _ := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	model = updated.(AppModel)
+	if model.overlayScroll != 3 || model.transcriptTop != 7 {
+		t.Fatalf("recap wheel state = overlay:%d transcript:%d", model.overlayScroll, model.transcriptTop)
+	}
+	updated, _ = model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	model = updated.(AppModel)
+	if model.overlayScroll != 0 {
+		t.Fatalf("recap wheel did not return to top: %d", model.overlayScroll)
+	}
+	for range 100 {
+		updated, _ = model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+		model = updated.(AppModel)
+	}
+	if model.overlayScroll != model.recapScrollLimit() {
+		t.Fatalf("recap wheel escaped valid range: offset=%d limit=%d", model.overlayScroll, model.recapScrollLimit())
+	}
+	updated, _ = model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	model = updated.(AppModel)
+	if model.overlayScroll != max(0, model.recapScrollLimit()-3) {
+		t.Fatalf("recap reverse wheel remained stuck after overscroll: %d", model.overlayScroll)
+	}
+}
+
 func TestAssistantMarkdownRendersWithoutSourceMarkers(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	block := Block{
@@ -2773,6 +2914,38 @@ func TestMemoryAndRecapCommandsAndOverlays(t *testing.T) {
 	}
 }
 
+func TestRecapOverlayCachesLongLayoutAndOnlySlicesVisibleWindow(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	var summary strings.Builder
+	for index := 0; index < 500; index++ {
+		fmt.Fprintf(&summary, "recap row %03d contains enough context to wrap predictably\n", index)
+	}
+	model.recap = &recap.Recap{Goal: "Keep scrolling smooth", Summary: summary.String(), OpenItems: "Verify cached rendering", Revision: 1}
+	model.openOverlay(OverlayRecap)
+
+	first := model.recapDescriptionLines(72)
+	second := model.recapDescriptionLines(72)
+	if len(first) < 500 || &first[0] != &second[0] {
+		t.Fatal("stable recap layout was wrapped again")
+	}
+	top := ansi.Strip(model.renderOverlay(80, 24))
+	model.overlayScroll = 300
+	scrolled := ansi.Strip(model.renderOverlay(80, 24))
+	third := model.recapDescriptionLines(72)
+	if &first[0] != &third[0] {
+		t.Fatal("scrolling invalidated the recap layout cache")
+	}
+	if top == scrolled || strings.Count(scrolled, "\n")+1 != 24 {
+		t.Fatalf("recap viewport was not sliced to the visible window:\n%s", scrolled)
+	}
+
+	model.recap.Summary = "updated recap"
+	updated := model.recapDescriptionLines(72)
+	if len(updated) == 0 || &first[0] == &updated[0] || !strings.Contains(strings.Join(updated, "\n"), "updated recap") {
+		t.Fatal("changed recap reused stale cached lines")
+	}
+}
+
 func TestRecapUpdateIsVisibleWhenIdleAndResumesWithSession(t *testing.T) {
 	runtime := &recordedRuntime{}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single", "session-1")
@@ -2810,13 +2983,46 @@ func TestRecapUpdateIsVisibleWhenIdleAndResumesWithSession(t *testing.T) {
 	}
 }
 
-func TestRecapStatusUsesOMPSingleLinePreviewBudget(t *testing.T) {
+func TestRecapStatusUsesConcisePlainTextPreview(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
-	model.width = 360
-	model.recap = &recap.Recap{Summary: strings.Repeat("context ", 80)}
-	status := strings.TrimRight(ansi.Strip(model.renderRecapStatus(model.width)), " ")
-	if strings.Contains(status, "\n") || ansi.StringWidth(status) > 320 || !strings.Contains(status, "…") {
-		t.Fatalf("recap preview was not bounded to one concise line: width=%d value=%q", ansi.StringWidth(status), status)
+	model.width = 240
+	original := "## Result\n\n**Recap display is complete.** The full session memory remains available. Implementation details should stay in the overlay."
+	model.recap = &recap.Recap{Summary: original}
+	status := strings.TrimSpace(ansi.Strip(model.renderRecapStatus(model.width)))
+	for _, unwanted := range []string{"##", "**", "Implementation details"} {
+		if strings.Contains(status, unwanted) {
+			t.Fatalf("recap status retained %q: %q", unwanted, status)
+		}
+	}
+	for _, wanted := range []string{"Recap display is complete.", "The full session memory remains available."} {
+		if !strings.Contains(status, wanted) {
+			t.Fatalf("recap status omitted %q: %q", wanted, status)
+		}
+	}
+	if model.recap.Summary != original {
+		t.Fatalf("status preview mutated persistent recap: %q", model.recap.Summary)
+	}
+
+	preview := recapStatusPreview(strings.Repeat("context ", 80))
+	if len(strings.Fields(strings.TrimSuffix(preview, "…"))) > 40 || ansi.StringWidth(preview) > 120 || !strings.HasSuffix(preview, "…") {
+		t.Fatalf("recap preview was not concise: words=%d width=%d value=%q", len(strings.Fields(preview)), ansi.StringWidth(preview), preview)
+	}
+}
+func TestRecapStatusFallsBackWhenSummaryHasNoPlainText(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.recap = &recap.Recap{Summary: "```go\nfmt.Println(\"details\")\n```", Goal: "Keep continuity visible"}
+	status := ansi.Strip(model.renderRecapStatus(100))
+	if !strings.Contains(status, "Keep continuity visible") || strings.Contains(status, "fmt.Println") {
+		t.Fatalf("recap fallback status = %q", status)
+	}
+}
+
+func TestRecapStatusYieldsWhileUserIsTyping(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.recap = &recap.Recap{Summary: "Keep the transcript usable"}
+	model.composer.SetValue("draft request")
+	if status := model.visibleRecapStatus(80, 24); status != "" {
+		t.Fatalf("recap status competed with composer draft: %q", ansi.Strip(status))
 	}
 }
 
