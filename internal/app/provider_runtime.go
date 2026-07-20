@@ -62,6 +62,7 @@ func NewProviderRuntime(cfg config.Config, authentication *auth.Service, modelCa
 	if strings.TrimSpace(subagentWorktreeRoot) == "" {
 		return nil, fmt.Errorf("subagent worktree root is empty")
 	}
+	cfg.Agents.Subagents = cloneSubagentConfig(cfg.Agents.Subagents)
 	return &ProviderRuntime{
 		cfg: cfg, auth: authentication, catalog: modelCatalog, coding: codingService,
 		subagentWorktreeRoot: subagentWorktreeRoot,
@@ -78,6 +79,37 @@ func (r *ProviderRuntime) Attach(host *Service, manager *mcpruntime.Manager, sub
 	}
 }
 
+func (r *ProviderRuntime) modelRouteSnapshot() (config.ModelRouteConfig, *subagentRuntime) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cfg.Agents.Compaction, r.subagents
+}
+
+// UpdateModelRoute updates only the live routing snapshot. Existing runs keep
+// the route captured when their engine or spawn profile was created.
+func (r *ProviderRuntime) UpdateModelRoute(scope, role string, route config.ModelRouteConfig) {
+	r.mu.Lock()
+	if scope == "compaction" {
+		r.cfg.Agents.Compaction = route
+	}
+	subagents := r.subagents
+	if scope == "subagent" {
+		current := r.cfg.Agents.Subagents.Roles[role]
+		current.Provider, current.Model, current.Reasoning = route.Provider, route.Model, route.Reasoning
+		r.cfg.Agents.Subagents.Roles[role] = current
+		delete(r.cfg.Agents.Subagents.Models, role)
+		if route == (config.ModelRouteConfig{}) {
+			delete(r.cfg.Agents.Subagents.Routes, role)
+		} else {
+			r.cfg.Agents.Subagents.Routes[role] = route
+		}
+	}
+	r.mu.Unlock()
+	if scope == "subagent" && subagents != nil {
+		subagents.updateModelRoute(role, route)
+	}
+}
+
 func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agentservice.Run, hyagent.Engine, error) {
 	account, modelID, contextWindow, driver, err := r.resolveDriver(ctx, request.Provider, request.Model, request.Reasoning)
 	if err != nil {
@@ -91,12 +123,16 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
+	compactionRoute, routeSubagents := r.modelRouteSnapshot()
 	r.mu.RLock()
 	host := r.host
 	manager := r.mcp
 	subagents := r.subagents
 	subagentInitErr := r.subagentInitErr
 	r.mu.RUnlock()
+	if routeSubagents != nil {
+		subagents = routeSubagents
+	}
 	if subagentInitErr != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, subagentInitErr.Error(), subagentInitErr)
 		return nil, hyagent.Engine{}, subagentInitErr
@@ -135,6 +171,15 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 			SessionID: request.SessionID, ParentRunID: run.RunID, ParentAgentID: run.HolderID,
 			ProviderID: request.Provider, ModelID: modelID, Reasoning: request.Reasoning, ContextTokenTarget: contextTarget,
 			WorkspaceRoot: r.cfg.Workspace.Root, Driver: driver, Coding: r.coding, Host: host,
+			CompactionRoute: compactionRoute,
+			CompactionRouteSnapshot: func() config.ModelRouteConfig {
+				route, _ := r.modelRouteSnapshot()
+				return route
+			},
+			ResolveDriver: func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
+				_, resolvedModel, window, resolved, resolveErr := r.resolveDriver(ctx, provider, model, reasoning)
+				return resolvedModel, window, resolved, resolveErr
+			},
 		})
 		if buildErr != nil {
 			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, buildErr.Error(), buildErr)
@@ -169,8 +214,12 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		history: request.History, persistedHistory: request.persistedHistory,
 		modelHistory: request.modelHistory, todo: request.Todo,
 	}
-	meteredDriver := &compactionUsageDriver{inner: driver}
-	contextManager.summarize = compactionSummarizer(meteredDriver, request.Provider, modelID, contextWindow, maxCompactionSummaryTokens(contextWindow))
+	meter := &compactionUsageMeter{}
+	meteredDriver := &compactionUsageDriver{inner: driver, meter: meter}
+	contextManager.summarize = lazyCompactionSummarizer(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
+		_, resolvedModel, window, resolved, resolveErr := r.resolveDriver(ctx, provider, model, reasoning)
+		return resolvedModel, window, resolved, resolveErr
+	}, compactionRoute, request.Provider, modelID, request.Reasoning, meter)
 	if host != nil {
 		contextManager.compactHooks = host.autoCompactHooks(host.hookMetadata(request.SessionID, run.RunID))
 		if host.sessions != nil {
@@ -228,6 +277,11 @@ const compactionRequestMetadataKey = "azem_internal_compaction"
 
 type compactionUsageDriver struct {
 	inner hyprovider.Driver
+	meter *compactionUsageMeter
+	mu    sync.Mutex
+}
+
+type compactionUsageMeter struct {
 	mu    sync.Mutex
 	usage hyprovider.Usage
 }
@@ -242,14 +296,23 @@ func (d *compactionUsageDriver) Stream(ctx context.Context, request hyprovider.R
 	return &compactionUsageStream{
 		Stream:     stream,
 		compaction: request.Metadata[compactionRequestMetadataKey] == "true",
-		driver:     d,
+		meter:      d.usageMeter(),
 	}, nil
+}
+
+func (d *compactionUsageDriver) usageMeter() *compactionUsageMeter {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.meter == nil {
+		d.meter = &compactionUsageMeter{}
+	}
+	return d.meter
 }
 
 type compactionUsageStream struct {
 	hyprovider.Stream
 	compaction bool
-	driver     *compactionUsageDriver
+	meter      *compactionUsageMeter
 }
 
 func (s *compactionUsageStream) Recv() (hyprovider.Event, error) {
@@ -257,15 +320,32 @@ func (s *compactionUsageStream) Recv() (hyprovider.Event, error) {
 	if err != nil || event.Kind != hyprovider.EventDone {
 		return event, err
 	}
-	s.driver.mu.Lock()
-	defer s.driver.mu.Unlock()
+	s.meter.mu.Lock()
+	defer s.meter.mu.Unlock()
 	if s.compaction {
-		s.driver.usage = s.driver.usage.Add(event.Usage)
-	} else if s.driver.usage != (hyprovider.Usage{}) {
-		event.Usage = event.Usage.Add(s.driver.usage)
-		s.driver.usage = hyprovider.Usage{}
+		s.meter.usage = s.meter.usage.Add(event.Usage)
+	} else if s.meter.usage != (hyprovider.Usage{}) {
+		event.Usage = event.Usage.Add(s.meter.usage)
+		s.meter.usage = hyprovider.Usage{}
 	}
 	return event, nil
+}
+
+func lazyCompactionSummarizer(resolve func(context.Context, string, string, string) (string, int, hyprovider.Driver, error), route config.ModelRouteConfig, providerID, modelID, reasoning string, meter *compactionUsageMeter) func(context.Context, string) (string, error) {
+	return func(ctx context.Context, transcript string) (string, error) {
+		if resolve == nil {
+			return "", fmt.Errorf("compaction provider resolver is unavailable")
+		}
+		if route != (config.ModelRouteConfig{}) {
+			providerID, modelID, reasoning = route.Provider, route.Model, route.Reasoning
+		}
+		resolvedModel, contextWindow, driver, err := resolve(ctx, providerID, modelID, reasoning)
+		if err != nil {
+			return "", err
+		}
+		metered := &compactionUsageDriver{inner: driver, meter: meter}
+		return compactionSummarizer(metered, providerID, resolvedModel, contextWindow, maxCompactionSummaryTokens(contextWindow))(ctx, transcript)
+	}
 }
 
 func compactionSummarizer(driver hyprovider.Driver, providerID, modelID string, contextWindow, maxOutputTokens int) func(context.Context, string) (string, error) {
@@ -389,11 +469,16 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 	if len(omitted) == 0 {
 		return session.CompactionPlan{}, false, nil
 	}
-	_, modelID, contextWindow, driver, err := r.resolveDriver(ctx, projection.Session.ProviderID, projection.Session.ModelID, projection.Session.Reasoning)
+	providerID, requestedModel, reasoning := projection.Session.ProviderID, projection.Session.ModelID, projection.Session.Reasoning
+	route, _ := r.modelRouteSnapshot()
+	if route != (config.ModelRouteConfig{}) {
+		providerID, requestedModel, reasoning = route.Provider, route.Model, route.Reasoning
+	}
+	_, modelID, contextWindow, driver, err := r.resolveDriver(ctx, providerID, requestedModel, reasoning)
 	if err != nil {
 		return session.CompactionPlan{}, false, err
 	}
-	generated, err := compactionSummarizer(driver, projection.Session.ProviderID, modelID, contextWindow, maxCompactionSummaryTokens(contextWindow))(ctx, serializeCompactionHistory(previous, omitted))
+	generated, err := compactionSummarizer(driver, providerID, modelID, contextWindow, maxCompactionSummaryTokens(contextWindow))(ctx, serializeCompactionHistory(previous, omitted))
 	if err != nil {
 		return session.CompactionPlan{}, false, fmt.Errorf("compact session summary: %w", err)
 	}
@@ -411,7 +496,7 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 	return session.CompactionPlan{
 		Summary: summaryText, ExpectedUpdatedAt: projection.UpdatedAt, TailStart: tailStart,
 		ModelHistory: session.ModelHistory{
-			ProviderID: projection.Session.ProviderID, ModelID: modelID,
+			ProviderID: projection.Session.ProviderID, ModelID: projection.Session.ModelID,
 			InstructionFingerprint: mainInstructionFingerprint, Messages: messages,
 		},
 	}, true, nil

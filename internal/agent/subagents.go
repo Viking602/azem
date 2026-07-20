@@ -34,6 +34,7 @@ type SubagentRun struct {
 	Type                string
 	State               SubagentState
 	Summary             string
+	Provider            string
 	Model               string
 	Reasoning           string
 	CapabilityMode      string
@@ -80,7 +81,7 @@ type SQLSubagentRunStore struct {
 }
 
 const subagentRunColumns = `id, session_id, parent_run_id, parent_agent_id, tool_call_id, child_run_id,
-	description, subagent_type, state, summary, model, reasoning, capability_mode,
+	description, subagent_type, state, summary, provider, model, reasoning, capability_mode,
 	requested_isolation, isolation, cwd, background, output, error, warning, transcript,
 	tool_calls, turns, tokens_used, tools_used, worktree_path, completion_delivered,
 	started_at, finished_at`
@@ -101,7 +102,7 @@ func (s *SQLSubagentRunStore) Create(ctx context.Context, run SubagentRun) error
 		return fmt.Errorf("encode subagent tools: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO subagent_runs(`+subagentRunColumns+`) VALUES(
-		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 	)`, subagentRunValues(run, toolsUsed)...)
 	return err
 }
@@ -117,7 +118,7 @@ func (s *SQLSubagentRunStore) Save(ctx context.Context, run SubagentRun) error {
 	values := subagentRunValues(run, toolsUsed)
 	result, err := s.db.ExecContext(ctx, `UPDATE subagent_runs SET
 		session_id=?, parent_run_id=?, parent_agent_id=?, tool_call_id=?, child_run_id=?,
-		description=?, subagent_type=?, state=?, summary=?, model=?, reasoning=?, capability_mode=?,
+		description=?, subagent_type=?, state=?, summary=?, provider=?, model=?, reasoning=?, capability_mode=?,
 		requested_isolation=?, isolation=?, cwd=?, background=?, output=?, error=?, warning=?, transcript=?,
 		tool_calls=?, turns=?, tokens_used=?, tools_used=?, worktree_path=?, completion_delivered=?,
 		started_at=?, finished_at=? WHERE id=?`, append(values[1:], values[0])...)
@@ -188,7 +189,7 @@ func subagentRunValues(run SubagentRun, toolsUsed []byte) []any {
 	}
 	return []any{
 		run.ID, run.SessionID, run.ParentRunID, run.ParentAgentID, run.ParentToolCallID, run.ChildRunID,
-		run.Description, run.Type, run.State, run.Summary, run.Model, run.Reasoning, run.CapabilityMode,
+		run.Description, run.Type, run.State, run.Summary, run.Provider, run.Model, run.Reasoning, run.CapabilityMode,
 		run.RequestedIsolation, run.Isolation, run.CWD, boolInt(run.Background), run.Output, run.Error,
 		run.Warning, transcript, run.ToolCalls, run.Turns, run.TokensUsed, toolsUsed,
 		run.WorktreePath, boolInt(run.CompletionDelivered), unixNano(run.StartedAt), unixNano(run.FinishedAt),
@@ -204,7 +205,7 @@ func scanSubagentRun(scan subagentScanner) (SubagentRun, error) {
 	var started, finished int64
 	err := scan(
 		&run.ID, &run.SessionID, &run.ParentRunID, &run.ParentAgentID, &run.ParentToolCallID, &run.ChildRunID,
-		&run.Description, &run.Type, &run.State, &run.Summary, &run.Model, &run.Reasoning, &run.CapabilityMode,
+		&run.Description, &run.Type, &run.State, &run.Summary, &run.Provider, &run.Model, &run.Reasoning, &run.CapabilityMode,
 		&run.RequestedIsolation, &run.Isolation, &run.CWD, &background, &run.Output, &run.Error, &run.Warning,
 		&transcript, &run.ToolCalls, &run.Turns, &run.TokensUsed, &toolsUsed, &run.WorktreePath, &delivered,
 		&started, &finished,

@@ -168,6 +168,7 @@ Without `-config`, Azem reads `azem/config.yaml` from the operating system's use
 | Command | Description |
 |---|---|
 | `/models` | Search for and select a model |
+| `/model-routing` | Configure models for compaction and each subagent role |
 | `/provider [chatgpt\|grok]` | Switch providers |
 | `/reasoning [level]` | Set reasoning effort |
 | `/login [provider]` | Sign in or import provider credentials |
@@ -230,12 +231,23 @@ agents:
   team:
     max_concurrency: 2
     max_ticks: 12
+  compaction:
+    # Leave all fields empty to inherit the model being compacted.
+    provider: ""
+    model: ""
+    reasoning: ""
   subagents:
     enabled: true
     max_depth: 1
     max_concurrency: 2
     await_timeout: 10m
     auto_wake: true
+    routes:
+      explore:
+        # Remove this entry to inherit the parent agent's model route.
+        provider: grok
+        model: grok-4.5
+        reasoning: low
     budget:
       max_tokens: 128000
       max_tool_calls: 64

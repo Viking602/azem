@@ -69,12 +69,14 @@ type Service struct {
 	hooks              hooks.Dispatcher
 	hookOptions        hooks.Options
 	hookWatcher        *hookWatcher
+	routeMu            sync.Mutex
 	memory             *memory.Service
 	recap              *recap.Service
 }
 
 func NewService(parent context.Context, cfg config.Config) *Service {
 	ctx, cancel := context.WithCancel(parent)
+	cfg.Agents.Subagents = cloneSubagentConfig(cfg.Agents.Subagents)
 	approvalMode := ApprovalMode(cfg.Defaults.ApprovalMode)
 	if approvalMode != ApprovalModePrompt && approvalMode != ApprovalModeAutoReview && approvalMode != ApprovalModeYolo {
 		approvalMode = ApprovalModePrompt

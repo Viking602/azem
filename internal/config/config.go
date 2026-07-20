@@ -77,9 +77,18 @@ type GrokConfig struct {
 }
 
 type AgentsConfig struct {
-	Main      MainAgentConfig `yaml:"main"`
-	Team      TeamConfig      `yaml:"team"`
-	Subagents SubagentConfig  `yaml:"subagents"`
+	Main       MainAgentConfig  `yaml:"main"`
+	Team       TeamConfig       `yaml:"team"`
+	Compaction ModelRouteConfig `yaml:"compaction" json:"compaction"`
+	Subagents  SubagentConfig   `yaml:"subagents"`
+}
+
+// ModelRouteConfig selects a provider model for a specific agent operation.
+// Its zero value inherits the route from the surrounding/default context.
+type ModelRouteConfig struct {
+	Provider  string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Model     string `yaml:"model,omitempty" json:"model,omitempty"`
+	Reasoning string `yaml:"reasoning,omitempty" json:"reasoning,omitempty"`
 }
 
 type MainAgentConfig struct {
@@ -116,6 +125,7 @@ type SubagentConfig struct {
 	AutoWake       bool                             `yaml:"auto_wake"`
 	Toggle         map[string]bool                  `yaml:"toggle,omitempty"`
 	Models         map[string]string                `yaml:"models,omitempty"`
+	Routes         map[string]ModelRouteConfig      `yaml:"routes,omitempty"`
 	Roles          map[string]SubagentRoleConfig    `yaml:"roles,omitempty"`
 	Personas       map[string]SubagentPersonaConfig `yaml:"personas,omitempty"`
 	Budget         SubagentBudgetConfig             `yaml:"budget"`
@@ -137,6 +147,7 @@ type SubagentRoleConfig struct {
 	Instructions     string   `json:"instructions,omitempty" toml:"instructions" yaml:"instructions"`
 	InstructionsFile string   `json:"instructions_file,omitempty" toml:"instructions_file" yaml:"instructions_file"`
 	Persona          string   `json:"persona,omitempty" toml:"persona" yaml:"persona"`
+	Provider         string   `json:"provider,omitempty" toml:"provider" yaml:"provider"`
 	Model            string   `json:"model,omitempty" toml:"model" yaml:"model"`
 	Reasoning        string   `json:"reasoning,omitempty" toml:"reasoning" yaml:"reasoning"`
 	CapabilityMode   string   `json:"capability_mode,omitempty" toml:"capability_mode" yaml:"capability_mode"`
@@ -149,6 +160,7 @@ type SubagentPersonaConfig struct {
 	Description      string                 `json:"description,omitempty" toml:"description" yaml:"description"`
 	Instructions     string                 `json:"instructions,omitempty" toml:"instructions" yaml:"instructions"`
 	InstructionsFile string                 `json:"instructions_file,omitempty" toml:"instructions_file" yaml:"instructions_file"`
+	Provider         string                 `json:"provider,omitempty" toml:"provider" yaml:"provider"`
 	Model            string                 `json:"model,omitempty" toml:"model" yaml:"model"`
 	Reasoning        string                 `json:"reasoning,omitempty" toml:"reasoning" yaml:"reasoning"`
 	Isolation        string                 `json:"isolation,omitempty" toml:"isolation" yaml:"isolation"`
@@ -209,7 +221,7 @@ func Default() Config {
 			Team: TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
 			Subagents: SubagentConfig{
 				Enabled: true, MaxDepth: 1, MaxConcurrency: 2, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
-				Toggle: map[string]bool{}, Models: map[string]string{}, Roles: builtInSubagentRoles(),
+				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
 					MaxTokens: 0, MaxToolCalls: 64, MaxTurns: 32,
@@ -315,6 +327,9 @@ func (c *Config) Validate() error {
 	c.Agents.Main.MaxWallClockDuration = mainWallClock
 	if c.Agents.Team.MaxConcurrency < 1 || c.Agents.Team.MaxTicks < 1 {
 		return fmt.Errorf("agents.team limits must be positive")
+	}
+	if err := validateModelRoute("agents.compaction", c.Agents.Compaction); err != nil {
+		return err
 	}
 	if err := c.validateSubagents(); err != nil {
 		return err
@@ -455,6 +470,9 @@ func (c *Config) validateSubagents() error {
 	if subagents.Models == nil {
 		subagents.Models = map[string]string{}
 	}
+	if subagents.Routes == nil {
+		subagents.Routes = map[string]ModelRouteConfig{}
+	}
 	if subagents.Roles == nil {
 		subagents.Roles = map[string]SubagentRoleConfig{}
 	}
@@ -472,6 +490,9 @@ func (c *Config) validateSubagents() error {
 		}
 		if strings.TrimSpace(persona.Instructions) == "" {
 			return fmt.Errorf("agents.subagents persona %q has no instructions", name)
+		}
+		if err := validateInheritedModelRoute("agents.subagents persona "+fmt.Sprintf("%q", name), ModelRouteConfig{Provider: persona.Provider, Model: persona.Model, Reasoning: persona.Reasoning}); err != nil {
+			return err
 		}
 		if err := validateSubagentContractItems("persona", name, "input", persona.Inputs); err != nil {
 			return err
@@ -511,6 +532,9 @@ func (c *Config) validateSubagents() error {
 		if strings.TrimSpace(role.Instructions) == "" && role.Persona == "" {
 			return fmt.Errorf("agents.subagents role %q has no instructions or persona", name)
 		}
+		if err := validateInheritedModelRoute("agents.subagents role "+fmt.Sprintf("%q", name), ModelRouteConfig{Provider: role.Provider, Model: role.Model, Reasoning: role.Reasoning}); err != nil {
+			return err
+		}
 		for _, toolName := range role.Tools {
 			if !allowedTools[toolName] {
 				return fmt.Errorf("agents.subagents role %q references unknown or forbidden tool %q", name, toolName)
@@ -519,6 +543,12 @@ func (c *Config) validateSubagents() error {
 		if model := strings.TrimSpace(subagents.Models[name]); model != "" {
 			role.Model = model
 		}
+		if route, configured := subagents.Routes[name]; configured {
+			if err := validateModelRoute("agents.subagents route "+fmt.Sprintf("%q", name), route); err != nil {
+				return err
+			}
+			role.Provider, role.Model, role.Reasoning = route.Provider, route.Model, route.Reasoning
+		}
 		subagents.Roles[name] = role
 	}
 	for name := range subagents.Models {
@@ -526,10 +556,43 @@ func (c *Config) validateSubagents() error {
 			return fmt.Errorf("agents.subagents.models references unknown role %q", name)
 		}
 	}
+	for name := range subagents.Routes {
+		if _, ok := subagents.Roles[name]; !ok {
+			return fmt.Errorf("agents.subagents.routes references unknown role %q", name)
+		}
+	}
 	for name := range subagents.Toggle {
 		if _, ok := subagents.Roles[name]; !ok {
 			return fmt.Errorf("agents.subagents.toggle references unknown role %q", name)
 		}
+	}
+	return nil
+}
+
+func validateModelRoute(name string, route ModelRouteConfig) error {
+	provider := strings.TrimSpace(route.Provider)
+	model := strings.TrimSpace(route.Model)
+	reasoning := strings.TrimSpace(route.Reasoning)
+	if provider == "" && model == "" && reasoning == "" {
+		return nil
+	}
+	if provider == "" || model == "" {
+		return fmt.Errorf("%s route must set both provider and model", name)
+	}
+	if provider != "chatgpt" && provider != "grok" {
+		return fmt.Errorf("%s provider must be chatgpt or grok", name)
+	}
+	return nil
+}
+
+func validateInheritedModelRoute(name string, route ModelRouteConfig) error {
+	provider := strings.TrimSpace(route.Provider)
+	model := strings.TrimSpace(route.Model)
+	if provider != "" && model == "" {
+		return fmt.Errorf("%s route must set model when provider is set", name)
+	}
+	if provider != "" && provider != "chatgpt" && provider != "grok" {
+		return fmt.Errorf("%s provider must be chatgpt or grok", name)
 	}
 	return nil
 }

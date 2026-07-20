@@ -55,6 +55,9 @@ const (
 	ActionRemember         ActionKind = "remember"
 	ActionForgetMemory     ActionKind = "forget_memory"
 	ActionShowRecap        ActionKind = "show_recap"
+	ActionListModelRoutes  ActionKind = "list_model_routes"
+	ActionSetModelRoute    ActionKind = "set_model_route"
+	ActionResetModelRoute  ActionKind = "reset_model_route"
 )
 
 type Action struct {
@@ -62,6 +65,7 @@ type Action struct {
 	Target    string
 	Decision  string
 	SessionID string
+	Route     *ModelRouteEntry
 }
 
 type ActionExecutor interface {
@@ -78,6 +82,13 @@ func (s *Service) AttachReconcileResolver(resolver ReconcileResolver) {
 
 func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	switch action.Kind {
+	case ActionListModelRoutes:
+		s.emit(ctx, Event{Kind: EventModelRoutes, State: "listed", ModelRoutes: s.modelRouteEntries()})
+		return nil
+	case ActionSetModelRoute:
+		return s.updateModelRoute(ctx, action.Route, false)
+	case ActionResetModelRoute:
+		return s.updateModelRoute(ctx, action.Route, true)
 	case ActionListMemories:
 		if s.memory == nil {
 			return fmt.Errorf("memory is unavailable")
@@ -332,6 +343,92 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	}
 }
 
+func (s *Service) modelRouteEntries() []ModelRouteEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := []ModelRouteEntry{{Scope: "compaction", Label: "Compaction", Route: s.cfg.Agents.Compaction}}
+	names := make([]string, 0, len(s.cfg.Agents.Subagents.Roles))
+	for name := range s.cfg.Agents.Subagents.Roles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		role := s.cfg.Agents.Subagents.Roles[name]
+		entries = append(entries, ModelRouteEntry{Scope: "subagent", Role: name, Label: firstNonempty(role.Description, name), Route: config.ModelRouteConfig{Provider: role.Provider, Model: role.Model, Reasoning: role.Reasoning}})
+	}
+	return entries
+}
+
+func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, reset bool) error {
+	if entry == nil {
+		return fmt.Errorf("model route is required")
+	}
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	if entry.Scope != "compaction" && entry.Scope != "subagent" {
+		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
+	}
+	if entry.Scope == "compaction" && entry.Role != "" {
+		return fmt.Errorf("role is not valid for compaction route")
+	}
+	s.mu.Lock()
+	_, roleExists := s.cfg.Agents.Subagents.Roles[entry.Role]
+	currentSession := s.currentSession
+	s.mu.Unlock()
+	if entry.Scope == "subagent" && (!roleExists || strings.TrimSpace(entry.Role) == "") {
+		return fmt.Errorf("unknown subagent role %q", entry.Role)
+	}
+	route := entry.Route
+	if reset {
+		route = config.ModelRouteConfig{}
+	} else {
+		if strings.TrimSpace(route.Provider) == "" || strings.TrimSpace(route.Model) == "" {
+			return fmt.Errorf("model route must set both provider and model")
+		}
+		if s.providers == nil {
+			return fmt.Errorf("provider runtime is unavailable")
+		}
+		if _, _, _, _, err := s.providers.resolveDriver(ctx, route.Provider, route.Model, route.Reasoning); err != nil {
+			return err
+		}
+	}
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			if reset {
+				return config.ResetModelRoute(s.configPath, entry.Scope, entry.Role)
+			}
+			return config.UpdateModelRoute(s.configPath, entry.Scope, entry.Role, route)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	if entry.Scope == "compaction" {
+		s.cfg.Agents.Compaction = route
+	} else {
+		role := s.cfg.Agents.Subagents.Roles[entry.Role]
+		role.Provider, role.Model, role.Reasoning = route.Provider, route.Model, route.Reasoning
+		s.cfg.Agents.Subagents.Roles[entry.Role] = role
+		delete(s.cfg.Agents.Subagents.Models, entry.Role)
+		if reset {
+			delete(s.cfg.Agents.Subagents.Routes, entry.Role)
+		} else {
+			s.cfg.Agents.Subagents.Routes[entry.Role] = route
+		}
+	}
+	s.mu.Unlock()
+	if s.providers != nil {
+		s.providers.UpdateModelRoute(entry.Scope, entry.Role, route)
+	}
+	s.emit(ctx, Event{Kind: EventModelRoutes, State: "updated", ModelRoutes: s.modelRouteEntries()})
+	return nil
+}
+
 func (s *Service) emitSkillCatalog(ctx context.Context, state string) error {
 	if s.skillCatalog == nil {
 		return fmt.Errorf("skills are unavailable")
@@ -357,10 +454,14 @@ func (s *Service) emitSkillCatalog(ctx context.Context, state string) error {
 }
 
 func (s *Service) agentTypeCatalog() []AgentCatalogEntry {
-	entries := make([]AgentCatalogEntry, 0, len(s.cfg.Agents.Subagents.Roles))
-	for name, role := range s.cfg.Agents.Subagents.Roles {
+	s.mu.Lock()
+	roles := cloneSubagentRoles(s.cfg.Agents.Subagents.Roles)
+	toggle := cloneBoolMap(s.cfg.Agents.Subagents.Toggle)
+	s.mu.Unlock()
+	entries := make([]AgentCatalogEntry, 0, len(roles))
+	for name, role := range roles {
 		enabled := true
-		if configured, ok := s.cfg.Agents.Subagents.Toggle[name]; ok {
+		if configured, ok := toggle[name]; ok {
 			enabled = configured
 		}
 		entries = append(entries, AgentCatalogEntry{
@@ -374,8 +475,11 @@ func (s *Service) agentTypeCatalog() []AgentCatalogEntry {
 }
 
 func (s *Service) personaCatalog() []AgentCatalogEntry {
-	entries := make([]AgentCatalogEntry, 0, len(s.cfg.Agents.Subagents.Personas))
-	for name, persona := range s.cfg.Agents.Subagents.Personas {
+	s.mu.Lock()
+	personas := cloneSubagentPersonas(s.cfg.Agents.Subagents.Personas)
+	s.mu.Unlock()
+	entries := make([]AgentCatalogEntry, 0, len(personas))
+	for name, persona := range personas {
 		entries = append(entries, AgentCatalogEntry{
 			Name: name, Description: persona.Description, Model: persona.Model, Reasoning: persona.Reasoning,
 			Isolation: persona.Isolation,

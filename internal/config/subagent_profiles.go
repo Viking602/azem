@@ -21,6 +21,7 @@ type discoveredSubagentProfile struct {
 	Instructions     string                 `json:"instructions,omitempty" toml:"instructions" yaml:"instructions"`
 	InstructionsFile string                 `json:"instructions_file,omitempty" toml:"instructions_file" yaml:"instructions_file"`
 	Persona          string                 `json:"persona,omitempty" toml:"persona" yaml:"persona"`
+	Provider         string                 `json:"provider,omitempty" toml:"provider" yaml:"provider"`
 	Model            string                 `json:"model,omitempty" toml:"model" yaml:"model"`
 	Reasoning        string                 `json:"reasoning,omitempty" toml:"reasoning" yaml:"reasoning"`
 	CapabilityMode   string                 `json:"capability_mode,omitempty" toml:"capability_mode" yaml:"capability_mode"`
@@ -164,7 +165,7 @@ func (profile discoveredSubagentProfile) discoveredRole(source string) (Subagent
 	}
 	return SubagentRoleConfig{
 		Description: profile.Description, Instructions: instructions, InstructionsFile: instructionsFile,
-		Persona: profile.Persona, Model: profile.Model, Reasoning: profile.Reasoning,
+		Persona: profile.Persona, Provider: profile.Provider, Model: profile.Model, Reasoning: profile.Reasoning,
 		CapabilityMode: profile.CapabilityMode, Isolation: profile.Isolation,
 		Tools: append([]string(nil), profile.Tools...), Source: source,
 	}, nil
@@ -177,7 +178,7 @@ func (profile discoveredSubagentProfile) discoveredPersona(source string) (Subag
 	}
 	return SubagentPersonaConfig{
 		Description: profile.Description, Instructions: instructions, InstructionsFile: instructionsFile,
-		Model: profile.Model, Reasoning: profile.Reasoning, Isolation: profile.Isolation,
+		Provider: profile.Provider, Model: profile.Model, Reasoning: profile.Reasoning, Isolation: profile.Isolation,
 		Inputs: append([]SubagentContractItem(nil), profile.Inputs...), Outputs: append([]SubagentContractItem(nil), profile.Outputs...),
 		Source: source,
 	}, nil

@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
@@ -333,11 +334,11 @@ func TestViewUsesAltScreenAndResponsiveSizes(t *testing.T) {
 
 func TestSlashCommandFuzzyRanking(t *testing.T) {
 	matches := commandSuggestions("/mod")
-	if len(matches) != 1 || matches[0].Name != "models" {
+	if len(matches) != 2 || matches[0].Name != "models" || matches[1].Name != "model-routing" {
 		t.Fatalf("/mod matches = %+v", matches)
 	}
 	matches = commandSuggestions("/mdl")
-	if len(matches) != 1 || matches[0].Name != "models" {
+	if len(matches) != 2 || matches[0].Name != "models" || matches[1].Name != "model-routing" {
 		t.Fatalf("/mdl matches = %+v", matches)
 	}
 	if matches = commandSuggestions("/not-a-command"); len(matches) != 0 {
@@ -387,7 +388,7 @@ func TestSlashCommandCompletionAndExecution(t *testing.T) {
 	model = updated.(AppModel)
 	updated, _ = model.updateKey(tea.KeyPressMsg{Code: tea.KeyTab})
 	model = updated.(AppModel)
-	if value := model.composer.Value(); value != "/models" {
+	if value := model.composer.Value(); value != "/model-routing" {
 		t.Fatalf("Tab completion = %q", value)
 	}
 
@@ -1554,6 +1555,146 @@ func TestModelOverlaySearchFiltersClearsAndSelects(t *testing.T) {
 	}
 }
 
+func TestModelRoutingCommandRendersConfiguredAndInheritedRoutes(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	updated, cmd := model.executeCommand(Command{Name: "model-routing"})
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("/model-routing did not start a list action")
+	}
+	result := cmd()
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionListModelRoutes {
+		t.Fatalf("model routing list action = %#v", runtime.actions)
+	}
+
+	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "compaction", Label: "Compaction"},
+		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("grok", "grok-4.5", "low")},
+	}})
+	if model.overlay != OverlayModelRoutes || len(model.overlayOptions()) != 2 {
+		t.Fatalf("model routes overlay = %q options=%#v", model.overlay, model.overlayOptions())
+	}
+	rendered := ansi.Strip(model.renderOverlay(100, 24))
+	for _, wanted := range []string{"MODEL ROUTING", "Compaction", "Inherit from active agent", "explore", "grok/grok-4.5/low"} {
+		if !strings.Contains(rendered, wanted) {
+			t.Fatalf("model routes missing %q:\n%s", wanted, rendered)
+		}
+	}
+}
+
+func TestModelRoutingSelectionDoesNotMutateMainModel(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	model.modelsByProvider = map[string][]ModelChoice{
+		"chatgpt": {{ID: "gpt-main", SupportsReasoning: true, ReasoningLevels: []string{"low", "high"}}},
+		"grok":    {{ID: "grok-worker", SupportsReasoning: true, ReasoningLevels: []string{"low", "medium", "high"}}},
+	}
+	model.selectModels(model.modelsByProvider["chatgpt"])
+	model.updateUsage(map[string]string{"inputTokens": "120", "outputTokens": "30"})
+	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "compaction", Label: "Compaction"},
+	}})
+
+	updated, _ := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if model.overlay != OverlayModel || model.pendingModelRoute == nil {
+		t.Fatalf("route editor did not open model picker: overlay=%q pending=%#v", model.overlay, model.pendingModelRoute)
+	}
+	for index, entry := range model.modelPickerEntries() {
+		if entry.Provider == "grok" && entry.Model.ID == "grok-worker" {
+			model.overlayCursor = index
+		}
+	}
+	updated, _ = model.activateOverlayOption()
+	model = updated.(AppModel)
+	if model.overlay != OverlayReasoning {
+		t.Fatalf("reasoning picker overlay = %q", model.overlay)
+	}
+	levels := model.reasoningLevels()
+	for index, level := range levels {
+		if level == "medium" {
+			model.overlayCursor = index
+		}
+	}
+	updated, cmd := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("route reasoning selection did not start save action")
+	}
+	_ = cmd()
+	if len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionSetModelRoute || runtime.actions[0].Route == nil {
+		t.Fatalf("route save action = %#v", runtime.actions)
+	}
+	route := runtime.actions[0].Route
+	if route.Scope != "compaction" || route.Route.Provider != "grok" || route.Route.Model != "grok-worker" || route.Route.Reasoning != "medium" {
+		t.Fatalf("saved route = %#v", route)
+	}
+	if model.provider != "chatgpt" || model.model != "gpt-main" || model.reasoning != "high" || model.usage.InputTokens != 120 || model.usage.OutputTokens != 30 {
+		t.Fatalf("route editor mutated main selection: provider=%q model=%q reasoning=%q usage=%+v", model.provider, model.model, model.reasoning, model.usage)
+	}
+}
+
+func TestModelRoutingNoReasoningResetAndEscape(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	model.modelsByProvider = map[string][]ModelChoice{"grok": {{ID: "grok-fast", SupportsReasoning: false}}}
+	entry := app.ModelRouteEntry{Scope: "subagent", Role: "verify", Label: "Verify changes", Route: appModelRoute("chatgpt", "old", "high")}
+	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{entry}})
+
+	updated, _ := model.activateOverlayOption()
+	model = updated.(AppModel)
+	updated, cmd := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("non-reasoning model did not save directly")
+	}
+	_ = cmd()
+	if len(runtime.actions) != 1 || runtime.actions[0].Route == nil || runtime.actions[0].Route.Route.Reasoning != "" || runtime.actions[0].Route.Route.Model != "grok-fast" {
+		t.Fatalf("non-reasoning save action = %#v", runtime.actions)
+	}
+
+	model.actionBusy = false
+	model.pendingModelRoute = nil
+	model.openOverlay(OverlayModelRoutes)
+	updated, resetCmd := model.updateOverlayKey("R")
+	model = updated.(AppModel)
+	if resetCmd == nil {
+		t.Fatal("R did not start reset action")
+	}
+	_ = resetCmd()
+	if len(runtime.actions) != 2 || runtime.actions[1].Kind != ActionResetModelRoute || runtime.actions[1].Route == nil || runtime.actions[1].Route.Role != "verify" {
+		t.Fatalf("route reset action = %#v", runtime.actions)
+	}
+
+	model.actionBusy = false
+	model.pendingModelRoute = &pendingModelRoute{Entry: entry}
+	model.openOverlay(OverlayModel)
+	updated, _ = model.updateOverlayKey("esc")
+	model = updated.(AppModel)
+	if model.overlay != OverlayModelRoutes || model.pendingModelRoute != nil {
+		t.Fatalf("route child escape = overlay:%q pending:%#v", model.overlay, model.pendingModelRoute)
+	}
+
+	model.pendingModelRoute = &pendingModelRoute{Entry: entry, Provider: "grok", Model: "grok-fast"}
+	model.overlay = OverlayReasoning
+	updated, _ = model.Update(actionResultMsg{Action: Action{Kind: ActionSetModelRoute, Route: &entry}, Err: errors.New("save failed")})
+	model = updated.(AppModel)
+	if model.overlay != OverlayModelRoutes || model.pendingModelRoute != nil || !strings.Contains(model.errorBanner, "save failed") {
+		t.Fatalf("failed route save cleanup = overlay:%q pending:%#v error:%q", model.overlay, model.pendingModelRoute, model.errorBanner)
+	}
+	model.openOverlay(OverlayModel)
+	if model.pendingModelRoute != nil || model.provider != "chatgpt" || model.model != "gpt-main" {
+		t.Fatalf("normal model picker was hijacked after route failure: pending=%#v provider=%q model=%q", model.pendingModelRoute, model.provider, model.model)
+	}
+}
+
+func appModelRoute(provider, model, reasoning string) config.ModelRouteConfig {
+	return config.ModelRouteConfig{Provider: provider, Model: model, Reasoning: reasoning}
+}
+
 func TestCompactOverlayFitsMinimumTerminal(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/a/very/long/workspace/path", "chatgpt", strings.Repeat("model-", 20), "xhigh", "single")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
@@ -1577,7 +1718,7 @@ func TestViewFitsRealTerminalBoundsAcrossResponsiveLayouts(t *testing.T) {
 		height int
 	}{{1, 1}, {5, 4}, {12, 5}, {20, 8}, {39, 12}, {40, 12}, {80, 24}, {120, 40}}
 	overlays := []Overlay{
-		OverlayNone, OverlayHelp, OverlayCommand, OverlayProvider, OverlayModel, OverlaySkills,
+		OverlayNone, OverlayHelp, OverlayCommand, OverlayProvider, OverlayModel, OverlayModelRoutes, OverlaySkills,
 		OverlayReasoning, OverlaySessions, OverlayApproval, OverlayCancel, OverlayDiff, OverlayAgents,
 		OverlayAgentDetail, OverlayAgentTypes, OverlayPersonas, OverlayMCP, OverlayRecovery, OverlayError,
 	}

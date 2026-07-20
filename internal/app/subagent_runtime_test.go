@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +31,50 @@ import (
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
+
+func TestNewSubagentCapturesLatestCompactionRoute(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = providerStore.Close(context.Background()) })
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := newSubagentRuntime(ctx, config.Default().Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	})
+	want := config.ModelRouteConfig{Provider: "grok", Model: "summary-new", Reasoning: "low"}
+	parent := subagentParentRuntime{
+		SessionID: "session", ParentRunID: "parent", ProviderID: "chatgpt", ModelID: "main",
+		WorkspaceRoot: t.TempDir(), CompactionRoute: config.ModelRouteConfig{Provider: "chatgpt", Model: "summary-old"},
+		CompactionRouteSnapshot: func() config.ModelRouteConfig { return want },
+		ResolveDriver: func(context.Context, string, string, string) (string, int, hyprovider.Driver, error) {
+			return "", 0, nil, errors.New("stop before execution")
+		},
+	}
+	run, err := runtime.Spawn(ctx, subagentSpawnInput{SubagentType: "explore", Prompt: "inspect"}, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	active := runtime.active[run.ID]
+	got := config.ModelRouteConfig{}
+	if active != nil {
+		got = active.parent.CompactionRoute
+	}
+	runtime.mu.Unlock()
+	if active == nil || got != want {
+		t.Fatalf("spawned child compaction route = %+v, want %+v", got, want)
+	}
+}
 
 func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 	var calls atomic.Int32
@@ -691,6 +736,34 @@ func TestRenderSubagentInstructionsComposesPersonaRoleAndContracts(t *testing.T)
 	}
 }
 
+func TestResolveSubagentProfileKeepsRouteLayerAtomic(t *testing.T) {
+	cfg := config.Default().Agents.Subagents
+	cfg.Personas["specialist"] = config.SubagentPersonaConfig{Instructions: "persona", Provider: "chatgpt", Model: "persona-model", Reasoning: "medium"}
+	cfg.Roles["explore"] = config.SubagentRoleConfig{Persona: "specialist", Instructions: "role", Reasoning: "high"}
+	runtime := subagentRuntime{cfg: cfg}
+	parent := subagentParentRuntime{ProviderID: "chatgpt", ModelID: "parent-model", Reasoning: "low", WorkspaceRoot: "/workspace"}
+
+	profile, err := runtime.resolveProfile(subagentSpawnInput{SubagentType: "explore"}, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Provider != "chatgpt" || profile.Model != "persona-model" || profile.Reasoning != "high" {
+		t.Fatalf("reasoning-only role spliced route: %#v", profile)
+	}
+
+	role := cfg.Roles["explore"]
+	role.Model = "role-model"
+	cfg.Roles["explore"] = role
+	runtime.cfg = cfg
+	profile, err = runtime.resolveProfile(subagentSpawnInput{SubagentType: "explore", Model: "explicit-model"}, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Provider != parent.ProviderID || profile.Model != "explicit-model" {
+		t.Fatalf("explicit model did not inherit parent provider: %#v", profile)
+	}
+}
+
 func TestForegroundWaitStartsAfterQueuedTaskRunsAndPersistsDemotion(t *testing.T) {
 	ctx := context.Background()
 	providerStore, err := sqlitestore.Open(ctx, ":memory:")
@@ -961,7 +1034,7 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 	}
 	source := agentservice.SubagentRun{
 		ID: "source", SessionID: "session", ParentRunID: "old-parent", ChildRunID: "old-child",
-		Description: "old", Type: "explore", State: agentservice.SubagentCompleted, Model: "model",
+		Description: "old", Type: "explore", State: agentservice.SubagentCompleted, Provider: "grok", Model: "model",
 		Reasoning: "high", CapabilityMode: "read-only", RequestedIsolation: "none", Isolation: "none",
 		CWD: workspace, Output: "source answer", Transcript: transcript, WorktreePath: "/old/worktree",
 		StartedAt: time.Now().Add(-time.Minute).UTC(), FinishedAt: time.Now().UTC(),
@@ -988,7 +1061,7 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 		t.Fatal(err)
 	}
 	if spawned.ID == source.ID || spawned.ParentRunID != "new-parent" || spawned.Type != source.Type ||
-		spawned.Model != source.Model || spawned.Reasoning != source.Reasoning || spawned.CapabilityMode != source.CapabilityMode ||
+		spawned.Provider != source.Provider || spawned.Model != source.Model || spawned.Reasoning != source.Reasoning || spawned.CapabilityMode != source.CapabilityMode ||
 		spawned.RequestedIsolation != source.RequestedIsolation || spawned.CWD != source.CWD || spawned.WorktreePath != "" ||
 		spawned.Description != "new description" || !spawned.Background {
 		t.Fatalf("resumed run = %#v", spawned)

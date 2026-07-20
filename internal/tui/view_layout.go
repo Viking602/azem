@@ -11,7 +11,7 @@ import (
 )
 
 var commandPaletteOptions = []string{
-	"login", "provider", "models", "skills", "reasoning", "sessions", "new", "recap", "agents", "mcp", "cancel", "help", "quit",
+	"login", "provider", "models", "model-routing", "skills", "reasoning", "sessions", "new", "recap", "agents", "mcp", "cancel", "help", "quit",
 }
 
 type overlayOption struct {

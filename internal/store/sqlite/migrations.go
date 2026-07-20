@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -205,6 +205,7 @@ var migrations = []string{
 			CAST(j.value AS BLOB)
 		FROM session_projections p, json_each(p.blocks) j;
 	UPDATE session_projections SET blocks='[]';`,
+	`ALTER TABLE subagent_runs ADD COLUMN provider TEXT NOT NULL DEFAULT '';`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

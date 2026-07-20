@@ -180,7 +180,7 @@ func TestConcurrentAgentsCanCreateOpenAndUpgradeSharedDatabase(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				for version := 1; version < schemaVersion; version++ {
+				for version := 1; version <= 6; version++ {
 					if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
 						t.Fatalf("apply fixture migration %d: %v", version, err)
 					}

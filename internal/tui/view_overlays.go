@@ -67,7 +67,7 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		return m.renderAgentDetailOverlay(width, height)
 	}
 	maxBoxWidth := 82
-	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap {
+	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes {
 		maxBoxWidth = 110
 	}
 	boxWidth := min(maxBoxWidth, max(3, width-2))
@@ -385,11 +385,16 @@ func (m AppModel) overlayHeading() (string, string) {
 			return "Model", "1 configured provider catalog"
 		}
 		return "Model", fmt.Sprintf("%d configured provider catalogs", count)
+	case OverlayModelRoutes:
+		return m.tr("overlay.model_routes.title"), m.tr("overlay.model_routes.subtitle")
 	case OverlaySkills:
 		return "Skills", "Reload affects new turns only"
 	case OverlayLanguage:
 		return m.tr("overlay.language.title"), m.tr("overlay.language.subtitle")
 	case OverlayReasoning:
+		if m.pendingModelRoute != nil {
+			return m.tr("overlay.model_routes.reasoning_title"), m.pendingModelRoute.Provider + "/" + m.pendingModelRoute.Model
+		}
 		return "Thinking level", m.provider + "/" + first(m.model, "no model") + " · applied to the next turn"
 	case OverlaySessions:
 		return "Resume session", "Choose a saved conversation"
@@ -426,6 +431,8 @@ func (m AppModel) overlayHeading() (string, string) {
 
 func (m AppModel) overlayDescription() []string {
 	switch m.overlay {
+	case OverlayModelRoutes:
+		return []string{m.tr("overlay.model_routes.description")}
 	case OverlayTodos:
 		if len(m.todo.Phases) == 0 {
 			return []string{m.tr("overlay.todos.empty")}
@@ -541,6 +548,25 @@ func (m AppModel) overlayOptions() []overlayOption {
 				Detail: item.ID + " · " + item.Provenance + " · " + item.UpdatedAt.Local().Format("2006-01-02 15:04"),
 				State:  fmt.Sprintf("%d", item.Importance),
 			})
+		}
+		return options
+	case OverlayModelRoutes:
+		options := make([]overlayOption, 0, len(m.modelRoutes))
+		for _, entry := range m.modelRoutes {
+			label := entry.Role
+			inherit := m.tr("overlay.model_routes.inherit_parent")
+			if entry.Scope == "compaction" {
+				label = m.tr("overlay.model_routes.compaction")
+				inherit = m.tr("overlay.model_routes.inherit_active")
+			}
+			detail := inherit
+			if entry.Route.Provider != "" || entry.Route.Model != "" || entry.Route.Reasoning != "" {
+				detail = strings.Trim(strings.Join([]string{entry.Route.Provider, entry.Route.Model, entry.Route.Reasoning}, "/"), "/")
+			}
+			if entry.Label != "" && entry.Label != label {
+				detail += " · " + entry.Label
+			}
+			options = append(options, overlayOption{Label: label, Detail: detail})
 		}
 		return options
 	case OverlayTodos:
@@ -769,6 +795,8 @@ func (m AppModel) overlayFooter() string {
 		return "Working · Esc cancels this action"
 	}
 	switch m.overlay {
+	case OverlayModelRoutes:
+		return m.tr("overlay.model_routes.footer")
 	case OverlayModel:
 		return "Type to search · ↑/↓ select · Enter confirm · Esc clear/close"
 	case OverlaySkills:
@@ -808,6 +836,8 @@ func (m AppModel) overlayFooterForWidth(width int) string {
 		return footer
 	}
 	switch m.overlay {
+	case OverlayModelRoutes:
+		return m.tr("overlay.model_routes.footer_short")
 	case OverlayApproval:
 		return "A once · D deny · Esc back"
 	case OverlayCancel:

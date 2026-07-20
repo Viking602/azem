@@ -94,6 +94,173 @@ func TestUpdateDefaultPersistsSelectionsAndPreservesConfig(t *testing.T) {
 	}
 }
 
+func TestUpdateModelRoutePreservesYAMLAndDeletesOnlyRouteScalars(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# top comment\nversion: 1\nagents:\n  # subagents comment\n  subagents:\n    models:\n      explore: legacy-model\n      review: keep-model\n    roles:\n      explore:\n        description: keep me\n        instructions: inspect only\n        unknown_future_field: keep too\n"
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "grok", Model: "grok-4", Reasoning: "high"}
+	if err := UpdateModelRoute(path, "subagent", "explore", route); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"# top comment", "# subagents comment", "description: keep me", "unknown_future_field: keep too", "review: keep-model", "provider: grok", "model: grok-4", "reasoning: high"} {
+		if !strings.Contains(string(data), expected) {
+			t.Fatalf("updated config missing %q:\n%s", expected, data)
+		}
+	}
+	if strings.Contains(string(data), "explore: legacy-model") {
+		t.Fatalf("updated route retained its legacy override:\n%s", data)
+	}
+	reloadPath := filepath.Join(root, "reload.yaml")
+	reloadable := strings.ReplaceAll(string(data), "        unknown_future_field: keep too\n", "")
+	if err := os.WriteFile(reloadPath, []byte(reloadable), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(reloadPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role := reloaded.Agents.Subagents.Roles["explore"]; role.Provider != "grok" || role.Model != "grok-4" || role.Reasoning != "high" {
+		t.Fatalf("reloaded route = %+v", role)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("config permissions = %o, want 600", info.Mode().Perm())
+	}
+	if err := UpdateModelRoute(path, "subagent", "explore", ModelRouteConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []string{"provider: grok", "model: grok-4", "reasoning: high"} {
+		if strings.Contains(string(data), removed) {
+			t.Fatalf("cleared config retained %q:\n%s", removed, data)
+		}
+	}
+	if !strings.Contains(string(data), "description: keep me") || !strings.Contains(string(data), "unknown_future_field: keep too") {
+		t.Fatalf("clearing route removed role fields:\n%s", data)
+	}
+}
+
+func TestResetModelRouteRemovesLegacyOverrideAndPreservesOtherFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := "agents:\n  subagents:\n    models:\n      explore: legacy-model\n      review: keep-model\n    roles:\n      explore:\n        description: keep me\n        provider: grok\n        model: grok-4\n        reasoning: high\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResetModelRoute(path, "subagent", "explore"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, kept := range []string{"description: keep me", "review: keep-model"} {
+		if !strings.Contains(text, kept) {
+			t.Fatalf("reset removed %q:\n%s", kept, text)
+		}
+	}
+	for _, removed := range []string{"explore: legacy-model", "provider: grok", "model: grok-4", "reasoning: high"} {
+		if strings.Contains(text, removed) {
+			t.Fatalf("reset retained %q:\n%s", removed, text)
+		}
+	}
+}
+
+func TestPersistedBuiltInRoleRouteReloadsWithoutExplicitRoleDefinition(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "grok", Model: "grok-4.5", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "subagent", "explore", route); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role := cfg.Agents.Subagents.Roles["explore"]
+	if role.Provider != route.Provider || role.Model != route.Model || role.Reasoning != route.Reasoning || role.Instructions == "" {
+		t.Fatalf("reloaded built-in route = %+v", role)
+	}
+	if err := ResetModelRoute(path, "subagent", "explore"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role = cfg.Agents.Subagents.Roles["explore"]
+	if role.Provider != "" || role.Model != "" || role.Reasoning != "" || role.Instructions == "" {
+		t.Fatalf("reset built-in route = %+v", role)
+	}
+}
+
+func TestModelRouteValidationAndCompactionLoad(t *testing.T) {
+	cfg := Default()
+	cfg.Agents.Compaction = ModelRouteConfig{Provider: "chatgpt", Model: "gpt-test"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid compaction route: %v", err)
+	}
+	for _, route := range []ModelRouteConfig{
+		{Provider: "chatgpt"},
+		{Model: "gpt-test"},
+		{Reasoning: "high"},
+		{Provider: "other", Model: "model"},
+	} {
+		cfg := Default()
+		cfg.Agents.Compaction = route
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("accepted invalid route %#v", route)
+		}
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  compaction:\n    provider: grok\n    model: grok-4\n    reasoning: high\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Agents.Compaction != (ModelRouteConfig{Provider: "grok", Model: "grok-4", Reasoning: "high"}) {
+		t.Fatalf("compaction route = %#v", loaded.Agents.Compaction)
+	}
+}
+
+func TestSubagentRoutesAllowInheritedProvider(t *testing.T) {
+	for _, route := range []ModelRouteConfig{{Model: "child"}, {Reasoning: "high"}, {Model: "child", Reasoning: "high"}} {
+		cfg := Default()
+		role := cfg.Agents.Subagents.Roles["explore"]
+		role.Provider, role.Model, role.Reasoning = route.Provider, route.Model, route.Reasoning
+		cfg.Agents.Subagents.Roles["explore"] = role
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("inherited role route %#v: %v", route, err)
+		}
+	}
+	cfg := Default()
+	role := cfg.Agents.Subagents.Roles["explore"]
+	role.Provider = "grok"
+	cfg.Agents.Subagents.Roles["explore"] = role
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("accepted subagent provider without model")
+	}
+}
+
 func TestLoadResolvesRelativeWorkspaceFromConfigDirectory(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "workspace")
@@ -286,6 +453,7 @@ agents:
       analyst:
         description: Reliability analyst
         instructions_file: persona.txt
+        provider: chatgpt
         model: persona-model
         reasoning: high
         isolation: worktree
