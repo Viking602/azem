@@ -126,7 +126,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: runErr.Error()})
 		return
 	}
-	if s.sessions != nil && strings.TrimSpace(result.Text) != "" {
+	if s.sessions != nil && (strings.TrimSpace(result.Text) != "" || len(result.Messages) > 0) {
 		history := session.ModelHistory{
 			ProviderID: request.Provider, ModelID: engine.Model,
 			InstructionFingerprint: mainInstructionFingerprint,

@@ -22,6 +22,7 @@ import (
 	"github.com/Viking602/go-hydaelyn/api"
 	"github.com/Viking602/go-hydaelyn/message"
 	"github.com/Viking602/go-hydaelyn/multiagent"
+	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 	"github.com/Viking602/go-hydaelyn/stream"
 	"github.com/Viking602/go-hydaelyn/tool"
 
@@ -37,6 +38,22 @@ import (
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
+
+type compactionTestDriver struct {
+	requests []hyprovider.Request
+	streams  [][]hyprovider.Event
+}
+
+func (d *compactionTestDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "test"}
+}
+
+func (d *compactionTestDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	d.requests = append(d.requests, request)
+	events := d.streams[0]
+	d.streams = d.streams[1:]
+	return hyprovider.NewSliceStream(events), nil
+}
 
 func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) {
 	ctx := context.Background()
@@ -218,6 +235,67 @@ func TestTurnContextBuildsPriorConversationBeforeCurrentRequest(t *testing.T) {
 	}
 }
 
+func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.mu.Lock()
+	service.activeRun = "run-guided"
+	service.activeSession = "session-guided"
+	service.guidanceOpen = true
+	service.mu.Unlock()
+
+	for _, text := range []string{"first correction", "second correction"} {
+		if err := service.GuideActiveTurn("session-guided", "run-guided", text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inner := turnContext{instructions: "rules"}
+	manager := activeGuidanceContext{
+		inner: inner,
+		peek:  func() activeGuidanceSnapshot { return service.peekActiveGuidance("session-guided", "run-guided") },
+		acknowledge: func(snapshot activeGuidanceSnapshot) {
+			service.acknowledgeActiveGuidance("session-guided", "run-guided", snapshot)
+		},
+	}
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "rules"),
+		message.NewText(message.RoleUser, strings.Repeat("old context ", 500)),
+		message.NewText(message.RoleAssistant, "old answer"),
+	}
+	prepared, err := manager.CompactTo(context.Background(), history, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := prepared[len(prepared)-1]
+	firstIndex, secondIndex := strings.Index(latest.Text, "first correction"), strings.Index(latest.Text, "second correction")
+	if latest.Role != message.RoleUser || firstIndex < 0 || secondIndex <= firstIndex {
+		t.Fatalf("prepared guidance context = %#v", prepared)
+	}
+	if remaining := service.drainActiveGuidance("session-guided", "run-guided"); len(remaining) != 0 {
+		t.Fatalf("guidance was not drained exactly once: %#v", remaining)
+	}
+	if err := service.GuideActiveTurn("session-guided", "run-guided", "terminal correction"); err != nil {
+		t.Fatal(err)
+	}
+	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0] != "terminal correction" {
+		t.Fatalf("terminal guidance = %#v", pending)
+	}
+	if err := service.GuideActiveTurn("session-guided", "run-guided", "accepted after retry"); err != nil {
+		t.Fatalf("guidance closed while terminal retry was required: %v", err)
+	}
+	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0] != "accepted after retry" {
+		t.Fatalf("guidance after terminal retry = %#v", pending)
+	}
+	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 0 {
+		t.Fatalf("terminal close unexpectedly drained guidance: %#v", pending)
+	}
+	if err := service.GuideActiveTurn("session-guided", "run-guided", "too late"); err == nil {
+		t.Fatal("finishing run accepted late guidance")
+	}
+	if err := service.GuideActiveTurn("session-guided", "stale-run", "wrong run"); err == nil {
+		t.Fatal("stale run accepted guidance")
+	}
+}
+
 func TestTurnContextInjectsHistoricalEvidenceAsPrivateSystemContext(t *testing.T) {
 	contextManager := turnContext{
 		instructions:      "system rules",
@@ -361,6 +439,219 @@ func TestTurnContextCompactToFitsTargetAndPreservesLatestRequest(t *testing.T) {
 	}
 	if !reflect.DeepEqual(compacted, again) {
 		t.Fatalf("compaction is not deterministic:\nfirst: %#v\nsecond: %#v", compacted, again)
+	}
+}
+
+func TestTurnContextCompactToGeneratesRecursiveSummary(t *testing.T) {
+	old := message.NewText(message.RoleSystem, "Objective: preserve the old decision")
+	old.Kind = message.KindCompactionSummary
+	old.Visibility = message.VisibilityPrivate
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "system rules"), old,
+		message.NewText(message.RoleUser, "older request"),
+		message.NewText(message.RoleAssistant, strings.Repeat("older work ", 300)),
+		message.NewText(message.RoleUser, "newest request"),
+	}
+	var input string
+	calls := 0
+	manager := turnContext{summarize: func(_ context.Context, transcript string) (string, error) {
+		calls++
+		input = transcript
+		return "Objective: newest request\nImportant Details: old decision retained\nWork State (Completed / Active / Blocked): Active\nNext Move: continue\nRelevant Files: provider_context.go", nil
+	}}
+	compacted, err := manager.CompactTo(context.Background(), history, 300)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(input, "old decision") || !strings.Contains(input, "older request") {
+		t.Fatalf("recursive summary input omitted history: %q", input)
+	}
+	summaries := 0
+	for _, current := range compacted {
+		if current.Kind == message.KindCompactionSummary {
+			summaries++
+			if current.Role != message.RoleAssistant || current.Visibility != message.VisibilityPrivate || !strings.Contains(current.Text, "Untrusted historical record") || !strings.Contains(current.Text, "newest request") {
+				t.Fatalf("generated summary = %#v", current)
+			}
+		}
+	}
+	if calls != 1 || summaries != 1 || compacted[len(compacted)-1].Text != "newest request" {
+		t.Fatalf("compacted history = %#v", compacted)
+	}
+}
+
+func TestTurnContextToolPruningRetainsPreviousSummaryWithoutRegeneration(t *testing.T) {
+	previous := message.NewText(message.RoleAssistant, compactionSummaryLabel+"## Objective\n- keep state")
+	previous.Kind = message.KindCompactionSummary
+	previous.Visibility = message.VisibilityPrivate
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "rules"), previous,
+		message.NewText(message.RoleUser, "latest request"),
+		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "read", Name: "read"}}},
+		message.NewToolResult(message.ToolResult{ToolCallID: "read", Name: "read", Content: strings.Repeat("data", 2_000)}),
+	}
+	calls := 0
+	manager := turnContext{summarize: func(context.Context, string) (string, error) {
+		calls++
+		return "unexpected", nil
+	}}
+	got, err := manager.CompactTo(context.Background(), history, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 || message.ValidateCompleteTurns(got) != nil {
+		t.Fatalf("tool-only pruning calls=%d history=%#v", calls, got)
+	}
+	summaries := 0
+	for _, current := range got {
+		if current.Kind == message.KindCompactionSummary {
+			summaries++
+		}
+	}
+	if summaries != 1 || got[len(got)-1].ToolResult == nil || !strings.Contains(got[len(got)-1].ToolResult.Content, "truncated") {
+		t.Fatalf("tool-only pruning result = %#v", got)
+	}
+}
+
+func TestManualCompactionTailRetainsLatestUserBeforeAgentBlocks(t *testing.T) {
+	blocks := []session.Block{
+		{Kind: "user", Content: "old"}, {Kind: "assistant", Content: "old answer"},
+		{Kind: "user", Content: "latest guidance"},
+		{Kind: "agent", Content: "one"}, {Kind: "agent", Content: "two"}, {Kind: "agent", Content: "three"},
+		{Kind: "agent", Content: "four"}, {Kind: "agent", Content: "five"},
+	}
+	if start := manualCompactionTailStart(blocks, 4); start != 2 {
+		t.Fatalf("tail start = %d, want latest user at 2", start)
+	}
+}
+
+func TestCompactionUsageIsChargedToNextMainProviderTurn(t *testing.T) {
+	inner := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 7, OutputTokens: 3, TotalTokens: 10}}},
+		{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 15, OutputTokens: 5, TotalTokens: 20}}},
+	}}
+	driver := &compactionUsageDriver{inner: inner}
+	compactStream, err := driver.Stream(context.Background(), hyprovider.Request{Metadata: map[string]string{compactionRequestMetadataKey: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compactStream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	mainStream, err := driver.Stream(context.Background(), hyprovider.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := mainStream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Usage.InputTokens != 22 || done.Usage.OutputTokens != 8 || done.Usage.TotalTokens != 30 {
+		t.Fatalf("combined usage = %#v", done.Usage)
+	}
+}
+
+func TestCompactionSummarizerBoundsOversizedInput(t *testing.T) {
+	inner := &compactionTestDriver{streams: [][]hyprovider.Event{{
+		{Kind: hyprovider.EventTextDelta, Text: "## Objective\n- continue"},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}}}
+	transcript := "header\n<transcript>\n" + strings.Repeat("ROLE assistant\nTEXT old data\n", 500) + "ROLE user\nTEXT newest evidence\n</transcript>"
+	summary, err := compactionSummarizer(inner, "grok", "model", 1_000, 200)(context.Background(), transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(summary, "Objective") || len(inner.requests) != 1 {
+		t.Fatalf("summary=%q requests=%d", summary, len(inner.requests))
+	}
+	requestText := inner.requests[0].Messages[1].Text
+	if inner.requests[0].ExtraBody["max_output_tokens"] != 200 || len(requestText) > contextTokenBytes(1_000-200-256) || !strings.Contains(requestText, "newest evidence") || !strings.Contains(requestText, "historical evidence truncated") {
+		t.Fatalf("bounded summary request (%d bytes) = %q", len(requestText), requestText)
+	}
+	chatGPT := &compactionTestDriver{streams: [][]hyprovider.Event{{
+		{Kind: hyprovider.EventTextDelta, Text: "summary"},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}}}
+	if _, err := compactionSummarizer(chatGPT, "chatgpt", "model", 1_000, 200)(context.Background(), "history"); err != nil {
+		t.Fatal(err)
+	}
+	if len(chatGPT.requests[0].ExtraBody) != 0 {
+		t.Fatalf("ChatGPT summary sent unsupported extra body: %#v", chatGPT.requests[0].ExtraBody)
+	}
+}
+
+func TestTurnContextCompactToSummaryFailureFallsBackToDeterministicCompaction(t *testing.T) {
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "rules"),
+		message.NewText(message.RoleUser, "old"),
+		message.NewText(message.RoleAssistant, strings.Repeat("work ", 300)),
+		message.NewText(message.RoleUser, "latest"),
+	}
+	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "partial", errors.New("offline") }}
+	got, err := manager.CompactTo(context.Background(), history, 100)
+	if err != nil || reflect.DeepEqual(got, history) || got[len(got)-1].Text != "latest" {
+		t.Fatalf("got=%#v err=%v", got, err)
+	}
+	if got[1].Kind != message.KindCompactionSummary || !strings.Contains(got[1].Text, "earlier messages omitted") {
+		t.Fatalf("fallback summary = %#v", got[1])
+	}
+}
+
+func TestActiveGuidanceSurvivesGeneratedCompaction(t *testing.T) {
+	snapshot := activeGuidanceSnapshot{values: []string{"first correction", "second correction"}}
+	acknowledged := false
+	manager := activeGuidanceContext{
+		inner: turnContext{summarize: func(context.Context, string) (string, error) { return "Objective: retain guidance", nil }},
+		peek:  func() activeGuidanceSnapshot { return snapshot },
+		acknowledge: func(got activeGuidanceSnapshot) {
+			acknowledged = reflect.DeepEqual(got, snapshot)
+		},
+	}
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "rules"),
+		message.NewText(message.RoleUser, strings.Repeat("old ", 400)),
+		message.NewText(message.RoleAssistant, "done"),
+	}
+	got, err := manager.CompactTo(context.Background(), history, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := got[len(got)-1].Text
+	if !strings.Contains(latest, "first correction") || !strings.Contains(latest, "second correction") {
+		t.Fatalf("trailing guidance lost: %#v", got)
+	}
+	if !acknowledged {
+		t.Fatal("successful compaction did not acknowledge guidance")
+	}
+}
+
+func TestActiveGuidanceRemainsQueuedWhenCompactionFails(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.mu.Lock()
+	service.activeRun = "run-guided"
+	service.activeSession = "session-guided"
+	service.guidanceOpen = true
+	service.mu.Unlock()
+	if err := service.GuideActiveTurn("session-guided", "run-guided", "do not lose this"); err != nil {
+		t.Fatal(err)
+	}
+	manager := activeGuidanceContext{
+		inner: turnContext{},
+		peek:  func() activeGuidanceSnapshot { return service.peekActiveGuidance("session-guided", "run-guided") },
+		acknowledge: func(snapshot activeGuidanceSnapshot) {
+			service.acknowledgeActiveGuidance("session-guided", "run-guided", snapshot)
+		},
+	}
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "rules"),
+		message.NewText(message.RoleUser, strings.Repeat("mandatory context ", 100)),
+	}
+	if _, err := manager.CompactTo(context.Background(), history, 1); err == nil {
+		t.Fatal("expected compaction failure")
+	}
+	remaining := service.drainActiveGuidance("session-guided", "run-guided")
+	if len(remaining) != 1 || remaining[0] != "do not lose this" {
+		t.Fatalf("guidance after failed compaction = %#v", remaining)
 	}
 }
 

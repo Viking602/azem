@@ -71,6 +71,14 @@ type transcriptLayoutCache struct {
 	lines        []string
 }
 
+type recapLayoutCache struct {
+	contentWidth int
+	language     string
+	initialized  bool
+	value        recap.Recap
+	lines        []string
+}
+
 type transcriptSelection struct {
 	startX int
 	startY int
@@ -235,6 +243,7 @@ type AppModel struct {
 	lastRunID           string
 	transcript          []Block
 	transcriptLayout    *transcriptLayoutCache
+	recapLayout         *recapLayoutCache
 	transcriptTop       int
 	transcriptCursor    int
 	transcriptSelection *transcriptSelection
@@ -328,7 +337,7 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 		runtime: runtime, initialCmd: focus, theme: theme, catalog: catalog, composer: composer, modelSearch: modelSearch,
 		width: 80, height: 24, sessionID: sessionID, provider: provider, model: model,
 		reasoning: reasoning, agentMode: mode, workspace: workspace, status: "Ready", approvalMode: ApprovalModePrompt,
-		focus: focusComposer, transcriptCursor: -1, transcriptLayout: &transcriptLayoutCache{},
+		focus: focusComposer, transcriptCursor: -1, transcriptLayout: &transcriptLayoutCache{}, recapLayout: &recapLayoutCache{},
 		auth: make(map[string]AuthView), modelsByProvider: make(map[string][]ModelChoice),
 		reducedMotion: os.Getenv("AZEM_REDUCED_MOTION") == "1" || os.Getenv("REDUCED_MOTION") == "1",
 	}
@@ -346,6 +355,9 @@ func (m *AppModel) SetLanguage(language string) error {
 	m.modelSearch.Placeholder = catalog.T("search.placeholder")
 	if m.transcriptLayout != nil {
 		m.transcriptLayout.initialized = false
+	}
+	if m.recapLayout != nil {
+		m.recapLayout.initialized = false
 	}
 	return nil
 }

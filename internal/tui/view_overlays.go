@@ -74,7 +74,10 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	innerWidth := max(1, boxWidth-2)
 	innerHeight := max(1, min(height-2, 20))
 	title, subtitle := m.overlayHeading()
-	description := m.overlayDescription()
+	var description []string
+	if m.overlay != OverlayRecap {
+		description = m.overlayDescription()
+	}
 	options := m.overlayOptions()
 
 	contentRows := innerHeight - 4
@@ -95,7 +98,9 @@ func (m AppModel) renderOverlay(width int, height int) string {
 			diffDescription = true
 		}
 	}
-	if !diffDescription {
+	if m.overlay == OverlayRecap {
+		descriptionLines = m.recapDescriptionLines(max(4, innerWidth-4))
+	} else if !diffDescription {
 		for _, line := range description {
 			descriptionLines = append(descriptionLines, wrapText(line, max(4, innerWidth-4))...)
 		}
@@ -201,6 +206,55 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		output = append(output, "")
 	}
 	return strings.Join(output[:height], "\n")
+}
+
+func (m AppModel) recapDescriptionLines(contentWidth int) []string {
+	if m.recap == nil {
+		return []string{m.tr("overlay.recap.empty")}
+	}
+	cache := m.recapLayout
+	language := m.catalog.Language()
+	if cache != nil && cache.initialized && cache.contentWidth == contentWidth && cache.language == language && cache.value == *m.recap {
+		return cache.lines
+	}
+	description := []string{
+		m.tr("overlay.recap.goal") + ": " + first(m.recap.Goal, "—"),
+		m.tr("overlay.recap.summary") + ": " + first(m.recap.Summary, "—"),
+		m.tr("overlay.recap.open_items") + ": " + first(m.recap.OpenItems, "—"),
+		fmt.Sprintf("%s: %s · r%d", m.tr("overlay.recap.boundary"), first(m.recap.CoveredBoundary, "—"), m.recap.Revision),
+	}
+	lines := make([]string, 0, len(description))
+	for _, line := range description {
+		lines = append(lines, wrapText(line, contentWidth)...)
+	}
+	if cache != nil {
+		cache.contentWidth = contentWidth
+		cache.language = language
+		cache.value = *m.recap
+		cache.lines = lines
+		cache.initialized = true
+	}
+	return lines
+}
+
+func (m AppModel) recapScrollLimit() int {
+	if m.width < 6 || m.height < 5 {
+		return 0
+	}
+	boxWidth := min(110, max(3, m.width-2))
+	innerWidth := max(1, boxWidth-2)
+	innerHeight := max(1, min(m.height-2, 20))
+	contentRows := innerHeight - 4
+	if _, subtitle := m.overlayHeading(); subtitle == "" {
+		contentRows++
+	}
+	visibleRows := max(1, contentRows)
+	lines := m.recapDescriptionLines(max(4, innerWidth-4))
+	return max(0, len(lines)-visibleRows)
+}
+
+func (m *AppModel) scrollRecap(delta int) {
+	m.overlayScroll = min(m.recapScrollLimit(), max(0, m.overlayScroll+delta))
 }
 
 func (m AppModel) renderAgentDetailOverlay(width, height int) string {

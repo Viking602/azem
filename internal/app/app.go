@@ -37,6 +37,9 @@ type Service struct {
 	mu                 sync.Mutex
 	activeRun          string
 	activeSession      string
+	activeGuidance     []string
+	guidanceGeneration uint64
+	guidanceOpen       bool
 	currentSession     string
 	hookSessions       map[string]struct{}
 	hookInitialUsers   map[string]string
@@ -384,6 +387,9 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	runCtx, cancel := context.WithCancel(s.ctx)
 	s.activeRun = "starting"
 	s.activeSession = request.SessionID
+	s.activeGuidance = nil
+	s.guidanceGeneration++
+	s.guidanceOpen = false
 	s.activeEnd = cancel
 	s.mu.Unlock()
 	sessionSource := "startup"
@@ -517,6 +523,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	engine = s.bindProviderEngine(engine)
 	s.mu.Lock()
 	s.activeRun = durableRun.RunID
+	s.guidanceOpen = true
 	s.mu.Unlock()
 	if s.sessions != nil {
 		if err := s.sessions.AppendBlock(s.ctx, request.SessionID, session.Block{Kind: "user", RunID: durableRun.RunID, Title: "You", Content: request.Prompt}); err != nil {
@@ -536,6 +543,89 @@ func (s *Service) persistSessionPreferences(ctx context.Context, request TurnReq
 		return nil
 	}
 	return s.sessions.UpdatePreferences(ctx, request.SessionID, request.Provider, request.Model, request.Reasoning, request.AgentMode)
+}
+
+// GuideActiveTurn queues a user message for the next model boundary of the
+// matching active single-agent run without cancelling or replaying completed tools.
+func (s *Service) GuideActiveTurn(sessionID, runID, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return fmt.Errorf("guidance message is empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shuttingDown {
+		return fmt.Errorf("application is shutting down")
+	}
+	if s.activeRun == "" || s.activeRun == "starting" || s.activeSession != sessionID || s.activeRun != runID {
+		return fmt.Errorf("run %q is not active for session %q", runID, sessionID)
+	}
+	if !s.guidanceOpen {
+		return fmt.Errorf("the active run is finishing and cannot accept guidance")
+	}
+	if s.sessions != nil {
+		if err := s.sessions.AppendBlock(s.ctx, sessionID, session.Block{
+			Kind: "user", RunID: s.activeRun, Title: "Guidance", Content: text, State: "guidance",
+		}); err != nil {
+			return fmt.Errorf("persist guidance message: %w", err)
+		}
+	}
+	s.activeGuidance = append(s.activeGuidance, text)
+	return nil
+}
+
+func (s *Service) drainActiveGuidance(sessionID, runID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID || len(s.activeGuidance) == 0 {
+		return nil
+	}
+	messages := append([]string(nil), s.activeGuidance...)
+	s.activeGuidance = nil
+	s.guidanceGeneration++
+	return messages
+}
+
+type activeGuidanceSnapshot struct {
+	values     []string
+	generation uint64
+}
+
+func (s *Service) peekActiveGuidance(sessionID, runID string) activeGuidanceSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID || len(s.activeGuidance) == 0 {
+		return activeGuidanceSnapshot{}
+	}
+	return activeGuidanceSnapshot{
+		values: append([]string(nil), s.activeGuidance...), generation: s.guidanceGeneration,
+	}
+}
+
+func (s *Service) acknowledgeActiveGuidance(sessionID, runID string, snapshot activeGuidanceSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if snapshot.generation != s.guidanceGeneration || s.activeSession != sessionID || s.activeRun != runID || len(snapshot.values) > len(s.activeGuidance) {
+		return
+	}
+	s.activeGuidance = append([]string(nil), s.activeGuidance[len(snapshot.values):]...)
+	s.guidanceGeneration++
+}
+
+func (s *Service) finishActiveGuidance(sessionID, runID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID {
+		return nil
+	}
+	if len(s.activeGuidance) > 0 {
+		messages := append([]string(nil), s.activeGuidance...)
+		s.activeGuidance = nil
+		s.guidanceGeneration++
+		return messages
+	}
+	s.guidanceOpen = false
+	return nil
 }
 
 func (s *Service) CancelActive() bool {
@@ -719,6 +809,9 @@ func (s *Service) clearRun(runID string) {
 		sessionID = s.activeSession
 		s.activeRun = ""
 		s.activeSession = ""
+		s.activeGuidance = nil
+		s.guidanceGeneration++
+		s.guidanceOpen = false
 		s.activeEnd = nil
 	}
 	s.mu.Unlock()
