@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/go-hydaelyn/coding"
@@ -30,6 +32,33 @@ func TestShellUsesWorkspaceAndReturnsStructuredExit(t *testing.T) {
 	}
 	if output.ExitCode != 0 || output.Truncated {
 		t.Fatalf("structured shell output=%+v", output)
+	}
+}
+
+func TestShellCancellationTerminatesDescendantsAndReturnsPromptly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell command")
+	}
+	root := t.TempDir()
+	driver := newShellDriver(root, "prompt", "prompt")
+	arguments, _ := json.Marshal(shellInput{Command: "(sleep 0.4; printf leaked > child-finished) & wait"})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	result, err := driver.Execute(ctx, tool.Call{ID: "shell-cancel", Name: ToolShell, Arguments: arguments}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
+		t.Fatalf("cancelled shell returned after %s, want less than 250ms", elapsed)
+	}
+	if !result.IsError || !strings.Contains(result.Content, context.DeadlineExceeded.Error()) {
+		t.Fatalf("cancelled shell result=%+v", result)
+	}
+	time.Sleep(450 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(root, "child-finished")); !os.IsNotExist(err) {
+		t.Fatalf("shell descendant survived cancellation: %v", err)
 	}
 }
 

@@ -97,6 +97,14 @@ func (m *AppModel) applyEvent(event app.Event) {
 		m.openOverlay(OverlaySkills)
 	case app.EventMemoryState:
 		switch event.State {
+		case "recalled":
+			count, _ := strconv.Atoi(event.Data["count"])
+			if count > 0 {
+				m.transcript = append(m.transcript, Block{
+					ID: "memory-recall:" + first(event.RunID, event.SessionID), Kind: BlockHook, State: "completed",
+					Hooks: []HookRunView{{Event: m.tr("memory.recalled", map[string]string{"count": strconv.Itoa(count)}), State: "completed"}},
+				})
+			}
 		case "forgotten":
 			for index := range m.memories {
 				if m.memories[index].ID == event.Text {
@@ -107,7 +115,9 @@ func (m *AppModel) applyEvent(event app.Event) {
 		default:
 			m.memories = append([]memory.Memory(nil), event.Memories...)
 		}
-		m.openOverlay(OverlayMemory)
+		if event.State != "recalled" {
+			m.openOverlay(OverlayMemory)
+		}
 	case app.EventRecapState:
 		if event.State == "failed" {
 			m.errorBanner = m.tr("recap.persist_failed") + ": " + event.Text

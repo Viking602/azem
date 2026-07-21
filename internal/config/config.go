@@ -97,9 +97,11 @@ type MainAgentConfig struct {
 	// cumulative token usage, governs long tasks. A positive value is checked
 	// between requests, so the final provider request can exceed it.
 	MaxTokens int64 `yaml:"max_tokens"`
-	// MaxToolCalls limits tool calls in one user turn. Zero is unbounded.
+	// MaxToolCalls optionally limits tool calls in one user turn. Coding runs
+	// default to zero so they can continue until the task is complete.
 	MaxToolCalls int `yaml:"max_tool_calls"`
-	// MaxWallClock limits the total duration of one user turn. Zero is unbounded.
+	// MaxWallClock optionally limits the total duration of one user turn. Coding
+	// runs default to zero, which is unbounded.
 	MaxWallClock         string        `yaml:"max_wall_clock"`
 	MaxWallClockDuration time.Duration `yaml:"-"`
 }
@@ -137,7 +139,9 @@ type SubagentBudgetConfig struct {
 	// subagent run. It defaults to zero so subagents can finish their assigned
 	// coding task. A positive value is checked between requests and can be
 	// exceeded by the final provider request.
-	MaxTokens            int           `yaml:"max_tokens"`
+	MaxTokens int `yaml:"max_tokens"`
+	// MaxToolCalls, MaxTurns, and MaxWallClock are optional limits. They all
+	// default to zero so coding subagents can run until completion.
 	MaxToolCalls         int           `yaml:"max_tool_calls"`
 	MaxTurns             int           `yaml:"max_turns"`
 	MaxWallClock         string        `yaml:"max_wall_clock"`
@@ -219,15 +223,15 @@ func Default() Config {
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
 		},
 		Agents: AgentsConfig{
-			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 64, MaxWallClock: "30m", MaxWallClockDuration: 30 * time.Minute},
+			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
 			Team: TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
 			Subagents: SubagentConfig{
 				Enabled: true, MaxDepth: 1, MaxConcurrency: 2, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
-					MaxTokens: 0, MaxToolCalls: 32, MaxTurns: 16,
-					MaxWallClock: "20m", MaxWallClockDuration: 20 * time.Minute,
+					MaxTokens: 0, MaxToolCalls: 0, MaxTurns: 0,
+					MaxWallClock: "0s",
 				},
 			},
 		},
@@ -452,16 +456,16 @@ func (c *Config) validateSubagents() error {
 		return fmt.Errorf("agents.subagents.await_timeout must be a positive duration")
 	}
 	wallClock, err := time.ParseDuration(subagents.Budget.MaxWallClock)
-	if err != nil || wallClock <= 0 {
-		return fmt.Errorf("agents.subagents.budget.max_wall_clock must be a positive duration")
+	if err != nil || wallClock < 0 {
+		return fmt.Errorf("agents.subagents.budget.max_wall_clock must be a non-negative duration (zero is unbounded)")
 	}
 	if subagents.Budget.MaxTokens < 0 {
 		return fmt.Errorf("agents.subagents.budget.max_tokens must be non-negative (zero is unbounded)")
 	}
-	if subagents.Budget.MaxToolCalls < 1 || subagents.Budget.MaxTurns < 1 {
-		return fmt.Errorf("agents.subagents tool-call and turn budgets must be positive")
+	if subagents.Budget.MaxToolCalls < 0 || subagents.Budget.MaxTurns < 0 {
+		return fmt.Errorf("agents.subagents tool-call and turn budgets must be non-negative (zero is unbounded)")
 	}
-	if await > wallClock {
+	if wallClock > 0 && await > wallClock {
 		return fmt.Errorf("agents.subagents.await_timeout must not exceed budget.max_wall_clock")
 	}
 	subagents.AwaitDuration = await

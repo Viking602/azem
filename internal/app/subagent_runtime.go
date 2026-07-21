@@ -592,8 +592,10 @@ func (r *subagentRuntime) execute(id string) {
 		Skills: skillSnapshot.Eager, AvailableSkills: skillSnapshot.Available,
 		Instructions: instructions, Model: childModel, Tools: toolNames,
 		LoopPolicy: hyagent.LoopPolicy{
-			MaxIterations: r.cfg.Budget.MaxTurns, MaxWallClock: r.cfg.Budget.MaxWallClockDuration,
-			ContextTokenTarget: contextTarget,
+			MaxIterations:       r.cfg.Budget.MaxTurns,
+			UnlimitedIterations: r.cfg.Budget.MaxTurns == 0,
+			MaxWallClock:        r.cfg.Budget.MaxWallClockDuration,
+			ContextTokenTarget:  contextTarget,
 		},
 		ExtraBody: map[string]any{"prompt_cache_key": childRun.RunID},
 	}

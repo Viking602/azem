@@ -29,6 +29,45 @@ type Theme struct {
 	FullAccess    lipgloss.Style
 	Cursor        lipgloss.Style
 	Selected      lipgloss.Style
+	PanelFocused  lipgloss.Style
+	PanelBlurred  lipgloss.Style
+	MetaLabel     lipgloss.Style
+	MetaValue     lipgloss.Style
+	MetaDivider   lipgloss.Style
+	HelpKey       lipgloss.Style
+	HelpDesc      lipgloss.Style
+	Chip          lipgloss.Style
+	ChipAsk       lipgloss.Style
+	ChipSmart     lipgloss.Style
+	ChipDanger    lipgloss.Style
+	BarFilled     lipgloss.Style
+	BarEmpty      lipgloss.Style
+	UserSurface   lipgloss.Style
+	AssistantTag  lipgloss.Style
+	ThinkingTag   lipgloss.Style
+	ToolTag       lipgloss.Style
+	ToolRead      lipgloss.Style
+	ToolSearch    lipgloss.Style
+	ToolWrite     lipgloss.Style
+	ToolExecute   lipgloss.Style
+	ToolMemory    lipgloss.Style
+	ToolAgent     lipgloss.Style
+	CodeKeyword   lipgloss.Style
+	CodeString    lipgloss.Style
+	CodeNumber    lipgloss.Style
+	CodeComment   lipgloss.Style
+	CodeName      lipgloss.Style
+	CodeOperator  lipgloss.Style
+	AgentTag      lipgloss.Style
+	ApprovalTag   lipgloss.Style
+	ErrorTag      lipgloss.Style
+	HookTag       lipgloss.Style
+	RailTitle     lipgloss.Style
+	RailTodo      lipgloss.Style
+	RailAgents    lipgloss.Style
+	RailMCP       lipgloss.Style
+	AttachmentTag lipgloss.Style
+	Attachment    lipgloss.Style
 }
 
 func DefaultTheme() Theme {
@@ -46,10 +85,25 @@ func DefaultTheme() Theme {
 	diffAddBackground := adaptiveColor("#e6f4ea", "194", "7", "#183325", "22", "0")
 	diffDelBackground := adaptiveColor("#fce8e8", "224", "7", "#3a2023", "52", "0")
 	diffHunkBackground := adaptiveColor("#e7f1f5", "195", "7", "#1d3037", "236", "0")
+	border := adaptiveColor("#c5cdc6", "250", "7", "#3a433c", "238", "0")
+	focusBorder := adaptiveColor("#4f8f78", "66", "6", "#6fa892", "108", "6")
+	cyan := adaptiveColor("#087f9c", "30", "6", "#67d4ee", "81", "6")
+	violet := adaptiveColor("#6754b8", "61", "5", "#b4a7ff", "147", "5")
+	// Transcript accents stay background-free. Distinction comes from restrained
+	// foreground hues so the conversation keeps its original dark, quiet tone.
+	chipBg := adaptiveColor("#e7eee9", "254", "7", "#222a25", "235", "0")
+	chipAskBg := adaptiveColor("#f5edd8", "230", "7", "#2f2818", "236", "0")
+	chipSmartBg := adaptiveColor("#e2eef7", "195", "7", "#1b2a35", "236", "0")
+	chipDangerBg := adaptiveColor("#f8e4e4", "224", "7", "#331f21", "236", "0")
+	panelBase := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1)
+	chipBase := lipgloss.NewStyle().Padding(0, 1).Bold(true)
+	messageTag := lipgloss.NewStyle().Bold(true)
 
 	return Theme{
 		Header:        lipgloss.NewStyle().Bold(true).Foreground(accent),
-		Border:        lipgloss.NewStyle().Foreground(muted),
+		Border:        lipgloss.NewStyle().Foreground(border),
 		User:          lipgloss.NewStyle().Foreground(userAccent),
 		UserAccent:    lipgloss.NewStyle().Bold(true).Foreground(userAccent),
 		Assistant:     lipgloss.NewStyle().Foreground(text),
@@ -69,6 +123,45 @@ func DefaultTheme() Theme {
 		FullAccess:    lipgloss.NewStyle().Bold(true).Foreground(danger),
 		Cursor:        lipgloss.NewStyle().Foreground(cursor),
 		Selected:      lipgloss.NewStyle().Bold(true).Foreground(text).Background(selection),
+		PanelFocused:  panelBase.BorderForeground(focusBorder),
+		PanelBlurred:  panelBase.BorderForeground(border),
+		MetaLabel:     lipgloss.NewStyle().Bold(true).Foreground(accent),
+		MetaValue:     lipgloss.NewStyle().Foreground(text),
+		MetaDivider:   lipgloss.NewStyle().Foreground(border),
+		HelpKey:       lipgloss.NewStyle().Bold(true).Foreground(secondary),
+		HelpDesc:      lipgloss.NewStyle().Foreground(muted),
+		Chip:          chipBase.Foreground(text).Background(chipBg),
+		ChipAsk:       chipBase.Foreground(warning).Background(chipAskBg),
+		ChipSmart:     chipBase.Foreground(blue).Background(chipSmartBg),
+		ChipDanger:    chipBase.Foreground(danger).Background(chipDangerBg),
+		BarFilled:     lipgloss.NewStyle().Foreground(accent),
+		BarEmpty:      lipgloss.NewStyle().Foreground(border),
+		UserSurface:   lipgloss.NewStyle().Foreground(userAccent),
+		AssistantTag:  messageTag.Foreground(cyan),
+		ThinkingTag:   messageTag.Foreground(violet),
+		ToolTag:       messageTag.Foreground(warning),
+		ToolRead:      lipgloss.NewStyle().Foreground(blue),
+		ToolSearch:    lipgloss.NewStyle().Foreground(violet),
+		ToolWrite:     lipgloss.NewStyle().Foreground(accent),
+		ToolExecute:   lipgloss.NewStyle().Foreground(warning),
+		ToolMemory:    lipgloss.NewStyle().Foreground(cyan),
+		ToolAgent:     lipgloss.NewStyle().Foreground(secondary),
+		CodeKeyword:   lipgloss.NewStyle().Bold(true).Foreground(violet),
+		CodeString:    lipgloss.NewStyle().Foreground(success),
+		CodeNumber:    lipgloss.NewStyle().Foreground(warning),
+		CodeComment:   lipgloss.NewStyle().Italic(true).Foreground(muted),
+		CodeName:      lipgloss.NewStyle().Foreground(cyan),
+		CodeOperator:  lipgloss.NewStyle().Foreground(blue),
+		AgentTag:      messageTag.Foreground(blue),
+		ApprovalTag:   messageTag.Foreground(accent),
+		ErrorTag:      messageTag.Foreground(danger),
+		HookTag:       messageTag.Foreground(secondary),
+		RailTitle:     lipgloss.NewStyle().Bold(true).Foreground(violet),
+		RailTodo:      lipgloss.NewStyle().Bold(true).Foreground(warning),
+		RailAgents:    lipgloss.NewStyle().Bold(true).Foreground(blue),
+		RailMCP:       lipgloss.NewStyle().Bold(true).Foreground(accent),
+		AttachmentTag: messageTag.Foreground(violet),
+		Attachment:    lipgloss.NewStyle().Foreground(cyan),
 	}
 }
 

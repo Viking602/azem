@@ -14,6 +14,7 @@ require (
 	charm.land/glamour/v2 v2.0.1
 	github.com/BurntSushi/toml v1.6.0
 	github.com/Viking602/go-hydaelyn v0.11.9
+	github.com/alecthomas/chroma/v2 v2.14.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/creack/pty v1.1.24
 	github.com/modelcontextprotocol/go-sdk v1.6.1
@@ -22,7 +23,6 @@ require (
 )
 
 require (
-	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/charmbracelet/x/exp/slice v0.0.0-20250327172914-2fdc97757edf // indirect
 	github.com/danieljoos/wincred v1.2.3 // indirect

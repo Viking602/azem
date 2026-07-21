@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -10,6 +12,8 @@ import (
 	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -36,25 +40,12 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 				indicator = frames[m.animationFrame%len(frames)]
 			}
 		}
-		header := fmt.Sprintf("  %s %s %s · %s", selector, indicator, m.tr("block.approval"), title)
-		if state != "" {
-			header += "  " + state
-		}
-		header = padOrTrim(header, width+2)
-		style := m.stateStyle(block.State)
-		if selected {
-			header = m.theme.Selected.Render(header)
-		} else {
-			header = style.Bold(true).Render(header)
-		}
+		header := m.renderBlockHeader(selector, indicator, m.tr("block.approval"), title, block.State, state, width, m.theme.ApprovalTag, m.theme.ApprovalAsk, selected)
 		lines := []string{header}
 		if block.Collapsed {
 			return lines
 		}
-		for _, line := range wrapText(block.Content, max(4, width-4)) {
-			lines = append(lines, m.theme.Muted.Render("      │ "+line))
-		}
-		return lines
+		return append(lines, m.renderApprovalContent(block.Content, width)...)
 	case BlockHook:
 		return m.renderHookPrompt(block, selected, width)
 	case BlockTool, BlockAgent, BlockDiff, BlockError:
@@ -63,34 +54,19 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 			toggle = "▸"
 		}
 		kind := m.tr("block." + string(block.Kind))
-		header := fmt.Sprintf("  %s %s %s · %s", selector, toggle, kind, title)
-		if state != "" {
-			header += "  " + state
-		}
-		header = padOrTrim(header, width+2)
-		style := m.stateStyle(block.State)
-		if rendersDiff {
-			style = m.theme.Diff
-		} else if block.Kind == BlockError {
-			style = m.theme.Error
-		}
-		if selected {
-			header = m.theme.Selected.Render(header)
-		} else {
-			header = style.Render(header)
-		}
+		tagStyle, accentStyle := m.blockKindStyles(block, rendersDiff)
+		header := m.renderBlockHeader(selector, toggle, kind, title, block.State, state, width, tagStyle, accentStyle, selected)
 		lines := []string{header}
 		if block.Collapsed {
 			return lines
 		}
 		if rendersDiff {
-			lines = append(lines, m.renderDiffContent(block.Content, width+2)...)
-			return lines
+			return append(lines, m.renderDiffContent(block.Content, width+2)...)
 		}
-		for _, line := range wrapText(block.Content, max(4, width-4)) {
-			lines = append(lines, m.theme.Assistant.Render("      │ "+line))
+		if block.Kind == BlockTool {
+			return append(lines, m.renderToolContent(block, width)...)
 		}
-		return lines
+		return append(lines, m.renderBlockContent(block.Content, width, accentStyle)...)
 	case BlockUser:
 		return m.renderUserMessage(block.Content, width)
 	case BlockThinking:
@@ -99,22 +75,272 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 			label += " · " + state
 		}
 		content := strings.ReplaceAll(block.Content, "****", "**\n\n**")
-		return renderMarkdownBlock(m.theme.Thinking, label, content, width)
+		return renderMarkdownBlock(m.theme.Thinking, m.theme.ThinkingTag.Render("◇ "+label), content, width)
 	case BlockAssistant:
-		if state == "STREAMING" && !strings.Contains(block.Content, "\n") {
-			return renderProseBlock(m.theme.Assistant, "", block.Content, width)
+		label := ""
+		if block.State != "streaming" || strings.Contains(block.Content, "\n") {
+			label = m.theme.AssistantTag.Render("◆ AZEM")
 		}
-		return renderMarkdownBlock(m.theme.Assistant, "", block.Content, width)
+		if state == "STREAMING" && !strings.Contains(block.Content, "\n") {
+			return renderProseBlock(m.theme.Assistant, label, block.Content, width)
+		}
+		return renderMarkdownBlock(m.theme.Assistant, label, block.Content, width)
 	default:
-		return renderProseBlock(m.theme.Assistant, "AZEM", block.Content, width)
+		return renderProseBlock(m.theme.Assistant, m.theme.AssistantTag.Render("◆ AZEM"), block.Content, width)
 	}
+}
+
+func (m AppModel) blockKindStyles(block Block, rendersDiff bool) (lipgloss.Style, lipgloss.Style) {
+	if rendersDiff {
+		return m.theme.AssistantTag, m.theme.Diff
+	}
+	switch block.Kind {
+	case BlockTool:
+		return m.toolStyles(block.Title)
+	case BlockAgent:
+		return m.theme.AgentTag, m.theme.ApprovalSmart
+	case BlockError:
+		return m.theme.ErrorTag, m.theme.Error
+	default:
+		return m.theme.AssistantTag, m.theme.Assistant
+	}
+}
+
+func (m AppModel) toolStyles(name string) (lipgloss.Style, lipgloss.Style) {
+	normalized := strings.ReplaceAll(name, "_", ".")
+	switch normalized {
+	case "coding.search":
+		return m.theme.ThinkingTag, m.theme.ToolSearch
+	case "coding.read.file", "coding.list.files":
+		return m.theme.AgentTag, m.theme.ToolRead
+	case "coding.edit.hashline", "coding.write.file", "coding.gofmt", "coding.git.diff":
+		return m.theme.AssistantTag, m.theme.ToolWrite
+	case "coding.shell", "coding.go.test":
+		return m.theme.ToolTag, m.theme.ToolExecute
+	case "todo", "hydaelyn.activate.skill", "hydaelyn.read.skill.resource", "subagent.spawn", "subagent.get.output", "subagent.kill":
+		return m.theme.HookTag, m.theme.ToolAgent
+	default:
+		if strings.Contains(normalized, "memory") || strings.Contains(normalized, "recap") {
+			return m.theme.AssistantTag, m.theme.ToolMemory
+		}
+		return m.theme.ToolTag, m.theme.Assistant
+	}
+}
+
+func (m AppModel) renderBlockHeader(selector, mark, kind, title, rawState, stateLabel string, width int, tagStyle, accentStyle lipgloss.Style, selected bool) string {
+	prefix := "  " + selector + " " + mark + " "
+	header := m.theme.Muted.Render(prefix) + tagStyle.Render(kind) + m.theme.MetaDivider.Render(" · ") + accentStyle.Bold(true).Render(title)
+	if stateLabel != "" {
+		header += "  " + m.stateStyle(rawState).Bold(true).Render(stateMark(rawState)+" "+stateLabel)
+	}
+	header = padOrTrim(header, width+2)
+	if selected {
+		return m.theme.Selected.Render(header)
+	}
+	return header
+}
+
+func (m AppModel) renderBlockContent(content string, width int, style lipgloss.Style) []string {
+	lines := make([]string, 0)
+	for _, line := range wrapText(content, max(4, width-4)) {
+		lines = append(lines, m.theme.MetaDivider.Render("      │ ")+style.Render(line))
+	}
+	return lines
+}
+
+func (m AppModel) renderApprovalContent(content string, width int) []string {
+	const rail = "      │ "
+	contentWidth := max(1, width-ansi.StringWidth(rail))
+	lines := make([]string, 0)
+	for _, source := range strings.Split(content, "\n") {
+		label, value, found := strings.Cut(source, ":")
+		if !found {
+			label, value, found = strings.Cut(source, "：")
+		}
+		styled := m.theme.Assistant.Render(source)
+		if found && strings.TrimSpace(label) != "" {
+			separator := ":"
+			if strings.Contains(source, "：") && !strings.Contains(source, ":") {
+				separator = "："
+			}
+			styled = m.theme.ApprovalAsk.Bold(true).Render(strings.TrimSpace(label)+separator) + m.theme.Assistant.Render(strings.TrimSpace(value))
+		}
+		for _, line := range wrapText(styled, contentWidth) {
+			lines = append(lines, m.theme.MetaDivider.Render(rail)+line)
+		}
+	}
+	return lines
+}
+
+type sourceResultSection struct {
+	path  string
+	lines []sourceResultLine
+}
+
+type sourceResultLine struct {
+	number int
+	code   string
+}
+
+func (m AppModel) renderToolContent(block Block, width int) []string {
+	switch block.Title {
+	case "coding.search", "coding.read_file":
+		if rows, ok := m.renderSourceToolContent(block, width); ok {
+			return rows
+		}
+	case "coding.list_files":
+		return m.renderPathList(block.Content, width)
+	}
+	_, accent := m.toolStyles(block.Title)
+	return m.renderBlockContent(block.Content, width, accent)
+}
+
+func (m AppModel) renderPathList(content string, width int) []string {
+	const rail = "      │ "
+	textWidth := max(1, width-ansi.StringWidth(rail))
+	rows := make([]string, 0)
+	for _, source := range strings.Split(content, "\n") {
+		style := m.theme.ToolRead
+		if strings.HasPrefix(strings.TrimSpace(source), "…") || strings.HasPrefix(strings.TrimSpace(source), "[") {
+			style = m.theme.Muted
+		}
+		for _, line := range wrapText(source, textWidth) {
+			rows = append(rows, m.theme.MetaDivider.Render(rail)+style.Render(line))
+		}
+	}
+	return rows
+}
+
+func (m AppModel) renderSourceToolContent(block Block, width int) ([]string, bool) {
+	sections := parseSourceResult(block.Content, sourcePathFromArguments(block.Arguments))
+	if len(sections) == 0 {
+		return nil, false
+	}
+	const rail = "      │ "
+	available := max(1, width-ansi.StringWidth(rail))
+	maxNumber := 1
+	for _, section := range sections {
+		for _, line := range section.lines {
+			maxNumber = max(maxNumber, line.number)
+		}
+	}
+	gutterWidth := len(strconv.Itoa(maxNumber))
+	showNumbers := available >= 18
+	rows := make([]string, 0)
+	pathStyle := m.theme.ToolRead
+	if block.Title == "coding.search" {
+		pathStyle = m.theme.ToolSearch
+	}
+	for sectionIndex, section := range sections {
+		if sectionIndex > 0 {
+			rows = append(rows, m.theme.MetaDivider.Render(rail))
+		}
+		path := first(section.path, "source")
+		pathLine := m.theme.MetaDivider.Render(rail) + pathStyle.Bold(true).Render("⌁ "+path)
+		rows = append(rows, padOrTrim(pathLine, width))
+		for _, source := range section.lines {
+			gutter := ""
+			if showNumbers {
+				gutter = m.theme.Muted.Render(fmt.Sprintf("%*d │ ", gutterWidth, source.number))
+			}
+			codeWidth := max(1, available-ansi.StringWidth(gutter))
+			highlighted := m.highlightSourceLine(path, source.code)
+			wrapped := wrapText(highlighted, codeWidth)
+			for index, line := range wrapped {
+				lineGutter := gutter
+				if index > 0 && showNumbers {
+					lineGutter = m.theme.Muted.Render(strings.Repeat(" ", gutterWidth) + " · ")
+				}
+				rows = append(rows, m.theme.MetaDivider.Render(rail)+lineGutter+line)
+			}
+		}
+	}
+	return rows, true
+}
+
+func parseSourceResult(content, fallbackPath string) []sourceResultSection {
+	sections := make([]sourceResultSection, 0)
+	current := -1
+	ensureSection := func(path string) int {
+		sections = append(sections, sourceResultSection{path: path})
+		return len(sections) - 1
+	}
+	for _, source := range strings.Split(strings.TrimSpace(content), "\n") {
+		if strings.HasPrefix(source, "¶") {
+			path := strings.TrimPrefix(strings.SplitN(source, "#", 2)[0], "¶")
+			current = ensureSection(first(path, fallbackPath))
+			continue
+		}
+		prefix, code, found := strings.Cut(source, ":")
+		number, err := strconv.Atoi(strings.TrimSpace(prefix))
+		if !found || err != nil || number < 1 {
+			continue
+		}
+		if current < 0 {
+			current = ensureSection(fallbackPath)
+		}
+		sections[current].lines = append(sections[current].lines, sourceResultLine{number: number, code: strings.TrimPrefix(code, " ")})
+	}
+	result := sections[:0]
+	for _, section := range sections {
+		if len(section.lines) > 0 {
+			result = append(result, section)
+		}
+	}
+	return result
+}
+
+func sourcePathFromArguments(arguments string) string {
+	var input struct {
+		Path string `json:"path"`
+		Glob string `json:"glob"`
+	}
+	if json.Unmarshal([]byte(arguments), &input) != nil {
+		return ""
+	}
+	return first(input.Path, input.Glob)
+}
+
+func (m AppModel) highlightSourceLine(path, source string) string {
+	lexer := lexers.Match(filepath.Base(path))
+	if lexer == nil || lexer == lexers.Fallback {
+		lexer = lexers.Analyse(source)
+	}
+	if lexer == nil {
+		return m.theme.Assistant.Render(source)
+	}
+	tokens, err := chroma.Tokenise(lexer, nil, source)
+	if err != nil {
+		return m.theme.Assistant.Render(source)
+	}
+	var rendered strings.Builder
+	for _, token := range tokens {
+		value := strings.TrimSuffix(token.Value, "\n")
+		style := m.theme.Assistant
+		switch {
+		case token.Type.InCategory(chroma.Keyword):
+			style = m.theme.CodeKeyword
+		case token.Type.InCategory(chroma.LiteralString):
+			style = m.theme.CodeString
+		case token.Type.InCategory(chroma.LiteralNumber):
+			style = m.theme.CodeNumber
+		case token.Type.InCategory(chroma.Comment):
+			style = m.theme.CodeComment
+		case token.Type.InCategory(chroma.Name):
+			style = m.theme.CodeName
+		case token.Type.InCategory(chroma.Operator), token.Type.InCategory(chroma.Punctuation):
+			style = m.theme.CodeOperator
+		}
+		rendered.WriteString(style.Render(value))
+	}
+	return rendered.String()
 }
 
 func (m AppModel) renderUserMessage(content string, width int) []string {
 	textWidth := max(1, width-2)
 	lines := make([]string, 0)
 	for _, line := range wrapText(content, textWidth) {
-		lines = append(lines, m.theme.UserAccent.Render("▌")+" "+m.theme.User.Render(line))
+		lines = append(lines, m.theme.UserSurface.Render("▌ "+padOrTrim(line, textWidth)))
 	}
 	return lines
 }
@@ -135,7 +361,8 @@ func (m AppModel) renderHookPrompt(block Block, selected bool, width int) []stri
 		if hook.Name != "" && hook.Name != "hook" {
 			name = " · " + hook.Name
 		}
-		label := padOrTrim(fmt.Sprintf("    %s %s · %s%s", mark, m.tr("hook.label"), hook.Event, name), width+2)
+		labelText := fmt.Sprintf("%s %s · %s%s", mark, m.tr("hook.label"), hook.Event, name)
+		label := padOrTrim("    "+m.theme.HookTag.Render(labelText), width+2)
 		style := m.theme.Muted
 		if hook.State == "failed" || hook.State == "blocked" {
 			style = m.stateStyle(hook.State)

@@ -189,7 +189,7 @@ func CodingTeamClasses(models TeamModels) ([]multiagent.AgentClass, error) {
 	implementerOutput := json.RawMessage(`{"type":"object","required":["summary","evidence"],"properties":{"summary":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}},"files_changed":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}`)
 	reviewerOutput := json.RawMessage(`{"type":"object","required":["verdict","findings","evidence"],"properties":{"verdict":{"type":"string","enum":["accept","revise"]},"findings":{"type":"array","items":{"type":"string"}},"evidence":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}`)
 	reporterOutput := json.RawMessage(`{"type":"object","required":["answer"],"properties":{"answer":{"type":"string"},"findings":{"type":"array","items":{"type":"string"}},"verification":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}`)
-	loop := hyagent.LoopPolicy{MaxIterations: 16, MaxWallClock: 10 * time.Minute}
+	loop := hyagent.LoopPolicy{UnlimitedIterations: true}
 	return []multiagent.AgentClass{
 		{
 			Name: PlannerClass, Model: models.Planner,

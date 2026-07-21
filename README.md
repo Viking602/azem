@@ -226,8 +226,8 @@ auth:
 agents:
   main:
     max_tokens: 0          # optional inter-request limit; the final request may overshoot it
-    max_tool_calls: 64     # per-turn safety limit; 0 means unbounded
-    max_wall_clock: 30m    # per-turn safety limit; 0s means unbounded
+    max_tool_calls: 0      # optional per-turn limit; 0 means unbounded
+    max_wall_clock: 0s     # optional per-turn limit; 0s means unbounded
   team:
     max_concurrency: 2
     max_ticks: 12
@@ -250,9 +250,9 @@ agents:
         reasoning: low
     budget:
       max_tokens: 0          # optional inter-request limit; the final request may overshoot it
-      max_tool_calls: 32
-      max_turns: 16
-      max_wall_clock: 20m
+      max_tool_calls: 0      # optional; 0 means unbounded
+      max_turns: 0           # optional; 0 means unbounded
+      max_wall_clock: 0s     # optional; 0s means unbounded
 
 skills:
   enabled: true

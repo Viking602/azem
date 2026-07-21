@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/i18n"
@@ -92,6 +93,7 @@ type Overlay string
 const (
 	OverlayNone        Overlay = ""
 	OverlayHelp        Overlay = "help"
+	OverlayStatus      Overlay = "status"
 	OverlayCommand     Overlay = "command"
 	OverlayProvider    Overlay = "provider"
 	OverlayModel       Overlay = "model"
@@ -336,7 +338,7 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	composer.CharLimit = 64 * 1024
 	composer.DynamicHeight = true
 	composer.MinHeight = 1
-	composer.MaxHeight = 5
+	composer.MaxHeight = 6
 	composer.MaxContentHeight = 32
 	composer.SetHeight(1)
 	composer.SetWidth(76)
@@ -345,9 +347,19 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	styles.Focused.Text = theme.Assistant
 	styles.Focused.Prompt = theme.Header
 	styles.Focused.Placeholder = theme.Muted
+	// Keep textarea content unframed. The panel chrome is rendered once by renderComposer;
+	// putting a border on Base makes bubbles apply it twice for an empty placeholder.
+	styles.Focused.CursorLine = lipgloss.NewStyle()
+	styles.Focused.CursorLineNumber = lipgloss.NewStyle()
+	styles.Focused.EndOfBuffer = lipgloss.NewStyle()
+	styles.Focused.LineNumber = lipgloss.NewStyle()
 	styles.Blurred.Text = theme.Muted
 	styles.Blurred.Prompt = theme.Muted
 	styles.Blurred.Placeholder = theme.Muted
+	styles.Blurred.CursorLine = lipgloss.NewStyle()
+	styles.Blurred.CursorLineNumber = lipgloss.NewStyle()
+	styles.Blurred.EndOfBuffer = lipgloss.NewStyle()
+	styles.Blurred.LineNumber = lipgloss.NewStyle()
 	styles.Cursor.Color = theme.Cursor.GetForeground()
 	styles.Cursor.Shape = tea.CursorBar
 	composer.SetStyles(styles)

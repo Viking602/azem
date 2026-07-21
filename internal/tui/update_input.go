@@ -26,7 +26,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = max(1, msg.Width)
 		m.height = max(1, msg.Height)
-		m.composer.SetWidth(max(1, m.width-4))
+		// The rounded panel is external to textarea; reserve its border and padding.
+		m.composer.SetWidth(max(1, m.width-m.theme.PanelFocused.GetHorizontalFrameSize()))
 		m.modelSearch.SetWidth(max(1, min(64, m.width-12)))
 		m.transcriptTop = min(m.transcriptTop, m.transcriptMaxOffset())
 		if m.overlay == OverlayRecap {
@@ -822,6 +823,8 @@ func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
 		return m.beginAction(Action{Kind: ActionNewSession})
 	case "recap":
 		return m.beginAction(Action{Kind: ActionShowRecap})
+	case "status":
+		m.openOverlay(OverlayStatus)
 	case "agents":
 		m.openOverlay(OverlayAgents)
 	case "agent-types":
@@ -1197,6 +1200,12 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		return m.beginAction(Action{Kind: ActionSetLanguage, Target: language})
 	case "help":
 		m.openOverlay(OverlayHelp)
+	case "status":
+		if len(command.Args) != 0 {
+			m.errorBanner = m.tr("status.usage")
+			break
+		}
+		m.openOverlay(OverlayStatus)
 	case "quit":
 		return m.beginShutdown()
 	case "cancel":
