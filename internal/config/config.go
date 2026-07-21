@@ -240,8 +240,8 @@ func Default() Config {
 
 func builtInSubagentRoles() map[string]SubagentRoleConfig {
 	readOnly := []string{"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff"}
-	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test")
-	execute := append(append([]string(nil), readOnly...), "coding.go_test")
+	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell")
+	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell")
 	return map[string]SubagentRoleConfig{
 		"general-purpose": {
 			Description:    "Handle delegated coding work with the full governed tool set.",

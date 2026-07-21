@@ -44,7 +44,7 @@ func (d *shellDriver) Definition() tool.Definition {
 	additional := false
 	definition := tool.Definition{
 		Name:        ToolShell,
-		Description: "Run a foreground shell command with the working directory fixed to the workspace. Set network=true when the command may access the network.",
+		Description: "Run a foreground command such as git, build, test, or workspace inspection. Do not use shell redirection, cat, tee, touch, or scripts to create or edit files: create files with coding.write_file and modify existing files with coding.edit_hashline. Set network=true when the command may access the network.",
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{

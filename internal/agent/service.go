@@ -309,9 +309,6 @@ func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Drive
 		return ExecutionResult{}, fmt.Errorf("tool driver is nil")
 	}
 	definition := driver.Definition()
-	if definition.Name == ToolShell || call.Name == ToolShell {
-		return ExecutionResult{}, fmt.Errorf("%w: %s is disabled; create files with %s and modify existing files with %s", tool.ErrToolNotFound, ToolShell, coding.ToolWriteFile, coding.ToolEditHashline)
-	}
 	if call.Name != definition.Name {
 		return ExecutionResult{}, fmt.Errorf("tool call %q does not match driver %q", call.Name, definition.Name)
 	}
@@ -439,6 +436,9 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 		}
 		drivers = append(drivers, driver)
 	}
+	if s.shellPolicy != "deny" {
+		drivers = append(drivers, newShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork))
+	}
 	return drivers, nil
 }
 
@@ -462,9 +462,6 @@ func (s *Service) ExecuteTeamDriver(ctx context.Context, runID string, driver to
 		return tool.Result{}, fmt.Errorf("team tool run ID is missing")
 	}
 	definition := driver.Definition()
-	if definition.Name == ToolShell || call.Name == ToolShell {
-		return tool.Result{}, fmt.Errorf("%w: %s is disabled; create files with %s and modify existing files with %s", tool.ErrToolNotFound, ToolShell, coding.ToolWriteFile, coding.ToolEditHashline)
-	}
 	ctx = withAuthorizedInvocation(ctx, scopeForCall(definition, call))
 	task, lease, err := s.enableTeamTaskActions(ctx, runID)
 	if err != nil {
