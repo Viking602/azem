@@ -217,14 +217,14 @@ func Default() Config {
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
 		},
 		Agents: AgentsConfig{
-			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
+			Main: MainAgentConfig{MaxTokens: 300_000, MaxToolCalls: 64, MaxWallClock: "30m", MaxWallClockDuration: 30 * time.Minute},
 			Team: TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
 			Subagents: SubagentConfig{
 				Enabled: true, MaxDepth: 1, MaxConcurrency: 2, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
-					MaxTokens: 0, MaxToolCalls: 64, MaxTurns: 32,
+					MaxTokens: 150_000, MaxToolCalls: 32, MaxTurns: 16,
 					MaxWallClock: "20m", MaxWallClockDuration: 20 * time.Minute,
 				},
 			},
@@ -240,8 +240,8 @@ func Default() Config {
 
 func builtInSubagentRoles() map[string]SubagentRoleConfig {
 	readOnly := []string{"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff"}
-	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell")
-	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell")
+	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test")
+	execute := append(append([]string(nil), readOnly...), "coding.go_test")
 	return map[string]SubagentRoleConfig{
 		"general-purpose": {
 			Description:    "Handle delegated coding work with the full governed tool set.",

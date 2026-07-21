@@ -13,9 +13,11 @@ import (
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/provider/catalog"
+	"github.com/Viking602/azem/internal/session"
 )
 
 var writeClipboard = clipboard.WriteAll
+var readClipboardText = clipboard.ReadAll
 
 type clipboardWriteResultMsg struct{ err error }
 
@@ -69,6 +71,25 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.errorBanner = "copy selection: " + msg.err.Error()
 		}
+		return m, nil
+	case clipboardImageResultMsg:
+		if msg.err != nil {
+			m.errorBanner = "paste image: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.empty {
+			// No image on clipboard; fall back to text paste into composer.
+			if text, err := readClipboardText(); err == nil && text != "" {
+				m.composer.InsertString(text)
+				m.commandCursor = 0
+			}
+			return m, nil
+		}
+		if err := m.appendPendingImage(msg.attachment); err != nil {
+			m.errorBanner = err.Error()
+			return m, nil
+		}
+		m.errorBanner = ""
 		return m, nil
 	case appEventMsg:
 		previousMaxOffset := 0
@@ -139,7 +160,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.errorBanner = "Action cancelled"
 				return m, nil
 			}
-			m.errorBanner = msg.Err.Error()
+			if msg.Action.Kind == ActionCompact {
+				m.status = "Ready"
+			}
+			if errors.Is(msg.Err, app.ErrNothingToCompact) {
+				m.errorBanner = m.tr("compact.nothing_to_compact")
+			} else {
+				m.errorBanner = msg.Err.Error()
+			}
 			return m, nil
 		}
 		m.applyActionResult(msg.Action)
@@ -230,6 +258,10 @@ func (m AppModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.isRunning() {
 			return m.requestTurnCancellation()
 		}
+		if strings.TrimSpace(m.composer.Value()) == "" && m.dropLastPendingImage() {
+			m.errorBanner = ""
+			return m, nil
+		}
 	case "ctrl+j":
 		m.composer.InsertString("\n")
 		m.commandCursor = 0
@@ -275,6 +307,9 @@ func (m AppModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.submit()
+	case "ctrl+v", "super+v", "cmd+v", "meta+v":
+		// Prefer clipboard image paste; text paste is the fallback when empty.
+		return m, pasteClipboardImage(m.runtime, m.sessionID)
 	}
 
 	previous := m.composer.Value()
@@ -653,12 +688,19 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		entries := m.modelPickerEntries()
-		if m.overlayCursor < len(entries) {
-			entry := entries[m.overlayCursor]
+		if m.overlayCursor >= len(entries) {
+			return m, nil
+		}
+		entry := entries[m.overlayCursor]
+		levels := catalog.AvailableReasoningLevels(entry.Provider, entry.Model)
+		if len(levels) == 0 {
 			m.switchProvider(entry.Provider)
 			m.selectModel(entry.Model.ID)
 			return m, m.closeOverlay()
 		}
+		m.pendingSessionModel = &pendingSessionModel{Provider: entry.Provider, Model: entry.Model.ID}
+		m.openOverlay(OverlayReasoning)
+		return m, nil
 	case OverlayLanguage:
 		languages := i18n.Languages()
 		if m.overlayCursor >= 0 && m.overlayCursor < len(languages) {
@@ -673,6 +715,22 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 				return m.savePendingModelRoute(levels[m.overlayCursor])
 			}
 			return m, nil
+		}
+		if pending := m.pendingSessionModel; pending != nil {
+			if m.isRunning() {
+				m.errorBanner = "model can only change while idle"
+				return m, nil
+			}
+			levels := m.reasoningLevels()
+			if m.overlayCursor >= len(levels) {
+				return m, nil
+			}
+			reasoning := levels[m.overlayCursor]
+			m.pendingSessionModel = nil
+			m.switchProvider(pending.Provider)
+			m.selectModel(pending.Model)
+			m.reasoning = reasoning
+			return m, m.closeOverlay()
 		}
 		if m.isRunning() {
 			m.errorBanner = "reasoning can only change while idle"
@@ -827,6 +885,9 @@ func (m AppModel) beginAction(action Action) (tea.Model, tea.Cmd) {
 	m.actionCancel = cancel
 	action.SessionID = first(action.SessionID, m.sessionID)
 	m.errorBanner = ""
+	if action.Kind == ActionCompact {
+		m.status = "Compacting"
+	}
 	return m, executeAction(ctx, m.runtime, action)
 }
 
@@ -865,6 +926,8 @@ func (m *AppModel) applyActionResult(action Action) {
 		m.switchProvider(provider)
 		m.status = "Ready"
 		_ = m.closeOverlay()
+	case ActionCompact:
+		m.status = "Ready"
 	case ActionNewSession, ActionResumeSession:
 		m.status = "Ready"
 		_ = m.closeOverlay()
@@ -1041,7 +1104,8 @@ func (m AppModel) approvalActionSummary(toolName, target string) string {
 
 func (m AppModel) submit() (tea.Model, tea.Cmd) {
 	input := strings.TrimSpace(m.composer.Value())
-	if input == "" {
+	images := append([]session.Attachment(nil), m.pendingImages...)
+	if input == "" && len(images) == 0 {
 		return m, nil
 	}
 	if command, ok, err := ParseCommand(input); ok {
@@ -1054,6 +1118,10 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 		return m.executeCommand(command)
 	}
 	if m.canGuideActiveRun() {
+		if len(images) > 0 {
+			m.errorBanner = "images can only be attached to a new turn, not live guidance"
+			return m, nil
+		}
 		m.composer.Reset()
 		m.commandCursor = 0
 		m.errorBanner = ""
@@ -1062,15 +1130,16 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 	if m.isRunning() {
 		return m, nil
 	}
-	m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: "You", Content: input})
+	m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: "You", Content: formatUserContent(input, images), Attachments: images})
 	m.composer.Reset()
 	m.commandCursor = 0
+	m.clearPendingImages()
 	m.status = "Starting"
 	m.errorBanner = ""
 	m.runID = ""
 	m.resetTurnUsage()
 	m.transcriptTop = 0
-	return m, startTurn(m.runtime, app.TurnRequest{SessionID: m.sessionID, Prompt: input, Provider: m.provider, Model: m.model, Reasoning: m.reasoning, AgentMode: m.agentMode})
+	return m, startTurn(m.runtime, app.TurnRequest{SessionID: m.sessionID, Prompt: input, Provider: m.provider, Model: m.model, Reasoning: m.reasoning, AgentMode: m.agentMode, Images: images})
 }
 
 type guidanceResultMsg struct {

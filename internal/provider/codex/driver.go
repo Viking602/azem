@@ -64,7 +64,7 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 		return nil, err
 	}
 	open := func() (hyprovider.Stream, error) {
-		return d.openStream(ctx, payload, reverseNames, cacheKey)
+		return d.openStream(ctx, payload, reverseNames, cacheKey, responses.RequestUsageReporter(request))
 	}
 	stream, retries, err := openProviderStream(ctx, open, d.retryDelay, 0)
 	if err != nil {
@@ -73,7 +73,7 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 	return &retryingStream{ctx: ctx, current: stream, open: open, delay: d.retryDelay, retries: retries}, nil
 }
 
-func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames map[string]string, cacheKey string) (hyprovider.Stream, error) {
+func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames map[string]string, cacheKey string, reporter responses.UsageReporter) (hyprovider.Stream, error) {
 	streamContext, cancel := context.WithCancel(ctx)
 	response, err := d.auth.DoStreamWithRefresh(streamContext, "chatgpt", d.accountID, func(auth.Credential) (*http.Request, error) {
 		httpRequest, err := http.NewRequest(http.MethodPost, d.endpoint, bytes.NewReader(payload))
@@ -95,7 +95,7 @@ func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames ma
 		cancel()
 		return nil, err
 	}
-	stream, err := responses.Open(response, streamContext, cancel)
+	stream, err := responses.Open(response, streamContext, cancel, reporter)
 	if err != nil {
 		return nil, err
 	}

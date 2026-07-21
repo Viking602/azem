@@ -8,6 +8,7 @@ import (
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/recap"
+	"github.com/Viking602/azem/internal/session"
 )
 
 func (m *AppModel) applyEvent(event app.Event) {
@@ -263,15 +264,16 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 		return
 	}
 	var recovered []struct {
-		ID               string `json:"id"`
-		Kind             string `json:"kind"`
-		RunID            string `json:"runId"`
-		AgentID          string `json:"agentId"`
-		ParentToolCallID string `json:"parentToolCallId"`
-		Title            string `json:"title"`
-		Content          string `json:"content"`
-		State            string `json:"state"`
-		Collapsed        bool   `json:"collapsed"`
+		ID               string               `json:"id"`
+		Kind             string               `json:"kind"`
+		RunID            string               `json:"runId"`
+		AgentID          string               `json:"agentId"`
+		ParentToolCallID string               `json:"parentToolCallId"`
+		Title            string               `json:"title"`
+		Content          string               `json:"content"`
+		State            string               `json:"state"`
+		Collapsed        bool                 `json:"collapsed"`
+		Attachments      []session.Attachment `json:"attachments"`
 	}
 	if err := json.Unmarshal([]byte(event.Data["blocks"]), &recovered); err != nil {
 		m.errorBanner = "recover session: " + err.Error()
@@ -288,10 +290,14 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	m.transcript = make([]Block, 0, len(recovered))
 	m.transcriptTop = 0
 	for _, block := range recovered {
+		content := block.Content
+		if BlockKind(block.Kind) == BlockUser {
+			content = formatUserContent(block.Content, block.Attachments)
+		}
 		m.transcript = append(m.transcript, Block{
 			ID: first(block.AgentID, block.ID), Kind: BlockKind(block.Kind), RunID: block.RunID,
-			ToolCallID: block.ParentToolCallID, Title: block.Title, Content: block.Content,
-			State: block.State, Collapsed: block.Collapsed,
+			ToolCallID: block.ParentToolCallID, Title: block.Title, Content: content,
+			State: block.State, Collapsed: block.Collapsed, Attachments: block.Attachments,
 		})
 	}
 	m.runID = ""
@@ -304,6 +310,7 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	}
 	m.detailAgentID = ""
 	m.usage = UsageView{}
+	m.clearPendingImages()
 	m.status = "Ready"
 	provider := first(event.Data["provider"], m.provider)
 	m.switchProvider(provider)
@@ -311,6 +318,7 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	m.reasoning = first(event.Data["reasoning"], m.reasoning)
 	m.syncReasoningForModel()
 	m.agentMode = first(event.Data["agentMode"], m.agentMode)
+	m.restoreUsage(event.Data["usage"])
 	if sessions := event.Data["sessions"]; sessions != "" {
 		_ = json.Unmarshal([]byte(sessions), &m.sessions)
 	}

@@ -309,6 +309,9 @@ func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Drive
 		return ExecutionResult{}, fmt.Errorf("tool driver is nil")
 	}
 	definition := driver.Definition()
+	if definition.Name == ToolShell || call.Name == ToolShell {
+		return ExecutionResult{}, fmt.Errorf("%w: %s is disabled; create files with %s and modify existing files with %s", tool.ErrToolNotFound, ToolShell, coding.ToolWriteFile, coding.ToolEditHashline)
+	}
 	if call.Name != definition.Name {
 		return ExecutionResult{}, fmt.Errorf("tool call %q does not match driver %q", call.Name, definition.Name)
 	}
@@ -425,7 +428,7 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 	workspace := coding.NewLocalWorkspace(absoluteRoot)
 	candidates := coding.NewToolSet(workspace)
 	isGitRepo := workspaceIsGitRepo(ctx, absoluteRoot)
-	drivers := make([]tool.Driver, 0, len(candidates)+1)
+	drivers := make([]tool.Driver, 0, len(candidates))
 	for _, driver := range candidates {
 		definition := driver.Definition()
 		if definition.Name == coding.ToolGitDiff && !isGitRepo {
@@ -435,9 +438,6 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 			continue
 		}
 		drivers = append(drivers, driver)
-	}
-	if s.shellPolicy != "deny" {
-		drivers = append(drivers, newShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork))
 	}
 	return drivers, nil
 }
@@ -461,7 +461,11 @@ func (s *Service) ExecuteTeamDriver(ctx context.Context, runID string, driver to
 	if strings.TrimSpace(runID) == "" {
 		return tool.Result{}, fmt.Errorf("team tool run ID is missing")
 	}
-	ctx = withAuthorizedInvocation(ctx, scopeForCall(driver.Definition(), call))
+	definition := driver.Definition()
+	if definition.Name == ToolShell || call.Name == ToolShell {
+		return tool.Result{}, fmt.Errorf("%w: %s is disabled; create files with %s and modify existing files with %s", tool.ErrToolNotFound, ToolShell, coding.ToolWriteFile, coding.ToolEditHashline)
+	}
+	ctx = withAuthorizedInvocation(ctx, scopeForCall(definition, call))
 	task, lease, err := s.enableTeamTaskActions(ctx, runID)
 	if err != nil {
 		return tool.Result{}, err

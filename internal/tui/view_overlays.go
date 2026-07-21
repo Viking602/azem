@@ -395,6 +395,9 @@ func (m AppModel) overlayHeading() (string, string) {
 		if m.pendingModelRoute != nil {
 			return m.tr("overlay.model_routes.reasoning_title"), m.pendingModelRoute.Provider + "/" + m.pendingModelRoute.Model
 		}
+		if m.pendingSessionModel != nil {
+			return "Thinking level", m.pendingSessionModel.Provider + "/" + first(m.pendingSessionModel.Model, "no model") + " · choose for the next turn"
+		}
 		return "Thinking level", m.provider + "/" + first(m.model, "no model") + " · applied to the next turn"
 	case OverlaySessions:
 		return "Resume session", "Choose a saved conversation"
@@ -456,7 +459,8 @@ func (m AppModel) overlayDescription() []string {
 		}
 	case OverlayHelp:
 		return []string{
-			"Enter submit · Ctrl+J newline · Esc close or cancel",
+			"Enter submit · Ctrl+J newline · Esc close/cancel/remove last image",
+			"Ctrl+V paste image from clipboard · text paste if no image",
 			"Ctrl+P commands · Ctrl+M model · Ctrl+R reasoning · Shift+Tab approval",
 			"Ctrl+B agents · PageUp/PageDown transcript · Tab cards",
 			"/login /logout /provider /models /skills /skill /new /sessions /resume /compact",

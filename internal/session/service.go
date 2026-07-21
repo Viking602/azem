@@ -24,14 +24,15 @@ type Session struct {
 }
 
 type Block struct {
-	Kind             string `json:"kind"`
-	RunID            string `json:"runId,omitempty"`
-	AgentID          string `json:"agentId,omitempty"`
-	ParentToolCallID string `json:"parentToolCallId,omitempty"`
-	Title            string `json:"title,omitempty"`
-	Content          string `json:"content,omitempty"`
-	State            string `json:"state,omitempty"`
-	Collapsed        bool   `json:"collapsed,omitempty"`
+	Kind             string       `json:"kind"`
+	RunID            string       `json:"runId,omitempty"`
+	AgentID          string       `json:"agentId,omitempty"`
+	ParentToolCallID string       `json:"parentToolCallId,omitempty"`
+	Title            string       `json:"title,omitempty"`
+	Content          string       `json:"content,omitempty"`
+	State            string       `json:"state,omitempty"`
+	Collapsed        bool         `json:"collapsed,omitempty"`
+	Attachments      []Attachment `json:"attachments,omitempty"`
 }
 
 // ModelHistory is a replaceable provider-resume checkpoint, not the durable
@@ -50,6 +51,7 @@ type Projection struct {
 	LastRunID    string
 	Blocks       []Block
 	ModelHistory ModelHistory
+	Usage        Usage
 	UpdatedAt    time.Time
 }
 
@@ -122,11 +124,11 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	if err != nil {
 		return Projection{}, err
 	}
-	var blocksData, historyData []byte
+	var blocksData, historyData, usageData []byte
 	var runID string
 	var updated int64
-	err = s.db.QueryRowContext(ctx, `SELECT last_run_id,blocks,model_history,updated_at FROM session_projections WHERE session_id=?`, id).Scan(
-		&runID, &blocksData, &historyData, &updated,
+	err = s.db.QueryRowContext(ctx, `SELECT last_run_id,blocks,model_history,usage,updated_at FROM session_projections WHERE session_id=?`, id).Scan(
+		&runID, &blocksData, &historyData, &usageData, &updated,
 	)
 	if err != nil {
 		return Projection{}, fmt.Errorf("load projection: %w", err)
@@ -139,6 +141,10 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	if err := json.Unmarshal(historyData, &history); err != nil {
 		return Projection{}, fmt.Errorf("decode model history: %w", err)
 	}
+	usage, err := DecodeUsage(usageData)
+	if err != nil {
+		return Projection{}, err
+	}
 	blocks, err = loadSessionBlocks(ctx, s.db, id)
 	if err != nil {
 		return Projection{}, err
@@ -149,7 +155,7 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 		}
 	}
 	return Projection{
-		Session: value, LastRunID: runID, Blocks: blocks, ModelHistory: history,
+		Session: value, LastRunID: runID, Blocks: blocks, ModelHistory: history, Usage: usage,
 		UpdatedAt: time.Unix(0, updated).UTC(),
 	}, nil
 }
@@ -238,20 +244,12 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 	return tx.Commit()
 }
 
-func (s *Service) Compact(ctx context.Context, sessionID string) (Projection, error) {
-	return s.compact(ctx, sessionID, CompactionPlan{})
-}
-
 // CompactWithSummary replaces older transcript blocks with a provider-generated
 // handoff and installs the matching provider-resume checkpoint atomically.
 func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan CompactionPlan) (Projection, error) {
 	if strings.TrimSpace(plan.Summary) == "" {
 		return Projection{}, fmt.Errorf("compact session: summary is empty")
 	}
-	return s.compact(ctx, sessionID, plan)
-}
-
-func (s *Service) compact(ctx context.Context, sessionID string, plan CompactionPlan) (Projection, error) {
 	projection, err := s.LoadProjection(ctx, sessionID)
 	if err != nil {
 		return Projection{}, err
@@ -280,31 +278,11 @@ func (s *Service) compact(ctx context.Context, sessionID string, plan Compaction
 	if len(projection.Blocks) <= keepRecent+1 {
 		return projection, nil
 	}
-	tailStart := len(projection.Blocks) - keepRecent
-	if plan.Summary != "" {
-		tailStart = plan.TailStart
-		if tailStart <= 0 || tailStart >= len(projection.Blocks) {
-			return Projection{}, fmt.Errorf("compact session: invalid retained tail start %d", tailStart)
-		}
+	tailStart := plan.TailStart
+	if tailStart <= 0 || tailStart >= len(projection.Blocks) {
+		return Projection{}, fmt.Errorf("compact session: invalid retained tail start %d", tailStart)
 	}
-	older := projection.Blocks[:tailStart]
-	var summary strings.Builder
-	if plan.Summary != "" {
-		summary.WriteString(strings.TrimSpace(plan.Summary))
-	} else {
-		summary.WriteString("Earlier conversation compacted locally:\n")
-		for _, block := range older {
-			text := []rune(strings.TrimSpace(block.Content))
-			if len(text) > 320 {
-				text = append(text[:320], '…')
-			}
-			fmt.Fprintf(&summary, "- %s: %s\n", firstSessionValue(block.Title, block.Kind), string(text))
-			if summary.Len() >= 4_000 {
-				break
-			}
-		}
-	}
-	compacted := []Block{{Kind: "assistant", Title: "Compacted history", Content: summary.String(), State: "compacted", Collapsed: true}}
+	compacted := []Block{{Kind: "assistant", Title: "Compacted history", Content: strings.TrimSpace(plan.Summary), State: "compacted", Collapsed: true}}
 	compacted = append(compacted, projection.Blocks[tailStart:]...)
 	now := time.Now().UTC().UnixNano()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_blocks WHERE session_id=?`, sessionID); err != nil {
@@ -319,12 +297,9 @@ func (s *Service) compact(ctx context.Context, sessionID string, plan Compaction
 			return Projection{}, err
 		}
 	}
-	encodedHistory := []byte(`{}`)
-	if plan.Summary != "" {
-		encodedHistory, err = json.Marshal(plan.ModelHistory)
-		if err != nil {
-			return Projection{}, fmt.Errorf("encode compacted model history: %w", err)
-		}
+	encodedHistory, err := json.Marshal(plan.ModelHistory)
+	if err != nil {
+		return Projection{}, fmt.Errorf("encode compacted model history: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history=?,updated_at=? WHERE session_id=?`, encodedHistory, now, sessionID); err != nil {
 		return Projection{}, err

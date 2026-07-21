@@ -225,14 +225,14 @@ auth:
 
 agents:
   main:
-    max_tokens: 0          # 0 means unbounded
-    max_tool_calls: 0      # 0 means unbounded
-    max_wall_clock: 0s     # 0s means unbounded; e.g. 45m sets a per-turn limit
+    max_tokens: 300000     # per-turn safety limit; 0 means unbounded
+    max_tool_calls: 64     # per-turn safety limit; 0 means unbounded
+    max_wall_clock: 30m    # per-turn safety limit; 0s means unbounded
   team:
     max_concurrency: 2
     max_ticks: 12
   compaction:
-    # Leave all fields empty to inherit the model being compacted.
+    # Empty provider/model inherit the active model; empty reasoning uses low.
     provider: ""
     model: ""
     reasoning: ""
@@ -249,9 +249,9 @@ agents:
         model: grok-4.5
         reasoning: low
     budget:
-      max_tokens: 128000
-      max_tool_calls: 64
-      max_turns: 32
+      max_tokens: 150000
+      max_tool_calls: 32
+      max_turns: 16
       max_wall_clock: 20m
 
 skills:

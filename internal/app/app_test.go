@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,71 @@ import (
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
+
+func TestConcurrentUsagePersistenceDoesNotLoseUpdates(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-usage"}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	var workers sync.WaitGroup
+	for index := 0; index < 100; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			service.recordSessionUsage("session-usage", map[string]string{
+				"inputTokens": "1", "uncachedInputTokens": "1", "requestKind": "compaction", "aggregateOnly": "true", "cacheStatus": "reported",
+			})
+		}()
+	}
+	workers.Wait()
+	projection, err := sessions.LoadProjection(ctx, "session-usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Usage.CompactionInput != 100 || projection.Usage.CompactionUncached != 100 {
+		t.Fatalf("concurrent usage = %#v", projection.Usage)
+	}
+}
+
+func TestMainOccupancyClearPreservesNewerTrackedUsage(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-clear"}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	service.recordSessionUsage("session-clear", map[string]string{
+		"inputTokens": "10", "uncachedInputTokens": "8", "requestKind": "compaction", "aggregateOnly": "true", "cacheStatus": "reported",
+	})
+	cleared, err := service.clearMainUsageOccupancy(ctx, "session-clear", session.Usage{CompactionInput: 1, InputTokens: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.CompactionInput != 10 || cleared.InputTokens != 0 {
+		t.Fatalf("cleared usage overwrote newer telemetry: %#v", cleared)
+	}
+	projection, err := sessions.LoadProjection(ctx, "session-clear")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Usage != cleared {
+		t.Fatalf("durable usage=%#v, want %#v", projection.Usage, cleared)
+	}
+}
 
 func TestUIPreferencesPersistAndRestore(t *testing.T) {
 	root := t.TempDir()
@@ -336,6 +402,46 @@ func TestResumeSessionIncludesPersistedRecap(t *testing.T) {
 	}
 	if event.Kind != EventSessionLoaded || event.Recap == nil || event.Recap.Summary != "Resume this context" {
 		t.Fatalf("resume event recap = %#v", event)
+	}
+}
+
+func TestResumeSessionIncludesPersistedUsage(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-usage", ProviderID: "chatgpt", ModelID: "gpt-main"}); err != nil {
+		t.Fatal(err)
+	}
+	usage := session.Usage{
+		InputTokens: 68000, OutputTokens: 4000, CacheInputTokens: 68000, CachedInputTokens: 34000,
+		MainCacheInput: 68000, MainCachedInput: 34000, ContextLimit: 272000,
+		CacheReported: true, MainCacheReported: true,
+	}
+	if err := sessions.UpdateUsage(ctx, "session-usage", usage); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionResumeSession, Target: "session-usage"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventSessionLoaded || event.Data["usage"] == "" {
+		t.Fatalf("resume event missing usage: %#v", event)
+	}
+	restored, err := session.DecodeUsage([]byte(event.Data["usage"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored != usage {
+		t.Fatalf("resume usage = %+v, want %+v", restored, usage)
 	}
 }
 

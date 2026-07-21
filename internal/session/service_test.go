@@ -11,48 +11,6 @@ import (
 	"github.com/Viking602/go-hydaelyn/message"
 )
 
-func TestCompactSummarizesOlderBlocksAndKeepsRecent(t *testing.T) {
-	ctx := context.Background()
-	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close(ctx)
-	service := NewService(store.DB())
-	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model", Reasoning: "high", AgentMode: "single"}); err != nil {
-		t.Fatal(err)
-	}
-	for index := 0; index < 8; index++ {
-		kind := "user"
-		if index%2 == 1 {
-			kind = "assistant"
-		}
-		if err := service.AppendBlock(ctx, "session", Block{Kind: kind, RunID: fmt.Sprintf("run-%d", index), Title: kind, Content: fmt.Sprintf("message %d", index)}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	projection, err := service.Compact(ctx, "session")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(projection.Blocks) != 5 || projection.Blocks[0].State != "compacted" || !projection.Blocks[0].Collapsed {
-		t.Fatalf("compacted blocks=%+v", projection.Blocks)
-	}
-	for index, block := range projection.Blocks[1:] {
-		want := fmt.Sprintf("message %d", index+4)
-		if block.Content != want {
-			t.Fatalf("recent block %d=%q want %q", index, block.Content, want)
-		}
-	}
-	reloaded, err := service.LoadProjection(ctx, "session")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(reloaded.Blocks) != 5 || reloaded.Blocks[0].Content != projection.Blocks[0].Content || reloaded.LastRunID != "run-7" {
-		t.Fatalf("reloaded projection=%+v", reloaded)
-	}
-}
-
 func TestCompactWithSummaryPersistsMatchingModelHistory(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "summary.db"))
@@ -205,7 +163,14 @@ func TestAgentBlockUpsertAfterCompactionDoesNotDuplicate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := service.Compact(ctx, "session"); err != nil {
+	before, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CompactWithSummary(ctx, "session", CompactionPlan{
+		Summary: "model-generated summary", ExpectedUpdatedAt: before.UpdatedAt, TailStart: 3,
+		ModelHistory: ModelHistory{ProviderID: "chatgpt", ModelID: "model"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	agent.Content = "done"
@@ -278,13 +243,6 @@ func TestCompleteTurnStoresAssistantBlockAndModelHistoryTogether(t *testing.T) {
 		got.InstructionFingerprint != history.InstructionFingerprint || len(got.Messages) != 3 ||
 		got.Messages[2].Role != message.RoleAssistant || got.Messages[2].Text != "answer" {
 		t.Fatalf("completed model history = %#v", got)
-	}
-	compacted, err := service.Compact(ctx, "session")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if compacted.ModelHistory.ProviderID != history.ProviderID || len(compacted.ModelHistory.Messages) != len(history.Messages) {
-		t.Fatalf("no-op compact changed provider model history = %#v", compacted.ModelHistory)
 	}
 }
 

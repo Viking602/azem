@@ -67,14 +67,20 @@ func (m AppModel) View() tea.View {
 	}
 	header := m.renderHeader(width)
 	composer := m.composer.View()
+	attachments := m.renderPendingAttachments(width)
+	attachmentRows := 0
+	if attachments != "" {
+		attachmentRows = 1
+	}
 	suggestions := m.visibleCommandSuggestions()
 	recapStatus := m.visibleRecapStatus(width, height)
 	recapRows := 0
 	if recapStatus != "" {
 		recapRows = 1
 	}
-	layout := measureViewLayout(height, strings.Count(composer, "\n")+1, len(suggestions), recapRows)
-	sections := make([]string, 0, 8)
+	composerLines := strings.Count(composer, "\n") + 1 + attachmentRows
+	layout := measureViewLayout(height, composerLines, len(suggestions), recapRows)
+	sections := make([]string, 0, 9)
 	if layout.showChrome {
 		sections = append(sections, header, m.theme.Border.Render(strings.Repeat("─", width)))
 	}
@@ -90,7 +96,12 @@ func (m AppModel) View() tea.View {
 	if recapStatus != "" {
 		sections = append(sections, recapStatus)
 	}
-	sections = append(sections, fitViewport(composer, width, layout.composerHeight))
+	if attachments != "" {
+		sections = append(sections, attachments)
+	}
+	// Keep one row of the measured composer block for the attachment strip.
+	composerHeight := max(1, layout.composerHeight-attachmentRows)
+	sections = append(sections, fitViewport(composer, width, composerHeight))
 	if layout.showModelStatus {
 		sections = append(sections, m.renderModelStatus(width))
 	}
@@ -99,7 +110,7 @@ func (m AppModel) View() tea.View {
 	}
 	view := tea.NewView(fitViewport(strings.Join(sections, "\n"), width, height))
 	if cursor := m.composer.Cursor(); cursor != nil {
-		cursor.Position.Y += composerOffsetY(layout)
+		cursor.Position.Y += composerOffsetY(layout) + attachmentRows
 		view.Cursor = cursor
 	}
 	view.AltScreen = true
@@ -109,6 +120,15 @@ func (m AppModel) View() tea.View {
 	return view
 
 }
+
+func (m AppModel) composerBlockLines() int {
+	lines := strings.Count(m.composer.View(), "\n") + 1
+	if len(m.pendingImages) > 0 {
+		lines++
+	}
+	return lines
+}
+
 func composerOffsetY(layout viewLayout) int {
 	offset := layout.bodyHeight + layout.suggestionHeight + layout.recapRows
 	if layout.showChrome {
@@ -219,12 +239,11 @@ func (m AppModel) renderTranscript(width int, height int) string {
 
 func (m AppModel) transcriptBounds() (left int, top int, width int, height int) {
 	width = max(1, m.width)
-	composer := m.composer.View()
 	recapRows := 0
 	if m.visibleRecapStatus(width, max(1, m.height)) != "" {
 		recapRows = 1
 	}
-	layout := measureViewLayout(max(1, m.height), strings.Count(composer, "\n")+1, len(m.visibleCommandSuggestions()), recapRows)
+	layout := measureViewLayout(max(1, m.height), m.composerBlockLines(), len(m.visibleCommandSuggestions()), recapRows)
 	if layout.showChrome {
 		top = 2
 	}
@@ -383,6 +402,8 @@ func (m AppModel) renderTranscriptFooter(width int, maxOffset int, offset int) s
 		switch m.status {
 		case "Starting":
 			detail = "Starting provider"
+		case "Compacting":
+			detail = "Waiting for the compaction model"
 		case "Awaiting approval":
 			detail = "Waiting for approval"
 		case "Reviewing approval":
@@ -420,13 +441,12 @@ func (m AppModel) renderTranscriptFooter(width int, maxOffset int, offset int) s
 func (m AppModel) transcriptViewportSize() (int, int) {
 	width := max(1, m.width)
 	height := max(1, m.height)
-	composer := m.composer.View()
 	suggestions := m.visibleCommandSuggestions()
 	recapRows := 0
 	if m.visibleRecapStatus(width, height) != "" {
 		recapRows = 1
 	}
-	layout := measureViewLayout(height, strings.Count(composer, "\n")+1, len(suggestions), recapRows)
+	layout := measureViewLayout(height, m.composerBlockLines(), len(suggestions), recapRows)
 	bodyHeight := layout.bodyHeight
 	if width >= 104 && bodyHeight >= 16 {
 		width -= min(31, width/3) + 1

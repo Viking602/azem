@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,29 @@ func TestWorkspacePolicyFiltersWritesAndShell(t *testing.T) {
 	}
 }
 
-func TestShellRequiresApprovalAndPersistsActionAttempt(t *testing.T) {
+func TestWorkspaceNeverExposesShell(t *testing.T) {
+	for _, policy := range []string{"allow", "prompt", "deny"} {
+		t.Run(policy, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := sqlitestore.Open(ctx, ":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			service, err := NewService(store, t.TempDir(), WithWorkspacePolicy(true, policy, "prompt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close(ctx)
+			for _, definition := range service.ToolDefinitions() {
+				if definition.Name == ToolShell {
+					t.Fatalf("shell policy %q exposed %s", policy, ToolShell)
+				}
+			}
+		})
+	}
+}
+
+func TestShellDriverIsRejectedBeforeApprovalOrExecution(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
@@ -71,51 +94,29 @@ func TestShellRequiresApprovalAndPersistsActionAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer service.Close(ctx)
 	run, err := service.StartRun(ctx, "create marker")
 	if err != nil {
 		t.Fatal(err)
 	}
 	arguments, _ := json.Marshal(shellInput{Command: "printf approved > marker.txt"})
 	call := tool.Call{ID: "shell-approved", Name: ToolShell, Arguments: arguments}
-	first, err := service.ExecuteTool(ctx, run, call, nil)
-	if err != nil {
-		t.Fatal(err)
+	driver := newShellDriver(root, "allow", "allow")
+	result, err := service.ExecuteDriver(ctx, run, driver, call, nil)
+	if !errors.Is(err, tool.ErrToolNotFound) || result.Approval != nil || result.Executed {
+		t.Fatalf("shell execution result=%+v error=%v", result, err)
 	}
-	if first.Approval == nil || first.Executed {
-		t.Fatalf("first shell execution=%+v", first)
+	if _, err := os.Stat(filepath.Join(root, "marker.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shell created marker before rejection: %v", err)
 	}
-	if err := service.ResolveApproval(ctx, run, call.ID, ApprovalOnce, "user"); err != nil {
-		t.Fatal(err)
-	}
-	second, err := service.ExecuteTool(ctx, run, call, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !second.Executed || second.Result.IsError {
-		t.Fatalf("approved shell execution=%+v", second)
-	}
-	contents, err := os.ReadFile(filepath.Join(root, "marker.txt"))
-	if err != nil || string(contents) != "approved" {
-		t.Fatalf("marker=%q error=%v", contents, err)
-	}
-	if err := service.CompleteRun(ctx, run, "done", nil); err != nil {
-		t.Fatal(err)
-	}
-	projection, err := service.Recover(ctx, run.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if projection.Run.Status != "completed" {
-		t.Fatalf("durable projection status=%q", projection.Run.Status)
+	if _, err := service.ExecuteTeamDriver(ctx, "team-run", driver, call, nil); !errors.Is(err, tool.ErrToolNotFound) {
+		t.Fatalf("team shell error=%v", err)
 	}
 	var attempts int
 	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind='action_attempt'`).Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 1 {
+	if attempts != 0 {
 		t.Fatalf("durable shell action attempts=%d", attempts)
-	}
-	if err := service.Close(ctx); err != nil {
-		t.Fatal(err)
 	}
 }

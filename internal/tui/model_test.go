@@ -581,6 +581,28 @@ func TestApprovalOverlayExecutesExplicitDecision(t *testing.T) {
 	}
 }
 
+func TestManualCompactShowsModelProgressAndRestoresReadyOnNoop(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.sessionID = "session-1"
+
+	updated, cmd := model.beginAction(Action{Kind: ActionCompact, Target: model.sessionID})
+	model = updated.(AppModel)
+	if cmd == nil || !model.actionBusy || model.status != "Compacting" || !model.isRunning() {
+		t.Fatalf("compact start = cmd:%v busy:%v status:%q running:%v", cmd != nil, model.actionBusy, model.status, model.isRunning())
+	}
+	footer := ansi.Strip(model.renderTranscriptFooter(100, 0, 0))
+	if !strings.Contains(footer, "COMPACTING") || !strings.Contains(footer, "Waiting for the compaction model") {
+		t.Fatalf("compact footer = %q", footer)
+	}
+
+	updated, _ = model.Update(actionResultMsg{Action: Action{Kind: ActionCompact}, Err: app.ErrNothingToCompact})
+	model = updated.(AppModel)
+	if model.actionBusy || model.status != "Ready" || model.errorBanner != "There is not enough new conversation history to compact." {
+		t.Fatalf("compact noop = busy:%v status:%q error:%q", model.actionBusy, model.status, model.errorBanner)
+	}
+}
+
 func TestShiftTabTogglesPromptAndYoloApprovalModes(t *testing.T) {
 	runtime := &recordedRuntime{}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
@@ -1484,6 +1506,26 @@ func TestSubagentCacheUsageAggregatesWithoutReplacingMainContext(t *testing.T) {
 	}
 }
 
+func TestDetailedUsageShowsReasoningCompactionAndTransport(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "grok", "grok-4.5", "high", "single")
+	model.usage.ContextLimit = 500_000
+	model.updateUsage(map[string]string{
+		"inputTokens": "100000", "cachedInputTokens": "60000", "uncachedInputTokens": "40000", "outputTokens": "5000",
+		"cacheStatus": "reported", "requestKind": "main", "transport": "xai-responses",
+	})
+	model.updateUsage(map[string]string{"reasoningTokens": "3000", "requestKind": "main", "aggregateOnly": "true"})
+	model.updateUsage(map[string]string{
+		"inputTokens": "20000", "cachedInputTokens": "5000", "uncachedInputTokens": "15000", "outputTokens": "2000", "reasoningTokens": "500",
+		"cacheStatus": "reported", "requestKind": "compaction", "aggregateOnly": "true", "transport": "xai-responses",
+	})
+	footer := ansi.Strip(model.renderContextUsage(320))
+	for _, wanted := range []string{"U 40K", "R 3K", "CMP 20K/2K", "U15K", "R500", "compaction", "xai-responses"} {
+		if !strings.Contains(footer, wanted) {
+			t.Fatalf("detailed usage footer missing %q: %q", wanted, footer)
+		}
+	}
+}
+
 func TestModelSelectionUpdatesCatalogContextAndResetsOccupancy(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "first", "high", "single")
 	model.selectModels([]ModelChoice{
@@ -1547,6 +1589,14 @@ func TestModelOverlaySearchFiltersClearsAndSelects(t *testing.T) {
 	for _, key := range "grok 4.5" {
 		updated, _ = model.updateKey(tea.KeyPressMsg{Code: key, Text: string(key)})
 		model = updated.(AppModel)
+	}
+	updated, _ = model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(AppModel)
+	if model.overlay != OverlayReasoning || model.pendingSessionModel == nil {
+		t.Fatalf("searched model should chain to reasoning: overlay:%q pending:%#v", model.overlay, model.pendingSessionModel)
+	}
+	if model.provider != "chatgpt" || model.model != "gpt-5.6-sol" {
+		t.Fatalf("search selection applied before reasoning: provider:%q model:%q", model.provider, model.model)
 	}
 	updated, _ = model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	model = updated.(AppModel)
@@ -1954,6 +2004,35 @@ func TestSessionTransitionAdoptsNewIDAndClearsPriorState(t *testing.T) {
 	}
 }
 
+func TestSessionReloadRestoresContextUsageFooter(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	model.selectModels([]ModelChoice{{ID: "gpt-main", ContextWindow: 272_000, SupportsReasoning: true}})
+	model.applyEvent(app.Event{
+		Kind: app.EventSessionLoaded, SessionID: "restored", State: "loaded",
+		Data: map[string]string{
+			"blocks":   `[{"kind":"user","title":"You","content":"hello"}]`,
+			"provider": "chatgpt",
+			"model":    "gpt-main",
+			"usage":    `{"inputTokens":68000,"outputTokens":4000,"cacheInputTokens":68000,"cachedInputTokens":34000,"mainCacheInput":68000,"mainCachedInput":34000,"contextLimit":272000,"cacheReported":true,"mainCacheReported":true}`,
+		},
+	})
+	if model.usage.InputTokens != 68000 || model.usage.OutputTokens != 4000 {
+		t.Fatalf("restored occupancy = %+v", model.usage)
+	}
+	if model.usage.MainCacheInput != 68000 || model.usage.MainCachedInput != 34000 || !model.usage.MainCacheReported {
+		t.Fatalf("restored cache = %+v", model.usage)
+	}
+	if model.usage.ContextLimit != 272_000 {
+		t.Fatalf("restored context limit = %d", model.usage.ContextLimit)
+	}
+	footer := ansi.Strip(model.renderContextUsage(120))
+	for _, wanted := range []string{"72K / 272K", "CACHE", "50.0%"} {
+		if !strings.Contains(footer, wanted) {
+			t.Fatalf("restored usage footer missing %q: %q", wanted, footer)
+		}
+	}
+}
+
 func TestProviderCatalogsSurviveSwitchAndLoginSelectsProvider(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-old", "high", "single")
 	model.loadModels(app.Event{Data: map[string]string{
@@ -2020,11 +2099,141 @@ func TestGroupedModelPickerSwitchesProviderOnSelection(t *testing.T) {
 	updated, _ = model.updateOverlayKey("enter")
 	model = updated.(AppModel)
 
-	if model.provider != "grok" || model.model != "grok-4.20" {
-		t.Fatalf("grouped picker selection = %s/%s, want grok/grok-4.20", model.provider, model.model)
+	if model.provider != "chatgpt" || model.model != "gpt-5.6" {
+		t.Fatalf("model applied before reasoning confirm: %s/%s", model.provider, model.model)
 	}
-	if model.overlay != OverlayNone {
-		t.Fatalf("model picker remained open: %q", model.overlay)
+	if model.overlay != OverlayReasoning || model.pendingSessionModel == nil {
+		t.Fatalf("expected reasoning chain: overlay=%q pending=%#v", model.overlay, model.pendingSessionModel)
+	}
+	if model.pendingSessionModel.Provider != "grok" || model.pendingSessionModel.Model != "grok-4.20" {
+		t.Fatalf("pending session model = %#v", model.pendingSessionModel)
+	}
+
+	levels := model.reasoningLevels()
+	for index, level := range levels {
+		if level == "high" {
+			model.overlayCursor = index
+			break
+		}
+	}
+	updated, _ = model.updateOverlayKey("enter")
+	model = updated.(AppModel)
+
+	if model.provider != "grok" || model.model != "grok-4.20" || model.reasoning != "high" {
+		t.Fatalf("grouped picker selection = %s/%s/%s, want grok/grok-4.20/high", model.provider, model.model, model.reasoning)
+	}
+	if model.overlay != OverlayNone || model.pendingSessionModel != nil {
+		t.Fatalf("picker state after confirm: overlay=%q pending=%#v", model.overlay, model.pendingSessionModel)
+	}
+}
+
+func TestModelPickerChainsToReasoningBeforeApplying(t *testing.T) {
+	runtime := &configuredTurnRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	model.modelsByProvider = map[string][]ModelChoice{
+		"chatgpt": {
+			{ID: "gpt-main", SupportsReasoning: true, ReasoningLevels: []string{"low", "high"}, DefaultReasoning: "high"},
+			{ID: "gpt-plain", SupportsReasoning: false},
+		},
+		"grok": {
+			{ID: "grok-worker", SupportsReasoning: true, ReasoningLevels: []string{"low", "medium", "high"}, DefaultReasoning: "medium"},
+		},
+	}
+	model.selectModels(model.modelsByProvider["chatgpt"])
+	model.updateUsage(map[string]string{"inputTokens": "42", "outputTokens": "7"})
+
+	model.openOverlay(OverlayModel)
+	for index, entry := range model.modelPickerEntries() {
+		if entry.Provider == "grok" && entry.Model.ID == "grok-worker" {
+			model.overlayCursor = index
+			break
+		}
+	}
+	updated, _ := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if model.overlay != OverlayReasoning {
+		t.Fatalf("overlay after model pick = %q, want reasoning", model.overlay)
+	}
+	if model.provider != "chatgpt" || model.model != "gpt-main" || model.reasoning != "high" {
+		t.Fatalf("selection mutated before confirm: %s/%s/%s", model.provider, model.model, model.reasoning)
+	}
+	if model.usage.InputTokens != 42 || model.usage.OutputTokens != 7 {
+		t.Fatalf("usage cleared before confirm: %+v", model.usage)
+	}
+	rendered := ansi.Strip(model.renderOverlay(100, 24))
+	for _, wanted := range []string{"THINKING LEVEL", "grok/grok-worker", "choose for the next turn", "medium"} {
+		if !strings.Contains(rendered, wanted) {
+			t.Fatalf("reasoning chain overlay missing %q:\n%s", wanted, rendered)
+		}
+	}
+
+	// Esc cancels without applying the pending model.
+	updated, _ = model.updateOverlayKey("esc")
+	model = updated.(AppModel)
+	if model.overlay != OverlayNone || model.pendingSessionModel != nil {
+		t.Fatalf("esc cleanup = overlay:%q pending:%#v", model.overlay, model.pendingSessionModel)
+	}
+	if model.provider != "chatgpt" || model.model != "gpt-main" || model.reasoning != "high" {
+		t.Fatalf("esc mutated selection: %s/%s/%s", model.provider, model.model, model.reasoning)
+	}
+
+	// Confirm applies provider/model/reasoning together.
+	model.openOverlay(OverlayModel)
+	for index, entry := range model.modelPickerEntries() {
+		if entry.Provider == "grok" && entry.Model.ID == "grok-worker" {
+			model.overlayCursor = index
+			break
+		}
+	}
+	updated, _ = model.activateOverlayOption()
+	model = updated.(AppModel)
+	levels := model.reasoningLevels()
+	for index, level := range levels {
+		if level == "low" {
+			model.overlayCursor = index
+			break
+		}
+	}
+	updated, _ = model.activateOverlayOption()
+	model = updated.(AppModel)
+	if model.provider != "grok" || model.model != "grok-worker" || model.reasoning != "low" {
+		t.Fatalf("confirmed selection = %s/%s/%s", model.provider, model.model, model.reasoning)
+	}
+	if model.overlay != OverlayNone || model.pendingSessionModel != nil {
+		t.Fatalf("confirm cleanup = overlay:%q pending:%#v", model.overlay, model.pendingSessionModel)
+	}
+	if model.usage.InputTokens != 0 || model.usage.OutputTokens != 0 {
+		t.Fatalf("usage should reset on model change: %+v", model.usage)
+	}
+
+	model.composer.SetValue("use chained model")
+	updated, startCmd := model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(AppModel)
+	if startCmd == nil {
+		t.Fatal("turn command is nil")
+	}
+	_ = startCmd()
+	if runtime.request.Provider != "grok" || runtime.request.Model != "grok-worker" || runtime.request.Reasoning != "low" {
+		t.Fatalf("turn request = %#v", runtime.request)
+	}
+
+	// Models without adjustable reasoning still apply immediately.
+	model.status = "Ready"
+	model.runID = ""
+	model.openOverlay(OverlayModel)
+	for index, entry := range model.modelPickerEntries() {
+		if entry.Provider == "chatgpt" && entry.Model.ID == "gpt-plain" {
+			model.overlayCursor = index
+			break
+		}
+	}
+	updated, _ = model.activateOverlayOption()
+	model = updated.(AppModel)
+	if model.overlay != OverlayNone || model.pendingSessionModel != nil {
+		t.Fatalf("plain model should apply immediately: overlay=%q pending=%#v", model.overlay, model.pendingSessionModel)
+	}
+	if model.provider != "chatgpt" || model.model != "gpt-plain" {
+		t.Fatalf("plain model selection = %s/%s", model.provider, model.model)
 	}
 }
 
@@ -3197,5 +3406,41 @@ func TestRecapCommandPaletteOpensRecap(t *testing.T) {
 	model = updated.(AppModel)
 	if len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionShowRecap || runtime.actions[0].SessionID != "session-1" {
 		t.Fatalf("recap palette actions = %#v", runtime.actions)
+	}
+}
+
+func TestClipboardImagePasteAttachesAndSubmits(t *testing.T) {
+	runtime := &configuredTurnRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if err := model.appendPendingImage(session.Attachment{ID: "1", Name: "a.png", MIME: "image/png", Path: "/tmp/a.png", Size: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if model.renderPendingAttachments(80) == "" {
+		t.Fatal("expected pending attachment strip")
+	}
+	model.composer.SetValue("what is in the image?")
+	updated, cmd := model.submit()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("submit cmd nil")
+	}
+	_ = cmd()
+	if len(model.pendingImages) != 0 {
+		t.Fatalf("pending images not cleared: %#v", model.pendingImages)
+	}
+	if len(model.transcript) != 1 || !strings.Contains(model.transcript[0].Content, "a.png") {
+		t.Fatalf("transcript = %#v", model.transcript)
+	}
+	if runtime.request.Prompt != "what is in the image?" || len(runtime.request.Images) != 1 || runtime.request.Images[0].Name != "a.png" {
+		t.Fatalf("turn request = %#v", runtime.request)
+	}
+}
+
+func TestClipboardImageResultMsgAppendsPending(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(clipboardImageResultMsg{attachment: session.Attachment{ID: "x", Name: "clip.png", MIME: "image/png", Path: "/tmp/clip.png", Size: 3}})
+	model = updated.(AppModel)
+	if len(model.pendingImages) != 1 || model.pendingImages[0].Name != "clip.png" {
+		t.Fatalf("pending = %#v", model.pendingImages)
 	}
 }

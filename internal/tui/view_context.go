@@ -320,9 +320,39 @@ func (m AppModel) renderContextUsage(width int) string {
 		cacheRateOnly = fmt.Sprintf("%s M%.1f%% A%.1f%%", cacheLabel, cacheRate, allRate)
 		compactCache = fmt.Sprintf("M%.0f/A%.0f%%", cacheRate, allRate)
 	}
+	details := make([]string, 0, 4)
+	if m.usage.UncachedInputTokens > 0 {
+		details = append(details, "U "+formatTokens(m.usage.UncachedInputTokens))
+	}
+	if m.usage.ReasoningTokens > 0 {
+		details = append(details, "R "+formatTokens(m.usage.ReasoningTokens))
+	}
+	if m.usage.CompactionInput > 0 || m.usage.CompactionOutput > 0 {
+		compaction := "CMP " + formatTokens(m.usage.CompactionInput) + "/" + formatTokens(m.usage.CompactionOutput)
+		if m.usage.CompactionInput > 0 {
+			compaction += fmt.Sprintf(" C%.0f%%", float64(min(m.usage.CompactionCached, m.usage.CompactionInput))*100/float64(m.usage.CompactionInput))
+		}
+		if m.usage.CompactionUncached > 0 {
+			compaction += " U" + formatTokens(m.usage.CompactionUncached)
+		}
+		if m.usage.CompactionReasoning > 0 {
+			compaction += " R" + formatTokens(m.usage.CompactionReasoning)
+		}
+		details = append(details, compaction)
+	}
+	if m.usage.LastRequestKind != "" {
+		details = append(details, m.usage.LastRequestKind)
+	}
+	if m.usage.LastTransport != "" {
+		details = append(details, m.usage.LastTransport)
+	}
+	detailSuffix := ""
+	if len(details) > 0 {
+		detailSuffix = " · " + strings.Join(details, " · ")
+	}
 	candidates := []string{
-		fmt.Sprintf("%s %s %s / %s · %.1f%% · %s", contextLabel, contextProgressBar(used, limit, 10), formatTokens(used), formatTokens(limit), percentage, cache),
-		fmt.Sprintf("%s %s/%s · %.1f%% · %s", contextLabel, formatTokens(used), formatTokens(limit), percentage, cacheRateOnly),
+		fmt.Sprintf("%s %s %s / %s · %.1f%% · %s%s", contextLabel, contextProgressBar(used, limit, 10), formatTokens(used), formatTokens(limit), percentage, cache, detailSuffix),
+		fmt.Sprintf("%s %s/%s · %.1f%% · %s%s", contextLabel, formatTokens(used), formatTokens(limit), percentage, cacheRateOnly, detailSuffix),
 		fmt.Sprintf("%s %s/%s %.0f%% C%s", contextLabel, formatTokens(used), formatTokens(limit), percentage, compactCache),
 		fmt.Sprintf("%s %.0f%%", contextLabel, percentage),
 	}
@@ -380,9 +410,9 @@ func (m AppModel) renderStatus(width int) string {
 		}
 		status += m.theme.Error.Render(" · " + m.errorBanner)
 	}
-	helpText := strings.Join([]string{"Drag copy", m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("footer.help.commands"), m.tr("status.help")}, "  ")
+	helpText := strings.Join([]string{"Drag copy", "Ctrl+V image", m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("footer.help.commands"), m.tr("status.help")}, "  ")
 	if width < 112 {
-		helpText = strings.Join([]string{"Drag copy", m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("status.help")}, "  ")
+		helpText = strings.Join([]string{"Drag copy", "Ctrl+V image", m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("status.help")}, "  ")
 	}
 	if width < 86 {
 		helpText = strings.Join([]string{"Drag copy", m.tr("footer.help.approval"), m.tr("status.help")}, "  ")

@@ -136,6 +136,7 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	}
 	service.SetConfigPath(paths.ConfigFile)
 	service.AttachDurable(sessions, coding)
+	service.AttachAttachments(filepath.Join(paths.DataDir, "attachments"))
 	service.AttachMemory(memory.NewService(store.DB(), cfg.Workspace.Root), recap.NewService(store.DB(), cfg.Workspace.Root))
 	service.AttachAuth(authentication, modelCatalog)
 	service.AttachSkills(skillCatalog)

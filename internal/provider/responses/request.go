@@ -2,8 +2,13 @@ package responses
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -16,6 +21,28 @@ type BuildOptions struct {
 	DefaultParallelTools      bool
 	DefaultReasoningEffort    string
 	ToolCallItemID            func(string) string
+}
+
+const (
+	UsageReporterExtraKey  = "azem_usage_reporter"
+	AttachmentRootExtraKey = "azem_attachment_root"
+	maxWireImages          = 6
+	maxWireImageBytes      = 8 << 20
+)
+
+type UsageDetails struct {
+	InputTokens     int
+	CachedTokens    int
+	OutputTokens    int
+	ReasoningTokens int
+	TotalTokens     int
+}
+
+type UsageReporter func(UsageDetails)
+
+func RequestUsageReporter(request hyprovider.Request) UsageReporter {
+	reporter, _ := request.ExtraBody[UsageReporterExtraKey].(UsageReporter)
+	return reporter
 }
 
 type wireRequest struct {
@@ -39,7 +66,7 @@ func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
 	if strings.TrimSpace(request.Model) == "" {
 		return nil, fmt.Errorf("responses request model is empty")
 	}
-	instructions, input, err := buildInput(request.Messages, options.ToolCallItemID)
+	instructions, input, err := buildInput(request.Messages, options.ToolCallItemID, strings.TrimSpace(stringExtra(request, AttachmentRootExtraKey)))
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +113,7 @@ func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
 	return json.Marshal(wire)
 }
 
-func buildInput(messages []message.Message, toolCallItemID func(string) string) (string, []any, error) {
+func buildInput(messages []message.Message, toolCallItemID func(string) string, attachmentRoot string) (string, []any, error) {
 	instructions := make([]string, 0, 2)
 	input := make([]any, 0, len(messages))
 	for _, current := range messages {
@@ -142,8 +169,12 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string) 
 				input = append(input, item)
 			}
 		case message.RoleUser, message.RoleCustom:
-			if current.Text != "" {
-				input = append(input, wireMessage("user", "input_text", current.Text))
+			item, ok, err := wireUserMessage(current, attachmentRoot)
+			if err != nil {
+				return "", nil, err
+			}
+			if ok {
+				input = append(input, item)
 			}
 		default:
 			return "", nil, fmt.Errorf("unsupported message role %q", current.Role)
@@ -166,6 +197,119 @@ func decodeProviderState(state json.RawMessage) ([]json.RawMessage, error) {
 
 func wireMessage(role string, contentType string, text string) map[string]any {
 	return map[string]any{"type": "message", "role": role, "content": []any{map[string]any{"type": contentType, "text": text}}}
+}
+
+type wireAttachment struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+	MIME string `json:"mime,omitempty"`
+	Path string `json:"path,omitempty"`
+	Size int64  `json:"size,omitempty"`
+}
+
+func wireUserMessage(current message.Message, attachmentRoot string) (map[string]any, bool, error) {
+	content := make([]any, 0, 4)
+	if text := strings.TrimSpace(current.Text); text != "" {
+		content = append(content, map[string]any{"type": "input_text", "text": text})
+	}
+	attachments, err := decodeWireAttachments(current.Metadata)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(attachments) > maxWireImages {
+		return nil, false, fmt.Errorf("responses request has %d images; maximum is %d", len(attachments), maxWireImages)
+	}
+	for _, att := range attachments {
+		part, err := wireInputImage(att, attachmentRoot)
+		if err != nil {
+			return nil, false, err
+		}
+		content = append(content, part)
+	}
+	if len(content) == 0 {
+		return nil, false, nil
+	}
+	return map[string]any{"type": "message", "role": "user", "content": content}, true, nil
+}
+
+func decodeWireAttachments(meta map[string]string) ([]wireAttachment, error) {
+	if meta == nil {
+		return nil, nil
+	}
+	raw := strings.TrimSpace(meta["azem.attachments"])
+	if raw == "" || raw == "[]" || raw == "null" {
+		return nil, nil
+	}
+	var atts []wireAttachment
+	if err := json.Unmarshal([]byte(raw), &atts); err != nil {
+		return nil, fmt.Errorf("decode responses image attachments: %w", err)
+	}
+	return atts, nil
+}
+
+func wireInputImage(att wireAttachment, attachmentRoot string) (map[string]any, error) {
+	path := strings.TrimSpace(att.Path)
+	if path == "" {
+		return nil, fmt.Errorf("image attachment %q is missing a path", att.Name)
+	}
+	if attachmentRoot == "" {
+		return nil, fmt.Errorf("image attachment %q has no trusted attachment root", att.Name)
+	}
+	root, err := filepath.EvalSymlinks(attachmentRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve attachment root: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve image %q: %w", firstNonEmpty(att.Name, path), err)
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return nil, fmt.Errorf("image attachment %q is outside the trusted attachment root", firstNonEmpty(att.Name, path))
+	}
+	file, err := os.Open(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("read image %q: %w", firstNonEmpty(att.Name, path), err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxWireImageBytes {
+		return nil, fmt.Errorf("image %q is not a regular file within the %d MiB limit", firstNonEmpty(att.Name, path), maxWireImageBytes>>20)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxWireImageBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read image %q: %w", firstNonEmpty(att.Name, path), err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("image %q is empty", firstNonEmpty(att.Name, path))
+	}
+	if len(data) > maxWireImageBytes {
+		return nil, fmt.Errorf("image %q exceeds the %d MiB limit", firstNonEmpty(att.Name, path), maxWireImageBytes>>20)
+	}
+	mimeType := strings.ToLower(strings.TrimSpace(strings.SplitN(http.DetectContentType(data[:min(len(data), 512)]), ";", 2)[0]))
+	if mimeType == "image/jpg" {
+		mimeType = "image/jpeg"
+	}
+	switch mimeType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+	default:
+		return nil, fmt.Errorf("image %q has unsupported detected type %q", firstNonEmpty(att.Name, path), mimeType)
+	}
+	url := "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
+	return map[string]any{
+		"type":      "input_image",
+		"image_url": url,
+		"detail":    "auto",
+	}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func boolExtra(request hyprovider.Request, key string) (bool, bool) {

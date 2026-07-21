@@ -16,6 +16,7 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	"github.com/Viking602/azem/internal/provider/responses"
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
 	"github.com/Viking602/go-hydaelyn/api"
 	"github.com/Viking602/go-hydaelyn/message"
@@ -522,7 +523,9 @@ func (r *subagentRuntime) execute(id string) {
 	var err error
 	childModel := profile.Model
 	contextTarget := parent.ContextTokenTarget
+	childContextWindow := 0
 	childDriver := parent.Driver
+	usageBudget := &providerUsageBudget{maxTokens: int64(r.cfg.Budget.MaxTokens)}
 	if parent.ResolveDriver != nil {
 		childModel, contextWindow, resolvedDriver, resolveErr := parent.ResolveDriver(ctx, profile.Provider, profile.Model, profile.Reasoning)
 		if resolveErr != nil {
@@ -530,7 +533,8 @@ func (r *subagentRuntime) execute(id string) {
 			return
 		}
 		childDriver = resolvedDriver
-		contextTarget, err = modelContextTokenTarget(childModel, contextWindow)
+		childContextWindow = contextWindow
+		contextTarget, err = modelContextTokenTarget(profile.Provider, childModel, contextWindow, 0)
 		if err != nil {
 			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
 			return
@@ -539,6 +543,7 @@ func (r *subagentRuntime) execute(id string) {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("model %q is not available from provider %s", profile.Model, profile.Provider)})
 		return
 	}
+	childDriver = &budgetedProviderDriver{inner: childDriver, budget: usageBudget}
 	childRun, err = parent.Coding.StartRun(ctx, prompt)
 	if err != nil {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("start child run: %w", err)})
@@ -576,6 +581,13 @@ func (r *subagentRuntime) execute(id string) {
 	}
 	skillSnapshot := parent.Coding.SkillSnapshot()
 	instructions := renderSubagentInstructions(profile)
+	if childContextWindow > 0 {
+		contextTarget, err = modelContextTokenTarget(profile.Provider, childModel, childContextWindow, estimateToolDefinitionTokens(governed))
+		if err != nil {
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
+			return
+		}
+	}
 	spec := hyagent.Spec{
 		Skills: skillSnapshot.Eager, AvailableSkills: skillSnapshot.Available,
 		Instructions: instructions, Model: childModel, Tools: toolNames,
@@ -585,16 +597,22 @@ func (r *subagentRuntime) execute(id string) {
 		},
 		ExtraBody: map[string]any{"prompt_cache_key": childRun.RunID},
 	}
-	meter := &compactionUsageMeter{}
-	meteredDriver := &compactionUsageDriver{inner: childDriver, meter: meter}
+	if parent.Host != nil && strings.TrimSpace(parent.Host.attachments.Root) != "" {
+		spec.ExtraBody[responses.AttachmentRootExtraKey] = parent.Host.attachments.Root
+	}
+	if parent.Host != nil && parent.Host.providers != nil {
+		if reporter := parent.Host.providers.responseUsageReporter(parent.Host, parent.SessionID, parent.ParentRunID, "subagent", profile.Provider, childModel, childDriver.Metadata().Name); reporter != nil {
+			spec.ExtraBody[responses.UsageReporterExtraKey] = reporter
+		}
+	}
 	contextManager := subagentTurnContext{instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
-		summarize: lazyCompactionSummarizer(parent.ResolveDriver, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, meter)}
+		summarize: lazyCompactionSummarizer(parent.ResolveDriver, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, r.compactionReporter(parent, parent.ParentRunID))}
 	if parent.Host != nil {
 		contextManager.compactHooks = parent.Host.autoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
 	}
 	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
 		Skills:    skillSnapshot.Registry,
-		Providers: hyprovider.Single(meteredDriver), Tools: tool.NewBus(governed...), ContextManager: contextManager,
+		Providers: hyprovider.Single(childDriver), Tools: tool.NewBus(governed...), ContextManager: contextManager,
 	})
 	if err != nil {
 		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", err)
@@ -922,4 +940,20 @@ func (r *subagentRuntime) maybeAutoWake(host *Service, run agentservice.Subagent
 		}
 		_ = r.store.SetCompletionDelivered(r.ctx, run.ID, true)
 	}()
+}
+
+func (r *subagentRuntime) compactionReporter(parent subagentParentRuntime, runID string) compactionUsageReporter {
+	if parent.Host == nil || strings.TrimSpace(parent.SessionID) == "" {
+		return nil
+	}
+	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens int) {
+		parent.Host.emit(parent.Host.ctx, Event{Kind: EventContextUsage, SessionID: parent.SessionID, RunID: runID, State: "reported", Data: map[string]string{
+			"inputTokens": fmt.Sprint(usage.InputTokens), "cachedInputTokens": fmt.Sprint(usage.CachedInputTokens),
+			"outputTokens": fmt.Sprint(usage.OutputTokens), "totalTokens": fmt.Sprint(usage.TotalTokens),
+			"reasoningTokens":     fmt.Sprint(reasoningTokens),
+			"uncachedInputTokens": fmt.Sprint(max(0, usage.InputTokens-usage.CachedInputTokens)),
+			"cacheStatus":         "reported", "aggregateOnly": "true", "requestKind": "compaction",
+			"provider": providerID, "model": modelID, "reasoning": reasoning, "transport": transport,
+		}})
+	}
 }

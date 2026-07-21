@@ -363,7 +363,7 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Agents.Main.MaxTokens != 0 || cfg.Agents.Main.MaxToolCalls != 0 || cfg.Agents.Main.MaxWallClockDuration != 0 {
+	if cfg.Agents.Main.MaxTokens != 300_000 || cfg.Agents.Main.MaxToolCalls != 64 || cfg.Agents.Main.MaxWallClockDuration != 30*time.Minute {
 		t.Fatalf("main agent budget = %#v", cfg.Agents.Main)
 	}
 	subagents := cfg.Agents.Subagents
@@ -371,8 +371,8 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		subagents.AwaitDuration != 10*time.Minute || !subagents.AutoWake {
 		t.Fatalf("subagent defaults = %#v", subagents)
 	}
-	if subagents.Budget.MaxTokens != 0 || subagents.Budget.MaxToolCalls != 64 ||
-		subagents.Budget.MaxTurns != 32 || subagents.Budget.MaxWallClockDuration != 20*time.Minute {
+	if subagents.Budget.MaxTokens != 150_000 || subagents.Budget.MaxToolCalls != 32 ||
+		subagents.Budget.MaxTurns != 16 || subagents.Budget.MaxWallClockDuration != 20*time.Minute {
 		t.Fatalf("subagent budget = %#v", subagents.Budget)
 	}
 	for _, name := range []string{"general-purpose", "explore", "plan", "review", "verify"} {

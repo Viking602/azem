@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
 	"github.com/Viking602/go-hydaelyn/api"
@@ -248,7 +247,7 @@ func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	inner := turnContext{instructions: "rules"}
+	inner := turnContext{instructions: "rules", summarize: func(context.Context, string) (string, error) { return "guidance summary", nil }}
 	manager := activeGuidanceContext{
 		inner: inner,
 		peek:  func() activeGuidanceSnapshot { return service.peekActiveGuidance("session-guided", "run-guided") },
@@ -351,7 +350,10 @@ func TestTurnContextRefreshesTodoReminderAfterMutation(t *testing.T) {
 			{ID: "item-2", Content: "verify", Status: session.TodoInProgress},
 		}}},
 	}
-	manager := turnContext{loadTodo: func(context.Context) (session.TodoList, error) { return latest, nil }}
+	manager := turnContext{
+		loadTodo:  func(context.Context) (session.TodoList, error) { return latest, nil },
+		summarize: func(context.Context, string) (string, error) { return "todo summary", nil },
+	}
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
 		message.NewText(message.RoleSystem, todoReminder(session.TodoList{Goal: "ship todo", Revision: 1})),
@@ -379,7 +381,10 @@ func TestTurnContextCompactPreservesFullSystemPrefixAndFreshTodo(t *testing.T) {
 	latest := session.TodoList{Goal: "ship", Revision: 4, Phases: []session.TodoPhase{{
 		ID: "phase", Title: "Build", Items: []session.TodoItem{{ID: "current", Content: "verify", Status: session.TodoInProgress}},
 	}}}
-	manager := turnContext{loadTodo: func(context.Context) (session.TodoList, error) { return latest, nil }}
+	manager := turnContext{
+		loadTodo:  func(context.Context) (session.TodoList, error) { return latest, nil },
+		summarize: func(context.Context, string) (string, error) { return "todo summary", nil },
+	}
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
 		message.NewText(message.RoleSystem, todoReminder(session.TodoList{Goal: "ship", Revision: 1})),
@@ -412,6 +417,21 @@ func TestTurnContextCompactPreservesFullSystemPrefixAndFreshTodo(t *testing.T) {
 	}
 }
 
+func TestTurnContextCompactRequiresModelAndPreservesHistory(t *testing.T) {
+	history := []message.Message{message.NewText(message.RoleSystem, "rules")}
+	for index := 0; index < 20; index++ {
+		role := message.RoleUser
+		if index%2 == 1 {
+			role = message.RoleAssistant
+		}
+		history = append(history, message.NewText(role, fmt.Sprintf("message %d", index)))
+	}
+	compacted, err := (turnContext{}).Compact(context.Background(), history)
+	if err == nil || !strings.Contains(err.Error(), "compaction model is unavailable") || !reflect.DeepEqual(compacted, history) {
+		t.Fatalf("local compact fallback history=%#v error=%v", compacted, err)
+	}
+}
+
 func TestTurnContextCompactToFitsTargetAndPreservesLatestRequest(t *testing.T) {
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
@@ -420,7 +440,8 @@ func TestTurnContextCompactToFitsTargetAndPreservesLatestRequest(t *testing.T) {
 		message.NewText(message.RoleUser, "current request"),
 	}
 	const target = 500
-	compacted, err := (turnContext{}).CompactTo(context.Background(), history, target)
+	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "current work summary", nil }}
+	compacted, err := manager.CompactTo(context.Background(), history, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +454,7 @@ func TestTurnContextCompactToFitsTargetAndPreservesLatestRequest(t *testing.T) {
 	if len(compacted) >= len(history) {
 		t.Fatalf("history was not compacted: %#v", compacted)
 	}
-	again, err := (turnContext{}).CompactTo(context.Background(), history, target)
+	again, err := manager.CompactTo(context.Background(), history, target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +501,7 @@ func TestTurnContextCompactToGeneratesRecursiveSummary(t *testing.T) {
 	}
 }
 
-func TestTurnContextToolPruningRetainsPreviousSummaryWithoutRegeneration(t *testing.T) {
+func TestTurnContextDoesNotLocallyPruneOversizedToolResult(t *testing.T) {
 	previous := message.NewText(message.RoleAssistant, compactionSummaryLabel+"## Objective\n- keep state")
 	previous.Kind = message.KindCompactionSummary
 	previous.Visibility = message.VisibilityPrivate
@@ -496,20 +517,8 @@ func TestTurnContextToolPruningRetainsPreviousSummaryWithoutRegeneration(t *test
 		return "unexpected", nil
 	}}
 	got, err := manager.CompactTo(context.Background(), history, 500)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if calls != 0 || message.ValidateCompleteTurns(got) != nil {
-		t.Fatalf("tool-only pruning calls=%d history=%#v", calls, got)
-	}
-	summaries := 0
-	for _, current := range got {
-		if current.Kind == message.KindCompactionSummary {
-			summaries++
-		}
-	}
-	if summaries != 1 || got[len(got)-1].ToolResult == nil || !strings.Contains(got[len(got)-1].ToolResult.Content, "truncated") {
-		t.Fatalf("tool-only pruning result = %#v", got)
+	if err == nil || !reflect.DeepEqual(got, history) || calls != 0 {
+		t.Fatalf("oversized tool result = calls:%d history:%#v error:%v", calls, got, err)
 	}
 }
 
@@ -525,12 +534,13 @@ func TestManualCompactionTailRetainsLatestUserBeforeAgentBlocks(t *testing.T) {
 	}
 }
 
-func TestCompactionUsageIsChargedToNextMainProviderTurn(t *testing.T) {
+func TestCompactionUsageIsReportedSeparatelyFromMainProviderTurn(t *testing.T) {
 	inner := &compactionTestDriver{streams: [][]hyprovider.Event{
 		{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 7, OutputTokens: 3, TotalTokens: 10}}},
 		{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 15, OutputTokens: 5, TotalTokens: 20}}},
 	}}
-	driver := &compactionUsageDriver{inner: inner}
+	var compactUsage hyprovider.Usage
+	driver := &compactionUsageDriver{inner: inner, report: func(usage hyprovider.Usage) { compactUsage = usage }}
 	compactStream, err := driver.Stream(context.Background(), hyprovider.Request{Metadata: map[string]string{compactionRequestMetadataKey: "true"}})
 	if err != nil {
 		t.Fatal(err)
@@ -546,26 +556,51 @@ func TestCompactionUsageIsChargedToNextMainProviderTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if done.Usage.InputTokens != 22 || done.Usage.OutputTokens != 8 || done.Usage.TotalTokens != 30 {
-		t.Fatalf("combined usage = %#v", done.Usage)
+	if compactUsage.InputTokens != 7 || compactUsage.OutputTokens != 3 || compactUsage.TotalTokens != 10 {
+		t.Fatalf("compaction usage = %#v", compactUsage)
+	}
+	if done.Usage.InputTokens != 15 || done.Usage.OutputTokens != 5 || done.Usage.TotalTokens != 20 {
+		t.Fatalf("main usage was contaminated = %#v", done.Usage)
 	}
 }
 
-func TestLazyCompactionRouteUsesIndependentDriverAndSharedUsage(t *testing.T) {
-	active := &compactionTestDriver{streams: [][]hyprovider.Event{{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{TotalTokens: 20}}}}}
+func TestProviderUsageBudgetIncludesCompactionWithoutMergingUsage(t *testing.T) {
+	inner := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{TotalTokens: 6}}},
+		{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{TotalTokens: 6}}},
+	}}
+	driver := &budgetedProviderDriver{inner: inner, budget: &providerUsageBudget{maxTokens: 10}}
+	for index := 0; index < 2; index++ {
+		stream, err := driver.Stream(context.Background(), hyprovider.Request{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Recv(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := driver.Stream(context.Background(), hyprovider.Request{}); !errors.Is(err, hyagent.ErrBudgetExhausted) {
+		t.Fatalf("combined usage budget error=%v", err)
+	}
+	if len(inner.requests) != 2 {
+		t.Fatalf("provider received %d requests after budget exhaustion", len(inner.requests))
+	}
+}
+
+func TestLazyCompactionRouteUsesIndependentDriverCacheKeyAndUsage(t *testing.T) {
 	compact := &compactionTestDriver{streams: [][]hyprovider.Event{{
 		{Kind: hyprovider.EventTextDelta, Text: "summary"},
 		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete, Usage: hyprovider.Usage{TotalTokens: 10}},
 	}}}
 	resolveCalls := 0
-	meter := &compactionUsageMeter{}
+	var reported hyprovider.Usage
 	summarize := lazyCompactionSummarizer(func(_ context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
 		resolveCalls++
 		if provider != "grok" || model != "summary-model" || reasoning != "high" {
 			t.Fatalf("resolved route = %s/%s/%s", provider, model, reasoning)
 		}
 		return model, 8_000, compact, nil
-	}, config.ModelRouteConfig{Provider: "grok", Model: "summary-model", Reasoning: "high"}, "chatgpt", "main-model", "low", meter)
+	}, config.ModelRouteConfig{Provider: "grok", Model: "summary-model", Reasoning: "high"}, "chatgpt", "main-model", "low", "session-1:compaction", nil, func(_, _, _, _ string, usage hyprovider.Usage, _ int) { reported = usage })
 	if resolveCalls != 0 {
 		t.Fatal("compaction driver resolved eagerly")
 	}
@@ -575,49 +610,182 @@ func TestLazyCompactionRouteUsesIndependentDriverAndSharedUsage(t *testing.T) {
 	if resolveCalls != 1 || len(compact.requests) != 1 || compact.requests[0].Model != "summary-model" {
 		t.Fatalf("resolve calls=%d requests=%#v", resolveCalls, compact.requests)
 	}
-	stream, err := (&compactionUsageDriver{inner: active, meter: meter}).Stream(context.Background(), hyprovider.Request{})
-	if err != nil {
-		t.Fatal(err)
+	request := compact.requests[0]
+	if request.ExtraBody["prompt_cache_key"] != "session-1:compaction" || request.Metadata["reasoning_effort"] != "high" {
+		t.Fatalf("compaction request metadata=%#v extra=%#v", request.Metadata, request.ExtraBody)
 	}
-	done, err := stream.Recv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if done.Usage.TotalTokens != 30 {
-		t.Fatalf("shared usage = %#v", done.Usage)
+	if reported.TotalTokens != 10 {
+		t.Fatalf("reported compaction usage = %#v", reported)
 	}
 }
 
-func TestCompactionSummarizerBoundsOversizedInput(t *testing.T) {
+func TestLazyCompactionDefaultsToLowReasoning(t *testing.T) {
+	compact := &compactionTestDriver{streams: [][]hyprovider.Event{{
+		{Kind: hyprovider.EventTextDelta, Text: "summary"},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}}}
+	summarize := lazyCompactionSummarizer(func(_ context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
+		if provider != "grok" || model != "grok-4.5" || reasoning != "low" {
+			t.Fatalf("inherited compaction route = %s/%s/%s", provider, model, reasoning)
+		}
+		return model, 500_000, compact, nil
+	}, config.ModelRouteConfig{}, "grok", "grok-4.5", "high", "session-1:compaction", nil, nil)
+	if _, err := summarize(context.Background(), "history"); err != nil {
+		t.Fatal(err)
+	}
+	request := compact.requests[0]
+	if request.Metadata["reasoning_effort"] != "low" || request.ExtraBody["prompt_cache_key"] != "session-1:compaction" {
+		t.Fatalf("default compaction request metadata=%#v extra=%#v", request.Metadata, request.ExtraBody)
+	}
+}
+
+func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) {
 	inner := &compactionTestDriver{streams: [][]hyprovider.Event{{
 		{Kind: hyprovider.EventTextDelta, Text: "## Objective\n- continue"},
 		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
 	}}}
 	transcript := "header\n<transcript>\n" + strings.Repeat("ROLE assistant\nTEXT old data\n", 500) + "ROLE user\nTEXT newest evidence\n</transcript>"
-	summary, err := compactionSummarizer(inner, "grok", "model", 1_000, 200)(context.Background(), transcript)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := compactionSummarizer(inner, "grok", "model", "low", "cache", 1_000, 200)(context.Background(), transcript); err == nil || len(inner.requests) != 0 {
+		t.Fatalf("oversized summary input requests=%d error=%v", len(inner.requests), err)
 	}
-	if !strings.Contains(summary, "Objective") || len(inner.requests) != 1 {
-		t.Fatalf("summary=%q requests=%d", summary, len(inner.requests))
-	}
-	requestText := inner.requests[0].Messages[1].Text
-	if inner.requests[0].ExtraBody["max_output_tokens"] != 200 || len(requestText) > contextTokenBytes(1_000-200-256) || !strings.Contains(requestText, "newest evidence") || !strings.Contains(requestText, "historical evidence truncated") {
-		t.Fatalf("bounded summary request (%d bytes) = %q", len(requestText), requestText)
+	oversizedOutput := &compactionTestDriver{streams: [][]hyprovider.Event{{
+		{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}}}
+	if _, err := compactionSummarizer(oversizedOutput, "grok", "model", "low", "cache", 1_000, 200)(context.Background(), "small input"); err == nil || !strings.Contains(err.Error(), "summary output requires") {
+		t.Fatalf("oversized summary output error=%v", err)
 	}
 	chatGPT := &compactionTestDriver{streams: [][]hyprovider.Event{{
 		{Kind: hyprovider.EventTextDelta, Text: "summary"},
 		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
 	}}}
-	if _, err := compactionSummarizer(chatGPT, "chatgpt", "model", 1_000, 200)(context.Background(), "history"); err != nil {
+	if _, err := compactionSummarizer(chatGPT, "chatgpt", "model", "low", "cache", 1_000, 200)(context.Background(), "history"); err != nil {
 		t.Fatal(err)
 	}
-	if len(chatGPT.requests[0].ExtraBody) != 0 {
-		t.Fatalf("ChatGPT summary sent unsupported extra body: %#v", chatGPT.requests[0].ExtraBody)
+	if extra := chatGPT.requests[0].ExtraBody; extra["prompt_cache_key"] != "cache" || extra["max_output_tokens"] != nil {
+		t.Fatalf("ChatGPT summary extra body: %#v", extra)
 	}
 }
 
-func TestTurnContextCompactToSummaryFailureFallsBackToDeterministicCompaction(t *testing.T) {
+func TestManualCompactWaitsForConfiguredModelAndPersistsSummary(t *testing.T) {
+	ctx := context.Background()
+	var responseCalls atomic.Int32
+	var responseBody string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/models":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-main","title":"Main","context_window":128000,"supported_reasoning_levels":["minimal"],"default_reasoning_level":"minimal","supports_tools":true},{"slug":"gpt-summary","title":"Summary","context_window":128000,"supported_reasoning_levels":["minimal"],"default_reasoning_level":"minimal","supports_tools":true}]}`))
+		case "/responses":
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Errorf("read compaction request: %v", err)
+				writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			responseBody = string(body)
+			responseCalls.Add(1)
+			writer.Header().Set("Content-Type", "text/event-stream")
+			writeProviderText(writer, "compact-response", "## Objective\n- preserve the task")
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	credentials, err := auth.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication := auth.NewService(store.DB(), credentials, chatgpt.NewClient(), grok.NewClient())
+	importPath := filepath.Join(t.TempDir(), "codex.json")
+	if err := os.WriteFile(importPath, []byte(`{"tokens":{"access_token":"access","refresh_token":"refresh","account_id":"acct"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authentication.ImportChatGPT(ctx, importPath); err != nil {
+		t.Fatal(err)
+	}
+	modelCatalog := catalog.NewService(store.DB(), authentication)
+	modelCatalog.Endpoints["chatgpt"] = server.URL + "/models"
+	modelCatalog.AdditionalEndpoints["chatgpt"] = nil
+	coding, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+
+	cfg := config.Default()
+	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-summary", Reasoning: "minimal"}
+	providerRuntime, err := NewProviderRuntime(cfg, authentication, modelCatalog, coding, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRuntime.ChatGPTEndpoint = server.URL + "/responses"
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1", Title: "Compact", ProviderID: "chatgpt", ModelID: "gpt-main", Reasoning: "minimal"}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 8; index++ {
+		kind := "user"
+		if index%2 == 1 {
+			kind = "assistant"
+		}
+		if err := sessions.AppendBlock(ctx, "session-1", session.Block{Kind: kind, Content: fmt.Sprintf("message %d", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	todo, err := sessions.UpdateTodo(ctx, "session-1", 0, func(todo *session.TodoList) error {
+		todo.Goal = "retain todo"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, cfg)
+	host.AttachDurable(sessions, coding)
+	host.AttachProviderRuntime(providerRuntime)
+
+	if err := host.ExecuteAction(ctx, Action{Kind: ActionCompact, Target: "session-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if responseCalls.Load() != 1 || !strings.Contains(responseBody, `"model":"gpt-summary"`) {
+		t.Fatalf("compaction requests=%d body=%s", responseCalls.Load(), responseBody)
+	}
+	var event Event
+	usageReported := false
+	for event.Kind != EventSessionLoaded {
+		event, err = host.NextEvent(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == EventContextUsage && event.Data["requestKind"] == "compaction" {
+			usageReported = event.Data["inputTokens"] == "10" && event.Data["outputTokens"] == "4" && event.Data["transport"] == "chatgpt-codex-responses"
+		}
+	}
+	if event.Kind != EventSessionLoaded || event.State != "compacted" || event.Todo == nil || event.Todo.Revision != todo.Revision {
+		t.Fatalf("compaction event = %+v", event)
+	}
+	if !usageReported {
+		t.Fatal("manual compaction usage was not reported independently")
+	}
+	projection, err := sessions.LoadProjection(ctx, "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 5 || projection.Blocks[0].State != "compacted" || !strings.Contains(projection.Blocks[0].Content, "preserve the task") {
+		t.Fatalf("persisted compaction = %#v", projection.Blocks)
+	}
+	if projection.Usage.CompactionInput != 10 || projection.Usage.CompactionOutput != 4 || projection.Usage.InputTokens != 0 || projection.Usage.OutputTokens != 0 {
+		t.Fatalf("persisted manual compaction usage = %#v", projection.Usage)
+	}
+}
+
+func TestTurnContextCompactToSummaryFailurePreservesHistory(t *testing.T) {
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "rules"),
 		message.NewText(message.RoleUser, "old"),
@@ -626,11 +794,8 @@ func TestTurnContextCompactToSummaryFailureFallsBackToDeterministicCompaction(t 
 	}
 	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "partial", errors.New("offline") }}
 	got, err := manager.CompactTo(context.Background(), history, 100)
-	if err != nil || reflect.DeepEqual(got, history) || got[len(got)-1].Text != "latest" {
+	if err == nil || !strings.Contains(err.Error(), "offline") || !reflect.DeepEqual(got, history) {
 		t.Fatalf("got=%#v err=%v", got, err)
-	}
-	if got[1].Kind != message.KindCompactionSummary || !strings.Contains(got[1].Text, "earlier messages omitted") {
-		t.Fatalf("fallback summary = %#v", got[1])
 	}
 }
 
@@ -692,7 +857,7 @@ func TestActiveGuidanceRemainsQueuedWhenCompactionFails(t *testing.T) {
 	}
 }
 
-func TestTurnContextCompactToTruncatesOversizedToolResultWithoutSplittingTurn(t *testing.T) {
+func TestTurnContextCompactToRejectsOversizedToolResultWithoutClipping(t *testing.T) {
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
 		message.NewText(message.RoleUser, "read the file"),
@@ -700,26 +865,14 @@ func TestTurnContextCompactToTruncatesOversizedToolResultWithoutSplittingTurn(t 
 		message.NewToolResult(message.ToolResult{ToolCallID: "read-1", Name: "read_file", Content: "prefix" + string([]byte{0xff}) + strings.Repeat("文件内容", 2_000)}),
 	}
 	const target = 1_000
-	compacted, err := (turnContext{}).CompactTo(context.Background(), history, target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := message.ValidateCompleteTurns(compacted); err != nil {
-		t.Fatalf("compaction split a tool turn: %v", err)
-	}
-	last := compacted[len(compacted)-1]
-	if last.ToolResult == nil || !strings.Contains(last.ToolResult.Content, "[tool result truncated") {
-		t.Fatalf("oversized tool result was not truncated: %#v", last)
-	}
-	if !utf8.ValidString(last.ToolResult.Content) {
-		t.Fatal("truncated tool result is not valid UTF-8")
-	}
-	if estimated := estimateContextTokens(compacted); estimated > target {
-		t.Fatalf("estimated compacted tokens = %d, target = %d", estimated, target)
+	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "summary", nil }}
+	compacted, err := manager.CompactTo(context.Background(), history, target)
+	if err == nil || !reflect.DeepEqual(compacted, history) {
+		t.Fatalf("oversized tool result history=%#v error=%v", compacted, err)
 	}
 }
 
-func TestTurnContextCompactToIgnoresAndClearsDuplicatedStructuredToolOutput(t *testing.T) {
+func TestTurnContextCompactToDoesNotClipDuplicatedStructuredToolOutput(t *testing.T) {
 	content := strings.Repeat("package recovery\n", 800)
 	structured, err := json.Marshal(map[string]any{"content": content, "lineCount": 800})
 	if err != nil {
@@ -735,19 +888,10 @@ func TestTurnContextCompactToIgnoresAndClearsDuplicatedStructuredToolOutput(t *t
 	}
 
 	const target = 2_000
-	compacted, err := (turnContext{}).CompactTo(context.Background(), history, target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if estimated := estimateContextTokens(compacted); estimated > target {
-		t.Fatalf("estimated compacted tokens = %d, target = %d", estimated, target)
-	}
-	result := compacted[len(compacted)-1].ToolResult
-	if result == nil || !strings.Contains(result.Content, "[tool result truncated") {
-		t.Fatalf("large tool result was not truncated: %#v", result)
-	}
-	if len(result.Structured) != 0 {
-		t.Fatalf("truncated result retained duplicated structured output (%d bytes)", len(result.Structured))
+	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "summary", nil }}
+	compacted, err := manager.CompactTo(context.Background(), history, target)
+	if err == nil || !reflect.DeepEqual(compacted, history) {
+		t.Fatalf("duplicated structured output history=%#v error=%v", compacted, err)
 	}
 }
 
@@ -777,7 +921,7 @@ func TestTurnContextCompactToUsesContentInsteadOfDuplicatedStructuredOutput(t *t
 	}
 }
 
-func TestTurnContextCompactToTruncatesMandatoryResultWhenOldResultsExhaustInitialShare(t *testing.T) {
+func TestTurnContextCompactToRejectsMandatoryResultThatCannotFit(t *testing.T) {
 	history := []message.Message{message.NewText(message.RoleSystem, "rules")}
 	for index := 0; index < 260; index++ {
 		id := fmt.Sprintf("old-%d", index)
@@ -794,21 +938,16 @@ func TestTurnContextCompactToTruncatesMandatoryResultWhenOldResultsExhaustInitia
 	)
 
 	const target = 64
-	compacted, err := (turnContext{}).CompactTo(context.Background(), history, target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if estimated := estimateContextTokens(compacted); estimated > target {
-		t.Fatalf("estimated compacted tokens = %d, target = %d", estimated, target)
-	}
-	if result := compacted[len(compacted)-1].ToolResult; result == nil || !strings.Contains(result.Content, "[tool result truncated") {
-		t.Fatalf("mandatory result was not truncated: %#v", result)
+	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "summary", nil }}
+	compacted, err := manager.CompactTo(context.Background(), history, target)
+	if err == nil || !reflect.DeepEqual(compacted, history) {
+		t.Fatalf("mandatory oversized result history=%#v error=%v", compacted, err)
 	}
 }
 
 func TestProviderStreamSinkDoesNotReportMissingUsageAsZero(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
-	if err := service.providerStreamSink("session", "run").Emit(context.Background(), stream.Frame{Kind: stream.FrameDone}); err != nil {
+	if err := service.providerStreamSink("session", "run", "grok", "model", "high", "xai-responses").Emit(context.Background(), stream.Frame{Kind: stream.FrameDone}); err != nil {
 		t.Fatal(err)
 	}
 	event, err := service.NextEvent(context.Background())
@@ -824,16 +963,25 @@ func TestProviderStreamSinkDoesNotReportMissingUsageAsZero(t *testing.T) {
 }
 
 func TestModelContextTokenTargetRequiresCatalogMetadataAndAvoidsOverflow(t *testing.T) {
-	if _, err := modelContextTokenTarget("missing", 0); err == nil {
+	if _, err := modelContextTokenTarget("grok", "missing", 0, 0); err == nil {
 		t.Fatal("missing context window was accepted")
 	}
 	maxInt := int(^uint(0) >> 1)
-	target, err := modelContextTokenTarget("large", maxInt)
+	target, err := modelContextTokenTarget("chatgpt", "large", maxInt, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if target <= 0 || target > maxInt {
 		t.Fatalf("large context target = %d", target)
+	}
+	if target, err := modelContextTokenTarget("grok", "grok-4.5", 500_000, 2_000); err != nil || target != 169_808 {
+		t.Fatalf("xAI long-context target = %d, error=%v", target, err)
+	}
+	if target, err := modelContextTokenTarget("grok", "grok-build", 256_000, 0); err != nil || target != 171_808 {
+		t.Fatalf("xAI build target = %d, error=%v", target, err)
+	}
+	if target, err := modelContextTokenTarget("chatgpt", "gpt", 500_000, 2_000); err != nil || target != 364_808 {
+		t.Fatalf("standard target = %d, error=%v", target, err)
 	}
 }
 
@@ -1281,15 +1429,15 @@ func TestProviderRuntimeSkillResourceRequiresActivation(t *testing.T) {
 func TestSkillAllowedToolsDoNotBypassApproval(t *testing.T) {
 	harness := newSkillRuntimeHarness(
 		t,
-		"---\nname: demo\ndescription: demo catalog\nallowed-tools: coding.shell\n---\nUse the shell when requested.\n",
+		"---\nname: demo\ndescription: demo catalog\nallowed-tools: coding.write_file\n---\nUse the governed file tool when requested.\n",
 		nil,
 		func(call int, body string, writer http.ResponseWriter) {
 			switch call {
 			case 1:
-				writeProviderToolCall(writer, "approval-1", "shell-approval", "coding.shell", `{"command":"printf skill-approval | tee approval-marker.txt"}`)
+				writeProviderToolCall(writer, "approval-1", "write-approval", "coding.write_file", `{"path":"approval-marker.txt","content":"skill-approval"}`)
 			case 2:
 				if !strings.Contains(body, "skill-approval") {
-					t.Errorf("approved shell output missing from second request: %s", body)
+					t.Errorf("approved file output missing from second request: %s", body)
 				}
 				writeProviderText(writer, "approval-2", "approved")
 			default:
@@ -1319,11 +1467,11 @@ func TestSkillAllowedToolsDoNotBypassApproval(t *testing.T) {
 		}
 		switch event.Kind {
 		case EventApprovalRequested:
-			if event.ToolCallID != "shell-approval" || event.Data["tool"] != "coding.shell" {
+			if event.ToolCallID != "write-approval" || event.Data["tool"] != "coding.write_file" {
 				t.Fatalf("approval event = %+v", event)
 			}
 			if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
-				t.Fatalf("shell command ran before approval, stat error = %v", err)
+				t.Fatalf("file was created before approval, stat error = %v", err)
 			}
 			if err := harness.service.ExecuteAction(context.Background(), Action{
 				Kind: ActionResolveApproval, Target: event.ApprovalID, Decision: "once",
