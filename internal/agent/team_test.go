@@ -35,6 +35,12 @@ func TestCodingSchedulerReplaysOneRevisionDeterministically(t *testing.T) {
 	if err := multiagent.ValidateDispatch(planner); err != nil {
 		t.Fatalf("planner dispatch invalid: %v", err)
 	}
+	if planner.Task.Budget == nil || planner.Task.Budget.MaxTokens != 0 || planner.Task.Budget.MaxToolCalls != 0 || planner.Task.Budget.MaxWallClock != 0 {
+		t.Fatalf("planner task budget = %#v, want unbounded", planner.Task.Budget)
+	}
+	if !byName[PlannerClass].LoopPolicy.UnlimitedIterations || byName[PlannerClass].LoopPolicy.MaxWallClock != 0 {
+		t.Fatalf("planner loop policy = %#v, want unbounded", byName[PlannerClass].LoopPolicy)
+	}
 	replayed := nextDispatch(t, scheduler, state, PlannerClass)
 	if !reflect.DeepEqual(planner, replayed) {
 		t.Fatalf("same state produced different dispatches:\nfirst=%#v\nsecond=%#v", planner, replayed)

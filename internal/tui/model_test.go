@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
@@ -947,8 +948,8 @@ func TestReadAndSkillToolResultsUseDisplaySummaries(t *testing.T) {
 		Kind: app.EventToolFinished, RunID: "run", ToolCallID: "read", State: "completed",
 		Text: "¶internal/skills/catalog.go#HASH\n3:import (\n4:\t\"embed\"\n5:)", Data: map[string]string{"name": "coding.read_file"},
 	})
-	if got := model.transcript[0].Content; got != "Read internal/skills/catalog.go · lines 3-5" {
-		t.Fatalf("read display summary = %q", got)
+	if got := model.transcript[0].Content; !strings.Contains(got, "¶internal/skills/catalog.go#HASH") || !strings.Contains(got, "4:\t\"embed\"") {
+		t.Fatalf("read source output was not retained for highlighting: %q", got)
 	}
 
 	model.updateTool(app.Event{
@@ -1522,11 +1523,66 @@ func TestDetailedUsageShowsReasoningCompactionAndTransport(t *testing.T) {
 		"inputTokens": "30000", "cachedInputTokens": "18000", "uncachedInputTokens": "12000", "cacheWriteTokens": "1000", "outputTokens": "4000", "reasoningTokens": "700",
 		"cacheStatus": "reported", "requestKind": "team", "aggregateOnly": "true", "transport": "xai-responses",
 	})
+	// Dense diagnostics belong in /status, not the footer strip.
 	footer := ansi.Strip(model.renderContextUsage(320))
-	for _, wanted := range []string{"U 40K", "W M10K/A13K", "R 3K", "CMP 20K/2K", "U15K", "W2K", "R500", "TEAM 30K/4K", "C60%", "U12K", "W1K", "R700", "team", "xai-responses"} {
-		if !strings.Contains(footer, wanted) {
-			t.Fatalf("detailed usage footer missing %q: %q", wanted, footer)
+	for _, unwanted := range []string{"U 40K", "CMP ", "TEAM ", "xai-responses"} {
+		if strings.Contains(footer, unwanted) {
+			t.Fatalf("footer still leaks diagnostic %q: %q", unwanted, footer)
 		}
+	}
+	report := strings.Join(model.statusReportLines(), "\n")
+	for _, wanted := range []string{
+		"Uncached input (U): 40K",
+		"Cache write (W): 10K main / 13K all",
+		"Reasoning tokens (R): 3K",
+		"Compaction (CMP): 20K in / 2K out",
+		"U 15K",
+		"W 2K",
+		"R 500",
+		"Team usage (TEAM): 30K in / 4K out",
+		"cache 60%",
+		"U 12K",
+		"W 1K",
+		"R 700",
+		"Last request kind: team",
+		"Transport: xai-responses",
+	} {
+		if !strings.Contains(report, wanted) {
+			t.Fatalf("status report missing %q:\n%s", wanted, report)
+		}
+	}
+}
+
+func TestStatusCommandOpensDiagnosticsOverlay(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "grok", "grok-4.5", "high", "single", "session-status")
+	model.status = "Ready"
+	model.usage.ContextLimit = 500_000
+	model.usage.InputTokens = 153_000
+	model.usage.UncachedInputTokens = 339
+	model.usage.ReasoningTokens = 8
+	model.usage.LastRequestKind = "main"
+	model.usage.LastTransport = "xai-responses"
+
+	command, ok, err := ParseCommand("/status")
+	if err != nil || !ok || command.Name != "status" {
+		t.Fatalf("ParseCommand(/status) = %#v ok=%v err=%v", command, ok, err)
+	}
+	updated, _ := model.executeCommand(command)
+	model = updated.(AppModel)
+	if model.overlay != OverlayStatus {
+		t.Fatalf("overlay = %q, want status", model.overlay)
+	}
+	content := ansi.Strip(model.View().Content)
+	for _, wanted := range []string{"RUNTIME STATUS", "Uncached input (U): 339", "Reasoning tokens (R): 8", "Last request kind: main", "Transport: xai-responses", "grok-4.5"} {
+		if !strings.Contains(content, wanted) {
+			t.Fatalf("status overlay missing %q:\n%s", wanted, content)
+		}
+	}
+
+	updated, _ = model.executeCommand(Command{Name: "status", Args: []string{"extra"}})
+	model = updated.(AppModel)
+	if model.errorBanner != "usage: /status" {
+		t.Fatalf("status usage error = %q", model.errorBanner)
 	}
 }
 
@@ -1772,7 +1828,7 @@ func TestViewFitsRealTerminalBoundsAcrossResponsiveLayouts(t *testing.T) {
 		height int
 	}{{1, 1}, {5, 4}, {12, 5}, {20, 8}, {39, 12}, {40, 12}, {80, 24}, {120, 40}}
 	overlays := []Overlay{
-		OverlayNone, OverlayHelp, OverlayCommand, OverlayProvider, OverlayModel, OverlayModelRoutes, OverlaySkills,
+		OverlayNone, OverlayHelp, OverlayStatus, OverlayCommand, OverlayProvider, OverlayModel, OverlayModelRoutes, OverlaySkills,
 		OverlayReasoning, OverlaySessions, OverlayApproval, OverlayCancel, OverlayDiff, OverlayAgents,
 		OverlayAgentDetail, OverlayAgentTypes, OverlayPersonas, OverlayMCP, OverlayRecovery, OverlayError,
 	}
@@ -3268,6 +3324,24 @@ func TestMemoryAndRecapCommandsAndOverlays(t *testing.T) {
 	}
 }
 
+func TestMemoryRecallAppearsInTranscriptWithoutOpeningOverlay(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single", "session-1")
+	model.applyEvent(app.Event{
+		Kind: app.EventMemoryState, SessionID: "session-1", State: "recalled",
+		Data: map[string]string{"count": "2"},
+	})
+	if model.overlay != OverlayNone {
+		t.Fatalf("memory recall opened overlay %q", model.overlay)
+	}
+	if len(model.transcript) != 1 || model.transcript[0].Kind != BlockHook {
+		t.Fatalf("memory recall transcript = %#v", model.transcript)
+	}
+	rendered := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 64), "\n"))
+	if !strings.Contains(rendered, "Recalled 2 workspace memories") {
+		t.Fatalf("memory recall is not visible: %q", rendered)
+	}
+}
+
 func TestRecapOverlayCachesLongLayoutAndOnlySlicesVisibleWindow(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	var summary strings.Builder
@@ -3371,6 +3445,19 @@ func TestRecapStatusFallsBackWhenSummaryHasNoPlainText(t *testing.T) {
 	}
 }
 
+func TestRecapStatusKeepsMutedDarkTreatment(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.recap = &recap.Recap{Summary: "Keep continuity visible"}
+	status := model.renderRecapStatus(80)
+	emptyBackground := fmt.Sprint(lipgloss.NewStyle().GetBackground())
+	if background := fmt.Sprint(model.theme.Muted.GetBackground()); background != emptyBackground {
+		t.Fatalf("muted recap background = %s, want unset (%s)", background, emptyBackground)
+	}
+	if !strings.Contains(ansi.Strip(status), "Keep continuity visible") {
+		t.Fatalf("recap text missing: %q", ansi.Strip(status))
+	}
+}
+
 func TestRecapStatusYieldsWhileUserIsTyping(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.recap = &recap.Recap{Summary: "Keep the transcript usable"}
@@ -3446,5 +3533,277 @@ func TestClipboardImageResultMsgAppendsPending(t *testing.T) {
 	model = updated.(AppModel)
 	if len(model.pendingImages) != 1 || model.pendingImages[0].Name != "clip.png" {
 		t.Fatalf("pending = %#v", model.pendingImages)
+	}
+}
+
+func TestSourceToolsRenderSyntaxAndStructuredGutters(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	search := Block{
+		Kind: BlockTool, Title: "coding.search", State: "completed",
+		Arguments: `{"query":"Remember","glob":"internal/**/*.go"}`,
+		Content: strings.Join([]string{
+			"¶internal/app/actions.go#7A99",
+			`56:const ActionRemember ActionKind = "remember"`,
+			"57:// Keep explicit memories private",
+			"¶internal/app/app.go#33A9",
+			"111:func (s *Service) AttachMemory() {}",
+		}, "\n"),
+	}
+	rendered := strings.Join(model.renderBlock(search, 0, 72), "\n")
+	plain := ansi.Strip(rendered)
+	for _, wanted := range []string{"SEARCH CODE", "internal/app/actions.go", "56 │ const", "internal/app/app.go", "111 │ func"} {
+		if !strings.Contains(strings.ToUpper(plain), strings.ToUpper(wanted)) {
+			t.Fatalf("source search missing %q:\n%s", wanted, plain)
+		}
+	}
+	if strings.Count(rendered, "\x1b[") < 8 {
+		t.Fatalf("search output lacks token-level syntax styling:\n%s", plain)
+	}
+	for _, line := range strings.Split(rendered, "\n") {
+		if ansi.StringWidth(line) > 74 {
+			t.Fatalf("search line width=%d, exceeds 74: %q", ansi.StringWidth(line), ansi.Strip(line))
+		}
+	}
+
+	read := Block{
+		Kind: BlockTool, Title: "coding.read_file", State: "completed",
+		Arguments: `{"path":"internal/app/app.go"}`,
+		Content:   "¶internal/app/app.go#33A9\n111:func answer() string { return \"ok\" }",
+	}
+	readRendered := strings.Join(model.renderBlock(read, 0, 72), "\n")
+	if !strings.Contains(ansi.Strip(readRendered), "111 │ func answer() string") || readRendered == rendered {
+		t.Fatalf("read_file did not use source rendering:\n%s", ansi.Strip(readRendered))
+	}
+}
+
+func TestSourceToolRenderingFitsNarrowWidths(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	block := Block{
+		Kind: BlockTool, Title: "coding.search", State: "completed",
+		Content: "¶internal/example/really_long_file_name.go#HASH\n123:func VeryLongFunctionName(value string) string { return value + \"suffix\" }",
+	}
+	for _, width := range []int{12, 18, 28} {
+		rendered := model.renderBlock(block, 0, width)
+		if len(rendered) < 2 {
+			t.Fatalf("width %d lost source rows: %#v", width, rendered)
+		}
+		for _, line := range rendered {
+			if ansi.StringWidth(line) > width+2 {
+				t.Fatalf("width %d rendered line width=%d: %q", width, ansi.StringWidth(line), ansi.Strip(line))
+			}
+		}
+	}
+}
+
+func TestToolCategoriesAndApprovalBodyUseDistinctMutedAccents(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	names := []string{"coding.search", "coding.read_file", "coding.edit_hashline", "coding.shell", "todo", "memory.search"}
+	foregrounds := make(map[string]string)
+	for _, name := range names {
+		_, accent := model.toolStyles(name)
+		foreground := fmt.Sprint(accent.GetForeground())
+		if previous := foregrounds[foreground]; previous != "" {
+			t.Fatalf("tool categories %s and %s share accent %s", previous, name, foreground)
+		}
+		foregrounds[foreground] = name
+	}
+	approval := Block{
+		Kind: BlockApproval, Title: "coding.edit_hashline", State: "reviewing",
+		Content: "Edit file · internal/app/app.go\nRisk: low\nReason: dry-run preview only",
+	}
+	rendered := strings.Join(model.renderBlock(approval, 0, 64), "\n")
+	plain := ansi.Strip(rendered)
+	for _, wanted := range []string{"APPROVAL", "Risk:", "low", "Reason:", "dry-run preview only"} {
+		if !strings.Contains(strings.ToUpper(plain), strings.ToUpper(wanted)) {
+			t.Fatalf("approval body missing %q:\n%s", wanted, plain)
+		}
+	}
+	if strings.Count(rendered, "\x1b[") < 5 {
+		t.Fatalf("approval body is still rendered as one flat color:\n%s", plain)
+	}
+}
+
+func TestTranscriptKindsUseDistinctMutedAccentsWithoutCardBackgrounds(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	styles := map[string]lipgloss.Style{
+		"user": model.theme.UserSurface, "assistant": model.theme.AssistantTag,
+		"thinking": model.theme.ThinkingTag, "tool": model.theme.ToolTag,
+		"agent": model.theme.AgentTag, "approval": model.theme.ApprovalTag,
+		"error": model.theme.ErrorTag,
+	}
+	emptyBackground := fmt.Sprint(lipgloss.NewStyle().GetBackground())
+	seen := make(map[string]string)
+	for kind, style := range styles {
+		if background := fmt.Sprint(style.GetBackground()); background != emptyBackground {
+			t.Fatalf("%s transcript accent has card background %s, want unset", kind, background)
+		}
+		foreground := fmt.Sprint(style.GetForeground())
+		if previous := seen[foreground]; previous != "" {
+			t.Fatalf("%s and %s share the same transcript accent", previous, kind)
+		}
+		seen[foreground] = kind
+	}
+
+	cases := []struct {
+		block Block
+		label string
+	}{
+		{Block{Kind: BlockAssistant, Content: "## Result\n\nDone.", State: "completed"}, "AZEM"},
+		{Block{Kind: BlockThinking, Content: "Checking constraints", State: "streaming"}, model.tr("block.thinking")},
+		{Block{Kind: BlockTool, Title: "coding.read_file", Content: "result", State: "completed"}, model.tr("block.tool")},
+		{Block{Kind: BlockAgent, Title: "reviewer", Content: "reviewing", State: "running"}, model.tr("block.agent")},
+		{Block{Kind: BlockApproval, Title: "shell", Content: "run command", State: "awaiting approval"}, model.tr("block.approval")},
+		{Block{Kind: BlockError, Title: "provider", Content: "request failed", State: "failed"}, model.tr("block.error")},
+	}
+	for _, test := range cases {
+		rendered := strings.Join(model.renderBlock(test.block, 0, 72), "\n")
+		if !strings.Contains(ansi.Strip(rendered), test.label) || !strings.Contains(rendered, "\x1b[") {
+			t.Fatalf("%s block lacks semantic label/style:\n%s", test.block.Kind, ansi.Strip(rendered))
+		}
+		for _, line := range strings.Split(rendered, "\n") {
+			if ansi.StringWidth(line) > 74 {
+				t.Fatalf("%s line width=%d, exceeds 74: %q", test.block.Kind, ansi.StringWidth(line), ansi.Strip(line))
+			}
+		}
+	}
+}
+
+func TestAttachmentStripUsesStyledLabelAndFitsWidth(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.pendingImages = []session.Attachment{{Name: "design.png"}, {Name: "trace.webp"}}
+	rendered := model.renderPendingAttachments(72)
+	plain := ansi.Strip(rendered)
+	if !strings.Contains(plain, "ATTACHMENTS 2/6") || !strings.Contains(plain, "design.png") || !strings.Contains(plain, "Esc remove last") {
+		t.Fatalf("attachment strip lacks hierarchy: %q", plain)
+	}
+	if ansi.StringWidth(rendered) != 72 || !strings.Contains(rendered, "\x1b[") {
+		t.Fatalf("attachment strip width/style invalid: width=%d value=%q", ansi.StringWidth(rendered), plain)
+	}
+}
+
+func TestComposerRendersSingleRoundedPanel(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	styles := model.composer.Styles()
+	if styles.Focused.Base.GetHorizontalFrameSize() != 0 || styles.Blurred.Base.GetHorizontalFrameSize() != 0 {
+		t.Fatal("textarea Base must remain unframed to avoid nested placeholder borders")
+	}
+	// Default bubbles CursorLine uses a solid background; clear it so the dock has no inner bar.
+	emptyBG := fmt.Sprint(lipgloss.NewStyle().GetBackground())
+	if bg := fmt.Sprint(styles.Focused.CursorLine.GetBackground()); bg != emptyBG {
+		t.Fatalf("focused CursorLine background = %s, want cleared (%s)", bg, emptyBG)
+	}
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(AppModel)
+	panel := ansi.Strip(model.renderComposer())
+	lines := strings.Split(panel, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("empty composer height = %d, want one 3-line panel:\n%s", len(lines), panel)
+	}
+	if !strings.HasPrefix(lines[0], "╭") || !strings.HasSuffix(lines[0], "╮") ||
+		!strings.HasPrefix(lines[1], "│") || !strings.HasSuffix(lines[1], "│") ||
+		!strings.HasPrefix(lines[2], "╰") || !strings.HasSuffix(lines[2], "╯") {
+		t.Fatalf("composer panel chrome is malformed:\n%s", panel)
+	}
+	if strings.Contains(lines[1], "╭") || strings.Contains(lines[1], "╰") {
+		t.Fatalf("composer contains a nested border:\n%s", panel)
+	}
+	for index, line := range lines {
+		if ansi.StringWidth(line) != 80 {
+			t.Fatalf("composer line %d width = %d, want 80", index, ansi.StringWidth(line))
+		}
+	}
+	view := model.View()
+	if view.Cursor == nil {
+		t.Fatal("composer cursor missing from docked view")
+	}
+	if view.Cursor.Position.X < 2 || view.Cursor.Position.Y < 2 {
+		t.Fatalf("composer cursor = %+v, expected offset inside external panel", view.Cursor.Position)
+	}
+}
+
+func TestDockFooterDeaggregatesOnSpaciousTerminal(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "grok", "grok-4.5", "high", "single")
+	model.approvalMode = ApprovalModeAutoReview
+	model.autoReviewAvailable = true
+	model.usage.ContextLimit = 500_000
+	model.usage.InputTokens = 153_000
+	model.usage.CacheInputTokens = 4_300_000
+	model.usage.CachedInputTokens = 4_100_000
+	model.usage.CacheReported = true
+	model.usage.MainCacheInput = 4_300_000
+	model.usage.MainCachedInput = 4_100_000
+	model.usage.MainCacheReported = true
+	model.status = "Ready"
+
+	if got := dockFooterLines(24, 100); got != 3 {
+		t.Fatalf("spacious footer lines = %d, want 3", got)
+	}
+	if got := dockFooterLines(10, 80); got != 2 {
+		t.Fatalf("medium footer lines = %d, want 2", got)
+	}
+	if got := dockFooterLines(5, 40); got != 1 {
+		t.Fatalf("compact footer lines = %d, want 1", got)
+	}
+
+	footer := ansi.Strip(model.renderDockFooter(100, 3))
+	lines := strings.Split(footer, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("dock footer height = %d, want 3:\n%s", len(lines), footer)
+	}
+	// Runtime identity, context meter, and help each own a row — no longer one jammed strip.
+	if !strings.Contains(lines[0], "Ready") || !strings.Contains(lines[0], "grok/grok-4.5") {
+		t.Fatalf("runtime strip missing status/model: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "CTX") || !strings.Contains(lines[1], "500K") || !strings.Contains(lines[1], "CACHE") {
+		t.Fatalf("context strip missing meter/cache: %q", lines[1])
+	}
+	// Primary occupancy and cache are separate facts; transport noise stays off the default strip.
+	if strings.Contains(lines[1], "xai-responses") || strings.Contains(lines[1], "U ") {
+		t.Fatalf("default context strip is still overloaded: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "Drag") || !strings.Contains(lines[2], "Ctrl+R") {
+		t.Fatalf("help strip missing shortcuts: %q", lines[2])
+	}
+	if strings.Contains(lines[0], "CTX") || strings.Contains(lines[1], "Ctrl+R") || strings.Contains(lines[2], "CTX") {
+		t.Fatalf("footer zones are still aggregated:\n%s", footer)
+	}
+
+	// Medium terminals keep metrics alone — shortcuts stay on the 3-line layout / compact status line.
+	medium := ansi.Strip(model.renderDockFooter(80, 2))
+	mediumLines := strings.Split(medium, "\n")
+	if len(mediumLines) != 2 || strings.Contains(medium, "Ctrl+R") {
+		t.Fatalf("medium footer should not mix help into metrics:\n%s", medium)
+	}
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	model = updated.(AppModel)
+	content := ansi.Strip(model.View().Content)
+	for _, wanted := range []string{"grok/grok-4.5", "CTX", "Drag", "SMART"} {
+		if !strings.Contains(content, wanted) {
+			t.Fatalf("spacious view missing %q:\n%s", wanted, content)
+		}
+	}
+}
+
+func TestMeasureViewLayoutReservesDockFooter(t *testing.T) {
+	layout := measureViewLayout(24, 100, 3, 0, 0)
+	if !layout.showChrome || layout.footerHeight != 3 {
+		t.Fatalf("spacious layout = %+v", layout)
+	}
+	// header(1) + rule(1) + footer(3) + composer >=1 leave body room.
+	if layout.bodyHeight < 10 || layout.composerHeight < 1 {
+		t.Fatalf("body/composer heights collapsed: %+v", layout)
+	}
+	if composerOffsetY(layout) != 2+layout.bodyHeight {
+		t.Fatalf("composer offset = %d, want %d", composerOffsetY(layout), 2+layout.bodyHeight)
+	}
+
+	medium := measureViewLayout(8, 40, 1, 0, 0)
+	if medium.footerHeight != 1 || !medium.showChrome {
+		t.Fatalf("medium layout = %+v", medium)
+	}
+	tiny := measureViewLayout(5, 40, 1, 0, 0)
+	if tiny.footerHeight != 1 || tiny.showChrome {
+		t.Fatalf("tiny layout = %+v", tiny)
 	}
 }

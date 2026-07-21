@@ -882,7 +882,7 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 	host.mu.Unlock()
 	host.wg.Add(1)
 	originalPrompt := firstNonempty(run.Metadata["original_prompt"], request.Prompt)
-	request.historicalContext = host.loadHistoricalContext(host.ctx, request.SessionID, originalPrompt)
+	request.historicalContext = host.loadTurnHistoricalContext(host.ctx, request.SessionID, originalPrompt)
 	go host.runResumedProviderTeam(runCtx, request, runID, originalPrompt, resolution)
 	return nil
 }

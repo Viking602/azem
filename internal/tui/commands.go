@@ -89,6 +89,7 @@ var slashCommands = []SlashCommand{
 	{Name: "memory", Usage: "/memory [query]"}, {Name: "remember", Usage: "/remember <text>"},
 	{Name: "forget", Usage: "/forget <memory-id>"}, {Name: "recap", Usage: "/recap"},
 	{Name: "reconcile", Usage: "/reconcile <attempt-id> <result>"}, {Name: "cancel", Usage: "/cancel"},
+	{Name: "status", Usage: "/status"},
 	{Name: "language", Usage: "/language <en|zh-CN>"}, {Name: "help", Usage: "/help"}, {Name: "quit", Usage: "/quit"},
 }
 

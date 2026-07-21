@@ -67,12 +67,16 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		return m.renderAgentDetailOverlay(width, height)
 	}
 	maxBoxWidth := 82
-	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes {
+	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes || m.overlay == OverlayStatus {
 		maxBoxWidth = 110
 	}
 	boxWidth := min(maxBoxWidth, max(3, width-2))
 	innerWidth := max(1, boxWidth-2)
-	innerHeight := max(1, min(height-2, 20))
+	maxInnerHeight := 20
+	if m.overlay == OverlayStatus {
+		maxInnerHeight = 28
+	}
+	innerHeight := max(1, min(height-2, maxInnerHeight))
 	title, subtitle := m.overlayHeading()
 	var description []string
 	if m.overlay != OverlayRecap {
@@ -372,6 +376,8 @@ func (m AppModel) overlayHeading() (string, string) {
 	switch m.overlay {
 	case OverlayHelp:
 		return "Keyboard help", "Every action remains keyboard reachable"
+	case OverlayStatus:
+		return m.tr("overlay.status.title"), m.tr("overlay.status.subtitle")
 	case OverlayCommand:
 		return m.tr("overlay.command.title"), m.tr("overlay.command.subtitle")
 	case OverlayProvider:
@@ -464,8 +470,10 @@ func (m AppModel) overlayDescription() []string {
 			"Ctrl+P commands · Ctrl+M model · Ctrl+R reasoning · Shift+Tab approval",
 			"Ctrl+B agents · PageUp/PageDown transcript · Tab cards",
 			"/login /logout /provider /models /skills /skill /new /sessions /resume /compact",
-			"/team /agents /mcp /reconcile /cancel /help /quit",
+			"/team /agents /mcp /status /reconcile /cancel /help /quit",
 		}
+	case OverlayStatus:
+		return m.statusReportLines()
 	case OverlayProvider:
 		if m.overlayPurpose == "login" {
 			return []string{
@@ -827,7 +835,7 @@ func (m AppModel) overlayFooter() string {
 		return "↑/↓ select · Enter inspect · /reconcile confirms an unknown side effect · Esc close"
 	case OverlayError:
 		return "Q quit · Esc return"
-	case OverlayHelp, OverlayDiff:
+	case OverlayHelp, OverlayDiff, OverlayStatus:
 		return "↑/↓ scroll · Esc close"
 	default:
 		return "↑/↓ select · Enter confirm · Esc close"
@@ -852,7 +860,7 @@ func (m AppModel) overlayFooterForWidth(width int) string {
 		return "↑/↓ scroll · Esc back"
 	case OverlayError:
 		return "Q quit · Esc back"
-	case OverlayHelp, OverlayDiff:
+	case OverlayHelp, OverlayDiff, OverlayStatus:
 		return "↑/↓ · Esc close"
 	default:
 		return "↑/↓ · Enter · Esc close"

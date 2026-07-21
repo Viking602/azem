@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/session"
@@ -127,10 +128,15 @@ func (m AppModel) renderPendingAttachments(width int) string {
 		if name == "" {
 			name = filepath.Base(att.Path)
 		}
-		names = append(names, name)
+		names = append(names, m.theme.Attachment.Render(name))
 	}
-	label := fmt.Sprintf("📎 %d image(s): %s  ·  esc removes last", len(m.pendingImages), strings.Join(names, ", "))
-	return m.theme.Muted.Render(padOrTrim(label, width))
+	label := m.theme.AttachmentTag.Render(fmt.Sprintf("ATTACHMENTS %d/%d", len(m.pendingImages), maxPendingImages))
+	content := label + "  " + strings.Join(names, m.theme.MetaDivider.Render("  ·  "))
+	hint := m.theme.HelpKey.Render("Esc") + m.theme.HelpDesc.Render(" remove last")
+	if ansi.StringWidth(content)+ansi.StringWidth(hint)+4 <= width {
+		content = joinSides(content, hint+" ", width)
+	}
+	return padOrTrim(content, width)
 }
 
 func formatUserContent(text string, atts []session.Attachment) string {

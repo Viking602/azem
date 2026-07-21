@@ -508,33 +508,16 @@ func summarizeReadFile(arguments, output string) string {
 		EndLine   int    `json:"endLine"`
 	}
 	_ = json.Unmarshal([]byte(arguments), &input)
-	path := input.Path
-	start, end := 0, 0
-	for _, line := range strings.Split(output, "\n") {
-		if path == "" && strings.HasPrefix(line, "¶") {
-			path = strings.TrimPrefix(strings.SplitN(line, "#", 2)[0], "¶")
-		}
-		prefix, _, found := strings.Cut(line, ":")
-		lineNumber, err := strconv.Atoi(strings.TrimSpace(prefix))
-		if !found || err != nil || lineNumber < 1 {
-			continue
-		}
-		if start == 0 || lineNumber < start {
-			start = lineNumber
-		}
-		if lineNumber > end {
-			end = lineNumber
-		}
-	}
-	if start == 0 {
-		start = input.StartLine
-		end = input.EndLine
-	}
-	if path == "" {
+	// Preserve governed source output for syntax highlighting, but retain the
+	// compact summary for plain-text/error results that have no line protocol.
+	if strings.Contains(output, "\n") && (strings.Contains(output, "\n¶") || strings.HasPrefix(output, "¶")) {
 		return output
 	}
-	if start > 0 && end >= start {
-		return fmt.Sprintf("Read %s · lines %d-%d", path, start, end)
+	if input.Path == "" {
+		return output
 	}
-	return "Read " + path
+	if input.StartLine > 0 && input.EndLine >= input.StartLine {
+		return fmt.Sprintf("Read %s · lines %d-%d", input.Path, input.StartLine, input.EndLine)
+	}
+	return "Read " + input.Path
 }

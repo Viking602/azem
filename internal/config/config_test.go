@@ -307,6 +307,26 @@ func TestLoadOverridesMainAgentBudgets(t *testing.T) {
 	}
 }
 
+func TestLoadSparseConfigKeepsCodingBudgetsUnbounded(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "version: 1\ndefaults:\n  language: zh-CN\n  approval_mode: auto_review\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agents.Main.MaxTokens != 0 || cfg.Agents.Main.MaxToolCalls != 0 || cfg.Agents.Main.MaxWallClockDuration != 0 {
+		t.Fatalf("sparse config main budget = %#v, want unbounded", cfg.Agents.Main)
+	}
+	budget := cfg.Agents.Subagents.Budget
+	if budget.MaxTokens != 0 || budget.MaxToolCalls != 0 || budget.MaxTurns != 0 || budget.MaxWallClockDuration != 0 {
+		t.Fatalf("sparse config subagent budget = %#v, want unbounded", budget)
+	}
+}
+
 func TestResolveReferenceRequiresExplicitScheme(t *testing.T) {
 	if _, err := ResolveReference("literal-secret", os.LookupEnv, nil); err == nil {
 		t.Fatal("ResolveReference accepted a literal secret")
@@ -366,7 +386,7 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	if !cfg.Skills.Enabled || cfg.Skills.TrustProject {
 		t.Fatalf("skill defaults = %#v, want enabled with project trust disabled", cfg.Skills)
 	}
-	if cfg.Agents.Main.MaxTokens != 0 || cfg.Agents.Main.MaxToolCalls != 64 || cfg.Agents.Main.MaxWallClockDuration != 30*time.Minute {
+	if cfg.Agents.Main.MaxTokens != 0 || cfg.Agents.Main.MaxToolCalls != 0 || cfg.Agents.Main.MaxWallClockDuration != 0 {
 		t.Fatalf("main agent budget = %#v", cfg.Agents.Main)
 	}
 	subagents := cfg.Agents.Subagents
@@ -374,8 +394,8 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		subagents.AwaitDuration != 10*time.Minute || !subagents.AutoWake {
 		t.Fatalf("subagent defaults = %#v", subagents)
 	}
-	if subagents.Budget.MaxTokens != 0 || subagents.Budget.MaxToolCalls != 32 ||
-		subagents.Budget.MaxTurns != 16 || subagents.Budget.MaxWallClockDuration != 20*time.Minute {
+	if subagents.Budget.MaxTokens != 0 || subagents.Budget.MaxToolCalls != 0 ||
+		subagents.Budget.MaxTurns != 0 || subagents.Budget.MaxWallClockDuration != 0 {
 		t.Fatalf("subagent budget = %#v", subagents.Budget)
 	}
 	for _, name := range []string{"general-purpose", "explore", "plan", "review", "verify"} {
@@ -391,6 +411,7 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.AwaitTimeout = "30m"
+	invalid.Agents.Subagents.Budget.MaxWallClock = "20m"
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("await timeout beyond wall-clock budget was accepted")
 	}
@@ -400,9 +421,19 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		t.Fatal("negative subagent token budget was accepted")
 	}
 	invalid = Default()
-	invalid.Agents.Subagents.Budget.MaxToolCalls = 0
+	invalid.Agents.Subagents.Budget.MaxToolCalls = -1
 	if err := invalid.Validate(); err == nil {
-		t.Fatal("zero tool-call budget was accepted")
+		t.Fatal("negative tool-call budget was accepted")
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.Budget.MaxTurns = -1
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative turn budget was accepted")
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.Budget.MaxWallClock = "-1s"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative subagent wall-clock budget was accepted")
 	}
 	invalid = Default()
 	invalid.Agents.Main.MaxTokens = -1

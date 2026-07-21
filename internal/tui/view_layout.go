@@ -11,7 +11,7 @@ import (
 )
 
 var commandPaletteOptions = []string{
-	"login", "provider", "models", "model-routing", "skills", "reasoning", "sessions", "new", "recap", "agents", "mcp", "cancel", "help", "quit",
+	"login", "provider", "models", "model-routing", "skills", "reasoning", "sessions", "new", "recap", "status", "agents", "mcp", "cancel", "help", "quit",
 }
 
 type overlayOption struct {
@@ -66,7 +66,7 @@ func (m AppModel) View() tea.View {
 		return view
 	}
 	header := m.renderHeader(width)
-	composer := m.composer.View()
+	composer := m.renderComposer()
 	attachments := m.renderPendingAttachments(width)
 	attachmentRows := 0
 	if attachments != "" {
@@ -79,16 +79,14 @@ func (m AppModel) View() tea.View {
 		recapRows = 1
 	}
 	composerLines := strings.Count(composer, "\n") + 1 + attachmentRows
-	layout := measureViewLayout(height, composerLines, len(suggestions), recapRows)
-	sections := make([]string, 0, 9)
+	layout := measureViewLayout(height, width, composerLines, len(suggestions), recapRows)
+	sections := make([]string, 0, 10)
 	if layout.showChrome {
+		// Top chrome only — the rounded composer dock replaces the old bottom rule.
 		sections = append(sections, header, m.theme.Border.Render(strings.Repeat("─", width)))
 	}
 	if layout.bodyHeight > 0 {
 		sections = append(sections, m.renderBody(width, layout.bodyHeight))
-	}
-	if layout.showChrome {
-		sections = append(sections, m.theme.Border.Render(strings.Repeat("─", width)))
 	}
 	if layout.suggestionHeight > 0 {
 		sections = append(sections, m.renderCommandSuggestions(width, layout.suggestionHeight, suggestions))
@@ -102,15 +100,13 @@ func (m AppModel) View() tea.View {
 	// Keep one row of the measured composer block for the attachment strip.
 	composerHeight := max(1, layout.composerHeight-attachmentRows)
 	sections = append(sections, fitViewport(composer, width, composerHeight))
-	if layout.showModelStatus {
-		sections = append(sections, m.renderModelStatus(width))
-	}
-	if layout.showStatus {
-		sections = append(sections, m.renderStatus(width))
+	if layout.footerHeight > 0 {
+		sections = append(sections, m.renderDockFooter(width, layout.footerHeight))
 	}
 	view := tea.NewView(fitViewport(strings.Join(sections, "\n"), width, height))
 	if cursor := m.composer.Cursor(); cursor != nil {
-		cursor.Position.Y += composerOffsetY(layout) + attachmentRows
+		cursor.Position.X += m.theme.PanelFocused.GetPaddingLeft() + m.theme.PanelFocused.GetBorderLeftSize()
+		cursor.Position.Y += composerOffsetY(layout) + attachmentRows + m.theme.PanelFocused.GetPaddingTop() + m.theme.PanelFocused.GetBorderTopSize()
 		view.Cursor = cursor
 	}
 	view.AltScreen = true
@@ -118,11 +114,18 @@ func (m AppModel) View() tea.View {
 	view.MouseMode = tea.MouseModeCellMotion
 	view.WindowTitle = "Azem"
 	return view
+}
 
+func (m AppModel) renderComposer() string {
+	style := m.theme.PanelBlurred
+	if m.composer.Focused() {
+		style = m.theme.PanelFocused
+	}
+	return style.Render(m.composer.View())
 }
 
 func (m AppModel) composerBlockLines() int {
-	lines := strings.Count(m.composer.View(), "\n") + 1
+	lines := strings.Count(m.renderComposer(), "\n") + 1
 	if len(m.pendingImages) > 0 {
 		lines++
 	}
@@ -132,7 +135,7 @@ func (m AppModel) composerBlockLines() int {
 func composerOffsetY(layout viewLayout) int {
 	offset := layout.bodyHeight + layout.suggestionHeight + layout.recapRows
 	if layout.showChrome {
-		offset += 3 // header and the separators above and below the body
+		offset += 2 // header + top separator (composer dock owns the lower edge)
 	}
 	return offset
 }
@@ -142,28 +145,27 @@ type viewLayout struct {
 	composerHeight   int
 	suggestionHeight int
 	recapRows        int
+	footerHeight     int
 	showChrome       bool
 	showModelStatus  bool
 	showStatus       bool
 }
 
-func measureViewLayout(height, composerHeight, suggestionCount, recapRows int) viewLayout {
+func measureViewLayout(height, width, composerHeight, suggestionCount, recapRows int) viewLayout {
 	height = max(1, height)
+	width = max(1, width)
+	footerHeight := dockFooterLines(height, width)
 	layout := viewLayout{
 		showChrome:      height >= 6,
-		showModelStatus: height >= 10,
-		showStatus:      height >= 2,
+		footerHeight:    footerHeight,
+		showModelStatus: footerHeight >= 2,
+		showStatus:      footerHeight >= 1,
 	}
 	fixedHeight := 0
 	if layout.showChrome {
-		fixedHeight += 3 // header and two separators
+		fixedHeight += 2 // header + top separator
 	}
-	if layout.showModelStatus {
-		fixedHeight++
-	}
-	if layout.showStatus {
-		fixedHeight++
-	}
+	fixedHeight += layout.footerHeight
 	layout.recapRows = min(max(0, recapRows), 1)
 	fixedHeight += layout.recapRows
 	available := max(1, height-fixedHeight)
@@ -178,6 +180,21 @@ func measureViewLayout(height, composerHeight, suggestionCount, recapRows int) v
 		layout.bodyHeight -= layout.suggestionHeight
 	}
 	return layout
+}
+
+// dockFooterLines chooses how many meta rows fit under the composer dock.
+// Spacious terminals get de-aggregated runtime / context / help strips.
+func dockFooterLines(height, width int) int {
+	switch {
+	case height >= 14 && width >= 72:
+		return 3
+	case height >= 10:
+		return 2
+	case height >= 2:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func (m AppModel) renderHeader(width int) string {
@@ -243,7 +260,7 @@ func (m AppModel) transcriptBounds() (left int, top int, width int, height int) 
 	if m.visibleRecapStatus(width, max(1, m.height)) != "" {
 		recapRows = 1
 	}
-	layout := measureViewLayout(max(1, m.height), m.composerBlockLines(), len(m.visibleCommandSuggestions()), recapRows)
+	layout := measureViewLayout(max(1, m.height), width, m.composerBlockLines(), len(m.visibleCommandSuggestions()), recapRows)
 	if layout.showChrome {
 		top = 2
 	}
@@ -446,7 +463,7 @@ func (m AppModel) transcriptViewportSize() (int, int) {
 	if m.visibleRecapStatus(width, height) != "" {
 		recapRows = 1
 	}
-	layout := measureViewLayout(height, m.composerBlockLines(), len(suggestions), recapRows)
+	layout := measureViewLayout(height, width, m.composerBlockLines(), len(suggestions), recapRows)
 	bodyHeight := layout.bodyHeight
 	if width >= 104 && bodyHeight >= 16 {
 		width -= min(31, width/3) + 1

@@ -96,6 +96,8 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	} else {
 		command = exec.CommandContext(commandCtx, "/bin/sh", "-lc", input.Command)
 	}
+	configureShellCommand(command)
+	command.WaitDelay = time.Second
 	command.Dir = d.root
 	output := &boundedShellBuffer{limit: maxShellOutput}
 	command.Stdout = output

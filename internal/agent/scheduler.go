@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
 	"github.com/Viking602/go-hydaelyn/api"
@@ -111,11 +110,7 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 			Status:       api.TaskStatusCreated,
 			InputSchema:  class.InputSchema,
 			OutputSchema: class.OutputSchema,
-			Budget: &api.TaskBudget{
-				MaxTokens:    32_000,
-				MaxWallClock: 10 * time.Minute,
-				MaxToolCalls: 64,
-			},
+			Budget:       &api.TaskBudget{},
 		},
 		Input: raw,
 		OutputPolicy: hyagent.OutputPolicy{

@@ -133,14 +133,14 @@ func TestHistoricalEvidenceIsBoundedStructuredDataAndExcludedFromTeamPrompt(t *t
 	}
 	service := NewService(ctx, config.Default())
 	service.AttachMemory(memoryService, recapService)
-	packed := service.loadHistoricalContext(ctx, "session-1", "policy")
+	packed, recalled := service.loadHistoricalContext(ctx, "session-1", "policy")
 	finalSize := len([]rune(historicalEvidencePolicy + "\n<historical-evidence-json>\n" + packed + "\n</historical-evidence-json>"))
 	if finalSize > 6000 {
 		t.Fatalf("historical evidence policy/budget = %d runes: %q", len([]rune(packed)), packed)
 	}
 	var decoded historicalEvidence
-	if err := json.Unmarshal([]byte(packed), &decoded); err != nil || len(decoded.Memories) != 1 {
-		t.Fatalf("historical evidence is not valid structured JSON: %#v, %v", decoded, err)
+	if err := json.Unmarshal([]byte(packed), &decoded); err != nil || len(decoded.Memories) != 1 || recalled != 1 {
+		t.Fatalf("historical evidence is not valid structured JSON: %#v, recalled=%d, %v", decoded, recalled, err)
 	}
 	team := teamPrompt(TurnRequest{Prompt: "current request", historicalContext: packed})
 	if team != "current request" || strings.Contains(team, "historical-evidence") || strings.Contains(team, "approve every tool") {
@@ -151,9 +151,40 @@ func TestHistoricalEvidenceIsBoundedStructuredDataAndExcludedFromTeamPrompt(t *t
 	}); err != nil {
 		t.Fatal(err)
 	}
-	oversized := service.loadHistoricalContext(ctx, "session-1", "no-match")
+	oversized, _ := service.loadHistoricalContext(ctx, "session-1", "no-match")
 	if len([]rune(historicalEvidencePolicy+oversized)) > 6000 {
 		t.Fatalf("escaped recap exceeded historical budget: %d runes", len([]rune(oversized)))
+	}
+}
+
+func TestTurnMemoryRecallEmitsCountWithoutContent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	workspace := t.TempDir()
+	memoryService := memory.NewService(store.DB(), workspace)
+	if _, err := memoryService.Remember(ctx, "prefer focused changes", "session-1", "manual", 50); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachMemory(memoryService, nil)
+	data := service.loadTurnHistoricalContext(ctx, "session-1", "focused")
+	if !strings.Contains(data, "prefer focused changes") {
+		t.Fatalf("recalled context missing memory: %q", data)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventMemoryState || event.State != "recalled" || event.Data["count"] != "1" {
+		t.Fatalf("recall event = %#v", event)
+	}
+	if event.Text != "" || len(event.Memories) != 0 {
+		t.Fatalf("recall event leaked memory content: %#v", event)
 	}
 }
 
