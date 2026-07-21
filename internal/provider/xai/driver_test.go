@@ -2,6 +2,7 @@ package xai
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,15 +25,43 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 }
 
 func TestStandardTransportUsesOnlyXAIHeaders(t *testing.T) {
+	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
 		if request.Header.Get("Authorization") != "Bearer access" {
 			t.Errorf("authorization=%q", request.Header.Get("Authorization"))
 		}
 		if request.Header.Get("originator") != "" || request.Header.Get("OpenAI-Beta") != "" {
 			t.Errorf("Codex headers leaked: %v", request.Header)
 		}
+		var payload struct {
+			PromptCacheKey string   `json:"prompt_cache_key"`
+			Include        []string `json:"include"`
+			Store          bool     `json:"store"`
+			Input          []any    `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode xAI request: %v", err)
+		}
+		if payload.Store || payload.PromptCacheKey != "session-1" || len(payload.Include) != 1 || payload.Include[0] != "reasoning.encrypted_content" {
+			t.Errorf("xAI cache request=%+v", payload)
+		}
+		if requestCount == 2 {
+			encoded, _ := json.Marshal(payload.Input)
+			wire := string(encoded)
+			reasoning := strings.Index(wire, `"encrypted_content":"opaque"`)
+			messageItem := strings.Index(wire, `"id":"msg_1"`)
+			latestUser := strings.LastIndex(wire, "next")
+			if reasoning < 0 || messageItem < reasoning || latestUser < messageItem {
+				t.Errorf("provider state replay order=%s", wire)
+			}
+		}
 		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"status\":\"completed\"}}\n\n"))
+		if requestCount == 1 {
+			_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"opaque\"},{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n"))
+		} else {
+			_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-2\",\"status\":\"completed\"}}\n\n"))
+		}
 	}))
 	defer server.Close()
 	ctx := context.Background()
@@ -55,7 +84,10 @@ func TestStandardTransportUsesOnlyXAIHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream, err := driver.Stream(ctx, hyprovider.Request{Model: "grok-test", Messages: []message.Message{message.NewText(message.RoleUser, "hello")}})
+	stream, err := driver.Stream(ctx, hyprovider.Request{
+		Model: "grok-test", Messages: []message.Message{message.NewText(message.RoleUser, "hello")},
+		ExtraBody: map[string]any{"prompt_cache_key": "session-1"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +97,21 @@ func TestStandardTransportUsesOnlyXAIHeaders(t *testing.T) {
 	}
 	if event.Kind != hyprovider.EventDone {
 		t.Fatalf("event=%#v", event)
+	}
+	assistant := message.NewText(message.RoleAssistant, "done")
+	assistant.ProviderState = event.ProviderState
+	second, err := driver.Stream(ctx, hyprovider.Request{
+		Model: "grok-test", Messages: []message.Message{message.NewText(message.RoleUser, "hello"), assistant, message.NewText(message.RoleUser, "next")},
+		ExtraBody: map[string]any{"prompt_cache_key": "session-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event, err := second.Recv(); err != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("second event=%#v error=%v", event, err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("xAI requests=%d", requestCount)
 	}
 }
 

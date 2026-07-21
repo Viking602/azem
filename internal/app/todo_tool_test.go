@@ -31,7 +31,7 @@ func TestTodoDriverReturnsStableIDsAndAdvancesCurrentItem(t *testing.T) {
 	}}
 
 	initResult, err := driver.Execute(ctx, tool.Call{ID: "init", Name: "todo", Arguments: json.RawMessage(`{
-		"op":"init","expected_revision":0,"goal":"ship","phases":[{"title":"Build","items":[{"content":"first"},{"content":"second"}]}]
+		"op":"init","goal":"ship","phases":[{"title":"Build","items":[{"content":"first"},{"content":"second"}]}]
 	}`)}, nil)
 	if err != nil || initResult.IsError {
 		t.Fatalf("init result=%+v err=%v", initResult, err)
@@ -46,7 +46,6 @@ func TestTodoDriverReturnsStableIDsAndAdvancesCurrentItem(t *testing.T) {
 	if event := <-events; event.Kind != EventTodoUpdated || event.Todo == nil || event.Todo.Revision != 1 {
 		t.Fatalf("todo event=%+v", event)
 	}
-
 	doneArguments, _ := json.Marshal(map[string]any{
 		"op": "done", "expected_revision": initialized.Revision, "item_id": initialized.Phases[0].Items[0].ID,
 	})
@@ -61,15 +60,28 @@ func TestTodoDriverReturnsStableIDsAndAdvancesCurrentItem(t *testing.T) {
 	if done.Phases[0].Items[0].Status != session.TodoCompleted || done.Phases[0].Items[1].Status != session.TodoInProgress {
 		t.Fatalf("todo did not advance: %+v", done)
 	}
+	reinit, err := driver.Execute(ctx, tool.Call{ID: "reinit", Name: "todo", Arguments: json.RawMessage(`{
+		"op":"init","goal":"replace","phases":[{"title":"Other","items":[{"content":"replacement"}]}]
+	}`)}, nil)
+	if err != nil || reinit.IsError {
+		t.Fatalf("implicit reinit result=%+v err=%v", reinit, err)
+	}
+	var replaced session.TodoList
+	if err := json.Unmarshal([]byte(reinit.Content), &replaced); err != nil {
+		t.Fatal(err)
+	}
+	if replaced.Revision != done.Revision+1 || replaced.Goal != "replace" || len(replaced.Phases) != 1 || replaced.Phases[0].Items[0].Content != "replacement" {
+		t.Fatalf("implicit reinit todo=%+v", replaced)
+	}
 }
 
-func TestTodoDriverRequiresRevisionForMutations(t *testing.T) {
+func TestTodoDriverRequiresRevisionAfterInit(t *testing.T) {
 	driver := &todoDriver{}
-	result, err := driver.Execute(context.Background(), tool.Call{ID: "init", Name: "todo", Arguments: json.RawMessage(`{"op":"init","goal":"ship","phases":[]}`)}, nil)
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "done", Name: "todo", Arguments: json.RawMessage(`{"op":"done","item_id":"item-1"}`)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.IsError || result.Content != "expected_revision is required for init" {
+	if !result.IsError || result.Content != "expected_revision is required for done" {
 		t.Fatalf("missing revision result=%+v", result)
 	}
 }
@@ -85,7 +97,7 @@ func TestTodoInitRejectsForgedSubagentBinding(t *testing.T) {
 	}
 }
 
-func TestCompactEventRetainsTodoSnapshot(t *testing.T) {
+func TestCompactRejectsShortSessionWithoutReportingFalseSuccess(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
@@ -113,14 +125,10 @@ func TestCompactEventRetainsTodoSnapshot(t *testing.T) {
 	}
 	service.activeRun = ""
 	service.activeSession = ""
-	if err := service.ExecuteAction(ctx, Action{Kind: ActionCompact, Target: "session-1"}); err != nil {
-		t.Fatal(err)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionCompact, Target: "session-1"}); !errors.Is(err, ErrNothingToCompact) {
+		t.Fatalf("short compact error = %v", err)
 	}
-	event, err := service.NextEvent(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if event.Kind != EventSessionLoaded || event.Todo == nil || event.Todo.Revision != initialized.Revision || event.Todo.Goal != initialized.Goal {
-		t.Fatalf("compact event lost todo: %+v", event)
+	if todo, err := sessions.LoadTodo(ctx, "session-1"); err != nil || todo.Revision != initialized.Revision || todo.Goal != initialized.Goal {
+		t.Fatalf("short compact changed todo=%+v error=%v", todo, err)
 	}
 }

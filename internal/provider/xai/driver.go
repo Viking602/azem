@@ -42,7 +42,7 @@ func (d *Driver) Metadata() hyprovider.Metadata {
 }
 
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
-	payload, err := responses.Build(request, responses.BuildOptions{DefaultParallelTools: true, DefaultReasoningEffort: d.reasoningEffort})
+	payload, err := responses.Build(request, responses.BuildOptions{IncludeEncryptedReasoning: true, DefaultParallelTools: true, DefaultReasoningEffort: d.reasoningEffort})
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +52,7 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 		cancel()
 		return nil, err
 	}
-	return responses.Open(response, streamContext, cancel)
+	return responses.Open(response, streamContext, cancel, responses.RequestUsageReporter(request))
 }
 
 type StandardTransport struct {

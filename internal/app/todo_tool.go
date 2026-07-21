@@ -35,7 +35,7 @@ func (d *todoDriver) Definition() tool.Definition {
 		"id": {Type: "string"}, "title": {Type: "string"},
 		"items": {Type: "array", Items: &itemSchema},
 	}, Required: []string{"title", "items"}, AdditionalProperties: &additional}
-	return tool.Definition{Name: "todo", Description: "Maintain the durable session plan. Read with view; mutations require expected_revision from the latest snapshot.", InputSchema: tool.Schema{
+	return tool.Definition{Name: "todo", Description: "Maintain the durable session plan. init may omit expected_revision and safely replaces the latest stored plan; later mutations require expected_revision from the latest snapshot. Read with view when the latest revision is unknown.", InputSchema: tool.Schema{
 		Type: "object", Properties: map[string]tool.Schema{
 			"op": {Type: "string", Enum: []string{"init", "view", "start", "done", "append", "cancel", "remove"}}, "expected_revision": {Type: "integer"},
 			"goal": {Type: "string"}, "phases": {Type: "array", Items: &phaseSchema}, "item_id": {Type: "string"}, "phase_id": {Type: "string"}, "content": {Type: "string"},
@@ -51,10 +51,19 @@ func (d *todoDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateS
 		todo, err := d.store.LoadTodo(ctx, d.sessionID)
 		return todoResult(call, todo, err), nil
 	}
-	if in.ExpectedRevision == nil {
+	expectedRevision := int64(0)
+	if in.ExpectedRevision != nil {
+		expectedRevision = *in.ExpectedRevision
+	} else if in.Op == "init" {
+		current, err := d.store.LoadTodo(ctx, d.sessionID)
+		if err != nil {
+			return todoResult(call, session.TodoList{}, err), nil
+		}
+		expectedRevision = current.Revision
+	} else {
 		return todoResult(call, session.TodoList{}, fmt.Errorf("expected_revision is required for %s", in.Op)), nil
 	}
-	todo, err := d.store.UpdateTodo(ctx, d.sessionID, *in.ExpectedRevision, func(todo *session.TodoList) error { return applyTodoOp(todo, in) })
+	todo, err := d.store.UpdateTodo(ctx, d.sessionID, expectedRevision, func(todo *session.TodoList) error { return applyTodoOp(todo, in) })
 	if err == nil && d.emit != nil {
 		snapshot := todo.Clone()
 		d.emit(Event{Kind: EventTodoUpdated, SessionID: d.sessionID, Todo: &snapshot})

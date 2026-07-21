@@ -118,8 +118,16 @@ func TestCodingTeamRolePermissions(t *testing.T) {
 			t.Fatalf("read-only role received %q", forbidden)
 		}
 	}
-	if !containsString(byName[ImplementerClass].Tools, "coding.edit_hashline") {
+	for _, class := range classes {
+		if containsString(class.Tools, ToolShell) {
+			t.Fatalf("%s role received disabled %s", class.Name, ToolShell)
+		}
+	}
+	if !containsString(byName[ImplementerClass].Tools, "coding.edit_hashline") || !containsString(byName[ImplementerClass].Tools, "coding.write_file") || !containsString(byName[ImplementerClass].Tools, "coding.go_test") {
 		t.Fatalf("implementer tools = %v", byName[ImplementerClass].Tools)
+	}
+	if !containsString(byName[ReviewerClass].Tools, "coding.go_test") {
+		t.Fatalf("reviewer tools = %v", byName[ReviewerClass].Tools)
 	}
 }
 

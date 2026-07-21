@@ -49,36 +49,7 @@ func (c subagentTurnContext) Build(_ context.Context, task api.Task) ([]message.
 }
 
 func (c subagentTurnContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
-	if c.compactHooks != nil {
-		if err := c.compactHooks(ctx, history, nil, nil); err != nil {
-			return history, err
-		}
-	}
-	const recentMessages = 20
-	prefixEnd := 0
-	for prefixEnd < len(history) && history[prefixEnd].Role == message.RoleSystem {
-		prefixEnd++
-	}
-	if len(history) <= recentMessages+prefixEnd {
-		if c.compactHooks != nil {
-			_ = c.compactHooks(ctx, history, history, nil)
-		}
-		return history, nil
-	}
-	start := len(history) - recentMessages
-	if start < prefixEnd {
-		start = prefixEnd
-	}
-	for start > prefixEnd && history[start].Role != message.RoleUser {
-		start--
-	}
-	compacted := make([]message.Message, 0, len(history)-start+prefixEnd)
-	compacted = append(compacted, history[:prefixEnd]...)
-	compacted = append(compacted, history[start:]...)
-	if c.compactHooks != nil {
-		_ = c.compactHooks(ctx, history, compacted, nil)
-	}
-	return compacted, nil
+	return (turnContext{compactHooks: c.compactHooks, summarize: c.summarize}).Compact(ctx, history)
 }
 
 func (c subagentTurnContext) CompactTo(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, error) {
@@ -90,8 +61,8 @@ func effectiveSubagentTools(roleTools []string, capability string) map[string]bo
 	modes := map[string]map[string]bool{
 		"read-only":  readOnly,
 		"read-write": {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.write_file": true, "coding.gofmt": true},
-		"execute":    {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.go_test": true, "coding.shell": true},
-		"all":        {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.write_file": true, "coding.gofmt": true, "coding.go_test": true, "coding.shell": true},
+		"execute":    {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.go_test": true},
+		"all":        {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.write_file": true, "coding.gofmt": true, "coding.go_test": true},
 	}
 	allowed := make(map[string]bool)
 	for _, name := range roleTools {

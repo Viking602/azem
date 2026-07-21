@@ -49,6 +49,9 @@ func TestReviewerPinsStrictSchemaModelAndNoTools(t *testing.T) {
 		if body["model"] != ApprovalReviewerModel {
 			t.Errorf("model=%v", body["model"])
 		}
+		if body["prompt_cache_key"] != "azem-approval-review-v1" {
+			t.Errorf("prompt_cache_key=%v", body["prompt_cache_key"])
+		}
 		if _, present := body["tools"]; present {
 			t.Errorf("review request exposed tools: %v", body["tools"])
 		}

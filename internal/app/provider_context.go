@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/go-hydaelyn/api"
@@ -34,6 +33,7 @@ type TurnRequest struct {
 	AgentMode         string
 	DisableSubagents  bool
 	ActiveSkills      []string
+	Images            []session.Attachment
 	Todo              session.TodoList
 	privateContext    string
 	historicalContext string
@@ -51,6 +51,7 @@ type turnContext struct {
 	history             []session.Block
 	persistedHistory    int
 	modelHistory        session.ModelHistory
+	images              []session.Attachment
 	reportContextTokens func(context.Context, int)
 	compactHooks        func(context.Context, []message.Message, []message.Message, error) error
 	summarize           func(context.Context, string) (string, error)
@@ -109,22 +110,25 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 		data.Visibility = message.VisibilityPrivate
 		messages = append(messages, data)
 	}
-	if goal := strings.TrimSpace(task.Goal); goal != "" {
-		messages = append(messages, message.NewText(message.RoleUser, goal))
+	goal := strings.TrimSpace(task.Goal)
+	if goal != "" || len(c.images) > 0 {
+		messages = append(messages, UserMessageWithAttachments(goal, c.images))
 	}
 	return messages, nil
 }
 
 func blockMessage(block session.Block) (message.Message, bool) {
 	text := strings.TrimSpace(block.Content)
+	if text == "" && len(block.Attachments) == 0 {
+		return message.Message{}, false
+	}
+	if block.Kind == "user" {
+		return UserMessageWithAttachments(text, block.Attachments), true
+	}
 	if text == "" {
 		return message.Message{}, false
 	}
-	role := message.RoleAssistant
-	if block.Kind == "user" {
-		role = message.RoleUser
-	}
-	return message.NewText(role, text), true
+	return message.NewText(message.RoleAssistant, text), true
 }
 
 const (
@@ -196,16 +200,21 @@ func (c turnContext) refreshTodoReminder(ctx context.Context, history []message.
 	return refreshed, nil
 }
 
-func (c turnContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
+func (c turnContext) Compact(ctx context.Context, history []message.Message) (result []message.Message, resultErr error) {
+	original := history
 	if c.compactHooks != nil {
 		if err := c.compactHooks(ctx, history, nil, nil); err != nil {
 			return history, err
 		}
+		defer func() { _ = c.compactHooks(ctx, original, result, resultErr) }()
 	}
 	var err error
 	history, err = c.refreshTodoReminder(ctx, history)
 	if err != nil {
-		return nil, err
+		return original, err
+	}
+	if err := message.ValidateCompleteTurns(history); err != nil {
+		return original, err
 	}
 	const recentMessages = 16
 	prefixEnd := 0
@@ -213,24 +222,39 @@ func (c turnContext) Compact(ctx context.Context, history []message.Message) ([]
 		prefixEnd++
 	}
 	if len(history) <= recentMessages+prefixEnd {
-		if c.compactHooks != nil {
-			_ = c.compactHooks(ctx, history, history, nil)
-		}
 		return history, nil
+	}
+	if c.summarize == nil {
+		return original, fmt.Errorf("compact context: compaction model is unavailable")
 	}
 	start := len(history) - recentMessages
 	if start < prefixEnd {
 		start = prefixEnd
 	}
-	for start > prefixEnd && history[start].Role != message.RoleUser {
-		start--
+	start, err = message.CompleteTurnBoundary(history, start)
+	if err != nil {
+		return original, err
 	}
-	compacted := make([]message.Message, 0, len(history)-start+prefixEnd)
+	previous, omitted := splitCompactionHistory(history[prefixEnd:start])
+	if len(omitted) == 0 && len(previous) == 0 {
+		return history, nil
+	}
+	generated, err := c.summarize(ctx, serializeCompactionHistory(previous, omitted))
+	if err != nil {
+		return original, fmt.Errorf("compact context with model: %w", err)
+	}
+	generated = strings.TrimSpace(generated)
+	if generated == "" {
+		return original, fmt.Errorf("compact context with model: empty summary")
+	}
+	summary := message.NewText(message.RoleAssistant, compactionSummaryLabel+generated)
+	summary.Kind = message.KindCompactionSummary
+	summary.Visibility = message.VisibilityPrivate
+	summary.CreatedAt = time.Time{}
+	compacted := make([]message.Message, 0, len(history)-start+prefixEnd+1)
 	compacted = append(compacted, history[:prefixEnd]...)
+	compacted = append(compacted, summary)
 	compacted = append(compacted, history[start:]...)
-	if c.compactHooks != nil {
-		_ = c.compactHooks(ctx, history, compacted, nil)
-	}
 	return compacted, nil
 }
 
@@ -262,6 +286,9 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, t
 	if estimateContextTokens(history) <= targetTokens {
 		return report(history), nil
 	}
+	if c.summarize == nil {
+		return original, fmt.Errorf("compact context: compaction model is unavailable")
+	}
 	var previousSummaries []string
 	withoutSummaries := make([]message.Message, 0, len(history))
 	for _, current := range history {
@@ -272,125 +299,75 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, t
 		withoutSummaries = append(withoutSummaries, current)
 	}
 	history = withoutSummaries
-
-	fitSuffix := func(prepared []message.Message) ([]message.Message, bool, error) {
-		prefixEnd := 0
-		for prefixEnd < len(prepared) && prepared[prefixEnd].Role == message.RoleSystem {
-			prefixEnd++
-		}
-		latestUser := -1
-		for index := len(prepared) - 1; index >= prefixEnd; index-- {
-			if prepared[index].Role == message.RoleUser {
-				latestUser = index
-				break
-			}
-		}
-		if latestUser < 0 {
-			return nil, false, fmt.Errorf("compact context: no user turn can be preserved")
-		}
-		for preferred := prefixEnd; preferred <= latestUser; preferred++ {
-			start, boundaryErr := message.CompleteTurnBoundary(prepared, preferred)
-			if boundaryErr != nil {
-				return nil, false, boundaryErr
-			}
-			if start > latestUser {
-				break
-			}
-			omitted := start - prefixEnd
-			if omitted <= 0 {
-				if len(previousSummaries) == 0 && estimateContextTokens(prepared) <= targetTokens {
-					return prepared, true, nil
-				}
-				if len(previousSummaries) > 0 {
-					base := append([]message.Message(nil), prepared[:prefixEnd]...)
-					base = append(base, prepared[start:]...)
-					available := contextTokenBytes(targetTokens - estimateContextTokens(base))
-					if available > 0 {
-						text := truncateSummary(previousSummaries[len(previousSummaries)-1], available)
-						summary := message.NewText(message.RoleAssistant, text)
-						summary.Kind = message.KindCompactionSummary
-						summary.Visibility = message.VisibilityPrivate
-						summary.CreatedAt = time.Time{}
-						compacted := append([]message.Message(nil), prepared[:prefixEnd]...)
-						compacted = append(compacted, summary)
-						compacted = append(compacted, prepared[start:]...)
-						if estimateContextTokens(compacted) <= targetTokens {
-							return compacted, true, nil
-						}
-					}
-				}
-				continue
-			}
-			base := make([]message.Message, 0, prefixEnd+len(prepared)-start)
-			base = append(base, prepared[:prefixEnd]...)
-			base = append(base, prepared[start:]...)
-			available := contextTokenBytes(targetTokens - estimateContextTokens(base))
-			if available <= 0 {
-				continue
-			}
-			text := fmt.Sprintf("[Compacted context: %d earlier messages omitted]", omitted)
-			if c.summarize != nil {
-				if available <= len(compactionSummaryLabel) {
-					continue
-				}
-				transcript := serializeCompactionHistory(previousSummaries, prepared[prefixEnd:start])
-				generated, summaryErr := c.summarize(ctx, transcript)
-				generated = strings.TrimSpace(generated)
-				if summaryErr == nil && generated != "" {
-					text = compactionSummaryLabel + generated
-				}
-			}
-			text = truncateSummary(text, available)
-			summary := message.NewText(message.RoleAssistant, text)
-			summary.Kind = message.KindCompactionSummary
-			summary.Visibility = message.VisibilityPrivate
-			summary.CreatedAt = time.Time{}
-			compacted := make([]message.Message, 0, len(base)+1)
-			compacted = append(compacted, prepared[:prefixEnd]...)
-			compacted = append(compacted, summary)
-			compacted = append(compacted, prepared[start:]...)
-			if estimateContextTokens(compacted) <= targetTokens {
-				return compacted, true, nil
-			}
-			if start > preferred {
-				preferred = start
-			}
-		}
-		return nil, false, nil
+	prefixEnd := 0
+	for prefixEnd < len(history) && history[prefixEnd].Role == message.RoleSystem {
+		prefixEnd++
 	}
-	if compacted, fits, fitErr := fitSuffix(history); fitErr != nil {
-		return original, fitErr
-	} else if fits {
-		return report(compacted), nil
-	}
-
-	toolResults := 0
-	for _, current := range history {
-		if current.ToolResult != nil {
-			toolResults++
+	latestUser := -1
+	for index := len(history) - 1; index >= prefixEnd; index-- {
+		if history[index].Role == message.RoleUser {
+			latestUser = index
+			break
 		}
 	}
-	if toolResults > 0 {
-		maxResultBytes := contextTokenBytes(targetTokens) / toolResults
-		for {
-			prepared := append([]message.Message(nil), history...)
-			for index := range prepared {
-				if result := prepared[index].ToolResult; result != nil {
-					prepared[index].ToolResult = truncateToolResult(result, maxResultBytes)
-				}
-			}
-			if compacted, fits, fitErr := fitSuffix(prepared); fitErr != nil {
-				return original, fitErr
-			} else if fits {
-				return report(compacted), nil
-			}
-			if maxResultBytes <= 1 {
-				break
-			}
-			maxResultBytes /= 2
+	if latestUser < 0 {
+		return original, fmt.Errorf("compact context: no user turn can be preserved")
+	}
+	for preferred := prefixEnd; preferred <= latestUser; preferred++ {
+		start, boundaryErr := message.CompleteTurnBoundary(history, preferred)
+		if boundaryErr != nil {
+			return original, boundaryErr
+		}
+		if start > latestUser {
+			break
+		}
+		omitted := history[prefixEnd:start]
+		if len(omitted) == 0 && len(previousSummaries) == 0 {
+			continue
+		}
+		base := make([]message.Message, 0, prefixEnd+len(history)-start)
+		base = append(base, history[:prefixEnd]...)
+		base = append(base, history[start:]...)
+		if estimateContextTokens(base) >= targetTokens {
+			continue
+		}
+		generated, summaryErr := c.summarize(ctx, serializeCompactionHistory(previousSummaries, omitted))
+		if summaryErr != nil {
+			return original, fmt.Errorf("compact context with model: %w", summaryErr)
+		}
+		generated = strings.TrimSpace(generated)
+		if generated == "" {
+			return original, fmt.Errorf("compact context with model: empty summary")
+		}
+		summary := message.NewText(message.RoleAssistant, compactionSummaryLabel+generated)
+		summary.Kind = message.KindCompactionSummary
+		summary.Visibility = message.VisibilityPrivate
+		summary.CreatedAt = time.Time{}
+		compacted := make([]message.Message, 0, len(base)+1)
+		compacted = append(compacted, history[:prefixEnd]...)
+		compacted = append(compacted, summary)
+		compacted = append(compacted, history[start:]...)
+		if estimateContextTokens(compacted) <= targetTokens {
+			return report(compacted), nil
+		}
+		if start > preferred {
+			preferred = start
 		}
 	}
 	return original, fmt.Errorf("compact context: required messages exceed %d-token target", targetTokens)
+}
+
+func splitCompactionHistory(history []message.Message) ([]string, []message.Message) {
+	previous := make([]string, 0, 1)
+	omitted := make([]message.Message, 0, len(history))
+	for _, current := range history {
+		if current.Kind == message.KindCompactionSummary {
+			previous = append(previous, current.Text)
+			continue
+		}
+		omitted = append(omitted, current)
+	}
+	return previous, omitted
 }
 
 func serializeCompactionHistory(previous []string, omitted []message.Message) string {
@@ -413,40 +390,12 @@ func serializeCompactionHistory(previous []string, omitted []message.Message) st
 			if visible == "" {
 				visible = string(result.Structured)
 			}
-			if len(visible) > 2000 {
-				visible = truncateUTF8(visible, 2000) + " [old tool output truncated]"
-			}
 			encoded, _ := json.Marshal(visible)
 			fmt.Fprintf(&out, "TOOL_RESULT id=%q name=%q error=%t content=%s\n", result.ToolCallID, result.Name, result.IsError, encoded)
 		}
 	}
 	out.WriteString("</transcript>")
 	return out.String()
-}
-
-func truncateSummary(value string, maxBytes int) string {
-	const marker = "\n[summary truncated to fit model context]"
-	if len(value) <= maxBytes {
-		return value
-	}
-	if maxBytes <= len(marker) {
-		return truncateUTF8(marker, maxBytes)
-	}
-	return truncateUTF8(value, maxBytes-len(marker)) + marker
-}
-
-func truncateUTF8(value string, maxBytes int) string {
-	value = strings.ToValidUTF8(value, "�")
-	if maxBytes >= len(value) {
-		return value
-	}
-	if maxBytes <= 0 {
-		return ""
-	}
-	for maxBytes > 0 && !utf8.ValidString(value[:maxBytes]) {
-		maxBytes--
-	}
-	return value[:maxBytes]
 }
 
 const estimatedBytesPerToken = 4
@@ -511,35 +460,4 @@ func contextTokenBytes(tokens int) int {
 		return maxInt
 	}
 	return tokens * estimatedBytesPerToken
-}
-
-func truncateToolResult(result *message.ToolResult, maxBytes int) *message.ToolResult {
-	visible := result.Content
-	if visible == "" {
-		visible = string(result.Structured)
-	}
-	visible = strings.ToValidUTF8(visible, "�")
-	if len(visible) <= maxBytes {
-		return result
-	}
-
-	const marker = "\n[tool result truncated to fit model context]"
-	keep := maxBytes - len(marker)
-	if keep < 0 {
-		keep = 0
-	}
-	if keep > len(visible) {
-		keep = len(visible)
-	}
-	for keep > 0 && !utf8.ValidString(visible[:keep]) {
-		keep--
-	}
-	truncated := visible[:keep] + marker
-	if len(truncated) >= len(visible) {
-		return result
-	}
-	cloned := *result
-	cloned.Content = truncated
-	cloned.Structured = nil
-	return &cloned
 }

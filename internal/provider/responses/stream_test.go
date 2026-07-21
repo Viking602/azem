@@ -40,11 +40,12 @@ func TestStreamAssemblesCrossChunkToolCallAndUsage(t *testing.T) {
 		`data: {"type":"response.function_call_arguments.delta","item_id":"item-1","delta":"{\"path\":\""}`,
 		`data: {"type":"response.function_call_arguments.delta","item_id":"item-1","delta":"a.go\"}"}`,
 		`data: {"type":"response.function_call_arguments.done","item_id":"item-1"}`,
-		`data: {"type":"response.completed","response":{"id":"response-1","status":"completed","usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,"input_tokens_details":{"cached_tokens":6}}}}`,
+		`data: {"type":"response.completed","response":{"id":"response-1","status":"completed","usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,"input_tokens_details":{"cached_tokens":6},"output_tokens_details":{"reasoning_tokens":3}}}}`,
 	}, "\n\n") + "\n\n"
 	body := &chunkBody{chunks: [][]byte{[]byte(frames[:17]), []byte(frames[17:93]), []byte(frames[93:211]), []byte(frames[211:])}}
 	ctx, cancel := context.WithCancel(context.Background())
-	stream := NewStream(ctx, cancel, body)
+	var details UsageDetails
+	stream := NewStream(ctx, cancel, body, func(value UsageDetails) { details = value })
 	var events []hyprovider.Event
 	for {
 		event, err := stream.Recv()
@@ -67,6 +68,9 @@ func TestStreamAssemblesCrossChunkToolCallAndUsage(t *testing.T) {
 	}
 	if events[3].StopReason != hyprovider.StopReasonToolUse || events[3].Usage.TotalTokens != 14 || events[3].Usage.CachedInputTokens != 6 {
 		t.Fatalf("done=%#v", events[3])
+	}
+	if details.InputTokens != 10 || details.CachedTokens != 6 || details.OutputTokens != 4 || details.ReasoningTokens != 3 || details.TotalTokens != 14 {
+		t.Fatalf("usage details=%#v", details)
 	}
 	if !body.closed {
 		t.Fatal("response body was not closed on completion")

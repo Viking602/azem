@@ -20,7 +20,7 @@ import (
 	"github.com/Viking602/go-hydaelyn/stream"
 )
 
-func (s *Service) providerStreamSink(sessionID, runID string) stream.Sink {
+func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reasoning, transport string) stream.Sink {
 	return stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
 		data := map[string]string{}
 		switch frame.Kind {
@@ -51,9 +51,15 @@ func (s *Service) providerStreamSink(sessionID, runID string) stream.Sink {
 			if frame.Usage.InputTokens != 0 || frame.Usage.OutputTokens != 0 || frame.Usage.TotalTokens != 0 {
 				usage["inputTokens"] = fmt.Sprint(frame.Usage.InputTokens)
 				usage["cachedInputTokens"] = fmt.Sprint(frame.Usage.CachedInputTokens)
+				usage["uncachedInputTokens"] = fmt.Sprint(max(0, frame.Usage.InputTokens-frame.Usage.CachedInputTokens))
 				usage["outputTokens"] = fmt.Sprint(frame.Usage.OutputTokens)
 				usage["totalTokens"] = fmt.Sprint(frame.Usage.TotalTokens)
 				usage["cacheStatus"] = "reported"
+				usage["requestKind"] = "main"
+				usage["provider"] = providerID
+				usage["model"] = modelID
+				usage["reasoning"] = reasoning
+				usage["transport"] = transport
 			}
 			s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: usage})
 		case stream.FrameError:
@@ -67,6 +73,7 @@ func (s *Service) providerStreamSink(sessionID, runID string) stream.Sink {
 
 func normalizeTurnRequest(request TurnRequest, defaults config.DefaultsConfig) TurnRequest {
 	request.Prompt = strings.TrimSpace(request.Prompt)
+	request.Images = CloneAttachments(request.Images)
 	if request.SessionID == "" {
 		request.SessionID = "default"
 	}
@@ -85,6 +92,16 @@ func normalizeTurnRequest(request TurnRequest, defaults config.DefaultsConfig) T
 	return request
 }
 
+func (s *Service) providerTransport(providerID string) string {
+	if providerID != "grok" {
+		return "chatgpt-codex-responses"
+	}
+	if s.cfg.Providers.Grok.Transport == "cli_proxy" {
+		return "grok-cli-proxy-responses-experimental"
+	}
+	return "xai-responses"
+}
+
 func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run *agentservice.Run, engine hyagent.Engine) {
 	defer s.wg.Done()
 	defer s.clearRun(run.RunID)
@@ -96,7 +113,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			MaxToolCalls: s.cfg.Agents.Main.MaxToolCalls,
 		},
 	}
-	result := engine.RunStream(ctx, task, hyagent.OutputPolicy{}, s.providerStreamSink(request.SessionID, run.RunID))
+	result := engine.RunStream(ctx, task, hyagent.OutputPolicy{}, s.providerStreamSink(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider)))
 	var runErr error
 	if result.Failure != nil {
 		runErr = result.Failure

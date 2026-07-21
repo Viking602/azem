@@ -44,17 +44,18 @@ type HookRunView struct {
 }
 
 type Block struct {
-	ID         string
-	Kind       BlockKind
-	RunID      string
-	ToolCallID string
-	Title      string
-	Arguments  string
-	Content    string
-	Collapsed  bool
-	State      string
-	Orphaned   bool
-	Hooks      []HookRunView
+	ID          string
+	Kind        BlockKind
+	RunID       string
+	ToolCallID  string
+	Title       string
+	Arguments   string
+	Content     string
+	Collapsed   bool
+	State       string
+	Orphaned    bool
+	Hooks       []HookRunView
+	Attachments []session.Attachment
 }
 
 type transcriptBlockLayout struct {
@@ -176,6 +177,11 @@ type modelPickerEntry struct {
 	Model    ModelChoice
 }
 
+type pendingSessionModel struct {
+	Provider string
+	Model    string
+}
+
 type pendingModelRoute struct {
 	Entry     app.ModelRouteEntry
 	Provider  string
@@ -225,15 +231,26 @@ type RecoveryView struct {
 }
 
 type UsageView struct {
-	InputTokens       int
-	CacheInputTokens  int
-	CachedInputTokens int
-	MainCacheInput    int
-	MainCachedInput   int
-	OutputTokens      int
-	ContextLimit      int
-	CacheReported     bool
-	MainCacheReported bool
+	InputTokens         int
+	CacheInputTokens    int
+	CachedInputTokens   int
+	MainCacheInput      int
+	MainCachedInput     int
+	OutputTokens        int
+	ReasoningTokens     int
+	UncachedInputTokens int
+	CompactionInput     int
+	CompactionCached    int
+	CompactionOutput    int
+	CompactionReasoning int
+	CompactionUncached  int
+	ContextLimit        int
+	CacheReported       bool
+	MainCacheReported   bool
+	LastRequestKind     string
+	LastProvider        string
+	LastModel           string
+	LastTransport       string
 }
 
 type AppModel struct {
@@ -290,12 +307,14 @@ type AppModel struct {
 	modelsByProvider    map[string][]ModelChoice
 	modelRoutes         []app.ModelRouteEntry
 	pendingModelRoute   *pendingModelRoute
+	pendingSessionModel *pendingSessionModel
 	sessions            []SessionChoice
 	recovery            []RecoveryView
 	auth                map[string]AuthView
 	approval            *ApprovalView
 	pendingApprovals    []ApprovalView
 	usage               UsageView
+	pendingImages       []session.Attachment
 }
 
 func NewModel(runtime Runtime, workspace string, provider string, model string, reasoning string, mode string, initialSessionID ...string) AppModel {
@@ -378,7 +397,7 @@ func (m AppModel) displayState(state string) string {
 	keys := map[string]string{
 		"Ready": "status.ready", "Starting": "status.starting", "Running": "status.running",
 		"Awaiting approval": "status.awaiting_approval", "Reviewing approval": "status.reviewing_approval",
-		"Cancelling": "status.cancelling", "Failed": "status.failed", "Recovery attention": "status.recovery_attention",
+		"Cancelling": "status.cancelling", "Compacting": "status.compacting", "Failed": "status.failed", "Recovery attention": "status.recovery_attention",
 		"completed": "status.completed", "denied": "status.denied", "streaming": "status.streaming",
 		"failed": "status.failed", "running": "status.running",
 	}
@@ -400,6 +419,7 @@ func (m *AppModel) openOverlay(overlay Overlay) {
 	m.composer.Blur()
 	m.modelSearch.Blur()
 	if overlay == OverlayModel {
+		m.pendingSessionModel = nil
 		m.modelSearch.Reset()
 		_ = m.modelSearch.Focus()
 		provider, model := m.provider, m.model
@@ -417,6 +437,13 @@ func (m *AppModel) openOverlay(overlay Overlay) {
 		reasoning := m.reasoning
 		if m.pendingModelRoute != nil {
 			reasoning = m.pendingModelRoute.Reasoning
+		} else if pending := m.pendingSessionModel; pending != nil {
+			if choice, ok := m.selectedModelChoice(); ok {
+				levels := catalog.AvailableReasoningLevels(pending.Provider, choice)
+				if !contains(levels, reasoning) {
+					reasoning = catalog.PreferredReasoningLevel(pending.Provider, choice)
+				}
+			}
 		}
 		for index, level := range m.reasoningLevels() {
 			if level == reasoning {
@@ -440,6 +467,7 @@ func (m *AppModel) closeOverlay() tea.Cmd {
 		m.modelSearch.Reset()
 		m.modelSearch.Blur()
 	}
+	m.pendingSessionModel = nil
 	m.overlay = OverlayNone
 	m.overlayCursor = 0
 	m.overlayScroll = 0
@@ -544,6 +572,8 @@ func (m AppModel) selectedModelChoice() (ModelChoice, bool) {
 	provider, model := m.provider, m.model
 	if m.pendingModelRoute != nil {
 		provider, model = m.pendingModelRoute.Provider, m.pendingModelRoute.Model
+	} else if m.pendingSessionModel != nil {
+		provider, model = m.pendingSessionModel.Provider, m.pendingSessionModel.Model
 	}
 	for _, choice := range m.modelsByProvider[provider] {
 		if choice.ID == model {
@@ -562,6 +592,8 @@ func (m AppModel) reasoningLevels() []string {
 	provider := m.provider
 	if m.pendingModelRoute != nil {
 		provider = m.pendingModelRoute.Provider
+	} else if m.pendingSessionModel != nil {
+		provider = m.pendingSessionModel.Provider
 	}
 	if choice, ok := m.selectedModelChoice(); ok {
 		return catalog.AvailableReasoningLevels(provider, choice)

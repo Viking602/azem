@@ -10,6 +10,7 @@ import (
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/i18n"
+	"github.com/Viking602/azem/internal/session"
 )
 
 func (m *AppModel) updateAgent(event app.Event) {
@@ -417,6 +418,13 @@ func (m *AppModel) switchProvider(provider string) {
 		m.usage.MainCacheInput = 0
 		m.usage.MainCachedInput = 0
 		m.usage.OutputTokens = 0
+		m.usage.ReasoningTokens = 0
+		m.usage.UncachedInputTokens = 0
+		m.usage.CompactionInput = 0
+		m.usage.CompactionCached = 0
+		m.usage.CompactionOutput = 0
+		m.usage.CompactionReasoning = 0
+		m.usage.CompactionUncached = 0
 		m.usage.CacheReported = false
 		m.usage.MainCacheReported = false
 	}
@@ -451,6 +459,13 @@ func (m *AppModel) selectModel(modelID string) {
 		m.usage.MainCacheInput = 0
 		m.usage.MainCachedInput = 0
 		m.usage.OutputTokens = 0
+		m.usage.ReasoningTokens = 0
+		m.usage.UncachedInputTokens = 0
+		m.usage.CompactionInput = 0
+		m.usage.CompactionCached = 0
+		m.usage.CompactionOutput = 0
+		m.usage.CompactionReasoning = 0
+		m.usage.CompactionUncached = 0
 		m.usage.CacheReported = false
 		m.usage.MainCacheReported = false
 	}
@@ -469,6 +484,7 @@ func (m *AppModel) updateUsage(data map[string]string) {
 	if data == nil {
 		return
 	}
+	requestKind := data["requestKind"]
 	inputTokens, inputErr := strconv.Atoi(data["inputTokens"])
 	if inputErr == nil && data["inputTokens"] != "" {
 		if data["aggregateOnly"] != "true" {
@@ -480,6 +496,9 @@ func (m *AppModel) updateUsage(data map[string]string) {
 		if data["cacheStatus"] == "reported" {
 			m.usage.CacheInputTokens += inputTokens
 		}
+		if requestKind == "compaction" {
+			m.usage.CompactionInput += inputTokens
+		}
 	}
 	if value, err := strconv.Atoi(data["cachedInputTokens"]); err == nil && data["cachedInputTokens"] != "" {
 		m.usage.CachedInputTokens += value
@@ -488,14 +507,46 @@ func (m *AppModel) updateUsage(data map[string]string) {
 			m.usage.MainCachedInput += value
 			m.usage.MainCacheReported = true
 		}
+		if requestKind == "compaction" {
+			m.usage.CompactionCached += value
+		}
 	}
 	if value, err := strconv.Atoi(data["outputTokens"]); err == nil && data["outputTokens"] != "" {
 		if data["aggregateOnly"] != "true" {
 			m.usage.OutputTokens = value
 		}
+		if requestKind == "compaction" {
+			m.usage.CompactionOutput += value
+		}
+	}
+	if value, err := strconv.Atoi(data["reasoningTokens"]); err == nil && data["reasoningTokens"] != "" {
+		if requestKind == "compaction" {
+			m.usage.CompactionReasoning += value
+		} else if requestKind == "main" {
+			m.usage.ReasoningTokens = value
+		}
+	}
+	if value, err := strconv.Atoi(data["uncachedInputTokens"]); err == nil && data["uncachedInputTokens"] != "" {
+		if requestKind == "compaction" {
+			m.usage.CompactionUncached += value
+		} else if requestKind == "main" {
+			m.usage.UncachedInputTokens = value
+		}
 	}
 	if value, err := strconv.Atoi(data["contextLimit"]); err == nil && data["contextLimit"] != "" {
 		m.usage.ContextLimit = value
+	}
+	if requestKind != "" {
+		m.usage.LastRequestKind = requestKind
+	}
+	if data["provider"] != "" {
+		m.usage.LastProvider = data["provider"]
+	}
+	if data["model"] != "" {
+		m.usage.LastModel = data["model"]
+	}
+	if data["transport"] != "" {
+		m.usage.LastTransport = data["transport"]
 	}
 }
 
@@ -506,12 +557,48 @@ func (m *AppModel) resetTurnUsage() {
 	m.usage.MainCacheInput = 0
 	m.usage.MainCachedInput = 0
 	m.usage.OutputTokens = 0
+	m.usage.ReasoningTokens = 0
+	m.usage.UncachedInputTokens = 0
+	m.usage.CompactionInput = 0
+	m.usage.CompactionCached = 0
+	m.usage.CompactionOutput = 0
+	m.usage.CompactionReasoning = 0
+	m.usage.CompactionUncached = 0
 	m.usage.CacheReported = false
 	m.usage.MainCacheReported = false
 }
 
+func (m *AppModel) restoreUsage(raw string) {
+	usage, err := session.DecodeUsage([]byte(raw))
+	if err != nil || usage.IsZero() {
+		return
+	}
+	if usage.ContextLimit > 0 {
+		m.usage.ContextLimit = usage.ContextLimit
+	}
+	m.usage.InputTokens = usage.InputTokens
+	m.usage.OutputTokens = usage.OutputTokens
+	m.usage.CacheInputTokens = usage.CacheInputTokens
+	m.usage.CachedInputTokens = usage.CachedInputTokens
+	m.usage.MainCacheInput = usage.MainCacheInput
+	m.usage.MainCachedInput = usage.MainCachedInput
+	m.usage.ReasoningTokens = usage.ReasoningTokens
+	m.usage.UncachedInputTokens = usage.UncachedInputTokens
+	m.usage.CompactionInput = usage.CompactionInput
+	m.usage.CompactionCached = usage.CompactionCached
+	m.usage.CompactionOutput = usage.CompactionOutput
+	m.usage.CompactionReasoning = usage.CompactionReasoning
+	m.usage.CompactionUncached = usage.CompactionUncached
+	m.usage.CacheReported = usage.CacheReported
+	m.usage.MainCacheReported = usage.MainCacheReported
+	m.usage.LastRequestKind = usage.LastRequestKind
+	m.usage.LastProvider = usage.LastProvider
+	m.usage.LastModel = usage.LastModel
+	m.usage.LastTransport = usage.LastTransport
+}
+
 func (m AppModel) isRunning() bool {
-	return m.status == "Starting" || m.status == "Running" || m.status == "Awaiting approval" || m.status == "Reviewing approval" || m.status == "Cancelling"
+	return m.status == "Starting" || m.status == "Running" || m.status == "Awaiting approval" || m.status == "Reviewing approval" || m.status == "Cancelling" || m.status == "Compacting"
 }
 
 func contains(values []string, wanted string) bool {

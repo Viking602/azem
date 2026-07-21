@@ -122,9 +122,9 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 			}
 			inputTokens, totalTokens, cachedTokens := 10, 15, 0
 			if call == 2 {
-				// A child run may legitimately spend more than the old 128K
-				// cumulative default and still have room in its model context.
-				inputTokens, totalTokens = 149_995, 150_000
+				// A child run can spend more than the old 128K default while
+				// remaining below the current cumulative safety limit.
+				inputTokens, totalTokens = 139_995, 140_000
 			}
 			if call == 3 {
 				cachedTokens = 6
@@ -687,8 +687,8 @@ func TestEffectiveSubagentToolsIntersectsCapabilityAndRoleAllowlist(t *testing.T
 	}{
 		{mode: "read-only", want: []string{"coding.git_diff", "coding.list_files", "coding.read_file", "coding.search"}},
 		{mode: "read-write", want: []string{"coding.edit_hashline", "coding.git_diff", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.search", "coding.write_file"}},
-		{mode: "execute", want: []string{"coding.git_diff", "coding.go_test", "coding.list_files", "coding.read_file", "coding.search", "coding.shell"}},
-		{mode: "all", want: []string{"coding.edit_hashline", "coding.git_diff", "coding.go_test", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.search", "coding.shell", "coding.write_file"}},
+		{mode: "execute", want: []string{"coding.git_diff", "coding.go_test", "coding.list_files", "coding.read_file", "coding.search"}},
+		{mode: "all", want: []string{"coding.edit_hashline", "coding.git_diff", "coding.go_test", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.search", "coding.write_file"}},
 		{mode: "invalid"},
 	}
 	for _, test := range tests {
@@ -1627,7 +1627,7 @@ func TestSubagentCoordinatorTerminalizesProviderFailureAndPanic(t *testing.T) {
 }
 
 func TestSubagentTurnContextCompactsToModelTarget(t *testing.T) {
-	contextManager := subagentTurnContext{}
+	contextManager := subagentTurnContext{summarize: func(context.Context, string) (string, error) { return "subagent summary", nil }}
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "stable rules"),
 		message.NewText(message.RoleUser, "old request"),

@@ -149,6 +149,7 @@ func (r *Reviewer) reviewOnce(ctx context.Context, request ApprovalReviewRequest
 		},
 		ExtraBody: map[string]any{
 			"parallel_tool_calls": false,
+			"prompt_cache_key":    "azem-approval-review-v1",
 		},
 	}
 	stream, err := r.driver.Stream(ctx, providerRequest)

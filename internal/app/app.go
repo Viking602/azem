@@ -26,7 +26,10 @@ import (
 	"github.com/Viking602/azem/internal/skills"
 )
 
-var ErrRunActive = errors.New("a run is already active")
+var (
+	ErrRunActive        = errors.New("a run is already active")
+	ErrNothingToCompact = errors.New("session does not have enough new history to compact")
+)
 
 type Service struct {
 	cfg                config.Config
@@ -72,6 +75,9 @@ type Service struct {
 	routeMu            sync.Mutex
 	memory             *memory.Service
 	recap              *recap.Service
+	usagePersistMu     sync.Mutex
+	sessionUsage       map[string]session.Usage
+	attachments        AttachmentStore
 }
 
 func NewService(parent context.Context, cfg config.Config) *Service {
@@ -86,6 +92,7 @@ func NewService(parent context.Context, cfg config.Config) *Service {
 		shutdownDone: make(chan struct{}), liveApprovals: make(map[string]*liveApproval),
 		teamApprovals: make(map[string]struct{}), autoReviewDenials: make(map[string]*autoReviewDenialTracker),
 		hookSessions: make(map[string]struct{}), hookInitialUsers: make(map[string]string), hookInitialContext: make(map[string]string), hookAsyncContext: make(map[string][]string), approvalMode: approvalMode,
+		sessionUsage: make(map[string]session.Usage),
 	}
 }
 
@@ -104,6 +111,19 @@ func (s *Service) AttachDurable(sessions *session.Service, coding *agentservice.
 func (s *Service) AttachMemory(memoryService *memory.Service, recapService *recap.Service) {
 	s.memory, s.recap = memoryService, recapService
 }
+
+func (s *Service) AttachAttachments(root string) {
+	s.attachments = NewAttachmentStore(root)
+}
+
+func (s *Service) ImportImage(sessionID, path string) (session.Attachment, error) {
+	return s.attachments.Import(sessionID, path)
+}
+
+func (s *Service) ImportImageBytes(sessionID, name, mimeType string, data []byte) (session.Attachment, error) {
+	return s.attachments.ImportBytes(sessionID, name, mimeType, data)
+}
+
 func (s *Service) loadRecap(ctx context.Context, sessionID string) (*recap.Recap, error) {
 	if s.recap == nil {
 		return nil, nil
@@ -333,11 +353,17 @@ func limitRunes(value string, limit int) string {
 }
 
 func sessionProjectionData(projection session.Projection, blocks string) map[string]string {
-	return map[string]string{
+	data := map[string]string{
 		"blocks": blocks, "lastRunID": projection.LastRunID,
 		"provider": projection.Session.ProviderID, "model": projection.Session.ModelID,
 		"reasoning": projection.Session.Reasoning, "agentMode": projection.Session.AgentMode,
 	}
+	if !projection.Usage.IsZero() {
+		if encoded, err := json.Marshal(projection.Usage); err == nil {
+			data["usage"] = string(encoded)
+		}
+	}
+	return data
 }
 
 func (s *Service) materializeTurnSession(ctx context.Context, request TurnRequest) error {
@@ -365,8 +391,11 @@ func (s *Service) materializeTurnSession(ctx context.Context, request TurnReques
 
 func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	request = normalizeTurnRequest(request, s.cfg.Defaults)
-	if request.Prompt == "" {
+	if request.Prompt == "" && len(request.Images) == 0 {
 		return "", fmt.Errorf("prompt is empty")
+	}
+	if err := ValidateTurnAttachments(request.Images); err != nil {
+		return "", err
 	}
 	if request.AgentMode == "team" && len(request.ActiveSkills) > 0 {
 		return "", fmt.Errorf("active skills require single-agent mode")
@@ -464,7 +493,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		s.activeRun = runID
 		s.mu.Unlock()
 		if s.sessions != nil {
-			if err := s.sessions.AppendBlock(s.ctx, request.SessionID, session.Block{Kind: "user", RunID: runID, Title: "You", Content: request.Prompt}); err != nil {
+			if err := s.sessions.AppendBlock(s.ctx, request.SessionID, userTurnBlock(runID, request)); err != nil {
 				cancel()
 				s.clearRun(runID)
 				return "", fmt.Errorf("persist user turn: %w", err)
@@ -499,7 +528,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		s.activeRun = runID
 		s.mu.Unlock()
 		if s.sessions != nil {
-			if err := s.sessions.AppendBlock(s.ctx, request.SessionID, session.Block{Kind: "user", RunID: runID, Title: "You", Content: request.Prompt}); err != nil {
+			if err := s.sessions.AppendBlock(s.ctx, request.SessionID, userTurnBlock(runID, request)); err != nil {
 				cancel()
 				s.clearRun(runID)
 				return "", fmt.Errorf("persist user turn: %w", err)
@@ -528,7 +557,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	s.guidanceOpen = true
 	s.mu.Unlock()
 	if s.sessions != nil {
-		if err := s.sessions.AppendBlock(s.ctx, request.SessionID, session.Block{Kind: "user", RunID: durableRun.RunID, Title: "You", Content: request.Prompt}); err != nil {
+		if err := s.sessions.AppendBlock(s.ctx, request.SessionID, userTurnBlock(durableRun.RunID, request)); err != nil {
 			cancel()
 			_ = s.coding.CompleteRun(context.WithoutCancel(s.ctx), durableRun, err.Error(), err)
 			s.clearRun(durableRun.RunID)
@@ -538,6 +567,13 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	s.wg.Add(1)
 	go s.runProviderTurn(runCtx, request, durableRun, engine)
 	return durableRun.RunID, nil
+}
+
+func userTurnBlock(runID string, request TurnRequest) session.Block {
+	return session.Block{
+		Kind: "user", RunID: runID, Title: "You", Content: request.Prompt,
+		Attachments: CloneAttachments(request.Images),
+	}
 }
 
 func (s *Service) persistSessionPreferences(ctx context.Context, request TurnRequest) error {
@@ -823,6 +859,12 @@ func (s *Service) clearRun(runID string) {
 }
 
 func (s *Service) emit(ctx context.Context, event Event) bool {
+	switch event.Kind {
+	case EventRunStarted:
+		s.resetTurnUsageTracking(event.SessionID)
+	case EventContextUsage:
+		s.recordSessionUsage(event.SessionID, event.Data)
+	}
 	event.At = time.Now().UTC()
 	select {
 	case <-ctx.Done():
@@ -830,6 +872,96 @@ func (s *Service) emit(ctx context.Context, event Event) bool {
 	case s.events <- event.Clone():
 		return true
 	}
+}
+
+func (s *Service) resetTurnUsageTracking(sessionID string) {
+	if s == nil || sessionID == "" {
+		return
+	}
+	s.usagePersistMu.Lock()
+	defer s.usagePersistMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionUsage == nil {
+		s.sessionUsage = make(map[string]session.Usage)
+	}
+	previous := s.sessionUsage[sessionID]
+	s.sessionUsage[sessionID] = session.Usage{ContextLimit: previous.ContextLimit}
+}
+
+func (s *Service) recordSessionUsage(sessionID string, data map[string]string) {
+	if s == nil || sessionID == "" || data == nil {
+		return
+	}
+	s.usagePersistMu.Lock()
+	defer s.usagePersistMu.Unlock()
+	s.mu.Lock()
+	if s.sessionUsage == nil {
+		s.sessionUsage = make(map[string]session.Usage)
+	}
+	usage, exists := s.sessionUsage[sessionID]
+	sessions := s.sessions
+	s.mu.Unlock()
+	if !exists && sessions != nil {
+		if projection, err := sessions.LoadProjection(context.WithoutCancel(s.ctx), sessionID); err == nil {
+			usage = projection.Usage
+		}
+	}
+	usage.Apply(data)
+	s.mu.Lock()
+	s.sessionUsage[sessionID] = usage
+	snapshot := usage.Clone()
+	s.mu.Unlock()
+	if sessions == nil {
+		return
+	}
+	_ = sessions.UpdateUsage(context.WithoutCancel(s.ctx), sessionID, snapshot)
+}
+
+func (s *Service) rememberSessionUsage(sessionID string, usage session.Usage) {
+	if s == nil || sessionID == "" {
+		return
+	}
+	s.usagePersistMu.Lock()
+	defer s.usagePersistMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionUsage == nil {
+		s.sessionUsage = make(map[string]session.Usage)
+	}
+	if _, exists := s.sessionUsage[sessionID]; !exists {
+		s.sessionUsage[sessionID] = usage.Clone()
+	}
+}
+
+func (s *Service) clearMainUsageOccupancy(ctx context.Context, sessionID string, fallback session.Usage) (session.Usage, error) {
+	if s == nil || sessionID == "" {
+		return fallback, nil
+	}
+	s.usagePersistMu.Lock()
+	defer s.usagePersistMu.Unlock()
+	s.mu.Lock()
+	if s.sessionUsage == nil {
+		s.sessionUsage = make(map[string]session.Usage)
+	}
+	usage, exists := s.sessionUsage[sessionID]
+	if !exists {
+		usage = fallback.Clone()
+	}
+	usage.InputTokens = 0
+	usage.OutputTokens = 0
+	usage.ReasoningTokens = 0
+	usage.UncachedInputTokens = 0
+	s.sessionUsage[sessionID] = usage
+	sessions := s.sessions
+	s.mu.Unlock()
+	if sessions == nil {
+		return usage, nil
+	}
+	if err := sessions.UpdateUsage(ctx, sessionID, usage); err != nil {
+		return session.Usage{}, err
+	}
+	return usage, nil
 }
 
 func randomID(prefix string) (string, error) {

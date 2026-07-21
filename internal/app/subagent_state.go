@@ -267,6 +267,7 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	childRunID := active.run.ChildRunID
 	parentRunID := active.run.ParentRunID
 	parentToolCallID := active.run.ParentToolCallID
+	providerID, modelID, reasoning := active.profile.Provider, active.profile.Model, active.profile.Reasoning
 	switch frame.Kind {
 	case stream.FrameThinking:
 		active.activity = compactActivity(frame.Thinking)
@@ -342,13 +343,18 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		event.State = "reported"
 		event.Data = map[string]string{
 			"inputTokens": fmt.Sprint(frame.Usage.InputTokens), "cachedInputTokens": fmt.Sprint(frame.Usage.CachedInputTokens),
-			"outputTokens": fmt.Sprint(frame.Usage.OutputTokens), "totalTokens": fmt.Sprint(frame.Usage.TotalTokens),
-			"cacheStatus": "reported", "aggregateOnly": "true", "source": frame.Source,
+			"uncachedInputTokens": fmt.Sprint(max(0, frame.Usage.InputTokens-frame.Usage.CachedInputTokens)),
+			"outputTokens":        fmt.Sprint(frame.Usage.OutputTokens), "totalTokens": fmt.Sprint(frame.Usage.TotalTokens),
+			"cacheStatus": "reported", "aggregateOnly": "true", "source": frame.Source, "requestKind": "subagent",
+			"provider": providerID, "model": modelID, "reasoning": reasoning,
 		}
 	default:
 		return
 	}
 	if parent := r.parentHost(id); parent != nil {
+		if event.Kind == EventContextUsage {
+			event.Data["transport"] = parent.providerTransport(providerID)
+		}
 		parent.emit(parent.ctx, event)
 	}
 }

@@ -20,17 +20,18 @@ const maxSSEFrameBytes = 4 << 20
 var errSSEFrameTooLarge = errors.New("provider SSE frame exceeds 4 MiB")
 
 type Stream struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	body       io.ReadCloser
-	reader     *frameReader
-	builders   map[string]*toolBuilder
-	emitted    map[string]bool
-	completed  bool
-	terminal   bool
-	toolUse    bool
-	textOutput bool
-	closeOnce  sync.Once
+	ctx         context.Context
+	cancel      context.CancelFunc
+	body        io.ReadCloser
+	reader      *frameReader
+	builders    map[string]*toolBuilder
+	emitted     map[string]bool
+	completed   bool
+	terminal    bool
+	toolUse     bool
+	textOutput  bool
+	closeOnce   sync.Once
+	reportUsage UsageReporter
 }
 
 type toolBuilder struct {
@@ -74,14 +75,21 @@ type completedResponse struct {
 		InputTokensDetails struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"input_tokens_details"`
+		OutputTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"output_tokens_details"`
 	} `json:"usage"`
 	IncompleteDetails *struct {
 		Reason string `json:"reason"`
 	} `json:"incomplete_details"`
 }
 
-func NewStream(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser) *Stream {
-	return &Stream{ctx: ctx, cancel: cancel, body: body, reader: newFrameReader(body), builders: make(map[string]*toolBuilder), emitted: make(map[string]bool)}
+func NewStream(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser, reporters ...UsageReporter) *Stream {
+	var reporter UsageReporter
+	if len(reporters) > 0 {
+		reporter = reporters[0]
+	}
+	return &Stream{ctx: ctx, cancel: cancel, body: body, reader: newFrameReader(body), builders: make(map[string]*toolBuilder), emitted: make(map[string]bool), reportUsage: reporter}
 }
 
 func (s *Stream) Recv() (hyprovider.Event, error) {
@@ -221,6 +229,13 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 		usage := hyprovider.Usage{
 			InputTokens: response.Usage.InputTokens, CachedInputTokens: response.Usage.InputTokensDetails.CachedTokens,
 			OutputTokens: response.Usage.OutputTokens, TotalTokens: response.Usage.TotalTokens,
+		}
+		if s.reportUsage != nil {
+			s.reportUsage(UsageDetails{
+				InputTokens: response.Usage.InputTokens, CachedTokens: response.Usage.InputTokensDetails.CachedTokens,
+				OutputTokens: response.Usage.OutputTokens, ReasoningTokens: response.Usage.OutputTokensDetails.ReasoningTokens,
+				TotalTokens: response.Usage.TotalTokens,
+			})
 		}
 		return hyprovider.Event{
 			Kind: hyprovider.EventDone, StopReason: reason, Usage: usage, ProviderState: providerState,

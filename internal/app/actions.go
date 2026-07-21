@@ -250,20 +250,30 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if err != nil {
 			return err
 		}
-		if s.providers != nil && len(projection.Blocks) > 5 {
-			plan, changed, prepareErr := s.providers.PrepareManualCompaction(ctx, projection)
-			if prepareErr != nil {
-				return prepareErr
-			}
-			if changed {
-				projection, err = s.sessions.CompactWithSummary(ctx, action.Target, plan)
-			}
-		} else {
-			projection, err = s.sessions.Compact(ctx, action.Target)
+		if len(projection.Blocks) <= 5 {
+			return ErrNothingToCompact
 		}
+		if s.providers == nil {
+			return fmt.Errorf("compaction model runtime is unavailable")
+		}
+		plan, changed, prepareErr := s.providers.PrepareManualCompaction(ctx, projection)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		if !changed {
+			return ErrNothingToCompact
+		}
+		projection, err = s.sessions.CompactWithSummary(ctx, action.Target, plan)
 		if err != nil {
 			return err
 		}
+		// Compaction shrinks the live context. Clear stale main occupancy while
+		// preserving the independently attributed compaction and cache totals.
+		cleared, err := s.clearMainUsageOccupancy(ctx, action.Target, projection.Usage)
+		if err != nil {
+			return err
+		}
+		projection.Usage = cleared
 		blocks, err := json.Marshal(projection.Blocks)
 		if err != nil {
 			return err
@@ -551,6 +561,7 @@ func (s *Service) emitSession(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	s.rememberSessionUsage(id, projection.Usage)
 	s.emit(ctx, Event{
 		Kind: EventSessionLoaded, SessionID: id, State: "loaded",
 		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,

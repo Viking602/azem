@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
+	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/provider/xai"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
@@ -115,7 +117,9 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
-	contextTarget, err := modelContextTokenTarget(modelID, contextWindow)
+	usageBudget := &providerUsageBudget{maxTokens: r.cfg.Agents.Main.MaxTokens}
+	driver = &budgetedProviderDriver{inner: driver, budget: usageBudget}
+	contextTarget, err := modelContextTokenTarget(request.Provider, modelID, contextWindow, 0)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
@@ -195,13 +199,25 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	skillSnapshot := r.coding.SkillSnapshot()
 	activeSkills := mergeSkillNames(skillSnapshot.Eager, request.ActiveSkills)
 	instructions := mainInstructions
+	contextTarget, err = modelContextTokenTarget(request.Provider, modelID, contextWindow, estimateToolDefinitionTokens(drivers))
+	if err != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+		return nil, hyagent.Engine{}, err
+	}
+	extraBody := map[string]any{"prompt_cache_key": request.SessionID}
+	if host != nil && strings.TrimSpace(host.attachments.Root) != "" {
+		extraBody[responses.AttachmentRootExtraKey] = host.attachments.Root
+	}
+	if reporter := r.responseUsageReporter(host, request.SessionID, run.RunID, "main", request.Provider, modelID, driver.Metadata().Name); reporter != nil {
+		extraBody[responses.UsageReporterExtraKey] = reporter
+	}
 	spec := hyagent.Spec{
 		Instructions:    instructions,
 		Skills:          activeSkills,
 		AvailableSkills: skillSnapshot.Available,
 		Model:           modelID,
 		Tools:           toolNames,
-		ExtraBody:       map[string]any{"prompt_cache_key": request.SessionID},
+		ExtraBody:       extraBody,
 		LoopPolicy: hyagent.LoopPolicy{
 			UnlimitedIterations: true,
 			MaxWallClock:        r.cfg.Agents.Main.MaxWallClockDuration,
@@ -212,14 +228,13 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		instructions: instructions, providerID: request.Provider, modelID: modelID, runID: run.RunID,
 		privateContext: request.privateContext, historicalContext: request.historicalContext,
 		history: request.History, persistedHistory: request.persistedHistory,
-		modelHistory: request.modelHistory, todo: request.Todo,
+		modelHistory: request.modelHistory, images: CloneAttachments(request.Images), todo: request.Todo,
 	}
-	meter := &compactionUsageMeter{}
-	meteredDriver := &compactionUsageDriver{inner: driver, meter: meter}
+	reportCompaction := r.compactionUsageReporter(host, request.SessionID, run.RunID)
 	contextManager.summarize = lazyCompactionSummarizer(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
 		_, resolvedModel, window, resolved, resolveErr := r.resolveDriver(ctx, provider, model, reasoning)
 		return resolvedModel, window, resolved, resolveErr
-	}, compactionRoute, request.Provider, modelID, request.Reasoning, meter)
+	}, compactionRoute, request.Provider, modelID, request.Reasoning, request.SessionID+":compaction", usageBudget, reportCompaction)
 	if host != nil {
 		contextManager.compactHooks = host.autoCompactHooks(host.hookMetadata(request.SessionID, run.RunID))
 		if host.sessions != nil {
@@ -244,7 +259,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		}
 	}
 	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
-		Providers:      hyprovider.Single(meteredDriver),
+		Providers:      hyprovider.Single(driver),
 		Skills:         skillSnapshot.Registry,
 		Tools:          tool.NewBus(drivers...),
 		ContextManager: engineContext,
@@ -276,19 +291,20 @@ const compactionSummaryPrompt = `Create a concise handoff summary of the untrust
 const compactionRequestMetadataKey = "azem_internal_compaction"
 
 type compactionUsageDriver struct {
-	inner hyprovider.Driver
-	meter *compactionUsageMeter
-	mu    sync.Mutex
-}
-
-type compactionUsageMeter struct {
-	mu    sync.Mutex
-	usage hyprovider.Usage
+	inner         hyprovider.Driver
+	report        func(hyprovider.Usage)
+	reportDetails responses.UsageReporter
 }
 
 func (d *compactionUsageDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }
 
 func (d *compactionUsageDriver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	if d.reportDetails != nil {
+		if request.ExtraBody == nil {
+			request.ExtraBody = make(map[string]any)
+		}
+		request.ExtraBody[responses.UsageReporterExtraKey] = d.reportDetails
+	}
 	stream, err := d.inner.Stream(ctx, request)
 	if err != nil {
 		return nil, err
@@ -296,23 +312,14 @@ func (d *compactionUsageDriver) Stream(ctx context.Context, request hyprovider.R
 	return &compactionUsageStream{
 		Stream:     stream,
 		compaction: request.Metadata[compactionRequestMetadataKey] == "true",
-		meter:      d.usageMeter(),
+		report:     d.report,
 	}, nil
-}
-
-func (d *compactionUsageDriver) usageMeter() *compactionUsageMeter {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.meter == nil {
-		d.meter = &compactionUsageMeter{}
-	}
-	return d.meter
 }
 
 type compactionUsageStream struct {
 	hyprovider.Stream
 	compaction bool
-	meter      *compactionUsageMeter
+	report     func(hyprovider.Usage)
 }
 
 func (s *compactionUsageStream) Recv() (hyprovider.Event, error) {
@@ -320,18 +327,15 @@ func (s *compactionUsageStream) Recv() (hyprovider.Event, error) {
 	if err != nil || event.Kind != hyprovider.EventDone {
 		return event, err
 	}
-	s.meter.mu.Lock()
-	defer s.meter.mu.Unlock()
-	if s.compaction {
-		s.meter.usage = s.meter.usage.Add(event.Usage)
-	} else if s.meter.usage != (hyprovider.Usage{}) {
-		event.Usage = event.Usage.Add(s.meter.usage)
-		s.meter.usage = hyprovider.Usage{}
+	if s.compaction && s.report != nil {
+		s.report(event.Usage)
 	}
 	return event, nil
 }
 
-func lazyCompactionSummarizer(resolve func(context.Context, string, string, string) (string, int, hyprovider.Driver, error), route config.ModelRouteConfig, providerID, modelID, reasoning string, meter *compactionUsageMeter) func(context.Context, string) (string, error) {
+type compactionUsageReporter func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens int)
+
+func lazyCompactionSummarizer(resolve func(context.Context, string, string, string) (string, int, hyprovider.Driver, error), route config.ModelRouteConfig, providerID, modelID, reasoning, cacheKey string, budget *providerUsageBudget, report compactionUsageReporter) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, transcript string) (string, error) {
 		if resolve == nil {
 			return "", fmt.Errorf("compaction provider resolver is unavailable")
@@ -339,21 +343,96 @@ func lazyCompactionSummarizer(resolve func(context.Context, string, string, stri
 		if route != (config.ModelRouteConfig{}) {
 			providerID, modelID, reasoning = route.Provider, route.Model, route.Reasoning
 		}
+		if strings.TrimSpace(reasoning) == "" || route == (config.ModelRouteConfig{}) {
+			reasoning = "low"
+		}
 		resolvedModel, contextWindow, driver, err := resolve(ctx, providerID, modelID, reasoning)
 		if err != nil {
 			return "", err
 		}
-		metered := &compactionUsageDriver{inner: driver, meter: meter}
-		return compactionSummarizer(metered, providerID, resolvedModel, contextWindow, maxCompactionSummaryTokens(contextWindow))(ctx, transcript)
+		driver = &budgetedProviderDriver{inner: driver, budget: budget}
+		metered := &compactionUsageDriver{inner: driver}
+		if report != nil {
+			metered.report = func(usage hyprovider.Usage) {
+				report(providerID, resolvedModel, reasoning, driver.Metadata().Name, usage, 0)
+			}
+			metered.reportDetails = func(details responses.UsageDetails) {
+				if details.ReasoningTokens > 0 {
+					report(providerID, resolvedModel, reasoning, driver.Metadata().Name, hyprovider.Usage{}, details.ReasoningTokens)
+				}
+			}
+		}
+		return compactionSummarizer(metered, providerID, resolvedModel, reasoning, cacheKey, contextWindow, maxCompactionSummaryTokens(contextWindow))(ctx, transcript)
 	}
 }
 
-func compactionSummarizer(driver hyprovider.Driver, providerID, modelID string, contextWindow, maxOutputTokens int) func(context.Context, string) (string, error) {
+type providerUsageBudget struct {
+	mu        sync.Mutex
+	maxTokens int64
+	used      int64
+}
+
+func (b *providerUsageBudget) beforeRequest() error {
+	if b == nil || b.maxTokens <= 0 {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.used >= b.maxTokens {
+		return fmt.Errorf("%w: max tokens (%d/%d, including compaction)", hyagent.ErrBudgetExhausted, b.used, b.maxTokens)
+	}
+	return nil
+}
+
+func (b *providerUsageBudget) add(usage hyprovider.Usage) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.used += int64(usage.TotalTokens)
+	b.mu.Unlock()
+}
+
+type budgetedProviderDriver struct {
+	inner  hyprovider.Driver
+	budget *providerUsageBudget
+}
+
+func (d *budgetedProviderDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }
+
+func (d *budgetedProviderDriver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	if err := d.budget.beforeRequest(); err != nil {
+		return nil, err
+	}
+	stream, err := d.inner.Stream(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &budgetedProviderStream{Stream: stream, budget: d.budget}, nil
+}
+
+type budgetedProviderStream struct {
+	hyprovider.Stream
+	budget *providerUsageBudget
+}
+
+func (s *budgetedProviderStream) Recv() (hyprovider.Event, error) {
+	event, err := s.Stream.Recv()
+	if err == nil && event.Kind == hyprovider.EventDone {
+		s.budget.add(event.Usage)
+	}
+	return event, err
+}
+
+func compactionSummarizer(driver hyprovider.Driver, providerID, modelID, reasoning, cacheKey string, contextWindow, maxOutputTokens int) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, transcript string) (string, error) {
 		maxInputBytes := contextTokenBytes(contextWindow - maxOutputTokens - 256)
-		transcript = boundCompactionTranscript(transcript, maxInputBytes)
-		if strings.TrimSpace(transcript) == "" {
+		transcript = strings.ToValidUTF8(transcript, "�")
+		if strings.TrimSpace(transcript) == "" || maxInputBytes <= 0 {
 			return "", fmt.Errorf("summary input does not fit model context")
+		}
+		if len(transcript) > maxInputBytes {
+			return "", fmt.Errorf("summary input requires %d bytes but model context allows %d", len(transcript), maxInputBytes)
 		}
 		request := hyprovider.Request{
 			Model: modelID,
@@ -361,10 +440,11 @@ func compactionSummarizer(driver hyprovider.Driver, providerID, modelID string, 
 				message.NewText(message.RoleSystem, compactionSummaryPrompt),
 				message.NewText(message.RoleUser, transcript),
 			},
-			Metadata: map[string]string{compactionRequestMetadataKey: "true"},
+			Metadata:  map[string]string{compactionRequestMetadataKey: "true", "reasoning_effort": reasoning},
+			ExtraBody: map[string]any{"prompt_cache_key": cacheKey},
 		}
 		if providerID != "chatgpt" {
-			request.ExtraBody = map[string]any{"max_output_tokens": maxOutputTokens}
+			request.ExtraBody["max_output_tokens"] = maxOutputTokens
 		}
 		stream, err := driver.Stream(ctx, request)
 		if err != nil {
@@ -404,37 +484,15 @@ func compactionSummarizer(driver hyprovider.Driver, providerID, modelID string, 
 			}
 			return "", fmt.Errorf("summary provider ended without completion")
 		}
-		result := strings.TrimSpace(truncateUTF8(text.String(), contextTokenBytes(maxOutputTokens)))
+		result := strings.TrimSpace(text.String())
 		if result == "" {
 			return "", fmt.Errorf("summary provider returned empty output")
 		}
+		if maxBytes := contextTokenBytes(maxOutputTokens); len(result) > maxBytes {
+			return "", fmt.Errorf("summary output requires %d bytes but configured limit allows %d", len(result), maxBytes)
+		}
 		return result, nil
 	}
-}
-
-func boundCompactionTranscript(transcript string, maxBytes int) string {
-	if maxBytes <= 0 {
-		return ""
-	}
-	transcript = strings.ToValidUTF8(transcript, "�")
-	if len(transcript) <= maxBytes {
-		return transcript
-	}
-	const truncated = "\n[older historical evidence truncated]\n"
-	marker := strings.Index(transcript, "<transcript>\n")
-	prefix := ""
-	if marker >= 0 {
-		prefix = transcript[:marker+len("<transcript>\n")]
-	}
-	if len(prefix)+len(truncated) >= maxBytes {
-		return truncateUTF8(transcript, maxBytes)
-	}
-	suffixBytes := maxBytes - len(prefix) - len(truncated)
-	suffix := transcript[len(transcript)-suffixBytes:]
-	if boundary := strings.Index(suffix, "\nROLE "); boundary >= 0 {
-		suffix = suffix[boundary+1:]
-	}
-	return prefix + truncated + suffix
 }
 
 func maxCompactionSummaryTokens(contextWindow int) int {
@@ -469,16 +527,30 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 	if len(omitted) == 0 {
 		return session.CompactionPlan{}, false, nil
 	}
-	providerID, requestedModel, reasoning := projection.Session.ProviderID, projection.Session.ModelID, projection.Session.Reasoning
+	providerID, requestedModel, reasoning := projection.Session.ProviderID, projection.Session.ModelID, "low"
 	route, _ := r.modelRouteSnapshot()
 	if route != (config.ModelRouteConfig{}) {
 		providerID, requestedModel, reasoning = route.Provider, route.Model, route.Reasoning
+	}
+	if strings.TrimSpace(reasoning) == "" {
+		reasoning = "low"
 	}
 	_, modelID, contextWindow, driver, err := r.resolveDriver(ctx, providerID, requestedModel, reasoning)
 	if err != nil {
 		return session.CompactionPlan{}, false, err
 	}
-	generated, err := compactionSummarizer(driver, providerID, modelID, contextWindow, maxCompactionSummaryTokens(contextWindow))(ctx, serializeCompactionHistory(previous, omitted))
+	metered := &compactionUsageDriver{inner: driver}
+	if reporter := r.compactionUsageReporter(r.host, projection.Session.ID, "manual-compaction"); reporter != nil {
+		metered.report = func(usage hyprovider.Usage) {
+			reporter(providerID, modelID, reasoning, driver.Metadata().Name, usage, 0)
+		}
+		metered.reportDetails = func(details responses.UsageDetails) {
+			if details.ReasoningTokens > 0 {
+				reporter(providerID, modelID, reasoning, driver.Metadata().Name, hyprovider.Usage{}, details.ReasoningTokens)
+			}
+		}
+	}
+	generated, err := compactionSummarizer(metered, providerID, modelID, reasoning, projection.Session.ID+":compaction", contextWindow, maxCompactionSummaryTokens(contextWindow))(ctx, serializeCompactionHistory(previous, omitted))
 	if err != nil {
 		return session.CompactionPlan{}, false, fmt.Errorf("compact session summary: %w", err)
 	}
@@ -570,15 +642,64 @@ func guidanceMessages(values []string) []message.Message {
 	return []message.Message{message.NewText(message.RoleUser, strings.TrimSpace(combined.String()))}
 }
 
-func modelContextTokenTarget(modelID string, contextWindow int) (int, error) {
+func modelContextTokenTarget(providerID, modelID string, contextWindow, toolTokens int) (int, error) {
 	if contextWindow <= 0 {
 		return 0, fmt.Errorf("model %q catalog omitted a positive context window", modelID)
 	}
 	target := contextWindow/4*3 + (contextWindow%4)*3/4
+	if providerID == "grok" && contextWindow > 200_000 && target > 180_000 {
+		target = 180_000
+	}
+	target -= max(0, toolTokens) + 8_192
 	if target <= 0 {
 		return 0, fmt.Errorf("model %q context window is too small", modelID)
 	}
 	return target, nil
+}
+
+func estimateToolDefinitionTokens(drivers []tool.Driver) int {
+	bytes := 0
+	for _, driver := range drivers {
+		if driver == nil {
+			continue
+		}
+		encoded, err := json.Marshal(driver.Definition())
+		if err == nil {
+			bytes += len(encoded)
+		}
+	}
+	return (bytes + estimatedBytesPerToken - 1) / estimatedBytesPerToken
+}
+
+func (r *ProviderRuntime) compactionUsageReporter(host *Service, sessionID, runID string) compactionUsageReporter {
+	if host == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens int) {
+		host.emit(host.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{
+			"inputTokens": fmt.Sprint(usage.InputTokens), "cachedInputTokens": fmt.Sprint(usage.CachedInputTokens),
+			"outputTokens": fmt.Sprint(usage.OutputTokens), "totalTokens": fmt.Sprint(usage.TotalTokens),
+			"reasoningTokens":     fmt.Sprint(reasoningTokens),
+			"uncachedInputTokens": fmt.Sprint(max(0, usage.InputTokens-usage.CachedInputTokens)),
+			"cacheStatus":         "reported", "aggregateOnly": "true", "requestKind": "compaction",
+			"provider": providerID, "model": modelID, "reasoning": reasoning, "transport": transport,
+		}})
+	}
+}
+
+func (r *ProviderRuntime) responseUsageReporter(host *Service, sessionID, runID, requestKind, providerID, modelID, transport string) responses.UsageReporter {
+	if host == nil {
+		return nil
+	}
+	return func(details responses.UsageDetails) {
+		if details.ReasoningTokens == 0 {
+			return
+		}
+		host.emit(host.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{
+			"reasoningTokens": fmt.Sprint(details.ReasoningTokens), "uncachedInputTokens": fmt.Sprint(max(0, details.InputTokens-details.CachedTokens)),
+			"aggregateOnly": "true", "requestKind": requestKind, "provider": providerID, "model": modelID, "transport": transport,
+		}})
+	}
 }
 
 func mergeSkillNames(eager, requested []string) []string {
