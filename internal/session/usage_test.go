@@ -33,22 +33,30 @@ func TestUsageApplyAndPersistAcrossReload(t *testing.T) {
 		"uncachedInputTokens": "10", "reasoningTokens": "3", "cacheWriteTokens": "7", "requestKind": "compaction",
 		"cacheStatus": "reported", "aggregateOnly": "true",
 	})
+	usage.Apply(map[string]string{
+		"inputTokens": "100", "cachedInputTokens": "60", "outputTokens": "20",
+		"uncachedInputTokens": "40", "reasoningTokens": "8", "cacheWriteTokens": "9", "requestKind": "team",
+		"cacheStatus": "reported", "aggregateOnly": "true",
+	})
 	if usage.InputTokens != 68000 || usage.OutputTokens != 4000 {
 		t.Fatalf("main occupancy = %+v", usage)
 	}
 	if usage.MainCacheInput != 68000 || usage.MainCachedInput != 34000 {
 		t.Fatalf("main cache = %+v", usage)
 	}
-	if usage.CacheInputTokens != 68050 || usage.CachedInputTokens != 34040 {
+	if usage.CacheInputTokens != 68150 || usage.CachedInputTokens != 34100 {
 		t.Fatalf("aggregate cache = %+v", usage)
 	}
-	if usage.CacheWriteTokens != 10007 || usage.MainCacheWrite != 10000 || usage.CompactionCacheWrite != 7 {
+	if usage.CacheWriteTokens != 10016 || usage.MainCacheWrite != 10000 || usage.CompactionCacheWrite != 7 || usage.TeamCacheWrite != 9 {
 		t.Fatalf("cache write usage = %+v", usage)
 	}
 	if usage.UncachedInputTokens != 34000 || usage.ReasoningTokens != 1200 || usage.CompactionInput != 50 || usage.CompactionCached != 40 || usage.CompactionUncached != 10 || usage.CompactionOutput != 5 || usage.CompactionReasoning != 3 {
 		t.Fatalf("detailed usage = %#v", usage)
 	}
-	if usage.LastRequestKind != "compaction" || usage.LastProvider != "grok" || usage.LastModel != "grok-4.5" || usage.LastTransport != "xai-responses" {
+	if usage.TeamInput != 100 || usage.TeamCached != 60 || usage.TeamUncached != 40 || usage.TeamOutput != 20 || usage.TeamReasoning != 8 {
+		t.Fatalf("team usage = %#v", usage)
+	}
+	if usage.LastRequestKind != "team" || usage.LastProvider != "grok" || usage.LastModel != "grok-4.5" || usage.LastTransport != "xai-responses" {
 		t.Fatalf("usage attribution = %#v", usage)
 	}
 	if err := service.UpdateUsage(ctx, "session", usage); err != nil {

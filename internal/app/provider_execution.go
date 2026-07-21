@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
 	"github.com/Viking602/go-hydaelyn/api"
@@ -18,6 +21,7 @@ import (
 	"github.com/Viking602/go-hydaelyn/multiagent"
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 	"github.com/Viking602/go-hydaelyn/stream"
+	"github.com/Viking602/go-hydaelyn/tool"
 )
 
 func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reasoning, transport string) stream.Sink {
@@ -25,14 +29,20 @@ func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reas
 		data := map[string]string{}
 		switch frame.Kind {
 		case stream.FrameText:
-			s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: frame.Text, Data: data})
+			if !s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: frame.Text, Data: data}) {
+				return eventDeliveryError(ctx)
+			}
 		case stream.FrameThinking:
-			s.emit(ctx, Event{Kind: EventThinkingDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: frame.Thinking, Data: data})
+			if !s.emit(ctx, Event{Kind: EventThinkingDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: frame.Thinking, Data: data}) {
+				return eventDeliveryError(ctx)
+			}
 		case stream.FrameToolCall:
 			if frame.ToolCall != nil {
 				data["name"] = frame.ToolCall.Name
 				data["arguments"] = string(frame.ToolCall.Arguments)
-				s.emit(ctx, Event{Kind: EventToolStarted, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolCall.ID, State: "running", Data: data})
+				if !s.emit(ctx, Event{Kind: EventToolStarted, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolCall.ID, State: "running", Data: data}) {
+					return eventDeliveryError(ctx)
+				}
 			}
 		case stream.FrameToolResult:
 			if frame.ToolResult != nil {
@@ -44,7 +54,9 @@ func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reas
 				if len(frame.ToolResult.Structured) > 0 {
 					data["structured"] = string(frame.ToolResult.Structured)
 				}
-				s.emit(ctx, Event{Kind: EventToolFinished, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolResult.ToolCallID, State: state, Text: frame.ToolResult.Content, Data: data})
+				if !s.emit(ctx, Event{Kind: EventToolFinished, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolResult.ToolCallID, State: state, Text: frame.ToolResult.Content, Data: data}) {
+					return eventDeliveryError(ctx)
+				}
 			}
 		case stream.FrameDone:
 			usage := map[string]string{}
@@ -61,7 +73,9 @@ func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reas
 				usage["reasoning"] = reasoning
 				usage["transport"] = transport
 			}
-			s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: usage})
+			if !s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: usage}) {
+				return eventDeliveryError(ctx)
+			}
 		case stream.FrameError:
 			if frame.Err != nil {
 				return frame.Err
@@ -164,53 +178,73 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 }
 
 func teamPrompt(request TurnRequest) string {
-	reminder := todoReminder(request.Todo)
-	if len(request.History) == 0 && reminder == "" {
-		return request.Prompt
-	}
-	var context strings.Builder
-	if len(request.History) > 0 {
-		context.WriteString("Continue this coding session using the prior conversation as context.\n\n")
-	}
-	for _, block := range request.History {
-		text := strings.TrimSpace(block.Content)
-		if text == "" {
-			continue
-		}
-		fmt.Fprintf(&context, "%s: %s\n", firstNonempty(block.Title, block.Kind), text)
-	}
-	if reminder != "" {
-		context.WriteString("\n")
-		context.WriteString(reminder)
-		context.WriteString("\n")
-	}
-	context.WriteString("\nCurrent request: ")
-	context.WriteString(request.Prompt)
-	return context.String()
+	return request.Prompt
 }
 
-func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runID, goal, modelID string, resolver hyprovider.Resolver) {
+type teamExecutionPolicy struct {
+	contextTarget  int
+	attachmentRoot string
+	images         []session.Attachment
+	newSummarizer  func(string) func(context.Context, string) (string, error)
+}
+
+func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, contextWindow int, tools *tool.Bus) (teamExecutionPolicy, error) {
+	toolTokens := 0
+	if tools != nil {
+		bytes := 0
+		for _, definition := range tools.Definitions() {
+			if encoded, err := json.Marshal(definition); err == nil {
+				bytes += len(encoded)
+			}
+		}
+		toolTokens = (bytes + estimatedBytesPerToken - 1) / estimatedBytesPerToken
+	}
+	target, err := modelContextTokenTarget(request.Provider, request.Model, contextWindow, toolTokens)
+	if err != nil {
+		return teamExecutionPolicy{}, err
+	}
+	policy := teamExecutionPolicy{contextTarget: target, attachmentRoot: s.attachments.Root, images: CloneAttachments(request.Images)}
+	compactionRoute, _ := s.providers.modelRouteSnapshot()
+	report := s.providers.compactionUsageReporter(s, request.SessionID, parentRunID)
+	policy.newSummarizer = func(cacheKey string) func(context.Context, string) (string, error) {
+		return lazyCompactionSummarizer(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
+			_, resolvedModel, window, driver, resolveErr := s.providers.resolveDriver(ctx, provider, model, reasoning)
+			return resolvedModel, window, driver, resolveErr
+		}, compactionRoute, request.Provider, request.Model, request.Reasoning, cacheKey, nil, report)
+	}
+	return policy, nil
+}
+
+func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runID, goal string, resolution teamProviderResolution) {
 	defer s.wg.Done()
 	defer s.clearRun(runID)
+	request.Provider = resolution.providerID
+	request.Model = resolution.modelID
 	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: request.SessionID, RunID: runID, State: "running"})
-	models := agentservice.TeamModels{Planner: modelID, Implementer: modelID, Reviewer: modelID, Reporter: modelID}
+	models := agentservice.TeamModels{Planner: resolution.modelID, Implementer: resolution.modelID, Reviewer: resolution.modelID, Reporter: resolution.modelID}
 	toolBus, toolErr := s.teamToolBus(ctx, request.SessionID, runID, goal)
 	if toolErr != nil {
 		s.finishProviderTeam(ctx, request.SessionID, runID, request.Prompt, request.Todo, agentservice.TeamExecution{}, toolErr)
 		return
 	}
-	execution, err := s.coding.StartTeamWithIDAndToolsMetadataHooks(ctx, runID, goal, models, resolver, toolBus, map[string]string{
+	policy, policyErr := s.teamExecutionPolicy(request, runID, resolution.contextWindow, toolBus)
+	if policyErr != nil {
+		s.finishProviderTeam(ctx, request.SessionID, runID, request.Prompt, request.Todo, agentservice.TeamExecution{}, policyErr)
+		return
+	}
+	execution, err := s.coding.StartTeamWithIDAndToolsMetadataHooks(ctx, runID, goal, models, resolution.resolver, toolBus, map[string]string{
 		"session_id":           request.SessionID,
 		"provider":             request.Provider,
-		"model":                modelID,
+		"model":                resolution.modelID,
 		"reasoning":            request.Reasoning,
 		"original_prompt":      request.Prompt,
 		"hook_private_context": request.privateContext,
-	}, s.teamHooks(request.SessionID, runID, request.privateContext, request.historicalContext), func(state multiagent.TeamState) {
+		"attachments":          EncodeAttachmentsMeta(request.Images),
+	}, s.teamHooks(request, runID, policy), func(state multiagent.TeamState) {
 		for _, instance := range state.Instances {
 			s.emit(ctx, Event{
 				Kind: EventAgentState, SessionID: request.SessionID, RunID: runID, AgentID: instance.ID, State: string(instance.State),
-				Agent: &AgentStatePayload{Type: instance.ClassName, Model: modelID, ParentRunID: runID, Activity: string(instance.State)},
+				Agent: &AgentStatePayload{Type: instance.ClassName, Model: resolution.modelID, ParentRunID: runID, Activity: string(instance.State)},
 				Data:  map[string]string{"id": instance.ID, "role": instance.ClassName, "state": string(instance.State)},
 			})
 		}
@@ -218,29 +252,51 @@ func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runI
 	s.finishProviderTeam(ctx, request.SessionID, runID, request.Prompt, request.Todo, execution, err)
 }
 
-func (s *Service) runResumedProviderTeam(ctx context.Context, sessionID, runID, durableGoal, recapGoal, modelID, privateContext, historicalContext string, resolver hyprovider.Resolver) {
+func (s *Service) runResumedProviderTeam(ctx context.Context, request TurnRequest, runID, recapGoal string, resolution teamProviderResolution) {
 	defer s.wg.Done()
 	defer s.clearRun(runID)
-	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: sessionID, RunID: runID, State: "resuming"})
-	models := agentservice.TeamModels{Planner: modelID, Implementer: modelID, Reviewer: modelID, Reporter: modelID}
-	toolBus, toolErr := s.teamToolBus(ctx, sessionID, runID, durableGoal)
+	request.Provider = resolution.providerID
+	request.Model = resolution.modelID
+	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: request.SessionID, RunID: runID, State: "resuming", Data: map[string]string{"preserveUsage": "true"}})
+	models := agentservice.TeamModels{Planner: resolution.modelID, Implementer: resolution.modelID, Reviewer: resolution.modelID, Reporter: resolution.modelID}
+	toolBus, toolErr := s.teamToolBus(ctx, request.SessionID, runID, request.Prompt)
 	if toolErr != nil {
-		s.finishProviderTeam(ctx, sessionID, runID, recapGoal, session.TodoList{}, agentservice.TeamExecution{}, toolErr)
+		s.finishProviderTeam(ctx, request.SessionID, runID, recapGoal, request.Todo, agentservice.TeamExecution{}, toolErr)
 		return
 	}
-	execution, err := s.coding.ResumeTeamWithToolsHooks(ctx, runID, models, resolver, toolBus, s.teamHooks(sessionID, runID, privateContext, historicalContext), func(state multiagent.TeamState) {
+	policy, policyErr := s.teamExecutionPolicy(request, runID, resolution.contextWindow, toolBus)
+	if policyErr != nil {
+		s.finishProviderTeam(ctx, request.SessionID, runID, recapGoal, request.Todo, agentservice.TeamExecution{}, policyErr)
+		return
+	}
+	execution, err := s.coding.ResumeTeamWithToolsHooks(ctx, runID, models, resolution.resolver, toolBus, s.teamHooks(request, runID, policy), func(state multiagent.TeamState) {
 		for _, instance := range state.Instances {
 			s.emit(ctx, Event{
-				Kind: EventAgentState, SessionID: sessionID, RunID: runID, AgentID: instance.ID, State: string(instance.State),
-				Agent: &AgentStatePayload{Type: instance.ClassName, Model: modelID, ParentRunID: runID, Activity: string(instance.State)},
+				Kind: EventAgentState, SessionID: request.SessionID, RunID: runID, AgentID: instance.ID, State: string(instance.State),
+				Agent: &AgentStatePayload{Type: instance.ClassName, Model: resolution.modelID, ParentRunID: runID, Activity: string(instance.State)},
 				Data:  map[string]string{"id": instance.ID, "role": instance.ClassName, "state": string(instance.State)},
 			})
 		}
 	})
-	s.finishProviderTeam(ctx, sessionID, runID, recapGoal, session.TodoList{}, execution, err)
+	s.finishProviderTeam(ctx, request.SessionID, runID, recapGoal, request.Todo, execution, err)
 }
 
-func (s *Service) teamHooks(sessionID, parentRunID, rootContext, historicalContext string) agentservice.TeamHooks {
+func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy teamExecutionPolicy) agentservice.TeamHooks {
+	sessionID := request.SessionID
+	teamImages := CloneAttachments(policy.images)
+	teamHistory := append([]session.Block(nil), request.History...)
+	if s.sessions != nil {
+		if projection, err := s.sessions.LoadProjection(s.ctx, sessionID); err == nil {
+			for index := len(projection.Blocks) - 1; index >= 0; index-- {
+				if projection.Blocks[index].RunID == parentRunID {
+					if len(projection.Blocks[index].Attachments) > 0 {
+						teamImages = CloneAttachments(projection.Blocks[index].Attachments)
+					}
+					break
+				}
+			}
+		}
+	}
 	beforeTask := func(ctx context.Context, dispatch multiagent.Dispatch, class multiagent.AgentClass) error {
 		metadata := hooks.Metadata{SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To, AgentType: class.Name, ParentRunID: parentRunID, CWD: s.cfg.Workspace.Root}
 		return s.dispatchLifecycle(ctx, hooks.TaskCreated, metadata, func(e *hooks.Envelope) {
@@ -249,11 +305,15 @@ func (s *Service) teamHooks(sessionID, parentRunID, rootContext, historicalConte
 	}
 	prepare := func(ctx context.Context, engine hyagent.Engine, dispatch multiagent.Dispatch, class multiagent.AgentClass) (hyagent.Engine, error) {
 		metadata := hooks.Metadata{SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To, AgentType: class.Name, ParentRunID: parentRunID, CWD: s.cfg.Workspace.Root}
-		extraBody := make(map[string]any, len(engine.ExtraBody)+1)
+		roleCacheKey := strings.Join([]string{sessionID, "team", request.Provider, request.Model, class.Name}, ":")
+		extraBody := make(map[string]any, len(engine.ExtraBody)+3)
 		for key, value := range engine.ExtraBody {
 			extraBody[key] = value
 		}
-		extraBody["prompt_cache_key"] = dispatch.Task.RunID
+		extraBody["prompt_cache_key"] = roleCacheKey
+		if strings.TrimSpace(policy.attachmentRoot) != "" {
+			extraBody[responses.AttachmentRootExtraKey] = policy.attachmentRoot
+		}
 		engine.ExtraBody = extraBody
 		decision := s.hooks.Dispatch(ctx, hooks.Envelope{
 			SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To,
@@ -268,15 +328,54 @@ func (s *Service) teamHooks(sessionID, parentRunID, rootContext, historicalConte
 				additional = append(additional, text)
 			}
 		}
-		contextParts := append([]string{strings.TrimSpace(rootContext)}, additional...)
+		contextParts := append([]string{strings.TrimSpace(request.privateContext)}, additional...)
 		contextText := strings.TrimSpace(strings.Join(contextParts, "\n"))
 		historical := ""
+		var history []session.Block
+		var images []session.Attachment
 		if class.Name == agentservice.PlannerClass {
-			historical = historicalContext
+			historical = request.historicalContext
+			history = append([]session.Block(nil), teamHistory...)
+			images = CloneAttachments(teamImages)
 		}
-		if contextText != "" || historical != "" {
-			engine.ContextBuilder = teamHookContext{inner: engine.ContextBuilder, additional: contextText, historical: historical}
+		var loadTodo func(context.Context) (session.TodoList, error)
+		if s.sessions != nil {
+			loadTodo = func(ctx context.Context) (session.TodoList, error) { return s.sessions.LoadTodo(ctx, sessionID) }
 		}
+		requestContext := teamHookContext{
+			additional: contextText, historical: historical,
+			history: history,
+		}
+		requestPreparer := &teamRequestPreparer{
+			context: requestContext, images: images, todo: request.Todo, loadTodo: loadTodo, runID: dispatch.Task.RunID,
+			target: policy.contextTarget,
+		}
+		if policy.newSummarizer != nil {
+			requestPreparer.compactor = &turnContext{
+				runID: dispatch.Task.RunID, todo: request.Todo, loadTodo: loadTodo,
+				summarize:    policy.newSummarizer(roleCacheKey + ":compaction"),
+				compactHooks: s.autoCompactHooks(metadata),
+				reportContextTokens: func(_ context.Context, tokens int) {
+					s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: parentRunID, State: "estimated", Data: map[string]string{
+						"inputTokens": fmt.Sprint(tokens), "outputTokens": "0", "totalTokens": fmt.Sprint(tokens),
+						"cacheStatus": "pending", "aggregateOnly": "true", "requestKind": "team", "role": class.Name, "agentID": dispatch.To,
+						"provider": request.Provider, "model": request.Model, "reasoning": request.Reasoning, "teamContextTarget": fmt.Sprint(policy.contextTarget),
+					}})
+				},
+			}
+		}
+		if engine.Provider != nil {
+			transport := engine.Provider.Metadata().Name
+			extraBody[responses.UsageReporterExtraKey] = responses.UsageReporter(func(details responses.UsageDetails) {
+				if details.ReasoningTokens > 0 || details.CacheWriteTokens > 0 {
+					s.emitTeamUsage(request, parentRunID, dispatch.To, class.Name, transport, hyprovider.Usage{}, details.ReasoningTokens, details.CacheWriteTokens)
+				}
+			})
+			engine.Provider = &teamUsageDriver{inner: engine.Provider, prepare: requestPreparer.prepare, report: func(usage hyprovider.Usage) {
+				s.emitTeamUsage(request, parentRunID, dispatch.To, class.Name, transport, usage, 0, 0)
+			}}
+		}
+		engine.ExtraBody = extraBody
 		return engine, nil
 	}
 	decorate := func(engine hyagent.Engine, dispatch multiagent.Dispatch, class multiagent.AgentClass) hyagent.Engine {
@@ -334,6 +433,7 @@ type teamHookContext struct {
 	inner      hyagent.ContextManager
 	additional string
 	historical string
+	history    []session.Block
 }
 
 func (c teamHookContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
@@ -341,31 +441,175 @@ func (c teamHookContext) Build(ctx context.Context, task api.Task) ([]message.Me
 	if err != nil {
 		return nil, err
 	}
-	prefix := make([]message.Message, 0, 2)
+	return c.enrich(ctx, messages)
+}
+
+func (c teamHookContext) enrich(ctx context.Context, messages []message.Message) ([]message.Message, error) {
+	systemEnd := 0
+	for systemEnd < len(messages) && messages[systemEnd].Role == message.RoleSystem {
+		systemEnd++
+	}
+	prefix := make([]message.Message, 0, systemEnd+2)
 	if c.additional != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted SubagentStart hook context]\n"+c.additional)
 		value.Visibility = message.VisibilityPrivate
+		value.CreatedAt = time.Time{}
 		prefix = append(prefix, value)
 	}
-	if c.historical != "" {
+	if c.historical != "" || len(c.history) > 0 {
 		policy := message.NewText(message.RoleSystem, historicalEvidencePolicy)
 		policy.Visibility = message.VisibilityPrivate
+		policy.CreatedAt = time.Time{}
 		prefix = append(prefix, policy)
 	}
-	result := append(prefix, messages...)
-	if c.historical == "" {
-		return result, nil
+	prefix = append(prefix, messages[:systemEnd]...)
+	contextMessages := make([]message.Message, 0, 3)
+	if len(c.history) > 0 {
+		encoded, encodeErr := json.Marshal(c.history)
+		if encodeErr != nil {
+			return nil, fmt.Errorf("encode team session history: %w", encodeErr)
+		}
+		data := message.NewText(message.RoleUser, "<session-history-json>\n"+string(encoded)+"\n</session-history-json>")
+		data.Visibility = message.VisibilityPrivate
+		data.CreatedAt = time.Time{}
+		contextMessages = append(contextMessages, data)
 	}
-	insertAt := 0
-	for insertAt < len(result) && result[insertAt].Role == message.RoleSystem {
-		insertAt++
+	if c.historical != "" {
+		data := message.NewText(message.RoleUser, "<historical-evidence-json>\n"+c.historical+"\n</historical-evidence-json>")
+		data.Visibility = message.VisibilityPrivate
+		data.CreatedAt = time.Time{}
+		contextMessages = append(contextMessages, data)
 	}
-	data := message.NewText(message.RoleUser, "<historical-evidence-json>\n"+c.historical+"\n</historical-evidence-json>")
-	data.Visibility = message.VisibilityPrivate
-	result = append(result, message.Message{})
-	copy(result[insertAt+1:], result[insertAt:])
-	result[insertAt] = data
+	result := make([]message.Message, 0, len(prefix)+len(contextMessages)+len(messages)-systemEnd)
+	result = append(result, prefix...)
+	result = append(result, contextMessages...)
+	result = append(result, messages[systemEnd:]...)
 	return result, nil
+}
+
+type teamRequestPreparer struct {
+	mu        sync.Mutex
+	context   teamHookContext
+	images    []session.Attachment
+	todo      session.TodoList
+	loadTodo  func(context.Context) (session.TodoList, error)
+	runID     string
+	lastTodo  string
+	lastRaw   []message.Message
+	prepared  []message.Message
+	target    int
+	compactor *turnContext
+}
+
+func (p *teamRequestPreparer) prepare(ctx context.Context, request hyprovider.Request) (hyprovider.Request, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	original := append([]message.Message(nil), request.Messages...)
+	if len(p.images) > 0 {
+		for index := 0; index < len(original); index++ {
+			if original[index].Role != message.RoleUser {
+				continue
+			}
+			metadata := make(map[string]string, len(original[index].Metadata)+1)
+			for key, value := range original[index].Metadata {
+				metadata[key] = value
+			}
+			metadata[attachmentMetaKey] = EncodeAttachmentsMeta(p.images)
+			original[index].Metadata = metadata
+			break
+		}
+	}
+	enriched, err := p.context.enrich(ctx, original)
+	if err != nil {
+		return hyprovider.Request{}, err
+	}
+	current := p.todo
+	if p.loadTodo != nil {
+		current, err = p.loadTodo(ctx)
+		if err != nil {
+			return hyprovider.Request{}, err
+		}
+	}
+	reminder := todoReminder(current)
+	if reminder == "" && p.lastTodo != "" {
+		reminder = fmt.Sprintf("%s revision=%d %s", todoReminderPrefix, current.Revision, todoReminderCleared)
+	}
+	extendsPrevious := len(p.lastRaw) > 0 && len(enriched) >= len(p.lastRaw)
+	if extendsPrevious {
+		for index := range p.lastRaw {
+			if !reflect.DeepEqual(p.lastRaw[index], enriched[index]) {
+				extendsPrevious = false
+				break
+			}
+		}
+	}
+	prepared := append([]message.Message(nil), enriched...)
+	if extendsPrevious {
+		prepared = append(append([]message.Message(nil), p.prepared...), enriched[len(p.lastRaw):]...)
+	}
+	if reminder != "" && reminder != p.lastTodo {
+		update := (turnContext{runID: p.runID}).todoReminderMessage(reminder)
+		update.CreatedAt = time.Time{}
+		prepared = append(prepared, update)
+		p.lastTodo = reminder
+	}
+	if p.compactor != nil {
+		prepared, err = p.compactor.CompactTo(ctx, prepared, p.target)
+		if err != nil {
+			return hyprovider.Request{}, err
+		}
+	}
+	p.lastRaw = append([]message.Message(nil), enriched...)
+	p.prepared = append([]message.Message(nil), prepared...)
+	request.Messages = prepared
+	return request, nil
+}
+
+type teamUsageDriver struct {
+	inner   hyprovider.Driver
+	prepare func(context.Context, hyprovider.Request) (hyprovider.Request, error)
+	report  func(hyprovider.Usage)
+}
+
+func (d *teamUsageDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }
+
+func (d *teamUsageDriver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	if d.prepare != nil {
+		var err error
+		request, err = d.prepare(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+	}
+	value, err := d.inner.Stream(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &teamUsageStream{Stream: value, report: d.report}, nil
+}
+
+type teamUsageStream struct {
+	hyprovider.Stream
+	report func(hyprovider.Usage)
+}
+
+func (s *teamUsageStream) Recv() (hyprovider.Event, error) {
+	event, err := s.Stream.Recv()
+	if err == nil && event.Kind == hyprovider.EventDone && s.report != nil {
+		s.report(event.Usage)
+	}
+	return event, err
+}
+
+func (s *Service) emitTeamUsage(request TurnRequest, parentRunID, agentID, role, transport string, usage hyprovider.Usage, reasoningTokens, cacheWriteTokens int) {
+	s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: request.SessionID, RunID: parentRunID, State: "reported", Data: map[string]string{
+		"inputTokens": fmt.Sprint(usage.InputTokens), "cachedInputTokens": fmt.Sprint(usage.CachedInputTokens),
+		"outputTokens": fmt.Sprint(usage.OutputTokens), "totalTokens": fmt.Sprint(usage.TotalTokens),
+		"reasoningTokens": fmt.Sprint(reasoningTokens), "cacheWriteTokens": fmt.Sprint(cacheWriteTokens),
+		"uncachedInputTokens": fmt.Sprint(max(0, usage.InputTokens-usage.CachedInputTokens)),
+		"cacheStatus":         "reported", "aggregateOnly": "true", "requestKind": "team", "role": role, "agentID": agentID,
+		"provider": request.Provider, "model": request.Model, "reasoning": request.Reasoning, "transport": transport,
+	}})
 }
 
 func (c teamHookContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
@@ -396,7 +640,12 @@ func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID, goal
 		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: "coding team completed without a reporter answer"})
 		return
 	}
-	s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: answer})
+	if !s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: answer}) {
+		deliveryErr := eventDeliveryError(ctx)
+		s.observeStop(sessionID, runID, hooks.StopFailure, "event_backlog", deliveryErr)
+		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: deliveryErr.Error()})
+		return
+	}
 	if s.sessions != nil {
 		if err := s.sessions.AppendBlock(ctx, sessionID, session.Block{Kind: "assistant", RunID: runID, Title: "Azem team", Content: answer, State: "completed"}); err != nil {
 			s.observeStop(sessionID, runID, hooks.StopFailure, "persist_failed", err)

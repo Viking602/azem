@@ -428,6 +428,12 @@ func (m *AppModel) switchProvider(provider string) {
 		m.usage.CompactionOutput = 0
 		m.usage.CompactionReasoning = 0
 		m.usage.CompactionUncached = 0
+		m.usage.TeamInput = 0
+		m.usage.TeamCached = 0
+		m.usage.TeamCacheWrite = 0
+		m.usage.TeamOutput = 0
+		m.usage.TeamReasoning = 0
+		m.usage.TeamUncached = 0
 		m.usage.CacheReported = false
 		m.usage.MainCacheReported = false
 	}
@@ -472,6 +478,12 @@ func (m *AppModel) selectModel(modelID string) {
 		m.usage.CompactionOutput = 0
 		m.usage.CompactionReasoning = 0
 		m.usage.CompactionUncached = 0
+		m.usage.TeamInput = 0
+		m.usage.TeamCached = 0
+		m.usage.TeamCacheWrite = 0
+		m.usage.TeamOutput = 0
+		m.usage.TeamReasoning = 0
+		m.usage.TeamUncached = 0
 		m.usage.CacheReported = false
 		m.usage.MainCacheReported = false
 	}
@@ -504,6 +516,8 @@ func (m *AppModel) updateUsage(data map[string]string) {
 		}
 		if requestKind == "compaction" {
 			m.usage.CompactionInput += inputTokens
+		} else if requestKind == "team" && data["cacheStatus"] == "reported" {
+			m.usage.TeamInput += inputTokens
 		}
 	}
 	if value, err := strconv.Atoi(data["cachedInputTokens"]); err == nil && data["cachedInputTokens"] != "" {
@@ -515,6 +529,8 @@ func (m *AppModel) updateUsage(data map[string]string) {
 		}
 		if requestKind == "compaction" {
 			m.usage.CompactionCached += value
+		} else if requestKind == "team" {
+			m.usage.TeamCached += value
 		}
 	}
 	if value, err := strconv.Atoi(data["cacheWriteTokens"]); err == nil && data["cacheWriteTokens"] != "" {
@@ -524,6 +540,8 @@ func (m *AppModel) updateUsage(data map[string]string) {
 		}
 		if requestKind == "compaction" {
 			m.usage.CompactionCacheWrite += value
+		} else if requestKind == "team" {
+			m.usage.TeamCacheWrite += value
 		}
 	}
 	if value, err := strconv.Atoi(data["outputTokens"]); err == nil && data["outputTokens"] != "" {
@@ -532,6 +550,8 @@ func (m *AppModel) updateUsage(data map[string]string) {
 		}
 		if requestKind == "compaction" {
 			m.usage.CompactionOutput += value
+		} else if requestKind == "team" {
+			m.usage.TeamOutput += value
 		}
 	}
 	if value, err := strconv.Atoi(data["reasoningTokens"]); err == nil && data["reasoningTokens"] != "" {
@@ -539,6 +559,8 @@ func (m *AppModel) updateUsage(data map[string]string) {
 			m.usage.CompactionReasoning += value
 		} else if requestKind == "main" {
 			m.usage.ReasoningTokens = value
+		} else if requestKind == "team" {
+			m.usage.TeamReasoning += value
 		}
 	}
 	if value, err := strconv.Atoi(data["uncachedInputTokens"]); err == nil && data["uncachedInputTokens"] != "" {
@@ -546,6 +568,8 @@ func (m *AppModel) updateUsage(data map[string]string) {
 			m.usage.CompactionUncached += value
 		} else if requestKind == "main" {
 			m.usage.UncachedInputTokens = value
+		} else if requestKind == "team" {
+			m.usage.TeamUncached += value
 		}
 	}
 	if value, err := strconv.Atoi(data["contextLimit"]); err == nil && data["contextLimit"] != "" {
@@ -582,6 +606,12 @@ func (m *AppModel) resetTurnUsage() {
 	m.usage.CompactionOutput = 0
 	m.usage.CompactionReasoning = 0
 	m.usage.CompactionUncached = 0
+	m.usage.TeamInput = 0
+	m.usage.TeamCached = 0
+	m.usage.TeamCacheWrite = 0
+	m.usage.TeamOutput = 0
+	m.usage.TeamReasoning = 0
+	m.usage.TeamUncached = 0
 	m.usage.CacheReported = false
 	m.usage.MainCacheReported = false
 }
@@ -610,6 +640,12 @@ func (m *AppModel) restoreUsage(raw string) {
 	m.usage.CompactionOutput = usage.CompactionOutput
 	m.usage.CompactionReasoning = usage.CompactionReasoning
 	m.usage.CompactionUncached = usage.CompactionUncached
+	m.usage.TeamInput = usage.TeamInput
+	m.usage.TeamCached = usage.TeamCached
+	m.usage.TeamCacheWrite = usage.TeamCacheWrite
+	m.usage.TeamOutput = usage.TeamOutput
+	m.usage.TeamReasoning = usage.TeamReasoning
+	m.usage.TeamUncached = usage.TeamUncached
 	m.usage.CacheReported = usage.CacheReported
 	m.usage.MainCacheReported = usage.MainCacheReported
 	m.usage.LastRequestKind = usage.LastRequestKind

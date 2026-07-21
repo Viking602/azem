@@ -23,64 +23,61 @@ type preparedSubagentWorktree struct {
 	Warning   string
 }
 
-func prepareSubagentWorktree(ctx context.Context, workspaceRoot, worktreeRoot, taskID string) preparedSubagentWorktree {
-	fallback := func(err error) preparedSubagentWorktree {
-		return preparedSubagentWorktree{
-			CWD: workspaceRoot, Isolation: "none",
-			Warning: fmt.Sprintf("worktree isolation unavailable: %v; using shared workspace", err),
-		}
+func prepareSubagentWorktree(ctx context.Context, workspaceRoot, worktreeRoot, taskID string) (preparedSubagentWorktree, error) {
+	fail := func(err error) (preparedSubagentWorktree, error) {
+		return preparedSubagentWorktree{}, fmt.Errorf("worktree isolation unavailable: %w", err)
 	}
 	if filepath.Base(taskID) != taskID || taskID == "." || taskID == "" {
-		return fallback(fmt.Errorf("invalid task ID"))
+		return fail(fmt.Errorf("invalid task ID"))
 	}
 	repoRoot, err := runGit(ctx, workspaceRoot, nil, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return fallback(fmt.Errorf("workspace is not a Git repository: %w", err))
+		return fail(fmt.Errorf("workspace is not a Git repository: %w", err))
 	}
 	repoRoot = strings.TrimSpace(repoRoot)
 	repoRoot, err = filepath.EvalSymlinks(repoRoot)
 	if err != nil {
-		return fallback(fmt.Errorf("resolve repository root: %w", err))
+		return fail(fmt.Errorf("resolve repository root: %w", err))
 	}
 	workspaceRoot, err = filepath.EvalSymlinks(workspaceRoot)
 	if err != nil {
-		return fallback(fmt.Errorf("resolve workspace root: %w", err))
+		return fail(fmt.Errorf("resolve workspace root: %w", err))
 	}
 	relativeWorkspace, err := filepath.Rel(repoRoot, workspaceRoot)
 	if err != nil || relativeWorkspace == ".." || strings.HasPrefix(relativeWorkspace, ".."+string(filepath.Separator)) {
-		return fallback(fmt.Errorf("workspace is outside repository root"))
+		return fail(fmt.Errorf("workspace is outside repository root"))
 	}
 	head, err := runGit(ctx, repoRoot, nil, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
-		return fallback(fmt.Errorf("repository has no usable HEAD: %w", err))
+		return fail(fmt.Errorf("repository has no usable HEAD: %w", err))
 	}
 	head = strings.TrimSpace(head)
 	if err := os.MkdirAll(worktreeRoot, 0o700); err != nil {
-		return fallback(fmt.Errorf("create worktree root: %w", err))
+		return fail(fmt.Errorf("create worktree root: %w", err))
 	}
 	indexFile, err := os.CreateTemp(worktreeRoot, ".index-*")
 	if err != nil {
-		return fallback(fmt.Errorf("create temporary Git index: %w", err))
+		return fail(fmt.Errorf("create temporary Git index: %w", err))
 	}
 	indexPath := indexFile.Name()
 	if closeErr := indexFile.Close(); closeErr != nil {
 		_ = os.Remove(indexPath)
-		return fallback(fmt.Errorf("close temporary Git index: %w", closeErr))
+		return fail(fmt.Errorf("close temporary Git index: %w", closeErr))
 	}
 	if err := os.Remove(indexPath); err != nil {
-		return fallback(fmt.Errorf("prepare temporary Git index: %w", err))
+		return fail(fmt.Errorf("prepare temporary Git index: %w", err))
 	}
 	defer os.Remove(indexPath)
 	indexEnv := []string{"GIT_INDEX_FILE=" + indexPath}
 	if _, err := runGit(ctx, repoRoot, indexEnv, "read-tree", head); err != nil {
-		return fallback(fmt.Errorf("seed temporary Git index: %w", err))
+		return fail(fmt.Errorf("seed temporary Git index: %w", err))
 	}
 	if _, err := runGit(ctx, repoRoot, indexEnv, "add", "-A", "--", "."); err != nil {
-		return fallback(fmt.Errorf("snapshot dirty workspace: %w", err))
+		return fail(fmt.Errorf("snapshot dirty workspace: %w", err))
 	}
 	tree, err := runGit(ctx, repoRoot, indexEnv, "write-tree")
 	if err != nil {
-		return fallback(fmt.Errorf("write workspace snapshot tree: %w", err))
+		return fail(fmt.Errorf("write workspace snapshot tree: %w", err))
 	}
 	tree = strings.TrimSpace(tree)
 	commitEnv := []string{
@@ -89,18 +86,18 @@ func prepareSubagentWorktree(ctx context.Context, workspaceRoot, worktreeRoot, t
 	}
 	commit, err := runGit(ctx, repoRoot, commitEnv, "commit-tree", tree, "-p", head, "-m", "Azem subagent workspace snapshot")
 	if err != nil {
-		return fallback(fmt.Errorf("create detached snapshot commit: %w", err))
+		return fail(fmt.Errorf("create detached snapshot commit: %w", err))
 	}
 	path := filepath.Join(worktreeRoot, taskID)
 	if _, err := os.Lstat(path); err == nil {
-		return fallback(fmt.Errorf("worktree path already exists"))
+		return fail(fmt.Errorf("worktree path already exists"))
 	} else if !os.IsNotExist(err) {
-		return fallback(fmt.Errorf("inspect worktree path: %w", err))
+		return fail(fmt.Errorf("inspect worktree path: %w", err))
 	}
 	if _, err := runGit(ctx, repoRoot, nil, "worktree", "add", "--detach", path, strings.TrimSpace(commit)); err != nil {
 		_, _ = runGit(context.WithoutCancel(ctx), repoRoot, nil, "worktree", "remove", "--force", path)
 		_ = os.RemoveAll(path)
-		return fallback(fmt.Errorf("create detached worktree: %w", err))
+		return fail(fmt.Errorf("create detached worktree: %w", err))
 	}
 	cwd := path
 	if relativeWorkspace != "." {
@@ -108,9 +105,9 @@ func prepareSubagentWorktree(ctx context.Context, workspaceRoot, worktreeRoot, t
 	}
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
 		_, _ = runGit(context.WithoutCancel(ctx), repoRoot, nil, "worktree", "remove", "--force", path)
-		return fallback(fmt.Errorf("isolated workspace directory is unavailable"))
+		return fail(fmt.Errorf("isolated workspace directory is unavailable"))
 	}
-	return preparedSubagentWorktree{CWD: cwd, Path: path, RepoRoot: repoRoot, Isolation: "worktree"}
+	return preparedSubagentWorktree{CWD: cwd, Path: path, RepoRoot: repoRoot, Isolation: "worktree"}, nil
 }
 
 func finalizeSubagentWorktree(run *agentservice.SubagentRun, repoRoot string) {

@@ -34,7 +34,7 @@ var (
 type Service struct {
 	cfg                config.Config
 	configPath         string
-	events             chan Event
+	events             *eventBroker
 	ctx                context.Context
 	cancel             context.CancelFunc
 	mu                 sync.Mutex
@@ -88,7 +88,7 @@ func NewService(parent context.Context, cfg config.Config) *Service {
 		approvalMode = ApprovalModePrompt
 	}
 	return &Service{
-		cfg: cfg, events: make(chan Event, 256), ctx: ctx, cancel: cancel,
+		cfg: cfg, events: newEventBroker(eventDeltaCoalesceWindow), ctx: ctx, cancel: cancel,
 		shutdownDone: make(chan struct{}), liveApprovals: make(map[string]*liveApproval),
 		teamApprovals: make(map[string]struct{}), autoReviewDenials: make(map[string]*autoReviewDenialTracker),
 		hookSessions: make(map[string]struct{}), hookInitialUsers: make(map[string]string), hookInitialContext: make(map[string]string), hookAsyncContext: make(map[string][]string), approvalMode: approvalMode,
@@ -254,15 +254,8 @@ func (s *Service) emitRecoveryState() {
 func (s *Service) Agent() *agentservice.Service { return s.coding }
 
 func (s *Service) NextEvent(ctx context.Context) (Event, error) {
-	select {
-	case <-ctx.Done():
-		return Event{}, ctx.Err()
-	case event, ok := <-s.events:
-		if !ok {
-			return Event{}, ioEOF{}
-		}
-		return event.Clone(), nil
-	}
+	event, err := s.events.Next(ctx)
+	return event.Clone(), err
 }
 
 func (s *Service) StartTurn(prompt string) (string, error) {
@@ -506,13 +499,14 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 
 	if request.AgentMode == "team" {
 		goal := teamPrompt(request)
-		modelID, resolver, err := s.providers.TeamResolver(runCtx, request)
+		resolution, err := s.providers.TeamResolver(runCtx, request)
 		if err != nil {
 			cancel()
 			s.clearRun("starting")
 			return "", err
 		}
-		request.Model = modelID
+		request.Provider = resolution.providerID
+		request.Model = resolution.modelID
 		if err := s.persistSessionPreferences(s.ctx, request); err != nil {
 			cancel()
 			s.clearRun("starting")
@@ -535,7 +529,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 			}
 		}
 		s.wg.Add(1)
-		go s.runProviderTeam(runCtx, request, runID, goal, modelID, resolver)
+		go s.runProviderTeam(runCtx, request, runID, goal, resolution)
 		return runID, nil
 	}
 
@@ -742,7 +736,7 @@ func (s *Service) shutdown() {
 			s.shutdownErr = errors.Join(s.shutdownErr, err)
 		}
 	}
-	close(s.events)
+	s.events.Close()
 	if s.coding != nil {
 		if err := s.coding.Close(shutdownCtx); err != nil {
 			s.shutdownErr = errors.Join(s.shutdownErr, err)
@@ -861,7 +855,9 @@ func (s *Service) clearRun(runID string) {
 func (s *Service) emit(ctx context.Context, event Event) bool {
 	switch event.Kind {
 	case EventRunStarted:
-		s.resetTurnUsageTracking(event.SessionID)
+		if event.Data["preserveUsage"] != "true" {
+			s.resetTurnUsageTracking(event.SessionID)
+		}
 	case EventContextUsage:
 		s.recordSessionUsage(event.SessionID, event.Data)
 	}
@@ -869,9 +865,9 @@ func (s *Service) emit(ctx context.Context, event Event) bool {
 	select {
 	case <-ctx.Done():
 		return false
-	case s.events <- event.Clone():
-		return true
+	default:
 	}
+	return s.events.Publish(event) == eventPublishAccepted
 }
 
 func (s *Service) resetTurnUsageTracking(sessionID string) {

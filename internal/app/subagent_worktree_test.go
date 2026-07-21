@@ -47,7 +47,10 @@ func TestPrepareSubagentWorktreeSnapshotsDirtyTrackedAndUntrackedWithoutTouching
 	}
 
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
-	prepared := prepareSubagentWorktree(ctx, workspace, worktreeRoot, "task-one")
+	prepared, err := prepareSubagentWorktree(ctx, workspace, worktreeRoot, "task-one")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if prepared.Isolation != "worktree" || prepared.Path == "" || prepared.RepoRoot == "" || prepared.Warning != "" {
 		t.Fatalf("prepared worktree = %#v", prepared)
 	}
@@ -105,7 +108,10 @@ func TestFinalizeSubagentWorktreeRetainsChildChangesAndNonGitFallsBack(t *testin
 		"-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base"); err != nil {
 		t.Fatal(err)
 	}
-	prepared := prepareSubagentWorktree(ctx, repoRoot, filepath.Join(t.TempDir(), "worktrees"), "task-dirty")
+	prepared, err := prepareSubagentWorktree(ctx, repoRoot, filepath.Join(t.TempDir(), "worktrees"), "task-dirty")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if prepared.Isolation != "worktree" {
 		t.Fatalf("prepared worktree = %#v", prepared)
 	}
@@ -125,17 +131,17 @@ func TestFinalizeSubagentWorktreeRetainsChildChangesAndNonGitFallsBack(t *testin
 	}
 
 	nonGit := t.TempDir()
-	fallback := prepareSubagentWorktree(ctx, nonGit, filepath.Join(t.TempDir(), "worktrees"), "task-fallback")
-	if fallback.CWD != nonGit || fallback.Isolation != "none" || fallback.Path != "" || !strings.Contains(fallback.Warning, "using shared workspace") {
-		t.Fatalf("non-Git fallback = %#v", fallback)
+	failed, err := prepareSubagentWorktree(ctx, nonGit, filepath.Join(t.TempDir(), "worktrees"), "task-fallback")
+	if err == nil || failed != (preparedSubagentWorktree{}) || !strings.Contains(err.Error(), "workspace is not a Git repository") {
+		t.Fatalf("non-Git worktree = %#v, %v", failed, err)
 	}
 	emptyRepo := t.TempDir()
 	if _, err := runGit(ctx, emptyRepo, nil, "init", "--initial-branch=main"); err != nil {
 		t.Fatal(err)
 	}
-	noHead := prepareSubagentWorktree(ctx, emptyRepo, filepath.Join(t.TempDir(), "worktrees"), "task-no-head")
-	if noHead.Isolation != "none" || !strings.Contains(noHead.Warning, "no usable HEAD") {
-		t.Fatalf("no-HEAD fallback = %#v", noHead)
+	noHead, err := prepareSubagentWorktree(ctx, emptyRepo, filepath.Join(t.TempDir(), "worktrees"), "task-no-head")
+	if err == nil || noHead != (preparedSubagentWorktree{}) || !strings.Contains(err.Error(), "no usable HEAD") {
+		t.Fatalf("no-HEAD worktree = %#v, %v", noHead, err)
 	}
 }
 

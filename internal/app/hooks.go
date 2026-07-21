@@ -107,9 +107,10 @@ func (s *Service) emitHookEvent(event Event) {
 	event.At = time.Now().UTC()
 	select {
 	case <-s.ctx.Done():
-	case s.events <- event.Clone():
+		return
 	default:
 	}
+	_ = s.events.Publish(event)
 }
 
 func (s *Service) dispatchLifecycle(ctx context.Context, event hooks.Event, metadata hooks.Metadata, add func(*hooks.Envelope)) error {

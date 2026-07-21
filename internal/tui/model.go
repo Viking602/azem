@@ -247,6 +247,12 @@ type UsageView struct {
 	CompactionOutput     int
 	CompactionReasoning  int
 	CompactionUncached   int
+	TeamInput            int
+	TeamCached           int
+	TeamCacheWrite       int
+	TeamOutput           int
+	TeamReasoning        int
+	TeamUncached         int
 	ContextLimit         int
 	CacheReported        bool
 	MainCacheReported    bool

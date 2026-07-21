@@ -289,7 +289,7 @@ func (m AppModel) renderContextUsage(width int) string {
 	mainInput := m.usage.MainCacheInput
 	mainCached := min(max(0, m.usage.MainCachedInput), mainInput)
 	mainReported := m.usage.MainCacheReported
-	if !mainReported && m.usage.CacheReported {
+	if !mainReported && m.usage.CacheReported && m.usage.TeamInput == 0 && m.usage.CompactionInput == 0 {
 		mainInput = m.usage.CacheInputTokens
 		mainCached = min(max(0, m.usage.CachedInputTokens), mainInput)
 		mainReported = true
@@ -349,6 +349,22 @@ func (m AppModel) renderContextUsage(width int) string {
 			compaction += " R" + formatTokens(m.usage.CompactionReasoning)
 		}
 		details = append(details, compaction)
+	}
+	if m.usage.TeamInput > 0 || m.usage.TeamOutput > 0 {
+		team := "TEAM " + formatTokens(m.usage.TeamInput) + "/" + formatTokens(m.usage.TeamOutput)
+		if m.usage.TeamInput > 0 {
+			team += fmt.Sprintf(" C%.0f%%", float64(min(m.usage.TeamCached, m.usage.TeamInput))*100/float64(m.usage.TeamInput))
+		}
+		if m.usage.TeamUncached > 0 {
+			team += " U" + formatTokens(m.usage.TeamUncached)
+		}
+		if m.usage.TeamCacheWrite > 0 {
+			team += " W" + formatTokens(m.usage.TeamCacheWrite)
+		}
+		if m.usage.TeamReasoning > 0 {
+			team += " R" + formatTokens(m.usage.TeamReasoning)
+		}
+		details = append(details, team)
 	}
 	if m.usage.LastRequestKind != "" {
 		details = append(details, m.usage.LastRequestKind)

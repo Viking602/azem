@@ -327,15 +327,12 @@ func TestTurnContextInjectsHistoricalEvidenceAsPrivateSystemContext(t *testing.T
 }
 
 func TestTeamHistoricalEvidenceIsPlannerOnlyAndNotSystemData(t *testing.T) {
-	service := NewService(context.Background(), config.Default())
-	hooks := service.teamHooks("session-1", "run-1", "", `{"memories":[{"Content":"planner evidence"}]}`)
 	for _, className := range []string{agentservice.PlannerClass, agentservice.ImplementerClass} {
-		engine := hyagent.Engine{ContextBuilder: turnContext{instructions: "system rules"}}
-		prepared, err := hooks.PrepareEngine(context.Background(), engine, multiagent.Dispatch{Task: api.Task{RunID: "run-1"}}, multiagent.AgentClass{Name: className})
-		if err != nil {
-			t.Fatal(err)
+		contextManager := teamHookContext{inner: turnContext{instructions: "system rules"}}
+		if className == agentservice.PlannerClass {
+			contextManager.historical = `{"memories":[{"Content":"planner evidence"}]}`
 		}
-		messages, err := prepared.ContextBuilder.Build(context.Background(), api.Task{Goal: "current task"})
+		messages, err := contextManager.Build(context.Background(), api.Task{Goal: "current task"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -350,6 +347,110 @@ func TestTeamHistoricalEvidenceIsPlannerOnlyAndNotSystemData(t *testing.T) {
 		}
 		if found != (className == agentservice.PlannerClass) {
 			t.Fatalf("%s historical evidence found=%v", className, found)
+		}
+	}
+}
+
+func TestTeamRequestPreparerKeepsPlannerImagesAndHistoryStructured(t *testing.T) {
+	image := session.Attachment{ID: "image-1", Name: "reference.png", MIME: "image/png", Path: "/tmp/reference.png"}
+	preparer := teamRequestPreparer{context: teamHookContext{
+		history: []session.Block{{Kind: "assistant", Content: "prior answer"}},
+	}, images: []session.Attachment{image}, target: 100_000, compactor: &turnContext{summarize: func(context.Context, string) (string, error) {
+		return "summary", nil
+	}}}
+	prepared, err := preparer.prepare(context.Background(), hyprovider.Request{
+		Messages: []message.Message{message.NewText(message.RoleUser, "current task")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepared.Messages) != 3 || prepared.Messages[0].Role != message.RoleSystem || prepared.Messages[1].Role != message.RoleUser || !strings.Contains(prepared.Messages[1].Text, "prior answer") || prepared.Messages[2].Text != "current task" {
+		t.Fatalf("prepared planner messages=%+v", prepared.Messages)
+	}
+	attachments := AttachmentsFromMessage(prepared.Messages[2])
+	if len(attachments) != 1 || attachments[0] != image {
+		t.Fatalf("prepared planner attachments=%+v", attachments)
+	}
+}
+
+func TestTeamRequestPreparerAppendsTodoUpdatesWithoutChangingWirePrefix(t *testing.T) {
+	current := session.TodoList{Goal: "ship", Revision: 1, Phases: []session.TodoPhase{{
+		ID: "phase-1", Title: "Build", Items: []session.TodoItem{{ID: "item-1", Content: "implement", Status: session.TodoInProgress}},
+	}}}
+	preparer := teamRequestPreparer{
+		runID: "team-role-1", loadTodo: func(context.Context) (session.TodoList, error) { return current, nil },
+	}
+	taskMessage := message.NewText(message.RoleUser, "current task")
+	first, err := preparer.prepare(context.Background(), hyprovider.Request{Messages: []message.Message{
+		taskMessage,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.Revision = 2
+	current.Phases[0].Items[0].Status = session.TodoCompleted
+	second, err := preparer.prepare(context.Background(), hyprovider.Request{Messages: []message.Message{
+		taskMessage,
+		message.NewText(message.RoleAssistant, "tool update completed"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Messages) <= len(first.Messages) {
+		t.Fatalf("todo continuation did not grow: first=%+v second=%+v", first.Messages, second.Messages)
+	}
+	for index := range first.Messages {
+		if !reflect.DeepEqual(first.Messages[index], second.Messages[index]) {
+			t.Fatalf("todo update changed wire prefix at message %d: first=%+v second=%+v", index, first.Messages[index], second.Messages[index])
+		}
+	}
+	if !strings.Contains(first.Messages[len(first.Messages)-1].Text, "revision=1") || !strings.Contains(second.Messages[len(second.Messages)-1].Text, "revision=2") {
+		t.Fatalf("todo reminders were not appended by revision: first=%+v second=%+v", first.Messages, second.Messages)
+	}
+}
+
+func TestTeamRequestPreparerUsesModelCompactionAtContextTarget(t *testing.T) {
+	messages := make([]message.Message, 0, 21)
+	for index := 0; index < 10; index++ {
+		messages = append(messages,
+			message.NewText(message.RoleUser, fmt.Sprintf("request-%d %s", index, strings.Repeat("x", 400))),
+			message.NewText(message.RoleAssistant, fmt.Sprintf("answer-%d %s", index, strings.Repeat("y", 400))),
+		)
+	}
+	messages = append(messages, message.NewText(message.RoleUser, "latest request"))
+	summaryCalls := 0
+	preparer := teamRequestPreparer{target: 600, compactor: &turnContext{summarize: func(context.Context, string) (string, error) {
+		summaryCalls++
+		return "model-generated team summary", nil
+	}}}
+	prepared, err := preparer.prepare(context.Background(), hyprovider.Request{Messages: messages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summaryCalls != 1 || len(prepared.Messages) >= len(messages) {
+		t.Fatalf("team compaction calls=%d messages=%d want fewer than %d", summaryCalls, len(prepared.Messages), len(messages))
+	}
+	foundSummary := false
+	for _, current := range prepared.Messages {
+		foundSummary = foundSummary || current.Kind == message.KindCompactionSummary
+	}
+	if !foundSummary {
+		t.Fatalf("team compaction omitted model summary: %+v", prepared.Messages)
+	}
+	continuedMessages := append(append([]message.Message(nil), messages...), message.NewText(message.RoleAssistant, "short continuation"))
+	continued, err := preparer.prepare(context.Background(), hyprovider.Request{Messages: continuedMessages})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summaryCalls != 1 {
+		t.Fatalf("unchanged compacted prefix was summarized again: calls=%d", summaryCalls)
+	}
+	if len(continued.Messages) <= len(prepared.Messages) {
+		t.Fatalf("compacted continuation did not grow: first=%d second=%d", len(prepared.Messages), len(continued.Messages))
+	}
+	for index := range prepared.Messages {
+		if !reflect.DeepEqual(prepared.Messages[index], continued.Messages[index]) {
+			t.Fatalf("compacted continuation changed provider prefix at message %d", index)
 		}
 	}
 }
@@ -2266,13 +2367,13 @@ func TestTurnContextBuildFallsBackWhenModelHistoryScopeDiffers(t *testing.T) {
 
 func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
-	hooks := service.teamHooks("session-1", "team-parent", "", "")
+	hooks := service.teamHooks(TurnRequest{SessionID: "session-1", Provider: "chatgpt", Model: "gpt-team"}, "team-parent", teamExecutionPolicy{})
 	base := hyagent.Engine{ExtraBody: map[string]any{"parallel_tool_calls": false}}
-	prepare := func(runID string) hyagent.Engine {
+	prepare := func(runID, role string) hyagent.Engine {
 		t.Helper()
 		prepared, err := hooks.PrepareEngine(context.Background(), base, multiagent.Dispatch{
-			Task: api.Task{RunID: runID}, To: "implementer",
-		}, multiagent.AgentClass{Name: agentservice.ImplementerClass})
+			Task: api.Task{RunID: runID}, To: role,
+		}, multiagent.AgentClass{Name: role})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2281,13 +2382,13 @@ func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testin
 		}
 		return prepared
 	}
-	first := prepare("child-run-1")
-	repeated := prepare("child-run-1")
-	second := prepare("child-run-2")
-	if first.ExtraBody["prompt_cache_key"] != "child-run-1" ||
-		repeated.ExtraBody["prompt_cache_key"] != "child-run-1" ||
-		second.ExtraBody["prompt_cache_key"] != "child-run-2" {
-		t.Fatalf("team cache keys first=%#v repeated=%#v second=%#v", first.ExtraBody, repeated.ExtraBody, second.ExtraBody)
+	first := prepare("child-run-1", agentservice.ImplementerClass)
+	repeated := prepare("child-run-2", agentservice.ImplementerClass)
+	secondRole := prepare("child-run-2", agentservice.ReviewerClass)
+	if first.ExtraBody["prompt_cache_key"] != "session-1:team:chatgpt:gpt-team:implementer" ||
+		repeated.ExtraBody["prompt_cache_key"] != first.ExtraBody["prompt_cache_key"] ||
+		secondRole.ExtraBody["prompt_cache_key"] == first.ExtraBody["prompt_cache_key"] {
+		t.Fatalf("team cache keys first=%#v repeated=%#v secondRole=%#v", first.ExtraBody, repeated.ExtraBody, secondRole.ExtraBody)
 	}
 	if _, mutated := base.ExtraBody["prompt_cache_key"]; mutated {
 		t.Fatalf("base engine ExtraBody mutated: %#v", base.ExtraBody)

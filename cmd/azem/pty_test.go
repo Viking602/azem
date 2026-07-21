@@ -186,6 +186,13 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 	if err := os.WriteFile(skillPath, []byte("---\nname: demo\ndescription: initial skill description\n---\nUse this skill for PTY verification.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	configDir := filepath.Join(temp, "config", "azem")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("version: 1\nskills:\n  trust_project: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	binary := filepath.Join(temp, "azem")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
