@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -108,6 +109,54 @@ func TestBuildKeepsPrivateSystemMessagesInConversationPosition(t *testing.T) {
 	}
 	if got := strings.Join(roles, ","); got != "user,developer,user" {
 		t.Fatalf("input roles = %s; payload=%s", got, data)
+	}
+}
+
+func TestBuildPrivateTodoUpdatePreservesExactWirePrefix(t *testing.T) {
+	initial := message.NewText(message.RoleSystem, "[Session Todo private reminder] revision=1")
+	initial.Visibility = message.VisibilityPrivate
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "stable rules"),
+		initial,
+		message.NewText(message.RoleUser, "continue"),
+	}
+	request := hyprovider.Request{
+		Model: "gpt-test", Messages: history,
+		ExtraBody: map[string]any{"prompt_cache_key": "session-1"},
+	}
+	firstData, err := Build(request, BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := message.NewText(message.RoleSystem, "[Session Todo private reminder] revision=2")
+	update.Visibility = message.VisibilityPrivate
+	request.Messages = append(append([]message.Message(nil), history...), update)
+	secondData, err := Build(request, BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first, second struct {
+		Instructions   string            `json:"instructions"`
+		PromptCacheKey string            `json:"prompt_cache_key"`
+		Tools          []json.RawMessage `json:"tools"`
+		Input          []json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(firstData, &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(secondData, &second); err != nil {
+		t.Fatal(err)
+	}
+	if first.Instructions != second.Instructions || first.PromptCacheKey != second.PromptCacheKey || !reflect.DeepEqual(first.Tools, second.Tools) {
+		t.Fatalf("stable request fields changed: first=%s second=%s", firstData, secondData)
+	}
+	if len(second.Input) != len(first.Input)+1 {
+		t.Fatalf("input lengths first=%d second=%d", len(first.Input), len(second.Input))
+	}
+	for index := range first.Input {
+		if string(first.Input[index]) != string(second.Input[index]) {
+			t.Fatalf("wire prefix changed at input %d: first=%s second=%s", index, first.Input[index], second.Input[index])
+		}
 	}
 }
 

@@ -134,10 +134,15 @@ func blockMessage(block session.Block) (message.Message, bool) {
 const (
 	todoReminderPrefix         = "[Session Todo private reminder]"
 	todoReminderRunMetadataKey = "azem.todo.run_id"
+	todoReminderCleared        = "state=cleared. This update supersedes all earlier todo reminders for this run."
 )
 
 func (c turnContext) todoReminderMessage(reminder string) message.Message {
 	value := message.NewText(message.RoleSystem, reminder)
+	return c.tagTodoReminder(value)
+}
+
+func (c turnContext) tagTodoReminder(value message.Message) message.Message {
 	value.Visibility = message.VisibilityPrivate
 	if c.runID != "" {
 		value.Metadata = map[string]string{todoReminderRunMetadataKey: c.runID}
@@ -178,7 +183,7 @@ func (c turnContext) refreshTodoReminder(ctx context.Context, history []message.
 	}
 	target := -1
 	for index, current := range history {
-		if current.Role != message.RoleSystem || !strings.HasPrefix(current.Text, todoReminderPrefix) {
+		if current.Role != message.RoleSystem || current.Visibility != message.VisibilityPrivate || !strings.HasPrefix(current.Text, todoReminderPrefix) {
 			continue
 		}
 		if c.runID == "" || current.Metadata[todoReminderRunMetadataKey] == c.runID {
@@ -192,12 +197,17 @@ func (c turnContext) refreshTodoReminder(ctx context.Context, history []message.
 		}
 		return append(append([]message.Message(nil), history...), c.todoReminderMessage(reminder)), nil
 	}
-	refreshed := append([]message.Message(nil), history...)
 	if reminder == "" {
-		return append(refreshed[:target], refreshed[target+1:]...), nil
+		reminder = fmt.Sprintf("%s revision=%d %s", todoReminderPrefix, todo.Revision, todoReminderCleared)
 	}
-	refreshed[target] = c.todoReminderMessage(reminder)
-	return refreshed, nil
+	if history[target].Text == reminder {
+		return history, nil
+	}
+	// Provider prompt caches require an exact prefix. Never replace or remove a
+	// reminder that may already have been sent. Private system messages are
+	// serialized as developer input at their current position, so appending the
+	// update preserves the complete wire prefix and its trusted semantics.
+	return append(append([]message.Message(nil), history...), c.todoReminderMessage(reminder)), nil
 }
 
 func (c turnContext) Compact(ctx context.Context, history []message.Message) (result []message.Message, resultErr error) {
@@ -255,6 +265,10 @@ func (c turnContext) Compact(ctx context.Context, history []message.Message) (re
 	compacted = append(compacted, history[:prefixEnd]...)
 	compacted = append(compacted, summary)
 	compacted = append(compacted, history[start:]...)
+	compacted, err = c.refreshTodoReminder(ctx, compacted)
+	if err != nil {
+		return original, err
+	}
 	return compacted, nil
 }
 
@@ -347,6 +361,10 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, t
 		compacted = append(compacted, history[:prefixEnd]...)
 		compacted = append(compacted, summary)
 		compacted = append(compacted, history[start:]...)
+		compacted, summaryErr = c.refreshTodoReminder(ctx, compacted)
+		if summaryErr != nil {
+			return original, summaryErr
+		}
 		if estimateContextTokens(compacted) <= targetTokens {
 			return report(compacted), nil
 		}

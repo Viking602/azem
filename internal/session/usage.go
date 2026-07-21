@@ -11,26 +11,29 @@ import (
 // Usage is the durable last-known context and cache snapshot for a session.
 // It mirrors the TUI footer counters so restart/resume can restore them.
 type Usage struct {
-	InputTokens         int    `json:"inputTokens,omitempty"`
-	OutputTokens        int    `json:"outputTokens,omitempty"`
-	CacheInputTokens    int    `json:"cacheInputTokens,omitempty"`
-	CachedInputTokens   int    `json:"cachedInputTokens,omitempty"`
-	MainCacheInput      int    `json:"mainCacheInput,omitempty"`
-	MainCachedInput     int    `json:"mainCachedInput,omitempty"`
-	ReasoningTokens     int    `json:"reasoningTokens,omitempty"`
-	UncachedInputTokens int    `json:"uncachedInputTokens,omitempty"`
-	CompactionInput     int    `json:"compactionInput,omitempty"`
-	CompactionCached    int    `json:"compactionCached,omitempty"`
-	CompactionOutput    int    `json:"compactionOutput,omitempty"`
-	CompactionReasoning int    `json:"compactionReasoning,omitempty"`
-	CompactionUncached  int    `json:"compactionUncached,omitempty"`
-	ContextLimit        int    `json:"contextLimit,omitempty"`
-	CacheReported       bool   `json:"cacheReported,omitempty"`
-	MainCacheReported   bool   `json:"mainCacheReported,omitempty"`
-	LastRequestKind     string `json:"lastRequestKind,omitempty"`
-	LastProvider        string `json:"lastProvider,omitempty"`
-	LastModel           string `json:"lastModel,omitempty"`
-	LastTransport       string `json:"lastTransport,omitempty"`
+	InputTokens          int    `json:"inputTokens,omitempty"`
+	OutputTokens         int    `json:"outputTokens,omitempty"`
+	CacheInputTokens     int    `json:"cacheInputTokens,omitempty"`
+	CachedInputTokens    int    `json:"cachedInputTokens,omitempty"`
+	MainCacheInput       int    `json:"mainCacheInput,omitempty"`
+	MainCachedInput      int    `json:"mainCachedInput,omitempty"`
+	CacheWriteTokens     int    `json:"cacheWriteTokens,omitempty"`
+	MainCacheWrite       int    `json:"mainCacheWrite,omitempty"`
+	ReasoningTokens      int    `json:"reasoningTokens,omitempty"`
+	UncachedInputTokens  int    `json:"uncachedInputTokens,omitempty"`
+	CompactionInput      int    `json:"compactionInput,omitempty"`
+	CompactionCached     int    `json:"compactionCached,omitempty"`
+	CompactionCacheWrite int    `json:"compactionCacheWrite,omitempty"`
+	CompactionOutput     int    `json:"compactionOutput,omitempty"`
+	CompactionReasoning  int    `json:"compactionReasoning,omitempty"`
+	CompactionUncached   int    `json:"compactionUncached,omitempty"`
+	ContextLimit         int    `json:"contextLimit,omitempty"`
+	CacheReported        bool   `json:"cacheReported,omitempty"`
+	MainCacheReported    bool   `json:"mainCacheReported,omitempty"`
+	LastRequestKind      string `json:"lastRequestKind,omitempty"`
+	LastProvider         string `json:"lastProvider,omitempty"`
+	LastModel            string `json:"lastModel,omitempty"`
+	LastTransport        string `json:"lastTransport,omitempty"`
 }
 
 func (u Usage) IsZero() bool {
@@ -81,6 +84,15 @@ func (u *Usage) Apply(data map[string]string) {
 			u.CompactionCached += value
 		}
 	}
+	if value, ok := atoiData(data, "cacheWriteTokens"); ok {
+		u.CacheWriteTokens += value
+		if requestKind == "main" {
+			u.MainCacheWrite += value
+		}
+		if requestKind == "compaction" {
+			u.CompactionCacheWrite += value
+		}
+	}
 	if value, ok := atoiData(data, "outputTokens"); ok {
 		if data["aggregateOnly"] != "true" {
 			u.OutputTokens = value
@@ -121,20 +133,23 @@ func (u Usage) Data() map[string]string {
 		return nil
 	}
 	data := map[string]string{
-		"inputTokens":         strconv.Itoa(u.InputTokens),
-		"outputTokens":        strconv.Itoa(u.OutputTokens),
-		"cacheInputTokens":    strconv.Itoa(u.CacheInputTokens),
-		"cachedInputTokens":   strconv.Itoa(u.CachedInputTokens),
-		"mainCacheInput":      strconv.Itoa(u.MainCacheInput),
-		"mainCachedInput":     strconv.Itoa(u.MainCachedInput),
-		"reasoningTokens":     strconv.Itoa(u.ReasoningTokens),
-		"uncachedInputTokens": strconv.Itoa(u.UncachedInputTokens),
-		"compactionInput":     strconv.Itoa(u.CompactionInput),
-		"compactionCached":    strconv.Itoa(u.CompactionCached),
-		"compactionOutput":    strconv.Itoa(u.CompactionOutput),
-		"compactionReasoning": strconv.Itoa(u.CompactionReasoning),
-		"compactionUncached":  strconv.Itoa(u.CompactionUncached),
-		"contextLimit":        strconv.Itoa(u.ContextLimit),
+		"inputTokens":          strconv.Itoa(u.InputTokens),
+		"outputTokens":         strconv.Itoa(u.OutputTokens),
+		"cacheInputTokens":     strconv.Itoa(u.CacheInputTokens),
+		"cachedInputTokens":    strconv.Itoa(u.CachedInputTokens),
+		"mainCacheInput":       strconv.Itoa(u.MainCacheInput),
+		"mainCachedInput":      strconv.Itoa(u.MainCachedInput),
+		"cacheWriteTokens":     strconv.Itoa(u.CacheWriteTokens),
+		"mainCacheWrite":       strconv.Itoa(u.MainCacheWrite),
+		"reasoningTokens":      strconv.Itoa(u.ReasoningTokens),
+		"uncachedInputTokens":  strconv.Itoa(u.UncachedInputTokens),
+		"compactionInput":      strconv.Itoa(u.CompactionInput),
+		"compactionCached":     strconv.Itoa(u.CompactionCached),
+		"compactionCacheWrite": strconv.Itoa(u.CompactionCacheWrite),
+		"compactionOutput":     strconv.Itoa(u.CompactionOutput),
+		"compactionReasoning":  strconv.Itoa(u.CompactionReasoning),
+		"compactionUncached":   strconv.Itoa(u.CompactionUncached),
+		"contextLimit":         strconv.Itoa(u.ContextLimit),
 	}
 	for key, value := range map[string]string{"lastRequestKind": u.LastRequestKind, "lastProvider": u.LastProvider, "lastModel": u.LastModel, "lastTransport": u.LastTransport} {
 		if value != "" {

@@ -73,7 +73,8 @@ type completedResponse struct {
 		OutputTokens       int `json:"output_tokens"`
 		TotalTokens        int `json:"total_tokens"`
 		InputTokensDetails struct {
-			CachedTokens int `json:"cached_tokens"`
+			CachedTokens     int `json:"cached_tokens"`
+			CacheWriteTokens int `json:"cache_write_tokens"`
 		} `json:"input_tokens_details"`
 		OutputTokensDetails struct {
 			ReasoningTokens int `json:"reasoning_tokens"`
@@ -233,7 +234,8 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 		if s.reportUsage != nil {
 			s.reportUsage(UsageDetails{
 				InputTokens: response.Usage.InputTokens, CachedTokens: response.Usage.InputTokensDetails.CachedTokens,
-				OutputTokens: response.Usage.OutputTokens, ReasoningTokens: response.Usage.OutputTokensDetails.ReasoningTokens,
+				CacheWriteTokens: response.Usage.InputTokensDetails.CacheWriteTokens,
+				OutputTokens:     response.Usage.OutputTokens, ReasoningTokens: response.Usage.OutputTokensDetails.ReasoningTokens,
 				TotalTokens: response.Usage.TotalTokens,
 			})
 		}

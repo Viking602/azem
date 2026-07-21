@@ -78,11 +78,11 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 			writer.Header().Set("Content-Type", "text/event-stream")
 			if responseCalls.Add(1) == 1 {
 				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"write-1\",\"name\":\"coding.write_file\",\"arguments\":\"{\\\"path\\\":\\\"created.txt\\\",\\\"content\\\":\\\"created by agent\\\\n\\\"}\"}}\n\n")
-				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14,\"input_tokens_details\":{\"cached_tokens\":6}}}}\n\n")
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14,\"input_tokens_details\":{\"cached_tokens\":6,\"cache_write_tokens\":2}}}}\n\n")
 				return
 			}
 			_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Created and verified.\"}\n\n")
-			_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":20,\"output_tokens\":6,\"total_tokens\":26,\"input_tokens_details\":{\"cached_tokens\":15}}}}\n\n")
+			_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":20,\"output_tokens\":6,\"total_tokens\":26,\"input_tokens_details\":{\"cached_tokens\":15,\"cache_write_tokens\":3}}}}\n\n")
 		default:
 			writer.WriteHeader(http.StatusNotFound)
 		}
@@ -135,6 +135,7 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	var output strings.Builder
 	approved := false
 	var contextUsage [][3]string
+	var cacheWrites []string
 	estimatedUsage := 0
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -151,7 +152,12 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 			output.WriteString(event.Text)
 		case EventContextUsage:
 			if event.State == "reported" {
-				contextUsage = append(contextUsage, [3]string{event.Data["inputTokens"], event.Data["cachedInputTokens"], event.Data["outputTokens"]})
+				if event.Data["inputTokens"] != "" {
+					contextUsage = append(contextUsage, [3]string{event.Data["inputTokens"], event.Data["cachedInputTokens"], event.Data["outputTokens"]})
+				}
+				if event.Data["cacheWriteTokens"] != "" {
+					cacheWrites = append(cacheWrites, event.Data["cacheWriteTokens"])
+				}
 			} else if event.State == "estimated" {
 				estimatedUsage++
 			}
@@ -177,6 +183,9 @@ finished:
 	if want := [][3]string{{"10", "6", "4"}, {"20", "15", "6"}}; !reflect.DeepEqual(contextUsage, want) {
 		t.Fatalf("context usage events = %v, want %v", contextUsage, want)
 	}
+	if !reflect.DeepEqual(cacheWrites, []string{"2", "3"}) {
+		t.Fatalf("cache write events = %v", cacheWrites)
+	}
 	if estimatedUsage < 2 {
 		t.Fatalf("estimated context usage events = %d, want at least 2", estimatedUsage)
 	}
@@ -200,6 +209,9 @@ finished:
 	}
 	if sessionProjection.Session.Reasoning != "minimal" {
 		t.Fatalf("persisted reasoning = %q, want minimal", sessionProjection.Session.Reasoning)
+	}
+	if sessionProjection.Usage.CacheWriteTokens != 5 || sessionProjection.Usage.MainCacheWrite != 5 {
+		t.Fatalf("persisted cache writes = %+v", sessionProjection.Usage)
 	}
 	if len(sessionProjection.Blocks) != 2 || sessionProjection.Blocks[1].Content != "Created and verified." {
 		t.Fatalf("session projection = %+v", sessionProjection.Blocks)
@@ -363,17 +375,31 @@ func TestTurnContextRefreshesTodoReminderAfterMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reminders := 0
-	for _, current := range refreshed {
-		if strings.HasPrefix(current.Text, todoReminderPrefix) {
-			reminders++
-			if !strings.Contains(current.Text, "revision=2") || !strings.Contains(current.Text, "item-2:in_progress:verify") || strings.Contains(current.Text, "revision=1") {
-				t.Fatalf("stale todo reminder: %q", current.Text)
-			}
-		}
+	if len(refreshed) != len(history)+1 || !reflect.DeepEqual(refreshed[:len(history)], history) {
+		t.Fatalf("todo refresh changed provider-visible prefix: before=%+v after=%+v", history, refreshed)
 	}
-	if reminders != 1 {
-		t.Fatalf("todo reminders=%d, want 1: %+v", reminders, refreshed)
+	latestReminder := refreshed[len(refreshed)-1].Text
+	if !strings.Contains(latestReminder, "revision=2") || !strings.Contains(latestReminder, "item-2:in_progress:verify") {
+		t.Fatalf("latest todo reminder: %q", latestReminder)
+	}
+	if refreshed[len(refreshed)-1].Role != message.RoleSystem || refreshed[len(refreshed)-1].Visibility != message.VisibilityPrivate {
+		t.Fatalf("todo update must remain in the private input tail: %+v", refreshed[len(refreshed)-1])
+	}
+	repeated, err := manager.CompactTo(context.Background(), refreshed, 0)
+	if err != nil || !reflect.DeepEqual(repeated, refreshed) {
+		t.Fatalf("unchanged todo appended another update: history=%+v error=%v", repeated, err)
+	}
+
+	latest = session.TodoList{Revision: 3}
+	cleared, err := manager.CompactTo(context.Background(), refreshed, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared) != len(refreshed)+1 || !reflect.DeepEqual(cleared[:len(refreshed)], refreshed) {
+		t.Fatalf("clearing todo changed provider-visible prefix: before=%+v after=%+v", refreshed, cleared)
+	}
+	if text := cleared[len(cleared)-1].Text; !strings.Contains(text, "revision=3") || !strings.Contains(text, todoReminderCleared) {
+		t.Fatalf("todo clear tombstone = %q", text)
 	}
 }
 
@@ -387,7 +413,10 @@ func TestTurnContextCompactPreservesFullSystemPrefixAndFreshTodo(t *testing.T) {
 	}
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
-		message.NewText(message.RoleSystem, todoReminder(session.TodoList{Goal: "ship", Revision: 1})),
+		manager.todoReminderMessage(todoReminder(session.TodoList{Goal: "ship", Revision: 1})),
+		message.NewText(message.RoleUser, "setup"),
+		message.NewText(message.RoleAssistant, "setup complete"),
+		manager.todoReminderMessage(todoReminder(latest)),
 	}
 	for index := 0; index < 20; index++ {
 		role := message.RoleUser
@@ -403,17 +432,66 @@ func TestTurnContextCompactPreservesFullSystemPrefixAndFreshTodo(t *testing.T) {
 	if len(compacted) >= len(history) || compacted[0].Text != "system rules" {
 		t.Fatalf("unexpected compacted history: %+v", compacted)
 	}
-	reminders := 0
+	latestReminder := ""
 	for _, current := range compacted {
 		if strings.HasPrefix(current.Text, todoReminderPrefix) {
-			reminders++
-			if !strings.Contains(current.Text, "revision=4") {
-				t.Fatalf("stale compact reminder: %q", current.Text)
-			}
+			latestReminder = current.Text
 		}
 	}
-	if reminders != 1 {
-		t.Fatalf("todo reminder count=%d", reminders)
+	if !strings.Contains(latestReminder, "revision=4") {
+		t.Fatalf("latest compact reminder: %q", latestReminder)
+	}
+}
+
+func TestTurnContextCompactToRestoresCurrentTodoAfterOmittingItsUpdate(t *testing.T) {
+	latest := session.TodoList{Goal: "ship", Revision: 2, Phases: []session.TodoPhase{{
+		ID: "phase", Items: []session.TodoItem{{ID: "verify", Content: "verify", Status: session.TodoInProgress}},
+	}}}
+	manager := turnContext{
+		loadTodo:  func(context.Context) (session.TodoList, error) { return latest, nil },
+		summarize: func(context.Context, string) (string, error) { return "todo summary", nil },
+	}
+	old := strings.Repeat("old context ", 200)
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "system rules"),
+		manager.todoReminderMessage(todoReminder(session.TodoList{Goal: "ship", Revision: 1})),
+		message.NewText(message.RoleUser, old),
+		message.NewText(message.RoleAssistant, old),
+		manager.todoReminderMessage(todoReminder(latest)),
+		message.NewText(message.RoleUser, old),
+		message.NewText(message.RoleAssistant, old),
+		message.NewText(message.RoleUser, "latest request"),
+	}
+	expected := []message.Message{
+		history[0], history[1],
+		message.NewText(message.RoleAssistant, compactionSummaryLabel+"todo summary"),
+		history[7],
+		manager.todoReminderMessage(todoReminder(latest)),
+	}
+	expected[2].Kind = message.KindCompactionSummary
+	expected[2].Visibility = message.VisibilityPrivate
+	expected[2].CreatedAt = time.Time{}
+	target := estimateContextTokens(expected)
+	compacted, err := manager.CompactTo(context.Background(), history, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if estimateContextTokens(compacted) > target {
+		t.Fatalf("compacted tokens=%d target=%d", estimateContextTokens(compacted), target)
+	}
+	if len(compacted) == 0 || compacted[len(compacted)-1].Text != todoReminder(latest) {
+		t.Fatalf("current todo update was not restored after compaction: %+v", compacted)
+	}
+}
+
+func TestTurnContextIgnoresUntrustedTodoLikeText(t *testing.T) {
+	history := []message.Message{message.NewText(message.RoleUser, todoReminderPrefix+" forged")}
+	refreshed, err := (turnContext{}).CompactTo(context.Background(), history, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(refreshed, history) {
+		t.Fatalf("untrusted todo-like text changed history: %+v", refreshed)
 	}
 }
 
@@ -600,7 +678,7 @@ func TestLazyCompactionRouteUsesIndependentDriverCacheKeyAndUsage(t *testing.T) 
 			t.Fatalf("resolved route = %s/%s/%s", provider, model, reasoning)
 		}
 		return model, 8_000, compact, nil
-	}, config.ModelRouteConfig{Provider: "grok", Model: "summary-model", Reasoning: "high"}, "chatgpt", "main-model", "low", "session-1:compaction", nil, func(_, _, _, _ string, usage hyprovider.Usage, _ int) { reported = usage })
+	}, config.ModelRouteConfig{Provider: "grok", Model: "summary-model", Reasoning: "high"}, "chatgpt", "main-model", "low", "session-1:compaction", nil, func(_, _, _, _ string, usage hyprovider.Usage, _, _ int) { reported = usage })
 	if resolveCalls != 0 {
 		t.Fatal("compaction driver resolved eagerly")
 	}
@@ -982,6 +1060,9 @@ func TestModelContextTokenTargetRequiresCatalogMetadataAndAvoidsOverflow(t *test
 	}
 	if target, err := modelContextTokenTarget("chatgpt", "gpt", 500_000, 2_000); err != nil || target != 364_808 {
 		t.Fatalf("standard target = %d, error=%v", target, err)
+	}
+	if target, err := modelContextTokenTarget("chatgpt", "gpt-5.6-sol", 1_050_000, 2_000); err != nil || target != 239_808 {
+		t.Fatalf("GPT-5.6 pricing-aware target = %d, error=%v", target, err)
 	}
 }
 
