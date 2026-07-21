@@ -24,13 +24,13 @@ func TestUsageApplyAndPersistAcrossReload(t *testing.T) {
 	var usage Usage
 	usage.Apply(map[string]string{
 		"inputTokens": "68000", "cachedInputTokens": "34000", "outputTokens": "4000",
-		"uncachedInputTokens": "34000", "requestKind": "main",
+		"uncachedInputTokens": "34000", "cacheWriteTokens": "10000", "requestKind": "main",
 		"cacheStatus": "reported", "contextLimit": "272000", "provider": "grok", "model": "grok-4.5", "transport": "xai-responses",
 	})
 	usage.Apply(map[string]string{"reasoningTokens": "1200", "requestKind": "main", "aggregateOnly": "true"})
 	usage.Apply(map[string]string{
 		"inputTokens": "50", "cachedInputTokens": "40", "outputTokens": "5",
-		"uncachedInputTokens": "10", "reasoningTokens": "3", "requestKind": "compaction",
+		"uncachedInputTokens": "10", "reasoningTokens": "3", "cacheWriteTokens": "7", "requestKind": "compaction",
 		"cacheStatus": "reported", "aggregateOnly": "true",
 	})
 	if usage.InputTokens != 68000 || usage.OutputTokens != 4000 {
@@ -41,6 +41,9 @@ func TestUsageApplyAndPersistAcrossReload(t *testing.T) {
 	}
 	if usage.CacheInputTokens != 68050 || usage.CachedInputTokens != 34040 {
 		t.Fatalf("aggregate cache = %+v", usage)
+	}
+	if usage.CacheWriteTokens != 10007 || usage.MainCacheWrite != 10000 || usage.CompactionCacheWrite != 7 {
+		t.Fatalf("cache write usage = %+v", usage)
 	}
 	if usage.UncachedInputTokens != 34000 || usage.ReasoningTokens != 1200 || usage.CompactionInput != 50 || usage.CompactionCached != 40 || usage.CompactionUncached != 10 || usage.CompactionOutput != 5 || usage.CompactionReasoning != 3 {
 		t.Fatalf("detailed usage = %#v", usage)

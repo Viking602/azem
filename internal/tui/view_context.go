@@ -324,6 +324,13 @@ func (m AppModel) renderContextUsage(width int) string {
 	if m.usage.UncachedInputTokens > 0 {
 		details = append(details, "U "+formatTokens(m.usage.UncachedInputTokens))
 	}
+	if m.usage.CacheWriteTokens > 0 {
+		write := "W " + formatTokens(m.usage.CacheWriteTokens)
+		if m.usage.MainCacheWrite != m.usage.CacheWriteTokens {
+			write = "W M" + formatTokens(m.usage.MainCacheWrite) + "/A" + formatTokens(m.usage.CacheWriteTokens)
+		}
+		details = append(details, write)
+	}
 	if m.usage.ReasoningTokens > 0 {
 		details = append(details, "R "+formatTokens(m.usage.ReasoningTokens))
 	}
@@ -334,6 +341,9 @@ func (m AppModel) renderContextUsage(width int) string {
 		}
 		if m.usage.CompactionUncached > 0 {
 			compaction += " U" + formatTokens(m.usage.CompactionUncached)
+		}
+		if m.usage.CompactionCacheWrite > 0 {
+			compaction += " W" + formatTokens(m.usage.CompactionCacheWrite)
 		}
 		if m.usage.CompactionReasoning > 0 {
 			compaction += " R" + formatTokens(m.usage.CompactionReasoning)

@@ -231,26 +231,29 @@ type RecoveryView struct {
 }
 
 type UsageView struct {
-	InputTokens         int
-	CacheInputTokens    int
-	CachedInputTokens   int
-	MainCacheInput      int
-	MainCachedInput     int
-	OutputTokens        int
-	ReasoningTokens     int
-	UncachedInputTokens int
-	CompactionInput     int
-	CompactionCached    int
-	CompactionOutput    int
-	CompactionReasoning int
-	CompactionUncached  int
-	ContextLimit        int
-	CacheReported       bool
-	MainCacheReported   bool
-	LastRequestKind     string
-	LastProvider        string
-	LastModel           string
-	LastTransport       string
+	InputTokens          int
+	CacheInputTokens     int
+	CachedInputTokens    int
+	MainCacheInput       int
+	MainCachedInput      int
+	CacheWriteTokens     int
+	MainCacheWrite       int
+	OutputTokens         int
+	ReasoningTokens      int
+	UncachedInputTokens  int
+	CompactionInput      int
+	CompactionCached     int
+	CompactionCacheWrite int
+	CompactionOutput     int
+	CompactionReasoning  int
+	CompactionUncached   int
+	ContextLimit         int
+	CacheReported        bool
+	MainCacheReported    bool
+	LastRequestKind      string
+	LastProvider         string
+	LastModel            string
+	LastTransport        string
 }
 
 type AppModel struct {

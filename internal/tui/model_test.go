@@ -1511,15 +1511,15 @@ func TestDetailedUsageShowsReasoningCompactionAndTransport(t *testing.T) {
 	model.usage.ContextLimit = 500_000
 	model.updateUsage(map[string]string{
 		"inputTokens": "100000", "cachedInputTokens": "60000", "uncachedInputTokens": "40000", "outputTokens": "5000",
-		"cacheStatus": "reported", "requestKind": "main", "transport": "xai-responses",
+		"cacheWriteTokens": "10000", "cacheStatus": "reported", "requestKind": "main", "transport": "xai-responses",
 	})
 	model.updateUsage(map[string]string{"reasoningTokens": "3000", "requestKind": "main", "aggregateOnly": "true"})
 	model.updateUsage(map[string]string{
-		"inputTokens": "20000", "cachedInputTokens": "5000", "uncachedInputTokens": "15000", "outputTokens": "2000", "reasoningTokens": "500",
+		"inputTokens": "20000", "cachedInputTokens": "5000", "uncachedInputTokens": "15000", "cacheWriteTokens": "2000", "outputTokens": "2000", "reasoningTokens": "500",
 		"cacheStatus": "reported", "requestKind": "compaction", "aggregateOnly": "true", "transport": "xai-responses",
 	})
 	footer := ansi.Strip(model.renderContextUsage(320))
-	for _, wanted := range []string{"U 40K", "R 3K", "CMP 20K/2K", "U15K", "R500", "compaction", "xai-responses"} {
+	for _, wanted := range []string{"U 40K", "W M10K/A12K", "R 3K", "CMP 20K/2K", "U15K", "W2K", "R500", "compaction", "xai-responses"} {
 		if !strings.Contains(footer, wanted) {
 			t.Fatalf("detailed usage footer missing %q: %q", wanted, footer)
 		}

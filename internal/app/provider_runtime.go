@@ -333,7 +333,7 @@ func (s *compactionUsageStream) Recv() (hyprovider.Event, error) {
 	return event, nil
 }
 
-type compactionUsageReporter func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens int)
+type compactionUsageReporter func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens, cacheWriteTokens int)
 
 func lazyCompactionSummarizer(resolve func(context.Context, string, string, string) (string, int, hyprovider.Driver, error), route config.ModelRouteConfig, providerID, modelID, reasoning, cacheKey string, budget *providerUsageBudget, report compactionUsageReporter) func(context.Context, string) (string, error) {
 	return func(ctx context.Context, transcript string) (string, error) {
@@ -354,11 +354,11 @@ func lazyCompactionSummarizer(resolve func(context.Context, string, string, stri
 		metered := &compactionUsageDriver{inner: driver}
 		if report != nil {
 			metered.report = func(usage hyprovider.Usage) {
-				report(providerID, resolvedModel, reasoning, driver.Metadata().Name, usage, 0)
+				report(providerID, resolvedModel, reasoning, driver.Metadata().Name, usage, 0, 0)
 			}
 			metered.reportDetails = func(details responses.UsageDetails) {
-				if details.ReasoningTokens > 0 {
-					report(providerID, resolvedModel, reasoning, driver.Metadata().Name, hyprovider.Usage{}, details.ReasoningTokens)
+				if details.ReasoningTokens > 0 || details.CacheWriteTokens > 0 {
+					report(providerID, resolvedModel, reasoning, driver.Metadata().Name, hyprovider.Usage{}, details.ReasoningTokens, details.CacheWriteTokens)
 				}
 			}
 		}
@@ -542,11 +542,11 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 	metered := &compactionUsageDriver{inner: driver}
 	if reporter := r.compactionUsageReporter(r.host, projection.Session.ID, "manual-compaction"); reporter != nil {
 		metered.report = func(usage hyprovider.Usage) {
-			reporter(providerID, modelID, reasoning, driver.Metadata().Name, usage, 0)
+			reporter(providerID, modelID, reasoning, driver.Metadata().Name, usage, 0, 0)
 		}
 		metered.reportDetails = func(details responses.UsageDetails) {
-			if details.ReasoningTokens > 0 {
-				reporter(providerID, modelID, reasoning, driver.Metadata().Name, hyprovider.Usage{}, details.ReasoningTokens)
+			if details.ReasoningTokens > 0 || details.CacheWriteTokens > 0 {
+				reporter(providerID, modelID, reasoning, driver.Metadata().Name, hyprovider.Usage{}, details.ReasoningTokens, details.CacheWriteTokens)
 			}
 		}
 	}
@@ -650,6 +650,9 @@ func modelContextTokenTarget(providerID, modelID string, contextWindow, toolToke
 	if providerID == "grok" && contextWindow > 200_000 && target > 180_000 {
 		target = 180_000
 	}
+	if providerID == "chatgpt" && strings.HasPrefix(strings.ToLower(modelID), "gpt-5.6") && target > 250_000 {
+		target = 250_000
+	}
 	target -= max(0, toolTokens) + 8_192
 	if target <= 0 {
 		return 0, fmt.Errorf("model %q context window is too small", modelID)
@@ -675,11 +678,12 @@ func (r *ProviderRuntime) compactionUsageReporter(host *Service, sessionID, runI
 	if host == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens int) {
+	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens, cacheWriteTokens int) {
 		host.emit(host.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{
 			"inputTokens": fmt.Sprint(usage.InputTokens), "cachedInputTokens": fmt.Sprint(usage.CachedInputTokens),
 			"outputTokens": fmt.Sprint(usage.OutputTokens), "totalTokens": fmt.Sprint(usage.TotalTokens),
 			"reasoningTokens":     fmt.Sprint(reasoningTokens),
+			"cacheWriteTokens":    fmt.Sprint(cacheWriteTokens),
 			"uncachedInputTokens": fmt.Sprint(max(0, usage.InputTokens-usage.CachedInputTokens)),
 			"cacheStatus":         "reported", "aggregateOnly": "true", "requestKind": "compaction",
 			"provider": providerID, "model": modelID, "reasoning": reasoning, "transport": transport,
@@ -692,11 +696,11 @@ func (r *ProviderRuntime) responseUsageReporter(host *Service, sessionID, runID,
 		return nil
 	}
 	return func(details responses.UsageDetails) {
-		if details.ReasoningTokens == 0 {
+		if details.ReasoningTokens == 0 && details.CacheWriteTokens == 0 {
 			return
 		}
 		host.emit(host.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{
-			"reasoningTokens": fmt.Sprint(details.ReasoningTokens), "uncachedInputTokens": fmt.Sprint(max(0, details.InputTokens-details.CachedTokens)),
+			"reasoningTokens": fmt.Sprint(details.ReasoningTokens), "cacheWriteTokens": fmt.Sprint(details.CacheWriteTokens), "uncachedInputTokens": fmt.Sprint(max(0, details.InputTokens-details.CachedTokens)),
 			"aggregateOnly": "true", "requestKind": requestKind, "provider": providerID, "model": modelID, "transport": transport,
 		}})
 	}

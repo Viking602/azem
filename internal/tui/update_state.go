@@ -417,11 +417,14 @@ func (m *AppModel) switchProvider(provider string) {
 		m.usage.CachedInputTokens = 0
 		m.usage.MainCacheInput = 0
 		m.usage.MainCachedInput = 0
+		m.usage.CacheWriteTokens = 0
+		m.usage.MainCacheWrite = 0
 		m.usage.OutputTokens = 0
 		m.usage.ReasoningTokens = 0
 		m.usage.UncachedInputTokens = 0
 		m.usage.CompactionInput = 0
 		m.usage.CompactionCached = 0
+		m.usage.CompactionCacheWrite = 0
 		m.usage.CompactionOutput = 0
 		m.usage.CompactionReasoning = 0
 		m.usage.CompactionUncached = 0
@@ -458,11 +461,14 @@ func (m *AppModel) selectModel(modelID string) {
 		m.usage.CachedInputTokens = 0
 		m.usage.MainCacheInput = 0
 		m.usage.MainCachedInput = 0
+		m.usage.CacheWriteTokens = 0
+		m.usage.MainCacheWrite = 0
 		m.usage.OutputTokens = 0
 		m.usage.ReasoningTokens = 0
 		m.usage.UncachedInputTokens = 0
 		m.usage.CompactionInput = 0
 		m.usage.CompactionCached = 0
+		m.usage.CompactionCacheWrite = 0
 		m.usage.CompactionOutput = 0
 		m.usage.CompactionReasoning = 0
 		m.usage.CompactionUncached = 0
@@ -511,6 +517,15 @@ func (m *AppModel) updateUsage(data map[string]string) {
 			m.usage.CompactionCached += value
 		}
 	}
+	if value, err := strconv.Atoi(data["cacheWriteTokens"]); err == nil && data["cacheWriteTokens"] != "" {
+		m.usage.CacheWriteTokens += value
+		if requestKind == "main" {
+			m.usage.MainCacheWrite += value
+		}
+		if requestKind == "compaction" {
+			m.usage.CompactionCacheWrite += value
+		}
+	}
 	if value, err := strconv.Atoi(data["outputTokens"]); err == nil && data["outputTokens"] != "" {
 		if data["aggregateOnly"] != "true" {
 			m.usage.OutputTokens = value
@@ -556,11 +571,14 @@ func (m *AppModel) resetTurnUsage() {
 	m.usage.CachedInputTokens = 0
 	m.usage.MainCacheInput = 0
 	m.usage.MainCachedInput = 0
+	m.usage.CacheWriteTokens = 0
+	m.usage.MainCacheWrite = 0
 	m.usage.OutputTokens = 0
 	m.usage.ReasoningTokens = 0
 	m.usage.UncachedInputTokens = 0
 	m.usage.CompactionInput = 0
 	m.usage.CompactionCached = 0
+	m.usage.CompactionCacheWrite = 0
 	m.usage.CompactionOutput = 0
 	m.usage.CompactionReasoning = 0
 	m.usage.CompactionUncached = 0
@@ -582,10 +600,13 @@ func (m *AppModel) restoreUsage(raw string) {
 	m.usage.CachedInputTokens = usage.CachedInputTokens
 	m.usage.MainCacheInput = usage.MainCacheInput
 	m.usage.MainCachedInput = usage.MainCachedInput
+	m.usage.CacheWriteTokens = usage.CacheWriteTokens
+	m.usage.MainCacheWrite = usage.MainCacheWrite
 	m.usage.ReasoningTokens = usage.ReasoningTokens
 	m.usage.UncachedInputTokens = usage.UncachedInputTokens
 	m.usage.CompactionInput = usage.CompactionInput
 	m.usage.CompactionCached = usage.CompactionCached
+	m.usage.CompactionCacheWrite = usage.CompactionCacheWrite
 	m.usage.CompactionOutput = usage.CompactionOutput
 	m.usage.CompactionReasoning = usage.CompactionReasoning
 	m.usage.CompactionUncached = usage.CompactionUncached

@@ -946,11 +946,12 @@ func (r *subagentRuntime) compactionReporter(parent subagentParentRuntime, runID
 	if parent.Host == nil || strings.TrimSpace(parent.SessionID) == "" {
 		return nil
 	}
-	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens int) {
+	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens, cacheWriteTokens int) {
 		parent.Host.emit(parent.Host.ctx, Event{Kind: EventContextUsage, SessionID: parent.SessionID, RunID: runID, State: "reported", Data: map[string]string{
 			"inputTokens": fmt.Sprint(usage.InputTokens), "cachedInputTokens": fmt.Sprint(usage.CachedInputTokens),
 			"outputTokens": fmt.Sprint(usage.OutputTokens), "totalTokens": fmt.Sprint(usage.TotalTokens),
 			"reasoningTokens":     fmt.Sprint(reasoningTokens),
+			"cacheWriteTokens":    fmt.Sprint(cacheWriteTokens),
 			"uncachedInputTokens": fmt.Sprint(max(0, usage.InputTokens-usage.CachedInputTokens)),
 			"cacheStatus":         "reported", "aggregateOnly": "true", "requestKind": "compaction",
 			"provider": providerID, "model": modelID, "reasoning": reasoning, "transport": transport,
