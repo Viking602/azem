@@ -61,8 +61,8 @@ func effectiveSubagentTools(roleTools []string, capability string) map[string]bo
 	modes := map[string]map[string]bool{
 		"read-only":  readOnly,
 		"read-write": {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.write_file": true, "coding.gofmt": true},
-		"execute":    {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.go_test": true},
-		"all":        {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.write_file": true, "coding.gofmt": true, "coding.go_test": true},
+		"execute":    {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.go_test": true, "coding.shell": true},
+		"all":        {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.write_file": true, "coding.gofmt": true, "coding.go_test": true, "coding.shell": true},
 	}
 	allowed := make(map[string]bool)
 	for _, name := range roleTools {

@@ -355,7 +355,9 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		if event.Kind == EventContextUsage {
 			event.Data["transport"] = parent.providerTransport(providerID)
 		}
-		parent.emit(parent.ctx, event)
+		if !parent.emit(parent.ctx, event) {
+			r.Cancel(sessionID, id)
+		}
 	}
 }
 

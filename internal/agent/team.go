@@ -202,14 +202,14 @@ func CodingTeamClasses(models TeamModels) ([]multiagent.AgentClass, error) {
 			Name: ImplementerClass, Model: models.Implementer,
 			Description:  "Implement and verify the approved coding plan.",
 			Instructions: `Implement the request using the supplied plan or review feedback. Use governed tools; never bypass approvals. Create files only with coding.write_file and modify existing files only with coding.edit_hashline. Keep the durable todo list current as work is started and completed. Verify the changed behavior. Return exactly one JSON object with only these fields: {"summary":"result","evidence":["evidence"],"files_changed":["path"]}. summary and evidence are required; files_changed is optional. Do not add status or other fields.`,
-			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, coding.ToolEditHashline, coding.ToolWriteFile, coding.ToolGofmt, coding.ToolGoTest, "todo"},
+			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, coding.ToolEditHashline, coding.ToolWriteFile, coding.ToolGofmt, coding.ToolGoTest, ToolShell, "todo"},
 			InputSchema:  inputSchema, OutputSchema: implementerOutput, LoopPolicy: loop,
 		},
 		{
 			Name: ReviewerClass, Model: models.Reviewer,
 			Description:  "Review the implementation and run governed verification.",
 			Instructions: `Review the implementation against the request and acceptance criteria. Read the workspace and run governed verification when needed. Use verdict accept only when evidence supports completion; otherwise use revise. Return exactly one JSON object with only these fields: {"verdict":"accept","findings":["finding"],"evidence":["evidence"]}. Every field is required; verdict must be accept or revise. Do not add status or other fields.`,
-			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, coding.ToolGoTest},
+			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, coding.ToolGoTest, ToolShell},
 			InputSchema:  inputSchema, OutputSchema: reviewerOutput, LoopPolicy: loop,
 		},
 		{

@@ -1518,8 +1518,12 @@ func TestDetailedUsageShowsReasoningCompactionAndTransport(t *testing.T) {
 		"inputTokens": "20000", "cachedInputTokens": "5000", "uncachedInputTokens": "15000", "cacheWriteTokens": "2000", "outputTokens": "2000", "reasoningTokens": "500",
 		"cacheStatus": "reported", "requestKind": "compaction", "aggregateOnly": "true", "transport": "xai-responses",
 	})
+	model.updateUsage(map[string]string{
+		"inputTokens": "30000", "cachedInputTokens": "18000", "uncachedInputTokens": "12000", "cacheWriteTokens": "1000", "outputTokens": "4000", "reasoningTokens": "700",
+		"cacheStatus": "reported", "requestKind": "team", "aggregateOnly": "true", "transport": "xai-responses",
+	})
 	footer := ansi.Strip(model.renderContextUsage(320))
-	for _, wanted := range []string{"U 40K", "W M10K/A12K", "R 3K", "CMP 20K/2K", "U15K", "W2K", "R500", "compaction", "xai-responses"} {
+	for _, wanted := range []string{"U 40K", "W M10K/A13K", "R 3K", "CMP 20K/2K", "U15K", "W2K", "R500", "TEAM 30K/4K", "C60%", "U12K", "W1K", "R700", "team", "xai-responses"} {
 		if !strings.Contains(footer, wanted) {
 			t.Fatalf("detailed usage footer missing %q: %q", wanted, footer)
 		}

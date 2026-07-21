@@ -2,9 +2,11 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -158,6 +160,157 @@ func TestRemoteToolFailureDegradesWithoutReplay(t *testing.T) {
 	}
 }
 
+func TestRemoteToolBusinessErrorKeepsServerReady(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{
+		tools: []message.ToolDefinition{{Name: "lookup", InputSchema: message.JSONSchema{Type: "object"}}},
+		callResult: &mcpcontract.CallToolResult{
+			Content: []mcpcontract.ContentBlock{{Type: "text", Text: "object not found"}}, IsError: true,
+		},
+	}
+	manager := managerWithClient(client)
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	driver := manager.Snapshot()[0]
+	result, err := driver.Execute(ctx, tool.Call{ID: "call-1", Name: driver.Definition().Name}, nil)
+	if err != nil || !result.IsError || result.Content != "object not found" {
+		t.Fatalf("business error result=%#v error=%v", result, err)
+	}
+	if manager.Servers()[0].State != StateReady || len(manager.Snapshot()) != 1 {
+		t.Fatalf("business error degraded server: servers=%#v snapshot=%v", manager.Servers(), manager.Snapshot())
+	}
+	second := manager.Snapshot()[0]
+	if _, err := second.Execute(ctx, tool.Call{ID: "call-2", Name: second.Definition().Name}, nil); err != nil {
+		t.Fatalf("second business-error call failed at transport level: %v", err)
+	}
+	if client.callCount != 2 {
+		t.Fatalf("call count=%d, want 2", client.callCount)
+	}
+}
+
+func TestRemoteToolPreservesBoundedTextAndStructuredResult(t *testing.T) {
+	ctx := context.Background()
+	structured := map[string]any{"status": "ready", "count": float64(2)}
+	client := &fakeClient{
+		tools: []message.ToolDefinition{{Name: "status", InputSchema: message.JSONSchema{Type: "object"}}},
+		callResult: &mcpcontract.CallToolResult{
+			Content:           []mcpcontract.ContentBlock{{Type: "text", Text: "ready"}},
+			StructuredContent: structured,
+		},
+	}
+	manager := managerWithClient(client)
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	driver := manager.Snapshot()[0]
+	result, err := driver.Execute(ctx, tool.Call{ID: "call", Name: driver.Definition().Name}, nil)
+	if err != nil || result.IsError || result.Content != "ready" {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(result.Structured, &decoded); err != nil || !reflect.DeepEqual(decoded, structured) {
+		t.Fatalf("structured=%s decoded=%v error=%v", result.Structured, decoded, err)
+	}
+}
+
+func TestRemoteToolOversizedTextReturnsBoundedBusinessError(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{
+		tools: []message.ToolDefinition{{Name: "search", InputSchema: message.JSONSchema{Type: "object"}}},
+		callResult: &mcpcontract.CallToolResult{
+			Content: []mcpcontract.ContentBlock{{Type: "text", Text: strings.Repeat("x", maxMCPModelOutputBytes+1)}},
+		},
+	}
+	manager := managerWithClient(client)
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	driver := manager.Snapshot()[0]
+	result, err := driver.Execute(ctx, tool.Call{ID: "large", Name: driver.Definition().Name}, nil)
+	assertMCPOutputLimitError(t, result, err)
+	if manager.Servers()[0].State != StateReady || len(manager.Snapshot()) != 1 {
+		t.Fatalf("output limit degraded server: servers=%#v snapshot=%v", manager.Servers(), manager.Snapshot())
+	}
+	client.setCallResult(nil)
+	result, err = manager.Snapshot()[0].Execute(ctx, tool.Call{ID: "small", Name: driver.Definition().Name}, nil)
+	if err != nil || result.IsError || result.Content != "ok" {
+		t.Fatalf("call after oversized output result=%#v error=%v", result, err)
+	}
+}
+
+func TestRemoteToolOversizedStructuredResultIsNotExposed(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{
+		tools: []message.ToolDefinition{{Name: "query", InputSchema: message.JSONSchema{Type: "object"}}},
+		callResult: &mcpcontract.CallToolResult{
+			Content:           []mcpcontract.ContentBlock{{Type: "text", Text: "small"}},
+			StructuredContent: map[string]any{"data": strings.Repeat("x", maxMCPModelOutputBytes)},
+		},
+	}
+	manager := managerWithClient(client)
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	driver := manager.Snapshot()[0]
+	result, err := driver.Execute(ctx, tool.Call{ID: "call", Name: driver.Definition().Name}, nil)
+	assertMCPOutputLimitError(t, result, err)
+	if len(result.Structured) != 0 {
+		t.Fatalf("oversized structured result leaked %d bytes", len(result.Structured))
+	}
+}
+
+func TestRemoteToolCombinedContentBlocksRespectAggregateLimit(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{
+		tools: []message.ToolDefinition{{Name: "read", InputSchema: message.JSONSchema{Type: "object"}}},
+		callResult: &mcpcontract.CallToolResult{Content: []mcpcontract.ContentBlock{
+			{Type: "text", Text: strings.Repeat("a", maxMCPModelOutputBytes/2)},
+			{Type: "text", Text: strings.Repeat("b", maxMCPModelOutputBytes/2)},
+		}},
+	}
+	manager := managerWithClient(client)
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	driver := manager.Snapshot()[0]
+	result, err := driver.Execute(ctx, tool.Call{ID: "call", Name: driver.Definition().Name}, nil)
+	assertMCPOutputLimitError(t, result, err)
+}
+
+func TestBoundMCPModelOutputSerializedBoundary(t *testing.T) {
+	base := tool.Result{ToolCallID: "call", Name: "mcp__local__read", Content: "x"}
+	encoded, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Content = strings.Repeat("x", maxMCPModelOutputBytes-len(encoded)+1)
+	encoded, err = json.Marshal(base)
+	if err != nil || len(encoded) != maxMCPModelOutputBytes {
+		t.Fatalf("boundary result size=%d error=%v", len(encoded), err)
+	}
+	bounded := boundMCPModelOutput(base)
+	if bounded.IsError || bounded.Content != base.Content {
+		t.Fatalf("exact-limit result was rejected: %#v", bounded)
+	}
+	base.Content += "x"
+	assertMCPOutputLimitError(t, boundMCPModelOutput(base), nil)
+}
+
+func assertMCPOutputLimitError(t *testing.T, result tool.Result, err error) {
+	t.Helper()
+	if err != nil || !result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if !strings.Contains(result.Content, "model-context output limit") ||
+		!strings.Contains(result.Content, "Narrow the query") {
+		t.Fatalf("unexpected output-limit message %q", result.Content)
+	}
+	if len(result.Content)+len(result.Structured) >= 1024 {
+		t.Fatalf("output-limit error is not bounded: content=%d structured=%d", len(result.Content), len(result.Structured))
+	}
+}
+
 func managerWithClient(client *fakeClient) *Manager {
 	return NewManager(map[string]config.MCPServerConfig{
 		"local": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
@@ -177,6 +330,7 @@ type fakeClient struct {
 	lastTool           string
 	callCount          int
 	callErr            error
+	callResult         *mcpcontract.CallToolResult
 	closed             bool
 }
 
@@ -199,6 +353,9 @@ func (c *fakeClient) CallTool(_ context.Context, name string, _ map[string]any) 
 	if c.callErr != nil {
 		return mcpcontract.CallToolResult{}, c.callErr
 	}
+	if c.callResult != nil {
+		return *c.callResult, nil
+	}
 	return mcpcontract.CallToolResult{Content: []mcpcontract.ContentBlock{{Type: "text", Text: "ok"}}, StructuredContent: map[string]any{"ok": true}}, nil
 }
 func (*fakeClient) ListResources(context.Context) ([]mcpcontract.Resource, error) { return nil, nil }
@@ -219,6 +376,12 @@ func (c *fakeClient) setTools(tools []message.ToolDefinition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tools = append([]message.ToolDefinition(nil), tools...)
+}
+
+func (c *fakeClient) setCallResult(result *mcpcontract.CallToolResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.callResult = result
 }
 
 func definitionNames(drivers []tool.Driver) []string {

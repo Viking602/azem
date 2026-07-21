@@ -157,6 +157,40 @@ func TestHistoricalEvidenceIsBoundedStructuredDataAndExcludedFromTeamPrompt(t *t
 	}
 }
 
+func TestTeamTurnRejectsMissingImagesBeforeActivatingRun(t *testing.T) {
+	ctx := context.Background()
+	imagePath := filepath.Join(t.TempDir(), "missing.png")
+	service := NewService(ctx, config.Default())
+	defer service.Shutdown(ctx)
+	_, err := service.StartConfiguredTurn(TurnRequest{
+		SessionID: "session-team-image", Prompt: "inspect this image", AgentMode: "team",
+		Images: []session.Attachment{{ID: "image-1", Name: "missing.png", MIME: "image/png", Path: imagePath}},
+	})
+	if err == nil || strings.Contains(err.Error(), "team mode does not support image attachments") || !strings.Contains(err.Error(), "missing.png") {
+		t.Fatalf("team image error = %v", err)
+	}
+	service.mu.Lock()
+	activeRun := service.activeRun
+	service.mu.Unlock()
+	if activeRun != "" {
+		t.Fatalf("rejected team image left active run %q", activeRun)
+	}
+}
+
+func TestResumedRunStartPreservesRecordedUsage(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	defer service.Shutdown(context.Background())
+	service.sessionUsage = map[string]session.Usage{"session-1": {TeamInput: 120, TeamOutput: 30, ContextLimit: 128_000}}
+	service.emit(context.Background(), Event{
+		Kind: EventRunStarted, SessionID: "session-1", RunID: "team-1", State: "resuming",
+		Data: map[string]string{"preserveUsage": "true"},
+	})
+	got := service.sessionUsage["session-1"]
+	if got.TeamInput != 120 || got.TeamOutput != 30 || got.ContextLimit != 128_000 {
+		t.Fatalf("resumed run reset usage: %+v", got)
+	}
+}
+
 func TestPersistRecapEmitsVisibleUpdatedEvent(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")

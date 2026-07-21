@@ -687,8 +687,8 @@ func TestEffectiveSubagentToolsIntersectsCapabilityAndRoleAllowlist(t *testing.T
 	}{
 		{mode: "read-only", want: []string{"coding.git_diff", "coding.list_files", "coding.read_file", "coding.search"}},
 		{mode: "read-write", want: []string{"coding.edit_hashline", "coding.git_diff", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.search", "coding.write_file"}},
-		{mode: "execute", want: []string{"coding.git_diff", "coding.go_test", "coding.list_files", "coding.read_file", "coding.search"}},
-		{mode: "all", want: []string{"coding.edit_hashline", "coding.git_diff", "coding.go_test", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.search", "coding.write_file"}},
+		{mode: "execute", want: []string{"coding.git_diff", "coding.go_test", "coding.list_files", "coding.read_file", "coding.search", "coding.shell"}},
+		{mode: "all", want: []string{"coding.edit_hashline", "coding.git_diff", "coding.go_test", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.search", "coding.shell", "coding.write_file"}},
 		{mode: "invalid"},
 	}
 	for _, test := range tests {

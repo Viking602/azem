@@ -886,7 +886,7 @@ func (r *subagentRuntime) prepareWorktree(ctx context.Context, parent subagentPa
 			return preparedSubagentWorktree{}, fmt.Errorf("worktree hook returned no valid absolute directory")
 		}
 	}
-	return prepareSubagentWorktree(ctx, profile.CWD, r.worktreeRoot, id), nil
+	return prepareSubagentWorktree(ctx, profile.CWD, r.worktreeRoot, id)
 }
 
 func (r *subagentRuntime) AutoWakePending(sessionID string) {

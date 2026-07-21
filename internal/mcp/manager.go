@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -30,6 +31,12 @@ const (
 	StateDegraded   State = "degraded"
 	StateStopped    State = "stopped"
 )
+
+// maxMCPModelOutputBytes bounds one MCP result before it enters provider
+// context, durable model history, or UI events. Unlike shell output, MCP
+// output cannot be silently truncated because doing so could turn incomplete
+// structured data into an apparently successful result.
+const maxMCPModelOutputBytes = 256 << 10
 
 type Event struct {
 	Server string
@@ -452,10 +459,46 @@ func (d *remoteDriver) Execute(ctx context.Context, call tool.Call, sink tool.Up
 		d.manager.degrade(d.server, err)
 		return result, err
 	}
-	if result.IsError {
-		d.manager.degrade(d.server, fmt.Errorf("remote tool %s returned an error", d.original))
+	return boundMCPModelOutput(result), nil
+}
+
+func boundMCPModelOutput(result tool.Result) tool.Result {
+	contentBytes, structuredBytes := len(result.Content), len(result.Structured)
+	if contentBytes > maxMCPModelOutputBytes ||
+		structuredBytes > maxMCPModelOutputBytes ||
+		contentBytes > maxMCPModelOutputBytes-structuredBytes {
+		return mcpOutputLimitError(result, contentBytes+structuredBytes)
 	}
-	return result, nil
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return mcpOutputEncodingError(result)
+	}
+	if len(encoded) > maxMCPModelOutputBytes {
+		return mcpOutputLimitError(result, len(encoded))
+	}
+	return result
+}
+
+func mcpOutputLimitError(result tool.Result, received int) tool.Result {
+	return tool.Result{
+		ToolCallID: result.ToolCallID,
+		Name:       result.Name,
+		Content: fmt.Sprintf(
+			"MCP result exceeded the model-context output limit (received %d bytes, limit %d bytes). Narrow the query or request a smaller range.",
+			received,
+			maxMCPModelOutputBytes,
+		),
+		IsError: true,
+	}
+}
+
+func mcpOutputEncodingError(result tool.Result) tool.Result {
+	return tool.Result{
+		ToolCallID: result.ToolCallID,
+		Name:       result.Name,
+		Content:    "MCP result could not be encoded for model context. Narrow the query or request a different result format.",
+		IsError:    true,
+	}
 }
 
 func defaultDial(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header, elicitation func(context.Context, string, mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error)) (mcpcontract.Client, error) {

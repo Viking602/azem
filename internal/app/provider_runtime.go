@@ -789,12 +789,19 @@ func (r *ProviderRuntime) Shutdown(ctx context.Context) error {
 	return runtime.Shutdown(ctx)
 }
 
-func (r *ProviderRuntime) TeamResolver(ctx context.Context, request TurnRequest) (string, hyprovider.Resolver, error) {
-	_, modelID, _, driver, err := r.resolveDriver(ctx, request.Provider, request.Model, request.Reasoning)
+type teamProviderResolution struct {
+	providerID    string
+	modelID       string
+	contextWindow int
+	resolver      hyprovider.Resolver
+}
+
+func (r *ProviderRuntime) TeamResolver(ctx context.Context, request TurnRequest) (teamProviderResolution, error) {
+	_, modelID, contextWindow, driver, err := r.resolveDriver(ctx, request.Provider, request.Model, request.Reasoning)
 	if err != nil {
-		return "", nil, err
+		return teamProviderResolution{}, err
 	}
-	return modelID, hyprovider.Single(driver), nil
+	return teamProviderResolution{providerID: request.Provider, modelID: modelID, contextWindow: contextWindow, resolver: hyprovider.Single(driver)}, nil
 }
 
 func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context) (*codex.Reviewer, error) {
@@ -833,9 +840,13 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 		Model:          firstNonempty(run.Metadata["model"], r.cfg.Defaults.Model),
 		Reasoning:      firstNonempty(run.Metadata["reasoning"], r.cfg.Defaults.Reasoning),
 		AgentMode:      "team",
+		Images:         DecodeAttachmentsMeta(run.Metadata["attachments"]),
 		privateContext: run.Metadata["hook_private_context"],
 	}
-	modelID, resolver, err := r.TeamResolver(context.Background(), request)
+	if err := ValidateTurnAttachments(request.Images); err != nil {
+		return fmt.Errorf("resume team %s attachments: %w", runID, err)
+	}
+	resolution, err := r.TeamResolver(context.Background(), request)
 	if err != nil {
 		return err
 	}
@@ -844,6 +855,20 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 	r.mu.RUnlock()
 	if host == nil {
 		return fmt.Errorf("resume team %s: application runtime is unavailable", runID)
+	}
+	if host.sessions != nil {
+		projection, loadErr := host.sessions.LoadProjection(host.ctx, request.SessionID)
+		if loadErr != nil {
+			return fmt.Errorf("resume team %s session: %w", runID, loadErr)
+		}
+		request.History = append([]session.Block(nil), projection.Blocks...)
+		if count := len(request.History); count > 0 && request.History[count-1].RunID == runID && request.History[count-1].Kind == "user" {
+			request.History = request.History[:count-1]
+		}
+		request.Todo, loadErr = host.sessions.LoadTodo(host.ctx, request.SessionID)
+		if loadErr != nil {
+			return fmt.Errorf("resume team %s todo: %w", runID, loadErr)
+		}
 	}
 	runCtx, cancel := context.WithCancel(host.ctx)
 	host.mu.Lock()
@@ -857,8 +882,8 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 	host.mu.Unlock()
 	host.wg.Add(1)
 	originalPrompt := firstNonempty(run.Metadata["original_prompt"], request.Prompt)
-	historicalContext := host.loadHistoricalContext(host.ctx, request.SessionID, originalPrompt)
-	go host.runResumedProviderTeam(runCtx, request.SessionID, runID, request.Prompt, originalPrompt, modelID, request.privateContext, historicalContext, resolver)
+	request.historicalContext = host.loadHistoricalContext(host.ctx, request.SessionID, originalPrompt)
+	go host.runResumedProviderTeam(runCtx, request, runID, originalPrompt, resolution)
 	return nil
 }
 

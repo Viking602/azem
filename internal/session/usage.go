@@ -27,6 +27,12 @@ type Usage struct {
 	CompactionOutput     int    `json:"compactionOutput,omitempty"`
 	CompactionReasoning  int    `json:"compactionReasoning,omitempty"`
 	CompactionUncached   int    `json:"compactionUncached,omitempty"`
+	TeamInput            int    `json:"teamInput,omitempty"`
+	TeamCached           int    `json:"teamCached,omitempty"`
+	TeamCacheWrite       int    `json:"teamCacheWrite,omitempty"`
+	TeamOutput           int    `json:"teamOutput,omitempty"`
+	TeamReasoning        int    `json:"teamReasoning,omitempty"`
+	TeamUncached         int    `json:"teamUncached,omitempty"`
 	ContextLimit         int    `json:"contextLimit,omitempty"`
 	CacheReported        bool   `json:"cacheReported,omitempty"`
 	MainCacheReported    bool   `json:"mainCacheReported,omitempty"`
@@ -71,6 +77,8 @@ func (u *Usage) Apply(data map[string]string) {
 		}
 		if requestKind == "compaction" {
 			u.CompactionInput += value
+		} else if requestKind == "team" && data["cacheStatus"] == "reported" {
+			u.TeamInput += value
 		}
 	}
 	if value, ok := atoiData(data, "cachedInputTokens"); ok {
@@ -82,6 +90,8 @@ func (u *Usage) Apply(data map[string]string) {
 		}
 		if requestKind == "compaction" {
 			u.CompactionCached += value
+		} else if requestKind == "team" {
+			u.TeamCached += value
 		}
 	}
 	if value, ok := atoiData(data, "cacheWriteTokens"); ok {
@@ -91,6 +101,8 @@ func (u *Usage) Apply(data map[string]string) {
 		}
 		if requestKind == "compaction" {
 			u.CompactionCacheWrite += value
+		} else if requestKind == "team" {
+			u.TeamCacheWrite += value
 		}
 	}
 	if value, ok := atoiData(data, "outputTokens"); ok {
@@ -99,6 +111,8 @@ func (u *Usage) Apply(data map[string]string) {
 		}
 		if requestKind == "compaction" {
 			u.CompactionOutput += value
+		} else if requestKind == "team" {
+			u.TeamOutput += value
 		}
 	}
 	if value, ok := atoiData(data, "reasoningTokens"); ok {
@@ -106,6 +120,8 @@ func (u *Usage) Apply(data map[string]string) {
 			u.CompactionReasoning += value
 		} else if requestKind == "main" {
 			u.ReasoningTokens = value
+		} else if requestKind == "team" {
+			u.TeamReasoning += value
 		}
 	}
 	if value, ok := atoiData(data, "uncachedInputTokens"); ok {
@@ -113,6 +129,8 @@ func (u *Usage) Apply(data map[string]string) {
 			u.CompactionUncached += value
 		} else if requestKind == "main" {
 			u.UncachedInputTokens = value
+		} else if requestKind == "team" {
+			u.TeamUncached += value
 		}
 	}
 	if value, ok := atoiData(data, "contextLimit"); ok {
@@ -149,6 +167,12 @@ func (u Usage) Data() map[string]string {
 		"compactionOutput":     strconv.Itoa(u.CompactionOutput),
 		"compactionReasoning":  strconv.Itoa(u.CompactionReasoning),
 		"compactionUncached":   strconv.Itoa(u.CompactionUncached),
+		"teamInput":            strconv.Itoa(u.TeamInput),
+		"teamCached":           strconv.Itoa(u.TeamCached),
+		"teamCacheWrite":       strconv.Itoa(u.TeamCacheWrite),
+		"teamOutput":           strconv.Itoa(u.TeamOutput),
+		"teamReasoning":        strconv.Itoa(u.TeamReasoning),
+		"teamUncached":         strconv.Itoa(u.TeamUncached),
 		"contextLimit":         strconv.Itoa(u.ContextLimit),
 	}
 	for key, value := range map[string]string{"lastRequestKind": u.LastRequestKind, "lastProvider": u.LastProvider, "lastModel": u.LastModel, "lastTransport": u.LastTransport} {

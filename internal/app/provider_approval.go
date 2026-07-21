@@ -40,11 +40,13 @@ func (d *governedAgentTool) Execute(ctx context.Context, call tool.Call, sink to
 		}
 		if d.host != nil {
 			runID := firstNonempty(d.streamRunID, d.run.RunID)
-			d.host.emit(ctx, Event{
+			if !d.host.emit(ctx, Event{
 				Kind: EventToolUpdate, SessionID: d.sessionID, RunID: runID, AgentID: d.agentID,
 				ToolCallID: call.ID, State: update.Kind, Text: update.Message,
 				Data: childFrameData("child:"+d.agentID, d.parentToolCallID, update.Data),
-			})
+			}) {
+				return eventDeliveryError(ctx)
+			}
 		}
 		if sink != nil {
 			return sink(update)
@@ -428,7 +430,9 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 	defer s.finishLiveApproval(live)
 	event.State = "pending"
 	s.notifyHook(s.ctx, metadata, "permission_prompt", "Approval required", action)
-	s.emit(s.ctx, event)
+	if !s.emit(ctx, event) {
+		return approvalResolution{}, eventDeliveryError(ctx)
+	}
 	select {
 	case <-ctx.Done():
 		return approvalResolution{}, ctx.Err()
@@ -537,7 +541,9 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 	defer s.finishLiveApproval(live)
 	event.State = "pending"
 	s.notifyHook(s.ctx, metadata, "permission_prompt", "Approval required", pending.Request.RequestedAction)
-	s.emit(s.ctx, event)
+	if !s.emit(ctx, event) {
+		return approvalResolution{}, eventDeliveryError(ctx)
+	}
 	select {
 	case <-ctx.Done():
 		return approvalResolution{}, ctx.Err()
@@ -582,7 +588,9 @@ func (s *Service) automaticApproval(
 ) (approvalResolution, error) {
 	event.State = "reviewing"
 	event.Data["reviewer"] = codex.ApprovalReviewerModel
-	s.emit(s.ctx, event)
+	if !s.emit(ctx, event) {
+		return approvalResolution{}, eventDeliveryError(ctx)
+	}
 
 	providerRequest, err := request.codexRequest()
 	failureKind := codex.ReviewFailureInvalidRequest
@@ -635,9 +643,12 @@ func (s *Service) automaticApproval(
 		s.recordAutoReview(event.RunID, false)
 		// Reviewer infrastructure failures are fail-closed assessments, not a
 		// successful classification of the request's original risk.
-		s.emitAutomaticApprovalResolved(event, state, "high", "unknown", rationale, string(failureKind), message)
+		delivered := s.emitAutomaticApprovalResolved(event, state, "high", "unknown", rationale, string(failureKind), message)
 		if decisionErr != nil {
 			return approvalResolution{}, errors.Join(err, fmt.Errorf("record fail-closed approval decision: %w", decisionErr))
+		}
+		if !delivered {
+			return approvalResolution{}, errors.Join(err, eventDeliveryError(ctx))
 		}
 		return approvalResolution{Mode: agentservice.ApprovalDenied, DenialMessage: message}, nil
 	}
@@ -650,11 +661,13 @@ func (s *Service) automaticApproval(
 		s.recordAutoReview(event.RunID, false)
 		if decisionErr != nil {
 			message := "Automatic review could not record approval; action did not run."
-			s.emitAutomaticApprovalResolved(event, "auto_failed", assessment.RiskLevel, assessment.UserAuthorization, rationale, "decision", message)
+			_ = s.emitAutomaticApprovalResolved(event, "auto_failed", assessment.RiskLevel, assessment.UserAuthorization, rationale, "decision", message)
 			return approvalResolution{}, fmt.Errorf("record automatic approval: %w", decisionErr)
 		}
 		message := "Approved by automatic review: " + rationale
-		s.emitAutomaticApprovalResolved(event, "auto_approved", assessment.RiskLevel, assessment.UserAuthorization, rationale, "", message)
+		if !s.emitAutomaticApprovalResolved(event, "auto_approved", assessment.RiskLevel, assessment.UserAuthorization, rationale, "", message) {
+			return approvalResolution{}, eventDeliveryError(ctx)
+		}
 		return approvalResolution{Mode: agentservice.ApprovalOnce}, nil
 	}
 
@@ -664,12 +677,14 @@ func (s *Service) automaticApproval(
 	if limitErr != nil {
 		message += "\nRepeated automatic denials were detected; automatic execution remains paused for user review."
 	}
-	s.emitAutomaticApprovalResolved(event, "auto_denied", assessment.RiskLevel, assessment.UserAuthorization, rationale, "", message)
+	if !s.emitAutomaticApprovalResolved(event, "auto_denied", assessment.RiskLevel, assessment.UserAuthorization, rationale, "", message) {
+		return approvalResolution{}, eventDeliveryError(ctx)
+	}
 	return approvalResolution{NeedsUserApproval: true, DenialMessage: message}, nil
 }
 
-func (s *Service) emitAutomaticApprovalResolved(event Event, state, risk, authorization, rationale, errorKind, text string) {
-	s.emit(s.ctx, Event{
+func (s *Service) emitAutomaticApprovalResolved(event Event, state, risk, authorization, rationale, errorKind, text string) bool {
+	return s.emit(s.ctx, Event{
 		Kind: EventApprovalResolved, SessionID: event.SessionID, RunID: event.RunID, AgentID: event.AgentID,
 		ToolCallID: event.ToolCallID, ApprovalID: event.ApprovalID, State: state, Text: text,
 		Data: map[string]string{

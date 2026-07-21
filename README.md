@@ -4,7 +4,7 @@
 
 **A local-first AI coding agent for your terminal.**
 
-Governed tools, durable sessions, crash recovery, MCP integrations, Agent Skills, and multi-agent workflows - all from a keyboard-driven TUI.
+Governed tools, durable sessions, side-effect recovery, MCP integrations, Agent Skills, and multi-agent workflows - all from a keyboard-driven TUI.
 
 [![Go](https://img.shields.io/badge/Go-1.25.8-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
@@ -22,7 +22,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 |---|---|
 | **Terminal-native workflow** | A fast Bubble Tea interface with streaming output, dedicated approval cards, concise tool summaries, colorized inline diffs, and token usage |
 | **Governed execution** | Prompt, Auto Review, and YOLO approval modes for file, shell, and external actions |
-| **Durable state** | SQLite-backed sessions, runs, approvals, leases, and crash recovery |
+| **Durable state** | SQLite-backed sessions, runs, approvals, leases, side-effect reconciliation, and Team resume |
 | **Multiple providers** | ChatGPT through Codex-compatible OAuth and Grok through API or CLI-proxy transport |
 | **Extensible tools** | MCP servers over stdio or Streamable HTTP, plus dynamically loaded Agent Skills |
 | **Multi-agent work** | Structured team mode and resumable subagents with optional Git worktree isolation |
@@ -93,7 +93,7 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
 - Persistent conversations with session resume, context compaction, and a visible per-session recap status line
-- Durable action attempts and reconciliation of unknown side effects after interruption
+- Durable action attempts and reconciliation of unknown side effects after interruption; Team runs resume automatically, while interrupted Single runs require a continuation turn
 - Retry handling for transient ChatGPT transport failures before output is emitted
 - MCP server discovery, reconnect, concurrency controls, and per-tool policies
 - Agent Skills discovery from user, project, configured, and bundled directories
@@ -124,7 +124,7 @@ flowchart LR
     A --> K[Agent Skills]
 ```
 
-Each turn is routed through the application runtime, which selects a provider, assembles the available tools, applies approval policy, persists execution state, and streams events back to the TUI. Structured tool results are projected into readable summaries and file diffs. If execution is interrupted, Azem uses the persisted state to recover runs and surface side effects that require reconciliation.
+Each turn is routed through the application runtime, which selects a provider, assembles the available tools, applies approval policy, persists execution state, and streams events back to the TUI. Structured tool results are projected into readable summaries and file diffs. After a restart, Azem restores durable run projections and surfaces side effects that require reconciliation. Team runs can resume from their checkpoint; Single-Agent model loops do not yet resume automatically and require a continuation turn.
 
 ### Provider stream resilience
 
@@ -225,7 +225,7 @@ auth:
 
 agents:
   main:
-    max_tokens: 300000     # per-turn safety limit; 0 means unbounded
+    max_tokens: 0          # optional inter-request limit; the final request may overshoot it
     max_tool_calls: 64     # per-turn safety limit; 0 means unbounded
     max_wall_clock: 30m    # per-turn safety limit; 0s means unbounded
   team:
@@ -249,14 +249,14 @@ agents:
         model: grok-4.5
         reasoning: low
     budget:
-      max_tokens: 150000
+      max_tokens: 0          # optional inter-request limit; the final request may overshoot it
       max_tool_calls: 32
       max_turns: 16
       max_wall_clock: 20m
 
 skills:
   enabled: true
-  trust_project: true
+  trust_project: false       # explicitly enable only for repositories you trust
   additional_dirs: []
   eager: []
   disabled: []
@@ -344,7 +344,7 @@ Azem's approvals and persistent action boundaries help reduce accidental operati
 - `allow_write: false` removes built-in write tools but cannot stop an approved shell command from writing files.
 - `allow_network` relies on tools declaring network use and does not enforce OS-level network isolation.
 - `shell_policy: allow` and YOLO mode remove important confirmation points.
-- If subagent worktree creation fails, Azem may fall back to the shared workspace and report a warning.
+- A subagent that explicitly requests worktree isolation fails if the worktree cannot be created; it never falls back to the shared workspace.
 
 For strict isolation, run Azem inside a container, virtual machine, or restricted OS account, and enforce filesystem and network policy outside the application.
 

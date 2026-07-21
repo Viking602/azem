@@ -92,9 +92,10 @@ type ModelRouteConfig struct {
 }
 
 type MainAgentConfig struct {
-	// MaxTokens limits cumulative provider-reported spend for one user turn.
-	// Zero leaves it unbounded; context capacity and other configured budgets
-	// still bound execution independently.
+	// MaxTokens optionally limits cumulative provider-reported usage for one
+	// user turn. Coding runs default to zero so context compaction, rather than
+	// cumulative token usage, governs long tasks. A positive value is checked
+	// between requests, so the final provider request can exceed it.
 	MaxTokens int64 `yaml:"max_tokens"`
 	// MaxToolCalls limits tool calls in one user turn. Zero is unbounded.
 	MaxToolCalls int `yaml:"max_tool_calls"`
@@ -132,9 +133,10 @@ type SubagentConfig struct {
 }
 
 type SubagentBudgetConfig struct {
-	// MaxTokens limits cumulative provider-reported spend for one subagent run.
-	// Zero leaves it unbounded; context capacity, turns, tool calls, and
-	// wall-clock duration still bound execution independently.
+	// MaxTokens optionally limits cumulative provider-reported usage for one
+	// subagent run. It defaults to zero so subagents can finish their assigned
+	// coding task. A positive value is checked between requests and can be
+	// exceeded by the final provider request.
 	MaxTokens            int           `yaml:"max_tokens"`
 	MaxToolCalls         int           `yaml:"max_tool_calls"`
 	MaxTurns             int           `yaml:"max_turns"`
@@ -217,19 +219,19 @@ func Default() Config {
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
 		},
 		Agents: AgentsConfig{
-			Main: MainAgentConfig{MaxTokens: 300_000, MaxToolCalls: 64, MaxWallClock: "30m", MaxWallClockDuration: 30 * time.Minute},
+			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 64, MaxWallClock: "30m", MaxWallClockDuration: 30 * time.Minute},
 			Team: TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
 			Subagents: SubagentConfig{
 				Enabled: true, MaxDepth: 1, MaxConcurrency: 2, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
-					MaxTokens: 150_000, MaxToolCalls: 32, MaxTurns: 16,
+					MaxTokens: 0, MaxToolCalls: 32, MaxTurns: 16,
 					MaxWallClock: "20m", MaxWallClockDuration: 20 * time.Minute,
 				},
 			},
 		},
-		Skills: SkillsConfig{Enabled: true, TrustProject: true},
+		Skills: SkillsConfig{Enabled: true, TrustProject: false},
 		Hooks: HooksConfig{
 			Enabled: true, ClaudeCompatibility: false, DefaultTimeout: "5s",
 			DefaultTimeoutParsed: 5 * time.Second, FailurePolicy: "open",
@@ -240,8 +242,8 @@ func Default() Config {
 
 func builtInSubagentRoles() map[string]SubagentRoleConfig {
 	readOnly := []string{"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff"}
-	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test")
-	execute := append(append([]string(nil), readOnly...), "coding.go_test")
+	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell")
+	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell")
 	return map[string]SubagentRoleConfig{
 		"general-purpose": {
 			Description:    "Handle delegated coding work with the full governed tool set.",
