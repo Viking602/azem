@@ -525,7 +525,7 @@ func (m AppModel) overlayDescription() []string {
 			first(m.approval.Action, m.approval.Diff),
 		}
 	case OverlayCancel:
-		return []string{"The parent run is active with at least one foreground child task."}
+		return []string{"The current agent has at least one active child agent."}
 	case OverlayDiff:
 		if block, ok := m.selectedDiff(); ok {
 			return strings.Split(block.Content, "\n")
@@ -728,8 +728,8 @@ func (m AppModel) overlayOptions() []overlayOption {
 		}
 	case OverlayCancel:
 		return []overlayOption{
-			{Label: "Cancel parent only", Detail: "Foreground child tasks continue in the background"},
-			{Label: "Cancel parent and children", Detail: "Cancel every active child spawned by this parent"},
+			{Label: "Cancel current agent only", Detail: "Child agents continue running"},
+			{Label: "Cancel current agent and all child agents", Detail: "Cancel all active descendants"},
 		}
 	case OverlayAgents:
 		options := make([]overlayOption, 0, len(m.agents))

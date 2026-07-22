@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/memory"
@@ -117,7 +118,9 @@ type recordedRuntime struct {
 	actions            []Action
 	shutdown           bool
 	foregroundChildren bool
+	backgroundChildren bool
 	cancelChildren     bool
+	shells             []agentservice.ShellExecutionSnapshot
 }
 
 func (*recordedRuntime) NextEvent(context.Context) (app.Event, error) {
@@ -135,10 +138,18 @@ func (r *recordedRuntime) HasActiveForegroundChildren() bool {
 	return r.foregroundChildren
 }
 
+func (r *recordedRuntime) HasActiveChildren() bool {
+	return r.foregroundChildren || r.backgroundChildren
+}
+
 func (r *recordedRuntime) CancelActiveWithChildren(children bool) bool {
 	r.cancelled = true
 	r.cancelChildren = children
 	return true
+}
+
+func (r *recordedRuntime) ActiveShellExecutions() []agentservice.ShellExecutionSnapshot {
+	return append([]agentservice.ShellExecutionSnapshot(nil), r.shells...)
 }
 
 func (r *recordedRuntime) ExecuteAction(_ context.Context, action Action) error {
@@ -884,6 +895,31 @@ func TestForegroundChildCancellationPromptsForScope(t *testing.T) {
 	}
 }
 
+func TestBackgroundOnlyChildCancellationPromptsAndCancelsAll(t *testing.T) {
+	runtime := &recordedRuntime{backgroundChildren: true}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status = "Running"
+	updated, cmd := model.requestTurnCancellation()
+	model = updated.(AppModel)
+	if cmd != nil || model.overlay != OverlayCancel {
+		t.Fatalf("background child did not prompt: overlay=%q cmd=%v", model.overlay, cmd)
+	}
+	options := model.overlayOptions()
+	if len(options) != 2 || options[0].Label != "Cancel current agent only" || options[1].Label != "Cancel current agent and all child agents" {
+		t.Fatalf("cancellation choices = %#v", options)
+	}
+	model.overlayCursor = 1
+	updated, cmd = model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("cancel-all choice returned no command")
+	}
+	message := cmd()
+	if result, ok := message.(cancelResultMsg); !ok || !result.Cancelled || !runtime.cancelChildren {
+		t.Fatalf("cancel result=%#v runtime=%#v", message, runtime)
+	}
+}
+
 func TestTerminalEventClearsActiveRunAndRejectsLateDelta(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.status = "Starting"
@@ -1549,6 +1585,20 @@ func TestDetailedUsageShowsReasoningCompactionAndTransport(t *testing.T) {
 	} {
 		if !strings.Contains(report, wanted) {
 			t.Fatalf("status report missing %q:\n%s", wanted, report)
+		}
+	}
+}
+
+func TestStatusReportShowsActiveShellOwnerAndProcess(t *testing.T) {
+	runtime := &recordedRuntime{shells: []agentservice.ShellExecutionSnapshot{{
+		AgentID: "background-reviewer", ToolCallID: "shell-17", PID: 123, PGID: 123,
+		OutputBytes: 4096, CommandHash: "1234567890abcdef",
+	}}}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	report := strings.Join(model.statusReportLines(), "\n")
+	for _, want := range []string{"Shell processes", "background-reviewer", "shell-17", "pid 123 / pgid 123", "4096 bytes", "1234567890ab"} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("status report missing %q:\n%s", want, report)
 		}
 	}
 }

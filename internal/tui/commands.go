@@ -230,7 +230,10 @@ func cancelTurn(runtime Runtime, children bool) tea.Cmd {
 	}
 }
 
-func hasActiveForegroundChildren(runtime Runtime) bool {
+func hasActiveChildren(runtime Runtime) bool {
+	if scoped, ok := runtime.(interface{ HasActiveChildren() bool }); ok {
+		return scoped.HasActiveChildren()
+	}
 	scoped, ok := runtime.(interface{ HasActiveForegroundChildren() bool })
 	return ok && scoped.HasActiveForegroundChildren()
 }
