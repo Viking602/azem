@@ -86,9 +86,7 @@ func TestPTYStreamResizeCancelAndExit(t *testing.T) {
 	if _, err := terminal.Write([]byte{3}); err != nil {
 		t.Fatalf("send cancellation: %v", err)
 	}
-	// Bubble Tea updates the status line in place, so "Cancelling" -> "Cancelled"
-	// emits only the changed suffix rather than a second full status label.
-	readUntil(t, reads, output, "ed · ☝︎ ASK", 5*time.Second)
+	readUntil(t, reads, output, "× Cancelled", 5*time.Second)
 	if _, err := terminal.Write([]byte{3}); err != nil {
 		t.Fatalf("send exit: %v", err)
 	}

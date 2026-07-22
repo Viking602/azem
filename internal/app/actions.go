@@ -243,18 +243,18 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		s.activeSession = action.Target
 		s.mu.Unlock()
 		defer s.clearRun(compactReservation)
-		if err := s.dispatchLifecycle(ctx, hooks.PreCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) { e.Trigger = "manual" }); err != nil {
-			return err
-		}
 		projection, err := s.sessions.LoadProjection(ctx, action.Target)
 		if err != nil {
 			return err
 		}
-		if len(projection.Blocks) <= 5 {
+		if !manualCompactionEligible(projection.Blocks) {
 			return ErrNothingToCompact
 		}
 		if s.providers == nil {
 			return fmt.Errorf("compaction model runtime is unavailable")
+		}
+		if err := s.dispatchLifecycle(ctx, hooks.PreCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) { e.Trigger = "manual" }); err != nil {
+			return err
 		}
 		plan, changed, prepareErr := s.providers.PrepareManualCompaction(ctx, projection)
 		if prepareErr != nil {

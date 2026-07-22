@@ -25,6 +25,10 @@ import (
 )
 
 func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reasoning, transport string) stream.Sink {
+	return s.providerStreamSinkWithFacts(sessionID, runID, providerID, modelID, reasoning, transport, false)
+}
+
+func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, modelID, reasoning, transport string, factMetered bool) stream.Sink {
 	return stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
 		data := map[string]string{}
 		switch frame.Kind {
@@ -59,22 +63,24 @@ func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reas
 				}
 			}
 		case stream.FrameDone:
-			usage := map[string]string{}
-			if frame.Usage.InputTokens != 0 || frame.Usage.OutputTokens != 0 || frame.Usage.TotalTokens != 0 {
-				usage["inputTokens"] = fmt.Sprint(frame.Usage.InputTokens)
-				usage["cachedInputTokens"] = fmt.Sprint(frame.Usage.CachedInputTokens)
-				usage["uncachedInputTokens"] = fmt.Sprint(max(0, frame.Usage.InputTokens-frame.Usage.CachedInputTokens))
-				usage["outputTokens"] = fmt.Sprint(frame.Usage.OutputTokens)
-				usage["totalTokens"] = fmt.Sprint(frame.Usage.TotalTokens)
-				usage["cacheStatus"] = "reported"
-				usage["requestKind"] = "main"
-				usage["provider"] = providerID
-				usage["model"] = modelID
-				usage["reasoning"] = reasoning
-				usage["transport"] = transport
+			if factMetered {
+				return nil
 			}
-			if !s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: usage}) {
-				return eventDeliveryError(ctx)
+			if frame.Usage.InputTokens != 0 || frame.Usage.OutputTokens != 0 || frame.Usage.TotalTokens != 0 {
+				usage := map[string]string{
+					"inputTokens": fmt.Sprint(frame.Usage.InputTokens), "cachedInputTokens": fmt.Sprint(frame.Usage.CachedInputTokens),
+					"uncachedInputTokens": fmt.Sprint(max(0, frame.Usage.InputTokens-frame.Usage.CachedInputTokens)),
+					"outputTokens":        fmt.Sprint(frame.Usage.OutputTokens), "totalTokens": fmt.Sprint(frame.Usage.TotalTokens),
+					"cacheStatus": "reported", "requestKind": "main", "provider": providerID, "model": modelID,
+					"reasoning": reasoning, "transport": transport,
+				}
+				if !s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: usage}) {
+					return eventDeliveryError(ctx)
+				}
+			} else if !factMetered {
+				if !s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{}}) {
+					return eventDeliveryError(ctx)
+				}
 			}
 		case stream.FrameError:
 			if frame.Err != nil {
@@ -127,7 +133,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			MaxToolCalls: s.cfg.Agents.Main.MaxToolCalls,
 		},
 	}
-	result := engine.RunStream(ctx, task, hyagent.OutputPolicy{}, s.providerStreamSink(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider)))
+	result := engine.RunStream(ctx, task, hyagent.OutputPolicy{}, s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil))
 	var runErr error
 	if result.Failure != nil {
 		runErr = result.Failure
@@ -161,6 +167,8 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		history := session.ModelHistory{
 			ProviderID: request.Provider, ModelID: engine.Model,
 			InstructionFingerprint: mainInstructionFingerprint,
+			StaticPrefixHash:       mainInstructionFingerprint,
+			WireVersion:            session.CurrentWireVersion,
 			Messages:               result.Messages,
 		}
 		if err := s.sessions.CompleteTurn(ctx, request.SessionID, session.Block{
@@ -209,8 +217,17 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 	policy.newSummarizer = func(cacheKey string) func(context.Context, string) (string, error) {
 		return lazyCompactionSummarizer(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
 			_, resolvedModel, window, driver, resolveErr := s.providers.resolveDriver(ctx, provider, model, reasoning)
+			if resolveErr == nil && s.sessions != nil {
+				driver = &meteredProviderDriver{inner: driver, store: s.sessions, host: s, sessionID: request.SessionID,
+					runID: parentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name}
+			}
 			return resolvedModel, window, driver, resolveErr
-		}, compactionRoute, request.Provider, request.Model, request.Reasoning, cacheKey, nil, report)
+		}, compactionRoute, request.Provider, request.Model, request.Reasoning, cacheKey, nil, func() compactionUsageReporter {
+			if s.sessions != nil {
+				return nil
+			}
+			return report
+		}())
 	}
 	return policy, nil
 }
@@ -366,14 +383,12 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 		}
 		if engine.Provider != nil {
 			transport := engine.Provider.Metadata().Name
-			extraBody[responses.UsageReporterExtraKey] = responses.UsageReporter(func(details responses.UsageDetails) {
-				if details.ReasoningTokens > 0 || details.CacheWriteTokens > 0 {
-					s.emitTeamUsage(request, parentRunID, dispatch.To, class.Name, transport, hyprovider.Usage{}, details.ReasoningTokens, details.CacheWriteTokens)
-				}
-			})
-			engine.Provider = &teamUsageDriver{inner: engine.Provider, prepare: requestPreparer.prepare, report: func(usage hyprovider.Usage) {
-				s.emitTeamUsage(request, parentRunID, dispatch.To, class.Name, transport, usage, 0, 0)
-			}}
+			inner := engine.Provider
+			if s.sessions != nil {
+				inner = &meteredProviderDriver{inner: inner, store: s.sessions, host: s, sessionID: sessionID,
+					runID: parentRunID, kind: "team", provider: request.Provider, model: request.Model, transport: transport}
+			}
+			engine.Provider = &teamUsageDriver{inner: inner, prepare: requestPreparer.prepare}
 		}
 		engine.ExtraBody = extraBody
 		return engine, nil
@@ -647,7 +662,7 @@ func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID, goal
 		return
 	}
 	if s.sessions != nil {
-		if err := s.sessions.AppendBlock(ctx, sessionID, session.Block{Kind: "assistant", RunID: runID, Title: "Azem team", Content: answer, State: "completed"}); err != nil {
+		if _, err := s.sessions.AppendBlock(ctx, sessionID, session.Block{Kind: "assistant", RunID: runID, Title: "Azem team", Content: answer, State: "completed"}); err != nil {
 			s.observeStop(sessionID, runID, hooks.StopFailure, "persist_failed", err)
 			s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 			return

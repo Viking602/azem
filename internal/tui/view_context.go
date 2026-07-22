@@ -443,10 +443,21 @@ func (m AppModel) contextMetrics() contextMetrics {
 		metrics.percentage = float64(used) * 100 / float64(limit)
 	}
 	cache := metrics.cacheLabel + " --"
+	if m.usage.CurrentCacheEpoch > 0 {
+		cache = fmt.Sprintf("%s E%d pending", metrics.cacheLabel, m.usage.CurrentCacheEpoch)
+	}
 	cacheRate := 0.0
-	mainInput := m.usage.MainCacheInput
-	mainCached := min(max(0, m.usage.MainCachedInput), mainInput)
+	mainInput := m.usage.CurrentEpochMainReportedInput
+	mainCached := min(max(0, m.usage.CurrentEpochMainCached), mainInput)
 	mainReported := m.usage.MainCacheReported
+	legacy := m.usage.CurrentEpochMainRequests == 0 && m.usage.MainCacheInput > 0
+	if legacy {
+		mainInput = m.usage.MainCacheInput
+		mainCached = min(max(0, m.usage.MainCachedInput), mainInput)
+	}
+	if m.usage.CurrentEpochMainRequests > 0 && m.usage.CurrentEpochMainReportedRequests == 0 {
+		cache = fmt.Sprintf("%s E%d N/A", metrics.cacheLabel, m.usage.CurrentCacheEpoch)
+	}
 	if !mainReported && m.usage.CacheReported && m.usage.TeamInput == 0 && m.usage.CompactionInput == 0 {
 		mainInput = m.usage.CacheInputTokens
 		mainCached = min(max(0, m.usage.CachedInputTokens), mainInput)
@@ -454,7 +465,13 @@ func (m AppModel) contextMetrics() contextMetrics {
 	}
 	if mainReported && mainInput > 0 {
 		cacheRate = float64(mainCached) * 100 / float64(mainInput)
-		cache = fmt.Sprintf("%s %s/%s · %.1f%%", metrics.cacheLabel, formatTokens(mainCached), formatTokens(mainInput), cacheRate)
+		if legacy {
+			cache = fmt.Sprintf("%s %s/%s · %.1f%%", metrics.cacheLabel, formatTokens(mainCached), formatTokens(mainInput), cacheRate)
+		} else {
+			cache = fmt.Sprintf("%s E%d %.1f%% · %d req", metrics.cacheLabel, m.usage.CurrentCacheEpoch, cacheRate, m.usage.CurrentEpochMainRequests)
+		}
+	} else if m.usage.CurrentEpochMainReportedRequests > 0 {
+		cache = fmt.Sprintf("%s E%d 0.0%% · %d req", metrics.cacheLabel, m.usage.CurrentCacheEpoch, m.usage.CurrentEpochMainRequests)
 	}
 	allInput := m.usage.CacheInputTokens
 	allCached := min(max(0, m.usage.CachedInputTokens), allInput)
@@ -656,8 +673,10 @@ func (m AppModel) statusReportLines() []string {
 		}
 		if m.usage.CompactionInput > 0 || m.usage.CompactionOutput > 0 {
 			line := fmt.Sprintf("  %s (CMP): %s in / %s out", m.tr("overlay.status.field.compaction"), formatTokens(m.usage.CompactionInput), formatTokens(m.usage.CompactionOutput))
-			if m.usage.CompactionInput > 0 {
-				line += fmt.Sprintf(" · cache %.0f%%", float64(min(m.usage.CompactionCached, m.usage.CompactionInput))*100/float64(m.usage.CompactionInput))
+			if m.usage.CompactionCacheReported && m.usage.CompactionReportedInput > 0 {
+				line += fmt.Sprintf(" · cache %.0f%%", float64(min(m.usage.CompactionCached, m.usage.CompactionReportedInput))*100/float64(m.usage.CompactionReportedInput))
+			} else {
+				line += " · cache N/A"
 			}
 			if m.usage.CompactionUncached > 0 {
 				line += " · U " + formatTokens(m.usage.CompactionUncached)
@@ -669,6 +688,9 @@ func (m AppModel) statusReportLines() []string {
 				line += " · R " + formatTokens(m.usage.CompactionReasoning)
 			}
 			lines = append(lines, line)
+		}
+		if m.usage.LifetimeMainRequests > 0 {
+			lines = append(lines, fmt.Sprintf("  MAIN lifetime: %s in / %s out · %d req", formatTokens(m.usage.LifetimeMainInput), formatTokens(m.usage.LifetimeMainOutput), m.usage.LifetimeMainRequests))
 		}
 		if m.usage.TeamInput > 0 || m.usage.TeamOutput > 0 {
 			line := fmt.Sprintf("  %s (TEAM): %s in / %s out", m.tr("overlay.status.field.team"), formatTokens(m.usage.TeamInput), formatTokens(m.usage.TeamOutput))

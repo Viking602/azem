@@ -72,6 +72,28 @@ func TestMigrationV3PreservesV2SubagentRuns(t *testing.T) {
 	}
 }
 
+func TestPhase3MigrationV11ArtifactForeignKeyCascade(t *testing.T) {
+	ctx := context.Background()
+	provider, err := Open(ctx, filepath.Join(t.TempDir(), "v11.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	if _, err := provider.db.ExecContext(ctx, `INSERT INTO sessions(id,title,created_at,updated_at) VALUES('s','S',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.db.ExecContext(ctx, `INSERT INTO context_artifacts(id,session_id,kind,sha256,payload,created_at) VALUES('a','s','tool_result','hash',X'01',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.db.ExecContext(ctx, `DELETE FROM sessions WHERE id='s'`); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := provider.db.QueryRowContext(ctx, `SELECT count(*) FROM context_artifacts WHERE id='a'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("cascade count=%d err=%v", count, err)
+	}
+}
+
 func TestMigrationV5CreatesMemoryAndRecapStores(t *testing.T) {
 	ctx := context.Background()
 	provider, err := Open(ctx, filepath.Join(t.TempDir(), "azem.db"))
@@ -155,6 +177,52 @@ func TestMigrationV7MovesProjectionBlocksIntoAppendOnlyRows(t *testing.T) {
 	}
 	if version != schemaVersion || gotBlocks != "[]" || modelHistory != "{}" || sequence != 0 || kind != "user" || runID != "run-1" || data != blocks[1:len(blocks)-1] {
 		t.Fatalf("migration result version=%d blocks=%q model_history=%q row=%d/%q/%q/%q", version, gotBlocks, modelHistory, sequence, kind, runID, data)
+	}
+}
+
+func TestPhase6MigrationV13BackfillsCanonicalBlocksAndArtifactPreviews(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "history-backfill.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 12; version++ {
+		if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
+			t.Fatalf("apply migration %d: %v", version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version=12`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO sessions(id,created_at,updated_at) VALUES('s',1,1);
+		INSERT INTO session_projections(session_id,updated_at) VALUES('s',1);
+		INSERT INTO session_blocks(session_id,sequence,kind,data) VALUES
+			('s',0,'user','{"kind":"user","content":"backfilluser"}'),
+			('s',1,'assistant','{"kind":"assistant","content":"backfillassistant"}'),
+			('s',2,'agent','{"kind":"agent","content":"backfillagent"}'),
+			('s',3,'assistant','{"kind":"assistant","content":"backfillcancelled","state":"cancelled"}');
+		INSERT INTO context_artifacts(id,session_id,kind,sha256,payload,preview,created_at)
+			VALUES('a','s','tool','hash',X'01','backfillartifact',1);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	for query, want := range map[string]string{"backfilluser": "sequence:0", "backfillassistant": "sequence:1", "backfillartifact": "artifact:a"} {
+		var source string
+		if err := provider.db.QueryRowContext(ctx, `SELECT source_id FROM history_fts WHERE history_fts MATCH ? AND session_id='s'`, query).Scan(&source); err != nil || source != want {
+			t.Fatalf("query %q source=%q err=%v", query, source, err)
+		}
+	}
+	var count int
+	if err := provider.db.QueryRowContext(ctx, `SELECT count(*) FROM history_fts WHERE history_fts MATCH 'backfillagent OR backfillcancelled'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("non-final backfill count=%d err=%v", count, err)
 	}
 }
 

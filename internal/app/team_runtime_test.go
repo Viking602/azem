@@ -121,7 +121,7 @@ func TestConfiguredTeamTurnRunsAllRolesAndPersistsReporterAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sessions.AppendBlock(ctx, "default", session.Block{Kind: "assistant", Title: "Prior", Content: "planner-only historical marker", State: "completed"}); err != nil {
+	if _, err := sessions.AppendBlock(ctx, "default", session.Block{Kind: "assistant", Title: "Prior", Content: "planner-only historical marker", State: "completed"}); err != nil {
 		t.Fatal(err)
 	}
 

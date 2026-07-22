@@ -80,6 +80,30 @@ func TestStreamAssemblesCrossChunkToolCallAndUsage(t *testing.T) {
 	}
 }
 
+func TestStreamCacheReportedDistinguishesMissingFromExplicitZero(t *testing.T) {
+	for _, tc := range []struct {
+		name, details string
+		reported      bool
+	}{
+		{name: "missing", details: `{}`, reported: false},
+		{name: "explicit zero", details: `{"cached_tokens":0}`, reported: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := `data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":9,"output_tokens":1,"total_tokens":10,"input_tokens_details":` + tc.details + `}}}` + "\n\n"
+			body := &chunkBody{chunks: [][]byte{[]byte(payload)}}
+			ctx, cancel := context.WithCancel(context.Background())
+			var details UsageDetails
+			event, err := NewStream(ctx, cancel, body, func(value UsageDetails) { details = value }).Recv()
+			if err != nil || event.Kind != hyprovider.EventDone {
+				t.Fatalf("event=%#v err=%v", event, err)
+			}
+			if details.CacheReported != tc.reported || details.CachedTokens != 0 {
+				t.Fatalf("details=%#v want reported=%v", details, tc.reported)
+			}
+		})
+	}
+}
+
 func TestStreamRejectsIncompleteToolJSONAndTruncatedFrames(t *testing.T) {
 	invalid := "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"item\",\"call_id\":\"call\",\"name\":\"tool\",\"arguments\":\"{bad\"}}\n\n"
 	body := &chunkBody{chunks: [][]byte{[]byte(invalid)}}

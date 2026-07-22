@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ type Session struct {
 }
 
 type Block struct {
+	Sequence         int64        `json:"-"`
 	Kind             string       `json:"kind"`
 	RunID            string       `json:"runId,omitempty"`
 	AgentID          string       `json:"agentId,omitempty"`
@@ -44,15 +46,25 @@ type ModelHistory struct {
 	ModelID                string            `json:"modelId,omitempty"`
 	InstructionFingerprint string            `json:"instructionFingerprint,omitempty"`
 	Messages               []message.Message `json:"messages,omitempty"`
+	CoveredThroughSequence *int64            `json:"coveredThroughSequence,omitempty"`
+	Generation             int64             `json:"generation,omitempty"`
+	SummaryHash            string            `json:"summaryHash,omitempty"`
+	StaticPrefixHash       string            `json:"staticPrefixHash,omitempty"`
+	WireVersion            int               `json:"wireVersion,omitempty"`
 }
 
+const CurrentWireVersion = 1
+
 type Projection struct {
-	Session      Session
-	LastRunID    string
-	Blocks       []Block
-	ModelHistory ModelHistory
-	Usage        Usage
-	UpdatedAt    time.Time
+	Session              Session
+	LastRunID            string
+	Blocks               []Block
+	ModelHistory         ModelHistory
+	Usage                Usage
+	UpdatedAt            time.Time
+	CheckpointGeneration int64
+	CacheEpoch           int64
+	CacheIdentityHash    string
 }
 
 type CompactionPlan struct {
@@ -60,10 +72,153 @@ type CompactionPlan struct {
 	ModelHistory      ModelHistory
 	ExpectedUpdatedAt time.Time
 	TailStart         int
+	ExpectedHighWater *int64
 }
 
 type Service struct {
 	db *sql.DB
+}
+
+type ContextArtifact struct {
+	ID        string
+	SessionID string
+	RunID     string
+	Kind      string
+	SHA256    string
+	Payload   []byte
+	Preview   string
+	CreatedAt time.Time
+}
+
+type HistoryRecord struct {
+	SessionID  string `json:"sessionId"`
+	SourceType string `json:"sourceType"`
+	SourceID   string `json:"sourceId"`
+	Preview    string `json:"preview,omitempty"`
+	Content    string `json:"content,omitempty"`
+}
+
+const (
+	defaultHistoryLimit = 8
+	maxHistoryLimit     = 20
+)
+
+// SearchHistory searches only durable, canonical sources in one session. The
+// payload budget is approximate (four UTF-8 bytes per token) and is also
+// capped by byteBudget. Artifact payloads are never loaded by this method.
+func (s *Service) SearchHistory(ctx context.Context, sessionID, query string, limit, tokenBudget, byteBudget int) ([]HistoryRecord, error) {
+	match := safeHistoryMatch(query)
+	if match == "" || strings.TrimSpace(sessionID) == "" || tokenBudget <= 0 || byteBudget <= 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = defaultHistoryLimit
+	}
+	if limit > maxHistoryLimit {
+		limit = maxHistoryLimit
+	}
+	budget := byteBudget
+	if tokenBytes := tokenBudget * 4; tokenBytes < budget {
+		budget = tokenBytes
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT f.session_id,f.source_type,f.source_id,f.content
+		FROM history_fts f
+		WHERE history_fts MATCH ? AND f.session_id=? AND (
+			(f.source_type='sequence' AND EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=f.session_id
+				AND (b.kind='user' OR (b.kind='assistant' AND COALESCE(json_extract(b.data,'$.state'),'') IN ('','completed')))
+				AND 'sequence:'||b.sequence=f.source_id)) OR
+			(f.source_type='artifact' AND EXISTS(SELECT 1 FROM context_artifacts a WHERE a.session_id=f.session_id AND 'artifact:'||a.id=f.source_id)))
+		ORDER BY bm25(history_fts) LIMIT ?`, match, sessionID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search session history: %w", err)
+	}
+	defer rows.Close()
+	result := make([]HistoryRecord, 0, limit)
+	used := 0
+	for rows.Next() {
+		var record HistoryRecord
+		var text string
+		if err := rows.Scan(&record.SessionID, &record.SourceType, &record.SourceID, &text); err != nil {
+			return nil, err
+		}
+		remaining := budget - used
+		if remaining <= 0 {
+			break
+		}
+		text = truncateUTF8Bytes(text, remaining)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		if record.SourceType == "artifact" {
+			record.Preview = text
+		} else {
+			record.Content = text
+		}
+		used += len(text)
+		result = append(result, record)
+	}
+	return result, rows.Err()
+}
+
+func safeHistoryMatch(query string) string {
+	words := strings.FieldsFunc(query, func(r rune) bool {
+		return !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r >= 0x80)
+	})
+	quoted := make([]string, 0, len(words))
+	for _, word := range words {
+		word = strings.TrimSpace(word)
+		if word != "" {
+			quoted = append(quoted, `"`+strings.ReplaceAll(word, `"`, `""`)+`"`)
+		}
+	}
+	return strings.Join(quoted, " OR ")
+}
+
+func truncateUTF8Bytes(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	if limit <= 0 {
+		return ""
+	}
+	for limit > 0 && (value[limit]&0xc0) == 0x80 {
+		limit--
+	}
+	return value[:limit]
+}
+
+// PutArtifact durably stores a payload and returns the existing row when the
+// same session, kind, and content are seen again.
+func (s *Service) PutArtifact(ctx context.Context, sessionID, runID, kind string, payload []byte, preview string) (ContextArtifact, error) {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(kind) == "" {
+		return ContextArtifact{}, fmt.Errorf("artifact session and kind are required")
+	}
+	digest := sha256.Sum256(payload)
+	hash := fmt.Sprintf("%x", digest[:])
+	idDigest := sha256.Sum256([]byte(sessionID + "\x00" + kind + "\x00" + hash))
+	id := fmt.Sprintf("artifact_%x", idDigest[:16])
+	now := time.Now().UTC()
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,payload,preview,created_at)
+		VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(session_id,kind,sha256) DO NOTHING`, id, sessionID, runID, kind, hash, payload, preview, now.UnixNano()); err != nil {
+		return ContextArtifact{}, fmt.Errorf("put context artifact: %w", err)
+	}
+	return s.LoadArtifact(ctx, sessionID, id)
+}
+
+func (s *Service) LoadArtifact(ctx context.Context, sessionID, id string) (ContextArtifact, error) {
+	var value ContextArtifact
+	var created int64
+	err := s.db.QueryRowContext(ctx, `SELECT id,session_id,run_id,kind,sha256,payload,preview,created_at
+		FROM context_artifacts WHERE id=? AND session_id=?`, id, sessionID).Scan(&value.ID, &value.SessionID, &value.RunID, &value.Kind, &value.SHA256, &value.Payload, &value.Preview, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ContextArtifact{}, fmt.Errorf("context artifact %q not found in session %q", id, sessionID)
+	}
+	if err != nil {
+		return ContextArtifact{}, fmt.Errorf("load context artifact: %w", err)
+	}
+	value.Payload = append([]byte(nil), value.Payload...)
+	value.CreatedAt = time.Unix(0, created).UTC()
+	return value, nil
 }
 
 func NewService(db *sql.DB) *Service { return &Service{db: db} }
@@ -126,9 +281,10 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	}
 	var blocksData, historyData, usageData []byte
 	var runID string
-	var updated int64
-	err = s.db.QueryRowContext(ctx, `SELECT last_run_id,blocks,model_history,usage,updated_at FROM session_projections WHERE session_id=?`, id).Scan(
-		&runID, &blocksData, &historyData, &usageData, &updated,
+	var updated, generation, cacheEpoch int64
+	var cacheIdentity string
+	err = s.db.QueryRowContext(ctx, `SELECT last_run_id,blocks,model_history,usage,updated_at,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?`, id).Scan(
+		&runID, &blocksData, &historyData, &usageData, &updated, &generation, &cacheEpoch, &cacheIdentity,
 	)
 	if err != nil {
 		return Projection{}, fmt.Errorf("load projection: %w", err)
@@ -156,27 +312,38 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	}
 	return Projection{
 		Session: value, LastRunID: runID, Blocks: blocks, ModelHistory: history, Usage: usage,
-		UpdatedAt: time.Unix(0, updated).UTC(),
+		UpdatedAt:            time.Unix(0, updated).UTC(),
+		CheckpointGeneration: generation, CacheEpoch: cacheEpoch, CacheIdentityHash: cacheIdentity,
 	}, nil
 }
 
-func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block) error {
+func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
-	if err := appendSessionBlock(ctx, tx, sessionID, block); err != nil {
-		return err
+	sequence, mutated, err := appendSessionBlock(ctx, tx, sessionID, block)
+	if err != nil {
+		return 0, err
 	}
 	now := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET last_run_id=?,model_history='{}',updated_at=? WHERE session_id=?`, block.RunID, now, sessionID); err != nil {
-		return err
+	// Appending a canonical user tail and UI-only lifecycle updates do not make
+	// an earlier checkpoint stale. Coalescing can rewrite a covered assistant.
+	query := `UPDATE session_projections SET last_run_id=?,updated_at=? WHERE session_id=?`
+	if mutated && block.Kind == "assistant" {
+		query = `UPDATE session_projections SET last_run_id=?,
+			model_history=CASE WHEN CAST(json_extract(model_history,'$.coveredThroughSequence') AS INTEGER)>=` + fmt.Sprint(sequence) + ` THEN '{}' ELSE model_history END,
+			checkpoint_generation=checkpoint_generation+CASE WHEN CAST(json_extract(model_history,'$.coveredThroughSequence') AS INTEGER)>=` + fmt.Sprint(sequence) + ` THEN 1 ELSE 0 END,
+			updated_at=? WHERE session_id=?`
+	}
+	if _, err := tx.ExecContext(ctx, query, block.RunID, now, sessionID); err != nil {
+		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
-		return err
+		return 0, err
 	}
-	return tx.Commit()
+	return sequence, tx.Commit()
 }
 
 func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Block, history ModelHistory) error {
@@ -186,17 +353,43 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 	}
 	defer tx.Rollback()
 	if strings.TrimSpace(block.Content) != "" {
-		if err := appendSessionBlock(ctx, tx, sessionID, block); err != nil {
+		if _, _, err := appendSessionBlock(ctx, tx, sessionID, block); err != nil {
 			return err
+		}
+	}
+	// Derive checkpoint identity from the actual provider history. Automatic
+	// compaction must never rely on an empty caller-supplied SummaryHash.
+	for _, current := range history.Messages {
+		if current.Kind == message.KindCompactionSummary {
+			digest := sha256.Sum256([]byte(current.Text))
+			history.SummaryHash = fmt.Sprintf("%x", digest[:])
+			history.WireVersion = CurrentWireVersion
+			if history.StaticPrefixHash == "" {
+				history.StaticPrefixHash = history.InstructionFingerprint
+			}
 		}
 	}
 	encodedHistory, err := json.Marshal(history)
 	if err != nil {
 		return fmt.Errorf("encode model history: %w", err)
 	}
+	boundary, err := canonicalHighWater(ctx, tx, sessionID)
+	if err != nil {
+		return err
+	}
+	history.CoveredThroughSequence = boundary
+	var generation int64
+	if err := tx.QueryRowContext(ctx, `SELECT checkpoint_generation+1 FROM session_projections WHERE session_id=?`, sessionID).Scan(&generation); err != nil {
+		return err
+	}
+	history.Generation = generation
+	encodedHistory, err = json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("encode model history: %w", err)
+	}
 	now := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET last_run_id=?,model_history=?,updated_at=? WHERE session_id=?`,
-		block.RunID, encodedHistory, now, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET last_run_id=?,model_history=?,checkpoint_generation=?,updated_at=? WHERE session_id=?`,
+		block.RunID, encodedHistory, generation, now, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
@@ -235,7 +428,7 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 		}
 	}
 	now := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history='{}',updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
@@ -244,8 +437,8 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 	return tx.Commit()
 }
 
-// CompactWithSummary replaces older transcript blocks with a provider-generated
-// handoff and installs the matching provider-resume checkpoint atomically.
+// CompactWithSummary activates a provider checkpoint without changing the
+// canonical transcript. The name is retained for API compatibility.
 func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan CompactionPlan) (Projection, error) {
 	if strings.TrimSpace(plan.Summary) == "" {
 		return Projection{}, fmt.Errorf("compact session: summary is empty")
@@ -259,13 +452,9 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 		return Projection{}, err
 	}
 	defer tx.Rollback()
-	projection.Blocks, err = loadSessionBlocks(ctx, tx, sessionID)
-	if err != nil {
-		return Projection{}, err
-	}
 	var historyData []byte
-	var projectionUpdated int64
-	if err := tx.QueryRowContext(ctx, `SELECT model_history,updated_at FROM session_projections WHERE session_id=?`, sessionID).Scan(&historyData, &projectionUpdated); err != nil {
+	var projectionUpdated, generation, cacheEpoch int64
+	if err := tx.QueryRowContext(ctx, `SELECT model_history,updated_at,checkpoint_generation,cache_epoch FROM session_projections WHERE session_id=?`, sessionID).Scan(&historyData, &projectionUpdated, &generation, &cacheEpoch); err != nil {
 		return Projection{}, err
 	}
 	if !plan.ExpectedUpdatedAt.IsZero() && projectionUpdated != plan.ExpectedUpdatedAt.UnixNano() {
@@ -274,34 +463,21 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 	if err := json.Unmarshal(historyData, &projection.ModelHistory); err != nil {
 		return Projection{}, fmt.Errorf("decode model history for compaction: %w", err)
 	}
-	const keepRecent = 4
-	if len(projection.Blocks) <= keepRecent+1 {
-		return projection, nil
-	}
-	tailStart := plan.TailStart
-	if tailStart <= 0 || tailStart >= len(projection.Blocks) {
-		return Projection{}, fmt.Errorf("compact session: invalid retained tail start %d", tailStart)
-	}
-	compacted := []Block{{Kind: "assistant", Title: "Compacted history", Content: strings.TrimSpace(plan.Summary), State: "compacted", Collapsed: true}}
-	compacted = append(compacted, projection.Blocks[tailStart:]...)
-	now := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM session_blocks WHERE session_id=?`, sessionID); err != nil {
+	boundary, err := canonicalHighWater(ctx, tx, sessionID)
+	if err != nil {
 		return Projection{}, err
 	}
-	for _, block := range compacted {
-		encoded, err := json.Marshal(block)
-		if err != nil {
-			return Projection{}, err
-		}
-		if err := insertSessionBlock(ctx, tx, sessionID, block, encoded); err != nil {
-			return Projection{}, err
-		}
+	if plan.ExpectedHighWater != nil && (boundary == nil || *boundary != *plan.ExpectedHighWater) {
+		return Projection{}, fmt.Errorf("compact session: projection changed while summary was generated")
 	}
+	plan.ModelHistory.CoveredThroughSequence = boundary
+	plan.ModelHistory.Generation = generation + 1
+	now := time.Now().UTC().UnixNano()
 	encodedHistory, err := json.Marshal(plan.ModelHistory)
 	if err != nil {
 		return Projection{}, fmt.Errorf("encode compacted model history: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history=?,updated_at=? WHERE session_id=?`, encodedHistory, now, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history=?,checkpoint_generation=?,cache_epoch=?,cache_identity_hash='',updated_at=? WHERE session_id=?`, encodedHistory, generation+1, cacheEpoch+1, now, sessionID); err != nil {
 		return Projection{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
@@ -310,9 +486,11 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 	if err := tx.Commit(); err != nil {
 		return Projection{}, err
 	}
-	projection.Blocks = compacted
 	projection.ModelHistory = plan.ModelHistory
 	projection.UpdatedAt = time.Unix(0, now).UTC()
+	projection.CheckpointGeneration = generation + 1
+	projection.CacheEpoch = cacheEpoch + 1
+	projection.CacheIdentityHash = ""
 	return projection, nil
 }
 
@@ -321,7 +499,7 @@ type sessionBlockQueryer interface {
 }
 
 func loadSessionBlocks(ctx context.Context, queryer sessionBlockQueryer, sessionID string) ([]Block, error) {
-	rows, err := queryer.QueryContext(ctx, `SELECT data FROM session_blocks WHERE session_id=? ORDER BY sequence`, sessionID)
+	rows, err := queryer.QueryContext(ctx, `SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load session blocks: %w", err)
 	}
@@ -329,45 +507,65 @@ func loadSessionBlocks(ctx context.Context, queryer sessionBlockQueryer, session
 	blocks := make([]Block, 0)
 	for rows.Next() {
 		var data []byte
-		if err := rows.Scan(&data); err != nil {
+		var sequence int64
+		if err := rows.Scan(&sequence, &data); err != nil {
 			return nil, err
 		}
 		var block Block
 		if err := json.Unmarshal(data, &block); err != nil {
 			return nil, fmt.Errorf("decode session block: %w", err)
 		}
+		block.Sequence = sequence
 		blocks = append(blocks, block)
 	}
 	return blocks, rows.Err()
 }
 
-func appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block) error {
-	var sequence int
+func appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block) (int64, bool, error) {
+	var sequence int64
 	var data []byte
 	err := tx.QueryRowContext(ctx, `SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence DESC LIMIT 1`, sessionID).Scan(&sequence, &data)
+	empty := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("load latest session block: %w", err)
+		return 0, false, fmt.Errorf("load latest session block: %w", err)
 	}
 	if err == nil && block.Kind == "assistant" {
 		var previous Block
 		if err := json.Unmarshal(data, &previous); err != nil {
-			return fmt.Errorf("decode latest session block: %w", err)
+			return 0, false, fmt.Errorf("decode latest session block: %w", err)
 		}
 		if previous.Kind == block.Kind && previous.RunID == block.RunID {
 			previous.Content += block.Content
 			encoded, err := json.Marshal(previous)
 			if err != nil {
-				return err
+				return 0, false, err
 			}
 			_, err = tx.ExecContext(ctx, `UPDATE session_blocks SET data=? WHERE session_id=? AND sequence=?`, encoded, sessionID, sequence)
-			return err
+			return sequence, true, err
 		}
 	}
 	encoded, err := json.Marshal(block)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
-	return insertSessionBlock(ctx, tx, sessionID, block, encoded)
+	sequence++
+	if empty {
+		sequence = 0
+	}
+	return sequence, false, insertSessionBlock(ctx, tx, sessionID, block, encoded)
+}
+
+func canonicalHighWater(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, sessionID string) (*int64, error) {
+	var value sql.NullInt64
+	if err := queryer.QueryRowContext(ctx, `SELECT MAX(sequence) FROM session_blocks WHERE session_id=? AND kind IN ('user','assistant')`, sessionID).Scan(&value); err != nil {
+		return nil, err
+	}
+	if !value.Valid {
+		return nil, nil
+	}
+	return &value.Int64, nil
 }
 
 func insertSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block, encoded []byte) error {
