@@ -437,8 +437,13 @@ func (m AppModel) displayState(state string) string {
 		"Ready": "status.ready", "Starting": "status.starting", "Running": "status.running",
 		"Awaiting approval": "status.awaiting_approval", "Reviewing approval": "status.reviewing_approval",
 		"Cancelling": "status.cancelling", "Compacting": "status.compacting", "Failed": "status.failed", "Recovery attention": "status.recovery_attention",
-		"completed": "status.completed", "denied": "status.denied", "streaming": "status.streaming",
-		"failed": "status.failed", "running": "status.running",
+		"Application stopped": "status.application_stopped", "Choose cancellation scope": "status.choose_cancellation", "Shutting down": "status.shutting_down",
+		"Cancelling action": "status.cancelling_action", "Reconciled": "status.reconciled",
+		"completed": "status.completed", "denied": "status.denied", "streaming": "status.streaming", "failed": "status.failed", "running": "status.running",
+		"initializing": "status.initializing", "queued": "status.queued", "cancelled": "status.cancelled", "interrupted": "status.interrupted", "not_found": "status.not_found",
+		"selected": "status.selected", "current": "status.current", "active": "status.active", "enabled": "status.enabled", "disabled": "status.disabled", "available": "status.available",
+		"manual-only": "status.manual_only", "eager": "status.eager", "connecting": "status.connecting", "ready": "status.ready", "degraded": "status.degraded",
+		"stopped": "status.stopped", "pending": "status.pending", "in_progress": "status.in_progress", "blocked": "status.blocked",
 	}
 	if key := keys[state]; key != "" {
 		return m.tr(key)

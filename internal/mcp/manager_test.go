@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,6 +92,198 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 	}
 	if !client.closed || manager.Servers()[0].State != StateStopped {
 		t.Fatalf("client closed=%v servers=%#v", client.closed, manager.Servers())
+	}
+	if events[len(events)-1].State != StateStopped {
+		t.Fatalf("close did not emit stopped event: %#v", events)
+	}
+}
+
+func TestManagerClosesClientsConcurrentlyAndHonorsContext(t *testing.T) {
+	releaseBoth := make(chan struct{})
+	startedBoth := make(chan struct{}, 2)
+	one := &fakeClient{closeBlock: releaseBoth, closeStarted: startedBoth}
+	two := &fakeClient{closeBlock: releaseBoth, closeStarted: startedBoth}
+	manager := NewManager(nil, "test", nil, Options{})
+	manager.servers = map[string]*server{
+		"one": {client: one, connection: newConnectionAttempt(one)},
+		"two": {client: two, connection: newConnectionAttempt(two)},
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- manager.CloseContext(context.Background()) }()
+	<-startedBoth
+	<-startedBoth
+	close(releaseBoth)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+	closeStarted := make(chan struct{}, 1)
+	blocked := &fakeClient{closeBlock: release, closeStarted: closeStarted}
+	manager = NewManager(nil, "test", nil, Options{})
+	manager.servers = map[string]*server{"blocked": {client: blocked, connection: newConnectionAttempt(blocked)}}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- manager.CloseContext(ctx) }()
+	<-closeStarted
+	cancel()
+	select {
+	case err := <-result:
+		t.Fatalf("close abandoned an existing client after cancellation: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatalf("released close: %v", err)
+	}
+}
+
+func TestManagerShutdownRejectsInflightPublishWithoutWaitingForClose(t *testing.T) {
+	initialize := make(chan struct{})
+	initializeStarted := make(chan struct{}, 1)
+	releaseClose := make(chan struct{})
+	client := &fakeClient{initializeBlock: initialize, initializeStarted: initializeStarted, closeBlock: releaseClose}
+	manager := managerWithClient(client)
+	startDone := make(chan error, 1)
+	go func() { startDone <- manager.Start(context.Background()) }()
+	<-initializeStarted
+	ctx, cancel := context.WithCancel(context.Background())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.CloseContext(ctx) }()
+	for !manager.isClosed() {
+		runtime.Gosched()
+	}
+	cancel()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("close abandoned initialized client: %v", err)
+	default:
+	}
+	close(initialize)
+	if err := <-startDone; !errors.Is(err, ErrManagerClosed) {
+		t.Fatalf("start error = %v", err)
+	}
+	if servers := manager.Servers(); servers[0].State != StateStopped || servers[0].ToolCount != 0 || len(manager.Snapshot()) != 0 {
+		t.Fatalf("manager republished after close: %#v", servers)
+	}
+	close(releaseClose)
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagerCloseAdmitsDialBeforeClientExists(t *testing.T) {
+	dialStarted := make(chan struct{}, 1)
+	releaseDial := make(chan struct{})
+	closeStarted := make(chan struct{}, 1)
+	releaseClose := make(chan struct{})
+	client := &fakeClient{closeStarted: closeStarted, closeBlock: releaseClose}
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"local": {Enabled: true, ConnectDuration: time.Second},
+	}, "test", nil, Options{
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+			dialStarted <- struct{}{}
+			<-releaseDial
+			return client, nil
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	startDone := make(chan error, 1)
+	go func() { startDone <- manager.Start(context.Background()) }()
+	<-dialStarted
+
+	closeCtx, cancelClose := context.WithCancel(context.Background())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.CloseContext(closeCtx) }()
+	for !manager.isClosed() {
+		runtime.Gosched()
+	}
+	select {
+	case err := <-closeDone:
+		t.Fatalf("close returned before admitted dial completed: %v", err)
+	default:
+	}
+	cancelClose()
+	if err := <-closeDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled close error = %v", err)
+	}
+
+	close(releaseDial)
+	<-closeStarted
+	close(releaseClose)
+	if err := <-startDone; !errors.Is(err, ErrManagerClosed) {
+		t.Fatalf("start error = %v", err)
+	}
+	if err := manager.CloseContext(context.Background()); err != nil {
+		t.Fatalf("wait for dialed client close: %v", err)
+	}
+}
+
+func TestManagerCloseWaitsForSupersededDial(t *testing.T) {
+	dialStarted := make(chan int, 2)
+	releaseDial := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	closeStarted := make(chan int, 2)
+	releaseClose := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	clientCloseStarted := []chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)}
+	clients := []*fakeClient{
+		{closeStarted: clientCloseStarted[0], closeBlock: releaseClose[0]},
+		{closeStarted: clientCloseStarted[1], closeBlock: releaseClose[1]},
+	}
+	for index, started := range clientCloseStarted {
+		index, started := index, started
+		go func() {
+			<-started
+			closeStarted <- index
+		}()
+	}
+	var dialCount atomic.Int32
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"local": {Enabled: true, ConnectDuration: time.Second},
+	}, "test", nil, Options{
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+			index := int(dialCount.Add(1) - 1)
+			dialStarted <- index
+			<-releaseDial[index]
+			return clients[index], nil
+		},
+	})
+	connectDone := make(chan error, 2)
+	go func() { connectDone <- manager.connectOnce(context.Background(), "local") }()
+	if index := <-dialStarted; index != 0 {
+		t.Fatalf("first dial index = %d", index)
+	}
+	go func() { connectDone <- manager.connectOnce(context.Background(), "local") }()
+	if index := <-dialStarted; index != 1 {
+		t.Fatalf("second dial index = %d", index)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- manager.CloseContext(context.Background()) }()
+	for !manager.isClosed() {
+		runtime.Gosched()
+	}
+	close(releaseDial[1])
+	if index := <-closeStarted; index != 1 {
+		t.Fatalf("first closed client index = %d", index)
+	}
+	close(releaseClose[1])
+	select {
+	case err := <-closed:
+		t.Fatalf("close returned before superseded dial completed: %v", err)
+	default:
+	}
+	close(releaseDial[0])
+	if index := <-closeStarted; index != 0 {
+		t.Fatalf("superseded closed client index = %d", index)
+	}
+	close(releaseClose[0])
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	for range clients {
+		if err := <-connectDone; !errors.Is(err, ErrManagerClosed) {
+			t.Fatalf("connect error = %v", err)
+		}
 	}
 }
 
@@ -331,10 +525,21 @@ type fakeClient struct {
 	callCount          int
 	callErr            error
 	callResult         *mcpcontract.CallToolResult
+	closeDelay         time.Duration
+	closeBlock         <-chan struct{}
+	closeStarted       chan<- struct{}
+	initializeBlock    <-chan struct{}
+	initializeStarted  chan<- struct{}
 	closed             bool
 }
 
 func (c *fakeClient) Initialize(_ context.Context, name, version string) (mcpcontract.InitializeResult, error) {
+	if c.initializeStarted != nil {
+		c.initializeStarted <- struct{}{}
+	}
+	if c.initializeBlock != nil {
+		<-c.initializeBlock
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.initializedName, c.initializedVersion = name, version
@@ -367,6 +572,15 @@ func (*fakeClient) GetPrompt(context.Context, string, map[string]string) ([]mcpc
 	return nil, nil
 }
 func (c *fakeClient) Close() error {
+	if c.closeStarted != nil {
+		c.closeStarted <- struct{}{}
+	}
+	if c.closeDelay > 0 {
+		time.Sleep(c.closeDelay)
+	}
+	if c.closeBlock != nil {
+		<-c.closeBlock
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true

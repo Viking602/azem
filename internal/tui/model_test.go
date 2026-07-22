@@ -14,6 +14,7 @@ import (
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
@@ -2918,7 +2919,7 @@ func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 	for _, wanted := range []string{
 		"SKILLS", "Reload affects new turns only", "disabled-demo", "DISABLED",
 		"eager-demo", "EAGER", "bundled", "1 resource", "available-demo",
-		"AVAILABLE", "2 resources", "manual-demo", "MANUAL-ONLY", "1 more warnings",
+		"AVAILABLE", "2 resources", "manual-demo", "MANUAL ONLY", "1 more warnings",
 	} {
 		if !strings.Contains(rendered, wanted) {
 			t.Fatalf("skills overlay missing %q:\n%s", wanted, rendered)
@@ -2970,6 +2971,20 @@ func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 	const fallback = `Apply the "demo" skill to the current workspace and report the result.`
 	if fallbackRuntime.request.Prompt != fallback || fallbackModel.transcript[0].Content != fallback {
 		t.Fatalf("/skill fallback request = %+v transcript=%#v", fallbackRuntime.request, fallbackModel.transcript)
+	}
+	chineseRuntime := &skillCommandRuntime{}
+	chineseModel := NewModel(chineseRuntime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if err := chineseModel.SetLanguage("zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	updated, startCmd = chineseModel.executeCommand(Command{Name: "skill", Args: []string{"DEMO"}})
+	chineseModel = updated.(AppModel)
+	if startCmd == nil {
+		t.Fatal("localized /skill fallback did not start a turn")
+	}
+	_ = startCmd()
+	if chineseRuntime.request.Prompt != fallback || chineseModel.transcript[0].Content != "将“demo”技能应用于当前工作区并报告结果。" {
+		t.Fatalf("localized /skill request = %+v transcript=%#v", chineseRuntime.request, chineseModel.transcript)
 	}
 
 	runningRuntime := &skillCommandRuntime{}
@@ -3805,5 +3820,53 @@ func TestMeasureViewLayoutReservesDockFooter(t *testing.T) {
 	tiny := measureViewLayout(5, 40, 1, 0, 0)
 	if tiny.footerHeight != 1 || tiny.showChrome {
 		t.Fatalf("tiny layout = %+v", tiny)
+	}
+}
+
+func TestChineseGeneratedUIPaths(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "grok", "grok-4", "high", "single", "session-zh")
+	model.SetLanguage("zh-CN")
+	model.status = "Running"
+	footer := ansi.Strip(model.renderTranscriptFooter(120, 0, 0))
+	for _, wanted := range []string{"运行中", "Azem 正在生成", "Ctrl+C 取消"} {
+		if !strings.Contains(footer, wanted) {
+			t.Fatalf("running footer missing %q: %q", wanted, footer)
+		}
+	}
+	model.overlay = OverlayHelp
+	heading, subtitle := model.overlayHeading()
+	if heading != "键盘帮助" || subtitle != "所有操作均可通过键盘完成" || !strings.Contains(model.overlayFooter(), "关闭") {
+		t.Fatalf("localized overlay = %q / %q / %q", heading, subtitle, model.overlayFooter())
+	}
+	catalog := i18n.Must("zh-CN")
+	if got := summarizeToolArguments("coding.read_file", `{"path":"internal/main.go","endLine":20}`, catalog); got != "读取 internal/main.go · 第 1-20 行" {
+		t.Fatalf("localized tool summary = %q", got)
+	}
+	if err := model.attachImagePath(""); err == nil || !strings.Contains(err.Error(), "图片路径为空") {
+		t.Fatalf("localized attachment error = %v", err)
+	}
+	model.status = "Ready"
+	updated, _ := model.executeCommand(Command{Name: "team"})
+	model = updated.(AppModel)
+	if model.errorBanner != "用法：/team on|off" {
+		t.Fatalf("localized command usage = %q", model.errorBanner)
+	}
+	for state, wanted := range map[string]string{
+		"Application stopped": "应用已停止", "Choose cancellation scope": "选择取消范围",
+		"Shutting down": "正在退出", "Cancelling action": "正在取消操作", "Reconciled": "已核对",
+	} {
+		if got := model.displayState(state); got != wanted {
+			t.Fatalf("localized state %q = %q, want %q", state, got, wanted)
+		}
+	}
+	model.composer.SetValue("/")
+	updated, _ = model.submit()
+	model = updated.(AppModel)
+	if model.errorBanner != "命令为空" {
+		t.Fatalf("localized empty command = %q", model.errorBanner)
+	}
+	model.openOverlay(OverlayLanguage)
+	if rendered := ansi.Strip(model.renderOverlay(80, 24)); !strings.Contains(rendered, "已选择") || strings.Contains(rendered, "SELECTED") {
+		t.Fatalf("localized option state = %q", rendered)
 	}
 }

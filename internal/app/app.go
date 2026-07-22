@@ -473,7 +473,14 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	s.guidanceGeneration++
 	s.guidanceOpen = false
 	s.activeEnd = cancel
+	s.wg.Add(1)
 	s.mu.Unlock()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			s.wg.Done()
+		}
+	}()
 	sessionSource := "startup"
 	if s.sessions != nil {
 		if _, loadErr := s.sessions.LoadSession(s.ctx, request.SessionID); loadErr == nil {
@@ -550,7 +557,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 				return "", fmt.Errorf("persist user turn: %w", err)
 			}
 		}
-		s.wg.Add(1)
+		handedOff = true
 		go s.runFakeTurn(runCtx, request.SessionID, runID, request.Prompt)
 		return runID, nil
 	}
@@ -586,7 +593,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 				return "", fmt.Errorf("persist user turn: %w", err)
 			}
 		}
-		s.wg.Add(1)
+		handedOff = true
 		go s.runProviderTeam(runCtx, request, runID, goal, resolution)
 		return runID, nil
 	}
@@ -616,7 +623,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 			return "", fmt.Errorf("persist user turn: %w", err)
 		}
 	}
-	s.wg.Add(1)
+	handedOff = true
 	go s.runProviderTurn(runCtx, request, durableRun, engine)
 	return durableRun.RunID, nil
 }
@@ -779,26 +786,45 @@ func (s *Service) shutdown() {
 		hookCancel()
 	}
 	s.cancel()
+	mcpCtx, mcpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer mcpCancel()
+	mcpClosed := make(chan error, 1)
+	if s.mcp != nil {
+		go func() {
+			mcpClosed <- s.mcp.CloseContext(mcpCtx)
+		}()
+	} else {
+		mcpClosed <- nil
+	}
 	s.wg.Wait()
 	s.hookWG.Wait()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	mcpReclosed := make(chan error, 1)
 	if s.mcp != nil {
-		if err := s.mcp.Close(); err != nil {
-			s.shutdownErr = errors.Join(s.shutdownErr, err)
-		}
+		go func() {
+			mcpReclosed <- s.mcp.CloseContext(mcpCtx)
+		}()
+	} else {
+		mcpReclosed <- nil
 	}
+
+	persistenceCtx, persistenceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer persistenceCancel()
 	if s.coding != nil {
-		if err := s.coding.Checkpoint(shutdownCtx); err != nil {
+		if err := s.coding.Checkpoint(persistenceCtx); err != nil {
 			s.shutdownErr = errors.Join(s.shutdownErr, err)
 		}
 	}
 	s.events.Close()
 	if s.coding != nil {
-		if err := s.coding.Close(shutdownCtx); err != nil {
+		if err := s.coding.Close(persistenceCtx); err != nil {
 			s.shutdownErr = errors.Join(s.shutdownErr, err)
 		}
+	}
+	if err := <-mcpClosed; err != nil {
+		s.shutdownErr = errors.Join(s.shutdownErr, err)
+	}
+	if err := <-mcpReclosed; err != nil {
+		s.shutdownErr = errors.Join(s.shutdownErr, err)
 	}
 }
 

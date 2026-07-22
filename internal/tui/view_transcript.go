@@ -15,6 +15,8 @@ import (
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/Viking602/azem/internal/i18n"
 )
 
 func (m AppModel) renderBlock(block Block, index int, width int) []string {
@@ -414,7 +416,7 @@ type diffViewFile struct {
 }
 
 func (m AppModel) renderDiffRows(content string, width int, prefix string) []string {
-	files, ok := parseDiffView(content)
+	files, ok := parseDiffView(content, m.catalog)
 	if !ok {
 		rows := make([]string, 0)
 		for _, source := range strings.Split(content, "\n") {
@@ -492,7 +494,11 @@ func (m AppModel) renderDiffRows(content string, width int, prefix string) []str
 	return rows
 }
 
-func parseDiffView(content string) ([]diffViewFile, bool) {
+func parseDiffView(content string, catalogs ...i18n.Catalog) ([]diffViewFile, bool) {
+	catalog := i18n.Must(i18n.DefaultLanguage)
+	if len(catalogs) > 0 {
+		catalog = catalogs[0]
+	}
 	sourceLines := strings.Split(content, "\n")
 	files := make([]diffViewFile, 0)
 	var file *diffViewFile
@@ -502,7 +508,7 @@ func parseDiffView(content string) ([]diffViewFile, bool) {
 	startFile := func(path string) {
 		path = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(path), "a/"), "b/")
 		if path == "" || path == "/dev/null" {
-			path = "workspace change"
+			path = catalog.T("diff.workspace_change")
 		}
 		files = append(files, diffViewFile{Path: path})
 		file = &files[len(files)-1]
@@ -510,7 +516,7 @@ func parseDiffView(content string) ([]diffViewFile, bool) {
 	}
 	startHunk := func(header string, oldStart, newStart int) {
 		if file == nil {
-			startFile("workspace change")
+			startFile(catalog.T("diff.workspace_change"))
 		}
 		file.Hunks = append(file.Hunks, diffViewHunk{Header: header})
 		hunk = &file.Hunks[len(file.Hunks)-1]
@@ -545,7 +551,7 @@ func parseDiffView(content string) ([]diffViewFile, bool) {
 			}
 			if path, line, ok := compactDiffHeader(source); ok {
 				startFile(path)
-				startHunk(fmt.Sprintf("@@ line %d @@", line), line, line)
+				startHunk(catalog.T("diff.line_header", map[string]string{"line": strconv.Itoa(line)}), line, line)
 				recognized = true
 				continue
 			}
@@ -557,7 +563,7 @@ func parseDiffView(content string) ([]diffViewFile, bool) {
 			continue
 		}
 		if hunk == nil {
-			startHunk("@@ change @@", 1, 1)
+			startHunk(catalog.T("diff.change_header"), 1, 1)
 		}
 		line := diffViewLine{Kind: diffContext, Text: source, OldLine: oldLine, NewLine: newLine}
 		switch {
@@ -606,35 +612,21 @@ func unifiedHunkStarts(source string) (int, int, bool) {
 	return oldStart, newStart, oldErr == nil && newErr == nil
 }
 
-func toolDisplayName(name string) string {
-	aliases := map[string]string{
-		"coding.read_file":        "Read File",
-		"coding.write_file":       "Write File",
-		"coding.edit_hashline":    "Edit File",
-		"coding.search":           "Search Code",
-		"coding.list_files":       "List Files",
-		"coding.shell":            "Run Command",
-		"coding.go_test":          "Run Go Tests",
-		"coding.gofmt":            "Format Go Code",
-		"coding.git_diff":         "View Git Diff",
-		"hydaelyn_activate_skill": "Load Skill",
-		"subagent.spawn":          "Start Subagent",
+func toolDisplayName(name string, catalogs ...i18n.Catalog) string {
+	catalog := i18n.Must(i18n.DefaultLanguage)
+	if len(catalogs) > 0 {
+		catalog = catalogs[0]
 	}
-	if alias, ok := aliases[name]; ok {
-		return alias
+	keys := map[string]string{
+		"coding.read_file": "tool.read_file", "coding.write_file": "tool.write_file", "coding.edit_hashline": "tool.edit_file",
+		"coding.search": "tool.search", "coding.list_files": "tool.list_files", "coding.shell": "tool.shell",
+		"coding.go_test": "tool.go_test", "coding.gofmt": "tool.gofmt", "coding.git_diff": "tool.git_diff",
+		"hydaelyn_activate_skill": "tool.activate_skill", "subagent.spawn": "tool.spawn",
 	}
-	if !strings.ContainsAny(name, "._-") {
-		return name
+	if key := keys[name]; key != "" {
+		return catalog.T(key)
 	}
-	parts := strings.FieldsFunc(name, func(r rune) bool {
-		return r == '.' || r == '_' || r == '-'
-	})
-	for index, part := range parts {
-		if part != "" {
-			parts[index] = strings.ToUpper(part[:1]) + part[1:]
-		}
-	}
-	return strings.Join(parts, " ")
+	return name
 }
 
 func (m AppModel) toolDisplayName(name string) string {
@@ -647,7 +639,7 @@ func (m AppModel) toolDisplayName(name string) string {
 	if key := keys[name]; key != "" {
 		return m.tr(key)
 	}
-	return toolDisplayName(name)
+	return toolDisplayName(name, m.catalog)
 }
 
 func renderProseBlock(style lipgloss.Style, label string, content string, width int) []string {

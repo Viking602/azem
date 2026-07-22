@@ -24,16 +24,16 @@ type clipboardImageResultMsg struct {
 func (m *AppModel) attachImagePath(path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return fmt.Errorf("image path is empty")
+		return fmt.Errorf("%s", m.tr("attachment.empty_path"))
 	}
 	if len(m.pendingImages) >= maxPendingImages {
-		return fmt.Errorf("at most %d images can be attached", maxPendingImages)
+		return fmt.Errorf("%s", m.tr("attachment.limit", map[string]string{"count": fmt.Sprint(maxPendingImages)}))
 	}
 	importer, ok := m.runtime.(interface {
 		ImportImage(string, string) (session.Attachment, error)
 	})
 	if !ok {
-		return fmt.Errorf("image attachments are unavailable in this runtime")
+		return fmt.Errorf("%s", m.tr("attachment.unavailable"))
 	}
 	att, err := importer.ImportImage(m.sessionID, path)
 	if err != nil {
@@ -44,13 +44,13 @@ func (m *AppModel) attachImagePath(path string) error {
 
 func (m *AppModel) attachImageBytes(name, mimeType string, data []byte) error {
 	if len(m.pendingImages) >= maxPendingImages {
-		return fmt.Errorf("at most %d images can be attached", maxPendingImages)
+		return fmt.Errorf("%s", m.tr("attachment.limit", map[string]string{"count": fmt.Sprint(maxPendingImages)}))
 	}
 	importer, ok := m.runtime.(interface {
 		ImportImageBytes(string, string, string, []byte) (session.Attachment, error)
 	})
 	if !ok {
-		return fmt.Errorf("image attachments are unavailable in this runtime")
+		return fmt.Errorf("%s", m.tr("attachment.unavailable"))
 	}
 	att, err := importer.ImportImageBytes(m.sessionID, name, mimeType, data)
 	if err != nil {
@@ -62,7 +62,7 @@ func (m *AppModel) attachImageBytes(name, mimeType string, data []byte) error {
 func (m *AppModel) appendPendingImage(att session.Attachment) error {
 	for _, existing := range m.pendingImages {
 		if existing.Path == att.Path || (existing.Name == att.Name && existing.Size == att.Size && existing.MIME == att.MIME) {
-			return fmt.Errorf("image already attached: %s", att.Name)
+			return fmt.Errorf("%s", m.tr("attachment.duplicate", map[string]string{"name": att.Name}))
 		}
 	}
 	m.pendingImages = append(m.pendingImages, att)
@@ -81,7 +81,7 @@ func (m *AppModel) dropLastPendingImage() bool {
 	return true
 }
 
-func pasteClipboardImage(runtime Runtime, sessionID string) tea.Cmd {
+func pasteClipboardImage(runtime Runtime, sessionID, unavailable string) tea.Cmd {
 	return func() tea.Msg {
 		data, mimeType, err := app.ReadClipboardImage()
 		if err != nil {
@@ -94,7 +94,7 @@ func pasteClipboardImage(runtime Runtime, sessionID string) tea.Cmd {
 			ImportImageBytes(string, string, string, []byte) (session.Attachment, error)
 		})
 		if !ok {
-			return clipboardImageResultMsg{err: fmt.Errorf("image attachments are unavailable in this runtime")}
+			return clipboardImageResultMsg{err: fmt.Errorf("%s", unavailable)}
 		}
 		name := fmt.Sprintf("clipboard-%s%s", time.Now().Format("150405"), extForMIME(mimeType))
 		att, err := importer.ImportImageBytes(sessionID, name, mimeType, data)
@@ -130,9 +130,9 @@ func (m AppModel) renderPendingAttachments(width int) string {
 		}
 		names = append(names, m.theme.Attachment.Render(name))
 	}
-	label := m.theme.AttachmentTag.Render(fmt.Sprintf("ATTACHMENTS %d/%d", len(m.pendingImages), maxPendingImages))
+	label := m.theme.AttachmentTag.Render(m.tr("attachment.label", map[string]string{"count": fmt.Sprint(len(m.pendingImages)), "limit": fmt.Sprint(maxPendingImages)}))
 	content := label + "  " + strings.Join(names, m.theme.MetaDivider.Render("  ·  "))
-	hint := m.theme.HelpKey.Render("Esc") + m.theme.HelpDesc.Render(" remove last")
+	hint := m.theme.HelpKey.Render("Esc") + m.theme.HelpDesc.Render(m.tr("attachment.remove_last"))
 	if ansi.StringWidth(content)+ansi.StringWidth(hint)+4 <= width {
 		content = joinSides(content, hint+" ", width)
 	}

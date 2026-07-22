@@ -191,6 +191,14 @@ func (s *Service) Accounts(ctx context.Context, provider string) ([]Account, err
 	return accounts, rows.Err()
 }
 
+func (s *Service) HasAnyAccount(ctx context.Context, provider string) (bool, error) {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM accounts WHERE provider_id=? LIMIT 1)`, provider).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // HasActiveChatGPTAccount is the authorization predicate for ChatGPT-only
 // features. Every active ChatGPT account currently comes from OAuth or a
 // Codex token import with an access token; API-key and PAT imports are not

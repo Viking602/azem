@@ -32,6 +32,8 @@ const (
 	StateStopped    State = "stopped"
 )
 
+var ErrManagerClosed = errors.New("mcp manager is closed")
+
 // maxMCPModelOutputBytes bounds one MCP result before it enters provider
 // context, durable model history, or UI events. Unlike shell output, MCP
 // output cannot be silently truncated because doing so could turn incomplete
@@ -71,20 +73,78 @@ type Options struct {
 }
 
 type Manager struct {
-	mu      sync.RWMutex
-	config  map[string]config.MCPServerConfig
-	version string
-	resolve SecretResolver
-	dial    DialFunc
-	sleep   SleepFunc
-	sink    func(Event)
-	servers map[string]*server
-	closed  bool
+	mu       sync.RWMutex
+	config   map[string]config.MCPServerConfig
+	version  string
+	resolve  SecretResolver
+	dial     DialFunc
+	sleep    SleepFunc
+	sink     func(Event)
+	servers  map[string]*server
+	attempts map[string]*connectionAttempt
+	closing  []*connectionAttempt
+	closed   bool
+}
+
+type connectionAttempt struct {
+	client mcpcontract.Client
+	cancel context.CancelFunc
+	ready  chan struct{}
+	once   sync.Once
+	done   chan struct{}
+	err    error
+}
+
+func newConnectionAttempt(client mcpcontract.Client) *connectionAttempt {
+	ready := make(chan struct{})
+	close(ready)
+	return &connectionAttempt{client: client, ready: ready, done: make(chan struct{})}
+}
+
+func newDialAttempt(cancel context.CancelFunc) *connectionAttempt {
+	return &connectionAttempt{cancel: cancel, ready: make(chan struct{}), done: make(chan struct{})}
+}
+
+func (a *connectionAttempt) finishDial(client mcpcontract.Client) {
+	a.client = client
+	close(a.ready)
+}
+
+func (a *connectionAttempt) close() {
+	a.once.Do(func() {
+		go func() {
+			if a.cancel != nil {
+				a.cancel()
+			}
+			<-a.ready
+			if a.client != nil {
+				a.err = a.client.Close()
+			}
+			close(a.done)
+		}()
+	})
+}
+
+func (a *connectionAttempt) waitClosed(ctx context.Context) error {
+	select {
+	case <-a.ready:
+		<-a.done
+		return a.err
+	default:
+	}
+	select {
+	case <-a.ready:
+		<-a.done
+		return a.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type server struct {
 	state       State
 	client      mcpcontract.Client
+	connection  *connectionAttempt
 	tools       []tool.Driver
 	diagnostics []Diagnostic
 	lastError   string
@@ -108,10 +168,13 @@ func NewManager(servers map[string]config.MCPServerConfig, version string, resol
 	if options.Sleep == nil {
 		options.Sleep = sleepContext
 	}
-	return &Manager{config: copied, version: version, resolve: resolve, dial: options.Dial, sleep: options.Sleep, sink: options.Sink, servers: states}
+	return &Manager{config: copied, version: version, resolve: resolve, dial: options.Dial, sleep: options.Sleep, sink: options.Sink, servers: states, attempts: make(map[string]*connectionAttempt)}
 }
 
 func (m *Manager) Start(ctx context.Context) error {
+	if m.isClosed() {
+		return ErrManagerClosed
+	}
 	names := m.names()
 	var startErr error
 	for _, name := range names {
@@ -128,6 +191,9 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 func (m *Manager) Reconnect(ctx context.Context, name string) error {
+	if m.isClosed() {
+		return ErrManagerClosed
+	}
 	serverConfig, ok := m.config[name]
 	if !ok {
 		return fmt.Errorf("mcp server %q not found", name)
@@ -142,10 +208,16 @@ func (m *Manager) Reconnect(ctx context.Context, name string) error {
 
 func (m *Manager) Refresh(ctx context.Context, name string) error {
 	m.mu.RLock()
+	if m.closed {
+		m.mu.RUnlock()
+		return ErrManagerClosed
+	}
 	current := m.servers[name]
 	var client mcpcontract.Client
+	var connection *connectionAttempt
 	if current != nil {
 		client = current.client
+		connection = current.connection
 	}
 	m.mu.RUnlock()
 	if client == nil {
@@ -162,6 +234,10 @@ func (m *Manager) Refresh(ctx context.Context, name string) error {
 	}
 	m.mu.Lock()
 	current = m.servers[name]
+	if m.closed || current == nil || current.connection != connection {
+		m.mu.Unlock()
+		return ErrManagerClosed
+	}
 	current.tools = drivers
 	current.diagnostics = diagnostics
 	m.mu.Unlock()
@@ -204,29 +280,40 @@ func (m *Manager) Servers() []ServerSnapshot {
 }
 
 func (m *Manager) Close() error {
+	return m.CloseContext(context.Background())
+}
+
+func (m *Manager) CloseContext(ctx context.Context) error {
 	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return nil
-	}
-	m.closed = true
-	names := make([]string, 0, len(m.servers))
-	clients := make([]mcpcontract.Client, 0, len(m.servers))
-	for name, current := range m.servers {
-		names = append(names, name)
-		if current.client != nil {
-			clients = append(clients, current.client)
-			current.client = nil
+	var stopped []string
+	if !m.closed {
+		m.closed = true
+		for name, current := range m.servers {
+			if current.connection != nil {
+				m.closing = append(m.closing, current.connection)
+				current.client = nil
+				current.connection = nil
+			}
+			current.tools = nil
+			current.state = StateStopped
+			stopped = append(stopped, name)
 		}
-		current.tools = nil
+		for name, attempt := range m.attempts {
+			m.closing = append(m.closing, attempt)
+			delete(m.attempts, name)
+		}
 	}
+	closing := append([]*connectionAttempt(nil), m.closing...)
 	m.mu.Unlock()
-	var closeErr error
-	for _, client := range clients {
-		closeErr = errors.Join(closeErr, client.Close())
-	}
-	for _, name := range names {
+	for _, name := range stopped {
 		m.transition(name, StateStopped, nil)
+	}
+	for _, attempt := range closing {
+		attempt.close()
+	}
+	var closeErr error
+	for _, attempt := range closing {
+		closeErr = errors.Join(closeErr, attempt.waitClosed(ctx))
 	}
 	return closeErr
 }
@@ -243,6 +330,9 @@ func (m *Manager) connectWithRetry(ctx context.Context, name string) error {
 			return nil
 		} else {
 			lastErr = err
+			if errors.Is(err, ErrManagerClosed) {
+				return err
+			}
 			m.transition(name, StateDegraded, err)
 		}
 		if attempt < len(delays) {
@@ -270,16 +360,39 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	}
 	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout(serverConfig))
 	defer cancel()
+	attempt := newDialAttempt(cancel)
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		attempt.finishDial(nil)
+		attempt.close()
+		return ErrManagerClosed
+	}
+	previous := m.attempts[name]
+	m.attempts[name] = attempt
+	if previous != nil {
+		m.closing = append(m.closing, previous)
+	}
+	m.mu.Unlock()
+	if previous != nil {
+		previous.close()
+	}
+	published := false
+	defer func() {
+		if !published {
+			m.mu.Lock()
+			if m.attempts[name] == attempt {
+				delete(m.attempts, name)
+			}
+			m.mu.Unlock()
+			attempt.close()
+		}
+	}()
 	client, err := m.dial(connectCtx, name, serverConfig, environment, headers)
+	attempt.finishDial(client)
 	if err != nil {
 		return err
 	}
-	initialized := false
-	defer func() {
-		if !initialized {
-			_ = client.Close()
-		}
-	}()
 	if _, err := client.Initialize(connectCtx, "azem", m.version); err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
@@ -289,16 +402,25 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	}
 	m.mu.Lock()
 	current := m.servers[name]
-	old := current.client
+	if m.closed || m.attempts[name] != attempt {
+		m.mu.Unlock()
+		return ErrManagerClosed
+	}
+	old := current.connection
 	current.client = client
+	current.connection = attempt
 	current.tools = drivers
 	current.diagnostics = diagnostics
 	current.lastError = ""
+	delete(m.attempts, name)
+	if old != nil {
+		m.closing = append(m.closing, old)
+	}
 	m.mu.Unlock()
 	if old != nil {
-		_ = old.Close()
+		old.close()
 	}
-	initialized = true
+	published = true
 	m.transition(name, StateReady, nil)
 	return nil
 }
@@ -383,6 +505,10 @@ func (m *Manager) transition(name string, state State, cause error) {
 		m.mu.Unlock()
 		return
 	}
+	if m.closed && state != StateStopped {
+		m.mu.Unlock()
+		return
+	}
 	current.state = state
 	if cause != nil {
 		current.lastError = cause.Error()
@@ -407,15 +533,19 @@ func (m *Manager) degrade(name string, cause error) {
 func (m *Manager) closeClient(name string) {
 	m.mu.Lock()
 	current := m.servers[name]
-	var client mcpcontract.Client
+	var connection *connectionAttempt
 	if current != nil {
-		client = current.client
+		connection = current.connection
 		current.client = nil
+		current.connection = nil
 		current.tools = nil
+		if connection != nil {
+			m.closing = append(m.closing, connection)
+		}
 	}
 	m.mu.Unlock()
-	if client != nil {
-		_ = client.Close()
+	if connection != nil {
+		connection.close()
 	}
 }
 
@@ -428,6 +558,12 @@ func (m *Manager) names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (m *Manager) isClosed() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.closed
 }
 
 type remoteDriver struct {

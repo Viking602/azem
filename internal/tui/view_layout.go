@@ -415,27 +415,27 @@ func (m AppModel) transcriptOffsetLimit(lineCount int, height int) int {
 func (m AppModel) renderTranscriptFooter(width int, maxOffset int, offset int) string {
 	if m.isRunning() {
 		label := strings.ToUpper(m.displayState(m.status))
-		detail := "Azem is generating"
+		detail := m.tr("status.detail.generating")
 		switch m.status {
 		case "Starting":
-			detail = "Starting provider"
+			detail = m.tr("status.detail.starting")
 		case "Compacting":
-			detail = "Waiting for the compaction model"
+			detail = m.tr("status.detail.compacting")
 		case "Awaiting approval":
-			detail = "Waiting for approval"
+			detail = m.tr("status.detail.approval")
 		case "Reviewing approval":
-			detail = "Checking this action"
+			detail = m.tr("status.detail.reviewing")
 		case "Cancelling":
-			detail = "Stopping run"
+			detail = m.tr("status.detail.cancelling")
 		}
 		indicator := "◆"
 		if !m.reducedMotion {
 			frames := [...]string{"◇", "◈", "◆", "◈"}
 			indicator = frames[m.animationFrame%len(frames)]
 		}
-		text := "  " + indicator + " " + label + "  " + detail + "  · Ctrl+C cancel"
+		text := "  " + indicator + " " + label + "  " + detail + "  · " + m.tr("status.cancel_hint")
 		if offset > 0 {
-			text += fmt.Sprintf("  · ↑ %d lines · Ctrl+End latest", offset)
+			text += "  · " + m.tr("status.history_above", map[string]string{"count": fmt.Sprint(offset)})
 		}
 		style := m.theme.Selected
 		if m.status == "Reviewing approval" {
@@ -445,12 +445,12 @@ func (m AppModel) renderTranscriptFooter(width int, maxOffset int, offset int) s
 	}
 	if offset > 0 {
 		return m.theme.Muted.Render(padOrTrim(
-			fmt.Sprintf("  ↑ HISTORY · %d lines from latest · Wheel/PgDn · Ctrl+End latest", offset),
+			"  "+m.tr("status.history_from_latest", map[string]string{"count": fmt.Sprint(offset)}),
 			width,
 		))
 	}
 	return m.theme.Muted.Render(padOrTrim(
-		fmt.Sprintf("  ↕ HISTORY · %d lines · Wheel/PgUp · Ctrl+Home oldest", maxOffset),
+		"  "+m.tr("status.history_all", map[string]string{"count": fmt.Sprint(maxOffset)}),
 		width,
 	))
 }

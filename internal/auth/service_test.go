@@ -31,6 +31,30 @@ func TestStreamingHTTPClientHasNoTotalBodyTimeout(t *testing.T) {
 	}
 }
 
+func TestHasAnyAccount(t *testing.T) {
+	ctx := context.Background()
+	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	service := NewService(provider.DB(), NewSQLiteStore(provider.DB()), chatgpt.NewClient(), grok.NewClient())
+	if exists, err := service.HasAnyAccount(ctx, "chatgpt"); err != nil || exists {
+		t.Fatalf("empty account lookup = %v, %v", exists, err)
+	}
+	now := time.Now().UTC().UnixNano()
+	if _, err := provider.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
+		"account", "chatgpt", "sqlite:chatgpt:account", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := service.HasAnyAccount(ctx, "chatgpt"); err != nil || !exists {
+		t.Fatalf("existing account lookup = %v, %v", exists, err)
+	}
+	if exists, err := service.HasAnyAccount(ctx, "grok"); err != nil || exists {
+		t.Fatalf("provider-scoped account lookup = %v, %v", exists, err)
+	}
+}
+
 func TestFileStorePermissionsAndRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "private", "credentials.json")
 	store, err := NewFileStore(path)

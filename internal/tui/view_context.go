@@ -13,12 +13,12 @@ import (
 func (m AppModel) renderContextRail(width int, height int) string {
 	activeAgents := m.activeAgents()
 	rows := []string{
-		m.theme.RailTitle.Render(padOrTrim("  RUN CONTEXT", width)),
+		m.theme.RailTitle.Render(padOrTrim("  "+m.tr("rail.run_context"), width)),
 		m.theme.RailTitle.Faint(true).Render(padOrTrim("  "+strings.Repeat("─", max(0, width-4)), width)),
 	}
-	todoHeader := "  TODO"
+	todoHeader := "  " + m.tr("rail.todos")
 	if completed, total := todoProgress(m.todo); total > 0 {
-		todoHeader = fmt.Sprintf("  TODO  %d/%d", completed, total)
+		todoHeader = fmt.Sprintf("  %s  %d/%d", m.tr("rail.todos"), completed, total)
 	}
 	rows = append(rows, m.theme.RailTodo.Render(padOrTrim(todoHeader, width)))
 	todoRows, more := m.todoSummaryRows(4)
@@ -33,16 +33,16 @@ func (m AppModel) renderContextRail(width int, height int) string {
 		rows = append(rows, style.Render(padOrTrim("  "+row.text, width)))
 	}
 	if more > 0 {
-		rows = append(rows, m.theme.Muted.Render(padOrTrim(fmt.Sprintf("  +%d more", more), width)))
+		rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.more", map[string]string{"count": fmt.Sprint(more)}), width)))
 	}
 	rows = append(rows, "")
-	rows = append(rows, m.theme.RailAgents.Render(padOrTrim(fmt.Sprintf("  AGENTS  %d", len(activeAgents)), width)))
+	rows = append(rows, m.theme.RailAgents.Render(padOrTrim(fmt.Sprintf("  %s  %d", m.tr("rail.agents"), len(activeAgents)), width)))
 	if len(activeAgents) == 0 {
 		rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.no_agents"), width)))
 	} else {
 		for index, agent := range activeAgents {
 			if index == 4 {
-				rows = append(rows, m.theme.Muted.Render(padOrTrim(fmt.Sprintf("  +%d more", len(activeAgents)-index), width)))
+				rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.more", map[string]string{"count": fmt.Sprint(len(activeAgents) - index)}), width)))
 				break
 			}
 			row := fmt.Sprintf("  %s %s", m.agentStateMark(agent.State), first(agent.Role, agent.ID))
@@ -55,7 +55,7 @@ func (m AppModel) renderContextRail(width int, height int) string {
 	} else {
 		for index, server := range m.mcpServers {
 			if index == 4 {
-				rows = append(rows, m.theme.Muted.Render(padOrTrim(fmt.Sprintf("  +%d more", len(m.mcpServers)-index), width)))
+				rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.more", map[string]string{"count": fmt.Sprint(len(m.mcpServers) - index)}), width)))
 				break
 			}
 			row := fmt.Sprintf("  %s %s · %d", stateMark(server.State), server.Name, server.ToolCount)
@@ -330,18 +330,12 @@ type helpItem struct {
 
 func (m AppModel) helpItems(width int) []helpItem {
 	all := []helpItem{
-		{key: "Drag", desc: "copy"},
-		{key: "Ctrl+V", desc: "image"},
-		{key: "Shift+Tab", desc: strings.TrimSpace(strings.TrimPrefix(m.tr("footer.help.approval"), "Shift+Tab"))},
-		{key: "Ctrl+R", desc: strings.TrimSpace(strings.TrimPrefix(m.tr("footer.help.reasoning"), "Ctrl+R"))},
-		{key: "Ctrl+P", desc: strings.TrimSpace(strings.TrimPrefix(m.tr("footer.help.commands"), "Ctrl+P"))},
-		{key: "?", desc: strings.TrimSpace(strings.TrimPrefix(m.tr("status.help"), "?"))},
-	}
-	// Normalize empty descriptions after trimming localized labels.
-	for index := range all {
-		if all[index].desc == "" {
-			all[index].desc = strings.ToLower(all[index].key)
-		}
+		{key: m.tr("footer.key.drag"), desc: m.tr("footer.desc.copy")},
+		{key: "Ctrl+V", desc: m.tr("footer.desc.paste_image")},
+		{key: "Shift+Tab", desc: m.tr("footer.desc.approval")},
+		{key: "Ctrl+R", desc: m.tr("footer.desc.reasoning")},
+		{key: "Ctrl+P", desc: m.tr("footer.desc.commands")},
+		{key: "?", desc: m.tr("footer.desc.help")},
 	}
 	switch {
 	case width >= 112:
@@ -377,7 +371,7 @@ func (m AppModel) renderStatusCluster() string {
 			}
 		}
 		if errorInTranscript {
-			status += " " + m.theme.Error.Render("DETAILS IN TRANSCRIPT")
+			status += " " + m.theme.Error.Render(m.tr("status.transcript_details"))
 		} else {
 			status += " " + m.theme.Error.Render(m.errorBanner)
 		}
@@ -386,7 +380,7 @@ func (m AppModel) renderStatusCluster() string {
 }
 
 func (m AppModel) renderModelCluster(includeReasoning bool) string {
-	model := m.provider + "/" + first(m.model, "no model")
+	model := m.provider + "/" + first(m.model, m.tr("value.no_model"))
 	label := m.theme.MetaLabel.Render(m.tr("footer.model")) + " " + m.theme.MetaValue.Render(model)
 	if includeReasoning && m.reasoning != "" {
 		label += m.theme.MetaDivider.Render(" · ") +
@@ -815,15 +809,15 @@ func (m AppModel) renderStatus(width int) string {
 }
 
 func (m AppModel) plainHelpText(width int) string {
-	helpText := strings.Join([]string{"Drag copy", "Ctrl+V image", m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("footer.help.commands"), m.tr("status.help")}, "  ")
+	helpText := strings.Join([]string{m.tr("footer.drag_copy"), m.tr("footer.paste_image"), m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("footer.help.commands"), m.tr("status.help")}, "  ")
 	if width < 112 {
-		helpText = strings.Join([]string{"Drag copy", "Ctrl+V image", m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("status.help")}, "  ")
+		helpText = strings.Join([]string{m.tr("footer.drag_copy"), m.tr("footer.paste_image"), m.tr("footer.help.approval"), m.tr("footer.help.reasoning"), m.tr("status.help")}, "  ")
 	}
 	if width < 86 {
-		helpText = strings.Join([]string{"Drag copy", m.tr("footer.help.approval"), m.tr("status.help")}, "  ")
+		helpText = strings.Join([]string{m.tr("footer.drag_copy"), m.tr("footer.help.approval"), m.tr("status.help")}, "  ")
 	}
 	if width < 64 {
-		helpText = "Drag copy"
+		helpText = m.tr("footer.drag_copy")
 	}
 	return helpText
 }

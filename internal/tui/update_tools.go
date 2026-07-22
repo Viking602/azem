@@ -134,7 +134,11 @@ func parseCompactEditOutput(output string) []fileChangeSection {
 	return result
 }
 
-func summarizeToolArguments(name, arguments string) string {
+func summarizeToolArguments(name, arguments string, catalogs ...i18n.Catalog) string {
+	catalog := i18n.Must(i18n.DefaultLanguage)
+	if len(catalogs) > 0 {
+		catalog = catalogs[0]
+	}
 	if strings.TrimSpace(arguments) == "" {
 		return ""
 	}
@@ -152,7 +156,7 @@ func summarizeToolArguments(name, arguments string) string {
 	}
 	switch name {
 	case "coding.edit_hashline":
-		return summarizeEditArguments(stringField("input"), fields["dryRun"] == true)
+		return summarizeEditArguments(stringField("input"), fields["dryRun"] == true, catalog)
 	case "coding.write_file":
 		if path := stringField("path"); path != "" {
 			content, _ := fields["content"].(string)
@@ -163,7 +167,7 @@ func summarizeToolArguments(name, arguments string) string {
 					lines--
 				}
 			}
-			return fmt.Sprintf("Create %s · %d lines", path, lines)
+			return catalog.T("tool.create_lines", map[string]string{"path": path, "count": strconv.Itoa(lines)})
 		}
 	case "coding.read_file":
 		path := stringField("path")
@@ -172,14 +176,14 @@ func summarizeToolArguments(name, arguments string) string {
 			start = 1
 		}
 		if path != "" && start > 0 && end >= start {
-			return fmt.Sprintf("Read %s · lines %d-%d", path, start, end)
+			return catalog.T("tool.read_lines", map[string]string{"path": path, "start": strconv.Itoa(start), "end": strconv.Itoa(end)})
 		}
 		if path != "" {
-			return "Read " + path
+			return catalog.T("tool.read", map[string]string{"path": path})
 		}
 	case "coding.go_test":
 		if pkg := stringField("package"); pkg != "" {
-			return "Test package " + pkg
+			return catalog.T("tool.test_package", map[string]string{"package": pkg})
 		}
 	case "coding.shell":
 		if command := stringField("command"); command != "" {
@@ -187,7 +191,7 @@ func summarizeToolArguments(name, arguments string) string {
 		}
 	case "coding.list_files":
 		if pattern := first(stringField("pattern"), stringField("path")); pattern != "" {
-			return "List " + pattern
+			return catalog.T("tool.list", map[string]string{"path": pattern})
 		}
 	}
 	if summary, ok := summarizeJSONOutput(arguments); ok {
@@ -197,7 +201,11 @@ func summarizeToolArguments(name, arguments string) string {
 	return compactAgentActivity(arguments)
 }
 
-func summarizeEditArguments(input string, dryRun bool) string {
+func summarizeEditArguments(input string, dryRun bool, catalogs ...i18n.Catalog) string {
+	catalog := i18n.Must(i18n.DefaultLanguage)
+	if len(catalogs) > 0 {
+		catalog = catalogs[0]
+	}
 	paths := make([]string, 0, 2)
 	seen := make(map[string]bool)
 	for _, line := range strings.Split(input, "\n") {
@@ -211,24 +219,28 @@ func summarizeEditArguments(input string, dryRun bool) string {
 			paths = append(paths, path)
 		}
 	}
-	action := "Edit"
+	action := catalog.T("tool.edit_action")
 	if dryRun {
-		action = "Preview"
+		action = catalog.T("tool.preview_action")
 	}
 	switch len(paths) {
 	case 0:
-		return action + " file changes"
+		return catalog.T("tool.file_changes", map[string]string{"action": action})
 	case 1:
-		return action + " " + paths[0]
+		return catalog.T("tool.file_action", map[string]string{"action": action, "path": paths[0]})
 	default:
-		return fmt.Sprintf("%s %d files · %s", action, len(paths), strings.Join(paths[:min(3, len(paths))], ", "))
+		return catalog.T("tool.files_action", map[string]string{"action": action, "count": strconv.Itoa(len(paths)), "paths": strings.Join(paths[:min(3, len(paths))], ", ")})
 	}
 }
 
-func summarizeToolFailure(name, output string) string {
+func summarizeToolFailure(name, output string, catalogs ...i18n.Catalog) string {
+	catalog := i18n.Must(i18n.DefaultLanguage)
+	if len(catalogs) > 0 {
+		catalog = catalogs[0]
+	}
 	output = strings.TrimSpace(output)
 	if output == "" {
-		return "Tool failed"
+		return catalog.T("tool.failed")
 	}
 	if summary, ok := summarizeJSONOutput(output); ok {
 		output = summary
@@ -257,6 +269,10 @@ func joinToolSummary(summary, detail string) string {
 }
 
 func summarizeToolResult(name, arguments, output string, catalogs ...i18n.Catalog) string {
+	catalog := i18n.Must(i18n.DefaultLanguage)
+	if len(catalogs) > 0 {
+		catalog = catalogs[0]
+	}
 	switch name {
 	case "todo":
 		var todo session.TodoList
@@ -273,13 +289,13 @@ func summarizeToolResult(name, arguments, output string, catalogs ...i18n.Catalo
 					}
 				}
 			}
-			summary := fmt.Sprintf("Todo updated · %d/%d", completed, total)
+			summary := catalog.T("tool.todo_updated", map[string]string{"completed": strconv.Itoa(completed), "total": strconv.Itoa(total)})
 			if current != "" {
-				summary += "\nCurrent: " + current
+				summary += "\n" + catalog.T("tool.todo_current", map[string]string{"detail": current})
 			}
 			return summary
 		}
-		return "Todo updated"
+		return catalog.T("tool.todo_updated_simple")
 	case "subagent.get_output":
 		catalog := i18n.Must(i18n.DefaultLanguage)
 		if len(catalogs) > 0 {
@@ -293,7 +309,7 @@ func summarizeToolResult(name, arguments, output string, catalogs ...i18n.Catalo
 		}
 		return output
 	case "coding.read_file":
-		return summarizeReadFile(arguments, output)
+		return summarizeReadFile(arguments, output, catalog)
 	case "coding.list_files":
 		return summarizeListOutput(output, 8)
 	case "hydaelyn_activate_skill":
@@ -353,7 +369,7 @@ func summarizeSubagentOutput(output string, catalog i18n.Catalog) (string, bool)
 	}
 	lines := make([]string, 0, len(payload.Tasks)*3)
 	for index, task := range payload.Tasks {
-		lines = append(lines, fmt.Sprintf("[%d] %s", index+1, first(task.Description, task.TaskID, "Subagent")))
+		lines = append(lines, fmt.Sprintf("[%d] %s", index+1, first(task.Description, task.TaskID, catalog.T("block.subagent"))))
 		status := localizedSubagentState(catalog, task.Status)
 		stats := []string{status}
 		if task.Type != "" {
@@ -501,7 +517,11 @@ func appendJSONSummary(lines *[]string, key string, value any, limit int) {
 	}
 }
 
-func summarizeReadFile(arguments, output string) string {
+func summarizeReadFile(arguments, output string, catalogs ...i18n.Catalog) string {
+	catalog := i18n.Must(i18n.DefaultLanguage)
+	if len(catalogs) > 0 {
+		catalog = catalogs[0]
+	}
 	var input struct {
 		Path      string `json:"path"`
 		StartLine int    `json:"startLine"`
@@ -517,7 +537,7 @@ func summarizeReadFile(arguments, output string) string {
 		return output
 	}
 	if input.StartLine > 0 && input.EndLine >= input.StartLine {
-		return fmt.Sprintf("Read %s · lines %d-%d", input.Path, input.StartLine, input.EndLine)
+		return catalog.T("tool.read_lines", map[string]string{"path": input.Path, "start": strconv.Itoa(input.StartLine), "end": strconv.Itoa(input.EndLine)})
 	}
-	return "Read " + input.Path
+	return catalog.T("tool.read", map[string]string{"path": input.Path})
 }

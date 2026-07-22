@@ -35,7 +35,7 @@ func (m *AppModel) updateAgentBlock(event app.Event, agent AgentView) {
 	for index := range m.transcript {
 		block := &m.transcript[index]
 		if block.Kind == BlockAgent && block.ID == agent.ID {
-			block.Title = first(agent.Role, "Subagent")
+			block.Title = first(agent.Role, m.tr("block.subagent"))
 			block.Content = content
 			block.State = agent.State
 			return
@@ -43,7 +43,7 @@ func (m *AppModel) updateAgentBlock(event app.Event, agent AgentView) {
 	}
 	m.transcript = append(m.transcript, Block{
 		ID: agent.ID, Kind: BlockAgent, RunID: first(agent.ParentRunID, event.RunID),
-		ToolCallID: agent.ParentToolCallID, Title: first(agent.Role, "Subagent"),
+		ToolCallID: agent.ParentToolCallID, Title: first(agent.Role, m.tr("block.subagent")),
 		Content: content, State: agent.State,
 	})
 }
@@ -72,25 +72,25 @@ func (m *AppModel) updateAgentStream(event app.Event) {
 		}
 	}
 	if index < 0 {
-		m.agents = append(m.agents, AgentView{ID: event.AgentID, Role: "Subagent", State: "running"})
+		m.agents = append(m.agents, AgentView{ID: event.AgentID, Role: m.tr("block.subagent"), State: "running"})
 		index = len(m.agents) - 1
 	}
 	agent := &m.agents[index]
 	switch event.Kind {
 	case app.EventThinkingDelta:
-		agent.Activity = first(compactAgentActivity(event.Text), "thinking")
-		appendAgentViewDelta(&agent.Blocks, BlockThinking, event.RunID, "Thinking", event.Text)
+		agent.Activity = first(compactAgentActivity(event.Text), m.tr("activity.thinking"))
+		appendAgentViewDelta(&agent.Blocks, BlockThinking, event.RunID, m.tr("block.thinking_title"), event.Text)
 	case app.EventTextDelta:
-		agent.Activity = "responding"
-		appendAgentViewDelta(&agent.Blocks, BlockAssistant, event.RunID, "Assistant", event.Text)
+		agent.Activity = m.tr("activity.responding")
+		appendAgentViewDelta(&agent.Blocks, BlockAssistant, event.RunID, m.tr("block.assistant_title"), event.Text)
 	case app.EventToolStarted:
-		agent.Activity = first(event.Data["name"], event.Text, "tool")
+		agent.Activity = first(event.Data["name"], event.Text, m.tr("activity.tool"))
 		upsertAgentTool(&agent.Blocks, event, "running", m.catalog)
 	case app.EventToolUpdate:
-		agent.Activity = first(event.Data["name"], event.Text, "tool update")
+		agent.Activity = first(event.Data["name"], event.Text, m.tr("activity.tool_update"))
 		upsertAgentTool(&agent.Blocks, event, "running", m.catalog)
 	case app.EventToolFinished:
-		agent.Activity = first(event.Data["name"], "tool finished")
+		agent.Activity = first(event.Data["name"], m.tr("activity.tool_finished"))
 		upsertAgentTool(&agent.Blocks, event, terminalToolState(event.State), m.catalog)
 	case app.EventHookStarted, app.EventHookFinished, app.EventHookDiagnostic:
 		m.updateHooks(&agent.Blocks, event)
@@ -256,14 +256,14 @@ func upsertAgentTool(blocks *[]Block, event app.Event, state string, catalog i18
 					block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text, catalog)
 				}
 			} else if event.Kind == app.EventToolFinished {
-				block.Content = joinToolSummary(summarizeToolArguments(block.Title, block.Arguments), summarizeToolFailure(block.Title, event.Text))
+				block.Content = joinToolSummary(summarizeToolArguments(block.Title, block.Arguments, catalog), summarizeToolFailure(block.Title, event.Text, catalog))
 			} else {
 				appendBlockContent(block, event.Text)
 			}
 		}
 		return
 	}
-	name := first(event.Data["name"], "Tool")
+	name := first(event.Data["name"], catalog.T("block.tool_title"))
 	content := first(event.Data["arguments"], event.Text)
 	kind := BlockTool
 	title := name
@@ -319,9 +319,9 @@ func agentTranscriptBlocks(blocks []app.AgentTranscriptBlock, catalogs ...i18n.C
 					content = summarizeToolResult(block.Title, arguments, content, catalog)
 				}
 			case "failed", "cancelled":
-				content = joinToolSummary(summarizeToolArguments(block.Title, arguments), summarizeToolFailure(block.Title, content))
+				content = joinToolSummary(summarizeToolArguments(block.Title, arguments, catalog), summarizeToolFailure(block.Title, content, catalog))
 			default:
-				content = summarizeToolArguments(block.Title, arguments)
+				content = summarizeToolArguments(block.Title, arguments, catalog)
 			}
 		}
 		result = append(result, Block{
@@ -394,7 +394,7 @@ func (m *AppModel) loadModels(event app.Event) {
 	provider := first(event.Data["provider"], m.provider)
 	var choices []ModelChoice
 	if err := json.Unmarshal([]byte(event.Data["models"]), &choices); err != nil {
-		m.errorBanner = "decode model catalog: " + err.Error()
+		m.errorBanner = m.tr("error.decode_models") + ": " + err.Error()
 		return
 	}
 	sort.Slice(choices, func(i, j int) bool { return choices[i].ID < choices[j].ID })

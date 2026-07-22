@@ -227,13 +227,16 @@ func (result BootstrapResult) Validate() error {
 }
 
 func importConfiguredCredentials(ctx context.Context, cfg config.Config, authentication *authservice.Service) {
+	if !cfg.Auth.ImportCodex && !cfg.Auth.ImportGrok {
+		return
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
 	}
 	if cfg.Auth.ImportCodex {
-		accounts, _ := authentication.Accounts(ctx, "chatgpt")
-		if len(accounts) == 0 {
+		hasAccount, accountErr := authentication.HasAnyAccount(ctx, "chatgpt")
+		if accountErr != nil || !hasAccount {
 			codexHome := os.Getenv("CODEX_HOME")
 			if codexHome == "" {
 				codexHome = filepath.Join(home, ".codex")
@@ -246,10 +249,10 @@ func importConfiguredCredentials(ctx context.Context, cfg config.Config, authent
 		}
 	}
 	if cfg.Auth.ImportGrok {
-		accounts, _ := authentication.Accounts(ctx, "grok")
 		path := filepath.Join(home, ".grok", "auth.json")
-		if len(accounts) == 0 {
-			if _, statErr := os.Stat(path); statErr == nil {
+		if _, statErr := os.Stat(path); statErr == nil {
+			hasAccount, accountErr := authentication.HasAnyAccount(ctx, "grok")
+			if accountErr != nil || !hasAccount {
 				_, _ = authentication.ImportGrok(ctx, path)
 			}
 		}

@@ -592,6 +592,17 @@ func TestBootstrapUsesFreshUnpersistedSessionEachLaunch(t *testing.T) {
 	}
 }
 
+func TestCredentialImportSkipsDisabledAndMissingSources(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.ImportCodex = false
+	cfg.Auth.ImportGrok = false
+	importConfiguredCredentials(context.Background(), cfg, nil)
+
+	t.Setenv("HOME", t.TempDir())
+	cfg.Auth.ImportGrok = true
+	importConfiguredCredentials(context.Background(), cfg, nil)
+}
+
 func TestBootstrapRoutesLegacyCredentialReference(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
