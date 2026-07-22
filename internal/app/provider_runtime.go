@@ -178,6 +178,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		subagentDrivers, buildErr := subagents.Drivers(subagentParentRuntime{
 			SessionID: request.SessionID, ParentRunID: run.RunID, ParentAgentID: run.HolderID,
 			ProviderID: request.Provider, ModelID: modelID, Reasoning: request.Reasoning, ContextTokenTarget: contextTarget,
+			ContextConfig: r.cfg.Agents.Context,
 			WorkspaceRoot: r.cfg.Workspace.Root, Driver: driver, Coding: r.coding, Host: host,
 			CompactionRoute: compactionRoute,
 			CompactionRouteSnapshot: func() config.ModelRouteConfig {
@@ -215,10 +216,9 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	if reporter := r.responseUsageReporter(host, request.SessionID, run.RunID, "main", request.Provider, modelID, driver.Metadata().Name); reporter != nil && (host == nil || host.sessions == nil) {
 		extraBody[responses.UsageReporterExtraKey] = reporter
 	}
-	hardContextTarget := 0
-	softContextTarget := 0
+	hardContextTarget := budgetConfig.HardTrigger
+	softContextTarget := budgetConfig.HardTrigger
 	if r.cfg.Agents.Context.Enabled {
-		hardContextTarget = budgetConfig.HardTrigger
 		softContextTarget = budgetConfig.SoftTrigger
 	}
 	spec := hyagent.Spec{
@@ -913,6 +913,13 @@ func (r *ProviderRuntime) HasActiveForegroundSubagents(sessionID, parentRunID st
 	runtime := r.subagents
 	r.mu.RUnlock()
 	return runtime != nil && runtime.HasForegroundByParentRun(sessionID, parentRunID)
+}
+
+func (r *ProviderRuntime) HasActiveSubagents(sessionID, parentRunID string) bool {
+	r.mu.RLock()
+	runtime := r.subagents
+	r.mu.RUnlock()
+	return runtime != nil && runtime.HasActiveByParentRun(sessionID, parentRunID)
 }
 
 func (r *ProviderRuntime) CancelParentSubagents(sessionID, parentRunID string) {

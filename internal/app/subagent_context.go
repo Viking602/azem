@@ -25,6 +25,7 @@ type subagentTurnContext struct {
 	seed           []message.Message
 	compactHooks   func(context.Context, []message.Message, []message.Message, error) error
 	summarize      func(context.Context, string) (string, error)
+	inner          turnContext
 }
 
 func (c subagentTurnContext) Build(_ context.Context, task api.Task) ([]message.Message, error) {
@@ -49,11 +50,25 @@ func (c subagentTurnContext) Build(_ context.Context, task api.Task) ([]message.
 }
 
 func (c subagentTurnContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
-	return (turnContext{compactHooks: c.compactHooks, summarize: c.summarize}).Compact(ctx, history)
+	inner := c.inner
+	if inner.summarize == nil {
+		inner.summarize = c.summarize
+	}
+	if inner.compactHooks == nil {
+		inner.compactHooks = c.compactHooks
+	}
+	return inner.Compact(ctx, history)
 }
 
 func (c subagentTurnContext) CompactTo(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, error) {
-	return (turnContext{compactHooks: c.compactHooks, summarize: c.summarize}).CompactTo(ctx, history, targetTokens)
+	inner := c.inner
+	if inner.summarize == nil {
+		inner.summarize = c.summarize
+	}
+	if inner.compactHooks == nil {
+		inner.compactHooks = c.compactHooks
+	}
+	return inner.CompactTo(ctx, history, targetTokens)
 }
 
 func effectiveSubagentTools(roleTools []string, capability string) map[string]bool {

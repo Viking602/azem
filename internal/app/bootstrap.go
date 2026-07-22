@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
@@ -77,8 +78,14 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 		_ = store.Close(ctx)
 		return BootstrapResult{}, fmt.Errorf("create startup session id: %w", err)
 	}
+	shellOptions := agentservice.ShellOptions{
+		MaxContextOutputBytes: cfg.Workspace.Shell.MaxContextOutputBytes, MaxArtifactOutputBytes: cfg.Workspace.Shell.MaxArtifactOutputBytes,
+		StopOnOutputLimit: cfg.Workspace.Shell.StopOnOutputLimit, MaxConcurrency: cfg.Workspace.Shell.MaxConcurrency,
+		ArtifactSink: newShellArtifactSink(sessions),
+	}
 	coding, err := agentservice.NewService(store, paths.Workspace,
 		agentservice.WithWorkspacePolicy(cfg.Workspace.AllowWrite, cfg.Workspace.ShellPolicy, cfg.Workspace.AllowNetwork),
+		agentservice.WithShellOptions(shellOptions),
 		agentservice.WithTeamLimits(cfg.Agents.Team.MaxConcurrency, cfg.Agents.Team.MaxTicks),
 		agentservice.WithSkills(skillCatalog),
 	)
@@ -194,6 +201,26 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 		service.emitAuthCatalog(service.ctx)
 	}()
 	return BootstrapResult{Config: cfg, Paths: paths, SessionID: startupSessionID, Service: service}, nil
+}
+
+func newShellArtifactSink(sessions *session.Service) func(context.Context, agentservice.ShellExecutionSnapshot, []byte) (agentservice.ShellArtifactResult, error) {
+	return func(ctx context.Context, execution agentservice.ShellExecutionSnapshot, payload []byte) (agentservice.ShellArtifactResult, error) {
+		if sessions == nil || strings.TrimSpace(execution.SessionID) == "" {
+			return agentservice.ShellArtifactResult{}, fmt.Errorf("persist shell artifact: session is unavailable")
+		}
+		preview := execution.Output
+		if len(preview) > 512 {
+			preview = preview[:512]
+		}
+		preview = strings.ToValidUTF8(preview, "�")
+		persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		artifact, err := sessions.PutArtifact(persistCtx, execution.SessionID, execution.RunID, "shell_output", payload, preview)
+		if err != nil {
+			return agentservice.ShellArtifactResult{}, err
+		}
+		return agentservice.ShellArtifactResult{Reference: "artifact:" + artifact.ID}, nil
+	}
 }
 
 func instructionMemoryType(path, homeDir, workspace string) string {

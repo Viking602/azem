@@ -38,6 +38,7 @@ type Service struct {
 	allowWrite           bool
 	shellPolicy          string
 	allowNetwork         string
+	shellRuntime         *shellRuntime
 	teamMaxConcurrency   int
 	teamMaxTicks         int
 	skills               *skills.Catalog
@@ -94,6 +95,7 @@ type serviceOptions struct {
 	teamMaxConcurrency int
 	teamMaxTicks       int
 	skills             *skills.Catalog
+	shellOptions       ShellOptions
 }
 
 type ServiceOption func(*serviceOptions)
@@ -123,6 +125,10 @@ func WithSkills(catalog *skills.Catalog) ServiceOption {
 	}
 }
 
+func WithShellOptions(options ShellOptions) ServiceOption {
+	return func(settings *serviceOptions) { settings.shellOptions = options }
+}
+
 func NewService(store api.StoreProvider, workspaceRoot string, options ...ServiceOption) (*Service, error) {
 	settings := serviceOptions{allowWrite: true, shellPolicy: "prompt", network: "prompt", teamMaxConcurrency: 2, teamMaxTicks: 12}
 	for _, option := range options {
@@ -145,6 +151,7 @@ func NewService(store api.StoreProvider, workspaceRoot string, options ...Servic
 		skills: settings.skills, runLeaseTTL: defaultRunLeaseTTL, runHeartbeatInterval: defaultRunLeaseHeartbeatInterval,
 		ctx: serviceCtx, cancel: serviceCancel,
 	}
+	service.shellRuntime = newShellRuntime(serviceCtx, settings.shellOptions)
 	drivers, err := service.WorkspaceDrivers(context.Background(), workspaceRoot)
 	if err != nil {
 		serviceCancel()
@@ -437,7 +444,7 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 		drivers = append(drivers, driver)
 	}
 	if s.shellPolicy != "deny" {
-		drivers = append(drivers, newShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork))
+		drivers = append(drivers, newRuntimeShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork, s.shellRuntime))
 	}
 	return drivers, nil
 }
@@ -630,10 +637,16 @@ func toolCallRequestsNetwork(arguments json.RawMessage) bool {
 }
 
 func (s *Service) Close(ctx context.Context) error {
+	if s.shellRuntime != nil {
+		s.shellRuntime.shutdown()
+	}
 	s.cancel()
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
+		if s.shellRuntime != nil {
+			s.shellRuntime.wg.Wait()
+		}
 		close(done)
 	}()
 	select {
@@ -645,6 +658,14 @@ func (s *Service) Close(ctx context.Context) error {
 		return closer.Close(ctx)
 	}
 	return nil
+}
+
+// ActiveShellExecutions returns a race-safe point-in-time status view.
+func (s *Service) ActiveShellExecutions() []ShellExecutionSnapshot {
+	if s == nil || s.shellRuntime == nil {
+		return nil
+	}
+	return s.shellRuntime.snapshot()
 }
 
 func scopeForCall(definition tool.Definition, call tool.Call) invocationScope {

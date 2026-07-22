@@ -7,6 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -738,7 +739,39 @@ func (m AppModel) statusReportLines() []string {
 			"  "+m.tr("overlay.status.field.cache")+": "+metrics.cache,
 		)
 	}
+	lines = append(lines, "Shell processes")
+	shells := activeShellExecutions(m.runtime)
+	if len(shells) == 0 {
+		lines = append(lines, "  none")
+	} else {
+		for _, shell := range shells {
+			owner := first(shell.AgentID, "unknown")
+			process := fmt.Sprintf("pid %d", shell.PID)
+			if shell.PGID != 0 {
+				process += fmt.Sprintf(" / pgid %d", shell.PGID)
+			} else if shell.JobID != "" {
+				process += " / job " + shell.JobID
+			}
+			deadline := "none"
+			if !shell.Deadline.IsZero() {
+				deadline = shell.Deadline.Format("15:04:05")
+			}
+			lines = append(lines, fmt.Sprintf("  %s · run %s · call %s · %s · %s · deadline %s · %d bytes · %s",
+				owner, first(shell.RunID, "unknown"), shell.ToolCallID, process, first(shell.State, "running"), deadline,
+				shell.OutputBytes, shell.CommandHash[:min(12, len(shell.CommandHash))]))
+		}
+	}
 	return lines
+}
+
+func activeShellExecutions(runtime Runtime) []agentservice.ShellExecutionSnapshot {
+	provider, ok := runtime.(interface {
+		ActiveShellExecutions() []agentservice.ShellExecutionSnapshot
+	})
+	if !ok {
+		return nil
+	}
+	return provider.ActiveShellExecutions()
 }
 
 func (m AppModel) approvalModeLabel() string {

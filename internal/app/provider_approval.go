@@ -31,9 +31,25 @@ type governedAgentTool struct {
 	update           func(tool.Update)
 }
 
+type callerToolDriver struct {
+	inner  tool.Driver
+	caller tool.CallerInfo
+}
+
+func (d callerToolDriver) Definition() tool.Definition { return d.inner.Definition() }
+func (d callerToolDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	return d.inner.Execute(tool.WithCaller(ctx, d.caller), call, sink)
+}
+
 func (d *governedAgentTool) Definition() tool.Definition { return d.definition }
 
 func (d *governedAgentTool) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	ctx = tool.WithCaller(ctx, tool.CallerInfo{
+		SessionID: d.sessionID,
+		TeamRunID: firstNonempty(d.streamRunID, d.run.RunID),
+		AgentID:   firstNonempty(d.agentID, "main"),
+		TaskID:    d.parentToolCallID,
+	})
 	updates := func(update tool.Update) error {
 		if d.update != nil {
 			d.update(update)
@@ -312,6 +328,7 @@ func (s *Service) teamToolBus(ctx context.Context, sessionID, runID, goal string
 		drivers = append(drivers, &todoDriver{sessionID: sessionID, store: s.sessions, emit: func(event Event) bool {
 			return s.emitTodoUpdated(sessionID, *event.Todo)
 		}})
+		drivers = append(drivers, &contextArtifactDriver{sessionID: sessionID, store: s.sessions})
 	}
 	governed := make([]tool.Driver, 0, len(drivers))
 	for _, driver := range drivers {

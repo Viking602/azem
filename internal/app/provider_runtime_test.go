@@ -67,6 +67,35 @@ func TestPhase3ArtifactToolRoundTripsBinaryPayloadAsBase64(t *testing.T) {
 	}
 }
 
+func TestShellArtifactSinkPersistsAfterExecutionCancellation(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "shell-artifact.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Shell artifact"}); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("shell-output\n"), 100)
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	result, err := newShellArtifactSink(sessions)(cancelled, agentservice.ShellExecutionSnapshot{
+		SessionID: "session", RunID: "run", Output: string(payload[:64]),
+	}, payload)
+	if err != nil || !strings.HasPrefix(result.Reference, "artifact:") {
+		t.Fatalf("artifact result=%#v err=%v", result, err)
+	}
+	artifact, err := sessions.LoadArtifact(ctx, "session", strings.TrimPrefix(result.Reference, "artifact:"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(artifact.Payload, payload) || artifact.RunID != "run" || artifact.Kind != "shell_output" {
+		t.Fatalf("persisted artifact=%#v", artifact)
+	}
+}
+
 func TestLegacyCompactResolvesSummarizerLazily(t *testing.T) {
 	history := []message.Message{message.NewText(message.RoleSystem, "rules")}
 	for index := 0; index < 10; index++ {
@@ -1531,6 +1560,34 @@ func TestTurnContextCompactToUsesContentInsteadOfDuplicatedStructuredOutput(t *t
 	result := compacted[len(compacted)-1].ToolResult
 	if result == nil || result.Content != content || !bytes.Equal(result.Structured, structured) {
 		t.Fatalf("provider-visible content was needlessly compacted: %#v", result)
+	}
+}
+
+func TestTurnContextExternalizesLargeToolResultBeforeSoftTrigger(t *testing.T) {
+	history := []message.Message{
+		message.NewText(message.RoleUser, "inspect"),
+		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "read-1", Name: "coding.read_file"}}},
+		message.NewToolResult(message.ToolResult{ToolCallID: "read-1", Name: "coding.read_file", Content: strings.Repeat("payload", 100)}),
+	}
+	var stored []byte
+	manager := turnContext{
+		largeToolTokens: 1, softTriggerTokens: 100_000, compactTargetTokens: 100,
+		coordinator: &compactionCoordinator{},
+		putArtifact: func(_ context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
+			stored = append([]byte(nil), payload...)
+			return session.ContextArtifact{ID: "artifact-1", SHA256: "digest"}, nil
+		},
+	}
+	prepared, err := manager.CompactTo(context.Background(), history, 90_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) != history[2].ToolResult.Content {
+		t.Fatalf("stored payload length=%d, want %d", len(stored), len(history[2].ToolResult.Content))
+	}
+	result := prepared[2].ToolResult
+	if result == nil || !strings.Contains(result.Content, `"artifact_ref":"artifact-1"`) || len(result.Structured) != 0 {
+		t.Fatalf("provider result was not replaced before threshold evaluation: %#v", result)
 	}
 }
 

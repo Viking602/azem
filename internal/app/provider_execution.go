@@ -190,10 +190,10 @@ func teamPrompt(request TurnRequest) string {
 }
 
 type teamExecutionPolicy struct {
-	contextTarget  int
-	attachmentRoot string
-	images         []session.Attachment
-	newSummarizer  func(string) func(context.Context, string) (string, error)
+	contextBudget         ContextBudget
+	attachmentRoot        string
+	images                []session.Attachment
+	newSummarizerResolver func(string) func(context.Context) (func(context.Context, string) (string, error), int, error)
 }
 
 func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, contextWindow int, tools *tool.Bus) (teamExecutionPolicy, error) {
@@ -207,15 +207,15 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 		}
 		toolTokens = (bytes + estimatedBytesPerToken - 1) / estimatedBytesPerToken
 	}
-	target, err := modelContextTokenTarget(request.Provider, request.Model, contextWindow, toolTokens)
+	budget, err := calculateContextBudget(request.Provider, request.Model, contextWindow, toolTokens, s.cfg.Agents.Context)
 	if err != nil {
 		return teamExecutionPolicy{}, err
 	}
-	policy := teamExecutionPolicy{contextTarget: target, attachmentRoot: s.attachments.Root, images: CloneAttachments(request.Images)}
+	policy := teamExecutionPolicy{contextBudget: budget, attachmentRoot: s.attachments.Root, images: CloneAttachments(request.Images)}
 	compactionRoute, _ := s.providers.modelRouteSnapshot()
 	report := s.providers.compactionUsageReporter(s, request.SessionID, parentRunID)
-	policy.newSummarizer = func(cacheKey string) func(context.Context, string) (string, error) {
-		return lazyCompactionSummarizer(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
+	policy.newSummarizerResolver = func(cacheKey string) func(context.Context) (func(context.Context, string) (string, error), int, error) {
+		return lazyCompactionResolver(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
 			_, resolvedModel, window, driver, resolveErr := s.providers.resolveDriver(ctx, provider, model, reasoning)
 			if resolveErr == nil && s.sessions != nil {
 				driver = &meteredProviderDriver{inner: driver, store: s.sessions, host: s, sessionID: request.SessionID,
@@ -322,6 +322,17 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 	}
 	prepare := func(ctx context.Context, engine hyagent.Engine, dispatch multiagent.Dispatch, class multiagent.AgentClass) (hyagent.Engine, error) {
 		metadata := hooks.Metadata{SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To, AgentType: class.Name, ParentRunID: parentRunID, CWD: s.cfg.Workspace.Root}
+		if engine.Tools != nil {
+			drivers := make([]tool.Driver, 0, len(engine.Tools.Definitions()))
+			for _, definition := range engine.Tools.Definitions() {
+				if driver, found := engine.Tools.Driver(definition.Name); found {
+					drivers = append(drivers, callerToolDriver{inner: driver, caller: tool.CallerInfo{
+						SessionID: sessionID, TeamRunID: dispatch.Task.RunID, AgentID: dispatch.To, TaskID: dispatch.Task.ID,
+					}})
+				}
+			}
+			engine.Tools = tool.NewBus(drivers...)
+		}
 		roleCacheKey := strings.Join([]string{sessionID, "team", request.Provider, request.Model, class.Name}, ":")
 		extraBody := make(map[string]any, len(engine.ExtraBody)+3)
 		for key, value := range engine.ExtraBody {
@@ -365,20 +376,28 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 		}
 		requestPreparer := &teamRequestPreparer{
 			context: requestContext, images: images, todo: request.Todo, loadTodo: loadTodo, runID: dispatch.Task.RunID,
-			target: policy.contextTarget,
+			target: policy.contextBudget.HardTrigger,
 		}
-		if policy.newSummarizer != nil {
+		if policy.newSummarizerResolver != nil {
 			requestPreparer.compactor = &turnContext{
 				runID: dispatch.Task.RunID, todo: request.Todo, loadTodo: loadTodo,
-				summarize:    policy.newSummarizer(roleCacheKey + ":compaction"),
+				resolveSummarizer: policy.newSummarizerResolver(roleCacheKey + ":compaction"), structuredSummary: true,
+				largeToolTokens: s.cfg.Agents.Context.LargeToolResultTokens, compactTargetTokens: policy.contextBudget.Target,
+				minReclaimTokens: s.cfg.Agents.Context.MinReclaimTokens, softTriggerTokens: policy.contextBudget.SoftTrigger,
+				backgroundPrepare: s.cfg.Agents.Context.BackgroundPrepare, coordinator: &compactionCoordinator{},
 				compactHooks: s.autoCompactHooks(metadata),
 				reportContextTokens: func(_ context.Context, tokens int) {
 					s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: parentRunID, State: "estimated", Data: map[string]string{
 						"inputTokens": fmt.Sprint(tokens), "outputTokens": "0", "totalTokens": fmt.Sprint(tokens),
 						"cacheStatus": "pending", "aggregateOnly": "true", "requestKind": "team", "role": class.Name, "agentID": dispatch.To,
-						"provider": request.Provider, "model": request.Model, "reasoning": request.Reasoning, "teamContextTarget": fmt.Sprint(policy.contextTarget),
+						"provider": request.Provider, "model": request.Model, "reasoning": request.Reasoning, "teamContextTarget": fmt.Sprint(policy.contextBudget.Target),
 					}})
 				},
+			}
+			if s.sessions != nil {
+				requestPreparer.compactor.putArtifact = func(ctx context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
+					return s.sessions.PutArtifact(ctx, sessionID, dispatch.Task.RunID, kind, payload, preview)
+				}
 			}
 		}
 		if engine.Provider != nil {

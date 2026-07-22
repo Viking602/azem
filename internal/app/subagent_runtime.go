@@ -17,6 +17,7 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/responses"
+	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
 	"github.com/Viking602/go-hydaelyn/api"
 	"github.com/Viking602/go-hydaelyn/message"
@@ -39,6 +40,7 @@ type subagentParentRuntime struct {
 	ModelID                 string
 	Reasoning               string
 	ContextTokenTarget      int
+	ContextConfig           config.ContextConfig
 	WorkspaceRoot           string
 	Driver                  hyprovider.Driver
 	ResolveDriver           func(context.Context, string, string, string) (string, int, hyprovider.Driver, error)
@@ -523,6 +525,7 @@ func (r *subagentRuntime) execute(id string) {
 	var err error
 	childModel := profile.Model
 	contextTarget := parent.ContextTokenTarget
+	contextBudget := ContextBudget{HardTrigger: contextTarget, Target: contextTarget}
 	childContextWindow := 0
 	childDriver := parent.Driver
 	usageBudget := &providerUsageBudget{maxTokens: int64(r.cfg.Budget.MaxTokens)}
@@ -534,7 +537,8 @@ func (r *subagentRuntime) execute(id string) {
 		}
 		childDriver = resolvedDriver
 		childContextWindow = contextWindow
-		contextTarget, err = modelContextTokenTarget(profile.Provider, childModel, contextWindow, 0)
+		contextBudget, err = calculateContextBudget(profile.Provider, childModel, contextWindow, 0, parent.ContextConfig)
+		contextTarget = contextBudget.HardTrigger
 		if err != nil {
 			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
 			return
@@ -579,10 +583,15 @@ func (r *subagentRuntime) execute(id string) {
 		governed = append(governed, hooks.WrapDriver(dispatcher, metadata, governedDriver))
 		toolNames = append(toolNames, definition.Name)
 	}
+	if parent.Host != nil && parent.Host.sessions != nil {
+		governed = append(governed, &contextArtifactDriver{sessionID: parent.SessionID, store: parent.Host.sessions})
+		toolNames = append(toolNames, contextReadArtifactTool)
+	}
 	skillSnapshot := parent.Coding.SkillSnapshot()
 	instructions := renderSubagentInstructions(profile)
 	if childContextWindow > 0 {
-		contextTarget, err = modelContextTokenTarget(profile.Provider, childModel, childContextWindow, estimateToolDefinitionTokens(governed))
+		contextBudget, err = calculateContextBudget(profile.Provider, childModel, childContextWindow, estimateToolDefinitionTokens(governed), parent.ContextConfig)
+		contextTarget = contextBudget.HardTrigger
 		if err != nil {
 			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
 			return
@@ -623,9 +632,17 @@ func (r *subagentRuntime) execute(id string) {
 		compactionReport = nil
 	}
 	contextManager := subagentTurnContext{instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
-		summarize: lazyCompactionSummarizer(compactionResolve, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, compactionReport)}
+		inner: turnContext{structuredSummary: true, largeToolTokens: parent.ContextConfig.LargeToolResultTokens,
+			compactTargetTokens: contextBudget.Target, minReclaimTokens: parent.ContextConfig.MinReclaimTokens,
+			softTriggerTokens: contextBudget.SoftTrigger, backgroundPrepare: parent.ContextConfig.BackgroundPrepare, coordinator: &compactionCoordinator{},
+			resolveSummarizer: lazyCompactionResolver(compactionResolve, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, compactionReport)}}
+	if parent.Host != nil && parent.Host.sessions != nil {
+		contextManager.inner.putArtifact = func(ctx context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
+			return parent.Host.sessions.PutArtifact(ctx, parent.SessionID, childRun.RunID, kind, payload, preview)
+		}
+	}
 	if parent.Host != nil {
-		contextManager.compactHooks = parent.Host.autoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
+		contextManager.inner.compactHooks = parent.Host.autoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
 	}
 	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
 		Skills:    skillSnapshot.Registry,

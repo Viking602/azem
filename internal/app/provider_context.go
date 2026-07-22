@@ -445,8 +445,8 @@ func (c turnContext) prepareCompaction(ctx context.Context, history []message.Me
 		}
 		return prepared
 	}
-	// Artifact replacement is required preparation only after the hard trigger;
-	// requests which already fit remain byte-for-byte unchanged.
+	// CompactTo externalizes oversized results before threshold evaluation;
+	// retain this normalization here for direct/background preparation callers.
 	history, err := c.normalizeToolResults(ctx, history)
 	if err != nil {
 		return original, err
@@ -549,6 +549,11 @@ func (c turnContext) prepareCompaction(ctx context.Context, history []message.Me
 }
 
 func (c turnContext) CompactTo(ctx context.Context, history []message.Message, hardTokens int) ([]message.Message, error) {
+	normalized, err := c.normalizeToolResults(ctx, history)
+	if err != nil {
+		return history, err
+	}
+	history = normalized
 	// Legacy/team contexts without Phase 5 thresholds retain synchronous
 	// CompactTo semantics.
 	if c.softTriggerTokens <= 0 || c.coordinator == nil {
