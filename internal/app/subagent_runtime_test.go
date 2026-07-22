@@ -927,6 +927,9 @@ func TestCancelByParentRunIsSessionScopedAndIncludesBackgroundOnRequest(t *testi
 	if !runtime.HasForegroundByParentRun("session", "parent") {
 		t.Fatal("foreground child was not detected")
 	}
+	if !runtime.HasActiveByParentRun("session", "parent") {
+		t.Fatal("active children were not detected")
+	}
 	runtime.CancelByParentRun("session", "parent", true)
 	for _, id := range []string{"foreground", "background"} {
 		snapshot := runtime.snapshot(id, "session")
@@ -939,6 +942,21 @@ func TestCancelByParentRunIsSessionScopedAndIncludesBackgroundOnRequest(t *testi
 		if !snapshot.Found || snapshot.Run.State != agentservice.SubagentQueued {
 			t.Fatalf("unrelated child %q = %#v", item.id, snapshot)
 		}
+	}
+}
+
+func TestActiveChildQueryDetectsBackgroundOnly(t *testing.T) {
+	runtime := &subagentRuntime{active: map[string]*activeSubagent{
+		"background": {run: agentservice.SubagentRun{
+			ID: "background", SessionID: "session", ParentRunID: "parent",
+			State: agentservice.SubagentRunning, Background: true,
+		}},
+	}}
+	if !runtime.HasActiveByParentRun("session", "parent") {
+		t.Fatal("background-only child was not detected")
+	}
+	if runtime.HasForegroundByParentRun("session", "parent") {
+		t.Fatal("background child was reported as foreground")
 	}
 }
 

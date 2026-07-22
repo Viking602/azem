@@ -219,7 +219,7 @@
   "overlay.signin.title": "登录", "overlay.signin.subtitle": "选择订阅提供方", "overlay.signin.chatgpt": "ChatGPT 使用兼容 Codex 的 OAuth；这不是 Azem 官方 OAuth 协议。", "overlay.signin.grok": "Grok 使用实验性的 Grok CLI 兼容公共客户端流程。", "overlay.signin.existing": "现有凭据：/login chatgpt --import-codex · /login grok --import",
   "overlay.model.title": "模型", "overlay.model.catalogs": "已配置 {count} 个提供方目录",
   "overlay.reasoning.title": "思考级别", "overlay.reasoning.choose_next": "为下一轮选择", "overlay.reasoning.applied_next": "下一轮生效", "overlay.reasoning.unsupported": "所选模型未声明可调整推理强度。",
-  "overlay.cancel.title": "取消运行", "overlay.cancel.subtitle": "选择子任务是否继续", "overlay.cancel.description": "父运行仍在执行，且至少有一个前台子任务。", "overlay.cancel.parent": "仅取消父运行", "overlay.cancel.parent_detail": "前台子任务将在后台继续", "overlay.cancel.all": "取消父运行和子任务", "overlay.cancel.all_detail": "取消此父运行产生的所有活动子任务",
+  "overlay.cancel.title": "取消运行", "overlay.cancel.subtitle": "选择子智能体是否继续运行", "overlay.cancel.description": "当前智能体至少有一个仍在运行的子智能体。", "overlay.cancel.parent": "仅取消当前智能体", "overlay.cancel.parent_detail": "子智能体将继续运行", "overlay.cancel.all": "取消当前智能体及所有子智能体", "overlay.cancel.all_detail": "取消所有仍在运行的后代智能体",
   "overlay.diff.title": "差异", "overlay.diff.subtitle": "建议的工作区变更", "overlay.agents.title": "代理", "overlay.agents.mode": "{mode} 模式",
   "overlay.agent_detail.title": "任务详情", "overlay.agent_detail.subtitle": "实时子任务记录和执行元数据", "overlay.agent_detail.unavailable": "任务已不可用。", "overlay.agent_detail.empty": "暂无子任务记录。", "overlay.agent_detail.child_execution": "子任务执行",
   "overlay.agent_types.title": "代理类型", "overlay.agent_types.subtitle": "生效的角色配置", "overlay.personas.title": "角色设定", "overlay.personas.subtitle": "生效的角色设定配置", "overlay.mcp.title": "MCP 服务器", "overlay.mcp.subtitle": "外部工具仍受治理",

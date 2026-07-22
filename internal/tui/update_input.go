@@ -851,7 +851,7 @@ func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
 
 func (m AppModel) requestTurnCancellation() (tea.Model, tea.Cmd) {
 	m.overlay = OverlayNone
-	if hasActiveForegroundChildren(m.runtime) {
+	if hasActiveChildren(m.runtime) {
 		m.status = "Choose cancellation scope"
 		m.openOverlay(OverlayCancel)
 		return m, nil

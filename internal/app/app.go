@@ -737,6 +737,14 @@ func (s *Service) HasActiveForegroundChildren() bool {
 		providers.HasActiveForegroundSubagents(sessionID, runID)
 }
 
+func (s *Service) HasActiveChildren() bool {
+	s.mu.Lock()
+	sessionID, runID, providers := s.activeSession, s.activeRun, s.providers
+	s.mu.Unlock()
+	return providers != nil && sessionID != "" && runID != "" && runID != "starting" &&
+		providers.HasActiveSubagents(sessionID, runID)
+}
+
 func (s *Service) CancelActiveWithChildren(children bool) bool {
 	s.mu.Lock()
 	cancel := s.activeEnd
@@ -750,6 +758,13 @@ func (s *Service) CancelActiveWithChildren(children bool) bool {
 	}
 	cancel()
 	return true
+}
+
+func (s *Service) ActiveShellExecutions() []agentservice.ShellExecutionSnapshot {
+	if s == nil || s.coding == nil {
+		return nil
+	}
+	return s.coding.ActiveShellExecutions()
 }
 
 func (s *Service) Shutdown(ctx context.Context) error {

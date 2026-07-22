@@ -206,6 +206,20 @@ func (r *subagentRuntime) Cancel(sessionID, id string) agentservice.SubagentCanc
 	return agentservice.SubagentCancelOutcome{Outcome: "cancel_requested", Snapshot: snapshot}
 }
 
+func (r *subagentRuntime) HasActiveByParentRun(sessionID, parentRunID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, active := range r.active {
+		if active.run.SessionID == sessionID && active.run.ParentRunID == parentRunID &&
+			!active.terminalizing && !subagentTerminal(active.run.State) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasForegroundByParentRun is retained for callers that need the old, narrower
+// query. Cancellation UI should use HasActiveByParentRun instead.
 func (r *subagentRuntime) HasForegroundByParentRun(sessionID, parentRunID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -221,9 +235,15 @@ func (r *subagentRuntime) HasForegroundByParentRun(sessionID, parentRunID string
 func (r *subagentRuntime) CancelByParentRun(sessionID, parentRunID string, cancelBackground bool) {
 	r.mu.Lock()
 	ids := make([]string, 0)
-	for _, active := range r.active {
-		if active.run.SessionID == sessionID && active.run.ParentRunID == parentRunID && (!active.run.Background || cancelBackground) {
-			ids = append(ids, active.run.ID)
+	parents := map[string]bool{parentRunID: true}
+	for added := true; added; {
+		added = false
+		for _, active := range r.active {
+			if active.run.SessionID == sessionID && parents[active.run.ParentRunID] && (!active.run.Background || cancelBackground) && !parents[active.run.ID] {
+				parents[active.run.ID] = true
+				ids = append(ids, active.run.ID)
+				added = true
+			}
 		}
 	}
 	r.mu.Unlock()

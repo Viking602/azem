@@ -47,10 +47,18 @@ type DefaultsConfig struct {
 }
 
 type WorkspaceConfig struct {
-	Root         string `yaml:"root,omitempty"`
-	AllowWrite   bool   `yaml:"allow_write"`
-	ShellPolicy  string `yaml:"shell_policy"`
-	AllowNetwork string `yaml:"allow_network"`
+	Root         string      `yaml:"root,omitempty"`
+	AllowWrite   bool        `yaml:"allow_write"`
+	ShellPolicy  string      `yaml:"shell_policy"`
+	AllowNetwork string      `yaml:"allow_network"`
+	Shell        ShellConfig `yaml:"shell"`
+}
+
+type ShellConfig struct {
+	MaxContextOutputBytes  int  `yaml:"max_context_output_bytes"`
+	MaxArtifactOutputBytes int  `yaml:"max_artifact_output_bytes"`
+	StopOnOutputLimit      bool `yaml:"stop_on_output_limit"`
+	MaxConcurrency         int  `yaml:"max_concurrency"`
 }
 
 type AuthConfig struct {
@@ -232,7 +240,7 @@ func Default() Config {
 		Defaults: DefaultsConfig{
 			Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single", Theme: "system", Language: "en", ApprovalMode: "prompt",
 		},
-		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt"},
+		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt", Shell: ShellConfig{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2}},
 		Auth:      AuthConfig{Store: "sqlite", ImportCodex: true, ImportGrok: true},
 		Providers: ProvidersConfig{
 			ChatGPT: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute},
@@ -328,6 +336,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Workspace.AllowNetwork != "prompt" && c.Workspace.AllowNetwork != "deny" && c.Workspace.AllowNetwork != "allow" {
 		return fmt.Errorf("workspace.allow_network must be prompt, deny, or allow")
+	}
+	if c.Workspace.Shell.MaxContextOutputBytes <= 0 || c.Workspace.Shell.MaxArtifactOutputBytes < c.Workspace.Shell.MaxContextOutputBytes || c.Workspace.Shell.MaxConcurrency <= 0 {
+		return fmt.Errorf("workspace.shell output limits and max_concurrency must be positive, and artifact limit must not be smaller than context limit")
+	}
+	if !c.Workspace.Shell.StopOnOutputLimit {
+		return fmt.Errorf("workspace.shell.stop_on_output_limit must be true")
 	}
 	for name, provider := range map[string]*ProviderConfig{"chatgpt": &c.Providers.ChatGPT, "grok": &c.Providers.Grok.ProviderConfig} {
 		ttl, err := time.ParseDuration(provider.TTL)

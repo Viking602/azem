@@ -217,6 +217,11 @@ workspace:
   allow_write: true
   shell_policy: prompt     # prompt | deny | allow
   allow_network: prompt    # prompt | deny | allow
+  shell:
+    max_context_output_bytes: 65536
+    max_artifact_output_bytes: 4194304
+    stop_on_output_limit: true
+    max_concurrency: 2
 
 auth:
   store: keyring           # sqlite | keyring | file
