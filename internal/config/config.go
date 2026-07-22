@@ -80,7 +80,23 @@ type AgentsConfig struct {
 	Main       MainAgentConfig  `yaml:"main"`
 	Team       TeamConfig       `yaml:"team"`
 	Compaction ModelRouteConfig `yaml:"compaction" json:"compaction"`
+	Context    ContextConfig    `yaml:"context"`
 	Subagents  SubagentConfig   `yaml:"subagents"`
+}
+
+type ContextConfig struct {
+	Enabled                bool    `yaml:"enabled"`
+	SoftTriggerRatio       float64 `yaml:"soft_trigger_ratio"`
+	HardTriggerRatio       float64 `yaml:"hard_trigger_ratio"`
+	TargetRatio            float64 `yaml:"target_ratio"`
+	BackgroundPrepare      bool    `yaml:"background_prepare"`
+	SafetyMarginRatio      float64 `yaml:"safety_margin_ratio"`
+	ReserveOutputTokens    int     `yaml:"reserve_output_tokens"`
+	ReserveReasoningTokens int     `yaml:"reserve_reasoning_tokens"`
+	MinReclaimTokens       int     `yaml:"min_reclaim_tokens"`
+	MaxSummaryTokens       int     `yaml:"max_summary_tokens"`
+	LargeToolResultTokens  int     `yaml:"large_tool_result_tokens"`
+	HistoryRetrievalTokens int     `yaml:"history_retrieval_tokens"`
 }
 
 // ModelRouteConfig selects a provider model for a specific agent operation.
@@ -225,6 +241,9 @@ func Default() Config {
 		Agents: AgentsConfig{
 			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
 			Team: TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
+			Context: ContextConfig{Enabled: true, SoftTriggerRatio: .68, HardTriggerRatio: .82, TargetRatio: .45, BackgroundPrepare: true, SafetyMarginRatio: .08,
+				ReserveOutputTokens: 16384, ReserveReasoningTokens: 8192, MinReclaimTokens: 16000,
+				MaxSummaryTokens: 4096, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096},
 			Subagents: SubagentConfig{
 				Enabled: true, MaxDepth: 1, MaxConcurrency: 2, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
@@ -336,6 +355,13 @@ func (c *Config) Validate() error {
 	}
 	if err := validateModelRoute("agents.compaction", c.Agents.Compaction); err != nil {
 		return err
+	}
+	contextConfig := c.Agents.Context
+	if contextConfig.TargetRatio <= 0 || contextConfig.SoftTriggerRatio <= contextConfig.TargetRatio || contextConfig.HardTriggerRatio <= contextConfig.SoftTriggerRatio || contextConfig.HardTriggerRatio >= 1 || contextConfig.SafetyMarginRatio < 0 || contextConfig.SafetyMarginRatio >= 1 || contextConfig.HardTriggerRatio+contextConfig.SafetyMarginRatio > 1 {
+		return fmt.Errorf("agents.context ratios must satisfy 0 < target_ratio < soft_trigger_ratio < hard_trigger_ratio < 1 and hard_trigger_ratio+safety_margin_ratio <= 1")
+	}
+	if contextConfig.ReserveOutputTokens < 0 || contextConfig.ReserveReasoningTokens < 0 || contextConfig.MinReclaimTokens < 0 || contextConfig.MaxSummaryTokens <= 0 || contextConfig.LargeToolResultTokens <= 0 || contextConfig.HistoryRetrievalTokens <= 0 {
+		return fmt.Errorf("agents.context token limits must be non-negative and summary/tool limits positive")
 	}
 	if err := c.validateSubagents(); err != nil {
 		return err

@@ -242,6 +242,29 @@ func TestModelRouteValidationAndCompactionLoad(t *testing.T) {
 	}
 }
 
+func TestPhase3ContextDefaultsAndValidation(t *testing.T) {
+	defaults := Default().Agents.Context
+	if !defaults.Enabled || defaults.TargetRatio != .45 || defaults.SoftTriggerRatio != .68 ||
+		defaults.HardTriggerRatio != .82 || !defaults.BackgroundPrepare ||
+		defaults.ReserveOutputTokens != 16384 || defaults.ReserveReasoningTokens != 8192 {
+		t.Fatalf("defaults=%+v", defaults)
+	}
+	for _, mutate := range []func(*ContextConfig){
+		func(c *ContextConfig) { c.TargetRatio = c.HardTriggerRatio },
+		func(c *ContextConfig) { c.SoftTriggerRatio = c.TargetRatio },
+		func(c *ContextConfig) { c.SoftTriggerRatio = c.HardTriggerRatio },
+		func(c *ContextConfig) { c.SafetyMarginRatio = -1 },
+		func(c *ContextConfig) { c.ReserveOutputTokens = -1 },
+		func(c *ContextConfig) { c.MaxSummaryTokens = 0 },
+	} {
+		cfg := Default()
+		mutate(&cfg.Agents.Context)
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("accepted invalid context config %+v", cfg.Agents.Context)
+		}
+	}
+}
+
 func TestSubagentRoutesAllowInheritedProvider(t *testing.T) {
 	for _, route := range []ModelRouteConfig{{Model: "child"}, {Reasoning: "high"}, {Model: "child", Reasoning: "high"}} {
 		cfg := Default()

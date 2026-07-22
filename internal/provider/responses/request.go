@@ -31,12 +31,14 @@ const (
 )
 
 type UsageDetails struct {
-	InputTokens      int
-	CachedTokens     int
-	CacheWriteTokens int
-	OutputTokens     int
-	ReasoningTokens  int
-	TotalTokens      int
+	ProviderRequestID string
+	InputTokens       int
+	CachedTokens      int
+	CacheReported     bool
+	CacheWriteTokens  int
+	OutputTokens      int
+	ReasoningTokens   int
+	TotalTokens       int
 }
 
 type UsageReporter func(UsageDetails)

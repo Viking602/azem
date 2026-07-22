@@ -603,12 +603,27 @@ func (r *subagentRuntime) execute(id string) {
 		spec.ExtraBody[responses.AttachmentRootExtraKey] = parent.Host.attachments.Root
 	}
 	if parent.Host != nil && parent.Host.providers != nil {
-		if reporter := parent.Host.providers.responseUsageReporter(parent.Host, parent.SessionID, parent.ParentRunID, "subagent", profile.Provider, childModel, childDriver.Metadata().Name); reporter != nil {
-			spec.ExtraBody[responses.UsageReporterExtraKey] = reporter
+		if parent.Host.sessions != nil {
+			childDriver = &meteredProviderDriver{inner: childDriver, store: parent.Host.sessions, host: parent.Host,
+				sessionID: parent.SessionID, runID: parent.ParentRunID, kind: "subagent", provider: profile.Provider,
+				model: childModel, transport: childDriver.Metadata().Name}
 		}
 	}
+	compactionResolve := parent.ResolveDriver
+	compactionReport := r.compactionReporter(parent, parent.ParentRunID)
+	if parent.Host != nil && parent.Host.sessions != nil {
+		compactionResolve = func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
+			resolvedModel, window, driver, resolveErr := parent.ResolveDriver(ctx, provider, model, reasoning)
+			if resolveErr == nil {
+				driver = &meteredProviderDriver{inner: driver, store: parent.Host.sessions, host: parent.Host, sessionID: parent.SessionID,
+					runID: parent.ParentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name}
+			}
+			return resolvedModel, window, driver, resolveErr
+		}
+		compactionReport = nil
+	}
 	contextManager := subagentTurnContext{instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
-		summarize: lazyCompactionSummarizer(parent.ResolveDriver, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, r.compactionReporter(parent, parent.ParentRunID))}
+		summarize: lazyCompactionSummarizer(compactionResolve, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, compactionReport)}
 	if parent.Host != nil {
 		contextManager.compactHooks = parent.Host.autoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
 	}

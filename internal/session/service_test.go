@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -10,6 +11,174 @@ import (
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/go-hydaelyn/message"
 )
+
+func TestPhase3ArtifactRoundTripAfterReopenAndDeduplicates(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "artifacts.db")
+	store, err := sqlitestore.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{0, 1, 2, 255}, 512*1024)
+	first, err := service.PutArtifact(ctx, "session", "run", "tool_result", payload, "preview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.PutArtifact(ctx, "session", "other-run", "tool_result", payload, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("dedup ids %q != %q", first.ID, second.ID)
+	}
+	if err := store.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store, err = sqlitestore.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	loaded, err := NewService(store.DB()).LoadArtifact(ctx, "session", first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(loaded.Payload, payload) {
+		t.Fatalf("round trip bytes=%d want=%d", len(loaded.Payload), len(payload))
+	}
+	var count int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM context_artifacts`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+func TestPhase6SearchHistoryIsolationSafetyBudgetsAndProvenance(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "history.db")
+	store, err := sqlitestore.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	for _, id := range []string{"one", "two"} {
+		if _, err := service.Ensure(ctx, Session{ID: id, Title: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sequence, err := service.AppendBlock(ctx, "one", Block{Kind: "user", Content: "needle canonical transcript"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "one", Block{Kind: "agent", Content: "needle mutable agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "one", Block{Kind: "assistant", RunID: "cancelled", Content: "needle partial answer", State: "cancelled"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "two", Block{Kind: "user", Content: "needle other session"}); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := service.PutArtifact(ctx, "one", "run", "tool_result", bytes.Repeat([]byte("SECRET"), 1000), "needle artifact preview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := service.SearchHistory(ctx, "one", `needle " OR ( ) : * -`, 1000, 4096, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("search results=%+v", items)
+	}
+	wantSources := map[string]bool{fmt.Sprintf("sequence:%d", sequence): false, "artifact:" + artifact.ID: false}
+	for _, item := range items {
+		if item.SessionID != "one" {
+			t.Fatalf("cross-session result: %+v", item)
+		}
+		if _, ok := wantSources[item.SourceID]; !ok {
+			t.Fatalf("fabricated or mutable source: %+v", item)
+		}
+		wantSources[item.SourceID] = true
+		if strings.Contains(item.Preview, "SECRET") {
+			t.Fatal("artifact payload leaked into search result")
+		}
+	}
+	for source, found := range wantSources {
+		if !found {
+			t.Fatalf("missing source %s", source)
+		}
+	}
+	bounded, err := service.SearchHistory(ctx, "one", "needle", 1000, 1, 3)
+	if err != nil || len(bounded) > 20 {
+		t.Fatalf("bounded search len=%d err=%v", len(bounded), err)
+	}
+	bytesUsed := 0
+	for _, item := range bounded {
+		bytesUsed += len(item.Content) + len(item.Preview)
+	}
+	if bytesUsed > 3 {
+		t.Fatalf("byte budget exceeded: %d", bytesUsed)
+	}
+	if empty, err := service.SearchHistory(ctx, "one", `!!! ""`, 8, 10, 40); err != nil || len(empty) != 0 {
+		t.Fatalf("meaningless search=%+v err=%v", empty, err)
+	}
+	if err := store.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store, err = sqlitestore.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	if reopened, err := NewService(store.DB()).SearchHistory(ctx, "one", "needle", 8, 4096, 4096); err != nil || len(reopened) != 2 {
+		t.Fatalf("reopened search=%+v err=%v", reopened, err)
+	}
+}
+
+func TestPhase6HistoryTriggersUpdateDeleteAndSessionCascade(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "triggers.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := service.AppendBlock(ctx, "s", Block{Kind: "assistant", RunID: "r", Content: "firstterm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "s", Block{Kind: "assistant", RunID: "r", Content: " secondterm"}); err != nil {
+		t.Fatal(err)
+	}
+	if old, _ := service.SearchHistory(ctx, "s", "firstterm", 8, 100, 400); len(old) != 1 {
+		t.Fatalf("coalesced update lost old content: %+v", old)
+	}
+	if updated, _ := service.SearchHistory(ctx, "s", "secondterm", 8, 100, 400); len(updated) != 1 || updated[0].SourceID != fmt.Sprintf("sequence:%d", sequence) {
+		t.Fatalf("coalesced update not indexed: %+v", updated)
+	}
+	if _, err := service.PutArtifact(ctx, "s", "r", "tool", []byte("payload"), "artifactterm"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `DELETE FROM session_blocks WHERE session_id='s' AND sequence=?`, sequence); err != nil {
+		t.Fatal(err)
+	}
+	if found, _ := service.SearchHistory(ctx, "s", "secondterm", 8, 100, 400); len(found) != 0 {
+		t.Fatalf("deleted block remained indexed: %+v", found)
+	}
+	if _, err := store.DB().ExecContext(ctx, `DELETE FROM sessions WHERE id='s'`); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM history_fts WHERE session_id='s'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("cascade left %d FTS rows: %v", count, err)
+	}
+}
 
 func TestCompactWithSummaryPersistsMatchingModelHistory(t *testing.T) {
 	ctx := context.Background()
@@ -27,7 +196,7 @@ func TestCompactWithSummaryPersistsMatchingModelHistory(t *testing.T) {
 		if index%2 == 1 {
 			kind = "assistant"
 		}
-		if err := service.AppendBlock(ctx, "session", Block{Kind: kind, Content: fmt.Sprintf("message %d", index)}); err != nil {
+		if _, err := service.AppendBlock(ctx, "session", Block{Kind: kind, Content: fmt.Sprintf("message %d", index)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -40,23 +209,34 @@ func TestCompactWithSummaryPersistsMatchingModelHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var rowsBefore string
+	if err := store.DB().QueryRowContext(ctx, `SELECT json_group_array(json_object('sequence',sequence,'data',hex(data))) FROM session_blocks WHERE session_id='session' ORDER BY sequence`).Scan(&rowsBefore); err != nil {
+		t.Fatal(err)
+	}
 	projection, err := service.CompactWithSummary(ctx, "session", CompactionPlan{
 		Summary: summary, ModelHistory: history, ExpectedUpdatedAt: before.UpdatedAt, TailStart: 4,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.Blocks) != 5 || projection.Blocks[0].Content != summary {
+	if len(projection.Blocks) != 8 || projection.Blocks[0].Content != "message 0" {
 		t.Fatalf("compacted blocks = %#v", projection.Blocks)
 	}
 	if projection.ModelHistory.ProviderID != "chatgpt" || len(projection.ModelHistory.Messages) != 2 {
 		t.Fatalf("compacted model history = %#v", projection.ModelHistory)
 	}
+	var rowsAfter string
+	if err := store.DB().QueryRowContext(ctx, `SELECT json_group_array(json_object('sequence',sequence,'data',hex(data))) FROM session_blocks WHERE session_id='session' ORDER BY sequence`).Scan(&rowsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if rowsAfter != rowsBefore {
+		t.Fatalf("manual compaction rewrote session blocks\nbefore=%s\nafter=%s", rowsBefore, rowsAfter)
+	}
 	reloaded, err := service.LoadProjection(ctx, "session")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.Blocks[0].Content != summary || reloaded.ModelHistory.InstructionFingerprint != "fingerprint" {
+	if reloaded.Blocks[0].Content != "message 0" || reloaded.ModelHistory.InstructionFingerprint != "fingerprint" {
 		t.Fatalf("reloaded compaction = %#v %#v", reloaded.Blocks, reloaded.ModelHistory)
 	}
 }
@@ -72,7 +252,7 @@ func TestCompleteTurnPersistsModelHistoryWithoutEmptyAssistantBlock(t *testing.T
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "use the tool"}); err != nil {
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "use the tool"}); err != nil {
 		t.Fatal(err)
 	}
 	history := ModelHistory{ProviderID: "chatgpt", ModelID: "model", Messages: []message.Message{
@@ -102,7 +282,7 @@ func TestUpsertAgentBlockPreservesLifecyclePosition(t *testing.T) {
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model", Reasoning: "high", AgentMode: "single"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "parent", Content: "delegate"}); err != nil {
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "parent", Content: "delegate"}); err != nil {
 		t.Fatal(err)
 	}
 	queued := Block{
@@ -157,7 +337,7 @@ func TestAgentBlockUpsertAfterCompactionDoesNotDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	for index := range 6 {
-		if err := service.AppendBlock(ctx, "session", Block{
+		if _, err := service.AppendBlock(ctx, "session", Block{
 			Kind: "assistant", RunID: fmt.Sprintf("run-%d", index), Content: fmt.Sprintf("message %d", index),
 		}); err != nil {
 			t.Fatal(err)
@@ -217,7 +397,7 @@ func TestCompleteTurnStoresAssistantBlockAndModelHistoryTogether(t *testing.T) {
 	if projection.ModelHistory.ProviderID != "" || len(projection.ModelHistory.Messages) != 0 {
 		t.Fatalf("new projection history = %#v", projection.ModelHistory)
 	}
-	if err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "request"}); err != nil {
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "request"}); err != nil {
 		t.Fatal(err)
 	}
 	history := ModelHistory{
@@ -258,7 +438,7 @@ func TestCompactWithSummaryRejectsStaleProjectionWithoutMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for index := 0; index < 6; index++ {
-		if err := service.AppendBlock(ctx, "session", Block{Kind: "user", Content: fmt.Sprintf("message %d", index)}); err != nil {
+		if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", Content: fmt.Sprintf("message %d", index)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -266,7 +446,7 @@ func TestCompactWithSummaryRejectsStaleProjectionWithoutMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AppendBlock(ctx, "session", Block{Kind: "assistant", Content: "concurrent update"}); err != nil {
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "assistant", Content: "concurrent update"}); err != nil {
 		t.Fatal(err)
 	}
 	_, err = service.CompactWithSummary(ctx, "session", CompactionPlan{
@@ -300,7 +480,7 @@ func TestSessionBlocksUseRowsWithoutRewritingProjectionJSON(t *testing.T) {
 		{Kind: "assistant", RunID: "run-1", Content: "first "},
 		{Kind: "assistant", RunID: "run-1", Content: "second"},
 	} {
-		if err := service.AppendBlock(ctx, "session", block); err != nil {
+		if _, err := service.AppendBlock(ctx, "session", block); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -343,21 +523,21 @@ func TestBlockMutationsInvalidateExactProviderHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.ModelHistory.Messages) != 0 {
-		t.Fatalf("agent mutation retained stale provider history = %#v", projection.ModelHistory)
+	if len(projection.ModelHistory.Messages) != 1 {
+		t.Fatalf("agent mutation invalidated provider history = %#v", projection.ModelHistory)
 	}
 	if err := service.CompleteTurn(ctx, "session", Block{Kind: "assistant", RunID: "run-2", Content: "next"}, history); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-3", Content: "failed turn"}); err != nil {
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-3", Content: "failed turn"}); err != nil {
 		t.Fatal(err)
 	}
 	projection, err = service.LoadProjection(ctx, "session")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.ModelHistory.Messages) != 0 {
-		t.Fatalf("append retained stale provider history = %#v", projection.ModelHistory)
+	if len(projection.ModelHistory.Messages) != 1 {
+		t.Fatalf("append invalidated provider history = %#v", projection.ModelHistory)
 	}
 }
 
@@ -372,7 +552,7 @@ func TestCompleteTurnRollsBackBlockAndModelHistoryOnSessionUpdateFailure(t *test
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "request"}); err != nil {
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "request"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.DB().ExecContext(ctx, `CREATE TRIGGER fail_session_update

@@ -236,6 +236,20 @@ agents:
     provider: ""
     model: ""
     reasoning: ""
+  context:
+    enabled: true
+    background_prepare: true
+    soft_trigger_ratio: 0.68
+    hard_trigger_ratio: 0.82
+    target_ratio: 0.45
+    safety_margin_ratio: 0.08
+    reserve_output_tokens: 16384
+    reserve_reasoning_tokens: 8192
+    min_reclaim_tokens: 16000
+    max_summary_tokens: 4096
+    large_tool_result_tokens: 12000
+    history_retrieval_tokens: 4096 # private, session-scoped SQLite FTS evidence budget
+    preserve_full_history: true
   subagents:
     enabled: true
     max_depth: 1

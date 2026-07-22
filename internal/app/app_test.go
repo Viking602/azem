@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -68,13 +69,16 @@ func TestMainOccupancyClearPreservesNewerTrackedUsage(t *testing.T) {
 	service := NewService(ctx, config.Default())
 	service.AttachDurable(sessions, nil)
 	service.recordSessionUsage("session-clear", map[string]string{
+		"inputTokens": "80", "cachedInputTokens": "40", "requestKind": "main", "cacheStatus": "reported",
+	})
+	service.recordSessionUsage("session-clear", map[string]string{
 		"inputTokens": "10", "uncachedInputTokens": "8", "requestKind": "compaction", "aggregateOnly": "true", "cacheStatus": "reported",
 	})
 	cleared, err := service.clearMainUsageOccupancy(ctx, "session-clear", session.Usage{CompactionInput: 1, InputTokens: 99})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cleared.CompactionInput != 10 || cleared.InputTokens != 0 {
+	if cleared.CompactionInput != 10 || cleared.InputTokens != 0 || cleared.MainCacheInput != 0 || cleared.MainCachedInput != 0 || cleared.MainCacheReported {
 		t.Fatalf("cleared usage overwrote newer telemetry: %#v", cleared)
 	}
 	projection, err := sessions.LoadProjection(ctx, "session-clear")
@@ -133,7 +137,7 @@ func TestHistoricalEvidenceIsBoundedStructuredDataAndExcludedFromTeamPrompt(t *t
 	}
 	service := NewService(ctx, config.Default())
 	service.AttachMemory(memoryService, recapService)
-	packed, recalled := service.loadHistoricalContext(ctx, "session-1", "policy")
+	packed, recalled := service.loadHistoricalContext(ctx, "session-1", "policy", nil)
 	finalSize := len([]rune(historicalEvidencePolicy + "\n<historical-evidence-json>\n" + packed + "\n</historical-evidence-json>"))
 	if finalSize > 6000 {
 		t.Fatalf("historical evidence policy/budget = %d runes: %q", len([]rune(packed)), packed)
@@ -151,7 +155,7 @@ func TestHistoricalEvidenceIsBoundedStructuredDataAndExcludedFromTeamPrompt(t *t
 	}); err != nil {
 		t.Fatal(err)
 	}
-	oversized, _ := service.loadHistoricalContext(ctx, "session-1", "no-match")
+	oversized, _ := service.loadHistoricalContext(ctx, "session-1", "no-match", nil)
 	if len([]rune(historicalEvidencePolicy+oversized)) > 6000 {
 		t.Fatalf("escaped recap exceeded historical budget: %d runes", len([]rune(oversized)))
 	}
@@ -172,7 +176,7 @@ func TestTurnMemoryRecallEmitsCountWithoutContent(t *testing.T) {
 	}
 	service := NewService(ctx, config.Default())
 	service.AttachMemory(memoryService, nil)
-	data := service.loadTurnHistoricalContext(ctx, "session-1", "focused")
+	data := service.loadTurnHistoricalContext(ctx, "session-1", "focused", nil)
 	if !strings.Contains(data, "prefer focused changes") {
 		t.Fatalf("recalled context missing memory: %q", data)
 	}
@@ -185,6 +189,37 @@ func TestTurnMemoryRecallEmitsCountWithoutContent(t *testing.T) {
 	}
 	if event.Text != "" || len(event.Memories) != 0 {
 		t.Fatalf("recall event leaked memory content: %#v", event)
+	}
+}
+
+func TestPhase6HistoricalSearchFiltersLiveTailAndSurvivesFailure(t *testing.T) {
+	ctx := context.Background()
+	service := NewService(ctx, config.Default())
+	boundary := int64(4)
+	service.historySearch = func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error) {
+		return []session.HistoryRecord{
+			{SessionID: "s", SourceType: "sequence", SourceID: "sequence:3", Content: "old compacted needle"},
+			{SessionID: "s", SourceType: "sequence", SourceID: "sequence:5", Content: "live tail needle"},
+			{SessionID: "s", SourceType: "artifact", SourceID: "artifact:a", Preview: "artifact needle"},
+		}, nil
+	}
+	data := service.loadTurnHistoricalContext(ctx, "s", "needle", &boundary)
+	if !strings.Contains(data, "sequence:3") || !strings.Contains(data, "artifact:a") || strings.Contains(data, "sequence:5") {
+		t.Fatalf("filtered evidence=%s", data)
+	}
+	withoutCheckpoint := service.loadTurnHistoricalContext(ctx, "s", "needle", nil)
+	if strings.Contains(withoutCheckpoint, "sequence:") || !strings.Contains(withoutCheckpoint, "artifact:a") {
+		t.Fatalf("no-checkpoint evidence=%s", withoutCheckpoint)
+	}
+	service.historySearch = func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error) {
+		return nil, errors.New("fts unavailable")
+	}
+	if got := service.loadTurnHistoricalContext(ctx, "s", "needle", &boundary); got != "" {
+		t.Fatalf("failed retrieval injected data: %q", got)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil || event.State != "warning" || !strings.Contains(event.Data["error"], "fts unavailable") {
+		t.Fatalf("retrieval diagnostic=%+v err=%v", event, err)
 	}
 }
 

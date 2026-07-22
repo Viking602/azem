@@ -502,6 +502,10 @@ func (m *AppModel) updateUsage(data map[string]string) {
 	if data == nil {
 		return
 	}
+	if data["factSnapshot"] == "true" && data["usageSnapshot"] != "" {
+		m.restoreUsage(data["usageSnapshot"])
+		return
+	}
 	requestKind := data["requestKind"]
 	inputTokens, inputErr := strconv.Atoi(data["inputTokens"])
 	if inputErr == nil && data["inputTokens"] != "" {
@@ -624,6 +628,24 @@ func (m *AppModel) restoreUsage(raw string) {
 	if usage.ContextLimit > 0 {
 		m.usage.ContextLimit = usage.ContextLimit
 	}
+	m.usage.CurrentCacheEpoch = usage.CurrentCacheEpoch
+	m.usage.CurrentEpochMainInput = usage.CurrentEpochMainInput
+	m.usage.CurrentEpochMainReportedInput = usage.CurrentEpochMainReportedInput
+	m.usage.CurrentEpochMainCached = usage.CurrentEpochMainCached
+	m.usage.CurrentEpochMainRequests = usage.CurrentEpochMainRequests
+	m.usage.CurrentEpochMainReportedRequests = usage.CurrentEpochMainReportedRequests
+	m.usage.LifetimeMainInput = usage.LifetimeMainInput
+	m.usage.LifetimeMainReportedInput = usage.LifetimeMainReportedInput
+	m.usage.LifetimeMainCached = usage.LifetimeMainCached
+	m.usage.LifetimeMainOutput = usage.LifetimeMainOutput
+	m.usage.LifetimeMainRequests = usage.LifetimeMainRequests
+	m.usage.CompactionReportedInput = usage.CompactionReportedInput
+	m.usage.CompactionRequests = usage.CompactionRequests
+	m.usage.CompactionReportedRequests = usage.CompactionReportedRequests
+	m.usage.CompactionCacheReported = usage.CompactionCacheReported
+	m.usage.TeamRequests = usage.TeamRequests
+	m.usage.SubagentInput = usage.SubagentInput
+	m.usage.SubagentRequests = usage.SubagentRequests
 	m.usage.InputTokens = usage.InputTokens
 	m.usage.OutputTokens = usage.OutputTokens
 	m.usage.CacheInputTokens = usage.CacheInputTokens

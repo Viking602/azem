@@ -66,6 +66,7 @@ type streamItem struct {
 }
 
 type completedResponse struct {
+	ID     string          `json:"id"`
 	Output json.RawMessage `json:"output"`
 	Status string          `json:"status"`
 	Usage  struct {
@@ -73,8 +74,8 @@ type completedResponse struct {
 		OutputTokens       int `json:"output_tokens"`
 		TotalTokens        int `json:"total_tokens"`
 		InputTokensDetails struct {
-			CachedTokens     int `json:"cached_tokens"`
-			CacheWriteTokens int `json:"cache_write_tokens"`
+			CachedTokens     *int `json:"cached_tokens"`
+			CacheWriteTokens int  `json:"cache_write_tokens"`
 		} `json:"input_tokens_details"`
 		OutputTokensDetails struct {
 			ReasoningTokens int `json:"reasoning_tokens"`
@@ -227,13 +228,18 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 		if s.toolUse {
 			reason = hyprovider.StopReasonToolUse
 		}
+		cachedTokens := 0
+		cacheReported := response.Usage.InputTokensDetails.CachedTokens != nil
+		if cacheReported {
+			cachedTokens = *response.Usage.InputTokensDetails.CachedTokens
+		}
 		usage := hyprovider.Usage{
-			InputTokens: response.Usage.InputTokens, CachedInputTokens: response.Usage.InputTokensDetails.CachedTokens,
+			InputTokens: response.Usage.InputTokens, CachedInputTokens: cachedTokens,
 			OutputTokens: response.Usage.OutputTokens, TotalTokens: response.Usage.TotalTokens,
 		}
 		if s.reportUsage != nil {
 			s.reportUsage(UsageDetails{
-				InputTokens: response.Usage.InputTokens, CachedTokens: response.Usage.InputTokensDetails.CachedTokens,
+				ProviderRequestID: response.ID, InputTokens: response.Usage.InputTokens, CachedTokens: cachedTokens, CacheReported: cacheReported,
 				CacheWriteTokens: response.Usage.InputTokensDetails.CacheWriteTokens,
 				OutputTokens:     response.Usage.OutputTokens, ReasoningTokens: response.Usage.OutputTokensDetails.ReasoningTokens,
 				TotalTokens: response.Usage.TotalTokens,

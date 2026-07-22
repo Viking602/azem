@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,9 +40,171 @@ import (
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
+func TestPhase3ArtifactToolRoundTripsBinaryPayloadAsBase64(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "binary-artifact.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte{0xff, 0x00, 0xfe, 'a'}
+	artifact, err := sessions.PutArtifact(ctx, "s", "r", "tool_result", payload, "binary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments, _ := json.Marshal(map[string]string{"artifact_id": artifact.ID})
+	result, err := (&contextArtifactDriver{sessionID: "s", store: sessions}).Execute(ctx, tool.Call{ID: "call", Name: contextReadArtifactTool, Arguments: arguments}, nil)
+	if err != nil || result.IsError {
+		t.Fatalf("artifact read=%+v err=%v", result, err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(result.Content)
+	if err != nil || !bytes.Equal(decoded, payload) || !strings.Contains(string(result.Structured), `"encoding":"base64"`) {
+		t.Fatalf("binary artifact content=%q structured=%s err=%v", result.Content, result.Structured, err)
+	}
+}
+
+func TestLegacyCompactResolvesSummarizerLazily(t *testing.T) {
+	history := []message.Message{message.NewText(message.RoleSystem, "rules")}
+	for index := 0; index < 10; index++ {
+		history = append(history, message.NewText(message.RoleUser, fmt.Sprintf("question %d", index)), message.NewText(message.RoleAssistant, "answer"))
+	}
+	activated := ""
+	manager := turnContext{staticIdentity: "static", activateCompaction: func(_ context.Context, identity string) error {
+		activated = identity
+		return nil
+	}, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
+		return func(context.Context, string) (string, error) { return "resolved summary", nil }, 1000, nil
+	}}
+	result, err := manager.Compact(context.Background(), history)
+	if err != nil || len(result) >= len(history) || activated != activeCacheIdentity("static", compactionSummaryHash(result)) {
+		t.Fatalf("legacy compact messages=%d/%d identity=%q err=%v", len(result), len(history), activated, err)
+	}
+}
+
+func TestLazyCompactionResolverRetriesAfterCancellation(t *testing.T) {
+	calls := 0
+	resolver := lazyCompactionResolver(func(ctx context.Context, _, _, _ string) (string, int, hyprovider.Driver, error) {
+		calls++
+		if calls == 1 {
+			return "", 0, nil, context.Canceled
+		}
+		return "model", 32000, &compactionTestDriver{}, nil
+	}, config.ModelRouteConfig{}, "chatgpt", "model", "low", "cache", nil, nil)
+	if _, _, err := resolver(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first resolution error=%v", err)
+	}
+	if summarizer, budget, err := resolver(context.Background()); err != nil || summarizer == nil || budget <= 0 || calls != 2 {
+		t.Fatalf("retry summarizer=%v budget=%d calls=%d err=%v", summarizer != nil, budget, calls, err)
+	}
+}
+
 type compactionTestDriver struct {
 	requests []hyprovider.Request
 	streams  [][]hyprovider.Event
+}
+
+func TestPhase3BoundedCompactionUsesResolvedWindowAndPreservesTurns(t *testing.T) {
+	var inputs []string
+	resolveCalls := 0
+	var resolved sync.Once
+	manager := turnContext{structuredSummary: true, compactTargetTokens: 250, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
+		resolved.Do(func() { resolveCalls++ })
+		return func(_ context.Context, input string) (string, error) {
+			inputs = append(inputs, input)
+			return `{"version":2,"objective":"continue","source_references":[]}`, nil
+		}, 350, nil
+	}}
+	history := []message.Message{message.NewText(message.RoleSystem, "rules")}
+	for i := range 8 {
+		history = append(history, message.NewText(message.RoleUser, fmt.Sprintf("turn-%d %s", i, strings.Repeat("u", 220))))
+		history = append(history, message.NewText(message.RoleAssistant, fmt.Sprintf("answer-%d %s", i, strings.Repeat("a", 220))))
+	}
+	history = append(history, message.NewText(message.RoleUser, "latest request"))
+	if unchanged, err := manager.CompactTo(context.Background(), history, estimateContextTokens(history)); err != nil || resolveCalls != 0 || !reflect.DeepEqual(unchanged, history) {
+		t.Fatalf("subthreshold resolved or changed: calls=%d err=%v", resolveCalls, err)
+	}
+	got, err := manager.CompactTo(context.Background(), history, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolveCalls != 1 || len(inputs) < 3 {
+		t.Fatalf("resolve=%d bounded calls=%d", resolveCalls, len(inputs))
+	}
+	for i, input := range inputs {
+		if len(input) > contextTokenBytes(350) {
+			t.Fatalf("compactor input %d = %d bytes, budget=%d", i, len(input), contextTokenBytes(350))
+		}
+		for turn := range 8 {
+			hasUser := strings.Contains(input, fmt.Sprintf("turn-%d ", turn))
+			hasAnswer := strings.Contains(input, fmt.Sprintf("answer-%d ", turn))
+			if hasUser != hasAnswer {
+				t.Fatalf("input %d split complete turn %d", i, turn)
+			}
+		}
+	}
+	if estimateContextTokens(got) > 250 {
+		t.Fatalf("compacted tokens=%d target=250", estimateContextTokens(got))
+	}
+	before := len(inputs)
+	if _, err := manager.CompactTo(context.Background(), got, 500); err != nil || len(inputs) != before {
+		t.Fatalf("repeat compact calls=%d want=%d err=%v", len(inputs), before, err)
+	}
+}
+
+func TestPhase3IrreducibleCompleteTurnReturnsExplicitError(t *testing.T) {
+	manager := turnContext{structuredSummary: true, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
+		return func(context.Context, string) (string, error) { return `{"version":2,"objective":"x"}`, nil }, 100, nil
+	}}
+	_, err := manager.summarizeBounded(context.Background(), nil, []message.Message{
+		message.NewText(message.RoleUser, strings.Repeat("x", 500)), message.NewText(message.RoleAssistant, "answer"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "complete turn") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestPhase3MapFailureLeavesHistoryCheckpointUnchanged(t *testing.T) {
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "rules"),
+		message.NewText(message.RoleUser, strings.Repeat("old", 200)),
+		message.NewText(message.RoleAssistant, "answer"),
+		message.NewText(message.RoleUser, "latest"),
+	}
+	manager := turnContext{structuredSummary: true, compactTargetTokens: 20, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
+		return func(context.Context, string) (string, error) { return "", errors.New("map failed") }, 1000, nil
+	}}
+	got, err := manager.CompactTo(context.Background(), history, 50)
+	if err == nil || !strings.Contains(err.Error(), "map failed") {
+		t.Fatalf("error=%v", err)
+	}
+	if !reflect.DeepEqual(got, history) {
+		t.Fatalf("failed compaction mutated checkpoint: %#v", got)
+	}
+}
+
+func TestPhase3DurableProvenanceUsesSequence(t *testing.T) {
+	value, ok := blockMessage(session.Block{Sequence: 42, Kind: "user", Content: "source"})
+	if !ok || messageSourceReference(value, 0, 0) != "sequence:42" {
+		t.Fatalf("message=%#v", value)
+	}
+	if _, err := normalizeSummaryV2(`{"version":2,"objective":"x","source_references":["message:0"]}`, nil); err == nil {
+		t.Fatal("accepted ambiguous per-chunk message provenance")
+	}
+}
+
+func TestPhase3ContextBudgetUsesConfiguredReservesOnce(t *testing.T) {
+	cfg := config.ContextConfig{HardTriggerRatio: .8, TargetRatio: .5, SafetyMarginRatio: .1, ReserveOutputTokens: 1000, ReserveReasoningTokens: 500}
+	got, err := calculateContextBudget("chatgpt", "model", 100_000, 300, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Usable != 80_008 || got.HardTrigger != 64_006 || got.Target != 40_004 {
+		t.Fatalf("budget=%+v", got)
+	}
 }
 
 func (d *compactionTestDriver) Metadata() hyprovider.Metadata {
@@ -318,8 +482,8 @@ func TestTurnContextInjectsHistoricalEvidenceAsPrivateSystemContext(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 6 || messages[2].Role != message.RoleSystem || messages[2].Visibility != message.VisibilityPrivate ||
-		!strings.Contains(messages[2].Text, "untrusted JSON data") || messages[4].Role != message.RoleUser ||
+	if len(messages) != 6 || messages[3].Role != message.RoleSystem || messages[3].Visibility != message.VisibilityPrivate ||
+		!strings.Contains(messages[3].Text, "untrusted JSON data") || messages[4].Role != message.RoleUser ||
 		messages[4].Visibility != message.VisibilityPrivate || !strings.Contains(messages[4].Text, `"Content":"use sqlite"`) ||
 		messages[5].Text != "current request" {
 		t.Fatalf("historical context ordering/visibility = %+v", messages)
@@ -914,7 +1078,7 @@ func TestManualCompactWaitsForConfiguredModelAndPersistsSummary(t *testing.T) {
 		if index%2 == 1 {
 			kind = "assistant"
 		}
-		if err := sessions.AppendBlock(ctx, "session-1", session.Block{Kind: kind, Content: fmt.Sprintf("message %d", index)}); err != nil {
+		if _, err := sessions.AppendBlock(ctx, "session-1", session.Block{Kind: kind, Content: fmt.Sprintf("message %d", index)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -956,7 +1120,7 @@ func TestManualCompactWaitsForConfiguredModelAndPersistsSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.Blocks) != 5 || projection.Blocks[0].State != "compacted" || !strings.Contains(projection.Blocks[0].Content, "preserve the task") {
+	if len(projection.Blocks) != 8 || projection.ModelHistory.SummaryHash == "" || projection.ModelHistory.CoveredThroughSequence == nil {
 		t.Fatalf("persisted compaction = %#v", projection.Blocks)
 	}
 	if projection.Usage.CompactionInput != 10 || projection.Usage.CompactionOutput != 4 || projection.Usage.InputTokens != 0 || projection.Usage.OutputTokens != 0 {
@@ -975,6 +1139,276 @@ func TestTurnContextCompactToSummaryFailurePreservesHistory(t *testing.T) {
 	got, err := manager.CompactTo(context.Background(), history, 100)
 	if err == nil || !strings.Contains(err.Error(), "offline") || !reflect.DeepEqual(got, history) {
 		t.Fatalf("got=%#v err=%v", got, err)
+	}
+}
+
+func TestTurnContextCompactToHooksOnlyBracketRequiredCompaction(t *testing.T) {
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "rules"),
+		message.NewText(message.RoleUser, "old"),
+		message.NewText(message.RoleAssistant, strings.Repeat("work ", 300)),
+		message.NewText(message.RoleUser, "latest"),
+	}
+	summaries, pre, post := 0, 0, 0
+	manager := turnContext{
+		summarize: func(context.Context, string) (string, error) {
+			summaries++
+			return "summary", nil
+		},
+		compactHooks: func(_ context.Context, _ []message.Message, compacted []message.Message, _ error) error {
+			if compacted == nil {
+				pre++
+			} else {
+				post++
+			}
+			return nil
+		},
+	}
+	for range 100 {
+		if got, err := manager.CompactTo(context.Background(), history, estimateContextTokens(history)); err != nil || !reflect.DeepEqual(got, history) {
+			t.Fatalf("subthreshold compaction changed history: got=%#v err=%v", got, err)
+		}
+	}
+	if summaries != 0 || pre != 0 || post != 0 {
+		t.Fatalf("subthreshold calls: summarize=%d pre=%d post=%d", summaries, pre, post)
+	}
+	if _, err := manager.CompactTo(context.Background(), history, 100); err != nil {
+		t.Fatal(err)
+	}
+	if summaries != 1 || pre != 1 || post != 1 {
+		t.Fatalf("changed call: summarize=%d pre=%d post=%d", summaries, pre, post)
+	}
+}
+
+func phase5History() []message.Message {
+	return []message.Message{
+		message.NewText(message.RoleSystem, "rules"),
+		message.NewText(message.RoleUser, strings.Repeat("old request ", 120)),
+		message.NewText(message.RoleAssistant, strings.Repeat("old answer ", 120)),
+		message.NewText(message.RoleUser, "latest request"),
+	}
+}
+
+func TestPhase5BelowSoftDoesNotPrepareOrHook(t *testing.T) {
+	history := phase5History()
+	var calls, hooks atomic.Int32
+	manager := turnContext{
+		softTriggerTokens: estimateContextTokens(history) + 1, backgroundPrepare: true,
+		compactTargetTokens: 100, coordinator: &compactionCoordinator{},
+		summarize:    func(context.Context, string) (string, error) { calls.Add(1); return "summary", nil },
+		compactHooks: func(context.Context, []message.Message, []message.Message, error) error { hooks.Add(1); return nil },
+	}
+	for range 100 {
+		got, err := manager.CompactTo(context.Background(), history, estimateContextTokens(history)+100)
+		if err != nil || !reflect.DeepEqual(got, history) {
+			t.Fatalf("below-soft result changed: err=%v", err)
+		}
+	}
+	if calls.Load() != 0 || hooks.Load() != 0 {
+		t.Fatalf("calls=%d hooks=%d", calls.Load(), hooks.Load())
+	}
+}
+
+func TestPhase5SoftPrepareReturnsImmediatelyAndStartsOnce(t *testing.T) {
+	history := phase5History()
+	tokens := estimateContextTokens(history)
+	started, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	manager := turnContext{
+		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		coordinator: &compactionCoordinator{}, summarize: func(ctx context.Context, _ string) (string, error) {
+			if calls.Add(1) == 1 {
+				close(started)
+			}
+			select {
+			case <-release:
+				return "summary", nil
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		},
+	}
+	if got, err := manager.CompactTo(context.Background(), history, tokens+100); err != nil || !reflect.DeepEqual(got, history) {
+		t.Fatalf("soft result changed: err=%v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not start")
+	}
+	for range 20 {
+		if _, err := manager.CompactTo(context.Background(), history, tokens+100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("workers=%d", calls.Load())
+	}
+	close(release)
+	select {
+	case <-manager.coordinator.done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestPhase5HardTriggerUsesPreparedResultAndActivatesOnce(t *testing.T) {
+	history := phase5History()
+	tokens := estimateContextTokens(history)
+	release := make(chan struct{})
+	var calls, pre, post, activations atomic.Int32
+	manager := turnContext{
+		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		coordinator: &compactionCoordinator{},
+		summarize: func(context.Context, string) (string, error) {
+			calls.Add(1)
+			<-release
+			return "prepared summary", nil
+		},
+		compactHooks: func(_ context.Context, _ []message.Message, compacted []message.Message, _ error) error {
+			if compacted == nil {
+				pre.Add(1)
+			} else {
+				post.Add(1)
+			}
+			return nil
+		},
+		activateCompaction: func(context.Context, string) error { activations.Add(1); return nil },
+	}
+	if got, err := manager.CompactTo(context.Background(), history, tokens+100); err != nil || !reflect.DeepEqual(got, history) {
+		t.Fatalf("soft result changed: err=%v", err)
+	}
+	close(release)
+	select {
+	case <-manager.coordinator.done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not finish")
+	}
+	backgroundCalls := calls.Load()
+	got, err := manager.CompactTo(context.Background(), history, tokens-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if estimateContextTokens(got) > 100 || calls.Load() != backgroundCalls {
+		t.Fatalf("prepared result tokens=%d calls=%d background=%d", estimateContextTokens(got), calls.Load(), backgroundCalls)
+	}
+	if pre.Load() != 1 || post.Load() != 1 || activations.Load() != 1 {
+		t.Fatalf("pre=%d post=%d activations=%d", pre.Load(), post.Load(), activations.Load())
+	}
+	if again, againErr := manager.CompactTo(context.Background(), history, tokens-1); againErr != nil || !reflect.DeepEqual(again, got) {
+		t.Fatalf("repeated prepared activation result changed: err=%v", againErr)
+	}
+	if pre.Load() != 1 || post.Load() != 1 || activations.Load() != 1 {
+		t.Fatalf("repeated activation: pre=%d post=%d activations=%d", pre.Load(), post.Load(), activations.Load())
+	}
+}
+
+func TestPhase5PreparedResultAcceptsAppendOnlyTail(t *testing.T) {
+	historyA := phase5History()
+	tokensA := estimateContextTokens(historyA)
+	var calls, pre, post, activations atomic.Int32
+	manager := turnContext{
+		softTriggerTokens: tokensA - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		coordinator: &compactionCoordinator{},
+		summarize: func(context.Context, string) (string, error) {
+			calls.Add(1)
+			return "source-specific summary", nil
+		},
+		compactHooks: func(_ context.Context, _ []message.Message, compacted []message.Message, _ error) error {
+			if compacted == nil {
+				pre.Add(1)
+			} else {
+				post.Add(1)
+			}
+			return nil
+		},
+		activateCompaction: func(context.Context, string) error { activations.Add(1); return nil },
+	}
+	if _, err := manager.CompactTo(context.Background(), historyA, tokensA+100); err != nil {
+		t.Fatal(err)
+	}
+	<-manager.coordinator.done
+	preparedA := append([]message.Message(nil), manager.coordinator.result...)
+	historyB := append(append([]message.Message(nil), historyA...),
+		message.NewText(message.RoleAssistant, "answer before source B"),
+		message.NewText(message.RoleUser, "SOURCE B CURRENT CONTENT"))
+	got, err := manager.CompactTo(context.Background(), historyB, estimateContextTokens(historyB)-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(got, preparedA) {
+		t.Fatal("prepared checkpoint did not include the uncovered tail")
+	}
+	if !strings.Contains(got[len(got)-1].Text, "SOURCE B CURRENT CONTENT") {
+		t.Fatalf("current source B content lost: %#v", got)
+	}
+	if calls.Load() != 1 || pre.Load() != 1 || post.Load() != 1 || activations.Load() != 1 {
+		t.Fatalf("calls=%d pre=%d post=%d activations=%d", calls.Load(), pre.Load(), post.Load(), activations.Load())
+	}
+}
+
+func TestPhase5SynchronousHardActivationOnce(t *testing.T) {
+	history := phase5History()
+	tokens := estimateContextTokens(history)
+	var calls, pre, post, activations atomic.Int32
+	manager := turnContext{
+		softTriggerTokens: tokens - 1, backgroundPrepare: false, compactTargetTokens: 100,
+		coordinator: &compactionCoordinator{},
+		summarize:   func(context.Context, string) (string, error) { calls.Add(1); return "synchronous summary", nil },
+		compactHooks: func(_ context.Context, _ []message.Message, compacted []message.Message, _ error) error {
+			if compacted == nil {
+				pre.Add(1)
+			} else {
+				post.Add(1)
+			}
+			return nil
+		},
+		activateCompaction: func(context.Context, string) error { activations.Add(1); return nil },
+	}
+	got, err := manager.CompactTo(context.Background(), history, tokens-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 || pre.Load() != 1 || post.Load() != 1 || activations.Load() != 1 {
+		t.Fatalf("calls=%d pre=%d post=%d activations=%d", calls.Load(), pre.Load(), post.Load(), activations.Load())
+	}
+	if again, againErr := manager.CompactTo(context.Background(), got, 100); againErr != nil || !reflect.DeepEqual(again, got) {
+		t.Fatalf("already compacted result changed: err=%v", againErr)
+	}
+	if calls.Load() != 1 || pre.Load() != 1 || post.Load() != 1 || activations.Load() != 1 {
+		t.Fatalf("repeated result calls=%d pre=%d post=%d activations=%d", calls.Load(), pre.Load(), post.Load(), activations.Load())
+	}
+}
+
+func TestPhase5CancelledOrFailedPreparationPreservesHistoryWithoutPostHook(t *testing.T) {
+	history := phase5History()
+	tokens := estimateContextTokens(history)
+	started := make(chan struct{})
+	var hooks atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	manager := turnContext{
+		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		coordinator: &compactionCoordinator{},
+		summarize: func(ctx context.Context, _ string) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+		compactHooks: func(context.Context, []message.Message, []message.Message, error) error { hooks.Add(1); return nil },
+	}
+	got, err := manager.CompactTo(ctx, history, tokens+100)
+	if err != nil || !reflect.DeepEqual(got, history) {
+		t.Fatalf("soft result changed: err=%v", err)
+	}
+	<-started
+	cancel()
+	select {
+	case <-manager.coordinator.done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled worker did not finish")
+	}
+	if hooks.Load() != 0 {
+		t.Fatalf("cancelled preparation hooks=%d", hooks.Load())
 	}
 }
 
@@ -2272,6 +2706,7 @@ func durableApprovalDecider(t *testing.T, coding *agentservice.Service, runID st
 }
 
 func TestTurnContextBuildReplaysCompatibleHistoryAndAppendsDynamicTail(t *testing.T) {
+	boundary := int64(1)
 	saved := []message.Message{
 		message.NewText(message.RoleSystem, mainInstructions),
 		{
@@ -2288,17 +2723,18 @@ func TestTurnContextBuildReplaysCompatibleHistoryAndAppendsDynamicTail(t *testin
 		instructions: mainInstructions, providerID: "chatgpt", modelID: "gpt-test",
 		modelHistory: session.ModelHistory{
 			ProviderID: "chatgpt", ModelID: "gpt-test",
-			InstructionFingerprint: mainInstructionFingerprint, Messages: saved,
+			InstructionFingerprint: mainInstructionFingerprint, StaticPrefixHash: mainInstructionFingerprint,
+			WireVersion: session.CurrentWireVersion, CoveredThroughSequence: &boundary, Messages: saved,
 		},
 		history: []session.Block{
-			{Kind: "user", Content: "old request"},
-			{Kind: "assistant", Content: "old answer"},
-			{Kind: "user", Content: "current hook user", State: "hook"},
+			{Sequence: 0, Kind: "user", Content: "old request"},
+			{Sequence: 1, Kind: "assistant", Content: "old answer"},
+			{Sequence: 2, Kind: "user", Content: "current hook user", State: "hook"},
 		},
-		persistedHistory:  2,
-		privateContext:    "current trusted hook",
-		historicalContext: `{"memories":["current evidence"]}`,
-		todo:              session.TodoList{Goal: "current todo", Revision: 3},
+		checkpointBoundary: &boundary,
+		privateContext:     "current trusted hook",
+		historicalContext:  `{"memories":["current evidence"]}`,
+		todo:               session.TodoList{Goal: "current todo", Revision: 3},
 	}
 	got, err := manager.Build(context.Background(), api.Task{Goal: "new request"})
 	if err != nil {
@@ -2346,7 +2782,6 @@ func TestTurnContextBuildFallsBackWhenModelHistoryScopeDiffers(t *testing.T) {
 			{Kind: "user", Content: "visible request"},
 			{Kind: "assistant", Content: "visible answer"},
 		},
-		persistedHistory: 2,
 	}
 	got, err := manager.Build(context.Background(), api.Task{Goal: "switched request"})
 	if err != nil {
@@ -2508,7 +2943,7 @@ func TestMainTurnReplacesMismatchedSnapshotOnlyAfterSuccessfulFallback(t *testin
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sessions.AppendBlock(ctx, "mismatch-session", session.Block{Kind: "user", RunID: "old-run", Content: "visible request"}); err != nil {
+	if _, err := sessions.AppendBlock(ctx, "mismatch-session", session.Block{Kind: "user", RunID: "old-run", Content: "visible request"}); err != nil {
 		t.Fatal(err)
 	}
 	stale := session.ModelHistory{
