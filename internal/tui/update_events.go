@@ -53,7 +53,7 @@ func (m *AppModel) applyEvent(event app.Event) {
 	case app.EventAgentDetail:
 		m.updateAgentDetail(event)
 	case app.EventThinkingDelta:
-		m.appendDelta(BlockThinking, event.RunID, "Thinking", event.Text)
+		m.appendDelta(BlockThinking, event.RunID, m.tr("block.thinking_title"), event.Text)
 	case app.EventTextDelta:
 		m.appendDelta(BlockAssistant, event.RunID, "Azem", event.Text)
 	case app.EventToolStarted, app.EventToolUpdate, app.EventToolFinished:
@@ -61,7 +61,7 @@ func (m *AppModel) applyEvent(event app.Event) {
 	case app.EventHookStarted, app.EventHookFinished, app.EventHookDiagnostic:
 		m.updateHooks(&m.transcript, event)
 	case app.EventDiffReady:
-		block := Block{ID: event.ToolCallID, Kind: BlockDiff, RunID: event.RunID, Title: first(event.Data["path"], "Diff"), Content: event.Text, State: first(event.State, "ready")}
+		block := Block{ID: event.ToolCallID, Kind: BlockDiff, RunID: event.RunID, Title: first(event.Data["path"], m.tr("block.diff_title")), Content: event.Text, State: first(event.State, "ready")}
 		m.transcript = append(m.transcript, block)
 	case app.EventApprovalRequested:
 		m.queueApproval(event)
@@ -139,7 +139,7 @@ func (m *AppModel) applyEvent(event app.Event) {
 		m.finishRun(event.RunID, "Cancelled")
 	case app.EventRunFailed:
 		m.errorBanner = event.Text
-		m.transcript = append(m.transcript, Block{Kind: BlockError, RunID: event.RunID, Title: "Run failed", Content: event.Text, State: "failed"})
+		m.transcript = append(m.transcript, Block{Kind: BlockError, RunID: event.RunID, Title: m.tr("error.run_failed"), Content: event.Text, State: "failed"})
 		if event.RunID != "" {
 			m.finishRun(event.RunID, "Failed")
 		} else {
@@ -190,14 +190,14 @@ func (m AppModel) acceptRunEvent(event app.Event) bool {
 func (m *AppModel) finishRun(runID string, status string) {
 	fallbackState := "failed"
 	orphaned := false
-	fallbackMessage := "parent run failed before tool completed"
+	fallbackMessage := m.tr("tool.parent_failed")
 	switch status {
 	case "Cancelled":
 		fallbackState = "cancelled"
-		fallbackMessage = "tool cancelled with parent run"
+		fallbackMessage = m.tr("tool.parent_cancelled")
 	case "Ready":
 		orphaned = true
-		fallbackMessage = "orphaned: missing tool result"
+		fallbackMessage = m.tr("tool.orphaned")
 	}
 	for index := range m.transcript {
 		block := &m.transcript[index]
@@ -266,7 +266,7 @@ func appendBlockContent(block *Block, content string) {
 func (m *AppModel) loadSessionEvent(event app.Event) {
 	if event.State == "list" {
 		if err := json.Unmarshal([]byte(event.Data["sessions"]), &m.sessions); err != nil {
-			m.errorBanner = "list sessions: " + err.Error()
+			m.errorBanner = m.tr("error.list_sessions") + ": " + err.Error()
 			return
 		}
 		m.status = "Ready"
@@ -286,7 +286,7 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 		Attachments      []session.Attachment `json:"attachments"`
 	}
 	if err := json.Unmarshal([]byte(event.Data["blocks"]), &recovered); err != nil {
-		m.errorBanner = "recover session: " + err.Error()
+		m.errorBanner = m.tr("error.recover_session") + ": " + err.Error()
 		return
 	}
 	if event.SessionID != "" {
@@ -346,7 +346,7 @@ func (m *AppModel) loadRecoveryEvent(event app.Event) {
 	}
 	var recovered []RecoveryView
 	if err := json.Unmarshal([]byte(event.Data["items"]), &recovered); err != nil {
-		m.errorBanner = "load recovery state: " + err.Error()
+		m.errorBanner = m.tr("error.load_recovery") + ": " + err.Error()
 		return
 	}
 	m.recovery = recovered
@@ -400,13 +400,13 @@ func (m *AppModel) updateTool(event app.Event) {
 	case app.EventToolStarted:
 		if index == -1 {
 			arguments := event.Data["arguments"]
-			name := first(event.Data["name"], event.Data["tool"], "Tool")
+			name := first(event.Data["name"], event.Data["tool"], m.tr("block.tool_title"))
 			if name == "todo" {
 				arguments = ""
 			}
 			m.transcript = append(m.transcript, Block{
 				ID: id, Kind: BlockTool, RunID: event.RunID, ToolCallID: id, Title: name,
-				Arguments: arguments, Content: first(event.Text, map[bool]string{true: "Todo / progress", false: summarizeToolArguments(name, arguments)}[name == "todo"]), State: "running",
+				Arguments: arguments, Content: first(event.Text, map[bool]string{true: m.tr("tool.todo_progress"), false: summarizeToolArguments(name, arguments, m.catalog)}[name == "todo"]), State: "running",
 			})
 			return
 		}
@@ -415,7 +415,7 @@ func (m *AppModel) updateTool(event app.Event) {
 			return
 		}
 		block.State = "running"
-		appendBlockContent(block, first(event.Text, summarizeToolArguments(block.Title, event.Data["arguments"])))
+		appendBlockContent(block, first(event.Text, summarizeToolArguments(block.Title, event.Data["arguments"], m.catalog)))
 	case app.EventToolUpdate:
 		if index == -1 {
 			return
@@ -430,7 +430,7 @@ func (m *AppModel) updateTool(event app.Event) {
 		if index == -1 {
 			content := event.Text
 			kind := BlockTool
-			title := first(event.Data["name"], event.Data["tool"], "Tool")
+			title := first(event.Data["name"], event.Data["tool"], m.tr("block.tool_title"))
 			if state == "completed" {
 				if diffTitle, diff, ok := summarizeFileChange(title, event.Data["arguments"], event.Data["structured"], event.Text); ok {
 					kind, title, content = BlockDiff, diffTitle, diff
@@ -449,8 +449,8 @@ func (m *AppModel) updateTool(event app.Event) {
 			return
 		}
 		if block.Orphaned {
-			block.Content = strings.TrimSuffix(block.Content, "\norphaned: missing tool result")
-			if block.Content == "orphaned: missing tool result" {
+			block.Content = strings.TrimSuffix(block.Content, "\n"+m.tr("tool.orphaned"))
+			if block.Content == m.tr("tool.orphaned") {
 				block.Content = ""
 			}
 		}
@@ -463,7 +463,7 @@ func (m *AppModel) updateTool(event app.Event) {
 				block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text, m.catalog)
 			}
 		} else {
-			block.Content = joinToolSummary(summarizeToolArguments(block.Title, block.Arguments), summarizeToolFailure(block.Title, event.Text))
+			block.Content = joinToolSummary(summarizeToolArguments(block.Title, block.Arguments, m.catalog), summarizeToolFailure(block.Title, event.Text, m.catalog))
 		}
 	}
 }

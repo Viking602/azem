@@ -46,7 +46,7 @@ func (m AppModel) renderCommandSuggestions(width int, height int, suggestions []
 		rows = append(rows, "")
 	}
 	if showFooter {
-		rows = append(rows, m.theme.Muted.Render(padOrTrim("   ↑/↓ select · Tab complete · Enter run", width)))
+		rows = append(rows, m.theme.Muted.Render(padOrTrim("   "+m.tr("overlay.suggestions.footer"), width)))
 	}
 	return strings.Join(rows, "\n")
 }
@@ -55,7 +55,7 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	if width < 6 || height < 5 {
 		title, _ := m.overlayHeading()
 		if m.overlay == OverlayAgentDetail {
-			title = "Task detail"
+			title = m.tr("overlay.agent_detail.title")
 		}
 		rows := []string{m.theme.Header.Render(strings.ToUpper(title))}
 		if height > 1 {
@@ -158,7 +158,7 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		option := options[renderRow.OptionIndex]
 		text := "   " + option.Label
 		if option.State != "" {
-			text += "  " + strings.ToUpper(option.State)
+			text += "  " + strings.ToUpper(m.displayState(option.State))
 		}
 		if option.Detail != "" {
 			text += " · " + option.Detail
@@ -268,35 +268,35 @@ func (m AppModel) renderAgentDetailOverlay(width, height int) string {
 	agent, found := m.agentDetail()
 	content := make([]string, 0)
 	if !found {
-		content = append(content, "Task is no longer available.")
+		content = append(content, m.tr("overlay.agent_detail.unavailable"))
 	} else {
 		content = append(content,
-			fmt.Sprintf("%s · %s", first(agent.Role, "Subagent"), strings.ToUpper(first(agent.State, "unknown"))),
+			fmt.Sprintf("%s · %s", first(agent.Role, m.tr("block.subagent")), strings.ToUpper(first(agent.State, m.tr("value.unknown")))),
 			fmt.Sprintf("ID %s", agent.ID),
 		)
 		if agent.Description != "" {
-			content = append(content, "Goal: "+agent.Description)
+			content = append(content, m.tr("agent.goal", map[string]string{"value": agent.Description}))
 		}
 		if agent.Activity != "" {
-			content = append(content, "Activity: "+agent.Activity)
+			content = append(content, m.tr("agent.activity", map[string]string{"value": agent.Activity}))
 		}
 		content = append(content,
-			fmt.Sprintf("Model: %s · capability: %s · background: %t", first(agent.Model, "inherit"), first(agent.CapabilityMode, "inherit"), agent.Background),
-			fmt.Sprintf("Isolation: %s · requested: %s", first(agent.Isolation, "none"), first(agent.RequestedIsolation, "none")),
-			fmt.Sprintf("Stats: %d tools · %d turns · %d tokens · %.1fs", agent.ToolCalls, agent.Turns, agent.TokensUsed, float64(agent.ElapsedMS)/1000),
+			m.tr("agent.model", map[string]string{"model": first(agent.Model, m.tr("value.inherit")), "capability": first(agent.CapabilityMode, m.tr("value.inherit")), "background": fmt.Sprint(agent.Background)}),
+			m.tr("agent.isolation", map[string]string{"value": first(agent.Isolation, m.tr("value.none")), "requested": first(agent.RequestedIsolation, m.tr("value.none"))}),
+			m.tr("agent.stats", map[string]string{"tools": strconv.Itoa(agent.ToolCalls), "turns": strconv.Itoa(agent.Turns), "tokens": strconv.Itoa(agent.TokensUsed), "seconds": fmt.Sprintf("%.1f", float64(agent.ElapsedMS)/1000)}),
 		)
 		if agent.CWD != "" {
 			content = append(content, "CWD: "+agent.CWD)
 		}
 		if agent.Warning != "" {
-			content = append(content, "Warning: "+agent.Warning)
+			content = append(content, m.tr("agent.warning", map[string]string{"value": agent.Warning}))
 		}
 		if agent.WorktreePath != "" {
 			content = append(content, "Worktree: "+agent.WorktreePath)
 		}
 		content = append(content, strings.Repeat("─", max(0, innerWidth-4)))
 		if len(agent.Blocks) == 0 {
-			content = append(content, "No child transcript yet.")
+			content = append(content, m.tr("overlay.agent_detail.empty"))
 		} else {
 			for _, block := range agent.Blocks {
 				if block.Kind == BlockHook {
@@ -318,8 +318,8 @@ func (m AppModel) renderAgentDetailOverlay(width, height int) string {
 	start := min(max(0, m.overlayScroll), max(0, len(content)-rowsAvailable))
 	end := min(len(content), start+rowsAvailable)
 	rows := []string{
-		m.boxRow(" TASK DETAIL", innerWidth, m.theme.Header, false),
-		m.boxRow(" "+first(agent.Description, agent.ID, "Child execution"), innerWidth, m.theme.Muted, false),
+		m.boxRow(" "+strings.ToUpper(m.tr("overlay.agent_detail.title")), innerWidth, m.theme.Header, false),
+		m.boxRow(" "+first(agent.Description, agent.ID, m.tr("overlay.agent_detail.child_execution")), innerWidth, m.theme.Muted, false),
 		m.boxRow(" "+strings.Repeat("─", max(0, innerWidth-2)), innerWidth, m.theme.Border, false),
 	}
 	for _, line := range content[start:end] {
@@ -375,26 +375,26 @@ func (m AppModel) boxRow(text string, width int, style lipgloss.Style, selected 
 func (m AppModel) overlayHeading() (string, string) {
 	switch m.overlay {
 	case OverlayHelp:
-		return "Keyboard help", "Every action remains keyboard reachable"
+		return m.tr("overlay.help.title"), m.tr("overlay.help.subtitle")
 	case OverlayStatus:
 		return m.tr("overlay.status.title"), m.tr("overlay.status.subtitle")
 	case OverlayCommand:
 		return m.tr("overlay.command.title"), m.tr("overlay.command.subtitle")
 	case OverlayProvider:
 		if m.overlayPurpose == "login" {
-			return "Sign in", "Choose a subscription provider"
+			return m.tr("overlay.signin.title"), m.tr("overlay.signin.subtitle")
 		}
-		return "Provider", "Choose the active provider"
+		return m.tr("overlay.provider.title"), m.tr("overlay.provider.subtitle")
 	case OverlayModel:
 		count := m.modelCatalogCount()
 		if count == 1 {
-			return "Model", "1 configured provider catalog"
+			return m.tr("overlay.model.title"), m.tr("overlay.model.catalogs", map[string]string{"count": "1"})
 		}
-		return "Model", fmt.Sprintf("%d configured provider catalogs", count)
+		return m.tr("overlay.model.title"), m.tr("overlay.model.catalogs", map[string]string{"count": strconv.Itoa(count)})
 	case OverlayModelRoutes:
 		return m.tr("overlay.model_routes.title"), m.tr("overlay.model_routes.subtitle")
 	case OverlaySkills:
-		return "Skills", "Reload affects new turns only"
+		return m.tr("overlay.skills.title"), m.tr("overlay.skills.subtitle")
 	case OverlayLanguage:
 		return m.tr("overlay.language.title"), m.tr("overlay.language.subtitle")
 	case OverlayReasoning:
@@ -402,19 +402,19 @@ func (m AppModel) overlayHeading() (string, string) {
 			return m.tr("overlay.model_routes.reasoning_title"), m.pendingModelRoute.Provider + "/" + m.pendingModelRoute.Model
 		}
 		if m.pendingSessionModel != nil {
-			return "Thinking level", m.pendingSessionModel.Provider + "/" + first(m.pendingSessionModel.Model, "no model") + " · choose for the next turn"
+			return m.tr("overlay.reasoning.title"), m.pendingSessionModel.Provider + "/" + first(m.pendingSessionModel.Model, m.tr("value.no_model")) + " · " + m.tr("overlay.reasoning.choose_next")
 		}
-		return "Thinking level", m.provider + "/" + first(m.model, "no model") + " · applied to the next turn"
+		return m.tr("overlay.reasoning.title"), m.provider + "/" + first(m.model, m.tr("value.no_model")) + " · " + m.tr("overlay.reasoning.applied_next")
 	case OverlaySessions:
-		return "Resume session", "Choose a saved conversation"
+		return m.tr("overlay.sessions.title"), m.tr("overlay.sessions.subtitle")
 	case OverlayApproval:
 		return m.tr("overlay.approval.title"), m.tr("overlay.approval.subtitle")
 	case OverlayCancel:
-		return "Cancel run", "Choose whether child tasks should continue"
+		return m.tr("overlay.cancel.title"), m.tr("overlay.cancel.subtitle")
 	case OverlayDiff:
-		return "Diff", "Proposed workspace change"
+		return m.tr("overlay.diff.title"), m.tr("overlay.diff.subtitle")
 	case OverlayAgents:
-		return "Agents", strings.ToUpper(m.agentMode) + " mode"
+		return m.tr("overlay.agents.title"), m.tr("overlay.agents.mode", map[string]string{"mode": strings.ToUpper(m.agentMode)})
 	case OverlayTodos:
 		return m.tr("overlay.todos.title"), m.tr("overlay.todos.subtitle")
 	case OverlayMemory:
@@ -422,17 +422,17 @@ func (m AppModel) overlayHeading() (string, string) {
 	case OverlayRecap:
 		return m.tr("overlay.recap.title"), m.tr("overlay.recap.subtitle")
 	case OverlayAgentDetail:
-		return "Task detail", "Live child transcript and execution metadata"
+		return m.tr("overlay.agent_detail.title"), m.tr("overlay.agent_detail.subtitle")
 	case OverlayAgentTypes:
-		return "Agent types", "Effective role configuration"
+		return m.tr("overlay.agent_types.title"), m.tr("overlay.agent_types.subtitle")
 	case OverlayPersonas:
-		return "Personas", "Effective persona configuration"
+		return m.tr("overlay.personas.title"), m.tr("overlay.personas.subtitle")
 	case OverlayMCP:
-		return "MCP servers", "External tools remain governed"
+		return m.tr("overlay.mcp.title"), m.tr("overlay.mcp.subtitle")
 	case OverlayRecovery:
-		return "Recovery requires attention", "Nothing uncertain is replayed automatically"
+		return m.tr("overlay.recovery.title"), m.tr("overlay.recovery.subtitle")
 	case OverlayError:
-		return "Application error", "Azem cannot continue normally"
+		return m.tr("overlay.error.title"), m.tr("overlay.error.subtitle")
 	default:
 		return "Azem", ""
 	}
@@ -465,10 +465,7 @@ func (m AppModel) overlayDescription() []string {
 		}
 	case OverlayHelp:
 		return []string{
-			"Enter submit · Ctrl+J newline · Esc close/cancel/remove last image",
-			"Ctrl+V paste image from clipboard · text paste if no image",
-			"Ctrl+P commands · Ctrl+M model · Ctrl+R reasoning · Shift+Tab approval",
-			"Ctrl+B agents · PageUp/PageDown transcript · Tab cards",
+			m.tr("overlay.help.line1"), m.tr("overlay.help.line2"), m.tr("overlay.help.line3"), m.tr("overlay.help.line4"),
 			"/login /logout /provider /models /skills /skill /new /sessions /resume /compact",
 			"/team /agents /mcp /status /reconcile /cancel /help /quit",
 		}
@@ -477,9 +474,7 @@ func (m AppModel) overlayDescription() []string {
 	case OverlayProvider:
 		if m.overlayPurpose == "login" {
 			return []string{
-				"ChatGPT uses Codex-compatible OAuth; it is not an official Azem OAuth contract.",
-				"Grok uses an experimental Grok CLI-compatible public-client flow.",
-				"Existing credentials: /login chatgpt --import-codex · /login grok --import",
+				m.tr("overlay.signin.chatgpt"), m.tr("overlay.signin.grok"), m.tr("overlay.signin.existing"),
 			}
 		}
 	case OverlayModel:
@@ -498,22 +493,22 @@ func (m AppModel) overlayDescription() []string {
 			if index == 3 {
 				break
 			}
-			path := first(shortenPath(diagnostic.Path, 32), "skill root")
-			warnings = append(warnings, "Warning · "+path+": "+diagnostic.Message)
+			path := first(shortenPath(diagnostic.Path, 32), m.tr("skill.root"))
+			warnings = append(warnings, m.tr("skill.warning", map[string]string{"path": path, "detail": diagnostic.Message}))
 		}
 		if remaining := len(m.skillDiagnostics) - len(warnings); remaining > 0 {
-			warnings = append(warnings, fmt.Sprintf("%d more warnings", remaining))
+			warnings = append(warnings, m.tr("skill.more_warnings", map[string]string{"count": strconv.Itoa(remaining)}))
 		}
 		return warnings
 	case OverlayReasoning:
 		if len(m.reasoningLevels()) == 0 {
-			return []string{"The selected model does not advertise adjustable reasoning."}
+			return []string{m.tr("overlay.reasoning.unsupported")}
 		}
 	case OverlaySessions:
 		if len(m.sessions) == 0 {
 			return []string{m.tr("overlay.sessions.empty")}
 		}
-		return []string{"Use Up/Down to choose, Enter to resume, Esc to close."}
+		return []string{m.tr("overlay.sessions.instructions")}
 	case OverlayApproval:
 		if m.approval == nil {
 			return []string{m.tr("overlay.approval.resolved")}
@@ -525,7 +520,7 @@ func (m AppModel) overlayDescription() []string {
 			first(m.approval.Action, m.approval.Diff),
 		}
 	case OverlayCancel:
-		return []string{"The current agent has at least one active child agent."}
+		return []string{m.tr("overlay.cancel.description")}
 	case OverlayDiff:
 		if block, ok := m.selectedDiff(); ok {
 			return strings.Split(block.Content, "\n")
@@ -541,11 +536,11 @@ func (m AppModel) overlayDescription() []string {
 		}
 	case OverlayRecovery:
 		if len(m.recovery) == 0 {
-			return []string{"No pending recovery decisions."}
+			return []string{m.tr("overlay.recovery.empty")}
 		}
-		return []string{"Approvals can be opened with Enter. Unknown side effects must be checked outside Azem before /reconcile."}
+		return []string{m.tr("overlay.recovery.description")}
 	case OverlayError:
-		return []string{first(m.errorBanner, "The application event stream stopped.")}
+		return []string{first(m.errorBanner, m.tr("overlay.error.stream_stopped"))}
 	}
 	return nil
 }
@@ -591,11 +586,11 @@ func (m AppModel) overlayOptions() []overlayOption {
 					continue
 				}
 				status := m.todoDisplayStatus(item)
-				detail := string(item.Status) + " · " + item.ID
+				detail := m.displayState(string(item.Status)) + " · " + item.ID
 				if item.SubagentRunID != "" {
 					for _, agent := range m.agents {
 						if agent.ID == item.SubagentRunID {
-							detail += " · agent " + agent.State
+							detail += " · " + m.tr("block.agent") + " " + m.displayState(agent.State)
 						}
 					}
 				}
@@ -614,7 +609,7 @@ func (m AppModel) overlayOptions() []overlayOption {
 		options := make([]overlayOption, 0, 2)
 		for _, provider := range []string{"chatgpt", "grok"} {
 			auth := m.auth[provider]
-			detail := "Not signed in"
+			detail := m.tr("provider.not_signed_in")
 			state := auth.State
 			if auth.Email != "" {
 				detail = auth.Email
@@ -635,13 +630,13 @@ func (m AppModel) overlayOptions() []overlayOption {
 			model := entry.Model
 			capabilities := make([]string, 0, 3)
 			if model.ContextWindow > 0 {
-				capabilities = append(capabilities, formatTokens(model.ContextWindow)+" context")
+				capabilities = append(capabilities, m.tr("model.context", map[string]string{"count": formatTokens(model.ContextWindow)}))
 			}
 			if model.SupportsTools {
-				capabilities = append(capabilities, "tools")
+				capabilities = append(capabilities, m.tr("model.tools"))
 			}
 			if model.SupportsReasoning {
-				capabilities = append(capabilities, "reasoning")
+				capabilities = append(capabilities, m.tr("model.reasoning"))
 			}
 			state := ""
 			if entry.Provider == m.provider && model.ID == m.model {
@@ -656,14 +651,11 @@ func (m AppModel) overlayOptions() []overlayOption {
 	case OverlaySkills:
 		options := make([]overlayOption, 0, len(m.skills))
 		for _, entry := range m.skills {
-			source := first(shortenPath(entry.SourcePath, 30), "disk")
+			source := first(shortenPath(entry.SourcePath, 30), m.tr("skill.source.disk"))
 			if entry.Bundled {
-				source = "bundled"
+				source = m.tr("skill.source.bundled")
 			}
-			resourceLabel := fmt.Sprintf("%d resources", entry.ResourceCount)
-			if entry.ResourceCount == 1 {
-				resourceLabel = "1 resource"
-			}
+			resourceLabel := m.tr("skill.resources", map[string]string{"count": strconv.Itoa(entry.ResourceCount)})
 			state := "manual-only"
 			switch {
 			case entry.Disabled:
@@ -703,7 +695,7 @@ func (m AppModel) overlayOptions() []overlayOption {
 			if level == m.reasoning {
 				state = "selected"
 			}
-			options = append(options, overlayOption{Label: level, Detail: reasoningLevelDetail(level), State: state})
+			options = append(options, overlayOption{Label: level, Detail: m.reasoningDescription(level), State: state})
 		}
 		return options
 	case OverlaySessions:
@@ -728,8 +720,8 @@ func (m AppModel) overlayOptions() []overlayOption {
 		}
 	case OverlayCancel:
 		return []overlayOption{
-			{Label: "Cancel current agent only", Detail: "Child agents continue running"},
-			{Label: "Cancel current agent and all child agents", Detail: "Cancel all active descendants"},
+			{Label: m.tr("overlay.cancel.parent"), Detail: m.tr("overlay.cancel.parent_detail")},
+			{Label: m.tr("overlay.cancel.all"), Detail: m.tr("overlay.cancel.all_detail")},
 		}
 	case OverlayAgents:
 		options := make([]overlayOption, 0, len(m.agents))
@@ -764,7 +756,7 @@ func (m AppModel) overlayOptions() []overlayOption {
 	case OverlayMCP:
 		options := make([]overlayOption, 0, len(m.mcpServers))
 		for _, server := range m.mcpServers {
-			detail := strconv.Itoa(server.ToolCount) + " tools"
+			detail := m.tr("mcp.tools", map[string]string{"count": strconv.Itoa(server.ToolCount)})
 			if server.Error != "" {
 				detail = server.Error
 			}
@@ -785,60 +777,60 @@ func (m AppModel) overlayOptions() []overlayOption {
 	return nil
 }
 
-func reasoningLevelDetail(level string) string {
+func (m AppModel) reasoningDescription(level string) string {
 	switch level {
 	case "minimal":
-		return "Fastest · minimal deliberate reasoning"
+		return m.tr("reasoning.minimal")
 	case "low":
-		return "Fast · light reasoning"
+		return m.tr("reasoning.low")
 	case "medium":
-		return "Balanced depth and latency"
+		return m.tr("reasoning.medium")
 	case "high":
-		return "Deep reasoning · higher latency"
+		return m.tr("reasoning.high")
 	case "xhigh":
-		return "Maximum supported reasoning effort"
+		return m.tr("reasoning.xhigh")
 	default:
-		return "Provider-defined reasoning effort"
+		return m.tr("reasoning.provider")
 	}
 }
 
 func (m AppModel) overlayFooter() string {
 	if m.actionBusy {
-		return "Working · Esc cancels this action"
+		return m.tr("overlay.footer.working")
 	}
 	switch m.overlay {
 	case OverlayModelRoutes:
 		return m.tr("overlay.model_routes.footer")
 	case OverlayModel:
-		return "Type to search · ↑/↓ select · Enter confirm · Esc clear/close"
+		return m.tr("overlay.footer.model")
 	case OverlaySkills:
-		return "↑/↓ browse · R reload · Esc close"
+		return m.tr("overlay.footer.skills")
 	case OverlayApproval:
-		return "Enter select · A once · Shift+A session · D deny · Esc inspect transcript"
+		return m.tr("overlay.footer.approval")
 	case OverlayCancel:
-		return "↑/↓ choose scope · Enter cancel · Esc keep running"
+		return m.tr("overlay.footer.cancel")
 	case OverlayAgents:
-		return "↑/↓ select · Enter detail · X cancel child · Esc close"
+		return m.tr("overlay.footer.agents")
 	case OverlayTodos:
-		return "↑/↓ select · H hide completed · Esc close"
+		return m.tr("overlay.footer.todos")
 	case OverlayMemory:
 		return m.tr("overlay.memory.footer")
 	case OverlayRecap:
 		return m.tr("overlay.recap.footer")
 	case OverlayAgentDetail:
-		return "↑/↓ scroll · Esc return to tasks"
+		return m.tr("overlay.footer.agent_detail")
 	case OverlayAgentTypes, OverlayPersonas:
-		return "↑/↓ browse · Esc close"
+		return m.tr("overlay.footer.browse")
 	case OverlayMCP:
-		return "↑/↓ select · R refresh · Shift+R reconnect · Esc close"
+		return m.tr("overlay.footer.mcp")
 	case OverlayRecovery:
-		return "↑/↓ select · Enter inspect · /reconcile confirms an unknown side effect · Esc close"
+		return m.tr("overlay.footer.recovery")
 	case OverlayError:
-		return "Q quit · Esc return"
+		return m.tr("overlay.footer.error")
 	case OverlayHelp, OverlayDiff, OverlayStatus:
-		return "↑/↓ scroll · Esc close"
+		return m.tr("overlay.footer.scroll_close")
 	default:
-		return "↑/↓ select · Enter confirm · Esc close"
+		return m.tr("overlay.footer.select")
 	}
 }
 
@@ -851,19 +843,19 @@ func (m AppModel) overlayFooterForWidth(width int) string {
 	case OverlayModelRoutes:
 		return m.tr("overlay.model_routes.footer_short")
 	case OverlayApproval:
-		return "A once · D deny · Esc back"
+		return m.tr("overlay.footer.approval_short")
 	case OverlayCancel:
-		return "Enter cancel · Esc back"
+		return m.tr("overlay.footer.cancel_short")
 	case OverlayAgents:
-		return "Enter detail · Esc close"
+		return m.tr("overlay.footer.agents_short")
 	case OverlayAgentDetail:
-		return "↑/↓ scroll · Esc back"
+		return m.tr("overlay.footer.scroll_back")
 	case OverlayError:
-		return "Q quit · Esc back"
+		return m.tr("overlay.footer.error_short")
 	case OverlayHelp, OverlayDiff, OverlayStatus:
-		return "↑/↓ · Esc close"
+		return m.tr("overlay.footer.scroll_close_short")
 	default:
-		return "↑/↓ · Enter · Esc close"
+		return m.tr("overlay.footer.short")
 	}
 }
 

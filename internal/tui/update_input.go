@@ -70,12 +70,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateKey(msg)
 	case clipboardWriteResultMsg:
 		if msg.err != nil {
-			m.errorBanner = "copy selection: " + msg.err.Error()
+			m.errorBanner = m.tr("error.copy_selection", map[string]string{"detail": msg.err.Error()})
 		}
 		return m, nil
 	case clipboardImageResultMsg:
 		if msg.err != nil {
-			m.errorBanner = "paste image: " + msg.err.Error()
+			m.errorBanner = m.tr("error.paste_image", map[string]string{"detail": msg.err.Error()})
 			return m, nil
 		}
 		if msg.empty {
@@ -121,7 +121,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Ready"
 			m.runID = ""
 			m.errorBanner = msg.Err.Error()
-			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: "Run rejected", Content: msg.Err.Error(), State: "failed"})
+			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: m.tr("error.run_rejected"), Content: msg.Err.Error(), State: "failed"})
 		} else if (m.status == "Starting" || m.status == "Running" || m.status == "Cancelling") && (m.runID == "" || m.runID == msg.RunID) {
 			m.runID = msg.RunID
 		}
@@ -129,12 +129,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case guidanceResultMsg:
 		if msg.Err != nil {
 			m.errorBanner = msg.Err.Error()
-			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: "Guidance rejected", Content: msg.Err.Error(), State: "failed"})
+			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: m.tr("error.guidance_rejected"), Content: msg.Err.Error(), State: "failed"})
 			if m.composer.Value() == "" {
 				m.composer.SetValue(msg.Text)
 			}
 		} else {
-			m.transcript = append(m.transcript, Block{Kind: BlockUser, RunID: msg.RunID, Title: "Guidance", Content: msg.Text, State: "guidance"})
+			m.transcript = append(m.transcript, Block{Kind: BlockUser, RunID: msg.RunID, Title: m.tr("block.guidance"), Content: msg.Text, State: "guidance"})
 		}
 		return m, nil
 	case cancelResultMsg:
@@ -158,7 +158,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if errors.Is(msg.Err, context.Canceled) {
 				m.status = "Ready"
-				m.errorBanner = "Action cancelled"
+				m.errorBanner = m.tr("error.action_cancelled")
+				return m, nil
+			}
+			if errors.Is(msg.Err, errActionUnsupported) {
+				m.errorBanner = m.tr("error.action_unavailable")
 				return m, nil
 			}
 			if msg.Action.Kind == ActionCompact {
@@ -310,7 +314,7 @@ func (m AppModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.submit()
 	case "ctrl+v", "super+v", "cmd+v", "meta+v":
 		// Prefer clipboard image paste; text paste is the fallback when empty.
-		return m, pasteClipboardImage(m.runtime, m.sessionID)
+		return m, pasteClipboardImage(m.runtime, m.sessionID, m.tr("attachment.unavailable"))
 	}
 
 	previous := m.composer.Value()
@@ -685,7 +689,7 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.isRunning() {
-			m.errorBanner = "model can only change while idle"
+			m.errorBanner = m.tr("error.model_idle")
 			return m, nil
 		}
 		entries := m.modelPickerEntries()
@@ -719,7 +723,7 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 		}
 		if pending := m.pendingSessionModel; pending != nil {
 			if m.isRunning() {
-				m.errorBanner = "model can only change while idle"
+				m.errorBanner = m.tr("error.model_idle")
 				return m, nil
 			}
 			levels := m.reasoningLevels()
@@ -734,7 +738,7 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 			return m, m.closeOverlay()
 		}
 		if m.isRunning() {
-			m.errorBanner = "reasoning can only change while idle"
+			m.errorBanner = m.tr("error.reasoning_idle")
 			return m, nil
 		}
 		levels := m.reasoningLevels()
@@ -770,11 +774,11 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 		}
 		item := m.recovery[m.overlayCursor]
 		if item.Kind == "approval" {
-			m.approval = &ApprovalView{ToolCallID: item.ID, Tool: "Recovered approval", Target: item.TaskID, Risk: item.Detail, Effect: "approval", Action: item.Detail}
+			m.approval = &ApprovalView{ToolCallID: item.ID, Tool: m.tr("approval.recovered"), Target: item.TaskID, Risk: item.Detail, Effect: m.tr("approval.effect"), Action: item.Detail}
 			m.openOverlay(OverlayApproval)
 			return m, nil
 		}
-		m.errorBanner = "Use /reconcile " + item.ID + " succeeded|failed|cancelled after checking the external result."
+		m.errorBanner = m.tr("recovery.reconcile_instruction", map[string]string{"id": item.ID})
 		return m, nil
 	case OverlayDiff:
 		return m, m.closeOverlay()
@@ -880,7 +884,7 @@ func (m AppModel) beginAction(action Action) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if action.Kind == ActionResolveApproval && action.Target == "" {
-		m.errorBanner = "approval request is no longer available"
+		m.errorBanner = m.tr("error.approval_unavailable")
 		return m, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -935,9 +939,9 @@ func (m *AppModel) applyActionResult(action Action) {
 		m.status = "Ready"
 		_ = m.closeOverlay()
 	case ActionCancelAgent:
-		m.errorBanner = "cancellation requested for " + action.Target
+		m.errorBanner = m.tr("action.cancellation_requested", map[string]string{"target": action.Target})
 	case ActionRefreshMCP, ActionReconnectMCP:
-		m.errorBanner = "MCP update requested for " + action.Target
+		m.errorBanner = m.tr("action.mcp_requested", map[string]string{"target": action.Target})
 	case ActionReconcileAttempt:
 		for index := range m.recovery {
 			if m.recovery[index].ID == action.Target {
@@ -1115,14 +1119,14 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 		m.composer.Reset()
 		m.commandCursor = 0
 		if err != nil {
-			m.errorBanner = err.Error()
+			m.errorBanner = m.tr("error.empty_command")
 			return m, nil
 		}
 		return m.executeCommand(command)
 	}
 	if m.canGuideActiveRun() {
 		if len(images) > 0 {
-			m.errorBanner = "images can only be attached to a new turn, not live guidance"
+			m.errorBanner = m.tr("error.guidance_images")
 			return m, nil
 		}
 		m.composer.Reset()
@@ -1133,7 +1137,7 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 	if m.isRunning() {
 		return m, nil
 	}
-	m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: "You", Content: formatUserContent(input, images), Attachments: images})
+	m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: m.tr("block.you"), Content: formatUserContent(input, images), Attachments: images})
 	m.composer.Reset()
 	m.commandCursor = 0
 	m.clearPendingImages()
@@ -1214,11 +1218,11 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		}
 	case "team":
 		if m.isRunning() {
-			m.errorBanner = "agent mode can only change while idle"
+			m.errorBanner = m.tr("error.agent_idle")
 			break
 		}
 		if len(command.Args) != 1 || (command.Args[0] != "on" && command.Args[0] != "off") {
-			m.errorBanner = "usage: /team on|off"
+			m.errorBanner = m.tr("command.usage.team")
 			break
 		}
 		if command.Args[0] == "on" {
@@ -1228,7 +1232,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		}
 	case "provider":
 		if m.isRunning() {
-			m.errorBanner = "provider can only change while idle"
+			m.errorBanner = m.tr("error.provider_idle")
 			break
 		}
 		if len(command.Args) == 0 {
@@ -1236,30 +1240,30 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		if len(command.Args) != 1 {
-			m.errorBanner = "usage: /provider [chatgpt|grok]"
+			m.errorBanner = m.tr("command.usage.provider")
 			break
 		}
 		provider := strings.ToLower(command.Args[0])
 		if provider != "chatgpt" && provider != "grok" {
-			m.errorBanner = "provider must be chatgpt or grok"
+			m.errorBanner = m.tr("provider.invalid")
 			break
 		}
 		m.switchProvider(provider)
 	case "login":
 		if len(command.Args) > 2 {
-			m.errorBanner = "usage: /login [chatgpt [--import-codex]|grok [--import]]"
+			m.errorBanner = m.tr("command.usage.login")
 			break
 		}
 		if len(command.Args) >= 1 {
 			provider := strings.ToLower(command.Args[0])
 			if provider != "chatgpt" && provider != "grok" {
-				m.errorBanner = "provider must be chatgpt or grok"
+				m.errorBanner = m.tr("provider.invalid")
 				break
 			}
 			target := provider
 			if len(command.Args) == 2 {
 				if (provider == "chatgpt" && command.Args[1] != "--import-codex") || (provider == "grok" && command.Args[1] != "--import") {
-					m.errorBanner = "usage: /login chatgpt --import-codex | /login grok --import"
+					m.errorBanner = m.tr("command.usage.login_import")
 					break
 				}
 				target += ":import"
@@ -1273,7 +1277,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		if len(command.Args) == 1 {
 			target = strings.ToLower(command.Args[0])
 		} else if len(command.Args) > 1 {
-			m.errorBanner = "usage: /logout [chatgpt|grok]"
+			m.errorBanner = m.tr("command.usage.logout")
 			break
 		}
 		return m.beginAction(Action{Kind: ActionLogout, Target: target})
@@ -1284,26 +1288,28 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		if len(command.Args) == 1 && strings.ToLower(command.Args[0]) == "reload" {
 			return m.beginAction(Action{Kind: ActionReloadSkills})
 		}
-		m.errorBanner = "usage: /skills [reload]"
+		m.errorBanner = m.tr("command.usage.skills")
 	case "skill":
 		if len(command.Args) == 0 {
-			m.errorBanner = "usage: /skill <name> [instruction]"
+			m.errorBanner = m.tr("command.usage.skill")
 			break
 		}
 		if m.isRunning() {
-			m.errorBanner = "skill invocation can only start while idle"
+			m.errorBanner = m.tr("error.skill_idle")
 			break
 		}
 		if m.agentMode == "team" {
-			m.errorBanner = "skill invocation requires single-agent mode; use /team off"
+			m.errorBanner = m.tr("error.skill_single_mode")
 			break
 		}
 		name := strings.ToLower(command.Args[0])
-		prompt := `Apply the "` + name + `" skill to the current workspace and report the result.`
+		prompt := fmt.Sprintf("Apply the %q skill to the current workspace and report the result.", name)
+		displayPrompt := m.tr("skill.invoke_prompt", map[string]string{"name": name})
 		if len(command.Args) > 1 {
 			prompt = strings.Join(command.Args[1:], " ")
+			displayPrompt = prompt
 		}
-		m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: "You", Content: prompt})
+		m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: m.tr("block.you"), Content: displayPrompt})
 		m.status = "Starting"
 		m.errorBanner = ""
 		m.runID = ""
@@ -1315,7 +1321,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		})
 	case "models":
 		if len(command.Args) != 0 {
-			m.errorBanner = "usage: /models"
+			m.errorBanner = m.tr("command.usage.models")
 			break
 		}
 		m.openOverlay(OverlayModel)
@@ -1326,15 +1332,15 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		}
 		levels := m.reasoningLevels()
 		if len(levels) == 0 {
-			m.errorBanner = "the selected model does not support adjustable reasoning"
+			m.errorBanner = m.tr("error.reasoning_unsupported")
 			break
 		}
 		if len(command.Args) != 1 || !contains(levels, command.Args[0]) {
-			m.errorBanner = "usage: /reasoning " + strings.Join(levels, "|")
+			m.errorBanner = m.tr("command.usage.reasoning", map[string]string{"levels": strings.Join(levels, "|")})
 			break
 		}
 		if m.isRunning() {
-			m.errorBanner = "reasoning can only change while idle"
+			m.errorBanner = m.tr("error.reasoning_idle")
 			break
 		}
 		m.reasoning = command.Args[0]
@@ -1344,7 +1350,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		return m.beginAction(Action{Kind: ActionListSessions})
 	case "resume":
 		if len(command.Args) != 0 {
-			m.errorBanner = "usage: /resume"
+			m.errorBanner = m.tr("command.usage.resume")
 			break
 		}
 		return m.beginAction(Action{Kind: ActionListSessions})
@@ -1377,25 +1383,25 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		if len(command.Args) != 2 || command.Args[0] != "cancel" {
-			m.errorBanner = "usage: /agents [cancel <id>]"
+			m.errorBanner = m.tr("command.usage.agents")
 			break
 		}
 		return m.beginAction(Action{Kind: ActionCancelAgent, Target: command.Args[1]})
 	case "todo", "todos":
 		if len(command.Args) != 0 {
-			m.errorBanner = "usage: /todos"
+			m.errorBanner = m.tr("command.usage.todos")
 			break
 		}
 		m.openOverlay(OverlayTodos)
 	case "agent-types":
 		if len(command.Args) != 0 {
-			m.errorBanner = "usage: /agent-types"
+			m.errorBanner = m.tr("command.usage.agent_types")
 			break
 		}
 		return m.beginAction(Action{Kind: ActionListAgentTypes})
 	case "personas":
 		if len(command.Args) != 0 {
-			m.errorBanner = "usage: /personas"
+			m.errorBanner = m.tr("command.usage.personas")
 			break
 		}
 		return m.beginAction(Action{Kind: ActionListPersonas})
@@ -1405,7 +1411,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		if len(command.Args) != 2 || (command.Args[0] != "refresh" && command.Args[0] != "reconnect") {
-			m.errorBanner = "usage: /mcp [refresh|reconnect <server>]"
+			m.errorBanner = m.tr("command.usage.mcp")
 			break
 		}
 		kind := ActionRefreshMCP
@@ -1415,12 +1421,12 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		return m.beginAction(Action{Kind: kind, Target: command.Args[1]})
 	case "reconcile":
 		if len(command.Args) != 2 {
-			m.errorBanner = "usage: /reconcile <attempt-id> succeeded|failed|cancelled"
+			m.errorBanner = m.tr("command.usage.reconcile")
 			break
 		}
 		return m.beginAction(Action{Kind: ActionReconcileAttempt, Target: command.Args[0], Decision: command.Args[1]})
 	default:
-		m.errorBanner = fmt.Sprintf("unknown command /%s", command.Name)
+		m.errorBanner = m.tr("command.unknown", map[string]string{"name": command.Name})
 	}
 	return m, nil
 }
