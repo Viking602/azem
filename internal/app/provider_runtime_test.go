@@ -2193,6 +2193,7 @@ func (d countedApprovalDriver) Execute(_ context.Context, call tool.Call, _ tool
 
 type autoReviewHarness struct {
 	host           *Service
+	runtime        *ProviderRuntime
 	coding         *agentservice.Service
 	authentication *auth.Service
 	run            *agentservice.Run
@@ -2449,32 +2450,152 @@ func TestAutoReviewDenyFallsBackToUserWhileMalformedFailureStaysClosed(t *testin
 	}
 }
 
-func TestAutoReviewTimeoutFailsClosedWithoutBecomingModelDeny(t *testing.T) {
+func TestAutoReviewTimeoutFallsBackToUserApproval(t *testing.T) {
+	var modelsMu sync.Mutex
+	var models []string
 	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		modelsMu.Lock()
+		models = append(models, body.Model)
+		modelsMu.Unlock()
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.WriteHeader(http.StatusOK)
 		writer.(http.Flusher).Flush()
 		<-request.Context().Done()
 	})
+	harness.runtime.approvalReviewTimeout = 20 * time.Millisecond
 	call := tool.Call{ID: "timeout-1", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"blocked.txt"}`)}
 	pending := prepareAutomaticApproval(t, harness, call)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	resolution, err := harness.host.awaitApproval(ctx, "session", "agent-1", "main", harness.run, call, pending)
-	if err != nil || resolution.Mode != agentservice.ApprovalDenied ||
-		!strings.Contains(resolution.DenialMessage, "timed out") || strings.Contains(resolution.DenialMessage, "Denied by automatic review") {
-		t.Fatalf("timeout resolution=%+v error=%v", resolution, err)
+	type approvalResult struct {
+		resolution approvalResolution
+		err        error
 	}
-	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	result := make(chan approvalResult, 1)
+	go func() {
+		resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+		result <- approvalResult{resolution: resolution, err: err}
+	}()
+	reviewing := nextApprovalEvent(t, harness.host, EventApprovalRequested)
 	resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved)
 	if resolved.State != "auto_timed_out" || resolved.Data["error_kind"] != "timeout" {
 		t.Fatalf("timeout event=%+v", resolved)
 	}
+	modelsMu.Lock()
+	gotModels := append([]string(nil), models...)
+	modelsMu.Unlock()
+	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerFallbackModel, codex.ApprovalReviewerModel}
+	if !reflect.DeepEqual(gotModels, wantModels) {
+		t.Fatalf("review models=%v, want %v", gotModels, wantModels)
+	}
+	prompt := nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	if prompt.State != "pending" || prompt.ApprovalID != reviewing.ApprovalID {
+		t.Fatalf("timeout manual fallback=%+v", prompt)
+	}
 	if harness.driver.executions.Load() != 0 {
 		t.Fatal("timed-out review executed tool")
 	}
-	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != "system:auto-review-failure" {
+	if err := harness.host.ExecuteAction(context.Background(), Action{
+		Kind: ActionResolveApproval, Target: prompt.ApprovalID, Decision: "once",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outcome := <-result
+	if outcome.err != nil || outcome.resolution.Mode != agentservice.ApprovalOnce {
+		t.Fatalf("timeout resolution=%+v error=%v", outcome.resolution, outcome.err)
+	}
+	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != "user" {
 		t.Fatalf("timeout decider=%q", decider)
+	}
+	executed, err := harness.coding.ExecuteDriver(context.Background(), harness.run, harness.driver, call, nil)
+	if err != nil || !executed.Executed || harness.driver.executions.Load() != 1 {
+		t.Fatalf("user-approved execution=%+v count=%d error=%v", executed, harness.driver.executions.Load(), err)
+	}
+}
+
+func TestAutoReviewTimeoutSwitchesModelAndUsesSuccessfulRetry(t *testing.T) {
+	var requests atomic.Int32
+	var modelsMu sync.Mutex
+	var models []string
+	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		modelsMu.Lock()
+		models = append(models, body.Model)
+		modelsMu.Unlock()
+		if requests.Add(1) == 1 {
+			writer.Header().Set("Content-Type", "text/event-stream")
+			writer.WriteHeader(http.StatusOK)
+			writer.(http.Flusher).Flush()
+			<-request.Context().Done()
+			return
+		}
+		writeAutomaticReview(writer, `{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"fallback model completed review"}`, true)
+	})
+	harness.runtime.approvalReviewTimeout = 20 * time.Millisecond
+	call := tool.Call{ID: "timeout-retry", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"retried.txt"}`)}
+	pending := prepareAutomaticApproval(t, harness, call)
+	resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+	if err != nil || resolution.Mode != agentservice.ApprovalOnce || resolution.NeedsUserApproval {
+		t.Fatalf("retry resolution=%+v error=%v", resolution, err)
+	}
+	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved)
+	if resolved.State != "auto_approved" || resolved.Data["error_kind"] != "" {
+		t.Fatalf("retry event=%+v", resolved)
+	}
+	modelsMu.Lock()
+	gotModels := append([]string(nil), models...)
+	modelsMu.Unlock()
+	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerFallbackModel}
+	if !reflect.DeepEqual(gotModels, wantModels) {
+		t.Fatalf("review models=%v, want %v", gotModels, wantModels)
+	}
+	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != codex.ApprovalReviewerFallbackModel {
+		t.Fatalf("retry decider=%q", decider)
+	}
+}
+
+func TestAutoReviewCallerDeadlineStopsWithoutRetryOrManualApproval(t *testing.T) {
+	var requests atomic.Int32
+	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		writer.WriteHeader(http.StatusOK)
+		writer.(http.Flusher).Flush()
+		<-request.Context().Done()
+	})
+	harness.runtime.approvalReviewTimeout = time.Second
+	call := tool.Call{ID: "caller-deadline", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"cancelled.txt"}`)}
+	pending := prepareAutomaticApproval(t, harness, call)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	resolution, err := harness.host.awaitApproval(ctx, "session", "agent-1", "main", harness.run, call, pending)
+	if !errors.Is(err, context.DeadlineExceeded) || resolution.NeedsUserApproval || requests.Load() != 1 {
+		t.Fatalf("caller deadline resolution=%+v requests=%d error=%v", resolution, requests.Load(), err)
+	}
+	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	noEventCtx, noEventCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer noEventCancel()
+	if event, nextErr := harness.host.NextEvent(noEventCtx); nextErr == nil {
+		t.Fatalf("caller deadline emitted follow-up approval event=%+v", event)
+	}
+	events, listErr := harness.coding.Runner().ListEvents(context.Background(), harness.run.RunID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	for _, event := range events {
+		if event.Type == api.EventApprovalDecided {
+			t.Fatalf("caller deadline recorded approval decision=%+v", event)
+		}
 	}
 }
 
@@ -2706,7 +2827,7 @@ func newAutoReviewHarness(t *testing.T, handler http.HandlerFunc) autoReviewHarn
 	}
 	counter := &atomic.Int32{}
 	return autoReviewHarness{
-		host: host, coding: coding, authentication: authentication, run: run,
+		host: host, runtime: runtime, coding: coding, authentication: authentication, run: run,
 		driver: countedApprovalDriver{executions: counter},
 	}
 }

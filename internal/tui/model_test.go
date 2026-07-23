@@ -668,6 +668,28 @@ func TestMouseClickTargetsToolHeaderAfterUserMessageWithoutBlankSeparator(t *tes
 	}
 }
 
+func TestMouseClickReactivatesComposer(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+	model.transcript = []Block{{Kind: BlockTool, State: "completed"}}
+	if !model.selectTranscript() || model.composer.Focused() {
+		t.Fatal("test setup did not move focus away from the composer")
+	}
+
+	left, top, width, height := model.composerBounds()
+	updated, _ = model.Update(tea.MouseClickMsg{X: left + width/2, Y: top + height/2, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.focus != focusComposer || !model.composer.Focused() {
+		t.Fatalf("composer focus after click = area:%d focused:%v", model.focus, model.composer.Focused())
+	}
+	updated, _ = model.Update(tea.KeyPressMsg{Text: "x", Code: 'x'})
+	model = updated.(AppModel)
+	if got := model.composer.Value(); got != "x" {
+		t.Fatalf("composer value after click = %q, want keyboard input", got)
+	}
+}
+
 func TestApprovalOverlayExecutesExplicitDecision(t *testing.T) {
 	runtime := &recordedRuntime{}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
@@ -1044,6 +1066,26 @@ func TestTerminalEventClearsActiveRunAndRejectsLateDelta(t *testing.T) {
 	model.applyEvent(app.Event{Kind: app.EventRunStarted, SessionID: "default", RunID: "run-2"})
 	if model.runID != "run-2" || model.status != "Running" {
 		t.Fatalf("next runID=%q status=%q", model.runID, model.status)
+	}
+}
+
+func TestTerminalEventReactivatesComposer(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status = "Running"
+	model.runID = "run-1"
+	model.transcript = []Block{{Kind: BlockTool, State: "completed"}}
+	if !model.selectTranscript() || model.composer.Focused() {
+		t.Fatal("test setup did not move focus away from the composer")
+	}
+
+	model.applyEvent(app.Event{Kind: app.EventRunFinished, SessionID: "default", RunID: "run-1"})
+	if model.focus != focusComposer || !model.composer.Focused() {
+		t.Fatalf("composer focus after completion = area:%d focused:%v", model.focus, model.composer.Focused())
+	}
+	updated, _ := model.Update(tea.KeyPressMsg{Text: "x", Code: 'x'})
+	model = updated.(AppModel)
+	if got := model.composer.Value(); got != "x" {
+		t.Fatalf("composer value after completion = %q, want keyboard input", got)
 	}
 }
 

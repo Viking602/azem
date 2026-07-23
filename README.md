@@ -40,7 +40,7 @@ Requirements:
 ```bash
 git clone https://github.com/Viking602/azem.git
 cd azem
-go build -o azem ./cmd/azem
+make build
 ```
 
 ### 2. Start it in a project
@@ -136,13 +136,13 @@ For ChatGPT, Azem retries transient stream-opening and transport failures up to 
 
 ```text
 azem [-config /path/to/config.yaml]
-azem -version
+azem --version
 ```
 
 | Option | Description |
 |---|---|
 | `-config` | Load a specific YAML configuration file |
-| `-version` | Print build version information |
+| `--version` | Print the version, current Git short hash, and UTC build time |
 
 Without `-config`, Azem reads `azem/config.yaml` from the operating system's user configuration directory. If the file does not exist, built-in defaults are used.
 

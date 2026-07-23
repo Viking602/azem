@@ -221,6 +221,9 @@ func (m *AppModel) finishRun(runID string, status string) {
 	m.approval = nil
 	if m.overlay == OverlayApproval {
 		_ = m.closeOverlay()
+	} else if m.overlay == OverlayNone {
+		m.focus = focusComposer
+		_ = m.composer.Focus()
 	}
 }
 
