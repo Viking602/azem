@@ -103,19 +103,21 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcriptTop = min(currentMaxOffset, max(0, m.transcriptTop+currentMaxOffset-previousMaxOffset))
 		}
 		commands := []tea.Cmd{waitForAppEvent(m.runtime)}
-		if (m.isRunning() || m.hasRunningHooks() || m.hasRunningAgents()) && !m.reducedMotion && !m.animationActive {
+		if (m.isRunning() || m.hasRunningHooks() || m.hasRunningAgents()) && !m.animationActive {
 			m.animationActive = true
-			commands = append(commands, nextAnimationFrame())
+			commands = append(commands, nextRunFeedbackFrame(m.reducedMotion))
 		}
 		return m, tea.Batch(commands...)
 	case animationTickMsg:
-		if (!m.isRunning() && !m.hasRunningHooks() && !m.hasRunningAgents()) || m.reducedMotion {
+		if !m.isRunning() && !m.hasRunningHooks() && !m.hasRunningAgents() {
 			m.animationActive = false
 			m.animationFrame = 0
 			return m, nil
 		}
-		m.animationFrame++
-		return m, nextAnimationFrame()
+		if !m.reducedMotion {
+			m.animationFrame++
+		}
+		return m, nextRunFeedbackFrame(m.reducedMotion)
 	case startTurnResultMsg:
 		if msg.Err != nil {
 			m.status = "Ready"
@@ -200,6 +202,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func nextAnimationFrame() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return animationTickMsg{} })
+}
+
+func nextRunFeedbackFrame(reducedMotion bool) tea.Cmd {
+	if reducedMotion {
+		return tea.Tick(time.Second, func(time.Time) tea.Msg { return animationTickMsg{} })
+	}
+	return nextAnimationFrame()
 }
 
 func (m AppModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -355,11 +364,38 @@ func (m AppModel) finishTranscriptSelection(mouse tea.Mouse) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	_, command := m.extendTranscriptSelection(tea.Mouse{X: mouse.X, Y: mouse.Y, Button: tea.MouseLeft})
+	selection := m.transcriptSelection
+	if selection.startX == selection.endX && selection.startY == selection.endY {
+		m.transcriptSelection = nil
+		if m.toggleTranscriptBlockAt(selection.endX, selection.endY) {
+			return m, nil
+		}
+	}
 	text := m.selectedTranscriptText()
 	if text == "" {
 		return m, command
 	}
 	return m, func() tea.Msg { return clipboardWriteResultMsg{err: writeClipboard(text)} }
+}
+
+func (m *AppModel) toggleTranscriptBlockAt(x, row int) bool {
+	_, _, width, height := m.transcriptBounds()
+	if x < 0 || x >= width {
+		return false
+	}
+	index, ok := m.transcriptBlockHeaderAt(row, width, height)
+	if !ok || index < 0 || index >= len(m.transcript) {
+		return false
+	}
+	block := &m.transcript[index]
+	if block.Kind != BlockTool && block.Kind != BlockDiff && block.Kind != BlockError {
+		return false
+	}
+	block.Collapsed = !block.Collapsed
+	m.focus = focusTranscript
+	m.transcriptCursor = index
+	m.composer.Blur()
+	return true
 }
 
 func (m AppModel) visibleCommandSuggestions() []SlashCommand {
@@ -1146,6 +1182,7 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 	m.runID = ""
 	m.resetTurnUsage()
 	m.transcriptTop = 0
+	m.beginRunActivity()
 	return m, startTurn(m.runtime, app.TurnRequest{SessionID: m.sessionID, Prompt: input, Provider: m.provider, Model: m.model, Reasoning: m.reasoning, AgentMode: m.agentMode, Images: images})
 }
 
@@ -1315,6 +1352,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		m.runID = ""
 		m.resetTurnUsage()
 		m.transcriptTop = 0
+		m.beginRunActivity()
 		return m, startTurn(m.runtime, app.TurnRequest{
 			SessionID: m.sessionID, Prompt: prompt, Provider: m.provider, Model: m.model,
 			Reasoning: m.reasoning, AgentMode: m.agentMode, ActiveSkills: []string{name},

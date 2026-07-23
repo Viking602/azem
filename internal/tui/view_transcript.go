@@ -145,7 +145,7 @@ func (m AppModel) renderBlockHeader(selector, mark, kind, title, rawState, state
 func (m AppModel) renderBlockContent(content string, width int, style lipgloss.Style) []string {
 	lines := make([]string, 0)
 	for _, line := range wrapText(content, max(4, width-4)) {
-		lines = append(lines, m.theme.MetaDivider.Render("      │ ")+style.Render(line))
+		lines = append(lines, m.theme.BlockRail.Render("      │ ")+style.Render(line))
 	}
 	return lines
 }
@@ -168,7 +168,7 @@ func (m AppModel) renderApprovalContent(content string, width int) []string {
 			styled = m.theme.ApprovalAsk.Bold(true).Render(strings.TrimSpace(label)+separator) + m.theme.Assistant.Render(strings.TrimSpace(value))
 		}
 		for _, line := range wrapText(styled, contentWidth) {
-			lines = append(lines, m.theme.MetaDivider.Render(rail)+line)
+			lines = append(lines, m.theme.BlockRail.Render(rail)+line)
 		}
 	}
 	return lines
@@ -342,7 +342,7 @@ func (m AppModel) renderUserMessage(content string, width int) []string {
 	textWidth := max(1, width-2)
 	lines := make([]string, 0)
 	for _, line := range wrapText(content, textWidth) {
-		lines = append(lines, m.theme.UserSurface.Render("▌ "+padOrTrim(line, textWidth)))
+		lines = append(lines, m.theme.UserSurface.Render("▌ ")+m.theme.Assistant.Render(padOrTrim(line, textWidth)))
 	}
 	return lines
 }

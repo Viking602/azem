@@ -25,6 +25,7 @@ import (
 
 func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 	var requests atomic.Int32
+	var retries []RetryProgress
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
 		if requests.Add(1) <= maxProviderStreamRetries {
@@ -36,7 +37,11 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 	defer server.Close()
 
 	driver := newTestDriver(t, server.URL)
-	driver.retryDelay = func(int) time.Duration { return 0 }
+	driver.retryDelay = func(attempt int) time.Duration { return time.Duration(attempt) * time.Millisecond }
+	driver.SetRetryObserver(func(progress RetryProgress) error {
+		retries = append(retries, progress)
+		return nil
+	})
 	stream, err := driver.Stream(context.Background(), testRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -48,6 +53,18 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 	}
 	if requests.Load() != 6 {
 		t.Fatalf("requests=%d, want initial request plus five retries", requests.Load())
+	}
+	if len(retries) != maxProviderStreamRetries {
+		t.Fatalf("retry progress events=%d, want %d", len(retries), maxProviderStreamRetries)
+	}
+	for index, progress := range retries {
+		attempt := index + 1
+		if progress.Attempt != attempt || progress.Max != maxProviderStreamRetries || progress.Delay != time.Duration(attempt)*time.Millisecond {
+			t.Fatalf("retry %d progress=%#v", attempt, progress)
+		}
+		if progress.Cause == nil || !strings.Contains(progress.Cause.Error(), "connection reset") {
+			t.Fatalf("retry %d cause=%v", attempt, progress.Cause)
+		}
 	}
 }
 
@@ -61,7 +78,7 @@ func TestOpenProviderStreamRetriesTLSBadRecordMACFiveTimesThenSucceeds(t *testin
 		}
 		return want, nil
 	}
-	stream, retries, err := openProviderStream(context.Background(), open, func(int) time.Duration { return 0 }, 0)
+	stream, retries, err := openProviderStream(context.Background(), open, func(int) time.Duration { return 0 }, nil, 0)
 	if err != nil || stream != want {
 		t.Fatalf("stream=%T retries=%d error=%v", stream, retries, err)
 	}
@@ -76,7 +93,7 @@ func TestOpenProviderStreamStopsAfterFiveTLSBadRecordMACRetries(t *testing.T) {
 		attempts++
 		return nil, &url.Error{Op: "Post", URL: DefaultEndpoint, Err: errors.New("remote error: tls: bad record MAC")}
 	}
-	stream, retries, err := openProviderStream(context.Background(), open, func(int) time.Duration { return 0 }, 0)
+	stream, retries, err := openProviderStream(context.Background(), open, func(int) time.Duration { return 0 }, nil, 0)
 	if stream != nil || err == nil || !strings.Contains(err.Error(), "failed after 5 retries") {
 		t.Fatalf("stream=%T retries=%d error=%v", stream, retries, err)
 	}
@@ -103,6 +120,39 @@ func TestRetryableProviderTransportRetriesUnexpectedStreamEOF(t *testing.T) {
 	err := &responses.APIError{Kind: responses.ErrorStream, Message: "EOF"}
 	if !isRetryableProviderTransport(err) {
 		t.Fatalf("unexpected stream EOF was not classified retryable: %v", err)
+	}
+}
+
+func TestCancelledProviderRetryDoesNotReportProgress(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reported := false
+	_, _, err := openProviderStream(ctx, func() (hyprovider.Stream, error) {
+		return nil, errors.New("connection reset by peer")
+	}, func(int) time.Duration { return time.Second }, func(RetryProgress) error {
+		reported = true
+		return nil
+	}, 0)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v, want context canceled", err)
+	}
+	if reported {
+		t.Fatal("retry progress reported after cancellation")
+	}
+}
+
+func TestProviderRetryObserverCanStopRetryLoop(t *testing.T) {
+	attempts := 0
+	want := errors.New("retry progress delivery failed")
+	_, _, err := openProviderStream(context.Background(), func() (hyprovider.Stream, error) {
+		attempts++
+		return nil, errors.New("connection reset by peer")
+	}, nil, func(RetryProgress) error { return want }, 0)
+	if !errors.Is(err, want) {
+		t.Fatalf("error=%v, want observer failure", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("open attempts=%d, want no retry after observer failure", attempts)
 	}
 }
 

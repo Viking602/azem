@@ -18,6 +18,7 @@ const (
 	EventContextUsage      EventKind = "context_usage"
 	EventAgentState        EventKind = "agent_state"
 	EventAgentDetail       EventKind = "agent_detail"
+	EventProviderRetry     EventKind = "provider_retry"
 	EventThinkingDelta     EventKind = "thinking_delta"
 	EventTextDelta         EventKind = "text_delta"
 	EventToolStarted       EventKind = "tool_started"

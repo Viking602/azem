@@ -217,6 +217,9 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 	policy.newSummarizerResolver = func(cacheKey string) func(context.Context) (func(context.Context, string) (string, error), int, error) {
 		return lazyCompactionResolver(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
 			_, resolvedModel, window, driver, resolveErr := s.providers.resolveDriver(ctx, provider, model, reasoning)
+			if resolveErr == nil {
+				observeProviderRetries(ctx, s, request.SessionID, parentRunID, provider, driver)
+			}
 			if resolveErr == nil && s.sessions != nil {
 				driver = &meteredProviderDriver{inner: driver, store: s.sessions, host: s, sessionID: request.SessionID,
 					runID: parentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name}

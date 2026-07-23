@@ -16,6 +16,7 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
+	azprovider "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
 	"github.com/Viking602/azem/internal/provider/responses"
@@ -119,6 +120,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
+	providerDriver := driver
 	usageBudget := &providerUsageBudget{maxTokens: r.cfg.Agents.Main.MaxTokens}
 	driver = &budgetedProviderDriver{inner: driver, budget: usageBudget}
 	contextTarget, err := modelContextTokenTarget(request.Provider, modelID, contextWindow, 0)
@@ -139,6 +141,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	if routeSubagents != nil {
 		subagents = routeSubagents
 	}
+	observeProviderRetries(ctx, host, request.SessionID, run.RunID, request.Provider, providerDriver)
 	if subagentInitErr != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, subagentInitErr.Error(), subagentInitErr)
 		return nil, hyagent.Engine{}, subagentInitErr
@@ -289,6 +292,9 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	reportCompaction := r.compactionUsageReporter(host, request.SessionID, run.RunID)
 	contextManager.resolveSummarizer = lazyCompactionResolver(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
 		_, resolvedModel, window, resolved, resolveErr := r.resolveDriver(ctx, provider, model, reasoning)
+		if resolveErr == nil {
+			observeProviderRetries(ctx, host, request.SessionID, run.RunID, provider, resolved)
+		}
 		if resolveErr == nil && host != nil && host.sessions != nil {
 			resolved = &meteredProviderDriver{inner: resolved, store: host.sessions, host: host, sessionID: request.SessionID,
 				runID: run.RunID, kind: "compaction", provider: provider, model: resolvedModel, transport: resolved.Metadata().Name}
@@ -974,6 +980,7 @@ type teamProviderResolution struct {
 	providerID    string
 	modelID       string
 	contextWindow int
+	driver        hyprovider.Driver
 	resolver      hyprovider.Resolver
 }
 
@@ -982,10 +989,33 @@ func (r *ProviderRuntime) TeamResolver(ctx context.Context, request TurnRequest)
 	if err != nil {
 		return teamProviderResolution{}, err
 	}
-	return teamProviderResolution{providerID: request.Provider, modelID: modelID, contextWindow: contextWindow, resolver: hyprovider.Single(driver)}, nil
+	return teamProviderResolution{providerID: request.Provider, modelID: modelID, contextWindow: contextWindow, driver: driver, resolver: hyprovider.Single(driver)}, nil
 }
 
-func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context) (*codex.Reviewer, error) {
+func observeProviderRetries(ctx context.Context, host *Service, sessionID, runID, providerID string, driver hyprovider.Driver) {
+	retryDriver, ok := driver.(azprovider.RetryObservable)
+	if !ok || host == nil {
+		return
+	}
+	retryDriver.SetRetryObserver(func(progress azprovider.RetryProgress) error {
+		cause := ""
+		if progress.Cause != nil {
+			cause = progress.Cause.Error()
+		}
+		if !host.emit(ctx, Event{
+			Kind: EventProviderRetry, SessionID: sessionID, RunID: runID, State: "waiting", Text: cause,
+			Data: map[string]string{
+				"provider": providerID, "attempt": fmt.Sprint(progress.Attempt), "max": fmt.Sprint(progress.Max),
+				"delay_ms": fmt.Sprint(progress.Delay.Milliseconds()),
+			},
+		}) {
+			return eventDeliveryError(ctx)
+		}
+		return nil
+	})
+}
+
+func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context, sessionID, runID string) (*codex.Reviewer, error) {
 	accounts, err := r.auth.Accounts(ctx, "chatgpt")
 	if err != nil {
 		return nil, err
@@ -1004,6 +1034,10 @@ func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context) (*codex.Reviewer
 	if err != nil {
 		return nil, err
 	}
+	r.mu.RLock()
+	host := r.host
+	r.mu.RUnlock()
+	observeProviderRetries(ctx, host, sessionID, runID, "chatgpt", driver)
 	return codex.NewReviewer(driver)
 }
 
@@ -1054,6 +1088,7 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 		}
 	}
 	runCtx, cancel := context.WithCancel(host.ctx)
+	observeProviderRetries(runCtx, host, request.SessionID, runID, request.Provider, resolution.driver)
 	host.mu.Lock()
 	if host.activeRun != "" {
 		host.mu.Unlock()

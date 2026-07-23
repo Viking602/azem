@@ -91,6 +91,38 @@ func TestPhase4ProviderFactsAreIdempotentIsolatedAndDurable(t *testing.T) {
 	}
 }
 
+func TestProviderUsageSnapshotUsesLatestMainRequestForContextOccupancy(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "latest-context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	svc := NewService(store.DB())
+	if _, err = svc.Ensure(ctx, Session{ID: "s", Title: "latest context"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, fact := range []ProviderRequestFact{
+		{RequestID: "main-1", SessionID: "s", RunID: "run", RequestKind: "main", Status: "completed", StartedAt: now, CompletedAt: now.Add(time.Second), InputTokens: 180_000, OutputTokens: 10_000, CacheReported: true},
+		{RequestID: "main-2", SessionID: "s", RunID: "run", RequestKind: "main", Status: "completed", StartedAt: now.Add(2 * time.Second), CompletedAt: now.Add(3 * time.Second), InputTokens: 210_000, OutputTokens: 12_000, CacheReported: true},
+	} {
+		if err = svc.UpsertProviderRequest(ctx, fact); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := svc.ProviderUsageSnapshot(ctx, "s", "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.InputTokens != 210_000 || snapshot.OutputTokens != 12_000 {
+		t.Fatalf("context occupancy=%d/%d, want latest request 210000/12000", snapshot.InputTokens, snapshot.OutputTokens)
+	}
+	if snapshot.CurrentTurnMainInput != 390_000 || snapshot.CurrentTurnMainOutput != 22_000 {
+		t.Fatalf("turn aggregate=%d/%d, want cache diagnostics preserved", snapshot.CurrentTurnMainInput, snapshot.CurrentTurnMainOutput)
+	}
+}
+
 func TestPhase4EpochIsolationMutationAndManualActivationBinding(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "epoch.db"))

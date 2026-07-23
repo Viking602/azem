@@ -630,7 +630,7 @@ func (s *Service) automaticApproval(
 			failureKind = codex.ReviewFailureProvider
 		} else {
 			var reviewer *codex.Reviewer
-			reviewer, err = s.providers.ApprovalReviewer(ctx)
+			reviewer, err = s.providers.ApprovalReviewer(ctx, event.SessionID, event.RunID)
 			if err == nil {
 				assessment, err = reviewer.Review(ctx, providerRequest)
 			}

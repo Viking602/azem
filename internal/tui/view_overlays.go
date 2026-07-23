@@ -132,7 +132,7 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	end := min(len(renderRows), start+visibleRows)
 
 	rows := make([]string, 0, innerHeight)
-	rows = append(rows, m.boxRow(" "+strings.ToUpper(title), innerWidth, m.theme.Header, false))
+	rows = append(rows, m.boxRow(" ◈ "+strings.ToUpper(title), innerWidth, m.theme.OverlayTitle, false))
 	if subtitle != "" {
 		rows = append(rows, m.boxRow(" "+subtitle, innerWidth, m.theme.Muted, false))
 	}
@@ -148,11 +148,11 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		}
 	}
 	if stickyGroup != "" {
-		rows = append(rows, m.boxRow(" "+strings.ToUpper(providerDisplayName(stickyGroup)), innerWidth, m.theme.Header, false))
+		rows = append(rows, m.boxRow(" "+strings.ToUpper(providerDisplayName(stickyGroup)), innerWidth, m.theme.OverlayGroup, false))
 	}
 	for _, renderRow := range renderRows[start:end] {
 		if renderRow.OptionIndex < 0 {
-			rows = append(rows, m.boxRow(" "+strings.ToUpper(providerDisplayName(renderRow.Group)), innerWidth, m.theme.Header, false))
+			rows = append(rows, m.boxRow(" "+strings.ToUpper(providerDisplayName(renderRow.Group)), innerWidth, m.theme.OverlayGroup, false))
 			continue
 		}
 		option := options[renderRow.OptionIndex]
@@ -183,9 +183,9 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		rows = append(rows, m.boxRow("", innerWidth, m.theme.Assistant, false))
 	}
 	footer := m.overlayFooterForWidth(max(1, innerWidth-1))
-	rows = append(rows, m.boxRow(" "+footer, innerWidth, m.theme.Muted, false))
+	rows = append(rows, m.boxRow(" "+footer, innerWidth, m.theme.OverlayFooter, false))
 	if len(rows) > innerHeight {
-		rows = append(rows[:innerHeight-1], m.boxRow(" "+footer, innerWidth, m.theme.Muted, false))
+		rows = append(rows[:innerHeight-1], m.boxRow(" "+footer, innerWidth, m.theme.OverlayFooter, false))
 	}
 
 	top := m.theme.Border.Render("┌" + strings.Repeat("─", innerWidth) + "┐")
@@ -318,7 +318,7 @@ func (m AppModel) renderAgentDetailOverlay(width, height int) string {
 	start := min(max(0, m.overlayScroll), max(0, len(content)-rowsAvailable))
 	end := min(len(content), start+rowsAvailable)
 	rows := []string{
-		m.boxRow(" "+strings.ToUpper(m.tr("overlay.agent_detail.title")), innerWidth, m.theme.Header, false),
+		m.boxRow(" ◈ "+strings.ToUpper(m.tr("overlay.agent_detail.title")), innerWidth, m.theme.OverlayTitle, false),
 		m.boxRow(" "+first(agent.Description, agent.ID, m.tr("overlay.agent_detail.child_execution")), innerWidth, m.theme.Muted, false),
 		m.boxRow(" "+strings.Repeat("─", max(0, innerWidth-2)), innerWidth, m.theme.Border, false),
 	}
@@ -328,7 +328,7 @@ func (m AppModel) renderAgentDetailOverlay(width, height int) string {
 	for len(rows) < innerHeight-1 {
 		rows = append(rows, m.boxRow("", innerWidth, m.theme.Assistant, false))
 	}
-	footer := m.boxRow(" "+m.overlayFooterForWidth(max(1, innerWidth-1)), innerWidth, m.theme.Muted, false)
+	footer := m.boxRow(" "+m.overlayFooterForWidth(max(1, innerWidth-1)), innerWidth, m.theme.OverlayFooter, false)
 	rows = append(rows, footer)
 	if len(rows) > innerHeight {
 		rows = append(rows[:innerHeight-1], footer)

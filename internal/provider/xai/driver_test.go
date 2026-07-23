@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Viking602/go-hydaelyn/message"
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
+	azprovider "github.com/Viking602/azem/internal/provider"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -22,6 +24,55 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
+}
+
+type retryTransport struct{ requests int }
+
+func (t *retryTransport) Name() string { return "retry-test" }
+
+func (t *retryTransport) Post(context.Context, []byte) (*http.Response, error) {
+	t.requests++
+	body := `data: {"type":"error","code":"server_error","message":"connection reset by peer"}` + "\n\n"
+	if t.requests == 3 {
+		body = `data: {"type":"response.completed","response":{"status":"completed"}}` + "\n\n"
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+func TestDriverReportsConnectionRetriesThroughGenericObserver(t *testing.T) {
+	transport := &retryTransport{}
+	driver, err := New(transport, []string{"grok-test"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver.retryDelay = func(int) time.Duration { return 0 }
+	var progress []azprovider.RetryProgress
+	driver.SetRetryObserver(func(retry azprovider.RetryProgress) error {
+		progress = append(progress, retry)
+		return nil
+	})
+	stream, err := driver.Stream(context.Background(), hyprovider.Request{
+		Model: "grok-test", Messages: []message.Message{message.NewText(message.RoleUser, "hello")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	event, err := stream.Recv()
+	if err != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("event=%#v error=%v", event, err)
+	}
+	if transport.requests != 3 || len(progress) != 2 {
+		t.Fatalf("requests=%d progress=%d, want 3 requests and 2 retry events", transport.requests, len(progress))
+	}
+	for index, retry := range progress {
+		if retry.Attempt != index+1 || retry.Max != azprovider.DefaultMaxStreamRetries || retry.Cause == nil {
+			t.Fatalf("retry %d=%#v", index+1, retry)
+		}
+	}
 }
 
 func TestStandardTransportUsesOnlyXAIHeaders(t *testing.T) {

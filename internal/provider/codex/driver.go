@@ -16,6 +16,7 @@ import (
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 
 	"github.com/Viking602/azem/internal/auth"
+	azprovider "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/responses"
 )
 
@@ -30,7 +31,11 @@ type Driver struct {
 	toolItemIDs     map[string]string
 	reasoningEffort string
 	retryDelay      func(int) time.Duration
+	retryObserver   RetryObserver
 }
+
+type RetryProgress = azprovider.RetryProgress
+type RetryObserver = azprovider.RetryObserver
 
 func New(authentication *auth.Service, accountID string, endpoint string, models []string, reasoningEffort string) (*Driver, error) {
 	if authentication == nil {
@@ -53,6 +58,12 @@ func (d *Driver) Metadata() hyprovider.Metadata {
 	return hyprovider.Metadata{Name: "chatgpt-codex-responses", Models: append([]string(nil), d.models...), Version: "1"}
 }
 
+// SetRetryObserver reports transport retries from the retry loop itself. The
+// observer must not block and is expected to be configured before Stream.
+func (d *Driver) SetRetryObserver(observer RetryObserver) {
+	d.retryObserver = observer
+}
+
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
 	cacheKey := promptCacheKey(request)
 	request, reverseNames := mapToolNames(request)
@@ -66,11 +77,11 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 	open := func() (hyprovider.Stream, error) {
 		return d.openStream(ctx, payload, reverseNames, cacheKey, responses.RequestUsageReporter(request))
 	}
-	stream, retries, err := openProviderStream(ctx, open, d.retryDelay, 0)
+	stream, retries, err := openProviderStream(ctx, open, d.retryDelay, d.retryObserver, 0)
 	if err != nil {
 		return nil, err
 	}
-	return &retryingStream{ctx: ctx, current: stream, open: open, delay: d.retryDelay, retries: retries}, nil
+	return &retryingStream{ctx: ctx, current: stream, open: open, delay: d.retryDelay, observe: d.retryObserver, retries: retries}, nil
 }
 
 func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames map[string]string, cacheKey string, reporter responses.UsageReporter) (hyprovider.Stream, error) {
@@ -114,6 +125,7 @@ type retryingStream struct {
 	current hyprovider.Stream
 	open    func() (hyprovider.Stream, error)
 	delay   func(int) time.Duration
+	observe RetryObserver
 	retries int
 	emitted bool
 	closed  bool
@@ -145,10 +157,14 @@ func (s *retryingStream) Recv() (hyprovider.Event, error) {
 
 		_ = s.current.Close()
 		s.retries++
-		if err := waitForProviderRetry(s.ctx, s.delay, s.retries); err != nil {
+		wait := providerRetryWait(s.delay, s.retries)
+		if err := reportProviderRetry(s.ctx, s.observe, s.retries, wait, cause); err != nil {
 			return hyprovider.Event{}, err
 		}
-		next, retries, openErr := openProviderStream(s.ctx, s.open, s.delay, s.retries)
+		if err := waitForProviderRetry(s.ctx, wait); err != nil {
+			return hyprovider.Event{}, err
+		}
+		next, retries, openErr := openProviderStream(s.ctx, s.open, s.delay, s.observe, s.retries)
 		s.retries = retries
 		if openErr != nil {
 			return streamFailure(event, openErr)
@@ -165,7 +181,7 @@ func (s *retryingStream) Close() error {
 	return s.current.Close()
 }
 
-func openProviderStream(ctx context.Context, open func() (hyprovider.Stream, error), delay func(int) time.Duration, retries int) (hyprovider.Stream, int, error) {
+func openProviderStream(ctx context.Context, open func() (hyprovider.Stream, error), delay func(int) time.Duration, observe RetryObserver, retries int) (hyprovider.Stream, int, error) {
 	for {
 		stream, err := open()
 		if err == nil {
@@ -178,17 +194,34 @@ func openProviderStream(ctx context.Context, open func() (hyprovider.Stream, err
 			return nil, retries, err
 		}
 		retries++
-		if err := waitForProviderRetry(ctx, delay, retries); err != nil {
+		wait := providerRetryWait(delay, retries)
+		if err := reportProviderRetry(ctx, observe, retries, wait, err); err != nil {
+			return nil, retries, err
+		}
+		if err := waitForProviderRetry(ctx, wait); err != nil {
 			return nil, retries, err
 		}
 	}
 }
 
-func waitForProviderRetry(ctx context.Context, delay func(int) time.Duration, attempt int) error {
+func providerRetryWait(delay func(int) time.Duration, attempt int) time.Duration {
 	if delay == nil {
-		return nil
+		return 0
 	}
-	wait := delay(attempt)
+	return max(0, delay(attempt))
+}
+
+func reportProviderRetry(ctx context.Context, observe RetryObserver, attempt int, delay time.Duration, cause error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if observe != nil {
+		return observe(RetryProgress{Attempt: attempt, Max: maxProviderStreamRetries, Delay: delay, Cause: cause})
+	}
+	return nil
+}
+
+func waitForProviderRetry(ctx context.Context, wait time.Duration) error {
 	if wait <= 0 {
 		return nil
 	}

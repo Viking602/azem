@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -69,6 +70,16 @@ func (s *Service) aggregateUsage(ctx context.Context, sessionID, clause string, 
 	return a, err
 }
 
+func (s *Service) latestMainUsage(ctx context.Context, sessionID, runID string) (input, output int, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT input_tokens,output_tokens FROM provider_requests
+		WHERE session_id=? AND run_id=? AND request_kind='main' AND status='completed'
+		ORDER BY completed_at DESC,started_at DESC,request_id DESC LIMIT 1`, sessionID, runID).Scan(&input, &output)
+	if err == sql.ErrNoRows {
+		return 0, 0, nil
+	}
+	return input, output, err
+}
+
 // ProviderUsageSnapshot derives all cache KPIs from persisted facts.
 func (s *Service) ProviderUsageSnapshot(ctx context.Context, sessionID, runID string) (Usage, error) {
 	p, err := s.LoadProjection(ctx, sessionID)
@@ -80,6 +91,10 @@ func (s *Service) ProviderUsageSnapshot(ctx context.Context, sessionID, runID st
 		return Usage{}, err
 	}
 	turn, err := s.aggregateUsage(ctx, sessionID, `AND request_kind='main' AND run_id=?`, runID)
+	if err != nil {
+		return Usage{}, err
+	}
+	latestInput, latestOutput, err := s.latestMainUsage(ctx, sessionID, runID)
 	if err != nil {
 		return Usage{}, err
 	}
@@ -115,7 +130,9 @@ func (s *Service) ProviderUsageSnapshot(ctx context.Context, sessionID, runID st
 	u.SubagentInput, u.SubagentReportedInput, u.SubagentCached, u.SubagentCacheWrite, u.SubagentOutput, u.SubagentReasoning, u.SubagentRequests, u.SubagentReportedRequests = sub.rawInput, sub.reportedInput, sub.cached, sub.write, sub.output, sub.reasoning, sub.requests, sub.reportedRequests
 	u.SubagentCacheReported = sub.reported
 	// Existing presentation fields now reflect the isolated current epoch.
-	u.InputTokens, u.OutputTokens = turn.rawInput, turn.output
+	// Context occupancy is the latest request's full context, not the sum of
+	// overlapping contexts sent by every model call in the agent loop.
+	u.InputTokens, u.OutputTokens = latestInput, latestOutput
 	u.MainCacheInput, u.MainCachedInput, u.MainCacheWrite, u.MainCacheReported = epoch.reportedInput, epoch.cached, epoch.write, epoch.reported
 	u.CacheInputTokens, u.CachedInputTokens, u.CacheWriteTokens, u.CacheReported = epoch.reportedInput, epoch.cached, epoch.write, epoch.reported
 	return u, nil
