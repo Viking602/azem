@@ -261,8 +261,8 @@ func isRetryableProviderTransport(err error) bool {
 		return true
 	}
 	var urlError *url.Error
-	if errors.As(err, &urlError) && urlError.Err != nil && isRetryableProviderTransport(urlError.Err) {
-		return true
+	if errors.As(err, &urlError) && urlError.Err != nil {
+		return errors.Is(urlError.Err, io.EOF) || isRetryableProviderTransport(urlError.Err)
 	}
 	var networkError net.Error
 	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {

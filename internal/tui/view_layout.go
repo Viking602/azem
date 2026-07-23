@@ -237,14 +237,63 @@ func (m AppModel) renderHeader(width int) string {
 
 func (m AppModel) renderBody(width int, height int) string {
 	if width < 104 || height < 16 {
-		return m.renderTranscript(width, height)
+		transcriptWidth := bodyTranscriptWidth(width, height)
+		transcript := m.renderTranscript(transcriptWidth, height)
+		if transcriptWidth == width {
+			return transcript
+		}
+		return lipgloss.JoinHorizontal(lipgloss.Top, transcript, m.renderTranscriptScrollbar(height, transcriptWidth))
 	}
 	railWidth := min(31, width/3)
 	transcriptWidth := width - railWidth - 1
 	transcript := m.renderTranscript(transcriptWidth, height)
-	divider := m.theme.Border.Render(strings.Repeat("│\n", height-1) + "│")
+	scrollbar := m.renderTranscriptScrollbar(height, transcriptWidth)
 	rail := m.renderContextRail(railWidth, height)
-	return lipgloss.JoinHorizontal(lipgloss.Top, transcript, divider, rail)
+	return lipgloss.JoinHorizontal(lipgloss.Top, transcript, scrollbar, rail)
+}
+
+func bodyTranscriptWidth(width, height int) int {
+	width = max(1, width)
+	if width >= 104 && height >= 16 {
+		return max(1, width-min(31, width/3)-1)
+	}
+	if width > 1 {
+		return width - 1
+	}
+	return width
+}
+
+func (m AppModel) renderTranscriptScrollbar(height, transcriptWidth int) string {
+	height = max(1, height)
+	lineCount := len(m.transcriptLines(max(1, transcriptWidth-4)))
+	maxOffset := m.transcriptOffsetLimit(lineCount, height)
+	offset := min(maxOffset, max(0, m.transcriptTop))
+	thumbStart, thumbSize := transcriptScrollbarThumb(height, lineCount, maxOffset, offset)
+	rows := make([]string, height)
+	for row := range rows {
+		if thumbSize > 0 && row >= thumbStart && row < thumbStart+thumbSize {
+			rows[row] = m.theme.ScrollThumb.Render("┃")
+		} else {
+			rows[row] = m.theme.ScrollTrack.Render("│")
+		}
+	}
+	return strings.Join(rows, "\n")
+}
+
+func transcriptScrollbarThumb(trackHeight, lineCount, maxOffset, offset int) (int, int) {
+	if trackHeight <= 0 || lineCount <= 0 || maxOffset <= 0 {
+		return 0, 0
+	}
+	contentHeight := max(1, lineCount-maxOffset)
+	thumbSize := min(trackHeight, max(1, (trackHeight*contentHeight+lineCount-1)/lineCount))
+	travel := trackHeight - thumbSize
+	if travel <= 0 {
+		return 0, thumbSize
+	}
+	offset = min(maxOffset, max(0, offset))
+	scrollFromOldest := maxOffset - offset
+	thumbStart := (scrollFromOldest*travel + maxOffset/2) / maxOffset
+	return min(travel, max(0, thumbStart)), thumbSize
 }
 
 func (m AppModel) renderTranscript(width int, height int) string {
@@ -294,9 +343,7 @@ func (m AppModel) transcriptBounds() (left int, top int, width int, height int) 
 		top = 2
 	}
 	height = layout.bodyHeight
-	if width >= 104 && height >= 16 {
-		width -= min(31, width/3) + 1
-	}
+	width = bodyTranscriptWidth(width, height)
 	return 0, top, width, height
 }
 
@@ -602,10 +649,7 @@ func (m AppModel) transcriptViewportSize() (int, int) {
 	}
 	layout := measureViewLayout(height, width, m.composerBlockLines(), len(suggestions), recapRows)
 	bodyHeight := layout.bodyHeight
-	if width >= 104 && bodyHeight >= 16 {
-		width -= min(31, width/3) + 1
-	}
-	return width, bodyHeight
+	return bodyTranscriptWidth(width, bodyHeight), bodyHeight
 }
 
 func (m AppModel) transcriptMaxOffset() int {

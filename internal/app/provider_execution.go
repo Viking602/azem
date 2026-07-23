@@ -133,7 +133,15 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			MaxToolCalls: s.cfg.Agents.Main.MaxToolCalls,
 		},
 	}
-	result := engine.RunStream(ctx, task, hyagent.OutputPolicy{}, s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil))
+	var streamed strings.Builder
+	uiSink := s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
+	sink := stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
+		if frame.Kind == stream.FrameText {
+			streamed.WriteString(frame.Text)
+		}
+		return uiSink.Emit(ctx, frame)
+	})
+	result := engine.RunStream(ctx, task, hyagent.OutputPolicy{}, sink)
 	var runErr error
 	if result.Failure != nil {
 		runErr = result.Failure
@@ -144,8 +152,19 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			runErr = fmt.Errorf("%w (increase agents.main.max_tool_calls, or set it to 0 for unbounded, in config.yaml)", runErr)
 		}
 	}
+	if runErr != nil && ctx.Err() == nil {
+		if s.sessions != nil && strings.TrimSpace(streamed.String()) != "" {
+			persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, err := s.sessions.AppendBlock(persistCtx, request.SessionID, session.Block{
+				Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: streamed.String(), State: "failed",
+			})
+			cancel()
+			if err != nil {
+				runErr = fmt.Errorf("%v; persist failed turn: %w", runErr, err)
+			}
+		}
+	}
 	completionCtx, completionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer completionCancel()
 	if err := s.coding.CompleteRun(completionCtx, run, result.Text, runErr); err != nil {
 		if runErr == nil {
 			runErr = err
@@ -153,6 +172,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			runErr = fmt.Errorf("%v; durable completion: %w", runErr, err)
 		}
 	}
+	completionCancel()
 	if ctx.Err() != nil {
 		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "cancelled", ctx.Err())
 		s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: request.SessionID, RunID: run.RunID, State: "cancelled"})
@@ -179,7 +199,9 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			return
 		}
 	}
-	if err := s.persistRecap(ctx, request.SessionID, run.RunID, request.Prompt, result.Text, request.Todo); err != nil {
+	if err := s.persistRecap(ctx, recapGenerationRequest{
+		SessionID: request.SessionID, RunID: run.RunID, Goal: request.Prompt, Answer: result.Text, Todo: request.Todo,
+	}); err != nil {
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
 	}
 	s.emit(ctx, Event{Kind: EventRunFinished, SessionID: request.SessionID, RunID: run.RunID, State: "completed"})
@@ -690,7 +712,7 @@ func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID, goal
 			return
 		}
 	}
-	if err := s.persistRecap(ctx, sessionID, runID, goal, answer, todo); err != nil {
+	if err := s.persistRecap(ctx, recapGenerationRequest{SessionID: sessionID, RunID: runID, Goal: goal, Answer: answer, Todo: todo}); err != nil {
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 	}
 	s.emit(ctx, Event{Kind: EventRunFinished, SessionID: sessionID, RunID: runID, State: "completed"})

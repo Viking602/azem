@@ -610,6 +610,129 @@ func maxCompactionSummaryTokens(contextWindow int) int {
 	return reserved
 }
 
+const recapPrompt = `Write a concise session recap in under 40 words and one or two plain sentences. Output plain text only, with no markdown. State the overall goal and current status, then the single next action when one remains. Do not repeat the full answer, list secondary details, or include implementation narrative.`
+
+func (r *ProviderRuntime) GenerateRecap(ctx context.Context, input recapGenerationRequest) (string, error) {
+	if r == nil {
+		return "", fmt.Errorf("provider runtime is unavailable")
+	}
+	providerID, modelID, reasoning := r.cfg.Defaults.Provider, r.cfg.Defaults.Model, "low"
+	if r.host != nil && r.host.sessions != nil {
+		if saved, err := r.host.sessions.LoadSession(ctx, input.SessionID); err == nil {
+			providerID = firstNonempty(saved.ProviderID, providerID)
+			modelID = firstNonempty(saved.ModelID, modelID)
+		}
+	}
+	route, _ := r.modelRouteSnapshot()
+	if route != (config.ModelRouteConfig{}) {
+		providerID, modelID, reasoning = route.Provider, route.Model, route.Reasoning
+	}
+	if strings.TrimSpace(reasoning) == "" {
+		reasoning = "low"
+	}
+	_, resolvedModel, contextWindow, driver, err := r.resolveDriver(ctx, providerID, modelID, reasoning)
+	if err != nil {
+		return "", err
+	}
+	maxOutputTokens := min(256, max(64, contextWindow/32))
+	prompt, err := recapInput(input, contextTokenBytes(contextWindow-maxOutputTokens-256))
+	if err != nil {
+		return "", err
+	}
+	if r.host != nil && r.host.sessions != nil {
+		driver = &meteredProviderDriver{
+			inner: driver, store: r.host.sessions, host: r.host, sessionID: input.SessionID, runID: input.RunID,
+			kind: "recap", provider: providerID, model: resolvedModel, transport: driver.Metadata().Name,
+		}
+	}
+	request := hyprovider.Request{
+		Model: resolvedModel,
+		Messages: []message.Message{
+			message.NewText(message.RoleSystem, recapPrompt),
+			message.NewText(message.RoleUser, prompt),
+		},
+		Metadata: map[string]string{"reasoning_effort": reasoning},
+		ExtraBody: map[string]any{
+			"prompt_cache_key": input.SessionID + ":recap",
+		},
+	}
+	if providerID != "chatgpt" {
+		request.ExtraBody["max_output_tokens"] = maxOutputTokens
+	}
+	return collectProviderText(ctx, driver, request, "recap")
+}
+
+func recapInput(input recapGenerationRequest, maxBytes int) (string, error) {
+	type evidence struct {
+		Goal      string   `json:"goal,omitempty"`
+		Answer    string   `json:"latest_answer,omitempty"`
+		OpenItems []string `json:"open_items,omitempty"`
+	}
+	value := evidence{Goal: strings.TrimSpace(input.Goal), Answer: strings.TrimSpace(input.Answer)}
+	for _, phase := range input.Todo.Phases {
+		for _, item := range phase.Items {
+			if item.Status == session.TodoPending || item.Status == session.TodoInProgress {
+				value.OpenItems = append(value.OpenItems, string(item.Status)+": "+item.Content)
+			}
+		}
+	}
+	for {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return "", err
+		}
+		if len(encoded) <= maxBytes {
+			return string(encoded), nil
+		}
+		if len(value.OpenItems) > 1 {
+			value.OpenItems = value.OpenItems[:len(value.OpenItems)-1]
+			continue
+		}
+		value.Answer = strings.ToValidUTF8(value.Answer, "�")
+		overhead := len(encoded) - len(value.Answer)
+		available := maxBytes - overhead - len("[truncated]")
+		if available <= 0 || len(value.Answer) <= available {
+			return "", fmt.Errorf("recap input does not fit model context")
+		}
+		value.Answer = value.Answer[len(value.Answer)-available:] + "[truncated]"
+	}
+}
+
+func collectProviderText(ctx context.Context, driver hyprovider.Driver, request hyprovider.Request, operation string) (string, error) {
+	stream, err := driver.Stream(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+	var text strings.Builder
+	for {
+		event, recvErr := stream.Recv()
+		if recvErr == io.EOF {
+			return "", fmt.Errorf("%s provider ended without completion", operation)
+		}
+		if recvErr != nil {
+			return "", recvErr
+		}
+		switch event.Kind {
+		case hyprovider.EventTextDelta:
+			text.WriteString(event.Text)
+		case hyprovider.EventError:
+			if event.Err != nil {
+				return "", event.Err
+			}
+			return "", fmt.Errorf("%s provider stream failed", operation)
+		case hyprovider.EventDone:
+			if event.StopReason != hyprovider.StopReasonComplete {
+				return "", fmt.Errorf("%s provider stopped with %s", operation, event.StopReason)
+			}
+			result := strings.TrimSpace(text.String())
+			if result == "" {
+				return "", fmt.Errorf("%s provider returned empty output", operation)
+			}
+			return result, nil
+		}
+	}
+}
 func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projection session.Projection) (session.CompactionPlan, bool, error) {
 	const keepRecent = 4
 	if len(projection.Blocks) <= keepRecent+1 {

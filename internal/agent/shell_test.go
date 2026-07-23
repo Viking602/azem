@@ -87,6 +87,34 @@ func TestShellDoesNotStartWhenContextIsAlreadyCancelled(t *testing.T) {
 	}
 }
 
+func TestSilentShellCommandEmitsProgressWithoutRepeatedMessages(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell command")
+	}
+	driver := newShellDriver(t.TempDir(), "allow", "deny")
+	arguments, _ := json.Marshal(shellInput{Command: "sleep 1"})
+	var updates []tool.Update
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "silent", Name: ToolShell, Arguments: arguments}, func(update tool.Update) error {
+		updates = append(updates, update)
+		return nil
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("silent shell result=%+v error=%v", result, err)
+	}
+	progress := 0
+	for _, update := range updates {
+		if update.Kind == "progress" {
+			progress++
+			if update.Message != "" || update.Data["output_bytes"] != "0" {
+				t.Fatalf("silent shell emitted visible progress update=%+v", update)
+			}
+		}
+	}
+	if progress == 0 {
+		t.Fatal("silent shell stopped emitting progress heartbeats")
+	}
+}
+
 func TestShellReapsResidualGroupAfterNormalShellExit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses POSIX process groups")

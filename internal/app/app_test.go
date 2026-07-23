@@ -257,7 +257,7 @@ func TestResumedRunStartPreservesRecordedUsage(t *testing.T) {
 	}
 }
 
-func TestPersistRecapEmitsVisibleUpdatedEvent(t *testing.T) {
+func TestPersistRecapGeneratesConciseSummaryAndEmitsUpdatedEvent(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
@@ -269,11 +269,33 @@ func TestPersistRecapEmitsVisibleUpdatedEvent(t *testing.T) {
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := sessions.UpdateTodo(ctx, "session-1", 0, func(todo *session.TodoList) error {
+		todo.Goal = "Ship recap"
+		todo.Phases = []session.TodoPhase{{Title: "Verify", Items: []session.TodoItem{
+			{Content: "Run focused tests", Status: session.TodoInProgress},
+			{Content: "Open PR", Status: session.TodoPending},
+			{Content: "Inspect implementation", Status: session.TodoCompleted},
+		}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	service := NewService(ctx, config.Default())
 	service.AttachDurable(sessions, nil)
 	service.AttachMemory(nil, recap.NewService(store.DB(), workspace))
-	if err := service.persistRecap(ctx, "session-1", "run-1", "Expose recap", "Recap is visible", session.TodoList{}); err != nil {
+	var generated recapGenerationRequest
+	service.recapGenerator = func(_ context.Context, request recapGenerationRequest) (string, error) {
+		generated = request
+		return "Recap generation is implemented. Next: run focused tests.", nil
+	}
+	fullAnswer := "A long final response with implementation details that must not be stored verbatim."
+	if err := service.persistRecap(ctx, recapGenerationRequest{
+		SessionID: "session-1", RunID: "run-1", Goal: "Expose recap", Answer: fullAnswer,
+	}); err != nil {
 		t.Fatal(err)
+	}
+	if generated.Answer != fullAnswer || generated.Todo.Revision != 1 {
+		t.Fatalf("generator input = %#v", generated)
 	}
 	eventCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
@@ -282,8 +304,41 @@ func TestPersistRecapEmitsVisibleUpdatedEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if event.Kind != EventRecapState || event.State != "updated" || event.SessionID != "session-1" ||
-		event.Recap == nil || event.Recap.Summary != "Recap is visible" || event.Recap.Revision != 1 {
+		event.Recap == nil || event.Recap.Summary != "Recap generation is implemented. Next: run focused tests." ||
+		event.Recap.Summary == fullAnswer || event.Recap.Revision != 1 ||
+		event.Recap.Goal != "Ship recap" || event.Recap.OpenItems != "in_progress: Run focused tests\npending: Open PR" {
 		t.Fatalf("recap update event = %#v", event)
+	}
+}
+
+func TestPersistRecapGenerationFailureKeepsPreviousRecap(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1"}); err != nil {
+		t.Fatal(err)
+	}
+	recaps := recap.NewService(store.DB(), t.TempDir())
+	if _, err := recaps.Upsert(ctx, recap.Recap{SessionID: "session-1", CoveredBoundary: "run-1", Summary: "Existing recap"}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	service.AttachMemory(nil, recaps)
+	service.recapGenerator = func(context.Context, recapGenerationRequest) (string, error) {
+		return "", errors.New("provider unavailable")
+	}
+	err = service.persistRecap(ctx, recapGenerationRequest{SessionID: "session-1", RunID: "run-2", Answer: "full answer"})
+	if err == nil || !strings.Contains(err.Error(), "provider unavailable") {
+		t.Fatalf("generation error = %v", err)
+	}
+	loaded, loadErr := recaps.Load(ctx, "session-1")
+	if loadErr != nil || loaded.Summary != "Existing recap" || loaded.Revision != 1 || loaded.CoveredBoundary != "run-1" {
+		t.Fatalf("previous recap changed: %#v, %v", loaded, loadErr)
 	}
 }
 
@@ -542,6 +597,52 @@ func TestResumeSessionIncludesPersistedUsage(t *testing.T) {
 	}
 	if restored != usage {
 		t.Fatalf("resume usage = %+v, want %+v", restored, usage)
+	}
+}
+
+func TestResumeSessionReturnsCompleteFailedOutputWithoutTruncation(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "failed-session", Title: "Failed"}); err != nil {
+		t.Fatal(err)
+	}
+	completeOutput := strings.Repeat("失败前的完整输出-0123456789\n", 20_000)
+	if _, err := sessions.AppendBlock(ctx, "failed-session", session.Block{
+		Kind: "user", RunID: "failed-run", Title: "You", Content: "continue this work",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "failed-session", session.Block{
+		Kind: "assistant", RunID: "failed-run", Title: "Azem", Content: completeOutput, State: "failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionResumeSession, Target: "failed-session"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blocks []session.Block
+	if err := json.Unmarshal([]byte(event.Data["blocks"]), &blocks); err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventSessionLoaded || event.State != "loaded" || len(blocks) != 2 ||
+		blocks[1].State != "failed" || blocks[1].Content != completeOutput {
+		outputBytes := 0
+		if len(blocks) > 1 {
+			outputBytes = len(blocks[1].Content)
+		}
+		t.Fatalf("resumed failed output: event=%s/%s blocks=%d output_bytes=%d want_bytes=%d",
+			event.Kind, event.State, len(blocks), outputBytes, len(completeOutput))
 	}
 }
 

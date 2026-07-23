@@ -220,8 +220,26 @@ func TestPhase3DurableProvenanceUsesSequence(t *testing.T) {
 	if !ok || messageSourceReference(value, 0, 0) != "sequence:42" {
 		t.Fatalf("message=%#v", value)
 	}
+	failed, ok := blockMessage(session.Block{Sequence: 43, Kind: "assistant", State: "failed", Content: "partial output"})
+	if !ok || failed.Text != failedAssistantLabel+"partial output" {
+		t.Fatalf("failed assistant message=%#v", failed)
+	}
 	if _, err := normalizeSummaryV2(`{"version":2,"objective":"x","source_references":["message:0"]}`, nil); err == nil {
 		t.Fatal("accepted ambiguous per-chunk message provenance")
+	}
+	normalized, err := normalizeSummaryV2(
+		`{"version":2,"objective":"x","covered":["transcript: invented prose"],"source_references":["transcript: invented prose"]}`,
+		[]string{"sequence:42"},
+	)
+	if err != nil {
+		t.Fatalf("host provenance did not replace model references: %v", err)
+	}
+	var summary compactionSummaryV2
+	if err := json.Unmarshal([]byte(normalized), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(summary.Sources, []string{"sequence:42"}) || !reflect.DeepEqual(summary.Covered, []string{"sequence:42"}) {
+		t.Fatalf("normalized provenance=%+v", summary)
 	}
 }
 
@@ -245,6 +263,138 @@ func (d *compactionTestDriver) Stream(_ context.Context, request hyprovider.Requ
 	events := d.streams[0]
 	d.streams = d.streams[1:]
 	return hyprovider.NewSliceStream(events), nil
+}
+
+func TestFailedProviderTurnPersistsStreamedBreakpoint(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coding, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "failed-session", Title: "Failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "failed-session", session.Block{Kind: "user", RunID: "completed-run", Content: "previous request"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.CompleteTurn(ctx, "failed-session", session.Block{
+		Kind: "assistant", RunID: "completed-run", Content: "previous answer", State: "completed",
+	}, session.ModelHistory{
+		ProviderID: "test", ModelID: "test", InstructionFingerprint: mainInstructionFingerprint,
+		StaticPrefixHash: mainInstructionFingerprint, WireVersion: session.CurrentWireVersion,
+		Messages: []message.Message{
+			message.NewText(message.RoleSystem, "test"), message.NewText(message.RoleUser, "previous request"),
+			message.NewText(message.RoleAssistant, "previous answer"),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	beforeFailure, err := sessions.LoadProjection(ctx, "failed-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := coding.StartRun(ctx, "keep the failed breakpoint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "failed-session", session.Block{
+		Kind: "user", RunID: run.RunID, Title: "You", Content: "keep the failed breakpoint",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, coding)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	service.wg.Add(1)
+	service.runProviderTurn(ctx, TurnRequest{
+		SessionID: "failed-session", Prompt: "keep the failed breakpoint", Provider: "test", Model: "test",
+	}, run, hyagent.Engine{
+		Provider: &compactionTestDriver{streams: [][]hyprovider.Event{{
+			{Kind: hyprovider.EventTextDelta, Text: "work completed before "},
+			{Kind: hyprovider.EventTextDelta, Text: "the provider failed"},
+			{Kind: hyprovider.EventError, Err: errors.New("provider failed")},
+		}}},
+		Model: "test", ContextBuilder: turnContext{instructions: "test"},
+	})
+	projection, err := sessions.LoadProjection(ctx, "failed-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 4 || projection.Blocks[3].Kind != "assistant" || projection.Blocks[3].State != "failed" ||
+		projection.Blocks[3].Content != "work completed before the provider failed" {
+		t.Fatalf("failed breakpoint blocks=%+v", projection.Blocks)
+	}
+	if !reflect.DeepEqual(projection.ModelHistory, beforeFailure.ModelHistory) ||
+		projection.CheckpointGeneration != beforeFailure.CheckpointGeneration {
+		t.Fatalf("failed breakpoint changed checkpoint:\n got=%+v generation=%d\nwant=%+v generation=%d",
+			projection.ModelHistory, projection.CheckpointGeneration, beforeFailure.ModelHistory, beforeFailure.CheckpointGeneration)
+	}
+}
+
+func TestRecapInputIncludesGoalAnswerAndOnlyOpenTodoItems(t *testing.T) {
+	encoded, err := recapInput(recapGenerationRequest{
+		Goal:   "Ship concise recap",
+		Answer: "The implementation is complete with many details.",
+		Todo: session.TodoList{Phases: []session.TodoPhase{{Title: "Work", Items: []session.TodoItem{
+			{Content: "Run focused tests", Status: session.TodoInProgress},
+			{Content: "Open PR", Status: session.TodoPending},
+			{Content: "Inspect implementation", Status: session.TodoCompleted},
+		}}}},
+	}, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(encoded, `"goal":"Ship concise recap"`) ||
+		!strings.Contains(encoded, `"latest_answer":"The implementation is complete with many details."`) ||
+		!strings.Contains(encoded, `"in_progress: Run focused tests"`) ||
+		!strings.Contains(encoded, `"pending: Open PR"`) || strings.Contains(encoded, "Inspect implementation") {
+		t.Fatalf("recap input = %s", encoded)
+	}
+}
+
+func TestRecapInputBoundsLongAnswerByKeepingItsTail(t *testing.T) {
+	encoded, err := recapInput(recapGenerationRequest{Goal: "goal", Answer: strings.Repeat("prefix ", 200) + "final outcome and next action"}, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > 200 || !strings.Contains(encoded, "final outcome and next action") || !strings.Contains(encoded, "[truncated]") {
+		t.Fatalf("bounded recap input (%d bytes) = %s", len(encoded), encoded)
+	}
+}
+
+func TestCollectProviderTextReturnsOnlyGeneratedRecap(t *testing.T) {
+	driver := &compactionTestDriver{streams: [][]hyprovider.Event{{
+		{Kind: hyprovider.EventTextDelta, Text: "Goal is complete. "},
+		{Kind: hyprovider.EventTextDelta, Text: "Next: open the PR."},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}}}
+	request := hyprovider.Request{Model: "model", Messages: []message.Message{message.NewText(message.RoleUser, "full answer")}}
+	got, err := collectProviderText(context.Background(), driver, request, "recap")
+	if err != nil || got != "Goal is complete. Next: open the PR." {
+		t.Fatalf("generated recap = %q, %v", got, err)
+	}
+	if len(driver.requests) != 1 || driver.requests[0].Messages[0].Text != "full answer" {
+		t.Fatalf("recap request = %#v", driver.requests)
+	}
+}
+
+func TestRecapPromptRequiresAConcisePlainTextStatus(t *testing.T) {
+	for _, requirement := range []string{"under 40 words", "plain text only", "single next action", "Do not repeat the full answer"} {
+		if !strings.Contains(recapPrompt, requirement) {
+			t.Fatalf("recap prompt omitted %q: %s", requirement, recapPrompt)
+		}
+	}
 }
 
 func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) {
