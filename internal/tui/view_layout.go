@@ -300,6 +300,22 @@ func (m AppModel) transcriptBounds() (left int, top int, width int, height int) 
 	return 0, top, width, height
 }
 
+func (m AppModel) composerBounds() (left int, top int, width int, height int) {
+	width = max(1, m.width)
+	recapRows := 0
+	if m.visibleRecapStatus(width, max(1, m.height)) != "" {
+		recapRows = 1
+	}
+	attachmentRows := 0
+	if len(m.pendingImages) > 0 {
+		attachmentRows = 1
+	}
+	layout := measureViewLayout(max(1, m.height), width, m.composerBlockLines(), len(m.visibleCommandSuggestions()), recapRows)
+	top = composerOffsetY(layout) + attachmentRows
+	height = max(1, layout.composerHeight-attachmentRows)
+	return 0, top, width, height
+}
+
 func (m AppModel) highlightTranscriptSelection(lines []string, width int) []string {
 	selection := m.transcriptSelection
 	if selection == nil {

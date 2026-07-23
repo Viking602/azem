@@ -21,10 +21,16 @@ const (
 	// Codex Guardian prefers gpt-5.4 for approval reviews. This value is sent
 	// directly to the Responses API and therefore must be a real model ID, not
 	// an internal reviewer label.
-	ApprovalReviewerModel = "gpt-5.4"
-	approvalReviewTimeout = 90 * time.Second
-	maxReviewOutputBytes  = 64 << 10
+	ApprovalReviewerModel         = "gpt-5.4"
+	ApprovalReviewerFallbackModel = "gpt-5.6-sol"
+	approvalReviewAttempts        = 3
+	approvalReviewTimeout         = 90 * time.Second
+	maxReviewOutputBytes          = 64 << 10
 )
+
+func ApprovalReviewerModels() []string {
+	return []string{ApprovalReviewerModel, ApprovalReviewerFallbackModel}
+}
 
 type ApprovalReviewRequest struct {
 	Goal            string          `json:"goal"`
@@ -44,6 +50,7 @@ type ApprovalReview struct {
 	UserAuthorization string `json:"user_authorization"`
 	Outcome           string `json:"outcome"`
 	Rationale         string `json:"rationale"`
+	Model             string `json:"-"`
 }
 
 type ReviewFailureKind string
@@ -85,11 +92,15 @@ type Reviewer struct {
 	timeout time.Duration
 }
 
-func NewReviewer(driver *Driver) (*Reviewer, error) {
+func NewReviewer(driver *Driver, timeout ...time.Duration) (*Reviewer, error) {
 	if driver == nil {
 		return nil, fmt.Errorf("Codex approval reviewer driver is nil")
 	}
-	return &Reviewer{driver: driver, timeout: approvalReviewTimeout}, nil
+	reviewTimeout := approvalReviewTimeout
+	if len(timeout) > 0 && timeout[0] > 0 {
+		reviewTimeout = timeout[0]
+	}
+	return &Reviewer{driver: driver, timeout: reviewTimeout}, nil
 }
 
 func (r *Reviewer) Review(ctx context.Context, request ApprovalReviewRequest) (ApprovalReview, error) {
@@ -100,6 +111,9 @@ func (r *Reviewer) Review(ctx context.Context, request ApprovalReviewRequest) (A
 		return ApprovalReview{}, reviewError(ReviewFailureInvalidRequest, errors.New("tool arguments are not valid JSON"))
 	}
 	active, err := r.driver.auth.HasActiveChatGPTAccount(ctx)
+	if ctx.Err() != nil {
+		return ApprovalReview{}, reviewError(ReviewFailureCancelled, ctx.Err())
+	}
 	if err != nil {
 		return ApprovalReview{}, reviewError(ReviewFailureAuthentication, err)
 	}
@@ -107,11 +121,31 @@ func (r *Reviewer) Review(ctx context.Context, request ApprovalReviewRequest) (A
 		return ApprovalReview{}, reviewError(ReviewFailureAuthentication, errors.New("no active ChatGPT account"))
 	}
 
+	models := r.reviewModels()
+	var lastErr error
+	for attempt := 0; attempt < approvalReviewAttempts; attempt++ {
+		assessment, err := r.reviewModel(ctx, request, models[attempt%len(models)])
+		if ctx.Err() != nil {
+			return ApprovalReview{}, reviewError(ReviewFailureCancelled, ctx.Err())
+		}
+		if err == nil {
+			assessment.Model = models[attempt%len(models)]
+			return assessment, nil
+		}
+		lastErr = err
+		if ReviewFailure(err) != ReviewFailureTimeout || ctx.Err() != nil {
+			return ApprovalReview{}, err
+		}
+	}
+	return ApprovalReview{}, lastErr
+}
+
+func (r *Reviewer) reviewModel(ctx context.Context, request ApprovalReviewRequest, model string) (ApprovalReview, error) {
 	reviewCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		assessment, retryable, err := r.reviewOnce(reviewCtx, request)
+		assessment, retryable, err := r.reviewOnce(reviewCtx, request, model)
 		if err == nil {
 			return assessment, nil
 		}
@@ -129,13 +163,27 @@ func (r *Reviewer) Review(ctx context.Context, request ApprovalReviewRequest) (A
 	return ApprovalReview{}, lastErr
 }
 
-func (r *Reviewer) reviewOnce(ctx context.Context, request ApprovalReviewRequest) (ApprovalReview, bool, error) {
+func (r *Reviewer) reviewModels() []string {
+	models := make([]string, 0, len(r.driver.models))
+	for _, model := range r.driver.models {
+		model = strings.TrimSpace(model)
+		if model != "" && !oneOf(model, models...) {
+			models = append(models, model)
+		}
+	}
+	if len(models) == 0 {
+		return []string{ApprovalReviewerModel}
+	}
+	return models
+}
+
+func (r *Reviewer) reviewOnce(ctx context.Context, request ApprovalReviewRequest, model string) (ApprovalReview, bool, error) {
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return ApprovalReview{}, false, reviewError(ReviewFailureInvalidRequest, fmt.Errorf("encode review evidence: %w", err))
 	}
 	providerRequest := hyprovider.Request{
-		Model: ApprovalReviewerModel,
+		Model: model,
 		Messages: []message.Message{
 			message.NewText(message.RoleSystem, guardianSystemPolicy()),
 			message.NewText(message.RoleUser, string(payload)),
@@ -283,13 +331,13 @@ func classifyReviewFailure(err error) (ReviewFailureKind, bool) {
 }
 
 func reviewContextError(parent context.Context, review context.Context) error {
+	if parent.Err() != nil {
+		return reviewError(ReviewFailureCancelled, parent.Err())
+	}
 	if errors.Is(review.Err(), context.DeadlineExceeded) {
 		return reviewError(ReviewFailureTimeout, context.DeadlineExceeded)
 	}
-	if errors.Is(parent.Err(), context.DeadlineExceeded) {
-		return reviewError(ReviewFailureTimeout, context.DeadlineExceeded)
-	}
-	if parent.Err() != nil || errors.Is(review.Err(), context.Canceled) {
+	if errors.Is(review.Err(), context.Canceled) {
 		return reviewError(ReviewFailureCancelled, context.Canceled)
 	}
 	return nil

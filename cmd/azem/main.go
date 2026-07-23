@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,7 +17,11 @@ import (
 	"github.com/Viking602/azem/internal/tui"
 )
 
-var version = "dev"
+var (
+	version   = "dev"
+	gitCommit = "unknown"
+	buildTime = "unknown"
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -32,7 +37,7 @@ func run() error {
 	flag.BoolVar(&showVersion, "version", false, "print version")
 	flag.Parse()
 	if showVersion {
-		fmt.Println(version)
+		printVersion(os.Stdout)
 		return nil
 	}
 	workspace, err := os.Getwd()
@@ -80,4 +85,8 @@ func run() error {
 		return runErr
 	}
 	return shutdownErr
+}
+
+func printVersion(w io.Writer) {
+	fmt.Fprintf(w, "azem %s\ngit commit: %s\nbuild time: %s\n", version, gitCommit, buildTime)
 }

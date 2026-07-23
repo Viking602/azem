@@ -30,13 +30,14 @@ import (
 )
 
 type ProviderRuntime struct {
-	cfg                  config.Config
-	auth                 *auth.Service
-	catalog              *catalog.Service
-	coding               *agentservice.Service
-	subagentWorktreeRoot string
-	ChatGPTEndpoint      string
-	GrokEndpoint         string
+	cfg                   config.Config
+	auth                  *auth.Service
+	catalog               *catalog.Service
+	coding                *agentservice.Service
+	subagentWorktreeRoot  string
+	approvalReviewTimeout time.Duration
+	ChatGPTEndpoint       string
+	GrokEndpoint          string
 
 	mu              sync.RWMutex
 	host            *Service
@@ -1030,7 +1031,7 @@ func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context, sessionID, runID
 	if accountID == "" {
 		return nil, fmt.Errorf("no active ChatGPT account is available")
 	}
-	driver, err := codex.New(r.auth, accountID, r.ChatGPTEndpoint, []string{codex.ApprovalReviewerModel}, "low")
+	driver, err := codex.New(r.auth, accountID, r.ChatGPTEndpoint, codex.ApprovalReviewerModels(), "low")
 	if err != nil {
 		return nil, err
 	}
@@ -1038,7 +1039,7 @@ func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context, sessionID, runID
 	host := r.host
 	r.mu.RUnlock()
 	observeProviderRetries(ctx, host, sessionID, runID, "chatgpt", driver)
-	return codex.NewReviewer(driver)
+	return codex.NewReviewer(driver, r.approvalReviewTimeout)
 }
 
 // ResumeTeam rebuilds provider and tool bindings from durable run metadata,

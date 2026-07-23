@@ -641,6 +641,12 @@ func (s *Service) automaticApproval(
 	}
 
 	if err != nil {
+		if ctx.Err() != nil {
+			return approvalResolution{}, ctx.Err()
+		}
+		if failureKind == codex.ReviewFailureCancelled {
+			return approvalResolution{}, err
+		}
 		state := "auto_failed"
 		message := fmt.Sprintf("Automatic review failed (%s); action did not run.", failureKind)
 		detail := strings.TrimSpace(err.Error())
@@ -651,10 +657,15 @@ func (s *Service) automaticApproval(
 		rationale = boundedReviewText(rationale, 600)
 		if failureKind == codex.ReviewFailureTimeout {
 			state = "auto_timed_out"
-			message = "Automatic review timed out; action did not run."
-			rationale = "Automatic approval review timed out while evaluating the requested action."
+			message = "Automatic review timed out after 3 model attempts; user confirmation is required before this action can run."
+			rationale = "Automatic approval review timed out across 3 model attempts while evaluating the requested action."
+			s.recordAutoReview(event.RunID, false)
+			if !s.emitAutomaticApprovalResolved(event, state, "high", "unknown", rationale, string(failureKind), message) {
+				return approvalResolution{}, errors.Join(err, eventDeliveryError(ctx))
+			}
+			return approvalResolution{NeedsUserApproval: true, DenialMessage: message}, nil
 		}
-		decisionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		decisionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		decisionErr := decide(decisionCtx, agentservice.ApprovalDenied, "system:auto-review-failure")
 		cancel()
 		s.recordAutoReview(event.RunID, false)
@@ -671,9 +682,10 @@ func (s *Service) automaticApproval(
 	}
 
 	rationale := boundedReviewText(assessment.Rationale, 600)
+	event.Data["reviewer"] = firstNonempty(assessment.Model, codex.ApprovalReviewerModel)
 	if assessment.Outcome == "allow" {
-		decisionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		decisionErr := decide(decisionCtx, agentservice.ApprovalOnce, codex.ApprovalReviewerModel)
+		decisionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		decisionErr := decide(decisionCtx, agentservice.ApprovalOnce, event.Data["reviewer"])
 		cancel()
 		s.recordAutoReview(event.RunID, false)
 		if decisionErr != nil {
@@ -705,7 +717,7 @@ func (s *Service) emitAutomaticApprovalResolved(event Event, state, risk, author
 		Kind: EventApprovalResolved, SessionID: event.SessionID, RunID: event.RunID, AgentID: event.AgentID,
 		ToolCallID: event.ToolCallID, ApprovalID: event.ApprovalID, State: state, Text: text,
 		Data: map[string]string{
-			"reviewer": codex.ApprovalReviewerModel, "risk": risk, "user_authorization": authorization,
+			"reviewer": firstNonempty(event.Data["reviewer"], codex.ApprovalReviewerModel), "risk": risk, "user_authorization": authorization,
 			"rationale": rationale, "error_kind": errorKind, "tool": event.Data["tool"],
 			"target": event.Data["target"], "effect": event.Data["effect"],
 		},

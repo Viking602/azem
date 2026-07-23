@@ -340,7 +340,13 @@ func (m AppModel) startTranscriptSelection(mouse tea.Mouse) (tea.Model, tea.Cmd)
 		m.transcriptSelection = nil
 		return m, nil
 	}
-	_, top, width, height := m.transcriptBounds()
+	left, top, width, height := m.composerBounds()
+	if mouse.X >= left && mouse.X < left+width && mouse.Y >= top && mouse.Y < top+height {
+		m.transcriptSelection = nil
+		m.focus = focusComposer
+		return m, m.composer.Focus()
+	}
+	_, top, width, height = m.transcriptBounds()
 	if width <= 0 || height <= 0 || mouse.X < 0 || mouse.X >= width || mouse.Y < top || mouse.Y >= top+height {
 		m.transcriptSelection = nil
 		return m, nil
