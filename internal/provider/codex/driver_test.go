@@ -102,6 +102,21 @@ func TestOpenProviderStreamStopsAfterFiveTLSBadRecordMACRetries(t *testing.T) {
 	}
 }
 
+func TestOpenProviderStreamRetriesWrappedEOFThenSucceeds(t *testing.T) {
+	attempts := 0
+	want := &stubProviderStream{}
+	stream, retries, err := openProviderStream(context.Background(), func() (hyprovider.Stream, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, &url.Error{Op: http.MethodPost, URL: DefaultEndpoint, Err: io.EOF}
+		}
+		return want, nil
+	}, func(int) time.Duration { return 0 }, nil, 0)
+	if err != nil || stream != want || attempts != 2 || retries != 1 {
+		t.Fatalf("stream=%T attempts=%d retries=%d error=%v", stream, attempts, retries, err)
+	}
+}
+
 func TestRetryableProviderTransportRejectsDeterministicErrors(t *testing.T) {
 	for _, err := range []error{
 		context.Canceled,

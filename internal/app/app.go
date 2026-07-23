@@ -80,6 +80,7 @@ type Service struct {
 	sessionUsage       map[string]session.Usage
 	attachments        AttachmentStore
 	historySearch      func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error)
+	recapGenerator     func(context.Context, recapGenerationRequest) (string, error)
 }
 
 func NewService(parent context.Context, cfg config.Config) *Service {
@@ -190,6 +191,7 @@ func (s *Service) AttachSkills(catalog *skills.Catalog) {
 func (s *Service) AttachProviderRuntime(runtime *ProviderRuntime) {
 	s.providers = runtime
 	if runtime != nil {
+		s.recapGenerator = runtime.GenerateRecap
 		runtime.Attach(s, s.mcp, s.subagentStore)
 	}
 }
@@ -374,23 +376,62 @@ func historicalRetrievalBoundary(history session.ModelHistory) *int64 {
 	return nil
 }
 
-func (s *Service) persistRecap(ctx context.Context, sessionID, runID, goal, summary string, todo session.TodoList) error {
+type recapGenerationRequest struct {
+	SessionID string
+	RunID     string
+	Goal      string
+	Answer    string
+	Todo      session.TodoList
+}
+
+func (s *Service) persistRecap(ctx context.Context, request recapGenerationRequest) error {
 	if s.recap == nil {
 		return nil
 	}
+	if s.recapGenerator == nil {
+		return nil
+	}
 	if s.sessions != nil {
-		current, err := s.sessions.LoadTodo(ctx, sessionID)
+		current, err := s.sessions.LoadTodo(ctx, request.SessionID)
 		if err != nil {
 			return fmt.Errorf("refresh recap todo: %w", err)
 		}
-		todo = current
+		request.Todo = current
 	}
-	saved, err := s.recap.Upsert(ctx, recap.Recap{SessionID: sessionID, CoveredBoundary: runID, Goal: goal, Summary: summary, OpenItems: todoReminder(todo)})
+	if goal := strings.TrimSpace(request.Todo.Goal); goal != "" {
+		request.Goal = goal
+	}
+	generationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	summary, err := s.recapGenerator(generationCtx, request)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("generate recap: %w", err)
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return fmt.Errorf("generate recap: empty summary")
+	}
+	saved, err := s.recap.Upsert(ctx, recap.Recap{
+		SessionID: request.SessionID, CoveredBoundary: request.RunID, Goal: request.Goal,
+		Summary: summary, OpenItems: todoOpenItems(request.Todo),
+	})
 	if err != nil {
 		return err
 	}
-	s.emit(ctx, Event{Kind: EventRecapState, SessionID: sessionID, RunID: runID, State: "updated", Recap: &saved})
+	s.emit(ctx, Event{Kind: EventRecapState, SessionID: request.SessionID, RunID: request.RunID, State: "updated", Recap: &saved})
 	return nil
+}
+
+func todoOpenItems(todo session.TodoList) string {
+	var items []string
+	for _, phase := range todo.Phases {
+		for _, item := range phase.Items {
+			if item.Status == session.TodoPending || item.Status == session.TodoInProgress {
+				items = append(items, string(item.Status)+": "+item.Content)
+			}
+		}
+	}
+	return strings.Join(items, "\n")
 }
 
 func limitRunes(value string, limit int) string {
@@ -888,7 +929,7 @@ func (s *Service) runFakeTurn(ctx context.Context, sessionID string, runID strin
 			return
 		}
 	}
-	if err := s.persistRecap(ctx, sessionID, runID, prompt, streamed.String(), session.TodoList{}); err != nil {
+	if err := s.persistRecap(ctx, recapGenerationRequest{SessionID: sessionID, RunID: runID, Goal: prompt, Answer: streamed.String()}); err != nil {
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 	}
 	s.emit(ctx, Event{Kind: EventRunFinished, SessionID: sessionID, RunID: runID, State: "completed"})

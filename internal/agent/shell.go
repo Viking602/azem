@@ -297,6 +297,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	reason := ""
 	var terminationErr error
 	finished := false
+	lastReportedOutputBytes := 0
 	for !finished && reason == "" {
 		select {
 		case err = <-done:
@@ -312,15 +313,21 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 				reason = "output_limit"
 			}
 		case <-ticker.C:
+			outputBytes := output.Total()
 			d.runtime.mu.Lock()
 			current := d.runtime.active[registryKey]
-			current.OutputBytes = output.Total()
+			current.OutputBytes = outputBytes
 			d.runtime.active[registryKey] = current
 			d.runtime.mu.Unlock()
 			if sink != nil {
-				if sinkErr := sink(tool.Update{Kind: "progress", Message: fmt.Sprintf("%d output bytes", output.Total())}); sinkErr != nil {
+				message := ""
+				if outputBytes != lastReportedOutputBytes {
+					message = fmt.Sprintf("%d output bytes", outputBytes)
+				}
+				if sinkErr := sink(tool.Update{Kind: "progress", Message: message, Data: map[string]string{"output_bytes": fmt.Sprint(outputBytes)}}); sinkErr != nil {
 					reason = "update_sink_failure"
 				}
+				lastReportedOutputBytes = outputBytes
 			}
 		}
 	}

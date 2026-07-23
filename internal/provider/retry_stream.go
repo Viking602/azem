@@ -163,8 +163,8 @@ func IsRetryableTransport(err error) bool {
 		return true
 	}
 	var urlError *url.Error
-	if errors.As(err, &urlError) && urlError.Err != nil && IsRetryableTransport(urlError.Err) {
-		return true
+	if errors.As(err, &urlError) && urlError.Err != nil {
+		return errors.Is(urlError.Err, io.EOF) || IsRetryableTransport(urlError.Err)
 	}
 	var networkError net.Error
 	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {

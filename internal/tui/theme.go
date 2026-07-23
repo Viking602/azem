@@ -53,6 +53,8 @@ type Theme struct {
 	ChipDanger    lipgloss.Style
 	BarFilled     lipgloss.Style
 	BarEmpty      lipgloss.Style
+	ScrollTrack   lipgloss.Style
+	ScrollThumb   lipgloss.Style
 	UserSurface   lipgloss.Style
 	AssistantTag  lipgloss.Style
 	ThinkingTag   lipgloss.Style
@@ -166,6 +168,8 @@ func DefaultTheme() Theme {
 		ChipDanger:    chipBase.Foreground(danger).Background(chipDangerBg),
 		BarFilled:     lipgloss.NewStyle().Foreground(accent),
 		BarEmpty:      lipgloss.NewStyle().Foreground(border),
+		ScrollTrack:   lipgloss.NewStyle().Foreground(border),
+		ScrollThumb:   lipgloss.NewStyle().Foreground(accent),
 		UserSurface:   lipgloss.NewStyle().Foreground(userAccent),
 		AssistantTag:  messageTag.Foreground(cyan),
 		ThinkingTag:   messageTag.Foreground(violet),

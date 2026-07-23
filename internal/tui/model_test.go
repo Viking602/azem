@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -1119,6 +1120,26 @@ func TestToolStateTransitionsRequireLifecycleEvents(t *testing.T) {
 	})
 	if model.transcript[0].State != "completed" || strings.Contains(model.transcript[0].Content, "duplicate") {
 		t.Fatalf("finished tool = %#v", model.transcript[0])
+	}
+}
+
+func TestShellLifecycleUpdatesDoNotPolluteCommandSummary(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.updateTool(app.Event{
+		Kind: app.EventToolStarted, RunID: "run", ToolCallID: "shell", Data: map[string]string{
+			"name": "coding.shell", "arguments": `{"command":"sleep 10"}`,
+		},
+	})
+	want := model.transcript[0].Content
+	for _, update := range []app.Event{
+		{Kind: app.EventToolUpdate, RunID: "run", ToolCallID: "shell", State: "started", Text: "sleep 10"},
+		{Kind: app.EventToolUpdate, RunID: "run", ToolCallID: "shell", State: "progress", Text: "0 output bytes"},
+		{Kind: app.EventToolUpdate, RunID: "run", ToolCallID: "shell", State: "finished", Text: "exit 0 (exited)"},
+	} {
+		model.updateTool(update)
+	}
+	if got := model.transcript[0].Content; got != want || strings.Contains(got, "output bytes") {
+		t.Fatalf("shell command summary=%q, want %q", got, want)
 	}
 }
 
@@ -2292,6 +2313,28 @@ func TestSessionReloadRestoresContextUsageFooter(t *testing.T) {
 	}
 }
 
+func TestSessionReloadKeepsCompleteFailedOutput(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	completeOutput := strings.Repeat("complete failed output 0123456789\n", 20_000)
+	blocks, err := json.Marshal([]session.Block{{
+		Kind: "assistant", RunID: "failed-run", Title: "Azem", Content: completeOutput, State: "failed",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.applyEvent(app.Event{
+		Kind: app.EventSessionLoaded, SessionID: "restored", State: "loaded",
+		Data: map[string]string{"blocks": string(blocks)},
+	})
+	if len(model.transcript) != 1 || model.transcript[0].State != "failed" || model.transcript[0].Content != completeOutput {
+		gotBytes := 0
+		if len(model.transcript) > 0 {
+			gotBytes = len(model.transcript[0].Content)
+		}
+		t.Fatalf("restored transcript blocks=%d output_bytes=%d want_bytes=%d", len(model.transcript), gotBytes, len(completeOutput))
+	}
+}
+
 func TestProviderCatalogsSurviveSwitchAndLoginSelectsProvider(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-old", "high", "single")
 	model.loadModels(app.Event{Data: map[string]string{
@@ -2699,6 +2742,62 @@ func TestTranscriptSupportsMouseAndKeyboardScrolling(t *testing.T) {
 	model = updated.(AppModel)
 	if model.transcriptTop != 0 {
 		t.Fatalf("Ctrl+End transcript offset = %d", model.transcriptTop)
+	}
+}
+
+func TestTranscriptScrollbarTracksHistoryPositionAtPaneRightEdge(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model = updated.(AppModel)
+	for index := range 80 {
+		model.transcript = append(model.transcript, Block{
+			Kind: BlockAssistant, Title: "Azem", Content: fmt.Sprintf("message %02d", index), State: "completed",
+		})
+	}
+	_, _, transcriptWidth, transcriptHeight := model.transcriptBounds()
+
+	thumbRows := func() []int {
+		body := strings.Split(ansi.Strip(model.renderBody(model.width, transcriptHeight)), "\n")
+		rows := make([]int, 0)
+		for row, line := range body {
+			if ansi.Cut(line, transcriptWidth, transcriptWidth+1) == "┃" {
+				rows = append(rows, row)
+			}
+		}
+		return rows
+	}
+
+	latest := thumbRows()
+	if len(latest) == 0 || latest[len(latest)-1] != transcriptHeight-1 {
+		t.Fatalf("latest scrollbar thumb rows = %v, want bottom row %d", latest, transcriptHeight-1)
+	}
+	model.transcriptTop = model.transcriptMaxOffset()
+	oldest := thumbRows()
+	if len(oldest) == 0 || oldest[0] != 0 {
+		t.Fatalf("oldest scrollbar thumb rows = %v, want top row", oldest)
+	}
+	if fmt.Sprint(oldest) == fmt.Sprint(latest) {
+		t.Fatalf("scrollbar thumb did not move: latest=%v oldest=%v", latest, oldest)
+	}
+}
+
+func TestTranscriptScrollbarReservesRightmostColumnWithoutContextRail(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(AppModel)
+	model.transcript = []Block{{Kind: BlockAssistant, Content: strings.Repeat("history line\n", 80), State: "completed"}}
+	_, _, transcriptWidth, transcriptHeight := model.transcriptBounds()
+	if transcriptWidth != model.width-1 {
+		t.Fatalf("transcript width = %d, want scrollbar-reserved width %d", transcriptWidth, model.width-1)
+	}
+	for row, line := range strings.Split(ansi.Strip(model.renderBody(model.width, transcriptHeight)), "\n") {
+		if ansi.StringWidth(line) != model.width {
+			t.Fatalf("body row %d width = %d, want %d", row, ansi.StringWidth(line), model.width)
+		}
+		glyph := ansi.Cut(line, model.width-1, model.width)
+		if glyph != "│" && glyph != "┃" {
+			t.Fatalf("body row %d rightmost glyph = %q, want scrollbar", row, glyph)
+		}
 	}
 }
 
