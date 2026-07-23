@@ -567,6 +567,107 @@ func TestTranscriptCardsAreKeyboardExpandable(t *testing.T) {
 	}
 }
 
+func TestCompletedToolBlocksDefaultToCollapsed(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.updateTool(app.Event{
+		Kind: app.EventToolStarted, RunID: "run", ToolCallID: "call-1",
+		Data: map[string]string{"name": "coding.shell", "arguments": `{"command":"pwd"}`},
+	})
+	if model.transcript[0].Collapsed {
+		t.Fatal("running tool block should remain expanded")
+	}
+	model.updateTool(app.Event{
+		Kind: app.EventToolFinished, RunID: "run", ToolCallID: "call-1", State: "completed",
+		Data: map[string]string{"name": "coding.shell"}, Text: "/tmp/workspace",
+	})
+	if !model.transcript[0].Collapsed {
+		t.Fatal("completed tool block should collapse by default")
+	}
+	lines := model.renderBlock(model.transcript[0], 0, 80)
+	if len(lines) != 1 || strings.Contains(ansi.Strip(lines[0]), "/tmp/workspace") {
+		t.Fatalf("collapsed tool rendered its result: %#v", lines)
+	}
+}
+
+func TestTranscriptToolHeaderTogglesWithMouseClick(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+	model.transcript = []Block{{
+		ID: "call-1", Kind: BlockTool, Title: "coding.shell", Content: "mouse result",
+		State: "completed", Collapsed: true,
+	}}
+	_, top, width, height := model.transcriptBounds()
+	rows := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
+	headerRow := -1
+	for index, row := range rows {
+		if strings.Contains(row, "TOOL") && strings.Contains(row, "Run Command") {
+			headerRow = index
+			break
+		}
+	}
+	if headerRow < 0 {
+		t.Fatalf("tool header was not rendered:\n%s", strings.Join(rows, "\n"))
+	}
+	click := tea.MouseClickMsg{X: 4, Y: top + headerRow, Button: tea.MouseLeft}
+	release := tea.MouseReleaseMsg{X: 4, Y: top + headerRow, Button: tea.MouseLeft}
+	updated, _ = model.Update(click)
+	model = updated.(AppModel)
+	updated, command := model.Update(release)
+	model = updated.(AppModel)
+	if model.transcript[0].Collapsed || command != nil {
+		t.Fatalf("first click = collapsed:%v command:%v, want expanded without copy", model.transcript[0].Collapsed, command != nil)
+	}
+	if content := ansi.Strip(model.renderTranscript(width, height)); !strings.Contains(content, "mouse result") {
+		t.Fatalf("expanded tool result is not visible:\n%s", content)
+	}
+
+	rows = strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
+	for index, row := range rows {
+		if strings.Contains(row, "TOOL") && strings.Contains(row, "Run Command") {
+			headerRow = index
+			break
+		}
+	}
+	click.Y, release.Y = top+headerRow, top+headerRow
+	updated, _ = model.Update(click)
+	model = updated.(AppModel)
+	updated, command = model.Update(release)
+	model = updated.(AppModel)
+	if !model.transcript[0].Collapsed || command != nil {
+		t.Fatalf("second click = collapsed:%v command:%v, want collapsed without copy", model.transcript[0].Collapsed, command != nil)
+	}
+}
+
+func TestMouseClickTargetsToolHeaderAfterUserMessageWithoutBlankSeparator(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+	model.transcript = []Block{
+		{Kind: BlockUser, Content: "run this", State: "completed"},
+		{ID: "call-1", Kind: BlockTool, Title: "coding.shell", Content: "result", State: "completed", Collapsed: true},
+	}
+	_, top, width, height := model.transcriptBounds()
+	rows := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
+	headerRow := -1
+	for index, row := range rows {
+		if strings.Contains(row, "TOOL") && strings.Contains(row, "Run Command") {
+			headerRow = index
+			break
+		}
+	}
+	if headerRow < 0 {
+		t.Fatalf("tool header was not rendered:\n%s", strings.Join(rows, "\n"))
+	}
+	updated, _ = model.Update(tea.MouseClickMsg{X: 4, Y: top + headerRow, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	updated, _ = model.Update(tea.MouseReleaseMsg{X: 4, Y: top + headerRow, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.transcript[1].Collapsed {
+		t.Fatal("tool header after user message did not expand")
+	}
+}
+
 func TestApprovalOverlayExecutesExplicitDecision(t *testing.T) {
 	runtime := &recordedRuntime{}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")

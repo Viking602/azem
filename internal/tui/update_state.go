@@ -249,6 +249,9 @@ func upsertAgentTool(blocks *[]Block, event app.Event, state string, catalog i18
 		}
 		if event.Kind == app.EventToolFinished || !toolStateTerminal(block.State) {
 			block.State = state
+			if event.Kind == app.EventToolFinished {
+				block.Collapsed = state == "completed"
+			}
 			if event.Kind == app.EventToolFinished && state == "completed" {
 				if title, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
 					block.Kind, block.Title, block.Content = BlockDiff, title, diff
@@ -275,6 +278,7 @@ func upsertAgentTool(blocks *[]Block, event app.Event, state string, catalog i18
 	*blocks = append(*blocks, Block{
 		ID: event.ToolCallID, Kind: kind, RunID: event.RunID, ToolCallID: event.ToolCallID,
 		Title: title, Arguments: event.Data["arguments"], Content: content, State: state,
+		Collapsed: event.Kind == app.EventToolFinished && state == "completed",
 	})
 }
 
@@ -327,6 +331,7 @@ func agentTranscriptBlocks(blocks []app.AgentTranscriptBlock, catalogs ...i18n.C
 		result = append(result, Block{
 			ID: block.ID, Kind: kind, RunID: block.RunID, ToolCallID: block.ToolCallID,
 			Title: block.Title, Arguments: arguments, Content: content, State: block.State,
+			Collapsed: defaultToolCollapsed(kind, block.State),
 		})
 	}
 	return result

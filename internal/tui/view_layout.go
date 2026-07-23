@@ -410,6 +410,40 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 	return cache.lines
 }
 
+// transcriptBlockHeaderAt maps a visible transcript row back to a block header.
+// It mirrors renderTranscript's viewport and separator calculations.
+func (m AppModel) transcriptBlockHeaderAt(row, width, height int) (int, bool) {
+	contentWidth := max(1, width-4)
+	lines := m.transcriptLines(contentWidth)
+	maxOffset := m.transcriptOffsetLimit(len(lines), height)
+	offset := min(maxOffset, max(0, m.transcriptTop))
+	contentHeight := height
+	if m.isRunning() || maxOffset > 0 {
+		footerRows := 1
+		if height >= 3 {
+			footerRows++
+		}
+		contentHeight = max(1, height-footerRows)
+	}
+	if row < 0 || row >= contentHeight {
+		return 0, false
+	}
+	end := len(lines) - offset
+	start := max(0, end-contentHeight)
+	line := start + row
+	cursor := 0
+	for index, layout := range m.transcriptLayout.blocks {
+		if cursor > 0 && lines[cursor-1] != "" {
+			cursor++
+		}
+		if line == cursor && len(layout.lines) > 0 {
+			return index, true
+		}
+		cursor += len(layout.lines)
+	}
+	return 0, false
+}
+
 func sameTranscriptBlock(left Block, right Block) bool {
 	return left.ID == right.ID && left.Kind == right.Kind && left.RunID == right.RunID &&
 		left.ToolCallID == right.ToolCallID && left.Title == right.Title && left.Arguments == right.Arguments &&

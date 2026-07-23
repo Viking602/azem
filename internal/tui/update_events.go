@@ -387,10 +387,11 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 		if BlockKind(block.Kind) == BlockUser {
 			content = formatUserContent(block.Content, block.Attachments)
 		}
+		kind := BlockKind(block.Kind)
 		m.transcript = append(m.transcript, Block{
-			ID: first(block.AgentID, block.ID), Kind: BlockKind(block.Kind), RunID: block.RunID,
+			ID: first(block.AgentID, block.ID), Kind: kind, RunID: block.RunID,
 			ToolCallID: block.ParentToolCallID, Title: block.Title, Content: content,
-			State: block.State, Collapsed: block.Collapsed, Attachments: block.Attachments,
+			State: block.State, Collapsed: block.Collapsed || defaultToolCollapsed(kind, block.State), Attachments: block.Attachments,
 		})
 	}
 	m.runID = ""
@@ -523,7 +524,7 @@ func (m *AppModel) updateTool(event app.Event) {
 			}
 			m.transcript = append(m.transcript, Block{
 				ID: id, Kind: kind, RunID: event.RunID, ToolCallID: id, Title: title,
-				Arguments: event.Data["arguments"], Content: content, State: state,
+				Arguments: event.Data["arguments"], Content: content, State: state, Collapsed: state == "completed",
 			})
 			return
 		}
@@ -539,6 +540,7 @@ func (m *AppModel) updateTool(event app.Event) {
 		}
 		block.State = state
 		block.Orphaned = false
+		block.Collapsed = state == "completed"
 		if state == "completed" {
 			if title, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
 				block.Kind, block.Title, block.Content = BlockDiff, title, diff

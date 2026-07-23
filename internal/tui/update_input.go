@@ -364,11 +364,38 @@ func (m AppModel) finishTranscriptSelection(mouse tea.Mouse) (tea.Model, tea.Cmd
 		return m, nil
 	}
 	_, command := m.extendTranscriptSelection(tea.Mouse{X: mouse.X, Y: mouse.Y, Button: tea.MouseLeft})
+	selection := m.transcriptSelection
+	if selection.startX == selection.endX && selection.startY == selection.endY {
+		m.transcriptSelection = nil
+		if m.toggleTranscriptBlockAt(selection.endX, selection.endY) {
+			return m, nil
+		}
+	}
 	text := m.selectedTranscriptText()
 	if text == "" {
 		return m, command
 	}
 	return m, func() tea.Msg { return clipboardWriteResultMsg{err: writeClipboard(text)} }
+}
+
+func (m *AppModel) toggleTranscriptBlockAt(x, row int) bool {
+	_, _, width, height := m.transcriptBounds()
+	if x < 0 || x >= width {
+		return false
+	}
+	index, ok := m.transcriptBlockHeaderAt(row, width, height)
+	if !ok || index < 0 || index >= len(m.transcript) {
+		return false
+	}
+	block := &m.transcript[index]
+	if block.Kind != BlockTool && block.Kind != BlockDiff && block.Kind != BlockError {
+		return false
+	}
+	block.Collapsed = !block.Collapsed
+	m.focus = focusTranscript
+	m.transcriptCursor = index
+	m.composer.Blur()
+	return true
 }
 
 func (m AppModel) visibleCommandSuggestions() []SlashCommand {

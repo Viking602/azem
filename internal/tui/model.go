@@ -60,6 +60,10 @@ type Block struct {
 	Attachments []session.Attachment
 }
 
+func defaultToolCollapsed(kind BlockKind, state string) bool {
+	return (kind == BlockTool || kind == BlockDiff) && state == "completed"
+}
+
 type transcriptBlockLayout struct {
 	block          Block
 	selected       bool
