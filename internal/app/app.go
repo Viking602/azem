@@ -583,6 +583,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 			s.clearRun("starting")
 			return "", err
 		}
+		observeProviderRetries(runCtx, s, request.SessionID, runID, request.Provider, resolution.driver)
 		s.mu.Lock()
 		s.activeRun = runID
 		s.mu.Unlock()

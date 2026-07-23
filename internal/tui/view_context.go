@@ -288,9 +288,9 @@ func (m AppModel) renderRuntimeStrip(width int) string {
 	model := m.renderModelCluster(width >= 56)
 	// Status owns the left edge; model identity anchors the right with a clear gutter.
 	if lipgloss.Width(status)+lipgloss.Width(model)+4 <= width {
-		return padStyledLine(joinSides(status, model+" ", width), width)
+		return renderSurface(m.theme.RuntimeStrip, padStyledLine(joinSides(status, model+" ", width), width))
 	}
-	return padStyledLine(joinSides(status, truncateStyledFallback(model, max(10, width/3))+" ", width), width)
+	return renderSurface(m.theme.RuntimeStrip, padStyledLine(joinSides(status, truncateStyledFallback(model, max(10, width/3))+" ", width), width))
 }
 
 func (m AppModel) renderContextStrip(width int) string {
@@ -301,13 +301,13 @@ func (m AppModel) renderContextStrip(width int) string {
 	primary := m.renderContextPrimary(max(12, width*2/3))
 	cache := m.renderCacheSummary(max(8, width/3))
 	if cache == "" {
-		return padStyledLine(padLeft(primary, 1), width)
+		return renderSurface(m.theme.ContextStrip, padStyledLine(padLeft(primary, 1), width))
 	}
-	return padStyledLine(joinSides(padLeft(primary, 1), cache+" ", width), width)
+	return renderSurface(m.theme.ContextStrip, padStyledLine(joinSides(padLeft(primary, 1), cache+" ", width), width))
 }
 
 func (m AppModel) renderHelpStrip(width int) string {
-	return padStyledLine(m.renderHelpStripContent(width), width)
+	return renderSurface(m.theme.HelpStrip, padStyledLine(m.renderHelpStripContent(width), width))
 }
 
 func (m AppModel) renderHelpStripContent(width int) string {

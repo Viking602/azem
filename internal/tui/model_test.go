@@ -34,12 +34,17 @@ func TestTextInputsUseBarCursors(t *testing.T) {
 	if model.composer.VirtualCursor() || model.composer.Styles().Cursor.Shape != tea.CursorBar {
 		t.Fatalf("composer cursor = virtual:%v shape:%v, want real bar", model.composer.VirtualCursor(), model.composer.Styles().Cursor.Shape)
 	}
-	if model.modelSearch.Styles().Cursor.Shape != tea.CursorBar {
-		t.Fatalf("search cursor = %v, want bar", model.modelSearch.Styles().Cursor.Shape)
+	if model.modelSearch.VirtualCursor() || model.modelSearch.Styles().Cursor.Shape != tea.CursorBar {
+		t.Fatalf("search cursor = virtual:%v shape:%v, want real bar", model.modelSearch.VirtualCursor(), model.modelSearch.Styles().Cursor.Shape)
 	}
 	view := model.View()
 	if view.Cursor == nil || view.Cursor.Shape != tea.CursorBar {
 		t.Fatalf("view cursor = %#v, want visible bar", view.Cursor)
+	}
+	model.openOverlay(OverlayModel)
+	view = model.View()
+	if view.Cursor == nil || view.Cursor.Shape != tea.CursorBar {
+		t.Fatalf("model search cursor = %#v, want visible bar", view.Cursor)
 	}
 }
 
@@ -2780,6 +2785,87 @@ func TestRunningIndicatorStaysVisibleInTranscript(t *testing.T) {
 	}
 }
 
+func TestRunActivitySummaryShowsPhaseElapsedAndSilence(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status = "Running"
+	now := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	model.runStartedAt = now.Add(-84 * time.Second)
+	model.runActivityAt = now.Add(-17 * time.Second)
+	model.runActivity = "waiting_after_tool"
+	model.runActivityDetail = "todo"
+
+	summary := model.runActivitySummary(now)
+	for _, wanted := range []string{"todo finished; waiting for model", "elapsed 1m24s", "no new events for 17s"} {
+		if !strings.Contains(summary, wanted) {
+			t.Fatalf("activity summary missing %q: %q", wanted, summary)
+		}
+	}
+	if footer := ansi.Strip(model.renderTranscriptFooter(120, 0, 0)); !strings.Contains(footer, "todo finished; waiting for model") {
+		t.Fatalf("activity phase is not visible in transcript footer: %q", footer)
+	}
+}
+
+func TestRunActivityTracksToolCompletionAndReducedMotionHeartbeat(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status = "Starting"
+	model.beginRunActivity()
+	model.applyEvent(app.Event{Kind: app.EventRunStarted, SessionID: "default", RunID: "run-activity"})
+	model.applyEvent(app.Event{
+		Kind: app.EventToolFinished, SessionID: "default", RunID: "run-activity", ToolCallID: "todo-1",
+		State: "completed", Data: map[string]string{"name": "todo"},
+	})
+	if model.runActivity != "waiting_after_tool" || model.runActivityDetail != "todo" {
+		t.Fatalf("tool completion activity = %q %q", model.runActivity, model.runActivityDetail)
+	}
+	model.reducedMotion = true
+	frame := model.animationFrame
+	updated, command := model.Update(animationTickMsg{})
+	model = updated.(AppModel)
+	if command == nil || model.animationFrame != frame {
+		t.Fatalf("reduced-motion heartbeat = command:%v frame:%d, want scheduled without animation", command != nil, model.animationFrame)
+	}
+}
+
+func TestProviderRetryActivityShowsProgressAndRecovers(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status = "Starting"
+	model.beginRunActivity()
+	model.applyEvent(app.Event{Kind: app.EventRunStarted, SessionID: "default", RunID: "run-retry"})
+	model.applyEvent(app.Event{
+		Kind: app.EventProviderRetry, SessionID: "default", RunID: "run-retry", Text: "upstream connection reset by peer",
+		Data: map[string]string{"attempt": "2", "max": "5", "delay_ms": "400"},
+	})
+	if model.runActivity != "retrying" {
+		t.Fatalf("retry activity=%q", model.runActivity)
+	}
+	summary := model.runActivitySummary(model.runActivityAt)
+	for _, wanted := range []string{"retry 2/5 in 400ms", "upstream connection reset"} {
+		if !strings.Contains(summary, wanted) {
+			t.Fatalf("retry summary missing %q: %q", wanted, summary)
+		}
+	}
+
+	model.applyEvent(app.Event{Kind: app.EventThinkingDelta, SessionID: "default", RunID: "run-retry", Text: "recovered"})
+	if model.runActivity != "thinking" {
+		t.Fatalf("activity after provider recovery=%q, want thinking", model.runActivity)
+	}
+}
+
+func TestProviderRetryActivityIsLocalizedInChinese(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.catalog, _ = i18n.New("zh-CN")
+	model.status = "Running"
+	model.runID = "run-retry-zh"
+	model.applyEvent(app.Event{
+		Kind: app.EventProviderRetry, SessionID: "default", RunID: "run-retry-zh", Text: "connection reset",
+		Data: map[string]string{"attempt": "1", "max": "5", "delay_ms": "200"},
+	})
+	summary := model.runActivitySummary(model.runActivityAt)
+	if !strings.Contains(summary, "200ms 后进行第 1/5 次重试") || !strings.Contains(summary, "connection reset") {
+		t.Fatalf("Chinese retry summary=%q", summary)
+	}
+}
+
 func TestTranscriptLayoutCacheReusesStableRender(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.transcript = []Block{{
@@ -3730,6 +3816,52 @@ func TestTranscriptKindsUseDistinctMutedAccentsWithoutCardBackgrounds(t *testing
 				t.Fatalf("%s line width=%d, exceeds 74: %q", test.block.Kind, ansi.StringWidth(line), ansi.Strip(line))
 			}
 		}
+	}
+}
+
+func TestThemeUsesDistinctSemanticSurfaces(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	emptyBackground := fmt.Sprint(lipgloss.NewStyle().GetBackground())
+	surfaces := map[string]lipgloss.Style{
+		"chrome": model.theme.Chrome, "runtime": model.theme.RuntimeStrip,
+		"context": model.theme.ContextStrip, "help": model.theme.HelpStrip,
+		"composer focused": model.theme.PanelFocused, "composer blurred": model.theme.PanelBlurred,
+		"overlay title": model.theme.OverlayTitle, "overlay footer": model.theme.OverlayFooter,
+	}
+	for name, style := range surfaces {
+		if background := fmt.Sprint(style.GetBackground()); background == emptyBackground {
+			t.Fatalf("%s surface has no background", name)
+		}
+	}
+	if focused, blurred := fmt.Sprint(model.theme.PanelFocused.GetBackground()), fmt.Sprint(model.theme.PanelBlurred.GetBackground()); focused == blurred {
+		t.Fatalf("focused and blurred composer surfaces are identical: %s", focused)
+	}
+	if title, footer := fmt.Sprint(model.theme.OverlayTitle.GetBackground()), fmt.Sprint(model.theme.OverlayFooter.GetBackground()); title == footer {
+		t.Fatalf("overlay title and footer surfaces are identical: %s", title)
+	}
+}
+
+func TestRenderSurfaceRestoresBackgroundAfterNestedStyleReset(t *testing.T) {
+	surface := lipgloss.NewStyle().Background(lipgloss.Color("#101820"))
+	child := lipgloss.NewStyle().Foreground(lipgloss.Color("#67d4ee")).Render("Azem")
+	opener := surfaceBackgroundOpener(surface)
+	if opener == "" {
+		t.Fatal("surface background produced no ANSI opener")
+	}
+	rendered := renderSurface(surface, child+" gap")
+	if !strings.Contains(rendered, "\x1b[m"+opener+" gap") && !strings.Contains(rendered, "\x1b[0m"+opener+" gap") {
+		t.Fatalf("surface background was not restored after child reset: %q", rendered)
+	}
+}
+
+func TestUserMessageUsesAccentRailAndPrimaryBodyText(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	rendered := strings.Join(model.renderUserMessage("Keep the body readable", 48), "\n")
+	if !strings.Contains(rendered, model.theme.UserSurface.Render("▌ ")) {
+		t.Fatalf("user message lacks accent rail: %q", rendered)
+	}
+	if !strings.Contains(rendered, model.theme.Assistant.Render(padOrTrim("Keep the body readable", 46))) {
+		t.Fatalf("user message body does not use primary text style: %q", rendered)
 	}
 }
 

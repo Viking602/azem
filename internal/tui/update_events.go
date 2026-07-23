@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/memory"
@@ -26,6 +27,7 @@ func (m *AppModel) applyEvent(event app.Event) {
 	if !m.acceptRunEvent(event) {
 		return
 	}
+	m.recordRunActivity(event)
 	m.updateUsage(event.Data)
 
 	switch event.Kind {
@@ -52,6 +54,7 @@ func (m *AppModel) applyEvent(event app.Event) {
 		m.updateAgent(event)
 	case app.EventAgentDetail:
 		m.updateAgentDetail(event)
+	case app.EventProviderRetry:
 	case app.EventThinkingDelta:
 		m.appendDelta(BlockThinking, event.RunID, m.tr("block.thinking_title"), event.Text)
 	case app.EventTextDelta:
@@ -211,10 +214,90 @@ func (m *AppModel) finishRun(runID string, status string) {
 	m.lastRunID = runID
 	m.runID = ""
 	m.status = status
+	m.runStartedAt = time.Time{}
+	m.runActivityAt = time.Time{}
+	m.runActivity = ""
+	m.runActivityDetail = ""
 	m.approval = nil
 	if m.overlay == OverlayApproval {
 		_ = m.closeOverlay()
 	}
+}
+
+func (m *AppModel) beginRunActivity() {
+	now := time.Now()
+	m.runStartedAt = now
+	m.runActivityAt = now
+	m.runActivity = "waiting_model"
+	m.runActivityDetail = ""
+}
+
+func (m *AppModel) recordRunActivity(event app.Event) {
+	now := time.Now()
+	if event.Kind == app.EventRunStarted {
+		if m.runStartedAt.IsZero() {
+			m.runStartedAt = now
+		}
+		m.runActivityAt = now
+		m.runActivity = "waiting_model"
+		m.runActivityDetail = ""
+		return
+	}
+	activity, detail := "", ""
+	switch event.Kind {
+	case app.EventProviderRetry:
+		activity = "retrying"
+		cause := compactAgentActivity(event.Text)
+		if cause == "" {
+			cause = m.tr("status.activity.retry_unknown")
+		}
+		detail = m.tr("status.activity.retrying", map[string]string{
+			"attempt": first(event.Data["attempt"], "?"), "max": first(event.Data["max"], "?"),
+			"delay": formatRetryDelay(event.Data["delay_ms"]), "reason": cause,
+		})
+	case app.EventThinkingDelta:
+		activity = "thinking"
+	case app.EventTextDelta:
+		activity = "responding"
+	case app.EventToolStarted, app.EventToolUpdate:
+		activity = "tool"
+		detail = first(event.Data["name"], event.Text, m.tr("block.tool"))
+	case app.EventToolFinished:
+		activity = "waiting_after_tool"
+		detail = first(event.Data["name"], m.tr("block.tool"))
+	case app.EventHookStarted:
+		activity = "hook"
+		detail = first(event.Data["name"], event.Data["event"], m.tr("block.hook"))
+	case app.EventHookFinished:
+		activity = "waiting_model"
+	case app.EventApprovalRequested:
+		activity = "approval"
+	case app.EventAgentState:
+		switch strings.ToLower(event.State) {
+		case "initializing", "queued", "running", "cancelling":
+			activity = "agents"
+		}
+	}
+	if activity == "" {
+		return
+	}
+	if m.runStartedAt.IsZero() {
+		m.runStartedAt = now
+	}
+	m.runActivityAt = now
+	m.runActivity = activity
+	m.runActivityDetail = compactAgentActivity(detail)
+}
+
+func formatRetryDelay(value string) string {
+	milliseconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || milliseconds < 0 {
+		return "?"
+	}
+	if milliseconds < 1000 {
+		return strconv.FormatInt(milliseconds, 10) + "ms"
+	}
+	return time.Duration(milliseconds * int64(time.Millisecond)).String()
 }
 
 func (m AppModel) hasAgent(id string) bool {

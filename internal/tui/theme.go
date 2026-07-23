@@ -2,6 +2,7 @@ package tui
 
 import (
 	"image/color"
+	"strings"
 
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
@@ -9,6 +10,12 @@ import (
 
 type Theme struct {
 	Header        lipgloss.Style
+	HeaderBrand   lipgloss.Style
+	HeaderMode    lipgloss.Style
+	Chrome        lipgloss.Style
+	RuntimeStrip  lipgloss.Style
+	ContextStrip  lipgloss.Style
+	HelpStrip     lipgloss.Style
 	Border        lipgloss.Style
 	User          lipgloss.Style
 	UserAccent    lipgloss.Style
@@ -31,6 +38,10 @@ type Theme struct {
 	Selected      lipgloss.Style
 	PanelFocused  lipgloss.Style
 	PanelBlurred  lipgloss.Style
+	OverlayTitle  lipgloss.Style
+	OverlayGroup  lipgloss.Style
+	OverlayFooter lipgloss.Style
+	BlockRail     lipgloss.Style
 	MetaLabel     lipgloss.Style
 	MetaValue     lipgloss.Style
 	MetaDivider   lipgloss.Style
@@ -87,6 +98,15 @@ func DefaultTheme() Theme {
 	diffHunkBackground := adaptiveColor("#e7f1f5", "195", "7", "#1d3037", "236", "0")
 	border := adaptiveColor("#c5cdc6", "250", "7", "#3a433c", "238", "0")
 	focusBorder := adaptiveColor("#4f8f78", "66", "6", "#6fa892", "108", "6")
+	surfaceAccent := adaptiveColor("#285f50", "23", "0", "#67d4ee", "81", "6")
+	chromeBackground := adaptiveColor("#edf2f0", "255", "7", "#101820", "234", "0")
+	runtimeBackground := adaptiveColor("#f3f6f4", "255", "7", "#151e27", "235", "0")
+	contextBackground := adaptiveColor("#f7f9f8", "255", "7", "#121a22", "234", "0")
+	helpBackground := adaptiveColor("#fafbfa", "255", "7", "#0f161d", "233", "0")
+	surfaceBackground := adaptiveColor("#f7f9f8", "255", "7", "#151e27", "235", "0")
+	raisedBackground := adaptiveColor("#ffffff", "231", "7", "#1a2530", "236", "0")
+	overlayTitleBackground := adaptiveColor("#e7efeb", "254", "7", "#1a2927", "235", "0")
+	overlayFooterBackground := adaptiveColor("#f0f4f2", "255", "7", "#121b23", "234", "0")
 	cyan := adaptiveColor("#087f9c", "30", "6", "#67d4ee", "81", "6")
 	violet := adaptiveColor("#6754b8", "61", "5", "#b4a7ff", "147", "5")
 	// Transcript accents stay background-free. Distinction comes from restrained
@@ -103,6 +123,12 @@ func DefaultTheme() Theme {
 
 	return Theme{
 		Header:        lipgloss.NewStyle().Bold(true).Foreground(accent),
+		HeaderBrand:   lipgloss.NewStyle().Bold(true).Foreground(surfaceAccent).Background(chromeBackground),
+		HeaderMode:    lipgloss.NewStyle().Bold(true).Foreground(text).Background(chipBg).Padding(0, 1),
+		Chrome:        lipgloss.NewStyle().Background(chromeBackground),
+		RuntimeStrip:  lipgloss.NewStyle().Background(runtimeBackground),
+		ContextStrip:  lipgloss.NewStyle().Background(contextBackground),
+		HelpStrip:     lipgloss.NewStyle().Background(helpBackground),
 		Border:        lipgloss.NewStyle().Foreground(border),
 		User:          lipgloss.NewStyle().Foreground(userAccent),
 		UserAccent:    lipgloss.NewStyle().Bold(true).Foreground(userAccent),
@@ -123,8 +149,12 @@ func DefaultTheme() Theme {
 		FullAccess:    lipgloss.NewStyle().Bold(true).Foreground(danger),
 		Cursor:        lipgloss.NewStyle().Foreground(cursor),
 		Selected:      lipgloss.NewStyle().Bold(true).Foreground(text).Background(selection),
-		PanelFocused:  panelBase.BorderForeground(focusBorder),
-		PanelBlurred:  panelBase.BorderForeground(border),
+		PanelFocused:  panelBase.BorderForeground(focusBorder).Background(raisedBackground),
+		PanelBlurred:  panelBase.BorderForeground(border).Background(surfaceBackground),
+		OverlayTitle:  lipgloss.NewStyle().Bold(true).Foreground(surfaceAccent).Background(overlayTitleBackground),
+		OverlayGroup:  lipgloss.NewStyle().Bold(true).Foreground(secondary),
+		OverlayFooter: lipgloss.NewStyle().Foreground(muted).Background(overlayFooterBackground),
+		BlockRail:     lipgloss.NewStyle().Foreground(border),
 		MetaLabel:     lipgloss.NewStyle().Bold(true).Foreground(accent),
 		MetaValue:     lipgloss.NewStyle().Foreground(text),
 		MetaDivider:   lipgloss.NewStyle().Foreground(border),
@@ -163,6 +193,31 @@ func DefaultTheme() Theme {
 		AttachmentTag: messageTag.Foreground(violet),
 		Attachment:    lipgloss.NewStyle().Foreground(cyan),
 	}
+}
+
+// renderSurface preserves a surface background across nested Lip Gloss spans.
+// Child styles emit a full ANSI reset, so an ordinary outer Style.Render would
+// leave the rest of the row on the terminal's default background.
+func renderSurface(style lipgloss.Style, content string) string {
+	opener := surfaceBackgroundOpener(style)
+	if opener != "" {
+		content = strings.ReplaceAll(content, "\x1b[0m", "\x1b[0m"+opener)
+		content = strings.ReplaceAll(content, "\x1b[m", "\x1b[m"+opener)
+	}
+	return style.Render(content)
+}
+
+func surfaceBackgroundOpener(style lipgloss.Style) string {
+	background := style.GetBackground()
+	if background == nil {
+		return ""
+	}
+	rendered := lipgloss.NewStyle().Background(background).Render(" ")
+	opener, _, found := strings.Cut(rendered, " ")
+	if !found {
+		return ""
+	}
+	return opener
 }
 
 func adaptiveColor(lightTrueColor string, lightANSI256 string, lightANSI string, darkTrueColor string, darkANSI256 string, darkANSI string) color.Color {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
@@ -319,6 +320,10 @@ type AppModel struct {
 	reducedMotion       bool
 	animationActive     bool
 	animationFrame      int
+	runStartedAt        time.Time
+	runActivityAt       time.Time
+	runActivity         string
+	runActivityDetail   string
 	actionBusy          bool
 	actionCancel        func()
 	agents              []AgentView
@@ -386,6 +391,7 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	modelSearch.Placeholder = catalog.T("search.placeholder")
 	modelSearch.CharLimit = 128
 	modelSearch.SetWidth(64)
+	modelSearch.SetVirtualCursor(false)
 	searchStyles := modelSearch.Styles()
 	searchStyles.Focused.Text = theme.Assistant
 	searchStyles.Focused.Prompt = theme.Header

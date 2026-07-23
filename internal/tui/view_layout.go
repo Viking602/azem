@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -59,6 +60,15 @@ func (m AppModel) View() tea.View {
 	height := max(1, m.height)
 	if m.overlay != OverlayNone {
 		view := tea.NewView(fitViewport(m.renderOverlay(width, height), width, height))
+		if m.overlay == OverlayModel {
+			if cursor := m.modelSearch.Cursor(); cursor != nil {
+				if offsetX, offsetY, visible := m.modelSearchCursorOffset(width, height); visible {
+					cursor.Position.X += offsetX
+					cursor.Position.Y += offsetY
+					view.Cursor = cursor
+				}
+			}
+		}
 		view.AltScreen = true
 		view.ReportFocus = true
 		view.MouseMode = tea.MouseModeCellMotion
@@ -116,12 +126,31 @@ func (m AppModel) View() tea.View {
 	return view
 }
 
+func (m AppModel) modelSearchCursorOffset(width, height int) (int, int, bool) {
+	if width < 6 || height < 5 {
+		return 0, 0, false
+	}
+	boxWidth := min(82, max(3, width-2))
+	innerHeight := max(1, min(height-2, 20))
+	_, subtitle := m.overlayHeading()
+	searchRow := 1
+	if subtitle != "" {
+		searchRow++
+	}
+	if searchRow >= innerHeight-1 {
+		return 0, 0, false
+	}
+	leftPadding := max(0, (width-boxWidth)/2)
+	topPadding := max(0, (height-(innerHeight+2))/2)
+	return leftPadding + 2, topPadding + 1 + searchRow, true
+}
+
 func (m AppModel) renderComposer() string {
 	style := m.theme.PanelBlurred
 	if m.composer.Focused() {
 		style = m.theme.PanelFocused
 	}
-	return style.Render(m.composer.View())
+	return renderSurface(style, m.composer.View())
 }
 
 func (m AppModel) composerBlockLines() int {
@@ -198,12 +227,12 @@ func dockFooterLines(height, width int) int {
 }
 
 func (m AppModel) renderHeader(width int) string {
-	left := m.theme.Header.Render(" Azem")
+	left := m.theme.HeaderBrand.Render(" ◈ Azem")
 	if width >= 60 {
-		left += m.theme.Muted.Render("  " + shortenPath(m.workspace, max(16, width/2)))
+		left += m.theme.Muted.Background(m.theme.Chrome.GetBackground()).Render("  " + shortenPath(m.workspace, max(16, width/2)))
 	}
-	right := m.theme.Muted.Render(strings.ToUpper(m.agentMode) + " ")
-	return joinSides(left, right, width)
+	right := m.theme.HeaderMode.Render(strings.ToUpper(m.agentMode)) + m.theme.Chrome.Render(" ")
+	return renderSurface(m.theme.Chrome, joinSides(left, right, width))
 }
 
 func (m AppModel) renderBody(width int, height int) string {
@@ -416,11 +445,18 @@ func (m AppModel) renderTranscriptFooter(width int, maxOffset int, offset int) s
 	if m.isRunning() {
 		label := strings.ToUpper(m.displayState(m.status))
 		detail := m.tr("status.detail.generating")
+		if offset == 0 {
+			detail = m.runActivitySummary(time.Now())
+		}
 		switch m.status {
 		case "Starting":
-			detail = m.tr("status.detail.starting")
+			if m.runStartedAt.IsZero() {
+				detail = m.tr("status.detail.starting")
+			}
 		case "Compacting":
-			detail = m.tr("status.detail.compacting")
+			if m.runActivity != "retrying" {
+				detail = m.tr("status.detail.compacting")
+			}
 		case "Awaiting approval":
 			detail = m.tr("status.detail.approval")
 		case "Reviewing approval":
@@ -453,6 +489,57 @@ func (m AppModel) renderTranscriptFooter(width int, maxOffset int, offset int) s
 		"  "+m.tr("status.history_all", map[string]string{"count": fmt.Sprint(maxOffset)}),
 		width,
 	))
+}
+
+func (m AppModel) runActivitySummary(now time.Time) string {
+	activity := m.tr("status.detail.generating")
+	switch m.runActivity {
+	case "waiting_model":
+		activity = m.tr("status.activity.waiting_model")
+	case "thinking":
+		activity = m.tr("status.activity.thinking")
+	case "responding":
+		activity = m.tr("status.activity.responding")
+	case "retrying":
+		activity = m.runActivityDetail
+	case "tool":
+		activity = m.tr("status.activity.tool", map[string]string{"name": first(m.runActivityDetail, m.tr("block.tool"))})
+	case "waiting_after_tool":
+		activity = m.tr("status.activity.waiting_after_tool", map[string]string{"name": first(m.runActivityDetail, m.tr("block.tool"))})
+	case "hook":
+		activity = m.tr("status.activity.hook", map[string]string{"name": first(m.runActivityDetail, m.tr("block.hook"))})
+	case "approval":
+		activity = m.tr("status.detail.approval")
+	case "agents":
+		activity = m.tr("status.activity.agents", map[string]string{"count": fmt.Sprint(len(m.activeAgents()))})
+	}
+	parts := []string{activity}
+	if !m.runStartedAt.IsZero() {
+		parts = append(parts, m.tr("status.activity.elapsed", map[string]string{"duration": formatActivityDuration(now.Sub(m.runStartedAt))}))
+	}
+	if m.status != "Awaiting approval" && m.status != "Reviewing approval" && m.status != "Cancelling" && !m.runActivityAt.IsZero() {
+		idle := now.Sub(m.runActivityAt)
+		if idle >= 5*time.Second {
+			parts = append(parts, m.tr("status.activity.idle", map[string]string{"duration": formatActivityDuration(idle)}))
+		}
+	}
+	return strings.Join(parts, "  · ")
+}
+
+func formatActivityDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	seconds := int(duration.Round(time.Second) / time.Second)
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes := seconds / 60
+	seconds %= 60
+	if minutes < 60 {
+		return fmt.Sprintf("%dm%02ds", minutes, seconds)
+	}
+	return fmt.Sprintf("%dh%02dm", minutes/60, minutes%60)
 }
 
 func (m AppModel) transcriptViewportSize() (int, int) {

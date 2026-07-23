@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 
 	"github.com/Viking602/azem/internal/auth"
+	azprovider "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/responses"
 )
 
@@ -28,6 +30,8 @@ type Driver struct {
 	transport       Transport
 	models          []string
 	reasoningEffort string
+	retryDelay      func(int) time.Duration
+	retryObserver   azprovider.RetryObserver
 }
 
 func New(transport Transport, models []string, reasoningEffort string) (*Driver, error) {
@@ -41,18 +45,25 @@ func (d *Driver) Metadata() hyprovider.Metadata {
 	return hyprovider.Metadata{Name: d.transport.Name(), Models: append([]string(nil), d.models...), Version: "1"}
 }
 
+func (d *Driver) SetRetryObserver(observer azprovider.RetryObserver) {
+	d.retryObserver = observer
+}
+
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
 	payload, err := responses.Build(request, responses.BuildOptions{IncludeEncryptedReasoning: true, DefaultParallelTools: true, DefaultReasoningEffort: d.reasoningEffort})
 	if err != nil {
 		return nil, err
 	}
-	streamContext, cancel := context.WithCancel(ctx)
-	response, err := d.transport.Post(streamContext, payload)
-	if err != nil {
-		cancel()
-		return nil, err
+	open := func() (hyprovider.Stream, error) {
+		streamContext, cancel := context.WithCancel(ctx)
+		response, err := d.transport.Post(streamContext, payload)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		return responses.Open(response, streamContext, cancel, responses.RequestUsageReporter(request))
 	}
-	return responses.Open(response, streamContext, cancel, responses.RequestUsageReporter(request))
+	return azprovider.OpenRetryingStream(ctx, open, azprovider.RetryOptions{Delay: d.retryDelay, Observer: d.retryObserver})
 }
 
 type StandardTransport struct {
