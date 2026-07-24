@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+type clipboardAppleScriptRunner func(script, path string) (stdout, stderr []byte, err error)
+
 // ReadClipboardImage returns image bytes and MIME type from the system clipboard.
 // It returns (nil, "", nil) when the clipboard has no image data.
 func ReadClipboardImage() (data []byte, mimeType string, err error) {
@@ -25,6 +27,18 @@ func ReadClipboardImage() (data []byte, mimeType string, err error) {
 }
 
 func readClipboardImageDarwin() ([]byte, string, error) {
+	return readClipboardImageDarwinWithRunner(runClipboardAppleScript)
+}
+
+func runClipboardAppleScript(script, path string) ([]byte, []byte, error) {
+	cmd := exec.Command("osascript", "-e", script, path)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	return stdout, stderr.Bytes(), err
+}
+
+func readClipboardImageDarwinWithRunner(run clipboardAppleScriptRunner) ([]byte, string, error) {
 	temporary, err := os.CreateTemp("", "azem-clipboard-image-*")
 	if err != nil {
 		return nil, "", fmt.Errorf("create macOS clipboard temporary file: %w", err)
@@ -62,13 +76,17 @@ on run argv
   return mimeType
 end run
 `
-	out, err := exec.Command("osascript", "-e", script, path).CombinedOutput()
-	result := strings.TrimSpace(string(out))
+	stdout, stderr, err := run(script, path)
+	result := strings.TrimSpace(string(stdout))
 	if err != nil {
-		if strings.Contains(result, "NOIMAGE") || result == "NOIMAGE" {
+		detail := strings.TrimSpace(string(stderr))
+		if detail == "" {
+			detail = result
+		}
+		if strings.Contains(result, "NOIMAGE") || strings.Contains(detail, "NOIMAGE") {
 			return nil, "", nil
 		}
-		return nil, "", fmt.Errorf("read macOS clipboard image: %w (%s)", err, result)
+		return nil, "", fmt.Errorf("read macOS clipboard image: %w (%s)", err, detail)
 	}
 	if result == "NOIMAGE" || result == "" {
 		return nil, "", nil
