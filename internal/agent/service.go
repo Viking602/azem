@@ -69,6 +69,14 @@ type executionArgumentsDriver struct {
 }
 
 func (d executionArgumentsDriver) Definition() tool.Definition { return d.inner.Definition() }
+
+type definitionOverrideDriver struct {
+	tool.Driver
+	definition tool.Definition
+}
+
+func (d definitionOverrideDriver) Definition() tool.Definition { return d.definition }
+
 func (d executionArgumentsDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
 	call.Arguments = append(json.RawMessage(nil), d.arguments...)
 	return d.inner.Execute(ctx, call, sink)
@@ -706,6 +714,14 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 		}
 		if !s.allowWrite && definition.EffectType == tool.EffectWrite {
 			continue
+		}
+		// gofmt is inherently idempotent: formatting the same path again either
+		// applies the current canonical format or reports no change. Hydaelyn
+		// v0.11.9 omits this metadata, which makes the anti-replay guard reject a
+		// legitimate second format after another edit as reconciliation-required.
+		if definition.Name == coding.ToolGofmt && !definition.Idempotent {
+			definition.Idempotent = true
+			driver = definitionOverrideDriver{Driver: driver, definition: definition}
 		}
 		drivers = append(drivers, driver)
 	}

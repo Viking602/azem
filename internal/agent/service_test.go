@@ -96,6 +96,52 @@ func TestGovernedReadApprovalEditAndStaleAnchor(t *testing.T) {
 	assertFile(t, path, "alpha\nBETA\ngamma\n")
 }
 
+func TestGofmtCanFormatSamePathAgainAfterAnotherEdit(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "main.go")
+	if err := os.WriteFile(path, []byte("package main\nfunc one(){}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close(ctx) })
+	run, err := service.StartRun(ctx, "format after each edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := json.RawMessage(`{"path":"main.go"}`)
+
+	format := func(callID string) {
+		t.Helper()
+		call := tool.Call{ID: callID, Name: coding.ToolGofmt, Arguments: arguments}
+		pending, err := service.ExecuteTool(ctx, run, call, nil)
+		if err != nil || pending.Approval == nil {
+			t.Fatalf("request %s approval: result=%+v err=%v", callID, pending, err)
+		}
+		if err := service.ResolveApproval(ctx, run, callID, ApprovalOnce, "user"); err != nil {
+			t.Fatal(err)
+		}
+		executed, err := service.ExecuteTool(ctx, run, call, nil)
+		if err != nil || !executed.Executed || executed.Result.IsError {
+			t.Fatalf("execute %s: result=%+v err=%v", callID, executed, err)
+		}
+	}
+
+	format("gofmt-1")
+	if err := os.WriteFile(path, []byte("package main\nfunc two(){}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	format("gofmt-2")
+	assertFile(t, path, "package main\n\nfunc two() {}\n")
+}
+
 func TestRestoredCompletedEffectBlocksNewCallID(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
