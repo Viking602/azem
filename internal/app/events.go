@@ -1,11 +1,13 @@
 package app
 
 import (
+	"time"
+
+	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
-	"time"
 )
 
 type EventKind string
@@ -42,6 +44,8 @@ const (
 	EventMemoryState       EventKind = "memory_state"
 	EventRecapState        EventKind = "recap_state"
 	EventModelRoutes       EventKind = "model_routes"
+	EventBackgroundState   EventKind = "background_state"
+	EventBackgroundLogs    EventKind = "background_logs"
 )
 
 type ModelRouteEntry struct {
@@ -137,6 +141,8 @@ type Event struct {
 	Memories         []memory.Memory
 	Recap            *recap.Recap
 	ModelRoutes      []ModelRouteEntry
+	Background       []backgroundservice.Process
+	BackgroundLogs   *backgroundservice.LogSnapshot
 	At               time.Time
 }
 
@@ -180,6 +186,14 @@ func (e Event) Clone() Event {
 	}
 	if e.ModelRoutes != nil {
 		cloned.ModelRoutes = append([]ModelRouteEntry(nil), e.ModelRoutes...)
+	}
+	if e.Background != nil {
+		cloned.Background = append([]backgroundservice.Process(nil), e.Background...)
+	}
+	if e.BackgroundLogs != nil {
+		value := *e.BackgroundLogs
+		value.Lines = append([]string(nil), e.BackgroundLogs.Lines...)
+		cloned.BackgroundLogs = &value
 	}
 	return cloned
 }

@@ -5,6 +5,15 @@ import "github.com/Viking602/azem/internal/app"
 type appEventMsg struct{ Event app.Event }
 type appStreamClosedMsg struct{ Err error }
 type animationTickMsg struct{}
+type backgroundPollMsg struct {
+	Generation uint64
+	ProcessID  string
+}
+type backgroundPollResultMsg struct {
+	Generation uint64
+	ProcessID  string
+	Err        error
+}
 type startTurnResultMsg struct {
 	RunID string
 	Err   error

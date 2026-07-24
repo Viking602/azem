@@ -36,6 +36,37 @@ func TestEventBrokerCoalescesDeltasBeforeLifecycleBarrier(t *testing.T) {
 	}
 }
 
+func TestTerminalEventReleasesRunAdmissionBeforeDelivery(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.mu.Lock()
+	service.activeRun = "run"
+	service.activeSession = "session"
+	service.activeEnd = func() {}
+	service.mu.Unlock()
+
+	if !service.emitTerminal(context.Background(), Event{
+		Kind: EventRunFailed, SessionID: "session", RunID: "run", State: "failed", Text: "stream interrupted",
+	}) {
+		t.Fatal("terminal event was not published")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventRunFailed {
+		t.Fatalf("event kind = %s, want %s", event.Kind, EventRunFailed)
+	}
+	service.mu.Lock()
+	activeRun, activeSession := service.activeRun, service.activeSession
+	service.mu.Unlock()
+	if activeRun != "" || activeSession != "" {
+		t.Fatalf("terminal event was observable before admission release: run=%q session=%q", activeRun, activeSession)
+	}
+}
+
 func TestEventBrokerDoesNotBlockProducerWhenConsumerIsIdle(t *testing.T) {
 	broker := newEventBroker(time.Hour)
 	done := make(chan struct{})

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Viking602/azem/internal/app"
+	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
@@ -134,6 +135,25 @@ func (m *AppModel) applyEvent(event app.Event) {
 		m.updateAuth(event)
 	case app.EventMCPState:
 		m.updateMCP(event)
+	case app.EventBackgroundState:
+		m.background = append([]backgroundservice.Process(nil), event.Background...)
+		m.reconcileBackgroundSelection()
+		m.openOverlay(OverlayBackground)
+	case app.EventBackgroundLogs:
+		if event.BackgroundLogs == nil {
+			break
+		}
+		snapshot := *event.BackgroundLogs
+		snapshot.Lines = append([]string(nil), event.BackgroundLogs.Lines...)
+		m.backgroundLogs = &snapshot
+		m.upsertBackground(snapshot.Process)
+		m.detailBackgroundID = snapshot.Process.ID
+		if m.overlay != OverlayBackgroundDetail {
+			m.openOverlay(OverlayBackgroundDetail)
+		}
+		if m.backgroundFollow {
+			m.overlayScroll = m.backgroundLogScrollLimit()
+		}
 	case app.EventRecoveryState:
 		m.loadRecoveryEvent(event)
 	case app.EventRunFinished:
@@ -179,7 +199,7 @@ func (m AppModel) acceptRunEvent(event app.Event) bool {
 		return true
 	}
 	if event.Kind == app.EventRunStarted {
-		return m.isRunning() && (m.runID == "" || m.runID == event.RunID)
+		return m.runID == "" || m.runID == event.RunID
 	}
 	if (event.Kind == app.EventToolFinished || event.Kind == app.EventHookFinished) && event.RunID == m.lastRunID {
 		if event.Kind == app.EventHookFinished {

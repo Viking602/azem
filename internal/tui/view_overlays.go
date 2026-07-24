@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/session"
 )
@@ -54,7 +55,7 @@ func (m AppModel) renderCommandSuggestions(width int, height int, suggestions []
 func (m AppModel) renderOverlay(width int, height int) string {
 	if width < 6 || height < 5 {
 		title, _ := m.overlayHeading()
-		if m.overlay == OverlayAgentDetail || m.overlay == OverlayMCPDetail {
+		if m.overlay == OverlayAgentDetail || m.overlay == OverlayMCPDetail || m.overlay == OverlayBackgroundDetail {
 			title, _ = m.overlayHeading()
 		}
 		rows := []string{m.theme.Header.Render(strings.ToUpper(title))}
@@ -69,8 +70,11 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	if m.overlay == OverlayMCPDetail {
 		return m.renderMCPDetailOverlay(width, height)
 	}
+	if m.overlay == OverlayBackgroundDetail {
+		return m.renderBackgroundDetailOverlay(width, height)
+	}
 	maxBoxWidth := 82
-	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes || m.overlay == OverlayStatus {
+	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes || m.overlay == OverlayStatus || m.overlay == OverlayBackground {
 		maxBoxWidth = 110
 	}
 	boxWidth := min(maxBoxWidth, max(3, width-2))
@@ -433,6 +437,113 @@ func (m AppModel) renderMCPDetailOverlay(width, height int) string {
 	return strings.Join(output[:height], "\n")
 }
 
+func (m AppModel) renderBackgroundDetailOverlay(width, height int) string {
+	boxWidth := min(118, max(3, width-2))
+	innerWidth := max(1, boxWidth-2)
+	innerHeight := max(1, min(height-2, 32))
+	process, found := m.selectedBackgroundProcess()
+	subtitle := m.tr("overlay.background_detail.unavailable")
+	content := make([]string, 0, 16)
+	if found {
+		subtitle = fmt.Sprintf("%s · %s · PID %d", process.Name, strings.ToUpper(m.displayState(process.State)), process.PID)
+		content = append(content,
+			m.tr("background.command", map[string]string{"value": process.Command}),
+			"CWD: "+process.CWD,
+			m.tr("background.runtime", map[string]string{"id": process.ID, "started": process.StartedAt.Local().Format("2006-01-02 15:04:05"), "bytes": formatByteCount(process.LogBytes)}),
+		)
+		if process.Error != "" {
+			content = append(content, m.tr("background.error", map[string]string{"value": process.Error}))
+		}
+		content = append(content, strings.Repeat("─", max(0, innerWidth-4)))
+	}
+	if m.backgroundLogs == nil || m.backgroundLogs.Process.ID != m.detailBackgroundID {
+		content = append(content, m.tr("overlay.background_detail.loading"))
+	} else {
+		if m.backgroundLogs.Truncated {
+			content = append(content, m.tr("overlay.background_detail.truncated"))
+		}
+		if len(m.backgroundLogs.Lines) == 0 {
+			content = append(content, m.tr("overlay.background_detail.empty"))
+		} else {
+			content = append(content, m.backgroundLogs.Lines...)
+		}
+	}
+	rowsAvailable := max(1, innerHeight-4)
+	limit := max(0, len(content)-rowsAvailable)
+	start := min(max(0, m.overlayScroll), limit)
+	end := min(len(content), start+rowsAvailable)
+	rows := []string{
+		m.boxRow(" ◈ "+strings.ToUpper(m.tr("overlay.background_detail.title")), innerWidth, m.theme.OverlayTitle, false),
+		m.boxRow(" "+subtitle, innerWidth, m.theme.Muted, false),
+		m.boxRow(" "+strings.Repeat("─", max(0, innerWidth-2)), innerWidth, m.theme.Border, false),
+	}
+	for _, line := range content[start:end] {
+		rows = append(rows, m.boxRow(" "+line, innerWidth, m.theme.Assistant, false))
+	}
+	for len(rows) < innerHeight-1 {
+		rows = append(rows, m.boxRow("", innerWidth, m.theme.Assistant, false))
+	}
+	footer := m.boxRow(" "+m.overlayFooterForWidth(max(1, innerWidth-1)), innerWidth, m.theme.OverlayFooter, false)
+	rows = append(rows, footer)
+	if len(rows) > innerHeight {
+		rows = append(rows[:innerHeight-1], footer)
+	}
+	top := m.theme.Border.Render("┌" + strings.Repeat("─", innerWidth) + "┐")
+	bottom := m.theme.Border.Render("└" + strings.Repeat("─", innerWidth) + "┘")
+	box := []string{top}
+	for _, row := range rows {
+		box = append(box, m.theme.Border.Render("│")+row+m.theme.Border.Render("│"))
+	}
+	box = append(box, bottom)
+	topPadding := max(0, (height-len(box))/2)
+	leftPadding := strings.Repeat(" ", max(0, (width-boxWidth)/2))
+	output := make([]string, 0, height)
+	for range topPadding {
+		output = append(output, "")
+	}
+	for _, line := range box {
+		output = append(output, leftPadding+line)
+	}
+	for len(output) < height {
+		output = append(output, "")
+	}
+	return strings.Join(output[:height], "\n")
+}
+
+func (m AppModel) backgroundLogScrollLimit() int {
+	if m.backgroundLogs == nil || m.backgroundLogs.Process.ID != m.detailBackgroundID {
+		return 0
+	}
+	innerHeight := max(1, min(m.height-2, 32))
+	metadata := 4
+	if m.backgroundLogs.Truncated {
+		metadata++
+	}
+	return max(0, metadata+len(m.backgroundLogs.Lines)-max(1, innerHeight-4))
+}
+
+func (m AppModel) selectedBackgroundProcess() (backgroundservice.Process, bool) {
+	for _, process := range m.background {
+		if process.ID == m.detailBackgroundID {
+			return process, true
+		}
+	}
+	if m.backgroundLogs != nil && m.backgroundLogs.Process.ID == m.detailBackgroundID {
+		return m.backgroundLogs.Process, true
+	}
+	return backgroundservice.Process{}, false
+}
+
+func formatByteCount(value int64) string {
+	if value < 1024 {
+		return fmt.Sprintf("%d B", value)
+	}
+	if value < 1024*1024 {
+		return fmt.Sprintf("%.1f KiB", float64(value)/1024)
+	}
+	return fmt.Sprintf("%.1f MiB", float64(value)/(1024*1024))
+}
+
 func (m AppModel) mcpToolEffect(effect string) string {
 	switch effect {
 	case "read_only", "write", "external_side_effect":
@@ -522,6 +633,14 @@ func (m AppModel) overlayHeading() (string, string) {
 			return m.tr("overlay.mcp_detail.title"), m.tr("overlay.mcp_detail.unavailable")
 		}
 		return m.tr("overlay.mcp_detail.title"), server.Name + " · " + m.mcpConnectionState(server.State)
+	case OverlayBackground:
+		return m.tr("overlay.background.title"), m.tr("overlay.background.subtitle")
+	case OverlayBackgroundDetail:
+		process, ok := m.selectedBackgroundProcess()
+		if !ok {
+			return m.tr("overlay.background_detail.title"), m.tr("overlay.background_detail.unavailable")
+		}
+		return m.tr("overlay.background_detail.title"), process.Name + " · " + m.displayState(process.State)
 	case OverlayRecovery:
 		return m.tr("overlay.recovery.title"), m.tr("overlay.recovery.subtitle")
 	case OverlayError:
@@ -626,6 +745,10 @@ func (m AppModel) overlayDescription() []string {
 	case OverlayMCP:
 		if len(m.mcpServers) == 0 {
 			return []string{m.tr("overlay.mcp.empty")}
+		}
+	case OverlayBackground:
+		if len(m.background) == 0 {
+			return []string{m.tr("overlay.background.empty")}
 		}
 	case OverlayRecovery:
 		if len(m.recovery) == 0 {
@@ -856,6 +979,16 @@ func (m AppModel) overlayOptions() []overlayOption {
 			options = append(options, overlayOption{Label: server.Name, Detail: detail, State: server.State})
 		}
 		return options
+	case OverlayBackground:
+		options := make([]overlayOption, 0, len(m.background))
+		for _, process := range m.background {
+			detail := fmt.Sprintf("PID %d · %s · %s", process.PID, formatByteCount(process.LogBytes), process.ID)
+			if process.Command != "" {
+				detail += " · " + compactAgentActivity(process.Command)
+			}
+			options = append(options, overlayOption{Label: first(process.Name, process.ID), Detail: detail, State: process.State})
+		}
+		return options
 	case OverlayRecovery:
 		options := make([]overlayOption, 0, len(m.recovery))
 		for _, item := range m.recovery {
@@ -918,6 +1051,10 @@ func (m AppModel) overlayFooter() string {
 		return m.tr("overlay.footer.mcp")
 	case OverlayMCPDetail:
 		return m.tr("overlay.footer.mcp_detail")
+	case OverlayBackground:
+		return m.tr("overlay.footer.background")
+	case OverlayBackgroundDetail:
+		return m.tr("overlay.footer.background_detail")
 	case OverlayRecovery:
 		return m.tr("overlay.footer.recovery")
 	case OverlayError:
@@ -947,6 +1084,10 @@ func (m AppModel) overlayFooterForWidth(width int) string {
 		return m.tr("overlay.footer.scroll_back")
 	case OverlayMCPDetail:
 		return m.tr("overlay.footer.mcp_detail_short")
+	case OverlayBackground:
+		return m.tr("overlay.footer.background_short")
+	case OverlayBackgroundDetail:
+		return m.tr("overlay.footer.background_detail_short")
 	case OverlayError:
 		return m.tr("overlay.footer.error_short")
 	case OverlayHelp, OverlayDiff, OverlayStatus:
