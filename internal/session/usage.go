@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 // Usage is the durable last-known context and cache snapshot for a session.
@@ -247,7 +249,7 @@ func (s *Service) UpdateUsage(ctx context.Context, sessionID string, usage Usage
 	if err != nil {
 		return fmt.Errorf("encode session usage: %w", err)
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE session_projections SET usage=? WHERE session_id=?`, encoded, sessionID)
+	result, err := dbgen.New(s.db).UpdateUsage(ctx, dbgen.UpdateUsageParams{Usage: encoded, SessionID: sessionID})
 	if err != nil {
 		return fmt.Errorf("update session usage: %w", err)
 	}

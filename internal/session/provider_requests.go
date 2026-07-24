@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 // ProviderRequestFact is the replaceable, per-provider-request source of truth
@@ -34,20 +36,7 @@ func (s *Service) UpsertProviderRequest(ctx context.Context, f ProviderRequestFa
 	if !f.CompletedAt.IsZero() {
 		completed = f.CompletedAt.UnixNano()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO provider_requests(
-		request_id,provider_request_id,session_id,run_id,request_kind,provider,model,transport,cache_epoch,checkpoint_generation,
-		input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,cache_reported,status,started_at,completed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(request_id) DO UPDATE SET
-		provider_request_id=excluded.provider_request_id,session_id=excluded.session_id,run_id=excluded.run_id,request_kind=excluded.request_kind,
-		provider=excluded.provider,model=excluded.model,transport=excluded.transport,cache_epoch=excluded.cache_epoch,
-		checkpoint_generation=excluded.checkpoint_generation,input_tokens=excluded.input_tokens,cached_tokens=excluded.cached_tokens,
-		cache_write_tokens=excluded.cache_write_tokens,output_tokens=excluded.output_tokens,reasoning_tokens=excluded.reasoning_tokens,
-		total_tokens=excluded.total_tokens,cache_reported=excluded.cache_reported,status=excluded.status,
-		started_at=MIN(provider_requests.started_at,excluded.started_at),completed_at=excluded.completed_at`,
-		f.RequestID, f.ProviderRequestID, f.SessionID, f.RunID, f.RequestKind, f.Provider, f.Model, f.Transport,
-		f.CacheEpoch, f.CheckpointGeneration, f.InputTokens, f.CachedTokens, f.CacheWriteTokens, f.OutputTokens,
-		f.ReasoningTokens, f.TotalTokens, f.CacheReported, f.Status, f.StartedAt.UnixNano(), completed)
+	err := dbgen.New(s.db).UpsertProviderRequest(ctx, dbgen.UpsertProviderRequestParams{RequestID: f.RequestID, ProviderRequestID: f.ProviderRequestID, SessionID: f.SessionID, RunID: f.RunID, RequestKind: f.RequestKind, Provider: f.Provider, Model: f.Model, Transport: f.Transport, CacheEpoch: f.CacheEpoch, CheckpointGeneration: f.CheckpointGeneration, InputTokens: int64(f.InputTokens), CachedTokens: int64(f.CachedTokens), CacheWriteTokens: int64(f.CacheWriteTokens), OutputTokens: int64(f.OutputTokens), ReasoningTokens: int64(f.ReasoningTokens), TotalTokens: int64(f.TotalTokens), CacheReported: requestBoolInt(f.CacheReported), Status: f.Status, StartedAt: f.StartedAt.UnixNano(), CompletedAt: completed})
 	if err != nil {
 		return fmt.Errorf("upsert provider request: %w", err)
 	}
@@ -60,46 +49,65 @@ type usageAggregate struct {
 }
 
 func (s *Service) aggregateUsage(ctx context.Context, sessionID, clause string, args ...any) (usageAggregate, error) {
-	values := append([]any{sessionID}, args...)
-	var a usageAggregate
-	var reported int
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens),0),COALESCE(SUM(CASE WHEN cache_reported=1 THEN input_tokens ELSE 0 END),0),COALESCE(SUM(CASE WHEN cache_reported=1 THEN cached_tokens ELSE 0 END),0),COALESCE(SUM(cache_write_tokens),0),
-		COALESCE(SUM(output_tokens),0),COALESCE(SUM(reasoning_tokens),0),COALESCE(SUM(total_tokens),0),COUNT(*),COALESCE(SUM(cache_reported),0),COALESCE(MAX(cache_reported),0)
-		FROM provider_requests WHERE session_id=? AND status='completed' `+clause, values...).Scan(&a.rawInput, &a.reportedInput, &a.cached, &a.write, &a.output, &a.reasoning, &a.total, &a.requests, &a.reportedRequests, &reported)
-	a.reported = reported != 0
-	return a, err
+	q := dbgen.New(s.db)
+	var values [10]int64
+	var err error
+	switch clause {
+	case `AND request_kind='main' AND cache_epoch=?`:
+		row, e := q.AggregateMainUsageByEpoch(ctx, dbgen.AggregateMainUsageByEpochParams{SessionID: sessionID, CacheEpoch: args[0].(int64)})
+		err = e
+		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
+	case `AND request_kind='main' AND run_id=?`:
+		row, e := q.AggregateMainUsageByRun(ctx, dbgen.AggregateMainUsageByRunParams{SessionID: sessionID, RunID: args[0].(string)})
+		err = e
+		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
+	case `AND request_kind='main'`:
+		row, e := q.AggregateMainUsage(ctx, sessionID)
+		err = e
+		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
+	case `AND request_kind='compaction'`:
+		row, e := q.AggregateCompactionUsage(ctx, sessionID)
+		err = e
+		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
+	case `AND request_kind='team'`:
+		row, e := q.AggregateTeamUsage(ctx, sessionID)
+		err = e
+		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
+	case `AND request_kind='subagent'`:
+		row, e := q.AggregateSubagentUsage(ctx, sessionID)
+		err = e
+		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
+	default:
+		return usageAggregate{}, fmt.Errorf("unsupported usage aggregate %q", clause)
+	}
+	return usageAggregate{rawInput: int(values[0]), reportedInput: int(values[1]), cached: int(values[2]), write: int(values[3]), output: int(values[4]), reasoning: int(values[5]), total: int(values[6]), requests: int(values[7]), reportedRequests: int(values[8]), reported: values[9] != 0}, err
+}
+
+func aggregateValues(rawInput, reportedInput, cached, cacheWrite, output, reasoning, total, requests, reportedRequests, reported int64) [10]int64 {
+	return [10]int64{rawInput, reportedInput, cached, cacheWrite, output, reasoning, total, requests, reportedRequests, reported}
 }
 
 func (s *Service) latestMainUsage(ctx context.Context, sessionID, runID string) (input, output int, err error) {
-	err = s.db.QueryRowContext(ctx, `SELECT input_tokens,output_tokens FROM provider_requests
-		WHERE session_id=? AND run_id=? AND request_kind='main' AND status='completed'
-		ORDER BY completed_at DESC,started_at DESC,request_id DESC LIMIT 1`, sessionID, runID).Scan(&input, &output)
+	row, err := dbgen.New(s.db).LatestMainUsage(ctx, dbgen.LatestMainUsageParams{SessionID: sessionID, RunID: runID})
 	if err == sql.ErrNoRows {
 		return 0, 0, nil
 	}
-	return input, output, err
+	return int(row.InputTokens), int(row.OutputTokens), err
 }
 
 // ProviderRunTotalTokens returns cumulative provider-reported usage for every
 // main and compaction request in one logical run.
 func (s *Service) ProviderRunTotalTokens(ctx context.Context, sessionID, runID string) (int64, error) {
-	var total int64
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(total_tokens),0) FROM provider_requests
-		WHERE session_id=? AND run_id=? AND status='completed'`, sessionID, runID).Scan(&total)
-	return total, err
+	return dbgen.New(s.db).ProviderRunTotalTokens(ctx, dbgen.ProviderRunTotalTokensParams{SessionID: sessionID, RunID: runID})
 }
 
 func (s *Service) ProviderRunHasUnknownRequest(ctx context.Context, sessionID, runID string) (bool, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_requests
-		WHERE session_id=? AND run_id=? AND status='unknown'`, sessionID, runID).Scan(&count)
+	count, err := dbgen.New(s.db).CountUnknownProviderRequests(ctx, dbgen.CountUnknownProviderRequestsParams{SessionID: sessionID, RunID: runID})
 	return count > 0, err
 }
 
 func (s *Service) ProviderRunHasUncheckpointedCompletion(ctx context.Context, sessionID, runID string, checkpointGeneration int64) (bool, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_requests
-		WHERE session_id=? AND run_id=? AND status='completed' AND checkpoint_generation>=?`, sessionID, runID, checkpointGeneration).Scan(&count)
+	count, err := dbgen.New(s.db).CountUncheckpointedCompletions(ctx, dbgen.CountUncheckpointedCompletionsParams{SessionID: sessionID, RunID: runID, CheckpointGeneration: checkpointGeneration})
 	return count > 0, err
 }
 
@@ -169,18 +177,19 @@ func (s *Service) EnsureCacheIdentity(ctx context.Context, sessionID, identity s
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	var epoch, generation int64
-	var current string
-	if err := tx.QueryRowContext(ctx, `SELECT cache_epoch,checkpoint_generation,cache_identity_hash FROM session_projections WHERE session_id=?`, sessionID).Scan(&epoch, &generation, &current); err != nil {
+	q := dbgen.New(tx)
+	projection, err := q.GetCacheProjection(ctx, sessionID)
+	if err != nil {
 		return 0, 0, err
 	}
+	epoch, generation, current := projection.CacheEpoch, projection.CheckpointGeneration, projection.CacheIdentityHash
 	if current == "" {
-		if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET cache_identity_hash=? WHERE session_id=?`, identity, sessionID); err != nil {
+		if err := q.InitializeCacheIdentity(ctx, dbgen.InitializeCacheIdentityParams{CacheIdentityHash: identity, SessionID: sessionID}); err != nil {
 			return 0, 0, err
 		}
 	} else if current != identity {
 		epoch++
-		if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET cache_epoch=?,cache_identity_hash=? WHERE session_id=?`, epoch, identity, sessionID); err != nil {
+		if err := q.ChangeCacheIdentity(ctx, dbgen.ChangeCacheIdentityParams{CacheEpoch: epoch, CacheIdentityHash: identity, SessionID: sessionID}); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -194,7 +203,8 @@ func (s *Service) EnsureCacheIdentity(ctx context.Context, sessionID, identity s
 // expected epoch makes activation idempotent when the same prepared generation
 // is observed more than once.
 func (s *Service) AdvanceCacheEpoch(ctx context.Context, sessionID string, expectedEpoch int64, identity string) (int64, bool, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE session_projections SET cache_epoch=cache_epoch+1,cache_identity_hash=? WHERE session_id=? AND cache_epoch=?`, identity, sessionID, expectedEpoch)
+	q := dbgen.New(s.db)
+	result, err := q.AdvanceCacheEpochCAS(ctx, dbgen.AdvanceCacheEpochCASParams{CacheIdentityHash: identity, SessionID: sessionID, CacheEpoch: expectedEpoch})
 	if err != nil {
 		return 0, false, err
 	}
@@ -202,9 +212,16 @@ func (s *Service) AdvanceCacheEpoch(ctx context.Context, sessionID string, expec
 	if err != nil {
 		return 0, false, err
 	}
-	var epoch int64
-	if err := s.db.QueryRowContext(ctx, `SELECT cache_epoch FROM session_projections WHERE session_id=?`, sessionID).Scan(&epoch); err != nil {
+	epoch, err := q.GetCacheEpoch(ctx, sessionID)
+	if err != nil {
 		return 0, false, err
 	}
 	return epoch, changed == 1, nil
+}
+
+func requestBoolInt(value bool) int64 {
+	if value {
+		return 1
+	}
+	return 0
 }

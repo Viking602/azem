@@ -654,7 +654,7 @@ func TestBootstrapUsesFreshUnpersistedSessionEachLaunch(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("AZEM_FAKE_PROVIDER", "1")
 	configFile := filepath.Join(root, "azem.yaml")
-	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: file\n  import_codex: false\n  import_grok: false\n"), 0o600); err != nil {
+	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: file\n  import_codex: false\n  import_grok: false\nmcp:\n  servers:\n    grep:\n      enabled: false\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -713,7 +713,7 @@ func TestBootstrapRoutesLegacyCredentialReference(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("AZEM_FAKE_PROVIDER", "1")
 	configFile := filepath.Join(root, "azem.yaml")
-	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: sqlite\n  import_codex: false\n  import_grok: false\n"), 0o600); err != nil {
+	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: sqlite\n  import_codex: false\n  import_grok: false\nmcp:\n  servers:\n    grep:\n      enabled: false\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

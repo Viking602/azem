@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 	"github.com/Viking602/go-hydaelyn/api"
 )
 
@@ -115,16 +117,28 @@ func (u *unitOfWork) ListTasks(ctx context.Context, runID string) ([]api.Task, e
 }
 
 func (u *unitOfWork) AppendEvent(ctx context.Context, value api.Event) error {
+	queries := dbgen.New(u.tx)
 	if value.Sequence <= 0 {
-		if err := u.tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id = ?`, value.RunID).Scan(&value.Sequence); err != nil {
+		latest, err := queries.LatestEventSequence(ctx, value.RunID)
+		if errors.Is(err, sql.ErrNoRows) {
+			latest = 0
+		} else if err != nil {
 			return fmt.Errorf("allocate event sequence: %w", err)
 		}
+		if latest == math.MaxInt64 {
+			return fmt.Errorf("allocate event sequence: SQLite INTEGER overflow")
+		}
+		sequence, err := intFromInt64(latest + 1)
+		if err != nil {
+			return fmt.Errorf("allocate event sequence: %w", err)
+		}
+		value.Sequence = sequence
 	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
-	_, err = u.tx.ExecContext(ctx, `INSERT INTO events(run_id, sequence, recorded_at, data) VALUES (?, ?, ?, ?)`, value.RunID, value.Sequence, nanos(value.RecordedAt), data)
+	err = queries.InsertEvent(ctx, dbgen.InsertEventParams{RunID: value.RunID, Sequence: int64(value.Sequence), RecordedAt: nanos(value.RecordedAt), Data: data})
 	if err != nil {
 		return fmt.Errorf("append event: %w", err)
 	}
@@ -140,18 +154,22 @@ func (u *unitOfWork) ListAfter(ctx context.Context, runID string, afterSeq uint6
 }
 
 func (u *unitOfWork) listEventsAfter(ctx context.Context, runID string, afterSeq uint64, strict bool) ([]api.Event, error) {
-	query := `SELECT data FROM events WHERE run_id = ? ORDER BY sequence`
-	args := []any{runID}
+	queries := dbgen.New(u.tx)
+	var data [][]byte
+	var err error
 	if strict {
-		query = `SELECT data FROM events WHERE run_id = ? AND sequence > ? ORDER BY sequence`
-		args = append(args, afterSeq)
+		sequence, conversionErr := int64FromUint64(afterSeq)
+		if conversionErr != nil {
+			return nil, fmt.Errorf("list events: %w", conversionErr)
+		}
+		data, err = queries.ListEventDataAfter(ctx, dbgen.ListEventDataAfterParams{RunID: runID, Sequence: sequence})
+	} else {
+		data, err = queries.ListEventData(ctx, runID)
 	}
-	rows, err := u.tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
 	}
-	defer rows.Close()
-	return decodeRows[api.Event](rows)
+	return decodeRows[api.Event](data)
 }
 
 func (u *unitOfWork) SaveTraceSpan(ctx context.Context, value api.TraceSpan) error {
@@ -289,14 +307,13 @@ func (u *unitOfWork) save(ctx context.Context, kind, key1, key2, runID, taskID, 
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", kind, err)
 	}
-	verb := "INSERT"
-	conflict := ""
+	queries := dbgen.New(u.tx)
+	params := dbgen.InsertRecordParams{Kind: kind, Key1: key1, Key2: key2, RunID: runID, TaskID: taskID, Status: status, CreatedAt: nanos(createdAt), ToolName: toolName, IdempotencyKey: idempotencyKey, Data: data}
 	if upsert {
-		verb = "INSERT"
-		conflict = ` ON CONFLICT(kind, key1, key2) DO UPDATE SET run_id=excluded.run_id, task_id=excluded.task_id, status=excluded.status, created_at=excluded.created_at, tool_name=excluded.tool_name, idempotency_key=excluded.idempotency_key, data=excluded.data`
+		err = queries.UpsertRecord(ctx, dbgen.UpsertRecordParams(params))
+	} else {
+		err = queries.InsertRecord(ctx, params)
 	}
-	query := verb + ` INTO records(kind,key1,key2,run_id,task_id,status,created_at,tool_name,idempotency_key,data) VALUES(?,?,?,?,?,?,?,?,?,?)` + conflict
-	_, err = u.tx.ExecContext(ctx, query, kind, key1, key2, runID, taskID, status, nanos(createdAt), toolName, idempotencyKey, data)
 	if err != nil {
 		if !upsert && isConstraint(err) {
 			return fmt.Errorf("save %s: %w: key %q already exists", kind, errors.Join(api.ErrIdempotencyConflict, err), key1)
@@ -308,8 +325,8 @@ func (u *unitOfWork) save(ctx context.Context, kind, key1, key2, runID, taskID, 
 
 func loadRecord[T any](ctx context.Context, tx *sql.Tx, kind string, key1 string, key2 string) (T, error) {
 	var zero T
-	var data []byte
-	if err := tx.QueryRowContext(ctx, `SELECT data FROM records WHERE kind=? AND key1=? AND key2=?`, kind, key1, key2).Scan(&data); err != nil {
+	data, err := dbgen.New(tx).GetRecordData(ctx, dbgen.GetRecordDataParams{Kind: kind, Key1: key1, Key2: key2})
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return zero, api.ErrNotFound
 		}
@@ -322,34 +339,30 @@ func loadRecord[T any](ctx context.Context, tx *sql.Tx, kind string, key1 string
 }
 
 func listRecords[T any](ctx context.Context, tx *sql.Tx, kind string, runID string) ([]T, error) {
-	query := `SELECT data FROM records WHERE kind=? ORDER BY created_at,key1,key2`
-	args := []any{kind}
+	queries := dbgen.New(tx)
+	var data [][]byte
+	var err error
 	if runID != "" {
-		query = `SELECT data FROM records WHERE kind=? AND run_id=? ORDER BY created_at,key1,key2`
-		args = append(args, runID)
+		data, err = queries.ListRecordDataByRun(ctx, dbgen.ListRecordDataByRunParams{Kind: kind, RunID: runID})
+	} else {
+		data, err = queries.ListRecordData(ctx, kind)
 	}
-	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", kind, err)
 	}
-	defer rows.Close()
-	return decodeRows[T](rows)
+	return decodeRows[T](data)
 }
 
-func decodeRows[T any](rows *sql.Rows) ([]T, error) {
+func decodeRows[T any](rows [][]byte) ([]T, error) {
 	var values []T
-	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
-			return nil, err
-		}
+	for _, data := range rows {
 		var value T
 		if err := json.Unmarshal(data, &value); err != nil {
 			return nil, err
 		}
 		values = append(values, value)
 	}
-	return values, rows.Err()
+	return values, nil
 }
 func marshalJSON(value any) ([]byte, error) {
 	var buffer bytes.Buffer
@@ -366,6 +379,28 @@ func nanos(value time.Time) int64 {
 		return 0
 	}
 	return value.UTC().UnixNano()
+}
+
+func int64FromUint64(value uint64) (int64, error) {
+	if value > math.MaxInt64 {
+		return 0, fmt.Errorf("value %d overflows SQLite INTEGER", value)
+	}
+	return int64(value), nil
+}
+
+func uint64FromInt64(value int64) (uint64, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("negative SQLite INTEGER %d cannot be converted to uint64", value)
+	}
+	return uint64(value), nil
+}
+
+func intFromInt64(value int64) (int, error) {
+	converted := int(value)
+	if int64(converted) != value {
+		return 0, fmt.Errorf("value %d overflows int", value)
+	}
+	return converted, nil
 }
 
 func within(value, since, until time.Time) bool {

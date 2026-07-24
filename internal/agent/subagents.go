@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 	"github.com/Viking602/go-hydaelyn/api"
 )
 
@@ -80,12 +81,6 @@ type SQLSubagentRunStore struct {
 	db *sql.DB
 }
 
-const subagentRunColumns = `id, session_id, parent_run_id, parent_agent_id, tool_call_id, child_run_id,
-	description, subagent_type, state, summary, provider, model, reasoning, capability_mode,
-	requested_isolation, isolation, cwd, background, output, error, warning, transcript,
-	tool_calls, turns, tokens_used, tools_used, worktree_path, completion_delivered,
-	started_at, finished_at`
-
 func NewSQLSubagentRunStore(db *sql.DB) (*SQLSubagentRunStore, error) {
 	if db == nil {
 		return nil, fmt.Errorf("subagent store: database is nil")
@@ -101,10 +96,7 @@ func (s *SQLSubagentRunStore) Create(ctx context.Context, run SubagentRun) error
 	if err != nil {
 		return fmt.Errorf("encode subagent tools: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO subagent_runs(`+subagentRunColumns+`) VALUES(
-		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-	)`, subagentRunValues(run, toolsUsed)...)
-	return err
+	return dbgen.New(s.db).CreateSubagentRun(ctx, createSubagentParams(run, toolsUsed))
 }
 
 func (s *SQLSubagentRunStore) Save(ctx context.Context, run SubagentRun) error {
@@ -115,13 +107,7 @@ func (s *SQLSubagentRunStore) Save(ctx context.Context, run SubagentRun) error {
 	if err != nil {
 		return fmt.Errorf("encode subagent tools: %w", err)
 	}
-	values := subagentRunValues(run, toolsUsed)
-	result, err := s.db.ExecContext(ctx, `UPDATE subagent_runs SET
-		session_id=?, parent_run_id=?, parent_agent_id=?, tool_call_id=?, child_run_id=?,
-		description=?, subagent_type=?, state=?, summary=?, provider=?, model=?, reasoning=?, capability_mode=?,
-		requested_isolation=?, isolation=?, cwd=?, background=?, output=?, error=?, warning=?, transcript=?,
-		tool_calls=?, turns=?, tokens_used=?, tools_used=?, worktree_path=?, completion_delivered=?,
-		started_at=?, finished_at=? WHERE id=?`, append(values[1:], values[0])...)
+	result, err := dbgen.New(s.db).SaveSubagentRun(ctx, saveSubagentParams(run, toolsUsed))
 	if err != nil {
 		return err
 	}
@@ -129,40 +115,41 @@ func (s *SQLSubagentRunStore) Save(ctx context.Context, run SubagentRun) error {
 }
 
 func (s *SQLSubagentRunStore) Get(ctx context.Context, id string) (SubagentRun, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+subagentRunColumns+` FROM subagent_runs WHERE id=?`, id)
-	run, err := scanSubagentRun(row.Scan)
+	row, err := dbgen.New(s.db).GetSubagentRun(ctx, id)
 	if err == sql.ErrNoRows {
 		return SubagentRun{}, api.ErrNotFound
 	}
-	return run, err
+	if err != nil {
+		return SubagentRun{}, err
+	}
+	return subagentRunFromDB(row)
 }
 
 func (s *SQLSubagentRunStore) List(ctx context.Context, sessionID string) ([]SubagentRun, error) {
-	query := `SELECT ` + subagentRunColumns + ` FROM subagent_runs`
-	args := []any{}
+	q := dbgen.New(s.db)
+	var rows []dbgen.SubagentRun
+	var err error
 	if sessionID != "" {
-		query += ` WHERE session_id=?`
-		args = append(args, sessionID)
+		rows, err = q.ListSubagentRunsBySession(ctx, sessionID)
+	} else {
+		rows, err = q.ListSubagentRuns(ctx)
 	}
-	query += ` ORDER BY started_at, id`
-	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	runs := make([]SubagentRun, 0)
-	for rows.Next() {
-		run, scanErr := scanSubagentRun(rows.Scan)
+	runs := make([]SubagentRun, 0, len(rows))
+	for _, row := range rows {
+		run, scanErr := subagentRunFromDB(row)
 		if scanErr != nil {
 			return nil, scanErr
 		}
 		runs = append(runs, run)
 	}
-	return runs, rows.Err()
+	return runs, nil
 }
 
 func (s *SQLSubagentRunStore) SetCompletionDelivered(ctx context.Context, id string, delivered bool) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE subagent_runs SET completion_delivered=? WHERE id=?`, boolInt(delivered), id)
+	result, err := dbgen.New(s.db).SetSubagentCompletionDelivered(ctx, dbgen.SetSubagentCompletionDeliveredParams{CompletionDelivered: int64(boolInt(delivered)), ID: id})
 	if err != nil {
 		return err
 	}
@@ -170,59 +157,33 @@ func (s *SQLSubagentRunStore) SetCompletionDelivered(ctx context.Context, id str
 }
 
 func (s *SQLSubagentRunStore) InterruptIncomplete(ctx context.Context, at time.Time) (int64, error) {
-	const reason = "interrupted by process restart"
-	result, err := s.db.ExecContext(ctx, `UPDATE subagent_runs
-		SET state=?, summary=?, error=?, finished_at=?
-		WHERE state IN (?, ?, ?, ?)`,
-		SubagentInterrupted, reason, reason, unixNano(at),
-		SubagentInitializing, SubagentQueued, SubagentRunning, SubagentCancelling)
+	result, err := dbgen.New(s.db).InterruptIncompleteSubagents(ctx, unixNano(at))
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
 }
 
-func subagentRunValues(run SubagentRun, toolsUsed []byte) []any {
+func createSubagentParams(run SubagentRun, toolsUsed []byte) dbgen.CreateSubagentRunParams {
 	transcript := []byte(run.Transcript)
 	if len(transcript) == 0 {
 		transcript = []byte("[]")
 	}
-	return []any{
-		run.ID, run.SessionID, run.ParentRunID, run.ParentAgentID, run.ParentToolCallID, run.ChildRunID,
-		run.Description, run.Type, run.State, run.Summary, run.Provider, run.Model, run.Reasoning, run.CapabilityMode,
-		run.RequestedIsolation, run.Isolation, run.CWD, boolInt(run.Background), run.Output, run.Error,
-		run.Warning, transcript, run.ToolCalls, run.Turns, run.TokensUsed, toolsUsed,
-		run.WorktreePath, boolInt(run.CompletionDelivered), unixNano(run.StartedAt), unixNano(run.FinishedAt),
-	}
+	return dbgen.CreateSubagentRunParams{ID: run.ID, SessionID: run.SessionID, ParentRunID: run.ParentRunID, ParentAgentID: run.ParentAgentID, ToolCallID: run.ParentToolCallID, ChildRunID: run.ChildRunID, Description: run.Description, SubagentType: run.Type, State: string(run.State), Summary: run.Summary, Provider: run.Provider, Model: run.Model, Reasoning: run.Reasoning, CapabilityMode: run.CapabilityMode, RequestedIsolation: run.RequestedIsolation, Isolation: run.Isolation, Cwd: run.CWD, Background: int64(boolInt(run.Background)), Output: run.Output, Error: run.Error, Warning: run.Warning, Transcript: transcript, ToolCalls: int64(run.ToolCalls), Turns: int64(run.Turns), TokensUsed: int64(run.TokensUsed), ToolsUsed: toolsUsed, WorktreePath: run.WorktreePath, CompletionDelivered: int64(boolInt(run.CompletionDelivered)), StartedAt: unixNano(run.StartedAt), FinishedAt: unixNano(run.FinishedAt)}
 }
 
-type subagentScanner func(...any) error
+func saveSubagentParams(run SubagentRun, toolsUsed []byte) dbgen.SaveSubagentRunParams {
+	p := createSubagentParams(run, toolsUsed)
+	return dbgen.SaveSubagentRunParams{ID: p.ID, SessionID: p.SessionID, ParentRunID: p.ParentRunID, ParentAgentID: p.ParentAgentID, ToolCallID: p.ToolCallID, ChildRunID: p.ChildRunID, Description: p.Description, SubagentType: p.SubagentType, State: p.State, Summary: p.Summary, Provider: p.Provider, Model: p.Model, Reasoning: p.Reasoning, CapabilityMode: p.CapabilityMode, RequestedIsolation: p.RequestedIsolation, Isolation: p.Isolation, Cwd: p.Cwd, Background: p.Background, Output: p.Output, Error: p.Error, Warning: p.Warning, Transcript: p.Transcript, ToolCalls: p.ToolCalls, Turns: p.Turns, TokensUsed: p.TokensUsed, ToolsUsed: p.ToolsUsed, WorktreePath: p.WorktreePath, CompletionDelivered: p.CompletionDelivered, StartedAt: p.StartedAt, FinishedAt: p.FinishedAt}
+}
 
-func scanSubagentRun(scan subagentScanner) (SubagentRun, error) {
-	var run SubagentRun
-	var transcript, toolsUsed []byte
-	var background, delivered int64
-	var started, finished int64
-	err := scan(
-		&run.ID, &run.SessionID, &run.ParentRunID, &run.ParentAgentID, &run.ParentToolCallID, &run.ChildRunID,
-		&run.Description, &run.Type, &run.State, &run.Summary, &run.Provider, &run.Model, &run.Reasoning, &run.CapabilityMode,
-		&run.RequestedIsolation, &run.Isolation, &run.CWD, &background, &run.Output, &run.Error, &run.Warning,
-		&transcript, &run.ToolCalls, &run.Turns, &run.TokensUsed, &toolsUsed, &run.WorktreePath, &delivered,
-		&started, &finished,
-	)
-	if err != nil {
-		return SubagentRun{}, err
-	}
-	if len(toolsUsed) > 0 {
-		if err := json.Unmarshal(toolsUsed, &run.ToolsUsed); err != nil {
+func subagentRunFromDB(row dbgen.SubagentRun) (SubagentRun, error) {
+	run := SubagentRun{ID: row.ID, SessionID: row.SessionID, ParentRunID: row.ParentRunID, ParentAgentID: row.ParentAgentID, ParentToolCallID: row.ToolCallID, ChildRunID: row.ChildRunID, Description: row.Description, Type: row.SubagentType, State: SubagentState(row.State), Summary: row.Summary, Provider: row.Provider, Model: row.Model, Reasoning: row.Reasoning, CapabilityMode: row.CapabilityMode, RequestedIsolation: row.RequestedIsolation, Isolation: row.Isolation, CWD: row.Cwd, Background: row.Background != 0, Output: row.Output, Error: row.Error, Warning: row.Warning, Transcript: append(json.RawMessage(nil), row.Transcript...), ToolCalls: int(row.ToolCalls), Turns: int(row.Turns), TokensUsed: int(row.TokensUsed), WorktreePath: row.WorktreePath, CompletionDelivered: row.CompletionDelivered != 0, StartedAt: timeFromUnixNano(row.StartedAt), FinishedAt: timeFromUnixNano(row.FinishedAt)}
+	if len(row.ToolsUsed) > 0 {
+		if err := json.Unmarshal(row.ToolsUsed, &run.ToolsUsed); err != nil {
 			return SubagentRun{}, fmt.Errorf("decode subagent tools for %s: %w", run.ID, err)
 		}
 	}
-	run.Transcript = append(json.RawMessage(nil), transcript...)
-	run.Background = background != 0
-	run.CompletionDelivered = delivered != 0
-	run.StartedAt = timeFromUnixNano(started)
-	run.FinishedAt = timeFromUnixNano(finished)
 	return run, nil
 }
 

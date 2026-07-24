@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Viking602/azem/internal/auth"
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 const (
@@ -329,27 +330,18 @@ func decode(provider string, data []byte) ([]Model, bool, string, error) {
 }
 
 func (s *Service) load(ctx context.Context, provider string, accountID string) (Result, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT fetched_at,expires_at,data FROM model_catalog WHERE provider_id=? AND account_id=? ORDER BY model_id`, provider, accountID)
+	rows, err := dbgen.New(s.db).ListCatalog(ctx, dbgen.ListCatalogParams{ProviderID: provider, AccountID: accountID})
 	if err != nil {
 		return Result{}, false, err
 	}
-	defer rows.Close()
 	result := Result{Provider: provider, AccountID: accountID}
-	for rows.Next() {
-		var fetched, expires int64
-		var data []byte
-		if err := rows.Scan(&fetched, &expires, &data); err != nil {
-			return Result{}, false, err
-		}
+	for _, row := range rows {
 		var model Model
-		if err := json.Unmarshal(data, &model); err != nil {
+		if err := json.Unmarshal(row.Data, &model); err != nil {
 			return Result{}, false, err
 		}
 		result.Models = append(result.Models, model)
-		result.FetchedAt, result.ExpiresAt = time.Unix(0, fetched).UTC(), time.Unix(0, expires).UTC()
-	}
-	if err := rows.Err(); err != nil {
-		return Result{}, false, err
+		result.FetchedAt, result.ExpiresAt = time.Unix(0, row.FetchedAt).UTC(), time.Unix(0, row.ExpiresAt).UTC()
 	}
 	return result, len(result.Models) > 0, nil
 }
@@ -360,7 +352,8 @@ func (s *Service) save(ctx context.Context, result Result, etag string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM model_catalog WHERE provider_id=? AND account_id=?`, result.Provider, result.AccountID); err != nil {
+	queries := dbgen.New(s.db).WithTx(tx)
+	if err := queries.DeleteCatalog(ctx, dbgen.DeleteCatalogParams{ProviderID: result.Provider, AccountID: result.AccountID}); err != nil {
 		return err
 	}
 	for _, model := range result.Models {
@@ -368,7 +361,7 @@ func (s *Service) save(ctx context.Context, result Result, etag string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO model_catalog(provider_id,account_id,model_id,etag,fetched_at,expires_at,data) VALUES(?,?,?,?,?,?,?)`, result.Provider, result.AccountID, model.ID, etag, result.FetchedAt.UnixNano(), result.ExpiresAt.UnixNano(), data); err != nil {
+		if err := queries.InsertCatalogModel(ctx, dbgen.InsertCatalogModelParams{ProviderID: result.Provider, AccountID: result.AccountID, ModelID: model.ID, Etag: etag, FetchedAt: result.FetchedAt.UnixNano(), ExpiresAt: result.ExpiresAt.UnixNano(), Data: data}); err != nil {
 			return err
 		}
 	}
@@ -377,13 +370,12 @@ func (s *Service) save(ctx context.Context, result Result, etag string) error {
 
 func (s *Service) extend(ctx context.Context, cached Result, ttl time.Duration) (Result, error) {
 	cached.ExpiresAt = time.Now().UTC().Add(ttl)
-	_, err := s.db.ExecContext(ctx, `UPDATE model_catalog SET expires_at=? WHERE provider_id=? AND account_id=?`, cached.ExpiresAt.UnixNano(), cached.Provider, cached.AccountID)
+	err := dbgen.New(s.db).ExtendCatalog(ctx, dbgen.ExtendCatalogParams{ExpiresAt: cached.ExpiresAt.UnixNano(), ProviderID: cached.Provider, AccountID: cached.AccountID})
 	return cached, err
 }
 
 func (s *Service) cachedETag(ctx context.Context, provider string, accountID string) string {
-	var etag string
-	_ = s.db.QueryRowContext(ctx, `SELECT etag FROM model_catalog WHERE provider_id=? AND account_id=? LIMIT 1`, provider, accountID).Scan(&etag)
+	etag, _ := dbgen.New(s.db).GetCatalogETag(ctx, dbgen.GetCatalogETagParams{ProviderID: provider, AccountID: accountID})
 	return etag
 }
 
