@@ -59,7 +59,7 @@ func (m AppModel) renderContextRail(width int, height int) string {
 				rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.more", map[string]string{"count": fmt.Sprint(len(m.mcpServers) - index)}), width)))
 				break
 			}
-			row := fmt.Sprintf("  %s %s · %d", stateMark(server.State), server.Name, server.ToolCount)
+			row := fmt.Sprintf("  %s %s · %s", stateMark(server.State), server.Name, m.mcpConnectionState(server.State))
 			rows = append(rows, m.stateStyle(server.State).Render(padOrTrim(row, width)))
 		}
 	}
@@ -67,6 +67,23 @@ func (m AppModel) renderContextRail(width int, height int) string {
 		rows = append(rows, "")
 	}
 	return strings.Join(rows[:height], "\n")
+}
+
+func (m AppModel) mcpConnectionState(state string) string {
+	switch strings.ToLower(state) {
+	case "ready":
+		return m.tr("mcp.status.connected")
+	case "connecting":
+		return m.tr("mcp.status.connecting")
+	case "degraded":
+		return m.tr("mcp.status.degraded")
+	case "disabled":
+		return m.tr("mcp.status.disabled")
+	case "stopped":
+		return m.tr("mcp.status.disconnected")
+	default:
+		return m.displayState(state)
+	}
 }
 
 type todoSummaryRow struct {

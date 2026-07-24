@@ -499,10 +499,54 @@ func TestWideLayoutAddsAgentAndMCPContextRail(t *testing.T) {
 	updated, _ = model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	model = updated.(AppModel)
 	content := ansi.Strip(model.View().Content)
-	for _, wanted := range []string{"RUN CONTEXT", "AGENTS  1", "review", "MCP  1", "files · 3"} {
+	for _, wanted := range []string{"RUN CONTEXT", "AGENTS  1", "review", "MCP  1", "files · Connected"} {
 		if !strings.Contains(content, wanted) {
 			t.Fatalf("wide layout missing %q:\n%s", wanted, content)
 		}
+	}
+}
+
+func TestMCPContextRailShowsServerCountAndLocalizedConnectionState(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if err := model.SetLanguage("zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	empty := ansi.Strip(model.renderContextRail(31, 16))
+	if !strings.Contains(empty, "MCP  0") {
+		t.Fatalf("empty MCP rail does not show the server count:\n%s", empty)
+	}
+	model.applyEvent(app.Event{Kind: app.EventMCPState, State: "ready", Data: map[string]string{"server": "grep", "toolCount": "1"}})
+	connected := ansi.Strip(model.renderContextRail(31, 16))
+	if !strings.Contains(connected, "MCP  1") || !strings.Contains(connected, "grep · 已连接") || strings.Contains(connected, "grep · 1") {
+		t.Fatalf("connected MCP rail does not separate server count and status:\n%s", connected)
+	}
+}
+
+func TestMCPServerEnterOpensLocalizedToolDetailsAndEscReturns(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if err := model.SetLanguage("zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	encoded := `[{"name":"grep","state":"ready","toolCount":1,"tools":[{"name":"searchGitHub","description":"搜索公开 GitHub 代码","effect":"read_only","requiresApproval":false}]}]`
+	model.applyEvent(app.Event{Kind: app.EventMCPState, State: "snapshot", Data: map[string]string{"servers": encoded}})
+	model.openOverlay(OverlayMCP)
+
+	updated, _ := model.updateOverlayKey("enter")
+	model = updated.(AppModel)
+	if model.overlay != OverlayMCPDetail || model.detailMCPName != "grep" {
+		t.Fatalf("MCP enter opened overlay=%q detail=%q", model.overlay, model.detailMCPName)
+	}
+	content := ansi.Strip(model.renderOverlay(100, 30))
+	for _, wanted := range []string{"MCP 服务器详情", "grep · 已连接", "searchGitHub", "搜索公开 GitHub 代码", "read_only", "不需要"} {
+		if !strings.Contains(content, wanted) {
+			t.Fatalf("MCP detail missing %q:\n%s", wanted, content)
+		}
+	}
+
+	updated, _ = model.updateOverlayKey("esc")
+	model = updated.(AppModel)
+	if model.overlay != OverlayMCP || model.overlayCursor != 0 {
+		t.Fatalf("MCP detail escape returned overlay=%q cursor=%d", model.overlay, model.overlayCursor)
 	}
 }
 
@@ -2050,7 +2094,7 @@ func TestViewFitsRealTerminalBoundsAcrossResponsiveLayouts(t *testing.T) {
 	overlays := []Overlay{
 		OverlayNone, OverlayHelp, OverlayStatus, OverlayCommand, OverlayProvider, OverlayModel, OverlayModelRoutes, OverlaySkills,
 		OverlayReasoning, OverlaySessions, OverlayApproval, OverlayCancel, OverlayDiff, OverlayAgents,
-		OverlayAgentDetail, OverlayAgentTypes, OverlayPersonas, OverlayMCP, OverlayRecovery, OverlayError,
+		OverlayAgentDetail, OverlayAgentTypes, OverlayPersonas, OverlayMCP, OverlayMCPDetail, OverlayRecovery, OverlayError,
 	}
 	for _, size := range sizes {
 		for _, overlay := range overlays {

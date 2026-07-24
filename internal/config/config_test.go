@@ -356,6 +356,43 @@ func TestResolveReferenceRequiresExplicitScheme(t *testing.T) {
 	}
 }
 
+func TestDefaultIncludesBuiltInGrepMCPServer(t *testing.T) {
+	cfg := Default()
+	server, ok := cfg.MCP.Servers["grep"]
+	if !ok {
+		t.Fatal("default config omitted built-in grep MCP server")
+	}
+	if !server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" || server.Approval != "never" {
+		t.Fatalf("built-in grep MCP server = %#v", server)
+	}
+	override, ok := server.ToolOverrides["searchGitHub"]
+	if !ok || override.Effect != "read_only" || override.Approval != "never" {
+		t.Fatalf("built-in grep tool override = %#v, present=%v", override, ok)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate default config: %v", err)
+	}
+}
+
+func TestLoadCanOverrideBuiltInGrepMCPServer(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "version: 1\nmcp:\n  servers:\n    grep:\n      enabled: false\n    local:\n      enabled: false\n      transport: stdio\n      command: local-mcp\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := cfg.MCP.Servers["grep"]
+	if server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" {
+		t.Fatalf("disabled built-in grep MCP server = %#v", server)
+	}
+	if local := cfg.MCP.Servers["local"]; local.Command != "local-mcp" {
+		t.Fatalf("custom MCP server was not retained: %#v", local)
+	}
+}
 func TestMCPConfigValidatesTransportSecretsAndDefaults(t *testing.T) {
 	cfg := Default()
 	cfg.MCP.Servers["local_files"] = MCPServerConfig{

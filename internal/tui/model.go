@@ -118,6 +118,7 @@ const (
 	OverlayAgentTypes  Overlay = "agent_types"
 	OverlayPersonas    Overlay = "personas"
 	OverlayMCP         Overlay = "mcp"
+	OverlayMCPDetail   Overlay = "mcp_detail"
 	OverlayRecovery    Overlay = "recovery"
 	OverlayError       Overlay = "error"
 )
@@ -170,11 +171,19 @@ type AgentCatalogView struct {
 type SkillCatalogView = app.SkillCatalogEntry
 type TodoView = session.TodoList
 
+type MCPToolView struct {
+	Name             string `json:"name"`
+	Description      string `json:"description"`
+	Effect           string `json:"effect"`
+	RequiresApproval bool   `json:"requiresApproval"`
+}
+
 type MCPView struct {
-	Name      string `json:"name"`
-	State     string `json:"state"`
-	ToolCount int    `json:"toolCount"`
-	Error     string `json:"error"`
+	Name      string        `json:"name"`
+	State     string        `json:"state"`
+	ToolCount int           `json:"toolCount"`
+	Tools     []MCPToolView `json:"tools"`
+	Error     string        `json:"error"`
 }
 
 type ModelChoice = catalog.Model
@@ -341,6 +350,7 @@ type AppModel struct {
 	skills              []SkillCatalogView
 	skillDiagnostics    []app.SkillDiagnostic
 	mcpServers          []MCPView
+	detailMCPName       string
 	models              []ModelChoice
 	modelsByProvider    map[string][]ModelChoice
 	modelRoutes         []app.ModelRouteEntry

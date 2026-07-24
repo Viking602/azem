@@ -525,6 +525,31 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.overlay == OverlayMCPDetail {
+		switch key {
+		case "esc":
+			m.overlay = OverlayMCP
+			m.overlayCursor = 0
+			for index, server := range m.mcpServers {
+				if server.Name == m.detailMCPName {
+					m.overlayCursor = index
+					break
+				}
+			}
+			m.overlayScroll = 0
+		case "up", "k":
+			m.overlayScroll = max(0, m.overlayScroll-1)
+		case "down", "j":
+			m.overlayScroll++
+		case "pgup":
+			m.overlayScroll = max(0, m.overlayScroll-max(1, m.height/3))
+		case "pgdown":
+			m.overlayScroll += max(1, m.height/3)
+		case "home":
+			m.overlayScroll = 0
+		}
+		return m, nil
+	}
 	if key == "esc" {
 		if (m.overlay == OverlayModel || m.overlay == OverlayReasoning) && m.pendingModelRoute != nil {
 			m.modelSearch.Reset()
@@ -808,6 +833,12 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 	case OverlayAgents:
 		if m.overlayCursor >= 0 && m.overlayCursor < len(m.agents) {
 			return m.beginAction(Action{Kind: ActionInspectAgent, Target: m.agents[m.overlayCursor].ID})
+		}
+		return m, nil
+	case OverlayMCP:
+		if m.overlayCursor >= 0 && m.overlayCursor < len(m.mcpServers) {
+			m.detailMCPName = m.mcpServers[m.overlayCursor].Name
+			m.openOverlay(OverlayMCPDetail)
 		}
 		return m, nil
 	case OverlayRecovery:

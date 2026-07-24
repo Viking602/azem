@@ -54,8 +54,8 @@ func (m AppModel) renderCommandSuggestions(width int, height int, suggestions []
 func (m AppModel) renderOverlay(width int, height int) string {
 	if width < 6 || height < 5 {
 		title, _ := m.overlayHeading()
-		if m.overlay == OverlayAgentDetail {
-			title = m.tr("overlay.agent_detail.title")
+		if m.overlay == OverlayAgentDetail || m.overlay == OverlayMCPDetail {
+			title, _ = m.overlayHeading()
 		}
 		rows := []string{m.theme.Header.Render(strings.ToUpper(title))}
 		if height > 1 {
@@ -65,6 +65,9 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	}
 	if m.overlay == OverlayAgentDetail {
 		return m.renderAgentDetailOverlay(width, height)
+	}
+	if m.overlay == OverlayMCPDetail {
+		return m.renderMCPDetailOverlay(width, height)
 	}
 	maxBoxWidth := 82
 	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes || m.overlay == OverlayStatus {
@@ -355,6 +358,81 @@ func (m AppModel) renderAgentDetailOverlay(width, height int) string {
 	return strings.Join(output[:height], "\n")
 }
 
+func (m AppModel) renderMCPDetailOverlay(width, height int) string {
+	boxWidth := min(96, max(3, width-2))
+	innerWidth := max(1, boxWidth-2)
+	innerHeight := max(1, min(height-2, 28))
+	server, found := m.selectedMCPServer()
+	content := make([]string, 0)
+	subtitle := m.tr("overlay.mcp_detail.unavailable")
+	if found {
+		subtitle = server.Name + " · " + m.mcpConnectionState(server.State)
+		content = append(content, m.tr("overlay.mcp_detail.summary", map[string]string{
+			"state": m.mcpConnectionState(server.State), "count": strconv.Itoa(server.ToolCount),
+		}))
+		if server.Error != "" {
+			content = append(content, m.tr("overlay.mcp_detail.error", map[string]string{"error": server.Error}))
+		}
+		content = append(content, strings.Repeat("─", max(0, innerWidth-4)))
+		if len(server.Tools) == 0 {
+			content = append(content, m.tr("overlay.mcp_detail.empty"))
+		} else {
+			for _, tool := range server.Tools {
+				approval := m.tr("overlay.mcp_detail.no_approval")
+				if tool.RequiresApproval {
+					approval = m.tr("overlay.mcp_detail.approval")
+				}
+				content = append(content, "◆ "+tool.Name)
+				content = append(content, "  "+m.tr("overlay.mcp_detail.governance", map[string]string{
+					"effect": first(tool.Effect, m.tr("value.unknown")), "approval": approval,
+				}))
+				for _, line := range wrapText(first(tool.Description, m.tr("overlay.mcp_detail.no_description")), max(4, innerWidth-6)) {
+					content = append(content, "  "+line)
+				}
+			}
+		}
+	}
+	rowsAvailable := max(1, innerHeight-4)
+	start := min(max(0, m.overlayScroll), max(0, len(content)-rowsAvailable))
+	end := min(len(content), start+rowsAvailable)
+	rows := []string{
+		m.boxRow(" ◈ "+strings.ToUpper(m.tr("overlay.mcp_detail.title")), innerWidth, m.theme.OverlayTitle, false),
+		m.boxRow(" "+subtitle, innerWidth, m.theme.Muted, false),
+		m.boxRow(" "+strings.Repeat("─", max(0, innerWidth-2)), innerWidth, m.theme.Border, false),
+	}
+	for _, line := range content[start:end] {
+		rows = append(rows, m.boxRow(" "+line, innerWidth, m.theme.Assistant, false))
+	}
+	for len(rows) < innerHeight-1 {
+		rows = append(rows, m.boxRow("", innerWidth, m.theme.Assistant, false))
+	}
+	footer := m.boxRow(" "+m.overlayFooterForWidth(max(1, innerWidth-1)), innerWidth, m.theme.OverlayFooter, false)
+	rows = append(rows, footer)
+	if len(rows) > innerHeight {
+		rows = append(rows[:innerHeight-1], footer)
+	}
+	top := m.theme.Border.Render("┌" + strings.Repeat("─", innerWidth) + "┐")
+	bottom := m.theme.Border.Render("└" + strings.Repeat("─", innerWidth) + "┘")
+	box := []string{top}
+	for _, row := range rows {
+		box = append(box, m.theme.Border.Render("│")+row+m.theme.Border.Render("│"))
+	}
+	box = append(box, bottom)
+	topPadding := max(0, (height-len(box))/2)
+	leftPadding := strings.Repeat(" ", max(0, (width-boxWidth)/2))
+	output := make([]string, 0, height)
+	for range topPadding {
+		output = append(output, "")
+	}
+	for _, line := range box {
+		output = append(output, leftPadding+line)
+	}
+	for len(output) < height {
+		output = append(output, "")
+	}
+	return strings.Join(output[:height], "\n")
+}
+
 func (m AppModel) agentDetail() (AgentView, bool) {
 	for _, agent := range m.agents {
 		if agent.ID == m.detailAgentID {
@@ -429,6 +507,12 @@ func (m AppModel) overlayHeading() (string, string) {
 		return m.tr("overlay.personas.title"), m.tr("overlay.personas.subtitle")
 	case OverlayMCP:
 		return m.tr("overlay.mcp.title"), m.tr("overlay.mcp.subtitle")
+	case OverlayMCPDetail:
+		server, ok := m.selectedMCPServer()
+		if !ok {
+			return m.tr("overlay.mcp_detail.title"), m.tr("overlay.mcp_detail.unavailable")
+		}
+		return m.tr("overlay.mcp_detail.title"), server.Name + " · " + m.mcpConnectionState(server.State)
 	case OverlayRecovery:
 		return m.tr("overlay.recovery.title"), m.tr("overlay.recovery.subtitle")
 	case OverlayError:
@@ -823,6 +907,8 @@ func (m AppModel) overlayFooter() string {
 		return m.tr("overlay.footer.browse")
 	case OverlayMCP:
 		return m.tr("overlay.footer.mcp")
+	case OverlayMCPDetail:
+		return m.tr("overlay.footer.mcp_detail")
 	case OverlayRecovery:
 		return m.tr("overlay.footer.recovery")
 	case OverlayError:
@@ -850,6 +936,8 @@ func (m AppModel) overlayFooterForWidth(width int) string {
 		return m.tr("overlay.footer.agents_short")
 	case OverlayAgentDetail:
 		return m.tr("overlay.footer.scroll_back")
+	case OverlayMCPDetail:
+		return m.tr("overlay.footer.mcp_detail_short")
 	case OverlayError:
 		return m.tr("overlay.footer.error_short")
 	case OverlayHelp, OverlayDiff, OverlayStatus:
@@ -857,6 +945,15 @@ func (m AppModel) overlayFooterForWidth(width int) string {
 	default:
 		return m.tr("overlay.footer.short")
 	}
+}
+
+func (m AppModel) selectedMCPServer() (MCPView, bool) {
+	for _, server := range m.mcpServers {
+		if server.Name == m.detailMCPName {
+			return server, true
+		}
+	}
+	return MCPView{}, false
 }
 
 func (m AppModel) selectedDiff() (Block, bool) {
