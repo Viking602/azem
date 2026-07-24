@@ -82,7 +82,7 @@ func TestMeteredProviderDriverPersistsTerminalFactsAndUsesDistinctRequestIDs(t *
 	}
 }
 
-func TestMeteredProviderDriverMarksPrematureEOFFailed(t *testing.T) {
+func TestMeteredProviderDriverMarksPrematureEOFUnknown(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "eof.db"))
 	if err != nil {
@@ -102,7 +102,7 @@ func TestMeteredProviderDriverMarksPrematureEOFFailed(t *testing.T) {
 		t.Fatalf("recv err=%v", err)
 	}
 	var status string
-	if err = store.DB().QueryRow(`SELECT status FROM provider_requests`).Scan(&status); err != nil || status != "failed" {
+	if err = store.DB().QueryRow(`SELECT status FROM provider_requests`).Scan(&status); err != nil || status != "unknown" {
 		t.Fatalf("status=%q err=%v", status, err)
 	}
 }

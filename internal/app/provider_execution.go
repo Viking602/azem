@@ -125,7 +125,11 @@ func (s *Service) providerTransport(providerID string) string {
 func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run *agentservice.Run, engine hyagent.Engine) {
 	defer s.wg.Done()
 	defer s.clearRun(run.RunID)
-	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: request.SessionID, RunID: run.RunID, State: "running"})
+	state := "running"
+	if request.resuming {
+		state = "resuming"
+	}
+	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: request.SessionID, RunID: run.RunID, State: state, Data: map[string]string{"preserveUsage": fmt.Sprint(request.resuming)}})
 	task := api.Task{
 		ID: run.TaskID, RunID: run.RunID, Type: api.TaskTypeWorker, Goal: request.Prompt,
 		Budget: &api.TaskBudget{
@@ -133,9 +137,23 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			MaxToolCalls: s.cfg.Agents.Main.MaxToolCalls,
 		},
 	}
+	if request.budgetRestored {
+		task.Budget.MaxTokens = max(int64(0), request.maxTokens-request.usedTokens)
+		if request.maxToolCalls > 0 {
+			task.Budget.MaxToolCalls = max(1, request.maxToolCalls-request.usedToolCalls)
+		}
+		if request.maxWallClock > 0 {
+			task.Budget.MaxWallClock = max(time.Duration(0), request.maxWallClock-time.Since(request.startedAt))
+		}
+	}
 	var streamed strings.Builder
 	uiSink := s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
 	sink := stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
+		if checkpoint, ok := engine.StepRecorder.(*runStepCheckpoint); ok {
+			if err := checkpoint.Emit(ctx, frame); err != nil {
+				return err
+			}
+		}
 		if frame.Kind == stream.FrameText {
 			streamed.WriteString(frame.Text)
 		}
@@ -164,12 +182,40 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			}
 		}
 	}
+	if runErr == nil && ctx.Err() == nil && s.sessions != nil && (strings.TrimSpace(result.Text) != "" || len(result.Messages) > 0) {
+		history := session.ModelHistory{
+			ProviderID: request.Provider, ModelID: engine.Model,
+			InstructionFingerprint: mainInstructionFingerprint,
+			StaticPrefixHash:       mainInstructionFingerprint,
+			WireVersion:            session.CurrentWireVersion,
+			Messages:               result.Messages,
+		}
+		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.sessions.CompleteTurn(persistCtx, request.SessionID, session.Block{
+			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: result.Text, State: "completed",
+		}, history); err != nil {
+			runErr = fmt.Errorf("persist completed turn: %w", err)
+		}
+		cancel()
+	}
+	if ctx.Err() != nil && s.cancellationIntent(run.RunID) == "shutdown" {
+		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = s.coding.ReleaseRun(releaseCtx, run)
+		releaseCancel()
+		return
+	}
 	completionCtx, completionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := s.coding.CompleteRun(completionCtx, run, result.Text, runErr); err != nil {
+	var completionErr error
+	if ctx.Err() != nil {
+		completionErr = s.coding.CancelRun(completionCtx, run, ctx.Err())
+	} else {
+		completionErr = s.coding.CompleteRun(completionCtx, run, result.Text, runErr)
+	}
+	if completionErr != nil {
 		if runErr == nil {
-			runErr = err
+			runErr = completionErr
 		} else {
-			runErr = fmt.Errorf("%v; durable completion: %w", runErr, err)
+			runErr = fmt.Errorf("%v; durable completion: %w", runErr, completionErr)
 		}
 	}
 	completionCancel()
@@ -182,22 +228,6 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "failed", runErr)
 		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: runErr.Error()})
 		return
-	}
-	if s.sessions != nil && (strings.TrimSpace(result.Text) != "" || len(result.Messages) > 0) {
-		history := session.ModelHistory{
-			ProviderID: request.Provider, ModelID: engine.Model,
-			InstructionFingerprint: mainInstructionFingerprint,
-			StaticPrefixHash:       mainInstructionFingerprint,
-			WireVersion:            session.CurrentWireVersion,
-			Messages:               result.Messages,
-		}
-		if err := s.sessions.CompleteTurn(ctx, request.SessionID, session.Block{
-			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: result.Text, State: "completed",
-		}, history); err != nil {
-			s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "persist_failed", err)
-			s.emit(ctx, Event{Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
-			return
-		}
 	}
 	if err := s.persistRecap(ctx, recapGenerationRequest{
 		SessionID: request.SessionID, RunID: run.RunID, Goal: request.Prompt, Answer: result.Text, Todo: request.Todo,

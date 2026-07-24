@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"github.com/Viking602/go-hydaelyn/api"
 	"github.com/Viking602/go-hydaelyn/message"
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	hyskill "github.com/Viking602/go-hydaelyn/skill"
 	"github.com/Viking602/go-hydaelyn/tool"
 )
 
@@ -44,6 +46,23 @@ type ProviderRuntime struct {
 	mcp             *mcpruntime.Manager
 	subagents       *subagentRuntime
 	subagentInitErr error
+}
+
+var errResumeProfileChanged = errors.New("resume run execution profile changed")
+var errResumeBudgetExhausted = errors.New("resume run budget exhausted")
+
+type singleRunManifest struct {
+	Version          int       `json:"version"`
+	Provider         string    `json:"provider"`
+	Model            string    `json:"model"`
+	Reasoning        string    `json:"reasoning"`
+	ActiveSkills     []string  `json:"active_skills"`
+	DisableSubagents bool      `json:"disable_subagents"`
+	StaticIdentity   string    `json:"static_identity"`
+	MaxTokens        int64     `json:"max_tokens"`
+	MaxToolCalls     int       `json:"max_tool_calls"`
+	MaxWallClockNS   int64     `json:"max_wall_clock_ns"`
+	StartedAt        time.Time `json:"started_at"`
 }
 
 type liveApproval struct {
@@ -121,14 +140,65 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
-	providerDriver := driver
-	usageBudget := &providerUsageBudget{maxTokens: r.cfg.Agents.Main.MaxTokens}
-	driver = &budgetedProviderDriver{inner: driver, budget: usageBudget}
-	contextTarget, err := modelContextTokenTarget(request.Provider, modelID, contextWindow, 0)
+	request.Reasoning, err = r.resolvedReasoningEffort(ctx, request.Provider, account.ID, modelID, request.Reasoning)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
-	run, err := r.coding.StartRun(ctx, request.Prompt)
+	run, err := r.coding.StartRunWithMetadata(ctx, request.Prompt, map[string]string{"session_id": request.SessionID})
+	if err != nil {
+		return nil, hyagent.Engine{}, err
+	}
+	r.mu.RLock()
+	host := r.host
+	r.mu.RUnlock()
+	if host != nil && host.sessions != nil {
+		if _, appendErr := host.sessions.AppendBlock(ctx, request.SessionID, userTurnBlock(run.RunID, request)); appendErr != nil {
+			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, appendErr.Error(), appendErr)
+			return nil, hyagent.Engine{}, fmt.Errorf("persist user turn: %w", appendErr)
+		}
+	}
+	durable, err := r.coding.Runner().Run(ctx, run.RunID)
+	if err != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+		return nil, hyagent.Engine{}, err
+	}
+	if durable.Metadata == nil {
+		durable.Metadata = map[string]string{}
+	}
+	durable.Metadata["session_id"] = request.SessionID
+	if err := r.coding.Runner().SaveRun(ctx, durable); err != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+		return nil, hyagent.Engine{}, err
+	}
+	return r.buildSingleRun(ctx, request, run, account.ID, modelID, contextWindow, driver)
+}
+
+func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnRequest, run *agentservice.Run, accountID, modelID string, contextWindow int, driver hyprovider.Driver) (*agentservice.Run, hyagent.Engine, error) {
+	providerDriver := driver
+	maxTokens := r.cfg.Agents.Main.MaxTokens
+	maxToolCalls := r.cfg.Agents.Main.MaxToolCalls
+	maxWallClock := r.cfg.Agents.Main.MaxWallClockDuration
+	if request.budgetRestored {
+		maxTokens, maxToolCalls, maxWallClock = request.maxTokens, request.maxToolCalls, request.maxWallClock
+		if maxToolCalls > 0 {
+			maxToolCalls -= request.usedToolCalls
+			if maxToolCalls <= 0 {
+				return nil, hyagent.Engine{}, fmt.Errorf("%w: max tool calls reached", errResumeBudgetExhausted)
+			}
+		}
+		if maxWallClock > 0 {
+			maxWallClock -= time.Since(request.startedAt)
+			if maxWallClock <= 0 {
+				return nil, hyagent.Engine{}, fmt.Errorf("%w: max wall clock reached", errResumeBudgetExhausted)
+			}
+		}
+	}
+	usageBudget := &providerUsageBudget{maxTokens: maxTokens, used: request.usedTokens}
+	if maxTokens > 0 && usageBudget.used >= maxTokens {
+		return nil, hyagent.Engine{}, fmt.Errorf("%w: max tokens reached", errResumeBudgetExhausted)
+	}
+	driver = &budgetedProviderDriver{inner: driver, budget: usageBudget}
+	contextTarget, err := modelContextTokenTarget(request.Provider, modelID, contextWindow, 0)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
@@ -234,47 +304,116 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		ExtraBody:       extraBody,
 		LoopPolicy: hyagent.LoopPolicy{
 			UnlimitedIterations: true,
-			MaxWallClock:        r.cfg.Agents.Main.MaxWallClockDuration,
+			MaxWallClock:        maxWallClock,
 			ContextTokenTarget:  hardContextTarget,
 		},
 	}
 	contextManager := turnContext{
 		instructions: instructions, providerID: request.Provider, modelID: modelID, runID: run.RunID,
 		privateContext: request.privateContext, historicalContext: request.historicalContext,
-		history: request.History, checkpointBoundary: request.checkpointBoundary,
+		resuming: request.resuming,
+		history:  request.History, checkpointBoundary: request.checkpointBoundary,
 		modelHistory: request.modelHistory, images: CloneAttachments(request.Images), todo: request.Todo,
-		largeToolTokens:     r.cfg.Agents.Context.LargeToolResultTokens,
-		compactTargetTokens: budgetConfig.Target,
-		minReclaimTokens:    r.cfg.Agents.Context.MinReclaimTokens,
-		structuredSummary:   true,
-		softTriggerTokens:   softContextTarget,
-		backgroundPrepare:   r.cfg.Agents.Context.BackgroundPrepare,
-		coordinator:         &compactionCoordinator{},
+		largeToolTokens:      r.cfg.Agents.Context.LargeToolResultTokens,
+		compactTargetTokens:  budgetConfig.Target,
+		minReclaimTokens:     r.cfg.Agents.Context.MinReclaimTokens,
+		structuredSummary:    true,
+		softTriggerTokens:    softContextTarget,
+		backgroundPrepare:    r.cfg.Agents.Context.BackgroundPrepare,
+		coordinator:          &compactionCoordinator{},
+		executionCheckpoints: host != nil && host.sessions != nil,
 	}
-	staticPayload, _ := json.Marshal(struct {
-		Provider, Model, Transport, Instructions string
-		Skills, Tools                            []string
-		Wire                                     int
-	}{request.Provider, modelID, driver.Metadata().Name, mainInstructionFingerprint, activeSkills, toolNames, session.CurrentWireVersion})
+	if strings.TrimSpace(r.cfg.Workspace.Root) != "" {
+		contextManager.captureWorkspace = func(ctx context.Context) (workspaceCheckpointWitness, error) {
+			return captureGitWorkspace(ctx, r.cfg.Workspace.Root)
+		}
+	}
+	type profileSkill struct {
+		Skill          any               `json:"skill"`
+		ResourceHashes map[string]string `json:"resource_hashes,omitempty"`
+	}
+	profileSkillNames := mergeSkillNames(activeSkills, skillSnapshot.Available)
+	resolvedSkills := make([]profileSkill, 0, len(profileSkillNames))
+	for _, name := range profileSkillNames {
+		if resolved, ok := skillSnapshot.Registry.Get(name); ok {
+			profile := profileSkill{Skill: resolved, ResourceHashes: make(map[string]string, len(resolved.Resources))}
+			for _, resource := range resolved.Resources {
+				payload, readErr := hyskill.ReadResource(resolved, resource.Name)
+				if readErr != nil {
+					_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, readErr.Error(), readErr)
+					return nil, hyagent.Engine{}, fmt.Errorf("hash skill %s resource %s: %w", name, resource.Name, readErr)
+				}
+				digest := sha256.Sum256(payload)
+				profile.ResourceHashes[resource.Name] = hex.EncodeToString(digest[:])
+			}
+			resolvedSkills = append(resolvedSkills, profile)
+		}
+	}
+	attachmentRoot := ""
+	if host != nil {
+		attachmentRoot = host.attachments.Root
+	}
+	staticPayload, marshalErr := json.Marshal(struct {
+		Provider, Account, Model, Reasoning, Transport, Instructions string
+		Skills, Tools                                                any
+		RuntimeConfig, CompactionRoute                               any
+		ChatGPTEndpoint, GrokEndpoint, AttachmentRoot                string
+		DisableSubagents                                             bool
+		Wire                                                         int
+	}{
+		request.Provider, accountID, modelID, request.Reasoning, driver.Metadata().Name, mainInstructionFingerprint,
+		resolvedSkills, tool.NewBus(drivers...).Definitions(), r.cfg, compactionRoute,
+		r.ChatGPTEndpoint, r.GrokEndpoint, attachmentRoot,
+		request.DisableSubagents, session.CurrentWireVersion,
+	})
+	if marshalErr != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, marshalErr.Error(), marshalErr)
+		return nil, hyagent.Engine{}, fmt.Errorf("encode immutable run profile: %w", marshalErr)
+	}
 	staticDigest := sha256.Sum256(staticPayload)
 	contextManager.staticIdentity = hex.EncodeToString(staticDigest[:])
+	if request.resuming {
+		if request.immutableIdentity != contextManager.staticIdentity {
+			return nil, hyagent.Engine{}, fmt.Errorf("%w: tools, skills, or provider transport differ", errResumeProfileChanged)
+		}
+	} else if persistErr := r.persistSingleRunManifest(ctx, run.RunID, request, modelID, activeSkills, contextManager.staticIdentity); persistErr != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, persistErr.Error(), persistErr)
+		return nil, hyagent.Engine{}, persistErr
+	}
 	if host != nil && host.sessions != nil {
+		contextManager.captureHighWater = func(ctx context.Context) (*int64, error) {
+			projection, err := host.sessions.LoadProjection(ctx, request.SessionID)
+			if err != nil {
+				return nil, err
+			}
+			return canonicalProjectionHighWater(projection.Blocks), nil
+		}
 		staticIdentity := activeCacheIdentity(contextManager.staticIdentity, request.modelHistory.SummaryHash)
-		epoch, _, identityErr := host.sessions.EnsureCacheIdentity(ctx, request.SessionID, staticIdentity)
+		_, _, identityErr := host.sessions.EnsureCacheIdentity(ctx, request.SessionID, staticIdentity)
 		if identityErr != nil {
 			err := identityErr
 			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 			return nil, hyagent.Engine{}, err
 		}
-		var epochMu sync.Mutex
-		contextManager.activateCompaction = func(activateCtx context.Context, identity string) error {
-			epochMu.Lock()
-			defer epochMu.Unlock()
-			newEpoch, changed, advanceErr := host.sessions.AdvanceCacheEpoch(activateCtx, request.SessionID, epoch, identity)
-			if changed {
-				epoch = newEpoch
+		contextManager.activateCompaction = func(activateCtx context.Context, messages []message.Message, identity string) error {
+			var expectedHighWater *int64
+			for _, current := range messages {
+				if facts, ok := parseExecutionCheckpoint(current); ok && facts.RunID == run.RunID {
+					expectedHighWater = facts.CanonicalHighWater
+				}
 			}
-			return advanceErr
+			return host.sessions.SaveRunCheckpoint(activateCtx, request.SessionID, session.RunCheckpoint{
+				RunID:             run.RunID,
+				CacheIdentity:     identity,
+				ExpectedHighWater: expectedHighWater,
+				ModelHistory: session.ModelHistory{
+					ProviderID: request.Provider, ModelID: modelID,
+					InstructionFingerprint: mainInstructionFingerprint,
+					StaticPrefixHash:       contextManager.staticIdentity,
+					WireVersion:            session.CurrentWireVersion,
+					Messages:               messages,
+				},
+			})
 		}
 		if usage, err := host.sessions.ProviderUsageSnapshot(ctx, request.SessionID, run.RunID); err == nil {
 			_ = host.sessions.UpdateUsage(ctx, request.SessionID, usage)
@@ -340,6 +479,27 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
+	if contextManager.activateCompaction != nil {
+		stepCheckpoint := &runStepCheckpoint{capture: contextManager.captureHighWater, save: func(saveCtx context.Context, messages []message.Message, boundary *int64) error {
+			stepContext := contextManager
+			stepContext.captureHighWater = func(context.Context) (*int64, error) { return boundary, nil }
+			refreshed, saveErr := stepContext.refreshExecutionCheckpoint(saveCtx, messages)
+			if saveErr != nil {
+				return saveErr
+			}
+			projection, saveErr := host.sessions.LoadProjection(saveCtx, request.SessionID)
+			if saveErr != nil {
+				return saveErr
+			}
+			identity := projection.CacheIdentityHash
+			if identity == "" {
+				identity = activeCacheIdentity(contextManager.staticIdentity, request.modelHistory.SummaryHash)
+			}
+			return contextManager.activateCompaction(saveCtx, refreshed, identity)
+		}}
+		engine.Hooks = engine.Hooks.Prepend(stepCheckpoint)
+		engine.StepRecorder = stepCheckpoint
+	}
 	if host != nil {
 		metadata := host.hookMetadata(request.SessionID, run.RunID)
 		engine.OutputGuardrails = append(engine.OutputGuardrails, host.stopHookGuardrail(metadata, hooks.Stop, func(input hyagent.OutputGuardrailInput) string {
@@ -354,8 +514,38 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 			return hyagent.RetryOutput(guidanceMessages(guidance)...), nil
 		}))
 	}
-	_ = account
+	if checkpoint, ok := engine.StepRecorder.(*runStepCheckpoint); ok {
+		for index, guardrail := range engine.OutputGuardrails {
+			engine.OutputGuardrails[index] = checkpointGuardrail{inner: guardrail, recorder: checkpoint}
+		}
+	}
 	return run, engine, nil
+}
+
+func (r *ProviderRuntime) persistSingleRunManifest(ctx context.Context, runID string, request TurnRequest, resolvedModel string, activeSkills []string, staticIdentity string) error {
+	durable, err := r.coding.Runner().Run(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if durable.Metadata == nil {
+		durable.Metadata = map[string]string{}
+	}
+	manifest := singleRunManifest{
+		Version: 1, Provider: request.Provider, Model: resolvedModel, Reasoning: request.Reasoning,
+		ActiveSkills: append([]string(nil), activeSkills...), DisableSubagents: request.DisableSubagents,
+		StaticIdentity: staticIdentity, MaxTokens: r.cfg.Agents.Main.MaxTokens, MaxToolCalls: r.cfg.Agents.Main.MaxToolCalls,
+		MaxWallClockNS: int64(r.cfg.Agents.Main.MaxWallClockDuration), StartedAt: durable.CreatedAt.UTC(),
+	}
+	if manifest.ActiveSkills == nil {
+		manifest.ActiveSkills = []string{}
+	}
+	encodedManifest, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	durable.Metadata["session_id"] = request.SessionID
+	durable.Metadata["single_run_manifest"] = string(encodedManifest)
+	return r.coding.Runner().SaveRun(ctx, durable)
 }
 
 func maxCompactionInputTokens(contextWindow, summaryTokens int) int {
@@ -798,7 +988,6 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 	summaryMessage.Kind = message.KindCompactionSummary
 	summaryMessage.Visibility = message.VisibilityPrivate
 	summaryMessage.CreatedAt = time.Time{}
-	summaryDigest := sha256.Sum256([]byte(summaryText))
 	messages := []message.Message{message.NewText(message.RoleSystem, mainInstructions), summaryMessage}
 	for _, block := range projection.Blocks[tailStart:] {
 		if current, ok := blockMessage(block); ok {
@@ -823,7 +1012,7 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 			ProviderID: projection.Session.ProviderID, ModelID: projection.Session.ModelID,
 			InstructionFingerprint: mainInstructionFingerprint, StaticPrefixHash: mainInstructionFingerprint,
 			WireVersion: session.CurrentWireVersion, Messages: messages,
-			SummaryHash: hex.EncodeToString(summaryDigest[:]),
+			SummaryHash: session.ModelCheckpointHash(messages),
 		},
 	}, true, nil
 }
@@ -1165,6 +1354,267 @@ func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context, sessionID, runID
 	return codex.NewReviewer(driver, r.approvalReviewTimeout)
 }
 
+// ResumeRun rebuilds a single-agent engine around the durable run and task
+// recovered by Hydaelyn. It resumes only when this session still owns a
+// checkpoint for the same run; runs requiring side-effect reconciliation stay
+// paused for explicit resolution.
+func (r *ProviderRuntime) ResumeRun(_ context.Context, runID string) error {
+	durable, err := r.coding.Runner().Run(context.Background(), runID)
+	if err != nil {
+		return err
+	}
+	if durable.Status == api.RunStatusReconcileRequired {
+		return nil
+	}
+	if finalizeErr := r.coding.FinalizeReportedRun(context.Background(), runID); finalizeErr == nil {
+		return nil
+	} else if !errors.Is(finalizeErr, agentservice.ErrTerminalReportMissing) {
+		return finalizeErr
+	}
+	sessionID := strings.TrimSpace(durable.Metadata["session_id"])
+	if sessionID == "" {
+		return r.coding.RequireRunReconciliation(context.Background(), runID, "durable run is missing session ownership")
+	}
+	r.mu.RLock()
+	host := r.host
+	r.mu.RUnlock()
+	if host == nil || host.sessions == nil {
+		return fmt.Errorf("resume run %s: application session runtime is unavailable", runID)
+	}
+	projection, err := host.sessions.LoadProjection(host.ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("resume run %s session: %w", runID, err)
+	}
+	if projection.LastRunID != runID {
+		return r.coding.RequireRunReconciliation(host.ctx, runID, "session projection does not own the recovered run")
+	}
+	if answer, completed := completedRunAnswer(projection.Blocks, runID); completed {
+		run, resumeErr := r.coding.ResumeRun(host.ctx, runID)
+		if resumeErr != nil {
+			return resumeErr
+		}
+		return r.coding.CompleteRun(context.WithoutCancel(host.ctx), run, answer, nil)
+	}
+	manifest, err := decodeSingleRunManifest(durable.Metadata["single_run_manifest"])
+	if err != nil {
+		return r.coding.RequireRunReconciliation(host.ctx, runID, "immutable single-run manifest is missing or invalid")
+	}
+	for _, current := range projection.ModelHistory.Messages {
+		facts, ok := parseExecutionCheckpoint(current)
+		if !ok || facts.RunID != runID {
+			continue
+		}
+		for _, reference := range facts.SourceArtifacts {
+			artifact, artifactErr := host.sessions.LoadArtifact(host.ctx, sessionID, reference.ID)
+			if artifactErr != nil || artifact.ID != reference.ID || artifact.RunID != reference.RunID || artifact.RunID != runID ||
+				artifact.Kind != reference.Kind || artifact.Kind != "execution_checkpoint_source" || artifact.SHA256 != reference.SHA256 {
+				return r.coding.RequireRunReconciliation(host.ctx, runID, "checkpoint source artifact is unavailable or invalid: "+reference.ID)
+			}
+			digest := sha256.Sum256(artifact.Payload)
+			if hex.EncodeToString(digest[:]) != reference.SHA256 {
+				return r.coding.RequireRunReconciliation(host.ctx, runID, "checkpoint source artifact hash mismatch: "+reference.ID)
+			}
+		}
+	}
+	if answer, completed := checkpointedRunAnswer(projection.ModelHistory, runID); completed {
+		if err := host.sessions.CompleteTurn(host.ctx, sessionID, session.Block{
+			Kind: "assistant", RunID: runID, Title: "Azem", Content: answer, State: "completed",
+		}, projection.ModelHistory); err != nil {
+			return err
+		}
+		run, resumeErr := r.coding.ResumeRun(host.ctx, runID)
+		if resumeErr != nil {
+			return resumeErr
+		}
+		return r.coding.CompleteRun(context.WithoutCancel(host.ctx), run, answer, nil)
+	}
+	request := TurnRequest{
+		SessionID: sessionID, Prompt: durable.Request,
+		Provider: manifest.Provider, Model: manifest.Model,
+		Reasoning: manifest.Reasoning, AgentMode: projection.Session.AgentMode,
+		History: append([]session.Block(nil), projection.Blocks...), modelHistory: projection.ModelHistory,
+		checkpointBoundary: projection.ModelHistory.CoveredThroughSequence, resuming: true,
+	}
+	request.ActiveSkills = append([]string(nil), manifest.ActiveSkills...)
+	request.DisableSubagents = manifest.DisableSubagents
+	request.immutableIdentity = manifest.StaticIdentity
+	request.budgetRestored = true
+	request.maxTokens, request.maxToolCalls = manifest.MaxTokens, manifest.MaxToolCalls
+	request.maxWallClock = time.Duration(manifest.MaxWallClockNS)
+	request.startedAt = manifest.StartedAt
+	unknownProviderRequest, err := host.sessions.ProviderRunHasUnknownRequest(host.ctx, sessionID, runID)
+	if err != nil {
+		return fmt.Errorf("resume run %s provider request state: %w", runID, err)
+	}
+	if unknownProviderRequest {
+		return r.coding.RequireRunReconciliation(host.ctx, runID, "provider request outcome and usage are unknown after interruption")
+	}
+	uncheckpointedCompletion, err := host.sessions.ProviderRunHasUncheckpointedCompletion(host.ctx, sessionID, runID, projection.CheckpointGeneration)
+	if err != nil {
+		return fmt.Errorf("resume run %s completed provider request state: %w", runID, err)
+	}
+	if uncheckpointedCompletion {
+		return r.coding.RequireRunReconciliation(host.ctx, runID, "completed provider request was not committed to the run checkpoint")
+	}
+	request.usedTokens, err = host.sessions.ProviderRunTotalTokens(host.ctx, sessionID, runID)
+	if err != nil {
+		return fmt.Errorf("resume run %s usage: %w", runID, err)
+	}
+	request.usedToolCalls, err = r.coding.ChargedToolCalls(host.ctx, runID)
+	if err != nil {
+		return fmt.Errorf("resume run %s tool charges: %w", runID, err)
+	}
+	if (request.maxTokens > 0 && request.usedTokens >= request.maxTokens) ||
+		(request.maxToolCalls > 0 && request.usedToolCalls >= request.maxToolCalls) ||
+		(request.maxWallClock > 0 && (request.startedAt.IsZero() || time.Since(request.startedAt) >= request.maxWallClock)) {
+		return r.terminalizeRecoveredBudget(host, sessionID, runID, nil)
+	}
+	for index := len(projection.Blocks) - 1; index >= 0; index-- {
+		if block := projection.Blocks[index]; block.RunID == runID && block.Kind == "user" {
+			request.Images = CloneAttachments(block.Attachments)
+			break
+		}
+	}
+	request.Todo, err = host.sessions.LoadTodo(host.ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("resume run %s todo: %w", runID, err)
+	}
+	account, modelID, contextWindow, driver, err := r.resolveDriver(host.ctx, request.Provider, request.Model, request.Reasoning)
+	if err != nil {
+		return err
+	}
+	if _, err := modelContextTokenTarget(request.Provider, modelID, contextWindow, 0); err != nil {
+		return err
+	}
+	runCtx, cancel := context.WithCancel(host.ctx)
+	host.mu.Lock()
+	if host.activeRun != "" {
+		host.mu.Unlock()
+		cancel()
+		return ErrRunActive
+	}
+	host.activeRun = runID
+	host.activeSession = sessionID
+	host.activeEnd = cancel
+	host.activeCancelIntent = ""
+	host.guidanceOpen = true
+	host.mu.Unlock()
+	run, err := r.coding.ResumeRun(runCtx, runID)
+	if err != nil {
+		cancel()
+		host.clearRun(runID)
+		return err
+	}
+	request.usedToolCalls = max(request.usedToolCalls, run.ChargedToolCalls())
+	if request.maxToolCalls > 0 && request.usedToolCalls >= request.maxToolCalls {
+		cancel()
+		host.clearRun(runID)
+		return r.terminalizeRecoveredBudget(host, sessionID, runID, run)
+	}
+	for _, current := range projection.ModelHistory.Messages {
+		facts, ok := parseExecutionCheckpoint(current)
+		if !ok || facts.RunID != runID {
+			continue
+		}
+		for _, fact := range facts.Tools {
+			if fact.Outcome == "terminal_success_do_not_replay" {
+				run.RestoreCompletedEffect(fact.Name, fact.ArgumentsSHA256)
+			}
+		}
+	}
+	_, engine, err := r.buildSingleRun(runCtx, request, run, account.ID, modelID, contextWindow, driver)
+	if err != nil {
+		cancel()
+		if errors.Is(err, errResumeProfileChanged) {
+			_ = r.coding.ReleaseRun(context.WithoutCancel(host.ctx), run)
+			host.clearRun(runID)
+			return r.coding.RequireRunReconciliation(context.WithoutCancel(host.ctx), runID, err.Error())
+		}
+		if errors.Is(err, errResumeBudgetExhausted) {
+			host.clearRun(runID)
+			return r.terminalizeRecoveredBudget(host, sessionID, runID, run)
+		}
+		host.clearRun(runID)
+		return err
+	}
+	engine = host.bindProviderEngine(engine)
+	host.wg.Add(1)
+	go host.runProviderTurn(runCtx, request, run, engine)
+	return nil
+}
+
+func (r *ProviderRuntime) terminalizeRecoveredBudget(host *Service, sessionID, runID string, run *agentservice.Run) error {
+	var err error
+	if run == nil {
+		run, err = r.coding.ResumeRun(context.WithoutCancel(host.ctx), runID)
+		if err != nil {
+			return fmt.Errorf("resume exhausted run %s for finalization: %w", runID, err)
+		}
+	}
+	failure := fmt.Errorf("%w: recovered run exhausted its original budget", hyagent.ErrBudgetExhausted)
+	if host.sessions != nil {
+		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, persistErr := host.sessions.AppendBlock(persistCtx, sessionID, session.Block{
+			Kind: "assistant", RunID: runID, Title: "Azem", Content: failure.Error(), State: "failed",
+		})
+		cancel()
+		if persistErr != nil {
+			_ = r.coding.ReleaseRun(context.WithoutCancel(host.ctx), run)
+			return persistErr
+		}
+	}
+	return r.coding.CompleteRun(context.WithoutCancel(host.ctx), run, failure.Error(), failure)
+}
+
+func decodeSingleRunManifest(raw string) (singleRunManifest, error) {
+	var manifest singleRunManifest
+	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
+		return manifest, err
+	}
+	if manifest.Version != 1 || manifest.Provider == "" || manifest.Model == "" || manifest.Reasoning == "" ||
+		manifest.StaticIdentity == "" || manifest.StartedAt.IsZero() || manifest.MaxTokens < 0 ||
+		manifest.MaxToolCalls < 0 || manifest.MaxWallClockNS < 0 || manifest.ActiveSkills == nil {
+		return manifest, fmt.Errorf("invalid single-run manifest")
+	}
+	return manifest, nil
+}
+
+func modelHistoryHasRunCheckpoint(history session.ModelHistory, runID string) bool {
+	for _, current := range history.Messages {
+		if facts, ok := parseExecutionCheckpoint(current); ok && facts.RunID == runID {
+			return true
+		}
+	}
+	return false
+}
+
+func checkpointedRunAnswer(history session.ModelHistory, runID string) (string, bool) {
+	if !modelHistoryHasRunCheckpoint(history, runID) {
+		return "", false
+	}
+	for index := len(history.Messages) - 1; index >= 0; index-- {
+		current := history.Messages[index]
+		if current.Visibility == message.VisibilityPrivate {
+			continue
+		}
+		if current.Role == message.RoleAssistant && len(current.ToolCalls) == 0 && strings.TrimSpace(current.Text) != "" {
+			return current.Text, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+func completedRunAnswer(blocks []session.Block, runID string) (string, bool) {
+	for index := len(blocks) - 1; index >= 0; index-- {
+		block := blocks[index]
+		if block.RunID == runID && block.Kind == "assistant" && block.State == "completed" {
+			return block.Content, true
+		}
+	}
+	return "", false
+}
+
 // ResumeTeam rebuilds provider and tool bindings from durable run metadata,
 // then resumes the TeamRunner checkpoint without blocking startup.
 func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
@@ -1221,6 +1671,7 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 	}
 	host.activeRun = runID
 	host.activeEnd = cancel
+	host.activeCancelIntent = ""
 	host.mu.Unlock()
 	host.wg.Add(1)
 	originalPrompt := firstNonempty(run.Metadata["original_prompt"], request.Prompt)
@@ -1288,4 +1739,17 @@ func (r *ProviderRuntime) resolveDriver(ctx context.Context, providerID, modelID
 	default:
 		return auth.Account{}, "", 0, nil, fmt.Errorf("unsupported provider %q", providerID)
 	}
+}
+
+func (r *ProviderRuntime) resolvedReasoningEffort(ctx context.Context, providerID, accountID, modelID, requested string) (string, error) {
+	models, err := r.catalog.List(ctx, providerID, accountID, false)
+	if err != nil {
+		return "", err
+	}
+	for _, model := range models.Models {
+		if model.ID == modelID {
+			return catalog.ResolveReasoningEffort(providerID, model, requested)
+		}
+	}
+	return "", fmt.Errorf("model %q is not available for %s account %s", modelID, providerID, accountID)
 }

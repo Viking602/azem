@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -55,6 +56,29 @@ type ModelHistory struct {
 
 const CurrentWireVersion = 1
 
+var ErrRunCheckpointStale = errors.New("session: run checkpoint source is stale")
+
+// ModelCheckpointHash identifies every private message that constitutes a
+// compacted provider checkpoint. Execution facts are included with the model
+// summary so cache identity cannot outlive the workspace/Todo evidence it was
+// paired with.
+func ModelCheckpointHash(messages []message.Message) string {
+	var checkpoint []message.Message
+	for _, current := range messages {
+		if current.Kind != message.KindCompactionSummary && current.Metadata["azem.context.execution_checkpoint"] == "" {
+			continue
+		}
+		current.CreatedAt = time.Time{}
+		checkpoint = append(checkpoint, current)
+	}
+	if len(checkpoint) == 0 {
+		return ""
+	}
+	encoded, _ := json.Marshal(checkpoint)
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", digest[:])
+}
+
 type Projection struct {
 	Session              Session
 	LastRunID            string
@@ -72,6 +96,17 @@ type CompactionPlan struct {
 	ModelHistory      ModelHistory
 	ExpectedUpdatedAt time.Time
 	TailStart         int
+	ExpectedHighWater *int64
+}
+
+// RunCheckpoint installs provider-resumable history for an active run without
+// appending a canonical assistant block. Cache identity changes atomically with
+// the history so a resumed request can never pair a new checkpoint with the
+// previous provider cache generation.
+type RunCheckpoint struct {
+	RunID             string
+	ModelHistory      ModelHistory
+	CacheIdentity     string
 	ExpectedHighWater *int64
 }
 
@@ -352,6 +387,15 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 		return err
 	}
 	defer tx.Rollback()
+	var activeRunID string
+	var currentGeneration int64
+	if err := tx.QueryRowContext(ctx, `SELECT last_run_id,checkpoint_generation FROM session_projections WHERE session_id=?`, sessionID).
+		Scan(&activeRunID, &currentGeneration); err != nil {
+		return err
+	}
+	if block.RunID != "" && activeRunID != "" && activeRunID != block.RunID {
+		return fmt.Errorf("complete turn: active run changed from %q to %q", block.RunID, activeRunID)
+	}
 	if strings.TrimSpace(block.Content) != "" {
 		if _, _, err := appendSessionBlock(ctx, tx, sessionID, block); err != nil {
 			return err
@@ -359,14 +403,11 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 	}
 	// Derive checkpoint identity from the actual provider history. Automatic
 	// compaction must never rely on an empty caller-supplied SummaryHash.
-	for _, current := range history.Messages {
-		if current.Kind == message.KindCompactionSummary {
-			digest := sha256.Sum256([]byte(current.Text))
-			history.SummaryHash = fmt.Sprintf("%x", digest[:])
-			history.WireVersion = CurrentWireVersion
-			if history.StaticPrefixHash == "" {
-				history.StaticPrefixHash = history.InstructionFingerprint
-			}
+	if hash := ModelCheckpointHash(history.Messages); hash != "" {
+		history.SummaryHash = hash
+		history.WireVersion = CurrentWireVersion
+		if history.StaticPrefixHash == "" {
+			history.StaticPrefixHash = history.InstructionFingerprint
 		}
 	}
 	encodedHistory, err := json.Marshal(history)
@@ -378,24 +419,122 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 		return err
 	}
 	history.CoveredThroughSequence = boundary
-	var generation int64
-	if err := tx.QueryRowContext(ctx, `SELECT checkpoint_generation+1 FROM session_projections WHERE session_id=?`, sessionID).Scan(&generation); err != nil {
-		return err
-	}
+	generation := currentGeneration + 1
 	history.Generation = generation
 	encodedHistory, err = json.Marshal(history)
 	if err != nil {
 		return fmt.Errorf("encode model history: %w", err)
 	}
 	now := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET last_run_id=?,model_history=?,checkpoint_generation=?,updated_at=? WHERE session_id=?`,
-		block.RunID, encodedHistory, generation, now, sessionID); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE session_projections SET last_run_id=?,model_history=?,checkpoint_generation=?,updated_at=?
+		WHERE session_id=? AND last_run_id=? AND checkpoint_generation=?`, block.RunID, encodedHistory, generation, now,
+		sessionID, activeRunID, currentGeneration)
+	if err != nil {
 		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("complete turn: active run or checkpoint changed while completion was prepared")
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func sameSequence(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+// SaveRunCheckpoint durably advances an active run's replaceable provider
+// history while leaving the canonical transcript unchanged. It is safe to call
+// repeatedly with the same checkpoint identity and rejects a stale run after a
+// newer user turn has taken ownership of the session.
+func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, checkpoint RunCheckpoint) error {
+	if strings.TrimSpace(checkpoint.RunID) == "" || len(checkpoint.ModelHistory.Messages) == 0 || strings.TrimSpace(checkpoint.CacheIdentity) == "" {
+		return fmt.Errorf("save run checkpoint: run, history, and cache identity are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var lastRunID, currentIdentity string
+	var generation, cacheEpoch int64
+	if err := tx.QueryRowContext(ctx, `SELECT last_run_id,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?`, sessionID).
+		Scan(&lastRunID, &generation, &cacheEpoch, &currentIdentity); err != nil {
+		return err
+	}
+	if lastRunID != checkpoint.RunID {
+		return fmt.Errorf("save run checkpoint: active run changed from %q to %q", checkpoint.RunID, lastRunID)
+	}
+	history := checkpoint.ModelHistory
+	if hash := ModelCheckpointHash(history.Messages); hash != "" {
+		history.SummaryHash = hash
+		history.WireVersion = CurrentWireVersion
+		if history.StaticPrefixHash == "" {
+			history.StaticPrefixHash = history.InstructionFingerprint
+		}
+	}
+	boundary, err := canonicalHighWater(ctx, tx, sessionID)
+	if err != nil {
+		return err
+	}
+	if checkpoint.ExpectedHighWater != nil && (boundary == nil || *boundary < *checkpoint.ExpectedHighWater) {
+		return fmt.Errorf("%w: canonical transcript changed while checkpoint was prepared", ErrRunCheckpointStale)
+	}
+	if currentIdentity == checkpoint.CacheIdentity {
+		var current ModelHistory
+		var encoded []byte
+		if err := tx.QueryRowContext(ctx, `SELECT model_history FROM session_projections WHERE session_id=?`, sessionID).Scan(&encoded); err != nil {
+			return err
+		}
+		if json.Unmarshal(encoded, &current) == nil && reflect.DeepEqual(normalizeMessageTimes(current.Messages), normalizeMessageTimes(history.Messages)) {
+			return tx.Commit()
+		}
+	}
+	history.CoveredThroughSequence = checkpoint.ExpectedHighWater
+	history.Generation = generation + 1
+	encoded, err := json.Marshal(history)
+	if err != nil {
+		return fmt.Errorf("encode run checkpoint: %w", err)
+	}
+	now := time.Now().UTC().UnixNano()
+	nextCacheEpoch := cacheEpoch
+	if currentIdentity != checkpoint.CacheIdentity {
+		nextCacheEpoch++
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history=?,checkpoint_generation=?,cache_epoch=?,cache_identity_hash=?,updated_at=?
+		WHERE session_id=? AND last_run_id=? AND checkpoint_generation=?`, encoded, generation+1, nextCacheEpoch, checkpoint.CacheIdentity, now,
+		sessionID, checkpoint.RunID, generation)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("save run checkpoint: projection changed while checkpoint was prepared")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func normalizeMessageTimes(messages []message.Message) []message.Message {
+	result := append([]message.Message(nil), messages...)
+	for index := range result {
+		result[index].CreatedAt = time.Time{}
+	}
+	return result
 }
 
 func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID string, block Block) error {

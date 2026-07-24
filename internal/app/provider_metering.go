@@ -144,7 +144,7 @@ type meteredProviderStream struct {
 func (s *meteredProviderStream) Recv() (hyprovider.Event, error) {
 	e, err := s.Stream.Recv()
 	if err != nil {
-		if finishErr := s.state.finish("failed", hyprovider.Usage{}); finishErr != nil {
+		if finishErr := s.state.finish("unknown", hyprovider.Usage{}); finishErr != nil {
 			return e, finishErr
 		}
 		return e, err
@@ -152,14 +152,14 @@ func (s *meteredProviderStream) Recv() (hyprovider.Event, error) {
 	if e.Kind == hyprovider.EventDone {
 		status := "completed"
 		if e.StopReason == hyprovider.StopReasonAborted || e.StopReason == hyprovider.StopReasonError {
-			status = "failed"
+			status = "unknown"
 		}
 		if err := s.state.finish(status, e.Usage); err != nil {
 			return hyprovider.Event{}, fmt.Errorf("persist provider request fact: %w", err)
 		}
 	}
 	if e.Kind == hyprovider.EventError {
-		if err := s.state.finish("failed", hyprovider.Usage{}); err != nil {
+		if err := s.state.finish("unknown", hyprovider.Usage{}); err != nil {
 			return hyprovider.Event{}, fmt.Errorf("persist provider request fact: %w", err)
 		}
 	}

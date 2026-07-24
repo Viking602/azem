@@ -80,6 +80,29 @@ func (s *Service) latestMainUsage(ctx context.Context, sessionID, runID string) 
 	return input, output, err
 }
 
+// ProviderRunTotalTokens returns cumulative provider-reported usage for every
+// main and compaction request in one logical run.
+func (s *Service) ProviderRunTotalTokens(ctx context.Context, sessionID, runID string) (int64, error) {
+	var total int64
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(total_tokens),0) FROM provider_requests
+		WHERE session_id=? AND run_id=? AND status='completed'`, sessionID, runID).Scan(&total)
+	return total, err
+}
+
+func (s *Service) ProviderRunHasUnknownRequest(ctx context.Context, sessionID, runID string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_requests
+		WHERE session_id=? AND run_id=? AND status='unknown'`, sessionID, runID).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Service) ProviderRunHasUncheckpointedCompletion(ctx context.Context, sessionID, runID string, checkpointGeneration int64) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_requests
+		WHERE session_id=? AND run_id=? AND status='completed' AND checkpoint_generation>=?`, sessionID, runID, checkpointGeneration).Scan(&count)
+	return count > 0, err
+}
+
 // ProviderUsageSnapshot derives all cache KPIs from persisted facts.
 func (s *Service) ProviderUsageSnapshot(ctx context.Context, sessionID, runID string) (Usage, error) {
 	p, err := s.LoadProjection(ctx, sessionID)

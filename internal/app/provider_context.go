@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -42,37 +43,51 @@ type TurnRequest struct {
 	Todo               session.TodoList
 	privateContext     string
 	historicalContext  string
+	resuming           bool
+	budgetRestored     bool
+	maxTokens          int64
+	maxToolCalls       int
+	maxWallClock       time.Duration
+	startedAt          time.Time
+	usedTokens         int64
+	usedToolCalls      int
 	modelHistory       session.ModelHistory
 	checkpointBoundary *int64
+	immutableIdentity  string
 }
 
 type turnContext struct {
-	instructions        string
-	providerID          string
-	modelID             string
-	runID               string
-	privateContext      string
-	historicalContext   string
-	history             []session.Block
-	modelHistory        session.ModelHistory
-	images              []session.Attachment
-	checkpointBoundary  *int64
-	reportContextTokens func(context.Context, int)
-	compactHooks        func(context.Context, []message.Message, []message.Message, error) error
-	summarize           func(context.Context, string) (string, error)
-	putArtifact         func(context.Context, string, []byte, string) (session.ContextArtifact, error)
-	largeToolTokens     int
-	compactTargetTokens int
-	minReclaimTokens    int
-	resolveSummarizer   func(context.Context) (func(context.Context, string) (string, error), int, error)
-	structuredSummary   bool
-	todo                session.TodoList
-	loadTodo            func(context.Context) (session.TodoList, error)
-	softTriggerTokens   int
-	backgroundPrepare   bool
-	staticIdentity      string
-	coordinator         *compactionCoordinator
-	activateCompaction  func(context.Context, string) error
+	instructions          string
+	providerID            string
+	modelID               string
+	runID                 string
+	privateContext        string
+	historicalContext     string
+	resuming              bool
+	history               []session.Block
+	modelHistory          session.ModelHistory
+	images                []session.Attachment
+	checkpointBoundary    *int64
+	reportContextTokens   func(context.Context, int)
+	compactHooks          func(context.Context, []message.Message, []message.Message, error) error
+	summarize             func(context.Context, string) (string, error)
+	putArtifact           func(context.Context, string, []byte, string) (session.ContextArtifact, error)
+	largeToolTokens       int
+	compactTargetTokens   int
+	minReclaimTokens      int
+	resolveSummarizer     func(context.Context) (func(context.Context, string) (string, error), int, error)
+	structuredSummary     bool
+	todo                  session.TodoList
+	loadTodo              func(context.Context) (session.TodoList, error)
+	softTriggerTokens     int
+	backgroundPrepare     bool
+	staticIdentity        string
+	coordinator           *compactionCoordinator
+	executionCheckpoints  bool
+	pendingWorkspacePaths []string
+	captureWorkspace      func(context.Context) (workspaceCheckpointWitness, error)
+	captureHighWater      func(context.Context) (*int64, error)
+	activateCompaction    func(context.Context, []message.Message, string) error
 }
 
 // compactionCoordinator is deliberately in-memory: a prepared summary is only
@@ -105,13 +120,7 @@ func compactionSourceHash(history []message.Message, target int, static string) 
 }
 
 func compactionSummaryHash(history []message.Message) string {
-	for _, current := range history {
-		if current.Kind == message.KindCompactionSummary {
-			digest := sha256.Sum256([]byte(current.Text))
-			return hex.EncodeToString(digest[:])
-		}
-	}
-	return ""
+	return session.ModelCheckpointHash(history)
 }
 
 func activeCacheIdentity(staticIdentity, summaryHash string) string {
@@ -119,24 +128,29 @@ func activeCacheIdentity(staticIdentity, summaryHash string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func (c turnContext) activateCompactionResult(ctx context.Context, result []message.Message) error {
+func (c turnContext) activateCompactionResult(ctx context.Context, result []message.Message) ([]message.Message, error) {
+	refreshed, err := c.refreshExecutionCheckpoint(ctx, result)
+	if err != nil {
+		return result, err
+	}
+	result = refreshed
 	if c.activateCompaction == nil {
-		return nil
+		return result, nil
 	}
 	identity := activeCacheIdentity(c.staticIdentity, compactionSummaryHash(result))
 	if c.coordinator == nil {
-		return c.activateCompaction(ctx, identity)
+		return result, c.activateCompaction(ctx, result, identity)
 	}
 	c.coordinator.mu.Lock()
 	defer c.coordinator.mu.Unlock()
 	if c.coordinator.activated == identity {
-		return nil
+		return result, nil
 	}
-	if err := c.activateCompaction(ctx, identity); err != nil {
-		return err
+	if err := c.activateCompaction(ctx, result, identity); err != nil {
+		return result, err
 	}
 	c.coordinator.activated = identity
-	return nil
+	return result, nil
 }
 
 func compactionSourcePrefix(source, current []message.Message) bool {
@@ -169,17 +183,23 @@ func preparedWithUncoveredTail(prepared, source, current []message.Message, targ
 
 func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
 	saved := c.modelHistory
+	staticPrefixCompatible := saved.StaticPrefixHash == mainInstructionFingerprint
+	if modelHistoryHasRunCheckpoint(saved, c.runID) {
+		staticPrefixCompatible = saved.StaticPrefixHash == c.staticIdentity
+	}
 	compatible := len(saved.Messages) > 0 &&
 		saved.ProviderID == c.providerID &&
 		saved.ModelID == c.modelID &&
 		saved.InstructionFingerprint == mainInstructionFingerprint &&
-		saved.StaticPrefixHash == mainInstructionFingerprint &&
+		staticPrefixCompatible &&
 		saved.WireVersion == session.CurrentWireVersion &&
 		saved.CoveredThroughSequence != nil && c.checkpointBoundary != nil &&
 		*saved.CoveredThroughSequence == *c.checkpointBoundary
 	messages := make([]message.Message, 0, len(saved.Messages)+len(c.history)+6)
 	if compatible {
-		messages = append(messages, saved.Messages...)
+		savedMessages := checkpointMessagesForRun(saved.Messages, c.runID)
+		messages = append(messages, savedMessages...)
+		messages = append(messages, c.workspaceReconciliationMessages(ctx, savedMessages)...)
 	} else {
 		if c.instructions != "" {
 			messages = append(messages, message.NewText(message.RoleSystem, c.instructions))
@@ -223,8 +243,21 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 		messages = append(messages, data)
 	}
 	goal := strings.TrimSpace(task.Goal)
-	if goal != "" || len(c.images) > 0 {
-		messages = append(messages, UserMessageWithAttachments(goal, c.images))
+	images := c.images
+	if compatible && c.resuming && modelHistoryHasRunCheckpoint(saved, c.runID) {
+		goal = ""
+		images = nil
+	} else if c.resuming {
+		for _, block := range c.history {
+			if block.RunID == c.runID && block.Kind == "user" {
+				goal = ""
+				images = nil
+				break
+			}
+		}
+	}
+	if goal != "" || len(images) > 0 {
+		messages = append(messages, UserMessageWithAttachments(goal, images))
 	}
 	return messages, nil
 }
@@ -406,7 +439,8 @@ func (c turnContext) Compact(ctx context.Context, history []message.Message) (re
 	if err != nil {
 		return original, err
 	}
-	if err := c.activateCompactionResult(ctx, compacted); err != nil {
+	compacted, err = c.activateCompactionResult(ctx, compacted)
+	if err != nil {
 		return original, err
 	}
 	return compacted, nil
@@ -468,10 +502,20 @@ func (c turnContext) prepareCompaction(ctx context.Context, history []message.Me
 		return original, fmt.Errorf("compact context: compaction model is unavailable")
 	}
 	var previousSummaries []string
+	var previousFacts []executionCheckpointFacts
 	withoutSummaries := make([]message.Message, 0, len(history))
 	for _, current := range history {
 		if current.Kind == message.KindCompactionSummary {
 			previousSummaries = append(previousSummaries, current.Text)
+			continue
+		}
+		if isExecutionCheckpointPolicy(current) {
+			continue
+		}
+		if facts, ok := parseExecutionCheckpoint(current); ok {
+			if facts.RunID == c.runID {
+				previousFacts = append(previousFacts, facts)
+			}
 			continue
 		}
 		withoutSummaries = append(withoutSummaries, current)
@@ -491,29 +535,45 @@ func (c turnContext) prepareCompaction(ctx context.Context, history []message.Me
 	if latestUser < 0 {
 		return original, fmt.Errorf("compact context: no user turn can be preserved")
 	}
-	mandatory := append(append([]message.Message(nil), history[:prefixEnd]...), history[latestUser:]...)
+	mandatory := append(append([]message.Message(nil), history[:prefixEnd]...), history[latestUser])
 	if hardTriggerTokens > 0 && estimateContextTokens(mandatory) > hardTriggerTokens {
 		return original, fmt.Errorf("compact context: mandatory tail requires %d tokens but hard limit allows %d", estimateContextTokens(mandatory), hardTriggerTokens)
 	}
-	hooksStarted := false
-	for preferred := prefixEnd; preferred <= latestUser; preferred++ {
-		start, boundaryErr := message.CompleteTurnBoundary(history, preferred)
-		if boundaryErr != nil {
-			return original, boundaryErr
-		}
-		if start > latestUser {
+	tailGroups, groupErr := compactionAtomicGroups(history[latestUser+1:])
+	if groupErr != nil {
+		return original, groupErr
+	}
+	rollingToolTurn := false
+	for _, current := range history[latestUser+1:] {
+		if len(current.ToolCalls) > 0 {
+			rollingToolTurn = true
 			break
 		}
-		if start < len(history) && history[start].Role != message.RoleUser {
-			continue
+	}
+	if !rollingToolTurn {
+		mandatory = append(append([]message.Message(nil), history[:prefixEnd]...), history[latestUser:]...)
+		if hardTriggerTokens > 0 && estimateContextTokens(mandatory) > hardTriggerTokens {
+			return original, fmt.Errorf("compact context: mandatory tail requires %d tokens but hard limit allows %d", estimateContextTokens(mandatory), hardTriggerTokens)
 		}
-		omitted := history[prefixEnd:start]
+		tailGroups = nil
+	}
+	tailStarts := make([]int, 1, len(tailGroups)+1)
+	tailStarts[0] = latestUser + 1
+	for _, group := range tailGroups {
+		tailStarts = append(tailStarts, latestUser+1+group.end)
+	}
+	hooksStarted := false
+	for _, hotStart := range tailStarts {
+		omitted := append([]message.Message(nil), history[prefixEnd:latestUser]...)
+		omitted = append(omitted, history[latestUser])
+		omitted = append(omitted, history[latestUser+1:hotStart]...)
 		if len(omitted) == 0 && len(previousSummaries) == 0 {
 			continue
 		}
-		base := make([]message.Message, 0, prefixEnd+len(history)-start)
+		base := make([]message.Message, 0, prefixEnd+1+len(history)-hotStart)
 		base = append(base, history[:prefixEnd]...)
-		base = append(base, history[start:]...)
+		base = append(base, history[latestUser])
+		base = append(base, history[hotStart:]...)
 		if estimateContextTokens(base) > targetTokens {
 			continue
 		}
@@ -536,19 +596,40 @@ func (c turnContext) prepareCompaction(ctx context.Context, history []message.Me
 		summary.Kind = message.KindCompactionSummary
 		summary.Visibility = message.VisibilityPrivate
 		summary.CreatedAt = time.Time{}
-		compacted := make([]message.Message, 0, len(base)+1)
+		var factsMessage message.Message
+		if c.executionCheckpoints {
+			factsMessage, summaryErr = c.buildExecutionCheckpointMessage(ctx, previousFacts, omitted, true)
+			if summaryErr != nil {
+				return original, fmt.Errorf("build execution checkpoint: %w", summaryErr)
+			}
+		}
+		compacted := make([]message.Message, 0, len(base)+3)
 		compacted = append(compacted, history[:prefixEnd]...)
-		compacted = append(compacted, summary)
-		compacted = append(compacted, history[start:]...)
+		if rollingToolTurn {
+			compacted = append(compacted, history[latestUser])
+			compacted = append(compacted, summary)
+			if c.executionCheckpoints {
+				compacted = append(compacted, executionCheckpointPolicyMessage())
+				compacted = append(compacted, factsMessage)
+			}
+			compacted = append(compacted, history[hotStart:]...)
+		} else {
+			compacted = append(compacted, summary)
+			if c.executionCheckpoints {
+				compacted = append(compacted, executionCheckpointPolicyMessage())
+				compacted = append(compacted, factsMessage)
+			}
+			compacted = append(compacted, history[latestUser:]...)
+		}
 		compacted, summaryErr = c.refreshTodoReminder(ctx, compacted)
 		if summaryErr != nil {
 			return original, summaryErr
 		}
 		if estimateContextTokens(compacted) <= targetTokens {
+			if validationErr := message.ValidateCompleteTurns(compacted); validationErr != nil {
+				return original, validationErr
+			}
 			return report(compacted), nil
-		}
-		if start > preferred {
-			preferred = start
 		}
 	}
 	return original, fmt.Errorf("compact context: required messages exceed %d-token target", targetTokens)
@@ -565,7 +646,7 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 	if c.softTriggerTokens <= 0 || c.coordinator == nil {
 		result, err := c.compactRequired(ctx, history, hardTokens)
 		if err == nil && !reflect.DeepEqual(result, history) {
-			err = c.activateCompactionResult(ctx, result)
+			result, err = c.activateCompactionResult(ctx, result)
 		}
 		return result, err
 	}
@@ -587,10 +668,18 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 	coord := c.coordinator
 	coord.mu.Lock()
 	compatiblePreparation := coord.done != nil && compactionSourcePrefix(coord.source, refreshed)
+	preparedReady := false
+	if compatiblePreparation {
+		select {
+		case <-coord.done:
+			preparedReady = true
+		default:
+		}
+	}
 	if coord.hash != hash && !compatiblePreparation && coord.cancel != nil {
 		coord.cancel()
 	}
-	if tokens < hardTokens {
+	if tokens < hardTokens && !preparedReady {
 		if !c.backgroundPrepare {
 			coord.mu.Unlock()
 			return report(refreshed), nil
@@ -600,7 +689,8 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 			coord.hash, coord.source, coord.done, coord.cancel, coord.result, coord.err = hash, append([]message.Message(nil), refreshed...), make(chan struct{}), cancel, nil, nil
 			done := coord.done
 			worker := c
-			worker.compactHooks = nil // lifecycle hooks run only for a result that is activated.
+			worker.compactHooks = nil     // lifecycle hooks run only for a result that is activated.
+			worker.captureWorkspace = nil // workspace evidence is captured synchronously at activation.
 			go func() {
 				result, prepareErr := worker.prepareCompaction(prepareCtx, append([]message.Message(nil), refreshed...), hardTokens)
 				coord.mu.Lock()
@@ -625,6 +715,11 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 		coord.mu.Lock()
 		if coord.err == nil {
 			if result, usable := preparedWithUncoveredTail(coord.result, coord.source, refreshed, c.compactTargetTokens); usable {
+				result, refreshErr := c.refreshExecutionCheckpoint(ctx, result)
+				if refreshErr != nil {
+					coord.mu.Unlock()
+					return history, refreshErr
+				}
 				activationIdentity := activeCacheIdentity(c.staticIdentity, compactionSummaryHash(result))
 				if coord.activated != activationIdentity {
 					if c.compactHooks != nil {
@@ -634,7 +729,11 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 						}
 					}
 					if c.activateCompaction != nil {
-						if activateErr := c.activateCompaction(ctx, activationIdentity); activateErr != nil {
+						if activateErr := c.activateCompaction(ctx, result, activationIdentity); activateErr != nil {
+							if errors.Is(activateErr, session.ErrRunCheckpointStale) {
+								coord.mu.Unlock()
+								goto synchronous
+							}
 							coord.mu.Unlock()
 							return history, activateErr
 						}
@@ -652,17 +751,11 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 	} else {
 		coord.mu.Unlock()
 	}
+
+synchronous:
 	result, err := c.compactRequired(ctx, refreshed, hardTokens)
-	if err == nil && !reflect.DeepEqual(result, refreshed) && c.activateCompaction != nil {
-		activationIdentity := activeCacheIdentity(c.staticIdentity, compactionSummaryHash(result))
-		coord.mu.Lock()
-		if coord.activated != activationIdentity {
-			err = c.activateCompaction(ctx, activationIdentity)
-			if err == nil {
-				coord.activated = activationIdentity
-			}
-		}
-		coord.mu.Unlock()
+	if err == nil && !reflect.DeepEqual(result, refreshed) {
+		result, err = c.activateCompactionResult(ctx, result)
 	}
 	return result, err
 }
@@ -737,21 +830,20 @@ func (c turnContext) summarizeBounded(ctx context.Context, previous []string, om
 	}
 	maxBytes := contextTokenBytes(budget)
 	var chunks [][]message.Message
-	for start := 0; start < len(omitted); {
-		end := start + 1
-		for end < len(omitted) && omitted[end].Role != message.RoleUser {
-			end++
+	groups, err := compactionAtomicGroups(omitted)
+	if err != nil {
+		return "", err
+	}
+	for _, group := range groups {
+		atom := omitted[group.start:group.end]
+		if len(serializeCompactionHistory(nil, atom)) > maxBytes {
+			return "", fmt.Errorf("compaction input: atomic group at message %d exceeds %d-token compactor budget", group.start, budget)
 		}
-		turn := omitted[start:end]
-		if len(serializeCompactionHistory(nil, turn)) > maxBytes {
-			return "", fmt.Errorf("compaction input: complete turn at message %d exceeds %d-token compactor budget", start, budget)
-		}
-		if len(chunks) == 0 || len(serializeCompactionHistory(nil, append(append([]message.Message(nil), chunks[len(chunks)-1]...), turn...))) > maxBytes {
-			chunks = append(chunks, append([]message.Message(nil), turn...))
+		if len(chunks) == 0 || len(serializeCompactionHistory(nil, append(append([]message.Message(nil), chunks[len(chunks)-1]...), atom...))) > maxBytes {
+			chunks = append(chunks, append([]message.Message(nil), atom...))
 		} else {
-			chunks[len(chunks)-1] = append(chunks[len(chunks)-1], turn...)
+			chunks[len(chunks)-1] = append(chunks[len(chunks)-1], atom...)
 		}
-		start = end
 	}
 	var summaries []string
 	for index, chunk := range chunks {
@@ -773,9 +865,7 @@ func (c turnContext) summarizeBounded(ctx context.Context, previous []string, om
 		summaries = append(summaries, normalized)
 		_ = index
 	}
-	for _, old := range previous {
-		summaries = append([]string{old}, summaries...)
-	}
+	summaries = append(append([]string(nil), previous...), summaries...)
 	for len(summaries) > 1 {
 		var next []string
 		for start := 0; start < len(summaries); {
@@ -813,6 +903,28 @@ func (c turnContext) summarizeBounded(ctx context.Context, previous []string, om
 		return "", fmt.Errorf("compaction produced no summary")
 	}
 	return summaries[0], nil
+}
+
+type compactionAtomicGroup struct{ start, end int }
+
+// compactionAtomicGroups keeps an assistant tool-call message and every
+// immediately following result for its calls indivisible. Other messages are
+// independently chunkable, including messages within the same user turn.
+func compactionAtomicGroups(messages []message.Message) ([]compactionAtomicGroup, error) {
+	if err := message.ValidateCompleteTurns(messages); err != nil {
+		return nil, err
+	}
+	groups := make([]compactionAtomicGroup, 0, len(messages))
+	for start := 0; start < len(messages); {
+		end := start + 1
+		calls := messages[start].ToolCalls
+		if len(calls) > 0 {
+			end += len(calls)
+		}
+		groups = append(groups, compactionAtomicGroup{start: start, end: end})
+		start = end
+	}
+	return groups, nil
 }
 
 func messageSourceReference(value message.Message, chunk, offset int) string {

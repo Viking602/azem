@@ -15,6 +15,15 @@ import (
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
+type recordingRunResumer struct {
+	runIDs []string
+}
+
+func (r *recordingRunResumer) ResumeRun(_ context.Context, runID string) error {
+	r.runIDs = append(r.runIDs, runID)
+	return nil
+}
+
 func TestRecoverProjectsPendingApprovalAndInterruptsSubagents(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
@@ -61,7 +70,7 @@ func TestRecoverProjectsPendingApprovalAndInterruptsSubagents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	recoveryService, err := NewService(store, codingService, subagents, nil)
+	recoveryService, err := NewService(store, codingService, subagents, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,5 +100,45 @@ func TestRecoverProjectsPendingApprovalAndInterruptsSubagents(t *testing.T) {
 	}
 	if len(children) != 1 || children[0].State != agentservice.SubagentInterrupted {
 		t.Fatalf("recovered subagents = %+v", children)
+	}
+}
+
+func TestRecoverResumesRedispatchedSingleAgentRun(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "resume.db")
+	store, err := sqlitestore.Open(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codingService, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := codingService.StartRun(ctx, "resume checkpoint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := codingService.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := sqlitestore.Open(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredCoding, err := agentservice.NewService(reopened, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recoveredCoding.Close(ctx)
+	resumer := &recordingRunResumer{}
+	recoveryService, err := NewService(reopened, recoveredCoding, nil, nil, resumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoveryService.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(resumer.runIDs) != 1 || resumer.runIDs[0] != run.RunID {
+		t.Fatalf("resumed runs=%v want=%s", resumer.runIDs, run.RunID)
 	}
 }

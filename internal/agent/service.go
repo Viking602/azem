@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -8,10 +9,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Viking602/azem/internal/skills"
@@ -49,20 +52,46 @@ type Service struct {
 	wg                   sync.WaitGroup
 }
 
+type succeededActionAttemptLister interface {
+	ListSucceededActionAttempts(context.Context, string, string) ([]api.ActionAttempt, error)
+}
+
+var ErrTerminalReportMissing = errors.New("terminal worker report is missing")
+
+type toolCallJournal interface {
+	RecordToolCallCharge(context.Context, string, string, string, string, string) (bool, error)
+	CountToolCallCharges(context.Context, string, string) (int, error)
+}
+
+type executionArgumentsDriver struct {
+	inner     tool.Driver
+	arguments json.RawMessage
+}
+
+func (d executionArgumentsDriver) Definition() tool.Definition { return d.inner.Definition() }
+func (d executionArgumentsDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	call.Arguments = append(json.RawMessage(nil), d.arguments...)
+	return d.inner.Execute(ctx, call, sink)
+}
+
 type Run struct {
-	RunID           string
-	Goal            string
-	TaskID          string
-	LeaseID         string
-	TaskVersion     int
-	HolderID        string
-	pending         map[string]PendingApproval
-	approvedOnce    map[string]string
-	leaseCancel     context.CancelFunc
-	leaseParentStop func() bool
-	leaseDone       <-chan error
-	leaseStopOnce   sync.Once
-	leaseErr        error
+	RunID            string
+	Goal             string
+	TaskID           string
+	LeaseID          string
+	TaskVersion      int
+	HolderID         string
+	pending          map[string]PendingApproval
+	approvedOnce     map[string]string
+	completedMu      sync.Mutex
+	completedEffects map[string]struct{}
+	completedCallIDs map[string]string
+	chargedToolCalls atomic.Int64
+	leaseCancel      context.CancelFunc
+	leaseParentStop  func() bool
+	leaseDone        <-chan error
+	leaseStopOnce    sync.Once
+	leaseErr         error
 }
 
 type PendingApproval struct {
@@ -171,6 +200,10 @@ func (s *Service) SkillSnapshot() skills.Snapshot {
 }
 
 func (s *Service) StartRun(ctx context.Context, request string) (*Run, error) {
+	return s.StartRunWithMetadata(ctx, request, nil)
+}
+
+func (s *Service) StartRunWithMetadata(ctx context.Context, request string, metadata map[string]string) (*Run, error) {
 	runID, err := newID("run")
 	if err != nil {
 		return nil, err
@@ -179,7 +212,7 @@ func (s *Service) StartRun(ctx context.Context, request string) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	run, root, err := s.runner.StartRun(ctx, api.StartRunCommand{RunID: runID, RootTaskID: rootID, Request: request})
+	run, root, err := s.runner.StartRun(ctx, api.StartRunCommand{RunID: runID, RootTaskID: rootID, Request: request, Metadata: metadata})
 	if err != nil {
 		return nil, err
 	}
@@ -220,10 +253,173 @@ func (s *Service) StartRun(ctx context.Context, request string) (*Run, error) {
 	}
 	tracked := &Run{
 		RunID: run.ID, Goal: request, TaskID: task.ID, LeaseID: lease.ID, TaskVersion: task.Version, HolderID: mainAgentID,
-		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string),
+		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string), completedEffects: make(map[string]struct{}), completedCallIDs: make(map[string]string),
 	}
 	s.startRunLeaseHeartbeat(ctx, tracked)
 	return tracked, nil
+}
+
+// ResumeRun reacquires the worker task that durable recovery redispatched for
+// an interrupted single-agent run. It preserves the original run and task IDs
+// so action-attempt idempotency remains scoped to the same execution.
+func (s *Service) ResumeRun(ctx context.Context, runID string) (*Run, error) {
+	durable, err := s.runner.Run(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	tasks, err := s.runner.ListTasks(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	var task api.Task
+	for _, candidate := range tasks {
+		if candidate.Type == api.TaskTypeWorker && candidate.AssignedAgentID == mainAgentID && candidate.Status == api.TaskStatusDispatched {
+			task = candidate
+			break
+		}
+	}
+	if task.ID == "" {
+		return nil, fmt.Errorf("resume coding run %s: no redispatched main task", runID)
+	}
+	envelopes, err := s.runner.ListEnvelopes(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	var envelope api.TaskEnvelope
+	for _, candidate := range envelopes {
+		if candidate.TaskID == task.ID && candidate.Status == "pending" {
+			envelope = candidate
+			break
+		}
+	}
+	if envelope.ID == "" {
+		return nil, fmt.Errorf("resume coding run %s: redispatched envelope is missing", runID)
+	}
+	lease, acquired, err := s.runner.AcquireTaskExecution(ctx, api.AcquireTaskExecutionCommand{
+		RunID: runID, TaskID: task.ID, EnvelopeID: envelope.ID,
+		HolderType: api.HolderAgent, HolderID: mainAgentID, TTL: s.runLeaseTTL,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, fmt.Errorf("resume coding run %s: no lease granted", runID)
+	}
+	tracked := &Run{
+		RunID: runID, Goal: task.Goal, TaskID: task.ID, LeaseID: lease.ID, TaskVersion: lease.TaskVersion, HolderID: mainAgentID,
+		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string), completedEffects: make(map[string]struct{}), completedCallIDs: make(map[string]string),
+	}
+	if tracked.Goal == "" {
+		tracked.Goal = durable.Request
+	}
+	lister, ok := s.store.(succeededActionAttemptLister)
+	if !ok {
+		_ = s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: lease.ID, HolderID: mainAgentID})
+		return nil, fmt.Errorf("resume coding run %s: durable action replay ledger is unavailable", runID)
+	}
+	attempts, err := lister.ListSucceededActionAttempts(ctx, runID, task.ID)
+	if err != nil {
+		_ = s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: lease.ID, HolderID: mainAgentID})
+		return nil, err
+	}
+	for _, attempt := range attempts {
+		tracked.RestoreCompletedCall(attempt.ActionID, attempt.ToolName, attempt.InputHash)
+	}
+	journal, ok := s.store.(toolCallJournal)
+	if !ok {
+		_ = s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: lease.ID, HolderID: mainAgentID})
+		return nil, fmt.Errorf("resume coding run %s: durable tool-call journal is unavailable", runID)
+	}
+	chargedToolCalls, err := journal.CountToolCallCharges(ctx, runID, task.ID)
+	if err != nil {
+		_ = s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: lease.ID, HolderID: mainAgentID})
+		return nil, err
+	}
+	tracked.chargedToolCalls.Store(int64(chargedToolCalls))
+	s.startRunLeaseHeartbeat(ctx, tracked)
+	return tracked, nil
+}
+
+// RestoreCompletedEffect installs a host-authored crash checkpoint guard. It
+// prevents a resumed model from executing the same non-idempotent tool input
+// under a newly generated call ID.
+func (run *Run) RestoreCompletedEffect(toolName, argumentsSHA256 string) {
+	run.RestoreCompletedCall("", toolName, argumentsSHA256)
+}
+
+func (run *Run) RestoreCompletedCall(callID, toolName, argumentsSHA256 string) {
+	if run == nil || toolName == "" || argumentsSHA256 == "" {
+		return
+	}
+	if run.completedEffects == nil {
+		run.completedEffects = make(map[string]struct{})
+	}
+	if run.completedCallIDs == nil {
+		run.completedCallIDs = make(map[string]string)
+	}
+	run.completedMu.Lock()
+	defer run.completedMu.Unlock()
+	effectKey := toolName + "\x00" + argumentsSHA256
+	run.completedEffects[effectKey] = struct{}{}
+	if callID != "" {
+		run.completedCallIDs[callID] = effectKey
+	}
+}
+
+func (run *Run) ChargedToolCalls() int {
+	if run == nil {
+		return 0
+	}
+	return int(run.chargedToolCalls.Load())
+}
+
+func (s *Service) ChargedToolCalls(ctx context.Context, runID string) (int, error) {
+	projection, err := s.runner.Recover(ctx, runID)
+	if err != nil {
+		return 0, err
+	}
+	taskID := ""
+	for _, task := range projection.Tasks {
+		if task.Type == api.TaskTypeWorker {
+			if taskID != "" {
+				return 0, fmt.Errorf("run %s has multiple worker tasks", runID)
+			}
+			taskID = task.ID
+		}
+	}
+	if taskID == "" {
+		return 0, fmt.Errorf("run %s worker task is missing", runID)
+	}
+	journal, ok := s.store.(toolCallJournal)
+	if !ok {
+		return 0, fmt.Errorf("durable tool-call journal is unavailable")
+	}
+	return journal.CountToolCallCharges(ctx, runID, taskID)
+}
+
+// ReleaseRun relinquishes a recovered lease when the host cannot safely
+// rebuild the immutable execution profile. The durable run remains
+// non-terminal and can be resumed after the incompatibility is resolved.
+func (s *Service) ReleaseRun(ctx context.Context, run *Run) error {
+	if run == nil {
+		return nil
+	}
+	heartbeatErr := run.stopRunLeaseHeartbeat()
+	releaseErr := s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: run.LeaseID, HolderID: run.HolderID})
+	return errors.Join(heartbeatErr, releaseErr)
+}
+
+func (s *Service) RequireRunReconciliation(ctx context.Context, runID, reason string) error {
+	if strings.TrimSpace(reason) == "" {
+		reason = "reconciliation required"
+	}
+	if _, err := s.runner.Recover(ctx, runID); err != nil {
+		return err
+	}
+	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusReconcileRequired}); err != nil {
+		return fmt.Errorf("mark run %s reconciliation required: %w", runID, err)
+	}
+	return nil
 }
 
 func (s *Service) startRunLeaseHeartbeat(parent context.Context, run *Run) {
@@ -319,6 +515,36 @@ func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Drive
 	if call.Name != definition.Name {
 		return ExecutionResult{}, fmt.Errorf("tool call %q does not match driver %q", call.Name, definition.Name)
 	}
+	executionArguments := append(json.RawMessage(nil), call.Arguments...)
+	canonicalArguments, err := canonicalToolArguments(call.Arguments)
+	if err != nil {
+		return ExecutionResult{}, fmt.Errorf("canonicalize %s arguments: %w", call.Name, err)
+	}
+	digest := sha256.Sum256(canonicalArguments)
+	inputHash := fmt.Sprintf("%x", digest[:])
+	journal, ok := s.store.(toolCallJournal)
+	if !ok {
+		return ExecutionResult{}, fmt.Errorf("durable tool-call journal is unavailable")
+	}
+	charged, err := journal.RecordToolCallCharge(ctx, run.RunID, run.TaskID, call.ID, call.Name, inputHash)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	if charged {
+		run.chargedToolCalls.Add(1)
+	}
+	nonIdempotentEffect := !definition.Idempotent && !definition.Security.Idempotent &&
+		(definition.EffectType == tool.EffectWrite || definition.EffectType == tool.EffectExternalSideEffect)
+	effectKey := call.Name + "\x00" + inputHash
+	if nonIdempotentEffect {
+		run.completedMu.Lock()
+		_, completed := run.completedEffects[effectKey]
+		sameCall := run.completedCallIDs[call.ID] == effectKey
+		run.completedMu.Unlock()
+		if completed && !sameCall {
+			return ExecutionResult{}, hydaelyn.ErrActionReconcileRequired
+		}
+	}
 	scope := scopeForCall(definition, call)
 	needsApproval := definition.RequiresApproval || definition.Security.RequiresApproval || definition.RequiresActionTask || definition.EffectType == tool.EffectWrite || definition.EffectType == tool.EffectExternalSideEffect
 	if definition.Metadata["approval"] == "allow" {
@@ -342,15 +568,55 @@ func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Drive
 	}
 
 	delete(run.approvedOnce, call.ID)
+	if nonIdempotentEffect {
+		run.completedMu.Lock()
+		if _, completed := run.completedEffects[effectKey]; completed {
+			run.completedMu.Unlock()
+			return ExecutionResult{}, hydaelyn.ErrActionReconcileRequired
+		}
+		run.completedEffects[effectKey] = struct{}{}
+		run.completedMu.Unlock()
+	}
 	governed := worker.GovernedToolBus{
-		Runner: s.runner, Bus: tool.NewBus(driver), RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID,
+		Runner: s.runner, Bus: tool.NewBus(executionArgumentsDriver{inner: driver, arguments: executionArguments}), RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID,
 		HolderType: api.HolderAgent, HolderID: run.HolderID, TaskVersion: run.TaskVersion,
 	}
-	result, err := governed.Execute(withAuthorizedInvocation(ctx, scope), call, sink)
+	identityCall := call
+	identityCall.Arguments = canonicalArguments
+	result, err := governed.Execute(withAuthorizedInvocation(ctx, scope), identityCall, sink)
 	if err != nil {
 		return ExecutionResult{Result: result}, err
 	}
+	if nonIdempotentEffect && result.IsError {
+		run.completedMu.Lock()
+		delete(run.completedEffects, effectKey)
+		run.completedMu.Unlock()
+	} else if nonIdempotentEffect {
+		run.completedMu.Lock()
+		run.completedCallIDs[call.ID] = effectKey
+		run.completedMu.Unlock()
+	}
 	return ExecutionResult{Result: result, Executed: true}, nil
+}
+
+func canonicalToolArguments(arguments json.RawMessage) (json.RawMessage, error) {
+	if len(bytes.TrimSpace(arguments)) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(arguments))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, fmt.Errorf("multiple JSON values")
+		}
+		return nil, err
+	}
+	return json.Marshal(value)
 }
 
 func (s *Service) ResolveApproval(ctx context.Context, run *Run, callID string, mode ApprovalMode, decidedBy string) error {
@@ -614,6 +880,92 @@ func (s *Service) CompleteRun(ctx context.Context, run *Run, summary string, fai
 	}
 	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: run.RunID, To: target}); err != nil {
 		return fmt.Errorf("finish run: %w", err)
+	}
+	return nil
+}
+
+// CancelRun records an explicit user cancellation as terminal. Application
+// shutdown uses ReleaseRun instead so an interrupted run remains resumable.
+func (s *Service) CancelRun(ctx context.Context, run *Run, cause error) error {
+	if run == nil {
+		return fmt.Errorf("run is nil")
+	}
+	if err := run.stopRunLeaseHeartbeat(); err != nil {
+		return err
+	}
+	if err := s.runner.HeartbeatTaskExecution(ctx, api.HeartbeatTaskExecutionCommand{
+		LeaseID: run.LeaseID, HolderID: run.HolderID, TTL: s.runLeaseTTL,
+	}); err != nil {
+		return fmt.Errorf("refresh run lease before cancellation: %w", err)
+	}
+	reason := "cancelled by user"
+	if cause != nil {
+		reason = cause.Error()
+	}
+	if err := s.runner.SubmitTypedReport(ctx, api.SubmitTypedReportCommand{
+		RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID, HolderType: api.HolderAgent,
+		HolderID: run.HolderID, TaskVersion: run.TaskVersion,
+		Report: api.TypedReport{Status: api.ReportStatusFailed, Summary: reason, Kind: "cancelled"},
+	}); err != nil {
+		return fmt.Errorf("submit cancelled run report: %w", err)
+	}
+	projection, err := s.runner.Recover(ctx, run.RunID)
+	if err != nil {
+		return fmt.Errorf("project cancelled run: %w", err)
+	}
+	if projection.Run.Status == api.RunStatusCancelled {
+		return nil
+	}
+	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: run.RunID, To: api.RunStatusCancelled}); err != nil {
+		return fmt.Errorf("cancel run: %w", err)
+	}
+	return nil
+}
+
+// FinalizeReportedRun completes the run-level state transition after a crash
+// that occurred after the worker report committed and released its lease.
+func (s *Service) FinalizeReportedRun(ctx context.Context, runID string) error {
+	projection, err := s.runner.Recover(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if projection.Run.Status == api.RunStatusCompleted || projection.Run.Status == api.RunStatusFailed ||
+		projection.Run.Status == api.RunStatusBlocked || projection.Run.Status == api.RunStatusCancelled {
+		return nil
+	}
+	target := api.RunStatus("")
+	for _, task := range projection.Tasks {
+		if task.Type != api.TaskTypeWorker || task.Result == nil {
+			continue
+		}
+		switch task.Status {
+		case api.TaskStatusCompleted:
+			if task.Result.Status == api.ReportStatusSuccess {
+				target = api.RunStatusCompleted
+			}
+		case api.TaskStatusFailed:
+			if task.Result.Kind == "cancelled" {
+				target = api.RunStatusCancelled
+			} else {
+				target = api.RunStatusFailed
+			}
+		case api.TaskStatusBlocked:
+			target = api.RunStatusBlocked
+		case api.TaskStatusCancelled:
+			target = api.RunStatusCancelled
+		}
+		break
+	}
+	if target == "" {
+		return fmt.Errorf("finalize reported run %s: %w", runID, ErrTerminalReportMissing)
+	}
+	if target == api.RunStatusCompleted && projection.Run.Status != api.RunStatusComposingResponse {
+		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusComposingResponse}); err != nil {
+			return fmt.Errorf("finalize reported run %s composing response: %w", runID, err)
+		}
+	}
+	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: target}); err != nil {
+		return fmt.Errorf("finalize reported run %s: %w", runID, err)
 	}
 	return nil
 }
