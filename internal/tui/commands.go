@@ -78,6 +78,7 @@ type SlashCommand struct {
 	Name   string
 	Usage  string
 	Detail string
+	Skill  string
 }
 
 var slashCommands = []SlashCommand{
@@ -174,6 +175,19 @@ func exactSlashCommand(input string) bool {
 		}
 	}
 	return false
+}
+
+func parseSkillInvocation(input string) (name string, args string, ok bool) {
+	trimmed := strings.TrimSpace(input)
+	if !strings.HasPrefix(trimmed, "/skill:") {
+		return "", "", false
+	}
+	fields := strings.Fields(trimmed)
+	name = strings.TrimPrefix(fields[0], "/skill:")
+	if name == "" {
+		return "", "", false
+	}
+	return name, strings.TrimSpace(strings.TrimPrefix(trimmed, fields[0])), true
 }
 
 func ParseCommand(input string) (Command, bool, error) {

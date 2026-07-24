@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -3355,24 +3357,65 @@ func BenchmarkLongTranscriptScroll(b *testing.B) {
 	}
 }
 
-func TestSkillSnapshotPopulatesContextRailWithoutOpeningOverlay(t *testing.T) {
-	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+func TestSkillSnapshotPopulatesSlashSuggestionsWithoutContextRail(t *testing.T) {
+	root := t.TempDir()
+	verifyDir := filepath.Join(root, "verify")
+	if err := os.MkdirAll(verifyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	verifyPath := filepath.Join(verifyDir, "SKILL.md")
+	if err := os.WriteFile(verifyPath, []byte("---\nname: verify\ndescription: Verify the current changes\n---\nVERIFY_SKILL_BODY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &skillCommandRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.applyEvent(app.Event{Kind: app.EventSkillCatalog, State: "snapshot", SkillCatalog: []app.SkillCatalogEntry{
-		{Name: "verify", ModelVisible: true},
+		{Name: "verify", Description: "Verify the current changes", SourcePath: verifyPath, ModelVisible: true},
 		{Name: "simplify", Eager: true},
 		{Name: "disabled", Disabled: true},
 	}})
 	if model.overlay != OverlayNone || len(model.skills) != 3 {
 		t.Fatalf("skill snapshot overlay=%q skills=%d", model.overlay, len(model.skills))
 	}
-	rail := ansi.Strip(model.renderContextRail(32, 20))
-	for _, wanted := range []string{"SKILLS  2", "verify", "simplify"} {
-		if !strings.Contains(rail, wanted) {
-			t.Fatalf("skill context rail missing %q:\n%s", wanted, rail)
+	model.composer.SetValue("/")
+	suggestions := model.visibleCommandSuggestions()
+	if len(suggestions) < 2 || suggestions[0].Skill != "verify" || suggestions[0].Usage != "/skill:verify" || suggestions[0].Detail != "Verify the current changes" || suggestions[1].Skill != "simplify" {
+		t.Fatalf("skill slash suggestions = %+v", suggestions)
+	}
+	for _, suggestion := range suggestions {
+		if suggestion.Skill == "disabled" {
+			t.Fatalf("disabled skill rendered as a slash suggestion: %+v", suggestions)
 		}
 	}
-	if strings.Contains(rail, "disabled") {
-		t.Fatalf("disabled skill rendered as available:\n%s", rail)
+	rail := ansi.Strip(model.renderContextRail(32, 20))
+	for _, unwanted := range []string{"SKILLS", "verify", "simplify", "disabled"} {
+		if strings.Contains(rail, unwanted) {
+			t.Fatalf("skill context rail contains %q:\n%s", unwanted, rail)
+		}
+	}
+
+	updated, startCmd := model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(AppModel)
+	if startCmd != nil || model.composer.Value() != "/skill:verify " {
+		t.Fatalf("skill slash completion cmd=%v composer=%q", startCmd != nil, model.composer.Value())
+	}
+	model.composer.SetValue("/skill:verify inspect the current changes")
+	updated, startCmd = model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(AppModel)
+	if startCmd == nil {
+		t.Fatal("sending with a selected skill did not start a turn")
+	}
+	_ = startCmd()
+	for _, wanted := range []string{`The user has invoked the "verify" skill`, "VERIFY_SKILL_BODY", "[Skill directory: " + verifyDir + "]", "User: inspect the current changes"} {
+		if !strings.Contains(runtime.request.Prompt, wanted) {
+			t.Fatalf("expanded skill prompt missing %q:\n%s", wanted, runtime.request.Prompt)
+		}
+	}
+	if len(runtime.request.ActiveSkills) != 0 {
+		t.Fatalf("skill slash activation request = %+v", runtime.request)
+	}
+	if got := model.transcript[len(model.transcript)-1].Content; got != "/skill:verify inspect the current changes" {
+		t.Fatalf("skill transcript = %q", got)
 	}
 }
 

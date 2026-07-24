@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	hyskill "github.com/Viking602/go-hydaelyn/skill"
 	"github.com/atotto/clipboard"
 
 	"github.com/Viking602/azem/internal/app"
@@ -285,6 +287,17 @@ func (m AppModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.completeCommandSuggestion(suggestions)
 			return m, nil
 		case "enter":
+			if exactSlashCommand(m.composer.Value()) {
+				break
+			}
+			selected := suggestions[min(max(0, m.commandCursor), len(suggestions)-1)]
+			if selected.Skill != "" {
+				if strings.TrimSpace(m.composer.Value()) == selected.Usage {
+					return m.submit()
+				}
+				m.completeCommandSuggestion(suggestions)
+				return m, nil
+			}
 			if !exactSlashCommand(m.composer.Value()) {
 				m.completeCommandSuggestion(suggestions)
 				return m, nil
@@ -436,10 +449,33 @@ func (m AppModel) visibleCommandSuggestions() []SlashCommand {
 	if m.overlay != OverlayNone || m.focus != focusComposer || m.actionBusy || m.isRunning() {
 		return nil
 	}
-	suggestions := commandSuggestions(m.composer.Value())
-	for index := range suggestions {
-		suggestions[index].Detail = m.tr("slash." + suggestions[index].Name + ".detail")
+	input := m.composer.Value()
+	query, ok := slashCommandQuery(input)
+	if !ok {
+		return nil
 	}
+	suggestions := make([]SlashCommand, 0, len(m.skills)+len(slashCommands))
+	for _, skill := range m.skills {
+		if skill.Disabled {
+			continue
+		}
+		commandName := "skill:" + skill.Name
+		if _, matched := fuzzyCommandScore(commandName, query); !matched {
+			continue
+		}
+		detail := skill.Description
+		if detail == "" {
+			detail = m.tr("slash.skill.detail")
+		}
+		suggestions = append(suggestions, SlashCommand{
+			Name: commandName, Usage: "/" + commandName, Detail: detail, Skill: skill.Name,
+		})
+	}
+	commands := commandSuggestions(input)
+	for index := range commands {
+		commands[index].Detail = m.tr("slash." + commands[index].Name + ".detail")
+	}
+	suggestions = append(suggestions, commands...)
 	return suggestions
 }
 
@@ -460,6 +496,12 @@ func (m *AppModel) completeCommandSuggestion(suggestions []SlashCommand) {
 	}
 	index := min(max(0, m.commandCursor), len(suggestions)-1)
 	command := suggestions[index]
+	if command.Skill != "" {
+		m.composer.SetValue(command.Usage + " ")
+		m.composer.MoveToEnd()
+		m.commandCursor = 0
+		return
+	}
 	value := "/" + command.Name
 	if strings.Contains(command.Usage, " ") {
 		value += " "
@@ -1300,6 +1342,9 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 	if input == "" && len(images) == 0 {
 		return m, nil
 	}
+	if name, args, ok := parseSkillInvocation(input); ok {
+		return m.invokeExpandedSkill(name, args, images)
+	}
 	if command, ok, err := ParseCommand(input); ok {
 		m.composer.Reset()
 		m.commandCursor = 0
@@ -1679,6 +1724,61 @@ func (m AppModel) invokeSkill(name, instruction string) (tea.Model, tea.Cmd) {
 	return m, startTurn(m.runtime, app.TurnRequest{
 		SessionID: m.sessionID, Prompt: prompt, Provider: m.provider, Model: m.model,
 		Reasoning: m.reasoning, AgentMode: m.agentMode, ActiveSkills: []string{name},
+	})
+}
+
+func (m AppModel) invokeExpandedSkill(name, args string, images []session.Attachment) (tea.Model, tea.Cmd) {
+	if m.isRunning() {
+		m.errorBanner = m.tr("error.skill_idle")
+		return m, nil
+	}
+	if m.agentMode == "team" {
+		m.errorBanner = m.tr("error.skill_single_mode")
+		return m, nil
+	}
+	var entry *SkillCatalogView
+	for index := range m.skills {
+		if m.skills[index].Name == name && !m.skills[index].Disabled {
+			entry = &m.skills[index]
+			break
+		}
+	}
+	if entry == nil {
+		m.errorBanner = "unknown skill: " + name
+		return m, nil
+	}
+	content, err := os.ReadFile(entry.SourcePath)
+	if err != nil {
+		m.errorBanner = fmt.Sprintf("load skill %s: %v", name, err)
+		return m, nil
+	}
+	parsed, err := hyskill.Parse(entry.SourcePath, content)
+	if err != nil {
+		m.errorBanner = fmt.Sprintf("load skill %s: %v", name, err)
+		return m, nil
+	}
+	prompt := fmt.Sprintf("[IMPORTANT: The user has invoked the %q skill, indicating they want you to follow its instructions. The full skill content is loaded below.]\n\n%s\n\n---\n\n[Skill directory: %s]\nResolve any relative paths in this skill against that directory.", parsed.Name, parsed.Body, parsed.SourceDir)
+	if args != "" {
+		prompt += "\n\nUser: " + args
+	}
+	displayPrompt := "/skill:" + parsed.Name
+	if args != "" {
+		displayPrompt += " " + args
+	}
+	_ = m.closeOverlay()
+	m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: m.tr("block.you"), Content: formatUserContent(displayPrompt, images), Attachments: images})
+	m.composer.Reset()
+	m.commandCursor = 0
+	m.clearPendingImages()
+	m.status = "Starting"
+	m.errorBanner = ""
+	m.runID = ""
+	m.resetTurnUsage()
+	m.transcriptTop = 0
+	m.beginRunActivity()
+	return m, startTurn(m.runtime, app.TurnRequest{
+		SessionID: m.sessionID, Prompt: prompt, Provider: m.provider, Model: m.model,
+		Reasoning: m.reasoning, AgentMode: m.agentMode, Images: images,
 	})
 }
 
