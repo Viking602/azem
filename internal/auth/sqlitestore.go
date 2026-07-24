@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 // SQLiteStore persists OAuth credentials in Azem's protected application
@@ -28,9 +30,9 @@ func (s *SQLiteStore) Put(ctx context.Context, value Credential) (string, error)
 		return "", fmt.Errorf("encode credential: %w", err)
 	}
 	now := time.Now().UTC().UnixNano()
-	_, err = s.db.ExecContext(ctx, `INSERT INTO auth_credentials(provider_id,account_id,data,created_at,updated_at) VALUES(?,?,?,?,?)
-		ON CONFLICT(provider_id,account_id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at`,
-		value.Provider, value.AccountID, string(data), now, now)
+	err = dbgen.New(s.db).UpsertCredential(ctx, dbgen.UpsertCredentialParams{
+		ProviderID: value.Provider, AccountID: value.AccountID, Data: string(data), CreatedAt: now, UpdatedAt: now,
+	})
 	if err != nil {
 		return "", fmt.Errorf("store credential in sqlite: %w", err)
 	}
@@ -42,8 +44,7 @@ func (s *SQLiteStore) Get(ctx context.Context, provider string, accountID string
 	if s == nil || s.db == nil {
 		return value, fmt.Errorf("credential database is unavailable")
 	}
-	var data string
-	err := s.db.QueryRowContext(ctx, `SELECT data FROM auth_credentials WHERE provider_id=? AND account_id=?`, provider, accountID).Scan(&data)
+	data, err := dbgen.New(s.db).GetCredential(ctx, dbgen.GetCredentialParams{ProviderID: provider, AccountID: accountID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return value, ErrCredentialNotFound
 	}
@@ -63,7 +64,7 @@ func (s *SQLiteStore) Delete(ctx context.Context, provider string, accountID str
 	if s == nil || s.db == nil {
 		return fmt.Errorf("credential database is unavailable")
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM auth_credentials WHERE provider_id=? AND account_id=?`, provider, accountID); err != nil {
+	if err := dbgen.New(s.db).DeleteCredential(ctx, dbgen.DeleteCredentialParams{ProviderID: provider, AccountID: accountID}); err != nil {
 		return fmt.Errorf("delete credential from sqlite: %w", err)
 	}
 	return nil

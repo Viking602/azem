@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 	"github.com/Viking602/go-hydaelyn/message"
 )
 
@@ -156,6 +157,8 @@ func (s *Service) SearchHistory(ctx context.Context, sessionID, query string, li
 	if tokenBytes := tokenBudget * 4; tokenBytes < budget {
 		budget = tokenBytes
 	}
+	// sqlc v1.30.0 treats the FTS5 table-name operand of MATCH as a column
+	// reference ("column history_fts does not exist"), so this query stays raw.
 	rows, err := s.db.QueryContext(ctx, `SELECT f.session_id,f.source_type,f.source_id,f.content
 		FROM history_fts f
 		WHERE history_fts MATCH ? AND f.session_id=? AND (
@@ -233,43 +236,41 @@ func (s *Service) PutArtifact(ctx context.Context, sessionID, runID, kind string
 	idDigest := sha256.Sum256([]byte(sessionID + "\x00" + kind + "\x00" + hash))
 	id := fmt.Sprintf("artifact_%x", idDigest[:16])
 	now := time.Now().UTC()
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,payload,preview,created_at)
-		VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(session_id,kind,sha256) DO NOTHING`, id, sessionID, runID, kind, hash, payload, preview, now.UnixNano()); err != nil {
+	if err := dbgen.New(s.db).InsertContextArtifact(ctx, dbgen.InsertContextArtifactParams{ID: id, SessionID: sessionID, RunID: runID, Kind: kind, Sha256: hash, Payload: payload, Preview: preview, CreatedAt: now.UnixNano()}); err != nil {
 		return ContextArtifact{}, fmt.Errorf("put context artifact: %w", err)
 	}
 	return s.LoadArtifact(ctx, sessionID, id)
 }
 
 func (s *Service) LoadArtifact(ctx context.Context, sessionID, id string) (ContextArtifact, error) {
-	var value ContextArtifact
-	var created int64
-	err := s.db.QueryRowContext(ctx, `SELECT id,session_id,run_id,kind,sha256,payload,preview,created_at
-		FROM context_artifacts WHERE id=? AND session_id=?`, id, sessionID).Scan(&value.ID, &value.SessionID, &value.RunID, &value.Kind, &value.SHA256, &value.Payload, &value.Preview, &created)
+	row, err := dbgen.New(s.db).GetContextArtifact(ctx, dbgen.GetContextArtifactParams{ID: id, SessionID: sessionID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return ContextArtifact{}, fmt.Errorf("context artifact %q not found in session %q", id, sessionID)
 	}
 	if err != nil {
 		return ContextArtifact{}, fmt.Errorf("load context artifact: %w", err)
 	}
-	value.Payload = append([]byte(nil), value.Payload...)
-	value.CreatedAt = time.Unix(0, created).UTC()
+	value := ContextArtifact{ID: row.ID, SessionID: row.SessionID, RunID: row.RunID, Kind: row.Kind, SHA256: row.Sha256, Payload: append([]byte(nil), row.Payload...), Preview: row.Preview, CreatedAt: time.Unix(0, row.CreatedAt).UTC()}
 	return value, nil
 }
 
 func NewService(db *sql.DB) *Service { return &Service{db: db} }
 
+func sessionFromDB(row dbgen.Session) Session {
+	return Session{ID: row.ID, Title: row.Title, ProviderID: row.ProviderID, ModelID: row.ModelID, Reasoning: row.Reasoning, AgentMode: row.AgentMode, CreatedAt: time.Unix(0, row.CreatedAt).UTC(), UpdatedAt: time.Unix(0, row.UpdatedAt).UTC()}
+}
 func (s *Service) Ensure(ctx context.Context, value Session) (Session, error) {
 	now := time.Now().UTC()
 	if value.CreatedAt.IsZero() {
 		value.CreatedAt = now
 	}
 	value.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions(id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, value.ID, value.Title, value.ProviderID, value.ModelID, value.Reasoning, value.AgentMode, value.CreatedAt.UnixNano(), value.UpdatedAt.UnixNano())
+	queries := dbgen.New(s.db)
+	err := queries.EnsureSession(ctx, dbgen.EnsureSessionParams{ID: value.ID, Title: value.Title, ProviderID: value.ProviderID, ModelID: value.ModelID, Reasoning: value.Reasoning, AgentMode: value.AgentMode, CreatedAt: value.CreatedAt.UnixNano(), UpdatedAt: value.UpdatedAt.UnixNano()})
 	if err != nil {
 		return Session{}, fmt.Errorf("ensure session: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO session_projections(session_id,updated_at) VALUES(?,?) ON CONFLICT(session_id) DO NOTHING`, value.ID, now.UnixNano())
+	err = queries.EnsureSessionProjection(ctx, dbgen.EnsureSessionProjectionParams{SessionID: value.ID, UpdatedAt: now.UnixNano()})
 	if err != nil {
 		return Session{}, fmt.Errorf("ensure session projection: %w", err)
 	}
@@ -277,25 +278,19 @@ func (s *Service) Ensure(ctx context.Context, value Session) (Session, error) {
 }
 
 func (s *Service) LoadSession(ctx context.Context, id string) (Session, error) {
-	var value Session
-	var created, updated int64
-	err := s.db.QueryRowContext(ctx, `SELECT id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at FROM sessions WHERE id=?`, id).Scan(
-		&value.ID, &value.Title, &value.ProviderID, &value.ModelID, &value.Reasoning, &value.AgentMode, &created, &updated,
-	)
+	row, err := dbgen.New(s.db).GetSession(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, fmt.Errorf("session %q not found", id)
 	}
 	if err != nil {
 		return Session{}, fmt.Errorf("load session: %w", err)
 	}
-	value.CreatedAt = time.Unix(0, created).UTC()
-	value.UpdatedAt = time.Unix(0, updated).UTC()
+	value := sessionFromDB(row)
 	return value, nil
 }
 
 func (s *Service) UpdatePreferences(ctx context.Context, id, providerID, modelID, reasoning, agentMode string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET provider_id=?,model_id=?,reasoning=?,agent_mode=?,updated_at=? WHERE id=?`,
-		providerID, modelID, reasoning, agentMode, time.Now().UTC().UnixNano(), id)
+	result, err := dbgen.New(s.db).UpdateSessionPreferences(ctx, dbgen.UpdateSessionPreferencesParams{ProviderID: providerID, ModelID: modelID, Reasoning: reasoning, AgentMode: agentMode, UpdatedAt: time.Now().UTC().UnixNano(), ID: id})
 	if err != nil {
 		return fmt.Errorf("update session preferences: %w", err)
 	}
@@ -314,25 +309,19 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	if err != nil {
 		return Projection{}, err
 	}
-	var blocksData, historyData, usageData []byte
-	var runID string
-	var updated, generation, cacheEpoch int64
-	var cacheIdentity string
-	err = s.db.QueryRowContext(ctx, `SELECT last_run_id,blocks,model_history,usage,updated_at,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?`, id).Scan(
-		&runID, &blocksData, &historyData, &usageData, &updated, &generation, &cacheEpoch, &cacheIdentity,
-	)
+	row, err := dbgen.New(s.db).GetSessionProjection(ctx, id)
 	if err != nil {
 		return Projection{}, fmt.Errorf("load projection: %w", err)
 	}
 	var blocks []Block
-	if err := json.Unmarshal(blocksData, &blocks); err != nil {
+	if err := json.Unmarshal(row.Blocks, &blocks); err != nil {
 		return Projection{}, fmt.Errorf("decode projection: %w", err)
 	}
 	var history ModelHistory
-	if err := json.Unmarshal(historyData, &history); err != nil {
+	if err := json.Unmarshal(row.ModelHistory, &history); err != nil {
 		return Projection{}, fmt.Errorf("decode model history: %w", err)
 	}
-	usage, err := DecodeUsage(usageData)
+	usage, err := DecodeUsage(row.Usage)
 	if err != nil {
 		return Projection{}, err
 	}
@@ -340,15 +329,15 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	if err != nil {
 		return Projection{}, err
 	}
-	if len(blocks) == 0 && string(blocksData) != "[]" {
-		if err := json.Unmarshal(blocksData, &blocks); err != nil {
+	if len(blocks) == 0 && string(row.Blocks) != "[]" {
+		if err := json.Unmarshal(row.Blocks, &blocks); err != nil {
 			return Projection{}, fmt.Errorf("decode legacy projection: %w", err)
 		}
 	}
 	return Projection{
-		Session: value, LastRunID: runID, Blocks: blocks, ModelHistory: history, Usage: usage,
-		UpdatedAt:            time.Unix(0, updated).UTC(),
-		CheckpointGeneration: generation, CacheEpoch: cacheEpoch, CacheIdentityHash: cacheIdentity,
+		Session: value, LastRunID: row.LastRunID, Blocks: blocks, ModelHistory: history, Usage: usage,
+		UpdatedAt:            time.Unix(0, row.UpdatedAt).UTC(),
+		CheckpointGeneration: row.CheckpointGeneration, CacheEpoch: row.CacheEpoch, CacheIdentityHash: row.CacheIdentityHash,
 	}, nil
 }
 
@@ -365,17 +354,15 @@ func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block
 	now := time.Now().UTC().UnixNano()
 	// Appending a canonical user tail and UI-only lifecycle updates do not make
 	// an earlier checkpoint stale. Coalescing can rewrite a covered assistant.
-	query := `UPDATE session_projections SET last_run_id=?,updated_at=? WHERE session_id=?`
+	queries := dbgen.New(tx)
 	if mutated && block.Kind == "assistant" {
-		query = `UPDATE session_projections SET last_run_id=?,
-			model_history=CASE WHEN CAST(json_extract(model_history,'$.coveredThroughSequence') AS INTEGER)>=` + fmt.Sprint(sequence) + ` THEN '{}' ELSE model_history END,
-			checkpoint_generation=checkpoint_generation+CASE WHEN CAST(json_extract(model_history,'$.coveredThroughSequence') AS INTEGER)>=` + fmt.Sprint(sequence) + ` THEN 1 ELSE 0 END,
-			updated_at=? WHERE session_id=?`
-	}
-	if _, err := tx.ExecContext(ctx, query, block.RunID, now, sessionID); err != nil {
+		if err := queries.UpdateProjectionRunAfterAssistantMutation(ctx, dbgen.UpdateProjectionRunAfterAssistantMutationParams{LastRunID: block.RunID, HistorySequence: sequence, GenerationSequence: sequence, UpdatedAt: now, SessionID: sessionID}); err != nil {
+			return 0, err
+		}
+	} else if err := queries.UpdateProjectionRun(ctx, dbgen.UpdateProjectionRunParams{LastRunID: block.RunID, UpdatedAt: now, SessionID: sessionID}); err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
+	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return 0, err
 	}
 	return sequence, tx.Commit()
@@ -387,12 +374,12 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 		return err
 	}
 	defer tx.Rollback()
-	var activeRunID string
-	var currentGeneration int64
-	if err := tx.QueryRowContext(ctx, `SELECT last_run_id,checkpoint_generation FROM session_projections WHERE session_id=?`, sessionID).
-		Scan(&activeRunID, &currentGeneration); err != nil {
+	queries := dbgen.New(tx)
+	checkpoint, err := queries.GetProjectionCheckpoint(ctx, sessionID)
+	if err != nil {
 		return err
 	}
+	activeRunID, currentGeneration := checkpoint.LastRunID, checkpoint.CheckpointGeneration
 	if block.RunID != "" && activeRunID != "" && activeRunID != block.RunID {
 		return fmt.Errorf("complete turn: active run changed from %q to %q", block.RunID, activeRunID)
 	}
@@ -426,9 +413,7 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 		return fmt.Errorf("encode model history: %w", err)
 	}
 	now := time.Now().UTC().UnixNano()
-	result, err := tx.ExecContext(ctx, `UPDATE session_projections SET last_run_id=?,model_history=?,checkpoint_generation=?,updated_at=?
-		WHERE session_id=? AND last_run_id=? AND checkpoint_generation=?`, block.RunID, encodedHistory, generation, now,
-		sessionID, activeRunID, currentGeneration)
+	result, err := queries.CompleteProjectionCAS(ctx, dbgen.CompleteProjectionCASParams{LastRunID: block.RunID, ModelHistory: encodedHistory, CheckpointGeneration: generation, UpdatedAt: now, SessionID: sessionID, LastRunID_2: activeRunID, CheckpointGeneration_2: currentGeneration})
 	if err != nil {
 		return err
 	}
@@ -439,7 +424,7 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 	if changed != 1 {
 		return fmt.Errorf("complete turn: active run or checkpoint changed while completion was prepared")
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
+	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -465,12 +450,12 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 		return err
 	}
 	defer tx.Rollback()
-	var lastRunID, currentIdentity string
-	var generation, cacheEpoch int64
-	if err := tx.QueryRowContext(ctx, `SELECT last_run_id,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?`, sessionID).
-		Scan(&lastRunID, &generation, &cacheEpoch, &currentIdentity); err != nil {
+	queries := dbgen.New(tx)
+	state, err := queries.GetRunCheckpointState(ctx, sessionID)
+	if err != nil {
 		return err
 	}
+	lastRunID, generation, cacheEpoch, currentIdentity := state.LastRunID, state.CheckpointGeneration, state.CacheEpoch, state.CacheIdentityHash
 	if lastRunID != checkpoint.RunID {
 		return fmt.Errorf("save run checkpoint: active run changed from %q to %q", checkpoint.RunID, lastRunID)
 	}
@@ -491,8 +476,8 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 	}
 	if currentIdentity == checkpoint.CacheIdentity {
 		var current ModelHistory
-		var encoded []byte
-		if err := tx.QueryRowContext(ctx, `SELECT model_history FROM session_projections WHERE session_id=?`, sessionID).Scan(&encoded); err != nil {
+		encoded, err := queries.GetProjectionHistory(ctx, sessionID)
+		if err != nil {
 			return err
 		}
 		if json.Unmarshal(encoded, &current) == nil && reflect.DeepEqual(normalizeMessageTimes(current.Messages), normalizeMessageTimes(history.Messages)) {
@@ -510,9 +495,7 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 	if currentIdentity != checkpoint.CacheIdentity {
 		nextCacheEpoch++
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history=?,checkpoint_generation=?,cache_epoch=?,cache_identity_hash=?,updated_at=?
-		WHERE session_id=? AND last_run_id=? AND checkpoint_generation=?`, encoded, generation+1, nextCacheEpoch, checkpoint.CacheIdentity, now,
-		sessionID, checkpoint.RunID, generation)
+	result, err := queries.SaveRunCheckpointCAS(ctx, dbgen.SaveRunCheckpointCASParams{ModelHistory: encoded, CheckpointGeneration: generation + 1, CacheEpoch: nextCacheEpoch, CacheIdentityHash: checkpoint.CacheIdentity, UpdatedAt: now, SessionID: sessionID, LastRunID: checkpoint.RunID, CheckpointGeneration_2: generation})
 	if err != nil {
 		return err
 	}
@@ -523,7 +506,7 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 	if changed != 1 {
 		return fmt.Errorf("save run checkpoint: projection changed while checkpoint was prepared")
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
+	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -552,8 +535,8 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 	if err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE session_blocks SET run_id=?,data=? WHERE session_id=? AND kind='agent' AND agent_id=?`,
-		block.RunID, encoded, sessionID, agentID)
+	queries := dbgen.New(tx)
+	result, err := queries.UpdateAgentBlock(ctx, dbgen.UpdateAgentBlockParams{RunID: block.RunID, Data: encoded, SessionID: sessionID, AgentID: agentID})
 	if err != nil {
 		return err
 	}
@@ -567,10 +550,10 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 		}
 	}
 	now := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET updated_at=? WHERE session_id=?`, now, sessionID); err != nil {
+	if err := queries.TouchProjection(ctx, dbgen.TouchProjectionParams{UpdatedAt: now, SessionID: sessionID}); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
+	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -591,11 +574,12 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 		return Projection{}, err
 	}
 	defer tx.Rollback()
-	var historyData []byte
-	var projectionUpdated, generation, cacheEpoch int64
-	if err := tx.QueryRowContext(ctx, `SELECT model_history,updated_at,checkpoint_generation,cache_epoch FROM session_projections WHERE session_id=?`, sessionID).Scan(&historyData, &projectionUpdated, &generation, &cacheEpoch); err != nil {
+	queries := dbgen.New(tx)
+	state, err := queries.GetCompactionState(ctx, sessionID)
+	if err != nil {
 		return Projection{}, err
 	}
+	historyData, projectionUpdated, generation, cacheEpoch := state.ModelHistory, state.UpdatedAt, state.CheckpointGeneration, state.CacheEpoch
 	if !plan.ExpectedUpdatedAt.IsZero() && projectionUpdated != plan.ExpectedUpdatedAt.UnixNano() {
 		return Projection{}, fmt.Errorf("compact session: projection changed while summary was generated")
 	}
@@ -616,10 +600,10 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 	if err != nil {
 		return Projection{}, fmt.Errorf("encode compacted model history: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE session_projections SET model_history=?,checkpoint_generation=?,cache_epoch=?,cache_identity_hash='',updated_at=? WHERE session_id=?`, encodedHistory, generation+1, cacheEpoch+1, now, sessionID); err != nil {
+	if err := queries.SaveCompaction(ctx, dbgen.SaveCompactionParams{ModelHistory: encodedHistory, CheckpointGeneration: generation + 1, CacheEpoch: cacheEpoch + 1, UpdatedAt: now, SessionID: sessionID}); err != nil {
 		return Projection{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, now, sessionID); err != nil {
+	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return Projection{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -633,37 +617,26 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 	return projection, nil
 }
 
-type sessionBlockQueryer interface {
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}
-
-func loadSessionBlocks(ctx context.Context, queryer sessionBlockQueryer, sessionID string) ([]Block, error) {
-	rows, err := queryer.QueryContext(ctx, `SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence`, sessionID)
+func loadSessionBlocks(ctx context.Context, queryer dbgen.DBTX, sessionID string) ([]Block, error) {
+	rows, err := dbgen.New(queryer).ListSessionBlocks(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load session blocks: %w", err)
 	}
-	defer rows.Close()
-	blocks := make([]Block, 0)
-	for rows.Next() {
-		var data []byte
-		var sequence int64
-		if err := rows.Scan(&sequence, &data); err != nil {
-			return nil, err
-		}
+	blocks := make([]Block, 0, len(rows))
+	for _, row := range rows {
 		var block Block
-		if err := json.Unmarshal(data, &block); err != nil {
+		if err := json.Unmarshal(row.Data, &block); err != nil {
 			return nil, fmt.Errorf("decode session block: %w", err)
 		}
-		block.Sequence = sequence
+		block.Sequence = row.Sequence
 		blocks = append(blocks, block)
 	}
-	return blocks, rows.Err()
+	return blocks, nil
 }
 
 func appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block) (int64, bool, error) {
-	var sequence int64
-	var data []byte
-	err := tx.QueryRowContext(ctx, `SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence DESC LIMIT 1`, sessionID).Scan(&sequence, &data)
+	row, err := dbgen.New(tx).GetLatestSessionBlock(ctx, sessionID)
+	sequence, data := row.Sequence, row.Data
 	empty := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, false, fmt.Errorf("load latest session block: %w", err)
@@ -679,7 +652,7 @@ func appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block
 			if err != nil {
 				return 0, false, err
 			}
-			_, err = tx.ExecContext(ctx, `UPDATE session_blocks SET data=? WHERE session_id=? AND sequence=?`, encoded, sessionID, sequence)
+			err = dbgen.New(tx).UpdateSessionBlockData(ctx, dbgen.UpdateSessionBlockDataParams{Data: encoded, SessionID: sessionID, Sequence: sequence})
 			return sequence, true, err
 		}
 	}
@@ -694,24 +667,19 @@ func appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block
 	return sequence, false, insertSessionBlock(ctx, tx, sessionID, block, encoded)
 }
 
-func canonicalHighWater(ctx context.Context, queryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, sessionID string) (*int64, error) {
-	var value sql.NullInt64
-	if err := queryer.QueryRowContext(ctx, `SELECT MAX(sequence) FROM session_blocks WHERE session_id=? AND kind IN ('user','assistant')`, sessionID).Scan(&value); err != nil {
-		return nil, err
-	}
-	if !value.Valid {
+func canonicalHighWater(ctx context.Context, queryer dbgen.DBTX, sessionID string) (*int64, error) {
+	value, err := dbgen.New(queryer).CanonicalHighWater(ctx, sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return &value.Int64, nil
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 func insertSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block, encoded []byte) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data)
-		SELECT ?,COALESCE(MAX(sequence)+1,0),?,?,?,? FROM session_blocks WHERE session_id=?`,
-		sessionID, block.Kind, block.RunID, block.AgentID, encoded, sessionID)
-	return err
+	return dbgen.New(tx).InsertSessionBlock(ctx, dbgen.InsertSessionBlockParams{SessionID: sessionID, Kind: block.Kind, RunID: block.RunID, AgentID: block.AgentID, Data: encoded, SessionID_2: sessionID})
 }
 
 func firstSessionValue(values ...string) string {
@@ -724,30 +692,20 @@ func firstSessionValue(values ...string) string {
 }
 
 func (s *Service) List(ctx context.Context, limit int) ([]Session, error) {
-	query := `SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at
-		FROM sessions s JOIN session_projections p ON p.session_id=s.id
-		WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) OR CAST(p.blocks AS TEXT)<>'[]'
-		ORDER BY s.updated_at DESC`
-	args := []any{}
+	queries := dbgen.New(s.db)
+	var rows []dbgen.Session
+	var err error
 	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
+		rows, err = queries.ListSessionsLimited(ctx, int64(limit))
+	} else {
+		rows, err = queries.ListSessions(ctx)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var values []Session
-	for rows.Next() {
-		var value Session
-		var created, updated int64
-		if err := rows.Scan(&value.ID, &value.Title, &value.ProviderID, &value.ModelID, &value.Reasoning, &value.AgentMode, &created, &updated); err != nil {
-			return nil, err
-		}
-		value.CreatedAt = time.Unix(0, created).UTC()
-		value.UpdatedAt = time.Unix(0, updated).UTC()
-		values = append(values, value)
+	values := make([]Session, 0, len(rows))
+	for _, row := range rows {
+		values = append(values, sessionFromDB(row))
 	}
-	return values, rows.Err()
+	return values, nil
 }

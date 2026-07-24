@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 	"github.com/Viking602/go-hydaelyn/api"
 )
 
@@ -22,21 +23,27 @@ func (u *unitOfWork) UpdateTraceSpan(ctx context.Context, value api.TraceSpan) e
 
 func (u *unitOfWork) SaveLease(ctx context.Context, value api.TaskExecutionLease) error {
 	syncLeaseExpiry(&value)
-	var current uint64
-	err := u.tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM leases WHERE run_id=? AND task_id=?`, value.RunID, value.TaskID).Scan(&current)
+	queries := dbgen.New(u.tx)
+	current, err := queries.MaxLeaseVersion(ctx, dbgen.MaxLeaseVersionParams{RunID: value.RunID, TaskID: value.TaskID})
 	if err != nil {
 		return fmt.Errorf("read lease version: %w", err)
 	}
-	if value.Version <= current {
-		value.Version = current + 1
+	currentVersion, err := uint64FromInt64(current)
+	if err != nil {
+		return fmt.Errorf("read lease version: %w", err)
+	}
+	if value.Version <= currentVersion {
+		value.Version = currentVersion + 1
+	}
+	version, err := int64FromUint64(value.Version)
+	if err != nil {
+		return fmt.Errorf("save lease: %w", err)
 	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("marshal lease: %w", err)
 	}
-	_, err = u.tx.ExecContext(ctx, `INSERT INTO leases(id,run_id,task_id,holder_id,status,expires_at,version,data) VALUES(?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,task_id=excluded.task_id,holder_id=excluded.holder_id,status=excluded.status,expires_at=excluded.expires_at,version=excluded.version,data=excluded.data`,
-		value.ID, value.RunID, value.TaskID, value.HolderID, string(value.Status), nanos(value.ExpiresAt), value.Version, data)
+	err = queries.UpsertLease(ctx, dbgen.UpsertLeaseParams{ID: value.ID, RunID: value.RunID, TaskID: value.TaskID, HolderID: value.HolderID, Status: string(value.Status), ExpiresAt: nanos(value.ExpiresAt), Version: version, Data: data})
 	if err != nil {
 		return fmt.Errorf("save lease: %w", err)
 	}
@@ -45,8 +52,8 @@ func (u *unitOfWork) SaveLease(ctx context.Context, value api.TaskExecutionLease
 
 func (u *unitOfWork) LoadLease(ctx context.Context, id string) (api.TaskExecutionLease, error) {
 	var value api.TaskExecutionLease
-	var data []byte
-	if err := u.tx.QueryRowContext(ctx, `SELECT data FROM leases WHERE id=?`, id).Scan(&data); err != nil {
+	data, err := dbgen.New(u.tx).GetLeaseData(ctx, id)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return value, api.ErrNotFound
 		}
@@ -60,8 +67,7 @@ func (u *unitOfWork) LoadLease(ctx context.Context, id string) (api.TaskExecutio
 
 func (u *unitOfWork) ActiveLeaseForTask(ctx context.Context, runID string, taskID string) (api.TaskExecutionLease, bool, error) {
 	var value api.TaskExecutionLease
-	var data []byte
-	err := u.tx.QueryRowContext(ctx, `SELECT data FROM leases WHERE run_id=? AND task_id=? ORDER BY version DESC LIMIT 1`, runID, taskID).Scan(&data)
+	data, err := dbgen.New(u.tx).GetLatestLeaseData(ctx, dbgen.GetLatestLeaseDataParams{RunID: runID, TaskID: taskID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return value, false, nil
 	}
@@ -75,9 +81,10 @@ func (u *unitOfWork) ActiveLeaseForTask(ctx context.Context, runID string, taskI
 }
 
 func (u *unitOfWork) AcquireWithExpectedVersion(ctx context.Context, value api.TaskExecutionLease, expected uint64) (bool, error) {
-	var data []byte
+	queries := dbgen.New(u.tx)
+	row, err := queries.GetLatestLease(ctx, dbgen.GetLatestLeaseParams{RunID: value.RunID, TaskID: value.TaskID})
 	var currentVersion uint64
-	err := u.tx.QueryRowContext(ctx, `SELECT version,data FROM leases WHERE run_id=? AND task_id=? ORDER BY version DESC LIMIT 1`, value.RunID, value.TaskID).Scan(&currentVersion, &data)
+	data := row.Data
 	if errors.Is(err, sql.ErrNoRows) {
 		currentVersion = 0
 		data = nil
@@ -85,6 +92,8 @@ func (u *unitOfWork) AcquireWithExpectedVersion(ctx context.Context, value api.T
 		if isBusy(err) {
 			return false, nil
 		}
+		return false, fmt.Errorf("read lease slot: %w", err)
+	} else if currentVersion, err = uint64FromInt64(row.Version); err != nil {
 		return false, fmt.Errorf("read lease slot: %w", err)
 	}
 	if currentVersion != expected {
@@ -100,11 +109,15 @@ func (u *unitOfWork) AcquireWithExpectedVersion(ctx context.Context, value api.T
 		}
 		if previous.Status == api.LeaseStatusActive {
 			previous.Status = api.LeaseStatusExpired
+			previousVersion, err := int64FromUint64(previous.Version)
+			if err != nil {
+				return false, fmt.Errorf("expire previous lease: %w", err)
+			}
 			previousData, err := json.Marshal(previous)
 			if err != nil {
 				return false, err
 			}
-			if _, err := u.tx.ExecContext(ctx, `UPDATE leases SET status=?,data=? WHERE id=? AND version=?`, string(previous.Status), previousData, previous.ID, previous.Version); err != nil {
+			if _, err := queries.ExpireLeaseCAS(ctx, dbgen.ExpireLeaseCASParams{Status: string(previous.Status), Data: previousData, ID: previous.ID, Version: previousVersion}); err != nil {
 				if isBusy(err) {
 					return false, nil
 				}
@@ -115,12 +128,15 @@ func (u *unitOfWork) AcquireWithExpectedVersion(ctx context.Context, value api.T
 	value.Version = expected + 1
 	value.Status = api.LeaseStatusActive
 	syncLeaseExpiry(&value)
+	version, err := int64FromUint64(value.Version)
+	if err != nil {
+		return false, fmt.Errorf("acquire lease: %w", err)
+	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return false, fmt.Errorf("marshal acquired lease: %w", err)
 	}
-	_, err = u.tx.ExecContext(ctx, `INSERT INTO leases(id,run_id,task_id,holder_id,status,expires_at,version,data) VALUES(?,?,?,?,?,?,?,?)`,
-		value.ID, value.RunID, value.TaskID, value.HolderID, string(value.Status), nanos(value.ExpiresAt), value.Version, encoded)
+	err = queries.InsertLease(ctx, dbgen.InsertLeaseParams{ID: value.ID, RunID: value.RunID, TaskID: value.TaskID, HolderID: value.HolderID, Status: string(value.Status), ExpiresAt: nanos(value.ExpiresAt), Version: version, Data: encoded})
 	if err != nil {
 		if isBusy(err) || isConstraint(err) {
 			return false, nil
@@ -146,7 +162,15 @@ func (u *unitOfWork) ExtendLease(ctx context.Context, leaseID string, workerID s
 		return false, nil
 	}
 	oldVersion := value.Version
+	oldVersionSQL, err := int64FromUint64(oldVersion)
+	if err != nil {
+		return false, fmt.Errorf("extend lease: %w", err)
+	}
 	value.Version++
+	nextVersionSQL, err := int64FromUint64(value.Version)
+	if err != nil {
+		return false, fmt.Errorf("extend lease: %w", err)
+	}
 	value.ExpiresAt = newExpiry.UTC()
 	value.Expiry = value.ExpiresAt
 	value.HeartbeatAt = time.Now().UTC()
@@ -154,7 +178,7 @@ func (u *unitOfWork) ExtendLease(ctx context.Context, leaseID string, workerID s
 	if err != nil {
 		return false, err
 	}
-	result, err := u.tx.ExecContext(ctx, `UPDATE leases SET expires_at=?,version=?,data=? WHERE id=? AND holder_id=? AND status=? AND version=?`, nanos(value.ExpiresAt), value.Version, data, leaseID, workerID, string(api.LeaseStatusActive), oldVersion)
+	result, err := dbgen.New(u.tx).ExtendLeaseCAS(ctx, dbgen.ExtendLeaseCASParams{ExpiresAt: nanos(value.ExpiresAt), Version: nextVersionSQL, Data: data, ID: leaseID, HolderID: workerID, Status: string(api.LeaseStatusActive), Version_2: oldVersionSQL})
 	if err != nil {
 		if isBusy(err) {
 			return false, nil
@@ -175,8 +199,7 @@ func (u *unitOfWork) LoadActionAttempt(ctx context.Context, id string) (api.Acti
 
 func (u *unitOfWork) LoadActionAttemptByIdempotencyKey(ctx context.Context, runID string, taskID string, toolName string, key string) (api.ActionAttempt, error) {
 	var value api.ActionAttempt
-	var data []byte
-	err := u.tx.QueryRowContext(ctx, `SELECT data FROM records WHERE kind=? AND run_id=? AND task_id=? AND tool_name=? AND idempotency_key=?`, kindAction, runID, taskID, toolName, key).Scan(&data)
+	data, err := dbgen.New(u.tx).GetActionAttemptByIdempotency(ctx, dbgen.GetActionAttemptByIdempotencyParams{Kind: kindAction, RunID: runID, TaskID: taskID, ToolName: toolName, IdempotencyKey: key})
 	if errors.Is(err, sql.ErrNoRows) {
 		return value, api.ErrNotFound
 	}

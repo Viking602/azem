@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 type TodoStatus string
@@ -54,20 +56,18 @@ func (t TodoList) Clone() TodoList {
 }
 
 func (s *Service) LoadTodo(ctx context.Context, sessionID string) (TodoList, error) {
-	var todo TodoList
-	var phases []byte
-	var updated int64
-	err := s.db.QueryRowContext(ctx, `SELECT goal,revision,phases,updated_at FROM session_todos WHERE session_id=?`, sessionID).Scan(&todo.Goal, &todo.Revision, &phases, &updated)
+	row, err := dbgen.New(s.db).GetTodo(ctx, sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TodoList{Phases: []TodoPhase{}}, nil
 	}
 	if err != nil {
 		return TodoList{}, fmt.Errorf("load todo: %w", err)
 	}
-	if err := json.Unmarshal(phases, &todo.Phases); err != nil {
+	todo := TodoList{Goal: row.Goal, Revision: row.Revision}
+	if err := json.Unmarshal(row.Phases, &todo.Phases); err != nil {
 		return TodoList{}, fmt.Errorf("decode todo: %w", err)
 	}
-	todo.UpdatedAt = time.Unix(0, updated).UTC()
+	todo.UpdatedAt = time.Unix(0, row.UpdatedAt).UTC()
 	return todo, nil
 }
 
@@ -81,8 +81,11 @@ func (s *Service) UpdateTodo(ctx context.Context, sessionID string, expectedRevi
 	defer tx.Rollback()
 	var current TodoList
 	var data []byte
-	var updated int64
-	err = tx.QueryRowContext(ctx, `SELECT goal,revision,phases,updated_at FROM session_todos WHERE session_id=?`, sessionID).Scan(&current.Goal, &current.Revision, &data, &updated)
+	row, err := dbgen.New(tx).GetTodo(ctx, sessionID)
+	exists := err == nil
+	if err == nil {
+		current.Goal, current.Revision, data = row.Goal, row.Revision, row.Phases
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		current.Phases = []TodoPhase{}
 	} else if err != nil {
@@ -106,8 +109,13 @@ func (s *Service) UpdateTodo(ctx context.Context, sessionID string, expectedRevi
 	if err != nil {
 		return TodoList{}, err
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO session_todos(session_id,goal,revision,phases,updated_at) VALUES(?,?,?,?,?)
-		ON CONFLICT(session_id) DO UPDATE SET goal=excluded.goal,revision=excluded.revision,phases=excluded.phases,updated_at=excluded.updated_at WHERE session_todos.revision=?`, sessionID, next.Goal, next.Revision, encoded, next.UpdatedAt.UnixNano(), expectedRevision)
+	queries := dbgen.New(tx)
+	var result sql.Result
+	if exists {
+		result, err = queries.UpdateTodoCAS(ctx, dbgen.UpdateTodoCASParams{Goal: next.Goal, Revision: next.Revision, Phases: encoded, UpdatedAt: next.UpdatedAt.UnixNano(), SessionID: sessionID, Revision_2: expectedRevision})
+	} else {
+		result, err = queries.InsertTodoIfAbsent(ctx, dbgen.InsertTodoIfAbsentParams{SessionID: sessionID, Goal: next.Goal, Revision: next.Revision, Phases: encoded, UpdatedAt: next.UpdatedAt.UnixNano()})
+	}
 	if err != nil {
 		return TodoList{}, fmt.Errorf("update todo: %w", err)
 	}

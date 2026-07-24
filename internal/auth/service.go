@@ -15,6 +15,7 @@ import (
 
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 type Account struct {
@@ -165,38 +166,30 @@ func (s *Service) Credential(ctx context.Context, provider string, accountID str
 }
 
 func (s *Service) Accounts(ctx context.Context, provider string) ([]Account, error) {
-	query := `SELECT id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at FROM accounts`
-	args := []any{}
+	queries := dbgen.New(s.db)
+	var rows []dbgen.Account
+	var err error
 	if provider != "" {
-		query += ` WHERE provider_id=?`
-		args = append(args, provider)
+		rows, err = queries.ListAccountsByProvider(ctx, provider)
+	} else {
+		rows, err = queries.ListAccounts(ctx)
 	}
-	query += ` ORDER BY updated_at DESC`
-	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	accounts := make([]Account, 0)
-	for rows.Next() {
-		var account Account
-		var createdAt, updatedAt int64
-		if err := rows.Scan(&account.ID, &account.Provider, &account.Email, &account.DisplayName, &account.Plan, &account.CredentialRef, &account.Status, &createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		account.CreatedAt = time.Unix(0, createdAt).UTC()
-		account.UpdatedAt = time.Unix(0, updatedAt).UTC()
-		accounts = append(accounts, account)
+	accounts := make([]Account, 0, len(rows))
+	for _, row := range rows {
+		accounts = append(accounts, accountFromDB(row))
 	}
-	return accounts, rows.Err()
+	return accounts, nil
 }
 
 func (s *Service) HasAnyAccount(ctx context.Context, provider string) (bool, error) {
-	var exists bool
-	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM accounts WHERE provider_id=? LIMIT 1)`, provider).Scan(&exists); err != nil {
+	exists, err := dbgen.New(s.db).HasAnyAccount(ctx, provider)
+	if err != nil {
 		return false, err
 	}
-	return exists, nil
+	return exists != 0, nil
 }
 
 // HasActiveChatGPTAccount is the authorization predicate for ChatGPT-only
@@ -204,15 +197,11 @@ func (s *Service) HasAnyAccount(ctx context.Context, provider string) (bool, err
 // Codex token import with an access token; API-key and PAT imports are not
 // supported. If those auth kinds are added, this predicate must be narrowed.
 func (s *Service) HasActiveChatGPTAccount(ctx context.Context) (bool, error) {
-	var active bool
-	err := s.db.QueryRowContext(
-		ctx,
-		`SELECT EXISTS(SELECT 1 FROM accounts WHERE provider_id='chatgpt' AND status='active')`,
-	).Scan(&active)
+	active, err := dbgen.New(s.db).HasActiveChatGPTAccount(ctx)
 	if err != nil {
 		return false, fmt.Errorf("query active ChatGPT account: %w", err)
 	}
-	return active, nil
+	return active != 0, nil
 }
 
 func (s *Service) Refresh(ctx context.Context, provider string, accountID string) (Credential, error) {
@@ -341,19 +330,14 @@ func (s *Service) doWithRefresh(ctx context.Context, client *http.Client, provid
 }
 
 func (s *Service) Account(ctx context.Context, provider string, accountID string) (Account, error) {
-	var value Account
-	var created, updated int64
-	err := s.db.QueryRowContext(ctx, `SELECT id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at FROM accounts WHERE provider_id=? AND id=?`, provider, accountID).Scan(
-		&value.ID, &value.Provider, &value.Email, &value.DisplayName, &value.Plan, &value.CredentialRef, &value.Status, &created, &updated,
-	)
+	row, err := dbgen.New(s.db).GetAccount(ctx, dbgen.GetAccountParams{ProviderID: provider, ID: accountID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, fmt.Errorf("account not found")
 	}
 	if err != nil {
 		return Account{}, err
 	}
-	value.CreatedAt, value.UpdatedAt = time.Unix(0, created).UTC(), time.Unix(0, updated).UTC()
-	return value, nil
+	return accountFromDB(row), nil
 }
 
 func (s *Service) storeChatGPT(ctx context.Context, tokens chatgpt.Tokens) (Account, error) {
@@ -373,9 +357,7 @@ func (s *Service) storeCredential(ctx context.Context, credential Credential) (A
 	}
 	now := time.Now().UTC()
 	account := Account{ID: credential.AccountID, Provider: credential.Provider, Email: credential.Email, DisplayName: credential.DisplayName, Plan: credential.Plan, CredentialRef: reference, Status: "active", CreatedAt: now, UpdatedAt: now}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(provider_id,id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,plan=excluded.plan,credential_ref=excluded.credential_ref,status=excluded.status,updated_at=excluded.updated_at`,
-		account.ID, account.Provider, account.Email, account.DisplayName, account.Plan, account.CredentialRef, account.Status, now.UnixNano(), now.UnixNano())
+	err = dbgen.New(s.db).UpsertAccount(ctx, dbgen.UpsertAccountParams{ID: account.ID, ProviderID: account.Provider, Email: account.Email, DisplayName: account.DisplayName, Plan: account.Plan, CredentialRef: account.CredentialRef, Status: account.Status, CreatedAt: now.UnixNano(), UpdatedAt: now.UnixNano()})
 	if err != nil {
 		_ = s.store.Delete(context.WithoutCancel(ctx), credential.Provider, credential.AccountID)
 		return Account{}, err
@@ -384,7 +366,7 @@ func (s *Service) storeCredential(ctx context.Context, credential Credential) (A
 }
 
 func (s *Service) markStatus(ctx context.Context, provider string, accountID string, status string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE accounts SET status=?,updated_at=? WHERE provider_id=? AND id=?`, status, time.Now().UTC().UnixNano(), provider, accountID)
+	result, err := dbgen.New(s.db).UpdateAccountStatus(ctx, dbgen.UpdateAccountStatusParams{Status: status, UpdatedAt: time.Now().UTC().UnixNano(), ProviderID: provider, ID: accountID})
 	if err != nil {
 		return err
 	}
@@ -402,6 +384,10 @@ func (s *Service) markStatus(ctx context.Context, provider string, accountID str
 		callback(ctx, AccountStatusChange{Provider: provider, AccountID: accountID, Status: status})
 	}
 	return nil
+}
+
+func accountFromDB(row dbgen.Account) Account {
+	return Account{ID: row.ID, Provider: row.ProviderID, Email: row.Email, DisplayName: row.DisplayName, Plan: row.Plan, CredentialRef: row.CredentialRef, Status: row.Status, CreatedAt: time.Unix(0, row.CreatedAt).UTC(), UpdatedAt: time.Unix(0, row.UpdatedAt).UTC()}
 }
 
 func applyChatGPTTokens(credential *Credential, tokens chatgpt.Tokens) {

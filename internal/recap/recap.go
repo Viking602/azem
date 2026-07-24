@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 const MaxFieldRunes = 8000
@@ -74,16 +76,15 @@ func (s *Service) Upsert(ctx context.Context, r Recap) (Recap, error) {
 	r.OpenItems = safeField(r.OpenItems, 1600)
 	r.CoveredBoundary = bounded(r.CoveredBoundary, 256)
 	r.UpdatedAt = time.Now().UTC()
-	err := s.db.QueryRowContext(ctx, `INSERT INTO recaps(session_id,anchor,covered_boundary,revision,goal,summary,open_items,updated_at) VALUES(?,?,?,1,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET covered_boundary=excluded.covered_boundary,revision=recaps.revision+1,goal=excluded.goal,summary=excluded.summary,open_items=excluded.open_items,updated_at=excluded.updated_at WHERE recaps.anchor=excluded.anchor RETURNING revision`, r.SessionID, r.Anchor, r.CoveredBoundary, r.Goal, r.Summary, r.OpenItems, r.UpdatedAt.UnixMilli()).Scan(&r.Revision)
+	revision, err := dbgen.New(s.db).UpsertRecap(ctx, dbgen.UpsertRecapParams{SessionID: r.SessionID, Anchor: r.Anchor, CoveredBoundary: r.CoveredBoundary, Goal: r.Goal, Summary: r.Summary, OpenItems: r.OpenItems, UpdatedAt: r.UpdatedAt.UnixMilli()})
+	r.Revision = int(revision)
 	if err == sql.ErrNoRows {
 		return Recap{}, fmt.Errorf("recap session %q belongs to another workspace", r.SessionID)
 	}
 	return r, err
 }
 func (s *Service) Load(ctx context.Context, id string) (Recap, error) {
-	var r Recap
-	var at int64
-	err := s.db.QueryRowContext(ctx, `SELECT session_id,anchor,covered_boundary,revision,goal,summary,open_items,updated_at FROM recaps WHERE session_id=? AND anchor=?`, id, s.anchor).Scan(&r.SessionID, &r.Anchor, &r.CoveredBoundary, &r.Revision, &r.Goal, &r.Summary, &r.OpenItems, &at)
-	r.UpdatedAt = time.UnixMilli(at).UTC()
+	row, err := dbgen.New(s.db).GetRecap(ctx, dbgen.GetRecapParams{SessionID: id, Anchor: s.anchor})
+	r := Recap{SessionID: row.SessionID, Anchor: row.Anchor, CoveredBoundary: row.CoveredBoundary, Revision: int(row.Revision), Goal: row.Goal, Summary: row.Summary, OpenItems: row.OpenItems, UpdatedAt: time.UnixMilli(row.UpdatedAt).UTC()}
 	return r, err
 }

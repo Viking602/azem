@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 const MaxContentRunes = 8000
@@ -59,12 +61,12 @@ func (s *Service) Remember(ctx context.Context, content, sessionID, provenance s
 	}
 	now := time.Now().UTC()
 	m := Memory{ID: "mem_" + hex.EncodeToString(b), Content: content, Anchor: s.anchor, SessionID: sessionID, Provenance: provenance, Status: "active", Importance: importance, CreatedAt: now, UpdatedAt: now}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO memories(id,content,anchor,session_id,provenance,status,importance,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, m.ID, m.Content, m.Anchor, m.SessionID, m.Provenance, m.Status, m.Importance, now.UnixMilli(), now.UnixMilli())
+	err := dbgen.New(s.db).InsertMemory(ctx, dbgen.InsertMemoryParams{ID: m.ID, Content: m.Content, Anchor: m.Anchor, SessionID: m.SessionID, Provenance: m.Provenance, Status: m.Status, Importance: int64(m.Importance), CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()})
 	return m, err
 }
 
 func (s *Service) Forget(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE memories SET status='forgotten',updated_at=? WHERE id=? AND anchor=? AND status='active'`, time.Now().UTC().UnixMilli(), strings.TrimSpace(id), s.anchor)
+	res, err := dbgen.New(s.db).ForgetMemory(ctx, dbgen.ForgetMemoryParams{UpdatedAt: time.Now().UTC().UnixMilli(), ID: strings.TrimSpace(id), Anchor: s.anchor})
 	if err != nil {
 		return err
 	}
@@ -87,9 +89,7 @@ func (s *Service) List(ctx context.Context, query string, limit int) ([]Memory, 
 			defer rows.Close()
 			return scan(rows)
 		}
-		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
-		like := "%" + escaped + "%"
-		return s.selectRecent(ctx, ` AND content LIKE ? ESCAPE '\'`, limit, like)
+		return s.selectRecent(ctx, query, limit)
 	}
 	return s.selectRecent(ctx, "", limit)
 }
@@ -113,17 +113,30 @@ func ftsQuery(query string) string {
 	return strings.Join(quoted, " OR ")
 }
 
-func (s *Service) selectRecent(ctx context.Context, extra string, limit int, args ...any) ([]Memory, error) {
-	params := []any{s.anchor}
-	params = append(params, args...)
-	params = append(params, limit)
-	rows, err := s.db.QueryContext(ctx, `SELECT id,content,anchor,session_id,provenance,status,importance,created_at,updated_at FROM memories WHERE anchor=? AND status='active'`+extra+` ORDER BY importance DESC,updated_at DESC LIMIT ?`, params...)
+func (s *Service) selectRecent(ctx context.Context, like string, limit int) ([]Memory, error) {
+	queries := dbgen.New(s.db)
+	if like == "" {
+		rows, err := queries.ListRecentMemories(ctx, dbgen.ListRecentMemoriesParams{Anchor: s.anchor, Limit: int64(limit)})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Memory, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, Memory{ID: row.ID, Content: row.Content, Anchor: row.Anchor, SessionID: row.SessionID, Provenance: row.Provenance, Status: row.Status, Importance: int(row.Importance), CreatedAt: time.UnixMilli(row.CreatedAt).UTC(), UpdatedAt: time.UnixMilli(row.UpdatedAt).UTC()})
+		}
+		return out, nil
+	}
+	rows, err := queries.ListMemoriesByContent(ctx, dbgen.ListMemoriesByContentParams{Anchor: s.anchor, Content: like, Limit: int64(limit)})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scan(rows)
+	out := make([]Memory, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, Memory{ID: row.ID, Content: row.Content, Anchor: row.Anchor, SessionID: row.SessionID, Provenance: row.Provenance, Status: row.Status, Importance: int(row.Importance), CreatedAt: time.UnixMilli(row.CreatedAt).UTC(), UpdatedAt: time.UnixMilli(row.UpdatedAt).UTC()})
+	}
+	return out, nil
 }
+
 func scan(rows *sql.Rows) ([]Memory, error) {
 	var out []Memory
 	for rows.Next() {

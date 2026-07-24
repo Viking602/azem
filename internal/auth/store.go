@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 var ErrCredentialNotFound = errors.New("credential not found")
@@ -96,8 +98,7 @@ func (s *RoutedStore) Delete(ctx context.Context, provider string, accountID str
 
 func (s *RoutedStore) storeFor(ctx context.Context, provider string, accountID string) (string, CredentialStore, error) {
 	name := s.defaultName
-	var reference string
-	err := s.db.QueryRowContext(ctx, `SELECT credential_ref FROM accounts WHERE provider_id=? AND id=?`, provider, accountID).Scan(&reference)
+	reference, err := dbgen.New(s.db).GetCredentialRef(ctx, dbgen.GetCredentialRefParams{ProviderID: provider, ID: accountID})
 	switch {
 	case err == nil:
 		name = referenceStoreName(reference)
