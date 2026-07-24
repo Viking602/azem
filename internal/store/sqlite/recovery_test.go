@@ -32,6 +32,13 @@ func TestPrepareRecoveryExpiresLeasesAndQuarantinesIncompleteActions(t *testing.
 	if err := uow.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO sessions(id,created_at,updated_at) VALUES('session-1',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO provider_requests(request_id,session_id,run_id,request_kind,status,started_at)
+		VALUES('request-1','session-1','run-1','main','started',1)`); err != nil {
+		t.Fatal(err)
+	}
 
 	expired, quarantined, err := store.PrepareRecovery(ctx, time.Now().UTC())
 	if err != nil {
@@ -61,6 +68,13 @@ func TestPrepareRecoveryExpiresLeasesAndQuarantinesIncompleteActions(t *testing.
 	}
 	if loadedAttempt.Status != api.ActionAttemptUnknown || !loadedAttempt.RequiresReconcile {
 		t.Fatalf("attempt = %+v", loadedAttempt)
+	}
+	var providerStatus string
+	if err := store.DB().QueryRowContext(ctx, `SELECT status FROM provider_requests WHERE request_id='request-1'`).Scan(&providerStatus); err != nil {
+		t.Fatal(err)
+	}
+	if providerStatus != "unknown" {
+		t.Fatalf("provider request status = %q, want unknown", providerStatus)
 	}
 
 	expired, quarantined, err = store.PrepareRecovery(ctx, time.Now().UTC())

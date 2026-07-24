@@ -26,6 +26,10 @@ type TeamResumer interface {
 	ResumeTeam(context.Context, string) error
 }
 
+type RunResumer interface {
+	ResumeRun(context.Context, string) error
+}
+
 type PendingApproval struct {
 	Approval api.ApprovalRequest
 	Token    api.ResumeToken
@@ -52,10 +56,11 @@ type Service struct {
 	runner    RunRecoverer
 	subagents SubagentInterrupter
 	teams     TeamResumer
+	runs      RunResumer
 	now       func() time.Time
 }
 
-func NewService(store api.StoreProvider, runner RunRecoverer, subagents SubagentInterrupter, teams TeamResumer) (*Service, error) {
+func NewService(store api.StoreProvider, runner RunRecoverer, subagents SubagentInterrupter, teams TeamResumer, runs RunResumer) (*Service, error) {
 	if store == nil {
 		return nil, fmt.Errorf("recovery store is nil")
 	}
@@ -66,7 +71,7 @@ func NewService(store api.StoreProvider, runner RunRecoverer, subagents Subagent
 	if !ok {
 		return nil, fmt.Errorf("recovery store does not support crash-boundary preparation")
 	}
-	return &Service{store: store, preparer: preparer, runner: runner, subagents: subagents, teams: teams, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{store: store, preparer: preparer, runner: runner, subagents: subagents, teams: teams, runs: runs, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 func (s *Service) Recover(ctx context.Context) (Summary, error) {
@@ -146,6 +151,10 @@ func (s *Service) Recover(ctx context.Context) (Summary, error) {
 			}
 			if err := s.teams.ResumeTeam(ctx, candidate.run.ID); err != nil {
 				return Summary{}, fmt.Errorf("resume team run %s: %w", candidate.run.ID, err)
+			}
+		} else if s.runs != nil && projection.Run.Status != api.RunStatusReconcileRequired {
+			if err := s.runs.ResumeRun(ctx, candidate.run.ID); err != nil {
+				return Summary{}, fmt.Errorf("resume run %s: %w", candidate.run.ID, err)
 			}
 		}
 		summary.Runs = append(summary.Runs, RecoveredRun{Run: candidate.run, Projection: projection, Team: candidate.team})

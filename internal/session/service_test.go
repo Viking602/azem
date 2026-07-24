@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -238,6 +239,132 @@ func TestCompactWithSummaryPersistsMatchingModelHistory(t *testing.T) {
 	}
 	if reloaded.Blocks[0].Content != "message 0" || reloaded.ModelHistory.InstructionFingerprint != "fingerprint" {
 		t.Fatalf("reloaded compaction = %#v %#v", reloaded.Blocks, reloaded.ModelHistory)
+	}
+}
+
+func TestSaveRunCheckpointPersistsHistoryWithoutCompletingTurn(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "run-checkpoint.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "long task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := message.NewText(message.RoleAssistant, "checkpoint summary")
+	summary.Kind = message.KindCompactionSummary
+	facts := message.NewText(message.RoleSystem, `{"version":1,"run_id":"run-1"}`)
+	facts.Kind = message.KindCustom
+	facts.Visibility = message.VisibilityPrivate
+	facts.Metadata = map[string]string{"azem.context.execution_checkpoint": "1"}
+	history := ModelHistory{
+		ProviderID: "chatgpt", ModelID: "model", InstructionFingerprint: "instructions", StaticPrefixHash: "instructions",
+		Messages: []message.Message{message.NewText(message.RoleSystem, "rules"), message.NewText(message.RoleUser, "long task"), summary, facts},
+	}
+	checkpoint := RunCheckpoint{RunID: "run-1", ModelHistory: history, CacheIdentity: "cache-checkpoint-1", ExpectedHighWater: &sequence}
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 1 || projection.Blocks[0].Kind != "user" {
+		t.Fatalf("checkpoint completed canonical turn: %#v", projection.Blocks)
+	}
+	if projection.ModelHistory.CoveredThroughSequence == nil || *projection.ModelHistory.CoveredThroughSequence != sequence ||
+		projection.ModelHistory.SummaryHash != ModelCheckpointHash(history.Messages) || projection.CheckpointGeneration != 1 ||
+		projection.CacheEpoch != 1 || projection.CacheIdentityHash != "cache-checkpoint-1" {
+		t.Fatalf("persisted checkpoint=%+v projection=%+v", projection.ModelHistory, projection)
+	}
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.CheckpointGeneration != projection.CheckpointGeneration || repeated.CacheEpoch != projection.CacheEpoch {
+		t.Fatalf("idempotent checkpoint advanced generation: before=%+v after=%+v", projection, repeated)
+	}
+	finalHistory := history
+	finalHistory.Messages = append(append([]message.Message(nil), history.Messages...), message.NewText(message.RoleAssistant, "final answer"))
+	checkpoint.ModelHistory = finalHistory
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	withFinal, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withFinal.CheckpointGeneration != repeated.CheckpointGeneration+1 || withFinal.CacheEpoch != repeated.CacheEpoch ||
+		len(withFinal.ModelHistory.Messages) != len(finalHistory.Messages) || withFinal.ModelHistory.Messages[len(finalHistory.Messages)-1].Text != "final answer" {
+		t.Fatalf("standard final assistant was not checkpointed: before=%+v after=%+v", repeated, withFinal)
+	}
+	repeated = withFinal
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "late guidance", State: "guidance"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
+		t.Fatalf("checkpoint with uncovered same-run guidance: %v", err)
+	}
+	afterStaleReplay, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterStaleReplay.CheckpointGeneration != repeated.CheckpointGeneration || afterStaleReplay.CacheEpoch != repeated.CacheEpoch ||
+		afterStaleReplay.ModelHistory.CoveredThroughSequence == nil || *afterStaleReplay.ModelHistory.CoveredThroughSequence != sequence {
+		t.Fatalf("uncovered guidance changed idempotent checkpoint: before=%+v after=%+v", repeated, afterStaleReplay)
+	}
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-2", Content: "new owner"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err == nil || !strings.Contains(err.Error(), "active run changed") {
+		t.Fatalf("stale run checkpoint error=%v", err)
+	}
+}
+
+func TestCompleteTurnRejectsOlderRunAfterNewerRunCompleted(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "late-completion.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "old task"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-2", Content: "new task"}); err != nil {
+		t.Fatal(err)
+	}
+	newHistory := ModelHistory{ProviderID: "chatgpt", ModelID: "model", Messages: []message.Message{message.NewText(message.RoleAssistant, "new history")}}
+	if err := service.CompleteTurn(ctx, "session", Block{Kind: "assistant", RunID: "run-2", Content: "new answer"}, newHistory); err != nil {
+		t.Fatal(err)
+	}
+	before, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHistory := ModelHistory{ProviderID: "chatgpt", ModelID: "model", Messages: []message.Message{message.NewText(message.RoleAssistant, "old history")}}
+	if err := service.CompleteTurn(ctx, "session", Block{Kind: "assistant", RunID: "run-1", Content: "late old answer"}, oldHistory); err == nil || !strings.Contains(err.Error(), "active run changed") {
+		t.Fatalf("late old completion error=%v", err)
+	}
+	after, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LastRunID != "run-2" || after.CheckpointGeneration != before.CheckpointGeneration || !reflect.DeepEqual(after.ModelHistory, before.ModelHistory) || len(after.Blocks) != len(before.Blocks) {
+		t.Fatalf("late completion changed projection: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -525,6 +652,9 @@ func TestBlockMutationsInvalidateExactProviderHistory(t *testing.T) {
 	}
 	if len(projection.ModelHistory.Messages) != 1 {
 		t.Fatalf("agent mutation invalidated provider history = %#v", projection.ModelHistory)
+	}
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-2", Content: "next turn"}); err != nil {
+		t.Fatal(err)
 	}
 	if err := service.CompleteTurn(ctx, "session", Block{Kind: "assistant", RunID: "run-2", Content: "next"}, history); err != nil {
 		t.Fatal(err)

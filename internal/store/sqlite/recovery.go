@@ -9,9 +9,10 @@ import (
 	"github.com/Viking602/go-hydaelyn/api"
 )
 
-// PrepareRecovery expires dead lease holders and quarantines any side effect
-// that was in flight when the process stopped. Quarantined attempts are never
-// eligible for automatic replay.
+// PrepareRecovery is called once at the exclusive application startup
+// boundary. Every active lease belongs to the prior process and must be
+// expired immediately; waiting for its TTL would make crash recovery stall for
+// up to ten minutes. Quarantined attempts are never eligible for replay.
 func (p *Provider) PrepareRecovery(ctx context.Context, at time.Time) (expiredLeases int64, quarantinedAttempts int64, err error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -25,7 +26,7 @@ func (p *Provider) PrepareRecovery(ctx context.Context, at time.Time) (expiredLe
 		data    []byte
 	}
 	leaseRows := make([]leaseRow, 0)
-	rows, err := tx.QueryContext(ctx, `SELECT id,version,data FROM leases WHERE status=? AND expires_at<=?`, string(api.LeaseStatusActive), at.UTC().UnixNano())
+	rows, err := tx.QueryContext(ctx, `SELECT id,version,data FROM leases WHERE status=?`, string(api.LeaseStatusActive))
 	if err != nil {
 		return 0, 0, fmt.Errorf("list expired leases: %w", err)
 	}
@@ -102,6 +103,9 @@ func (p *Provider) PrepareRecovery(ctx context.Context, at time.Time) (expiredLe
 		}
 		quarantinedAttempts += changed
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE provider_requests SET status='unknown' WHERE status='started'`); err != nil {
+		return 0, 0, fmt.Errorf("quarantine incomplete provider requests: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("commit recovery preparation: %w", err)
 	}
@@ -129,6 +133,58 @@ func (p *Provider) ListReconcileAttempts(ctx context.Context) ([]api.ActionAttem
 		}
 	}
 	return attempts, rows.Err()
+}
+
+// ListSucceededActionAttempts exposes the durable anti-replay ledger needed
+// when a recovered model generates a fresh call ID for an already completed
+// non-idempotent input.
+func (p *Provider) ListSucceededActionAttempts(ctx context.Context, runID, taskID string) ([]api.ActionAttempt, error) {
+	rows, err := p.db.QueryContext(ctx, `SELECT data FROM records WHERE kind=? AND run_id=? AND task_id=? AND status=? ORDER BY key1`,
+		kindAction, runID, taskID, string(api.ActionAttemptSucceeded))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var attempts []api.ActionAttempt
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var attempt api.ActionAttempt
+		if err := json.Unmarshal(data, &attempt); err != nil {
+			return nil, err
+		}
+		attempts = append(attempts, attempt)
+	}
+	return attempts, rows.Err()
+}
+
+func (p *Provider) RecordToolCallCharge(ctx context.Context, runID, taskID, callID, toolName, inputHash string) (bool, error) {
+	result, err := p.db.ExecContext(ctx, `INSERT OR IGNORE INTO tool_call_charges(run_id,task_id,call_id,tool_name,input_hash,created_at)
+		VALUES(?,?,?,?,?,?)`, runID, taskID, callID, toolName, inputHash, time.Now().UTC().UnixNano())
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 1 {
+		return changed == 1, err
+	}
+	var recordedTool, recordedHash string
+	if err := p.db.QueryRowContext(ctx, `SELECT tool_name,input_hash FROM tool_call_charges WHERE run_id=? AND task_id=? AND call_id=?`,
+		runID, taskID, callID).Scan(&recordedTool, &recordedHash); err != nil {
+		return false, err
+	}
+	if recordedTool != toolName || recordedHash != inputHash {
+		return false, fmt.Errorf("tool call %s was already charged with different input", callID)
+	}
+	return false, nil
+}
+
+func (p *Provider) CountToolCallCharges(ctx context.Context, runID, taskID string) (int, error) {
+	var count int
+	err := p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tool_call_charges WHERE run_id=? AND task_id=?`, runID, taskID).Scan(&count)
+	return count, err
 }
 
 func (p *Provider) ResolveReconcileAttempt(ctx context.Context, attemptID string, status api.ActionAttemptStatus, externalResultRef string) error {

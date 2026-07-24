@@ -50,6 +50,7 @@ type Service struct {
 	hookInitialContext map[string]string
 	hookAsyncContext   map[string][]string
 	activeEnd          context.CancelFunc
+	activeCancelIntent string
 	wg                 sync.WaitGroup
 	hookWG             sync.WaitGroup
 	shuttingDown       bool
@@ -514,6 +515,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	s.guidanceGeneration++
 	s.guidanceOpen = false
 	s.activeEnd = cancel
+	s.activeCancelIntent = ""
 	s.wg.Add(1)
 	s.mu.Unlock()
 	handedOff := false
@@ -657,14 +659,6 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	s.activeRun = durableRun.RunID
 	s.guidanceOpen = true
 	s.mu.Unlock()
-	if s.sessions != nil {
-		if _, err := s.sessions.AppendBlock(s.ctx, request.SessionID, userTurnBlock(durableRun.RunID, request)); err != nil {
-			cancel()
-			_ = s.coding.CompleteRun(context.WithoutCancel(s.ctx), durableRun, err.Error(), err)
-			s.clearRun(durableRun.RunID)
-			return "", fmt.Errorf("persist user turn: %w", err)
-		}
-	}
 	handedOff = true
 	go s.runProviderTurn(runCtx, request, durableRun, engine)
 	return durableRun.RunID, nil
@@ -771,6 +765,15 @@ func (s *Service) CancelActive() bool {
 	return s.CancelActiveWithChildren(false)
 }
 
+func (s *Service) cancellationIntent(runID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeRun != runID {
+		return ""
+	}
+	return s.activeCancelIntent
+}
+
 func (s *Service) HasActiveForegroundChildren() bool {
 	s.mu.Lock()
 	sessionID, runID, providers := s.activeSession, s.activeRun, s.providers
@@ -791,6 +794,9 @@ func (s *Service) CancelActiveWithChildren(children bool) bool {
 	s.mu.Lock()
 	cancel := s.activeEnd
 	sessionID, runID, providers := s.activeSession, s.activeRun, s.providers
+	if cancel != nil {
+		s.activeCancelIntent = "user"
+	}
 	s.mu.Unlock()
 	if cancel == nil {
 		return false
@@ -827,6 +833,9 @@ func (s *Service) shutdown() {
 	s.shuttingDown = true
 	sessionID := firstNonempty(s.activeSession, s.currentSession)
 	if s.activeEnd != nil {
+		if s.activeCancelIntent == "" {
+			s.activeCancelIntent = "shutdown"
+		}
 		s.activeEnd()
 	}
 	s.mu.Unlock()
@@ -988,6 +997,7 @@ func (s *Service) clearRun(runID string) {
 		s.guidanceOpen = false
 		cancel = s.activeEnd
 		s.activeEnd = nil
+		s.activeCancelIntent = ""
 	}
 	s.mu.Unlock()
 	if cancel != nil {

@@ -154,11 +154,13 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	}, Elicitation: service.handleMCPElicitation})
 	service.AttachAgentExtensions(manager, subagentRuns)
 	var teamResumer recovery.TeamResumer
+	var runResumer recovery.RunResumer
 	if os.Getenv("AZEM_FAKE_PROVIDER") != "1" {
 		service.AttachProviderRuntime(providerRuntime)
 		teamResumer = providerRuntime
+		runResumer = providerRuntime
 	}
-	recoveryService, err := recovery.NewService(store, coding, subagentRuns, teamResumer)
+	recoveryService, err := recovery.NewService(store, coding, subagentRuns, teamResumer, runResumer)
 	if err != nil {
 		_ = store.Close(ctx)
 		return BootstrapResult{}, err

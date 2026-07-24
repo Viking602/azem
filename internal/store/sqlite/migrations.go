@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 13
+const schemaVersion = 14
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -282,6 +282,16 @@ var migrations = []string{
 			INSERT INTO history_fts(content,session_id,source_type,source_id)
 				SELECT new.preview,new.session_id,'artifact','artifact:'||new.id WHERE TRIM(new.preview)<>'';
 		END;`,
+	`CREATE TABLE tool_call_charges (
+		run_id TEXT NOT NULL,
+		task_id TEXT NOT NULL,
+		call_id TEXT NOT NULL,
+		tool_name TEXT NOT NULL,
+		input_hash TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY(run_id,task_id,call_id)
+	);
+	CREATE INDEX tool_call_charges_run_task ON tool_call_charges(run_id,task_id);`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

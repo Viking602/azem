@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,6 +68,348 @@ func TestPhase3ArtifactToolRoundTripsBinaryPayloadAsBase64(t *testing.T) {
 	}
 }
 
+func TestExecutionCheckpointFactsCaptureTodoToolsAndWorkspace(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for _, arguments := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Azem Test"},
+	} {
+		if _, err := gitOutput(ctx, root, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tracked := filepath.Join(root, "tracked.go")
+	if err := os.WriteFile(tracked, []byte("package sample\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, root, "add", "tracked.go"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOutput(ctx, root, "commit", "-m", "base"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tracked, []byte("package sample\n\nconst Changed = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "new.txt"), []byte("new evidence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-secret")
+	if err := os.WriteFile(outside, []byte("TOP-SECRET-MUST-NOT-BE-CAPTURED"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "outside-link")); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := map[string][]byte{}
+	manager := turnContext{
+		runID: "run-checkpoint",
+		todo: session.TodoList{Goal: "ship safely", Revision: 7, Phases: []session.TodoPhase{{
+			ID: "build", Items: []session.TodoItem{{ID: "verify", Content: "run tests", Status: session.TodoInProgress}},
+		}}},
+		captureWorkspace: func(ctx context.Context) (workspaceCheckpointWitness, error) {
+			return captureGitWorkspace(ctx, root)
+		},
+		putArtifact: func(_ context.Context, kind string, payload []byte, _ string) (session.ContextArtifact, error) {
+			id := fmt.Sprintf("%s-%d", kind, len(artifacts)+1)
+			artifacts[id] = append([]byte(nil), payload...)
+			return session.ContextArtifact{ID: id}, nil
+		},
+	}
+	omitted := []message.Message{
+		message.NewText(message.RoleUser, "implement the checkpoint"),
+		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "call-1", Name: "shell", Arguments: json.RawMessage(`{"command":"go test ./..."}`)}}},
+		message.NewToolResult(message.ToolResult{ToolCallID: "call-1", Name: "shell", Content: "ok", IsError: false}),
+	}
+	checkpoint, err := manager.buildExecutionCheckpointMessage(ctx, nil, omitted, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, ok := parseExecutionCheckpoint(checkpoint)
+	if !ok {
+		t.Fatalf("invalid checkpoint message: %#v", checkpoint)
+	}
+	if facts.RunID != "run-checkpoint" || facts.Todo.Revision != 7 || len(facts.Tools) != 1 || facts.Tools[0].ResultSHA256 == "" {
+		t.Fatalf("checkpoint facts=%+v", facts)
+	}
+	if !facts.Workspace.Complete || facts.Workspace.Head == "" || len(facts.Workspace.Files) != 3 {
+		t.Fatalf("workspace witness=%+v", facts.Workspace)
+	}
+	encodedFacts, err := json.Marshal(facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, payload := range artifacts {
+		if bytes.Contains(payload, []byte("TOP-SECRET-MUST-NOT-BE-CAPTURED")) {
+			t.Fatalf("artifact %s captured secret content: %q", id, payload)
+		}
+	}
+	if bytes.Contains(encodedFacts, []byte("TOP-SECRET-MUST-NOT-BE-CAPTURED")) ||
+		bytes.Contains(encodedFacts, []byte("const Changed = true")) || bytes.Contains(encodedFacts, []byte("new evidence")) {
+		t.Fatalf("workspace witness captured file contents: %s", encodedFacts)
+	}
+	if len(facts.SourceArtifacts) != 1 || len(artifacts[facts.SourceArtifacts[0].ID]) == 0 {
+		t.Fatalf("source evidence=%+v artifacts=%+v", facts.SourceArtifacts, artifacts)
+	}
+}
+
+func TestRunStepCheckpointPersistsOnlyProtocolCompleteBoundaries(t *testing.T) {
+	var saved [][]message.Message
+	recorder := &runStepCheckpoint{save: func(_ context.Context, history []message.Message, _ *int64) error {
+		saved = append(saved, append([]message.Message(nil), history...))
+		return nil
+	}}
+	base := []message.Message{message.NewText(message.RoleSystem, "rules"), message.NewText(message.RoleUser, "continue")}
+	request := hyprovider.Request{Messages: base}
+	if err := recorder.BeforeModelCall(context.Background(), &request); err != nil {
+		t.Fatal(err)
+	}
+	call := message.ToolCall{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a.go"}`)}
+	for _, event := range []hyprovider.Event{
+		{Kind: hyprovider.EventToolCall, ToolCall: &call},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonToolUse, ProviderState: json.RawMessage(`[{"id":"provider-turn"}]`)},
+	} {
+		if err := recorder.OnEvent(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := message.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: "contents"}
+	if err := recorder.Emit(context.Background(), stream.Frame{Kind: stream.FrameToolResult, ToolResult: &result}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.RecordStep(context.Background(), hyagent.Step{Index: 0, Decision: hyagent.StepDecisionContinue}); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 2 {
+		t.Fatalf("checkpoint saves = %d, want initial boundary and finalized tool turn", len(saved))
+	}
+	got := saved[1]
+	if err := message.ValidateCompleteTurns(got); err != nil {
+		t.Fatalf("saved protocol is incomplete: %v\n%#v", err, got)
+	}
+	if len(got) != 4 || len(got[2].ToolCalls) != 1 || got[3].ToolResult == nil ||
+		string(got[2].ProviderState) != `[{"id":"provider-turn"}]` {
+		t.Fatalf("saved tool boundary = %#v", got)
+	}
+}
+
+func TestRunStepCheckpointPersistsFinalAssistantAtFinishDecision(t *testing.T) {
+	var saved []message.Message
+	recorder := &runStepCheckpoint{save: func(_ context.Context, history []message.Message, _ *int64) error {
+		saved = append([]message.Message(nil), history...)
+		return nil
+	}}
+	request := hyprovider.Request{Messages: []message.Message{message.NewText(message.RoleUser, "finish")}}
+	if err := recorder.BeforeModelCall(context.Background(), &request); err != nil {
+		t.Fatal(err)
+	}
+	_ = recorder.OnEvent(context.Background(), hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: "done"})
+	_ = recorder.OnEvent(context.Background(), hyprovider.Event{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete})
+	if err := recorder.RecordStep(context.Background(), hyagent.Step{Decision: hyagent.StepDecisionFinish}); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 2 || saved[1].Role != message.RoleAssistant || saved[1].Text != "done" {
+		t.Fatalf("final checkpoint = %#v", saved)
+	}
+}
+
+func TestSingleRunManifestAcceptsEmptyResolvedSkillSet(t *testing.T) {
+	manifest := singleRunManifest{
+		Version: 1, Provider: "chatgpt", Model: "model", Reasoning: "minimal",
+		ActiveSkills: []string{}, StaticIdentity: "identity", StartedAt: time.Now().UTC(),
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeSingleRunManifest(string(encoded))
+	if err != nil || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
+		t.Fatalf("decoded empty-skill manifest=%+v error=%v", decoded, err)
+	}
+}
+
+func TestRunStepCheckpointPersistsGuardrailRetryContext(t *testing.T) {
+	var saved []message.Message
+	recorder := &runStepCheckpoint{save: func(_ context.Context, history []message.Message, _ *int64) error {
+		saved = append([]message.Message(nil), history...)
+		return nil
+	}}
+	request := hyprovider.Request{Messages: []message.Message{message.NewText(message.RoleUser, "original")}}
+	if err := recorder.BeforeModelCall(context.Background(), &request); err != nil {
+		t.Fatal(err)
+	}
+	guardrail := checkpointGuardrail{recorder: recorder, inner: hyagent.NewOutputGuardrail("retry", func(context.Context, hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
+		return hyagent.RetryOutput(message.NewText(message.RoleUser, "late guidance")), nil
+	})}
+	if _, err := guardrail.Check(context.Background(), hyagent.OutputGuardrailInput{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = recorder.OnEvent(context.Background(), hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: "rejected"})
+	_ = recorder.OnEvent(context.Background(), hyprovider.Event{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete})
+	if err := recorder.RecordStep(context.Background(), hyagent.Step{Decision: hyagent.StepDecisionContinue}); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 2 || saved[1].Role != message.RoleUser || saved[1].Text != "late guidance" {
+		t.Fatalf("guardrail retry checkpoint=%#v", saved)
+	}
+}
+
+func TestExecutionCheckpointRefreshHasStableIdentity(t *testing.T) {
+	ctx := context.Background()
+	artifactWrites := 0
+	manager := turnContext{
+		runID: "run-stable",
+		todo:  session.TodoList{Goal: "continue", Revision: 2},
+		putArtifact: func(_ context.Context, _ string, _ []byte, _ string) (session.ContextArtifact, error) {
+			artifactWrites++
+			return session.ContextArtifact{ID: "source-stable"}, nil
+		},
+	}
+	omitted := []message.Message{
+		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "call-stable", Name: "read", Arguments: json.RawMessage(`{"path":"stable.go"}`)}}},
+		message.NewToolResult(message.ToolResult{ToolCallID: "call-stable", Name: "read", Content: "stable result"}),
+	}
+	checkpoint, err := manager.buildExecutionCheckpointMessage(ctx, nil, omitted, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := message.NewText(message.RoleAssistant, "stable semantic summary")
+	summary.Kind = message.KindCompactionSummary
+	summary.Visibility = message.VisibilityPrivate
+	history := []message.Message{summary, executionCheckpointPolicyMessage(), checkpoint}
+	first, err := manager.refreshExecutionCheckpoint(ctx, history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.refreshExecutionCheckpoint(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstHash, secondHash := session.ModelCheckpointHash(first), session.ModelCheckpointHash(second); firstHash == "" || firstHash != secondHash {
+		t.Fatalf("checkpoint identity changed across equivalent refreshes: first=%q second=%q", firstHash, secondHash)
+	}
+	if artifactWrites != 1 {
+		t.Fatalf("equivalent refresh persisted %d source artifacts, want 1", artifactWrites)
+	}
+}
+
+func TestExecutionCheckpointFactsDoNotCrossRunBoundary(t *testing.T) {
+	old := executionCheckpointFacts{Version: 1, RunID: "run-old", Tools: []checkpointToolFact{{
+		CallID: "call-old", Name: "shell", Outcome: "terminal_success_do_not_replay",
+	}}}
+	encoded, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := message.NewText(message.RoleAssistant, executionCheckpointFactsPrefix+string(encoded))
+	facts.Kind = message.KindCustom
+	facts.Visibility = message.VisibilityPrivate
+	facts.Metadata = map[string]string{executionCheckpointMetadataKey: "1"}
+	summary := message.NewText(message.RoleAssistant, "preserve semantic history")
+	summary.Kind = message.KindCompactionSummary
+	history := []message.Message{summary, executionCheckpointPolicyMessage(), facts}
+
+	filtered := checkpointMessagesForRun(history, "run-new")
+	if len(filtered) != 1 || filtered[0].Kind != message.KindCompactionSummary {
+		t.Fatalf("cross-run checkpoint facts survived: %#v", filtered)
+	}
+}
+
+func TestWorkspaceEvidenceRejectsOversizedFileWithoutReadingIt(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "large.bin")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, maxWorkspaceFileBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	remaining := int64(maxWorkspaceTotalBytes)
+	if _, err := readWorkspaceEvidence(root, "large.bin", &remaining); !errors.Is(err, errWorkspaceEvidenceLimit) {
+		t.Fatalf("oversized workspace evidence error=%v", err)
+	}
+	if remaining != maxWorkspaceTotalBytes {
+		t.Fatalf("oversized file consumed evidence budget: %d", remaining)
+	}
+}
+
+func TestIncompleteWorkspaceWitnessUsesFailClosedPolicy(t *testing.T) {
+	savedFacts := executionCheckpointFacts{
+		Version: 1, RunID: "run", Workspace: workspaceCheckpointWitness{
+			VCS: "git", Head: "old", Complete: false, ErrorCode: "limit_exceeded",
+		},
+	}
+	encoded, err := json.Marshal(savedFacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := message.NewText(message.RoleAssistant, executionCheckpointFactsPrefix+string(encoded))
+	checkpoint.Kind = message.KindCustom
+	checkpoint.Visibility = message.VisibilityPrivate
+	checkpoint.Metadata = map[string]string{executionCheckpointMetadataKey: "1"}
+	manager := turnContext{runID: "run", captureWorkspace: func(context.Context) (workspaceCheckpointWitness, error) {
+		return workspaceCheckpointWitness{VCS: "git", Head: "new", Complete: false, ErrorCode: "capture_failed"}, errors.New("private local path")
+	}}
+	messages := manager.workspaceReconciliationMessages(context.Background(), []message.Message{checkpoint})
+	if len(messages) != 2 || messages[0].Text != workspaceUnverifiedPolicy || strings.Contains(messages[1].Text, "private local path") {
+		t.Fatalf("incomplete workspace reconciliation=%#v", messages)
+	}
+}
+
+func TestWorkspaceCheckpointDriftTargetsOnlyChangedPaths(t *testing.T) {
+	saved := workspaceCheckpointWitness{Head: "head", Files: []workspaceFileWitness{
+		{Path: "stable.go", Status: " M", CurrentSHA256: "same", BaseSHA256: "base"},
+		{Path: "changed.go", Status: " M", CurrentSHA256: "old", BaseSHA256: "base"},
+	}}
+	current := workspaceCheckpointWitness{Head: "head", Files: []workspaceFileWitness{
+		{Path: "stable.go", Status: " M", CurrentSHA256: "same", BaseSHA256: "base"},
+		{Path: "changed.go", Status: " M", CurrentSHA256: "new", BaseSHA256: "base"},
+		{Path: "added.go", Status: "??", CurrentSHA256: "added"},
+	}}
+	got := workspaceDriftPaths(saved, current)
+	slices.Sort(got)
+	want := []string{"added.go", "changed.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stale paths=%v want=%v", got, want)
+	}
+}
+
+func TestWorkspaceReconciliationBaselineAdvancesOnlyAfterSuccessfulTargetedRead(t *testing.T) {
+	oldWitness := workspaceCheckpointWitness{VCS: "git", Head: "old", Complete: true, Files: []workspaceFileWitness{{Path: "a.go", CurrentSHA256: "old"}}}
+	newWitness := workspaceCheckpointWitness{VCS: "git", Head: "new", Complete: true, Files: []workspaceFileWitness{{Path: "a.go", CurrentSHA256: "new"}}}
+	manager := turnContext{
+		runID: "run", executionCheckpoints: true, pendingWorkspacePaths: []string{"a.go"},
+		captureWorkspace: func(context.Context) (workspaceCheckpointWitness, error) { return newWitness, nil },
+	}
+	first, err := manager.buildExecutionCheckpointMessage(context.Background(), []executionCheckpointFacts{{Version: 1, RunID: "run", Workspace: oldWitness}}, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFacts, ok := parseExecutionCheckpoint(first)
+	if !ok || !reflect.DeepEqual(firstFacts.WorkspacePending, []string{"a.go"}) || firstFacts.Workspace.Head != "old" {
+		t.Fatalf("pending reconciliation advanced baseline: %+v", firstFacts)
+	}
+	manager.captureWorkspace = func(context.Context) (workspaceCheckpointWitness, error) { return oldWitness, nil }
+	regenerated := manager.workspaceReconciliationMessages(context.Background(), []message.Message{first})
+	if len(regenerated) != 2 || !strings.Contains(regenerated[1].Text, `"a.go"`) {
+		t.Fatalf("durable pending path was not regenerated after interruption: %#v", regenerated)
+	}
+	manager.captureWorkspace = func(context.Context) (workspaceCheckpointWitness, error) { return newWitness, nil }
+	call := message.ToolCall{ID: "read-a", Name: "coding.read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)}
+	history := []message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{call}}, message.NewToolResult(message.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: "current"})}
+	manager.pendingWorkspacePaths = nil
+	second, err := manager.buildExecutionCheckpointMessage(context.Background(), []executionCheckpointFacts{firstFacts}, history, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFacts, ok := parseExecutionCheckpoint(second)
+	if !ok || len(secondFacts.WorkspacePending) != 0 || secondFacts.Workspace.Head != "new" {
+		t.Fatalf("completed reconciliation did not advance baseline: %+v", secondFacts)
+	}
+}
+
 func TestShellArtifactSinkPersistsAfterExecutionCancellation(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "shell-artifact.db"))
@@ -102,7 +445,7 @@ func TestLegacyCompactResolvesSummarizerLazily(t *testing.T) {
 		history = append(history, message.NewText(message.RoleUser, fmt.Sprintf("question %d", index)), message.NewText(message.RoleAssistant, "answer"))
 	}
 	activated := ""
-	manager := turnContext{staticIdentity: "static", activateCompaction: func(_ context.Context, identity string) error {
+	manager := turnContext{staticIdentity: "static", activateCompaction: func(_ context.Context, _ []message.Message, identity string) error {
 		activated = identity
 		return nil
 	}, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
@@ -167,13 +510,6 @@ func TestPhase3BoundedCompactionUsesResolvedWindowAndPreservesTurns(t *testing.T
 		if len(input) > contextTokenBytes(350) {
 			t.Fatalf("compactor input %d = %d bytes, budget=%d", i, len(input), contextTokenBytes(350))
 		}
-		for turn := range 8 {
-			hasUser := strings.Contains(input, fmt.Sprintf("turn-%d ", turn))
-			hasAnswer := strings.Contains(input, fmt.Sprintf("answer-%d ", turn))
-			if hasUser != hasAnswer {
-				t.Fatalf("input %d split complete turn %d", i, turn)
-			}
-		}
 	}
 	if estimateContextTokens(got) > 250 {
 		t.Fatalf("compacted tokens=%d target=250", estimateContextTokens(got))
@@ -184,15 +520,193 @@ func TestPhase3BoundedCompactionUsesResolvedWindowAndPreservesTurns(t *testing.T
 	}
 }
 
-func TestPhase3IrreducibleCompleteTurnReturnsExplicitError(t *testing.T) {
+func TestPhase3IrreducibleAtomicGroupReturnsExplicitError(t *testing.T) {
 	manager := turnContext{structuredSummary: true, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
 		return func(context.Context, string) (string, error) { return `{"version":2,"objective":"x"}`, nil }, 100, nil
 	}}
 	_, err := manager.summarizeBounded(context.Background(), nil, []message.Message{
 		message.NewText(message.RoleUser, strings.Repeat("x", 500)), message.NewText(message.RoleAssistant, "answer"),
 	})
-	if err == nil || !strings.Contains(err.Error(), "complete turn") {
+	if err == nil || !strings.Contains(err.Error(), "atomic group") {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestPhase3CompactsCompletedToolGroupsWithinLatestUserTurn(t *testing.T) {
+	var inputs []string
+	manager := turnContext{structuredSummary: true, compactTargetTokens: 430, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
+		return func(_ context.Context, input string) (string, error) {
+			inputs = append(inputs, input)
+			return `{"version":2,"objective":"continue"}`, nil
+		}, 500, nil
+	}}
+	latest := message.NewText(message.RoleUser, "keep this latest user message exactly")
+	history := []message.Message{message.NewText(message.RoleSystem, "rules"), latest}
+	appendGroups := func(dst []message.Message, first, count int) []message.Message {
+		for i := first; i < first+count; i++ {
+			id := fmt.Sprintf("call-%02d", i)
+			dst = append(dst,
+				message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: id, Name: "read"}}},
+				message.NewToolResult(message.ToolResult{ToolCallID: id, Name: "read", Content: id + strings.Repeat("x", 280)}),
+			)
+		}
+		return dst
+	}
+	history = appendGroups(history, 0, 12)
+	first, err := manager.CompactTo(context.Background(), history, 900)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRollingToolCheckpoint(t, first, latest)
+	if len(first) >= len(history) {
+		t.Fatalf("first compaction did not reclaim messages: %d >= %d", len(first), len(history))
+	}
+
+	secondSource := appendGroups(append([]message.Message(nil), first...), 12, 8)
+	second, err := manager.CompactTo(context.Background(), secondSource, 900)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRollingToolCheckpoint(t, second, latest)
+	if reflect.DeepEqual(second, secondSource) {
+		t.Fatal("second rolling compaction made no progress")
+	}
+	if len(inputs) < 2 {
+		t.Fatalf("summarizer calls=%d, want rolling calls", len(inputs))
+	}
+}
+
+func TestPhase3RollingCompactionCarriesTrustedExecutionFacts(t *testing.T) {
+	manager := turnContext{
+		runID: "run-facts", executionCheckpoints: true, compactTargetTokens: 2600,
+		todo:      session.TodoList{Goal: "continue without rereading", Revision: 3},
+		summarize: func(context.Context, string) (string, error) { return "semantic state", nil },
+	}
+	latest := message.NewText(message.RoleUser, "implement everything")
+	history := []message.Message{message.NewText(message.RoleSystem, "rules"), latest}
+	for index := range 10 {
+		id := fmt.Sprintf("fact-call-%d", index)
+		history = append(history,
+			message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: id, Name: "shell", Arguments: json.RawMessage(fmt.Sprintf(`{"command":"step-%d"}`, index))}}},
+			message.NewToolResult(message.ToolResult{ToolCallID: id, Name: "shell", Content: strings.Repeat("result ", 300)}),
+		)
+	}
+	first, err := manager.CompactTo(context.Background(), history, 3500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstFacts executionCheckpointFacts
+	for _, current := range first {
+		if parsed, ok := parseExecutionCheckpoint(current); ok {
+			firstFacts = parsed
+		}
+	}
+	if firstFacts.Version != 1 || firstFacts.RunID != "run-facts" || firstFacts.Todo.Revision != 3 || len(firstFacts.Tools) == 0 {
+		t.Fatalf("first execution facts=%+v history=%+v", firstFacts, first)
+	}
+	secondSource := append([]message.Message(nil), first...)
+	for index := 10; index < 16; index++ {
+		id := fmt.Sprintf("fact-call-%d", index)
+		secondSource = append(secondSource,
+			message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: id, Name: "shell"}}},
+			message.NewToolResult(message.ToolResult{ToolCallID: id, Name: "shell", Content: strings.Repeat("new result ", 300)}),
+		)
+	}
+	second, err := manager.CompactTo(context.Background(), secondSource, 3500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondFacts executionCheckpointFacts
+	for _, current := range second {
+		if parsed, ok := parseExecutionCheckpoint(current); ok {
+			secondFacts = parsed
+		}
+	}
+	if secondFacts.Version != 1 || len(secondFacts.Tools) < len(firstFacts.Tools) {
+		t.Fatalf("rolling execution facts regressed: first=%+v second=%+v", firstFacts, secondFacts)
+	}
+	if err := message.ValidateCompleteTurns(second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertRollingToolCheckpoint(t *testing.T, history []message.Message, latest message.Message) {
+	t.Helper()
+	if err := message.ValidateCompleteTurns(history); err != nil {
+		t.Fatalf("invalid compacted history: %v", err)
+	}
+	user := -1
+	summary := -1
+	for i, current := range history {
+		if current.Role == message.RoleUser {
+			user = i
+		}
+		if current.Kind == message.KindCompactionSummary {
+			summary = i
+		}
+	}
+	if user < 0 || !reflect.DeepEqual(history[user], latest) || summary != user+1 {
+		t.Fatalf("latest user/summary placement: user=%d summary=%d history=%#v", user, summary, history)
+	}
+	for i := summary + 1; i < len(history); i += 2 {
+		if i+1 >= len(history) || len(history[i].ToolCalls) == 0 || history[i+1].ToolResult == nil || history[i].ToolCalls[0].ID != history[i+1].ToolResult.ToolCallID {
+			t.Fatalf("split tool group at hot-tail message %d", i)
+		}
+	}
+}
+
+func TestPhase3SingleUserTurnLargerThanCompactorWindowChunksByToolGroup(t *testing.T) {
+	var inputs []string
+	manager := turnContext{structuredSummary: true, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
+		return func(_ context.Context, input string) (string, error) {
+			inputs = append(inputs, input)
+			return `{"version":2,"objective":"continue"}`, nil
+		}, 500, nil
+	}}
+	omitted := []message.Message{message.NewText(message.RoleUser, "one turn")}
+	for i := range 10 {
+		id := fmt.Sprintf("chunk-%d", i)
+		omitted = append(omitted,
+			message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: id, Name: "read"}}},
+			message.NewToolResult(message.ToolResult{ToolCallID: id, Name: "read", Content: id + strings.Repeat("z", 240)}),
+		)
+	}
+	if _, err := manager.summarizeBounded(context.Background(), nil, omitted); err != nil {
+		t.Fatal(err)
+	}
+	if len(inputs) < 2 {
+		t.Fatalf("single turn was not chunked: calls=%d", len(inputs))
+	}
+	for n, input := range inputs {
+		for i := range 10 {
+			id := fmt.Sprintf("chunk-%d", i)
+			if strings.Contains(input, `"id":"`+id+`"`) != strings.Contains(input, `"tool_call_id":"`+id+`"`) {
+				t.Fatalf("input %d split atomic tool group %s", n, id)
+			}
+		}
+	}
+}
+
+func TestPhase3SummaryReductionPreservesPreviousChronology(t *testing.T) {
+	var inputs []string
+	manager := turnContext{structuredSummary: true, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
+		return func(_ context.Context, input string) (string, error) {
+			inputs = append(inputs, input)
+			return `{"version":2,"objective":"reduced"}`, nil
+		}, 1000, nil
+	}}
+	previous := []string{
+		`{"version":2,"objective":"OLDEST"}`,
+		`{"version":2,"objective":"NEWEST"}`,
+	}
+	if _, err := manager.summarizeBounded(context.Background(), previous, []message.Message{message.NewText(message.RoleUser, "current")}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(inputs, "\n")
+	oldest := strings.Index(joined, "OLDEST")
+	newest := strings.Index(joined, "NEWEST")
+	if oldest < 0 || newest < 0 || oldest >= newest {
+		t.Fatalf("previous summary chronology reversed: %s", joined)
 	}
 }
 
@@ -1023,7 +1537,7 @@ func TestTurnContextCompactToGeneratesRecursiveSummary(t *testing.T) {
 	}
 }
 
-func TestTurnContextDoesNotLocallyPruneOversizedToolResult(t *testing.T) {
+func TestTurnContextRollsOversizedCompletedToolResultIntoSummary(t *testing.T) {
 	previous := message.NewText(message.RoleAssistant, compactionSummaryLabel+"## Objective\n- keep state")
 	previous.Kind = message.KindCompactionSummary
 	previous.Visibility = message.VisibilityPrivate
@@ -1039,9 +1553,10 @@ func TestTurnContextDoesNotLocallyPruneOversizedToolResult(t *testing.T) {
 		return "unexpected", nil
 	}}
 	got, err := manager.CompactTo(context.Background(), history, 500)
-	if err == nil || !reflect.DeepEqual(got, history) || calls != 0 {
+	if err != nil || reflect.DeepEqual(got, history) || calls == 0 {
 		t.Fatalf("oversized tool result = calls:%d history:%#v error:%v", calls, got, err)
 	}
+	assertRollingToolCheckpoint(t, got, history[2])
 }
 
 func TestManualCompactionTailRetainsLatestUserBeforeAgentBlocks(t *testing.T) {
@@ -1452,7 +1967,7 @@ func TestPhase5HardTriggerUsesPreparedResultAndActivatesOnce(t *testing.T) {
 			}
 			return nil
 		},
-		activateCompaction: func(context.Context, string) error { activations.Add(1); return nil },
+		activateCompaction: func(context.Context, []message.Message, string) error { activations.Add(1); return nil },
 	}
 	if got, err := manager.CompactTo(context.Background(), history, tokens+100); err != nil || !reflect.DeepEqual(got, history) {
 		t.Fatalf("soft result changed: err=%v", err)
@@ -1482,6 +1997,32 @@ func TestPhase5HardTriggerUsesPreparedResultAndActivatesOnce(t *testing.T) {
 	}
 }
 
+func TestPhase5CompletedSoftPreparationActivatesBeforeHardLimit(t *testing.T) {
+	history := phase5History()
+	tokens := estimateContextTokens(history)
+	var activations atomic.Int32
+	manager := turnContext{
+		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		coordinator: &compactionCoordinator{},
+		summarize:   func(context.Context, string) (string, error) { return "prepared state", nil },
+		activateCompaction: func(context.Context, []message.Message, string) error {
+			activations.Add(1)
+			return nil
+		},
+	}
+	if got, err := manager.CompactTo(context.Background(), history, tokens+100); err != nil || !reflect.DeepEqual(got, history) {
+		t.Fatalf("soft preparation changed first request: history=%+v error=%v", got, err)
+	}
+	<-manager.coordinator.done
+	got, err := manager.CompactTo(context.Background(), history, tokens+100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(got, history) || activations.Load() != 1 {
+		t.Fatalf("completed soft checkpoint was not activated: activations=%d history=%+v", activations.Load(), got)
+	}
+}
+
 func TestPhase5PreparedResultAcceptsAppendOnlyTail(t *testing.T) {
 	historyA := phase5History()
 	tokensA := estimateContextTokens(historyA)
@@ -1501,7 +2042,7 @@ func TestPhase5PreparedResultAcceptsAppendOnlyTail(t *testing.T) {
 			}
 			return nil
 		},
-		activateCompaction: func(context.Context, string) error { activations.Add(1); return nil },
+		activateCompaction: func(context.Context, []message.Message, string) error { activations.Add(1); return nil },
 	}
 	if _, err := manager.CompactTo(context.Background(), historyA, tokensA+100); err != nil {
 		t.Fatal(err)
@@ -1542,7 +2083,7 @@ func TestPhase5SynchronousHardActivationOnce(t *testing.T) {
 			}
 			return nil
 		},
-		activateCompaction: func(context.Context, string) error { activations.Add(1); return nil },
+		activateCompaction: func(context.Context, []message.Message, string) error { activations.Add(1); return nil },
 	}
 	got, err := manager.CompactTo(context.Background(), history, tokens-1)
 	if err != nil {
@@ -1649,7 +2190,7 @@ func TestActiveGuidanceRemainsQueuedWhenCompactionFails(t *testing.T) {
 	}
 }
 
-func TestTurnContextCompactToRejectsOversizedToolResultWithoutClipping(t *testing.T) {
+func TestTurnContextCompactToSummarizesOversizedCompletedToolResult(t *testing.T) {
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
 		message.NewText(message.RoleUser, "read the file"),
@@ -1659,12 +2200,13 @@ func TestTurnContextCompactToRejectsOversizedToolResultWithoutClipping(t *testin
 	const target = 1_000
 	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "summary", nil }}
 	compacted, err := manager.CompactTo(context.Background(), history, target)
-	if err == nil || !reflect.DeepEqual(compacted, history) {
+	if err != nil || reflect.DeepEqual(compacted, history) {
 		t.Fatalf("oversized tool result history=%#v error=%v", compacted, err)
 	}
+	assertRollingToolCheckpoint(t, compacted, history[1])
 }
 
-func TestTurnContextCompactToDoesNotClipDuplicatedStructuredToolOutput(t *testing.T) {
+func TestTurnContextCompactToSummarizesDuplicatedStructuredToolOutput(t *testing.T) {
 	content := strings.Repeat("package recovery\n", 800)
 	structured, err := json.Marshal(map[string]any{"content": content, "lineCount": 800})
 	if err != nil {
@@ -1682,9 +2224,10 @@ func TestTurnContextCompactToDoesNotClipDuplicatedStructuredToolOutput(t *testin
 	const target = 2_000
 	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "summary", nil }}
 	compacted, err := manager.CompactTo(context.Background(), history, target)
-	if err == nil || !reflect.DeepEqual(compacted, history) {
+	if err != nil || reflect.DeepEqual(compacted, history) {
 		t.Fatalf("duplicated structured output history=%#v error=%v", compacted, err)
 	}
+	assertRollingToolCheckpoint(t, compacted, history[1])
 }
 
 func TestTurnContextCompactToUsesContentInsteadOfDuplicatedStructuredOutput(t *testing.T) {
@@ -1741,7 +2284,7 @@ func TestTurnContextExternalizesLargeToolResultBeforeSoftTrigger(t *testing.T) {
 	}
 }
 
-func TestTurnContextCompactToRejectsMandatoryResultThatCannotFit(t *testing.T) {
+func TestTurnContextCompactToCanSummarizeLatestCompletedResultThatCannotFit(t *testing.T) {
 	history := []message.Message{message.NewText(message.RoleSystem, "rules")}
 	for index := 0; index < 260; index++ {
 		id := fmt.Sprintf("old-%d", index)
@@ -1760,9 +2303,10 @@ func TestTurnContextCompactToRejectsMandatoryResultThatCannotFit(t *testing.T) {
 	const target = 64
 	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "summary", nil }}
 	compacted, err := manager.CompactTo(context.Background(), history, target)
-	if err == nil || !reflect.DeepEqual(compacted, history) {
+	if err != nil || reflect.DeepEqual(compacted, history) {
 		t.Fatalf("mandatory oversized result history=%#v error=%v", compacted, err)
 	}
+	assertRollingToolCheckpoint(t, compacted, history[len(history)-3])
 }
 
 func TestProviderStreamSinkDoesNotReportMissingUsageAsZero(t *testing.T) {
@@ -3092,6 +3636,53 @@ func TestTurnContextBuildReplaysCompatibleHistoryAndAppendsDynamicTail(t *testin
 	}
 	if tail[5].Role != message.RoleUser || tail[5].Text != "new request" {
 		t.Fatalf("goal tail = %#v", tail[5])
+	}
+}
+
+func TestTurnContextResumeDoesNotDuplicateCheckpointedUser(t *testing.T) {
+	boundary := int64(1)
+	staticIdentity := "static-resume"
+	factsValue := executionCheckpointFacts{Version: 1, RunID: "run-resume"}
+	encoded, err := json.Marshal(factsValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := message.NewText(message.RoleAssistant, executionCheckpointFactsPrefix+string(encoded))
+	facts.Kind = message.KindCustom
+	facts.Visibility = message.VisibilityPrivate
+	facts.Metadata = map[string]string{executionCheckpointMetadataKey: "1"}
+	saved := []message.Message{
+		message.NewText(message.RoleSystem, mainInstructions),
+		message.NewText(message.RoleUser, "original request"),
+		message.NewText(message.RoleAssistant, "semantic checkpoint"),
+		executionCheckpointPolicyMessage(), facts,
+	}
+	saved[2].Kind = message.KindCompactionSummary
+	manager := turnContext{
+		instructions: mainInstructions, providerID: "chatgpt", modelID: "gpt-test", runID: "run-resume", resuming: true,
+		staticIdentity: staticIdentity, checkpointBoundary: &boundary,
+		modelHistory: session.ModelHistory{
+			ProviderID: "chatgpt", ModelID: "gpt-test", InstructionFingerprint: mainInstructionFingerprint,
+			StaticPrefixHash: staticIdentity, WireVersion: session.CurrentWireVersion,
+			CoveredThroughSequence: &boundary, Messages: saved,
+		},
+		history: []session.Block{
+			{Sequence: 1, Kind: "user", RunID: "run-resume", Content: "original request"},
+			{Sequence: 2, Kind: "user", RunID: "run-resume", Content: "late guidance", State: "guidance"},
+		},
+	}
+	got, err := manager.Build(context.Background(), api.Task{Goal: "original request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, current := range got {
+		if current.Role == message.RoleUser {
+			counts[current.Text]++
+		}
+	}
+	if counts["original request"] != 1 || counts["late guidance"] != 1 {
+		t.Fatalf("resumed user messages=%v history=%#v", counts, got)
 	}
 }
 

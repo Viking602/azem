@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/go-hydaelyn"
 	"github.com/Viking602/go-hydaelyn/api"
 	"github.com/Viking602/go-hydaelyn/coding"
 	"github.com/Viking602/go-hydaelyn/tool"
@@ -68,6 +71,11 @@ func TestGovernedReadApprovalEditAndStaleAnchor(t *testing.T) {
 		t.Fatalf("approved edit result = %+v", second)
 	}
 	assertFile(t, path, "alpha\nBETA\ngamma\n")
+	_, err = service.ExecuteTool(ctx, run, tool.Call{ID: "edit-replay-new-id", Name: coding.ToolEditHashline, Arguments: arguments}, nil)
+	if !errors.Is(err, hydaelyn.ErrActionReconcileRequired) {
+		t.Fatalf("same effect with new call ID error=%v", err)
+	}
+	assertFile(t, path, "alpha\nBETA\ngamma\n")
 
 	staleArgs, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 2:\n+STALE\n"})
 	staleCall := tool.Call{ID: "edit-stale", Name: coding.ToolEditHashline, Arguments: staleArgs}
@@ -86,6 +94,44 @@ func TestGovernedReadApprovalEditAndStaleAnchor(t *testing.T) {
 		t.Fatalf("stale result = %+v", stale)
 	}
 	assertFile(t, path, "alpha\nBETA\ngamma\n")
+}
+
+func TestRestoredCompletedEffectBlocksNewCallID(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close(ctx) })
+	run, err := service.StartRun(ctx, "do not replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := json.RawMessage(`{"input":"already-completed"}`)
+	digest := sha256.Sum256(arguments)
+	run.RestoreCompletedEffect(coding.ToolEditHashline, fmt.Sprintf("%x", digest[:]))
+	_, err = service.ExecuteTool(ctx, run, tool.Call{ID: "fresh-call-id", Name: coding.ToolEditHashline, Arguments: arguments}, nil)
+	if !errors.Is(err, hydaelyn.ErrActionReconcileRequired) {
+		t.Fatalf("semantic replay error=%v", err)
+	}
+}
+
+func TestCanonicalToolArgumentsGiveEquivalentSideEffectsOneIdentity(t *testing.T) {
+	first, err := canonicalToolArguments(json.RawMessage(`{"command":"deploy","network":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := canonicalToolArguments(json.RawMessage(" { \"network\" : true, \"command\" : \"deploy\" } "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("canonical arguments differ: %s != %s", first, second)
+	}
 }
 
 func TestConcurrentRunsKeepTasksLeasesAndApprovalsIsolated(t *testing.T) {
@@ -315,6 +361,77 @@ func TestRunnerRecoversFromSQLite(t *testing.T) {
 	}
 }
 
+func TestResumeRunReacquiresRecoveredTaskWithoutChangingRunID(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	notePath := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(notePath, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(t.TempDir(), "resume.db")
+	store, err := sqlitestore.Open(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := NewService(store, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := first.StartRun(ctx, "resume same logical run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := executeRead(t, ctx, first, run, "read-before-resume", "note.txt")
+	editArguments, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 1:\n+after\n"})
+	editCall := tool.Call{ID: "edit-before-resume", Name: coding.ToolEditHashline, Arguments: editArguments}
+	pending, err := first.ExecuteTool(ctx, run, editCall, nil)
+	if err != nil || pending.Approval == nil {
+		t.Fatalf("resume setup approval=%+v err=%v", pending, err)
+	}
+	if err := first.ResolveApproval(ctx, run, editCall.ID, ApprovalOnce, "user"); err != nil {
+		t.Fatal(err)
+	}
+	if executed, err := first.ExecuteTool(ctx, run, editCall, nil); err != nil || !executed.Executed || executed.Result.IsError {
+		t.Fatalf("resume setup execution=%+v err=%v", executed, err)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := sqlitestore.Open(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reopened.PrepareRecovery(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := NewService(reopened, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close(ctx)
+	if _, err := recovered.Recover(ctx, run.RunID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := recovered.ResumeRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.RunID != run.RunID || resumed.TaskID != run.TaskID || resumed.LeaseID == run.LeaseID {
+		t.Fatalf("resumed run=%+v original=%+v", resumed, run)
+	}
+	_, err = recovered.ExecuteTool(ctx, resumed, tool.Call{ID: "new-id-same-effect", Name: coding.ToolEditHashline, Arguments: editArguments}, nil)
+	if !errors.Is(err, hydaelyn.ErrActionReconcileRequired) {
+		t.Fatalf("resumed semantic replay error=%v", err)
+	}
+	if err := recovered.CompleteRun(ctx, resumed, "done after recovery", nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNewServiceCanStartRunAfterProcessRestart(t *testing.T) {
 	ctx := context.Background()
 	database := filepath.Join(t.TempDir(), "azem.db")
@@ -377,6 +494,73 @@ func TestCompleteRunPersistsTerminalState(t *testing.T) {
 	}
 	if projection.Run.Status != api.RunStatusCompleted {
 		t.Fatalf("run status = %q", projection.Run.Status)
+	}
+}
+
+func TestFinalizeReportedRunRepairsPostReportCrashWindow(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(ctx)
+	run, err := service.StartRun(ctx, "finalize reported")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.stopRunLeaseHeartbeat(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.runner.HeartbeatTaskExecution(ctx, api.HeartbeatTaskExecutionCommand{LeaseID: run.LeaseID, HolderID: run.HolderID, TTL: service.runLeaseTTL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.runner.SubmitTypedReport(ctx, api.SubmitTypedReportCommand{
+		RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID, HolderType: api.HolderAgent,
+		HolderID: run.HolderID, TaskVersion: run.TaskVersion,
+		Report: api.TypedReport{Status: api.ReportStatusSuccess, Summary: "already committed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.FinalizeReportedRun(ctx, run.RunID); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.Recover(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Run.Status != api.RunStatusCompleted {
+		t.Fatalf("repaired run status=%s", projection.Run.Status)
+	}
+	cancelled, err := service.StartRun(ctx, "finalize cancelled report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cancelled.stopRunLeaseHeartbeat(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.runner.HeartbeatTaskExecution(ctx, api.HeartbeatTaskExecutionCommand{LeaseID: cancelled.LeaseID, HolderID: cancelled.HolderID, TTL: service.runLeaseTTL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.runner.SubmitTypedReport(ctx, api.SubmitTypedReportCommand{
+		RunID: cancelled.RunID, TaskID: cancelled.TaskID, LeaseID: cancelled.LeaseID, HolderType: api.HolderAgent,
+		HolderID: cancelled.HolderID, TaskVersion: cancelled.TaskVersion,
+		Report: api.TypedReport{Status: api.ReportStatusFailed, Summary: "cancelled", Kind: "cancelled"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.FinalizeReportedRun(ctx, cancelled.RunID); err != nil {
+		t.Fatal(err)
+	}
+	cancelledProjection, err := service.Recover(ctx, cancelled.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelledProjection.Run.Status != api.RunStatusCancelled {
+		t.Fatalf("repaired cancelled run status=%s", cancelledProjection.Run.Status)
 	}
 }
 
