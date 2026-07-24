@@ -537,7 +537,7 @@ func TestMCPServerEnterOpensLocalizedToolDetailsAndEscReturns(t *testing.T) {
 		t.Fatalf("MCP enter opened overlay=%q detail=%q", model.overlay, model.detailMCPName)
 	}
 	content := ansi.Strip(model.renderOverlay(100, 30))
-	for _, wanted := range []string{"MCP 服务器详情", "grep · 已连接", "searchGitHub", "搜索公开 GitHub 代码", "read_only", "不需要"} {
+	for _, wanted := range []string{"MCP 服务器详情", "grep · 已连接", "searchGitHub", "搜索公开 GitHub 代码", "操作类型：只读", "审批：不需要"} {
 		if !strings.Contains(content, wanted) {
 			t.Fatalf("MCP detail missing %q:\n%s", wanted, content)
 		}

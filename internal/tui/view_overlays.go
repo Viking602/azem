@@ -384,7 +384,7 @@ func (m AppModel) renderMCPDetailOverlay(width, height int) string {
 				}
 				content = append(content, "◆ "+tool.Name)
 				content = append(content, "  "+m.tr("overlay.mcp_detail.governance", map[string]string{
-					"effect": first(tool.Effect, m.tr("value.unknown")), "approval": approval,
+					"effect": m.mcpToolEffect(tool.Effect), "approval": approval,
 				}))
 				for _, line := range wrapText(first(tool.Description, m.tr("overlay.mcp_detail.no_description")), max(4, innerWidth-6)) {
 					content = append(content, "  "+line)
@@ -431,6 +431,15 @@ func (m AppModel) renderMCPDetailOverlay(width, height int) string {
 		output = append(output, "")
 	}
 	return strings.Join(output[:height], "\n")
+}
+
+func (m AppModel) mcpToolEffect(effect string) string {
+	switch effect {
+	case "read_only", "write", "external_side_effect":
+		return m.tr("effect." + effect)
+	default:
+		return first(effect, m.tr("value.unknown"))
+	}
 }
 
 func (m AppModel) agentDetail() (AgentView, bool) {
