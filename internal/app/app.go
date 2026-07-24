@@ -15,6 +15,7 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
+	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
@@ -80,6 +81,7 @@ type Service struct {
 	usagePersistMu     sync.Mutex
 	sessionUsage       map[string]session.Usage
 	attachments        AttachmentStore
+	background         *backgroundservice.Manager
 	historySearch      func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error)
 	recapGenerator     func(context.Context, recapGenerationRequest) (string, error)
 }
@@ -121,6 +123,10 @@ func (s *Service) AttachMemory(memoryService *memory.Service, recapService *reca
 
 func (s *Service) AttachAttachments(root string) {
 	s.attachments = NewAttachmentStore(root)
+}
+
+func (s *Service) AttachBackground(manager *backgroundservice.Manager) {
+	s.background = manager
 }
 
 func (s *Service) ImportImage(sessionID, path string) (session.Attachment, error) {
@@ -880,6 +886,11 @@ func (s *Service) shutdown() {
 			s.shutdownErr = errors.Join(s.shutdownErr, err)
 		}
 	}
+	if s.background != nil {
+		if err := s.background.Close(); err != nil {
+			s.shutdownErr = errors.Join(s.shutdownErr, err)
+		}
+	}
 	s.events.Close()
 	if s.coding != nil {
 		if err := s.coding.Close(persistenceCtx); err != nil {
@@ -916,32 +927,32 @@ func (s *Service) runFakeTurn(ctx context.Context, sessionID string, runID strin
 				_, _ = s.sessions.AppendBlock(s.ctx, sessionID, session.Block{Kind: "assistant", RunID: runID, Title: "Azem", Content: streamed.String(), State: "cancelled"})
 			}
 			s.observeStop(sessionID, runID, hooks.StopFailure, "cancelled", ctx.Err(), streamed.String())
-			s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
+			s.emitTerminal(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
 			return
 		case <-timer.C:
 		}
 		if !s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, Text: text, State: "streaming"}) {
 			s.observeStop(sessionID, runID, hooks.StopFailure, "cancelled", context.Canceled, streamed.String())
-			s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
+			s.emitTerminal(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
 			return
 		}
 		streamed.WriteString(text)
 	}
 	if err := s.observeStop(sessionID, runID, hooks.Stop, "completed", nil, streamed.String()); err != nil {
-		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "stop_hook_blocked", Text: err.Error()})
+		s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "stop_hook_blocked", Text: err.Error()})
 		return
 	}
 	if s.sessions != nil {
 		if _, err := s.sessions.AppendBlock(ctx, sessionID, session.Block{Kind: "assistant", RunID: runID, Title: "Azem", Content: streamed.String(), State: "completed"}); err != nil {
 			s.observeStop(sessionID, runID, hooks.StopFailure, "persist_failed", err, streamed.String())
-			s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
+			s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 			return
 		}
 	}
 	if err := s.persistRecap(ctx, recapGenerationRequest{SessionID: sessionID, RunID: runID, Goal: prompt, Answer: streamed.String()}); err != nil {
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 	}
-	s.emit(ctx, Event{Kind: EventRunFinished, SessionID: sessionID, RunID: runID, State: "completed"})
+	s.emitTerminal(ctx, Event{Kind: EventRunFinished, SessionID: sessionID, RunID: runID, State: "completed"})
 }
 
 func (s *Service) canStartAutoWake(sessionID string) bool {
@@ -983,6 +994,13 @@ func (s *Service) startSubagentAutoWake(run agentservice.SubagentRun) error {
 }
 
 func (s *Service) clearRun(runID string) {
+	sessionID, providers := s.releaseRun(runID)
+	if sessionID != "" && providers != nil {
+		providers.AutoWakePending(sessionID)
+	}
+}
+
+func (s *Service) releaseRun(runID string) (string, *ProviderRuntime) {
 	s.mu.Lock()
 	sessionID := ""
 	var cancel context.CancelFunc
@@ -1003,9 +1021,7 @@ func (s *Service) clearRun(runID string) {
 	if cancel != nil {
 		cancel()
 	}
-	if sessionID != "" && providers != nil {
-		providers.AutoWakePending(sessionID)
-	}
+	return sessionID, providers
 }
 
 func (s *Service) emit(ctx context.Context, event Event) bool {
@@ -1024,6 +1040,35 @@ func (s *Service) emit(ctx context.Context, event Event) bool {
 	default:
 	}
 	return s.events.Publish(event) == eventPublishAccepted
+}
+
+func (s *Service) emitTerminal(_ context.Context, event Event) bool {
+	s.mu.Lock()
+	sessionID := ""
+	var cancel context.CancelFunc
+	providers := s.providers
+	delete(s.autoReviewDenials, event.RunID)
+	if s.activeRun == event.RunID {
+		sessionID = s.activeSession
+		s.activeRun = ""
+		s.activeSession = ""
+		s.activeGuidance = nil
+		s.guidanceGeneration++
+		s.guidanceOpen = false
+		cancel = s.activeEnd
+		s.activeEnd = nil
+		s.activeCancelIntent = ""
+	}
+	event.At = time.Now().UTC()
+	published := s.events.Publish(event) == eventPublishAccepted
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if sessionID != "" && providers != nil {
+		providers.AutoWakePending(sessionID)
+	}
+	return published
 }
 
 func (s *Service) resetTurnUsageTracking(sessionID string) {

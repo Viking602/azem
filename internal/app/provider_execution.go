@@ -221,12 +221,12 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	completionCancel()
 	if ctx.Err() != nil {
 		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "cancelled", ctx.Err())
-		s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: request.SessionID, RunID: run.RunID, State: "cancelled"})
+		s.emitTerminal(s.ctx, Event{Kind: EventRunCancelled, SessionID: request.SessionID, RunID: run.RunID, State: "cancelled"})
 		return
 	}
 	if runErr != nil {
 		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "failed", runErr)
-		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: runErr.Error()})
+		s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: runErr.Error()})
 		return
 	}
 	if err := s.persistRecap(ctx, recapGenerationRequest{
@@ -234,7 +234,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	}); err != nil {
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
 	}
-	s.emit(ctx, Event{Kind: EventRunFinished, SessionID: request.SessionID, RunID: run.RunID, State: "completed"})
+	s.emitTerminal(ctx, Event{Kind: EventRunFinished, SessionID: request.SessionID, RunID: run.RunID, State: "completed"})
 }
 
 func teamPrompt(request TurnRequest) string {
@@ -715,37 +715,37 @@ func (c teamHookContext) CompactTo(ctx context.Context, history []message.Messag
 func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID, goal string, todo session.TodoList, execution agentservice.TeamExecution, err error) {
 	if ctx.Err() != nil {
 		s.observeStop(sessionID, runID, hooks.StopFailure, "cancelled", ctx.Err())
-		s.emit(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
+		s.emitTerminal(s.ctx, Event{Kind: EventRunCancelled, SessionID: sessionID, RunID: runID, State: "cancelled"})
 		return
 	}
 	if err != nil {
 		s.observeStop(sessionID, runID, hooks.StopFailure, "failed", err)
-		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
+		s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 		return
 	}
 	answer := teamAnswer(execution.Result.State)
 	if strings.TrimSpace(answer) == "" {
 		s.observeStop(sessionID, runID, hooks.StopFailure, "empty_answer", errors.New("coding team completed without a reporter answer"))
-		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: "coding team completed without a reporter answer"})
+		s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: "coding team completed without a reporter answer"})
 		return
 	}
 	if !s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: answer}) {
 		deliveryErr := eventDeliveryError(ctx)
 		s.observeStop(sessionID, runID, hooks.StopFailure, "event_backlog", deliveryErr)
-		s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: deliveryErr.Error()})
+		s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: deliveryErr.Error()})
 		return
 	}
 	if s.sessions != nil {
 		if _, err := s.sessions.AppendBlock(ctx, sessionID, session.Block{Kind: "assistant", RunID: runID, Title: "Azem team", Content: answer, State: "completed"}); err != nil {
 			s.observeStop(sessionID, runID, hooks.StopFailure, "persist_failed", err)
-			s.emit(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
+			s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 			return
 		}
 	}
 	if err := s.persistRecap(ctx, recapGenerationRequest{SessionID: sessionID, RunID: runID, Goal: goal, Answer: answer, Todo: todo}); err != nil {
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
 	}
-	s.emit(ctx, Event{Kind: EventRunFinished, SessionID: sessionID, RunID: runID, State: "completed"})
+	s.emitTerminal(ctx, Event{Kind: EventRunFinished, SessionID: sessionID, RunID: runID, State: "completed"})
 }
 
 func teamAnswer(state multiagent.TeamState) string {

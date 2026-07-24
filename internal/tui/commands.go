@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -55,6 +56,10 @@ const (
 	ActionListModelRoutes  = app.ActionListModelRoutes
 	ActionSetModelRoute    = app.ActionSetModelRoute
 	ActionResetModelRoute  = app.ActionResetModelRoute
+	ActionListBackground   = app.ActionListBackground
+	ActionStartBackground  = app.ActionStartBackground
+	ActionStopBackground   = app.ActionStopBackground
+	ActionLogsBackground   = app.ActionLogsBackground
 )
 
 type (
@@ -82,6 +87,7 @@ var slashCommands = []SlashCommand{
 	{Name: "provider", Usage: "/provider [chatgpt|grok]"}, {Name: "reasoning", Usage: "/reasoning [level]"},
 	{Name: "login", Usage: "/login [chatgpt|grok]"}, {Name: "logout", Usage: "/logout [chatgpt|grok]"},
 	{Name: "team", Usage: "/team on|off"}, {Name: "agents", Usage: "/agents [cancel <id>]"},
+	{Name: "background", Usage: "/background [start [--name NAME] [--cwd DIR] -- COMMAND | stop <id> | logs <id>]"},
 	{Name: "todos", Usage: "/todos"}, {Name: "todo", Usage: "/todo"},
 	{Name: "agent-types", Usage: "/agent-types"}, {Name: "personas", Usage: "/personas"},
 	{Name: "new", Usage: "/new"}, {Name: "sessions", Usage: "/sessions"}, {Name: "resume", Usage: "/resume"},
@@ -246,6 +252,23 @@ func executeAction(ctx context.Context, runtime Runtime, action Action) tea.Cmd 
 		}
 		err := actionRuntime.ExecuteAction(ctx, action)
 		return actionResultMsg{Action: action, Err: err}
+	}
+}
+
+func pollBackground(processID string, generation uint64) tea.Cmd {
+	return tea.Tick(750*time.Millisecond, func(time.Time) tea.Msg {
+		return backgroundPollMsg{Generation: generation, ProcessID: processID}
+	})
+}
+
+func refreshBackground(runtime Runtime, processID string, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		actionRuntime, ok := runtime.(ActionRuntime)
+		if !ok {
+			return backgroundPollResultMsg{Generation: generation, ProcessID: processID, Err: errActionUnsupported}
+		}
+		err := actionRuntime.ExecuteAction(context.Background(), Action{Kind: ActionLogsBackground, Target: processID, Offset: -1, Limit: 400})
+		return backgroundPollResultMsg{Generation: generation, ProcessID: processID, Err: err}
 	}
 }
 

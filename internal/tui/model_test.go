@@ -15,6 +15,7 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/app"
+	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/memory"
@@ -1045,6 +1046,37 @@ func TestCancelDuringStartAcceptsEitherMessageOrdering(t *testing.T) {
 	model.applyEvent(app.Event{Kind: app.EventRunCancelled, SessionID: "default", RunID: "run-event-first"})
 	if model.runID != "" || model.status != "Cancelled" {
 		t.Fatalf("event-first terminal runID=%q status=%q", model.runID, model.status)
+	}
+}
+
+func TestAutoWakeRunStartedAfterParentFailureBecomesVisibleAndAcceptsGuidance(t *testing.T) {
+	runtime := &configuredTurnRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status = "Running"
+	model.runID = "parent-run"
+	model.applyEvent(app.Event{Kind: app.EventRunFailed, SessionID: "default", RunID: "parent-run", Text: "stream interrupted"})
+	if model.status != "Failed" || model.runID != "" {
+		t.Fatalf("parent terminal state runID=%q status=%q", model.runID, model.status)
+	}
+
+	model.applyEvent(app.Event{Kind: app.EventRunStarted, SessionID: "default", RunID: "auto-wake-run"})
+	if model.status != "Running" || model.runID != "auto-wake-run" {
+		t.Fatalf("auto-wake run was hidden: runID=%q status=%q", model.runID, model.status)
+	}
+
+	model.composer.SetValue("继续")
+	updated, cmd := model.submit()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("guidance for auto-wake run returned no command")
+	}
+	message := cmd()
+	result, ok := message.(guidanceResultMsg)
+	if !ok || result.Err != nil || result.RunID != "auto-wake-run" || result.Text != "继续" {
+		t.Fatalf("guidance result = %#v", message)
+	}
+	if len(runtime.guidance) != 1 || runtime.guidance[0] != "继续" {
+		t.Fatalf("auto-wake guidance = %#v", runtime.guidance)
 	}
 }
 
@@ -3461,6 +3493,64 @@ func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 	emptyModel.applyEvent(app.Event{Kind: app.EventSkillCatalog})
 	if content := ansi.Strip(emptyModel.renderOverlay(80, 20)); !strings.Contains(content, "No skills are available") {
 		t.Fatalf("skills empty state missing:\n%s", content)
+	}
+}
+
+func TestBackgroundCommandListAndLogDetail(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, cmd := model.executeCommand(Command{Name: "background", Args: []string{"start", "--name", "web", "--cwd", "cmd", "--", "go", "run", "."}})
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("background start did not produce an action")
+	}
+	_ = cmd()
+	if len(runtime.actions) != 1 {
+		t.Fatalf("background actions = %#v", runtime.actions)
+	}
+	action := runtime.actions[0]
+	if action.Kind != ActionStartBackground || action.Name != "web" || action.CWD != "cmd" || action.Target != "go run ." {
+		t.Fatalf("background start action = %+v", action)
+	}
+
+	process := backgroundservice.Process{ID: "bg_1", Name: "web", Command: "go run .", CWD: "/tmp/workspace/cmd", PID: 42, State: "running", StartedAt: time.Now(), LogBytes: 128}
+	model.applyEvent(app.Event{Kind: app.EventBackgroundState, Background: []backgroundservice.Process{process}})
+	if model.overlay != OverlayBackground || !strings.Contains(ansi.Strip(model.renderOverlay(100, 24)), "web") {
+		t.Fatalf("background list overlay=%q render=%q", model.overlay, ansi.Strip(model.renderOverlay(100, 24)))
+	}
+	model.actionBusy = false
+	model.actionCancel = nil
+	updated, cmd = model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil || model.detailBackgroundID != process.ID || !model.backgroundFollow {
+		t.Fatalf("background detail selection = id:%q follow:%t cmd:%v", model.detailBackgroundID, model.backgroundFollow, cmd != nil)
+	}
+	_ = cmd()
+	if got := runtime.actions[len(runtime.actions)-1]; got.Kind != ActionLogsBackground || got.Target != process.ID || got.Offset != -1 {
+		t.Fatalf("background logs action = %+v", got)
+	}
+
+	model.applyEvent(app.Event{Kind: app.EventBackgroundLogs, BackgroundLogs: &backgroundservice.LogSnapshot{
+		Process: process, Lines: []string{"listening on :8080", "request complete"}, TotalLines: 2,
+	}})
+	rendered := ansi.Strip(model.renderOverlay(110, 28))
+	for _, want := range []string{"BACKGROUND LOGS", "PID 42", "listening on :8080", "request complete"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("background detail missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
+func TestBackgroundManualScrollDisablesFollow(t *testing.T) {
+	model := NewModel(&recordedRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.overlay = OverlayBackgroundDetail
+	model.detailBackgroundID = "bg_1"
+	model.backgroundFollow = true
+	model.backgroundLogs = &backgroundservice.LogSnapshot{Process: backgroundservice.Process{ID: "bg_1", State: "running"}, Lines: make([]string, 100)}
+	updated, _ := model.updateOverlayKey("up")
+	model = updated.(AppModel)
+	if model.backgroundFollow {
+		t.Fatal("manual log scrolling did not pause follow mode")
 	}
 }
 

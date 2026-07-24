@@ -12,6 +12,7 @@ import (
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
+	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
@@ -144,6 +145,15 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	service.SetConfigPath(paths.ConfigFile)
 	service.AttachDurable(sessions, coding)
 	service.AttachAttachments(filepath.Join(paths.DataDir, "attachments"))
+	backgroundManager, err := backgroundservice.NewManager(backgroundservice.Options{
+		Root: paths.Workspace, LogDir: filepath.Join(paths.StateDir, "background"),
+	})
+	if err != nil {
+		_ = coding.Close(ctx)
+		_ = store.Close(ctx)
+		return BootstrapResult{}, err
+	}
+	service.AttachBackground(backgroundManager)
 	service.AttachMemory(memory.NewService(store.DB(), cfg.Workspace.Root), recap.NewService(store.DB(), cfg.Workspace.Root))
 	service.AttachAuth(authentication, modelCatalog)
 	service.AttachSkills(skillCatalog)
@@ -162,17 +172,23 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	}
 	recoveryService, err := recovery.NewService(store, coding, subagentRuns, teamResumer, runResumer)
 	if err != nil {
+		_ = backgroundManager.Close()
+		_ = coding.Close(ctx)
 		_ = store.Close(ctx)
 		return BootstrapResult{}, err
 	}
 	recoverySummary, err := recoveryService.Recover(ctx)
 	if err != nil {
+		_ = backgroundManager.Close()
+		_ = coding.Close(ctx)
 		_ = store.Close(ctx)
 		return BootstrapResult{}, err
 	}
 	service.AttachRecovery(recoverySummary)
 	service.AttachReconcileResolver(store)
 	if err := service.dispatchLifecycle(ctx, hooks.Setup, service.hookMetadata(startupSessionID, ""), func(e *hooks.Envelope) { e.Trigger = "init" }); err != nil {
+		_ = backgroundManager.Close()
+		_ = coding.Close(ctx)
 		_ = store.Close(ctx)
 		return BootstrapResult{}, err
 	}

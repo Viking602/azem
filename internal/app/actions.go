@@ -16,6 +16,7 @@ import (
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
+	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/memory"
@@ -58,6 +59,10 @@ const (
 	ActionListModelRoutes  ActionKind = "list_model_routes"
 	ActionSetModelRoute    ActionKind = "set_model_route"
 	ActionResetModelRoute  ActionKind = "reset_model_route"
+	ActionListBackground   ActionKind = "list_background"
+	ActionStartBackground  ActionKind = "start_background"
+	ActionStopBackground   ActionKind = "stop_background"
+	ActionLogsBackground   ActionKind = "logs_background"
 )
 
 type Action struct {
@@ -66,6 +71,10 @@ type Action struct {
 	Decision  string
 	SessionID string
 	Route     *ModelRouteEntry
+	Name      string
+	CWD       string
+	Offset    int
+	Limit     int
 }
 
 type ActionExecutor interface {
@@ -82,6 +91,38 @@ func (s *Service) AttachReconcileResolver(resolver ReconcileResolver) {
 
 func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	switch action.Kind {
+	case ActionListBackground:
+		return s.emitBackgroundSnapshot(ctx, "listed")
+	case ActionStartBackground:
+		if s.background == nil {
+			return fmt.Errorf("background runtime is unavailable")
+		}
+		if s.cfg.Workspace.ShellPolicy == "deny" {
+			return fmt.Errorf("background commands are disabled by workspace.shell_policy")
+		}
+		_, err := s.background.Start(ctx, backgroundservice.StartRequest{Name: action.Name, Command: action.Target, CWD: action.CWD})
+		if err != nil {
+			return err
+		}
+		return s.emitBackgroundSnapshot(ctx, "started")
+	case ActionStopBackground:
+		if s.background == nil {
+			return fmt.Errorf("background runtime is unavailable")
+		}
+		if err := s.background.Stop(ctx, action.Target); err != nil {
+			return err
+		}
+		return s.emitBackgroundSnapshot(ctx, "stopped")
+	case ActionLogsBackground:
+		if s.background == nil {
+			return fmt.Errorf("background runtime is unavailable")
+		}
+		snapshot, err := s.background.Logs(action.Target, action.Offset, action.Limit)
+		if err != nil {
+			return err
+		}
+		s.emit(ctx, Event{Kind: EventBackgroundLogs, State: "loaded", BackgroundLogs: &snapshot})
+		return nil
 	case ActionListModelRoutes:
 		s.emit(ctx, Event{Kind: EventModelRoutes, State: "listed", ModelRoutes: s.modelRouteEntries()})
 		return nil
@@ -367,6 +408,14 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 		entries = append(entries, ModelRouteEntry{Scope: "subagent", Role: name, Label: firstNonempty(role.Description, name), Route: config.ModelRouteConfig{Provider: role.Provider, Model: role.Model, Reasoning: role.Reasoning}})
 	}
 	return entries
+}
+
+func (s *Service) emitBackgroundSnapshot(ctx context.Context, state string) error {
+	if s.background == nil {
+		return fmt.Errorf("background runtime is unavailable")
+	}
+	s.emit(ctx, Event{Kind: EventBackgroundState, State: state, Background: s.background.List()})
+	return nil
 }
 
 func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, reset bool) error {

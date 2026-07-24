@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Viking602/azem/internal/app"
+	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/provider/catalog"
@@ -96,31 +97,33 @@ type transcriptSelection struct {
 type Overlay string
 
 const (
-	OverlayNone        Overlay = ""
-	OverlayHelp        Overlay = "help"
-	OverlayStatus      Overlay = "status"
-	OverlayCommand     Overlay = "command"
-	OverlayProvider    Overlay = "provider"
-	OverlayModel       Overlay = "model"
-	OverlayModelRoutes Overlay = "model_routes"
-	OverlaySkills      Overlay = "skills"
-	OverlayLanguage    Overlay = "language"
-	OverlayReasoning   Overlay = "reasoning"
-	OverlaySessions    Overlay = "sessions"
-	OverlayApproval    Overlay = "approval"
-	OverlayCancel      Overlay = "cancel"
-	OverlayDiff        Overlay = "diff"
-	OverlayAgents      Overlay = "agents"
-	OverlayTodos       Overlay = "todos"
-	OverlayMemory      Overlay = "memory"
-	OverlayRecap       Overlay = "recap"
-	OverlayAgentDetail Overlay = "agent_detail"
-	OverlayAgentTypes  Overlay = "agent_types"
-	OverlayPersonas    Overlay = "personas"
-	OverlayMCP         Overlay = "mcp"
-	OverlayMCPDetail   Overlay = "mcp_detail"
-	OverlayRecovery    Overlay = "recovery"
-	OverlayError       Overlay = "error"
+	OverlayNone             Overlay = ""
+	OverlayHelp             Overlay = "help"
+	OverlayStatus           Overlay = "status"
+	OverlayCommand          Overlay = "command"
+	OverlayProvider         Overlay = "provider"
+	OverlayModel            Overlay = "model"
+	OverlayModelRoutes      Overlay = "model_routes"
+	OverlaySkills           Overlay = "skills"
+	OverlayLanguage         Overlay = "language"
+	OverlayReasoning        Overlay = "reasoning"
+	OverlaySessions         Overlay = "sessions"
+	OverlayApproval         Overlay = "approval"
+	OverlayCancel           Overlay = "cancel"
+	OverlayDiff             Overlay = "diff"
+	OverlayAgents           Overlay = "agents"
+	OverlayTodos            Overlay = "todos"
+	OverlayMemory           Overlay = "memory"
+	OverlayRecap            Overlay = "recap"
+	OverlayAgentDetail      Overlay = "agent_detail"
+	OverlayAgentTypes       Overlay = "agent_types"
+	OverlayPersonas         Overlay = "personas"
+	OverlayMCP              Overlay = "mcp"
+	OverlayMCPDetail        Overlay = "mcp_detail"
+	OverlayBackground       Overlay = "background"
+	OverlayBackgroundDetail Overlay = "background_detail"
+	OverlayRecovery         Overlay = "recovery"
+	OverlayError            Overlay = "error"
 )
 
 type focusArea uint8
@@ -351,6 +354,11 @@ type AppModel struct {
 	skillDiagnostics    []app.SkillDiagnostic
 	mcpServers          []MCPView
 	detailMCPName       string
+	background          []backgroundservice.Process
+	backgroundLogs      *backgroundservice.LogSnapshot
+	detailBackgroundID  string
+	backgroundFollow    bool
+	backgroundPollGen   uint64
 	models              []ModelChoice
 	modelsByProvider    map[string][]ModelChoice
 	modelRoutes         []app.ModelRouteEntry
@@ -527,6 +535,9 @@ func (m *AppModel) openOverlay(overlay Overlay) {
 }
 
 func (m *AppModel) closeOverlay() tea.Cmd {
+	if m.overlay == OverlayBackgroundDetail {
+		m.stopBackgroundFollow()
+	}
 	if m.overlay == OverlayModel {
 		m.modelSearch.Reset()
 		m.modelSearch.Blur()

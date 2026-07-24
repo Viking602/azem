@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Viking602/azem/internal/app"
+	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/session"
 )
@@ -382,6 +383,30 @@ func (m *AppModel) updateMCP(event app.Event) {
 	}
 	m.mcpServers = append(m.mcpServers, value)
 	sort.Slice(m.mcpServers, func(i, j int) bool { return m.mcpServers[i].Name < m.mcpServers[j].Name })
+}
+
+func (m *AppModel) upsertBackground(process backgroundservice.Process) {
+	for index := range m.background {
+		if m.background[index].ID == process.ID {
+			m.background[index] = process
+			return
+		}
+	}
+	m.background = append(m.background, process)
+	sort.Slice(m.background, func(i, j int) bool { return m.background[i].StartedAt.After(m.background[j].StartedAt) })
+}
+
+func (m *AppModel) reconcileBackgroundSelection() {
+	if m.detailBackgroundID == "" {
+		return
+	}
+	for _, process := range m.background {
+		if process.ID == m.detailBackgroundID {
+			return
+		}
+	}
+	m.detailBackgroundID = ""
+	m.backgroundLogs = nil
 }
 
 func (m *AppModel) updateAuth(event app.Event) {

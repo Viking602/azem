@@ -49,10 +49,20 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.scrollRecap(-3)
 					return m, nil
 				}
+				if m.overlay == OverlayBackgroundDetail {
+					m.backgroundFollow = false
+					m.overlayScroll = max(0, m.overlayScroll-3)
+					return m, nil
+				}
 				return m.updateOverlayKey("up")
 			case tea.MouseWheelDown:
 				if m.overlay == OverlayRecap {
 					m.scrollRecap(3)
+					return m, nil
+				}
+				if m.overlay == OverlayBackgroundDetail {
+					m.backgroundFollow = false
+					m.overlayScroll = min(m.backgroundLogScrollLimit(), m.overlayScroll+3)
 					return m, nil
 				}
 				return m.updateOverlayKey("down")
@@ -178,7 +188,25 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.applyActionResult(msg.Action)
+		if msg.Action.Kind == ActionLogsBackground && m.backgroundFollow && msg.Action.Target == m.detailBackgroundID {
+			return m, pollBackground(msg.Action.Target, m.backgroundPollGen)
+		}
 		return m, nil
+	case backgroundPollMsg:
+		if msg.Generation != m.backgroundPollGen || m.overlay != OverlayBackgroundDetail || !m.backgroundFollow || msg.ProcessID != m.detailBackgroundID {
+			return m, nil
+		}
+		return m, refreshBackground(m.runtime, msg.ProcessID, msg.Generation)
+	case backgroundPollResultMsg:
+		if msg.Generation != m.backgroundPollGen || msg.ProcessID != m.detailBackgroundID || m.overlay != OverlayBackgroundDetail || !m.backgroundFollow {
+			return m, nil
+		}
+		if msg.Err != nil {
+			m.backgroundFollow = false
+			m.errorBanner = msg.Err.Error()
+			return m, nil
+		}
+		return m, pollBackground(msg.ProcessID, msg.Generation)
 	case shutdownResultMsg:
 		if msg.Err != nil {
 			m.errorBanner = msg.Err.Error()
@@ -550,6 +578,54 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.overlay == OverlayBackgroundDetail {
+		switch key {
+		case "esc":
+			m.stopBackgroundFollow()
+			m.overlay = OverlayBackground
+			m.overlayCursor = 0
+			for index, process := range m.background {
+				if process.ID == m.detailBackgroundID {
+					m.overlayCursor = index
+					break
+				}
+			}
+			m.overlayScroll = 0
+			return m, nil
+		case "up", "k":
+			m.backgroundFollow = false
+			m.overlayScroll = max(0, m.overlayScroll-1)
+		case "down", "j":
+			m.backgroundFollow = false
+			m.overlayScroll = min(m.backgroundLogScrollLimit(), m.overlayScroll+1)
+		case "pgup":
+			m.backgroundFollow = false
+			m.overlayScroll = max(0, m.overlayScroll-max(1, m.height/3))
+		case "pgdown":
+			m.backgroundFollow = false
+			m.overlayScroll = min(m.backgroundLogScrollLimit(), m.overlayScroll+max(1, m.height/3))
+		case "home":
+			m.backgroundFollow = false
+			m.overlayScroll = 0
+		case "end":
+			m.backgroundFollow = false
+			m.overlayScroll = m.backgroundLogScrollLimit()
+		case "f":
+			m.backgroundFollow = !m.backgroundFollow
+			if m.backgroundFollow {
+				m.overlayScroll = m.backgroundLogScrollLimit()
+				m.backgroundPollGen++
+				return m, refreshBackground(m.runtime, m.detailBackgroundID, m.backgroundPollGen)
+			}
+		case "r":
+			return m, refreshBackground(m.runtime, m.detailBackgroundID, m.backgroundPollGen)
+		case "x":
+			if process, ok := m.selectedBackgroundProcess(); ok && (process.State == "running" || process.State == "stopping") {
+				return m.beginAction(Action{Kind: ActionStopBackground, Target: process.ID})
+			}
+		}
+		return m, nil
+	}
 	if key == "esc" {
 		if (m.overlay == OverlayModel || m.overlay == OverlayReasoning) && m.pendingModelRoute != nil {
 			m.modelSearch.Reset()
@@ -646,6 +722,12 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 		if m.overlay == OverlayAgents && m.overlayCursor < len(m.agents) {
 			return m.beginAction(Action{Kind: ActionCancelAgent, Target: m.agents[m.overlayCursor].ID})
 		}
+		if m.overlay == OverlayBackground && m.overlayCursor < len(m.background) {
+			process := m.background[m.overlayCursor]
+			if process.State == "running" || process.State == "stopping" {
+				return m.beginAction(Action{Kind: ActionStopBackground, Target: process.ID})
+			}
+		}
 	case "r":
 		if m.overlay == OverlaySkills {
 			return m.beginAction(Action{Kind: ActionReloadSkills})
@@ -714,6 +796,8 @@ func (m AppModel) overlayOptionCount() int {
 		return len(m.personas)
 	case OverlayMCP:
 		return len(m.mcpServers)
+	case OverlayBackground:
+		return len(m.background)
 	case OverlayRecovery:
 		return len(m.recovery)
 	default:
@@ -841,6 +925,16 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 			m.openOverlay(OverlayMCPDetail)
 		}
 		return m, nil
+	case OverlayBackground:
+		if m.overlayCursor >= 0 && m.overlayCursor < len(m.background) {
+			process := m.background[m.overlayCursor]
+			m.detailBackgroundID = process.ID
+			m.backgroundLogs = nil
+			m.backgroundFollow = process.State == "running" || process.State == "stopping"
+			m.backgroundPollGen++
+			return m.beginAction(Action{Kind: ActionLogsBackground, Target: process.ID, Offset: -1, Limit: 400})
+		}
+		return m, nil
 	case OverlayRecovery:
 		if m.overlayCursor >= len(m.recovery) {
 			return m, nil
@@ -904,6 +998,8 @@ func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
 		m.openOverlay(OverlayStatus)
 	case "agents":
 		m.openOverlay(OverlayAgents)
+	case "background":
+		return m.beginAction(Action{Kind: ActionListBackground})
 	case "agent-types":
 		return m.beginAction(Action{Kind: ActionListAgentTypes})
 	case "personas":
@@ -1008,6 +1104,12 @@ func (m *AppModel) applyActionResult(action Action) {
 		_ = m.closeOverlay()
 	case ActionCompact:
 		m.status = "Ready"
+	case ActionStopBackground:
+		m.stopBackgroundFollow()
+	case ActionLogsBackground:
+		if m.backgroundFollow && m.detailBackgroundID == action.Target {
+			return
+		}
 	case ActionNewSession, ActionResumeSession:
 		m.status = "Ready"
 		_ = m.closeOverlay()
@@ -1452,6 +1554,8 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		return m.beginAction(Action{Kind: ActionShowRecap})
+	case "background":
+		return m.executeBackgroundCommand(command.Args)
 	case "agents":
 		if len(command.Args) == 0 {
 			m.openOverlay(OverlayAgents)
@@ -1504,4 +1608,61 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		m.errorBanner = m.tr("command.unknown", map[string]string{"name": command.Name})
 	}
 	return m, nil
+}
+
+func (m AppModel) executeBackgroundCommand(args []string) (tea.Model, tea.Cmd) {
+	usage := func() (tea.Model, tea.Cmd) {
+		m.errorBanner = m.tr("command.usage.background")
+		return m, nil
+	}
+	if len(args) == 0 {
+		return m.beginAction(Action{Kind: ActionListBackground})
+	}
+	switch strings.ToLower(args[0]) {
+	case "stop":
+		if len(args) != 2 {
+			return usage()
+		}
+		return m.beginAction(Action{Kind: ActionStopBackground, Target: args[1]})
+	case "logs":
+		if len(args) != 2 {
+			return usage()
+		}
+		m.detailBackgroundID = args[1]
+		m.backgroundFollow = true
+		m.backgroundPollGen++
+		return m.beginAction(Action{Kind: ActionLogsBackground, Target: args[1], Offset: -1, Limit: 400})
+	case "start":
+		name, cwd := "", ""
+		index := 1
+		for index < len(args) {
+			switch args[index] {
+			case "--":
+				index++
+				command := strings.TrimSpace(strings.Join(args[index:], " "))
+				if command == "" {
+					return usage()
+				}
+				return m.beginAction(Action{Kind: ActionStartBackground, Name: name, CWD: cwd, Target: command})
+			case "--name", "--cwd":
+				if index+1 >= len(args) {
+					return usage()
+				}
+				if args[index] == "--name" {
+					name = args[index+1]
+				} else {
+					cwd = args[index+1]
+				}
+				index += 2
+			default:
+				return usage()
+			}
+		}
+	}
+	return usage()
+}
+
+func (m *AppModel) stopBackgroundFollow() {
+	m.backgroundFollow = false
+	m.backgroundPollGen++
 }
