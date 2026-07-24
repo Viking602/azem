@@ -267,7 +267,19 @@ func Default() Config {
 			Enabled: true, ClaudeCompatibility: false, DefaultTimeout: "5s",
 			DefaultTimeoutParsed: 5 * time.Second, FailurePolicy: "open",
 		},
-		MCP: MCPConfig{Servers: map[string]MCPServerConfig{}},
+		MCP: MCPConfig{Servers: builtInMCPServers()},
+	}
+}
+
+func builtInMCPServers() map[string]MCPServerConfig {
+	return map[string]MCPServerConfig{
+		"grep": {
+			Enabled: true, Transport: "streamable_http", URL: "https://mcp.grep.app",
+			ConnectTimeout: "30s", CallTimeout: "60s", MaxConcurrency: 2, Approval: "never",
+			ToolOverrides: map[string]ToolOverride{
+				"searchGitHub": {Effect: "read_only", Approval: "never"},
+			},
+		},
 	}
 }
 

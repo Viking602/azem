@@ -298,7 +298,9 @@ The configured tool effect and approval policy still determine which operations 
 
 ## MCP Integrations
 
-Azem supports local stdio servers and remote Streamable HTTP servers.
+Azem includes the read-only [grep.app](https://grep.app) MCP server by default, exposed as `mcp__grep__searchGitHub`. It searches public GitHub repositories for literal code patterns. Override or disable it through `mcp.servers.grep` in the configuration file.
+
+Azem also supports custom local stdio servers and remote Streamable HTTP servers.
 
 ### stdio
 

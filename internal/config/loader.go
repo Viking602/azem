@@ -269,6 +269,18 @@ func Load(path string, startupWorkspace string) (Config, error) {
 			}
 			return Config{}, fmt.Errorf("decode config %q: %w", path, err)
 		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return Config{}, fmt.Errorf("rewind config %q: %w", path, err)
+		}
+		var document yaml.Node
+		if err := yaml.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&document); err != nil {
+			return Config{}, fmt.Errorf("decode config %q for built-in MCP merge: %w", path, err)
+		}
+		if len(document.Content) > 0 {
+			if err := mergeBuiltInMCPServers(&cfg, document.Content[0]); err != nil {
+				return Config{}, fmt.Errorf("merge built-in MCP config: %w", err)
+			}
+		}
 	}
 	for i, directory := range cfg.Skills.AdditionalDirs {
 		if !filepath.IsAbs(directory) {
@@ -329,6 +341,31 @@ func Load(path string, startupWorkspace string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func mergeBuiltInMCPServers(cfg *Config, root *yaml.Node) error {
+	builtIns := builtInMCPServers()
+	merged := make(map[string]MCPServerConfig, len(builtIns)+len(cfg.MCP.Servers))
+	for name, server := range builtIns {
+		merged[name] = server
+	}
+	for name, server := range cfg.MCP.Servers {
+		merged[name] = server
+	}
+	mcpNode := mappingValue(root, "mcp")
+	serversNode := mappingValue(mcpNode, "servers")
+	for name, server := range builtIns {
+		override := mappingValue(serversNode, name)
+		if override == nil {
+			continue
+		}
+		if err := override.Decode(&server); err != nil {
+			return fmt.Errorf("mcp.servers.%s: %w", name, err)
+		}
+		merged[name] = server
+	}
+	cfg.MCP.Servers = merged
+	return nil
 }
 
 func resolveSubagentInstructionFiles(cfg *Config, baseDir string) error {

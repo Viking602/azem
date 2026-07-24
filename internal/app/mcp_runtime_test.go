@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -131,6 +132,32 @@ func TestConfiguredTurnSnapshotsAndGovernsMCPTool(t *testing.T) {
 	service.AttachDurable(sessions, coding)
 	service.AttachAuth(authentication, modelCatalog)
 	service.AttachAgentExtensions(manager, nil)
+	if err := service.emitMCPSnapshot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshotEvent, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshots []struct {
+		Name  string `json:"name"`
+		Tools []struct {
+			Name             string `json:"name"`
+			Description      string `json:"description"`
+			Effect           string `json:"effect"`
+			RequiresApproval bool   `json:"requiresApproval"`
+		} `json:"tools"`
+	}
+	if snapshotEvent.Kind != EventMCPState || json.Unmarshal([]byte(snapshotEvent.Data["servers"]), &snapshots) != nil {
+		t.Fatalf("MCP snapshot event = %#v", snapshotEvent)
+	}
+	if len(snapshots) != 1 || snapshots[0].Name != "demo" || len(snapshots[0].Tools) != 1 {
+		t.Fatalf("MCP snapshot = %#v", snapshots)
+	}
+	toolSnapshot := snapshots[0].Tools[0]
+	if toolSnapshot.Name != "status" || toolSnapshot.Description != "return status" || toolSnapshot.Effect != "external_side_effect" || !toolSnapshot.RequiresApproval {
+		t.Fatalf("MCP tool snapshot = %#v", toolSnapshot)
+	}
 	service.AttachProviderRuntime(providerRuntime)
 
 	runID, err := service.StartConfiguredTurn(TurnRequest{SessionID: "default", Prompt: "check remote status", Provider: "chatgpt", Model: "gpt-mcp", Reasoning: "minimal", AgentMode: "single"})

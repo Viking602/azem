@@ -53,10 +53,18 @@ type Diagnostic struct {
 	Error  string
 }
 
+type ToolSnapshot struct {
+	Name             string
+	Description      string
+	Effect           string
+	RequiresApproval bool
+}
+
 type ServerSnapshot struct {
 	Name        string
 	State       State
 	ToolCount   int
+	Tools       []ToolSnapshot
 	Diagnostics []Diagnostic
 	LastError   string
 }
@@ -271,8 +279,17 @@ func (m *Manager) Servers() []ServerSnapshot {
 	result := make([]ServerSnapshot, 0, len(names))
 	for _, name := range names {
 		current := m.servers[name]
+		tools := make([]ToolSnapshot, 0, len(current.tools))
+		for _, driver := range current.tools {
+			definition := driver.Definition()
+			toolName := strings.TrimPrefix(definition.Name, "mcp__"+name+"__")
+			tools = append(tools, ToolSnapshot{
+				Name: toolName, Description: definition.Description, Effect: string(definition.EffectType),
+				RequiresApproval: definition.RequiresApproval || definition.Security.RequiresApproval,
+			})
+		}
 		result = append(result, ServerSnapshot{
-			Name: name, State: current.state, ToolCount: len(current.tools),
+			Name: name, State: current.state, ToolCount: len(tools), Tools: tools,
 			Diagnostics: append([]Diagnostic(nil), current.diagnostics...), LastError: current.lastError,
 		})
 	}

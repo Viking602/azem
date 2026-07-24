@@ -76,6 +76,15 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 	if len(servers) != 1 || servers[0].State != StateReady || len(servers[0].Diagnostics) != 2 {
 		t.Fatalf("servers=%#v", servers)
 	}
+	if len(servers[0].Tools) != 2 || servers[0].Tools[0].Name != "read_file" || servers[0].Tools[1].Name != "safe" {
+		t.Fatalf("server tool snapshots=%#v", servers[0].Tools)
+	}
+	if servers[0].Tools[0].Description != "read" || servers[0].Tools[0].Effect != string(tool.EffectExternalSideEffect) || !servers[0].Tools[0].RequiresApproval {
+		t.Fatalf("read tool snapshot=%#v", servers[0].Tools[0])
+	}
+	if servers[0].Tools[1].Effect != string(tool.EffectReadOnly) || servers[0].Tools[1].RequiresApproval {
+		t.Fatalf("safe tool snapshot=%#v", servers[0].Tools[1])
+	}
 	if len(events) < 2 || events[0].State != StateConnecting || events[len(events)-1].State != StateReady {
 		t.Fatalf("events=%#v", events)
 	}
@@ -95,6 +104,34 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 	}
 	if events[len(events)-1].State != StateStopped {
 		t.Fatalf("close did not emit stopped event: %#v", events)
+	}
+}
+
+func TestBuiltInGrepToolIsReadOnlyAndApprovalFree(t *testing.T) {
+	cfg := config.Default()
+	serverConfig := cfg.MCP.Servers["grep"]
+	client := &fakeClient{tools: []message.ToolDefinition{{
+		Name: "searchGitHub", Description: "search public code", InputSchema: message.JSONSchema{Type: "object"},
+	}}}
+	manager := NewManager(map[string]config.MCPServerConfig{"grep": serverConfig}, "test", nil, Options{
+		Dial: func(_ context.Context, name string, got config.MCPServerConfig, _ map[string]string, _ http.Header) (mcpcontract.Client, error) {
+			if name != "grep" || got.URL != "https://mcp.grep.app" || got.Transport != "streamable_http" {
+				t.Fatalf("built-in grep dial = %q %#v", name, got)
+			}
+			return client, nil
+		},
+	})
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = manager.Close() }()
+	drivers := manager.Snapshot()
+	if len(drivers) != 1 {
+		t.Fatalf("grep drivers = %v", definitionNames(drivers))
+	}
+	definition := drivers[0].Definition()
+	if definition.Name != "mcp__grep__searchGitHub" || definition.EffectType != tool.EffectReadOnly || definition.RequiresApproval || definition.RequiresActionTask {
+		t.Fatalf("built-in grep definition = %#v", definition)
 	}
 }
 

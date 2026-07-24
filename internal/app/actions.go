@@ -727,16 +727,27 @@ func (s *Service) emitMCPSnapshot(ctx context.Context) error {
 	if s.mcp == nil {
 		return fmt.Errorf("no MCP manager is attached")
 	}
+	type toolView struct {
+		Name             string `json:"name"`
+		Description      string `json:"description,omitempty"`
+		Effect           string `json:"effect,omitempty"`
+		RequiresApproval bool   `json:"requiresApproval,omitempty"`
+	}
 	type view struct {
-		Name      string `json:"name"`
-		State     string `json:"state"`
-		ToolCount int    `json:"toolCount"`
-		Error     string `json:"error"`
+		Name      string     `json:"name"`
+		State     string     `json:"state"`
+		ToolCount int        `json:"toolCount"`
+		Tools     []toolView `json:"tools,omitempty"`
+		Error     string     `json:"error"`
 	}
 	snapshots := s.mcp.Servers()
 	values := make([]view, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		values = append(values, view{Name: snapshot.Name, State: string(snapshot.State), ToolCount: snapshot.ToolCount, Error: snapshot.LastError})
+		tools := make([]toolView, 0, len(snapshot.Tools))
+		for _, tool := range snapshot.Tools {
+			tools = append(tools, toolView{Name: tool.Name, Description: tool.Description, Effect: tool.Effect, RequiresApproval: tool.RequiresApproval})
+		}
+		values = append(values, view{Name: snapshot.Name, State: string(snapshot.State), ToolCount: snapshot.ToolCount, Tools: tools, Error: snapshot.LastError})
 	}
 	encoded, err := json.Marshal(values)
 	if err != nil {
