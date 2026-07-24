@@ -50,6 +50,23 @@ func (m AppModel) renderContextRail(width int, height int) string {
 			rows = append(rows, m.stateStyle(agent.State).Render(padOrTrim(row, width)))
 		}
 	}
+	availableSkills := m.availableSkills()
+	rows = append(rows, "", m.theme.RailAgents.Render(padOrTrim(fmt.Sprintf("  %s  %d", m.tr("rail.skills"), len(availableSkills)), width)))
+	if len(availableSkills) == 0 {
+		rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.no_skills"), width)))
+	} else {
+		for index, skill := range availableSkills {
+			if index == 2 {
+				rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.more", map[string]string{"count": fmt.Sprint(len(availableSkills) - index)}), width)))
+				break
+			}
+			state := "available"
+			if skill.Eager {
+				state = "eager"
+			}
+			rows = append(rows, m.stateStyle(state).Render(padOrTrim("  ◆ "+skill.Name, width)))
+		}
+	}
 	rows = append(rows, "", m.theme.RailMCP.Render(padOrTrim(fmt.Sprintf("  MCP  %d", len(m.mcpServers)), width)))
 	if len(m.mcpServers) == 0 {
 		rows = append(rows, m.theme.Muted.Render(padOrTrim("  "+m.tr("rail.no_connections"), width)))
@@ -67,6 +84,16 @@ func (m AppModel) renderContextRail(width int, height int) string {
 		rows = append(rows, "")
 	}
 	return strings.Join(rows[:height], "\n")
+}
+
+func (m AppModel) availableSkills() []SkillCatalogView {
+	available := make([]SkillCatalogView, 0, len(m.skills))
+	for _, skill := range m.skills {
+		if !skill.Disabled {
+			available = append(available, skill)
+		}
+	}
+	return available
 }
 
 func (m AppModel) mcpConnectionState(state string) string {

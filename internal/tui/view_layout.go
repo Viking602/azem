@@ -229,7 +229,7 @@ func dockFooterLines(height, width int) int {
 func (m AppModel) renderHeader(width int) string {
 	left := m.theme.HeaderBrand.Render(" ◈ Azem")
 	if width >= 60 {
-		left += m.theme.Muted.Background(m.theme.Chrome.GetBackground()).Render("  " + shortenPath(m.workspace, max(16, width/2)))
+		left += m.theme.Muted.Render("  " + shortenPath(m.workspace, max(16, width/2)))
 	}
 	right := m.theme.HeaderMode.Render(strings.ToUpper(m.agentMode)) + m.theme.Chrome.Render(" ")
 	return renderSurface(m.theme.Chrome, joinSides(left, right, width))

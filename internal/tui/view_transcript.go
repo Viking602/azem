@@ -693,25 +693,40 @@ func renderTerminalMarkdown(content string, width int) (string, error) {
 		if len(markdownRendererCache.renderers) >= 8 {
 			markdownRendererCache.renderers = make(map[markdownRendererKey]*glamour.TermRenderer)
 		}
-		style := styles.LightStyleConfig
-		if key.dark {
-			style = styles.DarkStyleConfig
-		}
-		style.H2.Prefix = "▌ "
-		style.H3.Prefix = "│ "
-		style.H4.Prefix = "· "
-		style.H5.Prefix = ""
-		style.H6.Prefix = ""
-		style.HorizontalRule.Format = "\n──────\n"
 		var err error
-		renderer, err = glamour.NewTermRenderer(
-			glamour.WithStyles(style),
-			glamour.WithWordWrap(width),
-		)
+		renderer, err = newTerminalMarkdownRenderer(key)
 		if err != nil {
 			return "", err
 		}
 		markdownRendererCache.renderers[key] = renderer
 	}
 	return renderer.Render(content)
+}
+
+func newTerminalMarkdownRenderer(key markdownRendererKey) (*glamour.TermRenderer, error) {
+	style := styles.LightStyleConfig
+	if key.dark {
+		style = styles.DarkStyleConfig
+	}
+	// Glamour's built-in themes add backgrounds to headings, inline code,
+	// and fenced code. Keep transcript content transparent so it inherits
+	// the terminal background like the rest of the UI.
+	style.H1.BackgroundColor = nil
+	style.Code.BackgroundColor = nil
+	if style.CodeBlock.Chroma != nil {
+		chromaStyle := *style.CodeBlock.Chroma
+		chromaStyle.Error.BackgroundColor = nil
+		chromaStyle.Background.BackgroundColor = nil
+		style.CodeBlock.Chroma = &chromaStyle
+	}
+	style.H2.Prefix = "▌ "
+	style.H3.Prefix = "│ "
+	style.H4.Prefix = "· "
+	style.H5.Prefix = ""
+	style.H6.Prefix = ""
+	style.HorizontalRule.Format = "\n──────\n"
+	return glamour.NewTermRenderer(
+		glamour.WithStyles(style),
+		glamour.WithWordWrap(key.width),
+	)
 }

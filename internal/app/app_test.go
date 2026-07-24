@@ -854,6 +854,35 @@ func TestActiveSkillPreflightBeforeDurableRun(t *testing.T) {
 	}
 }
 
+func TestBootstrapEmitsSkillSnapshot(t *testing.T) {
+	catalog, err := skills.Load(skills.LoadOptions{Config: config.SkillsConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), config.Default())
+	service.AttachSkills(catalog)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+
+	service.Bootstrap()
+	bootstrap, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.Kind != EventBootstrapDone || snapshot.Kind != EventSkillCatalog || snapshot.State != "snapshot" || len(snapshot.SkillCatalog) == 0 {
+		t.Fatalf("bootstrap=%+v skill snapshot=%+v", bootstrap, snapshot)
+	}
+}
+
 func TestSkillCatalogActionsAndAtomicReload(t *testing.T) {
 	root := t.TempDir()
 	skillRoot := filepath.Join(root, "skills")

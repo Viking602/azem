@@ -223,6 +223,9 @@ func (s *Service) Bootstrap() {
 	s.emit(s.ctx, Event{
 		Kind: EventBootstrapDone, State: "ready", Text: s.cfg.Workspace.Root,
 	})
+	if s.skillCatalog != nil {
+		_ = s.emitSkillCatalog(s.ctx, "snapshot")
+	}
 	s.emitRecoveryState()
 	s.emitApprovalMode(s.ctx)
 }

@@ -2,7 +2,6 @@ package tui
 
 import (
 	"image/color"
-	"strings"
 
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/compat"
@@ -93,30 +92,14 @@ func DefaultTheme() Theme {
 	blue := adaptiveColor("#285f8a", "25", "4", "#79b8e8", "110", "4")
 	cursor := adaptiveColor("#6d4aff", "99", "5", "#a78bfa", "141", "5")
 	success := adaptiveColor("#3d6c31", "22", "2", "#91b477", "107", "2")
-	selection := adaptiveColor("#dce9e3", "254", "7", "#27332d", "236", "0")
 	userAccent := adaptiveColor("#176f5b", "29", "6", "#62d6b5", "79", "6")
-	diffAddBackground := adaptiveColor("#e6f4ea", "194", "7", "#183325", "22", "0")
-	diffDelBackground := adaptiveColor("#fce8e8", "224", "7", "#3a2023", "52", "0")
-	diffHunkBackground := adaptiveColor("#e7f1f5", "195", "7", "#1d3037", "236", "0")
 	border := adaptiveColor("#c5cdc6", "250", "7", "#3a433c", "238", "0")
 	focusBorder := adaptiveColor("#4f8f78", "66", "6", "#6fa892", "108", "6")
 	surfaceAccent := adaptiveColor("#285f50", "23", "0", "#67d4ee", "81", "6")
-	chromeBackground := adaptiveColor("#edf2f0", "255", "7", "#101820", "234", "0")
-	runtimeBackground := adaptiveColor("#f3f6f4", "255", "7", "#151e27", "235", "0")
-	contextBackground := adaptiveColor("#f7f9f8", "255", "7", "#121a22", "234", "0")
-	helpBackground := adaptiveColor("#fafbfa", "255", "7", "#0f161d", "233", "0")
-	surfaceBackground := adaptiveColor("#f7f9f8", "255", "7", "#151e27", "235", "0")
-	raisedBackground := adaptiveColor("#ffffff", "231", "7", "#1a2530", "236", "0")
-	overlayTitleBackground := adaptiveColor("#e7efeb", "254", "7", "#1a2927", "235", "0")
-	overlayFooterBackground := adaptiveColor("#f0f4f2", "255", "7", "#121b23", "234", "0")
 	cyan := adaptiveColor("#087f9c", "30", "6", "#67d4ee", "81", "6")
 	violet := adaptiveColor("#6754b8", "61", "5", "#b4a7ff", "147", "5")
-	// Transcript accents stay background-free. Distinction comes from restrained
-	// foreground hues so the conversation keeps its original dark, quiet tone.
-	chipBg := adaptiveColor("#e7eee9", "254", "7", "#222a25", "235", "0")
-	chipAskBg := adaptiveColor("#f5edd8", "230", "7", "#2f2818", "236", "0")
-	chipSmartBg := adaptiveColor("#e2eef7", "195", "7", "#1b2a35", "236", "0")
-	chipDangerBg := adaptiveColor("#f8e4e4", "224", "7", "#331f21", "236", "0")
+	// UI surfaces stay transparent so the terminal's own background remains visible.
+	// Hierarchy comes from foreground color, borders, weight, and spacing instead.
 	panelBase := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		Padding(0, 1)
@@ -125,12 +108,12 @@ func DefaultTheme() Theme {
 
 	return Theme{
 		Header:        lipgloss.NewStyle().Bold(true).Foreground(accent),
-		HeaderBrand:   lipgloss.NewStyle().Bold(true).Foreground(surfaceAccent).Background(chromeBackground),
-		HeaderMode:    lipgloss.NewStyle().Bold(true).Foreground(text).Background(chipBg).Padding(0, 1),
-		Chrome:        lipgloss.NewStyle().Background(chromeBackground),
-		RuntimeStrip:  lipgloss.NewStyle().Background(runtimeBackground),
-		ContextStrip:  lipgloss.NewStyle().Background(contextBackground),
-		HelpStrip:     lipgloss.NewStyle().Background(helpBackground),
+		HeaderBrand:   lipgloss.NewStyle().Bold(true).Foreground(surfaceAccent),
+		HeaderMode:    lipgloss.NewStyle().Bold(true).Foreground(text).Padding(0, 1),
+		Chrome:        lipgloss.NewStyle(),
+		RuntimeStrip:  lipgloss.NewStyle(),
+		ContextStrip:  lipgloss.NewStyle(),
+		HelpStrip:     lipgloss.NewStyle(),
 		Border:        lipgloss.NewStyle().Foreground(border),
 		User:          lipgloss.NewStyle().Foreground(userAccent),
 		UserAccent:    lipgloss.NewStyle().Bold(true).Foreground(userAccent),
@@ -138,9 +121,9 @@ func DefaultTheme() Theme {
 		Thinking:      lipgloss.NewStyle().Foreground(secondary),
 		Tool:          lipgloss.NewStyle().Foreground(warning),
 		Diff:          lipgloss.NewStyle().Foreground(accent),
-		DiffAdd:       lipgloss.NewStyle().Foreground(success).Background(diffAddBackground),
-		DiffDel:       lipgloss.NewStyle().Foreground(danger).Background(diffDelBackground),
-		DiffHunk:      lipgloss.NewStyle().Bold(true).Foreground(accent).Background(diffHunkBackground),
+		DiffAdd:       lipgloss.NewStyle().Foreground(success),
+		DiffDel:       lipgloss.NewStyle().Foreground(danger),
+		DiffHunk:      lipgloss.NewStyle().Bold(true).Foreground(accent),
 		Error:         lipgloss.NewStyle().Bold(true).Foreground(danger),
 		Muted:         lipgloss.NewStyle().Foreground(muted),
 		Status:        lipgloss.NewStyle().Bold(true).Foreground(accent),
@@ -150,22 +133,22 @@ func DefaultTheme() Theme {
 		ApprovalSmart: lipgloss.NewStyle().Bold(true).Foreground(blue),
 		FullAccess:    lipgloss.NewStyle().Bold(true).Foreground(danger),
 		Cursor:        lipgloss.NewStyle().Foreground(cursor),
-		Selected:      lipgloss.NewStyle().Bold(true).Foreground(text).Background(selection),
-		PanelFocused:  panelBase.BorderForeground(focusBorder).Background(raisedBackground),
-		PanelBlurred:  panelBase.BorderForeground(border).Background(surfaceBackground),
-		OverlayTitle:  lipgloss.NewStyle().Bold(true).Foreground(surfaceAccent).Background(overlayTitleBackground),
+		Selected:      lipgloss.NewStyle().Bold(true).Foreground(text),
+		PanelFocused:  panelBase.BorderForeground(focusBorder),
+		PanelBlurred:  panelBase.BorderForeground(border),
+		OverlayTitle:  lipgloss.NewStyle().Bold(true).Foreground(surfaceAccent),
 		OverlayGroup:  lipgloss.NewStyle().Bold(true).Foreground(secondary),
-		OverlayFooter: lipgloss.NewStyle().Foreground(muted).Background(overlayFooterBackground),
+		OverlayFooter: lipgloss.NewStyle().Foreground(muted),
 		BlockRail:     lipgloss.NewStyle().Foreground(border),
 		MetaLabel:     lipgloss.NewStyle().Bold(true).Foreground(accent),
 		MetaValue:     lipgloss.NewStyle().Foreground(text),
 		MetaDivider:   lipgloss.NewStyle().Foreground(border),
 		HelpKey:       lipgloss.NewStyle().Bold(true).Foreground(secondary),
 		HelpDesc:      lipgloss.NewStyle().Foreground(muted),
-		Chip:          chipBase.Foreground(text).Background(chipBg),
-		ChipAsk:       chipBase.Foreground(warning).Background(chipAskBg),
-		ChipSmart:     chipBase.Foreground(blue).Background(chipSmartBg),
-		ChipDanger:    chipBase.Foreground(danger).Background(chipDangerBg),
+		Chip:          chipBase.Foreground(text),
+		ChipAsk:       chipBase.Foreground(warning),
+		ChipSmart:     chipBase.Foreground(blue),
+		ChipDanger:    chipBase.Foreground(danger),
 		BarFilled:     lipgloss.NewStyle().Foreground(accent),
 		BarEmpty:      lipgloss.NewStyle().Foreground(border),
 		ScrollTrack:   lipgloss.NewStyle().Foreground(border),
@@ -199,29 +182,9 @@ func DefaultTheme() Theme {
 	}
 }
 
-// renderSurface preserves a surface background across nested Lip Gloss spans.
-// Child styles emit a full ANSI reset, so an ordinary outer Style.Render would
-// leave the rest of the row on the terminal's default background.
+// renderSurface renders a UI surface without overriding the terminal background.
 func renderSurface(style lipgloss.Style, content string) string {
-	opener := surfaceBackgroundOpener(style)
-	if opener != "" {
-		content = strings.ReplaceAll(content, "\x1b[0m", "\x1b[0m"+opener)
-		content = strings.ReplaceAll(content, "\x1b[m", "\x1b[m"+opener)
-	}
-	return style.Render(content)
-}
-
-func surfaceBackgroundOpener(style lipgloss.Style) string {
-	background := style.GetBackground()
-	if background == nil {
-		return ""
-	}
-	rendered := lipgloss.NewStyle().Background(background).Render(" ")
-	opener, _, found := strings.Cut(rendered, " ")
-	if !found {
-		return ""
-	}
-	return opener
+	return style.UnsetBackground().Render(content)
 }
 
 func adaptiveColor(lightTrueColor string, lightANSI256 string, lightANSI string, darkTrueColor string, darkANSI256 string, darkANSI string) color.Color {

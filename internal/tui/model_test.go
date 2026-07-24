@@ -1413,14 +1413,18 @@ func TestDiffRendererSeparatesFilesHunksAndLineNumbers(t *testing.T) {
 	}
 }
 
-func TestGitDiffToolUsesAccessibleFullRowChangeStyling(t *testing.T) {
+func TestGitDiffToolUsesAccessibleForegroundChangeStyling(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
-	if model.theme.DiffAdd.GetBackground() == nil || model.theme.DiffDel.GetBackground() == nil ||
-		model.theme.DiffHunk.GetBackground() == nil {
-		t.Fatal("diff change hierarchy is missing background colors")
+	emptyBackground := fmt.Sprint(lipgloss.NewStyle().GetBackground())
+	for name, style := range map[string]lipgloss.Style{
+		"added": model.theme.DiffAdd, "deleted": model.theme.DiffDel, "hunk": model.theme.DiffHunk,
+	} {
+		if background := fmt.Sprint(style.GetBackground()); background != emptyBackground {
+			t.Fatalf("%s diff style background = %s, want unset", name, background)
+		}
 	}
-	if fmt.Sprint(model.theme.DiffAdd.GetBackground()) == fmt.Sprint(model.theme.DiffDel.GetBackground()) {
-		t.Fatal("added and deleted rows use the same background color")
+	if fmt.Sprint(model.theme.DiffAdd.GetForeground()) == fmt.Sprint(model.theme.DiffDel.GetForeground()) {
+		t.Fatal("added and deleted rows use the same foreground color")
 	}
 	block := Block{
 		Kind: BlockTool, Title: "coding.git_diff", State: "completed",
@@ -3070,6 +3074,22 @@ func TestAssistantMarkdownRendersWithoutSourceMarkers(t *testing.T) {
 	}
 }
 
+func TestAssistantMarkdownDoesNotOverrideTerminalBackground(t *testing.T) {
+	for _, key := range []markdownRendererKey{{width: 72}, {width: 72, dark: true}} {
+		renderer, err := newTerminalMarkdownRenderer(key)
+		if err != nil {
+			t.Fatalf("create markdown renderer (dark=%t): %v", key.dark, err)
+		}
+		rendered, err := renderer.Render("# Result\n\n`inline code`\n\n```go\npackage main\n```")
+		if err != nil {
+			t.Fatalf("render markdown (dark=%t): %v", key.dark, err)
+		}
+		if strings.Contains(rendered, "\x1b[48;") {
+			t.Fatalf("markdown emitted a background ANSI sequence (dark=%t): %q", key.dark, rendered)
+		}
+	}
+}
+
 func TestRunningIndicatorStaysVisibleInTranscript(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.status = "Running"
@@ -3335,6 +3355,27 @@ func BenchmarkLongTranscriptScroll(b *testing.B) {
 	}
 }
 
+func TestSkillSnapshotPopulatesContextRailWithoutOpeningOverlay(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.applyEvent(app.Event{Kind: app.EventSkillCatalog, State: "snapshot", SkillCatalog: []app.SkillCatalogEntry{
+		{Name: "verify", ModelVisible: true},
+		{Name: "simplify", Eager: true},
+		{Name: "disabled", Disabled: true},
+	}})
+	if model.overlay != OverlayNone || len(model.skills) != 3 {
+		t.Fatalf("skill snapshot overlay=%q skills=%d", model.overlay, len(model.skills))
+	}
+	rail := ansi.Strip(model.renderContextRail(32, 20))
+	for _, wanted := range []string{"SKILLS  2", "verify", "simplify"} {
+		if !strings.Contains(rail, wanted) {
+			t.Fatalf("skill context rail missing %q:\n%s", wanted, rail)
+		}
+	}
+	if strings.Contains(rail, "disabled") {
+		t.Fatalf("disabled skill rendered as available:\n%s", rail)
+	}
+}
+
 func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 	runtime := &skillCommandRuntime{}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
@@ -3352,7 +3393,8 @@ func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 	}
 
 	model.applyEvent(app.Event{
-		Kind: app.EventSkillCatalog,
+		Kind:  app.EventSkillCatalog,
+		State: "listed",
 		SkillCatalog: []app.SkillCatalogEntry{
 			{Name: "disabled-demo", Description: "Disabled description", SourcePath: "/tmp/disabled/SKILL.md", Disabled: true},
 			{Name: "eager-demo", Description: "Eager description", Eager: true, Bundled: true, ResourceCount: 1},
@@ -3373,7 +3415,7 @@ func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 	for _, wanted := range []string{
 		"SKILLS", "Reload affects new turns only", "disabled-demo", "DISABLED",
 		"eager-demo", "EAGER", "bundled", "1 resource", "available-demo",
-		"AVAILABLE", "2 resources", "manual-demo", "MANUAL ONLY", "1 more warnings",
+		"AVAILABLE", "2 resources", "manual-demo", "MANUAL ONLY", "1 more warnings", "Enter invoke",
 	} {
 		if !strings.Contains(rendered, wanted) {
 			t.Fatalf("skills overlay missing %q:\n%s", wanted, rendered)
@@ -3383,7 +3425,28 @@ func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 		t.Fatalf("skills overlay rendered more than three warning details:\n%s", rendered)
 	}
 
-	_ = model.closeOverlay()
+	model.overlayCursor = 2
+	updated, startCmd := model.updateOverlayKey("enter")
+	model = updated.(AppModel)
+	if startCmd == nil || model.overlay != OverlayNone || model.focus != focusComposer || !model.composer.Focused() || model.overlayCursor != 0 {
+		t.Fatalf("skill overlay enter cmd=%v overlay=%q focus=%d composer focused=%t cursor=%d", startCmd != nil, model.overlay, model.focus, model.composer.Focused(), model.overlayCursor)
+	}
+	_ = startCmd()
+	if runtime.request.Prompt != `Apply the "available-demo" skill to the current workspace and report the result.` ||
+		len(runtime.request.ActiveSkills) != 1 || runtime.request.ActiveSkills[0] != "available-demo" {
+		t.Fatalf("skill overlay request = %+v", runtime.request)
+	}
+
+	disabledRuntime := &skillCommandRuntime{}
+	disabledModel := NewModel(disabledRuntime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	disabledModel.skills = []SkillCatalogView{{Name: "disabled-demo", Disabled: true}}
+	disabledModel.openOverlay(OverlaySkills)
+	updated, startCmd = disabledModel.updateOverlayKey("enter")
+	disabledModel = updated.(AppModel)
+	if startCmd != nil || disabledModel.overlay != OverlaySkills || disabledModel.errorBanner != "Skill disabled-demo is disabled" || disabledRuntime.request.Prompt != "" {
+		t.Fatalf("disabled skill invocation cmd=%v overlay=%q error=%q request=%+v", startCmd != nil, disabledModel.overlay, disabledModel.errorBanner, disabledRuntime.request)
+	}
+
 	model.status = "Running"
 	model.runID = "run-active"
 	updated, actionCmd = model.executeCommand(Command{Name: "skills", Args: []string{"reload"}})
@@ -3400,7 +3463,7 @@ func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 
 	model.status = "Ready"
 	model.runID = ""
-	updated, startCmd := model.executeCommand(Command{Name: "skill", Args: []string{"DEMO", "inspect", "parser"}})
+	updated, startCmd = model.executeCommand(Command{Name: "skill", Args: []string{"DEMO", "inspect", "parser"}})
 	model = updated.(AppModel)
 	if startCmd == nil {
 		t.Fatal("/skill did not start a configured turn")
@@ -3490,7 +3553,7 @@ func TestSkillCommandsListReloadAndInvoke(t *testing.T) {
 	}
 
 	emptyModel := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
-	emptyModel.applyEvent(app.Event{Kind: app.EventSkillCatalog})
+	emptyModel.applyEvent(app.Event{Kind: app.EventSkillCatalog, State: "listed"})
 	if content := ansi.Strip(emptyModel.renderOverlay(80, 20)); !strings.Contains(content, "No skills are available") {
 		t.Fatalf("skills empty state missing:\n%s", content)
 	}
@@ -4195,38 +4258,36 @@ func TestTranscriptKindsUseDistinctMutedAccentsWithoutCardBackgrounds(t *testing
 	}
 }
 
-func TestThemeUsesDistinctSemanticSurfaces(t *testing.T) {
+func TestThemeSurfacesDoNotOverrideTerminalBackground(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	emptyBackground := fmt.Sprint(lipgloss.NewStyle().GetBackground())
 	surfaces := map[string]lipgloss.Style{
+		"header brand": model.theme.HeaderBrand, "header mode": model.theme.HeaderMode,
 		"chrome": model.theme.Chrome, "runtime": model.theme.RuntimeStrip,
 		"context": model.theme.ContextStrip, "help": model.theme.HelpStrip,
 		"composer focused": model.theme.PanelFocused, "composer blurred": model.theme.PanelBlurred,
 		"overlay title": model.theme.OverlayTitle, "overlay footer": model.theme.OverlayFooter,
+		"selected": model.theme.Selected, "diff add": model.theme.DiffAdd,
+		"diff delete": model.theme.DiffDel, "diff hunk": model.theme.DiffHunk,
+		"chip": model.theme.Chip, "chip ask": model.theme.ChipAsk,
+		"chip smart": model.theme.ChipSmart, "chip danger": model.theme.ChipDanger,
 	}
 	for name, style := range surfaces {
-		if background := fmt.Sprint(style.GetBackground()); background == emptyBackground {
-			t.Fatalf("%s surface has no background", name)
+		if background := fmt.Sprint(style.GetBackground()); background != emptyBackground {
+			t.Fatalf("%s background = %s, want unset", name, background)
 		}
-	}
-	if focused, blurred := fmt.Sprint(model.theme.PanelFocused.GetBackground()), fmt.Sprint(model.theme.PanelBlurred.GetBackground()); focused == blurred {
-		t.Fatalf("focused and blurred composer surfaces are identical: %s", focused)
-	}
-	if title, footer := fmt.Sprint(model.theme.OverlayTitle.GetBackground()), fmt.Sprint(model.theme.OverlayFooter.GetBackground()); title == footer {
-		t.Fatalf("overlay title and footer surfaces are identical: %s", title)
 	}
 }
 
-func TestRenderSurfaceRestoresBackgroundAfterNestedStyleReset(t *testing.T) {
+func TestRenderSurfaceClearsConfiguredBackground(t *testing.T) {
 	surface := lipgloss.NewStyle().Background(lipgloss.Color("#101820"))
 	child := lipgloss.NewStyle().Foreground(lipgloss.Color("#67d4ee")).Render("Azem")
-	opener := surfaceBackgroundOpener(surface)
-	if opener == "" {
-		t.Fatal("surface background produced no ANSI opener")
-	}
 	rendered := renderSurface(surface, child+" gap")
-	if !strings.Contains(rendered, "\x1b[m"+opener+" gap") && !strings.Contains(rendered, "\x1b[0m"+opener+" gap") {
-		t.Fatalf("surface background was not restored after child reset: %q", rendered)
+	if strings.Contains(rendered, "48;") || strings.Contains(rendered, "\x1b[4") {
+		t.Fatalf("surface emitted a background ANSI sequence: %q", rendered)
+	}
+	if ansi.Strip(rendered) != "Azem gap" {
+		t.Fatalf("surface content = %q, want %q", ansi.Strip(rendered), "Azem gap")
 	}
 }
 

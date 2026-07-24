@@ -98,7 +98,9 @@ func (m *AppModel) applyEvent(event app.Event) {
 	case app.EventSkillCatalog:
 		m.skills = append([]SkillCatalogView(nil), event.SkillCatalog...)
 		m.skillDiagnostics = append([]app.SkillDiagnostic(nil), event.SkillDiagnostics...)
-		m.openOverlay(OverlaySkills)
+		if event.State != "snapshot" {
+			m.openOverlay(OverlaySkills)
+		}
 	case app.EventMemoryState:
 		switch event.State {
 		case "recalled":

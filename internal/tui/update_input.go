@@ -901,6 +901,16 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 		if m.overlayCursor < len(m.sessions) {
 			return m.beginAction(Action{Kind: ActionResumeSession, Target: m.sessions[m.overlayCursor].ID})
 		}
+	case OverlaySkills:
+		if m.overlayCursor < 0 || m.overlayCursor >= len(m.skills) {
+			return m, nil
+		}
+		entry := m.skills[m.overlayCursor]
+		if entry.Disabled {
+			m.errorBanner = m.tr("error.skill_disabled", map[string]string{"name": entry.Name})
+			return m, nil
+		}
+		return m.invokeSkill(entry.Name, "")
 	case OverlayApproval:
 		decisions := []string{"once", "session", "deny"}
 		if m.overlayCursor < len(decisions) {
@@ -1470,32 +1480,12 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			m.errorBanner = m.tr("command.usage.skill")
 			break
 		}
-		if m.isRunning() {
-			m.errorBanner = m.tr("error.skill_idle")
-			break
-		}
-		if m.agentMode == "team" {
-			m.errorBanner = m.tr("error.skill_single_mode")
-			break
-		}
 		name := strings.ToLower(command.Args[0])
-		prompt := fmt.Sprintf("Apply the %q skill to the current workspace and report the result.", name)
-		displayPrompt := m.tr("skill.invoke_prompt", map[string]string{"name": name})
+		instruction := ""
 		if len(command.Args) > 1 {
-			prompt = strings.Join(command.Args[1:], " ")
-			displayPrompt = prompt
+			instruction = strings.Join(command.Args[1:], " ")
 		}
-		m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: m.tr("block.you"), Content: displayPrompt})
-		m.status = "Starting"
-		m.errorBanner = ""
-		m.runID = ""
-		m.resetTurnUsage()
-		m.transcriptTop = 0
-		m.beginRunActivity()
-		return m, startTurn(m.runtime, app.TurnRequest{
-			SessionID: m.sessionID, Prompt: prompt, Provider: m.provider, Model: m.model,
-			Reasoning: m.reasoning, AgentMode: m.agentMode, ActiveSkills: []string{name},
-		})
+		return m.invokeSkill(name, instruction)
 	case "models":
 		if len(command.Args) != 0 {
 			m.errorBanner = m.tr("command.usage.models")
@@ -1660,6 +1650,36 @@ func (m AppModel) executeBackgroundCommand(args []string) (tea.Model, tea.Cmd) {
 		}
 	}
 	return usage()
+}
+
+func (m AppModel) invokeSkill(name, instruction string) (tea.Model, tea.Cmd) {
+	if m.isRunning() {
+		m.errorBanner = m.tr("error.skill_idle")
+		return m, nil
+	}
+	if m.agentMode == "team" {
+		m.errorBanner = m.tr("error.skill_single_mode")
+		return m, nil
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	prompt := fmt.Sprintf("Apply the %q skill to the current workspace and report the result.", name)
+	displayPrompt := m.tr("skill.invoke_prompt", map[string]string{"name": name})
+	if instruction != "" {
+		prompt = instruction
+		displayPrompt = instruction
+	}
+	_ = m.closeOverlay()
+	m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: m.tr("block.you"), Content: displayPrompt})
+	m.status = "Starting"
+	m.errorBanner = ""
+	m.runID = ""
+	m.resetTurnUsage()
+	m.transcriptTop = 0
+	m.beginRunActivity()
+	return m, startTurn(m.runtime, app.TurnRequest{
+		SessionID: m.sessionID, Prompt: prompt, Provider: m.provider, Model: m.model,
+		Reasoning: m.reasoning, AgentMode: m.agentMode, ActiveSkills: []string{name},
+	})
 }
 
 func (m *AppModel) stopBackgroundFollow() {
