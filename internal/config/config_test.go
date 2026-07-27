@@ -600,6 +600,81 @@ func TestBuiltInSubagentRoleContracts(t *testing.T) {
 	}
 }
 
+func TestBuiltInSubagentRolePromptDepth(t *testing.T) {
+	type promptContract struct {
+		minBytes int
+		maxBytes int
+		sections []string
+		markers  []string
+	}
+	want := map[string]promptContract{
+		"worker": {
+			minBytes: 3000,
+			maxBytes: 4500,
+			sections: []string{"Mission", "Before editing", "Implementation discipline", "Tool discipline", "Verification", "Failure handling", "Final response"},
+			markers:  []string{"source of the problem", "observed result", "Status: BLOCKED"},
+		},
+		"explore": {
+			minBytes: 2800,
+			maxBytes: 4300,
+			sections: []string{"Mission", "Choose the required depth", "Search strategy", "Evidence discipline", "Stop and failure conditions", "Final response"},
+			markers:  []string{"Quick", "Medium", "Thorough", "try at least one independent strategy", "producer", "consumer"},
+		},
+		"plan": {
+			minBytes: 2800,
+			maxBytes: 4200,
+			sections: []string{"Mission", "Investigation", "Plan construction", "Risk and verification", "Scope discipline", "Final response"},
+			markers:  []string{"real dependency", "observable result", "Non-goals", "Open decisions"},
+		},
+		"review": {
+			minBytes: 4200,
+			maxBytes: 6500,
+			sections: []string{"Mission", "Establish the review boundary", "Review procedure", "Finding criteria", "Severity", "Security and trust boundaries", "Compatibility and recovery", "Final response"},
+			markers:  []string{"Introduced", "Provable", "Actionable", "Material", "Proportionate", "producer or entry point", "consumer-side dispatcher"},
+		},
+		"verify": {
+			minBytes: 3000,
+			maxBytes: 4500,
+			sections: []string{"Mission", "Build the verification map", "Command discipline", "Failure attribution", "Evidence discipline", "Final response"},
+			markers:  []string{"verification ladder", "changed-path failure", "demonstrably pre-existing", "unknown attribution"},
+		},
+	}
+
+	roles := builtInSubagentRoles()
+	for name, expected := range want {
+		t.Run(name, func(t *testing.T) {
+			instructions := roles[name].Instructions
+			size := len([]byte(instructions))
+			if size < expected.minBytes || size > expected.maxBytes {
+				t.Fatalf("prompt size = %d bytes, want %d-%d", size, expected.minBytes, expected.maxBytes)
+			}
+
+			previousSection := -1
+			for _, section := range expected.sections {
+				heading := "## " + section
+				index := strings.Index(instructions, heading)
+				if index < 0 {
+					t.Fatalf("prompt missing section %q", heading)
+				}
+				if index <= previousSection {
+					t.Fatalf("prompt section %q is out of order", heading)
+				}
+				previousSection = index
+			}
+			for _, marker := range expected.markers {
+				if !strings.Contains(instructions, marker) {
+					t.Errorf("prompt missing role contract %q", marker)
+				}
+			}
+			for _, shared := range []string{"Effective CWD:", "Capability mode:", "You start without the parent conversation"} {
+				if strings.Contains(instructions, shared) {
+					t.Errorf("prompt duplicates shared execution envelope %q", shared)
+				}
+			}
+		})
+	}
+}
+
 func TestRemovedGeneralPurposeBuiltInCompatibility(t *testing.T) {
 	for name, configure := range map[string]func(*SubagentConfig){
 		"models": func(subagents *SubagentConfig) {
