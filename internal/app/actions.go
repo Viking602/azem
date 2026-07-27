@@ -179,7 +179,11 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if err := s.skillCatalog.Reload(); err != nil {
 			return err
 		}
-		return s.emitSkillCatalog(ctx, "reloaded")
+		if err := s.emitSkillCatalog(ctx, "reloaded"); err != nil {
+			return err
+		}
+		_ = s.emitContextProfile(ctx, action.SessionID)
+		return nil
 	case ActionSetApprovalMode:
 		return s.setApprovalMode(ctx, ApprovalMode(action.Target))
 	case ActionSetLanguage:
@@ -331,6 +335,7 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 			Kind: EventSessionLoaded, SessionID: action.Target, State: "compacted",
 			Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, action.Target), Todo: &todo, Recap: currentRecap,
 		})
+		_ = s.emitContextProfile(ctx, action.Target)
 		_ = s.dispatchLifecycle(ctx, hooks.PostCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) {
 			e.Trigger = "manual"
 			e.CompactSummary = fmt.Sprintf("Session compacted to %d persisted blocks.", len(projection.Blocks))
@@ -377,18 +382,16 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if s.mcp == nil {
 			return fmt.Errorf("no MCP manager is attached")
 		}
-		if err := s.mcp.Refresh(ctx, action.Target); err != nil {
-			return err
-		}
-		return s.emitMCPSnapshot(ctx)
+		refreshErr := s.mcp.Refresh(ctx, action.Target)
+		snapshotErr := s.emitMCPSnapshot(ctx)
+		return errors.Join(refreshErr, snapshotErr)
 	case ActionReconnectMCP:
 		if s.mcp == nil {
 			return fmt.Errorf("no MCP manager is attached")
 		}
-		if err := s.mcp.Reconnect(ctx, action.Target); err != nil {
-			return err
-		}
-		return s.emitMCPSnapshot(ctx)
+		reconnectErr := s.mcp.Reconnect(ctx, action.Target)
+		snapshotErr := s.emitMCPSnapshot(ctx)
+		return errors.Join(reconnectErr, snapshotErr)
 	default:
 		return fmt.Errorf("unsupported action %q", action.Kind)
 	}
@@ -584,6 +587,7 @@ func (s *Service) createSession(ctx context.Context, title string) error {
 	s.mu.Lock()
 	s.currentSession = id
 	s.mu.Unlock()
+	_ = s.emitContextProfile(ctx, id)
 	return nil
 }
 
@@ -621,6 +625,7 @@ func (s *Service) emitSession(ctx context.Context, id string) error {
 	s.mu.Lock()
 	s.currentSession = id
 	s.mu.Unlock()
+	_ = s.emitContextProfile(ctx, id)
 	return nil
 }
 
@@ -803,5 +808,9 @@ func (s *Service) emitMCPSnapshot(ctx context.Context) error {
 		return err
 	}
 	s.emit(ctx, Event{Kind: EventMCPState, State: "snapshot", Data: map[string]string{"servers": string(encoded)}})
+	s.mu.Lock()
+	sessionID := s.currentSession
+	s.mu.Unlock()
+	_ = s.emitContextProfile(ctx, sessionID)
 	return nil
 }

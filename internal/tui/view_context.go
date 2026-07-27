@@ -2,12 +2,16 @@ package tui
 
 import (
 	"fmt"
+	"math/bits"
+	"sort"
 	"strings"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -431,25 +435,58 @@ func padLeft(value string, spaces int) string {
 }
 
 type contextMetrics struct {
-	used          int
-	limit         int
-	percentage    float64
-	contextLabel  string
-	cacheLabel    string
-	cache         string
-	cacheRateOnly string
-	compactCache  string
-	detailSuffix  string
+	used           int
+	limit          int
+	percentage     float64
+	contextLabel   string
+	cacheLabel     string
+	cache          string
+	cacheRateOnly  string
+	compactCache   string
+	reported       bool
+	calibrated     bool
+	detailSuffix   string
+	estimated      bool
+	categoryTokens map[app.ContextCategory]int
+}
+
+func saturatingTokenSum(left, right int) int {
+	left, right = max(0, left), max(0, right)
+	if left > int(^uint(0)>>1)-right {
+		return int(^uint(0) >> 1)
+	}
+	return left + right
 }
 
 func (m AppModel) contextMetrics() contextMetrics {
-	used := max(0, m.usage.InputTokens+m.usage.OutputTokens)
+	categoryTokens := make(map[app.ContextCategory]int, 6)
+	for _, contribution := range m.contextProfile.Contributions {
+		categoryTokens[contribution.Category] = saturatingTokenSum(categoryTokens[contribution.Category], contribution.Tokens)
+	}
+	outputTokens := m.usage.OutputTokens
+	profileReported := m.contextProfile.ReportedInputTokens > 0
+	if m.contextProfile.Source == "team_request" {
+		outputTokens = m.contextProfile.ReportedOutputTokens
+	}
+	categoryTokens[app.ContextCategoryConversation] = saturatingTokenSum(categoryTokens[app.ContextCategoryConversation], outputTokens)
+	usageKnown := m.contextProfile.Source != "team_request" && m.usage.InputTokens > 0
+	reported := profileReported || (usageKnown && m.usage.ContextReported)
+	used := saturatingTokenSum(m.contextProfile.TotalTokens(), outputTokens)
+	if profileReported {
+		used = saturatingTokenSum(m.contextProfile.ReportedInputTokens, m.contextProfile.ReportedOutputTokens)
+	} else if usageKnown {
+		used = saturatingTokenSum(m.usage.InputTokens, m.usage.OutputTokens)
+	}
 	limit := m.usage.ContextLimit
 	metrics := contextMetrics{
-		used:         used,
-		limit:        limit,
-		contextLabel: m.tr("footer.context"),
-		cacheLabel:   m.tr("footer.cache"),
+		used:           used,
+		limit:          limit,
+		estimated:      !reported && (m.contextProfile.Estimated || usageKnown),
+		categoryTokens: categoryTokens,
+		reported:       reported,
+		calibrated:     profileReported || usageKnown,
+		contextLabel:   m.tr("footer.context"),
+		cacheLabel:     m.tr("footer.cache"),
 	}
 	if limit > 0 {
 		metrics.percentage = float64(used) * 100 / float64(limit)
@@ -587,24 +624,29 @@ func (m AppModel) renderContextPrimary(width int) string {
 	if metrics.limit <= 0 {
 		return truncateStyledFallback(m.theme.Muted.Render(metrics.contextLabel+" "+m.tr("footer.unavailable")), width)
 	}
-	barWidth := 10
-	if width >= 40 {
-		barWidth = 12
+	barWidth := 12
+	if width >= 44 {
+		barWidth = 16
 	}
 	if width < 28 {
-		barWidth = 6
+		barWidth = 8
+	}
+	estimateMark := ""
+	if metrics.estimated {
+		estimateMark = "~"
 	}
 	barPlain := contextProgressBar(metrics.used, metrics.limit, barWidth)
+	compactBar := contextProgressBar(metrics.used, metrics.limit, 8)
 	candidates := []struct {
 		text     string
 		barPlain string
 		barWidth int
 	}{
 		// Occupancy only — cache lives on the right of the strip.
-		{fmt.Sprintf("%s %s  %s / %s  ·  %.1f%%", metrics.contextLabel, barPlain, formatTokens(metrics.used), formatTokens(metrics.limit), metrics.percentage), barPlain, barWidth},
-		{fmt.Sprintf("%s %s %s/%s %.0f%%", metrics.contextLabel, contextProgressBar(metrics.used, metrics.limit, 8), formatTokens(metrics.used), formatTokens(metrics.limit), metrics.percentage), contextProgressBar(metrics.used, metrics.limit, 8), 8},
-		{fmt.Sprintf("%s %s/%s %.0f%%", metrics.contextLabel, formatTokens(metrics.used), formatTokens(metrics.limit), metrics.percentage), "", 0},
-		{fmt.Sprintf("%s %.0f%%", metrics.contextLabel, metrics.percentage), "", 0},
+		{fmt.Sprintf("%s %s  %s / %s  ·  %s%.1f%%", metrics.contextLabel, barPlain, formatTokens(metrics.used), formatTokens(metrics.limit), estimateMark, metrics.percentage), barPlain, barWidth},
+		{fmt.Sprintf("%s %s %s/%s %s%.0f%%", metrics.contextLabel, compactBar, formatTokens(metrics.used), formatTokens(metrics.limit), estimateMark, metrics.percentage), compactBar, 8},
+		{fmt.Sprintf("%s %s/%s %s%.0f%%", metrics.contextLabel, formatTokens(metrics.used), formatTokens(metrics.limit), estimateMark, metrics.percentage), "", 0},
+		{fmt.Sprintf("%s %s%.0f%%", metrics.contextLabel, estimateMark, metrics.percentage), "", 0},
 	}
 	return m.renderContextCandidate(width, metrics, candidates)
 }
@@ -640,9 +682,13 @@ func (m AppModel) renderContextUsage(width int) string {
 	if metrics.limit <= 0 {
 		return truncateStyledFallback(m.theme.Muted.Render(metrics.contextLabel+" "+m.tr("footer.unavailable")), width)
 	}
-	barWidth := 12
-	if width < 48 {
+	barWidth := 16
+	if width < 52 {
 		barWidth = 8
+	}
+	estimateMark := ""
+	if metrics.estimated {
+		estimateMark = "~"
 	}
 	barPlainWide := contextProgressBar(metrics.used, metrics.limit, barWidth)
 	barPlainMid := contextProgressBar(metrics.used, metrics.limit, 10)
@@ -652,11 +698,11 @@ func (m AppModel) renderContextUsage(width int) string {
 		barPlain string
 		barWidth int
 	}{
-		{fmt.Sprintf("%s %s  %s / %s  ·  %.1f%%  ·  %s", metrics.contextLabel, barPlainWide, formatTokens(metrics.used), formatTokens(metrics.limit), metrics.percentage, metrics.cache), barPlainWide, barWidth},
-		{fmt.Sprintf("%s %s %s / %s · %.1f%% · %s", metrics.contextLabel, barPlainMid, formatTokens(metrics.used), formatTokens(metrics.limit), metrics.percentage, metrics.cache), barPlainMid, 10},
-		{fmt.Sprintf("%s %s/%s · %.1f%% · %s", metrics.contextLabel, formatTokens(metrics.used), formatTokens(metrics.limit), metrics.percentage, metrics.cacheRateOnly), "", 0},
-		{fmt.Sprintf("%s %s/%s %.0f%% C%s", metrics.contextLabel, formatTokens(metrics.used), formatTokens(metrics.limit), metrics.percentage, metrics.compactCache), "", 0},
-		{fmt.Sprintf("%s %.0f%%", metrics.contextLabel, metrics.percentage), "", 0},
+		{fmt.Sprintf("%s %s  %s / %s  ·  %s%.1f%%  ·  %s", metrics.contextLabel, barPlainWide, formatTokens(metrics.used), formatTokens(metrics.limit), estimateMark, metrics.percentage, metrics.cache), barPlainWide, barWidth},
+		{fmt.Sprintf("%s %s %s / %s · %s%.1f%% · %s", metrics.contextLabel, barPlainMid, formatTokens(metrics.used), formatTokens(metrics.limit), estimateMark, metrics.percentage, metrics.cache), barPlainMid, 10},
+		{fmt.Sprintf("%s %s/%s · %s%.1f%% · %s", metrics.contextLabel, formatTokens(metrics.used), formatTokens(metrics.limit), estimateMark, metrics.percentage, metrics.cacheRateOnly), "", 0},
+		{fmt.Sprintf("%s %s/%s %s%.0f%% C%s", metrics.contextLabel, formatTokens(metrics.used), formatTokens(metrics.limit), estimateMark, metrics.percentage, metrics.compactCache), "", 0},
+		{fmt.Sprintf("%s %s%.0f%%", metrics.contextLabel, estimateMark, metrics.percentage), "", 0},
 	}
 	return m.renderContextCandidate(width, metrics, candidates)
 }
@@ -745,8 +791,12 @@ func (m AppModel) statusReportLines() []string {
 	if metrics.limit <= 0 {
 		lines = append(lines, "  "+m.tr("footer.unavailable"))
 	} else {
+		estimateMark := ""
+		if metrics.estimated {
+			estimateMark = "~"
+		}
 		lines = append(lines,
-			fmt.Sprintf("  %s: %s / %s (%.1f%%)", m.tr("overlay.status.field.occupancy"), formatTokens(metrics.used), formatTokens(metrics.limit), metrics.percentage),
+			fmt.Sprintf("  %s: %s%s / %s (%s%.1f%%)", m.tr("overlay.status.field.occupancy"), estimateMark, formatTokens(metrics.used), formatTokens(metrics.limit), estimateMark, metrics.percentage),
 			"  "+m.tr("overlay.status.field.cache")+": "+metrics.cache,
 		)
 	}
@@ -775,6 +825,251 @@ func (m AppModel) statusReportLines() []string {
 	return lines
 }
 
+var contextCategoryOrder = [...]app.ContextCategory{
+	app.ContextCategoryCore,
+	app.ContextCategorySkills,
+	app.ContextCategoryBuiltinTools,
+	app.ContextCategoryMCP,
+	app.ContextCategoryConversation,
+	app.ContextCategoryOther,
+}
+
+func allocateProportional(values []int, target int) []int {
+	allocated := make([]int, len(values))
+	if target <= 0 || len(values) == 0 {
+		return allocated
+	}
+	total := 0
+	for _, value := range values {
+		total = saturatingTokenSum(total, value)
+	}
+	if total <= 0 {
+		allocated[len(allocated)-1] = target
+		return allocated
+	}
+	remainders := make([]int64, len(values))
+	assigned := 0
+	for index, value := range values {
+		high, low := bits.Mul64(uint64(max(0, value)), uint64(target))
+		quotient, remainder := bits.Div64(high, low, uint64(total))
+		allocated[index] = int(quotient)
+		remainders[index] = int64(remainder)
+		assigned = saturatingTokenSum(assigned, allocated[index])
+	}
+	for assigned < target {
+		best := 0
+		for index := 1; index < len(remainders); index++ {
+			if remainders[index] > remainders[best] {
+				best = index
+			}
+		}
+		allocated[best]++
+		remainders[best] = -1
+		assigned++
+	}
+	return allocated
+}
+
+func normalizedContextCategoryTotals(totals map[app.ContextCategory]int, target int) map[app.ContextCategory]int {
+	values := make([]int, len(contextCategoryOrder))
+	for index, category := range contextCategoryOrder {
+		values[index] = totals[category]
+	}
+	allocated := allocateProportional(values, target)
+	normalized := make(map[app.ContextCategory]int, len(contextCategoryOrder))
+	for index, category := range contextCategoryOrder {
+		normalized[category] = allocated[index]
+	}
+	return normalized
+}
+
+func normalizedContextContributions(contributions []app.ContextContribution, totals map[app.ContextCategory]int) []app.ContextContribution {
+	normalized := append([]app.ContextContribution(nil), contributions...)
+	for _, category := range contextCategoryOrder {
+		indices := make([]int, 0)
+		values := make([]int, 0)
+		for index, contribution := range normalized {
+			if contribution.Category == category {
+				indices = append(indices, index)
+				values = append(values, contribution.Tokens)
+			}
+		}
+		allocated := allocateProportional(values, totals[category])
+		for index, contributionIndex := range indices {
+			normalized[contributionIndex].Tokens = allocated[index]
+		}
+	}
+	return normalized
+}
+
+func (m AppModel) contextReportLines() []string {
+	metrics := m.contextMetrics()
+	estimateMark := ""
+	if metrics.estimated {
+		estimateMark = "~"
+	}
+	lines := make([]string, 0, len(m.contextProfile.Contributions)+16)
+	if metrics.limit > 0 {
+		lines = append(lines,
+			m.styledContextProgressBar(metrics, 40),
+			fmt.Sprintf("%s%s / %s · %s%.1f%%", estimateMark, formatTokens(metrics.used), formatTokens(metrics.limit), estimateMark, metrics.percentage),
+		)
+	} else {
+		lines = append(lines, fmt.Sprintf("%s%s · %s", estimateMark, formatTokens(metrics.used), m.tr("footer.unavailable")))
+	}
+	if m.contextProfileError != "" {
+		lines = append(lines, m.theme.Error.Render(m.tr("overlay.context.profile_error", map[string]string{"error": m.contextProfileError})))
+	}
+	sourceKey := "overlay.context.source.estimated"
+	if metrics.reported {
+		sourceKey = "overlay.context.source.reported"
+	}
+	lines = append(lines, m.theme.Muted.Render(m.tr(sourceKey)), "", m.tr("overlay.context.section.categories"))
+
+	totals := make(map[app.ContextCategory]int, len(metrics.categoryTokens))
+	totalEstimated := 0
+	for category, tokens := range metrics.categoryTokens {
+		totals[category] = max(0, tokens)
+		totalEstimated = saturatingTokenSum(totalEstimated, tokens)
+	}
+	if totalEstimated < metrics.used {
+		totals[app.ContextCategoryOther] += metrics.used - totalEstimated
+	}
+	if metrics.calibrated && totalEstimated > metrics.used {
+		totals = normalizedContextCategoryTotals(totals, metrics.used)
+	}
+	for _, category := range contextCategoryOrder {
+		tokens := totals[category]
+		if tokens == 0 {
+			continue
+		}
+		percentage := ""
+		if metrics.limit > 0 {
+			percentage = fmt.Sprintf(" · ~%.1f%%", float64(tokens)*100/float64(metrics.limit))
+		}
+		marker := m.contextCategoryStyle(category).Render("■")
+		lines = append(lines, fmt.Sprintf("%s %s  ~%s%s", marker, m.contextCategoryLabel(category), formatTokens(tokens), percentage))
+	}
+
+	contributions := append([]app.ContextContribution(nil), m.contextProfile.Contributions...)
+	if m.contextProfile.Source == "team_request" && m.contextProfile.ReportedOutputTokens > 0 {
+		contributions = append(contributions, app.ContextContribution{
+			Category: app.ContextCategoryConversation,
+			Name:     "current_output",
+			Tokens:   m.contextProfile.ReportedOutputTokens,
+		})
+	} else if m.contextProfile.Source != "team_request" && m.usage.OutputTokens > 0 {
+		contributions = append(contributions, app.ContextContribution{
+			Category: app.ContextCategoryConversation,
+			Name:     "current_output",
+			Tokens:   m.usage.OutputTokens,
+		})
+	}
+	if totalEstimated < metrics.used {
+		contributions = append(contributions, app.ContextContribution{
+			Category: app.ContextCategoryOther,
+			Name:     "provider_framing",
+			Tokens:   metrics.used - totalEstimated,
+		})
+	}
+	if metrics.calibrated && totalEstimated > metrics.used {
+		contributions = normalizedContextContributions(contributions, totals)
+	}
+	categoryRank := make(map[app.ContextCategory]int, len(contextCategoryOrder))
+	for index, category := range contextCategoryOrder {
+		categoryRank[category] = index
+	}
+	sort.SliceStable(contributions, func(i, j int) bool {
+		if contributions[i].Category != contributions[j].Category {
+			return categoryRank[contributions[i].Category] < categoryRank[contributions[j].Category]
+		}
+		if contributions[i].Tokens != contributions[j].Tokens {
+			return contributions[i].Tokens > contributions[j].Tokens
+		}
+		return contributions[i].Name < contributions[j].Name
+	})
+	if len(contributions) > 0 {
+		lines = append(lines, "", m.tr("overlay.context.section.details"))
+		currentCategory := app.ContextCategory("")
+		for _, contribution := range contributions {
+			if contribution.Tokens <= 0 {
+				continue
+			}
+			if contribution.Category != currentCategory {
+				currentCategory = contribution.Category
+				lines = append(lines, m.contextCategoryStyle(currentCategory).Bold(true).Render(m.contextCategoryLabel(currentCategory)))
+			}
+			lines = append(lines, fmt.Sprintf("  %s · ~%s", m.contextContributionLabel(contribution), formatTokens(contribution.Tokens)))
+		}
+	}
+	return lines
+}
+
+func (m AppModel) contextCategoryLabel(category app.ContextCategory) string {
+	return m.tr("overlay.context.category." + string(category))
+}
+
+func sanitizeContextLabel(value string) string {
+	value = ansi.Strip(value)
+	value = strings.Map(func(current rune) rune {
+		if unicode.IsControl(current) {
+			return -1
+		}
+		return current
+	}, value)
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "—"
+	}
+	return ansi.Truncate(value, 96, "…")
+}
+
+func (m AppModel) contextContributionLabel(contribution app.ContextContribution) string {
+	return sanitizeContextLabel(m.rawContextContributionLabel(contribution))
+}
+
+func (m AppModel) rawContextContributionLabel(contribution app.ContextContribution) string {
+	switch contribution.Name {
+	case "azem.core_instructions":
+		return m.tr("overlay.context.item.core")
+	case "runtime.overhead":
+		return m.tr("overlay.context.item.skill_runtime")
+	case "catalog.overhead":
+		return m.tr("overlay.context.item.skill_catalog")
+	case "current_output":
+		return m.tr("overlay.context.item.current_output")
+	case "provider_framing":
+		return m.tr("overlay.context.item.provider_framing")
+	case app.ContextContributionRemainingItems:
+		return m.tr("overlay.context.item.remaining")
+	}
+	if strings.HasPrefix(contribution.Name, "mcp__") {
+		parts := strings.Split(contribution.Name, "__")
+		if len(parts) >= 3 {
+			return parts[1] + " / " + strings.Join(parts[2:], "__")
+		}
+	}
+	if strings.HasPrefix(contribution.Name, "message:") {
+		parts := strings.Split(contribution.Name, ":")
+		if len(parts) == 3 {
+			return m.tr("overlay.context.item.message", map[string]string{
+				"role":  m.tr("overlay.context.role." + parts[1]),
+				"count": parts[2],
+			})
+		}
+	}
+	if strings.HasPrefix(contribution.Name, "tool_result:") {
+		return m.tr("overlay.context.item.tool_result", map[string]string{"name": strings.TrimPrefix(contribution.Name, "tool_result:")})
+	}
+	if strings.HasPrefix(contribution.Name, "compaction:") {
+		return m.tr("overlay.context.item.compaction")
+	}
+	if strings.HasPrefix(contribution.Name, "system:") {
+		return m.tr("overlay.context.item.system", map[string]string{"count": strings.TrimPrefix(contribution.Name, "system:")})
+	}
+	return contribution.Name
+}
+
 func activeShellExecutions(runtime Runtime) []agentservice.ShellExecutionSnapshot {
 	provider, ok := runtime.(interface {
 		ActiveShellExecutions() []agentservice.ShellExecutionSnapshot
@@ -800,7 +1095,8 @@ func (m AppModel) renderContextCandidate(width int, metrics contextMetrics, cand
 	text     string
 	barPlain string
 	barWidth int
-}) string {
+},
+) string {
 	chosen := candidates[len(candidates)-1]
 	for _, candidate := range candidates {
 		if ansi.StringWidth(candidate.text) <= width {
@@ -814,7 +1110,7 @@ func (m AppModel) renderContextCandidate(width int, metrics contextMetrics, cand
 		return tone.Render(text)
 	}
 	parts := strings.SplitN(text, chosen.barPlain, 2)
-	return tone.Render(parts[0]) + m.styledContextProgressBar(metrics.used, metrics.limit, chosen.barWidth) + tone.Render(parts[1])
+	return tone.Render(parts[0]) + m.styledContextProgressBar(metrics, chosen.barWidth) + tone.Render(parts[1])
 }
 
 func contextProgressBar(used int, limit int, width int) string {
@@ -823,20 +1119,65 @@ func contextProgressBar(used int, limit int, width int) string {
 	}
 	clamped := min(max(0, used), limit)
 	filled := int((int64(clamped)*int64(width) + int64(limit)/2) / int64(limit))
+	if clamped > 0 && filled == 0 {
+		filled = 1
+	}
 	return "[" + strings.Repeat("■", filled) + strings.Repeat("·", width-filled) + "]"
 }
 
-func (m AppModel) styledContextProgressBar(used int, limit int, width int) string {
-	plain := contextProgressBar(used, limit, width)
+func (m AppModel) styledContextProgressBar(metrics contextMetrics, width int) string {
+	plain := contextProgressBar(metrics.used, metrics.limit, width)
 	if plain == "" || width <= 0 {
 		return plain
 	}
-	clamped := min(max(0, used), limit)
-	filled := int((int64(clamped)*int64(width) + int64(limit)/2) / int64(limit))
-	return m.theme.MetaDivider.Render("[") +
-		m.theme.BarFilled.Render(strings.Repeat("■", filled)) +
-		m.theme.BarEmpty.Render(strings.Repeat("·", width-filled)) +
-		m.theme.MetaDivider.Render("]")
+	clamped := min(max(0, metrics.used), metrics.limit)
+	filled := int((int64(clamped)*int64(width) + int64(metrics.limit)/2) / int64(metrics.limit))
+	if clamped > 0 && filled == 0 {
+		filled = 1
+	}
+	categories := contextCategoryOrder
+	tokens := make([]int, len(categories))
+	total := 0
+	for index, category := range categories {
+		tokens[index] = max(0, metrics.categoryTokens[category])
+		total = saturatingTokenSum(total, tokens[index])
+	}
+	if total < metrics.used {
+		tokens[len(tokens)-1] += metrics.used - total
+		total = metrics.used
+	}
+	if total == 0 && filled > 0 {
+		tokens[len(tokens)-1] = metrics.used
+		total = metrics.used
+	}
+	cells := allocateProportional(tokens, filled)
+	var bar strings.Builder
+	bar.WriteString(m.theme.MetaDivider.Render("["))
+	for index, count := range cells {
+		if count > 0 {
+			bar.WriteString(m.contextCategoryStyle(categories[index]).Render(strings.Repeat("■", count)))
+		}
+	}
+	bar.WriteString(m.theme.BarEmpty.Render(strings.Repeat("·", width-filled)))
+	bar.WriteString(m.theme.MetaDivider.Render("]"))
+	return bar.String()
+}
+
+func (m AppModel) contextCategoryStyle(category app.ContextCategory) lipgloss.Style {
+	switch category {
+	case app.ContextCategoryCore:
+		return m.theme.BarCore
+	case app.ContextCategorySkills:
+		return m.theme.BarSkills
+	case app.ContextCategoryBuiltinTools:
+		return m.theme.BarBuiltin
+	case app.ContextCategoryMCP:
+		return m.theme.BarMCP
+	case app.ContextCategoryConversation:
+		return m.theme.BarChat
+	default:
+		return m.theme.BarOther
+	}
 }
 
 func (m AppModel) renderStatus(width int) string {

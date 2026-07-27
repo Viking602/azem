@@ -228,6 +228,20 @@ func (s *Service) Bootstrap() {
 	}
 	s.emitRecoveryState()
 	s.emitApprovalMode(s.ctx)
+	_ = s.emitContextProfile(s.ctx, "")
+}
+
+func (s *Service) emitContextProfile(ctx context.Context, sessionID string) error {
+	if s.providers == nil {
+		return nil
+	}
+	profile, err := s.providers.EstimateContextProfile(ctx, sessionID)
+	if err != nil {
+		s.emit(ctx, Event{Kind: EventContextProfile, SessionID: sessionID, State: "failed", Text: err.Error()})
+		return err
+	}
+	s.emit(ctx, Event{Kind: EventContextProfile, SessionID: sessionID, State: "estimated", ContextProfile: &profile})
+	return nil
 }
 
 func (s *Service) emitRecoveryState() {

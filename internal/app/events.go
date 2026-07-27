@@ -18,6 +18,7 @@ const (
 	EventTodoUpdated       EventKind = "todo_updated"
 	EventRunStarted        EventKind = "run_started"
 	EventContextUsage      EventKind = "context_usage"
+	EventContextProfile    EventKind = "context_profile"
 	EventAgentState        EventKind = "agent_state"
 	EventAgentDetail       EventKind = "agent_detail"
 	EventProviderRetry     EventKind = "provider_retry"
@@ -121,6 +122,49 @@ type AgentSnapshotPayload struct {
 	Agent   AgentStatePayload
 }
 
+type ContextCategory string
+
+const (
+	ContextCategoryCore         ContextCategory = "core"
+	ContextCategorySkills       ContextCategory = "skills"
+	ContextCategoryBuiltinTools ContextCategory = "builtin_tools"
+	ContextCategoryMCP          ContextCategory = "mcp"
+	ContextCategoryConversation ContextCategory = "conversation"
+	ContextCategoryOther        ContextCategory = "other"
+)
+
+const ContextContributionRemainingItems = "azem.context.remaining_items"
+
+type ContextContribution struct {
+	Category ContextCategory `json:"category"`
+	Name     string          `json:"name"`
+	Tokens   int             `json:"tokens"`
+}
+
+type ContextProfile struct {
+	Source               string                `json:"source"`
+	Estimated            bool                  `json:"estimated"`
+	Contributions        []ContextContribution `json:"contributions"`
+	ReportedInputTokens  int                   `json:"reportedInputTokens,omitempty"`
+	ReportedOutputTokens int                   `json:"reportedOutputTokens,omitempty"`
+}
+
+func (p ContextProfile) TotalTokens() int {
+	total := 0
+	for _, contribution := range p.Contributions {
+		total = saturatingContextTokenSum(total, contribution.Tokens)
+	}
+	return total
+}
+
+func saturatingContextTokenSum(left, right int) int {
+	left, right = max(0, left), max(0, right)
+	if left > int(^uint(0)>>1)-right {
+		return int(^uint(0) >> 1)
+	}
+	return left + right
+}
+
 type Event struct {
 	Kind             EventKind
 	SessionID        string
@@ -137,6 +181,7 @@ type Event struct {
 	AgentSnapshots   []AgentSnapshotPayload
 	SkillCatalog     []SkillCatalogEntry
 	SkillDiagnostics []SkillDiagnostic
+	ContextProfile   *ContextProfile
 	Todo             *session.TodoList
 	Memories         []memory.Memory
 	Recap            *recap.Recap
@@ -172,6 +217,11 @@ func (e Event) Clone() Event {
 	}
 	if e.SkillDiagnostics != nil {
 		cloned.SkillDiagnostics = append([]SkillDiagnostic(nil), e.SkillDiagnostics...)
+	}
+	if e.ContextProfile != nil {
+		profile := *e.ContextProfile
+		profile.Contributions = append([]ContextContribution(nil), e.ContextProfile.Contributions...)
+		cloned.ContextProfile = &profile
 	}
 	if e.Todo != nil {
 		todo := e.Todo.Clone()

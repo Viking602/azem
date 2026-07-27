@@ -74,13 +74,13 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		return m.renderBackgroundDetailOverlay(width, height)
 	}
 	maxBoxWidth := 82
-	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes || m.overlay == OverlayStatus || m.overlay == OverlayBackground {
+	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes || m.overlay == OverlayStatus || m.overlay == OverlayContext || m.overlay == OverlayBackground {
 		maxBoxWidth = 110
 	}
 	boxWidth := min(maxBoxWidth, max(3, width-2))
 	innerWidth := max(1, boxWidth-2)
 	maxInnerHeight := 20
-	if m.overlay == OverlayStatus {
+	if m.overlay == OverlayStatus || m.overlay == OverlayContext {
 		maxInnerHeight = 28
 	}
 	innerHeight := max(1, min(height-2, maxInnerHeight))
@@ -576,6 +576,8 @@ func (m AppModel) overlayHeading() (string, string) {
 		return m.tr("overlay.help.title"), m.tr("overlay.help.subtitle")
 	case OverlayStatus:
 		return m.tr("overlay.status.title"), m.tr("overlay.status.subtitle")
+	case OverlayContext:
+		return m.tr("overlay.context.title"), m.tr("overlay.context.subtitle")
 	case OverlayCommand:
 		return m.tr("overlay.command.title"), m.tr("overlay.command.subtitle")
 	case OverlayProvider:
@@ -679,10 +681,12 @@ func (m AppModel) overlayDescription() []string {
 		return []string{
 			m.tr("overlay.help.line1"), m.tr("overlay.help.line2"), m.tr("overlay.help.line3"), m.tr("overlay.help.line4"),
 			"/login /logout /provider /models /skills /skill /new /sessions /resume /compact",
-			"/team /agents /mcp /status /reconcile /cancel /help /quit",
+			"/team /agents /mcp /status /context /reconcile /cancel /help /quit",
 		}
 	case OverlayStatus:
 		return m.statusReportLines()
+	case OverlayContext:
+		return m.contextReportLines()
 	case OverlayProvider:
 		if m.overlayPurpose == "login" {
 			return []string{
@@ -1059,7 +1063,7 @@ func (m AppModel) overlayFooter() string {
 		return m.tr("overlay.footer.recovery")
 	case OverlayError:
 		return m.tr("overlay.footer.error")
-	case OverlayHelp, OverlayDiff, OverlayStatus:
+	case OverlayHelp, OverlayDiff, OverlayStatus, OverlayContext:
 		return m.tr("overlay.footer.scroll_close")
 	default:
 		return m.tr("overlay.footer.select")
@@ -1090,7 +1094,7 @@ func (m AppModel) overlayFooterForWidth(width int) string {
 		return m.tr("overlay.footer.background_detail_short")
 	case OverlayError:
 		return m.tr("overlay.footer.error_short")
-	case OverlayHelp, OverlayDiff, OverlayStatus:
+	case OverlayHelp, OverlayDiff, OverlayStatus, OverlayContext:
 		return m.tr("overlay.footer.scroll_close_short")
 	default:
 		return m.tr("overlay.footer.short")

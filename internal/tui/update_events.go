@@ -38,6 +38,8 @@ func (m *AppModel) applyEvent(event app.Event) {
 	case app.EventSessionLoaded:
 		m.loadSessionEvent(event)
 		if event.State != "list" {
+			m.contextProfile = app.ContextProfile{}
+			m.contextProfileError = ""
 			m.recap = cloneRecap(event.Recap)
 		}
 	case app.EventTodoUpdated:
@@ -46,11 +48,22 @@ func (m *AppModel) applyEvent(event app.Event) {
 		}
 	case app.EventRunStarted:
 		m.resetTurnUsage()
+		m.contextProfile = app.ContextProfile{}
+		m.contextProfileError = ""
 		m.runID = event.RunID
 		if m.status != "Cancelling" {
 			m.status = "Running"
 		}
 	case app.EventContextUsage:
+	case app.EventContextProfile:
+		if event.ContextProfile != nil {
+			m.contextProfile = *event.ContextProfile
+			m.contextProfile.Contributions = append([]app.ContextContribution(nil), event.ContextProfile.Contributions...)
+			m.contextProfileError = ""
+		} else if event.State == "failed" {
+			m.contextProfile = app.ContextProfile{}
+			m.contextProfileError = event.Text
+		}
 	case app.EventAgentState:
 		m.updateAgent(event)
 	case app.EventAgentDetail:

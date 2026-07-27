@@ -109,6 +109,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 - **Inline file diffs** turn successful patch edits and newly created files into collapsible transcript blocks. Each block identifies the affected file, reports `+added/-deleted` totals, and colorizes changed lines.
 - **Compact tool activity** summarizes file reads, searches, tests, shell commands, edits, and failures. Large patch bodies and complete file contents stay out of routine status messages.
 - **Subagent visibility** applies the same summaries and file-diff presentation when inspecting child-agent activity.
+- **Context visibility** shows startup occupancy before the first model call, then calibrates the total from provider usage. The segmented meter and `/context` breakdown separate core instructions, Skills, built-in tools, MCP tools, conversation history, and provider framing.
 
 ## How It Works
 
@@ -188,6 +189,8 @@ Without `-config`, Azem reads `azem/config.yaml` from the operating system's use
 | `/forget <memory-id>` | Remove one workspace memory |
 | `/recap` | Inspect the current session continuity recap |
 | `/mcp [refresh\|reconnect <server>]` | Inspect or update MCP servers |
+| `/status` | Inspect runtime, session, cache, and token diagnostics |
+| `/context` | Inspect the segmented context-window occupancy and individual contributors |
 | `/reconcile <attempt-id> <result>` | Reconcile an unknown side effect |
 | `/cancel` | Cancel the active run |
 | `/help` | Open help |

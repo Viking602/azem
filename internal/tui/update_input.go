@@ -18,8 +18,10 @@ import (
 	"github.com/Viking602/azem/internal/session"
 )
 
-var writeClipboard = clipboard.WriteAll
-var readClipboardText = clipboard.ReadAll
+var (
+	writeClipboard    = clipboard.WriteAll
+	readClipboardText = clipboard.ReadAll
+)
 
 type clipboardWriteResultMsg struct{ err error }
 
@@ -1048,6 +1050,8 @@ func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
 		return m.beginAction(Action{Kind: ActionShowRecap})
 	case "status":
 		m.openOverlay(OverlayStatus)
+	case "context":
+		m.openOverlay(OverlayContext)
 	case "agents":
 		m.openOverlay(OverlayAgents)
 	case "background":
@@ -1441,6 +1445,12 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.openOverlay(OverlayStatus)
+	case "context":
+		if len(command.Args) != 0 {
+			m.errorBanner = m.tr("context.usage")
+			break
+		}
+		m.openOverlay(OverlayContext)
 	case "quit":
 		return m.beginShutdown()
 	case "cancel":

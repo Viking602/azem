@@ -273,8 +273,10 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 				observeProviderRetries(ctx, s, request.SessionID, parentRunID, provider, driver)
 			}
 			if resolveErr == nil && s.sessions != nil {
-				driver = &meteredProviderDriver{inner: driver, store: s.sessions, host: s, sessionID: request.SessionID,
-					runID: parentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name}
+				driver = &meteredProviderDriver{
+					inner: driver, store: s.sessions, host: s, sessionID: request.SessionID,
+					runID: parentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name,
+				}
 			}
 			return resolvedModel, window, driver, resolveErr
 		}, compactionRoute, request.Provider, request.Model, request.Reasoning, cacheKey, nil, func() compactionUsageReporter {
@@ -459,10 +461,20 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 			transport := engine.Provider.Metadata().Name
 			inner := engine.Provider
 			if s.sessions != nil {
-				inner = &meteredProviderDriver{inner: inner, store: s.sessions, host: s, sessionID: sessionID,
-					runID: parentRunID, kind: "team", provider: request.Provider, model: request.Model, transport: transport}
+				inner = &meteredProviderDriver{
+					inner: inner, store: s.sessions, host: s, sessionID: sessionID,
+					runID: parentRunID, kind: "team", provider: request.Provider, model: request.Model, transport: transport,
+				}
 			}
-			engine.Provider = &teamUsageDriver{inner: inner, prepare: requestPreparer.prepare}
+			engine.Provider = &teamUsageDriver{
+				inner: inner, prepare: requestPreparer.prepare,
+				emitProfile: func(profile ContextProfile) {
+					s.emit(s.ctx, Event{
+						Kind: EventContextProfile, SessionID: sessionID, RunID: parentRunID, AgentID: dispatch.To,
+						State: "estimated", ContextProfile: &profile,
+					})
+				},
+			}
 		}
 		engine.ExtraBody = extraBody
 		return engine, nil
@@ -655,9 +667,10 @@ func (p *teamRequestPreparer) prepare(ctx context.Context, request hyprovider.Re
 }
 
 type teamUsageDriver struct {
-	inner   hyprovider.Driver
-	prepare func(context.Context, hyprovider.Request) (hyprovider.Request, error)
-	report  func(hyprovider.Usage)
+	inner       hyprovider.Driver
+	prepare     func(context.Context, hyprovider.Request) (hyprovider.Request, error)
+	report      func(hyprovider.Usage)
+	emitProfile func(ContextProfile)
 }
 
 func (d *teamUsageDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }
@@ -670,22 +683,37 @@ func (d *teamUsageDriver) Stream(ctx context.Context, request hyprovider.Request
 			return nil, err
 		}
 	}
+	profile := contextProfileFromRequest(request)
+	profile.Source = "team_request"
+	if d.emitProfile != nil {
+		d.emitProfile(profile)
+	}
 	value, err := d.inner.Stream(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-	return &teamUsageStream{Stream: value, report: d.report}, nil
+	return &teamUsageStream{Stream: value, report: d.report, profile: profile, emitProfile: d.emitProfile}, nil
 }
 
 type teamUsageStream struct {
 	hyprovider.Stream
-	report func(hyprovider.Usage)
+	report      func(hyprovider.Usage)
+	profile     ContextProfile
+	emitProfile func(ContextProfile)
 }
 
 func (s *teamUsageStream) Recv() (hyprovider.Event, error) {
 	event, err := s.Stream.Recv()
-	if err == nil && event.Kind == hyprovider.EventDone && s.report != nil {
-		s.report(event.Usage)
+	if err == nil && event.Kind == hyprovider.EventDone {
+		if s.emitProfile != nil {
+			profile := s.profile
+			profile.ReportedInputTokens = event.Usage.InputTokens
+			profile.ReportedOutputTokens = event.Usage.OutputTokens
+			s.emitProfile(profile)
+		}
+		if s.report != nil {
+			s.report(event.Usage)
+		}
 	}
 	return event, err
 }

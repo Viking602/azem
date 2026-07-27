@@ -100,6 +100,7 @@ const (
 	OverlayNone             Overlay = ""
 	OverlayHelp             Overlay = "help"
 	OverlayStatus           Overlay = "status"
+	OverlayContext          Overlay = "context"
 	OverlayCommand          Overlay = "command"
 	OverlayProvider         Overlay = "provider"
 	OverlayModel            Overlay = "model"
@@ -171,8 +172,10 @@ type AgentCatalogView struct {
 	Enabled        bool
 }
 
-type SkillCatalogView = app.SkillCatalogEntry
-type TodoView = session.TodoList
+type (
+	SkillCatalogView = app.SkillCatalogEntry
+	TodoView         = session.TodoList
+)
 
 type MCPToolView struct {
 	Name             string `json:"name"`
@@ -256,6 +259,7 @@ type UsageView struct {
 	CurrentEpochMainCached           int
 	CurrentEpochMainRequests         int
 	CurrentEpochMainReportedRequests int
+	CurrentTurnMainReported          bool
 	LifetimeMainInput                int
 	LifetimeMainReportedInput        int
 	LifetimeMainCached               int
@@ -291,6 +295,7 @@ type UsageView struct {
 	SubagentInput                    int
 	SubagentRequests                 int
 	ContextLimit                     int
+	ContextReported                  bool
 	CacheReported                    bool
 	MainCacheReported                bool
 	LastRequestKind                  string
@@ -370,6 +375,8 @@ type AppModel struct {
 	approval            *ApprovalView
 	pendingApprovals    []ApprovalView
 	usage               UsageView
+	contextProfile      app.ContextProfile
+	contextProfileError string
 	pendingImages       []session.Attachment
 }
 

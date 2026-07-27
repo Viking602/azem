@@ -442,30 +442,9 @@ func (m *AppModel) switchProvider(provider string) {
 		return
 	}
 	if provider != m.provider {
-		m.usage.InputTokens = 0
-		m.usage.CacheInputTokens = 0
-		m.usage.CachedInputTokens = 0
-		m.usage.MainCacheInput = 0
-		m.usage.MainCachedInput = 0
-		m.usage.CacheWriteTokens = 0
-		m.usage.MainCacheWrite = 0
-		m.usage.OutputTokens = 0
-		m.usage.ReasoningTokens = 0
-		m.usage.UncachedInputTokens = 0
-		m.usage.CompactionInput = 0
-		m.usage.CompactionCached = 0
-		m.usage.CompactionCacheWrite = 0
-		m.usage.CompactionOutput = 0
-		m.usage.CompactionReasoning = 0
-		m.usage.CompactionUncached = 0
-		m.usage.TeamInput = 0
-		m.usage.TeamCached = 0
-		m.usage.TeamCacheWrite = 0
-		m.usage.TeamOutput = 0
-		m.usage.TeamReasoning = 0
-		m.usage.TeamUncached = 0
-		m.usage.CacheReported = false
-		m.usage.MainCacheReported = false
+		m.resetTurnUsage()
+		m.contextProfile = app.ContextProfile{}
+		m.contextProfileError = ""
 	}
 	m.provider = provider
 	m.selectModels(m.modelsByProvider[provider])
@@ -492,30 +471,9 @@ func (m *AppModel) selectModels(choices []ModelChoice) {
 
 func (m *AppModel) selectModel(modelID string) {
 	if modelID != m.model {
-		m.usage.InputTokens = 0
-		m.usage.CacheInputTokens = 0
-		m.usage.CachedInputTokens = 0
-		m.usage.MainCacheInput = 0
-		m.usage.MainCachedInput = 0
-		m.usage.CacheWriteTokens = 0
-		m.usage.MainCacheWrite = 0
-		m.usage.OutputTokens = 0
-		m.usage.ReasoningTokens = 0
-		m.usage.UncachedInputTokens = 0
-		m.usage.CompactionInput = 0
-		m.usage.CompactionCached = 0
-		m.usage.CompactionCacheWrite = 0
-		m.usage.CompactionOutput = 0
-		m.usage.CompactionReasoning = 0
-		m.usage.CompactionUncached = 0
-		m.usage.TeamInput = 0
-		m.usage.TeamCached = 0
-		m.usage.TeamCacheWrite = 0
-		m.usage.TeamOutput = 0
-		m.usage.TeamReasoning = 0
-		m.usage.TeamUncached = 0
-		m.usage.CacheReported = false
-		m.usage.MainCacheReported = false
+		m.resetTurnUsage()
+		m.contextProfile = app.ContextProfile{}
+		m.contextProfileError = ""
 	}
 	m.model = modelID
 	m.usage.ContextLimit = 0
@@ -541,6 +499,7 @@ func (m *AppModel) updateUsage(data map[string]string) {
 	if inputErr == nil && data["inputTokens"] != "" {
 		if data["aggregateOnly"] != "true" {
 			m.usage.InputTokens = inputTokens
+			m.usage.ContextReported = data["cacheStatus"] != "pending"
 			if data["cacheStatus"] == "reported" {
 				m.usage.MainCacheInput += inputTokens
 			}
@@ -625,8 +584,10 @@ func (m *AppModel) updateUsage(data map[string]string) {
 
 func (m *AppModel) resetTurnUsage() {
 	m.usage.InputTokens = 0
+	m.usage.ContextReported = false
 	m.usage.CacheInputTokens = 0
 	m.usage.CachedInputTokens = 0
+	m.usage.CurrentTurnMainReported = false
 	m.usage.MainCacheInput = 0
 	m.usage.MainCachedInput = 0
 	m.usage.CacheWriteTokens = 0
@@ -682,6 +643,7 @@ func (m *AppModel) restoreUsage(raw string) {
 	m.usage.CachedInputTokens = usage.CachedInputTokens
 	m.usage.MainCacheInput = usage.MainCacheInput
 	m.usage.MainCachedInput = usage.MainCachedInput
+	m.usage.CurrentTurnMainReported = usage.CurrentTurnMainReported
 	m.usage.CacheWriteTokens = usage.CacheWriteTokens
 	m.usage.MainCacheWrite = usage.MainCacheWrite
 	m.usage.ReasoningTokens = usage.ReasoningTokens
@@ -700,6 +662,7 @@ func (m *AppModel) restoreUsage(raw string) {
 	m.usage.TeamUncached = usage.TeamUncached
 	m.usage.CacheReported = usage.CacheReported
 	m.usage.MainCacheReported = usage.MainCacheReported
+	m.usage.ContextReported = usage.InputTokens > 0 && usage.CurrentTurnMainReported
 	m.usage.LastRequestKind = usage.LastRequestKind
 	m.usage.LastProvider = usage.LastProvider
 	m.usage.LastModel = usage.LastModel

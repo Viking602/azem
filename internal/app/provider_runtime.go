@@ -48,8 +48,10 @@ type ProviderRuntime struct {
 	subagentInitErr error
 }
 
-var errResumeProfileChanged = errors.New("resume run execution profile changed")
-var errResumeBudgetExhausted = errors.New("resume run budget exhausted")
+var (
+	errResumeProfileChanged  = errors.New("resume run execution profile changed")
+	errResumeBudgetExhausted = errors.New("resume run budget exhausted")
+)
 
 type singleRunManifest struct {
 	Version          int       `json:"version"`
@@ -418,11 +420,15 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		if usage, err := host.sessions.ProviderUsageSnapshot(ctx, request.SessionID, run.RunID); err == nil {
 			_ = host.sessions.UpdateUsage(ctx, request.SessionID, usage)
 			encoded, _ := json.Marshal(usage)
-			host.emit(host.ctx, Event{Kind: EventContextUsage, SessionID: request.SessionID, RunID: run.RunID, State: "pending",
-				Data: map[string]string{"factSnapshot": "true", "usageSnapshot": string(encoded), "requestKind": "main"}})
+			host.emit(host.ctx, Event{
+				Kind: EventContextUsage, SessionID: request.SessionID, RunID: run.RunID, State: "pending",
+				Data: map[string]string{"factSnapshot": "true", "usageSnapshot": string(encoded), "requestKind": "main"},
+			})
 		}
-		driver = &meteredProviderDriver{inner: driver, store: host.sessions, host: host, sessionID: request.SessionID,
-			runID: run.RunID, kind: "main", provider: request.Provider, model: modelID, transport: driver.Metadata().Name}
+		driver = &meteredProviderDriver{
+			inner: driver, store: host.sessions, host: host, sessionID: request.SessionID,
+			runID: run.RunID, kind: "main", provider: request.Provider, model: modelID, transport: driver.Metadata().Name,
+		}
 	}
 	if host != nil && host.sessions != nil {
 		contextManager.putArtifact = func(ctx context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
@@ -436,8 +442,10 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			observeProviderRetries(ctx, host, request.SessionID, run.RunID, provider, resolved)
 		}
 		if resolveErr == nil && host != nil && host.sessions != nil {
-			resolved = &meteredProviderDriver{inner: resolved, store: host.sessions, host: host, sessionID: request.SessionID,
-				runID: run.RunID, kind: "compaction", provider: provider, model: resolvedModel, transport: resolved.Metadata().Name}
+			resolved = &meteredProviderDriver{
+				inner: resolved, store: host.sessions, host: host, sessionID: request.SessionID,
+				runID: run.RunID, kind: "compaction", provider: provider, model: resolvedModel, transport: resolved.Metadata().Name,
+			}
 		}
 		return resolvedModel, window, resolved, resolveErr
 	}, compactionRoute, request.Provider, modelID, request.Reasoning, request.SessionID+":compaction", usageBudget, func() compactionUsageReporter {
@@ -468,6 +476,14 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 				host.acknowledgeActiveGuidance(request.SessionID, run.RunID, snapshot)
 			},
 		}
+	}
+	if host != nil {
+		driver = &contextProfileProviderDriver{inner: driver, emit: func(profile ContextProfile) {
+			host.emit(host.ctx, Event{
+				Kind: EventContextProfile, SessionID: request.SessionID, RunID: run.RunID,
+				State: "estimated", ContextProfile: &profile,
+			})
+		}}
 	}
 	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
 		Providers:      hyprovider.Single(driver),
@@ -923,6 +939,7 @@ func collectProviderText(ctx context.Context, driver hyprovider.Driver, request 
 		}
 	}
 }
+
 func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projection session.Projection) (session.CompactionPlan, bool, error) {
 	const keepRecent = 4
 	if len(projection.Blocks) <= keepRecent+1 {
@@ -960,8 +977,10 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 	}
 	metered := &compactionUsageDriver{inner: driver}
 	if r.host != nil && r.host.sessions != nil {
-		metered.inner = &meteredProviderDriver{inner: driver, store: r.host.sessions, host: r.host, sessionID: projection.Session.ID,
-			runID: "manual-compaction", kind: "compaction", provider: providerID, model: modelID, transport: driver.Metadata().Name}
+		metered.inner = &meteredProviderDriver{
+			inner: driver, store: r.host.sessions, host: r.host, sessionID: projection.Session.ID,
+			runID: "manual-compaction", kind: "compaction", provider: providerID, model: modelID, transport: driver.Metadata().Name,
+		}
 	} else if reporter := r.compactionUsageReporter(r.host, projection.Session.ID, "manual-compaction"); reporter != nil {
 		metered.report = func(usage hyprovider.Usage) {
 			reporter(providerID, modelID, reasoning, driver.Metadata().Name, usage, 0, 0)
