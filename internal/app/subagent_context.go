@@ -94,8 +94,26 @@ func renderSubagentInstructions(profile effectiveSubagentProfile) string {
 	if profile.Persona != "" {
 		fmt.Fprintf(&rendered, " Apply the %s persona.", profile.Persona)
 	}
-	fmt.Fprintf(&rendered, " Work only within %s.\n", profile.CWD)
+	rendered.WriteByte('\n')
+	fmt.Fprintf(&rendered, "Effective CWD: %s.\n", profile.CWD)
+
+	permission := map[string]string{
+		"read-only":  "You may inspect governed workspace evidence, but you cannot modify files or persistent state.",
+		"read-write": "You may inspect and use governed file edits, but you cannot execute unavailable checks.",
+		"execute":    "You may inspect and run governed commands, but you cannot edit files or persistent state.",
+		"all":        "You may inspect, edit, and verify with the governed tools available to you.",
+	}[profile.CapabilityMode]
+	fmt.Fprintf(&rendered, "Capability mode: %s. %s\n", profile.CapabilityMode, permission)
+
+	rendered.WriteString("Assignment contract:\n")
+	rendered.WriteString("- You start without the parent conversation; the supplied assignment is your complete boundary.\n")
+	rendered.WriteString("- Stay inside the assigned goal and scope. Do not add features or delegate again.\n")
+	rendered.WriteString("- Inspect the relevant workspace state before acting and preserve unknown user work.\n")
+	rendered.WriteString("- The actual governed tool inventory is authoritative; do not assume an unavailable tool exists.\n")
+	rendered.WriteString("- Finish the assignment with concrete evidence or return the exact blocker without claiming success.\n")
+
 	if profile.Instructions != "" {
+		rendered.WriteString("Role and persona instructions:\n")
 		rendered.WriteString(profile.Instructions)
 		rendered.WriteByte('\n')
 	}
@@ -119,7 +137,11 @@ func renderSubagentInstructions(profile effectiveSubagentProfile) string {
 	}
 	writeContract("Input", profile.Inputs)
 	writeContract("Output", profile.Outputs)
-	rendered.WriteString("Return a direct final answer with concrete evidence.")
+	if len(profile.Outputs) > 0 {
+		rendered.WriteString("Final response: satisfy the declared output contract exactly; do not substitute the role's default headings.")
+	} else {
+		rendered.WriteString("Final response: follow any format defined by the role instructions and include concrete evidence.")
+	}
 	return strings.TrimSpace(rendered.String())
 }
 

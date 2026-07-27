@@ -6,7 +6,10 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
+	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/go-hydaelyn/message"
 
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
@@ -52,6 +55,58 @@ func TestContextProfileFromRequestClassifiesEveryWireContribution(t *testing.T) 
 			t.Fatalf("missing %s contributions: %v; profile=%+v", category, names, profile.Contributions)
 		}
 	}
+}
+
+func TestEstimateContextProfileUsesLiveSubagentCatalog(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	workspace := t.TempDir()
+	coding, err := agentservice.NewService(providerStore, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+	subagentStore, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Workspace.Root = workspace
+	worker := cfg.Agents.Subagents.Roles["worker"]
+	worker.Description = strings.Repeat("live catalog marker ", 20)
+	cfg.Agents.Subagents.Roles["worker"] = worker
+	subagents, err := newSubagentRuntime(ctx, cfg.Agents.Subagents, subagentStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subagents.cancel()
+	runtime := &ProviderRuntime{cfg: cfg, coding: coding, subagents: subagents}
+
+	definition := (&subagentSpawnDriver{runtime: subagents}).Definition()
+	if advertised := limitRunes(strings.TrimSpace(worker.Description), maxAdvertisedSubagentRoleDescriptionRunes); !strings.Contains(definition.Description, advertised) {
+		t.Fatalf("live spawn definition does not contain bounded configured description:\n%s", definition.Description)
+	}
+	expected := estimateToolTokens(definition)
+	if stale := estimateToolTokens((&subagentSpawnDriver{}).Definition()); stale == expected {
+		t.Fatalf("test catalog does not change estimated size: live=%d stale=%d", expected, stale)
+	}
+	profile, err := runtime.EstimateContextProfile(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, contribution := range profile.Contributions {
+		if contribution.Category == ContextCategoryBuiltinTools && contribution.Name == subagentSpawnTool {
+			if contribution.Tokens != expected {
+				t.Fatalf("spawn estimate = %d, want live definition estimate %d", contribution.Tokens, expected)
+			}
+			return
+		}
+	}
+	t.Fatalf("spawn contribution missing: %+v", profile.Contributions)
 }
 
 func TestContextProfileTotalIgnoresNegativeContributions(t *testing.T) {

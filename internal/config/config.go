@@ -14,6 +14,11 @@ const CurrentVersion = 1
 
 var mcpServerNamePattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
 
+const (
+	maxConfiguredSubagentRoles         = 64
+	maxConfiguredSubagentRoleNameBytes = 64
+)
+
 type Config struct {
 	Version   int             `yaml:"version"`
 	Defaults  DefaultsConfig  `yaml:"defaults"`
@@ -249,9 +254,11 @@ func Default() Config {
 		Agents: AgentsConfig{
 			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
 			Team: TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
-			Context: ContextConfig{Enabled: true, SoftTriggerRatio: .68, HardTriggerRatio: .82, TargetRatio: .45, BackgroundPrepare: true, SafetyMarginRatio: .08,
+			Context: ContextConfig{
+				Enabled: true, SoftTriggerRatio: .68, HardTriggerRatio: .82, TargetRatio: .45, BackgroundPrepare: true, SafetyMarginRatio: .08,
 				ReserveOutputTokens: 16384, ReserveReasoningTokens: 8192, MinReclaimTokens: 16000,
-				MaxSummaryTokens: 4096, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096},
+				MaxSummaryTokens: 4096, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
+			},
 			Subagents: SubagentConfig{
 				Enabled: true, MaxDepth: 1, MaxConcurrency: 2, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
@@ -288,29 +295,29 @@ func builtInSubagentRoles() map[string]SubagentRoleConfig {
 	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell")
 	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell")
 	return map[string]SubagentRoleConfig{
-		"general-purpose": {
-			Description:    "Handle delegated coding work with the full governed tool set.",
-			Instructions:   "Complete the delegated task, preserve user work, and return a concise verified result.",
+		"worker": {
+			Description:    "Implement one scoped coding task end-to-end and return verified evidence.",
+			Instructions:   strings.TrimSpace(workerSubagentInstructions),
 			CapabilityMode: "all", Isolation: "none", Tools: all, Source: "builtin",
 		},
 		"explore": {
-			Description:    "Investigate the workspace and return file-backed evidence.",
-			Instructions:   "Investigate without modifying files. Return concise findings with file and line evidence.",
+			Description:    "Investigate the workspace without changes and return file-backed evidence.",
+			Instructions:   strings.TrimSpace(exploreSubagentInstructions),
 			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), readOnly...), Source: "builtin",
 		},
 		"plan": {
-			Description:    "Develop a concrete implementation plan without modifying files.",
-			Instructions:   "Inspect the workspace as needed and return a decision-complete plan. Do not modify files.",
+			Description:    "Produce a decision-complete implementation plan without changing the workspace.",
+			Instructions:   strings.TrimSpace(planSubagentInstructions),
 			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), readOnly...), Source: "builtin",
 		},
 		"review": {
-			Description:    "Review implementation quality and correctness without modifying files.",
-			Instructions:   "Review the delegated change against its requirements. Return findings with concrete evidence.",
+			Description:    "Review a delegated change for requirement, correctness, and regression risks without editing.",
+			Instructions:   strings.TrimSpace(reviewSubagentInstructions),
 			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), readOnly...), Source: "builtin",
 		},
 		"verify": {
-			Description:    "Run governed verification and report exact outcomes.",
-			Instructions:   "Verify the delegated behavior with inspection and governed commands. Do not edit files.",
+			Description:    "Run governed checks without editing and report exact outcomes.",
+			Instructions:   strings.TrimSpace(verifySubagentInstructions),
 			CapabilityMode: "execute", Isolation: "none", Tools: execute, Source: "builtin",
 		},
 	}
@@ -563,9 +570,12 @@ func (c *Config) validateSubagents() error {
 		}
 	}
 	readOnlyTools := []string{"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff"}
+	if len(subagents.Roles) > maxConfiguredSubagentRoles {
+		return fmt.Errorf("agents.subagents.roles must contain at most %d roles", maxConfiguredSubagentRoles)
+	}
 	for name, role := range subagents.Roles {
-		if !mcpServerNamePattern.MatchString(name) {
-			return fmt.Errorf("agents.subagents role %q must match [a-z0-9_-]+", name)
+		if len(name) > maxConfiguredSubagentRoleNameBytes || !mcpServerNamePattern.MatchString(name) {
+			return fmt.Errorf("agents.subagents role %q must be at most %d bytes and match [a-z0-9_-]+", name, maxConfiguredSubagentRoleNameBytes)
 		}
 		if role.CapabilityMode == "" {
 			role.CapabilityMode = "read-only"

@@ -3,7 +3,9 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,94 @@ import (
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
+
+func TestMainInstructionsContract(t *testing.T) {
+	wantHeadings := []string{
+		"## Role and priorities",
+		"## Instruction boundaries",
+		"## Intent and scope",
+		"## Tool strategy",
+		"## Execution workflow",
+		"## Delegation",
+		"## Verification",
+		"## Completion and reporting",
+	}
+	var gotHeadings []string
+	for _, line := range strings.Split(mainInstructions, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			gotHeadings = append(gotHeadings, line)
+		}
+	}
+	if !reflect.DeepEqual(gotHeadings, wantHeadings) {
+		t.Fatalf("second-level headings = %q, want %q", gotHeadings, wantHeadings)
+	}
+	if size := len([]byte(mainInstructions)); size < 4096 || size > 12288 {
+		t.Fatalf("main instructions size = %d bytes, want 4096..12288", size)
+	}
+	for _, name := range []string{
+		"coding.list_files", "coding.search", "coding.read_file", "coding.git_diff",
+		"coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test",
+		"coding.shell", "todo", "subagent.spawn", "subagent.get_output", "subagent.kill",
+	} {
+		if !strings.Contains(mainInstructions, "`"+name+"`") {
+			t.Errorf("main instructions do not list %q", name)
+		}
+	}
+	for _, unsupported := range []string{"lsp", "ast_edit", "browser", "worker.run"} {
+		if strings.Contains(mainInstructions, unsupported) {
+			t.Errorf("main instructions mention unsupported tool %q", unsupported)
+		}
+	}
+	sum := sha256.Sum256([]byte(mainInstructions))
+	if want := hex.EncodeToString(sum[:]); mainInstructionFingerprint != want {
+		t.Fatalf("main instruction fingerprint = %q, want %q", mainInstructionFingerprint, want)
+	}
+}
+
+func TestTurnContextBuildFallsBackWhenInstructionFingerprintDiffers(t *testing.T) {
+	boundary := int64(2)
+	staleState := json.RawMessage(`[{"type":"reasoning","id":"stale"}]`)
+	manager := turnContext{
+		instructions: mainInstructions,
+		providerID:   "chatgpt",
+		modelID:      "gpt-test",
+		history: []session.Block{
+			{Sequence: 1, Kind: "user", Content: "canonical request"},
+			{Sequence: 2, Kind: "assistant", Content: "canonical answer"},
+		},
+		modelHistory: session.ModelHistory{
+			ProviderID:             "chatgpt",
+			ModelID:                "gpt-test",
+			InstructionFingerprint: "stale-fingerprint",
+			StaticPrefixHash:       "stale-fingerprint",
+			WireVersion:            session.CurrentWireVersion,
+			CoveredThroughSequence: &boundary,
+			Messages: []message.Message{{
+				Role:          message.RoleAssistant,
+				Text:          "stale provider answer",
+				ProviderState: staleState,
+			}},
+		},
+		checkpointBoundary: &boundary,
+	}
+	messages, err := manager.Build(context.Background(), api.Task{Goal: "current goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 4 || messages[0].Role != message.RoleSystem || messages[0].Text != mainInstructions {
+		t.Fatalf("fallback prefix = %#v", messages)
+	}
+	if messages[1].Role != message.RoleUser || messages[1].Text != "canonical request" ||
+		messages[2].Role != message.RoleAssistant || messages[2].Text != "canonical answer" ||
+		messages[3].Role != message.RoleUser || messages[3].Text != "current goal" {
+		t.Fatalf("fallback canonical history = %#v", messages)
+	}
+	for _, current := range messages {
+		if len(current.ProviderState) > 0 || current.Text == "stale provider answer" {
+			t.Fatalf("fallback reused stale provider state: %#v", messages)
+		}
+	}
+}
 
 func TestPhase3ArtifactToolRoundTripsBinaryPayloadAsBase64(t *testing.T) {
 	ctx := context.Background()
@@ -1561,10 +1651,14 @@ func TestTurnContextRollsOversizedCompletedToolResultIntoSummary(t *testing.T) {
 
 func TestManualCompactionTailRetainsLatestUserBeforeAgentBlocks(t *testing.T) {
 	blocks := []session.Block{
-		{Kind: "user", Content: "old"}, {Kind: "assistant", Content: "old answer"},
+		{Kind: "user", Content: "old"},
+		{Kind: "assistant", Content: "old answer"},
 		{Kind: "user", Content: "latest guidance"},
-		{Kind: "agent", Content: "one"}, {Kind: "agent", Content: "two"}, {Kind: "agent", Content: "three"},
-		{Kind: "agent", Content: "four"}, {Kind: "agent", Content: "five"},
+		{Kind: "agent", Content: "one"},
+		{Kind: "agent", Content: "two"},
+		{Kind: "agent", Content: "three"},
+		{Kind: "agent", Content: "four"},
+		{Kind: "agent", Content: "five"},
 	}
 	if start := manualCompactionTailStart(blocks, 4); start != 2 {
 		t.Fatalf("tail start = %d, want latest user at 2", start)
@@ -3814,6 +3908,9 @@ func TestMainTurnsKeepSerializedPrefixStableAndAppendRawOutputAndNewTail(t *test
 	if len(captured) != 2 || captured[0].PromptCacheKey != "cache-session" ||
 		captured[1].PromptCacheKey != "cache-session" || captured[0].Instructions != captured[1].Instructions {
 		t.Fatalf("captured cache requests = %#v", captured)
+	}
+	if !strings.HasPrefix(captured[0].Instructions, mainInstructions) {
+		t.Fatalf("first public instructions do not start with main instructions:\n%s", captured[0].Instructions)
 	}
 	var rawOutput []json.RawMessage
 	if err := json.Unmarshal([]byte(firstOutput), &rawOutput); err != nil {

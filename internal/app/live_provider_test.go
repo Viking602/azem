@@ -114,6 +114,76 @@ func TestLiveSubscriptionGovernedEdits(t *testing.T) {
 	}
 }
 
+func TestLiveWorkerCompletesScopedEdit(t *testing.T) {
+	if os.Getenv("AZEM_LIVE_ACCEPTANCE") != "1" {
+		t.Skip("set AZEM_LIVE_ACCEPTANCE=1 to use local subscription credentials")
+	}
+	ctx, boot, workspace := liveBootstrap(t)
+	account, model, reasoning := liveProviderSelection(t, ctx, boot.Service, "chatgpt")
+	runID, err := boot.Service.StartConfiguredTurn(TurnRequest{
+		SessionID: "default",
+		Prompt: "Call subagent.spawn exactly once without subagent_type and with background false. " +
+			"Give the default child a complete handoff that requires it to use coding.write_file to create worker.txt containing exactly worker-ok, " +
+			"use coding.read_file to read it back, avoid coding.shell, and return verification evidence. After the child completes, report its result.",
+		Provider: "chatgpt", Model: model.ID, Reasoning: reasoning, AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerIDs := map[string]bool{}
+	completedWorker := ""
+	writeApprovals := 0
+	for {
+		event, err := boot.Service.NextEvent(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == EventApprovalRequested {
+			if event.Data["agent_type"] != "worker" || event.Data["tool"] != "coding.write_file" {
+				t.Fatalf("unexpected approval during worker run: %+v", event)
+			}
+			writeApprovals++
+			if err := boot.Service.ExecuteAction(ctx, Action{
+				Kind: ActionResolveApproval, Target: event.ApprovalID, Decision: "once",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if event.RunID != runID {
+			continue
+		}
+		switch event.Kind {
+		case EventAgentState:
+			if event.Agent == nil || event.Agent.Type != "worker" {
+				continue
+			}
+			workerIDs[event.AgentID] = true
+			if event.State == "completed" {
+				completedWorker = event.AgentID
+			}
+		case EventRunFailed:
+			t.Fatalf("default worker turn failed: %s", event.Text)
+		case EventRunFinished:
+			if len(workerIDs) != 1 || completedWorker == "" {
+				t.Fatalf("default worker states = %v, completed=%q", workerIDs, completedWorker)
+			}
+			if writeApprovals == 0 {
+				t.Fatal("default worker edit completed without governed write approval")
+			}
+			content, err := os.ReadFile(filepath.Join(workspace, "worker.txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(content)) != "worker-ok" {
+				t.Fatalf("worker.txt content = %q", content)
+			}
+			t.Logf("ChatGPT account %s model %s completed default worker %s", account.ID, model.ID, completedWorker)
+			return
+		}
+	}
+}
+
 func TestLiveSubagentCompletionAndCancellation(t *testing.T) {
 	if os.Getenv("AZEM_LIVE_ACCEPTANCE") != "1" {
 		t.Skip("set AZEM_LIVE_ACCEPTANCE=1 to use local subscription credentials")

@@ -380,6 +380,12 @@ func cloneBoolMap(source map[string]bool) map[string]bool {
 	return result
 }
 
+func (r *subagentRuntime) roleCatalogSnapshot() (map[string]config.SubagentRoleConfig, map[string]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return cloneSubagentRoles(r.cfg.Roles), cloneBoolMap(r.cfg.Toggle)
+}
+
 func (r *subagentRuntime) resolveResumeProfile(sourceID string, parent subagentParentRuntime) (effectiveSubagentProfile, error) {
 	source, err := r.store.Get(r.ctx, sourceID)
 	if err != nil || source.SessionID != parent.SessionID {
@@ -613,9 +619,11 @@ func (r *subagentRuntime) execute(id string) {
 	}
 	if parent.Host != nil && parent.Host.providers != nil {
 		if parent.Host.sessions != nil {
-			childDriver = &meteredProviderDriver{inner: childDriver, store: parent.Host.sessions, host: parent.Host,
+			childDriver = &meteredProviderDriver{
+				inner: childDriver, store: parent.Host.sessions, host: parent.Host,
 				sessionID: parent.SessionID, runID: parent.ParentRunID, kind: "subagent", provider: profile.Provider,
-				model: childModel, transport: childDriver.Metadata().Name}
+				model: childModel, transport: childDriver.Metadata().Name,
+			}
 		}
 	}
 	compactionResolve := parent.ResolveDriver
@@ -624,18 +632,24 @@ func (r *subagentRuntime) execute(id string) {
 		compactionResolve = func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
 			resolvedModel, window, driver, resolveErr := parent.ResolveDriver(ctx, provider, model, reasoning)
 			if resolveErr == nil {
-				driver = &meteredProviderDriver{inner: driver, store: parent.Host.sessions, host: parent.Host, sessionID: parent.SessionID,
-					runID: parent.ParentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name}
+				driver = &meteredProviderDriver{
+					inner: driver, store: parent.Host.sessions, host: parent.Host, sessionID: parent.SessionID,
+					runID: parent.ParentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name,
+				}
 			}
 			return resolvedModel, window, driver, resolveErr
 		}
 		compactionReport = nil
 	}
-	contextManager := subagentTurnContext{instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
-		inner: turnContext{structuredSummary: true, largeToolTokens: parent.ContextConfig.LargeToolResultTokens,
+	contextManager := subagentTurnContext{
+		instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
+		inner: turnContext{
+			structuredSummary: true, largeToolTokens: parent.ContextConfig.LargeToolResultTokens,
 			compactTargetTokens: contextBudget.Target, minReclaimTokens: parent.ContextConfig.MinReclaimTokens,
 			softTriggerTokens: contextBudget.SoftTrigger, backgroundPrepare: parent.ContextConfig.BackgroundPrepare, coordinator: &compactionCoordinator{},
-			resolveSummarizer: lazyCompactionResolver(compactionResolve, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, compactionReport)}}
+			resolveSummarizer: lazyCompactionResolver(compactionResolve, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, compactionReport),
+		},
+	}
 	if parent.Host != nil && parent.Host.sessions != nil {
 		contextManager.inner.putArtifact = func(ctx context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
 			return parent.Host.sessions.PutArtifact(ctx, parent.SessionID, childRun.RunID, kind, payload, preview)

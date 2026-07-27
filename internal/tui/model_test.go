@@ -557,7 +557,7 @@ func TestRunningSubagentAnimatesInContextRail(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "team")
 	updated, _ := model.Update(appEventMsg{Event: app.Event{
 		Kind: app.EventAgentState, AgentID: "child-1", State: "running",
-		Agent: &app.AgentStatePayload{Type: "general-purpose"},
+		Agent: &app.AgentStatePayload{Type: "worker"},
 	}})
 	model = updated.(AppModel)
 	if !model.animationActive || !model.hasRunningAgents() {
@@ -566,7 +566,7 @@ func TestRunningSubagentAnimatesInContextRail(t *testing.T) {
 	before := ansi.Strip(model.renderContextRail(32, 16))
 	model.animationFrame++
 	after := ansi.Strip(model.renderContextRail(32, 16))
-	if before == after || !strings.Contains(before, "◇ general-purpose") || !strings.Contains(after, "◈ general-purpose") {
+	if before == after || !strings.Contains(before, "◇ worker") || !strings.Contains(after, "◈ worker") {
 		t.Fatalf("subagent indicator did not animate:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 	model.reducedMotion = true
@@ -4069,6 +4069,7 @@ func TestRecapStatusUsesConcisePlainTextPreview(t *testing.T) {
 		t.Fatalf("recap preview was not concise: words=%d width=%d value=%q", len(strings.Fields(preview)), ansi.StringWidth(preview), preview)
 	}
 }
+
 func TestRecapStatusFallsBackWhenSummaryHasNoPlainText(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.recap = &recap.Recap{Summary: "```go\nfmt.Println(\"details\")\n```", Goal: "Keep continuity visible"}

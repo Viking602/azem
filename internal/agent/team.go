@@ -28,12 +28,14 @@ type TeamExecution struct {
 	Result multiagent.DriveResult
 }
 
-type TeamEngineDecorator func(hyagent.Engine, multiagent.Dispatch, multiagent.AgentClass) hyagent.Engine
-type TeamHooks struct {
-	BeforeTask     func(context.Context, multiagent.Dispatch, multiagent.AgentClass) error
-	PrepareEngine  func(context.Context, hyagent.Engine, multiagent.Dispatch, multiagent.AgentClass) (hyagent.Engine, error)
-	DecorateEngine TeamEngineDecorator
-}
+type (
+	TeamEngineDecorator func(hyagent.Engine, multiagent.Dispatch, multiagent.AgentClass) hyagent.Engine
+	TeamHooks           struct {
+		BeforeTask     func(context.Context, multiagent.Dispatch, multiagent.AgentClass) error
+		PrepareEngine  func(context.Context, hyagent.Engine, multiagent.Dispatch, multiagent.AgentClass) (hyagent.Engine, error)
+		DecorateEngine TeamEngineDecorator
+	}
+)
 
 func (s *Service) StartTeam(ctx context.Context, prompt string, models TeamModels, providers provider.Resolver) (TeamExecution, error) {
 	runID, err := newID("team")
@@ -193,29 +195,29 @@ func CodingTeamClasses(models TeamModels) ([]multiagent.AgentClass, error) {
 	return []multiagent.AgentClass{
 		{
 			Name: PlannerClass, Model: models.Planner,
-			Description:  "Plan a coding task without modifying the workspace.",
-			Instructions: `Analyze the coding request. Inspect the workspace with read-only tools when needed. For a multi-step request, call todo view, then initialize or update the durable phased todo list before returning the plan. Do not edit files. Return exactly one JSON object with only these fields: {"plan":["step"],"risks":["risk"],"acceptance_criteria":["criterion"]}. Every field is required and every value is an array of strings.`,
+			Description:  "Plan a coding task with repository-backed acceptance criteria without modifying files.",
+			Instructions: strings.TrimSpace(plannerTeamInstructions),
 			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, "todo"},
 			InputSchema:  inputSchema, OutputSchema: plannerOutput, LoopPolicy: loop,
 		},
 		{
 			Name: ImplementerClass, Model: models.Implementer,
-			Description:  "Implement and verify the approved coding plan.",
-			Instructions: `Implement the request using the supplied plan or review feedback. Use governed tools; never bypass approvals. Create files only with coding.write_file and modify existing files only with coding.edit_hashline. Keep the durable todo list current as work is started and completed. Verify the changed behavior. Return exactly one JSON object with only these fields: {"summary":"result","evidence":["evidence"],"files_changed":["path"]}. summary and evidence are required; files_changed is optional. Do not add status or other fields.`,
+			Description:  "Implement one approved coding plan and verify the changed behavior.",
+			Instructions: strings.TrimSpace(implementerTeamInstructions),
 			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, coding.ToolEditHashline, coding.ToolWriteFile, coding.ToolGofmt, coding.ToolGoTest, ToolShell, "todo"},
 			InputSchema:  inputSchema, OutputSchema: implementerOutput, LoopPolicy: loop,
 		},
 		{
 			Name: ReviewerClass, Model: models.Reviewer,
-			Description:  "Review the implementation and run governed verification.",
-			Instructions: `Review the implementation against the request and acceptance criteria. Read the workspace and run governed verification when needed. Use verdict accept only when evidence supports completion; otherwise use revise. Return exactly one JSON object with only these fields: {"verdict":"accept","findings":["finding"],"evidence":["evidence"]}. Every field is required; verdict must be accept or revise. Do not add status or other fields.`,
+			Description:  "Review the implementation against the request and run read-only verification.",
+			Instructions: strings.TrimSpace(reviewerTeamInstructions),
 			Tools:        []string{coding.ToolListFiles, coding.ToolReadFile, coding.ToolSearch, coding.ToolGitDiff, coding.ToolGoTest, ToolShell},
 			InputSchema:  inputSchema, OutputSchema: reviewerOutput, LoopPolicy: loop,
 		},
 		{
 			Name: ReporterClass, Model: models.Reporter,
-			Description:  "Summarize the team's verified result for the user.",
-			Instructions: `Produce the final user-facing result from the review. If the revision limit was reached, state the unresolved findings plainly. Do not modify the workspace. Return exactly one JSON object with only these fields: {"answer":"answer","findings":["finding"],"verification":["check"]}. answer is required; findings and verification are optional. Do not add status or other fields.`,
+			Description:  "Report only the team's verified result and unresolved findings.",
+			Instructions: strings.TrimSpace(reporterTeamInstructions),
 			InputSchema:  inputSchema, OutputSchema: reporterOutput, LoopPolicy: loop,
 		},
 	}, nil

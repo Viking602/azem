@@ -186,7 +186,7 @@ finished:
 			t.Fatalf("request %d planner image=%v history=%v input=%s", index, hasImage, hasHistory, encodedInput)
 		}
 	}
-	if strings.Count(string(requestBodies[0]), "Analyze the coding request") != 1 {
+	if strings.Count(string(requestBodies[0]), "Treat `request` as immutable.") != 1 {
 		t.Fatalf("planner worker instructions were duplicated: %s", requestBodies[0])
 	}
 	if captured[1].PromptCacheKey == "" || captured[1].PromptCacheKey != captured[2].PromptCacheKey || captured[0].PromptCacheKey == captured[1].PromptCacheKey {

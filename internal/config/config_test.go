@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -393,6 +394,7 @@ func TestLoadCanOverrideBuiltInGrepMCPServer(t *testing.T) {
 		t.Fatalf("custom MCP server was not retained: %#v", local)
 	}
 }
+
 func TestMCPConfigValidatesTransportSecretsAndDefaults(t *testing.T) {
 	cfg := Default()
 	cfg.MCP.Servers["local_files"] = MCPServerConfig{
@@ -458,10 +460,17 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		subagents.Budget.MaxTurns != 0 || subagents.Budget.MaxWallClockDuration != 0 {
 		t.Fatalf("subagent budget = %#v", subagents.Budget)
 	}
-	for _, name := range []string{"general-purpose", "explore", "plan", "review", "verify"} {
+	wantRoles := []string{"worker", "explore", "plan", "review", "verify"}
+	if len(subagents.Roles) != len(wantRoles) {
+		t.Fatalf("built-in roles = %#v, want exactly %q", subagents.Roles, wantRoles)
+	}
+	for _, name := range wantRoles {
 		if _, ok := subagents.Roles[name]; !ok {
 			t.Fatalf("built-in role %q is missing", name)
 		}
+	}
+	if _, ok := subagents.Roles["general-purpose"]; ok {
+		t.Fatal("removed general-purpose role remains built in")
 	}
 
 	invalid := Default()
@@ -496,6 +505,22 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		t.Fatal("negative subagent wall-clock budget was accepted")
 	}
 	invalid = Default()
+	for index := 0; index <= maxConfiguredSubagentRoles; index++ {
+		invalid.Agents.Subagents.Roles[fmt.Sprintf("custom-%d", index)] = SubagentRoleConfig{
+			Instructions: "inspect", CapabilityMode: "read-only",
+		}
+	}
+	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("oversized subagent role catalog validation error = %v", err)
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.Roles[strings.Repeat("x", maxConfiguredSubagentRoleNameBytes+1)] = SubagentRoleConfig{
+		Instructions: "inspect", CapabilityMode: "read-only",
+	}
+	if err := invalid.Validate(); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("oversized subagent role name validation error = %v", err)
+	}
+	invalid = Default()
 	invalid.Agents.Main.MaxTokens = -1
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("negative main-agent token budget was accepted")
@@ -514,6 +539,112 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid.Agents.Main.MaxWallClock = "-1s"
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("negative main-agent wall-clock budget was accepted")
+	}
+}
+
+func TestBuiltInSubagentRoleContracts(t *testing.T) {
+	roles := builtInSubagentRoles()
+	readOnly := []string{"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff"}
+	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell")
+	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell")
+	want := map[string]struct {
+		description string
+		capability  string
+		tools       []string
+		mission     string
+	}{
+		"worker": {
+			"Implement one scoped coding task end-to-end and return verified evidence.",
+			"all", all, "Implement one scoped coding assignment",
+		},
+		"explore": {
+			"Investigate the workspace without changes and return file-backed evidence.",
+			"read-only", readOnly, "Investigate the assigned workspace question",
+		},
+		"plan": {
+			"Produce a decision-complete implementation plan without changing the workspace.",
+			"read-only", readOnly, "Produce a decision-complete implementation plan",
+		},
+		"review": {
+			"Review a delegated change for requirement, correctness, and regression risks without editing.",
+			"read-only", readOnly, "Review the delegated change",
+		},
+		"verify": {
+			"Run governed checks without editing and report exact outcomes.",
+			"execute", execute, "Verify the assigned behavior",
+		},
+	}
+	if len(roles) != len(want) {
+		t.Fatalf("built-in role count = %d, want %d", len(roles), len(want))
+	}
+	seenInstructions := map[string]string{}
+	for name, expected := range want {
+		role, ok := roles[name]
+		if !ok {
+			t.Fatalf("built-in role %q is missing", name)
+		}
+		if role.Description != expected.description || role.CapabilityMode != expected.capability ||
+			role.Isolation != "none" || strings.Join(role.Tools, "\x00") != strings.Join(expected.tools, "\x00") {
+			t.Errorf("role %q contract = %#v", name, role)
+		}
+		if strings.TrimSpace(role.Instructions) == "" || !strings.Contains(role.Instructions, expected.mission) {
+			t.Errorf("role %q instructions do not contain mission %q: %q", name, expected.mission, role.Instructions)
+		}
+		if previous, duplicate := seenInstructions[role.Instructions]; duplicate {
+			t.Errorf("roles %q and %q share the same instructions", previous, name)
+		}
+		seenInstructions[role.Instructions] = name
+		if role.Provider != "" || role.Model != "" || role.Reasoning != "" {
+			t.Errorf("role %q hard-codes model route: %#v", name, role)
+		}
+	}
+}
+
+func TestRemovedGeneralPurposeBuiltInCompatibility(t *testing.T) {
+	for name, configure := range map[string]func(*SubagentConfig){
+		"models": func(subagents *SubagentConfig) {
+			subagents.Models["general-purpose"] = "legacy-model"
+		},
+		"routes": func(subagents *SubagentConfig) {
+			subagents.Routes["general-purpose"] = ModelRouteConfig{Provider: "chatgpt", Model: "legacy-model"}
+		},
+		"toggle": func(subagents *SubagentConfig) {
+			subagents.Toggle["general-purpose"] = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			configure(&cfg.Agents.Subagents)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), `unknown role "general-purpose"`) {
+				t.Fatalf("legacy %s reference validation error = %v", name, err)
+			}
+		})
+	}
+
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	path := filepath.Join(root, "config.yaml")
+	contents := `version: 1
+agents:
+  subagents:
+    roles:
+      general-purpose:
+        description: Custom compatibility role
+        instructions: Perform only the configured custom task.
+        capability_mode: read-only
+        isolation: none
+        tools: [coding.list_files, coding.read_file, coding.search, coding.git_diff]
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	role, ok := cfg.Agents.Subagents.Roles["general-purpose"]
+	if !ok || role.Source != "config:"+path || role.Description != "Custom compatibility role" {
+		t.Fatalf("explicit custom general-purpose role = %#v", role)
 	}
 }
 

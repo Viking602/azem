@@ -135,6 +135,115 @@ func TestCodingTeamRolePermissions(t *testing.T) {
 	}
 }
 
+func TestCodingTeamRolePromptContracts(t *testing.T) {
+	classes, err := CodingTeamClasses(TeamModels{Implementer: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]multiagent.AgentClass, len(classes))
+	for _, class := range classes {
+		byName[class.Name] = class
+	}
+	expectations := map[string]struct {
+		description string
+		required    []string
+		properties  []string
+		evidence    []string
+		allows      bool
+	}{
+		PlannerClass: {
+			"Plan a coding task with repository-backed acceptance criteria without modifying files.",
+			[]string{"plan", "risks", "acceptance_criteria"},
+			[]string{"plan", "risks", "acceptance_criteria"},
+			[]string{"Treat `request` as immutable.", "repository evidence", "observable acceptance criteria"},
+			false,
+		},
+		ImplementerClass: {
+			"Implement one approved coding plan and verify the changed behavior.",
+			[]string{"summary", "evidence"},
+			[]string{"summary", "evidence", "files_changed"},
+			[]string{"planner report or reviewer feedback", "only observed command or scenario results", "repository-relative paths"},
+			true,
+		},
+		ReviewerClass: {
+			"Review the implementation against the request and run read-only verification.",
+			[]string{"verdict", "findings", "evidence"},
+			[]string{"verdict", "findings", "evidence"},
+			[]string{"original `request`", "immediately preceding implementer report", "do not receive the planner report or its acceptance criteria", "concrete workspace and verification evidence"},
+			true,
+		},
+		ReporterClass: {
+			"Report only the team's verified result and unresolved findings.",
+			[]string{"answer"},
+			[]string{"answer", "findings", "verification"},
+			[]string{"only the original `request` and the latest review report", "`revision_limit_reached` is true", "Do not infer unreported changes"},
+			false,
+		},
+	}
+	scheduler := CodingScheduler{Prompt: "change safely", Classes: byName}
+	for name, expected := range expectations {
+		class := byName[name]
+		if class.Description != expected.description {
+			t.Errorf("%s description = %q, want %q", name, class.Description, expected.description)
+		}
+		for _, phrase := range append(expected.evidence,
+			"Return raw JSON only",
+			"Do not use Markdown fences.",
+			"Do not add any JSON fields.",
+		) {
+			if !strings.Contains(class.Instructions, phrase) {
+				t.Errorf("%s instructions missing %q:\n%s", name, phrase, class.Instructions)
+			}
+		}
+
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(class.OutputSchema, &raw); err != nil {
+			t.Fatalf("%s output schema: %v", name, err)
+		}
+		if string(raw["additionalProperties"]) != "false" {
+			t.Errorf("%s additionalProperties = %s", name, raw["additionalProperties"])
+		}
+		var schema struct {
+			Required   []string                   `json:"required"`
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.Unmarshal(class.OutputSchema, &schema); err != nil {
+			t.Fatalf("%s typed output schema: %v", name, err)
+		}
+		if !reflect.DeepEqual(schema.Required, expected.required) || len(schema.Properties) != len(expected.properties) {
+			t.Errorf("%s schema required=%q properties=%v", name, schema.Required, schema.Properties)
+		}
+		for _, property := range expected.properties {
+			if _, ok := schema.Properties[property]; !ok {
+				t.Errorf("%s schema is missing property %q", name, property)
+			}
+		}
+		if name == ReviewerClass {
+			var verdict struct {
+				Enum []string `json:"enum"`
+			}
+			if err := json.Unmarshal(schema.Properties["verdict"], &verdict); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(verdict.Enum, []string{"accept", "revise"}) {
+				t.Errorf("reviewer verdict enum = %q", verdict.Enum)
+			}
+		}
+
+		dispatches, err := scheduler.dispatch(multiagent.TeamState{RunID: "prompt-contract"}, name, nil, map[string]any{"request": "change safely"})
+		if err != nil || len(dispatches) != 1 {
+			t.Fatalf("%s dispatches=%#v error=%v", name, dispatches, err)
+		}
+		dispatch := dispatches[0]
+		if dispatch.Task.Goal != class.Instructions ||
+			!reflect.DeepEqual(dispatch.Task.OutputSchema, class.OutputSchema) ||
+			!reflect.DeepEqual(dispatch.OutputPolicy.Schema, class.OutputSchema) ||
+			!dispatch.OutputPolicy.Validate || dispatch.Task.AllowsAction != expected.allows {
+			t.Errorf("%s dispatch contract = %#v", name, dispatch)
+		}
+	}
+}
+
 func TestTeamRunnerPersistsAndResumesCodingTeam(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "team.db"))
