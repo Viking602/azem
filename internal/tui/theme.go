@@ -91,18 +91,19 @@ type Theme struct {
 func DefaultTheme() Theme {
 	text := adaptiveColor("#20231f", "235", "0", "#d8ddd7", "252", "7")
 	muted := adaptiveColor("#616861", "241", "0", "#808880", "244", "7")
-	accent := adaptiveColor("#285f50", "23", "6", "#8fb9a8", "108", "6")
+	accent := adaptiveColor("#176b8f", "24", "6", "#73c7f5", "117", "6")
 	secondary := adaptiveColor("#4a5965", "240", "4", "#9aabb8", "110", "4")
 	warning := adaptiveColor("#805719", "94", "3", "#d5a65b", "179", "3")
 	danger := adaptiveColor("#8a3434", "124", "1", "#d67b78", "174", "1")
 	blue := adaptiveColor("#285f8a", "25", "4", "#79b8e8", "110", "4")
 	cursor := adaptiveColor("#6d4aff", "99", "5", "#a78bfa", "141", "5")
 	success := adaptiveColor("#3d6c31", "22", "2", "#91b477", "107", "2")
-	userAccent := adaptiveColor("#176f5b", "29", "6", "#62d6b5", "79", "6")
+	userAccent := adaptiveColor("#166d93", "24", "6", "#7dd3fc", "117", "6")
 	border := adaptiveColor("#c5cdc6", "250", "7", "#3a433c", "238", "0")
-	focusBorder := adaptiveColor("#4f8f78", "66", "6", "#6fa892", "108", "6")
-	surfaceAccent := adaptiveColor("#285f50", "23", "0", "#67d4ee", "81", "6")
+	focusBorder := adaptiveColor("#3b82a6", "31", "6", "#69b9e6", "74", "6")
+	surfaceAccent := adaptiveColor("#176b8f", "24", "6", "#67d4ee", "81", "6")
 	cyan := adaptiveColor("#087f9c", "30", "6", "#67d4ee", "81", "6")
+	teal := adaptiveColor("#14766c", "29", "6", "#5ed6c0", "79", "6")
 	violet := adaptiveColor("#6754b8", "61", "5", "#b4a7ff", "147", "5")
 	// UI surfaces stay transparent so the terminal's own background remains visible.
 	// Hierarchy comes from foreground color, borders, weight, and spacing instead.
@@ -188,7 +189,7 @@ func DefaultTheme() Theme {
 		RailTitle:     lipgloss.NewStyle().Bold(true).Foreground(violet),
 		RailTodo:      lipgloss.NewStyle().Bold(true).Foreground(warning),
 		RailAgents:    lipgloss.NewStyle().Bold(true).Foreground(blue),
-		RailMCP:       lipgloss.NewStyle().Bold(true).Foreground(accent),
+		RailMCP:       lipgloss.NewStyle().Bold(true).Foreground(teal),
 		AttachmentTag: messageTag.Foreground(violet),
 		Attachment:    lipgloss.NewStyle().Foreground(cyan),
 	}
