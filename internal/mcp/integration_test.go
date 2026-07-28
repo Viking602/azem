@@ -113,6 +113,38 @@ func TestManagerCallsStreamableHTTPWithResolvedHeader(t *testing.T) {
 	}
 }
 
+func TestManagerDoesNotDeleteStatelessHTTPSessionOnClose(t *testing.T) {
+	server := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "stateless-server", Version: "1"}, nil)
+	handler := sdkmcp.NewStreamableHTTPHandler(
+		func(*http.Request) *sdkmcp.Server { return server },
+		&sdkmcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
+	)
+	var deleteRequests atomic.Int32
+	httpServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete {
+			deleteRequests.Add(1)
+		}
+		handler.ServeHTTP(writer, request)
+	}))
+	defer httpServer.Close()
+
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"stateless": {
+			Enabled: true, Transport: "streamable_http", URL: httpServer.URL,
+			ConnectTimeout: "5s", CallTimeout: "5s", MaxConcurrency: 1,
+		},
+	}, "test", nil, Options{})
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := deleteRequests.Load(); got != 0 {
+		t.Fatalf("stateless MCP close sent %d DELETE requests", got)
+	}
+}
+
 func TestMCPDefaultDriverRequiresRunnerApprovalBeforeRemoteCall(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{tools: []tool.Definition{{Name: "deploy", InputSchema: tool.Schema{Type: "object"}}}}
