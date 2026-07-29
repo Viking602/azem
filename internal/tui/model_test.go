@@ -52,21 +52,28 @@ func TestTextInputsUseBarCursors(t *testing.T) {
 	}
 }
 
-func TestSentUserMessageUsesAccentCardWithoutSenderLabel(t *testing.T) {
+func TestSentUserMessageUsesElevatedBandWithoutSenderLabel(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	block := Block{Kind: BlockUser, Title: "You", Content: "为 hooks 单独设计一个提示，不要太明显"}
 	lines := model.renderBlock(block, 0, 28)
 	plain := ansi.Strip(strings.Join(lines, "\n"))
-	if len(lines) < 2 || !strings.Contains(plain, "▌") || strings.Contains(plain, model.tr("block.user")) || strings.Contains(plain, "You") {
-		t.Fatalf("sent message did not render as an unlabeled accent card:\n%s", plain)
+	if len(lines) < 3 || !strings.Contains(plain, "›") || strings.Contains(plain, model.tr("block.user")) || strings.Contains(plain, "You") {
+		t.Fatalf("sent message did not render as an unlabeled prompt dialog:\n%s", plain)
 	}
+	if !strings.Contains(plain, "╭") || !strings.Contains(plain, "╰") {
+		t.Fatalf("sent message is not a floating dialog card:\n%s", plain)
+	}
+	hasSurface := false
 	for _, line := range lines {
-		if strings.Contains(line, "\x1b[48;") {
-			t.Fatalf("sent message contains a background color: %q", line)
+		if strings.Contains(line, ";48;") {
+			hasSurface = true
 		}
 		if width := ansi.StringWidth(line); width > 28 {
 			t.Fatalf("sent message width = %d, exceeds 28: %q", width, ansi.Strip(line))
 		}
+	}
+	if !hasSurface {
+		t.Fatalf("sent message lacks its elevated background:\n%s", plain)
 	}
 }
 
@@ -78,12 +85,12 @@ func TestAssistantMessageOmitsGeneratingHeader(t *testing.T) {
 	if strings.Contains(plain, "AZEM") || strings.Contains(plain, model.tr("state.streaming")) || !strings.Contains(plain, block.Content) {
 		t.Fatalf("assistant response contains a redundant generating header: %q", plain)
 	}
-	userLine := ansi.Strip(model.renderBlock(Block{Kind: BlockUser, Content: "hi"}, 0, 40)[0])
-	assistantLine := ansi.Strip(assistantLines[0])
-	userColumn := ansi.StringWidth(strings.SplitN(userLine, "hi", 2)[0])
-	assistantColumn := ansi.StringWidth(strings.SplitN(assistantLine, "Hi", 2)[0])
-	if userColumn != assistantColumn {
-		t.Fatalf("user and assistant text are not aligned: user=%q assistant=%q", userLine, ansi.Strip(assistantLines[0]))
+	userPlain := ansi.Strip(strings.Join(model.renderBlock(Block{Kind: BlockUser, Content: "hi"}, 0, 40), "\n"))
+	if !strings.Contains(userPlain, "› hi") || strings.Contains(plain, "›") {
+		t.Fatalf("prompt direction is not distinct: user=%q assistant=%q", userPlain, plain)
+	}
+	if !strings.Contains(userPlain, "╭") {
+		t.Fatalf("user prompt is not a dialog card: %q", userPlain)
 	}
 }
 
@@ -349,8 +356,12 @@ func TestViewUsesAltScreenAndResponsiveSizes(t *testing.T) {
 	if model.width != 120 || model.height != 40 {
 		t.Fatalf("resized size = %dx%d", model.width, model.height)
 	}
-	if !strings.Contains(model.View().Content, "Azem") {
-		t.Fatal("view does not contain product title")
+	content := ansi.Strip(model.View().Content)
+	if !strings.Contains(content, "⌁") || !strings.Contains(content, "/tmp/workspace") || strings.Contains(content, "◈ Azem") {
+		t.Fatalf("view does not use quiet session chrome:\n%s", content)
+	}
+	if strings.Contains(content, "⌁ default") {
+		t.Fatalf("header still shows session id instead of branch/path chrome:\n%s", content)
 	}
 }
 
@@ -488,23 +499,20 @@ func TestCtrlJAddsNewlineWithoutSubmitting(t *testing.T) {
 	}
 }
 
-func TestWideLayoutAddsAgentAndMCPContextRail(t *testing.T) {
+func TestWideLayoutKeepsTranscriptFullWidthWithoutContextRail(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "team")
 	model.applyEvent(app.Event{Kind: app.EventAgentState, AgentID: "child-1", State: "running", Agent: &app.AgentStatePayload{Type: "review"}})
 	model.applyEvent(app.Event{Kind: app.EventMCPState, State: "ready", Data: map[string]string{"server": "files", "toolCount": "3"}})
 
-	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	model = updated.(AppModel)
-	if content := ansi.Strip(model.View().Content); strings.Contains(content, "RUN CONTEXT") {
-		t.Fatal("compact layout rendered the context rail")
-	}
-
-	updated, _ = model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	model = updated.(AppModel)
-	content := ansi.Strip(model.View().Content)
-	for _, wanted := range []string{"RUN CONTEXT", "AGENTS  1", "review", "MCP  1", "files · Connected"} {
-		if !strings.Contains(content, wanted) {
-			t.Fatalf("wide layout missing %q:\n%s", wanted, content)
+	for _, size := range []tea.WindowSizeMsg{{Width: 80, Height: 24}, {Width: 120, Height: 40}} {
+		updated, _ := model.Update(size)
+		model = updated.(AppModel)
+		content := ansi.Strip(model.View().Content)
+		if strings.Contains(content, "RUN CONTEXT") {
+			t.Fatalf("%d-column layout rendered the old context rail:\n%s", size.Width, content)
+		}
+		if got := bodyTranscriptWidth(size.Width, size.Height); got != size.Width-1 {
+			t.Fatalf("%d-column transcript width = %d, want %d", size.Width, got, size.Width-1)
 		}
 	}
 }
@@ -594,7 +602,7 @@ func TestTranscriptCardsAreKeyboardExpandable(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.transcript = []Block{{ID: "call-1", Kind: BlockTool, Title: "coding.read_file", Content: "result", State: "completed"}}
 	model.width = 100
-	if content := ansi.Strip(model.View().Content); !strings.Contains(content, "TOOL · Read File") || strings.Contains(content, "coding.read_file") {
+	if content := ansi.Strip(model.View().Content); !strings.Contains(content, "◆ Read File") || strings.Contains(content, "coding.read_file") {
 		t.Fatalf("tool alias was not used:\n%s", content)
 	}
 
@@ -649,7 +657,7 @@ func TestTranscriptToolHeaderTogglesWithMouseClick(t *testing.T) {
 	rows := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
 	headerRow := -1
 	for index, row := range rows {
-		if strings.Contains(row, "TOOL") && strings.Contains(row, "Run Command") {
+		if strings.Contains(row, "◆ Run Command") {
 			headerRow = index
 			break
 		}
@@ -672,7 +680,7 @@ func TestTranscriptToolHeaderTogglesWithMouseClick(t *testing.T) {
 
 	rows = strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
 	for index, row := range rows {
-		if strings.Contains(row, "TOOL") && strings.Contains(row, "Run Command") {
+		if strings.Contains(row, "◆ Run Command") {
 			headerRow = index
 			break
 		}
@@ -699,7 +707,7 @@ func TestMouseClickTargetsToolHeaderAfterUserMessageWithoutBlankSeparator(t *tes
 	rows := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
 	headerRow := -1
 	for index, row := range rows {
-		if strings.Contains(row, "TOOL") && strings.Contains(row, "Run Command") {
+		if strings.Contains(row, "◆ Run Command") {
 			headerRow = index
 			break
 		}
@@ -735,6 +743,322 @@ func TestMouseClickReactivatesComposer(t *testing.T) {
 	model = updated.(AppModel)
 	if got := model.composer.Value(); got != "x" {
 		t.Fatalf("composer value after click = %q, want keyboard input", got)
+	}
+}
+
+func renderedTextPoint(t *testing.T, rendered, needle string) (int, int) {
+	t.Helper()
+	for row, line := range strings.Split(ansi.Strip(rendered), "\n") {
+		offset := strings.Index(line, needle)
+		if offset >= 0 {
+			return ansi.StringWidth(line[:offset]), row
+		}
+	}
+	t.Fatalf("rendered output does not contain %q:\n%s", needle, ansi.Strip(rendered))
+	return 0, 0
+}
+
+func TestHeaderMetadataClicksOpenContextAndExpandTodos(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.usage.ContextLimit = 500_000
+	model.usage.InputTokens = 125_000
+	model.todo = session.TodoList{Phases: []session.TodoPhase{{Items: []session.TodoItem{
+		{Content: "done", Status: session.TodoCompleted},
+		{Content: "next", Status: session.TodoPending},
+	}}}}
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+
+	contextX, _ := renderedTextPoint(t, model.renderHeader(model.width), "125K / 500K")
+	updated, _ = model.Update(tea.MouseClickMsg{X: contextX + 1, Y: 0, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.overlay != OverlayContext {
+		t.Fatalf("context click opened overlay %q, want %q", model.overlay, OverlayContext)
+	}
+	contextOverlay := ansi.Strip(model.renderOverlay(model.width, model.height))
+	if !strings.Contains(contextOverlay, "125K / 500K") {
+		t.Fatalf("context click opened an overlay without occupancy details:\n%s", contextOverlay)
+	}
+
+	_ = model.closeOverlay()
+	todoX, _ := renderedTextPoint(t, model.renderHeader(model.width), "1/2 ✓")
+	updated, _ = model.Update(tea.MouseClickMsg{X: todoX + 1, Y: 0, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.overlay != OverlayNone || !model.todoExpanded || model.focus != focusTodo {
+		t.Fatalf("todo click = overlay:%q expanded:%t focus:%d", model.overlay, model.todoExpanded, model.focus)
+	}
+	content := ansi.Strip(model.View().Content)
+	for _, wanted := range []string{"✓ done", "□ next"} {
+		if !strings.Contains(content, wanted) {
+			t.Fatalf("expanded todo pane omitted %q:\n%s", wanted, content)
+		}
+	}
+}
+
+func TestTodoCommandTogglesInlinePane(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, cmd := model.executeCommand(Command{Name: "todo"})
+	model = updated.(AppModel)
+	if cmd != nil || model.overlay != OverlayNone || !model.todoExpanded || model.focus != focusTodo {
+		t.Fatalf("/todo open = cmd:%t overlay:%q expanded:%t focus:%d", cmd != nil, model.overlay, model.todoExpanded, model.focus)
+	}
+	if footer := ansi.Strip(model.renderDockFooter(80, 1)); !strings.Contains(footer, "h:hide done") {
+		t.Fatalf("focused todo footer omitted hide hint: %q", footer)
+	}
+
+	updated, cmd = model.executeCommand(Command{Name: "todos"})
+	model = updated.(AppModel)
+	if model.todoExpanded || model.focus != focusComposer || !model.composer.Focused() {
+		t.Fatalf("/todos close = cmd:%t expanded:%t focus:%d composer:%t", cmd != nil, model.todoExpanded, model.focus, model.composer.Focused())
+	}
+}
+
+func TestComposerCaptionClicksOpenPickersAndCycleApproval(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "gpt-5.6-sol", "high", "single")
+	model.autoReviewAvailable = true
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+
+	clickCaption := func(needle string) tea.Cmd {
+		rendered := model.renderComposer()
+		x, row := renderedTextPoint(t, rendered, needle)
+		_, top, _, _ := model.composerBounds()
+		var cmd tea.Cmd
+		updated, cmd = model.Update(tea.MouseClickMsg{X: x + 1, Y: top + row, Button: tea.MouseLeft})
+		model = updated.(AppModel)
+		return cmd
+	}
+
+	clickCaption("gpt-5.6-sol")
+	if model.overlay != OverlayModel {
+		t.Fatalf("model caption click opened %q, want %q", model.overlay, OverlayModel)
+	}
+	_ = model.closeOverlay()
+	clickCaption("(high)")
+	if model.overlay != OverlayReasoning {
+		t.Fatalf("reasoning caption click opened %q, want %q", model.overlay, OverlayReasoning)
+	}
+	_ = model.closeOverlay()
+	cmd := clickCaption(model.approvalModeLabel())
+	if cmd == nil {
+		t.Fatal("approval caption click did not dispatch a mode change")
+	}
+	result := cmd().(actionResultMsg)
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionSetApprovalMode || runtime.actions[0].Target != string(ApprovalModeAutoReview) {
+		t.Fatalf("approval caption action = %#v", runtime.actions)
+	}
+}
+
+func TestOverlayOptionClickActivatesRenderedRow(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+	model.openOverlay(OverlayReasoning)
+	options := model.overlayOptions()
+	if len(options) < 2 {
+		t.Fatalf("reasoning options = %d, want at least 2", len(options))
+	}
+	target := options[0]
+	x, y := renderedTextPoint(t, model.renderOverlay(model.width, model.height), target.Label)
+	updated, _ = model.Update(tea.MouseClickMsg{X: x + 1, Y: y, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.overlay != OverlayNone || model.reasoning != model.reasoningLevels()[0] {
+		t.Fatalf("clicked reasoning row = overlay:%q reasoning:%q", model.overlay, model.reasoning)
+	}
+}
+
+func TestScrollbarClickAndDragMovesTranscript(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	for index := range 40 {
+		model.transcript = append(model.transcript, Block{Kind: BlockUser, Content: fmt.Sprintf("message %02d", index)})
+	}
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	model = updated.(AppModel)
+	_, top, width, height := model.transcriptBounds()
+	maxOffset := model.transcriptMaxOffset()
+	if maxOffset == 0 {
+		t.Fatal("test transcript does not overflow")
+	}
+
+	updated, _ = model.Update(tea.MouseClickMsg{X: width, Y: top, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.transcriptTop != maxOffset {
+		t.Fatalf("top scrollbar click offset = %d, want %d", model.transcriptTop, maxOffset)
+	}
+	updated, _ = model.Update(tea.MouseMotionMsg{X: width, Y: top + height - 1, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	updated, _ = model.Update(tea.MouseReleaseMsg{X: width, Y: top + height - 1, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.transcriptTop != 0 {
+		t.Fatalf("bottom scrollbar drag offset = %d, want 0", model.transcriptTop)
+	}
+}
+
+func overflowingContextOverlayModel() AppModel {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	categories := []app.ContextCategory{
+		app.ContextCategoryCore,
+		app.ContextCategorySkills,
+		app.ContextCategoryBuiltinTools,
+		app.ContextCategoryMCP,
+		app.ContextCategoryConversation,
+	}
+	for index := range 120 {
+		model.contextProfile.Contributions = append(model.contextProfile.Contributions, app.ContextContribution{
+			Category: categories[index%len(categories)],
+			Name:     fmt.Sprintf("contribution-%03d", index),
+			Tokens:   50 + index,
+		})
+	}
+	model.usage.ContextLimit = 272_000
+	model.width, model.height = 100, 30
+	model.openOverlay(OverlayContext)
+	return model
+}
+
+func TestScrollableContextOverlayRendersScrollbar(t *testing.T) {
+	model := overflowingContextOverlayModel()
+	rendered := ansi.Strip(model.renderOverlay(model.width, model.height))
+	if !strings.ContainsAny(rendered, "▁▂▃▄▅▆▇█") {
+		t.Fatalf("overflowing context overlay has no scrollbar thumb:\n%s", rendered)
+	}
+}
+
+func TestContextOverlayScrollStopsAtContentBounds(t *testing.T) {
+	model := overflowingContextOverlayModel()
+	for range 500 {
+		updated, _ := model.updateOverlayKey("down")
+		model = updated.(AppModel)
+	}
+	if model.overlayScroll >= 500 {
+		t.Fatalf("context overlay scroll is unbounded: %d", model.overlayScroll)
+	}
+	atBottom := model.overlayScroll
+	updated, _ := model.updateOverlayKey("down")
+	model = updated.(AppModel)
+	if model.overlayScroll != atBottom {
+		t.Fatalf("context overlay moved past bottom: %d -> %d", atBottom, model.overlayScroll)
+	}
+}
+
+func TestContextOverlayScrollbarClickAndDrag(t *testing.T) {
+	model := overflowingContextOverlayModel()
+	scrollbar, ok := model.overlayScrollbar(model.width, model.height)
+	if !ok {
+		t.Fatal("overflowing context overlay has no scrollbar geometry")
+	}
+	updated, _ := model.Update(tea.MouseClickMsg{
+		X: scrollbar.x, Y: scrollbar.y + scrollbar.height - 1, Button: tea.MouseLeft,
+	})
+	model = updated.(AppModel)
+	if model.overlayScroll != scrollbar.maxOffset || !model.overlayScrollbarDragging {
+		t.Fatalf("bottom scrollbar click = offset:%d dragging:%v want:%d", model.overlayScroll, model.overlayScrollbarDragging, scrollbar.maxOffset)
+	}
+	updated, _ = model.Update(tea.MouseMotionMsg{X: scrollbar.x, Y: scrollbar.y, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	updated, _ = model.Update(tea.MouseReleaseMsg{X: scrollbar.x, Y: scrollbar.y, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.overlayScroll != 0 || model.overlayScrollbarDragging {
+		t.Fatalf("top scrollbar drag = offset:%d dragging:%v", model.overlayScroll, model.overlayScrollbarDragging)
+	}
+}
+
+func TestContextOverlayWheelUsesResponsiveBoundedSteps(t *testing.T) {
+	model := overflowingContextOverlayModel()
+	updated, _ := model.Update(tea.MouseWheelMsg{X: 50, Y: 15, Button: tea.MouseWheelDown})
+	model = updated.(AppModel)
+	if model.overlayScroll != 3 {
+		t.Fatalf("first wheel step = %d, want 3", model.overlayScroll)
+	}
+	model.overlayScroll = model.readOnlyOverlayScrollLimit()
+	updated, _ = model.Update(tea.MouseWheelMsg{X: 50, Y: 15, Button: tea.MouseWheelDown})
+	model = updated.(AppModel)
+	if model.overlayScroll != model.readOnlyOverlayScrollLimit() {
+		t.Fatalf("wheel moved past bottom: %d", model.overlayScroll)
+	}
+}
+
+func TestContextOverlayReusesWrappedReportUntilDataChanges(t *testing.T) {
+	model := overflowingContextOverlayModel()
+	first := model.contextOverlayDescriptionLines(80)
+	second := model.contextOverlayDescriptionLines(80)
+	if len(first) == 0 || len(second) == 0 || &first[0] != &second[0] {
+		t.Fatal("unchanged context report was rebuilt")
+	}
+	model.contextProfile.Contributions[0].Tokens++
+	third := model.contextOverlayDescriptionLines(80)
+	if len(third) == 0 || &second[0] == &third[0] {
+		t.Fatal("changed context report reused stale wrapped lines")
+	}
+}
+
+func TestHeaderWorkspaceCopiesAndStatusOpensDetails(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status = "Cancelled"
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+
+	copied := ""
+	previousClipboard := writeClipboard
+	writeClipboard = func(text string) error {
+		copied = text
+		return nil
+	}
+	t.Cleanup(func() { writeClipboard = previousClipboard })
+
+	workspaceX, _ := renderedTextPoint(t, model.renderHeader(model.width), "workspace")
+	updated, cmd := model.Update(tea.MouseClickMsg{X: workspaceX + 1, Y: 0, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("workspace click did not return a clipboard command")
+	}
+	cmd()
+	if copied != "/tmp/workspace" {
+		t.Fatalf("workspace click copied %q", copied)
+	}
+
+	statusX, _ := renderedTextPoint(t, model.renderHeader(model.width), "Cancelled")
+	updated, _ = model.Update(tea.MouseClickMsg{X: statusX + 1, Y: 0, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.overlay != OverlayStatus {
+		t.Fatalf("status click opened %q, want %q", model.overlay, OverlayStatus)
+	}
+}
+
+func TestCommandSuggestionClickCompletesRenderedRow(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.composer.SetValue("/mod")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+	suggestions := model.visibleCommandSuggestions()
+	if len(suggestions) < 2 {
+		t.Fatalf("/mod suggestions = %d, want at least 2", len(suggestions))
+	}
+	target := suggestions[1]
+	x, y := renderedTextPoint(t, model.View().Content, target.Usage)
+	updated, _ = model.Update(tea.MouseClickMsg{X: x + 1, Y: y, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	want := "/" + target.Name
+	if strings.Contains(target.Usage, " ") {
+		want += " "
+	}
+	if model.composer.Value() != want {
+		t.Fatalf("clicked command value = %q, want %q", model.composer.Value(), want)
+	}
+}
+
+func TestOverlayOutsideClickClosesModal(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+	model.openOverlay(OverlayHelp)
+	updated, _ = model.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.overlay != OverlayNone || model.focus != focusComposer {
+		t.Fatalf("outside click = overlay:%q focus:%d", model.overlay, model.focus)
 	}
 }
 
@@ -2107,6 +2431,70 @@ func appModelRoute(provider, model, reasoning string) config.ModelRouteConfig {
 	return config.ModelRouteConfig{Provider: provider, Model: model, Reasoning: reasoning}
 }
 
+func TestHeaderBranchClickAndDirtyBranchConfirmation(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.branch = "main"
+	model.width, model.height = 100, 24
+
+	updated, cmd := model.handleMouseClick(tea.Mouse{X: 4, Y: 0, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("branch click did not start a list action")
+	}
+	result := cmd().(actionResultMsg)
+	if result.Err != nil || result.Action.Kind != ActionListGitBranches {
+		t.Fatalf("branch click result = %#v", result)
+	}
+	model.actionBusy = false
+
+	model.applyEvent(app.Event{Kind: app.EventGitBranches, State: "listed", Text: "main", WorkspaceDirty: true, GitBranches: []app.GitBranchEntry{{Name: "feature"}, {Name: "main", Current: true}}})
+	if model.overlay != OverlayBranches || model.overlayCursor != 1 || !model.branchDirty {
+		t.Fatalf("branch list state = overlay:%q cursor:%d dirty:%v", model.overlay, model.overlayCursor, model.branchDirty)
+	}
+	model.overlayCursor = 0
+	updated, cmd = model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd != nil || model.overlay != OverlayBranchConfirm || model.pendingBranch != "feature" {
+		t.Fatalf("dirty selection = overlay:%q pending:%q cmd:%v", model.overlay, model.pendingBranch, cmd != nil)
+	}
+	updated, cmd = model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("confirmed switch did not start an action")
+	}
+	result = cmd().(actionResultMsg)
+	if result.Err != nil || result.Action.Kind != ActionSwitchGitBranch || result.Action.Target != "feature" || result.Action.Decision != "confirm_dirty" {
+		t.Fatalf("confirmed switch result = %#v", result)
+	}
+
+	model.actionBusy = false
+	model.applyEvent(app.Event{Kind: app.EventGitBranches, State: "switched", Text: "feature", GitBranches: []app.GitBranchEntry{{Name: "feature", Current: true}, {Name: "main"}}})
+	if model.branch != "feature" || model.overlay != OverlayNone || model.pendingBranch != "" {
+		t.Fatalf("switched state = branch:%q overlay:%q pending:%q", model.branch, model.overlay, model.pendingBranch)
+	}
+}
+
+func TestHeaderPathRemainsSeparateFromBranchClick(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.branch = "main"
+	model.width, model.height = 100, 24
+	segments := model.headerLeftSegments(model.width)
+	branchStart, pathStart := -1, -1
+	cursor := 0
+	for _, segment := range segments {
+		if segment.target == uiClickBranch {
+			branchStart = cursor
+		}
+		if segment.target == uiClickWorkspace {
+			pathStart = cursor
+		}
+		cursor += lipgloss.Width(segment.content)
+	}
+	if branchStart < 0 || pathStart < 0 || model.headerClickTarget(branchStart, 0) != uiClickBranch || model.headerClickTarget(pathStart, 0) != uiClickWorkspace {
+		t.Fatalf("header targets = branch:%d/%v path:%d/%v", branchStart, model.headerClickTarget(branchStart, 0), pathStart, model.headerClickTarget(pathStart, 0))
+	}
+}
 func TestCompactOverlayFitsMinimumTerminal(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/a/very/long/workspace/path", "chatgpt", strings.Repeat("model-", 20), "xhigh", "single")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
@@ -2131,8 +2519,9 @@ func TestViewFitsRealTerminalBoundsAcrossResponsiveLayouts(t *testing.T) {
 	}{{1, 1}, {5, 4}, {12, 5}, {20, 8}, {39, 12}, {40, 12}, {80, 24}, {120, 40}}
 	overlays := []Overlay{
 		OverlayNone, OverlayHelp, OverlayStatus, OverlayCommand, OverlayProvider, OverlayModel, OverlayModelRoutes, OverlaySkills,
-		OverlayReasoning, OverlaySessions, OverlayApproval, OverlayCancel, OverlayDiff, OverlayAgents,
-		OverlayAgentDetail, OverlayAgentTypes, OverlayPersonas, OverlayMCP, OverlayMCPDetail, OverlayRecovery, OverlayError,
+		OverlayReasoning, OverlaySessions, OverlayBranches, OverlayBranchConfirm, OverlayApproval, OverlayCancel, OverlayDiff, OverlayAgents,
+		OverlayAgentDetail, OverlayAgentTypes, OverlayPersonas, OverlayMCP, OverlayMCPDetail, OverlayBackground, OverlayBackgroundDetail,
+		OverlayRecovery, OverlayError,
 	}
 	for _, size := range sizes {
 		for _, overlay := range overlays {
@@ -2209,8 +2598,8 @@ func TestWideColumnsKeepTheirDeclaredAlignment(t *testing.T) {
 		if width := ansi.StringWidth(line); width != 120 {
 			t.Fatalf("body line %d width=%d, want 120: %q", index, width, line)
 		}
-		if divider := strings.Index(line, "│"); divider != 88 {
-			t.Fatalf("body line %d divider=%d, want 88: %q", index, divider, line)
+		if divider := strings.Index(line, "│"); divider != 119 {
+			t.Fatalf("body line %d divider=%d, want 119: %q", index, divider, line)
 		}
 	}
 	header := model.renderHeader(120)
@@ -2346,9 +2735,18 @@ func TestResumeCommandOpensPickerAndResumesSelectedSession(t *testing.T) {
 
 func TestSessionTransitionAdoptsNewIDAndClearsPriorState(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single", "startup-session")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(AppModel)
 	model.transcript = []Block{{Kind: BlockAssistant, Content: "old conversation"}}
 	model.agents = []AgentView{{ID: "old-agent"}}
 	model.usage = UsageView{InputTokens: 99, OutputTokens: 42}
+	model.todo = TodoView{Revision: 1, Phases: []session.TodoPhase{{Items: []session.TodoItem{{
+		ID: "old-todo", Content: "old task", Status: session.TodoPending,
+	}}}}}
+	model.todoExpanded = true
+	model.focus = focusTodo
+	model.composer.Blur()
+	_ = model.View()
 
 	model.applyEvent(app.Event{
 		Kind: app.EventSessionLoaded, SessionID: "next-session", State: "new",
@@ -2361,8 +2759,54 @@ func TestSessionTransitionAdoptsNewIDAndClearsPriorState(t *testing.T) {
 	if model.usage.InputTokens != 0 || model.usage.OutputTokens != 0 {
 		t.Fatalf("new session retained usage: %+v", model.usage)
 	}
+	if model.todoItemCount() != 0 || model.todoExpanded || model.focus != focusComposer || !model.composer.Focused() {
+		t.Fatalf("new session retained todo presentation state: items:%d expanded:%t focus:%d composer:%t",
+			model.todoItemCount(), model.todoExpanded, model.focus, model.composer.Focused())
+	}
+	if model.paint.todoRender != "" {
+		t.Fatalf("new session retained cached todo render: %q", ansi.Strip(model.paint.todoRender))
+	}
 	if model.provider != "grok" || model.model != "grok-model" || model.reasoning != "medium" || model.agentMode != "team" {
 		t.Fatalf("new session preferences = %s/%s %s %s", model.provider, model.model, model.reasoning, model.agentMode)
+	}
+}
+
+func TestSessionTransitionInvalidatesScrollMetricsBeforeNextFrame(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(AppModel)
+	model.transcript = []Block{{Kind: BlockAssistant, Content: "short session"}}
+	_ = model.View()
+
+	blocks := make([]map[string]string, 80)
+	for index := range blocks {
+		blocks[index] = map[string]string{
+			"kind": "assistant", "content": fmt.Sprintf("message %02d %s", index, strings.Repeat("history ", 8)),
+		}
+	}
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.applyEvent(app.Event{
+		Kind: app.EventSessionLoaded, SessionID: "long-session", State: "loaded",
+		Data: map[string]string{"blocks": string(encoded)},
+	})
+
+	model.scrollTranscript(3)
+	if model.transcriptTop == 0 {
+		t.Fatal("first wheel event after session switch was clamped by stale scroll metrics")
+	}
+	_ = model.View()
+	for range 500 {
+		model.scrollTranscript(3)
+	}
+	if model.transcriptTop != model.transcriptMaxOffset() {
+		t.Fatalf("oldest offset = %d, want %d", model.transcriptTop, model.transcriptMaxOffset())
+	}
+	width, height := model.transcriptViewportSize()
+	if oldest := ansi.Strip(model.renderTranscript(width, height)); !strings.Contains(oldest, "message 00") {
+		t.Fatalf("scrolling did not reach oldest session content:\n%s", oldest)
 	}
 }
 
@@ -2842,7 +3286,7 @@ func TestTranscriptScrollbarTracksHistoryPositionAtPaneRightEdge(t *testing.T) {
 		body := strings.Split(ansi.Strip(model.renderBody(model.width, transcriptHeight)), "\n")
 		rows := make([]int, 0)
 		for row, line := range body {
-			if ansi.Cut(line, transcriptWidth, transcriptWidth+1) == "┃" {
+			if strings.Contains("▁▂▃▄▅▆▇█", ansi.Cut(line, transcriptWidth, transcriptWidth+1)) {
 				rows = append(rows, row)
 			}
 		}
@@ -2863,6 +3307,23 @@ func TestTranscriptScrollbarTracksHistoryPositionAtPaneRightEdge(t *testing.T) {
 	}
 }
 
+func TestScrollbarThumbAdvancesByEighthCell(t *testing.T) {
+	start, startSize := transcriptScrollbarThumb(20, 1000, 982, 0)
+	next, nextSize := transcriptScrollbarThumb(20, 1000, 982, 6)
+	if start-next != 1 {
+		t.Fatalf("eighth-cell thumb movement = %d -> %d, want one eighth-cell", start, next)
+	}
+	if glyph, reverse := scrollbarThumbGlyph(19, start, startSize); glyph != "█" || reverse {
+		t.Fatalf("aligned thumb cell = %q reverse:%v, want full block", glyph, reverse)
+	}
+	if glyph, reverse := scrollbarThumbGlyph(18, next, nextSize); glyph != "▁" || reverse {
+		t.Fatalf("leading eighth-cell = %q reverse:%v, want lower one-eighth block", glyph, reverse)
+	}
+	if glyph, reverse := scrollbarThumbGlyph(19, next, nextSize); glyph != "▁" || !reverse {
+		t.Fatalf("trailing seven-eighths cell = %q reverse:%v, want reversed lower one-eighth block", glyph, reverse)
+	}
+}
+
 func TestTranscriptScrollbarReservesRightmostColumnWithoutContextRail(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -2877,7 +3338,7 @@ func TestTranscriptScrollbarReservesRightmostColumnWithoutContextRail(t *testing
 			t.Fatalf("body row %d width = %d, want %d", row, ansi.StringWidth(line), model.width)
 		}
 		glyph := ansi.Cut(line, model.width-1, model.width)
-		if glyph != "│" && glyph != "┃" {
+		if glyph != "│" && !strings.Contains("▁▂▃▄▅▆▇█", glyph) {
 			t.Fatalf("body row %d rightmost glyph = %q, want scrollbar", row, glyph)
 		}
 	}
@@ -3197,11 +3658,12 @@ func TestProviderRetryActivityIsLocalizedInChinese(t *testing.T) {
 	model.status = "Running"
 	model.runID = "run-retry-zh"
 	model.applyEvent(app.Event{
-		Kind: app.EventProviderRetry, SessionID: "default", RunID: "run-retry-zh", Text: "connection reset",
-		Data: map[string]string{"attempt": "1", "max": "5", "delay_ms": "200"},
+		Kind: app.EventProviderRetry, SessionID: "default", RunID: "run-retry-zh", Text: "provider rate_limit error (server_is_overloaded)",
+		Data: map[string]string{"attempt": "1", "max": "5", "delay_ms": "500"},
 	})
 	summary := model.runActivitySummary(model.runActivityAt)
-	if !strings.Contains(summary, "200ms 后进行第 1/5 次重试") || !strings.Contains(summary, "connection reset") {
+	if !strings.Contains(summary, "正在重连") || !strings.Contains(summary, "500ms 后进行第 1/5 次重试") ||
+		!strings.Contains(summary, "rate_limit") {
 		t.Fatalf("Chinese retry summary=%q", summary)
 	}
 }
@@ -3232,6 +3694,28 @@ func TestTranscriptLayoutCacheReusesStableRender(t *testing.T) {
 	afterAnimation := model.transcriptLines(72)
 	if &stable[0] != &afterAnimation[0] {
 		t.Fatal("animation frame rerendered a transcript block without an animated indicator")
+	}
+}
+
+func TestViewScrollReusesTranscriptLayout(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model = updated.(AppModel)
+	model.transcript = []Block{{
+		Kind:    BlockAssistant,
+		Content: strings.Repeat("scroll performance content ", 200),
+		State:   "completed",
+	}}
+
+	_ = model.View()
+	contentWidth := max(1, bodyTranscriptWidth(model.width, model.paint.bodyHeight)-4)
+	before := model.transcriptLines(contentWidth)
+	model.scrollTranscript(3)
+	_ = model.View()
+	after := model.transcriptLines(contentWidth)
+
+	if len(before) == 0 || len(after) == 0 || &before[0] != &after[0] {
+		t.Fatal("pure scrolling invalidated the stable transcript layout")
 	}
 }
 
@@ -3347,13 +3831,12 @@ func BenchmarkLongTranscriptScroll(b *testing.B) {
 			State: "completed",
 		})
 	}
-	width, height := model.transcriptViewportSize()
-	_ = model.renderTranscript(width, height)
+	_ = model.View()
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
 		model.scrollTranscript(3)
-		_ = model.renderTranscript(width, height)
+		_ = model.View()
 	}
 }
 
@@ -3762,7 +4245,7 @@ func TestLanguageCommandSwitchesImmediatelyAndAcceptsTypoAlias(t *testing.T) {
 	result = cmd().(actionResultMsg)
 	updated, _ = model.Update(result)
 	model = updated.(AppModel)
-	if model.catalog.Language() != "zh-CN" || model.composer.Placeholder != "描述要更改、检查或验证的内容" {
+	if model.catalog.Language() != "zh-CN" || model.composer.Placeholder != "构建任何内容" {
 		t.Fatalf("language switch = language:%q placeholder:%q cmd:%v", model.catalog.Language(), model.composer.Placeholder, cmd != nil)
 	}
 	model.composer.SetValue("/lang")
@@ -3802,7 +4285,7 @@ func TestFooterPrioritizesReadableRuntimeState(t *testing.T) {
 	}
 }
 
-func TestTodoOverlayNavigationStaleEventsAndBoundedRendering(t *testing.T) {
+func TestTodoPaneFilteringStaleEventsAndBoundedRendering(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.todo = session.TodoList{Goal: "Ship", Revision: 3, Phases: []session.TodoPhase{{
 		ID: "phase-1", Title: "Build", Items: []session.TodoItem{
@@ -3811,19 +4294,20 @@ func TestTodoOverlayNavigationStaleEventsAndBoundedRendering(t *testing.T) {
 			{ID: "next", Content: "Verify", Status: session.TodoPending},
 		},
 	}}}
-	model.openOverlay(OverlayTodos)
-	if model.overlayOptionCount() != 3 {
-		t.Fatalf("todo option count=%d", model.overlayOptionCount())
+	model.todoExpanded = true
+	model.focus = focusTodo
+	model.width, model.height = 80, 24
+	if model.visibleTodoItemCount() != 3 {
+		t.Fatalf("todo item count=%d, want 3", model.visibleTodoItemCount())
 	}
-	updated, _ := model.updateOverlayKey("down")
+	updated, _ := model.updateTodoKey("h")
 	model = updated.(AppModel)
-	if model.overlayCursor != 1 {
-		t.Fatalf("todo cursor=%d, want 1", model.overlayCursor)
+	if !model.todoHideCompleted || model.visibleTodoItemCount() != 2 {
+		t.Fatalf("hidden todo count=%d hide=%v", model.visibleTodoItemCount(), model.todoHideCompleted)
 	}
-	updated, _ = model.updateOverlayKey("h")
-	model = updated.(AppModel)
-	if !model.todoHideCompleted || model.overlayOptionCount() != 2 {
-		t.Fatalf("hidden todo options=%d hide=%v", model.overlayOptionCount(), model.todoHideCompleted)
+	filtered := ansi.Strip(model.renderTodoPane(80, 3))
+	if strings.Contains(filtered, "Analyze") || !strings.Contains(filtered, "Implement") || !strings.Contains(filtered, "Verify") {
+		t.Fatalf("todo pane filtering is wrong:\n%s", filtered)
 	}
 
 	model.applyEvent(app.Event{Kind: app.EventTodoUpdated, Todo: &session.TodoList{Revision: 2}})
@@ -3832,22 +4316,95 @@ func TestTodoOverlayNavigationStaleEventsAndBoundedRendering(t *testing.T) {
 	}
 	model.todoHideCompleted = false
 	for _, size := range [][2]int{{20, 8}, {40, 12}, {80, 24}, {120, 40}} {
-		rendered := model.renderOverlay(size[0], size[1])
+		model.width, model.height = size[0], size[1]
+		rendered := model.View().Content
 		lines := strings.Split(rendered, "\n")
 		if len(lines) != size[1] {
-			t.Fatalf("todo overlay height=%d, want %d at %v", len(lines), size[1], size)
+			t.Fatalf("todo view height=%d, want %d at %v", len(lines), size[1], size)
 		}
 		for lineNumber, line := range lines {
 			if width := ansi.StringWidth(line); width > size[0] {
-				t.Fatalf("todo overlay line %d width=%d, want <=%d", lineNumber+1, width, size[0])
+				t.Fatalf("todo view line %d width=%d, want <=%d", lineNumber+1, width, size[0])
 			}
 		}
 	}
-	if rendered := model.renderOverlay(80, 24); !strings.Contains(rendered, ";9m") {
-		t.Fatalf("completed todo is not rendered with strikethrough: %q", rendered)
-	}
 	if rail := model.renderContextRail(31, 16); !strings.Contains(rail, ";9m") {
 		t.Fatalf("completed rail todo is not rendered with strikethrough: %q", rail)
+	}
+}
+
+func TestInlineTodoPaneScrollsAndCloseControlCollapses(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	items := make([]session.TodoItem, 12)
+	for index := range items {
+		items[index] = session.TodoItem{
+			ID:      fmt.Sprintf("todo-%02d", index),
+			Content: fmt.Sprintf("Task %02d", index),
+			Status:  session.TodoPending,
+		}
+	}
+	model.todo = session.TodoList{Phases: []session.TodoPhase{{Items: items}}}
+	model.width, model.height = 100, 30
+	model.todoExpanded = true
+	model.focus = focusTodo
+	model.composer.Blur()
+
+	_, top, width, height := model.todoPaneBounds()
+	// 30-row terminal × 30% cap → room for more of a long todo list.
+	if height < 8 {
+		t.Fatalf("todo pane height=%d, want at least 8", height)
+	}
+	initial := ansi.Strip(model.renderTodoPane(width, height))
+	if !strings.Contains(initial, "Task 00") || !strings.ContainsAny(initial, "▁▂▃▄▅▆▇█") {
+		t.Fatalf("scrollable todo pane omitted first item or thumb:\n%s", initial)
+	}
+
+	updated, _ := model.Update(tea.MouseWheelMsg{X: 10, Y: top + 1, Button: tea.MouseWheelDown})
+	model = updated.(AppModel)
+	if model.todoScroll != 1 {
+		t.Fatalf("todo wheel offset=%d, want 1", model.todoScroll)
+	}
+	updated, _ = model.updateTodoKey("end")
+	model = updated.(AppModel)
+	if model.todoScroll != model.todoPaneScrollLimit(height) {
+		t.Fatalf("todo end offset=%d, want %d", model.todoScroll, model.todoPaneScrollLimit(height))
+	}
+
+	updated, _ = model.Update(tea.MouseClickMsg{X: width - 1, Y: top, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.todoExpanded || model.focus != focusComposer || !model.composer.Focused() {
+		t.Fatalf("todo close = expanded:%t focus:%d composer:%t", model.todoExpanded, model.focus, model.composer.Focused())
+	}
+}
+
+func TestTodoPaneHeightTracksContentUntilMaximum(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.width, model.height = 100, 100
+	model.todoExpanded = true
+
+	model.todo = session.TodoList{Phases: []session.TodoPhase{{Items: []session.TodoItem{
+		{Content: "First", Status: session.TodoPending},
+		{Content: "Second", Status: session.TodoPending},
+	}}}}
+	_, _, _, height := model.todoPaneBounds()
+	if height != 2 {
+		t.Fatalf("short todo pane height=%d, want content height 2", height)
+	}
+
+	items := make([]session.TodoItem, maxTodoPaneHeight+5)
+	for index := range items {
+		items[index] = session.TodoItem{Content: fmt.Sprintf("Task %02d", index), Status: session.TodoPending}
+	}
+	model.todo = session.TodoList{Phases: []session.TodoPhase{{Items: items}}}
+	_, _, width, height := model.todoPaneBounds()
+	if height != maxTodoPaneHeight {
+		t.Fatalf("long todo pane height=%d, want maximum %d", height, maxTodoPaneHeight)
+	}
+	if limit := model.todoPaneScrollLimit(height); limit <= 0 {
+		t.Fatalf("long todo scroll limit=%d, want positive", limit)
+	}
+	if pane := ansi.Strip(model.renderTodoPane(width, height)); !strings.ContainsAny(pane, "▁▂▃▄▅▆▇█") {
+		t.Fatalf("long todo pane omitted scrollbar:\n%s", pane)
 	}
 }
 
@@ -3866,6 +4423,186 @@ func TestTodoRailShowsProgressInsteadOfInternalRevision(t *testing.T) {
 	rail := ansi.Strip(model.renderContextRail(31, 16))
 	if strings.Contains(rail, "r9") || !strings.Contains(rail, "TODO  1/2") {
 		t.Fatalf("todo header should show user-facing progress: %q", rail)
+	}
+}
+
+func TestStickyInstructionPinsScrolledPastUserPrompt(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.width, model.height = 100, 30
+	model.transcript = []Block{
+		{Kind: BlockUser, RunID: "run-1", Content: "optimize the sticky prompt dialog"},
+		{Kind: BlockAssistant, RunID: "run-1", Content: strings.Repeat("tool output line\n", 40)},
+	}
+	model.status = "Running"
+	model.runID = "run-1"
+	// Follow the bottom so the user prompt has left the viewport.
+	model.transcriptTop = model.transcriptMaxOffset()
+
+	content, ok := model.stickyInstructionContent(76, 12)
+	if !ok || !strings.Contains(content, "optimize the sticky prompt dialog") {
+		t.Fatalf("sticky content = %q ok=%v, want current instruction", content, ok)
+	}
+	card := ansi.Strip(model.renderStickyInstruction(80, 12))
+	if !strings.Contains(card, "╭") || !strings.Contains(card, "›") || !strings.Contains(card, "optimize the sticky") {
+		t.Fatalf("sticky dialog card is wrong:\n%s", card)
+	}
+
+	// When the prompt is still on screen, do not pin a duplicate.
+	model.transcriptTop = 0
+	model.status = "Ready"
+	model.runID = ""
+	if content, ok = model.stickyInstructionContent(76, 40); ok {
+		t.Fatalf("sticky should hide while prompt is visible, got %q", content)
+	}
+}
+
+func TestTranscriptScrollDoesNotReverseAtStickyBoundary(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.width, model.height = 100, 30
+	model.transcriptLayout = &transcriptLayoutCache{
+		initialized: true,
+		lines:       make([]string, 100),
+		userMarks:   []stickyUserMark{{content: "keep this prompt pinned", endLine: 80}},
+	}
+	model.paint.width = model.width
+	model.paint.height = model.height
+	model.paint.preBodyHeight = 20
+	model.paint.bodyHeight = 16
+	model.paint.lineCount = 100
+	model.transcriptTop = 5
+
+	if !model.stickyVisibleWithCache(model.paint.preBodyHeight) {
+		t.Fatal("test setup is below the sticky dismissal boundary")
+	}
+	model.scrollTranscript(3)
+	if model.transcriptTop != 8 {
+		t.Fatalf("wheel up reversed at sticky boundary: offset=%d, want 8", model.transcriptTop)
+	}
+	if model.stickyVisibleWithCache(model.paint.preBodyHeight) {
+		t.Fatal("sticky prompt remained visible after crossing its dismissal boundary")
+	}
+}
+
+func TestTranscriptScrollDownStillReturnsToLatest(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(AppModel)
+	model.transcript = []Block{{Kind: BlockAssistant, Content: strings.Repeat("history ", 400), State: "completed"}}
+	_ = model.View()
+	model.scrollTranscript(12)
+	if model.transcriptTop == 0 {
+		t.Fatal("test transcript did not scroll into history")
+	}
+	model.scrollTranscript(-1000)
+	if model.transcriptTop != 0 {
+		t.Fatalf("scroll down offset = %d, want latest", model.transcriptTop)
+	}
+}
+
+func TestInterruptedEmptyTurnScrollIsMonotonicAcrossStickyBoundary(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+	model.transcript = []Block{
+		{Kind: BlockUser, RunID: "run-previous", Content: "previous interrupted prompt"},
+		{Kind: BlockUser, RunID: "run-current", Content: "continue"},
+		{Kind: BlockAssistant, RunID: "run-current", Content: strings.Repeat("completed answer line ", 400), State: "completed"},
+	}
+	model.status = "Ready"
+	model.runID = ""
+	_ = model.View()
+
+	previous := model.transcriptTop
+	stickySeen := false
+	for range 40 {
+		model.scrollTranscript(3)
+		if model.transcriptTop < previous {
+			t.Fatalf("wheel up reversed after interrupted empty turn: offset=%d, previous=%d", model.transcriptTop, previous)
+		}
+		_ = model.View()
+		stickySeen = stickySeen || model.paint.stickyHeight > 0
+		previous = model.transcriptTop
+		if previous == model.transcriptMaxOffsetForTop(previous) {
+			break
+		}
+	}
+	if !stickySeen {
+		t.Fatal("test did not show a sticky prompt")
+	}
+}
+
+func TestHeaderShowsBranchAndCollapsesHomePath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("home directory unavailable")
+	}
+	workspace := filepath.Join(home, "GolandProjects", "azem")
+	model := NewModel(inertRuntime{}, workspace, "chatgpt", "model", "high", "single")
+	model.branch = "main"
+	header := ansi.Strip(model.renderHeader(120))
+	if !strings.Contains(header, "⎇ main") {
+		t.Fatalf("header missing branch: %q", header)
+	}
+	if !strings.Contains(header, "~/GolandProjects/azem") {
+		t.Fatalf("header did not collapse home path: %q", header)
+	}
+	if strings.Contains(header, home) || strings.Contains(header, "default") {
+		t.Fatalf("header leaked absolute home path or session id: %q", header)
+	}
+	if got := collapseHomePath(home); got != "~" {
+		t.Fatalf("collapseHomePath(home)=%q, want ~", got)
+	}
+	if got := collapseHomePath(filepath.Join(home, "src")); got != "~/src" {
+		t.Fatalf("collapseHomePath nested=%q, want ~/src", got)
+	}
+	if got := collapseHomePath("/tmp/workspace"); got != "/tmp/workspace" {
+		t.Fatalf("collapseHomePath non-home=%q", got)
+	}
+}
+
+func TestTodoPaneShowsPhaseBoundariesAndCompletedGroupRails(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.todo = session.TodoList{Phases: []session.TodoPhase{
+		{Title: "P1: 基础", Items: []session.TodoItem{
+			{Content: "done-a", Status: session.TodoCompleted},
+			{Content: "done-b", Status: session.TodoCompleted},
+			{Content: "active", Status: session.TodoInProgress},
+		}},
+		{Title: "P2: 架构演进", Items: []session.TodoItem{
+			{Content: "next", Status: session.TodoPending},
+		}},
+	}}
+	model.todoExpanded = true
+	model.focus = focusTodo
+	pane := ansi.Strip(model.renderTodoPane(80, 10))
+	for _, wanted := range []string{"▌ P1: 基础", "▌ P2: 架构演进", "┌ ✓", "└ ✓", "▶ active", "□ next"} {
+		if !strings.Contains(pane, wanted) {
+			t.Fatalf("todo pane missing phase boundary marker %q:\n%s", wanted, pane)
+		}
+	}
+	// A blank gap separates the two phases so the list does not read as one block.
+	lines := strings.Split(pane, "\n")
+	p1, p2 := -1, -1
+	for index, line := range lines {
+		if strings.Contains(line, "P1: 基础") {
+			p1 = index
+		}
+		if strings.Contains(line, "P2: 架构演进") {
+			p2 = index
+		}
+	}
+	if p1 < 0 || p2 <= p1+1 {
+		t.Fatalf("phases are not separated:\n%s", pane)
+	}
+	foundGap := false
+	for _, line := range lines[p1+1 : p2] {
+		if strings.TrimSpace(ansi.Strip(line)) == "" || strings.Trim(strings.TrimSpace(line), "│┌┐└┘ ×┃") == "" {
+			foundGap = true
+			break
+		}
+	}
+	if !foundGap {
+		t.Fatalf("expected blank gap between phases:\n%s", pane)
 	}
 }
 
@@ -3892,11 +4629,12 @@ func TestTodoRowsAreNumberedAndBoundRunningSubagentsAnimate(t *testing.T) {
 		}
 	}
 
-	model.openOverlay(OverlayTodos)
-	overlay := ansi.Strip(model.renderOverlay(80, 24))
-	for _, wanted := range []string{"1. Main task", "2. Delegated task", "3. Next task"} {
-		if !strings.Contains(overlay, wanted) {
-			t.Fatalf("numbered todo overlay omitted %q:\n%s", wanted, overlay)
+	model.todoExpanded = true
+	model.focus = focusTodo
+	pane := ansi.Strip(model.renderTodoPane(80, 5))
+	for _, wanted := range []string{"▌ Work", "▶ Main task", "▶ Delegated task", "□ Next task"} {
+		if !strings.Contains(pane, wanted) {
+			t.Fatalf("inline todo pane omitted %q:\n%s", wanted, pane)
 		}
 	}
 }
@@ -4257,13 +4995,15 @@ func TestToolCategoriesAndApprovalBodyUseDistinctMutedAccents(t *testing.T) {
 	}
 }
 
-func TestTranscriptKindsUseDistinctMutedAccentsWithoutCardBackgrounds(t *testing.T) {
+func TestTranscriptKindsUseQuietHierarchyAndSemanticStyles(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	styles := map[string]lipgloss.Style{
-		"user": model.theme.UserSurface, "assistant": model.theme.AssistantTag,
-		"thinking": model.theme.ThinkingTag, "tool": model.theme.ToolTag,
-		"agent": model.theme.AgentTag, "approval": model.theme.ApprovalTag,
-		"error": model.theme.ErrorTag,
+		"assistant": model.theme.AssistantTag,
+		"thinking":  model.theme.ThinkingTag,
+		"tool":      model.theme.ToolTag,
+		"agent":     model.theme.AgentTag,
+		"approval":  model.theme.ApprovalTag,
+		"error":     model.theme.ErrorTag,
 	}
 	emptyBackground := fmt.Sprint(lipgloss.NewStyle().GetBackground())
 	seen := make(map[string]string)
@@ -4277,14 +5017,17 @@ func TestTranscriptKindsUseDistinctMutedAccentsWithoutCardBackgrounds(t *testing
 		}
 		seen[foreground] = kind
 	}
+	if background := fmt.Sprint(model.theme.UserSurface.GetBackground()); background == emptyBackground {
+		t.Fatal("user prompt band must be elevated from the transcript")
+	}
 
 	cases := []struct {
 		block Block
 		label string
 	}{
-		{Block{Kind: BlockAssistant, Content: "## Result\n\nDone.", State: "completed"}, "AZEM"},
+		{Block{Kind: BlockAssistant, Content: "## Result\n\nDone.", State: "completed"}, "Result"},
 		{Block{Kind: BlockThinking, Content: "Checking constraints", State: "streaming"}, model.tr("block.thinking")},
-		{Block{Kind: BlockTool, Title: "coding.read_file", Content: "result", State: "completed"}, model.tr("block.tool")},
+		{Block{Kind: BlockTool, Title: "coding.read_file", Content: "result", State: "completed"}, model.tr("tool.read_file")},
 		{Block{Kind: BlockAgent, Title: "reviewer", Content: "reviewing", State: "running"}, model.tr("block.agent")},
 		{Block{Kind: BlockApproval, Title: "shell", Content: "run command", State: "awaiting approval"}, model.tr("block.approval")},
 		{Block{Kind: BlockError, Title: "provider", Content: "request failed", State: "failed"}, model.tr("block.error")},
@@ -4335,14 +5078,20 @@ func TestRenderSurfaceClearsConfiguredBackground(t *testing.T) {
 	}
 }
 
-func TestUserMessageUsesAccentRailAndPrimaryBodyText(t *testing.T) {
+func TestUserMessageUsesElevatedPromptBand(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	rendered := strings.Join(model.renderUserMessage("Keep the body readable", 48), "\n")
-	if !strings.Contains(rendered, model.theme.UserSurface.Render("▌ ")) {
-		t.Fatalf("user message lacks accent rail: %q", rendered)
+	plain := ansi.Strip(rendered)
+	if !strings.Contains(plain, "› Keep the body readable") || !strings.Contains(plain, "╭") || !strings.Contains(plain, "╰") {
+		t.Fatalf("user message dialog = %q", plain)
 	}
-	if !strings.Contains(rendered, model.theme.Assistant.Render(padOrTrim("Keep the body readable", 46))) {
-		t.Fatalf("user message body does not use primary text style: %q", rendered)
+	if !strings.Contains(rendered, ";48;") {
+		t.Fatalf("user message lacks elevated surface: %q", rendered)
+	}
+	for _, line := range strings.Split(rendered, "\n") {
+		if width := ansi.StringWidth(line); width > 48 {
+			t.Fatalf("user message line width = %d: %q", width, ansi.Strip(line))
+		}
 	}
 }
 
@@ -4399,76 +5148,57 @@ func TestComposerRendersSingleRoundedPanel(t *testing.T) {
 	}
 }
 
-func TestDockFooterDeaggregatesOnSpaciousTerminal(t *testing.T) {
+func TestGrokStyleChromeDistributesMetadata(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "grok", "grok-4.5", "high", "single")
 	model.approvalMode = ApprovalModeAutoReview
 	model.autoReviewAvailable = true
 	model.usage.ContextLimit = 500_000
 	model.usage.InputTokens = 153_000
-	model.usage.CacheInputTokens = 4_300_000
-	model.usage.CachedInputTokens = 4_100_000
-	model.usage.CacheReported = true
-	model.usage.MainCacheInput = 4_300_000
-	model.usage.MainCachedInput = 4_100_000
-	model.usage.MainCacheReported = true
 	model.status = "Ready"
 
-	if got := dockFooterLines(24, 100); got != 3 {
-		t.Fatalf("spacious footer lines = %d, want 3", got)
-	}
-	if got := dockFooterLines(10, 80); got != 2 {
-		t.Fatalf("medium footer lines = %d, want 2", got)
-	}
-	if got := dockFooterLines(5, 40); got != 1 {
-		t.Fatalf("compact footer lines = %d, want 1", got)
+	for _, size := range []struct{ height, width int }{{24, 100}, {10, 80}, {5, 40}} {
+		if got := dockFooterLines(size.height, size.width); got != 1 {
+			t.Fatalf("%dx%d footer lines = %d, want 1", size.width, size.height, got)
+		}
 	}
 
-	footer := ansi.Strip(model.renderDockFooter(100, 3))
-	lines := strings.Split(footer, "\n")
-	if len(lines) != 3 {
-		t.Fatalf("dock footer height = %d, want 3:\n%s", len(lines), footer)
+	footer := ansi.Strip(model.renderDockFooter(100, 1))
+	for _, wanted := range []string{"Drag:copy", "Shift+Tab:approval", "Ctrl+P:commands", "?:shortcuts"} {
+		if !strings.Contains(footer, wanted) {
+			t.Fatalf("shortcut bar missing %q: %q", wanted, footer)
+		}
 	}
-	// Runtime identity, context meter, and help each own a row — no longer one jammed strip.
-	if !strings.Contains(lines[0], "Ready") || !strings.Contains(lines[0], "grok/grok-4.5") {
-		t.Fatalf("runtime strip missing status/model: %q", lines[0])
+	header := ansi.Strip(model.renderHeader(100))
+	if !strings.Contains(header, "⌁") || !strings.Contains(header, "/tmp/workspace") || !strings.Contains(header, "153K / 500K") || strings.Contains(header, "grok-4.5") {
+		t.Fatalf("top chrome hierarchy is wrong: %q", header)
 	}
-	if !strings.Contains(lines[1], "CTX") || !strings.Contains(lines[1], "500K") || !strings.Contains(lines[1], "CACHE") {
-		t.Fatalf("context strip missing meter/cache: %q", lines[1])
+	if strings.Contains(header, "⌁ default") {
+		t.Fatalf("top chrome still shows session id: %q", header)
 	}
-	// Primary occupancy and cache are separate facts; transport noise stays off the default strip.
-	if strings.Contains(lines[1], "xai-responses") || strings.Contains(lines[1], "U ") {
-		t.Fatalf("default context strip is still overloaded: %q", lines[1])
-	}
-	if !strings.Contains(lines[2], "Drag") || !strings.Contains(lines[2], "Ctrl+R") {
-		t.Fatalf("help strip missing shortcuts: %q", lines[2])
-	}
-	if strings.Contains(lines[0], "CTX") || strings.Contains(lines[1], "Ctrl+R") || strings.Contains(lines[2], "CTX") {
-		t.Fatalf("footer zones are still aggregated:\n%s", footer)
-	}
-
-	// Medium terminals keep metrics alone — shortcuts stay on the 3-line layout / compact status line.
-	medium := ansi.Strip(model.renderDockFooter(80, 2))
-	mediumLines := strings.Split(medium, "\n")
-	if len(mediumLines) != 2 || strings.Contains(medium, "Ctrl+R") {
-		t.Fatalf("medium footer should not mix help into metrics:\n%s", medium)
+	composer := ansi.Strip(model.renderComposer())
+	if !strings.Contains(composer, "grok-4.5 (high) · SMART") {
+		t.Fatalf("composer caption is missing model/mode: %q", composer)
 	}
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	model = updated.(AppModel)
 	content := ansi.Strip(model.View().Content)
-	for _, wanted := range []string{"grok/grok-4.5", "CTX", "Drag", "SMART"} {
+	for _, wanted := range []string{"153K / 500K", "grok-4.5 (high)", "Drag:copy", "SMART"} {
 		if !strings.Contains(content, wanted) {
 			t.Fatalf("spacious view missing %q:\n%s", wanted, content)
 		}
 	}
+	if strings.Contains(content, "RUN CONTEXT") {
+		t.Fatalf("spacious view still contains the detached context rail:\n%s", content)
+	}
 }
 
-func TestMeasureViewLayoutReservesDockFooter(t *testing.T) {
-	layout := measureViewLayout(24, 100, 3, 0, 0)
-	if !layout.showChrome || layout.footerHeight != 3 {
+func TestMeasureViewLayoutReservesSingleShortcutRow(t *testing.T) {
+	layout := measureViewLayout(24, 100, 3, 0, 0, 0)
+	if !layout.showChrome || layout.footerHeight != 1 {
 		t.Fatalf("spacious layout = %+v", layout)
 	}
-	// header(1) + rule(1) + footer(3) + composer >=1 leave body room.
+	// header(1) + air(1) + footer(1) + composer >=1 leave body room.
 	if layout.bodyHeight < 10 || layout.composerHeight < 1 {
 		t.Fatalf("body/composer heights collapsed: %+v", layout)
 	}
@@ -4476,11 +5206,11 @@ func TestMeasureViewLayoutReservesDockFooter(t *testing.T) {
 		t.Fatalf("composer offset = %d, want %d", composerOffsetY(layout), 2+layout.bodyHeight)
 	}
 
-	medium := measureViewLayout(8, 40, 1, 0, 0)
+	medium := measureViewLayout(8, 40, 1, 0, 0, 0)
 	if medium.footerHeight != 1 || !medium.showChrome {
 		t.Fatalf("medium layout = %+v", medium)
 	}
-	tiny := measureViewLayout(5, 40, 1, 0, 0)
+	tiny := measureViewLayout(5, 40, 1, 0, 0, 0)
 	if tiny.footerHeight != 1 || tiny.showChrome {
 		t.Fatalf("tiny layout = %+v", tiny)
 	}

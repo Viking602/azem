@@ -280,24 +280,7 @@ func (m AppModel) renderDockFooter(width int, lines int) string {
 	if width <= 0 || lines <= 0 {
 		return ""
 	}
-	rows := make([]string, 0, lines)
-	switch {
-	case lines >= 3:
-		// Three clear bands: who/what is running, context health, then shortcuts.
-		rows = append(rows,
-			m.renderRuntimeStrip(width),
-			m.renderContextStrip(width),
-			m.renderHelpStrip(width),
-		)
-	case lines == 2:
-		// Keep metrics alone on the second row — do not mix them with shortcut noise.
-		rows = append(rows,
-			m.renderRuntimeStrip(width),
-			m.renderContextStrip(width),
-		)
-	default:
-		rows = append(rows, m.renderStatus(width))
-	}
+	rows := []string{m.renderHelpStrip(width)}
 	for len(rows) < lines {
 		rows = append(rows, padStyledLine("", width))
 	}
@@ -338,10 +321,9 @@ func (m AppModel) renderHelpStripContent(width int) string {
 	}
 	parts := make([]string, 0, len(items))
 	for _, item := range items {
-		parts = append(parts, m.theme.HelpKey.Render(item.key)+m.theme.HelpDesc.Render(" "+item.desc))
+		parts = append(parts, m.theme.HelpKey.Render(item.key)+m.theme.HelpDesc.Render(":"+item.desc))
 	}
-	// Leading gutter + wider separators keep shortcuts scannable under the meter.
-	content := " " + strings.Join(parts, m.theme.MetaDivider.Render("   "))
+	content := " " + strings.Join(parts, m.theme.MetaDivider.Render("  │  "))
 	return truncateStyledFallback(content, width)
 }
 
@@ -351,23 +333,39 @@ type helpItem struct {
 }
 
 func (m AppModel) helpItems(width int) []helpItem {
+	if m.focus == focusTodo {
+		action := m.tr("todo.footer.hide")
+		if m.todoHideCompleted {
+			action = m.tr("todo.footer.show")
+		}
+		items := []helpItem{
+			{key: "h", desc: action},
+			{key: "?", desc: m.tr("footer.desc.help")},
+		}
+		if width < 36 {
+			return items[:1]
+		}
+		return items
+	}
+	firstItem := helpItem{key: m.tr("footer.key.drag"), desc: m.tr("footer.desc.copy")}
+	if m.isRunning() {
+		firstItem = helpItem{key: "Ctrl+C", desc: m.tr("footer.desc.cancel")}
+	}
 	all := []helpItem{
-		{key: m.tr("footer.key.drag"), desc: m.tr("footer.desc.copy")},
-		{key: "Ctrl+V", desc: m.tr("footer.desc.paste_image")},
+		firstItem,
 		{key: "Shift+Tab", desc: m.tr("footer.desc.approval")},
-		{key: "Ctrl+R", desc: m.tr("footer.desc.reasoning")},
 		{key: "Ctrl+P", desc: m.tr("footer.desc.commands")},
 		{key: "?", desc: m.tr("footer.desc.help")},
 	}
 	switch {
-	case width >= 112:
+	case width >= 88:
 		return all
-	case width >= 86:
-		return all[:5]
-	case width >= 64:
-		return []helpItem{all[0], all[2], all[3], all[5]}
+	case width >= 62:
+		return all[:3]
+	case width >= 36:
+		return all[:2]
 	default:
-		return []helpItem{all[0]}
+		return all[:1]
 	}
 }
 
@@ -902,7 +900,92 @@ func normalizedContextContributions(contributions []app.ContextContribution, tot
 	return normalized
 }
 
+func contextProfileContributionHash(profile app.ContextProfile) uint64 {
+	const (
+		offset64 = uint64(14695981039346656037)
+		prime64  = uint64(1099511628211)
+	)
+	hash := offset64
+	mixString := func(value string) {
+		for index := range len(value) {
+			hash ^= uint64(value[index])
+			hash *= prime64
+		}
+		hash ^= 0xff
+		hash *= prime64
+	}
+	mixInt := func(value int) {
+		number := uint64(value)
+		for range 8 {
+			hash ^= number & 0xff
+			hash *= prime64
+			number >>= 8
+		}
+	}
+	for _, contribution := range profile.Contributions {
+		mixString(string(contribution.Category))
+		mixString(contribution.Name)
+		mixInt(contribution.Tokens)
+	}
+	return hash
+}
+
 func (m AppModel) contextReportLines() []string {
+	cache := m.contextReportCache
+	hash := contextProfileContributionHash(m.contextProfile)
+	language := m.catalog.Language()
+	if cache != nil &&
+		cache.valid &&
+		cache.usage == m.usage &&
+		cache.language == language &&
+		cache.profileSource == m.contextProfile.Source &&
+		cache.profileEstimated == m.contextProfile.Estimated &&
+		cache.profileReportedInput == m.contextProfile.ReportedInputTokens &&
+		cache.profileReportedOutput == m.contextProfile.ReportedOutputTokens &&
+		cache.profileContributionCount == len(m.contextProfile.Contributions) &&
+		cache.profileContributionHash == hash &&
+		cache.profileError == m.contextProfileError {
+		return cache.lines
+	}
+
+	lines := m.buildContextReportLines()
+	if cache != nil {
+		cache.valid = true
+		cache.usage = m.usage
+		cache.language = language
+		cache.profileSource = m.contextProfile.Source
+		cache.profileEstimated = m.contextProfile.Estimated
+		cache.profileReportedInput = m.contextProfile.ReportedInputTokens
+		cache.profileReportedOutput = m.contextProfile.ReportedOutputTokens
+		cache.profileContributionCount = len(m.contextProfile.Contributions)
+		cache.profileContributionHash = hash
+		cache.profileError = m.contextProfileError
+		cache.lines = lines
+		cache.wrappedWidth = 0
+		cache.wrappedLines = nil
+	}
+	return lines
+}
+
+func (m AppModel) contextOverlayDescriptionLines(width int) []string {
+	width = max(1, width)
+	lines := m.contextReportLines()
+	cache := m.contextReportCache
+	if cache != nil && cache.wrappedWidth == width && cache.wrappedLines != nil {
+		return cache.wrappedLines
+	}
+	wrapped := make([]string, 0, len(lines))
+	for _, line := range lines {
+		wrapped = append(wrapped, wrapText(line, width)...)
+	}
+	if cache != nil {
+		cache.wrappedWidth = width
+		cache.wrappedLines = wrapped
+	}
+	return wrapped
+}
+
+func (m AppModel) buildContextReportLines() []string {
 	metrics := m.contextMetrics()
 	estimateMark := ""
 	if metrics.estimated {

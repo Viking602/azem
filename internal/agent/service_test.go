@@ -96,6 +96,73 @@ func TestGovernedReadApprovalEditAndStaleAnchor(t *testing.T) {
 	assertFile(t, path, "alpha\nBETA\ngamma\n")
 }
 
+func TestFailedEditRequiresReadBeforeNextEdit(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "note.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close(ctx) })
+	run, err := service.StartRun(ctx, "recover from rejected edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	read := executeRead(t, ctx, service, run, "read-before-failure", "note.txt")
+	malformedArgs, _ := json.Marshal(map[string]string{"input": read.Header + "\n@@\n"})
+	malformed := tool.Call{ID: "edit-malformed", Name: coding.ToolEditHashline, Arguments: malformedArgs}
+	pending, err := service.ExecuteTool(ctx, run, malformed, nil)
+	if err != nil || pending.Approval == nil {
+		t.Fatalf("malformed edit approval = %+v, error=%v", pending, err)
+	}
+	if err := service.ResolveApproval(ctx, run, malformed.ID, ApprovalOnce, "user"); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := service.ExecuteTool(ctx, run, malformed, nil)
+	if err != nil || !failed.Executed || !failed.Result.IsError {
+		t.Fatalf("malformed edit result = %+v, error=%v", failed, err)
+	}
+	for _, required := range []string{"Required hashline retry format:", "replace N..M:", "Never use @@", "-old rows"} {
+		if !strings.Contains(failed.Result.Content, required) {
+			t.Fatalf("malformed edit result omitted %q: %q", required, failed.Result.Content)
+		}
+	}
+
+	validArgs, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 2:\n+BETA\n"})
+	blocked, err := service.ExecuteTool(ctx, run, tool.Call{ID: "edit-without-reread", Name: coding.ToolEditHashline, Arguments: validArgs}, nil)
+	if err != nil || !blocked.Executed || !blocked.Result.IsError || blocked.Approval != nil {
+		t.Fatalf("edit without re-read = %+v, error=%v", blocked, err)
+	}
+	if !strings.Contains(blocked.Result.Content, coding.ToolReadFile) {
+		t.Fatalf("blocked edit did not require %s: %q", coding.ToolReadFile, blocked.Result.Content)
+	}
+
+	refreshed := executeRead(t, ctx, service, run, "read-after-failure", "note.txt")
+	retryArgs, _ := json.Marshal(map[string]string{"input": refreshed.Header + "\nreplace 2:\n+BETA\n"})
+	retryCall := tool.Call{ID: "edit-after-reread", Name: coding.ToolEditHashline, Arguments: retryArgs}
+	retry, err := service.ExecuteTool(ctx, run, retryCall, nil)
+	if err != nil || retry.Approval == nil {
+		t.Fatalf("edit after re-read = %+v, error=%v", retry, err)
+	}
+	if err := service.ResolveApproval(ctx, run, retryCall.ID, ApprovalOnce, "user"); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := service.ExecuteTool(ctx, run, retryCall, nil)
+	if err != nil || !applied.Executed || applied.Result.IsError {
+		t.Fatalf("edit after re-read apply = %+v, error=%v", applied, err)
+	}
+	assertFile(t, path, "alpha\nBETA\ngamma\n")
+}
+
 func TestGofmtCanFormatSamePathAgainAfterAnotherEdit(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()

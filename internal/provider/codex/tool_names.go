@@ -11,24 +11,38 @@ import (
 const maxCodexToolNameLength = 64
 
 func mapToolNames(request hyprovider.Request) (hyprovider.Request, map[string]string) {
-	if len(request.Tools) == 0 {
+	hasToolNames := len(request.Tools) > 0
+	if !hasToolNames {
+		for _, current := range request.Messages {
+			if len(current.ToolCalls) > 0 {
+				hasToolNames = true
+				break
+			}
+		}
+	}
+	if !hasToolNames {
 		return request, nil
 	}
 	mapped := request
 	mapped.Tools = append([]message.ToolDefinition(nil), request.Tools...)
 	forward := make(map[string]string, len(request.Tools))
 	reverse := make(map[string]string, len(request.Tools))
-	for index := range mapped.Tools {
-		original := mapped.Tools[index].Name
+	mapName := func(original string) string {
+		if name, exists := forward[original]; exists {
+			return name
+		}
 		name := codexToolName(original)
 		if collision, exists := reverse[name]; exists && collision != original {
 			digest := sha256.Sum256([]byte(original))
 			suffix := fmt.Sprintf("_%x", digest[:4])
 			name = name[:min(len(name), maxCodexToolNameLength-len(suffix))] + suffix
 		}
-		mapped.Tools[index].Name = name
 		forward[original] = name
 		reverse[name] = original
+		return name
+	}
+	for index := range mapped.Tools {
+		mapped.Tools[index].Name = mapName(mapped.Tools[index].Name)
 	}
 	mapped.Messages = append([]message.Message(nil), request.Messages...)
 	for index := range mapped.Messages {
@@ -37,9 +51,7 @@ func mapToolNames(request hyprovider.Request) (hyprovider.Request, map[string]st
 		}
 		mapped.Messages[index].ToolCalls = append([]message.ToolCall(nil), mapped.Messages[index].ToolCalls...)
 		for callIndex := range mapped.Messages[index].ToolCalls {
-			if name := forward[mapped.Messages[index].ToolCalls[callIndex].Name]; name != "" {
-				mapped.Messages[index].ToolCalls[callIndex].Name = name
-			}
+			mapped.Messages[index].ToolCalls[callIndex].Name = mapName(mapped.Messages[index].ToolCalls[callIndex].Name)
 		}
 	}
 	return mapped, reverse

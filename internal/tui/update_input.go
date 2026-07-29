@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	hyskill "github.com/Viking602/go-hydaelyn/skill"
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/i18n"
@@ -37,12 +38,35 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.overlay == OverlayRecap {
 			m.overlayScroll = min(m.overlayScroll, m.recapScrollLimit())
 		}
+		if m.isGenericReadOnlyOverlay() {
+			m.scrollReadOnlyOverlay(0)
+		}
+		_, _, _, todoHeight := m.todoPaneBounds()
+		m.scrollTodoPane(0, todoHeight)
 		return m, nil
 	case tea.MouseClickMsg:
-		return m.startTranscriptSelection(msg.Mouse())
+		return m.handleMouseClick(msg.Mouse())
 	case tea.MouseMotionMsg:
+		if m.overlayScrollbarDragging {
+			m.applyOverlayScrollbarPosition(msg.Y)
+			return m, nil
+		}
+		if m.scrollbarDragging {
+			m.applyScrollbarPosition(msg.Y)
+			return m, nil
+		}
 		return m.extendTranscriptSelection(msg.Mouse())
 	case tea.MouseReleaseMsg:
+		if m.overlayScrollbarDragging {
+			m.applyOverlayScrollbarPosition(msg.Y)
+			m.overlayScrollbarDragging = false
+			return m, nil
+		}
+		if m.scrollbarDragging {
+			m.applyScrollbarPosition(msg.Y)
+			m.scrollbarDragging = false
+			return m, nil
+		}
 		return m.finishTranscriptSelection(msg.Mouse())
 	case tea.MouseWheelMsg:
 		m.transcriptSelection = nil
@@ -58,6 +82,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.overlayScroll = max(0, m.overlayScroll-3)
 					return m, nil
 				}
+				if m.isGenericReadOnlyOverlay() {
+					m.scrollReadOnlyOverlay(-3)
+					return m, nil
+				}
 				return m.updateOverlayKey("up")
 			case tea.MouseWheelDown:
 				if m.overlay == OverlayRecap {
@@ -69,9 +97,25 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.overlayScroll = min(m.backgroundLogScrollLimit(), m.overlayScroll+3)
 					return m, nil
 				}
+				if m.isGenericReadOnlyOverlay() {
+					m.scrollReadOnlyOverlay(3)
+					return m, nil
+				}
 				return m.updateOverlayKey("down")
 			}
 			return m, nil
+		}
+		if m.todoExpanded {
+			_, todoTop, todoWidth, todoHeight := m.todoPaneBounds()
+			if todoHeight > 0 && msg.X >= 0 && msg.X < todoWidth && msg.Y >= todoTop && msg.Y < todoTop+todoHeight {
+				switch msg.Button {
+				case tea.MouseWheelUp:
+					m.scrollTodoPane(-1, todoHeight)
+				case tea.MouseWheelDown:
+					m.scrollTodoPane(1, todoHeight)
+				}
+				return m, nil
+			}
 		}
 		switch msg.Button {
 		case tea.MouseWheelUp:
@@ -172,6 +216,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.openOverlay(OverlayModelRoutes)
 				}
 			}
+			if msg.Action.Kind == ActionSwitchGitBranch && errors.Is(msg.Err, app.ErrDirtyWorkspace) {
+				m.pendingBranch = msg.Action.Target
+				m.branchDirty = true
+				m.errorBanner = ""
+				m.openOverlay(OverlayBranchConfirm)
+				return m, nil
+			}
 			if errors.Is(msg.Err, context.Canceled) {
 				m.status = "Ready"
 				m.errorBanner = m.tr("error.action_cancelled")
@@ -256,21 +307,13 @@ func (m AppModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.beginShutdown()
 	}
 	if key == "shift+tab" {
-		mode := ApprovalModePrompt
-		if m.autoReviewAvailable {
-			switch m.approvalMode {
-			case ApprovalModePrompt:
-				mode = ApprovalModeAutoReview
-			case ApprovalModeAutoReview:
-				mode = ApprovalModeYolo
-			}
-		} else if m.approvalMode == ApprovalModePrompt {
-			mode = ApprovalModeYolo
-		}
-		return m.beginAction(Action{Kind: ActionSetApprovalMode, Target: string(mode)})
+		return m.cycleApprovalMode()
 	}
 	if m.overlay != OverlayNone {
 		return m.updateOverlayKeyMsg(msg)
+	}
+	if m.focus == focusTodo {
+		return m.updateTodoKey(key)
 	}
 	if m.focus == focusTranscript {
 		return m.updateTranscriptKey(key)
@@ -376,6 +419,260 @@ func (m AppModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.commandCursor = 0
 	}
 	return m, cmd
+}
+
+func (m AppModel) cycleApprovalMode() (tea.Model, tea.Cmd) {
+	mode := ApprovalModePrompt
+	if m.autoReviewAvailable {
+		switch m.approvalMode {
+		case ApprovalModePrompt:
+			mode = ApprovalModeAutoReview
+		case ApprovalModeAutoReview:
+			mode = ApprovalModeYolo
+		}
+	} else if m.approvalMode == ApprovalModePrompt {
+		mode = ApprovalModeYolo
+	}
+	return m.beginAction(Action{Kind: ActionSetApprovalMode, Target: string(mode)})
+}
+
+func (m AppModel) toggleTodoPane() (tea.Model, tea.Cmd) {
+	if m.todoExpanded {
+		return m.closeTodoPane()
+	}
+	m.todoExpanded = true
+	m.todoScroll = 0
+	m.focus = focusTodo
+	m.composer.Blur()
+	return m, nil
+}
+
+func (m AppModel) closeTodoPane() (tea.Model, tea.Cmd) {
+	m.todoExpanded = false
+	m.todoScroll = 0
+	m.focus = focusComposer
+	m.transcriptTop = min(m.transcriptTop, m.transcriptMaxOffset())
+	return m, m.composer.Focus()
+}
+
+func (m AppModel) updateTodoKey(key string) (tea.Model, tea.Cmd) {
+	_, _, _, height := m.todoPaneBounds()
+	switch key {
+	case "esc", "q", "tab":
+		return m.closeTodoPane()
+	case "?":
+		m.openOverlay(OverlayHelp)
+		return m, nil
+	case "h":
+		m.todoHideCompleted = !m.todoHideCompleted
+		m.todoScroll = 0
+	case "up", "k":
+		m.scrollTodoPane(-1, height)
+	case "down", "j":
+		m.scrollTodoPane(1, height)
+	case "pgup":
+		m.scrollTodoPane(-max(1, height), height)
+	case "pgdown":
+		m.scrollTodoPane(max(1, height), height)
+	case "home":
+		m.todoScroll = 0
+	case "end":
+		m.todoScroll = m.todoPaneScrollLimit(height)
+	}
+	return m, nil
+}
+
+func (m AppModel) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
+	if mouse.Button != tea.MouseLeft {
+		return m, nil
+	}
+	m.scrollbarDragging = false
+	m.overlayScrollbarDragging = false
+	if m.overlay != OverlayNone {
+		return m.handleOverlayClick(mouse)
+	}
+
+	switch m.headerClickTarget(mouse.X, mouse.Y) {
+	case uiClickBranch:
+		if m.isRunning() {
+			m.errorBanner = m.tr("branch.error.running")
+			return m, nil
+		}
+		m.pendingBranch = ""
+		return m.beginAction(Action{Kind: ActionListGitBranches})
+	case uiClickWorkspace:
+		workspace := m.workspace
+		return m, func() tea.Msg { return clipboardWriteResultMsg{err: writeClipboard(workspace)} }
+	case uiClickStatus:
+		m.openOverlay(OverlayStatus)
+		return m, nil
+	case uiClickContext:
+		m.openOverlay(OverlayContext)
+		return m, nil
+	case uiClickTodos:
+		return m.toggleTodoPane()
+	}
+
+	_, todoTop, todoWidth, todoHeight := m.todoPaneBounds()
+	if todoHeight > 0 &&
+		mouse.X >= 0 && mouse.X < todoWidth &&
+		mouse.Y >= todoTop && mouse.Y < todoTop+todoHeight {
+		if mouse.Y == todoTop && mouse.X == todoWidth-1 {
+			return m.closeTodoPane()
+		}
+		m.focus = focusTodo
+		m.composer.Blur()
+		return m, nil
+	}
+	switch m.composerCaptionClickTarget(mouse.X, mouse.Y) {
+	case uiClickModel:
+		m.openOverlay(OverlayModel)
+		return m, nil
+	case uiClickReasoning:
+		m.openOverlay(OverlayReasoning)
+		return m, nil
+	case uiClickApprovalMode:
+		return m.cycleApprovalMode()
+	}
+
+	if index, ok := m.commandSuggestionAt(mouse.X, mouse.Y); ok {
+		suggestions := m.visibleCommandSuggestions()
+		m.commandCursor = index
+		m.completeCommandSuggestion(suggestions)
+		m.focus = focusComposer
+		return m, m.composer.Focus()
+	}
+
+	if m.scrollbarContains(mouse.X, mouse.Y) {
+		m.transcriptSelection = nil
+		m.scrollbarDragging = true
+		m.focus = focusTranscript
+		m.composer.Blur()
+		m.applyScrollbarPosition(mouse.Y)
+		return m, nil
+	}
+	return m.startTranscriptSelection(mouse)
+}
+
+func (m AppModel) handleOverlayClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
+	if scrollbar, ok := m.overlayScrollbar(max(1, m.width), max(1, m.height)); ok &&
+		mouse.X == scrollbar.x &&
+		mouse.Y >= scrollbar.y &&
+		mouse.Y < scrollbar.y+scrollbar.height {
+		m.overlayScrollbarDragging = true
+		m.applyOverlayScrollbarPosition(mouse.Y)
+		return m, nil
+	}
+	rendered := strings.Split(ansi.Strip(m.renderOverlay(max(1, m.width), max(1, m.height))), "\n")
+	if mouse.Y < 0 || mouse.Y >= len(rendered) {
+		return m, m.closeOverlay()
+	}
+	line := rendered[mouse.Y]
+	borderOffset := strings.IndexAny(line, "│┌└")
+	if borderOffset < 0 {
+		return m, m.closeOverlay()
+	}
+	left := ansi.StringWidth(line[:borderOffset])
+	right := ansi.StringWidth(line) - 1
+	if mouse.X <= left || mouse.X >= right {
+		return m, m.closeOverlay()
+	}
+
+	for index, option := range m.overlayOptions() {
+		if strings.Contains(line, option.Label) {
+			m.overlayCursor = index
+			return m.activateOverlayOption()
+		}
+	}
+	return m, nil
+}
+
+func (m AppModel) isGenericReadOnlyOverlay() bool {
+	return m.overlay != OverlayNone &&
+		m.overlay != OverlayAgentDetail &&
+		m.overlay != OverlayMCPDetail &&
+		m.overlay != OverlayBackgroundDetail &&
+		m.overlay != OverlayRecap &&
+		m.overlayOptionCount() == 0
+}
+
+func (m *AppModel) scrollReadOnlyOverlay(delta int) {
+	limit := m.readOnlyOverlayScrollLimit()
+	m.overlayScroll = min(limit, max(0, m.overlayScroll+delta))
+}
+
+func (m *AppModel) applyOverlayScrollbarPosition(y int) {
+	scrollbar, ok := m.overlayScrollbar(max(1, m.width), max(1, m.height))
+	if !ok || scrollbar.height <= 1 {
+		m.overlayScroll = 0
+		return
+	}
+	position := min(max(0, y-scrollbar.y), scrollbar.height-1)
+	m.overlayScroll = (position*scrollbar.maxOffset + (scrollbar.height-1)/2) / (scrollbar.height - 1)
+}
+
+func (m AppModel) commandSuggestionAt(x, y int) (int, bool) {
+	suggestions := m.visibleCommandSuggestions()
+	if len(suggestions) == 0 {
+		return 0, false
+	}
+	recapRows := 0
+	if m.visibleRecapStatus(max(1, m.width), max(1, m.height)) != "" {
+		recapRows = 1
+	}
+	layout := measureViewLayout(
+		max(1, m.height),
+		max(1, m.width),
+		m.composerBlockLines(),
+		len(suggestions),
+		recapRows,
+		m.todoPaneDesiredHeight(max(1, m.height)),
+	)
+	width := max(1, m.width)
+	if m.stickyInstructionHeight(width, layout.bodyHeight) > 0 && layout.bodyHeight > stickySlotRows+1 {
+		layout.stickyHeight = stickySlotRows
+		layout.bodyHeight -= stickySlotRows
+	}
+	top := layout.bodyHeight
+	if layout.showChrome {
+		top += 2
+	}
+	top += layout.todoHeight + layout.todoGap + layout.stickyHeight
+	optionRows := layout.suggestionHeight
+	if optionRows > 1 {
+		optionRows--
+	}
+	row := y - top
+	if x < 0 || x >= m.width || row < 0 || row >= optionRows {
+		return 0, false
+	}
+	cursor := min(max(0, m.commandCursor), len(suggestions)-1)
+	start := optionWindowStart(cursor, len(suggestions), optionRows)
+	index := start + row
+	return index, index >= 0 && index < len(suggestions)
+}
+
+func (m AppModel) scrollbarContains(x, y int) bool {
+	left, top, width, height := m.transcriptBounds()
+	return modelHasTranscriptScrollbar(m.width) &&
+		x == left+width && y >= top && y < top+height &&
+		m.transcriptMaxOffset() > 0
+}
+
+func modelHasTranscriptScrollbar(width int) bool {
+	return width > 1
+}
+
+func (m *AppModel) applyScrollbarPosition(y int) {
+	_, top, _, height := m.transcriptBounds()
+	maxOffset := m.transcriptMaxOffset()
+	if height <= 1 || maxOffset <= 0 {
+		m.transcriptTop = 0
+		return
+	}
+	position := min(max(0, y-top), height-1)
+	fromOldest := (position*maxOffset + (height-1)/2) / (height - 1)
+	m.transcriptTop = maxOffset - fromOldest
 }
 
 func (m AppModel) startTranscriptSelection(mouse tea.Mouse) (tea.Model, tea.Cmd) {
@@ -573,11 +870,6 @@ func (m AppModel) updateOverlayKeyMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 }
 
 func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
-	if m.overlay == OverlayTodos && key == "h" {
-		m.todoHideCompleted = !m.todoHideCompleted
-		m.overlayCursor = 0
-		return m, nil
-	}
 	if m.overlay == OverlayAgentDetail {
 		switch key {
 		case "esc":
@@ -678,6 +970,10 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 			m.openOverlay(OverlayModelRoutes)
 			return m, nil
 		}
+		if m.overlay == OverlayBranchConfirm {
+			m.openOverlay(OverlayBranches)
+			return m, nil
+		}
 		if m.overlay == OverlayCancel {
 			m.status = "Running"
 		}
@@ -711,21 +1007,25 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 	}
 	count := m.overlayOptionCount()
 	if count == 0 {
+		limit := m.readOnlyOverlayScrollLimit()
 		switch key {
 		case "up", "k":
-			m.overlayScroll = max(0, m.overlayScroll-1)
+			m.overlayScroll = min(limit, max(0, m.overlayScroll-1))
 			return m, nil
 		case "down", "j":
-			m.overlayScroll++
+			m.overlayScroll = min(limit, m.overlayScroll+1)
 			return m, nil
 		case "pgup":
-			m.overlayScroll = max(0, m.overlayScroll-max(1, m.height/3))
+			m.overlayScroll = min(limit, max(0, m.overlayScroll-max(1, m.height/3)))
 			return m, nil
 		case "pgdown":
-			m.overlayScroll += max(1, m.height/3)
+			m.overlayScroll = min(limit, m.overlayScroll+max(1, m.height/3))
 			return m, nil
 		case "home":
 			m.overlayScroll = 0
+			return m, nil
+		case "end":
+			m.overlayScroll = limit
 			return m, nil
 		}
 	}
@@ -820,14 +1120,16 @@ func (m AppModel) overlayOptionCount() int {
 		return len(m.skills)
 	case OverlayLanguage:
 		return len(i18n.Languages())
-	case OverlayTodos:
-		return len(m.overlayOptions())
 	case OverlayMemory:
 		return len(m.memories)
 	case OverlayReasoning:
 		return len(m.reasoningLevels())
 	case OverlaySessions:
 		return len(m.sessions)
+	case OverlayBranches:
+		return len(m.branches)
+	case OverlayBranchConfirm:
+		return 2
 	case OverlayApproval:
 		return 3
 	case OverlayCancel:
@@ -955,6 +1257,27 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.invokeSkill(entry.Name, "")
+	case OverlayBranches:
+		if m.overlayCursor < 0 || m.overlayCursor >= len(m.branches) {
+			return m, nil
+		}
+		target := m.branches[m.overlayCursor].Name
+		if target == m.branch {
+			return m, m.closeOverlay()
+		}
+		m.pendingBranch = target
+		if m.branchDirty {
+			m.openOverlay(OverlayBranchConfirm)
+			return m, nil
+		}
+		return m.beginAction(Action{Kind: ActionSwitchGitBranch, Target: target})
+	case OverlayBranchConfirm:
+		if m.overlayCursor == 0 && m.pendingBranch != "" {
+			return m.beginAction(Action{Kind: ActionSwitchGitBranch, Target: m.pendingBranch, Decision: "confirm_dirty"})
+		}
+		m.pendingBranch = ""
+		m.openOverlay(OverlayBranches)
+		return m, nil
 	case OverlayApproval:
 		decisions := []string{"once", "session", "deny"}
 		if m.overlayCursor < len(decisions) {
@@ -1131,6 +1454,11 @@ func (m *AppModel) applyActionResult(action Action) {
 		if err := m.SetLanguage(action.Target); err != nil {
 			m.errorBanner = err.Error()
 		}
+	case ActionSwitchGitBranch:
+		m.branch = action.Target
+		m.pendingBranch = ""
+		m.branchDirty = false
+		_ = m.closeOverlay()
 	case ActionResolveApproval:
 		recovered := m.runID == ""
 		m.approval = nil
@@ -1616,7 +1944,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			m.errorBanner = m.tr("command.usage.todos")
 			break
 		}
-		m.openOverlay(OverlayTodos)
+		return m.toggleTodoPane()
 	case "agent-types":
 		if len(command.Args) != 0 {
 			m.errorBanner = m.tr("command.usage.agent_types")

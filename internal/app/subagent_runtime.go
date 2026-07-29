@@ -667,6 +667,7 @@ func (r *subagentRuntime) execute(id string) {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("build child engine: %w", err)})
 		return
 	}
+	engine.Hooks = engine.Hooks.Prepend(editRecoveryHook{run: childRun})
 	if parent.Host != nil {
 		metadata := hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD}
 		taskCompleted := hyagent.NewOutputGuardrail("claude-task-completed-hook", func(guardCtx context.Context, input hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {

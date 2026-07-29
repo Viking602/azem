@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
@@ -51,6 +52,9 @@ func (s *retryingStream) Recv() (hyprovider.Event, error) {
 		cause := recvErr
 		if event.Kind == hyprovider.EventError && event.Err != nil {
 			cause = event.Err
+		}
+		if s.emitted && errors.Is(recvErr, io.EOF) {
+			return event, recvErr
 		}
 		if !IsRetryableTransport(cause) {
 			if recvErr == nil && event.Kind != hyprovider.EventError && event.Kind != hyprovider.EventDone {
@@ -153,27 +157,40 @@ func IsRetryableTransport(err error) bool {
 		return false
 	}
 	var apiError *responses.APIError
-	if errors.As(err, &apiError) && apiError.Kind != responses.ErrorServer && apiError.Kind != responses.ErrorStream {
-		return false
+	if errors.As(err, &apiError) {
+		switch apiError.Kind {
+		case responses.ErrorServer, responses.ErrorRateLimit, responses.ErrorStream:
+			return true
+		default:
+			return false
+		}
 	}
-	if apiError != nil && apiError.Kind == responses.ErrorStream && strings.EqualFold(strings.TrimSpace(apiError.Message), "EOF") {
-		return true
-	}
-	if errors.Is(err, io.ErrUnexpectedEOF) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ENETDOWN) || errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ETIMEDOUT) {
 		return true
 	}
 	var urlError *url.Error
 	if errors.As(err, &urlError) && urlError.Err != nil {
 		return errors.Is(urlError.Err, io.EOF) || IsRetryableTransport(urlError.Err)
 	}
+	var operationError *net.OpError
+	if errors.As(err, &operationError) && operationError.Err != nil {
+		return IsRetryableTransport(operationError.Err)
+	}
 	var networkError net.Error
-	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
+	if errors.As(err, &networkError) {
 		return true
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "upstream connection reset") || strings.Contains(message, "connection reset") ||
-		strings.Contains(message, "tls: bad record mac") || strings.Contains(message, "unexpected eof") ||
-		strings.Contains(message, "broken pipe") || strings.Contains(message, "server closed idle connection") ||
-		strings.Contains(message, "client connection lost") || strings.Contains(message, "connection aborted") ||
+		strings.Contains(message, "connection refused") || strings.Contains(message, "connection closed") ||
+		strings.Contains(message, "connection aborted") || strings.Contains(message, "tls: bad record mac") ||
+		strings.Contains(message, "unexpected eof") || strings.Contains(message, "broken pipe") ||
+		strings.Contains(message, "server closed idle connection") || strings.Contains(message, "client connection lost") ||
+		strings.Contains(message, "network is unreachable") || strings.Contains(message, "no route to host") ||
+		strings.Contains(message, "i/o timeout") || strings.Contains(message, "abnormal closure") ||
 		strings.Contains(message, "use of closed network connection")
 }

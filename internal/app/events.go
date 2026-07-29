@@ -47,6 +47,7 @@ const (
 	EventModelRoutes       EventKind = "model_routes"
 	EventBackgroundState   EventKind = "background_state"
 	EventBackgroundLogs    EventKind = "background_logs"
+	EventGitBranches       EventKind = "git_branches"
 )
 
 type ModelRouteEntry struct {
@@ -54,6 +55,11 @@ type ModelRouteEntry struct {
 	Role  string
 	Label string
 	Route config.ModelRouteConfig
+}
+
+type GitBranchEntry struct {
+	Name    string
+	Current bool
 }
 
 type AgentStatePayload struct {
@@ -188,6 +194,8 @@ type Event struct {
 	ModelRoutes      []ModelRouteEntry
 	Background       []backgroundservice.Process
 	BackgroundLogs   *backgroundservice.LogSnapshot
+	GitBranches      []GitBranchEntry
+	WorkspaceDirty   bool
 	At               time.Time
 }
 
@@ -244,6 +252,9 @@ func (e Event) Clone() Event {
 		value := *e.BackgroundLogs
 		value.Lines = append([]string(nil), e.BackgroundLogs.Lines...)
 		cloned.BackgroundLogs = &value
+	}
+	if e.GitBranches != nil {
+		cloned.GitBranches = append([]GitBranchEntry(nil), e.GitBranches...)
 	}
 	return cloned
 }

@@ -50,7 +50,17 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 		return append(lines, m.renderApprovalContent(block.Content, width)...)
 	case BlockHook:
 		return m.renderHookPrompt(block, selected, width)
-	case BlockTool, BlockAgent, BlockDiff, BlockError:
+	case BlockTool:
+		header := m.renderToolHeader(block, selector, width, selected)
+		lines := []string{header}
+		if block.Collapsed {
+			return lines
+		}
+		if rendersDiff {
+			return append(lines, m.renderDiffContent(block.Content, width+2)...)
+		}
+		return append(lines, m.renderToolContent(block, width)...)
+	case BlockAgent, BlockDiff, BlockError:
 		toggle := "▾"
 		if block.Collapsed {
 			toggle = "▸"
@@ -65,31 +75,106 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 		if rendersDiff {
 			return append(lines, m.renderDiffContent(block.Content, width+2)...)
 		}
-		if block.Kind == BlockTool {
-			return append(lines, m.renderToolContent(block, width)...)
-		}
 		return append(lines, m.renderBlockContent(block.Content, width, accentStyle)...)
 	case BlockUser:
 		return m.renderUserMessage(block.Content, width)
 	case BlockThinking:
-		label := m.tr("block.thinking")
-		if state != "" {
-			label += " · " + state
-		}
-		content := strings.ReplaceAll(block.Content, "****", "**\n\n**")
-		return renderMarkdownBlock(m.theme.Thinking, m.theme.ThinkingTag.Render("◇ "+label), content, width)
+		return m.renderThinkingMessage(block, width)
 	case BlockAssistant:
-		label := ""
-		if block.State != "streaming" || strings.Contains(block.Content, "\n") {
-			label = m.theme.AssistantTag.Render("◆ AZEM")
+		if block.State == "streaming" && !strings.Contains(block.Content, "\n") {
+			return renderProseBlock(m.theme.Assistant, "", block.Content, width)
 		}
-		if state == "STREAMING" && !strings.Contains(block.Content, "\n") {
-			return renderProseBlock(m.theme.Assistant, label, block.Content, width)
-		}
-		return renderMarkdownBlock(m.theme.Assistant, label, block.Content, width)
+		return renderMarkdownBlock(m.theme.Assistant, "", block.Content, width)
 	default:
-		return renderProseBlock(m.theme.Assistant, m.theme.AssistantTag.Render("◆ AZEM"), block.Content, width)
+		return renderProseBlock(m.theme.Assistant, "", block.Content, width)
 	}
+}
+
+func (m AppModel) renderToolHeader(block Block, selector string, width int, selected bool) string {
+	summary := m.toolDisplayName(block.Title)
+	if detail := toolArgumentSummary(block); detail != "" {
+		summary += " " + detail
+	}
+	if strings.ReplaceAll(block.Title, "_", ".") == "coding.search" {
+		sections := parseSourceResult(block.Content, "")
+		matches := 0
+		for _, section := range sections {
+			matches += len(section.lines)
+		}
+		if matches > 0 {
+			summary += fmt.Sprintf(" (%d matches in %d files)", matches, len(sections))
+		}
+	}
+
+	prefix := "  "
+	if selected {
+		prefix = "› "
+	}
+	line := m.theme.Muted.Render(prefix+"◆ ") + m.theme.Assistant.Render(summary)
+	if block.State != "" && block.State != "completed" {
+		line += m.theme.MetaDivider.Render("  ·  ") +
+			m.stateStyle(block.State).Render(stateMark(block.State)+" "+m.displayState(block.State))
+	}
+	if len(block.Hooks) > 0 {
+		line += m.theme.MetaDivider.Render(fmt.Sprintf("  [hooks: %d]", len(block.Hooks)))
+	}
+	line = padOrTrim(line, width)
+	if selected {
+		return m.theme.Selected.Render(line)
+	}
+	return line
+}
+
+func toolArgumentSummary(block Block) string {
+	var arguments map[string]any
+	if json.Unmarshal([]byte(block.Arguments), &arguments) != nil {
+		return ""
+	}
+	value := func(keys ...string) string {
+		for _, key := range keys {
+			if raw, ok := arguments[key]; ok {
+				text := strings.TrimSpace(fmt.Sprint(raw))
+				if text != "" {
+					return text
+				}
+			}
+		}
+		return ""
+	}
+
+	name := strings.ReplaceAll(block.Title, "_", ".")
+	switch name {
+	case "coding.search":
+		query := value("query", "pattern")
+		scope := value("glob", "path")
+		switch {
+		case query != "" && scope != "":
+			return fmt.Sprintf("%q in %s", query, scope)
+		case query != "":
+			return fmt.Sprintf("%q", query)
+		}
+	case "coding.read.file", "coding.list.files", "coding.write.file", "coding.edit.hashline", "coding.git.diff":
+		return value("path", "file")
+	case "coding.shell", "coding.go.test", "coding.gofmt":
+		return value("command", "package", "path")
+	}
+	return value("path", "query", "command")
+}
+
+func (m AppModel) renderThinkingMessage(block Block, width int) []string {
+	label := m.tr("block.thinking")
+	header := m.theme.ThinkingTag.Render("  ◆ " + label)
+	content := strings.ReplaceAll(block.Content, "****", "**\n\n**")
+	body := renderMarkdownBlock(m.theme.Thinking, "", content, max(4, width-4))
+	if len(body) == 0 {
+		return []string{header}
+	}
+	lines := make([]string, 0, len(body)+1)
+	lines = append(lines, header)
+	for _, line := range body {
+		lines = append(lines, m.theme.BlockRail.Render("  │ ")+line)
+	}
+	return lines
 }
 
 func (m AppModel) blockKindStyles(block Block, rendersDiff bool) (lipgloss.Style, lipgloss.Style) {
@@ -338,13 +423,197 @@ func (m AppModel) highlightSourceLine(path, source string) string {
 	return rendered.String()
 }
 
+// maxStickyInstructionBody is the collapsed body height for the pinned prompt
+// chip (mirrors grok-build sticky user prompts: short, always-scannable).
+const maxStickyInstructionBody = 1
+
+// stickyCardRows is fixed: top border + body + bottom border. A fixed slot
+// prevents layout thrashing (and scroll jank) when sticky toggles or wraps.
+const stickyCardRows = maxStickyInstructionBody + 2
+
+// stickySlotRows is the layout cost of an active sticky chip (card + gap).
+const stickySlotRows = stickyCardRows + 1
+
+// renderUserMessage paints the in-transcript prompt as a floating dialog card
+// (rounded frame + elevated band), matching the grok-build user-prompt look.
 func (m AppModel) renderUserMessage(content string, width int) []string {
-	textWidth := max(1, width-2)
-	lines := make([]string, 0)
-	for _, line := range wrapText(content, textWidth) {
-		lines = append(lines, m.theme.UserSurface.Render("▌ ")+m.theme.Assistant.Render(padOrTrim(line, textWidth)))
+	return m.renderUserDialog(content, width, 0)
+}
+
+// renderUserDialog draws a rounded instruction card. maxBodyLines caps the
+// body (0 = unlimited); sticky pins use a small cap so the chip stays compact.
+func (m AppModel) renderUserDialog(content string, width int, maxBodyLines int) []string {
+	if width < 6 {
+		return []string{m.theme.UserSurface.Render(padOrTrim(" › "+strings.TrimSpace(content), width))}
 	}
+	innerWidth := max(1, width-4) // between "│ " and " │"
+	textWidth := max(1, innerWidth-2)
+	body := wrapText(strings.TrimSpace(content), textWidth)
+	if len(body) == 0 {
+		body = []string{""}
+	}
+	if maxBodyLines > 0 && len(body) > maxBodyLines {
+		body = append([]string(nil), body[:maxBodyLines]...)
+		last := body[len(body)-1]
+		if ansi.StringWidth(last) >= textWidth {
+			body[len(body)-1] = ansi.Truncate(last, textWidth, "…")
+		} else if !strings.HasSuffix(last, "…") {
+			body[len(body)-1] = last + "…"
+		}
+	}
+	border := m.theme.Border
+	lines := make([]string, 0, len(body)+2)
+	lines = append(lines, border.Render("╭"+strings.Repeat("─", width-2)+"╮"))
+	for index, line := range body {
+		prefix := "  "
+		if index == 0 {
+			prefix = "› "
+		}
+		inner := m.theme.UserSurface.Render(padOrTrim(prefix+line, innerWidth))
+		lines = append(lines, border.Render("│ ")+inner+border.Render(" │"))
+	}
+	lines = append(lines, border.Render("╰"+strings.Repeat("─", width-2)+"╯"))
 	return lines
+}
+
+type stickyUserMark struct {
+	content string
+	endLine int
+	runID   string
+}
+
+// stickyInstructionContent returns the latest user prompt that has scrolled
+// above the transcript viewport (iOS/grok sticky section header).
+//
+// bodyHeight must be the pre-sticky body height. Decision uses a fixed sticky
+// slot so showing the chip cannot feed back into a different decision and
+// thrash scroll position.
+func (m AppModel) stickyInstructionContent(contentWidth, bodyHeight int) (string, bool) {
+	if bodyHeight < stickySlotRows+2 {
+		return "", false
+	}
+	// Ensure marks are warm; transcriptLines is cached after the first call.
+	_ = m.transcriptLines(contentWidth)
+	cache := m.transcriptLayout
+	if cache == nil || len(cache.userMarks) == 0 {
+		return "", false
+	}
+	totalLines := len(cache.lines)
+	if totalLines == 0 {
+		return "", false
+	}
+
+	contentHeight := max(1, bodyHeight-stickySlotRows)
+	if m.isRunning() || m.transcriptOffsetLimit(totalLines, contentHeight) > 0 {
+		footerGap := 0
+		if contentHeight >= 3 {
+			footerGap = 1
+		}
+		contentHeight = max(1, contentHeight-1-footerGap)
+	}
+	offset := min(m.transcriptOffsetLimit(totalLines, max(1, bodyHeight-stickySlotRows)), max(0, m.transcriptTop))
+	end := totalLines - offset
+	visibleStart := max(0, end-contentHeight)
+
+	for index := len(cache.userMarks) - 1; index >= 0; index-- {
+		mark := cache.userMarks[index]
+		if mark.endLine > visibleStart {
+			continue
+		}
+		if m.isRunning() && m.runID != "" && mark.runID != "" && mark.runID != m.runID {
+			continue
+		}
+		content := strings.TrimSpace(mark.content)
+		if content == "" {
+			continue
+		}
+		return content, true
+	}
+	return "", false
+}
+
+// stickyInstructionHeight returns the fixed layout cost of the sticky chip
+// (0 when hidden). Height is constant to avoid scroll jank from wrap changes.
+func (m AppModel) stickyInstructionHeight(width, bodyHeight int) int {
+	if m.stickyVisibleWithCache(bodyHeight) {
+		return stickyCardRows
+	}
+	// Cold cache (marks not built yet): fall back to full content lookup once.
+	if _, ok := m.stickyInstructionContent(transcriptContentWidth(width, bodyHeight), bodyHeight); ok {
+		return stickyCardRows
+	}
+	return 0
+}
+
+func (m AppModel) renderStickyInstruction(width, bodyHeight int) string {
+	content, ok := m.stickyInstructionContent(transcriptContentWidth(width, bodyHeight), bodyHeight)
+	if !ok || width <= 0 {
+		return ""
+	}
+	lines := m.renderUserDialog(content, width, maxStickyInstructionBody)
+	for len(lines) < stickyCardRows {
+		lines = append(lines, padStyledLine("", width))
+	}
+	if len(lines) > stickyCardRows {
+		lines = lines[:stickyCardRows]
+	}
+	for index, line := range lines {
+		lines[index] = padStyledLine(line, width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// applyStickyLayout reserves a fixed sticky slot on layout when the current
+// instruction has scrolled out of view. Returns the rendered chip (may be empty).
+// Uses paint cache so pure scroll frames reuse the previous chip string.
+func (m AppModel) applyStickyLayout(width int, layout *viewLayout) string {
+	if layout == nil || layout.bodyHeight < stickySlotRows+2 {
+		return ""
+	}
+	preBody := layout.bodyHeight
+	content, ok := m.stickyInstructionContent(transcriptContentWidth(width, preBody), preBody)
+	if !ok {
+		if p := m.paint; p != nil {
+			p.stickyHeight = 0
+			p.stickyText = ""
+			p.stickyRender = ""
+			p.preBodyHeight = preBody
+		}
+		return ""
+	}
+	layout.stickyHeight = stickySlotRows
+	layout.bodyHeight -= stickySlotRows
+
+	if p := m.paint; p != nil &&
+		p.stickyText == content &&
+		p.stickyHeight == stickySlotRows &&
+		p.width == width &&
+		p.stickyRender != "" {
+		return p.stickyRender
+	}
+
+	lines := m.renderUserDialog(content, width, maxStickyInstructionBody)
+	for len(lines) < stickyCardRows {
+		lines = append(lines, padStyledLine("", width))
+	}
+	if len(lines) > stickyCardRows {
+		lines = lines[:stickyCardRows]
+	}
+	for index, line := range lines {
+		lines[index] = padStyledLine(line, width)
+	}
+	rendered := strings.Join(lines, "\n")
+	if p := m.paint; p != nil {
+		p.stickyHeight = stickySlotRows
+		p.stickyText = content
+		p.stickyRender = rendered
+		p.stickyTop = m.transcriptTop
+		p.stickyRunID = m.runID
+		p.stickyRun = m.isRunning()
+		p.preBodyHeight = preBody
+		p.width = width
+	}
+	return rendered
 }
 
 func (m AppModel) renderHookPrompt(block Block, selected bool, width int) []string {

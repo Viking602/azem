@@ -264,6 +264,7 @@ type teamApprovalDriver struct {
 	sessionID string
 	runID     string
 	goal      string
+	recovery  *agentservice.EditRecovery
 }
 
 type approvalRequiredDriver struct{ inner tool.Driver }
@@ -294,6 +295,9 @@ func (d *teamApprovalDriver) Definition() tool.Definition {
 
 func (d *teamApprovalDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
 	definition := d.inner.Definition()
+	if blocked, required := d.recovery.BlockedEdit(call); required {
+		return blocked, nil
+	}
 	if hooks.PreToolPermissionFromContext(ctx) == "ask" || teamToolRequiresApproval(definition, call) {
 		resolution, err := d.host.awaitTeamApproval(ctx, d.sessionID, d.runID, d.goal, call, definition)
 		if err != nil {
@@ -313,13 +317,18 @@ func (d *teamApprovalDriver) Execute(ctx context.Context, call tool.Call, sink t
 			}, nil
 		}
 	}
+	var result tool.Result
+	var err error
 	if teamToolHasSideEffect(definition) {
-		return d.host.coding.ExecuteTeamDriver(ctx, d.runID, d.inner, call, sink)
+		result, err = d.host.coding.ExecuteTeamDriver(ctx, d.runID, d.inner, call, sink)
+	} else {
+		result, err = d.inner.Execute(ctx, call, sink)
 	}
-	return d.inner.Execute(ctx, call, sink)
+	d.recovery.Observe(call, result, err)
+	return result, err
 }
 
-func (s *Service) teamToolBus(ctx context.Context, sessionID, runID, goal string) (*tool.Bus, error) {
+func (s *Service) teamToolBus(ctx context.Context, sessionID, runID, goal string, recovery *agentservice.EditRecovery) (*tool.Bus, error) {
 	drivers, err := s.coding.WorkspaceDrivers(ctx, s.cfg.Workspace.Root)
 	if err != nil {
 		return nil, err
@@ -332,7 +341,7 @@ func (s *Service) teamToolBus(ctx context.Context, sessionID, runID, goal string
 	}
 	governed := make([]tool.Driver, 0, len(drivers))
 	for _, driver := range drivers {
-		approval := &teamApprovalDriver{inner: driver, host: s, sessionID: sessionID, runID: runID, goal: goal}
+		approval := &teamApprovalDriver{inner: driver, host: s, sessionID: sessionID, runID: runID, goal: goal, recovery: recovery}
 		metadata := hooks.Metadata{SessionID: sessionID, RunID: runID, AgentID: "team", AgentType: "team", CWD: s.cfg.Workspace.Root}
 		governed = append(governed, hooks.WrapDriver(s.hooks, metadata, approval))
 	}

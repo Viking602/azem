@@ -24,6 +24,7 @@ import (
 
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
 	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/go-hydaelyn/coding"
 	"github.com/Viking602/go-hydaelyn/message"
 	"github.com/Viking602/go-hydaelyn/multiagent"
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
@@ -73,6 +74,11 @@ func TestMainInstructionsContract(t *testing.T) {
 	} {
 		if !strings.Contains(mainInstructions, "`"+name+"`") {
 			t.Errorf("main instructions do not list %q", name)
+		}
+	}
+	for _, grammar := range []string{"`¶PATH#TAG`", "`replace N..M:`", "`+final content`", "Never use `@@` hunks", "`-old` rows"} {
+		if !strings.Contains(mainInstructions, grammar) {
+			t.Errorf("main instructions omit hashline grammar %q", grammar)
 		}
 	}
 	for _, unsupported := range []string{"lsp", "ast_edit", "browser", "worker.run"} {
@@ -3815,7 +3821,8 @@ func TestTurnContextBuildFallsBackWhenModelHistoryScopeDiffers(t *testing.T) {
 
 func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
-	hooks := service.teamHooks(TurnRequest{SessionID: "session-1", Provider: "chatgpt", Model: "gpt-team"}, "team-parent", teamExecutionPolicy{})
+	recovery := &agentservice.EditRecovery{}
+	hooks := service.teamHooks(TurnRequest{SessionID: "session-1", Provider: "chatgpt", Model: "gpt-team"}, "team-parent", teamExecutionPolicy{}, recovery)
 	base := hyagent.Engine{ExtraBody: map[string]any{"parallel_tool_calls": false}}
 	prepare := func(runID, role string) hyagent.Engine {
 		t.Helper()
@@ -3840,6 +3847,38 @@ func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testin
 	}
 	if _, mutated := base.ExtraBody["prompt_cache_key"]; mutated {
 		t.Fatalf("base engine ExtraBody mutated: %#v", base.ExtraBody)
+	}
+	failedPatch, _ := json.Marshal(map[string]string{"input": "[internal/app/app.go#ABCD]\ninvalid"})
+	recovery.Observe(
+		tool.Call{ID: "failed-edit", Name: coding.ToolEditHashline, Arguments: failedPatch},
+		tool.Result{ToolCallID: "failed-edit", Name: coding.ToolEditHashline, IsError: true},
+		nil,
+	)
+	recoveryRequest := hyprovider.Request{Tools: []message.ToolDefinition{
+		{Name: coding.ToolEditHashline},
+		{Name: coding.ToolReadFile},
+	}}
+	if err := first.Hooks.BeforeModelCall(context.Background(), &recoveryRequest); err != nil {
+		t.Fatal(err)
+	}
+	if len(recoveryRequest.Tools) != 1 || recoveryRequest.Tools[0].Name != coding.ToolReadFile {
+		t.Fatalf("team edit recovery tools = %#v", recoveryRequest.Tools)
+	}
+	readArguments, _ := json.Marshal(map[string]string{"path": "internal/app/app.go"})
+	recovery.Observe(
+		tool.Call{ID: "recovery-read", Name: coding.ToolReadFile, Arguments: readArguments},
+		tool.Result{ToolCallID: "recovery-read", Name: coding.ToolReadFile},
+		nil,
+	)
+	restoredRequest := hyprovider.Request{Tools: []message.ToolDefinition{
+		{Name: coding.ToolEditHashline},
+		{Name: coding.ToolReadFile},
+	}}
+	if err := first.Hooks.BeforeModelCall(context.Background(), &restoredRequest); err != nil {
+		t.Fatal(err)
+	}
+	if len(restoredRequest.Tools) != 2 {
+		t.Fatalf("team tools were not restored after read: %#v", restoredRequest.Tools)
 	}
 }
 

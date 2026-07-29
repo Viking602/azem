@@ -159,6 +159,9 @@ func (m *AppModel) invalidateTranscriptLayout() {
 	if m.transcriptLayout != nil {
 		m.transcriptLayout.initialized = false
 	}
+	if m.paint != nil {
+		m.paint.lineCount = -1
+	}
 }
 
 func hookRunFromEvent(event app.Event) HookRunView {

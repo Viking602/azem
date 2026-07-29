@@ -32,7 +32,7 @@ func (t *retryTransport) Name() string { return "retry-test" }
 
 func (t *retryTransport) Post(context.Context, []byte) (*http.Response, error) {
 	t.requests++
-	body := `data: {"type":"error","code":"server_error","message":"connection reset by peer"}` + "\n\n"
+	body := `data: {"type":"error","code":"server_is_overloaded","message":"server overloaded; request ID req_server_456"}` + "\n\n"
 	if t.requests == 3 {
 		body = `data: {"type":"response.completed","response":{"status":"completed"}}` + "\n\n"
 	}
@@ -42,7 +42,7 @@ func (t *retryTransport) Post(context.Context, []byte) (*http.Response, error) {
 	}, nil
 }
 
-func TestDriverReportsConnectionRetriesThroughGenericObserver(t *testing.T) {
+func TestDriverReportsRateLimitRetriesThroughGenericObserver(t *testing.T) {
 	transport := &retryTransport{}
 	driver, err := New(transport, []string{"grok-test"}, "")
 	if err != nil {
@@ -71,6 +71,9 @@ func TestDriverReportsConnectionRetriesThroughGenericObserver(t *testing.T) {
 	for index, retry := range progress {
 		if retry.Attempt != index+1 || retry.Max != azprovider.DefaultMaxStreamRetries || retry.Cause == nil {
 			t.Fatalf("retry %d=%#v", index+1, retry)
+		}
+		if !strings.Contains(retry.Cause.Error(), "request ID req_server_456") {
+			t.Fatalf("retry %d lost request ID: %v", index+1, retry.Cause)
 		}
 	}
 }

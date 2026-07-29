@@ -63,6 +63,8 @@ const (
 	ActionStartBackground  ActionKind = "start_background"
 	ActionStopBackground   ActionKind = "stop_background"
 	ActionLogsBackground   ActionKind = "logs_background"
+	ActionListGitBranches  ActionKind = "list_git_branches"
+	ActionSwitchGitBranch  ActionKind = "switch_git_branch"
 )
 
 type Action struct {
@@ -91,6 +93,10 @@ func (s *Service) AttachReconcileResolver(resolver ReconcileResolver) {
 
 func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	switch action.Kind {
+	case ActionListGitBranches:
+		return s.emitGitBranches(ctx, "listed")
+	case ActionSwitchGitBranch:
+		return s.switchGitBranch(ctx, action.Target, action.Decision == "confirm_dirty")
 	case ActionListBackground:
 		return s.emitBackgroundSnapshot(ctx, "listed")
 	case ActionStartBackground:
@@ -395,6 +401,127 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	default:
 		return fmt.Errorf("unsupported action %q", action.Kind)
 	}
+}
+
+func (s *Service) emitGitBranches(ctx context.Context, state string) error {
+	branches, current, dirty, err := s.gitBranchSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	s.emitGitBranchSnapshot(ctx, state, branches, current, dirty)
+	return nil
+}
+
+func (s *Service) switchGitBranch(ctx context.Context, target string, confirmDirty bool) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("git branch is required")
+	}
+	const branchSwitchReservation = "maintenance:switch-git-branch"
+	s.mu.Lock()
+	root := s.cfg.Workspace.Root
+	allowWrite := s.cfg.Workspace.AllowWrite
+	if s.activeRun != "" {
+		s.mu.Unlock()
+		return ErrRunActive
+	}
+	if !allowWrite {
+		s.mu.Unlock()
+		return fmt.Errorf("git branch switching is disabled by workspace.allow_write")
+	}
+	s.activeRun = branchSwitchReservation
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.activeRun == branchSwitchReservation {
+			s.activeRun = ""
+		}
+		s.mu.Unlock()
+	}()
+	branches, current, dirty, err := gitBranchSnapshot(ctx, root)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, branch := range branches {
+		if branch.Name == target {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown local git branch %q", target)
+	}
+	if target == current {
+		s.emitGitBranchSnapshot(ctx, "switched", branches, current, dirty)
+		return nil
+	}
+	if dirty && !confirmDirty {
+		s.emitGitBranchSnapshot(ctx, "dirty_confirmation_required", branches, current, true)
+		return ErrDirtyWorkspace
+	}
+	if _, err := gitOutputLimited(ctx, root, 64*1024, "switch", "--no-guess", "--", target); err != nil {
+		return fmt.Errorf("switch git branch to %q: %w", target, err)
+	}
+	return s.emitGitBranches(ctx, "switched")
+}
+
+func (s *Service) gitBranchSnapshot(ctx context.Context) ([]GitBranchEntry, string, bool, error) {
+	s.mu.Lock()
+	root := s.cfg.Workspace.Root
+	s.mu.Unlock()
+	return gitBranchSnapshot(ctx, root)
+}
+
+func gitBranchSnapshot(ctx context.Context, root string) ([]GitBranchEntry, string, bool, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil, "", false, fmt.Errorf("workspace root is empty")
+	}
+	inside, err := gitOutputLimited(ctx, root, 1024, "rev-parse", "--is-inside-work-tree")
+	if err != nil || strings.TrimSpace(string(inside)) != "true" {
+		if err != nil {
+			return nil, "", false, fmt.Errorf("inspect git workspace: %w", err)
+		}
+		return nil, "", false, fmt.Errorf("workspace %q is not a git work tree", root)
+	}
+	currentOutput, err := gitOutputLimited(ctx, root, 64*1024, "branch", "--show-current")
+	if err != nil {
+		return nil, "", false, fmt.Errorf("read current git branch: %w", err)
+	}
+	current := strings.TrimSpace(string(currentOutput))
+	branchOutput, err := gitOutputLimited(ctx, root, 1024*1024, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+	if err != nil {
+		return nil, "", false, fmt.Errorf("list git branches: %w", err)
+	}
+	lines := strings.Split(string(branchOutput), "\n")
+	branches := make([]GitBranchEntry, 0, len(lines))
+	currentListed := false
+	for _, line := range lines {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		isCurrent := name == current
+		currentListed = currentListed || isCurrent
+		branches = append(branches, GitBranchEntry{Name: name, Current: isCurrent})
+	}
+	if current != "" && !currentListed {
+		branches = append(branches, GitBranchEntry{Name: current, Current: true})
+	}
+	sort.Slice(branches, func(left, right int) bool { return branches[left].Name < branches[right].Name })
+	status, err := gitOutputLimited(ctx, root, 1024*1024, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return nil, "", false, fmt.Errorf("read git workspace status: %w", err)
+	}
+	return branches, current, len(status) > 0, nil
+}
+
+func (s *Service) emitGitBranchSnapshot(ctx context.Context, state string, branches []GitBranchEntry, current string, dirty bool) {
+	s.emit(ctx, Event{
+		Kind: EventGitBranches, State: state, Text: current,
+		GitBranches: branches, WorkspaceDirty: dirty,
+	})
 }
 
 func (s *Service) modelRouteEntries() []ModelRouteEntry {

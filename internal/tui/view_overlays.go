@@ -10,7 +10,6 @@ import (
 
 	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/i18n"
-	"github.com/Viking602/azem/internal/session"
 )
 
 func (m AppModel) renderCommandSuggestions(width int, height int, suggestions []SlashCommand) string {
@@ -52,6 +51,129 @@ func (m AppModel) renderCommandSuggestions(width int, height int, suggestions []
 	return strings.Join(rows, "\n")
 }
 
+type overlayFrameLayout struct {
+	boxWidth    int
+	innerWidth  int
+	innerHeight int
+	leftPadding int
+	topPadding  int
+}
+
+func (m AppModel) genericOverlayFrame(width, height int) overlayFrameLayout {
+	maxBoxWidth := 82
+	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes || m.overlay == OverlayStatus || m.overlay == OverlayContext || m.overlay == OverlayBackground {
+		maxBoxWidth = 110
+	}
+	boxWidth := min(maxBoxWidth, max(3, width-2))
+	innerHeight := max(1, min(height-2, 20))
+	if m.overlay == OverlayStatus || m.overlay == OverlayContext {
+		innerHeight = max(1, min(height-2, 28))
+	}
+	return overlayFrameLayout{
+		boxWidth:    boxWidth,
+		innerWidth:  max(1, boxWidth-2),
+		innerHeight: innerHeight,
+		leftPadding: max(0, (width-boxWidth)/2),
+		topPadding:  max(0, (height-(innerHeight+2))/2),
+	}
+}
+
+func (m AppModel) overlayContentRows(innerHeight int) int {
+	_, subtitle := m.overlayHeading()
+	contentRows := innerHeight - 4
+	if m.overlay == OverlayModel {
+		contentRows--
+	}
+	if subtitle == "" {
+		contentRows++
+	}
+	return max(1, contentRows)
+}
+
+func (m AppModel) overlayDescriptionRenderLines(innerWidth int) ([]string, bool) {
+	if m.overlay == OverlayDiff {
+		if block, ok := m.selectedDiff(); ok {
+			return m.renderDiffRows(block.Content, max(4, innerWidth-2), " "), true
+		}
+	}
+	if m.overlay == OverlayRecap {
+		return m.recapDescriptionLines(max(4, innerWidth-4)), false
+	}
+	if m.overlay == OverlayContext {
+		return m.contextOverlayDescriptionLines(max(4, innerWidth-4)), false
+	}
+	descriptionLines := make([]string, 0)
+	for _, line := range m.overlayDescription() {
+		descriptionLines = append(descriptionLines, wrapText(line, max(4, innerWidth-4))...)
+	}
+	return descriptionLines, false
+}
+
+type overlayScrollbarGeometry struct {
+	x         int
+	y         int
+	height    int
+	maxOffset int
+	offset    int
+}
+
+func (m AppModel) overlayScrollbar(width, height int) (overlayScrollbarGeometry, bool) {
+	if width < 6 || height < 5 ||
+		m.overlay == OverlayAgentDetail ||
+		m.overlay == OverlayMCPDetail ||
+		m.overlay == OverlayBackgroundDetail ||
+		len(m.overlayOptions()) > 0 {
+		return overlayScrollbarGeometry{}, false
+	}
+	frame := m.genericOverlayFrame(width, height)
+	descriptionLines, _ := m.overlayDescriptionRenderLines(frame.innerWidth)
+	viewportRows := m.overlayContentRows(frame.innerHeight)
+	maxOffset := max(0, len(descriptionLines)-viewportRows)
+	if maxOffset == 0 {
+		return overlayScrollbarGeometry{}, false
+	}
+	_, subtitle := m.overlayHeading()
+	descriptionY := frame.topPadding + 3
+	if subtitle != "" {
+		descriptionY++
+	}
+	if m.overlay == OverlayModel {
+		descriptionY++
+	}
+	return overlayScrollbarGeometry{
+		x:         frame.leftPadding + frame.innerWidth - 1,
+		y:         descriptionY,
+		height:    viewportRows,
+		maxOffset: maxOffset,
+		offset:    min(max(0, m.overlayScroll), maxOffset),
+	}, true
+}
+
+func (m AppModel) readOnlyOverlayScrollLimit() int {
+	scrollbar, ok := m.overlayScrollbar(max(1, m.width), max(1, m.height))
+	if !ok {
+		return 0
+	}
+	return scrollbar.maxOffset
+}
+
+func (m AppModel) renderOverlayScrollbar(rows []string, rowStart, innerWidth, total, viewport, offset int) {
+	maxOffset := max(0, total-viewport)
+	if maxOffset == 0 || viewport <= 0 {
+		return
+	}
+	thumbStart, thumbSize := transcriptScrollbarThumb(viewport, total, maxOffset, maxOffset-offset)
+	column := max(0, innerWidth-2)
+	for row := range viewport {
+		index := rowStart + row
+		if index < 0 || index >= len(rows) {
+			break
+		}
+		glyph := m.renderScrollbarCell(row, thumbStart, thumbSize)
+		rows[index] = ansi.Cut(rows[index], 0, column) + glyph + ansi.Cut(rows[index], column+1, innerWidth)
+	}
+}
+
 func (m AppModel) renderOverlay(width int, height int) string {
 	if width < 6 || height < 5 {
 		title, _ := m.overlayHeading()
@@ -73,56 +195,26 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	if m.overlay == OverlayBackgroundDetail {
 		return m.renderBackgroundDetailOverlay(width, height)
 	}
-	maxBoxWidth := 82
-	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes || m.overlay == OverlayStatus || m.overlay == OverlayContext || m.overlay == OverlayBackground {
-		maxBoxWidth = 110
-	}
-	boxWidth := min(maxBoxWidth, max(3, width-2))
-	innerWidth := max(1, boxWidth-2)
-	maxInnerHeight := 20
-	if m.overlay == OverlayStatus || m.overlay == OverlayContext {
-		maxInnerHeight = 28
-	}
-	innerHeight := max(1, min(height-2, maxInnerHeight))
+	frame := m.genericOverlayFrame(width, height)
+	innerWidth := frame.innerWidth
+	innerHeight := frame.innerHeight
 	title, subtitle := m.overlayHeading()
-	var description []string
-	if m.overlay != OverlayRecap {
-		description = m.overlayDescription()
-	}
 	options := m.overlayOptions()
-
-	contentRows := innerHeight - 4
-	if m.overlay == OverlayModel {
-		contentRows--
-	}
-	if subtitle == "" {
-		contentRows++
-	}
-	if contentRows < 1 {
-		contentRows = 1
-	}
-	descriptionLines := make([]string, 0)
-	diffDescription := false
-	if m.overlay == OverlayDiff {
-		if block, ok := m.selectedDiff(); ok {
-			descriptionLines = m.renderDiffRows(block.Content, max(4, innerWidth-2), " ")
-			diffDescription = true
-		}
-	}
-	if m.overlay == OverlayRecap {
-		descriptionLines = m.recapDescriptionLines(max(4, innerWidth-4))
-	} else if !diffDescription {
-		for _, line := range description {
-			descriptionLines = append(descriptionLines, wrapText(line, max(4, innerWidth-4))...)
-		}
-	}
+	contentRows := m.overlayContentRows(innerHeight)
+	descriptionLines, diffDescription := m.overlayDescriptionRenderLines(innerWidth)
 	maxDescription := max(0, contentRows-1)
+	descriptionTotal := len(descriptionLines)
+	descriptionOffset := 0
+	descriptionViewport := maxDescription
 	if len(options) == 0 {
 		maxDescription = max(1, contentRows)
-		start := min(max(0, m.overlayScroll), max(0, len(descriptionLines)-maxDescription))
-		descriptionLines = descriptionLines[start:min(len(descriptionLines), start+maxDescription)]
+		descriptionViewport = maxDescription
+		maxOffset := max(0, descriptionTotal-maxDescription)
+		descriptionOffset = min(max(0, m.overlayScroll), maxOffset)
+		descriptionLines = descriptionLines[descriptionOffset:min(descriptionTotal, descriptionOffset+maxDescription)]
 	} else {
 		maxDescription = min(maxDescription, 4)
+		descriptionViewport = maxDescription
 		if len(descriptionLines) > maxDescription {
 			descriptionLines = append(descriptionLines[:max(0, maxDescription-1)], "…")
 		}
@@ -147,12 +239,23 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		rows = append(rows, m.boxRow(" "+m.modelSearch.View(), innerWidth, m.theme.Assistant, false))
 	}
 	rows = append(rows, m.boxRow(" "+strings.Repeat("─", max(0, innerWidth-2)), innerWidth, m.theme.Border, false))
+	descriptionRowStart := len(rows)
 	for _, line := range descriptionLines {
 		if diffDescription {
 			rows = append(rows, m.boxRow(line, innerWidth, lipgloss.NewStyle(), false))
 		} else {
 			rows = append(rows, m.boxRow(" "+line, innerWidth, m.theme.Assistant, false))
 		}
+	}
+	if len(options) == 0 {
+		m.renderOverlayScrollbar(
+			rows,
+			descriptionRowStart,
+			innerWidth,
+			descriptionTotal,
+			descriptionViewport,
+			descriptionOffset,
+		)
 	}
 	if stickyGroup != "" {
 		rows = append(rows, m.boxRow(" "+strings.ToUpper(providerDisplayName(stickyGroup)), innerWidth, m.theme.OverlayGroup, false))
@@ -178,12 +281,6 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		if selected {
 			style = m.theme.Selected
 		}
-		if m.overlay == OverlayTodos && option.State == string(session.TodoCompleted) {
-			style = style.Strikethrough(true)
-		}
-		if m.overlay == OverlayTodos && option.State == string(session.TodoCancelled) {
-			style = style.Strikethrough(true)
-		}
 		rows = append(rows, m.boxRow(text, innerWidth, style, false))
 	}
 	for len(rows) < innerHeight-1 {
@@ -203,9 +300,8 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	}
 	box = append(box, bottom)
 
-	boxHeight := len(box)
-	topPadding := max(0, (height-boxHeight)/2)
-	leftPadding := strings.Repeat(" ", max(0, (width-boxWidth)/2))
+	topPadding := frame.topPadding
+	leftPadding := strings.Repeat(" ", frame.leftPadding)
 	output := make([]string, 0, height)
 	for range topPadding {
 		output = append(output, "")
@@ -607,6 +703,10 @@ func (m AppModel) overlayHeading() (string, string) {
 		return m.tr("overlay.reasoning.title"), m.provider + "/" + first(m.model, m.tr("value.no_model")) + " · " + m.tr("overlay.reasoning.applied_next")
 	case OverlaySessions:
 		return m.tr("overlay.sessions.title"), m.tr("overlay.sessions.subtitle")
+	case OverlayBranches:
+		return m.tr("overlay.branches.title"), m.tr("overlay.branches.subtitle")
+	case OverlayBranchConfirm:
+		return m.tr("overlay.branch_confirm.title"), m.tr("overlay.branch_confirm.subtitle")
 	case OverlayApproval:
 		return m.tr("overlay.approval.title"), m.tr("overlay.approval.subtitle")
 	case OverlayCancel:
@@ -615,8 +715,6 @@ func (m AppModel) overlayHeading() (string, string) {
 		return m.tr("overlay.diff.title"), m.tr("overlay.diff.subtitle")
 	case OverlayAgents:
 		return m.tr("overlay.agents.title"), m.tr("overlay.agents.mode", map[string]string{"mode": strings.ToUpper(m.agentMode)})
-	case OverlayTodos:
-		return m.tr("overlay.todos.title"), m.tr("overlay.todos.subtitle")
 	case OverlayMemory:
 		return m.tr("overlay.memory.title"), m.tr("overlay.memory.subtitle")
 	case OverlayRecap:
@@ -656,13 +754,6 @@ func (m AppModel) overlayDescription() []string {
 	switch m.overlay {
 	case OverlayModelRoutes:
 		return []string{m.tr("overlay.model_routes.description")}
-	case OverlayTodos:
-		if len(m.todo.Phases) == 0 {
-			return []string{m.tr("overlay.todos.empty")}
-		}
-		if m.todo.Goal != "" {
-			return []string{m.todo.Goal}
-		}
 	case OverlayMemory:
 		if len(m.memories) == 0 {
 			return []string{m.tr("overlay.memory.empty")}
@@ -725,6 +816,15 @@ func (m AppModel) overlayDescription() []string {
 			return []string{m.tr("overlay.sessions.empty")}
 		}
 		return []string{m.tr("overlay.sessions.instructions")}
+	case OverlayBranches:
+		if len(m.branches) == 0 {
+			return []string{m.tr("overlay.branches.empty")}
+		}
+		if m.branchDirty {
+			return []string{m.tr("overlay.branches.dirty")}
+		}
+	case OverlayBranchConfirm:
+		return []string{m.tr("overlay.branch_confirm.description", map[string]string{"branch": m.pendingBranch})}
 	case OverlayApproval:
 		if m.approval == nil {
 			return []string{m.tr("overlay.approval.resolved")}
@@ -794,29 +894,6 @@ func (m AppModel) overlayOptions() []overlayOption {
 				detail += " · " + entry.Label
 			}
 			options = append(options, overlayOption{Label: label, Detail: detail})
-		}
-		return options
-	case OverlayTodos:
-		options := []overlayOption{}
-		itemNumber := 0
-		for _, phase := range m.todo.Phases {
-			for _, item := range phase.Items {
-				itemNumber++
-				if m.todoHideCompleted && item.Status == session.TodoCompleted {
-					continue
-				}
-				status := m.todoDisplayStatus(item)
-				detail := m.displayState(string(item.Status)) + " · " + item.ID
-				if item.SubagentRunID != "" {
-					for _, agent := range m.agents {
-						if agent.ID == item.SubagentRunID {
-							detail += " · " + m.tr("block.agent") + " " + m.displayState(agent.State)
-						}
-					}
-				}
-				label := fmt.Sprintf("%s  %d. %s", todoMark(status, m.animationFrame), itemNumber, item.Content)
-				options = append(options, overlayOption{Group: phase.Title, Label: label, Detail: detail, State: string(status)})
-			}
 		}
 		return options
 	case OverlayCommand:
@@ -932,6 +1009,21 @@ func (m AppModel) overlayOptions() []overlayOption {
 			options = append(options, overlayOption{Label: first(session.Title, session.ID), Detail: detail, State: state})
 		}
 		return options
+	case OverlayBranches:
+		options := make([]overlayOption, 0, len(m.branches))
+		for _, branch := range m.branches {
+			state := ""
+			if branch.Current {
+				state = "current"
+			}
+			options = append(options, overlayOption{Label: branch.Name, State: state})
+		}
+		return options
+	case OverlayBranchConfirm:
+		return []overlayOption{
+			{Label: m.tr("overlay.branch_confirm.switch"), Detail: m.tr("overlay.branch_confirm.switch_detail")},
+			{Label: m.tr("overlay.branch_confirm.back"), Detail: m.tr("overlay.branch_confirm.back_detail")},
+		}
 	case OverlayApproval:
 		return []overlayOption{
 			{Label: m.tr("overlay.approval.once"), Detail: m.tr("overlay.approval.once_detail"), State: "a"},
@@ -1035,14 +1127,16 @@ func (m AppModel) overlayFooter() string {
 		return m.tr("overlay.footer.model")
 	case OverlaySkills:
 		return m.tr("overlay.footer.skills")
+	case OverlayBranches:
+		return m.tr("overlay.branches.footer")
+	case OverlayBranchConfirm:
+		return m.tr("overlay.branch_confirm.footer")
 	case OverlayApproval:
 		return m.tr("overlay.footer.approval")
 	case OverlayCancel:
 		return m.tr("overlay.footer.cancel")
 	case OverlayAgents:
 		return m.tr("overlay.footer.agents")
-	case OverlayTodos:
-		return m.tr("overlay.footer.todos")
 	case OverlayMemory:
 		return m.tr("overlay.memory.footer")
 	case OverlayRecap:

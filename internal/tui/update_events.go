@@ -34,6 +34,7 @@ func (m *AppModel) applyEvent(event app.Event) {
 	switch event.Kind {
 	case app.EventBootstrapDone:
 		m.workspace = event.Text
+		m.branch = resolveGitBranch(m.workspace)
 		m.status = "Ready"
 	case app.EventSessionLoaded:
 		m.loadSessionEvent(event)
@@ -45,12 +46,25 @@ func (m *AppModel) applyEvent(event app.Event) {
 	case app.EventTodoUpdated:
 		if event.Todo != nil && event.Todo.Revision >= m.todo.Revision {
 			m.todo = event.Todo.Clone()
+			_, _, _, height := m.todoPaneBounds()
+			m.scrollTodoPane(0, height)
 		}
 	case app.EventRunStarted:
 		m.resetTurnUsage()
 		m.contextProfile = app.ContextProfile{}
 		m.contextProfileError = ""
 		m.runID = event.RunID
+		// Attach the run to the latest untagged user prompt so sticky pinning
+		// can bind the floating instruction to this turn.
+		for index := len(m.transcript) - 1; index >= 0; index-- {
+			if m.transcript[index].Kind != BlockUser {
+				continue
+			}
+			if m.transcript[index].RunID == "" {
+				m.transcript[index].RunID = event.RunID
+			}
+			break
+		}
 		if m.status != "Cancelling" {
 			m.status = "Running"
 		}
@@ -106,6 +120,29 @@ func (m *AppModel) applyEvent(event app.Event) {
 			if entry.Scope == cursorScope && entry.Role == cursorRole {
 				m.overlayCursor = index
 				break
+			}
+		}
+	case app.EventGitBranches:
+		m.branches = append([]app.GitBranchEntry(nil), event.GitBranches...)
+		m.branchDirty = event.WorkspaceDirty
+		if event.Text != "" {
+			m.branch = event.Text
+		}
+		switch event.State {
+		case "switched":
+			m.pendingBranch = ""
+			_ = m.closeOverlay()
+		case "dirty_confirmation_required":
+			if m.pendingBranch != "" {
+				m.openOverlay(OverlayBranchConfirm)
+			}
+		default:
+			m.openOverlay(OverlayBranches)
+			for index, branch := range m.branches {
+				if branch.Current {
+					m.overlayCursor = index
+					break
+				}
 			}
 		}
 	case app.EventSkillCatalog:
@@ -418,6 +455,19 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	} else {
 		m.todo = TodoView{}
 	}
+	if m.paint != nil {
+		m.paint.todoRender = ""
+	}
+	if m.todoItemCount() == 0 {
+		m.todoExpanded = false
+		m.todoScroll = 0
+		if m.focus == focusTodo {
+			m.focus = focusComposer
+			_ = m.composer.Focus()
+		}
+	}
+	_, _, _, todoHeight := m.todoPaneBounds()
+	m.scrollTodoPane(0, todoHeight)
 	m.transcript = make([]Block, 0, len(recovered))
 	m.transcriptTop = 0
 	for _, block := range recovered {
@@ -432,6 +482,7 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 			State: block.State, Collapsed: block.Collapsed || defaultToolCollapsed(kind, block.State), Attachments: block.Attachments,
 		})
 	}
+	m.invalidateTranscriptLayout()
 	m.runID = ""
 	m.lastRunID = event.Data["lastRunID"]
 	m.approval = nil

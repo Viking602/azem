@@ -59,12 +59,12 @@ func TestPTYStreamResizeCancelAndExit(t *testing.T) {
 	if _, err := terminal.Write([]byte("\x1b[Z")); err != nil {
 		t.Fatalf("enable yolo approval mode: %v", err)
 	}
-	readUntil(t, reads, output, "⚠ FULL ACCESS", 5*time.Second)
+	readUntil(t, reads, output, "FULL ACCESS", 5*time.Second)
 	output.Reset()
 	if _, err := terminal.Write([]byte("\x1b[Z")); err != nil {
 		t.Fatalf("restore prompt approval mode: %v", err)
 	}
-	readUntil(t, reads, output, "☝︎ ASK", 5*time.Second)
+	readUntil(t, reads, output, "ASK", 5*time.Second)
 	output.Reset()
 	if err := pty.Setsize(terminal, &pty.Winsize{Rows: 40, Cols: 120}); err != nil {
 		t.Fatalf("resize PTY: %v", err)
@@ -75,7 +75,7 @@ func TestPTYStreamResizeCancelAndExit(t *testing.T) {
 	readUntil(t, reads, output, "Deterministic ", 5*time.Second)
 	readUntil(t, reads, output, "response: ", 5*time.Second)
 	readUntil(t, reads, output, "automated ", 5*time.Second)
-	readUntil(t, reads, output, "pty ", 5*time.Second)
+	readUntil(t, reads, output, "pty", 5*time.Second)
 	output.Reset()
 
 	longPrompt := strings.Repeat("cancel-me ", 80)
@@ -147,7 +147,7 @@ func TestPTYRecoveryApprovalDoesNotReplayPendingEdit(t *testing.T) {
 	if _, err := terminal.Write([]byte("d")); err != nil {
 		t.Fatalf("deny recovered approval: %v", err)
 	}
-	readUntil(t, reads, output, "Ready", 5*time.Second)
+	readUntil(t, reads, output, "Build anything", 5*time.Second)
 	content, err := os.ReadFile(notePath)
 	if err != nil {
 		t.Fatal(err)

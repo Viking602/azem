@@ -1019,6 +1019,102 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	}
 }
 
+func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for _, arguments := range [][]string{
+		{"init", "--initial-branch=main"},
+		{"config", "user.email", "azem@example.test"},
+		{"config", "user.name", "Azem Test"},
+	} {
+		if _, err := gitOutput(ctx, root, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tracked := filepath.Join(root, "tracked.txt")
+	if err := os.WriteFile(tracked, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		{"add", "tracked.txt"},
+		{"commit", "-m", "base"},
+		{"branch", "feature"},
+	} {
+		if _, err := gitOutput(ctx, root, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Default()
+	cfg.Workspace.Root = root
+	service := NewService(ctx, cfg)
+
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionListGitBranches}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.Kind != EventGitBranches || listed.State != "listed" || listed.Text != "main" || listed.WorkspaceDirty {
+		t.Fatalf("listed branch event = %#v", listed)
+	}
+	if got := []GitBranchEntry{{Name: "feature"}, {Name: "main", Current: true}}; !reflect.DeepEqual(listed.GitBranches, got) {
+		t.Fatalf("branches = %#v, want %#v", listed.GitBranches, got)
+	}
+	clone := listed.Clone()
+	clone.GitBranches[0].Name = "mutated"
+	if listed.GitBranches[0].Name != "feature" {
+		t.Fatal("event clone mutated source branches")
+	}
+
+	if err := os.WriteFile(tracked, []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "feature"})
+	if !errors.Is(err, ErrDirtyWorkspace) {
+		t.Fatalf("dirty switch error = %v", err)
+	}
+	blocked, eventErr := service.NextEvent(ctx)
+	if eventErr != nil {
+		t.Fatal(eventErr)
+	}
+	if blocked.Kind != EventGitBranches || blocked.State != "dirty_confirmation_required" || !blocked.WorkspaceDirty || blocked.Text != "main" {
+		t.Fatalf("dirty branch event = %#v", blocked)
+	}
+
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "feature", Decision: "confirm_dirty"}); err != nil {
+		t.Fatal(err)
+	}
+	switched, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if switched.Kind != EventGitBranches || switched.State != "switched" || switched.Text != "feature" || !switched.WorkspaceDirty {
+		t.Fatalf("switched branch event = %#v", switched)
+	}
+	current, err := gitOutput(ctx, root, "branch", "--show-current")
+	if err != nil || strings.TrimSpace(string(current)) != "feature" {
+		t.Fatalf("current branch = %q, error=%v", current, err)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "missing"}); err == nil || !strings.Contains(err.Error(), "unknown local git branch") {
+		t.Fatalf("missing branch error = %v", err)
+	}
+
+	service.mu.Lock()
+	service.activeRun = "run-active"
+	service.mu.Unlock()
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "main"}); !errors.Is(err, ErrRunActive) {
+		t.Fatalf("active run switch error = %v", err)
+	}
+	service.mu.Lock()
+	service.activeRun = ""
+	service.cfg.Workspace.AllowWrite = false
+	service.mu.Unlock()
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "main"}); err == nil || !strings.Contains(err.Error(), "workspace.allow_write") {
+		t.Fatalf("read-only switch error = %v", err)
+	}
+}
+
 func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 	cfg := config.Default()
 	cfg.Agents.Subagents.Roles = map[string]config.SubagentRoleConfig{

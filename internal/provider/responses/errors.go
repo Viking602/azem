@@ -66,6 +66,8 @@ func HTTPError(response *http.Response) error {
 		kind = ErrorAuthentication
 	case http.StatusForbidden:
 		kind = ErrorEntitlement
+	case http.StatusRequestTimeout, http.StatusConflict:
+		kind = ErrorServer
 	case http.StatusTooManyRequests:
 		kind = ErrorRateLimit
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:

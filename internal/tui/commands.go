@@ -60,6 +60,8 @@ const (
 	ActionStartBackground  = app.ActionStartBackground
 	ActionStopBackground   = app.ActionStopBackground
 	ActionLogsBackground   = app.ActionLogsBackground
+	ActionListGitBranches  = app.ActionListGitBranches
+	ActionSwitchGitBranch  = app.ActionSwitchGitBranch
 )
 
 type (

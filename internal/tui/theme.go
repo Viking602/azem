@@ -89,22 +89,22 @@ type Theme struct {
 }
 
 func DefaultTheme() Theme {
-	text := adaptiveColor("#20231f", "235", "0", "#d8ddd7", "252", "7")
-	muted := adaptiveColor("#616861", "241", "0", "#808880", "244", "7")
-	accent := adaptiveColor("#176b8f", "24", "6", "#73c7f5", "117", "6")
-	secondary := adaptiveColor("#4a5965", "240", "4", "#9aabb8", "110", "4")
-	warning := adaptiveColor("#805719", "94", "3", "#d5a65b", "179", "3")
-	danger := adaptiveColor("#8a3434", "124", "1", "#d67b78", "174", "1")
-	blue := adaptiveColor("#285f8a", "25", "4", "#79b8e8", "110", "4")
-	cursor := adaptiveColor("#6d4aff", "99", "5", "#a78bfa", "141", "5")
-	success := adaptiveColor("#3d6c31", "22", "2", "#91b477", "107", "2")
-	userAccent := adaptiveColor("#166d93", "24", "6", "#7dd3fc", "117", "6")
-	border := adaptiveColor("#c5cdc6", "250", "7", "#3a433c", "238", "0")
-	focusBorder := adaptiveColor("#3b82a6", "31", "6", "#69b9e6", "74", "6")
-	surfaceAccent := adaptiveColor("#176b8f", "24", "6", "#67d4ee", "81", "6")
-	cyan := adaptiveColor("#087f9c", "30", "6", "#67d4ee", "81", "6")
-	teal := adaptiveColor("#14766c", "29", "6", "#5ed6c0", "79", "6")
-	violet := adaptiveColor("#6754b8", "61", "5", "#b4a7ff", "147", "5")
+	text := adaptiveColor("#20231f", "235", "0", "#d7dbd7", "252", "7")
+	muted := adaptiveColor("#626862", "241", "0", "#777d78", "243", "7")
+	accent := adaptiveColor("#385e76", "24", "6", "#9eb6c7", "110", "6")
+	secondary := adaptiveColor("#53626d", "240", "4", "#919da6", "246", "7")
+	warning := adaptiveColor("#755921", "94", "3", "#c7a96e", "179", "3")
+	danger := adaptiveColor("#813d3d", "124", "1", "#cb817d", "174", "1")
+	blue := adaptiveColor("#44667d", "25", "4", "#8baac0", "110", "4")
+	cursor := adaptiveColor("#385e76", "24", "6", "#c7d2da", "252", "7")
+	success := adaptiveColor("#48663f", "22", "2", "#9bb28f", "107", "2")
+	userAccent := adaptiveColor("#20231f", "235", "0", "#d7dbd7", "252", "7")
+	border := adaptiveColor("#c7cbc7", "250", "7", "#343936", "237", "0")
+	focusBorder := adaptiveColor("#71808a", "245", "7", "#697983", "243", "7")
+	surfaceAccent := adaptiveColor("#385e76", "24", "6", "#9eb6c7", "110", "6")
+	cyan := adaptiveColor("#44667d", "25", "6", "#8baac0", "110", "6")
+	teal := adaptiveColor("#486b65", "29", "6", "#83aaa2", "109", "6")
+	violet := adaptiveColor("#665f79", "61", "5", "#aaa2bd", "146", "5")
 	// UI surfaces stay transparent so the terminal's own background remains visible.
 	// Hierarchy comes from foreground color, borders, weight, and spacing instead.
 	panelBase := lipgloss.NewStyle().
@@ -112,6 +112,9 @@ func DefaultTheme() Theme {
 		Padding(0, 1)
 	chipBase := lipgloss.NewStyle().Padding(0, 1).Bold(true)
 	messageTag := lipgloss.NewStyle().Bold(true)
+	userSurface := lipgloss.NewStyle().
+		Foreground(text).
+		Background(adaptiveColor("#ecefec", "255", "7", "#222522", "235", "0"))
 
 	return Theme{
 		Header:        lipgloss.NewStyle().Bold(true).Foreground(accent),
@@ -166,7 +169,7 @@ func DefaultTheme() Theme {
 		BarOther:      lipgloss.NewStyle().Foreground(secondary),
 		ScrollTrack:   lipgloss.NewStyle().Foreground(border),
 		ScrollThumb:   lipgloss.NewStyle().Foreground(accent),
-		UserSurface:   lipgloss.NewStyle().Foreground(userAccent),
+		UserSurface:   userSurface,
 		AssistantTag:  messageTag.Foreground(cyan),
 		ThinkingTag:   messageTag.Foreground(violet),
 		ToolTag:       messageTag.Foreground(warning),

@@ -22,6 +22,21 @@ func TestHTTPErrorClassifiesAndBoundsBody(t *testing.T) {
 	}
 }
 
+func TestHTTPErrorClassifiesConnectionInterruptionStatusesAsServerErrors(t *testing.T) {
+	for _, status := range []int{http.StatusRequestTimeout, http.StatusConflict} {
+		response := &http.Response{
+			StatusCode: status,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"connection interrupted"}}`)),
+		}
+		err := HTTPError(response)
+		var apiError *APIError
+		if !errors.As(err, &apiError) || apiError.Kind != ErrorServer {
+			t.Fatalf("HTTP %d error=%+v, want retryable server error", status, err)
+		}
+	}
+}
+
 func TestHTTPErrorParsesNonstandardCodexBadRequestDetail(t *testing.T) {
 	response := &http.Response{
 		StatusCode: http.StatusBadRequest,

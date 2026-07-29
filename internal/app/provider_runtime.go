@@ -25,6 +25,7 @@ import (
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
 	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/go-hydaelyn/coding"
 	"github.com/Viking602/go-hydaelyn/message"
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 	hyskill "github.com/Viking602/go-hydaelyn/skill"
@@ -47,6 +48,40 @@ type ProviderRuntime struct {
 	subagents       *subagentRuntime
 	subagentInitErr error
 }
+
+type editRecoveryRequirement interface {
+	RequiredEditReadTarget() (string, bool)
+}
+
+type editRecoveryHook struct {
+	run editRecoveryRequirement
+}
+
+func (h editRecoveryHook) TransformContext(_ context.Context, messages []message.Message) ([]message.Message, error) {
+	return messages, nil
+}
+
+func (h editRecoveryHook) BeforeModelCall(_ context.Context, request *hyprovider.Request) error {
+	target, required := h.run.RequiredEditReadTarget()
+	if !required {
+		return nil
+	}
+	readTools := make([]message.ToolDefinition, 0, 1)
+	for _, definition := range request.Tools {
+		if definition.Name == coding.ToolReadFile {
+			readTools = append(readTools, definition)
+		}
+	}
+	if len(readTools) == 0 {
+		return fmt.Errorf("edit recovery for %q requires unavailable tool %s", target, coding.ToolReadFile)
+	}
+	request.Tools = readTools
+	return nil
+}
+
+func (editRecoveryHook) BeforeToolCall(context.Context, *tool.Call) error  { return nil }
+func (editRecoveryHook) AfterToolCall(context.Context, *tool.Result) error { return nil }
+func (editRecoveryHook) OnEvent(context.Context, hyprovider.Event) error   { return nil }
 
 var (
 	errResumeProfileChanged  = errors.New("resume run execution profile changed")
@@ -495,6 +530,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
+	engine.Hooks = engine.Hooks.Prepend(editRecoveryHook{run: run})
 	if contextManager.activateCompaction != nil {
 		stepCheckpoint := &runStepCheckpoint{capture: contextManager.captureHighWater, save: func(saveCtx context.Context, messages []message.Message, boundary *int64) error {
 			stepContext := contextManager

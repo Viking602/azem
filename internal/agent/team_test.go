@@ -162,7 +162,7 @@ func TestCodingTeamRolePromptContracts(t *testing.T) {
 			"Implement one approved coding plan and verify the changed behavior.",
 			[]string{"summary", "evidence"},
 			[]string{"summary", "evidence", "files_changed"},
-			[]string{"planner report or reviewer feedback", "only observed command or scenario results", "repository-relative paths"},
+			[]string{"planner report or reviewer feedback", "only observed command or scenario results", "repository-relative paths", "`coding.edit_hashline` is not unified diff", "`replace N..M:`", "`-old`"},
 			true,
 		},
 		ReviewerClass: {

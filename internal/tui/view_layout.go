@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/Viking602/azem/internal/session"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -25,6 +26,52 @@ type overlayOption struct {
 type overlayRenderRow struct {
 	Group       string
 	OptionIndex int
+}
+
+type uiClickTarget uint8
+
+const (
+	uiClickNone uiClickTarget = iota
+	uiClickBranch
+	uiClickWorkspace
+	uiClickStatus
+	uiClickContext
+	uiClickTodos
+	uiClickModel
+	uiClickReasoning
+	uiClickApprovalMode
+)
+
+type uiSegment struct {
+	target  uiClickTarget
+	content string
+}
+
+func renderUISegments(segments []uiSegment) string {
+	var rendered strings.Builder
+	for _, segment := range segments {
+		rendered.WriteString(segment.content)
+	}
+	return rendered.String()
+}
+
+func hitUISegments(segments []uiSegment, x, start, visibleWidth int) uiClickTarget {
+	if x < start || x >= start+visibleWidth {
+		return uiClickNone
+	}
+	offset := x - start
+	cursor := 0
+	for _, segment := range segments {
+		width := lipgloss.Width(segment.content)
+		if offset >= cursor && offset < cursor+width {
+			return segment.target
+		}
+		cursor += width
+		if cursor >= visibleWidth {
+			break
+		}
+	}
+	return uiClickNone
 }
 
 func buildOverlayRenderRows(options []overlayOption, cursor int) ([]overlayRenderRow, int) {
@@ -55,6 +102,305 @@ func providerDisplayName(provider string) string {
 	}
 }
 
+const (
+	// Todo pane: tall enough for multi-phase plans without feeling cramped.
+	// Still capped so a long list cannot crowd out the transcript.
+	maxTodoPaneHeight  = 18
+	maxTodoPanePercent = 30
+)
+
+type todoPaneLineKind uint8
+
+const (
+	todoLineItem todoPaneLineKind = iota
+	todoLinePhase
+	todoLineGap
+)
+
+type todoPaneLine struct {
+	kind  todoPaneLineKind
+	title string
+	item  session.TodoItem
+	// rail is a left grouping connector for consecutive items within a phase
+	// (┌ / │ / └ / space), matching the grok-build accent column pattern.
+	rail string
+}
+
+func (m AppModel) todoItemCount() int {
+	total := 0
+	for _, phase := range m.todo.Phases {
+		total += len(phase.Items)
+	}
+	return total
+}
+
+func todoItemDone(status session.TodoStatus) bool {
+	return status == session.TodoCompleted || status == session.TodoCancelled
+}
+
+func (m AppModel) phaseVisibleItems(phase session.TodoPhase) []session.TodoItem {
+	items := make([]session.TodoItem, 0, len(phase.Items))
+	for _, item := range phase.Items {
+		if m.todoHideCompleted && todoItemDone(item.Status) {
+			continue
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func (m AppModel) visibleTodoItemCount() int {
+	total := 0
+	for _, phase := range m.todo.Phases {
+		total += len(m.phaseVisibleItems(phase))
+	}
+	return total
+}
+
+// todoPaneLines builds the flat render list with phase headers, gaps between
+// phases, and left-rail grouping for consecutive same-status item runs.
+func (m AppModel) todoPaneLines() []todoPaneLine {
+	lines := make([]todoPaneLine, 0, m.visibleTodoItemCount()+len(m.todo.Phases)*2)
+	for _, phase := range m.todo.Phases {
+		items := m.phaseVisibleItems(phase)
+		if len(items) == 0 {
+			continue
+		}
+		if len(lines) > 0 {
+			lines = append(lines, todoPaneLine{kind: todoLineGap})
+		}
+		if title := strings.TrimSpace(phase.Title); title != "" {
+			lines = append(lines, todoPaneLine{kind: todoLinePhase, title: title})
+		}
+		for index, item := range items {
+			lines = append(lines, todoPaneLine{
+				kind: todoLineItem,
+				item: item,
+				rail: todoItemRail(items, index, m),
+			})
+		}
+	}
+	return lines
+}
+
+func todoItemRail(items []session.TodoItem, index int, m AppModel) string {
+	if len(items) <= 1 {
+		return " "
+	}
+	status := m.todoDisplayStatus(items[index])
+	// Only group completed/cancelled runs — active work stays unbracketed so
+	// the eye lands on the current and pending items first.
+	if status != session.TodoCompleted && status != session.TodoCancelled {
+		return " "
+	}
+	prevSame := index > 0 && m.todoDisplayStatus(items[index-1]) == status
+	nextSame := index+1 < len(items) && m.todoDisplayStatus(items[index+1]) == status
+	switch {
+	case !prevSame && nextSame:
+		return "┌"
+	case prevSame && nextSame:
+		return "│"
+	case prevSame && !nextSame:
+		return "└"
+	default:
+		return " "
+	}
+}
+
+func (m AppModel) visibleTodoRowCount() int {
+	return len(m.todoPaneLines())
+}
+
+func (m AppModel) todoPaneDesiredHeight(viewHeight int) int {
+	if !m.todoExpanded {
+		return 0
+	}
+	count := m.visibleTodoRowCount()
+	if count == 0 {
+		return 1
+	}
+	fractionCap := max(1, viewHeight*maxTodoPanePercent/100)
+	return min(count, min(maxTodoPaneHeight, fractionCap))
+}
+
+func (m AppModel) todoPaneScrollLimit(viewportHeight int) int {
+	return max(0, m.visibleTodoRowCount()-max(1, viewportHeight))
+}
+
+func (m *AppModel) scrollTodoPane(delta, viewportHeight int) {
+	limit := m.todoPaneScrollLimit(viewportHeight)
+	m.todoScroll = min(limit, max(0, m.todoScroll+delta))
+}
+
+// cachedTodoPane reuses the last rendered todo pane when nothing todo-related
+// changed — pure transcript scrolling must not re-paint the whole list.
+func (m AppModel) cachedTodoPane(width, height int) string {
+	p := m.paint
+	focusTodo := m.focus == focusTodo
+	if p != nil &&
+		p.todoRender != "" &&
+		p.todoWidth == width &&
+		p.todoHeight == height &&
+		p.todoScroll == m.todoScroll &&
+		p.todoHide == m.todoHideCompleted &&
+		p.todoFocus == focusTodo &&
+		p.todoRevision == m.todo.Revision &&
+		// In-progress marks animate; only bust cache when animation is live.
+		(p.todoFrame == m.animationFrame || !m.todoHasInProgress()) {
+		return p.todoRender
+	}
+	rendered := m.renderTodoPane(width, height)
+	if p != nil {
+		p.todoWidth = width
+		p.todoHeight = height
+		p.todoScroll = m.todoScroll
+		p.todoHide = m.todoHideCompleted
+		p.todoFocus = focusTodo
+		p.todoRevision = m.todo.Revision
+		p.todoFrame = m.animationFrame
+		p.todoRender = rendered
+	}
+	return rendered
+}
+
+func (m AppModel) todoHasInProgress() bool {
+	for _, phase := range m.todo.Phases {
+		for _, item := range phase.Items {
+			if m.todoDisplayStatus(item) == session.TodoInProgress {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m AppModel) renderTodoPaneItem(item session.TodoItem, rail string, width int) string {
+	status := m.todoDisplayStatus(item)
+	markStyle := m.theme.Assistant
+	textStyle := m.theme.Assistant
+	mark := "□"
+	switch status {
+	case session.TodoInProgress:
+		mark = "▶"
+		markStyle = m.theme.Warning
+		textStyle = textStyle.Bold(true)
+	case session.TodoCompleted:
+		mark = "✓"
+		markStyle = m.theme.Success
+		textStyle = m.theme.Muted
+	case session.TodoCancelled:
+		mark = "×"
+		markStyle = m.theme.Error
+		textStyle = m.theme.Muted.Strikethrough(true)
+	}
+	if rail == "" {
+		rail = " "
+	}
+	prefix := m.theme.Muted.Render(rail) + " " + markStyle.Render(mark) + " "
+	return truncateStyledFallback(prefix+textStyle.Render(item.Content), max(0, width))
+}
+
+func (m AppModel) renderTodoPanePhase(title string, width int) string {
+	// Accent bar + phase title, matching the grok-build accent column and the
+	// phase headers users expect for multi-step plans.
+	accent := m.theme.Header.Render("▌")
+	label := m.theme.Header.Render(" " + title)
+	return truncateStyledFallback(accent+label, max(0, width))
+}
+
+func (m AppModel) renderTodoPane(width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	if width < 4 {
+		return fitViewport(m.tr("overlay.todos.empty"), width, height)
+	}
+
+	contentWidth := width - 4
+	contentRows := make([]string, 0, height)
+	lines := m.todoPaneLines()
+	visibleCount := len(lines)
+	offset := min(m.todoPaneScrollLimit(height), max(0, m.todoScroll))
+	if visibleCount == 0 {
+		empty := "todo.all_done"
+		if m.todoItemCount() == 0 {
+			empty = "overlay.todos.empty"
+		}
+		contentRows = append(contentRows, m.theme.Muted.Render(m.tr(empty)))
+	} else {
+		for index := offset; index < visibleCount && len(contentRows) < height; index++ {
+			line := lines[index]
+			switch line.kind {
+			case todoLinePhase:
+				contentRows = append(contentRows, m.renderTodoPanePhase(line.title, contentWidth))
+			case todoLineGap:
+				contentRows = append(contentRows, "")
+			default:
+				contentRows = append(contentRows, m.renderTodoPaneItem(line.item, line.rail, contentWidth))
+			}
+		}
+	}
+	for len(contentRows) < height {
+		contentRows = append(contentRows, "")
+	}
+
+	if visibleCount > height {
+		thumbStart, thumbSize := transcriptScrollbarThumb(
+			height,
+			visibleCount,
+			m.todoPaneScrollLimit(height),
+			m.todoPaneScrollLimit(height)-offset,
+		)
+		column := max(0, contentWidth-1)
+		for row := range height {
+			contentRows[row] = ansi.Cut(padStyledLine(contentRows[row], contentWidth), 0, column) +
+				m.renderScrollbarCell(row, thumbStart, thumbSize)
+		}
+	}
+
+	borderStyle := m.theme.Border
+	if m.focus == focusTodo {
+		borderStyle = m.theme.Header
+	}
+	rows := make([]string, height)
+	for row := range height {
+		left, right := "│", "│"
+		if row == 0 {
+			left, right = "┌", "┐"
+			if m.focus == focusTodo {
+				right = "×"
+			}
+		}
+		if row == height-1 && height > 1 {
+			left, right = "└", "┘"
+		}
+		rows[row] = borderStyle.Render(left) + " " +
+			padStyledLine(contentRows[row], contentWidth) + " " +
+			borderStyle.Render(right)
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (m AppModel) todoPaneBounds() (left, top, width, height int) {
+	width = max(1, m.width)
+	recapRows := 0
+	if m.visibleRecapStatus(width, max(1, m.height)) != "" {
+		recapRows = 1
+	}
+	layout := measureViewLayout(
+		max(1, m.height),
+		width,
+		m.composerBlockLines(),
+		len(m.visibleCommandSuggestions()),
+		recapRows,
+		m.todoPaneDesiredHeight(max(1, m.height)),
+	)
+	if layout.showChrome {
+		top = 2
+	}
+	return 0, top, width, layout.todoHeight
+}
+
 func (m AppModel) View() tea.View {
 	width := max(1, m.width)
 	height := max(1, m.height)
@@ -76,7 +422,7 @@ func (m AppModel) View() tea.View {
 		return view
 	}
 	header := m.renderHeader(width)
-	composer := m.renderComposer()
+	composer := m.cachedComposer(width)
 	attachments := m.renderPendingAttachments(width)
 	attachmentRows := 0
 	if attachments != "" {
@@ -89,11 +435,35 @@ func (m AppModel) View() tea.View {
 		recapRows = 1
 	}
 	composerLines := strings.Count(composer, "\n") + 1 + attachmentRows
-	layout := measureViewLayout(height, width, composerLines, len(suggestions), recapRows)
-	sections := make([]string, 0, 10)
+	layout := measureViewLayout(height, width, composerLines, len(suggestions), recapRows, m.todoPaneDesiredHeight(height))
+	// Sticky instruction chip (grok-build style): pin the current/scrolled-past
+	// user prompt above the transcript so the active instruction stays visible.
+	sticky := m.applyStickyLayout(width, &layout)
+	// Publish scroll metrics for O(1) wheel clamping (pointer so value-receiver View persists).
+	if p := m.paint; p != nil {
+		p.width = width
+		p.height = height
+		p.bodyHeight = layout.bodyHeight
+		p.contentWidth = transcriptContentWidth(width, layout.bodyHeight)
+		// Warm line count once per frame; subsequent scroll events reuse it.
+		p.lineCount = len(m.transcriptLines(p.contentWidth))
+		if layout.stickyHeight == 0 {
+			p.preBodyHeight = layout.bodyHeight
+		}
+	}
+	sections := make([]string, 0, 12)
 	if layout.showChrome {
-		// Top chrome only — the rounded composer dock replaces the old bottom rule.
-		sections = append(sections, header, m.theme.Border.Render(strings.Repeat("─", width)))
+		// Match the quiet Grok-style top chrome: one metadata row, then air.
+		sections = append(sections, header, padStyledLine("", width))
+	}
+	if layout.todoHeight > 0 {
+		sections = append(sections, m.cachedTodoPane(width, layout.todoHeight))
+		if layout.todoGap > 0 {
+			sections = append(sections, padStyledLine("", width))
+		}
+	}
+	if layout.stickyHeight > 0 {
+		sections = append(sections, sticky, padStyledLine("", width))
 	}
 	if layout.bodyHeight > 0 {
 		sections = append(sections, m.renderBody(width, layout.bodyHeight))
@@ -145,16 +515,113 @@ func (m AppModel) modelSearchCursorOffset(width, height int) (int, int, bool) {
 	return leftPadding + 2, topPadding + 1 + searchRow, true
 }
 
-func (m AppModel) renderComposer() string {
-	style := m.theme.PanelBlurred
-	if m.composer.Focused() {
-		style = m.theme.PanelFocused
+// cachedComposer reuses the docked input panel across pure scroll frames.
+// Typing / focus / model / mode changes bust the cache.
+func (m AppModel) cachedComposer(width int) string {
+	p := m.paint
+	value := m.composer.Value()
+	height := m.composer.Height()
+	focused := m.composer.Focused()
+	mode := m.approvalModeLabel()
+	if p != nil &&
+		p.composerRender != "" &&
+		p.composerWidth == width &&
+		p.composerValue == value &&
+		p.composerHeight == height &&
+		p.composerFocused == focused &&
+		p.composerModel == m.model &&
+		p.composerReason == m.reasoning &&
+		p.composerMode == mode {
+		return p.composerRender
 	}
-	return renderSurface(style, m.composer.View())
+	rendered := m.renderComposer()
+	if p != nil {
+		p.composerWidth = width
+		p.composerValue = value
+		p.composerHeight = height
+		p.composerFocused = focused
+		p.composerModel = m.model
+		p.composerReason = m.reasoning
+		p.composerMode = mode
+		p.composerRender = rendered
+	}
+	return rendered
+}
+
+func (m AppModel) renderComposer() string {
+	width := max(1, m.width)
+	if width < 4 {
+		return fitViewport(m.composer.View(), width, max(1, strings.Count(m.composer.View(), "\n")+1))
+	}
+
+	borderStyle := m.theme.Border
+	if m.composer.Focused() {
+		borderStyle = m.theme.Header
+	}
+	contentWidth := width - 4
+	content := strings.Split(m.composer.View(), "\n")
+	rows := make([]string, 0, len(content)+2)
+	rows = append(rows, borderStyle.Render("╭"+strings.Repeat("─", width-2)+"╮"))
+	for _, line := range content {
+		rows = append(rows,
+			borderStyle.Render("│ ")+padStyledLine(line, contentWidth)+borderStyle.Render(" │"),
+		)
+	}
+
+	interiorWidth := width - 2
+	caption := m.renderComposerCaption(max(0, interiorWidth-2))
+	captionWidth := lipgloss.Width(caption)
+	ruleWidth := max(0, interiorWidth-captionWidth)
+	rows = append(rows,
+		borderStyle.Render("╰"+strings.Repeat("─", ruleWidth))+caption+borderStyle.Render("╯"),
+	)
+	return strings.Join(rows, "\n")
+}
+
+func (m AppModel) renderComposerCaption(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return truncateStyledFallback(renderUISegments(m.composerCaptionSegments()), width)
+}
+
+func (m AppModel) composerCaptionSegments() []uiSegment {
+	segments := []uiSegment{
+		{content: " "},
+		{target: uiClickModel, content: m.theme.MetaValue.Render(first(m.model, m.tr("value.no_model")))},
+	}
+	if m.reasoning != "" {
+		segments = append(segments, uiSegment{
+			target:  uiClickReasoning,
+			content: m.theme.MetaValue.Render(" (" + m.reasoning + ")"),
+		})
+	}
+	return append(segments,
+		uiSegment{content: m.theme.MetaDivider.Render(" · ")},
+		uiSegment{target: uiClickApprovalMode, content: m.theme.Muted.Render(m.approvalModeLabel())},
+		uiSegment{content: " "},
+	)
+}
+
+func (m AppModel) composerCaptionClickTarget(x, y int) uiClickTarget {
+	if m.width < 4 {
+		return uiClickNone
+	}
+	_, top, width, height := m.composerBounds()
+	if height <= 0 || y != top+height-1 {
+		return uiClickNone
+	}
+	maxCaptionWidth := max(0, width-4)
+	caption := m.renderComposerCaption(maxCaptionWidth)
+	captionWidth := lipgloss.Width(caption)
+	start := width - 1 - captionWidth
+	return hitUISegments(m.composerCaptionSegments(), x, start, captionWidth)
 }
 
 func (m AppModel) composerBlockLines() int {
-	lines := strings.Count(m.renderComposer(), "\n") + 1
+	// Avoid renderComposer() on the hot scroll/layout path. The docked panel is
+	// always: top border + textarea rows + bottom border (+ optional attach row).
+	lines := max(1, m.composer.Height()) + 2
 	if len(m.pendingImages) > 0 {
 		lines++
 	}
@@ -162,7 +629,7 @@ func (m AppModel) composerBlockLines() int {
 }
 
 func composerOffsetY(layout viewLayout) int {
-	offset := layout.bodyHeight + layout.suggestionHeight + layout.recapRows
+	offset := layout.todoHeight + layout.todoGap + layout.stickyHeight + layout.bodyHeight + layout.suggestionHeight + layout.recapRows
 	if layout.showChrome {
 		offset += 2 // header + top separator (composer dock owns the lower edge)
 	}
@@ -174,13 +641,16 @@ type viewLayout struct {
 	composerHeight   int
 	suggestionHeight int
 	recapRows        int
+	todoHeight       int
+	todoGap          int
+	stickyHeight     int // pinned instruction card + trailing gap
 	footerHeight     int
 	showChrome       bool
 	showModelStatus  bool
 	showStatus       bool
 }
 
-func measureViewLayout(height, width, composerHeight, suggestionCount, recapRows int) viewLayout {
+func measureViewLayout(height, width, composerHeight, suggestionCount, recapRows, todoHeight int) viewLayout {
 	height = max(1, height)
 	width = max(1, width)
 	footerHeight := dockFooterLines(height, width)
@@ -197,6 +667,12 @@ func measureViewLayout(height, width, composerHeight, suggestionCount, recapRows
 	fixedHeight += layout.footerHeight
 	layout.recapRows = min(max(0, recapRows), 1)
 	fixedHeight += layout.recapRows
+	availableForTodo := max(1, height-fixedHeight)
+	if todoHeight > 0 && availableForTodo >= 4 {
+		layout.todoHeight = min(todoHeight, availableForTodo-3)
+		layout.todoGap = 1
+		fixedHeight += layout.todoHeight + layout.todoGap
+	}
 	available := max(1, height-fixedHeight)
 	layout.composerHeight = 1
 	if available > 1 {
@@ -211,56 +687,102 @@ func measureViewLayout(height, width, composerHeight, suggestionCount, recapRows
 	return layout
 }
 
-// dockFooterLines chooses how many meta rows fit under the composer dock.
-// Spacious terminals get de-aggregated runtime / context / help strips.
+// dockFooterLines keeps the bottom chrome to one discoverability row. Runtime
+// activity, model, mode, and context live closer to the content they describe.
 func dockFooterLines(height, width int) int {
-	switch {
-	case height >= 14 && width >= 72:
-		return 3
-	case height >= 10:
-		return 2
-	case height >= 2:
-		return 1
-	default:
+	if height < 2 || width <= 0 {
 		return 0
 	}
+	return 1
 }
 
 func (m AppModel) renderHeader(width int) string {
-	left := m.theme.HeaderBrand.Render(" ◈ Azem")
-	if width >= 60 {
-		left += m.theme.Muted.Render("  " + shortenPath(m.workspace, max(16, width/2)))
-	}
-	right := m.theme.HeaderMode.Render(strings.ToUpper(m.agentMode)) + m.theme.Chrome.Render(" ")
+	left := m.renderHeaderLeft(width)
+	right := renderUISegments(m.headerRightSegments())
 	return renderSurface(m.theme.Chrome, joinSides(left, right, width))
 }
 
-func (m AppModel) renderBody(width int, height int) string {
-	if width < 104 || height < 16 {
-		transcriptWidth := bodyTranscriptWidth(width, height)
-		transcript := m.renderTranscript(transcriptWidth, height)
-		if transcriptWidth == width {
-			return transcript
-		}
-		return lipgloss.JoinHorizontal(lipgloss.Top, transcript, m.renderTranscriptScrollbar(height, transcriptWidth))
+func (m AppModel) headerLeftSegments(width int) []uiSegment {
+	segments := []uiSegment{{content: m.theme.Header.Render("⌁")}}
+	if branch := strings.TrimSpace(m.branch); branch != "" {
+		segments = append(segments, uiSegment{content: " "}, uiSegment{target: uiClickBranch, content: m.theme.MetaValue.Render("⎇ " + branch)})
 	}
-	railWidth := min(31, width/3)
-	transcriptWidth := width - railWidth - 1
+	if width >= 32 {
+		segments = append(segments, uiSegment{content: "  "}, uiSegment{target: uiClickWorkspace, content: m.theme.Muted.Render(shortenPath(m.workspace, max(12, width/2)))})
+	}
+	return segments
+}
+
+func (m AppModel) renderHeaderLeft(width int) string {
+	return renderUISegments(m.headerLeftSegments(width))
+}
+
+func (m AppModel) headerRightSegments() []uiSegment {
+	segments := make([]uiSegment, 0, 5)
+	appendSegment := func(target uiClickTarget, content string) {
+		if len(segments) > 0 {
+			segments = append(segments, uiSegment{content: m.theme.MetaDivider.Render(" │ ")})
+		}
+		segments = append(segments, uiSegment{target: target, content: content})
+	}
+	if m.status != "" && m.status != "Ready" && !m.isRunning() {
+		appendSegment(uiClickStatus, m.stateStyle(m.status).Render(
+			stateMark(m.status)+" "+m.displayState(m.status),
+		))
+	}
+	metrics := m.contextMetrics()
+	if metrics.limit > 0 {
+		appendSegment(uiClickContext, m.contextTone(metrics.percentage).Render(
+			formatTokens(metrics.used)+" / "+formatTokens(metrics.limit),
+		))
+	}
+	if completed, total := todoProgress(m.todo); total > 0 {
+		appendSegment(uiClickTodos, m.theme.Muted.Render(fmt.Sprintf("%d/%d ✓", completed, total)))
+	}
+	return segments
+}
+
+func (m AppModel) headerClickTarget(x, y int) uiClickTarget {
+	width := max(1, m.width)
+	if y != 0 || m.height < 6 || x < 0 || x >= width {
+		return uiClickNone
+	}
+	segments := m.headerRightSegments()
+	right := truncateStyledFallback(renderUISegments(segments), width)
+	rightWidth := lipgloss.Width(right)
+	rightStart := width - rightWidth
+	if target := hitUISegments(segments, x, rightStart, rightWidth); target != uiClickNone {
+		return target
+	}
+
+	gap := 0
+	if rightWidth > 0 && width-rightWidth >= 2 {
+		gap = 2
+	}
+	leftSegments := m.headerLeftSegments(width)
+	left := truncateStyledFallback(renderUISegments(leftSegments), max(0, width-rightWidth-gap))
+	return hitUISegments(leftSegments, x, 0, lipgloss.Width(left))
+}
+
+func (m AppModel) renderBody(width int, height int) string {
+	transcriptWidth := bodyTranscriptWidth(width, height)
 	transcript := m.renderTranscript(transcriptWidth, height)
-	scrollbar := m.renderTranscriptScrollbar(height, transcriptWidth)
-	rail := m.renderContextRail(railWidth, height)
-	return lipgloss.JoinHorizontal(lipgloss.Top, transcript, scrollbar, rail)
+	if transcriptWidth == width {
+		return transcript
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, transcript, m.renderTranscriptScrollbar(height, transcriptWidth))
 }
 
 func bodyTranscriptWidth(width, height int) int {
 	width = max(1, width)
-	if width >= 104 && height >= 16 {
-		return max(1, width-min(31, width/3)-1)
-	}
 	if width > 1 {
 		return width - 1
 	}
 	return width
+}
+
+func transcriptContentWidth(width, height int) int {
+	return max(1, bodyTranscriptWidth(width, height)-4)
 }
 
 func (m AppModel) renderTranscriptScrollbar(height, transcriptWidth int) string {
@@ -271,22 +793,26 @@ func (m AppModel) renderTranscriptScrollbar(height, transcriptWidth int) string 
 	thumbStart, thumbSize := transcriptScrollbarThumb(height, lineCount, maxOffset, offset)
 	rows := make([]string, height)
 	for row := range rows {
-		if thumbSize > 0 && row >= thumbStart && row < thumbStart+thumbSize {
-			rows[row] = m.theme.ScrollThumb.Render("┃")
-		} else {
-			rows[row] = m.theme.ScrollTrack.Render("│")
-		}
+		rows[row] = m.renderScrollbarCell(row, thumbStart, thumbSize)
 	}
 	return strings.Join(rows, "\n")
 }
+
+const scrollbarSubcells = 8
+
+var scrollbarLowerBlocks = [...]string{"", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
 
 func transcriptScrollbarThumb(trackHeight, lineCount, maxOffset, offset int) (int, int) {
 	if trackHeight <= 0 || lineCount <= 0 || maxOffset <= 0 {
 		return 0, 0
 	}
+	// Block elements provide eight vertical positions per terminal row. This
+	// keeps proportional thumb movement responsive without relying on terminal-
+	// specific pixel graphics.
+	trackSize := trackHeight * scrollbarSubcells
 	contentHeight := max(1, lineCount-maxOffset)
-	thumbSize := min(trackHeight, max(1, (trackHeight*contentHeight+lineCount-1)/lineCount))
-	travel := trackHeight - thumbSize
+	thumbSize := min(trackSize, max(scrollbarSubcells, (trackSize*contentHeight+lineCount-1)/lineCount))
+	travel := trackSize - thumbSize
 	if travel <= 0 {
 		return 0, thumbSize
 	}
@@ -294,6 +820,41 @@ func transcriptScrollbarThumb(trackHeight, lineCount, maxOffset, offset int) (in
 	scrollFromOldest := maxOffset - offset
 	thumbStart := (scrollFromOldest*travel + maxOffset/2) / maxOffset
 	return min(travel, max(0, thumbStart)), thumbSize
+}
+
+func scrollbarThumbGlyph(row, thumbStart, thumbSize int) (glyph string, reverse bool) {
+	if thumbSize <= 0 {
+		return "│", false
+	}
+	cellStart := row * scrollbarSubcells
+	cellEnd := cellStart + scrollbarSubcells
+	fillStart := max(cellStart, thumbStart)
+	fillEnd := min(cellEnd, thumbStart+thumbSize)
+	if fillStart >= fillEnd {
+		return "│", false
+	}
+	if fillStart == cellStart && fillEnd == cellEnd {
+		return "█", false
+	}
+	filled := fillEnd - fillStart
+	if fillEnd == cellEnd {
+		return scrollbarLowerBlocks[filled], false
+	}
+	// Reverse a lower block to synthesize the corresponding upper fractional
+	// block without relying on rarely-supported legacy Unicode glyphs.
+	return scrollbarLowerBlocks[scrollbarSubcells-filled], true
+}
+
+func (m AppModel) renderScrollbarCell(row, thumbStart, thumbSize int) string {
+	glyph, reverse := scrollbarThumbGlyph(row, thumbStart, thumbSize)
+	if glyph == "│" {
+		return m.theme.ScrollTrack.Render(glyph)
+	}
+	style := m.theme.ScrollThumb
+	if reverse {
+		style = style.Reverse(true)
+	}
+	return style.Render(glyph)
 }
 
 func (m AppModel) renderTranscript(width int, height int) string {
@@ -338,9 +899,22 @@ func (m AppModel) transcriptBounds() (left int, top int, width int, height int) 
 	if m.visibleRecapStatus(width, max(1, m.height)) != "" {
 		recapRows = 1
 	}
-	layout := measureViewLayout(max(1, m.height), width, m.composerBlockLines(), len(m.visibleCommandSuggestions()), recapRows)
+	layout := measureViewLayout(max(1, m.height), width, m.composerBlockLines(), len(m.visibleCommandSuggestions()), recapRows, m.todoPaneDesiredHeight(max(1, m.height)))
+	// Prefer cached sticky decision when marks are warm — no full content lookup.
+	if m.stickyVisibleWithCache(layout.bodyHeight) && layout.bodyHeight > stickySlotRows+1 {
+		layout.stickyHeight = stickySlotRows
+		layout.bodyHeight -= stickySlotRows
+	} else if m.stickyInstructionHeight(width, layout.bodyHeight) > 0 && layout.bodyHeight > stickySlotRows+1 {
+		layout.stickyHeight = stickySlotRows
+		layout.bodyHeight -= stickySlotRows
+	}
 	if layout.showChrome {
 		top = 2
+	}
+	top += layout.todoHeight + layout.todoGap + layout.stickyHeight
+	// Prefer body height published by the last View frame when geometry matches.
+	if p := m.paint; p != nil && p.bodyHeight > 0 && p.width == width && p.height == max(1, m.height) {
+		layout.bodyHeight = p.bodyHeight
 	}
 	height = layout.bodyHeight
 	width = bodyTranscriptWidth(width, height)
@@ -357,7 +931,7 @@ func (m AppModel) composerBounds() (left int, top int, width int, height int) {
 	if len(m.pendingImages) > 0 {
 		attachmentRows = 1
 	}
-	layout := measureViewLayout(max(1, m.height), width, m.composerBlockLines(), len(m.visibleCommandSuggestions()), recapRows)
+	layout := measureViewLayout(max(1, m.height), width, m.composerBlockLines(), len(m.visibleCommandSuggestions()), recapRows, m.todoPaneDesiredHeight(max(1, m.height)))
 	top = composerOffsetY(layout) + attachmentRows
 	height = max(1, layout.composerHeight-attachmentRows)
 	return 0, top, width, height
@@ -428,6 +1002,7 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 		cache.initialized = false
 		cache.blocks = nil
 		cache.lines = nil
+		cache.userMarks = nil
 	}
 
 	dirty := !cache.initialized || len(cache.blocks) != len(m.transcript)
@@ -435,6 +1010,7 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 		blocks := make([]transcriptBlockLayout, len(m.transcript))
 		copy(blocks, cache.blocks)
 		cache.blocks = blocks
+		dirty = true
 	}
 	lineCount := 0
 	for index, block := range m.transcript {
@@ -455,6 +1031,7 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 	}
 
 	lines := make([]string, 0, lineCount+len(cache.blocks))
+	marks := make([]stickyUserMark, 0, 4)
 	if len(cache.blocks) == 0 {
 		lines = append(lines,
 			m.theme.Muted.Render("  "+m.tr("empty.title")),
@@ -462,13 +1039,24 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 			m.theme.Muted.Render("  "+m.tr("empty.help")),
 		)
 	}
+	linePos := 0
 	for _, block := range cache.blocks {
 		if len(lines) > 0 && lines[len(lines)-1] != "" {
 			lines = append(lines, "")
+			linePos++
+		}
+		if block.block.Kind == BlockUser {
+			marks = append(marks, stickyUserMark{
+				content: block.block.Content,
+				endLine: linePos + len(block.lines),
+				runID:   block.block.RunID,
+			})
 		}
 		lines = append(lines, block.lines...)
+		linePos += len(block.lines)
 	}
 	cache.lines = lines
+	cache.userMarks = marks
 	cache.initialized = true
 	return cache.lines
 }
@@ -642,22 +1230,108 @@ func formatActivityDuration(duration time.Duration) string {
 func (m AppModel) transcriptViewportSize() (int, int) {
 	width := max(1, m.width)
 	height := max(1, m.height)
+	if p := m.paint; p != nil && p.bodyHeight > 0 && p.width == width && p.height == height {
+		return bodyTranscriptWidth(width, p.bodyHeight), p.bodyHeight
+	}
 	suggestions := m.visibleCommandSuggestions()
 	recapRows := 0
 	if m.visibleRecapStatus(width, height) != "" {
 		recapRows = 1
 	}
-	layout := measureViewLayout(height, width, m.composerBlockLines(), len(suggestions), recapRows)
-	bodyHeight := layout.bodyHeight
-	return bodyTranscriptWidth(width, bodyHeight), bodyHeight
+	layout := measureViewLayout(height, width, m.composerBlockLines(), len(suggestions), recapRows, m.todoPaneDesiredHeight(height))
+	if m.stickyInstructionHeight(width, layout.bodyHeight) > 0 && layout.bodyHeight > stickySlotRows+1 {
+		layout.stickyHeight = stickySlotRows
+		layout.bodyHeight -= stickySlotRows
+	}
+	return bodyTranscriptWidth(width, layout.bodyHeight), layout.bodyHeight
 }
 
 func (m AppModel) transcriptMaxOffset() int {
+	// Hot path: use metrics last published by View via paint cache.
+	if p := m.paint; p != nil && p.bodyHeight > 0 && p.lineCount >= 0 &&
+		p.width == max(1, m.width) && p.height == max(1, m.height) {
+		return m.transcriptOffsetLimit(p.lineCount, p.bodyHeight)
+	}
 	width, height := m.transcriptViewportSize()
 	lineCount := len(m.transcriptLines(max(1, width-4)))
 	return m.transcriptOffsetLimit(lineCount, height)
 }
 
 func (m *AppModel) scrollTranscript(delta int) {
-	m.transcriptTop = min(m.transcriptMaxOffset(), max(0, m.transcriptTop+delta))
+	// Clamp against the layout implied by the destination offset. The cached
+	// paint height describes the previous frame; when scrolling crosses a sticky
+	// prompt boundary that height changes by stickySlotRows. Reusing it for one
+	// more event can clamp the offset back across the boundary, making repeated
+	// wheel-up events alternate between the sticky and non-sticky layouts.
+	next := max(0, m.transcriptTop+delta)
+	maxOffset := m.transcriptMaxOffsetForTop(next)
+	clamped := min(maxOffset, next)
+	if delta > 0 {
+		clamped = max(m.transcriptTop, clamped)
+	}
+	m.transcriptTop = clamped
+}
+
+func (m AppModel) transcriptMaxOffsetForTop(top int) int {
+	width := max(1, m.width)
+	height := max(1, m.height)
+	suggestions := m.visibleCommandSuggestions()
+	recapRows := 0
+	if m.visibleRecapStatus(width, height) != "" {
+		recapRows = 1
+	}
+	layout := measureViewLayout(height, width, m.composerBlockLines(), len(suggestions), recapRows, m.todoPaneDesiredHeight(height))
+	contentWidth := transcriptContentWidth(width, layout.bodyHeight)
+	lines := m.transcriptLines(contentWidth)
+	if m.stickyVisibleAtTop(layout.bodyHeight, top, lines, m.transcriptLayout.userMarks) {
+		layout.bodyHeight -= stickySlotRows
+	}
+	return max(m.transcriptMaxOffset(), m.transcriptOffsetLimit(len(lines), max(1, layout.bodyHeight)))
+}
+
+// stickyVisibleWithCache decides sticky visibility using cached userMarks and
+// paint metrics — no composer render, no full layout measure.
+func (m AppModel) stickyVisibleWithCache(preBodyHeight int) bool {
+	if preBodyHeight < stickySlotRows+2 {
+		return false
+	}
+	cache := m.transcriptLayout
+	if cache == nil || !cache.initialized || len(cache.userMarks) == 0 {
+		return false
+	}
+	return m.stickyVisibleAtTop(preBodyHeight, m.transcriptTop, cache.lines, cache.userMarks)
+}
+
+func (m AppModel) stickyVisibleAtTop(preBodyHeight, top int, lines []string, marks []stickyUserMark) bool {
+	totalLines := len(lines)
+	if totalLines == 0 {
+		return false
+	}
+	contentHeight := max(1, preBodyHeight-stickySlotRows)
+	if m.isRunning() || m.transcriptOffsetLimit(totalLines, contentHeight) > 0 {
+		footerGap := 0
+		if contentHeight >= 3 {
+			footerGap = 1
+		}
+		contentHeight = max(1, contentHeight-1-footerGap)
+	}
+	offset := min(m.transcriptOffsetLimit(totalLines, max(1, preBodyHeight-stickySlotRows)), max(0, top))
+	end := totalLines - offset
+	visibleStart := max(0, end-contentHeight)
+	runID := m.runID
+	running := m.isRunning()
+	for index := len(marks) - 1; index >= 0; index-- {
+		mark := marks[index]
+		if mark.endLine > visibleStart {
+			continue
+		}
+		if running && runID != "" && mark.runID != "" && mark.runID != runID {
+			continue
+		}
+		if strings.TrimSpace(mark.content) == "" {
+			continue
+		}
+		return true
+	}
+	return false
 }

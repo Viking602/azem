@@ -77,6 +77,46 @@ type transcriptLayoutCache struct {
 	initialized  bool
 	blocks       []transcriptBlockLayout
 	lines        []string
+	// userMarks are rebuilt with lines so sticky/scroll can stay O(user prompts).
+	userMarks []stickyUserMark
+}
+
+// paintCache holds per-frame layout artifacts shared across value-receiver
+// View() and pointer-receiver scroll paths. Must be heap-allocated so mutations
+// from View (value receiver) persist.
+type paintCache struct {
+	width, height int
+	// post-sticky transcript body height used by maxOffset / clamp
+	bodyHeight int
+	// pre-sticky body height used for sticky visibility decisions
+	preBodyHeight int
+	contentWidth  int
+	lineCount     int
+
+	stickyHeight int
+	stickyText   string
+	stickyRender string
+	stickyTop    int // transcriptTop used when sticky* was computed
+	stickyRunID  string
+	stickyRun    bool
+
+	todoWidth    int
+	todoHeight   int
+	todoScroll   int
+	todoHide     bool
+	todoFocus    bool
+	todoRevision int64
+	todoFrame    int
+	todoRender   string
+
+	composerWidth   int
+	composerValue   string
+	composerHeight  int
+	composerFocused bool
+	composerModel   string
+	composerReason  string
+	composerMode    string
+	composerRender  string
 }
 
 type recapLayoutCache struct {
@@ -85,6 +125,22 @@ type recapLayoutCache struct {
 	initialized  bool
 	value        recap.Recap
 	lines        []string
+}
+
+type contextReportRenderCache struct {
+	valid                    bool
+	usage                    UsageView
+	language                 string
+	profileSource            string
+	profileEstimated         bool
+	profileReportedInput     int
+	profileReportedOutput    int
+	profileContributionCount int
+	profileContributionHash  uint64
+	profileError             string
+	lines                    []string
+	wrappedWidth             int
+	wrappedLines             []string
 }
 
 type transcriptSelection struct {
@@ -109,11 +165,12 @@ const (
 	OverlayLanguage         Overlay = "language"
 	OverlayReasoning        Overlay = "reasoning"
 	OverlaySessions         Overlay = "sessions"
+	OverlayBranches         Overlay = "branches"
+	OverlayBranchConfirm    Overlay = "branch_confirm"
 	OverlayApproval         Overlay = "approval"
 	OverlayCancel           Overlay = "cancel"
 	OverlayDiff             Overlay = "diff"
 	OverlayAgents           Overlay = "agents"
-	OverlayTodos            Overlay = "todos"
 	OverlayMemory           Overlay = "memory"
 	OverlayRecap            Overlay = "recap"
 	OverlayAgentDetail      Overlay = "agent_detail"
@@ -132,6 +189,7 @@ type focusArea uint8
 const (
 	focusComposer focusArea = iota
 	focusTranscript
+	focusTodo
 	focusOverlay
 )
 
@@ -305,79 +363,89 @@ type UsageView struct {
 }
 
 type AppModel struct {
-	runtime             Runtime
-	initialCmd          tea.Cmd
-	theme               Theme
-	catalog             i18n.Catalog
-	composer            textarea.Model
-	modelSearch         textinput.Model
-	commandCursor       int
-	width               int
-	height              int
-	sessionID           string
-	runID               string
-	lastRunID           string
-	transcript          []Block
-	transcriptLayout    *transcriptLayoutCache
-	recapLayout         *recapLayoutCache
-	transcriptTop       int
-	transcriptCursor    int
-	transcriptSelection *transcriptSelection
-	focus               focusArea
-	overlay             Overlay
-	overlayCursor       int
-	overlayScroll       int
-	overlayPurpose      string
-	provider            string
-	model               string
-	reasoning           string
-	agentMode           string
-	workspace           string
-	status              string
-	approvalMode        ApprovalMode
-	autoReviewAvailable bool
-	errorBanner         string
-	quitting            bool
-	reducedMotion       bool
-	animationActive     bool
-	animationFrame      int
-	runStartedAt        time.Time
-	runActivityAt       time.Time
-	runActivity         string
-	runActivityDetail   string
-	actionBusy          bool
-	actionCancel        func()
-	agents              []AgentView
-	todo                TodoView
-	todoHideCompleted   bool
-	memories            []memory.Memory
-	recap               *recap.Recap
-	detailAgentID       string
-	agentTypes          []AgentCatalogView
-	personas            []AgentCatalogView
-	skills              []SkillCatalogView
-	skillDiagnostics    []app.SkillDiagnostic
-	mcpServers          []MCPView
-	detailMCPName       string
-	background          []backgroundservice.Process
-	backgroundLogs      *backgroundservice.LogSnapshot
-	detailBackgroundID  string
-	backgroundFollow    bool
-	backgroundPollGen   uint64
-	models              []ModelChoice
-	modelsByProvider    map[string][]ModelChoice
-	modelRoutes         []app.ModelRouteEntry
-	pendingModelRoute   *pendingModelRoute
-	pendingSessionModel *pendingSessionModel
-	sessions            []SessionChoice
-	recovery            []RecoveryView
-	auth                map[string]AuthView
-	approval            *ApprovalView
-	pendingApprovals    []ApprovalView
-	usage               UsageView
-	contextProfile      app.ContextProfile
-	contextProfileError string
-	pendingImages       []session.Attachment
+	runtime                  Runtime
+	initialCmd               tea.Cmd
+	theme                    Theme
+	catalog                  i18n.Catalog
+	composer                 textarea.Model
+	modelSearch              textinput.Model
+	commandCursor            int
+	width                    int
+	height                   int
+	sessionID                string
+	runID                    string
+	lastRunID                string
+	transcript               []Block
+	transcriptLayout         *transcriptLayoutCache
+	recapLayout              *recapLayoutCache
+	paint                    *paintCache
+	transcriptTop            int
+	transcriptCursor         int
+	transcriptSelection      *transcriptSelection
+	scrollbarDragging        bool
+	overlayScrollbarDragging bool
+	todoExpanded             bool
+	todoScroll               int
+	contextReportCache       *contextReportRenderCache
+	focus                    focusArea
+	overlay                  Overlay
+	overlayCursor            int
+	overlayScroll            int
+	overlayPurpose           string
+	provider                 string
+	model                    string
+	reasoning                string
+	agentMode                string
+	workspace                string
+	branch                   string
+	branches                 []app.GitBranchEntry
+	branchDirty              bool
+	pendingBranch            string
+	status                   string
+	approvalMode             ApprovalMode
+	autoReviewAvailable      bool
+	errorBanner              string
+	quitting                 bool
+	reducedMotion            bool
+	animationActive          bool
+	animationFrame           int
+	runStartedAt             time.Time
+	runActivityAt            time.Time
+	runActivity              string
+	runActivityDetail        string
+	actionBusy               bool
+	actionCancel             func()
+	agents                   []AgentView
+	todo                     TodoView
+	todoHideCompleted        bool
+	memories                 []memory.Memory
+	recap                    *recap.Recap
+	detailAgentID            string
+	agentTypes               []AgentCatalogView
+	personas                 []AgentCatalogView
+	skills                   []SkillCatalogView
+	skillDiagnostics         []app.SkillDiagnostic
+	mcpServers               []MCPView
+	detailMCPName            string
+	background               []backgroundservice.Process
+	backgroundLogs           *backgroundservice.LogSnapshot
+	detailBackgroundID       string
+	backgroundFollow         bool
+	backgroundPollGen        uint64
+	models                   []ModelChoice
+	modelsByProvider         map[string][]ModelChoice
+	modelRoutes              []app.ModelRouteEntry
+	pendingModelRoute        *pendingModelRoute
+	pendingSessionModel      *pendingSessionModel
+	sessions                 []SessionChoice
+	recovery                 []RecoveryView
+	auth                     map[string]AuthView
+	approval                 *ApprovalView
+	pendingApprovals         []ApprovalView
+	usage                    UsageView
+	contextProfile           app.ContextProfile
+	contextProfileError      string
+	pendingImages            []session.Attachment
 }
 
 func NewModel(runtime Runtime, workspace string, provider string, model string, reasoning string, mode string, initialSessionID ...string) AppModel {
@@ -439,8 +507,8 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	return AppModel{
 		runtime: runtime, initialCmd: focus, theme: theme, catalog: catalog, composer: composer, modelSearch: modelSearch,
 		width: 80, height: 24, sessionID: sessionID, provider: provider, model: model,
-		reasoning: reasoning, agentMode: mode, workspace: workspace, status: "Ready", approvalMode: ApprovalModePrompt,
-		focus: focusComposer, transcriptCursor: -1, transcriptLayout: &transcriptLayoutCache{}, recapLayout: &recapLayoutCache{},
+		reasoning: reasoning, agentMode: mode, workspace: workspace, branch: resolveGitBranch(workspace), status: "Ready", approvalMode: ApprovalModePrompt,
+		focus: focusComposer, transcriptCursor: -1, transcriptLayout: &transcriptLayoutCache{}, recapLayout: &recapLayoutCache{}, paint: &paintCache{}, contextReportCache: &contextReportRenderCache{},
 		auth: make(map[string]AuthView), modelsByProvider: make(map[string][]ModelChoice),
 		reducedMotion: os.Getenv("AZEM_REDUCED_MOTION") == "1" || os.Getenv("REDUCED_MOTION") == "1",
 	}

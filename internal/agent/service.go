@@ -58,6 +58,33 @@ type succeededActionAttemptLister interface {
 
 var ErrTerminalReportMissing = errors.New("terminal worker report is missing")
 
+const hashlineEditToolDescription = `Apply a hashline patch to existing files. This is not unified diff. Copy the exact ¶PATH#TAG header and N:TEXT line numbers from the latest coding.read_file result. Grammar:
+¶PATH#TAG
+replace N:
++final replacement line
+replace N..M:
++first final line
++second final line
+delete N..M
+insert before N:
++new final line
+insert after N:
++new final line
+insert head:
++new final line
+insert tail:
++new final line
+replace block N:
++complete final block
+delete block N
+Use positive 1-based line numbers. Body rows are final content only and each starts with '+'. Never send @@ hunks, ~ or : ranges, -old rows, or bare context rows. Delete has no body.`
+
+const hashlineRetryGuidance = `Required hashline retry format:
+¶PATH#TAG
+replace N..M:
++final content only
+Copy ¶PATH#TAG and line numbers from the latest coding.read_file result. Allowed operations: replace N or N..M, delete N or N..M, insert before/after N, insert head/tail, replace block N, delete block N. Never use @@, ~N:M, -old rows, or bare context.`
+
 type toolCallJournal interface {
 	RecordToolCallCharge(context.Context, string, string, string, string, string) (bool, error)
 	CountToolCallCharges(context.Context, string, string) (int, error)
@@ -82,6 +109,81 @@ func (d executionArgumentsDriver) Execute(ctx context.Context, call tool.Call, s
 	return d.inner.Execute(ctx, call, sink)
 }
 
+type EditRecovery struct {
+	mu           sync.Mutex
+	readRequired map[string]struct{}
+}
+
+func (recovery *EditRecovery) RequiredEditReadTarget() (string, bool) {
+	if recovery == nil {
+		return "", false
+	}
+	recovery.mu.Lock()
+	defer recovery.mu.Unlock()
+	target := ""
+	for candidate := range recovery.readRequired {
+		if target == "" || candidate < target {
+			target = candidate
+		}
+	}
+	return target, target != ""
+}
+
+func (recovery *EditRecovery) BlockedEdit(call tool.Call) (tool.Result, bool) {
+	if recovery == nil || call.Name != coding.ToolEditHashline {
+		return tool.Result{}, false
+	}
+	target, required := recovery.RequiredEditReadTarget()
+	if !required {
+		return tool.Result{}, false
+	}
+	return tool.Result{
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Content: fmt.Sprintf(
+			"edit blocked: the previous edit for %q failed. Call %s for that file, then rebuild the patch from the new header and visible lines before editing again.",
+			target, coding.ToolReadFile,
+		),
+		IsError: true,
+	}, true
+}
+
+func addHashlineRetryGuidance(call tool.Call, result tool.Result) tool.Result {
+	if call.Name != coding.ToolEditHashline || !result.IsError || strings.Contains(result.Content, "Required hashline retry format:") {
+		return result
+	}
+	result.Content = strings.TrimSpace(result.Content) + "\n\n" + hashlineRetryGuidance
+	return result
+}
+
+func (recovery *EditRecovery) Observe(call tool.Call, result tool.Result, executionErr error) {
+	if recovery == nil {
+		return
+	}
+	target := normalizedTarget(call.Arguments)
+	if target == "" {
+		target = "workspace"
+	}
+	recovery.mu.Lock()
+	defer recovery.mu.Unlock()
+	switch call.Name {
+	case coding.ToolEditHashline:
+		if executionErr == nil && !result.IsError {
+			return
+		}
+		if recovery.readRequired == nil {
+			recovery.readRequired = make(map[string]struct{})
+		}
+		recovery.readRequired[target] = struct{}{}
+	case coding.ToolReadFile:
+		if executionErr != nil || result.IsError {
+			return
+		}
+		delete(recovery.readRequired, target)
+		delete(recovery.readRequired, "workspace")
+	}
+}
+
 type Run struct {
 	RunID            string
 	Goal             string
@@ -95,6 +197,7 @@ type Run struct {
 	completedEffects map[string]struct{}
 	completedCallIDs map[string]string
 	chargedToolCalls atomic.Int64
+	editRecovery     EditRecovery
 	leaseCancel      context.CancelFunc
 	leaseParentStop  func() bool
 	leaseDone        <-chan error
@@ -115,6 +218,13 @@ type ExecutionResult struct {
 	Result   tool.Result
 	Approval *PendingApproval
 	Executed bool
+}
+
+func (run *Run) RequiredEditReadTarget() (string, bool) {
+	if run == nil {
+		return "", false
+	}
+	return run.editRecovery.RequiredEditReadTarget()
 }
 
 type ApprovalMode string
@@ -541,6 +651,9 @@ func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Drive
 	if charged {
 		run.chargedToolCalls.Add(1)
 	}
+	if blocked, required := run.editRecovery.BlockedEdit(call); required {
+		return ExecutionResult{Result: blocked, Executed: true}, nil
+	}
 	nonIdempotentEffect := !definition.Idempotent && !definition.Security.Idempotent &&
 		(definition.EffectType == tool.EffectWrite || definition.EffectType == tool.EffectExternalSideEffect)
 	effectKey := call.Name + "\x00" + inputHash
@@ -592,6 +705,8 @@ func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Drive
 	identityCall := call
 	identityCall.Arguments = canonicalArguments
 	result, err := governed.Execute(withAuthorizedInvocation(ctx, scope), identityCall, sink)
+	result = addHashlineRetryGuidance(call, result)
+	run.editRecovery.Observe(call, result, err)
 	if err != nil {
 		return ExecutionResult{Result: result}, err
 	}
@@ -714,6 +829,10 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 		}
 		if !s.allowWrite && definition.EffectType == tool.EffectWrite {
 			continue
+		}
+		if definition.Name == coding.ToolEditHashline {
+			definition.Description = hashlineEditToolDescription
+			driver = definitionOverrideDriver{Driver: driver, definition: definition}
 		}
 		// gofmt is inherently idempotent: formatting the same path again either
 		// applies the current canonical format or reports no change. Hydaelyn

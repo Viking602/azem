@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -95,7 +97,48 @@ func padOrTrim(value string, width int) string {
 	return value + strings.Repeat(" ", width-displayWidth)
 }
 
+// resolveGitBranch returns the current branch for workspace, or empty when
+// the path is not a git work tree / git is unavailable. Matches grok-build's
+// status-bar branch chip (no detached-HEAD decoration here).
+func resolveGitBranch(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return ""
+	}
+	cmd := exec.Command("git", "-C", workspace, "branch", "--show-current")
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// collapseHomePath rewrites $HOME prefixes to ~/ so chrome paths stay short
+// and never show platform-specific roots like /Users/… or /home/….
+func collapseHomePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	cleaned := filepath.Clean(path)
+	home = filepath.Clean(home)
+	if cleaned == home {
+		return "~"
+	}
+	sep := string(os.PathSeparator)
+	if strings.HasPrefix(cleaned, home+sep) {
+		return "~" + cleaned[len(home):]
+	}
+	return path
+}
+
 func shortenPath(path string, width int) string {
+	path = collapseHomePath(path)
 	if utf8.RuneCountInString(path) <= width {
 		return path
 	}

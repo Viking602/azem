@@ -31,6 +31,7 @@ import (
 var (
 	ErrRunActive        = errors.New("a run is already active")
 	ErrNothingToCompact = errors.New("session does not have enough new history to compact")
+	ErrDirtyWorkspace   = errors.New("workspace has uncommitted changes")
 )
 
 type Service struct {

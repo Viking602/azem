@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -34,8 +32,10 @@ type Driver struct {
 	retryObserver   RetryObserver
 }
 
-type RetryProgress = azprovider.RetryProgress
-type RetryObserver = azprovider.RetryObserver
+type (
+	RetryProgress = azprovider.RetryProgress
+	RetryObserver = azprovider.RetryObserver
+)
 
 func New(authentication *auth.Service, accountID string, endpoint string, models []string, reasoningEffort string) (*Driver, error) {
 	if authentication == nil {
@@ -141,6 +141,9 @@ func (s *retryingStream) Recv() (hyprovider.Event, error) {
 		if event.Kind == hyprovider.EventError && event.Err != nil {
 			cause = event.Err
 		}
+		if s.emitted && errors.Is(recvErr, io.EOF) {
+			return event, recvErr
+		}
 		if !isRetryableProviderTransport(cause) {
 			if recvErr == nil && event.Kind != hyprovider.EventError && event.Kind != hyprovider.EventDone {
 				s.emitted = true
@@ -244,46 +247,12 @@ func streamFailure(event hyprovider.Event, err error) (hyprovider.Event, error) 
 }
 
 func isRetryableProviderTransport(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	var apiError *responses.APIError
-	if errors.As(err, &apiError) && apiError.Kind != responses.ErrorServer && apiError.Kind != responses.ErrorStream {
-		return false
-	}
-	if apiError != nil && apiError.Kind == responses.ErrorStream && strings.EqualFold(strings.TrimSpace(apiError.Message), "EOF") {
-		return true
-	}
-	if errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	var urlError *url.Error
-	if errors.As(err, &urlError) && urlError.Err != nil {
-		return errors.Is(urlError.Err, io.EOF) || isRetryableProviderTransport(urlError.Err)
-	}
-	var networkError net.Error
-	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
-		return true
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "upstream connection reset") ||
-		strings.Contains(message, "connection reset by peer") ||
-		strings.Contains(message, "connection reset") ||
-		strings.Contains(message, "tls: bad record mac") ||
-		strings.Contains(message, "unexpected eof") ||
-		strings.Contains(message, "broken pipe") ||
-		strings.Contains(message, "server closed idle connection") ||
-		strings.Contains(message, "client connection lost") ||
-		strings.Contains(message, "connection aborted") ||
-		strings.Contains(message, "use of closed network connection")
+	return azprovider.IsRetryableTransport(err)
 }
 
 func providerStreamRetryDelay(attempt int) time.Duration {
-	delay := 200 * time.Millisecond * time.Duration(1<<max(0, attempt-1))
-	return min(delay, 2*time.Second)
+	delay := 500 * time.Millisecond * time.Duration(1<<max(0, attempt-1))
+	return min(delay, 8*time.Second)
 }
 
 func (d *Driver) toolItemID(callID string) string {

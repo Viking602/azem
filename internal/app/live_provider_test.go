@@ -114,6 +114,67 @@ func TestLiveSubscriptionGovernedEdits(t *testing.T) {
 	}
 }
 
+func TestLiveChatGPTHashlineEdit(t *testing.T) {
+	if os.Getenv("AZEM_LIVE_ACCEPTANCE") != "1" {
+		t.Skip("set AZEM_LIVE_ACCEPTANCE=1 to use local subscription credentials")
+	}
+	ctx, boot, workspace := liveBootstrap(t)
+	path := filepath.Join(workspace, "existing.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	account, model, reasoning := liveProviderSelection(t, ctx, boot.Service, "chatgpt")
+	if override := strings.TrimSpace(os.Getenv("AZEM_LIVE_CHATGPT_MODEL")); override != "" {
+		model.ID = override
+	}
+	if override := strings.TrimSpace(os.Getenv("AZEM_LIVE_CHATGPT_REASONING")); override != "" {
+		reasoning = override
+	}
+	runID, err := boot.Service.StartConfiguredTurn(TurnRequest{
+		SessionID: "default",
+		Prompt: "Use coding.read_file and coding.edit_hashline to replace only the line beta in existing.txt with BETA. " +
+			"You must edit the existing file, verify its final content, and briefly report completion. Do not use coding.write_file or coding.shell.",
+		Provider: "chatgpt", Model: model.ID, Reasoning: reasoning, AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	editApprovals := 0
+	for {
+		event, err := boot.Service.NextEvent(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.RunID != runID {
+			continue
+		}
+		switch event.Kind {
+		case EventApprovalRequested:
+			if event.Data["tool"] == "coding.edit_hashline" {
+				editApprovals++
+			}
+			if err := boot.Service.ExecuteAction(ctx, Action{Kind: ActionResolveApproval, Target: event.ApprovalID, Decision: "once"}); err != nil {
+				t.Fatal(err)
+			}
+		case EventRunFailed:
+			t.Fatalf("ChatGPT hashline edit failed: %s", event.Text)
+		case EventRunFinished:
+			if editApprovals == 0 {
+				t.Fatal("ChatGPT completed without a governed hashline edit")
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(content) != "alpha\nBETA\ngamma\n" {
+				t.Fatalf("hashline-edited content = %q", content)
+			}
+			t.Logf("ChatGPT account %s model %s completed an approved hashline edit", account.ID, model.ID)
+			return
+		}
+	}
+}
+
 func TestLiveWorkerCompletesScopedEdit(t *testing.T) {
 	if os.Getenv("AZEM_LIVE_ACCEPTANCE") != "1" {
 		t.Skip("set AZEM_LIVE_ACCEPTANCE=1 to use local subscription credentials")

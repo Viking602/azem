@@ -121,7 +121,6 @@ func TestRetryableProviderTransportRejectsDeterministicErrors(t *testing.T) {
 	for _, err := range []error{
 		context.Canceled,
 		context.DeadlineExceeded,
-		io.EOF,
 		&responses.APIError{Kind: responses.ErrorInvalidRequest, StatusCode: http.StatusBadRequest, Message: "max_output_tokens is not supported"},
 		errors.New("x509: certificate signed by unknown authority"),
 	} {
@@ -131,10 +130,15 @@ func TestRetryableProviderTransportRejectsDeterministicErrors(t *testing.T) {
 	}
 }
 
-func TestRetryableProviderTransportRetriesUnexpectedStreamEOF(t *testing.T) {
-	err := &responses.APIError{Kind: responses.ErrorStream, Message: "EOF"}
-	if !isRetryableProviderTransport(err) {
-		t.Fatalf("unexpected stream EOF was not classified retryable: %v", err)
+func TestRetryableProviderTransportRetriesConnectionEOFs(t *testing.T) {
+	for _, err := range []error{
+		io.EOF,
+		io.ErrUnexpectedEOF,
+		&responses.APIError{Kind: responses.ErrorStream, Message: "EOF"},
+	} {
+		if !isRetryableProviderTransport(err) {
+			t.Fatalf("connection EOF was not classified retryable: %v", err)
+		}
 	}
 }
 
@@ -171,6 +175,22 @@ func TestProviderRetryObserverCanStopRetryLoop(t *testing.T) {
 	}
 }
 
+func TestProviderStreamRetryDelayCoversTransientOutage(t *testing.T) {
+	want := []time.Duration{
+		500 * time.Millisecond,
+		time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+		8 * time.Second,
+	}
+	for index, expected := range want {
+		if got := providerStreamRetryDelay(index + 1); got != expected {
+			t.Fatalf("retry %d delay = %s, want %s", index+1, got, expected)
+		}
+	}
+}
+
 type stubProviderStream struct{}
 
 func (*stubProviderStream) Recv() (hyprovider.Event, error) { return hyprovider.Event{}, nil }
@@ -181,7 +201,7 @@ func TestDriverStopsAfterFiveConnectionResetRetries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = writer.Write([]byte("data: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"upstream connection reset\"}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"request failed; request ID req_server_123\"}\n\n"))
 	}))
 	defer server.Close()
 
@@ -196,11 +216,81 @@ func TestDriverStopsAfterFiveConnectionResetRetries(t *testing.T) {
 	if err != nil || event.Kind != hyprovider.EventError || event.Err == nil {
 		t.Fatalf("event=%#v error=%v", event, err)
 	}
-	if !strings.Contains(event.Err.Error(), "after 5 retries") || !strings.Contains(event.Err.Error(), "upstream connection reset") {
+	if !strings.Contains(event.Err.Error(), "after 5 retries") ||
+		!strings.Contains(event.Err.Error(), "request ID req_server_123") {
 		t.Fatalf("unexpected final error: %v", event.Err)
 	}
 	if requests.Load() != 6 {
 		t.Fatalf("requests=%d, want initial request plus five retries", requests.Load())
+	}
+}
+
+func TestDriverRetriesOverloadedRateLimitFiveTimesThenSucceeds(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		request := requests.Add(1)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if request <= 5 {
+			_, _ = writer.Write([]byte("data: {\"type\":\"error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded. Please try again later.\"}\n\n"))
+			return
+		}
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	driver := newTestDriver(t, server.URL)
+	driver.retryDelay = func(int) time.Duration { return 0 }
+	var progress []RetryProgress
+	driver.SetRetryObserver(func(retry RetryProgress) error {
+		progress = append(progress, retry)
+		return nil
+	})
+	stream, err := driver.Stream(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	event, err := stream.Recv()
+	if err != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("event=%#v error=%v", event, err)
+	}
+	if requests.Load() != 6 || len(progress) != 5 {
+		t.Fatalf("requests=%d progress=%d, want initial request plus five reconnects", requests.Load(), len(progress))
+	}
+	for index, retry := range progress {
+		if retry.Attempt != index+1 || retry.Max != 5 ||
+			!strings.Contains(retry.Cause.Error(), "currently overloaded") {
+			t.Fatalf("retry %d = %+v", index+1, retry)
+		}
+	}
+}
+
+func TestDriverStopsAfterFiveOverloadedRateLimitRetries(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"error\",\"code\":\"server_is_overloaded\",\"message\":\"server overloaded; request ID req_overload_123\"}\n\n"))
+	}))
+	defer server.Close()
+
+	driver := newTestDriver(t, server.URL)
+	driver.retryDelay = func(int) time.Duration { return 0 }
+	stream, err := driver.Stream(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	event, err := stream.Recv()
+	if err != nil || event.Kind != hyprovider.EventError || event.Err == nil {
+		t.Fatalf("event=%#v error=%v", event, err)
+	}
+	if !strings.Contains(event.Err.Error(), "after 5 retries") ||
+		!strings.Contains(event.Err.Error(), "request ID req_overload_123") {
+		t.Fatalf("unexpected final error: %v", event.Err)
+	}
+	if requests.Load() != 6 {
+		t.Fatalf("requests=%d, want initial request plus five reconnects", requests.Load())
 	}
 }
 
@@ -366,6 +456,37 @@ func TestDriverMapsNamesOutsideCodexToolPattern(t *testing.T) {
 	if event.ToolCall == nil || event.ToolCall.Name != "coding.read_file" {
 		t.Fatalf("tool event=%#v", event)
 	}
+}
+
+func TestDriverMapsHistoricalToolNamesThatAreNoLongerExposed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Input []map[string]any `json:"input"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if len(body.Input) != 3 || body.Input[1]["name"] != "coding_edit_hashline" {
+			t.Errorf("mapped input=%+v", body.Input)
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte(`data: {"type":"response.completed","response":{"status":"completed","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+	driver := newTestDriver(t, server.URL)
+	stream, err := driver.Stream(context.Background(), hyprovider.Request{
+		Model: "gpt-test",
+		Messages: []message.Message{
+			message.NewText(message.RoleUser, "edit"),
+			{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "call_1", Name: "coding.edit_hashline", Arguments: json.RawMessage(`{"input":"patch"}`)}}},
+			message.NewToolResult(message.ToolResult{ToolCallID: "call_1", Name: "coding.edit_hashline", Content: "rejected"}),
+		},
+		Tools: []message.ToolDefinition{{Name: "coding.read_file", Description: "read"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
 }
 
 func TestDriverRoundTripsDistinctFunctionItemID(t *testing.T) {

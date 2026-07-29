@@ -296,7 +296,8 @@ func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runI
 	request.Model = resolution.modelID
 	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: request.SessionID, RunID: runID, State: "running"})
 	models := agentservice.TeamModels{Planner: resolution.modelID, Implementer: resolution.modelID, Reviewer: resolution.modelID, Reporter: resolution.modelID}
-	toolBus, toolErr := s.teamToolBus(ctx, request.SessionID, runID, goal)
+	editRecovery := &agentservice.EditRecovery{}
+	toolBus, toolErr := s.teamToolBus(ctx, request.SessionID, runID, goal, editRecovery)
 	if toolErr != nil {
 		s.finishProviderTeam(ctx, request.SessionID, runID, request.Prompt, request.Todo, agentservice.TeamExecution{}, toolErr)
 		return
@@ -314,7 +315,7 @@ func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runI
 		"original_prompt":      request.Prompt,
 		"hook_private_context": request.privateContext,
 		"attachments":          EncodeAttachmentsMeta(request.Images),
-	}, s.teamHooks(request, runID, policy), func(state multiagent.TeamState) {
+	}, s.teamHooks(request, runID, policy, editRecovery), func(state multiagent.TeamState) {
 		for _, instance := range state.Instances {
 			s.emit(ctx, Event{
 				Kind: EventAgentState, SessionID: request.SessionID, RunID: runID, AgentID: instance.ID, State: string(instance.State),
@@ -333,7 +334,8 @@ func (s *Service) runResumedProviderTeam(ctx context.Context, request TurnReques
 	request.Model = resolution.modelID
 	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: request.SessionID, RunID: runID, State: "resuming", Data: map[string]string{"preserveUsage": "true"}})
 	models := agentservice.TeamModels{Planner: resolution.modelID, Implementer: resolution.modelID, Reviewer: resolution.modelID, Reporter: resolution.modelID}
-	toolBus, toolErr := s.teamToolBus(ctx, request.SessionID, runID, request.Prompt)
+	editRecovery := &agentservice.EditRecovery{}
+	toolBus, toolErr := s.teamToolBus(ctx, request.SessionID, runID, request.Prompt, editRecovery)
 	if toolErr != nil {
 		s.finishProviderTeam(ctx, request.SessionID, runID, recapGoal, request.Todo, agentservice.TeamExecution{}, toolErr)
 		return
@@ -343,7 +345,7 @@ func (s *Service) runResumedProviderTeam(ctx context.Context, request TurnReques
 		s.finishProviderTeam(ctx, request.SessionID, runID, recapGoal, request.Todo, agentservice.TeamExecution{}, policyErr)
 		return
 	}
-	execution, err := s.coding.ResumeTeamWithToolsHooks(ctx, runID, models, resolution.resolver, toolBus, s.teamHooks(request, runID, policy), func(state multiagent.TeamState) {
+	execution, err := s.coding.ResumeTeamWithToolsHooks(ctx, runID, models, resolution.resolver, toolBus, s.teamHooks(request, runID, policy, editRecovery), func(state multiagent.TeamState) {
 		for _, instance := range state.Instances {
 			s.emit(ctx, Event{
 				Kind: EventAgentState, SessionID: request.SessionID, RunID: runID, AgentID: instance.ID, State: string(instance.State),
@@ -355,7 +357,7 @@ func (s *Service) runResumedProviderTeam(ctx context.Context, request TurnReques
 	s.finishProviderTeam(ctx, request.SessionID, runID, recapGoal, request.Todo, execution, err)
 }
 
-func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy teamExecutionPolicy) agentservice.TeamHooks {
+func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy teamExecutionPolicy, editRecovery *agentservice.EditRecovery) agentservice.TeamHooks {
 	sessionID := request.SessionID
 	teamImages := CloneAttachments(policy.images)
 	teamHistory := append([]session.Block(nil), request.History...)
@@ -477,6 +479,7 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 			}
 		}
 		engine.ExtraBody = extraBody
+		engine.Hooks = engine.Hooks.Prepend(editRecoveryHook{run: editRecovery})
 		return engine, nil
 	}
 	decorate := func(engine hyagent.Engine, dispatch multiagent.Dispatch, class multiagent.AgentClass) hyagent.Engine {

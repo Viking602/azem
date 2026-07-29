@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,6 +119,21 @@ func TestWorkspaceDriversFilterGitDiffByEffectiveRoot(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	foundEditDefinition := false
+	for _, definition := range service.ToolDefinitions() {
+		if definition.Name != coding.ToolEditHashline {
+			continue
+		}
+		foundEditDefinition = true
+		for _, required := range []string{"¶PATH#TAG", "replace N..M:", "Never send @@ hunks", "-old rows"} {
+			if !strings.Contains(definition.Description, required) {
+				t.Fatalf("edit tool description omitted %q: %q", required, definition.Description)
+			}
+		}
+	}
+	if !foundEditDefinition {
+		t.Fatalf("service omitted %q", coding.ToolEditHashline)
+	}
 
 	nonGit := t.TempDir()
 	drivers, err := service.WorkspaceDrivers(ctx, nonGit)
