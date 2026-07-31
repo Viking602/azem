@@ -1,13 +1,14 @@
 package xai
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"resty.dev/v3"
 
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 
@@ -22,7 +23,7 @@ const (
 )
 
 type Transport interface {
-	Post(context.Context, []byte) (*http.Response, error)
+	Post(context.Context, []byte) (*resty.Response, error)
 	Name() string
 }
 
@@ -54,6 +55,10 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 	if err != nil {
 		return nil, err
 	}
+	// xAI prompt caching is automatic: route with prompt_cache_key, report hits via
+	// cached_tokens only. Drop cache_write_tokens so shared metering/UI do not
+	// pretend Anthropic/Codex-style writes exist for Grok.
+	reporter := responses.WrapUsageReporter(responses.RequestUsageReporter(request), responses.CacheModelAutomatic)
 	open := func() (hyprovider.Stream, error) {
 		streamContext, cancel := context.WithCancel(ctx)
 		response, err := d.transport.Post(streamContext, payload)
@@ -61,7 +66,7 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 			cancel()
 			return nil, err
 		}
-		return responses.Open(response, streamContext, cancel, responses.RequestUsageReporter(request))
+		return responses.Open(response, streamContext, cancel, reporter)
 	}
 	return azprovider.OpenRetryingStream(ctx, open, azprovider.RetryOptions{Delay: d.retryDelay, Observer: d.retryObserver})
 }
@@ -74,7 +79,7 @@ type StandardTransport struct {
 
 func (t *StandardTransport) Name() string { return "xai-responses" }
 
-func (t *StandardTransport) Post(ctx context.Context, payload []byte) (*http.Response, error) {
+func (t *StandardTransport) Post(ctx context.Context, payload []byte) (*resty.Response, error) {
 	if t.Auth == nil {
 		return nil, fmt.Errorf("xAI standard transport auth service is nil")
 	}
@@ -85,28 +90,33 @@ func (t *StandardTransport) Post(ctx context.Context, payload []byte) (*http.Res
 	if endpoint == "" {
 		endpoint = DefaultEndpoint
 	}
-	return t.Auth.DoStreamWithRefresh(ctx, "grok", t.AccountID, func(auth.Credential) (*http.Request, error) {
-		request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
-		if err != nil {
-			return nil, err
-		}
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Accept", "text/event-stream")
-		request.Header.Set("User-Agent", "azem/1")
-		return request, nil
-	})
+	return t.Auth.DoStreamWithRefresh(
+		ctx,
+		"grok",
+		t.AccountID,
+		resty.MethodPost,
+		endpoint,
+		func(request *resty.Request) {
+			request.SetBody(payload)
+			request.SetHeader("Content-Type", "application/json")
+			request.SetHeader("Accept", "text/event-stream")
+			request.SetHeader("User-Agent", "azem/1")
+		},
+	)
 }
 
 type CLIProxyTransport struct {
 	Endpoint string
 	Token    func(context.Context) (string, error)
 	Headers  map[string]string
-	HTTP     *http.Client
+	Client   *resty.Client
+
+	clientMu sync.Mutex
 }
 
 func (t *CLIProxyTransport) Name() string { return "grok-cli-proxy-responses-experimental" }
 
-func (t *CLIProxyTransport) Post(ctx context.Context, payload []byte) (*http.Response, error) {
+func (t *CLIProxyTransport) Post(ctx context.Context, payload []byte) (*resty.Response, error) {
 	endpoint := t.Endpoint
 	if endpoint == "" {
 		endpoint = CLIProxyEndpoint
@@ -125,29 +135,34 @@ func (t *CLIProxyTransport) Post(ctx context.Context, payload []byte) (*http.Res
 	if err != nil {
 		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "text/event-stream")
-	request.Header.Set("User-Agent", "azem/1")
+	request := t.restyClient().R().
+		SetContext(ctx).
+		SetResponseDoNotParse(true).
+		SetBody(payload).
+		SetHeader("Content-Type", "application/json").
+		SetHeader("Accept", "text/event-stream").
+		SetHeader("User-Agent", "azem/1")
 	for name, value := range t.Headers {
-		canonical := http.CanonicalHeaderKey(name)
-		switch canonical {
-		case "Authorization", "Host", "Content-Length":
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "authorization", "host", "content-length":
 			continue
 		}
-		request.Header.Set(canonical, value)
+		request.SetHeader(name, value)
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	client := t.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return client.Do(request)
+	return request.SetAuthToken(token).Post(endpoint)
 }
 
-var _ hyprovider.Driver = (*Driver)(nil)
-var _ Transport = (*StandardTransport)(nil)
-var _ Transport = (*CLIProxyTransport)(nil)
+func (t *CLIProxyTransport) restyClient() *resty.Client {
+	t.clientMu.Lock()
+	defer t.clientMu.Unlock()
+	if t.Client == nil {
+		t.Client = resty.New()
+	}
+	return t.Client
+}
+
+var (
+	_ hyprovider.Driver = (*Driver)(nil)
+	_ Transport         = (*StandardTransport)(nil)
+	_ Transport         = (*CLIProxyTransport)(nil)
+)

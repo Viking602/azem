@@ -349,8 +349,9 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		instructions: instructions, providerID: request.Provider, modelID: modelID, runID: run.RunID,
 		privateContext: request.privateContext, historicalContext: request.historicalContext,
 		resuming: request.resuming,
-		history:  request.History, checkpointBoundary: request.checkpointBoundary,
-		modelHistory: request.modelHistory, images: CloneAttachments(request.Images), todo: request.Todo,
+		history:  request.History, modelHistory: request.modelHistory, toolRecords: request.toolRecords,
+		workspaceRoot: r.cfg.Workspace.Root, checkpointBoundary: request.checkpointBoundary,
+		images: CloneAttachments(request.Images), todo: request.Todo,
 		largeToolTokens:      r.cfg.Agents.Context.LargeToolResultTokens,
 		compactTargetTokens:  budgetConfig.Target,
 		minReclaimTokens:     r.cfg.Agents.Context.MinReclaimTokens,
@@ -359,6 +360,20 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		backgroundPrepare:    r.cfg.Agents.Context.BackgroundPrepare,
 		coordinator:          &compactionCoordinator{},
 		executionCheckpoints: host != nil && host.sessions != nil,
+	}
+	if host != nil {
+		contextManager.reportCachePrefixDegraded = func(reason string) {
+			host.emit(host.ctx, Event{
+				Kind: EventContextUsage, SessionID: request.SessionID, RunID: run.RunID, State: "degraded",
+				Data: map[string]string{
+					"cachePrefix": "degraded",
+					"reason":      reason,
+					"provider":    request.Provider,
+					"model":       modelID,
+					"cacheModel":  cacheModelForProvider(request.Provider, ""),
+				},
+			})
+		}
 	}
 	if strings.TrimSpace(r.cfg.Workspace.Root) != "" {
 		contextManager.captureWorkspace = func(ctx context.Context) (workspaceCheckpointWitness, error) {
@@ -1227,6 +1242,10 @@ func (r *ProviderRuntime) compactionUsageReporter(host *Service, sessionID, runI
 		return nil
 	}
 	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens, cacheWriteTokens int) {
+		model := cacheModelForProvider(providerID, "")
+		if model == responses.CacheModelAutomatic {
+			cacheWriteTokens = 0
+		}
 		host.emit(host.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{
 			"inputTokens": fmt.Sprint(usage.InputTokens), "cachedInputTokens": fmt.Sprint(usage.CachedInputTokens),
 			"outputTokens": fmt.Sprint(usage.OutputTokens), "totalTokens": fmt.Sprint(usage.TotalTokens),
@@ -1235,6 +1254,7 @@ func (r *ProviderRuntime) compactionUsageReporter(host *Service, sessionID, runI
 			"uncachedInputTokens": fmt.Sprint(max(0, usage.InputTokens-usage.CachedInputTokens)),
 			"cacheStatus":         "reported", "aggregateOnly": "true", "requestKind": "compaction",
 			"provider": providerID, "model": modelID, "reasoning": reasoning, "transport": transport,
+			"cacheModel": model,
 		}})
 	}
 }
@@ -1244,12 +1264,14 @@ func (r *ProviderRuntime) responseUsageReporter(host *Service, sessionID, runID,
 		return nil
 	}
 	return func(details responses.UsageDetails) {
+		details = responses.NormalizeUsage(details, cacheModelForProvider(providerID, details.CacheModel))
 		if details.ReasoningTokens == 0 && details.CacheWriteTokens == 0 {
 			return
 		}
 		host.emit(host.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{
 			"reasoningTokens": fmt.Sprint(details.ReasoningTokens), "cacheWriteTokens": fmt.Sprint(details.CacheWriteTokens), "uncachedInputTokens": fmt.Sprint(max(0, details.InputTokens-details.CachedTokens)),
 			"aggregateOnly": "true", "requestKind": requestKind, "provider": providerID, "model": modelID, "transport": transport,
+			"cacheModel": details.CacheModel,
 		}})
 	}
 }
@@ -1488,6 +1510,7 @@ func (r *ProviderRuntime) ResumeRun(_ context.Context, runID string) error {
 		Provider: manifest.Provider, Model: manifest.Model,
 		Reasoning: manifest.Reasoning, AgentMode: projection.Session.AgentMode,
 		History: append([]session.Block(nil), projection.Blocks...), modelHistory: projection.ModelHistory,
+		toolRecords:        append([]session.ToolRecord(nil), projection.ToolRecords...),
 		checkpointBoundary: projection.ModelHistory.CoveredThroughSequence, resuming: true,
 	}
 	request.ActiveSkills = append([]string(nil), manifest.ActiveSkills...)

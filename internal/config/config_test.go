@@ -43,6 +43,36 @@ func TestHooksConfigDefaultsAndLoad(t *testing.T) {
 	}
 }
 
+func TestRetryConfigDefaultsLoadAndValidation(t *testing.T) {
+	cfg := Default()
+	if !cfg.Retry.Enabled || cfg.Retry.MaxRetries != 10 ||
+		cfg.Retry.BaseDelayDuration != 500*time.Millisecond || cfg.Retry.MaxDelayDuration != 5*time.Minute {
+		t.Fatalf("retry defaults = %#v", cfg.Retry)
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nretry:\n  enabled: true\n  max_retries: 3\n  base_delay: 250ms\n  max_delay: 1m\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Retry.MaxRetries != 3 || loaded.Retry.BaseDelayDuration != 250*time.Millisecond ||
+		loaded.Retry.MaxDelayDuration != time.Minute {
+		t.Fatalf("loaded retry config = %#v", loaded.Retry)
+	}
+	loaded.Retry.MaxDelay = "100ms"
+	if err := loaded.Validate(); err == nil {
+		t.Fatal("retry max delay below base delay was accepted")
+	}
+	loaded = Default()
+	loaded.Retry.MaxDelay = "0s"
+	if err := loaded.Validate(); err != nil {
+		t.Fatalf("zero retry max delay should disable the fail-fast cap: %v", err)
+	}
+}
+
 func TestLanguageDefaultAndValidation(t *testing.T) {
 	cfg := Default()
 	if cfg.Defaults.Language != "en" {

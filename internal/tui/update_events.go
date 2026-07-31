@@ -19,7 +19,7 @@ func (m *AppModel) applyEvent(event app.Event) {
 	}
 	if event.AgentID != "" && event.AgentID != "main" {
 		switch event.Kind {
-		case app.EventThinkingDelta, app.EventTextDelta, app.EventToolStarted, app.EventToolUpdate, app.EventToolFinished,
+		case app.EventProviderRetry, app.EventThinkingDelta, app.EventTextDelta, app.EventToolStarted, app.EventToolUpdate, app.EventToolFinished,
 			app.EventHookStarted, app.EventHookFinished, app.EventHookDiagnostic:
 			m.updateAgentStream(event)
 			return
@@ -83,6 +83,9 @@ func (m *AppModel) applyEvent(event app.Event) {
 	case app.EventAgentDetail:
 		m.updateAgentDetail(event)
 	case app.EventProviderRetry:
+		if event.Data["reset_partial"] == "true" {
+			m.discardRetryableAssistant(event.RunID)
+		}
 	case app.EventThinkingDelta:
 		m.appendDelta(BlockThinking, event.RunID, m.tr("block.thinking_title"), event.Text)
 	case app.EventTextDelta:
@@ -442,10 +445,30 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 		State            string               `json:"state"`
 		Collapsed        bool                 `json:"collapsed"`
 		Attachments      []session.Attachment `json:"attachments"`
+		Sequence         int64                `json:"-"`
 	}
 	if err := json.Unmarshal([]byte(event.Data["blocks"]), &recovered); err != nil {
 		m.errorBanner = m.tr("error.recover_session") + ": " + err.Error()
 		return
+	}
+	var sequences []int64
+	if raw := event.Data["blockSequences"]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &sequences); err != nil {
+			m.errorBanner = m.tr("error.recover_session") + ": " + err.Error()
+			return
+		}
+	}
+	for index := range recovered {
+		if index < len(sequences) {
+			recovered[index].Sequence = sequences[index]
+		}
+	}
+	var toolRecords []session.ToolRecord
+	if raw := event.Data["toolRecords"]; raw != "" {
+		if err := json.Unmarshal([]byte(raw), &toolRecords); err != nil {
+			m.errorBanner = m.tr("error.recover_session") + ": " + err.Error()
+			return
+		}
 	}
 	if event.SessionID != "" {
 		m.sessionID = event.SessionID
@@ -468,8 +491,9 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	}
 	_, _, _, todoHeight := m.todoPaneBounds()
 	m.scrollTodoPane(0, todoHeight)
-	m.transcript = make([]Block, 0, len(recovered))
+	m.transcript = make([]Block, 0, len(recovered)+len(toolRecords))
 	m.transcriptTop = 0
+	toolIndex := 0
 	for _, block := range recovered {
 		content := block.Content
 		if BlockKind(block.Kind) == BlockUser {
@@ -481,6 +505,13 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 			ToolCallID: block.ParentToolCallID, Title: block.Title, Content: content,
 			State: block.State, Collapsed: block.Collapsed || defaultToolCollapsed(kind, block.State), Attachments: block.Attachments,
 		})
+		for toolIndex < len(toolRecords) && toolRecords[toolIndex].AnchorSequence <= block.Sequence {
+			m.transcript = append(m.transcript, m.recoveredToolBlock(toolRecords[toolIndex]))
+			toolIndex++
+		}
+	}
+	for ; toolIndex < len(toolRecords); toolIndex++ {
+		m.transcript = append(m.transcript, m.recoveredToolBlock(toolRecords[toolIndex]))
 	}
 	m.invalidateTranscriptLayout()
 	m.runID = ""
@@ -507,6 +538,41 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	}
 }
 
+func (m *AppModel) recoveredToolBlock(record session.ToolRecord) Block {
+	arguments := string(record.Arguments)
+	if record.Name == "todo" {
+		arguments = ""
+	}
+	content := record.Content
+	if content == "" && record.ArtifactID != "" {
+		content = "[tool result stored as artifact: " + record.ArtifactID + "]"
+	}
+	state := record.State
+	switch state {
+	case session.ToolInterrupted:
+		state = "cancelled"
+	case session.ToolReconcileRequired:
+		state = "failed"
+	}
+	kind := BlockTool
+	title := first(record.Name, m.tr("block.tool_title"))
+	if state == "completed" {
+		if _, diff, ok := summarizeFileChange(title, arguments, string(record.Structured), content); ok {
+			content = diff
+		} else {
+			content = summarizeToolResult(title, arguments, content, m.catalog)
+		}
+	} else if state == "running" {
+		content = joinToolSummary(summarizeToolArguments(title, arguments, m.catalog), content)
+	} else {
+		content = joinToolSummary(summarizeToolArguments(title, arguments, m.catalog), summarizeToolFailure(title, content, m.catalog))
+	}
+	return Block{
+		ID: record.ToolCallID, Kind: kind, RunID: record.RunID, ToolCallID: record.ToolCallID,
+		Title: title, Arguments: arguments, Content: content, State: state, Collapsed: state == "completed",
+	}
+}
+
 func (m *AppModel) loadRecoveryEvent(event app.Event) {
 	if event.State == "reconciled" {
 		for index := range m.recovery {
@@ -528,6 +594,27 @@ func (m *AppModel) loadRecoveryEvent(event app.Event) {
 		m.openOverlay(OverlayRecovery)
 		return
 	}
+}
+
+func (m *AppModel) discardRetryableAssistant(runID string) {
+	var changed bool
+	m.transcript, changed = discardRetryableAssistantTail(m.transcript, runID)
+	if changed {
+		m.invalidateTranscriptLayout()
+	}
+}
+
+func discardRetryableAssistantTail(blocks []Block, runID string) ([]Block, bool) {
+	original := len(blocks)
+	for len(blocks) > 0 {
+		last := blocks[len(blocks)-1]
+		if last.RunID != runID || last.State != "streaming" ||
+			(last.Kind != BlockAssistant && last.Kind != BlockThinking) {
+			break
+		}
+		blocks = blocks[:len(blocks)-1]
+	}
+	return blocks, len(blocks) != original
 }
 
 func (m *AppModel) appendDelta(kind BlockKind, runID string, title string, text string) {
@@ -608,8 +695,8 @@ func (m *AppModel) updateTool(event app.Event) {
 			kind := BlockTool
 			title := first(event.Data["name"], event.Data["tool"], m.tr("block.tool_title"))
 			if state == "completed" {
-				if diffTitle, diff, ok := summarizeFileChange(title, event.Data["arguments"], event.Data["structured"], event.Text); ok {
-					kind, title, content = BlockDiff, diffTitle, diff
+				if _, diff, ok := summarizeFileChange(title, event.Data["arguments"], event.Data["structured"], event.Text); ok {
+					content = diff
 				} else {
 					content = summarizeToolResult(title, event.Data["arguments"], event.Text, m.catalog)
 				}
@@ -634,8 +721,8 @@ func (m *AppModel) updateTool(event app.Event) {
 		block.Orphaned = false
 		block.Collapsed = state == "completed"
 		if state == "completed" {
-			if title, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
-				block.Kind, block.Title, block.Content = BlockDiff, title, diff
+			if _, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
+				block.Content = diff
 			} else {
 				block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text, m.catalog)
 			}

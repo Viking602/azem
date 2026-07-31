@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"resty.dev/v3"
+
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -22,12 +24,12 @@ import (
 
 func TestStreamingHTTPClientHasNoTotalBodyTimeout(t *testing.T) {
 	service := NewService(nil, nil, nil, nil)
-	if service.streamClient.Timeout != 0 {
-		t.Fatalf("streaming client total timeout = %v, want none", service.streamClient.Timeout)
+	if service.streamClient.Timeout() != 0 {
+		t.Fatalf("streaming client total timeout = %v, want none", service.streamClient.Timeout())
 	}
-	transport, ok := service.streamClient.Transport.(*http.Transport)
+	transport, ok := service.streamClient.Transport().(*http.Transport)
 	if !ok || transport.ResponseHeaderTimeout != 30*time.Second {
-		t.Fatalf("streaming transport = %#v", service.streamClient.Transport)
+		t.Fatalf("streaming transport = %#v", service.streamClient.Transport())
 	}
 }
 
@@ -232,19 +234,17 @@ func TestRefreshRetryForbiddenAndBestEffortLogout(t *testing.T) {
 		_, _ = writer.Write([]byte("ok"))
 	}))
 	defer resource.Close()
-	response, err := service.DoWithRefresh(ctx, "chatgpt", account.ID, func(Credential) (*http.Request, error) {
-		return http.NewRequest(http.MethodGet, resource.URL+"/ok", nil)
-	})
+	response, err := service.DoWithRefresh(ctx, "chatgpt", account.ID, resty.MethodGet, resource.URL+"/ok", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
+	if response.String() != "ok" {
+		t.Fatalf("response body = %q", response.String())
+	}
 	if calls.Load() != 2 || refreshes.Load() != 1 {
 		t.Fatalf("calls=%d refreshes=%d", calls.Load(), refreshes.Load())
 	}
-	_, err = service.DoWithRefresh(ctx, "chatgpt", account.ID, func(Credential) (*http.Request, error) {
-		return http.NewRequest(http.MethodGet, resource.URL+"/forbidden", nil)
-	})
+	_, err = service.DoWithRefresh(ctx, "chatgpt", account.ID, resty.MethodGet, resource.URL+"/forbidden", nil)
 	var entitlement EntitlementError
 	if !errors.As(err, &entitlement) {
 		t.Fatalf("forbidden error = %v", err)

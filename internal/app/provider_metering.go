@@ -90,6 +90,10 @@ func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) erro
 			f.InputTokens, f.CachedTokens, f.OutputTokens, f.TotalTokens = d.InputTokens, d.CachedTokens, d.OutputTokens, d.TotalTokens
 		}
 		f.CacheWriteTokens, f.ReasoningTokens, f.CacheReported = d.CacheWriteTokens, d.ReasoningTokens, d.CacheReported
+		if cacheModelForProvider(f.Provider, d.CacheModel) == responses.CacheModelAutomatic {
+			// Durable facts must not retain write-token noise for automatic caches.
+			f.CacheWriteTokens = 0
+		}
 		s.terminal = &f
 	}
 	f := *s.terminal
@@ -129,11 +133,28 @@ func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) erro
 				"inputTokens": fmt.Sprint(f.InputTokens), "cachedInputTokens": fmt.Sprint(f.CachedTokens), "outputTokens": fmt.Sprint(f.OutputTokens),
 				"totalTokens": fmt.Sprint(f.TotalTokens), "cacheWriteTokens": fmt.Sprint(f.CacheWriteTokens), "reasoningTokens": fmt.Sprint(f.ReasoningTokens),
 				"provider": f.Provider, "model": f.Model, "transport": f.Transport,
+				"cacheModel":  cacheModelForProvider(f.Provider, s.detail.CacheModel),
 				"cacheStatus": map[bool]string{true: "reported", false: "unreported"}[f.CacheReported]}})
 	}
 	s.finished = true
 	s.finishErr = nil
 	return nil
+}
+
+// cacheModelForProvider prefers driver-tagged semantics, then falls back to the
+// known provider default so UI/events stay honest when a path omits CacheModel.
+func cacheModelForProvider(provider, tagged string) string {
+	if tagged != "" {
+		return tagged
+	}
+	switch provider {
+	case "grok":
+		return responses.CacheModelAutomatic
+	case "chatgpt":
+		return responses.CacheModelWriteTokens
+	default:
+		return ""
+	}
 }
 
 type meteredProviderStream struct {

@@ -17,6 +17,10 @@ type fileChangeSection struct {
 	Diff             string `json:"diff"`
 }
 
+func isFileChangeTool(name string) bool {
+	return name == "coding.edit_hashline" || name == "coding.write_file"
+}
+
 func summarizeFileChange(name, arguments, structured, output string) (string, string, bool) {
 	type editResult struct {
 		Sections []fileChangeSection `json:"sections"`

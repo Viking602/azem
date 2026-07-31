@@ -121,6 +121,61 @@ func (aggregateOnlyMeteringDriver) Stream(context.Context, hyprovider.Request) (
 	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 12, OutputTokens: 3}}}), nil
 }
 
+func TestCacheModelForProviderDefaults(t *testing.T) {
+	if got := cacheModelForProvider("grok", ""); got != responses.CacheModelAutomatic {
+		t.Fatalf("grok default=%q", got)
+	}
+	if got := cacheModelForProvider("chatgpt", ""); got != responses.CacheModelWriteTokens {
+		t.Fatalf("chatgpt default=%q", got)
+	}
+	if got := cacheModelForProvider("grok", responses.CacheModelWriteTokens); got != responses.CacheModelWriteTokens {
+		t.Fatalf("tagged override=%q", got)
+	}
+}
+
+func TestMeteredProviderDriverZerosAutomaticCacheWrites(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "auto-cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	svc := session.NewService(store.DB())
+	if _, err = svc.Ensure(ctx, session.Session{ID: "s", Title: "auto"}); err != nil {
+		t.Fatal(err)
+	}
+	inner := &writeTokenNoiseDriver{}
+	driver := &meteredProviderDriver{inner: inner, store: svc, sessionID: "s", runID: "r", kind: "main", provider: "grok", model: "m"}
+	stream, err := driver.Stream(ctx, hyprovider.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = stream.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	var write int
+	if err = store.DB().QueryRow(`SELECT cache_write_tokens FROM provider_requests`).Scan(&write); err != nil {
+		t.Fatal(err)
+	}
+	if write != 0 {
+		t.Fatalf("automatic cache fact write=%d", write)
+	}
+}
+
+type writeTokenNoiseDriver struct{}
+
+func (writeTokenNoiseDriver) Metadata() hyprovider.Metadata { return hyprovider.Metadata{} }
+func (writeTokenNoiseDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	if reporter := responses.RequestUsageReporter(request); reporter != nil {
+		// Simulate a noisy peer field that automatic caches must drop even without a driver wrap.
+		reporter(responses.UsageDetails{
+			ProviderRequestID: "upstream", InputTokens: 20, CachedTokens: 12, CacheWriteTokens: 8,
+			OutputTokens: 4, TotalTokens: 24, CacheReported: true, CacheModel: responses.CacheModelAutomatic,
+		})
+	}
+	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 20, CachedInputTokens: 12, OutputTokens: 4, TotalTokens: 24}}}), nil
+}
+
 func TestMeteredProviderDriverDoesNotInferMissingCacheFieldAsZero(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "missing-cache.db"))

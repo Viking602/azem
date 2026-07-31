@@ -174,6 +174,22 @@ type SessionTodo struct {
 	UpdatedAt int64  `db:"updated_at"`
 }
 
+type SessionToolRecord struct {
+	SessionID      string `db:"session_id"`
+	RunID          string `db:"run_id"`
+	ToolCallID     string `db:"tool_call_id"`
+	AnchorSequence int64  `db:"anchor_sequence"`
+	Name           string `db:"name"`
+	Arguments      []byte `db:"arguments"`
+	State          string `db:"state"`
+	Content        string `db:"content"`
+	Structured     []byte `db:"structured"`
+	ArtifactID     string `db:"artifact_id"`
+	Observations   []byte `db:"observations"`
+	StartedAt      int64  `db:"started_at"`
+	CompletedAt    int64  `db:"completed_at"`
+}
+
 type SubagentRun struct {
 	ID                  string `db:"id"`
 	SessionID           string `db:"session_id"`
@@ -214,4 +230,10 @@ type ToolCallCharge struct {
 	ToolName  string `db:"tool_name"`
 	InputHash string `db:"input_hash"`
 	CreatedAt int64  `db:"created_at"`
+}
+
+type WorkspaceSessionState struct {
+	Anchor    string `db:"anchor"`
+	SessionID string `db:"session_id"`
+	UpdatedAt int64  `db:"updated_at"`
 }

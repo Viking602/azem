@@ -129,7 +129,7 @@ func DefaultTheme() Theme {
 		UserAccent:    lipgloss.NewStyle().Bold(true).Foreground(userAccent),
 		Assistant:     lipgloss.NewStyle().Foreground(text),
 		Thinking:      lipgloss.NewStyle().Foreground(secondary),
-		Tool:          lipgloss.NewStyle().Foreground(warning),
+		Tool:          lipgloss.NewStyle().Foreground(secondary),
 		Diff:          lipgloss.NewStyle().Foreground(accent),
 		DiffAdd:       lipgloss.NewStyle().Foreground(success),
 		DiffDel:       lipgloss.NewStyle().Foreground(danger),

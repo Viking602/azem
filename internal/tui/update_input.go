@@ -733,14 +733,26 @@ func (m *AppModel) toggleTranscriptBlockAt(x, row int) bool {
 	if !ok || index < 0 || index >= len(m.transcript) {
 		return false
 	}
+	if !m.toggleTranscriptBlock(index) {
+		return false
+	}
+	m.focus = focusTranscript
+	m.transcriptCursor = index
+	m.composer.Blur()
+	return true
+}
+
+func (m *AppModel) toggleTranscriptBlock(index int) bool {
+	if index < 0 || index >= len(m.transcript) {
+		return false
+	}
 	block := &m.transcript[index]
 	if block.Kind != BlockTool && block.Kind != BlockDiff && block.Kind != BlockError {
 		return false
 	}
+	expanded := block.Collapsed
 	block.Collapsed = !block.Collapsed
-	m.focus = focusTranscript
-	m.transcriptCursor = index
-	m.composer.Blur()
+	m.positionTranscriptAfterToggle(index, expanded)
 	return true
 }
 
@@ -826,12 +838,9 @@ func (m AppModel) updateTranscriptKey(key string) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.moveTranscriptCursor(1)
 	case "enter", " ":
-		if m.transcriptCursor >= 0 && m.transcriptCursor < len(m.transcript) {
-			block := &m.transcript[m.transcriptCursor]
-			block.Collapsed = !block.Collapsed
-		}
+		m.toggleTranscriptBlock(m.transcriptCursor)
 	case "d":
-		if m.transcriptCursor >= 0 && m.transcriptCursor < len(m.transcript) && m.transcript[m.transcriptCursor].Kind == BlockDiff {
+		if m.transcriptCursor >= 0 && m.transcriptCursor < len(m.transcript) && blockRendersDiff(m.transcript[m.transcriptCursor]) {
 			m.openOverlay(OverlayDiff)
 		}
 	case "pgup":
@@ -1530,23 +1539,6 @@ func (m *AppModel) queueApproval(event app.Event) {
 		Action: first(event.Data["action"], event.Text), Diff: event.Data["diff"],
 	}
 	if event.State == "reviewing" {
-		id := "approval:" + approval.ApprovalID
-		title := m.tr("approval.reviewing")
-		content := m.approvalActionSummary(approval.Tool, approval.Target)
-		for index := range m.transcript {
-			if m.transcript[index].ID == id {
-				m.transcript[index].Kind = BlockApproval
-				m.transcript[index].Title = title
-				m.transcript[index].Content = content
-				m.transcript[index].State = "reviewing"
-				m.status = "Reviewing approval"
-				return
-			}
-		}
-		m.transcript = append(m.transcript, Block{
-			ID: id, Kind: BlockApproval, RunID: event.RunID, ToolCallID: event.ToolCallID,
-			Title: title, Content: content, State: "reviewing",
-		})
 		m.status = "Reviewing approval"
 		return
 	}
@@ -1571,7 +1563,9 @@ func (m *AppModel) queueApproval(event app.Event) {
 
 func (m *AppModel) resolveApproval(event app.Event) {
 	if strings.HasPrefix(event.State, "auto_") {
-		m.resolveAutomaticApproval(event)
+		if (event.State == "auto_failed" || event.State == "auto_timed_out") && strings.TrimSpace(event.Text) != "" {
+			m.errorBanner = strings.TrimSpace(event.Text)
+		}
 		if len(m.pendingApprovals) > 0 {
 			m.status = "Awaiting approval"
 			return
@@ -1611,50 +1605,6 @@ func (m *AppModel) resolveApproval(event app.Event) {
 			m.status = "Ready"
 		}
 	}
-}
-
-func (m *AppModel) resolveAutomaticApproval(event app.Event) {
-	id := "approval:" + first(event.ApprovalID, event.ToolCallID)
-	label := m.tr("approval.failed")
-	state := "failed"
-	switch event.State {
-	case "auto_approved":
-		label = m.tr("approval.allowed")
-		state = "completed"
-	case "auto_denied":
-		label = m.tr("approval.denied")
-		state = "denied"
-	case "auto_timed_out":
-		label = m.tr("approval.timed_out")
-	}
-	content := m.approvalActionSummary(event.Data["tool"], event.Data["target"])
-	if risk := event.Data["risk"]; risk != "" {
-		content = joinToolSummary(content, m.tr("approval.risk", map[string]string{"risk": risk}))
-	}
-	if rationale := strings.TrimSpace(event.Data["rationale"]); rationale != "" {
-		content = joinToolSummary(content, m.tr("approval.rationale", map[string]string{"rationale": rationale}))
-	} else if event.State == "auto_failed" || event.State == "auto_timed_out" {
-		if detail := strings.TrimSpace(event.Text); detail != "" {
-			content = joinToolSummary(content, m.tr("approval.failure", map[string]string{"failure": detail}))
-		}
-	}
-	if content == "" {
-		content = event.Text
-	}
-	for index := range m.transcript {
-		if m.transcript[index].ID != id {
-			continue
-		}
-		m.transcript[index].Kind = BlockApproval
-		m.transcript[index].Title = label
-		m.transcript[index].Content = content
-		m.transcript[index].State = state
-		return
-	}
-	m.transcript = append(m.transcript, Block{
-		ID: id, Kind: BlockApproval, RunID: event.RunID, ToolCallID: event.ToolCallID,
-		Title: label, Content: content, State: state,
-	})
 }
 
 func (m AppModel) approvalActionSummary(toolName, target string) string {

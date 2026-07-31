@@ -153,6 +153,22 @@ INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data) SELECT
 SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) OR CAST(p.blocks AS TEXT)<>'[]' ORDER BY s.updated_at DESC;
 -- name: ListSessionsLimited :many
 SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) OR CAST(p.blocks AS TEXT)<>'[]' ORDER BY s.updated_at DESC LIMIT ?;
+-- name: InsertSessionToolRecord :execresult
+INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id,run_id,tool_call_id) DO NOTHING;
+-- name: GetSessionToolRecord :one
+SELECT anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at FROM session_tool_records WHERE session_id=? AND run_id=? AND tool_call_id=?;
+-- name: CompleteSessionToolRecordCAS :execresult
+UPDATE session_tool_records SET name=?,state=?,content=?,structured=?,artifact_id=?,observations=?,completed_at=? WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='running';
+-- name: RestartInterruptedSessionToolRecordCAS :execresult
+UPDATE session_tool_records SET name=?,arguments=?,state='running',content='',structured='null',artifact_id='',observations='[]',started_at=?,completed_at=0 WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='interrupted';
+-- name: ListSessionToolRecords :many
+SELECT run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at FROM session_tool_records WHERE session_id=? ORDER BY started_at,run_id,tool_call_id;
+-- name: InterruptRunningSessionToolRecordsByRun :exec
+UPDATE session_tool_records SET state='interrupted',completed_at=? WHERE run_id=? AND state='running';
+-- name: UpsertWorkspaceSession :exec
+INSERT INTO workspace_session_state(anchor,session_id,updated_at) VALUES(?,?,?) ON CONFLICT(anchor) DO UPDATE SET session_id=excluded.session_id,updated_at=excluded.updated_at;
+-- name: GetWorkspaceSession :one
+SELECT session_id FROM workspace_session_state WHERE anchor=?;
 -- name: ListAccounts :many
 SELECT id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at FROM accounts ORDER BY updated_at DESC;
 -- name: ListAccountsByProvider :many

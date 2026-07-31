@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"resty.dev/v3"
 )
 
 type ErrorKind string
@@ -20,6 +23,16 @@ const (
 	ErrorInvalidRequest ErrorKind = "invalid_request"
 	ErrorServer         ErrorKind = "server"
 	ErrorStream         ErrorKind = "stream"
+)
+
+const (
+	statusBadRequest          = 400
+	statusUnauthorized        = 401
+	statusForbidden           = 403
+	statusRequestTimeout      = 408
+	statusConflict            = 409
+	statusUnprocessableEntity = 422
+	statusTooManyRequests     = 429
 )
 
 type APIError struct {
@@ -50,9 +63,12 @@ func (e *APIError) Error() string {
 	return "provider " + string(e.Kind) + " error"
 }
 
-func HTTPError(response *http.Response) error {
-	defer response.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+func HTTPError(response *resty.Response) error {
+	var body []byte
+	if response.Body != nil {
+		defer response.Body.Close()
+		body, _ = io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	}
 	code, message := decodeError(body)
 	if strings.TrimSpace(message) == "" {
 		// ChatGPT's Codex endpoint does not consistently use the public API error
@@ -60,27 +76,31 @@ func HTTPError(response *http.Response) error {
 		// than reducing a useful HTTP 400 response to only the status code.
 		message = strings.TrimSpace(string(body))
 	}
+	statusCode := response.StatusCode()
 	kind := ErrorServer
-	switch response.StatusCode {
-	case http.StatusUnauthorized:
+	switch statusCode {
+	case statusUnauthorized:
 		kind = ErrorAuthentication
-	case http.StatusForbidden:
+	case statusForbidden:
 		kind = ErrorEntitlement
-	case http.StatusRequestTimeout, http.StatusConflict:
+	case statusRequestTimeout, statusConflict:
 		kind = ErrorServer
-	case http.StatusTooManyRequests:
+	case statusTooManyRequests:
 		kind = ErrorRateLimit
-	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+	case statusBadRequest, statusUnprocessableEntity:
 		kind = classifyCode(code)
 		if kind == ErrorStream {
 			kind = ErrorInvalidRequest
 		}
 	default:
-		if response.StatusCode < 500 {
+		if statusCode < 500 {
 			kind = ErrorInvalidRequest
 		}
 	}
-	return &APIError{Kind: kind, StatusCode: response.StatusCode, Code: code, Message: boundedMessage(message), RetryAfter: retryAfter(response.Header)}
+	return &APIError{
+		Kind: kind, StatusCode: statusCode, Code: code, Message: boundedMessage(message),
+		RetryAfter: retryAfter(response.Header(), string(body), time.Now()),
+	}
 }
 
 func streamError(payload json.RawMessage) error {
@@ -104,7 +124,7 @@ func streamError(payload json.RawMessage) error {
 		} `json:"response"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return &APIError{Kind: ErrorStream, Message: "malformed provider error event"}
+		return &APIError{Kind: ErrorStream, Message: "malformed provider error event", RetryAfter: retryAfter(nil, string(payload), time.Now())}
 	}
 	failure := envelope.Error
 	if failure == nil && envelope.Response != nil {
@@ -112,11 +132,15 @@ func streamError(payload json.RawMessage) error {
 	}
 	if failure != nil {
 		code := firstString(failure.Code, failure.Type)
-		return &APIError{Kind: classifyCode(code), Code: code, Message: boundedMessage(failure.Message)}
+		return &APIError{
+			Kind: classifyCode(code), Code: code, Message: boundedMessage(failure.Message),
+			RetryAfter: retryAfter(nil, failure.Message, time.Now()),
+		}
 	}
 	if envelope.Code != "" || envelope.Message != "" {
 		return &APIError{
 			Kind: classifyCode(envelope.Code), Code: envelope.Code, Message: boundedMessage(envelope.Message),
+			RetryAfter: retryAfter(nil, envelope.Message, time.Now()),
 		}
 	}
 	if envelope.Response != nil && envelope.Response.Incomplete != nil {
@@ -125,9 +149,15 @@ func streamError(payload json.RawMessage) error {
 		if code == "max_output_tokens" {
 			kind = ErrorContextLimit
 		}
-		return &APIError{Kind: kind, Code: code, Message: "provider returned an incomplete response"}
+		return &APIError{
+			Kind: kind, Code: code, Message: "provider returned an incomplete response",
+			RetryAfter: retryAfter(nil, string(payload), time.Now()),
+		}
 	}
-	return &APIError{Kind: ErrorStream, Message: "provider stream failed"}
+	return &APIError{
+		Kind: ErrorStream, Message: "provider stream failed",
+		RetryAfter: retryAfter(nil, string(payload), time.Now()),
+	}
 }
 
 func decodeError(body []byte) (string, string) {
@@ -177,20 +207,104 @@ func classifyCode(code string) ErrorKind {
 	}
 }
 
-func retryAfter(header http.Header) time.Duration {
-	value := header.Get("Retry-After")
-	if value == "" {
-		return 0
+var (
+	quotaResetPattern  = regexp.MustCompile(`(?i)reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s`)
+	pleaseRetryPattern = regexp.MustCompile(`(?i)please retry in ([0-9.]+)(ms|s)`)
+	retryDelayPattern  = regexp.MustCompile(`(?i)"retryDelay"\s*:\s*"([0-9.]+)(ms|s)"`)
+	tryAgainPattern    = regexp.MustCompile(`(?i)try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b`)
+)
+
+func retryAfter(header interface{ Get(string) string }, body string, now time.Time) time.Duration {
+	if header != nil {
+		if delay, ok := numericDuration(header.Get("retry-after-ms"), time.Millisecond); ok {
+			return delay
+		}
+		if value := header.Get("Retry-After"); value != "" {
+			if delay, ok := numericDuration(value, time.Second); ok {
+				return delay
+			}
+			if at, err := http.ParseTime(value); err == nil {
+				return max(0, at.Sub(now))
+			}
+		}
+		if value := header.Get("x-ratelimit-reset-ms"); value != "" {
+			if raw, err := strconv.ParseFloat(value, 64); err == nil && raw > 0 {
+				switch {
+				case raw > 1e12:
+					return max(0, time.UnixMilli(int64(raw)).Sub(now))
+				case raw > 1e9:
+					return max(0, time.Unix(int64(raw), 0).Sub(now))
+				default:
+					if delay, ok := durationFromNumber(raw, time.Millisecond); ok {
+						return delay
+					}
+				}
+			}
+		}
+		if value := header.Get("x-ratelimit-reset"); value != "" {
+			if seconds, err := strconv.ParseFloat(value, 64); err == nil && seconds > 0 {
+				return max(0, time.Unix(int64(seconds), 0).Sub(now))
+			}
+		}
+		if delay, ok := numericDuration(header.Get("x-ratelimit-reset-after"), time.Second); ok {
+			return delay
+		}
 	}
-	if seconds, err := strconv.Atoi(value); err == nil {
-		return time.Duration(seconds) * time.Second
+	if match := quotaResetPattern.FindStringSubmatch(body); len(match) == 4 {
+		hours, _ := strconv.ParseFloat(match[1], 64)
+		minutes, _ := strconv.ParseFloat(match[2], 64)
+		seconds, err := strconv.ParseFloat(match[3], 64)
+		if err == nil {
+			if delay, ok := durationFromNumber((hours*60+minutes)*60+seconds, time.Second); ok {
+				return delay
+			}
+		}
 	}
-	if at, err := http.ParseTime(value); err == nil {
-		if delay := time.Until(at); delay > 0 {
+	for _, pattern := range []*regexp.Regexp{pleaseRetryPattern, retryDelayPattern, tryAgainPattern} {
+		match := pattern.FindStringSubmatch(body)
+		if len(match) != 3 {
+			continue
+		}
+		value, err := strconv.ParseFloat(match[1], 64)
+		if err != nil {
+			continue
+		}
+		if delay, ok := durationFromNumber(value, retryUnit(match[2])); ok {
 			return delay
 		}
 	}
 	return 0
+}
+
+func numericDuration(value string, unit time.Duration) (time.Duration, bool) {
+	number, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil {
+		return 0, false
+	}
+	return durationFromNumber(number, unit)
+}
+
+func durationFromNumber(value float64, unit time.Duration) (time.Duration, bool) {
+	const maxDuration = time.Duration(1<<63 - 1)
+	if value < 0 || unit <= 0 || value > float64(maxDuration)/float64(unit) {
+		return 0, false
+	}
+	return time.Duration(value * float64(unit)), true
+}
+
+func retryUnit(value string) time.Duration {
+	switch strings.ToLower(value) {
+	case "ms":
+		return time.Millisecond
+	case "s", "sec":
+		return time.Second
+	case "m", "min", "mins", "minute", "minutes":
+		return time.Minute
+	case "h", "hr", "hrs", "hour", "hours":
+		return time.Hour
+	default:
+		return 0
+	}
 }
 
 func boundedMessage(message string) string {

@@ -39,6 +39,7 @@ import (
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
+	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -95,6 +96,7 @@ func TestMainInstructionsContract(t *testing.T) {
 func TestTurnContextBuildFallsBackWhenInstructionFingerprintDiffers(t *testing.T) {
 	boundary := int64(2)
 	staleState := json.RawMessage(`[{"type":"reasoning","id":"stale"}]`)
+	var degradedReason string
 	manager := turnContext{
 		instructions: mainInstructions,
 		providerID:   "chatgpt",
@@ -116,7 +118,8 @@ func TestTurnContextBuildFallsBackWhenInstructionFingerprintDiffers(t *testing.T
 				ProviderState: staleState,
 			}},
 		},
-		checkpointBoundary: &boundary,
+		checkpointBoundary:        &boundary,
+		reportCachePrefixDegraded: func(reason string) { degradedReason = reason },
 	}
 	messages, err := manager.Build(context.Background(), api.Task{Goal: "current goal"})
 	if err != nil {
@@ -134,6 +137,9 @@ func TestTurnContextBuildFallsBackWhenInstructionFingerprintDiffers(t *testing.T
 		if len(current.ProviderState) > 0 || current.Text == "stale provider answer" {
 			t.Fatalf("fallback reused stale provider state: %#v", messages)
 		}
+	}
+	if !strings.Contains(degradedReason, "without provider state") {
+		t.Fatalf("expected cache-prefix degradation report, got %q", degradedReason)
 	}
 }
 
@@ -469,6 +475,70 @@ func TestWorkspaceCheckpointDriftTargetsOnlyChangedPaths(t *testing.T) {
 	want := []string{"added.go", "changed.go"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("stale paths=%v want=%v", got, want)
+	}
+}
+
+func TestDurableToolContinuityVerifiesOnlyObservedFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "stable.go"), []byte("package stable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := turnContext{
+		workspaceRoot: root,
+		toolRecords: []session.ToolRecord{{
+			RunID: "run", ToolCallID: "read-1", Name: "coding.read_file", State: session.ToolCompleted,
+			Observations: []session.FileObservation{{
+				Path: "stable.go", Operation: "read", SHA256: sha256Hex([]byte("package stable\n")),
+			}},
+		}},
+	}
+	messages := manager.toolContinuityMessages(context.Background())
+	if len(messages) != 2 || !strings.Contains(messages[1].Text, `"state":"verified_unchanged"`) {
+		t.Fatalf("unchanged file evidence=%#v", messages)
+	}
+	if err := os.WriteFile(filepath.Join(root, "stable.go"), []byte("package changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	messages = manager.toolContinuityMessages(context.Background())
+	if len(messages) != 2 || !strings.Contains(messages[1].Text, `"state":"stale"`) {
+		t.Fatalf("changed file evidence=%#v", messages)
+	}
+}
+
+func TestDurableToolTimelineCapturesCompletedReadObservation(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "note.txt"), []byte("durable note\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Timeline"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "session", session.Block{Kind: "user", RunID: "run", Content: "read note"}); err != nil {
+		t.Fatal(err)
+	}
+	arguments := json.RawMessage(`{"path":"note.txt"}`)
+	timeline := newDurableToolTimeline(sessions, root, "session", "run")
+	if err := timeline.start(ctx, tool.Call{ID: "read-1", Name: coding.ToolReadFile, Arguments: arguments}); err != nil {
+		t.Fatal(err)
+	}
+	if err := timeline.finish(ctx, tool.Result{ToolCallID: "read-1", Name: coding.ToolReadFile, Content: "durable note"}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := sessions.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.ToolRecords) != 1 || projection.ToolRecords[0].State != session.ToolCompleted ||
+		len(projection.ToolRecords[0].Observations) != 1 ||
+		projection.ToolRecords[0].Observations[0].SHA256 != sha256Hex([]byte("durable note\n")) {
+		t.Fatalf("durable tool record=%#v", projection.ToolRecords)
 	}
 }
 
@@ -949,6 +1019,110 @@ func TestFailedProviderTurnPersistsStreamedBreakpoint(t *testing.T) {
 		projection.CheckpointGeneration != beforeFailure.CheckpointGeneration {
 		t.Fatalf("failed breakpoint changed checkpoint:\n got=%+v generation=%d\nwant=%+v generation=%d",
 			projection.ModelHistory, projection.CheckpointGeneration, beforeFailure.ModelHistory, beforeFailure.CheckpointGeneration)
+	}
+}
+
+func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coding, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "retry-session", Title: "Retry"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := coding.StartRun(ctx, "recover this turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "retry-session", session.Block{
+		Kind: "user", RunID: run.RunID, Title: "You", Content: "recover this turn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Retry.BaseDelayDuration = 0
+	cfg.Retry.MaxRetries = 2
+	service := NewService(ctx, cfg)
+	service.AttachDurable(sessions, coding)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	driver := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventTextDelta, Text: "uncommitted partial"},
+			{Kind: hyprovider.EventError, Err: &responses.APIError{Kind: responses.ErrorRateLimit, Code: "server_is_overloaded"}},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: "recovered answer"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+	service.wg.Add(1)
+	service.runProviderTurn(ctx, TurnRequest{
+		SessionID: "retry-session", Prompt: "recover this turn", Provider: "test", Model: "test",
+	}, run, hyagent.Engine{Provider: driver, Model: "test", ContextBuilder: turnContext{instructions: "test"}})
+
+	if len(driver.requests) != 2 {
+		t.Fatalf("provider requests = %d, want initial request plus one session retry", len(driver.requests))
+	}
+	for _, current := range driver.requests[1].Messages {
+		if strings.Contains(current.Text, "uncommitted partial") {
+			t.Fatalf("failed partial assistant leaked into retry context: %#v", driver.requests[1].Messages)
+		}
+	}
+	projection, err := sessions.LoadProjection(ctx, "retry-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 2 || projection.Blocks[1].Kind != "assistant" ||
+		projection.Blocks[1].State != "completed" || projection.Blocks[1].Content != "recovered answer" {
+		t.Fatalf("recovered transcript blocks=%+v", projection.Blocks)
+	}
+	if err := message.ValidateCompleteTurns(projection.ModelHistory.Messages); err != nil {
+		t.Fatalf("recovered model history is incomplete: %v", err)
+	}
+}
+
+func TestProviderRetryContinuationRejectsIncompleteToolTurn(t *testing.T) {
+	result := hyagent.Result{
+		Failure: (&hyagent.AgentFailure{Kind: hyagent.FailureKindEngineError, Reason: "server error", Retryable: true}).
+			WithCause(&responses.APIError{Kind: responses.ErrorServer, Code: "server_error"}),
+		Messages: []message.Message{
+			message.NewText(message.RoleSystem, "system"),
+			message.NewText(message.RoleUser, "do not replay tools"),
+			{
+				Role: message.RoleAssistant,
+				ToolCalls: []message.ToolCall{{
+					ID: "partial-call", Name: "lookup", Arguments: json.RawMessage(`{"query":"state"}`),
+				}},
+			},
+		},
+	}
+	_, resetPartial, retryable := providerRetryContinuation(result)
+	if resetPartial || retryable {
+		t.Fatalf("incomplete tool turn accepted for replay: reset=%v retryable=%v", resetPartial, retryable)
+	}
+}
+
+func TestProviderAutoRetryBackoffMatchesOMPCapAndJitter(t *testing.T) {
+	if got := providerAutoRetryDelayWithJitter(500*time.Millisecond, 1, 0); got != 375*time.Millisecond {
+		t.Fatalf("first retry delay = %s, want 375ms", got)
+	}
+	if got := providerAutoRetryDelayWithJitter(500*time.Millisecond, 5, 1); got != 8*time.Second {
+		t.Fatalf("capped retry delay = %s, want 8s", got)
+	}
+	if got := providerAutoRetryDelayWithJitter(500*time.Millisecond, 8, 0); got != 6*time.Second {
+		t.Fatalf("downward jitter at cap = %s, want 6s", got)
 	}
 }
 
@@ -3692,10 +3866,10 @@ func TestTurnContextBuildReplaysCompatibleHistoryAndAppendsDynamicTail(t *testin
 		},
 	}
 	manager := turnContext{
-		instructions: mainInstructions, providerID: "chatgpt", modelID: "gpt-test",
+		instructions: mainInstructions, providerID: "chatgpt", modelID: "gpt-test", staticIdentity: "durable-static-prefix",
 		modelHistory: session.ModelHistory{
 			ProviderID: "chatgpt", ModelID: "gpt-test",
-			InstructionFingerprint: mainInstructionFingerprint, StaticPrefixHash: mainInstructionFingerprint,
+			InstructionFingerprint: mainInstructionFingerprint, StaticPrefixHash: "durable-static-prefix",
 			WireVersion: session.CurrentWireVersion, CoveredThroughSequence: &boundary, Messages: saved,
 		},
 		history: []session.Block{

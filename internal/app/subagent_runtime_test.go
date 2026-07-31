@@ -27,6 +27,7 @@ import (
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/provider/catalog"
+	azresponses "github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -1745,6 +1746,85 @@ func TestSubagentCoordinatorEnforcesConcurrencyAndFIFOQueue(t *testing.T) {
 	driver.mu.Unlock()
 	if peak != cfg.MaxConcurrency {
 		t.Fatalf("peak concurrent streams = %d, want %d", peak, cfg.MaxConcurrency)
+	}
+}
+
+type recoveringSubagentDriver struct {
+	mu       sync.Mutex
+	requests []hyprovider.Request
+}
+
+func (*recoveringSubagentDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "test", Models: []string{"model"}}
+}
+
+func (d *recoveringSubagentDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	d.mu.Lock()
+	d.requests = append(d.requests, request)
+	attempt := len(d.requests)
+	d.mu.Unlock()
+	if attempt == 1 {
+		return hyprovider.NewSliceStream([]hyprovider.Event{
+			{Kind: hyprovider.EventTextDelta, Text: "uncommitted child partial"},
+			{Kind: hyprovider.EventError, Err: &azresponses.APIError{Kind: azresponses.ErrorServer, Code: "server_is_overloaded"}},
+		}), nil
+	}
+	return hyprovider.NewSliceStream([]hyprovider.Event{
+		{Kind: hyprovider.EventTextDelta, Text: "child recovered"},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}), nil
+}
+
+func TestSubagentSessionRetryRecoversWithoutPartialReplay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	coding, err := agentservice.NewService(providerStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Retry.BaseDelayDuration = 0
+	host := NewService(ctx, cfg)
+	defer host.Shutdown(ctx)
+	runtime, err := newSubagentRuntime(ctx, cfg.Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(ctx)
+	driver := &recoveringSubagentDriver{}
+	parent := subagentParentRuntime{
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir(), Host: host,
+	}
+	run, err := runtime.Spawn(ctx, subagentSpawnInput{
+		Prompt: "recover", Description: "recover", SubagentType: "explore", Background: true,
+	}, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := runtime.Query(ctx, "session", []string{run.ID}, 3*time.Second)
+	if len(snapshots) != 1 || !snapshots[0].Found || snapshots[0].Run.State != agentservice.SubagentCompleted {
+		t.Fatalf("recovered subagent snapshot=%#v", snapshots)
+	}
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	if len(driver.requests) != 2 {
+		t.Fatalf("subagent provider requests=%d, want one retry", len(driver.requests))
+	}
+	for _, current := range driver.requests[1].Messages {
+		if strings.Contains(current.Text, "uncommitted child partial") {
+			t.Fatalf("failed child partial leaked into retry context: %#v", driver.requests[1].Messages)
+		}
 	}
 }
 

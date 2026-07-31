@@ -296,6 +296,38 @@ func (q *Queries) CompleteProjectionCAS(ctx context.Context, arg CompleteProject
 	)
 }
 
+const completeSessionToolRecordCAS = `-- name: CompleteSessionToolRecordCAS :execresult
+UPDATE session_tool_records SET name=?,state=?,content=?,structured=?,artifact_id=?,observations=?,completed_at=? WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='running'
+`
+
+type CompleteSessionToolRecordCASParams struct {
+	Name         string `db:"name"`
+	State        string `db:"state"`
+	Content      string `db:"content"`
+	Structured   []byte `db:"structured"`
+	ArtifactID   string `db:"artifact_id"`
+	Observations []byte `db:"observations"`
+	CompletedAt  int64  `db:"completed_at"`
+	SessionID    string `db:"session_id"`
+	RunID        string `db:"run_id"`
+	ToolCallID   string `db:"tool_call_id"`
+}
+
+func (q *Queries) CompleteSessionToolRecordCAS(ctx context.Context, arg CompleteSessionToolRecordCASParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, completeSessionToolRecordCAS,
+		arg.Name,
+		arg.State,
+		arg.Content,
+		arg.Structured,
+		arg.ArtifactID,
+		arg.Observations,
+		arg.CompletedAt,
+		arg.SessionID,
+		arg.RunID,
+		arg.ToolCallID,
+	)
+}
+
 const countToolCallCharges = `-- name: CountToolCallCharges :one
 SELECT COUNT(*) FROM tool_call_charges WHERE run_id=? AND task_id=?
 `
@@ -985,6 +1017,47 @@ func (q *Queries) GetSessionProjection(ctx context.Context, sessionID string) (G
 	return i, err
 }
 
+const getSessionToolRecord = `-- name: GetSessionToolRecord :one
+SELECT anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at FROM session_tool_records WHERE session_id=? AND run_id=? AND tool_call_id=?
+`
+
+type GetSessionToolRecordParams struct {
+	SessionID  string `db:"session_id"`
+	RunID      string `db:"run_id"`
+	ToolCallID string `db:"tool_call_id"`
+}
+
+type GetSessionToolRecordRow struct {
+	AnchorSequence int64  `db:"anchor_sequence"`
+	Name           string `db:"name"`
+	Arguments      []byte `db:"arguments"`
+	State          string `db:"state"`
+	Content        string `db:"content"`
+	Structured     []byte `db:"structured"`
+	ArtifactID     string `db:"artifact_id"`
+	Observations   []byte `db:"observations"`
+	StartedAt      int64  `db:"started_at"`
+	CompletedAt    int64  `db:"completed_at"`
+}
+
+func (q *Queries) GetSessionToolRecord(ctx context.Context, arg GetSessionToolRecordParams) (GetSessionToolRecordRow, error) {
+	row := q.db.QueryRowContext(ctx, getSessionToolRecord, arg.SessionID, arg.RunID, arg.ToolCallID)
+	var i GetSessionToolRecordRow
+	err := row.Scan(
+		&i.AnchorSequence,
+		&i.Name,
+		&i.Arguments,
+		&i.State,
+		&i.Content,
+		&i.Structured,
+		&i.ArtifactID,
+		&i.Observations,
+		&i.StartedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
 const getSubagentRun = `-- name: GetSubagentRun :one
 SELECT id, session_id, parent_run_id, parent_agent_id, tool_call_id, child_run_id, description, subagent_type, state, summary, provider, model, reasoning, capability_mode, requested_isolation, isolation, cwd, background, output, error, warning, transcript, tool_calls, turns, tokens_used, tools_used, worktree_path, completion_delivered, started_at, finished_at FROM subagent_runs WHERE id=?
 `
@@ -1070,6 +1143,17 @@ func (q *Queries) GetToolCallCharge(ctx context.Context, arg GetToolCallChargePa
 	var i GetToolCallChargeRow
 	err := row.Scan(&i.ToolName, &i.InputHash)
 	return i, err
+}
+
+const getWorkspaceSession = `-- name: GetWorkspaceSession :one
+SELECT session_id FROM workspace_session_state WHERE anchor=?
+`
+
+func (q *Queries) GetWorkspaceSession(ctx context.Context, anchor string) (string, error) {
+	row := q.db.QueryRowContext(ctx, getWorkspaceSession, anchor)
+	var session_id string
+	err := row.Scan(&session_id)
+	return session_id, err
 }
 
 const hasActiveChatGPTAccount = `-- name: HasActiveChatGPTAccount :one
@@ -1303,6 +1387,44 @@ func (q *Queries) InsertSessionBlock(ctx context.Context, arg InsertSessionBlock
 	return err
 }
 
+const insertSessionToolRecord = `-- name: InsertSessionToolRecord :execresult
+INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id,run_id,tool_call_id) DO NOTHING
+`
+
+type InsertSessionToolRecordParams struct {
+	SessionID      string `db:"session_id"`
+	RunID          string `db:"run_id"`
+	ToolCallID     string `db:"tool_call_id"`
+	AnchorSequence int64  `db:"anchor_sequence"`
+	Name           string `db:"name"`
+	Arguments      []byte `db:"arguments"`
+	State          string `db:"state"`
+	Content        string `db:"content"`
+	Structured     []byte `db:"structured"`
+	ArtifactID     string `db:"artifact_id"`
+	Observations   []byte `db:"observations"`
+	StartedAt      int64  `db:"started_at"`
+	CompletedAt    int64  `db:"completed_at"`
+}
+
+func (q *Queries) InsertSessionToolRecord(ctx context.Context, arg InsertSessionToolRecordParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertSessionToolRecord,
+		arg.SessionID,
+		arg.RunID,
+		arg.ToolCallID,
+		arg.AnchorSequence,
+		arg.Name,
+		arg.Arguments,
+		arg.State,
+		arg.Content,
+		arg.Structured,
+		arg.ArtifactID,
+		arg.Observations,
+		arg.StartedAt,
+		arg.CompletedAt,
+	)
+}
+
 const insertTodoIfAbsent = `-- name: InsertTodoIfAbsent :execresult
 INSERT INTO session_todos(session_id,goal,revision,phases,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(session_id) DO NOTHING
 `
@@ -1355,6 +1477,20 @@ UPDATE subagent_runs SET state='interrupted',summary='interrupted by process res
 
 func (q *Queries) InterruptIncompleteSubagents(ctx context.Context, finishedAt int64) (sql.Result, error) {
 	return q.db.ExecContext(ctx, interruptIncompleteSubagents, finishedAt)
+}
+
+const interruptRunningSessionToolRecordsByRun = `-- name: InterruptRunningSessionToolRecordsByRun :exec
+UPDATE session_tool_records SET state='interrupted',completed_at=? WHERE run_id=? AND state='running'
+`
+
+type InterruptRunningSessionToolRecordsByRunParams struct {
+	CompletedAt int64  `db:"completed_at"`
+	RunID       string `db:"run_id"`
+}
+
+func (q *Queries) InterruptRunningSessionToolRecordsByRun(ctx context.Context, arg InterruptRunningSessionToolRecordsByRunParams) error {
+	_, err := q.db.ExecContext(ctx, interruptRunningSessionToolRecordsByRun, arg.CompletedAt, arg.RunID)
+	return err
 }
 
 const latestEventSequence = `-- name: LatestEventSequence :one
@@ -1863,6 +1999,61 @@ func (q *Queries) ListSessionBlocks(ctx context.Context, sessionID string) ([]Li
 	return items, nil
 }
 
+const listSessionToolRecords = `-- name: ListSessionToolRecords :many
+SELECT run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at FROM session_tool_records WHERE session_id=? ORDER BY started_at,run_id,tool_call_id
+`
+
+type ListSessionToolRecordsRow struct {
+	RunID          string `db:"run_id"`
+	ToolCallID     string `db:"tool_call_id"`
+	AnchorSequence int64  `db:"anchor_sequence"`
+	Name           string `db:"name"`
+	Arguments      []byte `db:"arguments"`
+	State          string `db:"state"`
+	Content        string `db:"content"`
+	Structured     []byte `db:"structured"`
+	ArtifactID     string `db:"artifact_id"`
+	Observations   []byte `db:"observations"`
+	StartedAt      int64  `db:"started_at"`
+	CompletedAt    int64  `db:"completed_at"`
+}
+
+func (q *Queries) ListSessionToolRecords(ctx context.Context, sessionID string) ([]ListSessionToolRecordsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listSessionToolRecords, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSessionToolRecordsRow
+	for rows.Next() {
+		var i ListSessionToolRecordsRow
+		if err := rows.Scan(
+			&i.RunID,
+			&i.ToolCallID,
+			&i.AnchorSequence,
+			&i.Name,
+			&i.Arguments,
+			&i.State,
+			&i.Content,
+			&i.Structured,
+			&i.ArtifactID,
+			&i.Observations,
+			&i.StartedAt,
+			&i.CompletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSessions = `-- name: ListSessions :many
 SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) OR CAST(p.blocks AS TEXT)<>'[]' ORDER BY s.updated_at DESC
 `
@@ -2174,6 +2365,30 @@ func (q *Queries) ResolveReconcileAttemptCAS(ctx context.Context, arg ResolveRec
 		arg.Kind,
 		arg.Key1,
 		arg.Status_2,
+	)
+}
+
+const restartInterruptedSessionToolRecordCAS = `-- name: RestartInterruptedSessionToolRecordCAS :execresult
+UPDATE session_tool_records SET name=?,arguments=?,state='running',content='',structured='null',artifact_id='',observations='[]',started_at=?,completed_at=0 WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='interrupted'
+`
+
+type RestartInterruptedSessionToolRecordCASParams struct {
+	Name       string `db:"name"`
+	Arguments  []byte `db:"arguments"`
+	StartedAt  int64  `db:"started_at"`
+	SessionID  string `db:"session_id"`
+	RunID      string `db:"run_id"`
+	ToolCallID string `db:"tool_call_id"`
+}
+
+func (q *Queries) RestartInterruptedSessionToolRecordCAS(ctx context.Context, arg RestartInterruptedSessionToolRecordCASParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, restartInterruptedSessionToolRecordCAS,
+		arg.Name,
+		arg.Arguments,
+		arg.StartedAt,
+		arg.SessionID,
+		arg.RunID,
+		arg.ToolCallID,
 	)
 }
 
@@ -2690,5 +2905,20 @@ func (q *Queries) UpsertRecord(ctx context.Context, arg UpsertRecordParams) erro
 		arg.IdempotencyKey,
 		arg.Data,
 	)
+	return err
+}
+
+const upsertWorkspaceSession = `-- name: UpsertWorkspaceSession :exec
+INSERT INTO workspace_session_state(anchor,session_id,updated_at) VALUES(?,?,?) ON CONFLICT(anchor) DO UPDATE SET session_id=excluded.session_id,updated_at=excluded.updated_at
+`
+
+type UpsertWorkspaceSessionParams struct {
+	Anchor    string `db:"anchor"`
+	SessionID string `db:"session_id"`
+	UpdatedAt int64  `db:"updated_at"`
+}
+
+func (q *Queries) UpsertWorkspaceSession(ctx context.Context, arg UpsertWorkspaceSessionParams) error {
+	_, err := q.db.ExecContext(ctx, upsertWorkspaceSession, arg.Anchor, arg.SessionID, arg.UpdatedAt)
 	return err
 }

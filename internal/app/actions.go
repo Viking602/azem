@@ -729,6 +729,9 @@ func (s *Service) emitSession(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if err := s.rememberWorkspaceSession(ctx, id); err != nil {
+		return err
+	}
 	blocks, err := json.Marshal(projection.Blocks)
 	if err != nil {
 		return err

@@ -38,7 +38,7 @@ func TestReviewerAllowsAndDeniesValidAssessments(t *testing.T) {
 }
 
 func TestReviewerPinsStrictSchemaModelAndNoTools(t *testing.T) {
-	if ApprovalReviewerModel != "gpt-5.4" {
+	if ApprovalReviewerModel != "gpt-5.6-luna" {
 		t.Fatalf("approval reviewer model %q is not the Codex Guardian model", ApprovalReviewerModel)
 	}
 	server := reviewServer(t, func(writer http.ResponseWriter, request *http.Request, _ int32) {

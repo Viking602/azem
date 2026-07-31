@@ -617,6 +617,16 @@ func TestResumeSessionReturnsCompleteFailedOutputWithoutTruncation(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := sessions.StartToolRecord(ctx, "failed-session", session.ToolRecord{
+		RunID: "failed-run", ToolCallID: "read-1", Name: "coding.read_file", Arguments: json.RawMessage(`{"path":"note.txt"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.FinishToolRecord(ctx, "failed-session", session.ToolRecord{
+		RunID: "failed-run", ToolCallID: "read-1", Name: "coding.read_file", State: session.ToolCompleted, Content: "note",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := sessions.AppendBlock(ctx, "failed-session", session.Block{
 		Kind: "assistant", RunID: "failed-run", Title: "Azem", Content: completeOutput, State: "failed",
 	}); err != nil {
@@ -635,6 +645,10 @@ func TestResumeSessionReturnsCompleteFailedOutputWithoutTruncation(t *testing.T)
 	if err := json.Unmarshal([]byte(event.Data["blocks"]), &blocks); err != nil {
 		t.Fatal(err)
 	}
+	var tools []session.ToolRecord
+	if err := json.Unmarshal([]byte(event.Data["toolRecords"]), &tools); err != nil {
+		t.Fatal(err)
+	}
 	if event.Kind != EventSessionLoaded || event.State != "loaded" || len(blocks) != 2 ||
 		blocks[1].State != "failed" || blocks[1].Content != completeOutput {
 		outputBytes := 0
@@ -643,6 +657,9 @@ func TestResumeSessionReturnsCompleteFailedOutputWithoutTruncation(t *testing.T)
 		}
 		t.Fatalf("resumed failed output: event=%s/%s blocks=%d output_bytes=%d want_bytes=%d",
 			event.Kind, event.State, len(blocks), outputBytes, len(completeOutput))
+	}
+	if len(tools) != 1 || tools[0].ToolCallID != "read-1" || tools[0].State != session.ToolCompleted {
+		t.Fatalf("resumed tool timeline=%#v", tools)
 	}
 }
 
@@ -690,6 +707,98 @@ func TestBootstrapUsesFreshUnpersistedSessionEachLaunch(t *testing.T) {
 	}
 	if firstDatabase != secondDatabase {
 		t.Fatalf("launch databases differ: %q != %q", firstDatabase, secondDatabase)
+	}
+}
+
+func TestBootstrapStartsFreshAndResumesPersistedSessionExplicitly(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("AZEM_FAKE_PROVIDER", "1")
+	configFile := filepath.Join(root, "azem.yaml")
+	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: file\n  import_codex: false\n  import_grok: false\nmcp:\n  servers:\n    grep:\n      enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := Bootstrap(ctx, root, configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistedID := "persisted-session"
+	runID, err := first.Service.StartConfiguredTurn(TurnRequest{SessionID: persistedID, Prompt: "remember this session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer waitCancel()
+	for {
+		event, nextErr := first.Service.NextEvent(waitCtx)
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		if event.Kind == EventRunFinished && event.RunID == runID {
+			break
+		}
+	}
+	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := first.Service.Shutdown(shutdownCtx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+
+	restarted, err := Bootstrap(ctx, root, configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := restarted.Service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	}()
+	if restarted.SessionID == "" || restarted.SessionID == persistedID || restarted.SessionID == first.SessionID {
+		t.Fatalf("restart session=%q persisted=%q first=%q", restarted.SessionID, persistedID, first.SessionID)
+	}
+
+	quietCtx, quietCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	for {
+		event, nextErr := restarted.Service.NextEvent(quietCtx)
+		if errors.Is(nextErr, context.DeadlineExceeded) {
+			break
+		}
+		if nextErr != nil {
+			quietCancel()
+			t.Fatal(nextErr)
+		}
+		if event.Kind == EventSessionLoaded {
+			quietCancel()
+			t.Fatalf("startup automatically loaded persisted session: %+v", event)
+		}
+	}
+	quietCancel()
+
+	if err := restarted.Service.ExecuteAction(ctx, Action{Kind: ActionResumeSession, Target: persistedID}); err != nil {
+		t.Fatal(err)
+	}
+	resumeCtx, resumeCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer resumeCancel()
+	for {
+		event, nextErr := restarted.Service.NextEvent(resumeCtx)
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		if event.Kind != EventSessionLoaded {
+			continue
+		}
+		if event.SessionID != persistedID || event.State != "loaded" {
+			t.Fatalf("explicit resume event=%+v", event)
+		}
+		return
 	}
 }
 

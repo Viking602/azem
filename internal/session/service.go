@@ -84,6 +84,7 @@ type Projection struct {
 	Session              Session
 	LastRunID            string
 	Blocks               []Block
+	ToolRecords          []ToolRecord
 	ModelHistory         ModelHistory
 	Usage                Usage
 	UpdatedAt            time.Time
@@ -259,6 +260,7 @@ func NewService(db *sql.DB) *Service { return &Service{db: db} }
 func sessionFromDB(row dbgen.Session) Session {
 	return Session{ID: row.ID, Title: row.Title, ProviderID: row.ProviderID, ModelID: row.ModelID, Reasoning: row.Reasoning, AgentMode: row.AgentMode, CreatedAt: time.Unix(0, row.CreatedAt).UTC(), UpdatedAt: time.Unix(0, row.UpdatedAt).UTC()}
 }
+
 func (s *Service) Ensure(ctx context.Context, value Session) (Session, error) {
 	now := time.Now().UTC()
 	if value.CreatedAt.IsZero() {
@@ -334,8 +336,12 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 			return Projection{}, fmt.Errorf("decode legacy projection: %w", err)
 		}
 	}
+	tools, err := s.ListToolRecords(ctx, id)
+	if err != nil {
+		return Projection{}, err
+	}
 	return Projection{
-		Session: value, LastRunID: row.LastRunID, Blocks: blocks, ModelHistory: history, Usage: usage,
+		Session: value, LastRunID: row.LastRunID, Blocks: blocks, ToolRecords: tools, ModelHistory: history, Usage: usage,
 		UpdatedAt:            time.Unix(0, row.UpdatedAt).UTC(),
 		CheckpointGeneration: row.CheckpointGeneration, CacheEpoch: row.CacheEpoch, CacheIdentityHash: row.CacheIdentityHash,
 	}, nil

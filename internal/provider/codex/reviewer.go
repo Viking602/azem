@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	// Codex Guardian prefers gpt-5.4 for approval reviews. This value is sent
-	// directly to the Responses API and therefore must be a real model ID, not
-	// an internal reviewer label.
-	ApprovalReviewerModel         = "gpt-5.4"
+	// Automatic approval reviews use gpt-5.6-luna. This value is sent directly
+	// to the Responses API and therefore must be a real model ID, not an
+	// internal reviewer label.
+	ApprovalReviewerModel         = "gpt-5.6-luna"
 	ApprovalReviewerFallbackModel = "gpt-5.6-sol"
 	approvalReviewAttempts        = 3
 	approvalReviewTimeout         = 90 * time.Second

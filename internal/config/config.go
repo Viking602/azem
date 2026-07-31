@@ -29,6 +29,16 @@ type Config struct {
 	MCP       MCPConfig       `yaml:"mcp"`
 	Skills    SkillsConfig    `yaml:"skills"`
 	Hooks     HooksConfig     `yaml:"hooks"`
+	Retry     RetryConfig     `yaml:"retry"`
+}
+
+type RetryConfig struct {
+	Enabled           bool          `yaml:"enabled"`
+	MaxRetries        int           `yaml:"max_retries"`
+	BaseDelay         string        `yaml:"base_delay"`
+	BaseDelayDuration time.Duration `yaml:"-"`
+	MaxDelay          string        `yaml:"max_delay"`
+	MaxDelayDuration  time.Duration `yaml:"-"`
 }
 
 type HooksConfig struct {
@@ -251,6 +261,10 @@ func Default() Config {
 			ChatGPT: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute},
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
 		},
+		Retry: RetryConfig{
+			Enabled: true, MaxRetries: 10, BaseDelay: "500ms", BaseDelayDuration: 500 * time.Millisecond,
+			MaxDelay: "5m", MaxDelayDuration: 5 * time.Minute,
+		},
 		Agents: AgentsConfig{
 			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
 			Team: TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
@@ -372,6 +386,19 @@ func (c *Config) Validate() error {
 	if c.Providers.Grok.Transport != "api" && c.Providers.Grok.Transport != "cli_proxy" {
 		return fmt.Errorf("providers.grok.transport must be api or cli_proxy")
 	}
+	if c.Retry.MaxRetries < 1 || c.Retry.MaxRetries > 100 {
+		return fmt.Errorf("retry.max_retries must be between 1 and 100")
+	}
+	retryBaseDelay, err := time.ParseDuration(c.Retry.BaseDelay)
+	if err != nil || retryBaseDelay < 0 {
+		return fmt.Errorf("retry.base_delay must be a non-negative duration")
+	}
+	retryMaxDelay, err := time.ParseDuration(c.Retry.MaxDelay)
+	if err != nil || retryMaxDelay < 0 || (retryMaxDelay > 0 && retryMaxDelay < retryBaseDelay) {
+		return fmt.Errorf("retry.max_delay must be zero or a duration greater than or equal to retry.base_delay")
+	}
+	c.Retry.BaseDelayDuration = retryBaseDelay
+	c.Retry.MaxDelayDuration = retryMaxDelay
 	if c.Agents.Main.MaxTokens < 0 {
 		return fmt.Errorf("agents.main.max_tokens must be non-negative (zero is unbounded)")
 	}

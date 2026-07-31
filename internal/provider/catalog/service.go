@@ -5,12 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
+
+	"resty.dev/v3"
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
@@ -98,6 +98,7 @@ func (s *Service) ValidateSelection(ctx context.Context, provider string, accoun
 	}
 	return fmt.Errorf("model %q is not present in the %s catalog for account %s", modelID, provider, accountID)
 }
+
 func (s *Service) fetch(ctx context.Context, provider string, accountID string, cached Result) (Result, error) {
 	primary := s.Endpoints[provider]
 	if primary == "" {
@@ -123,33 +124,35 @@ func (s *Service) fetch(ctx context.Context, provider string, accountID string, 
 		next := endpoint
 		for page := range 20 {
 			currentURL := next
-			response, err := s.auth.DoWithRefresh(ctx, provider, accountID, func(auth.Credential) (*http.Request, error) {
-				request, err := http.NewRequest(http.MethodGet, currentURL, nil)
-				if err == nil && provider == "chatgpt" {
-					request.Header.Set("originator", "codex_cli_rs")
-					request.Header.Set("User-Agent", "azem/1")
-				}
-				if err == nil && sourceIndex == 0 && page == 0 && etag != "" {
-					request.Header.Set("If-None-Match", etag)
-				}
-				return request, err
-			})
+			response, err := s.auth.DoWithRefresh(
+				ctx,
+				provider,
+				accountID,
+				resty.MethodGet,
+				currentURL,
+				func(request *resty.Request) {
+					request.SetResponseBodyLimit(4 << 20)
+					if provider == "chatgpt" {
+						request.SetHeader("originator", "codex_cli_rs")
+						request.SetHeader("User-Agent", "azem/1")
+					}
+					if sourceIndex == 0 && page == 0 && etag != "" {
+						request.SetHeader("If-None-Match", etag)
+					}
+				},
+			)
 			if err != nil {
 				return Result{}, err
 			}
-			body, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-			response.Body.Close()
-			if readErr != nil {
-				return Result{}, readErr
-			}
-			if response.StatusCode == http.StatusNotModified && sourceIndex == 0 && len(endpoints) == 1 && len(cached.Models) > 0 {
+			body := response.Bytes()
+			if response.StatusCode() == 304 && sourceIndex == 0 && len(endpoints) == 1 && len(cached.Models) > 0 {
 				return s.extend(ctx, cached, s.ttl(provider))
 			}
-			if response.StatusCode/100 != 2 {
-				return Result{}, catalogHTTPError(provider, response.StatusCode, body)
+			if response.StatusCode()/100 != 2 {
+				return Result{}, catalogHTTPError(provider, response.StatusCode(), body)
 			}
 			if sourceIndex == 0 && page == 0 {
-				etag = response.Header.Get("ETag")
+				etag = response.Header().Get("ETag")
 			}
 			pageModels, hasMore, after, err := decode(provider, body)
 			if err != nil {

@@ -92,8 +92,9 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
-- Persistent conversations with session resume, context compaction, and a visible per-session recap status line
-- Durable action attempts and reconciliation of unknown side effects after interruption; Team runs resume automatically, while interrupted Single runs require a continuation turn
+- Persistent conversations start in a fresh session on every launch; use `/resume` to reopen prior sessions with their context, tool history, and recap
+- Durable main-agent tool timelines preserve read, search, edit, test, and shell history across cancellation and process restarts; observed file hashes let resumed turns reuse unchanged evidence and target only stale paths
+- Durable action attempts and reconciliation of unknown side effects after interruption; Team and eligible Single-Agent runs resume automatically without replaying completed side effects
 - Retry handling for transient ChatGPT transport failures before output is emitted
 - MCP server discovery, reconnect, concurrency controls, and per-tool policies
 - Agent Skills discovery from user, project, configured, and bundled directories
@@ -230,6 +231,12 @@ auth:
   store: keyring           # sqlite | keyring | file
   import_codex: true
   import_grok: true
+
+retry:
+  enabled: true
+  max_retries: 10         # session-level retries after transport retries are exhausted
+  base_delay: 500ms       # exponential backoff base; randomized to 75%-100%, capped at 8s
+  max_delay: 5m           # fail fast instead of sleeping past this server-requested delay; 0s disables the cap
 
 agents:
   main:

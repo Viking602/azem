@@ -10,6 +10,25 @@ import (
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 )
 
+func TestNormalizeUsageAndWrapReporterApplyCacheModels(t *testing.T) {
+	automatic := NormalizeUsage(UsageDetails{CachedTokens: 10, CacheWriteTokens: 7, CacheReported: true}, CacheModelAutomatic)
+	if automatic.CacheModel != CacheModelAutomatic || automatic.CacheWriteTokens != 0 || automatic.CachedTokens != 10 {
+		t.Fatalf("automatic normalize=%+v", automatic)
+	}
+	write := NormalizeUsage(UsageDetails{CachedTokens: 10, CacheWriteTokens: 7, CacheReported: true}, CacheModelWriteTokens)
+	if write.CacheModel != CacheModelWriteTokens || write.CacheWriteTokens != 7 {
+		t.Fatalf("write-token normalize=%+v", write)
+	}
+	if WrapUsageReporter(nil, CacheModelAutomatic) != nil {
+		t.Fatal("nil reporter should stay nil")
+	}
+	var got UsageDetails
+	WrapUsageReporter(func(details UsageDetails) { got = details }, CacheModelAutomatic)(UsageDetails{CacheWriteTokens: 9, CachedTokens: 3})
+	if got.CacheWriteTokens != 0 || got.CachedTokens != 3 || got.CacheModel != CacheModelAutomatic {
+		t.Fatalf("wrapped reporter=%+v", got)
+	}
+}
+
 func TestBuildMapsHistoryToolsReasoningAndFormat(t *testing.T) {
 	additional := false
 	request := hyprovider.Request{

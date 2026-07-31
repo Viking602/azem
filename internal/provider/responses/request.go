@@ -30,15 +30,25 @@ const (
 	maxWireImageBytes      = 8 << 20
 )
 
+// Prompt-cache models describe provider-specific billing/reporting semantics.
+// Shared stream parsing stays neutral; drivers normalize UsageDetails before
+// metering so ChatGPT write-token accounting never bleeds into automatic caches.
+const (
+	CacheModelAutomatic   = "automatic"    // xAI/Grok: prefix cache; hits via cached_tokens only
+	CacheModelWriteTokens = "write-tokens" // ChatGPT/Codex-style explicit cache write counters
+)
+
 type UsageDetails struct {
 	ProviderRequestID string
 	InputTokens       int
 	CachedTokens      int
 	CacheReported     bool
 	CacheWriteTokens  int
-	OutputTokens      int
-	ReasoningTokens   int
-	TotalTokens       int
+	// CacheModel is set by provider drivers (not by the shared stream parser).
+	CacheModel      string
+	OutputTokens    int
+	ReasoningTokens int
+	TotalTokens     int
 }
 
 type UsageReporter func(UsageDetails)
@@ -46,6 +56,27 @@ type UsageReporter func(UsageDetails)
 func RequestUsageReporter(request hyprovider.Request) UsageReporter {
 	reporter, _ := request.ExtraBody[UsageReporterExtraKey].(UsageReporter)
 	return reporter
+}
+
+// NormalizeUsage applies provider cache semantics to a parsed usage detail.
+// Automatic caches ignore write counters even if a peer field appears on the wire.
+func NormalizeUsage(details UsageDetails, cacheModel string) UsageDetails {
+	details.CacheModel = cacheModel
+	if cacheModel == CacheModelAutomatic {
+		details.CacheWriteTokens = 0
+	}
+	return details
+}
+
+// WrapUsageReporter tags and normalizes usage reports for a specific cache model.
+// A nil reporter stays nil so callers can pass RequestUsageReporter results through.
+func WrapUsageReporter(reporter UsageReporter, cacheModel string) UsageReporter {
+	if reporter == nil {
+		return nil
+	}
+	return func(details UsageDetails) {
+		reporter(NormalizeUsage(details, cacheModel))
+	}
 }
 
 type wireRequest struct {

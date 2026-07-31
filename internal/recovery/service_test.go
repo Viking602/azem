@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -13,13 +14,18 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
+	"github.com/Viking602/go-hydaelyn/api"
 )
 
 type recordingRunResumer struct {
 	runIDs []string
+	events *[]string
 }
 
 func (r *recordingRunResumer) ResumeRun(_ context.Context, runID string) error {
+	if r.events != nil {
+		*r.events = append(*r.events, "resume")
+	}
 	r.runIDs = append(r.runIDs, runID)
 	return nil
 }
@@ -130,15 +136,26 @@ func TestRecoverResumesRedispatchedSingleAgentRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer recoveredCoding.Close(ctx)
-	resumer := &recordingRunResumer{}
+	events := []string{}
+	resumer := &recordingRunResumer{events: &events}
 	recoveryService, err := NewService(reopened, recoveredCoding, nil, nil, resumer)
 	if err != nil {
 		t.Fatal(err)
 	}
+	recoveryService.SetBeforeResume(func(_ context.Context, runs []api.Run) error {
+		if len(runs) != 1 || runs[0].ID != run.RunID {
+			t.Fatalf("discovered runs=%v want=%s", runs, run.RunID)
+		}
+		events = append(events, "session_loaded")
+		return nil
+	})
 	if _, err := recoveryService.Recover(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if len(resumer.runIDs) != 1 || resumer.runIDs[0] != run.RunID {
 		t.Fatalf("resumed runs=%v want=%s", resumer.runIDs, run.RunID)
+	}
+	if !reflect.DeepEqual(events, []string{"session_loaded", "resume"}) {
+		t.Fatalf("recovery event order=%v", events)
 	}
 }

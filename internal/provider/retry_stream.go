@@ -125,7 +125,7 @@ func reportAndWait(ctx context.Context, options RetryOptions, attempt int, cause
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	delay := max(time.Duration(0), options.Delay(attempt))
+	delay := max(time.Duration(0), options.Delay(attempt), SuggestedRetryDelay(cause))
 	if options.Observer != nil {
 		if err := options.Observer(RetryProgress{Attempt: attempt, Max: options.Max, Delay: delay, Cause: cause}); err != nil {
 			return err
@@ -142,6 +142,17 @@ func reportAndWait(ctx context.Context, options RetryOptions, attempt int, cause
 	case <-timer.C:
 		return nil
 	}
+}
+
+// SuggestedRetryDelay returns the server-requested backoff carried by a
+// provider error. Wrapped errors are supported so both transport-level and
+// session-level recovery honor the original response.
+func SuggestedRetryDelay(err error) time.Duration {
+	var apiError *responses.APIError
+	if !errors.As(err, &apiError) {
+		return 0
+	}
+	return max(0, apiError.RetryAfter)
 }
 
 func retryStreamFailure(event hyprovider.Event, err error) (hyprovider.Event, error) {

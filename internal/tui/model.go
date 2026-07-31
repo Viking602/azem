@@ -360,6 +360,11 @@ type UsageView struct {
 	LastProvider                     string
 	LastModel                        string
 	LastTransport                    string
+	// CacheModel is provider cache semantics: "automatic" (xAI) or "write-tokens" (ChatGPT).
+	CacheModel string
+	// CachePrefixDegraded is set when model history fell back without ProviderState.
+	CachePrefixDegraded bool
+	CachePrefixReason   string
 }
 
 type AppModel struct {

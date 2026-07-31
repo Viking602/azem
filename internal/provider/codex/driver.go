@@ -1,15 +1,15 @@
 package codex
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"resty.dev/v3"
 
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 
@@ -74,8 +74,11 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 	if err != nil {
 		return nil, err
 	}
+	// ChatGPT/Codex reports explicit cache write counters; tag metering so UI and
+	// facts stay on the write-token model without coupling to xAI automatic cache.
+	reporter := responses.WrapUsageReporter(responses.RequestUsageReporter(request), responses.CacheModelWriteTokens)
 	open := func() (hyprovider.Stream, error) {
-		return d.openStream(ctx, payload, reverseNames, cacheKey, responses.RequestUsageReporter(request))
+		return d.openStream(ctx, payload, reverseNames, cacheKey, reporter)
 	}
 	stream, retries, err := openProviderStream(ctx, open, d.retryDelay, d.retryObserver, 0)
 	if err != nil {
@@ -86,22 +89,25 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 
 func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames map[string]string, cacheKey string, reporter responses.UsageReporter) (hyprovider.Stream, error) {
 	streamContext, cancel := context.WithCancel(ctx)
-	response, err := d.auth.DoStreamWithRefresh(streamContext, "chatgpt", d.accountID, func(auth.Credential) (*http.Request, error) {
-		httpRequest, err := http.NewRequest(http.MethodPost, d.endpoint, bytes.NewReader(payload))
-		if err != nil {
-			return nil, err
-		}
-		httpRequest.Header.Set("Content-Type", "application/json")
-		httpRequest.Header.Set("Accept", "text/event-stream")
-		httpRequest.Header.Set("OpenAI-Beta", "responses=experimental")
-		httpRequest.Header.Set("originator", "codex_cli_rs")
-		httpRequest.Header.Set("User-Agent", "azem/1")
-		if cacheKey != "" {
-			httpRequest.Header.Set("conversation_id", cacheKey)
-			httpRequest.Header.Set("session_id", cacheKey)
-		}
-		return httpRequest, nil
-	})
+	response, err := d.auth.DoStreamWithRefresh(
+		streamContext,
+		"chatgpt",
+		d.accountID,
+		resty.MethodPost,
+		d.endpoint,
+		func(request *resty.Request) {
+			request.SetBody(payload)
+			request.SetHeader("Content-Type", "application/json")
+			request.SetHeader("Accept", "text/event-stream")
+			request.SetHeader("OpenAI-Beta", "responses=experimental")
+			request.SetHeader("originator", "codex_cli_rs")
+			request.SetHeader("User-Agent", "azem/1")
+			if cacheKey != "" {
+				request.SetHeader("conversation_id", cacheKey)
+				request.SetHeader("session_id", cacheKey)
+			}
+		},
+	)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -160,7 +166,7 @@ func (s *retryingStream) Recv() (hyprovider.Event, error) {
 
 		_ = s.current.Close()
 		s.retries++
-		wait := providerRetryWait(s.delay, s.retries)
+		wait := providerRetryWait(s.delay, s.retries, cause)
 		if err := reportProviderRetry(s.ctx, s.observe, s.retries, wait, cause); err != nil {
 			return hyprovider.Event{}, err
 		}
@@ -197,7 +203,7 @@ func openProviderStream(ctx context.Context, open func() (hyprovider.Stream, err
 			return nil, retries, err
 		}
 		retries++
-		wait := providerRetryWait(delay, retries)
+		wait := providerRetryWait(delay, retries, err)
 		if err := reportProviderRetry(ctx, observe, retries, wait, err); err != nil {
 			return nil, retries, err
 		}
@@ -207,11 +213,12 @@ func openProviderStream(ctx context.Context, open func() (hyprovider.Stream, err
 	}
 }
 
-func providerRetryWait(delay func(int) time.Duration, attempt int) time.Duration {
-	if delay == nil {
-		return 0
+func providerRetryWait(delay func(int) time.Duration, attempt int, cause error) time.Duration {
+	configured := time.Duration(0)
+	if delay != nil {
+		configured = delay(attempt)
 	}
-	return max(0, delay(attempt))
+	return max(0, configured, azprovider.SuggestedRetryDelay(cause))
 }
 
 func reportProviderRetry(ctx context.Context, observe RetryObserver, attempt int, delay time.Duration, cause error) error {

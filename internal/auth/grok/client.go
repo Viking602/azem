@@ -5,19 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"resty.dev/v3"
 )
 
 const (
-	DefaultClientID      = "b1a00492-073a-47ea-816f-4c329264a828"
-	DefaultScope         = "openid profile email offline_access grok-cli:access api:access"
+	DefaultClientID     = "b1a00492-073a-47ea-816f-4c329264a828"
+	DefaultScope        = "openid profile email offline_access grok-cli:access api:access"
 	CompatibilityNotice = "Grok sign-in uses the Grok CLI public-client compatibility surface and is experimental."
 )
 
@@ -27,12 +28,13 @@ var (
 )
 
 type Client struct {
-	HTTP          *http.Client
+	HTTP          *resty.Client
 	DiscoveryURL  string
 	ClientID      string
 	Scope         string
 	AllowInsecure bool
 	Wait          func(context.Context, time.Duration) error
+	httpMu        sync.Mutex
 }
 
 type Discovery struct {
@@ -68,7 +70,7 @@ type Tokens struct {
 
 func NewClient() *Client {
 	return &Client{
-		HTTP: &http.Client{Timeout: 30 * time.Second}, DiscoveryURL: "https://auth.x.ai/.well-known/openid-configuration",
+		HTTP: resty.New().SetTimeout(30 * time.Second), DiscoveryURL: "https://auth.x.ai/.well-known/openid-configuration",
 		ClientID: DefaultClientID, Scope: DefaultScope,
 	}
 }
@@ -77,20 +79,18 @@ func (c *Client) Discover(ctx context.Context) (Discovery, error) {
 	if err := c.validateEndpoint(c.DiscoveryURL); err != nil {
 		return Discovery{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.DiscoveryURL, nil)
+	response, err := c.httpClient().R().
+		SetContext(ctx).
+		SetResponseBodyLimit(1 << 20).
+		Get(c.DiscoveryURL)
 	if err != nil {
 		return Discovery{}, err
 	}
-	response, err := c.httpClient().Do(request)
-	if err != nil {
-		return Discovery{}, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode/100 != 2 {
-		return Discovery{}, fmt.Errorf("OIDC discovery returned HTTP %d", response.StatusCode)
+	if response.StatusCode()/100 != 2 {
+		return Discovery{}, fmt.Errorf("OIDC discovery returned HTTP %d", response.StatusCode())
 	}
 	var discovery Discovery
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&discovery); err != nil {
+	if err := json.Unmarshal(response.Bytes(), &discovery); err != nil {
 		return Discovery{}, err
 	}
 	if discovery.DeviceAuthorizationEndpoint == "" || discovery.TokenEndpoint == "" {
@@ -112,13 +112,9 @@ func (c *Client) BeginDevice(ctx context.Context, discovery Discovery) (DeviceAu
 	if err != nil {
 		return DeviceAuthorization{}, err
 	}
-	defer response.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		return DeviceAuthorization{}, err
-	}
-	if response.StatusCode/100 != 2 {
-		return DeviceAuthorization{}, fmt.Errorf("device authorization returned HTTP %d", response.StatusCode)
+	data := response.Bytes()
+	if response.StatusCode()/100 != 2 {
+		return DeviceAuthorization{}, fmt.Errorf("device authorization returned HTTP %d", response.StatusCode())
 	}
 	var device DeviceAuthorization
 	if err := json.Unmarshal(data, &device); err != nil {
@@ -164,12 +160,8 @@ func (c *Client) PollDevice(ctx context.Context, discovery Discovery, device Dev
 		if err != nil {
 			return Tokens{}, err
 		}
-		data, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		response.Body.Close()
-		if readErr != nil {
-			return Tokens{}, readErr
-		}
-		if response.StatusCode/100 == 2 {
+		data := response.Bytes()
+		if response.StatusCode()/100 == 2 {
 			return decodeTokens(data)
 		}
 		var failure struct {
@@ -188,7 +180,7 @@ func (c *Client) PollDevice(ctx context.Context, discovery Discovery, device Dev
 		case "access_denied":
 			return Tokens{}, ErrAccessDenied
 		default:
-			return Tokens{}, fmt.Errorf("device token request returned HTTP %d: %s", response.StatusCode, failure.Error)
+			return Tokens{}, fmt.Errorf("device token request returned HTTP %d: %s", response.StatusCode(), failure.Error)
 		}
 	}
 }
@@ -198,13 +190,9 @@ func (c *Client) Refresh(ctx context.Context, discovery Discovery, refreshToken 
 	if err != nil {
 		return Tokens{}, err
 	}
-	defer response.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		return Tokens{}, err
-	}
-	if response.StatusCode/100 != 2 {
-		return Tokens{}, fmt.Errorf("refresh returned HTTP %d", response.StatusCode)
+	data := response.Bytes()
+	if response.StatusCode()/100 != 2 {
+		return Tokens{}, fmt.Errorf("refresh returned HTTP %d", response.StatusCode())
 	}
 	return decodeTokens(data)
 }
@@ -217,9 +205,8 @@ func (c *Client) Revoke(ctx context.Context, discovery Discovery, token string) 
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
-	if response.StatusCode/100 != 2 {
-		return fmt.Errorf("revoke returned HTTP %d", response.StatusCode)
+	if response.StatusCode()/100 != 2 {
+		return fmt.Errorf("revoke returned HTTP %d", response.StatusCode())
 	}
 	return nil
 }
@@ -437,16 +424,15 @@ func decodeTokens(data []byte) (Tokens, error) {
 	return result, nil
 }
 
-func (c *Client) postForm(ctx context.Context, endpoint string, values url.Values) (*http.Response, error) {
+func (c *Client) postForm(ctx context.Context, endpoint string, values url.Values) (*resty.Response, error) {
 	if err := c.validateEndpoint(endpoint); err != nil {
 		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(values.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	return c.httpClient().Do(request)
+	return c.httpClient().R().
+		SetContext(ctx).
+		SetResponseBodyLimit(1 << 20).
+		SetFormDataFromValues(values).
+		Post(endpoint)
 }
 
 func (c *Client) ValidateResourceURL(raw string) error {
@@ -485,9 +471,20 @@ func (c *Client) wait(ctx context.Context, duration time.Duration) error {
 	}
 }
 
-func (c *Client) httpClient() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
+func (c *Client) httpClient() *resty.Client {
+	c.httpMu.Lock()
+	defer c.httpMu.Unlock()
+	if c.HTTP == nil {
+		c.HTTP = resty.New().SetTimeout(30 * time.Second)
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	return c.HTTP
+}
+
+func (c *Client) Close() error {
+	c.httpMu.Lock()
+	defer c.httpMu.Unlock()
+	if c.HTTP == nil {
+		return nil
+	}
+	return c.HTTP.Close()
 }

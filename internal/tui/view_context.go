@@ -546,7 +546,7 @@ func (m AppModel) contextMetrics() contextMetrics {
 	if m.usage.UncachedInputTokens > 0 {
 		details = append(details, "U "+formatTokens(m.usage.UncachedInputTokens))
 	}
-	if m.usage.CacheWriteTokens > 0 {
+	if m.showsCacheWrite() {
 		write := "W " + formatTokens(m.usage.CacheWriteTokens)
 		if m.usage.MainCacheWrite != m.usage.CacheWriteTokens {
 			write = "W M" + formatTokens(m.usage.MainCacheWrite) + "/A" + formatTokens(m.usage.CacheWriteTokens)
@@ -564,7 +564,7 @@ func (m AppModel) contextMetrics() contextMetrics {
 		if m.usage.CompactionUncached > 0 {
 			compaction += " U" + formatTokens(m.usage.CompactionUncached)
 		}
-		if m.usage.CompactionCacheWrite > 0 {
+		if !m.usesAutomaticPromptCache() && m.usage.CompactionCacheWrite > 0 {
 			compaction += " W" + formatTokens(m.usage.CompactionCacheWrite)
 		}
 		if m.usage.CompactionReasoning > 0 {
@@ -580,7 +580,7 @@ func (m AppModel) contextMetrics() contextMetrics {
 		if m.usage.TeamUncached > 0 {
 			team += " U" + formatTokens(m.usage.TeamUncached)
 		}
-		if m.usage.TeamCacheWrite > 0 {
+		if !m.usesAutomaticPromptCache() && m.usage.TeamCacheWrite > 0 {
 			team += " W" + formatTokens(m.usage.TeamCacheWrite)
 		}
 		if m.usage.TeamReasoning > 0 {
@@ -710,14 +710,27 @@ func (m AppModel) statusReportLines() []string {
 	// Lead with the dense counters users open /status to read, then identity/context.
 	lines := []string{m.tr("overlay.status.section.diagnostics")}
 	if metrics.detailSuffix == "" && m.usage.UncachedInputTokens == 0 && m.usage.ReasoningTokens == 0 &&
-		m.usage.CacheWriteTokens == 0 && m.usage.CompactionInput == 0 && m.usage.TeamInput == 0 &&
-		m.usage.LastRequestKind == "" && m.usage.LastTransport == "" {
+		!m.showsCacheWrite() && m.usage.CompactionInput == 0 && m.usage.TeamInput == 0 &&
+		m.usage.LastRequestKind == "" && m.usage.LastTransport == "" &&
+		!m.usesAutomaticPromptCache() && !m.usage.CachePrefixDegraded {
 		lines = append(lines, "  "+m.tr("overlay.status.empty_diagnostics"))
 	} else {
+		if m.usesAutomaticPromptCache() {
+			lines = append(lines, "  "+m.tr("overlay.status.field.cache_model")+": "+m.tr("overlay.status.cache_model.automatic"))
+		} else if m.usage.CacheModel == "write-tokens" || m.provider == "chatgpt" {
+			lines = append(lines, "  "+m.tr("overlay.status.field.cache_model")+": "+m.tr("overlay.status.cache_model.write_tokens"))
+		}
+		if m.usage.CachePrefixDegraded {
+			reason := m.usage.CachePrefixReason
+			if reason == "" {
+				reason = m.tr("overlay.status.cache_prefix.degraded_default")
+			}
+			lines = append(lines, "  "+m.tr("overlay.status.field.cache_prefix")+": "+reason)
+		}
 		if m.usage.UncachedInputTokens > 0 {
 			lines = append(lines, fmt.Sprintf("  %s (U): %s", m.tr("overlay.status.field.uncached"), formatTokens(m.usage.UncachedInputTokens)))
 		}
-		if m.usage.CacheWriteTokens > 0 {
+		if m.showsCacheWrite() {
 			write := formatTokens(m.usage.CacheWriteTokens)
 			if m.usage.MainCacheWrite != m.usage.CacheWriteTokens {
 				write = fmt.Sprintf("%s main / %s all", formatTokens(m.usage.MainCacheWrite), formatTokens(m.usage.CacheWriteTokens))
@@ -737,7 +750,7 @@ func (m AppModel) statusReportLines() []string {
 			if m.usage.CompactionUncached > 0 {
 				line += " · U " + formatTokens(m.usage.CompactionUncached)
 			}
-			if m.usage.CompactionCacheWrite > 0 {
+			if !m.usesAutomaticPromptCache() && m.usage.CompactionCacheWrite > 0 {
 				line += " · W " + formatTokens(m.usage.CompactionCacheWrite)
 			}
 			if m.usage.CompactionReasoning > 0 {
@@ -756,7 +769,7 @@ func (m AppModel) statusReportLines() []string {
 			if m.usage.TeamUncached > 0 {
 				line += " · U " + formatTokens(m.usage.TeamUncached)
 			}
-			if m.usage.TeamCacheWrite > 0 {
+			if !m.usesAutomaticPromptCache() && m.usage.TeamCacheWrite > 0 {
 				line += " · W " + formatTokens(m.usage.TeamCacheWrite)
 			}
 			if m.usage.TeamReasoning > 0 {

@@ -19,8 +19,19 @@ import (
 	"github.com/Viking602/azem/internal/i18n"
 )
 
+func blockRendersDiff(block Block) bool {
+	if block.Kind == BlockDiff {
+		return true
+	}
+	if block.Kind != BlockTool {
+		return false
+	}
+	return block.Title == "coding.git_diff" ||
+		isFileChangeTool(block.Title) && strings.HasPrefix(strings.TrimSpace(block.Content), "@@ ")
+}
+
 func (m AppModel) renderBlock(block Block, index int, width int) []string {
-	rendersDiff := block.Kind == BlockDiff || block.Kind == BlockTool && block.Title == "coding.git_diff"
+	rendersDiff := blockRendersDiff(block)
 	title := first(block.Title, string(block.Kind))
 	if block.Kind == BlockTool {
 		title = m.toolDisplayName(title)
@@ -34,20 +45,7 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 
 	switch block.Kind {
 	case BlockApproval:
-		indicator := stateMark(block.State)
-		if block.State == "running" || block.State == "reviewing" {
-			indicator = "◆"
-			if !m.reducedMotion {
-				frames := [...]string{"◇", "◈", "◆", "◈"}
-				indicator = frames[m.animationFrame%len(frames)]
-			}
-		}
-		header := m.renderBlockHeader(selector, indicator, m.tr("block.approval"), title, block.State, state, width, m.theme.ApprovalTag, m.theme.ApprovalAsk, selected)
-		lines := []string{header}
-		if block.Collapsed {
-			return lines
-		}
-		return append(lines, m.renderApprovalContent(block.Content, width)...)
+		return m.renderApprovalStatus(block, width)
 	case BlockHook:
 		return m.renderHookPrompt(block, selected, width)
 	case BlockTool:
@@ -110,8 +108,16 @@ func (m AppModel) renderToolHeader(block Block, selector string, width int, sele
 	if selected {
 		prefix = "› "
 	}
-	line := m.theme.Muted.Render(prefix+"◆ ") + m.theme.Assistant.Render(summary)
-	if block.State != "" && block.State != "completed" {
+	indicator := stateMark(block.State)
+	if strings.EqualFold(block.State, "running") {
+		indicator = "◆"
+		if !m.reducedMotion {
+			frames := [...]string{"◇", "◈", "◆", "◈"}
+			indicator = frames[m.animationFrame%len(frames)]
+		}
+	}
+	line := m.theme.Tool.Render(prefix + indicator + " " + summary)
+	if block.State != "" && block.State != "completed" && block.State != "running" {
 		line += m.theme.MetaDivider.Render("  ·  ") +
 			m.stateStyle(block.State).Render(stateMark(block.State)+" "+m.displayState(block.State))
 	}
@@ -198,7 +204,7 @@ func (m AppModel) toolStyles(name string) (lipgloss.Style, lipgloss.Style) {
 	switch normalized {
 	case "coding.search":
 		return m.theme.ThinkingTag, m.theme.ToolSearch
-	case "coding.read.file", "coding.list.files":
+	case "coding.read.file", "coding.list.files", "context.read.artifact":
 		return m.theme.AgentTag, m.theme.ToolRead
 	case "coding.edit.hashline", "coding.write.file", "coding.gofmt", "coding.git.diff":
 		return m.theme.AssistantTag, m.theme.ToolWrite
@@ -235,28 +241,50 @@ func (m AppModel) renderBlockContent(content string, width int, style lipgloss.S
 	return lines
 }
 
-func (m AppModel) renderApprovalContent(content string, width int) []string {
-	const rail = "      │ "
-	contentWidth := max(1, width-ansi.StringWidth(rail))
-	lines := make([]string, 0)
-	for _, source := range strings.Split(content, "\n") {
-		label, value, found := strings.Cut(source, ":")
-		if !found {
-			label, value, found = strings.Cut(source, "：")
-		}
-		styled := m.theme.Assistant.Render(source)
-		if found && strings.TrimSpace(label) != "" {
-			separator := ":"
-			if strings.Contains(source, "：") && !strings.Contains(source, ":") {
-				separator = "："
-			}
-			styled = m.theme.ApprovalAsk.Bold(true).Render(strings.TrimSpace(label)+separator) + m.theme.Assistant.Render(strings.TrimSpace(value))
-		}
-		for _, line := range wrapText(styled, contentWidth) {
-			lines = append(lines, m.theme.BlockRail.Render(rail)+line)
+func (m AppModel) renderApprovalStatus(block Block, width int) []string {
+	indicator := stateMark(block.State)
+	indicatorStyle := m.stateStyle(block.State)
+	if block.State == "running" || block.State == "reviewing" {
+		indicator = "◆"
+		indicatorStyle = m.theme.ApprovalSmart
+		if !m.reducedMotion {
+			frames := [...]string{"◇", "◈", "◆", "◈"}
+			indicator = frames[m.animationFrame%len(frames)]
 		}
 	}
+
+	lineWidth := max(1, width+2)
+	header := m.theme.Muted.Render("  ") +
+		indicatorStyle.Bold(true).Render(indicator) + " " +
+		m.theme.ApprovalTag.Render(m.tr("block.approval"))
+	if title := strings.TrimSpace(block.Title); title != "" {
+		header += m.theme.MetaDivider.Render(" · ") + indicatorStyle.Bold(true).Render(title)
+	}
+
+	details := approvalStatusDetails(block.Content)
+	if details == "" {
+		return []string{padOrTrim(header, lineWidth)}
+	}
+	separator := m.theme.MetaDivider.Render("  ")
+	if ansi.StringWidth(header)+ansi.StringWidth(separator)+ansi.StringWidth(details) <= lineWidth {
+		return []string{padOrTrim(header+separator+m.theme.Muted.Render(details), lineWidth)}
+	}
+
+	lines := []string{padOrTrim(header, lineWidth)}
+	for _, line := range wrapText(details, max(1, lineWidth-6)) {
+		lines = append(lines, padOrTrim(m.theme.Muted.Render("      "+line), lineWidth))
+	}
 	return lines
+}
+
+func approvalStatusDetails(content string) string {
+	parts := make([]string, 0, 3)
+	for _, line := range strings.Split(content, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, "  ")
 }
 
 type sourceResultSection struct {
@@ -734,14 +762,17 @@ func (m AppModel) renderDiffRows(content string, width int, prefix string) []str
 				}
 				gutter := mark + " "
 				if showNumbers {
-					oldNumber, newNumber := "", ""
-					if line.OldLine > 0 {
-						oldNumber = strconv.Itoa(line.OldLine)
+					lineNumber := line.NewLine
+					if line.Kind == diffDeleted {
+						lineNumber = line.OldLine
+					} else if line.Kind == diffMeta {
+						lineNumber = 0
 					}
-					if line.NewLine > 0 {
-						newNumber = strconv.Itoa(line.NewLine)
+					number := ""
+					if lineNumber > 0 {
+						number = strconv.Itoa(lineNumber)
 					}
-					gutter = fmt.Sprintf("%*s %*s %s ", gutterWidth, oldNumber, gutterWidth, newNumber, mark)
+					gutter = fmt.Sprintf("%*s %s ", gutterWidth, number, mark)
 				}
 				displayText := strings.ReplaceAll(line.Text, "\t", "    ")
 				textWidth := max(1, width-ansi.StringWidth(prefix)-ansi.StringWidth(gutter))
@@ -891,6 +922,7 @@ func toolDisplayName(name string, catalogs ...i18n.Catalog) string {
 		"coding.search": "tool.search", "coding.list_files": "tool.list_files", "coding.shell": "tool.shell",
 		"coding.go_test": "tool.go_test", "coding.gofmt": "tool.gofmt", "coding.git_diff": "tool.git_diff",
 		"hydaelyn_activate_skill": "tool.activate_skill", "subagent.spawn": "tool.spawn",
+		"context.read_artifact": "tool.read_artifact",
 	}
 	if key := keys[name]; key != "" {
 		return catalog.T(key)
@@ -899,15 +931,6 @@ func toolDisplayName(name string, catalogs ...i18n.Catalog) string {
 }
 
 func (m AppModel) toolDisplayName(name string) string {
-	keys := map[string]string{
-		"coding.read_file": "tool.read_file", "coding.write_file": "tool.write_file", "coding.edit_hashline": "tool.edit_file",
-		"coding.search": "tool.search", "coding.list_files": "tool.list_files", "coding.shell": "tool.shell",
-		"coding.go_test": "tool.go_test", "coding.gofmt": "tool.gofmt", "coding.git_diff": "tool.git_diff",
-		"hydaelyn_activate_skill": "tool.activate_skill", "subagent.spawn": "tool.spawn",
-	}
-	if key := keys[name]; key != "" {
-		return m.tr(key)
-	}
 	return toolDisplayName(name, m.catalog)
 }
 
@@ -954,22 +977,175 @@ func renderMarkdownBlock(style lipgloss.Style, label string, content string, wid
 }
 
 func renderTerminalMarkdown(content string, width int) (string, error) {
+	segments := markdownRenderSegments(content, width)
 	markdownRendererCache.Lock()
 	defer markdownRendererCache.Unlock()
-	key := markdownRendererKey{width: width, dark: compat.HasDarkBackground}
-	renderer := markdownRendererCache.renderers[key]
-	if renderer == nil {
-		if len(markdownRendererCache.renderers) >= 8 {
-			markdownRendererCache.renderers = make(map[markdownRendererKey]*glamour.TermRenderer)
+
+	rendered := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		key := markdownRendererKey{width: segment.width, dark: compat.HasDarkBackground}
+		renderer := markdownRendererCache.renderers[key]
+		if renderer == nil {
+			if len(markdownRendererCache.renderers) >= 8 {
+				markdownRendererCache.renderers = make(map[markdownRendererKey]*glamour.TermRenderer)
+			}
+			var err error
+			renderer, err = newTerminalMarkdownRenderer(key)
+			if err != nil {
+				return "", err
+			}
+			markdownRendererCache.renderers[key] = renderer
 		}
-		var err error
-		renderer, err = newTerminalMarkdownRenderer(key)
+		value, err := renderer.Render(segment.content)
 		if err != nil {
 			return "", err
 		}
-		markdownRendererCache.renderers[key] = renderer
+		if value = strings.Trim(value, "\n"); value != "" {
+			rendered = append(rendered, value)
+		}
 	}
-	return renderer.Render(content)
+	return strings.Join(rendered, "\n\n"), nil
+}
+
+type markdownRenderSegment struct {
+	content string
+	width   int
+}
+
+func markdownRenderSegments(content string, width int) []markdownRenderSegment {
+	lines := strings.Split(content, "\n")
+	segments := make([]markdownRenderSegment, 0, 3)
+	segmentStart := 0
+	inFence := false
+	for line := 0; line+1 < len(lines); {
+		if markdownFenceBoundary(lines[line]) {
+			inFence = !inFence
+			line++
+			continue
+		}
+		header, headerOK := markdownTableCells(lines[line])
+		delimiter, delimiterOK := markdownTableCells(lines[line+1])
+		if inFence || !headerOK || !delimiterOK || !markdownTableDelimiter(delimiter, len(header)) {
+			line++
+			continue
+		}
+		if segmentStart < line {
+			value := strings.Trim(strings.Join(lines[segmentStart:line], "\n"), "\n")
+			if strings.TrimSpace(value) != "" {
+				segments = append(segments, markdownRenderSegment{content: value, width: width})
+			}
+		}
+		end := line + 2
+		for end < len(lines) {
+			row, ok := markdownTableCells(lines[end])
+			if !ok || len(row) != len(header) {
+				break
+			}
+			end++
+		}
+		tableLines := lines[line:end]
+		segments = append(segments, markdownRenderSegment{
+			content: strings.Join(tableLines, "\n"),
+			width:   markdownTableRenderWidth(tableLines, len(header), width),
+		})
+		segmentStart = end
+		line = end
+	}
+	if segmentStart < len(lines) {
+		value := strings.Trim(strings.Join(lines[segmentStart:], "\n"), "\n")
+		if strings.TrimSpace(value) != "" {
+			segments = append(segments, markdownRenderSegment{content: value, width: width})
+		}
+	}
+	if len(segments) == 0 {
+		return []markdownRenderSegment{{content: content, width: width}}
+	}
+	return segments
+}
+
+func markdownFenceBoundary(line string) bool {
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~")
+}
+
+func markdownTableCells(line string) ([]string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil, false
+	}
+	cells := make([]string, 0, 3)
+	var cell strings.Builder
+	escaped := false
+	separators := 0
+	for _, current := range line {
+		if escaped {
+			if current != '|' {
+				cell.WriteRune('\\')
+			}
+			cell.WriteRune(current)
+			escaped = false
+			continue
+		}
+		if current == '\\' {
+			escaped = true
+			continue
+		}
+		if current == '|' {
+			cells = append(cells, strings.TrimSpace(cell.String()))
+			cell.Reset()
+			separators++
+			continue
+		}
+		cell.WriteRune(current)
+	}
+	if escaped {
+		cell.WriteRune('\\')
+	}
+	cells = append(cells, strings.TrimSpace(cell.String()))
+	if separators == 0 {
+		return nil, false
+	}
+	if len(cells) > 0 && cells[0] == "" {
+		cells = cells[1:]
+	}
+	if len(cells) > 0 && cells[len(cells)-1] == "" {
+		cells = cells[:len(cells)-1]
+	}
+	return cells, len(cells) > 0
+}
+
+func markdownTableDelimiter(cells []string, columns int) bool {
+	if len(cells) != columns {
+		return false
+	}
+	for _, cell := range cells {
+		cell = strings.TrimSpace(strings.Trim(cell, ":"))
+		if len(cell) < 3 || strings.Trim(cell, "-") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func markdownTableRenderWidth(lines []string, columns int, available int) int {
+	columnWidths := make([]int, columns)
+	for index, line := range lines {
+		if index == 1 {
+			continue
+		}
+		cells, ok := markdownTableCells(line)
+		if !ok || len(cells) != columns {
+			continue
+		}
+		for column, cell := range cells {
+			columnWidths[column] = max(columnWidths[column], ansi.StringWidth(cell))
+		}
+	}
+	natural := 4 + columns*2 + max(0, columns-1)
+	for _, columnWidth := range columnWidths {
+		natural += columnWidth
+	}
+	return min(available, max(4, natural))
 }
 
 func newTerminalMarkdownRenderer(key markdownRendererKey) (*glamour.TermRenderer, error) {

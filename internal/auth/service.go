@@ -6,10 +6,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"resty.dev/v3"
 
 	"golang.org/x/sync/singleflight"
 
@@ -51,8 +52,8 @@ type Service struct {
 	store        CredentialStore
 	chatgpt      *chatgpt.Client
 	grok         *grok.Client
-	httpClient   *http.Client
-	streamClient *http.Client
+	httpClient   *resty.Client
+	streamClient *resty.Client
 	refresh      singleflight.Group
 	statusMu     sync.RWMutex
 	statusChange StatusChangeCallback
@@ -65,11 +66,12 @@ func NewService(db *sql.DB, store CredentialStore, chatgptClient *chatgpt.Client
 	if grokClient == nil {
 		grokClient = grok.NewClient()
 	}
-	streamTransport := http.DefaultTransport.(*http.Transport).Clone()
-	streamTransport.ResponseHeaderTimeout = 30 * time.Second
 	return &Service{
 		db: db, store: store, chatgpt: chatgptClient, grok: grokClient,
-		httpClient: &http.Client{Timeout: 30 * time.Second}, streamClient: &http.Client{Transport: streamTransport},
+		httpClient: resty.New().SetTimeout(30 * time.Second),
+		streamClient: resty.NewWithTransportSettings(&resty.TransportSettings{
+			ResponseHeaderTimeout: 30 * time.Second,
+		}).SetResponseDoNotParse(true),
 	}
 }
 
@@ -278,55 +280,90 @@ func (s *Service) Logout(ctx context.Context, provider string, accountID string)
 	return errors.Join(deleteErr, statusErr)
 }
 
-func (s *Service) DoWithRefresh(ctx context.Context, provider string, accountID string, build func(Credential) (*http.Request, error)) (*http.Response, error) {
-	return s.doWithRefresh(ctx, s.httpClient, provider, accountID, build)
+func (s *Service) DoWithRefresh(
+	ctx context.Context,
+	provider string,
+	accountID string,
+	method string,
+	url string,
+	configure func(*resty.Request),
+) (*resty.Response, error) {
+	return s.doWithRefresh(ctx, s.httpClient, provider, accountID, method, url, configure)
 }
 
-// DoStreamWithRefresh authenticates a streaming request without imposing a
-// total response-body timeout. The caller's context remains the stream's
+// DoStreamWithRefresh authenticates a Resty streaming request without imposing
+// a total response-body timeout. The caller's context remains the stream's
 // lifetime and the transport still bounds response-header waits.
-func (s *Service) DoStreamWithRefresh(ctx context.Context, provider string, accountID string, build func(Credential) (*http.Request, error)) (*http.Response, error) {
-	return s.doWithRefresh(ctx, s.streamClient, provider, accountID, build)
+func (s *Service) DoStreamWithRefresh(
+	ctx context.Context,
+	provider string,
+	accountID string,
+	method string,
+	url string,
+	configure func(*resty.Request),
+) (*resty.Response, error) {
+	return s.doWithRefresh(ctx, s.streamClient, provider, accountID, method, url, configure)
 }
 
-func (s *Service) doWithRefresh(ctx context.Context, client *http.Client, provider string, accountID string, build func(Credential) (*http.Request, error)) (*http.Response, error) {
+func (s *Service) doWithRefresh(
+	ctx context.Context,
+	client *resty.Client,
+	provider string,
+	accountID string,
+	method string,
+	url string,
+	configure func(*resty.Request),
+) (*resty.Response, error) {
+	if provider == "grok" {
+		if err := s.grok.ValidateResourceURL(url); err != nil {
+			return nil, err
+		}
+	}
 	credential, err := s.Credential(ctx, provider, accountID)
 	if err != nil {
 		return nil, err
 	}
 	for attempt := range 2 {
-		request, err := build(credential)
-		if err != nil {
-			return nil, err
-		}
-		if provider == "grok" {
-			if err := s.grok.ValidateResourceURL(request.URL.String()); err != nil {
-				return nil, err
-			}
-		}
-		request = request.WithContext(ctx)
-		request.Header.Set("Authorization", "Bearer "+credential.AccessToken)
+		request := client.R().SetContext(ctx).SetAuthToken(credential.AccessToken)
 		if provider == "chatgpt" {
-			request.Header.Set("ChatGPT-Account-ID", accountID)
+			request.SetHeader("ChatGPT-Account-ID", accountID)
 		}
-		response, err := client.Do(request)
+		if configure != nil {
+			configure(request)
+		}
+		response, err := request.Execute(method, url)
 		if err != nil {
 			return nil, err
 		}
-		if response.StatusCode == http.StatusForbidden {
-			response.Body.Close()
-			return nil, EntitlementError{Provider: provider, Status: response.StatusCode}
+		if response.StatusCode() == 403 {
+			closeResponseBody(response)
+			return nil, EntitlementError{Provider: provider, Status: response.StatusCode()}
 		}
-		if response.StatusCode != http.StatusUnauthorized || attempt == 1 {
+		if response.StatusCode() != 401 || attempt == 1 {
 			return response, nil
 		}
-		response.Body.Close()
+		closeResponseBody(response)
 		credential, err = s.Refresh(ctx, provider, accountID)
 		if err != nil {
 			return nil, err
 		}
 	}
 	return nil, fmt.Errorf("request retry exhausted")
+}
+
+func (s *Service) Close() error {
+	return errors.Join(
+		s.httpClient.Close(),
+		s.streamClient.Close(),
+		s.chatgpt.Close(),
+		s.grok.Close(),
+	)
+}
+
+func closeResponseBody(response *resty.Response) {
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
 }
 
 func (s *Service) Account(ctx context.Context, provider string, accountID string) (Account, error) {

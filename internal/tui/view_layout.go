@@ -1040,8 +1040,8 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 		)
 	}
 	linePos := 0
-	for _, block := range cache.blocks {
-		if len(lines) > 0 && lines[len(lines)-1] != "" {
+	for index, block := range cache.blocks {
+		if index > 0 && transcriptBlocksNeedSeparator(cache.blocks[index-1], block) {
 			lines = append(lines, "")
 			linePos++
 		}
@@ -1059,6 +1059,53 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 	cache.userMarks = marks
 	cache.initialized = true
 	return cache.lines
+}
+
+func compactToolTranscriptBlock(block transcriptBlockLayout) bool {
+	return len(block.lines) == 1 && (block.block.Kind == BlockTool || block.block.Kind == BlockDiff)
+}
+
+func transcriptBlocksNeedSeparator(previous, current transcriptBlockLayout) bool {
+	if len(previous.lines) == 0 || previous.lines[len(previous.lines)-1] == "" {
+		return false
+	}
+	if compactToolTranscriptBlock(previous) &&
+		previous.block.RunID == current.block.RunID &&
+		current.block.Kind != BlockUser {
+		return false
+	}
+	return true
+}
+
+func (m *AppModel) positionTranscriptAfterToggle(index int, expanded bool) {
+	_, _, width, height := m.transcriptBounds()
+	lines := m.transcriptLines(max(1, width-4))
+	maxOffset := m.transcriptOffsetLimit(len(lines), height)
+	if !expanded {
+		m.transcriptTop = min(m.transcriptTop, maxOffset)
+		return
+	}
+	blocks := m.transcriptLayout.blocks
+	if index < 0 || index >= len(blocks) {
+		m.transcriptTop = min(m.transcriptTop, maxOffset)
+		return
+	}
+	blockStart := 0
+	for current := 0; current < index; current++ {
+		blockStart += len(blocks[current].lines)
+		if transcriptBlocksNeedSeparator(blocks[current], blocks[current+1]) {
+			blockStart++
+		}
+	}
+	targetTop := max(0, maxOffset-blockStart)
+	for range 3 {
+		adjusted := max(0, m.transcriptMaxOffsetForTop(targetTop)-blockStart)
+		if adjusted == targetTop {
+			break
+		}
+		targetTop = adjusted
+	}
+	m.transcriptTop = targetTop
 }
 
 // transcriptBlockHeaderAt maps a visible transcript row back to a block header.
@@ -1084,7 +1131,7 @@ func (m AppModel) transcriptBlockHeaderAt(row, width, height int) (int, bool) {
 	line := start + row
 	cursor := 0
 	for index, layout := range m.transcriptLayout.blocks {
-		if cursor > 0 && lines[cursor-1] != "" {
+		if index > 0 && transcriptBlocksNeedSeparator(m.transcriptLayout.blocks[index-1], layout) {
 			cursor++
 		}
 		if line == cursor && len(layout.lines) > 0 {
@@ -1103,6 +1150,9 @@ func sameTranscriptBlock(left Block, right Block) bool {
 }
 
 func transcriptBlockAnimated(block Block) bool {
+	if (block.Kind == BlockTool || block.Kind == BlockDiff) && strings.EqualFold(block.State, "running") {
+		return true
+	}
 	if block.Kind == BlockApproval && (block.State == "running" || block.State == "reviewing") {
 		return true
 	}

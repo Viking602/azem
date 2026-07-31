@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 14
+const schemaVersion = 15
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -292,6 +292,29 @@ var migrations = []string{
 		PRIMARY KEY(run_id,task_id,call_id)
 	);
 	CREATE INDEX tool_call_charges_run_task ON tool_call_charges(run_id,task_id);`,
+	`CREATE TABLE session_tool_records (
+		session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+		run_id TEXT NOT NULL,
+		tool_call_id TEXT NOT NULL,
+		anchor_sequence INTEGER NOT NULL DEFAULT -1,
+		name TEXT NOT NULL,
+		arguments BLOB NOT NULL DEFAULT '{}',
+		state TEXT NOT NULL,
+		content TEXT NOT NULL DEFAULT '',
+		structured BLOB NOT NULL DEFAULT 'null',
+		artifact_id TEXT NOT NULL DEFAULT '',
+		observations BLOB NOT NULL DEFAULT '[]',
+		started_at INTEGER NOT NULL,
+		completed_at INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY(session_id,run_id,tool_call_id)
+	);
+	CREATE INDEX session_tool_records_session_started
+		ON session_tool_records(session_id,started_at,run_id,tool_call_id);
+	CREATE TABLE workspace_session_state (
+		anchor TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+		updated_at INTEGER NOT NULL
+	);`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

@@ -16,9 +16,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zalando/go-keyring"
+	"resty.dev/v3"
 )
 
 const (
@@ -29,12 +31,13 @@ const (
 )
 
 type Client struct {
-	HTTP           *http.Client
+	HTTP           *resty.Client
 	ClientID       string
 	AuthorizeURL   string
 	TokenURL       string
 	RevokeURL      string
 	ListenCallback func() (net.Listener, int, error)
+	httpMu         sync.Mutex
 }
 
 type Tokens struct {
@@ -56,7 +59,7 @@ type PKCE struct {
 
 func NewClient() *Client {
 	return &Client{
-		HTTP: &http.Client{Timeout: 30 * time.Second}, ClientID: DefaultClientID,
+		HTTP: resty.New().SetTimeout(30 * time.Second), ClientID: DefaultClientID,
 		AuthorizeURL: "https://auth.openai.com/oauth/authorize", TokenURL: "https://auth.openai.com/oauth/token", RevokeURL: "https://auth.openai.com/oauth/revoke",
 	}
 }
@@ -185,39 +188,31 @@ func (c *Client) Revoke(ctx context.Context, token string) error {
 	if token == "" || c.RevokeURL == "" {
 		return nil
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.RevokeURL, strings.NewReader(url.Values{"client_id": {c.ClientID}, "token": {token}}.Encode()))
+	response, err := c.httpClient().R().
+		SetContext(ctx).
+		SetFormDataFromValues(url.Values{"client_id": {c.ClientID}, "token": {token}}).
+		Post(c.RevokeURL)
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := c.httpClient().Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode/100 != 2 {
-		return fmt.Errorf("revoke returned HTTP %d", response.StatusCode)
+	if response.StatusCode()/100 != 2 {
+		return fmt.Errorf("revoke returned HTTP %d", response.StatusCode())
 	}
 	return nil
 }
 
 func (c *Client) tokenRequest(ctx context.Context, values url.Values) (Tokens, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.TokenURL, strings.NewReader(values.Encode()))
+	response, err := c.httpClient().R().
+		SetContext(ctx).
+		SetResponseBodyLimit(1 << 20).
+		SetFormDataFromValues(values).
+		Post(c.TokenURL)
 	if err != nil {
 		return Tokens{}, err
 	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := c.httpClient().Do(request)
-	if err != nil {
-		return Tokens{}, err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		return Tokens{}, err
-	}
-	if response.StatusCode/100 != 2 {
-		return Tokens{}, fmt.Errorf("token exchange returned HTTP %d: %s", response.StatusCode, boundedError(body))
+	body := response.Bytes()
+	if response.StatusCode()/100 != 2 {
+		return Tokens{}, fmt.Errorf("token exchange returned HTTP %d: %s", response.StatusCode(), boundedError(body))
 	}
 	var payload struct {
 		AccessToken  string `json:"access_token"`
@@ -337,11 +332,22 @@ func claimMetadata(claims map[string]any) (accountID string, email string, plan 
 	return
 }
 
-func (c *Client) httpClient() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
+func (c *Client) httpClient() *resty.Client {
+	c.httpMu.Lock()
+	defer c.httpMu.Unlock()
+	if c.HTTP == nil {
+		c.HTTP = resty.New().SetTimeout(30 * time.Second)
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	return c.HTTP
+}
+
+func (c *Client) Close() error {
+	c.httpMu.Lock()
+	defer c.httpMu.Unlock()
+	if c.HTTP == nil {
+		return nil
+	}
+	return c.HTTP.Close()
 }
 
 func randomURLSafe(size int) (string, error) {

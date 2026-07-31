@@ -16,6 +16,7 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	azprovider "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
@@ -731,13 +732,61 @@ func (r *subagentRuntime) execute(id string) {
 			MaxToolCalls: r.cfg.Budget.MaxToolCalls, MaxSteps: r.cfg.Budget.MaxTurns,
 		},
 	}
-	result := engine.RunStream(ctx, task, hyagent.OutputPolicy{}, stream.SinkFunc(func(_ context.Context, frame stream.Frame) error {
+	retryTaskBase := task
+	retryContextBase := engine.ContextBuilder
+	retryStartedAt := time.Now()
+	initialToolCalls := childRun.ChargedToolCalls()
+	sessionRetries := 0
+	var retryErr error
+	sink := stream.SinkFunc(func(_ context.Context, frame stream.Frame) error {
 		frame.Source = "child:" + id
 		r.handleFrame(id, frame)
 		return nil
-	}))
+	})
+	var result hyagent.Result
+	for {
+		result = engine.RunStream(ctx, task, hyagent.OutputPolicy{}, sink)
+		continuation, resetPartial, retryable := providerRetryContinuation(result)
+		if ctx.Err() != nil || parent.Host == nil || !parent.Host.cfg.Retry.Enabled || !retryable {
+			break
+		}
+		if sessionRetries >= parent.Host.cfg.Retry.MaxRetries {
+			retryErr = fmt.Errorf("provider recovery failed after %d session retries: %w", sessionRetries, result.Failure)
+			break
+		}
+		nextTask, err := providerRetryTask(retryTaskBase, retryStartedAt, initialToolCalls, childRun)
+		if err != nil {
+			retryErr = err
+			break
+		}
+		sessionRetries++
+		delay := providerAutoRetryDelay(parent.Host.cfg.Retry.BaseDelayDuration, sessionRetries)
+		delay = max(delay, azprovider.SuggestedRetryDelay(result.Failure))
+		if parent.Host.cfg.Retry.MaxDelayDuration > 0 && delay > parent.Host.cfg.Retry.MaxDelayDuration {
+			retryErr = fmt.Errorf("provider requested retry delay %s, exceeding configured maximum %s: %w",
+				delay, parent.Host.cfg.Retry.MaxDelayDuration, result.Failure)
+			break
+		}
+		parent.Host.emit(ctx, Event{
+			Kind: EventProviderRetry, SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id,
+			Text: result.Failure.Error(), State: "waiting",
+			Data: map[string]string{
+				"provider": profile.Provider, "attempt": fmt.Sprint(sessionRetries),
+				"max": fmt.Sprint(parent.Host.cfg.Retry.MaxRetries), "delay_ms": fmt.Sprint(delay.Milliseconds()),
+				"reset_partial": fmt.Sprint(resetPartial),
+			},
+		})
+		if err := waitForProviderAutoRetry(ctx, delay); err != nil {
+			retryErr = err
+			break
+		}
+		engine.ContextBuilder = providerRetryContext{inner: retryContextBase, messages: continuation}
+		task = nextTask
+	}
 	var runErr error
-	if result.Failure != nil {
+	if retryErr != nil {
+		runErr = retryErr
+	} else if result.Failure != nil {
 		runErr = result.Failure
 	}
 	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {

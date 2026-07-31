@@ -1207,12 +1207,12 @@ func (m AppModel) selectedMCPServer() (MCPView, bool) {
 func (m AppModel) selectedDiff() (Block, bool) {
 	if m.transcriptCursor >= 0 && m.transcriptCursor < len(m.transcript) {
 		block := m.transcript[m.transcriptCursor]
-		if block.Kind == BlockDiff {
+		if blockRendersDiff(block) {
 			return block, true
 		}
 	}
 	for index := len(m.transcript) - 1; index >= 0; index-- {
-		if m.transcript[index].Kind == BlockDiff {
+		if blockRendersDiff(m.transcript[index]) {
 			return m.transcript[index], true
 		}
 	}

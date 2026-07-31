@@ -47,6 +47,7 @@ type Service struct {
 	guidanceGeneration uint64
 	guidanceOpen       bool
 	currentSession     string
+	workspaceAnchor    string
 	hookSessions       map[string]struct{}
 	hookInitialUsers   map[string]string
 	hookInitialContext map[string]string
@@ -116,6 +117,25 @@ func (s *Service) AttachDurable(sessions *session.Service, coding *agentservice.
 	if sessions != nil {
 		s.historySearch = sessions.SearchHistory
 	}
+}
+
+func (s *Service) SetWorkspaceAnchor(anchor string) {
+	s.mu.Lock()
+	s.workspaceAnchor = strings.TrimSpace(anchor)
+	s.mu.Unlock()
+}
+
+func (s *Service) rememberWorkspaceSession(ctx context.Context, sessionID string) error {
+	if s.sessions == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	s.mu.Lock()
+	anchor := s.workspaceAnchor
+	s.mu.Unlock()
+	if anchor == "" {
+		return nil
+	}
+	return s.sessions.SetWorkspaceSession(ctx, anchor, sessionID)
 }
 
 func (s *Service) AttachMemory(memoryService *memory.Service, recapService *recap.Service) {
@@ -475,6 +495,18 @@ func sessionProjectionData(projection session.Projection, blocks string) map[str
 		"checkpointGeneration": fmt.Sprint(projection.CheckpointGeneration),
 		"cacheEpoch":           fmt.Sprint(projection.CacheEpoch), "cacheIdentityHash": projection.CacheIdentityHash,
 	}
+	if encoded, err := json.Marshal(projection.ToolRecords); err == nil {
+		data["toolRecords"] = string(encoded)
+	}
+	if len(projection.Blocks) > 0 {
+		sequences := make([]int64, len(projection.Blocks))
+		for index := range projection.Blocks {
+			sequences[index] = projection.Blocks[index].Sequence
+		}
+		if encoded, err := json.Marshal(sequences); err == nil {
+			data["blockSequences"] = string(encoded)
+		}
+	}
 	if !projection.Usage.IsZero() {
 		if encoded, err := json.Marshal(projection.Usage); err == nil {
 			data["usage"] = string(encoded)
@@ -559,6 +591,11 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		s.clearRun("starting")
 		return "", fmt.Errorf("create session: %w", err)
 	}
+	if err := s.rememberWorkspaceSession(s.ctx, request.SessionID); err != nil {
+		cancel()
+		s.clearRun("starting")
+		return "", err
+	}
 	if s.sessions != nil {
 		projection, err := s.sessions.LoadProjection(s.ctx, request.SessionID)
 		if err != nil {
@@ -568,6 +605,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		}
 		request.History = append([]session.Block(nil), projection.Blocks...)
 		request.modelHistory = projection.ModelHistory
+		request.toolRecords = append([]session.ToolRecord(nil), projection.ToolRecords...)
 		request.checkpointBoundary = projection.ModelHistory.CoveredThroughSequence
 		transcript := append([]session.Block(nil), projection.Blocks...)
 		transcript = append(transcript, session.Block{Kind: "user", Content: request.Prompt, State: "submitted"})
@@ -906,6 +944,11 @@ func (s *Service) shutdown() {
 	}
 	if s.background != nil {
 		if err := s.background.Close(); err != nil {
+			s.shutdownErr = errors.Join(s.shutdownErr, err)
+		}
+	}
+	if s.authentication != nil {
+		if err := s.authentication.Close(); err != nil {
 			s.shutdownErr = errors.Join(s.shutdownErr, err)
 		}
 	}

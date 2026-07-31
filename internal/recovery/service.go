@@ -51,13 +51,14 @@ type Summary struct {
 }
 
 type Service struct {
-	store     api.StoreProvider
-	preparer  StorePreparer
-	runner    RunRecoverer
-	subagents SubagentInterrupter
-	teams     TeamResumer
-	runs      RunResumer
-	now       func() time.Time
+	store        api.StoreProvider
+	preparer     StorePreparer
+	runner       RunRecoverer
+	subagents    SubagentInterrupter
+	teams        TeamResumer
+	runs         RunResumer
+	now          func() time.Time
+	beforeResume func(context.Context, []api.Run) error
 }
 
 func NewService(store api.StoreProvider, runner RunRecoverer, subagents SubagentInterrupter, teams TeamResumer, runs RunResumer) (*Service, error) {
@@ -72,6 +73,10 @@ func NewService(store api.StoreProvider, runner RunRecoverer, subagents Subagent
 		return nil, fmt.Errorf("recovery store does not support crash-boundary preparation")
 	}
 	return &Service{store: store, preparer: preparer, runner: runner, subagents: subagents, teams: teams, runs: runs, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+func (s *Service) SetBeforeResume(fn func(context.Context, []api.Run) error) {
+	s.beforeResume = fn
 }
 
 func (s *Service) Recover(ctx context.Context) (Summary, error) {
@@ -139,6 +144,16 @@ func (s *Service) Recover(ctx context.Context) (Summary, error) {
 		return Summary{}, fmt.Errorf("commit recovery scan: %w", err)
 	}
 	closed = true
+
+	if s.beforeResume != nil {
+		discovered := make([]api.Run, 0, len(candidates))
+		for _, candidate := range candidates {
+			discovered = append(discovered, candidate.run)
+		}
+		if err := s.beforeResume(ctx, discovered); err != nil {
+			return Summary{}, fmt.Errorf("prepare recovered run presentation: %w", err)
+		}
+	}
 
 	for _, candidate := range candidates {
 		projection, err := s.runner.Recover(ctx, candidate.run.ID)

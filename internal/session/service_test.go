@@ -705,3 +705,94 @@ func TestCompleteTurnRollsBackBlockAndModelHistoryOnSessionUpdateFailure(t *test
 		t.Fatalf("rolled back projection = %#v", projection)
 	}
 }
+
+func TestToolTimelineAndWorkspaceSessionSurviveReopen(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "tool-timeline.db")
+	store, err := sqlitestore.Open(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Durable"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "edit file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "session", ToolRecord{
+		RunID: "run", ToolCallID: "read-1", Name: "coding.read_file", Arguments: []byte(`{"path":"note.txt"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.FinishToolRecord(ctx, "session", ToolRecord{
+		RunID: "run", ToolCallID: "read-1", Name: "coding.read_file", State: ToolCompleted, Content: "hello",
+		Observations: []FileObservation{{Path: "note.txt", Operation: "read", SHA256: strings.Repeat("a", 64)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "session", ToolRecord{
+		RunID: "run", ToolCallID: "edit-1", Name: "coding.edit_hashline", Arguments: []byte(`{"input":"patch"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	running, err := service.ListToolRecords(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(running) != 2 {
+		t.Fatalf("tool records before interrupt=%#v", running)
+	}
+	if err := service.InterruptRunningToolRecordsForRun(ctx, "run", running[1].StartedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetWorkspaceSession(ctx, "/workspace", "session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := sqlitestore.Open(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(ctx)
+	recovered := NewService(reopened.DB())
+	projection, err := recovered.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.ToolRecords) != 2 {
+		t.Fatalf("recovered tool records=%#v", projection.ToolRecords)
+	}
+	if projection.ToolRecords[0].State != ToolCompleted || projection.ToolRecords[0].Content != "hello" ||
+		len(projection.ToolRecords[0].Observations) != 1 || projection.ToolRecords[0].Observations[0].Path != "note.txt" {
+		t.Fatalf("completed tool record=%#v", projection.ToolRecords[0])
+	}
+	if projection.ToolRecords[1].State != ToolInterrupted {
+		t.Fatalf("running tool was not interrupted: %#v", projection.ToolRecords[1])
+	}
+	retried, err := recovered.StartToolRecord(ctx, "session", ToolRecord{
+		RunID: "run", ToolCallID: "edit-1", Name: "coding.edit_hashline", Arguments: []byte(`{"input":"patch"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.State != ToolRunning || retried.AnchorSequence != projection.ToolRecords[1].AnchorSequence {
+		t.Fatalf("retried tool record=%#v", retried)
+	}
+	if _, err := recovered.FinishToolRecord(ctx, "session", ToolRecord{
+		RunID: "run", ToolCallID: "edit-1", Name: "coding.edit_hashline", State: ToolCompleted, Content: "changed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionID, err := recovered.WorkspaceSession(ctx, "/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessionID != "session" {
+		t.Fatalf("workspace session=%q", sessionID)
+	}
+}

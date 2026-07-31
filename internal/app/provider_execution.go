@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"reflect"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	azprovider "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/go-hydaelyn/agent"
@@ -29,6 +31,7 @@ func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reas
 }
 
 func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, modelID, reasoning, transport string, factMetered bool) stream.Sink {
+	timeline := newDurableToolTimeline(s.sessions, s.cfg.Workspace.Root, sessionID, runID)
 	return stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
 		data := map[string]string{}
 		switch frame.Kind {
@@ -42,6 +45,9 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 			}
 		case stream.FrameToolCall:
 			if frame.ToolCall != nil {
+				if err := timeline.start(ctx, *frame.ToolCall); err != nil {
+					return err
+				}
 				data["name"] = frame.ToolCall.Name
 				data["arguments"] = string(frame.ToolCall.Arguments)
 				if !s.emit(ctx, Event{Kind: EventToolStarted, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolCall.ID, State: "running", Data: data}) {
@@ -50,6 +56,9 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 			}
 		case stream.FrameToolResult:
 			if frame.ToolResult != nil {
+				if err := timeline.finish(ctx, *frame.ToolResult); err != nil {
+					return err
+				}
 				state := "completed"
 				if frame.ToolResult.IsError {
 					state = "failed"
@@ -122,6 +131,101 @@ func (s *Service) providerTransport(providerID string) string {
 	return "xai-responses"
 }
 
+const providerAutoRetryBackoffCap = 8 * time.Second
+
+type providerRetryContext struct {
+	messages []message.Message
+	inner    hyagent.ContextManager
+}
+
+func (c providerRetryContext) Build(context.Context, api.Task) ([]message.Message, error) {
+	return append([]message.Message(nil), c.messages...), nil
+}
+
+func (c providerRetryContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	if c.inner == nil {
+		return history, nil
+	}
+	return c.inner.Compact(ctx, history)
+}
+
+func (c providerRetryContext) CompactTo(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, error) {
+	if target, ok := c.inner.(hyagent.TargetContextManager); ok {
+		return target.CompactTo(ctx, history, targetTokens)
+	}
+	return c.Compact(ctx, history)
+}
+
+func providerRetryContinuation(result hyagent.Result) ([]message.Message, bool, bool) {
+	if result.Failure == nil || !azprovider.IsRetryableTransport(result.Failure) {
+		return nil, false, false
+	}
+	messages := append([]message.Message(nil), result.Messages...)
+	resetPartial := false
+	if len(messages) > 0 && messages[len(messages)-1].Role == message.RoleAssistant {
+		failed := messages[len(messages)-1]
+		if len(failed.ToolCalls) > 0 {
+			return nil, false, false
+		}
+		resetPartial = failed.Text != "" || failed.Thinking != "" || failed.RedactedThinking != ""
+		messages = messages[:len(messages)-1]
+	}
+	if len(messages) == 0 || message.ValidateCompleteTurns(messages) != nil {
+		return nil, false, false
+	}
+	return messages, resetPartial, true
+}
+
+func providerAutoRetryDelay(base time.Duration, attempt int) time.Duration {
+	return providerAutoRetryDelayWithJitter(base, attempt, rand.Float64())
+}
+
+func providerAutoRetryDelayWithJitter(base time.Duration, attempt int, sample float64) time.Duration {
+	delay := max(time.Duration(0), base)
+	for current := 1; current < attempt && delay < providerAutoRetryBackoffCap; current++ {
+		delay = min(providerAutoRetryBackoffCap, delay*2)
+	}
+	delay = min(delay, providerAutoRetryBackoffCap)
+	sample = min(1, max(0, sample))
+	return time.Duration(float64(delay) * (0.75 + sample*0.25))
+}
+
+func providerRetryTask(task api.Task, startedAt time.Time, initialToolCalls int, run *agentservice.Run) (api.Task, error) {
+	if task.Budget == nil {
+		return task, nil
+	}
+	budget := *task.Budget
+	if budget.MaxToolCalls > 0 {
+		spent := max(0, run.ChargedToolCalls()-initialToolCalls)
+		budget.MaxToolCalls -= spent
+		if budget.MaxToolCalls <= 0 {
+			return task, fmt.Errorf("%w: max tool calls reached before provider recovery", hyagent.ErrBudgetExhausted)
+		}
+	}
+	if budget.MaxWallClock > 0 {
+		budget.MaxWallClock -= time.Since(startedAt)
+		if budget.MaxWallClock <= 0 {
+			return task, fmt.Errorf("%w: max wall clock reached before provider recovery", hyagent.ErrBudgetExhausted)
+		}
+	}
+	task.Budget = &budget
+	return task, nil
+}
+
+func waitForProviderAutoRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run *agentservice.Run, engine hyagent.Engine) {
 	defer s.wg.Done()
 	defer s.clearRun(run.RunID)
@@ -147,39 +251,110 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		}
 	}
 	var streamed strings.Builder
-	uiSink := s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
-	sink := stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
-		if checkpoint, ok := engine.StepRecorder.(*runStepCheckpoint); ok {
-			if err := checkpoint.Emit(ctx, frame); err != nil {
-				return err
-			}
-		}
-		if frame.Kind == stream.FrameText {
-			streamed.WriteString(frame.Text)
-		}
-		return uiSink.Emit(ctx, frame)
-	})
-	result := engine.RunStream(ctx, task, hyagent.OutputPolicy{}, sink)
+	var result hyagent.Result
 	var runErr error
-	if result.Failure != nil {
-		runErr = result.Failure
-		if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {
-			runErr = fmt.Errorf("%w (increase agents.main.max_tokens in config.yaml for unusually large tasks)", runErr)
+	retryEngine := engine
+	retryStartedAt := time.Now()
+	initialToolCalls := run.ChargedToolCalls()
+	retryTaskBase := task
+	sessionRetries := 0
+	retryExhausted := false
+	for {
+		streamed.Reset()
+		uiSink := s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
+		sink := stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
+			if checkpoint, ok := retryEngine.StepRecorder.(*runStepCheckpoint); ok {
+				if err := checkpoint.Emit(ctx, frame); err != nil {
+					return err
+				}
+			}
+			if frame.Kind == stream.FrameText {
+				streamed.WriteString(frame.Text)
+			}
+			return uiSink.Emit(ctx, frame)
+		})
+		result = retryEngine.RunStream(ctx, task, hyagent.OutputPolicy{}, sink)
+		if result.Failure == nil {
+			runErr = nil
+			break
 		}
-		if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tool calls") {
-			runErr = fmt.Errorf("%w (increase agents.main.max_tool_calls, or set it to 0 for unbounded, in config.yaml)", runErr)
+		runErr = result.Failure
+		continuation, resetPartial, retryable := providerRetryContinuation(result)
+		if ctx.Err() != nil || !s.cfg.Retry.Enabled || !retryable {
+			break
+		}
+		if sessionRetries >= s.cfg.Retry.MaxRetries {
+			retryExhausted = true
+			break
+		}
+		nextTask, budgetErr := providerRetryTask(retryTaskBase, retryStartedAt, initialToolCalls, run)
+		if budgetErr != nil {
+			runErr = budgetErr
+			break
+		}
+		attempt := sessionRetries + 1
+		delay := max(
+			providerAutoRetryDelay(s.cfg.Retry.BaseDelayDuration, attempt),
+			azprovider.SuggestedRetryDelay(runErr),
+		)
+		if s.cfg.Retry.MaxDelayDuration > 0 && delay > s.cfg.Retry.MaxDelayDuration {
+			runErr = fmt.Errorf(
+				"provider requested %s wait, exceeding retry.max_delay %s: %w",
+				delay.Round(time.Millisecond), s.cfg.Retry.MaxDelayDuration, runErr,
+			)
+			break
+		}
+		sessionRetries = attempt
+		s.emit(ctx, Event{
+			Kind: EventProviderRetry, SessionID: request.SessionID, RunID: run.RunID, State: "waiting", Text: runErr.Error(),
+			Data: map[string]string{
+				"provider": request.Provider, "attempt": fmt.Sprint(attempt), "max": fmt.Sprint(s.cfg.Retry.MaxRetries),
+				"delay_ms": fmt.Sprint(delay.Milliseconds()), "scope": "session", "reset_partial": fmt.Sprint(resetPartial),
+			},
+		})
+		if err := waitForProviderAutoRetry(ctx, delay); err != nil {
+			runErr = err
+			break
+		}
+		task = nextTask
+		retryEngine = engine
+		retryEngine.ContextBuilder = providerRetryContext{messages: continuation, inner: engine.ContextBuilder}
+	}
+	if retryExhausted {
+		runErr = fmt.Errorf("provider recovery failed after %d session retries: %w", sessionRetries, runErr)
+	}
+	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {
+		runErr = fmt.Errorf("%w (increase agents.main.max_tokens in config.yaml for unusually large tasks)", runErr)
+	}
+	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tool calls") {
+		runErr = fmt.Errorf("%w (increase agents.main.max_tool_calls, or set it to 0 for unbounded, in config.yaml)", runErr)
+	}
+	if s.sessions != nil {
+		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := s.sessions.InterruptRunningToolRecordsForRun(persistCtx, run.RunID, time.Now().UTC())
+		cancel()
+		if err != nil {
+			if runErr == nil {
+				runErr = err
+			} else {
+				runErr = fmt.Errorf("%v; persist interrupted tools: %w", runErr, err)
+			}
 		}
 	}
-	if runErr != nil && ctx.Err() == nil {
-		if s.sessions != nil && strings.TrimSpace(streamed.String()) != "" {
-			persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_, err := s.sessions.AppendBlock(persistCtx, request.SessionID, session.Block{
-				Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: streamed.String(), State: "failed",
-			})
-			cancel()
-			if err != nil {
-				runErr = fmt.Errorf("%v; persist failed turn: %w", runErr, err)
-			}
+	if runErr != nil && ctx.Err() == nil && s.sessions != nil {
+		failed := session.Block{
+			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: streamed.String(), State: "failed",
+		}
+		if strings.TrimSpace(failed.Content) == "" {
+			failed.Kind = "error"
+			failed.Title = "Provider"
+			failed.Content = runErr.Error()
+		}
+		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := s.sessions.AppendBlock(persistCtx, request.SessionID, failed)
+		cancel()
+		if err != nil {
+			runErr = fmt.Errorf("%v; persist failed turn: %w", runErr, err)
 		}
 	}
 	if runErr == nil && ctx.Err() == nil && s.sessions != nil && (strings.TrimSpace(result.Text) != "" || len(result.Messages) > 0) {

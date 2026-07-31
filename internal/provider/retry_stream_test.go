@@ -124,3 +124,25 @@ func TestRetryingStreamPreservesNormalEOFAfterOutput(t *testing.T) {
 		t.Fatalf("normal EOF reopened provider %d times", attempts)
 	}
 }
+
+func TestOpenRetryingStreamHonorsServerRetryDelayBeforeWaiting(t *testing.T) {
+	stop := errors.New("stop before sleep")
+	var progress RetryProgress
+	stream, err := OpenRetryingStream(context.Background(), func() (hyprovider.Stream, error) {
+		return nil, &responses.APIError{
+			Kind: responses.ErrorRateLimit, Code: "server_is_overloaded", RetryAfter: 3 * time.Second,
+		}
+	}, RetryOptions{
+		Delay: func(int) time.Duration { return 0 },
+		Observer: func(retry RetryProgress) error {
+			progress = retry
+			return stop
+		},
+	})
+	if stream != nil || !errors.Is(err, stop) {
+		t.Fatalf("stream=%T error=%v, want observer stop", stream, err)
+	}
+	if progress.Delay != 3*time.Second || progress.Attempt != 1 {
+		t.Fatalf("retry progress=%+v, want server delay on first retry", progress)
+	}
+}

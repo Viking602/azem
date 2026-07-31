@@ -11,12 +11,15 @@ import (
 	"testing"
 	"time"
 
+	"resty.dev/v3"
+
 	"github.com/Viking602/go-hydaelyn/message"
 	hyprovider "github.com/Viking602/go-hydaelyn/provider"
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
 	azprovider "github.com/Viking602/azem/internal/provider"
+	"github.com/Viking602/azem/internal/provider/responses"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -26,20 +29,26 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return function(request)
 }
 
+func restyStreamResponse(body string) *resty.Response {
+	raw := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	return &resty.Response{RawResponse: raw, Body: raw.Body}
+}
+
 type retryTransport struct{ requests int }
 
 func (t *retryTransport) Name() string { return "retry-test" }
 
-func (t *retryTransport) Post(context.Context, []byte) (*http.Response, error) {
+func (t *retryTransport) Post(context.Context, []byte) (*resty.Response, error) {
 	t.requests++
 	body := `data: {"type":"error","code":"server_is_overloaded","message":"server overloaded; request ID req_server_456"}` + "\n\n"
 	if t.requests == 3 {
 		body = `data: {"type":"response.completed","response":{"status":"completed"}}` + "\n\n"
 	}
-	return &http.Response{
-		StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body: io.NopCloser(strings.NewReader(body)),
-	}, nil
+	return restyStreamResponse(body), nil
 }
 
 func TestDriverReportsRateLimitRetriesThroughGenericObserver(t *testing.T) {
@@ -76,6 +85,40 @@ func TestDriverReportsRateLimitRetriesThroughGenericObserver(t *testing.T) {
 			t.Fatalf("retry %d lost request ID: %v", index+1, retry.Cause)
 		}
 	}
+}
+
+func TestDriverNormalizesAutomaticCacheUsage(t *testing.T) {
+	transport := &cacheUsageTransport{body: `data: {"type":"response.completed","response":{"id":"response-1","status":"completed","usage":{"input_tokens":20,"output_tokens":4,"total_tokens":24,"input_tokens_details":{"cached_tokens":12,"cache_write_tokens":8},"output_tokens_details":{"reasoning_tokens":2}}}}` + "\n\n"}
+	driver, err := New(transport, []string{"grok-test"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var details responses.UsageDetails
+	stream, err := driver.Stream(context.Background(), hyprovider.Request{
+		Model: "grok-test", Messages: []message.Message{message.NewText(message.RoleUser, "hello")},
+		ExtraBody: map[string]any{responses.UsageReporterExtraKey: responses.UsageReporter(func(d responses.UsageDetails) { details = d })},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := stream.Recv()
+	if err != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("event=%#v err=%v", event, err)
+	}
+	if details.CacheModel != responses.CacheModelAutomatic || details.CacheWriteTokens != 0 || details.CachedTokens != 12 || !details.CacheReported {
+		t.Fatalf("xAI automatic cache details=%+v", details)
+	}
+	if event.Usage.CachedInputTokens != 12 {
+		t.Fatalf("stream cached tokens=%d", event.Usage.CachedInputTokens)
+	}
+}
+
+type cacheUsageTransport struct{ body string }
+
+func (t *cacheUsageTransport) Name() string { return "cache-usage-test" }
+
+func (t *cacheUsageTransport) Post(context.Context, []byte) (*resty.Response, error) {
+	return restyStreamResponse(t.body), nil
 }
 
 func TestStandardTransportUsesOnlyXAIHeaders(t *testing.T) {
@@ -170,7 +213,7 @@ func TestStandardTransportUsesOnlyXAIHeaders(t *testing.T) {
 }
 
 func TestCLIProxyTransportKeepsFingerprintIsolated(t *testing.T) {
-	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	client := resty.NewWithClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Hostname() != "cli-chat-proxy.grok.com" {
 			t.Fatalf("host=%q", request.URL.Hostname())
 		}
@@ -181,8 +224,9 @@ func TestCLIProxyTransportKeepsFingerprintIsolated(t *testing.T) {
 			t.Fatalf("standard headers leaked=%v", request.Header)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"status\":\"completed\"}}\n\n")), Request: request}, nil
-	})}
-	transport := &CLIProxyTransport{Token: func(context.Context) (string, error) { return "proxy-token", nil }, Headers: map[string]string{"X-Stainless-Lang": "js", "Authorization": "must-not-win"}, HTTP: client}
+	})})
+	defer client.Close()
+	transport := &CLIProxyTransport{Token: func(context.Context) (string, error) { return "proxy-token", nil }, Headers: map[string]string{"X-Stainless-Lang": "js", "Authorization": "must-not-win"}, Client: client}
 	driver, err := New(transport, []string{"grok-test"}, "")
 	if err != nil {
 		t.Fatal(err)

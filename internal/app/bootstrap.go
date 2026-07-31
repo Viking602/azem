@@ -23,6 +23,7 @@ import (
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
+	"github.com/Viking602/go-hydaelyn/api"
 )
 
 type BootstrapResult struct {
@@ -74,6 +75,7 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 		return BootstrapResult{}, fmt.Errorf("load skills: %w", err)
 	}
 	sessions := session.NewService(store.DB())
+	workspaceAnchor := canonicalWorkspaceAnchor(paths.Workspace)
 	startupSessionID, err := randomID("session")
 	if err != nil {
 		_ = store.Close(ctx)
@@ -144,6 +146,7 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	}
 	service.SetConfigPath(paths.ConfigFile)
 	service.AttachDurable(sessions, coding)
+	service.SetWorkspaceAnchor(workspaceAnchor)
 	service.AttachAttachments(filepath.Join(paths.DataDir, "attachments"))
 	backgroundManager, err := backgroundservice.NewManager(backgroundservice.Options{
 		Root: paths.Workspace, LogDir: filepath.Join(paths.StateDir, "background"),
@@ -177,6 +180,21 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 		_ = store.Close(ctx)
 		return BootstrapResult{}, err
 	}
+	recoveryService.SetBeforeResume(func(recoveryCtx context.Context, runs []api.Run) error {
+		for _, run := range runs {
+			if err := sessions.InterruptRunningToolRecordsForRun(recoveryCtx, run.ID, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	service.Bootstrap()
+	if err := service.dispatchLifecycle(ctx, hooks.Setup, service.hookMetadata(startupSessionID, ""), func(e *hooks.Envelope) { e.Trigger = "init" }); err != nil {
+		_ = backgroundManager.Close()
+		_ = coding.Close(ctx)
+		_ = store.Close(ctx)
+		return BootstrapResult{}, err
+	}
 	recoverySummary, err := recoveryService.Recover(ctx)
 	if err != nil {
 		_ = backgroundManager.Close()
@@ -185,13 +203,8 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 		return BootstrapResult{}, err
 	}
 	service.AttachRecovery(recoverySummary)
+	service.emitRecoveryState()
 	service.AttachReconcileResolver(store)
-	if err := service.dispatchLifecycle(ctx, hooks.Setup, service.hookMetadata(startupSessionID, ""), func(e *hooks.Envelope) { e.Trigger = "init" }); err != nil {
-		_ = backgroundManager.Close()
-		_ = coding.Close(ctx)
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
-	}
 	for _, entry := range skillCatalog.Snapshot().Entries {
 		if entry.Eager && !entry.Bundled {
 			service.emitInstructionsLoaded(ctx, entry.SourcePath, instructionMemoryType(entry.SourcePath, homeDir, paths.Workspace), "session_start")
@@ -209,7 +222,6 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 		_ = manager.Start(service.ctx)
 		_ = service.emitMCPSnapshot(service.ctx)
 	}()
-	service.Bootstrap()
 	for _, diagnostic := range registry.Diagnostics {
 		service.emitHookEvent(Event{Kind: EventHookDiagnostic, State: "failed", Text: diagnostic.Message, Data: map[string]string{"event": string(diagnostic.Event), "source": diagnostic.Source, "reason": diagnostic.Message}})
 	}
@@ -250,6 +262,16 @@ func instructionMemoryType(path, homeDir, workspace string) string {
 		return "User"
 	}
 	return "Managed"
+}
+
+func canonicalWorkspaceAnchor(workspace string) string {
+	if absolute, err := filepath.Abs(workspace); err == nil {
+		workspace = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(workspace); err == nil {
+		workspace = resolved
+	}
+	return filepath.Clean(workspace)
 }
 
 func directoryOf(path string) string {

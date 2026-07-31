@@ -78,6 +78,20 @@ func (m *AppModel) updateAgentStream(event app.Event) {
 	}
 	agent := &m.agents[index]
 	switch event.Kind {
+	case app.EventProviderRetry:
+		if event.Data["reset_partial"] == "true" {
+			var changed bool
+			agent.Blocks, changed = discardRetryableAssistantTail(agent.Blocks, event.RunID)
+			if changed {
+				m.invalidateTranscriptLayout()
+			}
+		}
+		agent.Activity = m.tr("status.activity.retrying", map[string]string{
+			"attempt": first(event.Data["attempt"], "?"),
+			"max":     first(event.Data["max"], "?"),
+			"delay":   formatRetryDelay(event.Data["delay_ms"]),
+			"reason":  compactAgentActivity(event.Text),
+		})
 	case app.EventThinkingDelta:
 		agent.Activity = first(compactAgentActivity(event.Text), m.tr("activity.thinking"))
 		appendAgentViewDelta(&agent.Blocks, BlockThinking, event.RunID, m.tr("block.thinking_title"), event.Text)
@@ -257,8 +271,8 @@ func upsertAgentTool(blocks *[]Block, event app.Event, state string, catalog i18
 				block.Collapsed = state == "completed"
 			}
 			if event.Kind == app.EventToolFinished && state == "completed" {
-				if title, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
-					block.Kind, block.Title, block.Content = BlockDiff, title, diff
+				if _, diff, ok := summarizeFileChange(block.Title, block.Arguments, event.Data["structured"], event.Text); ok {
+					block.Content = diff
 				} else {
 					block.Content = summarizeToolResult(block.Title, block.Arguments, event.Text, catalog)
 				}
@@ -275,8 +289,8 @@ func upsertAgentTool(blocks *[]Block, event app.Event, state string, catalog i18
 	kind := BlockTool
 	title := name
 	if event.Kind == app.EventToolFinished && state == "completed" {
-		if diffTitle, diff, ok := summarizeFileChange(name, event.Data["arguments"], event.Data["structured"], event.Text); ok {
-			kind, title, content = BlockDiff, diffTitle, diff
+		if _, diff, ok := summarizeFileChange(name, event.Data["arguments"], event.Data["structured"], event.Text); ok {
+			content = diff
 		}
 	}
 	*blocks = append(*blocks, Block{
@@ -321,8 +335,8 @@ func agentTranscriptBlocks(blocks []app.AgentTranscriptBlock, catalogs ...i18n.C
 			arguments, content = splitAgentToolContent(block.Content)
 			switch block.State {
 			case "completed":
-				if title, diff, ok := summarizeFileChange(block.Title, arguments, "", content); ok {
-					kind, block.Title, content = BlockDiff, title, diff
+				if _, diff, ok := summarizeFileChange(block.Title, arguments, "", content); ok {
+					content = diff
 				} else {
 					content = summarizeToolResult(block.Title, arguments, content, catalog)
 				}
@@ -529,15 +543,27 @@ func (m *AppModel) updateUsage(data map[string]string) {
 			m.usage.TeamCached += value
 		}
 	}
-	if value, err := strconv.Atoi(data["cacheWriteTokens"]); err == nil && data["cacheWriteTokens"] != "" {
-		m.usage.CacheWriteTokens += value
-		if requestKind == "main" {
-			m.usage.MainCacheWrite += value
+	if data["cacheModel"] != "" {
+		m.usage.CacheModel = data["cacheModel"]
+	}
+	if data["cachePrefix"] == "degraded" {
+		m.usage.CachePrefixDegraded = true
+		if data["reason"] != "" {
+			m.usage.CachePrefixReason = data["reason"]
 		}
-		if requestKind == "compaction" {
-			m.usage.CompactionCacheWrite += value
-		} else if requestKind == "team" {
-			m.usage.TeamCacheWrite += value
+	}
+	if value, err := strconv.Atoi(data["cacheWriteTokens"]); err == nil && data["cacheWriteTokens"] != "" {
+		// Automatic caches (xAI) have no write counters; ignore residual values.
+		if !m.usesAutomaticPromptCache() {
+			m.usage.CacheWriteTokens += value
+			if requestKind == "main" {
+				m.usage.MainCacheWrite += value
+			}
+			if requestKind == "compaction" {
+				m.usage.CompactionCacheWrite += value
+			} else if requestKind == "team" {
+				m.usage.TeamCacheWrite += value
+			}
 		}
 	}
 	if value, err := strconv.Atoi(data["outputTokens"]); err == nil && data["outputTokens"] != "" {
@@ -670,6 +696,27 @@ func (m *AppModel) restoreUsage(raw string) {
 	m.usage.LastProvider = usage.LastProvider
 	m.usage.LastModel = usage.LastModel
 	m.usage.LastTransport = usage.LastTransport
+	if m.usesAutomaticPromptCache() {
+		m.usage.CacheWriteTokens = 0
+		m.usage.MainCacheWrite = 0
+		m.usage.CompactionCacheWrite = 0
+		m.usage.TeamCacheWrite = 0
+		m.usage.CacheModel = "automatic"
+	}
+}
+
+func (m AppModel) usesAutomaticPromptCache() bool {
+	if m.usage.CacheModel == "automatic" {
+		return true
+	}
+	if m.usage.CacheModel == "write-tokens" {
+		return false
+	}
+	return m.provider == "grok" || m.usage.LastProvider == "grok"
+}
+
+func (m AppModel) showsCacheWrite() bool {
+	return !m.usesAutomaticPromptCache() && m.usage.CacheWriteTokens > 0
 }
 
 func (m AppModel) isRunning() bool {

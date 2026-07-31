@@ -583,18 +583,34 @@ func TestRunningSubagentAnimatesInContextRail(t *testing.T) {
 	}
 }
 
-func TestReviewingApprovalUsesSmartApprovalColor(t *testing.T) {
+func TestReviewingApprovalUsesStandaloneAnimatedRunStatus(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	if got, want := model.stateStyle("Reviewing approval").GetForeground(), model.theme.ApprovalSmart.GetForeground(); got != want {
 		t.Fatalf("reviewing approval color=%v, want smart approval color=%v", got, want)
 	}
+	model.runID = "run-1"
 	model.status = "Reviewing approval"
-	model.transcript = []Block{{Kind: BlockApproval, State: "reviewing", Title: "Reviewing"}}
-	before := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 64), "\n"))
+	before := ansi.Strip(model.renderTranscriptFooter(64, 0, 0))
 	model.animationFrame++
-	after := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 64), "\n"))
-	if before == after {
-		t.Fatalf("reviewing approval indicator did not animate: %q", before)
+	after := ansi.Strip(model.renderTranscriptFooter(64, 0, 0))
+	if before == after || !strings.Contains(before, "REVIEWING APPROVAL") || len(model.transcript) != 0 {
+		t.Fatalf("standalone approval status did not animate: before=%q after=%q transcript=%#v", before, after, model.transcript)
+	}
+}
+
+func TestContextArtifactToolUsesLocalizedDisplayName(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	block := Block{Kind: BlockTool, Title: "context.read_artifact", State: "completed", Collapsed: true}
+	rendered := ansi.Strip(strings.Join(model.renderBlock(block, 0, 64), "\n"))
+	if !strings.Contains(rendered, "Read Artifact") || strings.Contains(rendered, "context.read_artifact") {
+		t.Fatalf("artifact tool did not use its English display name:\n%s", rendered)
+	}
+	if err := model.SetLanguage("zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	rendered = ansi.Strip(strings.Join(model.renderBlock(block, 0, 64), "\n"))
+	if !strings.Contains(rendered, "读取工件") || strings.Contains(rendered, "context.read_artifact") {
+		t.Fatalf("artifact tool did not use its Chinese display name:\n%s", rendered)
 	}
 }
 
@@ -602,7 +618,7 @@ func TestTranscriptCardsAreKeyboardExpandable(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.transcript = []Block{{ID: "call-1", Kind: BlockTool, Title: "coding.read_file", Content: "result", State: "completed"}}
 	model.width = 100
-	if content := ansi.Strip(model.View().Content); !strings.Contains(content, "◆ Read File") || strings.Contains(content, "coding.read_file") {
+	if content := ansi.Strip(model.View().Content); !strings.Contains(content, "✓ Read File") || strings.Contains(content, "coding.read_file") {
 		t.Fatalf("tool alias was not used:\n%s", content)
 	}
 
@@ -645,6 +661,95 @@ func TestCompletedToolBlocksDefaultToCollapsed(t *testing.T) {
 	}
 }
 
+func TestExpandingLongToolKeepsHeaderAtViewportStart(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 18})
+	model = updated.(AppModel)
+	var content strings.Builder
+	for line := 1; line <= 40; line++ {
+		fmt.Fprintf(&content, "result line %02d\n", line)
+	}
+	model.transcript = []Block{
+		{Kind: BlockUser, RunID: "run-1", Content: "analyze the workspace", State: "completed"},
+		{
+			ID: "call-1", Kind: BlockTool, RunID: "run-1", Title: "coding.shell",
+			Arguments: `{"command":"git status --short"}`,
+			Content:   content.String(), State: "completed", Collapsed: true,
+		},
+	}
+	_ = model.View()
+	_, _, width, height := model.transcriptBounds()
+	collapsed := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
+	headerRow := -1
+	for index, line := range collapsed {
+		if strings.Contains(line, "Run Command") {
+			headerRow = index
+			break
+		}
+	}
+	if headerRow < 0 || !model.toggleTranscriptBlockAt(4, headerRow) {
+		t.Fatalf("tool header did not expand:\n%s", strings.Join(collapsed, "\n"))
+	}
+
+	_ = model.View()
+	_, _, width, height = model.transcriptBounds()
+	visible := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
+	first := ""
+	for _, line := range visible {
+		if strings.TrimSpace(line) != "" {
+			first = line
+			break
+		}
+	}
+	if !strings.Contains(first, "Run Command") {
+		t.Fatalf("expanded tool header was not kept at the viewport start; first=%q:\n%s", first, strings.Join(visible, "\n"))
+	}
+	if strings.Contains(strings.Join(visible, "\n"), "result line 40") {
+		t.Fatalf("expanded tool remained anchored to its last line:\n%s", strings.Join(visible, "\n"))
+	}
+}
+
+func TestToolHeaderAnimatesThenSettlesToCheckmark(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	running := Block{ID: "call-1", Kind: BlockTool, Title: "coding.shell", State: "running"}
+	if !transcriptBlockAnimated(running) {
+		t.Fatal("running tool was excluded from transcript animation invalidation")
+	}
+	before := ansi.Strip(model.renderToolHeader(running, " ", 80, false))
+	model.animationFrame++
+	after := ansi.Strip(model.renderToolHeader(running, " ", 80, false))
+	if before == after || !strings.Contains(before, "◇ Run Command") || !strings.Contains(after, "◈ Run Command") {
+		t.Fatalf("running tool indicator did not animate: before=%q after=%q", before, after)
+	}
+	completed := running
+	completed.State = "completed"
+	if header := ansi.Strip(model.renderToolHeader(completed, " ", 80, false)); !strings.Contains(header, "✓ Run Command") {
+		t.Fatalf("completed tool header=%q", header)
+	}
+	model.reducedMotion = true
+	if header := ansi.Strip(model.renderToolHeader(running, " ", 80, false)); !strings.Contains(header, "◆ Run Command") {
+		t.Fatalf("reduced-motion running header=%q", header)
+	}
+	if got, want := model.theme.Tool.GetForeground(), model.theme.Thinking.GetForeground(); got != want {
+		t.Fatalf("tool foreground=%v want subdued gray=%v", got, want)
+	}
+}
+
+func TestCollapsedToolTimelineRendersWithoutBlankRows(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.transcript = []Block{
+		{ID: "call-1", Kind: BlockTool, RunID: "run", Title: "coding.shell", State: "completed", Collapsed: true},
+		{ID: "call-2", Kind: BlockTool, RunID: "run", Title: "coding.search", State: "completed", Collapsed: true},
+		{Kind: BlockThinking, RunID: "run", Content: "Continue reasoning", State: "streaming"},
+	}
+	lines := model.transcriptLines(80)
+	if len(lines) < 3 || !strings.Contains(ansi.Strip(lines[0]), "✓ Run Command") ||
+		!strings.Contains(ansi.Strip(lines[1]), "✓ Search Code") ||
+		!strings.Contains(ansi.Strip(lines[2]), "THINKING") {
+		t.Fatalf("compact tool timeline=%q", ansi.Strip(strings.Join(lines, "\n")))
+	}
+}
+
 func TestTranscriptToolHeaderTogglesWithMouseClick(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -657,7 +762,7 @@ func TestTranscriptToolHeaderTogglesWithMouseClick(t *testing.T) {
 	rows := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
 	headerRow := -1
 	for index, row := range rows {
-		if strings.Contains(row, "◆ Run Command") {
+		if strings.Contains(row, "✓ Run Command") {
 			headerRow = index
 			break
 		}
@@ -680,7 +785,7 @@ func TestTranscriptToolHeaderTogglesWithMouseClick(t *testing.T) {
 
 	rows = strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
 	for index, row := range rows {
-		if strings.Contains(row, "◆ Run Command") {
+		if strings.Contains(row, "✓ Run Command") {
 			headerRow = index
 			break
 		}
@@ -692,6 +797,46 @@ func TestTranscriptToolHeaderTogglesWithMouseClick(t *testing.T) {
 	model = updated.(AppModel)
 	if !model.transcript[0].Collapsed || command != nil {
 		t.Fatalf("second click = collapsed:%v command:%v, want collapsed without copy", model.transcript[0].Collapsed, command != nil)
+	}
+}
+
+func TestSecondCompactToolCanExpandAndCollapseWithMouse(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+	model.transcript = []Block{
+		{ID: "call-1", Kind: BlockTool, Title: "coding.shell", State: "completed", Collapsed: true},
+		{ID: "call-2", Kind: BlockTool, Title: "coding.search", Content: "mouse result", State: "completed", Collapsed: true},
+	}
+	_, top, width, height := model.transcriptBounds()
+	toggleSecond := func(current AppModel) AppModel {
+		rows := strings.Split(ansi.Strip(current.renderTranscript(width, height)), "\n")
+		headerRow := -1
+		for index, row := range rows {
+			if strings.Contains(row, "✓ Search Code") {
+				headerRow = index
+				break
+			}
+		}
+		if headerRow < 0 {
+			t.Fatalf("second compact tool header was not rendered:\n%s", strings.Join(rows, "\n"))
+		}
+		next, _ := current.Update(tea.MouseClickMsg{X: 4, Y: top + headerRow, Button: tea.MouseLeft})
+		current = next.(AppModel)
+		next, command := current.Update(tea.MouseReleaseMsg{X: 4, Y: top + headerRow, Button: tea.MouseLeft})
+		if command != nil {
+			t.Fatal("tool toggle unexpectedly copied transcript text")
+		}
+		return next.(AppModel)
+	}
+
+	model = toggleSecond(model)
+	if model.transcript[1].Collapsed {
+		t.Fatal("second compact tool did not expand")
+	}
+	model = toggleSecond(model)
+	if !model.transcript[1].Collapsed {
+		t.Fatal("expanded second compact tool did not collapse")
 	}
 }
 
@@ -707,7 +852,7 @@ func TestMouseClickTargetsToolHeaderAfterUserMessageWithoutBlankSeparator(t *tes
 	rows := strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
 	headerRow := -1
 	for index, row := range rows {
-		if strings.Contains(row, "◆ Run Command") {
+		if strings.Contains(row, "✓ Run Command") {
 			headerRow = index
 			break
 		}
@@ -1206,28 +1351,16 @@ func TestShiftTabIncludesAutomaticReviewOnlyWhenChatGPTCapabilityIsAvailable(t *
 	}
 }
 
-func TestAutomaticApprovalEventsRenderReviewingAndResolvedTranscriptStates(t *testing.T) {
+func TestAutomaticApprovalEventsStayOutOfTranscript(t *testing.T) {
 	tests := []struct {
 		state      string
-		data       map[string]string
 		text       string
-		blockState string
-		title      string
-		want       string
+		wantBanner bool
 	}{
-		{
-			state: "auto_approved", blockState: "completed", title: "Allowed", want: "Rationale: bounded write",
-			data: map[string]string{"risk": "low", "rationale": "bounded write"},
-		},
-		{
-			state: "auto_denied", blockState: "denied", title: "Denied", want: "Risk: high",
-			data: map[string]string{"risk": "high", "rationale": "target not authorized"},
-		},
-		{
-			state: "auto_failed", blockState: "failed", title: "Review failed", text: "Automatic review failed (parse)", want: "Failure: Automatic review failed (parse)",
-			data: map[string]string{"risk": "medium"},
-		},
-		{state: "auto_timed_out", blockState: "failed", title: "Timed out", text: "Automatic review timed out", want: "timed out"},
+		{state: "auto_approved"},
+		{state: "auto_denied"},
+		{state: "auto_failed", text: "Automatic review failed (parse)", wantBanner: true},
+		{state: "auto_timed_out", text: "Automatic review timed out", wantBanner: true},
 	}
 	for _, test := range tests {
 		t.Run(test.state, func(t *testing.T) {
@@ -1239,21 +1372,21 @@ func TestAutomaticApprovalEventsRenderReviewingAndResolvedTranscriptStates(t *te
 				ToolCallID: "call-1", ApprovalID: "approval-1", State: "reviewing",
 				Data: map[string]string{"tool": "coding.write_file", "action": "write config"},
 			})
+			status := ansi.Strip(model.renderTranscriptFooter(80, 0, 0))
 			if model.status != "Reviewing approval" || model.overlay != OverlayNone ||
-				len(model.pendingApprovals) != 0 || len(model.transcript) != 1 ||
-				model.transcript[0].Kind != BlockApproval || model.transcript[0].State != "reviewing" {
-				t.Fatalf("reviewing projection=%+v", model)
+				len(model.pendingApprovals) != 0 || len(model.transcript) != 0 ||
+				!strings.Contains(status, "REVIEWING APPROVAL") {
+				t.Fatalf("automatic review leaked into chat: status=%q footer=%q transcript=%#v", model.status, status, model.transcript)
 			}
 			model.applyEvent(app.Event{
 				Kind: app.EventApprovalResolved, SessionID: "default", RunID: "run-1",
-				ToolCallID: "call-1", ApprovalID: "approval-1", State: test.state,
-				Text: test.text, Data: test.data,
+				ToolCallID: "call-1", ApprovalID: "approval-1", State: test.state, Text: test.text,
 			})
-			block := model.transcript[0]
-			if model.status != "Running" || block.Kind != BlockApproval || block.State != test.blockState ||
-				block.Title != test.title ||
-				!strings.Contains(block.Content, test.want) {
-				t.Fatalf("resolved projection: status=%q block=%+v", model.status, block)
+			if model.status != "Running" || len(model.transcript) != 0 {
+				t.Fatalf("resolved automatic review leaked into chat: status=%q transcript=%#v", model.status, model.transcript)
+			}
+			if got := model.errorBanner != ""; got != test.wantBanner {
+				t.Fatalf("error banner present=%t, want %t: %q", got, test.wantBanner, model.errorBanner)
 			}
 		})
 	}
@@ -1285,7 +1418,7 @@ func TestAutomaticDenialFallsBackToInteractiveApprovalOverlay(t *testing.T) {
 	}
 }
 
-func TestAutomaticApprovalAndEditUseSeparateAnimatedBlocks(t *testing.T) {
+func TestAutomaticApprovalDoesNotCreateChatBlockBeforeEdit(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.runID = "run-1"
 	model.status = "Running"
@@ -1297,11 +1430,8 @@ func TestAutomaticApprovalAndEditUseSeparateAnimatedBlocks(t *testing.T) {
 			"action": strings.Repeat("raw patch ", 500),
 		},
 	})
-	before := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 80), "\n"))
-	model.animationFrame++
-	animated := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 80), "\n"))
-	if before == animated || strings.Contains(before, "raw patch") || !strings.Contains(before, "Edit File · README.md") {
-		t.Fatalf("approval animation/summary before=%q after=%q", before, animated)
+	if len(model.transcript) != 0 {
+		t.Fatalf("automatic approval appeared as a chat block: %#v", model.transcript)
 	}
 
 	model.applyEvent(app.Event{
@@ -1322,11 +1452,12 @@ func TestAutomaticApprovalAndEditUseSeparateAnimatedBlocks(t *testing.T) {
 			"structured": `{"sections":[{"path":"README.md","firstChangedLine":1,"diff":"-old\n+new"}]}`,
 		},
 	})
-	if len(model.transcript) != 2 {
-		t.Fatalf("approval and edit were not separated: %#v", model.transcript)
+	if len(model.transcript) != 1 {
+		t.Fatalf("approval added a block beside the edit: %#v", model.transcript)
 	}
-	if approval, edit := model.transcript[0], model.transcript[1]; approval.Kind != BlockApproval || approval.State != "completed" || edit.Kind != BlockDiff || edit.State != "completed" {
-		t.Fatalf("approval/edit lifecycle collided: approval=%#v edit=%#v", approval, edit)
+	edit := model.transcript[0]
+	if edit.Kind != BlockTool || edit.Title != "coding.edit_hashline" || edit.State != "completed" {
+		t.Fatalf("edit lifecycle was not preserved: %#v", edit)
 	}
 }
 
@@ -1655,7 +1786,7 @@ func TestPersistedFailedAgentEditHidesRawPatch(t *testing.T) {
 	}
 }
 
-func TestFileChangesBecomeInlineDiffBlocks(t *testing.T) {
+func TestFileChangesRemainNamedToolsWithInlineDiffs(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.updateTool(app.Event{
 		Kind: app.EventToolStarted, RunID: "run", ToolCallID: "edit", Data: map[string]string{
@@ -1670,7 +1801,7 @@ func TestFileChangesBecomeInlineDiffBlocks(t *testing.T) {
 		},
 	})
 	edit := model.transcript[0]
-	if edit.Kind != BlockDiff || edit.Title != "internal/app.go  +1/-1" {
+	if edit.Kind != BlockTool || edit.Title != "coding.edit_hashline" {
 		t.Fatalf("edit block = %#v", edit)
 	}
 	if edit.Content != "@@ internal/app.go:12 @@\n-old value\n+new value" {
@@ -1687,7 +1818,7 @@ func TestFileChangesBecomeInlineDiffBlocks(t *testing.T) {
 		Text: "¶new.go#1234\ncreated new.go", Data: map[string]string{"name": "coding.write_file"},
 	})
 	created := model.transcript[1]
-	if created.Kind != BlockDiff || created.Title != "new.go  +3/-0" {
+	if created.Kind != BlockTool || created.Title != "coding.write_file" {
 		t.Fatalf("write block = %#v", created)
 	}
 	for _, line := range []string{"@@ new.go:1 @@", "+package main", "+", "+func main() {}"} {
@@ -1727,15 +1858,30 @@ func TestDiffRendererSeparatesFilesHunksAndLineNumbers(t *testing.T) {
 	for _, wanted := range []string{
 		"M internal/app.go  +1 -1",
 		"@@ line 12 @@",
-		"12    - old value",
-		"   12 + new value",
-		"13 13   unchanged",
+		"12 - old value",
+		"12 + new value",
+		"13   unchanged",
 		"A internal/tui/view.go  +1 -0",
 		"@@ line 40 @@",
 	} {
 		if !strings.Contains(plain, wanted) {
 			t.Fatalf("rendered diff omitted %q:\n%s", wanted, plain)
 		}
+	}
+	if strings.Contains(plain, "13 13") {
+		t.Fatalf("context line rendered duplicate old/new line numbers:\n%s", plain)
+	}
+	shifted := ansi.Strip(strings.Join(model.renderDiffContent(
+		"diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -74,2 +77,2 @@\n-old\n+new\n context",
+		72,
+	), "\n"))
+	for _, wanted := range []string{"74 - old", "77 + new", "78   context"} {
+		if !strings.Contains(shifted, wanted) {
+			t.Fatalf("shifted diff omitted %q:\n%s", wanted, shifted)
+		}
+	}
+	if strings.Contains(shifted, "75 78") {
+		t.Fatalf("shifted context rendered two line-number columns:\n%s", shifted)
 	}
 }
 
@@ -1769,7 +1915,7 @@ func TestGitDiffToolUsesAccessibleForegroundChangeStyling(t *testing.T) {
 		plainRows[index] = ansi.Strip(row)
 	}
 	plain := strings.Join(plainRows, "\n")
-	for _, wanted := range []string{"M main.go  +1 -1", "@@ -7 +7 @@", "7   - ", "  7 + ", "oldCall()", "newCall()"} {
+	for _, wanted := range []string{"M main.go  +1 -1", "@@ -7 +7 @@", "7 - ", "7 + ", "oldCall()", "newCall()"} {
 		if !strings.Contains(plain, wanted) {
 			t.Fatalf("Git diff tool omitted %q:\n%s", wanted, plain)
 		}
@@ -2120,30 +2266,33 @@ func TestSubagentCacheUsageAggregatesWithoutReplacingMainContext(t *testing.T) {
 }
 
 func TestDetailedUsageShowsReasoningCompactionAndTransport(t *testing.T) {
-	model := NewModel(inertRuntime{}, "/tmp/workspace", "grok", "grok-4.5", "high", "single")
+	// ChatGPT uses write-token cache semantics; W counters should surface in /status.
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-test", "high", "single")
 	model.usage.ContextLimit = 500_000
 	model.updateUsage(map[string]string{
 		"inputTokens": "100000", "cachedInputTokens": "60000", "uncachedInputTokens": "40000", "outputTokens": "5000",
-		"cacheWriteTokens": "10000", "cacheStatus": "reported", "requestKind": "main", "transport": "xai-responses",
+		"cacheWriteTokens": "10000", "cacheStatus": "reported", "requestKind": "main", "transport": "codex-responses",
+		"cacheModel": "write-tokens", "provider": "chatgpt",
 	})
 	model.updateUsage(map[string]string{"reasoningTokens": "3000", "requestKind": "main", "aggregateOnly": "true"})
 	model.updateUsage(map[string]string{
 		"inputTokens": "20000", "cachedInputTokens": "5000", "uncachedInputTokens": "15000", "cacheWriteTokens": "2000", "outputTokens": "2000", "reasoningTokens": "500",
-		"cacheStatus": "reported", "requestKind": "compaction", "aggregateOnly": "true", "transport": "xai-responses",
+		"cacheStatus": "reported", "requestKind": "compaction", "aggregateOnly": "true", "transport": "codex-responses",
 	})
 	model.updateUsage(map[string]string{
 		"inputTokens": "30000", "cachedInputTokens": "18000", "uncachedInputTokens": "12000", "cacheWriteTokens": "1000", "outputTokens": "4000", "reasoningTokens": "700",
-		"cacheStatus": "reported", "requestKind": "team", "aggregateOnly": "true", "transport": "xai-responses",
+		"cacheStatus": "reported", "requestKind": "team", "aggregateOnly": "true", "transport": "codex-responses",
 	})
 	// Dense diagnostics belong in /status, not the footer strip.
 	footer := ansi.Strip(model.renderContextUsage(320))
-	for _, unwanted := range []string{"U 40K", "CMP ", "TEAM ", "xai-responses"} {
+	for _, unwanted := range []string{"U 40K", "CMP ", "TEAM ", "codex-responses"} {
 		if strings.Contains(footer, unwanted) {
 			t.Fatalf("footer still leaks diagnostic %q: %q", unwanted, footer)
 		}
 	}
 	report := strings.Join(model.statusReportLines(), "\n")
 	for _, wanted := range []string{
+		"Cache model: write-tokens (cached + cache write)",
 		"Uncached input (U): 40K",
 		"Cache write (W): 10K main / 13K all",
 		"Reasoning tokens (R): 3K",
@@ -2157,11 +2306,31 @@ func TestDetailedUsageShowsReasoningCompactionAndTransport(t *testing.T) {
 		"W 1K",
 		"R 700",
 		"Last request kind: team",
-		"Transport: xai-responses",
+		"Transport: codex-responses",
 	} {
 		if !strings.Contains(report, wanted) {
 			t.Fatalf("status report missing %q:\n%s", wanted, report)
 		}
+	}
+}
+
+func TestGrokAutomaticCacheHidesWriteCounters(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "grok", "grok-4.5", "high", "single")
+	model.usage.ContextLimit = 500_000
+	model.updateUsage(map[string]string{
+		"inputTokens": "100000", "cachedInputTokens": "60000", "uncachedInputTokens": "40000", "outputTokens": "5000",
+		"cacheWriteTokens": "10000", "cacheStatus": "reported", "requestKind": "main", "transport": "xai-responses",
+		"cacheModel": "automatic", "provider": "grok",
+	})
+	if model.usage.CacheWriteTokens != 0 || model.showsCacheWrite() {
+		t.Fatalf("automatic cache still kept write counters: %+v", model.usage)
+	}
+	report := strings.Join(model.statusReportLines(), "\n")
+	if strings.Contains(report, "Cache write") || strings.Contains(report, "(W):") {
+		t.Fatalf("automatic cache still shows write diagnostics:\n%s", report)
+	}
+	if !strings.Contains(report, "automatic (hits via cached tokens; write N/A)") {
+		t.Fatalf("status report missing automatic cache model:\n%s", report)
 	}
 }
 
@@ -2495,6 +2664,7 @@ func TestHeaderPathRemainsSeparateFromBranchClick(t *testing.T) {
 		t.Fatalf("header targets = branch:%d/%v path:%d/%v", branchStart, model.headerClickTarget(branchStart, 0), pathStart, model.headerClickTarget(pathStart, 0))
 	}
 }
+
 func TestCompactOverlayFitsMinimumTerminal(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/a/very/long/workspace/path", "chatgpt", strings.Repeat("model-", 20), "xhigh", "single")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
@@ -2858,6 +3028,42 @@ func TestSessionReloadKeepsCompleteFailedOutput(t *testing.T) {
 			gotBytes = len(model.transcript[0].Content)
 		}
 		t.Fatalf("restored transcript blocks=%d output_bytes=%d want_bytes=%d", len(model.transcript), gotBytes, len(completeOutput))
+	}
+}
+
+func TestSessionReloadRestoresDurableToolTimelineInSequence(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	tools, err := json.Marshal([]session.ToolRecord{
+		{
+			SessionID: "restored", RunID: "run-1", ToolCallID: "read-1", AnchorSequence: 1,
+			Name: "coding.read_file", Arguments: json.RawMessage(`{"path":"note.txt"}`), State: session.ToolCompleted, Content: "hello",
+		},
+		{
+			SessionID: "restored", RunID: "run-1", ToolCallID: "edit-1", AnchorSequence: 1,
+			Name: "coding.edit_hashline", Arguments: json.RawMessage(`{"input":"patch"}`), State: session.ToolInterrupted,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.applyEvent(app.Event{
+		Kind: app.EventSessionLoaded, SessionID: "restored", State: "loaded",
+		Data: map[string]string{
+			"blocks":         `[{"kind":"user","runId":"run-1","content":"change note"},{"kind":"assistant","runId":"run-1","content":"done","state":"completed"}]`,
+			"blockSequences": `[1,2]`,
+			"toolRecords":    string(tools),
+		},
+	})
+	if len(model.transcript) != 4 {
+		t.Fatalf("restored transcript=%#v", model.transcript)
+	}
+	if model.transcript[0].Kind != BlockUser || model.transcript[1].ID != "read-1" ||
+		model.transcript[2].ID != "edit-1" || model.transcript[3].Kind != BlockAssistant {
+		t.Fatalf("restored timeline order=%#v", model.transcript)
+	}
+	if model.transcript[1].State != "completed" || !model.transcript[1].Collapsed ||
+		model.transcript[2].State != "cancelled" {
+		t.Fatalf("restored tool states=%#v", model.transcript[1:3])
 	}
 }
 
@@ -3537,6 +3743,26 @@ func TestAssistantMarkdownRendersWithoutSourceMarkers(t *testing.T) {
 	}
 }
 
+func TestAssistantMarkdownTableUsesContentWidth(t *testing.T) {
+	content := "| 类型 | 文件数 | 代码量 |\n" +
+		"| --- | ---: | ---: |\n" +
+		"| 已跟踪文件修改 | 32 | +1192 / -91 |\n" +
+		"| 未跟踪新文件 | 2 | 581 行 |\n" +
+		"| 暂存区修改 | 0 | 0 |\n" +
+		"| 合计 | 34 | 约 +1773 / -91，净增加 1682 行 |"
+	rendered, err := renderTerminalMarkdown(content, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxWidth := 0
+	for _, line := range strings.Split(ansi.Strip(rendered), "\n") {
+		maxWidth = max(maxWidth, ansi.StringWidth(line))
+	}
+	if maxWidth > 72 {
+		t.Fatalf("markdown table width=%d, want content-sized table <=72:\n%s", maxWidth, ansi.Strip(rendered))
+	}
+}
+
 func TestAssistantMarkdownDoesNotOverrideTerminalBackground(t *testing.T) {
 	for _, key := range []markdownRendererKey{{width: 72}, {width: 72, dark: true}} {
 		renderer, err := newTerminalMarkdownRenderer(key)
@@ -3649,6 +3875,49 @@ func TestProviderRetryActivityShowsProgressAndRecovers(t *testing.T) {
 	model.applyEvent(app.Event{Kind: app.EventThinkingDelta, SessionID: "default", RunID: "run-retry", Text: "recovered"})
 	if model.runActivity != "thinking" {
 		t.Fatalf("activity after provider recovery=%q, want thinking", model.runActivity)
+	}
+}
+
+func TestProviderSessionRetryDiscardsOnlyUncommittedAssistantTail(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.sessionID = "default"
+	model.runID = "run-retry"
+	model.transcript = []Block{{Kind: BlockUser, RunID: "run-retry", Content: "keep me", State: "submitted"}}
+	model.applyEvent(app.Event{Kind: app.EventThinkingDelta, SessionID: "default", RunID: "run-retry", Text: "partial thought"})
+	model.applyEvent(app.Event{Kind: app.EventTextDelta, SessionID: "default", RunID: "run-retry", Text: "partial answer"})
+	if len(model.transcript) != 3 {
+		t.Fatalf("partial transcript blocks=%+v", model.transcript)
+	}
+	model.applyEvent(app.Event{
+		Kind: app.EventProviderRetry, SessionID: "default", RunID: "run-retry",
+		Data: map[string]string{"attempt": "1", "max": "10", "delay_ms": "0", "reset_partial": "true"},
+	})
+	if len(model.transcript) != 1 || model.transcript[0].Kind != BlockUser || model.transcript[0].Content != "keep me" {
+		t.Fatalf("retry reset removed durable transcript or kept partial output: %+v", model.transcript)
+	}
+}
+
+func TestSubagentSessionRetryDiscardsChildPartialTail(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.sessionID = "default"
+	model.agents = []AgentView{{
+		ID: "child-1",
+		Blocks: []Block{
+			{Kind: BlockTool, RunID: "child-run", Content: "durable tool", State: "completed"},
+			{Kind: BlockThinking, RunID: "child-run", Content: "partial thought", State: "streaming"},
+			{Kind: BlockAssistant, RunID: "child-run", Content: "partial answer", State: "streaming"},
+		},
+	}}
+	model.applyEvent(app.Event{
+		Kind: app.EventProviderRetry, SessionID: "default", RunID: "child-run", AgentID: "child-1",
+		Text: "server overloaded",
+		Data: map[string]string{"attempt": "1", "max": "10", "delay_ms": "0", "reset_partial": "true"},
+	})
+	if len(model.agents[0].Blocks) != 1 || model.agents[0].Blocks[0].Kind != BlockTool {
+		t.Fatalf("child retry reset blocks=%+v", model.agents[0].Blocks)
+	}
+	if !strings.Contains(model.agents[0].Activity, "retry") {
+		t.Fatalf("child retry activity=%q", model.agents[0].Activity)
 	}
 }
 
@@ -4183,15 +4452,18 @@ func TestZhCNCoreTUIRendering(t *testing.T) {
 		Kind: app.EventApprovalRequested, RunID: "run-zh", ToolCallID: "edit-zh", ApprovalID: "approval-zh", State: "reviewing",
 		Data: map[string]string{"tool": "coding.edit_hashline", "target": "README.md"},
 	})
+	reviewing := ansi.Strip(model.renderTranscriptFooter(48, 0, 0))
+	for _, wanted := range []string{"正在审查", "正在检查此操作"} {
+		if !strings.Contains(reviewing, wanted) {
+			t.Fatalf("localized standalone approval status missing %q:\n%s", wanted, reviewing)
+		}
+	}
 	model.applyEvent(app.Event{
 		Kind: app.EventApprovalResolved, RunID: "run-zh", ToolCallID: "edit-zh", ApprovalID: "approval-zh", State: "auto_approved",
 		Data: map[string]string{"tool": "coding.edit_hashline", "target": "README.md", "risk": "low", "rationale": "bounded edit"},
 	})
-	approval := ansi.Strip(strings.Join(model.renderBlock(model.transcript[0], 0, 40), "\n"))
-	for _, wanted := range []string{"已允许", "已完成", "风险：low", "理由：bounded edit"} {
-		if !strings.Contains(approval, wanted) {
-			t.Fatalf("localized approval missing %q:\n%s", wanted, approval)
-		}
+	if len(model.transcript) != 0 {
+		t.Fatalf("localized approval appeared in chat: %#v", model.transcript)
 	}
 
 	model.openOverlay(OverlayCommand)
@@ -4967,6 +5239,23 @@ func TestSourceToolRenderingFitsNarrowWidths(t *testing.T) {
 	}
 }
 
+func TestApprovalRendersAsAuditStatusInsteadOfToolBlock(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	block := Block{
+		Kind: BlockApproval, Title: "Allowed", State: "completed",
+		Content: "Edit File · README.md\nRisk: low\nRationale: bounded edit",
+	}
+	rendered := ansi.Strip(strings.Join(model.renderBlock(block, 0, 80), "\n"))
+	for _, wanted := range []string{"APPROVAL", "Allowed", "Edit File · README.md", "Risk: low", "Rationale: bounded edit"} {
+		if !strings.Contains(rendered, wanted) {
+			t.Fatalf("approval audit status omitted %q:\n%s", wanted, rendered)
+		}
+	}
+	if strings.Contains(rendered, "│") || strings.Contains(rendered, "COMPLETED") {
+		t.Fatalf("approval still renders like a tool block:\n%s", rendered)
+	}
+}
+
 func TestToolCategoriesAndApprovalBodyUseDistinctMutedAccents(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	names := []string{"coding.search", "coding.read_file", "coding.edit_hashline", "coding.shell", "todo", "memory.search"}
@@ -4985,8 +5274,9 @@ func TestToolCategoriesAndApprovalBodyUseDistinctMutedAccents(t *testing.T) {
 	}
 	rendered := strings.Join(model.renderBlock(approval, 0, 64), "\n")
 	plain := ansi.Strip(rendered)
+	flat := strings.ReplaceAll(strings.Join(strings.Fields(plain), " "), "- ", "-")
 	for _, wanted := range []string{"APPROVAL", "Risk:", "low", "Reason:", "dry-run preview only"} {
-		if !strings.Contains(strings.ToUpper(plain), strings.ToUpper(wanted)) {
+		if !strings.Contains(strings.ToUpper(flat), strings.ToUpper(wanted)) {
 			t.Fatalf("approval body missing %q:\n%s", wanted, plain)
 		}
 	}
