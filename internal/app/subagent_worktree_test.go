@@ -11,7 +11,7 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 func TestPrepareSubagentWorktreeSnapshotsDirtyTrackedAndUntrackedWithoutTouchingIndex(t *testing.T) {

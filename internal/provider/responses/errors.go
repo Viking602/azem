@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"resty.dev/v3"
+
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 type ErrorKind string
@@ -63,6 +64,47 @@ func (e *APIError) Error() string {
 	return "provider " + string(e.Kind) + " error"
 }
 
+func (e *APIError) Retryable() bool {
+	if e == nil {
+		return false
+	}
+	switch e.Kind {
+	case ErrorServer, ErrorRateLimit, ErrorStream:
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *APIError) Category() hyprovider.ErrorKind {
+	if e == nil {
+		return hyprovider.ErrorUnknown
+	}
+	switch e.Kind {
+	case ErrorAuthentication:
+		return hyprovider.ErrorAuthentication
+	case ErrorEntitlement:
+		return hyprovider.ErrorPermission
+	case ErrorRateLimit:
+		return hyprovider.ErrorRateLimit
+	case ErrorContextLimit, ErrorInvalidRequest:
+		return hyprovider.ErrorInvalidRequest
+	case ErrorServer:
+		return hyprovider.ErrorServer
+	case ErrorStream:
+		return hyprovider.ErrorStream
+	default:
+		return hyprovider.ErrorUnknown
+	}
+}
+
+func (e *APIError) RetryDelay() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return max(time.Duration(0), e.RetryAfter)
+}
+
 func HTTPError(response *resty.Response) error {
 	var body []byte
 	if response.Body != nil {
@@ -99,7 +141,7 @@ func HTTPError(response *resty.Response) error {
 	}
 	return &APIError{
 		Kind: kind, StatusCode: statusCode, Code: code, Message: boundedMessage(message),
-		RetryAfter: retryAfter(response.Header(), string(body), time.Now()),
+		RetryAfter: retryAfter(response.Header(), time.Now()),
 	}
 }
 
@@ -124,7 +166,7 @@ func streamError(payload json.RawMessage) error {
 		} `json:"response"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return &APIError{Kind: ErrorStream, Message: "malformed provider error event", RetryAfter: retryAfter(nil, string(payload), time.Now())}
+		return &APIError{Kind: ErrorStream, Message: "malformed provider error event"}
 	}
 	failure := envelope.Error
 	if failure == nil && envelope.Response != nil {
@@ -134,13 +176,11 @@ func streamError(payload json.RawMessage) error {
 		code := firstString(failure.Code, failure.Type)
 		return &APIError{
 			Kind: classifyCode(code), Code: code, Message: boundedMessage(failure.Message),
-			RetryAfter: retryAfter(nil, failure.Message, time.Now()),
 		}
 	}
 	if envelope.Code != "" || envelope.Message != "" {
 		return &APIError{
 			Kind: classifyCode(envelope.Code), Code: envelope.Code, Message: boundedMessage(envelope.Message),
-			RetryAfter: retryAfter(nil, envelope.Message, time.Now()),
 		}
 	}
 	if envelope.Response != nil && envelope.Response.Incomplete != nil {
@@ -151,13 +191,9 @@ func streamError(payload json.RawMessage) error {
 		}
 		return &APIError{
 			Kind: kind, Code: code, Message: "provider returned an incomplete response",
-			RetryAfter: retryAfter(nil, string(payload), time.Now()),
 		}
 	}
-	return &APIError{
-		Kind: ErrorStream, Message: "provider stream failed",
-		RetryAfter: retryAfter(nil, string(payload), time.Now()),
-	}
+	return &APIError{Kind: ErrorStream, Message: "provider stream failed"}
 }
 
 func decodeError(body []byte) (string, string) {
@@ -188,33 +224,26 @@ func decodeError(body []byte) (string, string) {
 }
 
 func classifyCode(code string) ErrorKind {
-	code = strings.ToLower(code)
-	switch {
-	case strings.Contains(code, "context"), strings.Contains(code, "max_output"):
+	switch strings.ToLower(code) {
+	case "context_length_exceeded", "max_output_tokens":
 		return ErrorContextLimit
-	case strings.Contains(code, "rate"), strings.Contains(code, "quota"), strings.Contains(code, "overload"):
+	case "rate_limit_exceeded", "rate_limit_error":
 		return ErrorRateLimit
-	case strings.Contains(code, "server"), strings.Contains(code, "internal"), strings.Contains(code, "unavailable"), strings.Contains(code, "timeout"):
+	case "server_error", "server_is_overloaded", "overloaded_error", "api_error",
+		"internal_error", "service_unavailable", "model_error", "timeout":
 		return ErrorServer
-	case strings.Contains(code, "auth"), strings.Contains(code, "token"):
+	case "invalid_token", "invalid_api_key", "authentication_error":
 		return ErrorAuthentication
-	case strings.Contains(code, "entitlement"), strings.Contains(code, "permission"), strings.Contains(code, "plan"):
+	case "entitlement_error", "permission_error", "insufficient_permissions", "plan_required":
 		return ErrorEntitlement
-	case code == "":
+	case "":
 		return ErrorStream
 	default:
 		return ErrorInvalidRequest
 	}
 }
 
-var (
-	quotaResetPattern  = regexp.MustCompile(`(?i)reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s`)
-	pleaseRetryPattern = regexp.MustCompile(`(?i)please retry in ([0-9.]+)(ms|s)`)
-	retryDelayPattern  = regexp.MustCompile(`(?i)"retryDelay"\s*:\s*"([0-9.]+)(ms|s)"`)
-	tryAgainPattern    = regexp.MustCompile(`(?i)try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b`)
-)
-
-func retryAfter(header interface{ Get(string) string }, body string, now time.Time) time.Duration {
+func retryAfter(header interface{ Get(string) string }, now time.Time) time.Duration {
 	if header != nil {
 		if delay, ok := numericDuration(header.Get("retry-after-ms"), time.Millisecond); ok {
 			return delay
@@ -250,29 +279,6 @@ func retryAfter(header interface{ Get(string) string }, body string, now time.Ti
 			return delay
 		}
 	}
-	if match := quotaResetPattern.FindStringSubmatch(body); len(match) == 4 {
-		hours, _ := strconv.ParseFloat(match[1], 64)
-		minutes, _ := strconv.ParseFloat(match[2], 64)
-		seconds, err := strconv.ParseFloat(match[3], 64)
-		if err == nil {
-			if delay, ok := durationFromNumber((hours*60+minutes)*60+seconds, time.Second); ok {
-				return delay
-			}
-		}
-	}
-	for _, pattern := range []*regexp.Regexp{pleaseRetryPattern, retryDelayPattern, tryAgainPattern} {
-		match := pattern.FindStringSubmatch(body)
-		if len(match) != 3 {
-			continue
-		}
-		value, err := strconv.ParseFloat(match[1], 64)
-		if err != nil {
-			continue
-		}
-		if delay, ok := durationFromNumber(value, retryUnit(match[2])); ok {
-			return delay
-		}
-	}
 	return 0
 }
 
@@ -290,21 +296,6 @@ func durationFromNumber(value float64, unit time.Duration) (time.Duration, bool)
 		return 0, false
 	}
 	return time.Duration(value * float64(unit)), true
-}
-
-func retryUnit(value string) time.Duration {
-	switch strings.ToLower(value) {
-	case "ms":
-		return time.Millisecond
-	case "s", "sec":
-		return time.Second
-	case "m", "min", "mins", "minute", "minutes":
-		return time.Minute
-	case "h", "hr", "hrs", "hour", "hours":
-		return time.Hour
-	default:
-		return 0
-	}
 }
 
 func boundedMessage(message string) string {

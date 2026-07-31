@@ -10,10 +10,9 @@ import (
 
 	"resty.dev/v3"
 
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	hyprovider "github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/auth"
-	azprovider "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/responses"
 )
 
@@ -32,7 +31,8 @@ type Driver struct {
 	models          []string
 	reasoningEffort string
 	retryDelay      func(int) time.Duration
-	retryObserver   azprovider.RetryObserver
+	maxRetryDelay   time.Duration
+	retryObserver   hyprovider.RetryObserver
 }
 
 func New(transport Transport, models []string, reasoningEffort string) (*Driver, error) {
@@ -46,8 +46,12 @@ func (d *Driver) Metadata() hyprovider.Metadata {
 	return hyprovider.Metadata{Name: d.transport.Name(), Models: append([]string(nil), d.models...), Version: "1"}
 }
 
-func (d *Driver) SetRetryObserver(observer azprovider.RetryObserver) {
+func (d *Driver) SetRetryObserver(observer hyprovider.RetryObserver) {
 	d.retryObserver = observer
+}
+
+func (d *Driver) SetMaxRetryDelay(delay time.Duration) {
+	d.maxRetryDelay = delay
 }
 
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
@@ -68,7 +72,9 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 		}
 		return responses.Open(response, streamContext, cancel, reporter)
 	}
-	return azprovider.OpenRetryingStream(ctx, open, azprovider.RetryOptions{Delay: d.retryDelay, Observer: d.retryObserver})
+	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
+		Delay: d.retryDelay, MaxDelay: d.maxRetryDelay, Observer: d.retryObserver,
+	})
 }
 
 type StandardTransport struct {

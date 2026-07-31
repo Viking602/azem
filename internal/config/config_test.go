@@ -45,7 +45,7 @@ func TestHooksConfigDefaultsAndLoad(t *testing.T) {
 
 func TestRetryConfigDefaultsLoadAndValidation(t *testing.T) {
 	cfg := Default()
-	if !cfg.Retry.Enabled || cfg.Retry.MaxRetries != 10 ||
+	if !cfg.Retry.Enabled || cfg.Retry.MaxRetries != 5 ||
 		cfg.Retry.BaseDelayDuration != 500*time.Millisecond || cfg.Retry.MaxDelayDuration != 5*time.Minute {
 		t.Fatalf("retry defaults = %#v", cfg.Retry)
 	}

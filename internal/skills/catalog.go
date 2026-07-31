@@ -12,14 +12,14 @@ import (
 	"unicode/utf8"
 
 	"github.com/Viking602/azem/internal/config"
-	"github.com/Viking602/go-hydaelyn/skill"
+	"github.com/Viking602/venat/skill"
 )
 
 const (
 	modelSkillCatalogCharBudget   = 8_000
 	maxModelSkillDescriptionChars = 250
 	maxConfiguredAdditionalDirs   = 56
-	modelSkillCatalogPrefix       = "Available Hydaelyn skills:\nWhen a task matches a description, call hydaelyn_activate_skill before proceeding. Skill resources remain unavailable until activation.\n"
+	modelSkillCatalogPrefix       = "Available Venat skills:\nWhen a task matches a description, call hydaelyn_activate_skill before proceeding. Skill resources remain unavailable until activation.\n"
 )
 
 //go:embed bundled/*/SKILL.md
@@ -126,7 +126,12 @@ func buildCatalog(options LoadOptions) (catalogState, error) {
 	if err != nil {
 		return catalogState{}, err
 	}
-	discovered, err := skill.Discover(skill.DiscoveryOptions{AdditionalDirs: roots})
+	discovered, err := skill.Discover(skill.DiscoveryOptions{
+		UserDir:        options.HomeDir,
+		ProjectDir:     options.WorkspaceDir,
+		TrustProject:   options.Config.TrustProject,
+		AdditionalDirs: roots,
+	})
 	if err != nil {
 		return catalogState{}, err
 	}
@@ -245,12 +250,12 @@ func discoveryRoots(options LoadOptions) ([]string, error) {
 			candidates = append(candidates, rootCandidate{path: filepath.Join(base, directory, "skills"), optional: true})
 		}
 	}
-	appendConventional(options.HomeDir, ".agents", ".hydaelyn", ".claude")
+	appendConventional(options.HomeDir, ".claude")
 	if options.ConfigDir != "" {
 		candidates = append(candidates, rootCandidate{path: filepath.Join(options.ConfigDir, "skills"), optional: true})
 	}
 	if options.Config.TrustProject && options.WorkspaceDir != "" {
-		appendConventional(options.WorkspaceDir, ".agents", ".hydaelyn", ".claude", ".azem")
+		appendConventional(options.WorkspaceDir, ".claude", ".azem")
 	}
 	for _, directory := range options.Config.AdditionalDirs {
 		candidates = append(candidates, rootCandidate{path: directory})

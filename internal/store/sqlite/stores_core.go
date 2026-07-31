@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
-	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/venat/api"
 )
 
 const (

@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/tool"
 )
 
 const contextReadArtifactTool = "context.read_artifact"

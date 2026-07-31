@@ -9,7 +9,7 @@ import (
 	"time"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/go-hydaelyn/message"
+	"github.com/Viking602/venat/message"
 )
 
 func TestPhase4ProviderFactsAreIdempotentIsolatedAndDurable(t *testing.T) {

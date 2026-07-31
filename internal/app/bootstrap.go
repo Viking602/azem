@@ -23,7 +23,7 @@ import (
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/venat/api"
 )
 
 type BootstrapResult struct {
@@ -204,7 +204,7 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	}
 	service.AttachRecovery(recoverySummary)
 	service.emitRecoveryState()
-	service.AttachReconcileResolver(store)
+	service.AttachReconcileResolver(coding)
 	for _, entry := range skillCatalog.Snapshot().Entries {
 		if entry.Eager && !entry.Bundled {
 			service.emitInstructionsLoaded(ctx, entry.SourcePath, instructionMemoryType(entry.SourcePath, homeDir, paths.Workspace), "session_start")

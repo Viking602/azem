@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,10 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/go-hydaelyn"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/coding"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/tool"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
@@ -71,11 +69,6 @@ func TestGovernedReadApprovalEditAndStaleAnchor(t *testing.T) {
 		t.Fatalf("approved edit result = %+v", second)
 	}
 	assertFile(t, path, "alpha\nBETA\ngamma\n")
-	_, err = service.ExecuteTool(ctx, run, tool.Call{ID: "edit-replay-new-id", Name: coding.ToolEditHashline, Arguments: arguments}, nil)
-	if !errors.Is(err, hydaelyn.ErrActionReconcileRequired) {
-		t.Fatalf("same effect with new call ID error=%v", err)
-	}
-	assertFile(t, path, "alpha\nBETA\ngamma\n")
 
 	staleArgs, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 2:\n+STALE\n"})
 	staleCall := tool.Call{ID: "edit-stale", Name: coding.ToolEditHashline, Arguments: staleArgs}
@@ -94,6 +87,141 @@ func TestGovernedReadApprovalEditAndStaleAnchor(t *testing.T) {
 		t.Fatalf("stale result = %+v", stale)
 	}
 	assertFile(t, path, "alpha\nBETA\ngamma\n")
+}
+
+func TestRecoveredApprovalResumesExactOperationAndPreservesDenial(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "note.txt")
+	if err := os.WriteFile(path, []byte("before\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close(ctx) })
+	run, err := service.StartRun(ctx, "recover approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	read := executeRead(t, ctx, service, run, "read-recovery", "note.txt")
+	arguments, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 1:\n+approved\n"})
+	call := tool.Call{
+		ID: "provider-before-crash", OperationID: "turn:1:call:0",
+		Name: coding.ToolEditHashline, Arguments: arguments,
+	}
+	pending, err := service.ExecuteTool(ctx, run, call, nil)
+	if err != nil || pending.Approval == nil {
+		t.Fatalf("approval request=%+v error=%v", pending, err)
+	}
+	if pending.Approval.Request.ActionID != call.OperationID ||
+		pending.Approval.Request.Metadata[approvalMetadataOperationID] != call.OperationID ||
+		pending.Approval.Request.Metadata[approvalMetadataScope] == "" {
+		t.Fatalf("durable approval identity = %+v", pending.Approval.Request)
+	}
+	recoveredRun := newRecoveredApprovalRun(run)
+	if err := service.ResolveRecoveredApproval(
+		ctx, pending.Approval.Request, pending.Approval.Token.TokenID, "once",
+	); err != nil {
+		t.Fatalf("ResolveRecoveredApproval(once) error = %v", err)
+	}
+	regenerated := call
+	regenerated.ID = "provider-after-crash"
+	executed, err := service.ExecuteTool(ctx, recoveredRun, regenerated, nil)
+	if err != nil || !executed.Executed || executed.Result.IsError {
+		t.Fatalf("recovered approved execution=%+v error=%v", executed, err)
+	}
+	assertFile(t, path, "approved\n")
+
+	read = executeRead(t, ctx, service, recoveredRun, "read-denial", "note.txt")
+	arguments, _ = json.Marshal(map[string]string{"input": read.Header + "\nreplace 1:\n+denied-write\n"})
+	deniedCall := tool.Call{
+		ID: "provider-denied-before-crash", OperationID: "turn:3:call:0",
+		Name: coding.ToolEditHashline, Arguments: arguments,
+	}
+	deniedPending, err := service.ExecuteTool(ctx, recoveredRun, deniedCall, nil)
+	if err != nil || deniedPending.Approval == nil {
+		t.Fatalf("denied approval request=%+v error=%v", deniedPending, err)
+	}
+	secondRecovery := newRecoveredApprovalRun(recoveredRun)
+	if err := service.ResolveRecoveredApproval(
+		ctx, deniedPending.Approval.Request, deniedPending.Approval.Token.TokenID, "deny",
+	); err != nil {
+		t.Fatalf("ResolveRecoveredApproval(deny) error = %v", err)
+	}
+	deniedCall.ID = "provider-denied-after-crash"
+	denied, err := service.ExecuteTool(ctx, secondRecovery, deniedCall, nil)
+	if err != nil || denied.Executed || !denied.Result.IsError || denied.Approval != nil ||
+		!strings.Contains(denied.Result.Content, "Denied") {
+		t.Fatalf("recovered denied execution=%+v error=%v", denied, err)
+	}
+	assertFile(t, path, "approved\n")
+
+	read = executeRead(t, ctx, service, secondRecovery, "read-expired", "note.txt")
+	arguments, _ = json.Marshal(map[string]string{"input": read.Header + "\nreplace 1:\n+expired-write\n"})
+	expiredCall := tool.Call{
+		ID: "provider-expired-before-crash", OperationID: "turn:5:call:0",
+		Name: coding.ToolEditHashline, Arguments: arguments,
+	}
+	expiredPending, err := service.ExecuteTool(ctx, secondRecovery, expiredCall, nil)
+	if err != nil || expiredPending.Approval == nil {
+		t.Fatalf("expired approval request=%+v error=%v", expiredPending, err)
+	}
+	uow, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := uow.ResumeTokens().LoadResumeToken(ctx, expiredPending.Approval.Token.TokenID)
+	if err != nil {
+		_ = uow.Rollback(ctx)
+		t.Fatal(err)
+	}
+	token.ExpiresAt = time.Now().Add(-time.Minute)
+	if err := uow.ResumeTokens().SaveResumeToken(ctx, token); err != nil {
+		_ = uow.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := uow.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ResolveRecoveredApproval(
+		ctx, expiredPending.Approval.Request, expiredPending.Approval.Token.TokenID, "once",
+	); !errors.Is(err, api.ErrInvalidCommand) {
+		t.Fatalf("expired ResolveRecoveredApproval() error = %v, want ErrInvalidCommand", err)
+	}
+	uow, err = store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = uow.Rollback(ctx) }()
+	storedApproval, err := uow.Approvals().LoadApproval(ctx, expiredPending.Approval.Request.ApprovalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedApproval.Status != "pending" {
+		t.Fatalf("expired token mutated approval = %#v", storedApproval)
+	}
+	assertFile(t, path, "approved\n")
+}
+
+func newRecoveredApprovalRun(run *Run) *Run {
+	return &Run{
+		RunID:        run.RunID,
+		Goal:         run.Goal,
+		TaskID:       run.TaskID,
+		EnvelopeID:   run.EnvelopeID,
+		LeaseID:      run.LeaseID,
+		TaskVersion:  run.TaskVersion,
+		HolderID:     run.HolderID,
+		pending:      make(map[string]PendingApproval),
+		approvedOnce: make(map[string]string),
+	}
 }
 
 func TestFailedEditRequiresReadBeforeNextEdit(t *testing.T) {
@@ -207,44 +335,6 @@ func TestGofmtCanFormatSamePathAgainAfterAnotherEdit(t *testing.T) {
 	}
 	format("gofmt-2")
 	assertFile(t, path, "package main\n\nfunc two() {}\n")
-}
-
-func TestRestoredCompletedEffectBlocksNewCallID(t *testing.T) {
-	ctx := context.Background()
-	store, err := sqlitestore.Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err := NewService(store, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = service.Close(ctx) })
-	run, err := service.StartRun(ctx, "do not replay")
-	if err != nil {
-		t.Fatal(err)
-	}
-	arguments := json.RawMessage(`{"input":"already-completed"}`)
-	digest := sha256.Sum256(arguments)
-	run.RestoreCompletedEffect(coding.ToolEditHashline, fmt.Sprintf("%x", digest[:]))
-	_, err = service.ExecuteTool(ctx, run, tool.Call{ID: "fresh-call-id", Name: coding.ToolEditHashline, Arguments: arguments}, nil)
-	if !errors.Is(err, hydaelyn.ErrActionReconcileRequired) {
-		t.Fatalf("semantic replay error=%v", err)
-	}
-}
-
-func TestCanonicalToolArgumentsGiveEquivalentSideEffectsOneIdentity(t *testing.T) {
-	first, err := canonicalToolArguments(json.RawMessage(`{"command":"deploy","network":true}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := canonicalToolArguments(json.RawMessage(" { \"network\" : true, \"command\" : \"deploy\" } "))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(first) != string(second) {
-		t.Fatalf("canonical arguments differ: %s != %s", first, second)
-	}
 }
 
 func TestConcurrentRunsKeepTasksLeasesAndApprovalsIsolated(t *testing.T) {
@@ -535,10 +625,6 @@ func TestResumeRunReacquiresRecoveredTaskWithoutChangingRunID(t *testing.T) {
 	}
 	if resumed.RunID != run.RunID || resumed.TaskID != run.TaskID || resumed.LeaseID == run.LeaseID {
 		t.Fatalf("resumed run=%+v original=%+v", resumed, run)
-	}
-	_, err = recovered.ExecuteTool(ctx, resumed, tool.Call{ID: "new-id-same-effect", Name: coding.ToolEditHashline, Arguments: editArguments}, nil)
-	if !errors.Is(err, hydaelyn.ErrActionReconcileRequired) {
-		t.Fatalf("resumed semantic replay error=%v", err)
 	}
 	if err := recovered.CompleteRun(ctx, resumed, "done after recovery", nil); err != nil {
 		t.Fatal(err)

@@ -234,9 +234,9 @@ auth:
 
 retry:
   enabled: true
-  max_retries: 10         # session-level retries after transport retries are exhausted
-  base_delay: 500ms       # exponential backoff base; randomized to 75%-100%, capped at 8s
-  max_delay: 5m           # fail fast instead of sleeping past this server-requested delay; 0s disables the cap
+  max_retries: 5          # full-engine retries after transport retries are exhausted
+  base_delay: 500ms       # exponential task-retry backoff base
+  max_delay: 5m           # maximum task or server-requested retry delay; 0s disables the cap
 
 agents:
   main:

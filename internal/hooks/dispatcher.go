@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	"github.com/Viking602/go-hydaelyn/provider"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/message"
+	"github.com/Viking602/venat/provider"
+	"github.com/Viking602/venat/tool"
 )
 
 type preToolPermissionKey struct{}
@@ -20,22 +20,26 @@ func PreToolPermissionFromContext(ctx context.Context) string {
 	return value
 }
 
-var ErrDenied = errors.New("hook denied operation")
-var ErrPreventContinuation = errors.New("hook prevented continuation")
+var (
+	ErrDenied              = errors.New("hook denied operation")
+	ErrPreventContinuation = errors.New("hook prevented continuation")
+)
 
-type Callback func(RunResult)
-type StartCallback func(RunInfo)
-type RunInfo struct {
-	Event         Event
-	Name          string
-	Source        string
-	SessionID     string
-	RunID         string
-	AgentID       string
-	ToolCallID    string
-	ToolName      string
-	StatusMessage string
-}
+type (
+	Callback      func(RunResult)
+	StartCallback func(RunInfo)
+	RunInfo       struct {
+		Event         Event
+		Name          string
+		Source        string
+		SessionID     string
+		RunID         string
+		AgentID       string
+		ToolCallID    string
+		ToolName      string
+		StatusMessage string
+	}
+)
 type Dispatcher struct {
 	Registry     *Registry
 	Runner       Runner
@@ -178,18 +182,22 @@ func matcherQuery(e Envelope) string {
 	return ""
 }
 
-type Metadata struct{ SessionID, TranscriptPath, RunID, AgentID, AgentType, ParentRunID, ParentToolCallID, CWD string }
-type Handler struct {
-	dispatcher Dispatcher
-	metadata   Metadata
-}
+type (
+	Metadata struct{ SessionID, TranscriptPath, RunID, AgentID, AgentType, ParentRunID, ParentToolCallID, CWD string }
+	Handler  struct {
+		dispatcher Dispatcher
+		metadata   Metadata
+	}
+)
 
 func NewHandler(dispatcher Dispatcher, metadata Metadata) *Handler {
 	return &Handler{dispatcher: dispatcher, metadata: metadata}
 }
+
 func (h *Handler) envelope(event Event) Envelope {
 	return Envelope{SessionID: h.metadata.SessionID, TranscriptPath: h.metadata.TranscriptPath, RunID: h.metadata.RunID, AgentID: h.metadata.AgentID, AgentType: h.metadata.AgentType, ParentRunID: h.metadata.ParentRunID, ParentToolCallID: h.metadata.ParentToolCallID, CWD: h.metadata.CWD, HookEventName: event}
 }
+
 func (h *Handler) BeforeToolCall(ctx context.Context, call *tool.Call) error {
 	if call == nil {
 		return nil
@@ -208,6 +216,7 @@ func (h *Handler) BeforeToolCall(ctx context.Context, call *tool.Call) error {
 	}
 	return nil
 }
+
 func (h *Handler) AfterToolCall(ctx context.Context, result *tool.Result) error {
 	if result == nil {
 		return nil
@@ -227,6 +236,7 @@ func (h *Handler) AfterToolCall(ctx context.Context, result *tool.Result) error 
 	h.dispatcher.Dispatch(ctx, e)
 	return nil
 }
+
 func (*Handler) TransformContext(_ context.Context, messages []message.Message) ([]message.Message, error) {
 	return messages, nil
 }
@@ -252,6 +262,17 @@ func WrapDriver(dispatcher Dispatcher, metadata Metadata, inner tool.Driver) too
 func (d *hookedDriver) Definition() tool.Definition { return d.inner.Definition() }
 
 func (d *hookedDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	prepared, err := d.Prepare(ctx, call, sink)
+	if err != nil {
+		return prepared.Result, err
+	}
+	if prepared.Complete {
+		return prepared.Result, nil
+	}
+	return prepared.Execute(ctx)
+}
+
+func (d *hookedDriver) Prepare(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.PreparedExecution, error) {
 	input := Envelope{
 		SessionID: d.metadata.SessionID, RunID: d.metadata.RunID, AgentID: d.metadata.AgentID,
 		AgentType: d.metadata.AgentType, ParentRunID: d.metadata.ParentRunID,
@@ -260,18 +281,18 @@ func (d *hookedDriver) Execute(ctx context.Context, call tool.Call, sink tool.Up
 	}
 	decision := d.dispatcher.Dispatch(ctx, input)
 	if decision.PreventContinuation {
-		return tool.Result{ToolCallID: call.ID, Name: call.Name, IsError: true, Content: decision.StopReason},
-			fmt.Errorf("%w: %s", ErrPreventContinuation, decision.StopReason)
+		result := tool.Result{ToolCallID: call.ID, Name: call.Name, IsError: true, Content: decision.StopReason}
+		return tool.PreparedExecution{Call: call, Result: result}, fmt.Errorf("%w: %s", ErrPreventContinuation, decision.StopReason)
 	}
 	if decision.Denied {
 		reason := strings.TrimSpace(decision.Reason)
 		if reason == "" {
 			reason = "blocked by hook"
 		}
-		return tool.Result{
+		return tool.PreparedExecution{Call: call, Result: tool.Result{
 			ToolCallID: call.ID, Name: call.Name, IsError: true,
 			Content: "Blocked by hook: " + reason,
-		}, nil
+		}, Complete: true}, nil
 	}
 	if len(decision.UpdatedInput) > 0 {
 		call.Arguments = decision.UpdatedInput
@@ -279,7 +300,39 @@ func (d *hookedDriver) Execute(ctx context.Context, call tool.Call, sink tool.Up
 	if decision.PermissionDecision != "" {
 		ctx = context.WithValue(ctx, preToolPermissionKey{}, decision.PermissionDecision)
 	}
-	result, err := d.inner.Execute(ctx, call, sink)
+	if preparing, ok := d.inner.(tool.PreparingDriver); ok {
+		prepared, err := preparing.Prepare(ctx, call, sink)
+		if prepared.Call.ID == "" {
+			prepared.Call = call
+		}
+		if err != nil {
+			prepared.Result, err = d.finish(ctx, prepared.Call, prepared.Result, err)
+			return prepared, err
+		}
+		if prepared.Complete {
+			prepared.Result, err = d.finish(ctx, prepared.Call, prepared.Result, nil)
+			return prepared, err
+		}
+		if prepared.Execute == nil {
+			return tool.PreparedExecution{Call: prepared.Call}, errors.New("prepared tool execution is empty")
+		}
+		execute := prepared.Execute
+		prepared.Execute = func(runCtx context.Context) (tool.Result, error) {
+			result, executeErr := execute(runCtx)
+			return d.finish(runCtx, prepared.Call, result, executeErr)
+		}
+		return prepared, nil
+	}
+	return tool.PreparedExecution{
+		Call: call,
+		Execute: func(runCtx context.Context) (tool.Result, error) {
+			result, err := d.inner.Execute(runCtx, call, sink)
+			return d.finish(runCtx, call, result, err)
+		},
+	}, nil
+}
+
+func (d *hookedDriver) finish(ctx context.Context, call tool.Call, result tool.Result, err error) (tool.Result, error) {
 	if result.ToolCallID == "" {
 		result.ToolCallID = call.ID
 	}

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	hyskill "github.com/Viking602/go-hydaelyn/skill"
+	hyskill "github.com/Viking602/venat/skill"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
 

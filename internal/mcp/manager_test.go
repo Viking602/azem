@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	"github.com/Viking602/go-hydaelyn/tool"
-	"github.com/Viking602/go-hydaelyn/transport/mcpcontract"
+	"github.com/Viking602/venat/message"
+	"github.com/Viking602/venat/tool"
+	"github.com/Viking602/venat/transport/mcpcontract"
 
 	"github.com/Viking602/azem/internal/config"
 )

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
-	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/venat/api"
 )
 
 // PrepareRecovery is called once at the exclusive application startup
@@ -146,45 +146,4 @@ func (p *Provider) CountToolCallCharges(ctx context.Context, runID, taskID strin
 		return 0, err
 	}
 	return intFromInt64(count)
-}
-
-func (p *Provider) ResolveReconcileAttempt(ctx context.Context, attemptID string, status api.ActionAttemptStatus, externalResultRef string) error {
-	switch status {
-	case api.ActionAttemptSucceeded, api.ActionAttemptFailed, api.ActionAttemptCancelled:
-	default:
-		return fmt.Errorf("invalid reconciled action status %q", status)
-	}
-	tx, err := p.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	queries := dbgen.New(tx)
-	data, err := queries.GetReconcileAttemptData(ctx, dbgen.GetReconcileAttemptDataParams{Kind: kindAction, Key1: attemptID, Status: string(api.ActionAttemptUnknown)})
-	if err != nil {
-		return fmt.Errorf("load reconcile attempt %s: %w", attemptID, err)
-	}
-	var attempt api.ActionAttempt
-	if err := json.Unmarshal(data, &attempt); err != nil {
-		return err
-	}
-	attempt.Status = status
-	attempt.RequiresReconcile = false
-	attempt.ExternalResultRef = externalResultRef
-	encoded, err := json.Marshal(attempt)
-	if err != nil {
-		return err
-	}
-	result, err := queries.ResolveReconcileAttemptCAS(ctx, dbgen.ResolveReconcileAttemptCASParams{Status: string(status), Data: encoded, Kind: kindAction, Key1: attemptID, Status_2: string(api.ActionAttemptUnknown)})
-	if err != nil {
-		return err
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if changed != 1 {
-		return fmt.Errorf("reconcile attempt %s changed concurrently", attemptID)
-	}
-	return tx.Commit()
 }

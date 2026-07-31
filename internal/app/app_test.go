@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Viking602/venat/api"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
@@ -21,6 +24,10 @@ import (
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
+
+func gitOutput(ctx context.Context, root string, arguments ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "git", append([]string{"-C", root}, arguments...)...).CombinedOutput()
+}
 
 func TestConcurrentUsagePersistenceDoesNotLoseUpdates(t *testing.T) {
 	ctx := context.Background()
@@ -1264,6 +1271,21 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 	}
 	if got := service.modelRouteEntries()[1].Route; got != (config.ModelRouteConfig{}) {
 		t.Fatalf("validation failure mutated route: %+v", got)
+	}
+}
+
+func TestReconciledStatusAcceptsTerminalOutcomes(t *testing.T) {
+	tests := map[string]api.ActionAttemptStatus{
+		"succeeded": api.ActionAttemptSucceeded,
+		"failed":    api.ActionAttemptFailed,
+		"timed_out": api.ActionAttemptTimeout,
+		"cancelled": api.ActionAttemptCancelled,
+	}
+	for input, want := range tests {
+		got, err := reconciledStatus(input)
+		if err != nil || got != want {
+			t.Fatalf("reconciledStatus(%q)=%q error=%v, want %q", input, got, err, want)
+		}
 	}
 }
 

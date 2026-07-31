@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 const maxSSEFrameBytes = 4 << 20

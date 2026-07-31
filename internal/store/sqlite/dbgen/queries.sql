@@ -75,6 +75,18 @@ SELECT version,data FROM leases WHERE run_id=? AND task_id=? ORDER BY version DE
 UPDATE leases SET status=?,data=? WHERE id=? AND version=?;
 -- name: ExtendLeaseCAS :execresult
 UPDATE leases SET expires_at=?,version=?,data=? WHERE id=? AND holder_id=? AND status=? AND version=?;
+-- name: ReleaseExpiredLeaseCAS :execresult
+UPDATE leases
+SET status=?,version=?,data=?
+WHERE leases.id=?
+  AND leases.status=?
+  AND leases.version=?
+  AND leases.expires_at<=?
+  AND leases.version=(
+    SELECT MAX(latest.version)
+    FROM leases AS latest
+    WHERE latest.run_id=leases.run_id AND latest.task_id=leases.task_id
+  );
 
 -- name: ListActiveLeases :many
 SELECT id,version,data FROM leases WHERE status=?;

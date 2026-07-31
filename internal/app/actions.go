@@ -9,10 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
-	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/venat/api"
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
@@ -219,13 +220,19 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if resolved, err := s.resolveLiveApproval(ctx, action.Target, action.Decision, "user"); resolved {
 			return err
 		}
-		for _, pending := range s.recovery.Approvals {
+		for index, pending := range s.recovery.Approvals {
 			if pending.Approval.ApprovalID != action.Target {
 				continue
 			}
-			if err := s.coding.ResolveRecoveredApproval(ctx, pending.Approval.RunID, pending.Approval.ApprovalID, pending.Token.TokenID, action.Decision); err != nil {
+			if err := s.coding.ResolveRecoveredApproval(ctx, pending.Approval, pending.Token.TokenID, action.Decision); err != nil {
 				return err
 			}
+			if s.providers != nil {
+				if err := s.providers.ResumeRecoveredRun(ctx, pending.Approval.RunID); err != nil {
+					return fmt.Errorf("resume approved run %s: %w", pending.Approval.RunID, err)
+				}
+			}
+			s.recovery.Approvals = slices.Delete(s.recovery.Approvals, index, index+1)
 			s.emit(ctx, Event{Kind: EventApprovalResolved, RunID: pending.Approval.RunID, State: action.Decision, Text: pending.Approval.ApprovalID})
 			return nil
 		}
@@ -238,10 +245,28 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if err != nil {
 			return err
 		}
+		attemptIndex := -1
+		runID := ""
+		for index, attempt := range s.recovery.ReconcileAttempts {
+			if attempt.AttemptID == action.Target {
+				attemptIndex = index
+				runID = attempt.RunID
+				break
+			}
+		}
+		if runID == "" {
+			return fmt.Errorf("reconciliation attempt %q is not pending", action.Target)
+		}
 		if err := s.reconciler.ResolveReconcileAttempt(ctx, action.Target, status, "user-confirmed"); err != nil {
 			return err
 		}
-		s.emit(ctx, Event{Kind: EventRecoveryState, State: "reconciled", Text: action.Target, Data: map[string]string{"decision": string(status)}})
+		if s.providers != nil {
+			if err := s.providers.ResumeRecoveredRun(ctx, runID); err != nil {
+				return fmt.Errorf("resume reconciled run %s: %w", runID, err)
+			}
+		}
+		s.recovery.ReconcileAttempts = slices.Delete(s.recovery.ReconcileAttempts, attemptIndex, attemptIndex+1)
+		s.emit(ctx, Event{Kind: EventRecoveryState, RunID: runID, State: "reconciled", Text: action.Target, Data: map[string]string{"decision": string(status)}})
 		return nil
 	case ActionLogout:
 		if s.authentication == nil {
@@ -687,8 +712,10 @@ func reconciledStatus(value string) (api.ActionAttemptStatus, error) {
 		return api.ActionAttemptFailed, nil
 	case "cancelled", "canceled":
 		return api.ActionAttemptCancelled, nil
+	case "timeout", "timed_out", "timed out":
+		return api.ActionAttemptTimeout, nil
 	default:
-		return "", fmt.Errorf("reconcile decision must be succeeded, failed, or cancelled")
+		return "", fmt.Errorf("reconcile decision must be succeeded, failed, timed out, or cancelled")
 	}
 }
 

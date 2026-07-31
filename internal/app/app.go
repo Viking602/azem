@@ -25,7 +25,7 @@ import (
 	"github.com/Viking602/azem/internal/recovery"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
-	"github.com/Viking602/go-hydaelyn/message"
+	"github.com/Viking602/venat/message"
 )
 
 var (

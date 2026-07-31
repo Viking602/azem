@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	hyagent "github.com/Viking602/go-hydaelyn/agent"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/multiagent"
+	hyagent "github.com/Viking602/venat/agent"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/multiagent"
 )
 
 const (
@@ -105,7 +105,7 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 			RunID:        state.RunID,
 			Type:         api.TaskTypeWorker,
 			AllowsAction: className == ImplementerClass || className == ReviewerClass,
-			Goal:         class.Instructions,
+			Goal:         codingTaskGoal(className),
 			Input:        raw,
 			Status:       api.TaskStatusCreated,
 			InputSchema:  class.InputSchema,
@@ -129,6 +129,21 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 		}
 	}
 	return []multiagent.Dispatch{dispatch}, nil
+}
+
+func codingTaskGoal(className string) string {
+	switch className {
+	case PlannerClass:
+		return "Plan the requested workspace change."
+	case ImplementerClass:
+		return "Implement the approved workspace change."
+	case ReviewerClass:
+		return "Review the implementation against the request."
+	case ReporterClass:
+		return "Report the verified result to the user."
+	default:
+		return "Complete the assigned team task."
+	}
 }
 
 func activeOrFailed(state multiagent.TeamState) bool {

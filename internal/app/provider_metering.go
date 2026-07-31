@@ -9,7 +9,7 @@ import (
 
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 // meteredProviderDriver creates one durable fact immediately before every

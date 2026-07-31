@@ -262,7 +262,7 @@ func Default() Config {
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
 		},
 		Retry: RetryConfig{
-			Enabled: true, MaxRetries: 10, BaseDelay: "500ms", BaseDelayDuration: 500 * time.Millisecond,
+			Enabled: true, MaxRetries: 5, BaseDelay: "500ms", BaseDelayDuration: 500 * time.Millisecond,
 			MaxDelay: "5m", MaxDelayDuration: 5 * time.Minute,
 		},
 		Agents: AgentsConfig{

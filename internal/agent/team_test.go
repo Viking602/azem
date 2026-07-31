@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/multiagent"
-	"github.com/Viking602/go-hydaelyn/provider"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/multiagent"
+	"github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/skills"
@@ -235,7 +235,7 @@ func TestCodingTeamRolePromptContracts(t *testing.T) {
 			t.Fatalf("%s dispatches=%#v error=%v", name, dispatches, err)
 		}
 		dispatch := dispatches[0]
-		if dispatch.Task.Goal != class.Instructions ||
+		if dispatch.Task.Goal != codingTaskGoal(name) ||
 			!reflect.DeepEqual(dispatch.Task.OutputSchema, class.OutputSchema) ||
 			!reflect.DeepEqual(dispatch.OutputPolicy.Schema, class.OutputSchema) ||
 			!dispatch.OutputPolicy.Validate || dispatch.Task.AllowsAction != expected.allows {

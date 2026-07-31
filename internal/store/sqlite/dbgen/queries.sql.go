@@ -2346,6 +2346,42 @@ func (q *Queries) QuarantineStartedProviderRequests(ctx context.Context) error {
 	return err
 }
 
+const releaseExpiredLeaseCAS = `-- name: ReleaseExpiredLeaseCAS :execresult
+UPDATE leases
+SET status=?,version=?,data=?
+WHERE leases.id=?
+  AND leases.status=?
+  AND leases.version=?
+  AND leases.expires_at<=?
+  AND leases.version=(
+    SELECT MAX(latest.version)
+    FROM leases AS latest
+    WHERE latest.run_id=leases.run_id AND latest.task_id=leases.task_id
+  )
+`
+
+type ReleaseExpiredLeaseCASParams struct {
+	Status    string `db:"status"`
+	Version   int64  `db:"version"`
+	Data      []byte `db:"data"`
+	ID        string `db:"id"`
+	Status_2  string `db:"status_2"`
+	Version_2 int64  `db:"version_2"`
+	ExpiresAt int64  `db:"expires_at"`
+}
+
+func (q *Queries) ReleaseExpiredLeaseCAS(ctx context.Context, arg ReleaseExpiredLeaseCASParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, releaseExpiredLeaseCAS,
+		arg.Status,
+		arg.Version,
+		arg.Data,
+		arg.ID,
+		arg.Status_2,
+		arg.Version_2,
+		arg.ExpiresAt,
+	)
+}
+
 const resolveReconcileAttemptCAS = `-- name: ResolveReconcileAttemptCAS :execresult
 UPDATE records SET status=?,data=? WHERE kind=? AND key1=? AND status=?
 `

@@ -11,8 +11,8 @@ import (
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
-	"github.com/Viking602/go-hydaelyn/stream"
+	hyprovider "github.com/Viking602/venat/provider"
+	"github.com/Viking602/venat/stream"
 )
 
 type phase4MeteringDriver struct{ calls int }

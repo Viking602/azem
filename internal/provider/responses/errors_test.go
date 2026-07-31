@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"resty.dev/v3"
+
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 func testResponse(status int, header http.Header, body string) *resty.Response {
@@ -30,6 +32,9 @@ func TestHTTPErrorClassifiesAndBoundsBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "slow down") {
 		t.Fatalf("provider diagnostic was lost from Error(): %v", err)
+	}
+	if hyprovider.ErrorKindOf(err) != hyprovider.ErrorRateLimit || !hyprovider.IsRetryableError(err) {
+		t.Fatalf("SDK classification = %q retryable=%v", hyprovider.ErrorKindOf(err), hyprovider.IsRetryableError(err))
 	}
 }
 
@@ -91,30 +96,9 @@ func TestRetryAfterParsesCodexAndRateLimitHints(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			header := make(http.Header)
 			header.Set(test.header, test.value)
-			if got := retryAfter(header, "", now); got != test.want {
+			if got := retryAfter(header, now); got != test.want {
 				t.Fatalf("retry delay = %s, want %s", got, test.want)
 			}
 		})
-	}
-	for _, test := range []struct {
-		body string
-		want time.Duration
-	}{
-		{body: "Your quota will reset after 1h2m3.5s", want: time.Hour + 2*time.Minute + 3500*time.Millisecond},
-		{body: "Please retry in 250ms", want: 250 * time.Millisecond},
-		{body: `"retryDelay": "34.25s"`, want: 34250 * time.Millisecond},
-		{body: "try again in ~5 min.", want: 5 * time.Minute},
-	} {
-		if got := retryAfter(nil, test.body, now); got != test.want {
-			t.Fatalf("retry delay for %q = %s, want %s", test.body, got, test.want)
-		}
-	}
-}
-
-func TestStreamErrorCarriesRetryHint(t *testing.T) {
-	err := streamError([]byte(`{"code":"server_is_overloaded","message":"Please retry in 12s"}`))
-	var apiError *APIError
-	if !errors.As(err, &apiError) || apiError.RetryAfter != 12*time.Second {
-		t.Fatalf("stream error retry hint = %+v", err)
 	}
 }

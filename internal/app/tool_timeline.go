@@ -2,8 +2,13 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -12,14 +17,81 @@ import (
 	"unicode/utf8"
 
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/go-hydaelyn/coding"
-	"github.com/Viking602/go-hydaelyn/message"
+	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/message"
 )
 
 const (
 	maxInlineToolRecordBytes  = 64 << 10
 	maxToolRecordPreviewBytes = 16 << 10
+	maxWorkspaceFileBytes     = 1 << 20
+	maxWorkspaceTotalBytes    = 8 << 20
 )
+
+var errWorkspaceEvidenceLimit = errors.New("workspace evidence limit exceeded")
+
+func readWorkspaceEvidence(root, file string, remaining *int64) ([]byte, error) {
+	if remaining == nil || *remaining <= 0 {
+		return nil, errWorkspaceEvidenceLimit
+	}
+	if filepath.IsAbs(file) {
+		return nil, fmt.Errorf("workspace path must be relative")
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	rootAbs, err = filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return nil, err
+	}
+	targetAbs, err := filepath.Abs(filepath.Join(rootAbs, filepath.Clean(file)))
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := filepath.EvalSymlinks(targetAbs)
+	if err != nil {
+		return nil, err
+	}
+	relative, err := filepath.Rel(rootAbs, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("workspace path escapes root")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	limit := min(int64(maxWorkspaceFileBytes), *remaining)
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, errWorkspaceEvidenceLimit
+	}
+	handle, err := os.Open(resolved)
+	if err != nil {
+		return nil, err
+	}
+	defer handle.Close()
+	payload, err := io.ReadAll(io.LimitReader(handle, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > limit {
+		return nil, errWorkspaceEvidenceLimit
+	}
+	*remaining -= int64(len(payload))
+	return payload, nil
+}
+
+func sha256Hex(value []byte) string {
+	digest := sha256.Sum256(value)
+	return hex.EncodeToString(digest[:])
+}
+
+func workspaceLimitOrCaptureCode(err error) string {
+	if errors.Is(err, errWorkspaceEvidenceLimit) {
+		return "limit_exceeded"
+	}
+	return "capture_failed"
+}
 
 type durableToolTimeline struct {
 	store            *session.Service

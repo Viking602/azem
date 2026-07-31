@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 type chunkBody struct {

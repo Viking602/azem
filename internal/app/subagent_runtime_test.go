@@ -17,9 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
+	"github.com/Viking602/venat/tool"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/auth"
@@ -681,6 +682,157 @@ func TestSubagentGetOutputReturnsOrderedSnapshotsAndMarksDelivery(t *testing.T) 
 	}
 	if _, _, err := decodeSubagentQueryInput(json.RawMessage(`{"task_ids":["one"],"timeout_ms":600001}`)); err == nil {
 		t.Fatal("oversized timeout was accepted")
+	}
+}
+
+func TestRecoverInterruptedSubagentRequeuesExistingDurableChild(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = providerStore.Close(context.Background()) })
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	runtime, err := newSubagentRuntime(ctx, cfg.Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.cancel)
+	runtime.running = runtime.cfg.MaxConcurrency
+	finished := time.Now().UTC()
+	interrupted := agentservice.SubagentRun{
+		ID: "recoverable", SessionID: "session", ParentRunID: "parent", ParentAgentID: "main",
+		ChildRunID: "durable-child", Description: "inspect", Type: "explore",
+		State: agentservice.SubagentInterrupted, Summary: processRestartInterruption, Error: processRestartInterruption,
+		Provider: "chatgpt", Model: "main", CapabilityMode: "read-only",
+		RequestedIsolation: "none", Isolation: "none", CWD: t.TempDir(),
+		StartedAt: finished.Add(-time.Minute), FinishedAt: finished,
+	}
+	if err := store.Create(ctx, interrupted); err != nil {
+		t.Fatal(err)
+	}
+	parent := subagentParentRuntime{
+		SessionID: "session", ParentRunID: "parent", ParentAgentID: "main",
+		ProviderID: "chatgpt", ModelID: "main", WorkspaceRoot: t.TempDir(),
+	}
+	if err := runtime.recoverInterrupted(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.recoverInterrupted(parent); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.Get(ctx, interrupted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != agentservice.SubagentQueued || recovered.ChildRunID != interrupted.ChildRunID ||
+		recovered.Error != "" || !recovered.FinishedAt.IsZero() {
+		t.Fatalf("recovered durable child = %#v", recovered)
+	}
+	runtime.mu.Lock()
+	active := runtime.active[interrupted.ID]
+	pending := append([]string(nil), runtime.pending...)
+	runtime.mu.Unlock()
+	if active == nil || active.run.ChildRunID != interrupted.ChildRunID ||
+		len(pending) != 1 || pending[0] != interrupted.ID ||
+		!runtime.ownsDurableRun(interrupted.ChildRunID) {
+		t.Fatalf("active recovery=%#v pending=%v", active, pending)
+	}
+}
+
+type completedSubagentDriver struct{}
+
+func (completedSubagentDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "test", Models: []string{"model"}}
+}
+
+func (completedSubagentDriver) Stream(context.Context, hyprovider.Request) (hyprovider.Stream, error) {
+	return hyprovider.NewSliceStream([]hyprovider.Event{
+		{Kind: hyprovider.EventTextDelta, Text: "recovered child"},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}), nil
+}
+
+func TestRecoveredSubagentExecutesExistingDurableChildToCompletion(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = providerStore.Close(context.Background()) })
+	workspace := t.TempDir()
+	coding, err := agentservice.NewService(providerStore, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coding.Close(context.Background()) })
+	child, err := coding.StartRun(ctx, "continue durable child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coding.ReleaseRun(ctx, child); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coding.Runner().Recover(ctx, child.RunID); err != nil {
+		t.Fatal(err)
+	}
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted := agentservice.SubagentRun{
+		ID: "recoverable-execution", SessionID: "session", ParentRunID: "parent", ParentAgentID: "main",
+		ChildRunID: child.RunID, Description: "continue durable child", Type: "explore",
+		State: agentservice.SubagentInterrupted, Summary: processRestartInterruption, Error: processRestartInterruption,
+		Provider: "test", Model: "model", CapabilityMode: "read-only",
+		RequestedIsolation: "none", Isolation: "none", CWD: workspace,
+		StartedAt: time.Now().Add(-time.Minute), FinishedAt: time.Now(),
+	}
+	if err := store.Create(ctx, interrupted); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := newSubagentRuntime(ctx, config.Default().Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	})
+	if _, err := runtime.Drivers(subagentParentRuntime{
+		SessionID: "session", ParentRunID: "parent", ParentAgentID: "main",
+		ProviderID: "test", ModelID: "model", WorkspaceRoot: workspace,
+		Driver: completedSubagentDriver{}, Coding: coding,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		persisted, loadErr := store.Get(ctx, interrupted.ID)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if subagentTerminal(persisted.State) {
+			if persisted.State != agentservice.SubagentCompleted ||
+				persisted.ChildRunID != child.RunID ||
+				persisted.Output != "recovered child" {
+				t.Fatalf("recovered child = %#v", persisted)
+			}
+			durable, runErr := coding.Runner().Run(ctx, child.RunID)
+			if runErr != nil || durable.Status != api.RunStatusCompleted {
+				t.Fatalf("durable child status=%v error=%v", durable.Status, runErr)
+			}
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

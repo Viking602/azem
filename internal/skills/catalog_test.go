@@ -67,11 +67,11 @@ func TestLoadPrecedenceAndBundledProtection(t *testing.T) {
 		description string
 	}{
 		{filepath.Join(home, ".agents", "skills"), "home agents"},
-		{filepath.Join(home, ".hydaelyn", "skills"), "home hydaelyn"},
+		{filepath.Join(home, ".venat", "skills"), "home venat"},
 		{filepath.Join(home, ".claude", "skills"), "home claude"},
 		{filepath.Join(configDir, "skills"), "config"},
 		{filepath.Join(workspace, ".agents", "skills"), "project agents"},
-		{filepath.Join(workspace, ".hydaelyn", "skills"), "project hydaelyn"},
+		{filepath.Join(workspace, ".venat", "skills"), "project venat"},
 		{filepath.Join(workspace, ".claude", "skills"), "project claude"},
 		{filepath.Join(workspace, ".azem", "skills"), "project azem"},
 		{additionalFirst, "additional first"},
@@ -80,6 +80,8 @@ func TestLoadPrecedenceAndBundledProtection(t *testing.T) {
 	for _, root := range roots {
 		writeTestSkill(t, root.path, "demo", root.description, strings.ToUpper(strings.ReplaceAll(root.description, " ", "_")))
 	}
+	legacyRoot := filepath.Join(home, ".hydaelyn", "skills")
+	writeTestSkill(t, legacyRoot, "legacy-only", "Legacy skill", "LEGACY_BODY")
 	writeTestSkill(t, additionalLast, "verify", "Disk verify", "DISK_VERIFY_BODY")
 
 	catalog, err := Load(LoadOptions{
@@ -96,6 +98,19 @@ func TestLoadPrecedenceAndBundledProtection(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	snapshot := catalog.Snapshot()
+	if _, ok := snapshot.Registry.Get("legacy-only"); ok {
+		t.Fatal("legacy .hydaelyn skill root was loaded")
+	}
+	var legacyDiagnostic bool
+	for _, diagnostic := range snapshot.Diagnostics {
+		if diagnostic.Path == legacyRoot && strings.Contains(diagnostic.Message, "legacy discovery root is ignored") {
+			legacyDiagnostic = true
+			break
+		}
+	}
+	if !legacyDiagnostic {
+		t.Fatalf("legacy migration diagnostic missing: %#v", snapshot.Diagnostics)
+	}
 	demo, ok := snapshot.Registry.Get("demo")
 	if !ok {
 		t.Fatal("demo skill is missing")

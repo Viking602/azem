@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/provider/responses"

@@ -10,10 +10,10 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/go-hydaelyn/message"
+	"github.com/Viking602/venat/message"
 
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
-	hyskill "github.com/Viking602/go-hydaelyn/skill"
+	hyprovider "github.com/Viking602/venat/provider"
+	hyskill "github.com/Viking602/venat/skill"
 )
 
 func TestContextProfileFromRequestClassifiesEveryWireContribution(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 func TestNormalizeUsageAndWrapReporterApplyCacheModels(t *testing.T) {

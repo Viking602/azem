@@ -12,10 +12,10 @@ import (
 
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
-	hyagent "github.com/Viking602/go-hydaelyn/agent"
-	"github.com/Viking602/go-hydaelyn/message"
-	"github.com/Viking602/go-hydaelyn/tool"
-	"github.com/Viking602/go-hydaelyn/transport/mcpcontract"
+	hyagent "github.com/Viking602/venat/agent"
+	"github.com/Viking602/venat/message"
+	"github.com/Viking602/venat/tool"
+	"github.com/Viking602/venat/transport/mcpcontract"
 )
 
 func TestHookSourcesExcludeUntrustedProjectPaths(t *testing.T) {
