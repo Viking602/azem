@@ -2,7 +2,7 @@
 
 # Azem
 
-**A local-first AI coding agent for your terminal.**
+**A local-first AI coding agent for your terminal and desktop.**
 
 Governed tools, durable sessions, side-effect recovery, MCP integrations, Agent Skills, and multi-agent workflows - all from a keyboard-driven TUI.
 
@@ -20,7 +20,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 
 | Capability | What it provides |
 |---|---|
-| **Terminal-native workflow** | A fast Bubble Tea interface with streaming output, dedicated approval cards, concise tool summaries, colorized inline diffs, and token usage |
+| **Terminal and desktop workflows** | A fast Bubble Tea TUI plus a Wails desktop workspace with streaming output, inline approvals and diffs, Agent inspection, recovery, and role-model settings |
 | **Governed execution** | Prompt, Auto Review, and YOLO approval modes for file, shell, and external actions |
 | **Durable state** | SQLite-backed sessions, runs, approvals, leases, side-effect reconciliation, and Team resume |
 | **Multiple providers** | ChatGPT through Codex-compatible OAuth and Grok through API or CLI-proxy transport |
@@ -42,6 +42,15 @@ git clone https://github.com/Viking602/azem.git
 cd azem
 make build
 ```
+
+To build the Wails desktop app, install [Bun](https://bun.sh/) and run:
+
+```bash
+make gui
+./azem-gui
+```
+
+The desktop app and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. The React UI receives a bounded event projection; it does not expose arbitrary shell or filesystem bindings.
 
 ### 2. Start it in a project
 
@@ -117,6 +126,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 ```mermaid
 flowchart LR
     U[Terminal UI] --> A[Application runtime]
+    D[Wails desktop UI] --> A
     A --> P[ChatGPT or Grok]
     A --> G[Approval and tool governance]
     G --> T[Files, tests, and shell]
