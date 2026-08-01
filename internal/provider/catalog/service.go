@@ -24,19 +24,43 @@ const (
 )
 
 type Model struct {
-	ID                string         `json:"id"`
-	Name              string         `json:"name,omitempty"`
-	Description       string         `json:"description,omitempty"`
-	ContextWindow     int            `json:"contextWindow,omitempty"`
-	ReasoningLevels   []string       `json:"reasoningLevels,omitempty"`
-	DefaultReasoning  string         `json:"defaultReasoning,omitempty"`
-	SupportsTools     bool           `json:"supportsTools"`
-	SupportsParallel  bool           `json:"supportsParallel"`
-	SupportsReasoning bool           `json:"supportsReasoning"`
-	Aliases           []string       `json:"aliases,omitempty"`
-	InputModalities   []string       `json:"inputModalities,omitempty"`
-	OutputModalities  []string       `json:"outputModalities,omitempty"`
-	Pricing           map[string]any `json:"pricing,omitempty"`
+	ID                   string         `json:"id"`
+	Name                 string         `json:"name,omitempty"`
+	Description          string         `json:"description,omitempty"`
+	ContextWindow        int            `json:"contextWindow,omitempty"`
+	ReasoningLevels      []string       `json:"reasoningLevels,omitempty"`
+	DefaultReasoning     string         `json:"defaultReasoning,omitempty"`
+	SupportsTools        bool           `json:"supportsTools"`
+	SupportsParallel     bool           `json:"supportsParallel"`
+	SupportsReasoning    bool           `json:"supportsReasoning"`
+	Aliases              []string       `json:"aliases,omitempty"`
+	InputModalities      []string       `json:"inputModalities,omitempty"`
+	OutputModalities     []string       `json:"outputModalities,omitempty"`
+	Pricing              map[string]any `json:"pricing,omitempty"`
+	ServiceTiers         []ServiceTier  `json:"serviceTiers,omitempty"`
+	AdditionalSpeedTiers []string       `json:"additionalSpeedTiers,omitempty"`
+}
+
+type ServiceTier struct {
+	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+func (m Model) SupportsServiceTier(id string) bool {
+	for _, tier := range m.ServiceTiers {
+		if tier.ID == id {
+			return true
+		}
+	}
+	if id == "priority" {
+		for _, tier := range m.AdditionalSpeedTiers {
+			if tier == "fast" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type Result struct {
@@ -247,18 +271,20 @@ func decode(provider string, data []byte) ([]Model, bool, string, error) {
 	case "chatgpt":
 		var payload struct {
 			Models []struct {
-				ID               string          `json:"id"`
-				Slug             string          `json:"slug"`
-				Name             string          `json:"name"`
-				Title            string          `json:"title"`
-				DisplayName      string          `json:"display_name"`
-				Description      string          `json:"description"`
-				ContextWindow    int             `json:"context_window"`
-				DefaultReasoning string          `json:"default_reasoning_level"`
-				ReasoningLevels  reasoningLevels `json:"supported_reasoning_levels"`
-				SupportsTools    *bool           `json:"supports_tools"`
-				SupportsParallel *bool           `json:"supports_parallel_tool_calls"`
-				InputModalities  []string        `json:"input_modalities"`
+				ID                   string          `json:"id"`
+				Slug                 string          `json:"slug"`
+				Name                 string          `json:"name"`
+				Title                string          `json:"title"`
+				DisplayName          string          `json:"display_name"`
+				Description          string          `json:"description"`
+				ContextWindow        int             `json:"context_window"`
+				DefaultReasoning     string          `json:"default_reasoning_level"`
+				ReasoningLevels      reasoningLevels `json:"supported_reasoning_levels"`
+				SupportsTools        *bool           `json:"supports_tools"`
+				SupportsParallel     *bool           `json:"supports_parallel_tool_calls"`
+				InputModalities      []string        `json:"input_modalities"`
+				ServiceTiers         []ServiceTier   `json:"service_tiers"`
+				AdditionalSpeedTiers []string        `json:"additional_speed_tiers"`
 			} `json:"models"`
 			Data    json.RawMessage `json:"data"`
 			HasMore bool            `json:"has_more"`
@@ -282,7 +308,8 @@ func decode(provider string, data []byte) ([]Model, bool, string, error) {
 				Description: item.Description, ContextWindow: item.ContextWindow,
 				ReasoningLevels: []string(item.ReasoningLevels), DefaultReasoning: item.DefaultReasoning,
 				SupportsReasoning: len(item.ReasoningLevels) > 0 || item.DefaultReasoning != "",
-				InputModalities:   item.InputModalities,
+				InputModalities:   item.InputModalities, ServiceTiers: item.ServiceTiers,
+				AdditionalSpeedTiers: item.AdditionalSpeedTiers,
 			}
 			model.SupportsTools = item.SupportsTools == nil || *item.SupportsTools
 			model.SupportsParallel = item.SupportsParallel != nil && *item.SupportsParallel
@@ -409,6 +436,12 @@ func mergeDuplicates(models []Model) []Model {
 		current.InputModalities = appendUnique(current.InputModalities, model.InputModalities...)
 		current.OutputModalities = appendUnique(current.OutputModalities, model.OutputModalities...)
 		current.ReasoningLevels = appendUnique(current.ReasoningLevels, model.ReasoningLevels...)
+		current.AdditionalSpeedTiers = appendUnique(current.AdditionalSpeedTiers, model.AdditionalSpeedTiers...)
+		for _, tier := range model.ServiceTiers {
+			if !current.SupportsServiceTier(tier.ID) {
+				current.ServiceTiers = append(current.ServiceTiers, tier)
+			}
+		}
 		current.SupportsTools = current.SupportsTools || model.SupportsTools
 		current.SupportsParallel = current.SupportsParallel || model.SupportsParallel
 		current.SupportsReasoning = current.SupportsReasoning || model.SupportsReasoning

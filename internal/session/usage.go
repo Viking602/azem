@@ -74,6 +74,7 @@ type Usage struct {
 	TeamUncached                     int    `json:"teamUncached,omitempty"`
 	ContextLimit                     int    `json:"contextLimit,omitempty"`
 	CacheReported                    bool   `json:"cacheReported,omitempty"`
+	CacheWriteReported               bool   `json:"cacheWriteReported,omitempty"`
 	MainCacheReported                bool   `json:"mainCacheReported,omitempty"`
 	LastRequestKind                  string `json:"lastRequestKind,omitempty"`
 	LastProvider                     string `json:"lastProvider,omitempty"`
@@ -135,6 +136,9 @@ func (u *Usage) Apply(data map[string]string) {
 	}
 	if value, ok := atoiData(data, "cacheWriteTokens"); ok {
 		u.CacheWriteTokens += value
+		if value > 0 {
+			u.CacheWriteReported = true
+		}
 		if requestKind == "main" {
 			u.MainCacheWrite += value
 		}
@@ -143,6 +147,9 @@ func (u *Usage) Apply(data map[string]string) {
 		} else if requestKind == "team" {
 			u.TeamCacheWrite += value
 		}
+	}
+	if data["cacheWriteStatus"] == "reported" {
+		u.CacheWriteReported = true
 	}
 	if value, ok := atoiData(data, "outputTokens"); ok {
 		if data["aggregateOnly"] != "true" {
@@ -221,6 +228,9 @@ func (u Usage) Data() map[string]string {
 	}
 	if u.CacheReported {
 		data["cacheReported"] = "true"
+	}
+	if u.CacheWriteReported {
+		data["cacheWriteReported"] = "true"
 	}
 	if u.MainCacheReported {
 		data["mainCacheReported"] = "true"

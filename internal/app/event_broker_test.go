@@ -10,10 +10,10 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/multiagent"
-	"github.com/Viking602/go-hydaelyn/stream"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/multiagent"
+	"github.com/Viking602/venat/stream"
+	"github.com/Viking602/venat/tool"
 )
 
 func TestEventBrokerCoalescesDeltasBeforeLifecycleBarrier(t *testing.T) {

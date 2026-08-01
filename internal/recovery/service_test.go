@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/go-hydaelyn/coding"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/tool"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/venat/api"
 )
 
 type recordingRunResumer struct {

@@ -83,14 +83,19 @@ type AuthConfig struct {
 }
 
 type ProvidersConfig struct {
-	ChatGPT ProviderConfig `yaml:"chatgpt"`
-	Grok    GrokConfig     `yaml:"grok"`
+	ChatGPT ChatGPTConfig `yaml:"chatgpt"`
+	Grok    GrokConfig    `yaml:"grok"`
 }
 
 type ProviderConfig struct {
 	Enabled    bool          `yaml:"enabled"`
 	CatalogTTL time.Duration `yaml:"-"`
 	TTL        string        `yaml:"catalog_ttl"`
+}
+
+type ChatGPTConfig struct {
+	ProviderConfig `yaml:",inline"`
+	FastMode       bool `yaml:"fast_mode"`
 }
 
 type GrokConfig struct {
@@ -102,6 +107,7 @@ type GrokConfig struct {
 type AgentsConfig struct {
 	Main       MainAgentConfig  `yaml:"main"`
 	Team       TeamConfig       `yaml:"team"`
+	Plan       ModelRouteConfig `yaml:"plan" json:"plan"`
 	Compaction ModelRouteConfig `yaml:"compaction" json:"compaction"`
 	Context    ContextConfig    `yaml:"context"`
 	Subagents  SubagentConfig   `yaml:"subagents"`
@@ -258,11 +264,11 @@ func Default() Config {
 		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt", Shell: ShellConfig{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2}},
 		Auth:      AuthConfig{Store: "sqlite", ImportCodex: true, ImportGrok: true},
 		Providers: ProvidersConfig{
-			ChatGPT: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute},
+			ChatGPT: ChatGPTConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}},
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
 		},
 		Retry: RetryConfig{
-			Enabled: true, MaxRetries: 10, BaseDelay: "500ms", BaseDelayDuration: 500 * time.Millisecond,
+			Enabled: true, MaxRetries: 5, BaseDelay: "500ms", BaseDelayDuration: 500 * time.Millisecond,
 			MaxDelay: "5m", MaxDelayDuration: 5 * time.Minute,
 		},
 		Agents: AgentsConfig{
@@ -376,7 +382,7 @@ func (c *Config) Validate() error {
 	if !c.Workspace.Shell.StopOnOutputLimit {
 		return fmt.Errorf("workspace.shell.stop_on_output_limit must be true")
 	}
-	for name, provider := range map[string]*ProviderConfig{"chatgpt": &c.Providers.ChatGPT, "grok": &c.Providers.Grok.ProviderConfig} {
+	for name, provider := range map[string]*ProviderConfig{"chatgpt": &c.Providers.ChatGPT.ProviderConfig, "grok": &c.Providers.Grok.ProviderConfig} {
 		ttl, err := time.ParseDuration(provider.TTL)
 		if err != nil || ttl <= 0 {
 			return fmt.Errorf("providers.%s.catalog_ttl must be a positive duration", name)
@@ -412,6 +418,9 @@ func (c *Config) Validate() error {
 	c.Agents.Main.MaxWallClockDuration = mainWallClock
 	if c.Agents.Team.MaxConcurrency < 1 || c.Agents.Team.MaxTicks < 1 {
 		return fmt.Errorf("agents.team limits must be positive")
+	}
+	if err := validateModelRoute("agents.plan", c.Agents.Plan); err != nil {
+		return err
 	}
 	if err := validateModelRoute("agents.compaction", c.Agents.Compaction); err != nil {
 		return err

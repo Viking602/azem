@@ -13,12 +13,11 @@ import (
 
 	"resty.dev/v3"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
-	azprovider "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/responses"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
@@ -58,8 +57,8 @@ func TestDriverReportsRateLimitRetriesThroughGenericObserver(t *testing.T) {
 		t.Fatal(err)
 	}
 	driver.retryDelay = func(int) time.Duration { return 0 }
-	var progress []azprovider.RetryProgress
-	driver.SetRetryObserver(func(retry azprovider.RetryProgress) error {
+	var progress []hyprovider.RetryProgress
+	driver.SetRetryObserver(func(retry hyprovider.RetryProgress) error {
 		progress = append(progress, retry)
 		return nil
 	})
@@ -78,7 +77,7 @@ func TestDriverReportsRateLimitRetriesThroughGenericObserver(t *testing.T) {
 		t.Fatalf("requests=%d progress=%d, want 3 requests and 2 retry events", transport.requests, len(progress))
 	}
 	for index, retry := range progress {
-		if retry.Attempt != index+1 || retry.Max != azprovider.DefaultMaxStreamRetries || retry.Cause == nil {
+		if retry.Attempt != index+1 || retry.Max != hyprovider.DefaultMaxStreamRetries || retry.Cause == nil {
 			t.Fatalf("retry %d=%#v", index+1, retry)
 		}
 		if !strings.Contains(retry.Cause.Error(), "request ID req_server_456") {

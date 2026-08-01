@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	hyagent "github.com/Viking602/go-hydaelyn/agent"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/multiagent"
+	hyagent "github.com/Viking602/venat/agent"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/multiagent"
 )
 
 const (
@@ -23,8 +23,9 @@ const (
 // Prompt is immutable run input; every scheduling decision and retry count is
 // otherwise derived from the supplied TeamState snapshot.
 type CodingScheduler struct {
-	Prompt  string
-	Classes map[string]multiagent.AgentClass
+	Prompt      string
+	Classes     map[string]multiagent.AgentClass
+	RetryPolicy api.RetryPolicy
 }
 
 func (s CodingScheduler) Next(ctx context.Context, state multiagent.TeamState) ([]multiagent.Dispatch, error) {
@@ -105,12 +106,13 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 			RunID:        state.RunID,
 			Type:         api.TaskTypeWorker,
 			AllowsAction: className == ImplementerClass || className == ReviewerClass,
-			Goal:         class.Instructions,
+			Goal:         codingTaskGoal(className),
 			Input:        raw,
 			Status:       api.TaskStatusCreated,
 			InputSchema:  class.InputSchema,
 			OutputSchema: class.OutputSchema,
 			Budget:       &api.TaskBudget{},
+			RetryPolicy:  s.RetryPolicy,
 		},
 		Input: raw,
 		OutputPolicy: hyagent.OutputPolicy{
@@ -129,6 +131,21 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 		}
 	}
 	return []multiagent.Dispatch{dispatch}, nil
+}
+
+func codingTaskGoal(className string) string {
+	switch className {
+	case PlannerClass:
+		return "Plan the requested workspace change."
+	case ImplementerClass:
+		return "Implement the approved workspace change."
+	case ReviewerClass:
+		return "Review the implementation against the request."
+	case ReporterClass:
+		return "Report the verified result to the user."
+	default:
+		return "Complete the assigned team task."
+	}
 }
 
 func activeOrFailed(state multiagent.TeamState) bool {

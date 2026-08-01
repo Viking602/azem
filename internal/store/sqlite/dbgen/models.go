@@ -101,6 +101,7 @@ type ProviderRequest struct {
 	InputTokens          int64  `db:"input_tokens"`
 	CachedTokens         int64  `db:"cached_tokens"`
 	CacheWriteTokens     int64  `db:"cache_write_tokens"`
+	CacheWriteReported   int64  `db:"cache_write_reported"`
 	OutputTokens         int64  `db:"output_tokens"`
 	ReasoningTokens      int64  `db:"reasoning_tokens"`
 	TotalTokens          int64  `db:"total_tokens"`

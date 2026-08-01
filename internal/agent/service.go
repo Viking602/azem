@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,20 +8,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Viking602/azem/internal/skills"
-	"github.com/Viking602/go-hydaelyn"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/coding"
-	"github.com/Viking602/go-hydaelyn/tool"
-	"github.com/Viking602/go-hydaelyn/worker"
+	"github.com/Viking602/venat"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/tool"
 )
 
 const mainAgentID = "azem-main"
@@ -32,8 +28,18 @@ const (
 	defaultRunLeaseHeartbeatInterval = 30 * time.Second
 )
 
+const (
+	approvalMetadataOperationID = "azem.operation_id"
+	approvalMetadataScope       = "azem.scope_fingerprint"
+)
+
+type recoveredApprovalDecision struct {
+	fingerprint string
+	approved    bool
+}
+
 type Service struct {
-	runner               *hydaelyn.Runner
+	runner               *venat.Runner
 	store                api.StoreProvider
 	workspace            coding.Workspace
 	tools                *tool.Bus
@@ -50,10 +56,8 @@ type Service struct {
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	wg                   sync.WaitGroup
-}
-
-type succeededActionAttemptLister interface {
-	ListSucceededActionAttempts(context.Context, string, string) ([]api.ActionAttempt, error)
+	approvalMu           sync.Mutex
+	recoveredApprovals   map[string]map[string]recoveredApprovalDecision
 }
 
 var ErrTerminalReportMissing = errors.New("terminal worker report is missing")
@@ -85,29 +89,12 @@ replace N..M:
 +final content only
 Copy ¶PATH#TAG and line numbers from the latest coding.read_file result. Allowed operations: replace N or N..M, delete N or N..M, insert before/after N, insert head/tail, replace block N, delete block N. Never use @@, ~N:M, -old rows, or bare context.`
 
-type toolCallJournal interface {
-	RecordToolCallCharge(context.Context, string, string, string, string, string) (bool, error)
-	CountToolCallCharges(context.Context, string, string) (int, error)
-}
-
-type executionArgumentsDriver struct {
-	inner     tool.Driver
-	arguments json.RawMessage
-}
-
-func (d executionArgumentsDriver) Definition() tool.Definition { return d.inner.Definition() }
-
 type definitionOverrideDriver struct {
 	tool.Driver
 	definition tool.Definition
 }
 
 func (d definitionOverrideDriver) Definition() tool.Definition { return d.definition }
-
-func (d executionArgumentsDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
-	call.Arguments = append(json.RawMessage(nil), d.arguments...)
-	return d.inner.Execute(ctx, call, sink)
-}
 
 type EditRecovery struct {
 	mu           sync.Mutex
@@ -184,25 +171,27 @@ func (recovery *EditRecovery) Observe(call tool.Call, result tool.Result, execut
 	}
 }
 
+type RunExecutionPolicy struct {
+	Budget      *api.TaskBudget
+	RetryPolicy api.RetryPolicy
+}
+
 type Run struct {
-	RunID            string
-	Goal             string
-	TaskID           string
-	LeaseID          string
-	TaskVersion      int
-	HolderID         string
-	pending          map[string]PendingApproval
-	approvedOnce     map[string]string
-	completedMu      sync.Mutex
-	completedEffects map[string]struct{}
-	completedCallIDs map[string]string
-	chargedToolCalls atomic.Int64
-	editRecovery     EditRecovery
-	leaseCancel      context.CancelFunc
-	leaseParentStop  func() bool
-	leaseDone        <-chan error
-	leaseStopOnce    sync.Once
-	leaseErr         error
+	RunID           string
+	Goal            string
+	TaskID          string
+	EnvelopeID      string
+	LeaseID         string
+	TaskVersion     int
+	HolderID        string
+	pending         map[string]PendingApproval
+	approvedOnce    map[string]string
+	editRecovery    EditRecovery
+	leaseCancel     context.CancelFunc
+	leaseParentStop func() bool
+	leaseDone       <-chan error
+	leaseStopOnce   sync.Once
+	leaseErr        error
 }
 
 type PendingApproval struct {
@@ -284,7 +273,7 @@ func NewService(store api.StoreProvider, workspaceRoot string, options ...Servic
 		}
 	}
 	policy := NewApprovalPolicy()
-	runner, err := hydaelyn.NewProduction(api.Config{StoreProvider: store, PolicyEngine: policy})
+	runner, err := venat.NewProduction(api.Config{StoreProvider: store, PolicyEngine: policy})
 	if err != nil {
 		return nil, err
 	}
@@ -297,6 +286,7 @@ func NewService(store api.StoreProvider, workspaceRoot string, options ...Servic
 		teamMaxConcurrency: settings.teamMaxConcurrency, teamMaxTicks: settings.teamMaxTicks,
 		skills: settings.skills, runLeaseTTL: defaultRunLeaseTTL, runHeartbeatInterval: defaultRunLeaseHeartbeatInterval,
 		ctx: serviceCtx, cancel: serviceCancel,
+		recoveredApprovals: make(map[string]map[string]recoveredApprovalDecision),
 	}
 	service.shellRuntime = newShellRuntime(serviceCtx, settings.shellOptions)
 	drivers, err := service.WorkspaceDrivers(context.Background(), workspaceRoot)
@@ -308,7 +298,16 @@ func NewService(store api.StoreProvider, workspaceRoot string, options ...Servic
 	return service, nil
 }
 
-func (s *Service) Runner() *hydaelyn.Runner { return s.runner }
+func (s *Service) Runner() *venat.Runner { return s.runner }
+
+func (s *Service) ResolveReconcileAttempt(ctx context.Context, attemptID string, status api.ActionAttemptStatus, externalResultRef string) error {
+	_, err := s.runner.ResolveActionAttempt(ctx, api.ResolveActionAttemptCommand{
+		AttemptID:         attemptID,
+		Status:            status,
+		ExternalResultRef: externalResultRef,
+	})
+	return err
+}
 
 func (s *Service) SkillSnapshot() skills.Snapshot {
 	if s == nil || s.skills == nil {
@@ -321,7 +320,7 @@ func (s *Service) StartRun(ctx context.Context, request string) (*Run, error) {
 	return s.StartRunWithMetadata(ctx, request, nil)
 }
 
-func (s *Service) StartRunWithMetadata(ctx context.Context, request string, metadata map[string]string) (*Run, error) {
+func (s *Service) StartRunWithMetadata(ctx context.Context, request string, metadata map[string]string, policies ...RunExecutionPolicy) (*Run, error) {
 	runID, err := newID("run")
 	if err != nil {
 		return nil, err
@@ -349,9 +348,14 @@ func (s *Service) StartRunWithMetadata(ctx context.Context, request string, meta
 	if err != nil {
 		return nil, err
 	}
+	var executionPolicy RunExecutionPolicy
+	if len(policies) > 0 {
+		executionPolicy = policies[0]
+	}
 	task, err := s.runner.CreateTask(ctx, api.CreateTaskCommand{
 		RunID: run.ID, TaskID: taskID, ParentTaskID: root.ID, Type: api.TaskTypeWorker,
 		Goal: request, OwnerAgentID: mainAgentID, AssignedAgentID: mainAgentID, AllowsAction: true,
+		Budget: executionPolicy.Budget, RetryPolicy: executionPolicy.RetryPolicy,
 	})
 	if err != nil {
 		return nil, err
@@ -370,8 +374,8 @@ func (s *Service) StartRunWithMetadata(ctx context.Context, request string, meta
 		return nil, fmt.Errorf("acquire coding task lease: no lease granted")
 	}
 	tracked := &Run{
-		RunID: run.ID, Goal: request, TaskID: task.ID, LeaseID: lease.ID, TaskVersion: task.Version, HolderID: mainAgentID,
-		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string), completedEffects: make(map[string]struct{}), completedCallIDs: make(map[string]string),
+		RunID: run.ID, Goal: request, TaskID: task.ID, EnvelopeID: envelope.ID, LeaseID: lease.ID, TaskVersion: lease.TaskVersion, HolderID: mainAgentID,
+		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string),
 	}
 	s.startRunLeaseHeartbeat(ctx, tracked)
 	return tracked, nil
@@ -424,95 +428,14 @@ func (s *Service) ResumeRun(ctx context.Context, runID string) (*Run, error) {
 		return nil, fmt.Errorf("resume coding run %s: no lease granted", runID)
 	}
 	tracked := &Run{
-		RunID: runID, Goal: task.Goal, TaskID: task.ID, LeaseID: lease.ID, TaskVersion: lease.TaskVersion, HolderID: mainAgentID,
-		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string), completedEffects: make(map[string]struct{}), completedCallIDs: make(map[string]string),
+		RunID: runID, Goal: task.Goal, TaskID: task.ID, EnvelopeID: envelope.ID, LeaseID: lease.ID, TaskVersion: lease.TaskVersion, HolderID: mainAgentID,
+		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string),
 	}
 	if tracked.Goal == "" {
 		tracked.Goal = durable.Request
 	}
-	lister, ok := s.store.(succeededActionAttemptLister)
-	if !ok {
-		_ = s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: lease.ID, HolderID: mainAgentID})
-		return nil, fmt.Errorf("resume coding run %s: durable action replay ledger is unavailable", runID)
-	}
-	attempts, err := lister.ListSucceededActionAttempts(ctx, runID, task.ID)
-	if err != nil {
-		_ = s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: lease.ID, HolderID: mainAgentID})
-		return nil, err
-	}
-	for _, attempt := range attempts {
-		tracked.RestoreCompletedCall(attempt.ActionID, attempt.ToolName, attempt.InputHash)
-	}
-	journal, ok := s.store.(toolCallJournal)
-	if !ok {
-		_ = s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: lease.ID, HolderID: mainAgentID})
-		return nil, fmt.Errorf("resume coding run %s: durable tool-call journal is unavailable", runID)
-	}
-	chargedToolCalls, err := journal.CountToolCallCharges(ctx, runID, task.ID)
-	if err != nil {
-		_ = s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: lease.ID, HolderID: mainAgentID})
-		return nil, err
-	}
-	tracked.chargedToolCalls.Store(int64(chargedToolCalls))
 	s.startRunLeaseHeartbeat(ctx, tracked)
 	return tracked, nil
-}
-
-// RestoreCompletedEffect installs a host-authored crash checkpoint guard. It
-// prevents a resumed model from executing the same non-idempotent tool input
-// under a newly generated call ID.
-func (run *Run) RestoreCompletedEffect(toolName, argumentsSHA256 string) {
-	run.RestoreCompletedCall("", toolName, argumentsSHA256)
-}
-
-func (run *Run) RestoreCompletedCall(callID, toolName, argumentsSHA256 string) {
-	if run == nil || toolName == "" || argumentsSHA256 == "" {
-		return
-	}
-	if run.completedEffects == nil {
-		run.completedEffects = make(map[string]struct{})
-	}
-	if run.completedCallIDs == nil {
-		run.completedCallIDs = make(map[string]string)
-	}
-	run.completedMu.Lock()
-	defer run.completedMu.Unlock()
-	effectKey := toolName + "\x00" + argumentsSHA256
-	run.completedEffects[effectKey] = struct{}{}
-	if callID != "" {
-		run.completedCallIDs[callID] = effectKey
-	}
-}
-
-func (run *Run) ChargedToolCalls() int {
-	if run == nil {
-		return 0
-	}
-	return int(run.chargedToolCalls.Load())
-}
-
-func (s *Service) ChargedToolCalls(ctx context.Context, runID string) (int, error) {
-	projection, err := s.runner.Recover(ctx, runID)
-	if err != nil {
-		return 0, err
-	}
-	taskID := ""
-	for _, task := range projection.Tasks {
-		if task.Type == api.TaskTypeWorker {
-			if taskID != "" {
-				return 0, fmt.Errorf("run %s has multiple worker tasks", runID)
-			}
-			taskID = task.ID
-		}
-	}
-	if taskID == "" {
-		return 0, fmt.Errorf("run %s worker task is missing", runID)
-	}
-	journal, ok := s.store.(toolCallJournal)
-	if !ok {
-		return 0, fmt.Errorf("durable tool-call journal is unavailable")
-	}
-	return journal.CountToolCallCharges(ctx, runID, taskID)
 }
 
 // ReleaseRun relinquishes a recovered lease when the host cannot safely
@@ -594,6 +517,21 @@ func (run *Run) stopRunLeaseHeartbeat() error {
 	return run.leaseErr
 }
 
+func (s *Service) TransferRunExecution(run *Run) (api.TaskEnvelope, api.TaskExecutionLease, error) {
+	if run == nil {
+		return api.TaskEnvelope{}, api.TaskExecutionLease{}, fmt.Errorf("run is nil")
+	}
+	if err := run.stopRunLeaseHeartbeat(); err != nil {
+		return api.TaskEnvelope{}, api.TaskExecutionLease{}, err
+	}
+	return api.TaskEnvelope{
+			ID: run.EnvelopeID, RunID: run.RunID, TaskID: run.TaskID, Status: "pending", TaskVersion: run.TaskVersion,
+		}, api.TaskExecutionLease{
+			ID: run.LeaseID, RunID: run.RunID, TaskID: run.TaskID, EnvelopeID: run.EnvelopeID,
+			HolderType: api.HolderAgent, HolderID: run.HolderID, TaskVersion: run.TaskVersion, Status: api.LeaseStatusActive,
+		}, nil
+}
+
 func (s *Service) dispatchTask(ctx context.Context, command api.DispatchTaskCommand) (api.TaskEnvelope, error) {
 	for {
 		envelope, err := s.runner.DispatchTask(ctx, command)
@@ -620,126 +558,85 @@ func (s *Service) ExecuteTool(ctx context.Context, run *Run, call tool.Call, sin
 	return s.ExecuteDriver(ctx, run, driver, call, sink)
 }
 
-// ExecuteDriver applies the same approval policy and durable action-attempt
-// boundary used by built-in coding tools to a turn-scoped external driver.
-func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Driver, call tool.Call, sink tool.UpdateSink) (ExecutionResult, error) {
+// PrepareDriver applies Azem's approval policy without running the underlying
+// operation. ready is true only when ExecutePreparedDriver may run immediately.
+func (s *Service) PrepareDriver(ctx context.Context, run *Run, driver tool.Driver, call tool.Call) (result ExecutionResult, ready bool, err error) {
 	if run == nil {
-		return ExecutionResult{}, fmt.Errorf("run is nil")
+		return ExecutionResult{}, false, fmt.Errorf("run is nil")
 	}
 	if driver == nil {
-		return ExecutionResult{}, fmt.Errorf("tool driver is nil")
+		return ExecutionResult{}, false, fmt.Errorf("tool driver is nil")
 	}
 	definition := driver.Definition()
 	if call.Name != definition.Name {
-		return ExecutionResult{}, fmt.Errorf("tool call %q does not match driver %q", call.Name, definition.Name)
-	}
-	executionArguments := append(json.RawMessage(nil), call.Arguments...)
-	canonicalArguments, err := canonicalToolArguments(call.Arguments)
-	if err != nil {
-		return ExecutionResult{}, fmt.Errorf("canonicalize %s arguments: %w", call.Name, err)
-	}
-	digest := sha256.Sum256(canonicalArguments)
-	inputHash := fmt.Sprintf("%x", digest[:])
-	journal, ok := s.store.(toolCallJournal)
-	if !ok {
-		return ExecutionResult{}, fmt.Errorf("durable tool-call journal is unavailable")
-	}
-	charged, err := journal.RecordToolCallCharge(ctx, run.RunID, run.TaskID, call.ID, call.Name, inputHash)
-	if err != nil {
-		return ExecutionResult{}, err
-	}
-	if charged {
-		run.chargedToolCalls.Add(1)
+		return ExecutionResult{}, false, fmt.Errorf("tool call %q does not match driver %q", call.Name, definition.Name)
 	}
 	if blocked, required := run.editRecovery.BlockedEdit(call); required {
-		return ExecutionResult{Result: blocked, Executed: true}, nil
-	}
-	nonIdempotentEffect := !definition.Idempotent && !definition.Security.Idempotent &&
-		(definition.EffectType == tool.EffectWrite || definition.EffectType == tool.EffectExternalSideEffect)
-	effectKey := call.Name + "\x00" + inputHash
-	if nonIdempotentEffect {
-		run.completedMu.Lock()
-		_, completed := run.completedEffects[effectKey]
-		sameCall := run.completedCallIDs[call.ID] == effectKey
-		run.completedMu.Unlock()
-		if completed && !sameCall {
-			return ExecutionResult{}, hydaelyn.ErrActionReconcileRequired
-		}
+		return ExecutionResult{Result: blocked, Executed: true}, false, nil
 	}
 	scope := scopeForCall(definition, call)
+	approvalKey := approvalCallKey(call)
 	needsApproval := definition.RequiresApproval || definition.Security.RequiresApproval || definition.RequiresActionTask || definition.EffectType == tool.EffectWrite || definition.EffectType == tool.EffectExternalSideEffect
 	if definition.Metadata["approval"] == "allow" {
 		needsApproval = definition.Metadata["network"] == "prompt" && toolCallRequestsNetwork(call.Arguments)
 	}
-	if needsApproval && !s.policy.sessionGranted(scope.Fingerprint) && run.approvedOnce[call.ID] != scope.Fingerprint {
-		if pending, found := run.pending[call.ID]; found && pending.Scope.Fingerprint == scope.Fingerprint {
-			return ExecutionResult{Approval: &pending}, nil
+	approved := s.policy.sessionGranted(scope.Fingerprint) || run.approvedOnce[approvalKey] == scope.Fingerprint
+	if needsApproval && !approved {
+		if recovered, found := s.consumeRecoveredApproval(run.RunID, approvalKey, scope.Fingerprint); found {
+			if !recovered.approved {
+				return ExecutionResult{Result: tool.Result{
+					ToolCallID: call.ID,
+					Name:       call.Name,
+					Content:    "Denied by user",
+					IsError:    true,
+				}}, false, nil
+			}
+			approved = true
 		}
-		approval, token, err := s.runner.RequestApproval(ctx, api.RequestApprovalCommand{
-			RunID: run.RunID, TaskID: run.TaskID, ActionID: call.ID, RequesterAgentID: run.HolderID,
+	}
+	if needsApproval && !approved {
+		if pending, found := run.pending[approvalKey]; found && pending.Scope.Fingerprint == scope.Fingerprint {
+			return ExecutionResult{Approval: &pending}, false, nil
+		}
+		approval, token, requestErr := s.runner.RequestApproval(ctx, api.RequestApprovalCommand{
+			RunID: run.RunID, TaskID: run.TaskID, ActionID: approvalKey, RequesterAgentID: run.HolderID,
 			Reason: fmt.Sprintf("%s requests %s", run.HolderID, call.Name), RiskSummary: scope.Risk + " · " + scope.Target,
 			RequestedAction: summarizeArguments(call.Arguments),
+			Metadata: map[string]string{
+				approvalMetadataOperationID: approvalKey,
+				approvalMetadataScope:       scope.Fingerprint,
+			},
 		})
-		if err != nil {
-			return ExecutionResult{}, err
+		if requestErr != nil {
+			return ExecutionResult{}, false, requestErr
 		}
 		pending := PendingApproval{Request: approval, Token: token, Call: call, Scope: scope, Effect: string(definition.EffectType), Replayable: definition.Idempotent || definition.Security.Idempotent}
-		run.pending[call.ID] = pending
-		return ExecutionResult{Approval: &pending}, nil
+		run.pending[approvalKey] = pending
+		return ExecutionResult{Approval: &pending}, false, nil
 	}
+	return ExecutionResult{}, true, nil
+}
 
-	delete(run.approvedOnce, call.ID)
-	if nonIdempotentEffect {
-		run.completedMu.Lock()
-		if _, completed := run.completedEffects[effectKey]; completed {
-			run.completedMu.Unlock()
-			return ExecutionResult{}, hydaelyn.ErrActionReconcileRequired
-		}
-		run.completedEffects[effectKey] = struct{}{}
-		run.completedMu.Unlock()
-	}
-	governed := worker.GovernedToolBus{
-		Runner: s.runner, Bus: tool.NewBus(executionArgumentsDriver{inner: driver, arguments: executionArguments}), RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID,
-		HolderType: api.HolderAgent, HolderID: run.HolderID, TaskVersion: run.TaskVersion,
-	}
-	identityCall := call
-	identityCall.Arguments = canonicalArguments
-	result, err := governed.Execute(withAuthorizedInvocation(ctx, scope), identityCall, sink)
+// ExecutePreparedDriver runs an operation that already passed PrepareDriver.
+func (s *Service) ExecutePreparedDriver(ctx context.Context, run *Run, driver tool.Driver, call tool.Call, sink tool.UpdateSink) (ExecutionResult, error) {
+	delete(run.approvedOnce, approvalCallKey(call))
+	result, err := driver.Execute(ctx, call, sink)
 	result = addHashlineRetryGuidance(call, result)
 	run.editRecovery.Observe(call, result, err)
 	if err != nil {
 		return ExecutionResult{Result: result}, err
 	}
-	if nonIdempotentEffect && result.IsError {
-		run.completedMu.Lock()
-		delete(run.completedEffects, effectKey)
-		run.completedMu.Unlock()
-	} else if nonIdempotentEffect {
-		run.completedMu.Lock()
-		run.completedCallIDs[call.ID] = effectKey
-		run.completedMu.Unlock()
-	}
 	return ExecutionResult{Result: result, Executed: true}, nil
 }
 
-func canonicalToolArguments(arguments json.RawMessage) (json.RawMessage, error) {
-	if len(bytes.TrimSpace(arguments)) == 0 {
-		return json.RawMessage(`{}`), nil
+// ExecuteDriver preserves the direct-call API by preparing and then executing.
+// Venat workers call PrepareDriver before journaling side effects.
+func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Driver, call tool.Call, sink tool.UpdateSink) (ExecutionResult, error) {
+	prepared, ready, err := s.PrepareDriver(ctx, run, driver, call)
+	if err != nil || !ready {
+		return prepared, err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(arguments))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return nil, err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return nil, fmt.Errorf("multiple JSON values")
-		}
-		return nil, err
-	}
-	return json.Marshal(value)
+	return s.ExecutePreparedDriver(ctx, run, driver, call, sink)
 }
 
 func (s *Service) ResolveApproval(ctx context.Context, run *Run, callID string, mode ApprovalMode, decidedBy string) error {
@@ -772,26 +669,84 @@ func (s *Service) ResolveApproval(ctx context.Context, run *Run, callID string, 
 	return nil
 }
 
-func (s *Service) ResolveRecoveredApproval(ctx context.Context, runID, approvalID, tokenID, decision string) error {
+func (s *Service) ResolveRecoveredApproval(ctx context.Context, approval api.ApprovalRequest, tokenID, decision string) error {
+	mode := ApprovalOnce
 	switch decision {
-	case "once", "session", "approved", "approve":
+	case "session":
+		mode = ApprovalSession
+		decision = "approved"
+	case "once", "approved", "approve":
 		decision = "approved"
 	case "denied", "deny", "rejected", "reject":
+		mode = ApprovalDenied
 		decision = "rejected"
 	default:
 		return fmt.Errorf("invalid approval decision %q", decision)
 	}
+	operationID := approval.Metadata[approvalMetadataOperationID]
+	if operationID == "" {
+		operationID = approval.ActionID
+	}
+	fingerprint := approval.Metadata[approvalMetadataScope]
+	if operationID == "" || fingerprint == "" {
+		return fmt.Errorf("recovered approval %s is missing its durable operation scope", approval.ApprovalID)
+	}
+	if tokenID != "" {
+		token, err := s.runner.RecoverResumeToken(ctx, api.RecoverResumeTokenCommand{TokenID: tokenID})
+		if err != nil {
+			return err
+		}
+		if token.RunID != approval.RunID || token.ApprovalID != approval.ApprovalID {
+			return fmt.Errorf("recovered approval %s does not own resume token %s", approval.ApprovalID, tokenID)
+		}
+	}
 	if err := s.runner.DecideApproval(ctx, api.DecideApprovalCommand{
-		RunID: runID, ApprovalID: approvalID, DecidedBy: "user", Decision: decision,
+		RunID: approval.RunID, ApprovalID: approval.ApprovalID, DecidedBy: "user", Decision: decision,
 	}); err != nil {
 		return err
 	}
-	if tokenID != "" {
-		if _, err := s.runner.RecoverResumeToken(ctx, api.RecoverResumeTokenCommand{TokenID: tokenID}); err != nil {
-			return err
-		}
+	if mode == ApprovalSession {
+		s.policy.GrantSession(fingerprint)
+	} else {
+		s.storeRecoveredApproval(approval.RunID, operationID, recoveredApprovalDecision{
+			fingerprint: fingerprint,
+			approved:    decision == "approved",
+		})
 	}
 	return nil
+}
+
+func approvalCallKey(call tool.Call) string {
+	if call.OperationID != "" {
+		return call.OperationID
+	}
+	return call.ID
+}
+
+func (s *Service) storeRecoveredApproval(runID, operationID string, decision recoveredApprovalDecision) {
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
+	byOperation := s.recoveredApprovals[runID]
+	if byOperation == nil {
+		byOperation = make(map[string]recoveredApprovalDecision)
+		s.recoveredApprovals[runID] = byOperation
+	}
+	byOperation[operationID] = decision
+}
+
+func (s *Service) consumeRecoveredApproval(runID, operationID, fingerprint string) (recoveredApprovalDecision, bool) {
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
+	byOperation := s.recoveredApprovals[runID]
+	decision, found := byOperation[operationID]
+	if !found || decision.fingerprint != fingerprint {
+		return recoveredApprovalDecision{}, false
+	}
+	delete(byOperation, operationID)
+	if len(byOperation) == 0 {
+		delete(s.recoveredApprovals, runID)
+	}
+	return decision, true
 }
 
 func (s *Service) ToolDefinitions() []tool.Definition {
@@ -834,14 +789,6 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 			definition.Description = hashlineEditToolDescription
 			driver = definitionOverrideDriver{Driver: driver, definition: definition}
 		}
-		// gofmt is inherently idempotent: formatting the same path again either
-		// applies the current canonical format or reports no change. Hydaelyn
-		// v0.11.9 omits this metadata, which makes the anti-replay guard reject a
-		// legitimate second format after another edit as reconciliation-required.
-		if definition.Name == coding.ToolGofmt && !definition.Idempotent {
-			definition.Idempotent = true
-			driver = definitionOverrideDriver{Driver: driver, definition: definition}
-		}
 		drivers = append(drivers, driver)
 	}
 	if s.shellPolicy != "deny" {
@@ -856,119 +803,6 @@ func workspaceIsGitRepo(ctx context.Context, root string) bool {
 	}
 	output, err := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--is-inside-work-tree").Output()
 	return err == nil && strings.TrimSpace(string(output)) == "true"
-}
-
-// ExecuteTeamDriver records a side-effect attempt for a TeamRunner worker
-// before invoking the raw driver. Hydaelyn v0.10.1 drops Task.AllowsAction
-// while materializing multi-agent dispatches, so the adapter restores that
-// durable task capability before crossing the side-effect boundary.
-func (s *Service) ExecuteTeamDriver(ctx context.Context, runID string, driver tool.Driver, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
-	if s == nil || s.runner == nil || s.store == nil || driver == nil {
-		return tool.Result{}, fmt.Errorf("team tool runtime is unavailable")
-	}
-	if strings.TrimSpace(runID) == "" {
-		return tool.Result{}, fmt.Errorf("team tool run ID is missing")
-	}
-	definition := driver.Definition()
-	ctx = withAuthorizedInvocation(ctx, scopeForCall(definition, call))
-	task, lease, err := s.enableTeamTaskActions(ctx, runID)
-	if err != nil {
-		return tool.Result{}, err
-	}
-	attemptID, err := newID("attempt")
-	if err != nil {
-		return tool.Result{}, err
-	}
-	attempt, err := s.runner.StartActionAttempt(ctx, api.StartActionAttemptCommand{
-		AttemptID:      attemptID,
-		ActionID:       call.ID,
-		RunID:          runID,
-		TaskID:         task.ID,
-		LeaseID:        lease.ID,
-		HolderType:     lease.HolderType,
-		HolderID:       lease.HolderID,
-		TaskVersion:    task.Version,
-		ToolName:       call.Name,
-		IdempotencyKey: call.ID,
-		InputHash:      fmt.Sprintf("%x", sha256.Sum256(call.Arguments)),
-	})
-	if err != nil {
-		return tool.Result{}, err
-	}
-	if attempt.AttemptID != attemptID || attempt.RequiresReconcile || attempt.Status != api.ActionAttemptRunning {
-		return tool.Result{}, hydaelyn.ErrActionReconcileRequired
-	}
-	result, executeErr := driver.Execute(ctx, call, sink)
-	status := api.ActionAttemptSucceeded
-	requiresReconcile := false
-	switch {
-	case executeErr != nil:
-		status = api.ActionAttemptUnknown
-		requiresReconcile = true
-	case result.IsError:
-		status = api.ActionAttemptFailed
-	}
-	_, completeErr := s.runner.CompleteActionAttempt(context.WithoutCancel(ctx), api.CompleteActionAttemptCommand{
-		RunID:             runID,
-		TaskID:            task.ID,
-		LeaseID:           lease.ID,
-		HolderType:        lease.HolderType,
-		HolderID:          lease.HolderID,
-		TaskVersion:       task.Version,
-		AttemptID:         attempt.AttemptID,
-		Status:            status,
-		RequiresReconcile: requiresReconcile,
-	})
-	if executeErr != nil || completeErr != nil {
-		return result, errors.Join(executeErr, completeErr)
-	}
-	return result, nil
-}
-
-func (s *Service) enableTeamTaskActions(ctx context.Context, runID string) (api.Task, api.TaskExecutionLease, error) {
-	uow, err := s.store.Begin(ctx)
-	if err != nil {
-		return api.Task{}, api.TaskExecutionLease{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = uow.Rollback(context.WithoutCancel(ctx))
-		}
-	}()
-	tasks, err := uow.Tasks().ListTasks(ctx, runID)
-	if err != nil {
-		return api.Task{}, api.TaskExecutionLease{}, err
-	}
-	var task api.Task
-	var lease api.TaskExecutionLease
-	for _, candidate := range tasks {
-		candidateLease, found, loadErr := uow.Leases().ActiveLeaseForTask(ctx, runID, candidate.ID)
-		if loadErr != nil {
-			return api.Task{}, api.TaskExecutionLease{}, loadErr
-		}
-		if !found || candidateLease.Status != api.LeaseStatusActive || !candidateLease.ExpiresAt.After(time.Now()) || candidateLease.HolderType != api.HolderAgent {
-			continue
-		}
-		if task.ID != "" {
-			return api.Task{}, api.TaskExecutionLease{}, fmt.Errorf("team run %q has multiple active agent tasks", runID)
-		}
-		task, lease = candidate, candidateLease
-	}
-	if task.ID == "" {
-		return api.Task{}, api.TaskExecutionLease{}, api.ErrLeaseNotActive
-	}
-	if !task.AllowsAction {
-		task.AllowsAction = true
-		if err := uow.Tasks().SaveTask(ctx, task); err != nil {
-			return api.Task{}, api.TaskExecutionLease{}, err
-		}
-	}
-	if err := uow.Commit(ctx); err != nil {
-		return api.Task{}, api.TaskExecutionLease{}, err
-	}
-	committed = true
-	return task, lease, nil
 }
 
 func (s *Service) CompleteRun(ctx context.Context, run *Run, summary string, failure error) error {
@@ -1001,7 +835,13 @@ func (s *Service) CompleteRun(ctx context.Context, run *Run, summary string, fai
 	}); err != nil {
 		return fmt.Errorf("submit run report: %w", err)
 	}
-	projection, err := s.runner.Recover(ctx, run.RunID)
+	return s.finalizeReportedRunTo(ctx, run.RunID, target)
+}
+
+// finalizeReportedRunTo advances a report authored directly by Azem when
+// execution never reached Venat's worker.
+func (s *Service) finalizeReportedRunTo(ctx context.Context, runID string, target api.RunStatus) error {
+	projection, err := s.runner.Recover(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("project reported run: %w", err)
 	}
@@ -1009,11 +849,11 @@ func (s *Service) CompleteRun(ctx context.Context, run *Run, summary string, fai
 		return nil
 	}
 	if target == api.RunStatusCompleted {
-		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: run.RunID, To: api.RunStatusComposingResponse}); err != nil {
+		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusComposingResponse}); err != nil {
 			return fmt.Errorf("compose run response from %s: %w", projection.Run.Status, err)
 		}
 	}
-	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: run.RunID, To: target}); err != nil {
+	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: target}); err != nil {
 		return fmt.Errorf("finish run: %w", err)
 	}
 	return nil

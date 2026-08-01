@@ -3,14 +3,13 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/tool"
 )
 
 const (
@@ -45,7 +44,7 @@ type subagentSpawnDriver struct {
 
 func (d *subagentSpawnDriver) Definition() tool.Definition {
 	additional := false
-	description := "Spawn one supervised subagent task. Returns a durable task ID for background work."
+	description := "Spawn one supervised subagent task. Read-only and shared-workspace tasks block until terminal; only write-capable worktree tasks may run in the background."
 	subagentType := tool.Schema{
 		Type:        "string",
 		Description: "Enabled role; omit only when enabled `worker` is desired, otherwise select an advertised role explicitly.",
@@ -95,7 +94,7 @@ func (d *subagentSpawnDriver) Definition() tool.Definition {
 				},
 				"background": {
 					Type:        "boolean",
-					Description: "Defaults true; use false only when the result blocks the parent's next action.",
+					Description: "Defaults false. Detached execution is honored only for a write-capable task with isolation=worktree; all other tasks block until terminal.",
 				},
 				"capability_mode": {
 					Type:        "string",
@@ -145,7 +144,7 @@ func (d *subagentSpawnDriver) Execute(ctx context.Context, call tool.Call, _ too
 	if err != nil {
 		return subagentToolError(call, err), nil
 	}
-	if input.Background {
+	if run.Background {
 		return subagentJSONResult(call, map[string]any{"task_id": run.ID, "status": string(run.State), "description": run.Description, "type": run.Type, "warning": run.Warning}), nil
 	}
 	snapshot := d.runtime.waitForForegroundStart(ctx, run.SessionID, run.ID)
@@ -158,21 +157,15 @@ func (d *subagentSpawnDriver) Execute(ctx context.Context, call tool.Call, _ too
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		warning := "foreground wait interrupted; task continues in background"
-		d.runtime.demote(run.SessionID, run.ID, warning)
+		d.runtime.Cancel(run.SessionID, run.ID)
 		snapshot := d.runtime.snapshot(run.ID, run.SessionID)
-		return subagentJSONResult(call, map[string]any{
-			"task_id": run.ID, "status": string(snapshot.Run.State), "description": run.Description, "type": run.Type,
-			"warning": snapshot.Run.Warning,
-		}), nil
+		return subagentJSONResult(call, foregroundSubagentResult(snapshot)), nil
 	case <-timer.C:
-		warning := fmt.Sprintf("foreground wait timed out after %s; task continues in background", d.runtime.cfg.AwaitDuration)
-		d.runtime.demote(run.SessionID, run.ID, warning)
+		d.runtime.Cancel(run.SessionID, run.ID)
 		snapshot := d.runtime.snapshot(run.ID, run.SessionID)
-		return subagentJSONResult(call, map[string]any{
-			"task_id": run.ID, "status": string(snapshot.Run.State), "description": run.Description, "type": run.Type,
-			"warning": snapshot.Run.Warning,
-		}), nil
+		result := foregroundSubagentResult(snapshot)
+		result["warning"] = fmt.Sprintf("foreground wait timed out after %s; task cancelled", d.runtime.cfg.AwaitDuration)
+		return subagentJSONResult(call, result), nil
 	case <-done:
 	}
 	snapshot = d.runtime.snapshot(run.ID, run.SessionID)
@@ -233,29 +226,6 @@ func commitSubagentTodoBinding(ctx context.Context, parent subagentParentRuntime
 	snapshot := updated.Clone()
 	parent.Host.emitTodoUpdated(parent.SessionID, snapshot)
 	return nil
-}
-
-func (r *subagentRuntime) demote(sessionID, id, warning string) {
-	r.mu.Lock()
-	active := r.active[id]
-	if active == nil || active.run.SessionID != sessionID || active.run.Background || active.terminalizing {
-		r.mu.Unlock()
-		return
-	}
-	active.run.Background = true
-	active.run.Warning = appendWarning(active.run.Warning, warning)
-	run := cloneSubagentRun(active.run)
-	r.mu.Unlock()
-	if r.store.Save(r.ctx, run) != nil {
-		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: errors.New("persist foreground demotion")})
-		return
-	}
-	r.mu.Lock()
-	if active = r.active[id]; active != nil && !active.terminalizing {
-		active.run = run
-	}
-	r.mu.Unlock()
-	r.emitState(run, "running in background")
 }
 
 type subagentGetOutputDriver struct {
@@ -381,9 +351,6 @@ func decodeSubagentSpawnInput(arguments json.RawMessage) (subagentSpawnInput, er
 			return subagentSpawnInput{}, fmt.Errorf("background must be a boolean")
 		}
 		input.BackgroundSet = true
-	}
-	if !input.BackgroundSet {
-		input.Background = true
 	}
 	if input.ResumeFrom == "" {
 		if !input.SubagentTypeSet {

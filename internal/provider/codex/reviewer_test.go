@@ -52,6 +52,9 @@ func TestReviewerPinsStrictSchemaModelAndNoTools(t *testing.T) {
 		if body["prompt_cache_key"] != "azem-approval-review-v1" {
 			t.Errorf("prompt_cache_key=%v", body["prompt_cache_key"])
 		}
+		if _, present := body["prompt_cache_options"]; present {
+			t.Errorf("prompt_cache_options must be omitted: %v", body["prompt_cache_options"])
+		}
 		if _, present := body["tools"]; present {
 			t.Errorf("review request exposed tools: %v", body["tools"])
 		}
@@ -89,6 +92,9 @@ func TestReviewerPinsStrictSchemaModelAndNoTools(t *testing.T) {
 		entry, _ := input[0].(map[string]any)
 		content, _ := entry["content"].([]any)
 		part, _ := content[0].(map[string]any)
+		if _, present := part["prompt_cache_breakpoint"]; present {
+			t.Errorf("prompt_cache_breakpoint must be omitted: %v", part["prompt_cache_breakpoint"])
+		}
 		var evidence ApprovalReviewRequest
 		if err := json.Unmarshal([]byte(part["text"].(string)), &evidence); err != nil {
 			t.Fatal(err)

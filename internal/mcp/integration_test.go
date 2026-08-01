@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/go-hydaelyn"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/tool"
-	"github.com/Viking602/go-hydaelyn/worker"
+	"github.com/Viking602/venat"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/tool"
+	"github.com/Viking602/venat/worker"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
@@ -173,7 +173,7 @@ func TestMCPDefaultDriverRequiresRunnerApprovalBeforeRemoteCall(t *testing.T) {
 		LeaseID: run.LeaseID, HolderType: api.HolderAgent, HolderID: run.HolderID, TaskVersion: run.TaskVersion,
 	}
 	_, err = governed.Execute(ctx, tool.Call{ID: "deploy-call", Name: driver.Definition().Name}, nil)
-	if !errors.Is(err, hydaelyn.ErrPolicyDenied) {
+	if !errors.Is(err, venat.ErrPolicyDenied) {
 		t.Fatalf("governed MCP error=%v", err)
 	}
 	if client.callCount != 0 {

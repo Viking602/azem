@@ -8,11 +8,11 @@ import (
 
 	"github.com/Viking602/azem/internal/session"
 
-	hyagent "github.com/Viking602/go-hydaelyn/agent"
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
-	hyskill "github.com/Viking602/go-hydaelyn/skill"
-	"github.com/Viking602/go-hydaelyn/tool"
+	hyagent "github.com/Viking602/venat/agent"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
+	hyskill "github.com/Viking602/venat/skill"
+	"github.com/Viking602/venat/tool"
 )
 
 const skillContextMetadataKey = "hydaelyn.skill.context"

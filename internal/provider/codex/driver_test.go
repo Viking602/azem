@@ -3,29 +3,25 @@ package codex
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/chatgpt"
-	"github.com/Viking602/azem/internal/provider/responses"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
 func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 	var requests atomic.Int32
-	var retries []RetryProgress
+	var retries []hyprovider.RetryProgress
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
 		if requests.Add(1) <= maxProviderStreamRetries {
@@ -38,7 +34,7 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 
 	driver := newTestDriver(t, server.URL)
 	driver.retryDelay = func(attempt int) time.Duration { return time.Duration(attempt) * time.Millisecond }
-	driver.SetRetryObserver(func(progress RetryProgress) error {
+	driver.SetRetryObserver(func(progress hyprovider.RetryProgress) error {
 		retries = append(retries, progress)
 		return nil
 	})
@@ -68,110 +64,31 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 	}
 }
 
-func TestOpenProviderStreamRetriesTLSBadRecordMACFiveTimesThenSucceeds(t *testing.T) {
-	attempts := 0
-	want := &stubProviderStream{}
-	open := func() (hyprovider.Stream, error) {
-		attempts++
-		if attempts <= maxProviderStreamRetries {
-			return nil, &url.Error{Op: "Post", URL: DefaultEndpoint, Err: errors.New("remote error: tls: bad record MAC")}
+func TestDriverFastModeSendsPriorityServiceTier(t *testing.T) {
+	var serviceTier string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
 		}
-		return want, nil
-	}
-	stream, retries, err := openProviderStream(context.Background(), open, func(int) time.Duration { return 0 }, nil, 0)
-	if err != nil || stream != want {
-		t.Fatalf("stream=%T retries=%d error=%v", stream, retries, err)
-	}
-	if attempts != 6 || retries != maxProviderStreamRetries {
-		t.Fatalf("attempts=%d retries=%d, want 6 attempts and 5 retries", attempts, retries)
-	}
-}
+		serviceTier, _ = payload["service_tier"].(string)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"))
+	}))
+	defer server.Close()
 
-func TestOpenProviderStreamStopsAfterFiveTLSBadRecordMACRetries(t *testing.T) {
-	attempts := 0
-	open := func() (hyprovider.Stream, error) {
-		attempts++
-		return nil, &url.Error{Op: "Post", URL: DefaultEndpoint, Err: errors.New("remote error: tls: bad record MAC")}
+	driver := newTestDriver(t, server.URL)
+	driver.SetServiceTier(FastServiceTier)
+	stream, err := driver.Stream(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
 	}
-	stream, retries, err := openProviderStream(context.Background(), open, func(int) time.Duration { return 0 }, nil, 0)
-	if stream != nil || err == nil || !strings.Contains(err.Error(), "failed after 5 retries") {
-		t.Fatalf("stream=%T retries=%d error=%v", stream, retries, err)
+	defer stream.Close()
+	if event, err := stream.Recv(); err != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("event=%#v error=%v", event, err)
 	}
-	if attempts != 6 || retries != maxProviderStreamRetries {
-		t.Fatalf("attempts=%d retries=%d, want 6 attempts and 5 retries", attempts, retries)
-	}
-}
-
-func TestOpenProviderStreamRetriesWrappedEOFThenSucceeds(t *testing.T) {
-	attempts := 0
-	want := &stubProviderStream{}
-	stream, retries, err := openProviderStream(context.Background(), func() (hyprovider.Stream, error) {
-		attempts++
-		if attempts == 1 {
-			return nil, &url.Error{Op: http.MethodPost, URL: DefaultEndpoint, Err: io.EOF}
-		}
-		return want, nil
-	}, func(int) time.Duration { return 0 }, nil, 0)
-	if err != nil || stream != want || attempts != 2 || retries != 1 {
-		t.Fatalf("stream=%T attempts=%d retries=%d error=%v", stream, attempts, retries, err)
-	}
-}
-
-func TestRetryableProviderTransportRejectsDeterministicErrors(t *testing.T) {
-	for _, err := range []error{
-		context.Canceled,
-		context.DeadlineExceeded,
-		&responses.APIError{Kind: responses.ErrorInvalidRequest, StatusCode: http.StatusBadRequest, Message: "max_output_tokens is not supported"},
-		errors.New("x509: certificate signed by unknown authority"),
-	} {
-		if isRetryableProviderTransport(err) {
-			t.Fatalf("deterministic error was classified retryable: %v", err)
-		}
-	}
-}
-
-func TestRetryableProviderTransportRetriesConnectionEOFs(t *testing.T) {
-	for _, err := range []error{
-		io.EOF,
-		io.ErrUnexpectedEOF,
-		&responses.APIError{Kind: responses.ErrorStream, Message: "EOF"},
-	} {
-		if !isRetryableProviderTransport(err) {
-			t.Fatalf("connection EOF was not classified retryable: %v", err)
-		}
-	}
-}
-
-func TestCancelledProviderRetryDoesNotReportProgress(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	reported := false
-	_, _, err := openProviderStream(ctx, func() (hyprovider.Stream, error) {
-		return nil, errors.New("connection reset by peer")
-	}, func(int) time.Duration { return time.Second }, func(RetryProgress) error {
-		reported = true
-		return nil
-	}, 0)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("error=%v, want context canceled", err)
-	}
-	if reported {
-		t.Fatal("retry progress reported after cancellation")
-	}
-}
-
-func TestProviderRetryObserverCanStopRetryLoop(t *testing.T) {
-	attempts := 0
-	want := errors.New("retry progress delivery failed")
-	_, _, err := openProviderStream(context.Background(), func() (hyprovider.Stream, error) {
-		attempts++
-		return nil, errors.New("connection reset by peer")
-	}, nil, func(RetryProgress) error { return want }, 0)
-	if !errors.Is(err, want) {
-		t.Fatalf("error=%v, want observer failure", err)
-	}
-	if attempts != 1 {
-		t.Fatalf("open attempts=%d, want no retry after observer failure", attempts)
+	if serviceTier != "priority" {
+		t.Fatalf("service_tier = %q", serviceTier)
 	}
 }
 
@@ -190,11 +107,6 @@ func TestProviderStreamRetryDelayCoversTransientOutage(t *testing.T) {
 		}
 	}
 }
-
-type stubProviderStream struct{}
-
-func (*stubProviderStream) Recv() (hyprovider.Event, error) { return hyprovider.Event{}, nil }
-func (*stubProviderStream) Close() error                    { return nil }
 
 func TestDriverStopsAfterFiveConnectionResetRetries(t *testing.T) {
 	var requests atomic.Int32
@@ -240,8 +152,8 @@ func TestDriverRetriesOverloadedRateLimitFiveTimesThenSucceeds(t *testing.T) {
 
 	driver := newTestDriver(t, server.URL)
 	driver.retryDelay = func(int) time.Duration { return 0 }
-	var progress []RetryProgress
-	driver.SetRetryObserver(func(retry RetryProgress) error {
+	var progress []hyprovider.RetryProgress
+	driver.SetRetryObserver(func(retry hyprovider.RetryProgress) error {
 		progress = append(progress, retry)
 		return nil
 	})

@@ -16,15 +16,15 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
-	azprovider "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
-	hyagent "github.com/Viking602/go-hydaelyn/agent"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
-	"github.com/Viking602/go-hydaelyn/stream"
-	"github.com/Viking602/go-hydaelyn/tool"
+	hyagent "github.com/Viking602/venat/agent"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
+	"github.com/Viking602/venat/stream"
+	"github.com/Viking602/venat/tool"
+	hyworker "github.com/Viking602/venat/worker"
 )
 
 const (
@@ -33,18 +33,23 @@ const (
 	subagentKillTool      = "subagent.kill"
 )
 
+const processRestartInterruption = "interrupted by process restart"
+
 type subagentParentRuntime struct {
 	SessionID               string
 	ParentRunID             string
 	ParentAgentID           string
 	ProviderID              string
+	AccountID               string
 	ModelID                 string
 	Reasoning               string
+	PlanMode                bool
 	ContextTokenTarget      int
 	ContextConfig           config.ContextConfig
 	WorkspaceRoot           string
 	Driver                  hyprovider.Driver
 	ResolveDriver           func(context.Context, string, string, string) (string, int, hyprovider.Driver, error)
+	ResolveAccountDriver    func(context.Context, string, string, string, string) (string, string, int, hyprovider.Driver, error)
 	CompactionRoute         config.ModelRouteConfig
 	CompactionRouteSnapshot func() config.ModelRouteConfig
 	Coding                  *agentservice.Service
@@ -59,6 +64,7 @@ type effectiveSubagentProfile struct {
 	Outputs            []config.SubagentContractItem
 	Seed               []message.Message
 	Provider           string
+	AccountID          string
 	Model              string
 	Reasoning          string
 	CapabilityMode     string
@@ -133,11 +139,78 @@ func (r *subagentRuntime) Drivers(parent subagentParentRuntime) ([]tool.Driver, 
 	if parent.Coding == nil || parent.Driver == nil || parent.SessionID == "" || parent.ParentRunID == "" {
 		return nil, fmt.Errorf("subagent parent runtime is incomplete")
 	}
+	if err := r.recoverInterrupted(parent); err != nil {
+		return nil, err
+	}
 	return []tool.Driver{
 		&subagentSpawnDriver{runtime: r, parent: parent},
 		&subagentGetOutputDriver{runtime: r, sessionID: parent.SessionID},
 		&subagentKillDriver{runtime: r, sessionID: parent.SessionID},
 	}, nil
+}
+
+func (r *subagentRuntime) recoverInterrupted(parent subagentParentRuntime) error {
+	runs, err := r.store.List(r.ctx, parent.SessionID)
+	if err != nil {
+		return fmt.Errorf("list interrupted subagents: %w", err)
+	}
+	for _, run := range runs {
+		if run.ParentRunID != parent.ParentRunID || run.State != agentservice.SubagentInterrupted ||
+			run.Error != processRestartInterruption || strings.TrimSpace(run.ChildRunID) == "" {
+			continue
+		}
+		profile, profileErr := r.resolveProfile(subagentSpawnInput{
+			SubagentType: run.Type, Model: run.Model, CapabilityMode: run.CapabilityMode,
+			Isolation: run.RequestedIsolation, CWD: ".",
+		}, parent)
+		if profileErr != nil {
+			continue
+		}
+		profile.Provider = firstNonempty(run.Provider, profile.Provider)
+		profile.AccountID = run.AccountID
+		profile.Model = firstNonempty(run.Model, profile.Model)
+		profile.Reasoning = firstNonempty(run.Reasoning, profile.Reasoning)
+		profile.CapabilityMode = run.CapabilityMode
+		profile.RequestedIsolation = run.RequestedIsolation
+		profile.Isolation = run.Isolation
+		profile.CWD = run.CWD
+		run.Background = run.Background && subagentMayRunInBackground(profile)
+
+		run.State = agentservice.SubagentQueued
+		run.Summary = "queued after process restart"
+		run.Error = ""
+		run.FinishedAt = time.Time{}
+		childCtx, cancel := context.WithCancel(r.ctx)
+		active := &activeSubagent{
+			run: run, profile: profile, prompt: run.Description, parent: parent, ctx: childCtx, cancel: cancel,
+			done: make(chan struct{}), toolNames: make(map[string]struct{}),
+		}
+		r.mu.Lock()
+		if _, exists := r.active[run.ID]; exists {
+			r.mu.Unlock()
+			cancel()
+			continue
+		}
+		r.active[run.ID] = active
+		if parent.Host != nil {
+			r.hosts[parent.SessionID] = parent.Host
+		}
+		r.mu.Unlock()
+		if err := r.store.Save(r.ctx, run); err != nil {
+			r.mu.Lock()
+			delete(r.active, run.ID)
+			r.mu.Unlock()
+			cancel()
+			return fmt.Errorf("queue interrupted subagent %q: %w", run.ID, err)
+		}
+		r.mu.Lock()
+		r.pending = append(r.pending, run.ID)
+		r.signalChangedLocked()
+		r.pumpLocked()
+		r.mu.Unlock()
+		r.emitState(run, string(run.State))
+	}
+	return nil
 }
 
 func (r *subagentRuntime) updateModelRoute(roleName string, route config.ModelRouteConfig) {
@@ -152,6 +225,13 @@ func (r *subagentRuntime) updateModelRoute(roleName string, route config.ModelRo
 	} else {
 		r.cfg.Routes[roleName] = route
 	}
+}
+
+func (r *subagentRuntime) updateMaxConcurrency(maxConcurrency int) {
+	r.mu.Lock()
+	r.cfg.MaxConcurrency = maxConcurrency
+	r.pumpLocked()
+	r.mu.Unlock()
 }
 
 func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, parent subagentParentRuntime) (agentservice.SubagentRun, error) {
@@ -181,8 +261,9 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 		ID: id, SessionID: parent.SessionID, ParentRunID: parent.ParentRunID, ParentAgentID: parent.ParentAgentID,
 		ParentToolCallID: input.parentToolCallID, Description: input.Description, Type: profile.Type,
 		State: agentservice.SubagentInitializing, Summary: "initializing", Provider: profile.Provider, Model: profile.Model, Reasoning: profile.Reasoning,
+		AccountID:      profile.AccountID,
 		CapabilityMode: profile.CapabilityMode, RequestedIsolation: profile.RequestedIsolation, Isolation: profile.Isolation,
-		CWD: profile.CWD, Background: input.Background, StartedAt: now,
+		CWD: profile.CWD, Background: input.Background && subagentMayRunInBackground(profile), StartedAt: now,
 	}
 	if parent.Host != nil {
 		metadata := hooks.Metadata{SessionID: run.SessionID, RunID: run.ParentRunID, AgentID: run.ID, AgentType: run.Type, ParentRunID: run.ParentRunID, ParentToolCallID: run.ParentToolCallID, CWD: run.CWD}
@@ -304,6 +385,10 @@ func (r *subagentRuntime) resolveProfile(input subagentSpawnInput, parent subage
 	}
 	capability := firstNonempty(input.CapabilityMode, role.CapabilityMode, "read-only")
 	isolation := firstNonempty(input.Isolation, role.Isolation, persona.Isolation, "none")
+	if parent.PlanMode {
+		capability = "read-only"
+		isolation = "none"
+	}
 	cwd := parent.WorkspaceRoot
 	if input.CWD != "" {
 		resolved, resolveErr := resolveSubagentCWD(parent.WorkspaceRoot, input.CWD)
@@ -416,12 +501,17 @@ func (r *subagentRuntime) resolveResumeProfile(sourceID string, parent subagentP
 	}
 	profile.Model = source.Model
 	profile.Provider = firstNonempty(source.Provider, parent.ProviderID)
+	profile.AccountID = source.AccountID
 	profile.Reasoning = source.Reasoning
 	profile.CapabilityMode = source.CapabilityMode
 	profile.RequestedIsolation = source.RequestedIsolation
 	profile.Isolation = "none"
 	profile.CWD = cwd
 	profile.Seed = seed
+	if parent.PlanMode {
+		profile.CapabilityMode = "read-only"
+		profile.RequestedIsolation = "none"
+	}
 	return profile, nil
 }
 
@@ -477,6 +567,8 @@ func (r *subagentRuntime) execute(id string) {
 	profile := active.profile
 	ctx := active.ctx
 	parentToolCallID := active.run.ParentToolCallID
+	durableRunID := strings.TrimSpace(active.run.ChildRunID)
+	recoveredWorktreePath := active.run.WorktreePath
 	r.mu.Unlock()
 	var childRun *agentservice.Run
 	defer func() {
@@ -499,7 +591,28 @@ func (r *subagentRuntime) execute(id string) {
 	}()
 	if profile.RequestedIsolation == "worktree" {
 		oldCWD := profile.CWD
-		prepared, prepareErr := r.prepareWorktree(ctx, parent, profile, id)
+		prepared := preparedSubagentWorktree{}
+		var prepareErr error
+		if durableRunID != "" && recoveredWorktreePath != "" {
+			worktreeInfo, worktreeErr := os.Stat(recoveredWorktreePath)
+			cwdInfo, cwdErr := os.Stat(profile.CWD)
+			if worktreeErr != nil || !worktreeInfo.IsDir() || cwdErr != nil || !cwdInfo.IsDir() {
+				r.terminalize(id, terminalRequest{
+					state: agentservice.SubagentFailed,
+					err:   fmt.Errorf("recover subagent worktree %q: workspace is unavailable", recoveredWorktreePath),
+				})
+				return
+			}
+			prepared = preparedSubagentWorktree{
+				CWD: profile.CWD, Path: recoveredWorktreePath, Isolation: "worktree",
+			}
+			if commonDir, commonErr := runGit(ctx, recoveredWorktreePath, nil,
+				"rev-parse", "--path-format=absolute", "--git-common-dir"); commonErr == nil {
+				prepared.RepoRoot = filepath.Dir(strings.TrimSpace(commonDir))
+			}
+		} else {
+			prepared, prepareErr = r.prepareWorktree(ctx, parent, profile, id)
+		}
 		if prepareErr != nil {
 			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: prepareErr})
 			return
@@ -511,7 +624,7 @@ func (r *subagentRuntime) execute(id string) {
 		active = r.active[id]
 		if active == nil || active.terminalizing {
 			r.mu.Unlock()
-			if prepared.Path != "" {
+			if prepared.Path != "" && durableRunID == "" {
 				cleanup := agentservice.SubagentRun{WorktreePath: prepared.Path}
 				finalizeSubagentWorktree(&cleanup, prepared.RepoRoot)
 			}
@@ -536,7 +649,23 @@ func (r *subagentRuntime) execute(id string) {
 	childContextWindow := 0
 	childDriver := parent.Driver
 	usageBudget := &providerUsageBudget{maxTokens: int64(r.cfg.Budget.MaxTokens)}
-	if parent.ResolveDriver != nil {
+	if parent.ResolveAccountDriver != nil {
+		resolvedAccount, resolvedModel, contextWindow, resolvedDriver, resolveErr := parent.ResolveAccountDriver(ctx, profile.Provider, profile.Model, profile.Reasoning, profile.AccountID)
+		if resolveErr != nil {
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("resolve subagent provider: %w", resolveErr)})
+			return
+		}
+		profile.AccountID = resolvedAccount
+		childModel = resolvedModel
+		childDriver = resolvedDriver
+		childContextWindow = contextWindow
+		contextBudget, err = calculateContextBudget(profile.Provider, childModel, contextWindow, 0, parent.ContextConfig)
+		contextTarget = contextBudget.HardTrigger
+		if err != nil {
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
+			return
+		}
+	} else if parent.ResolveDriver != nil {
 		childModel, contextWindow, resolvedDriver, resolveErr := parent.ResolveDriver(ctx, profile.Provider, profile.Model, profile.Reasoning)
 		if resolveErr != nil {
 			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("resolve subagent provider: %w", resolveErr)})
@@ -553,13 +682,39 @@ func (r *subagentRuntime) execute(id string) {
 	} else if profile.Provider != parent.ProviderID || !providerHasModel(parent.Driver, profile.Model) {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("model %q is not available from provider %s", profile.Model, profile.Provider)})
 		return
+	} else {
+		profile.AccountID = parent.AccountID
 	}
+	executionPolicy := agentservice.RunExecutionPolicy{Budget: &api.TaskBudget{
+		MaxTokens: int64(r.cfg.Budget.MaxTokens), MaxWallClock: r.cfg.Budget.MaxWallClockDuration,
+		MaxToolCalls: r.cfg.Budget.MaxToolCalls, MaxSteps: r.cfg.Budget.MaxTurns,
+	}}
+	if parent.Host != nil && parent.Host.cfg.Retry.Enabled {
+		executionPolicy.RetryPolicy = api.RetryPolicy{
+			MaxAttempts: parent.Host.cfg.Retry.MaxRetries + 1,
+			Backoff:     parent.Host.cfg.Retry.BaseDelayDuration,
+			MaxBackoff:  parent.Host.cfg.Retry.MaxDelayDuration,
+		}
+	}
+	if durableRunID == "" {
+		childRun, err = parent.Coding.StartRunWithMetadata(ctx, prompt, nil, executionPolicy)
+		if err != nil {
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("start child run: %w", err)})
+			return
+		}
+	} else {
+		childRun, err = waitForSubagentResume(ctx, parent.Coding, durableRunID)
+		if err != nil {
+			if ctx.Err() != nil {
+				r.terminalize(id, terminalRequest{state: agentservice.SubagentCancelled})
+				return
+			}
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("resume child run: %w", err)})
+			return
+		}
+	}
+	observeProviderRetries(ctx, parent.Host, parent.SessionID, childRun.RunID, profile.Provider, childDriver)
 	childDriver = &budgetedProviderDriver{inner: childDriver, budget: usageBudget}
-	childRun, err = parent.Coding.StartRun(ctx, prompt)
-	if err != nil {
-		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("start child run: %w", err)})
-		return
-	}
 	workspaceDrivers, err := parent.Coding.WorkspaceDrivers(ctx, profile.CWD)
 	if err != nil {
 		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", err)
@@ -615,6 +770,7 @@ func (r *subagentRuntime) execute(id string) {
 		},
 		ExtraBody: map[string]any{"prompt_cache_key": childRun.RunID},
 	}
+	enableExplicitPromptCache(spec.ExtraBody, profile.Provider, childModel)
 	if parent.Host != nil && strings.TrimSpace(parent.Host.attachments.Root) != "" {
 		spec.ExtraBody[responses.AttachmentRootExtraKey] = parent.Host.attachments.Root
 	}
@@ -628,10 +784,31 @@ func (r *subagentRuntime) execute(id string) {
 		}
 	}
 	compactionResolve := parent.ResolveDriver
+	if parent.ResolveAccountDriver != nil {
+		compactionResolve = func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
+			boundAccountID := ""
+			if provider == profile.Provider {
+				boundAccountID = profile.AccountID
+			}
+			_, resolvedModel, window, driver, resolveErr := parent.ResolveAccountDriver(ctx, provider, model, reasoning, boundAccountID)
+			return resolvedModel, window, driver, resolveErr
+		}
+	}
+	if compactionResolve != nil {
+		baseResolve := compactionResolve
+		compactionResolve = func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
+			resolvedModel, window, driver, resolveErr := baseResolve(ctx, provider, model, reasoning)
+			if resolveErr == nil {
+				observeProviderRetries(ctx, parent.Host, parent.SessionID, childRun.RunID, provider, driver)
+			}
+			return resolvedModel, window, driver, resolveErr
+		}
+	}
 	compactionReport := r.compactionReporter(parent, parent.ParentRunID)
 	if parent.Host != nil && parent.Host.sessions != nil {
+		baseResolve := compactionResolve
 		compactionResolve = func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
-			resolvedModel, window, driver, resolveErr := parent.ResolveDriver(ctx, provider, model, reasoning)
+			resolvedModel, window, driver, resolveErr := baseResolve(ctx, provider, model, reasoning)
 			if resolveErr == nil {
 				driver = &meteredProviderDriver{
 					inner: driver, store: parent.Host.sessions, host: parent.Host, sessionID: parent.SessionID,
@@ -708,6 +885,7 @@ func (r *subagentRuntime) execute(id string) {
 	active.run.State = agentservice.SubagentRunning
 	active.run.Summary = "running"
 	active.run.CWD = profile.CWD
+	active.run.AccountID = profile.AccountID
 	active.run.Isolation = profile.Isolation
 	running := cloneSubagentRun(active.run)
 	r.mu.Unlock()
@@ -725,76 +903,70 @@ func (r *subagentRuntime) execute(id string) {
 	r.mu.Unlock()
 	r.emitState(running, "running")
 
-	task := api.Task{
-		ID: childRun.TaskID, RunID: childRun.RunID, Type: api.TaskTypeWorker, Goal: prompt,
-		Budget: &api.TaskBudget{
-			MaxTokens: int64(r.cfg.Budget.MaxTokens), MaxWallClock: r.cfg.Budget.MaxWallClockDuration,
-			MaxToolCalls: r.cfg.Budget.MaxToolCalls, MaxSteps: r.cfg.Budget.MaxTurns,
-		},
-	}
-	retryTaskBase := task
-	retryContextBase := engine.ContextBuilder
-	retryStartedAt := time.Now()
-	initialToolCalls := childRun.ChargedToolCalls()
-	sessionRetries := 0
-	var retryErr error
+	envelope, lease, runErr := parent.Coding.TransferRunExecution(childRun)
 	sink := stream.SinkFunc(func(_ context.Context, frame stream.Frame) error {
 		frame.Source = "child:" + id
 		r.handleFrame(id, frame)
 		return nil
 	})
 	var result hyagent.Result
-	for {
-		result = engine.RunStream(ctx, task, hyagent.OutputPolicy{}, sink)
-		continuation, resetPartial, retryable := providerRetryContinuation(result)
-		if ctx.Err() != nil || parent.Host == nil || !parent.Host.cfg.Retry.Enabled || !retryable {
-			break
+	workerStarted := false
+	if runErr == nil {
+		workerStarted = true
+		for {
+			outcome, executeErr := (hyworker.AgentWorker{
+				Runner: parent.Coding.Runner(), Engine: engine, AgentID: childRun.HolderID, Model: engine.Model, TTL: 10 * time.Minute,
+			}).ExecuteContinuing(agentservice.DelegatedApprovalContext(ctx), hyworker.ExecuteEnvelopeRequest{
+				Envelope: envelope, Lease: lease, TTL: 10 * time.Minute, Sink: sink,
+			})
+			result, runErr = outcome.Result, executeErr
+			if outcome.State != hyworker.ExecutionSuspended {
+				break
+			}
+			summary := "waiting for durable resume"
+			if outcome.Suspension != nil {
+				summary = "waiting for " + string(outcome.Suspension.Kind)
+			}
+			if err := r.persistActiveState(id, summary); err != nil {
+				runErr = errors.Join(runErr, err)
+				break
+			}
+			if ctx.Err() != nil {
+				runErr = ctx.Err()
+				break
+			}
+			resumed, resumeErr := waitForSubagentResume(ctx, parent.Coding, childRun.RunID)
+			if resumeErr != nil {
+				if ctx.Err() != nil {
+					runErr = ctx.Err()
+				} else {
+					runErr = errors.Join(runErr, resumeErr)
+				}
+				break
+			}
+			envelope, lease, runErr = parent.Coding.TransferRunExecution(resumed)
+			if runErr != nil {
+				break
+			}
+			copyRunExecution(childRun, resumed)
+			if err := r.persistActiveState(id, "running"); err != nil {
+				runErr = err
+				break
+			}
 		}
-		if sessionRetries >= parent.Host.cfg.Retry.MaxRetries {
-			retryErr = fmt.Errorf("provider recovery failed after %d session retries: %w", sessionRetries, result.Failure)
-			break
-		}
-		nextTask, err := providerRetryTask(retryTaskBase, retryStartedAt, initialToolCalls, childRun)
-		if err != nil {
-			retryErr = err
-			break
-		}
-		sessionRetries++
-		delay := providerAutoRetryDelay(parent.Host.cfg.Retry.BaseDelayDuration, sessionRetries)
-		delay = max(delay, azprovider.SuggestedRetryDelay(result.Failure))
-		if parent.Host.cfg.Retry.MaxDelayDuration > 0 && delay > parent.Host.cfg.Retry.MaxDelayDuration {
-			retryErr = fmt.Errorf("provider requested retry delay %s, exceeding configured maximum %s: %w",
-				delay, parent.Host.cfg.Retry.MaxDelayDuration, result.Failure)
-			break
-		}
-		parent.Host.emit(ctx, Event{
-			Kind: EventProviderRetry, SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id,
-			Text: result.Failure.Error(), State: "waiting",
-			Data: map[string]string{
-				"provider": profile.Provider, "attempt": fmt.Sprint(sessionRetries),
-				"max": fmt.Sprint(parent.Host.cfg.Retry.MaxRetries), "delay_ms": fmt.Sprint(delay.Milliseconds()),
-				"reset_partial": fmt.Sprint(resetPartial),
-			},
-		})
-		if err := waitForProviderAutoRetry(ctx, delay); err != nil {
-			retryErr = err
-			break
-		}
-		engine.ContextBuilder = providerRetryContext{inner: retryContextBase, messages: continuation}
-		task = nextTask
-	}
-	var runErr error
-	if retryErr != nil {
-		runErr = retryErr
-	} else if result.Failure != nil {
-		runErr = result.Failure
 	}
 	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {
 		runErr = fmt.Errorf("%w (increase agents.subagents.budget.max_tokens, or set it to 0 for unbounded, in config.yaml)", runErr)
 	}
 	stopHookRan := runErr == nil && ctx.Err() == nil && parent.Host != nil
 	completionCtx, completionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if completeErr := parent.Coding.CompleteRun(completionCtx, childRun, result.Text, runErr); completeErr != nil {
+	var completeErr error
+	if workerStarted {
+		completeErr = parent.Coding.FinalizeReportedRun(completionCtx, childRun.RunID)
+	} else {
+		completeErr = parent.Coding.CompleteRun(completionCtx, childRun, result.Text, runErr)
+	}
+	if completeErr != nil {
 		if runErr == nil {
 			runErr = completeErr
 		} else {
@@ -810,6 +982,76 @@ func (r *subagentRuntime) execute(id string) {
 		state = agentservice.SubagentFailed
 	}
 	r.terminalize(id, terminalRequest{state: state, err: runErr, result: &result, stopHookRan: stopHookRan})
+}
+
+func (r *subagentRuntime) persistActiveState(id, summary string) error {
+	r.mu.Lock()
+	active := r.active[id]
+	if active == nil || active.terminalizing || active.terminalized {
+		r.mu.Unlock()
+		return context.Canceled
+	}
+	run := cloneSubagentRun(active.run)
+	run.State = agentservice.SubagentRunning
+	run.Summary = summary
+	r.mu.Unlock()
+	if err := r.store.Save(r.ctx, run); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if current := r.active[id]; current != nil && !current.terminalizing && !current.terminalized {
+		current.run = run
+		r.signalChangedLocked()
+	}
+	r.mu.Unlock()
+	r.emitState(run, string(run.State))
+	return nil
+}
+
+func (r *subagentRuntime) ownsDurableRun(runID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, active := range r.active {
+		if active != nil && active.run.ChildRunID == runID &&
+			!active.terminalizing && !active.terminalized {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForSubagentResume(ctx context.Context, coding *agentservice.Service, runID string) (*agentservice.Run, error) {
+	const pollInterval = 100 * time.Millisecond
+	for {
+		durable, err := coding.Runner().Run(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		switch durable.Status {
+		case api.RunStatusRunning, api.RunStatusCreated:
+			resumed, resumeErr := coding.ResumeRun(ctx, runID)
+			if resumeErr != nil {
+				return nil, resumeErr
+			}
+			return resumed, nil
+		case api.RunStatusCompleted, api.RunStatusFailed, api.RunStatusBlocked, api.RunStatusCancelled:
+			return nil, fmt.Errorf("subagent durable run %q became terminal with status %q", runID, durable.Status)
+		}
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func copyRunExecution(target, source *agentservice.Run) {
+	target.EnvelopeID = source.EnvelopeID
+	target.LeaseID = source.LeaseID
+	target.TaskVersion = source.TaskVersion
+	target.HolderID = source.HolderID
 }
 
 type terminalRequest struct {

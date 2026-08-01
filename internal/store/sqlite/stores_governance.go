@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
-	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/venat/api"
 )
 
 func (u *unitOfWork) LoadTraceSpan(ctx context.Context, id string) (api.TraceSpan, error) {
@@ -189,6 +190,54 @@ func (u *unitOfWork) ExtendLease(ctx context.Context, leaseID string, workerID s
 	return count == 1, err
 }
 
+func (u *unitOfWork) ReleaseExpiredLease(ctx context.Context, leaseID string, expectedVersion uint64, releasedAt time.Time) (bool, error) {
+	value, err := u.LoadLease(ctx, leaseID)
+	if errors.Is(err, api.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	syncLeaseExpiry(&value)
+	if value.Status != api.LeaseStatusActive ||
+		value.Version != expectedVersion ||
+		value.ExpiresAt.IsZero() ||
+		value.ExpiresAt.After(releasedAt) {
+		return false, nil
+	}
+	oldVersion, err := int64FromUint64(value.Version)
+	if err != nil {
+		return false, fmt.Errorf("release expired lease: %w", err)
+	}
+	value.Status = api.LeaseStatusReleased
+	value.Version++
+	nextVersion, err := int64FromUint64(value.Version)
+	if err != nil {
+		return false, fmt.Errorf("release expired lease: %w", err)
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return false, fmt.Errorf("release expired lease: %w", err)
+	}
+	result, err := dbgen.New(u.tx).ReleaseExpiredLeaseCAS(ctx, dbgen.ReleaseExpiredLeaseCASParams{
+		Status:    string(api.LeaseStatusReleased),
+		Version:   nextVersion,
+		Data:      data,
+		ID:        leaseID,
+		Status_2:  string(api.LeaseStatusActive),
+		Version_2: oldVersion,
+		ExpiresAt: nanos(releasedAt),
+	})
+	if err != nil {
+		if isBusy(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("release expired lease: %w", err)
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
 func (u *unitOfWork) SaveActionAttempt(ctx context.Context, value api.ActionAttempt) error {
 	return u.save(ctx, kindAction, value.AttemptID, "", value.RunID, value.TaskID, string(value.Status), time.Time{}, value.ToolName, value.IdempotencyKey, value, true)
 }
@@ -210,6 +259,75 @@ func (u *unitOfWork) LoadActionAttemptByIdempotencyKey(ctx context.Context, runI
 		return value, err
 	}
 	return value, nil
+}
+
+func (u *unitOfWork) ListActionAttempts(ctx context.Context, selector api.ActionAttemptSelector) ([]api.ActionAttempt, error) {
+	values, err := listRecords[api.ActionAttempt](ctx, u.tx, kindAction, selector.RunID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := values[:0]
+	for _, value := range values {
+		if selector.TaskID != "" && value.TaskID != selector.TaskID ||
+			selector.ToolName != "" && value.ToolName != selector.ToolName ||
+			len(selector.Statuses) > 0 && !contains(selector.Statuses, value.Status) ||
+			selector.RequiresReconcile != nil && value.RequiresReconcile != *selector.RequiresReconcile {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].AttemptID < filtered[j].AttemptID
+	})
+	return limit(filtered, selector.Limit), nil
+}
+
+func (u *unitOfWork) ResolveActionAttempt(ctx context.Context, value api.ActionAttempt) (bool, error) {
+	current, err := u.LoadActionAttempt(ctx, value.AttemptID)
+	if errors.Is(err, api.ErrNotFound) {
+		return false, api.ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	if current.Status != api.ActionAttemptUnknown || !current.RequiresReconcile {
+		return false, nil
+	}
+	switch value.Status {
+	case api.ActionAttemptSucceeded, api.ActionAttemptFailed, api.ActionAttemptTimeout, api.ActionAttemptCancelled:
+	default:
+		return false, nil
+	}
+	if value.RequiresReconcile ||
+		value.ActionID != current.ActionID ||
+		value.RunID != current.RunID ||
+		value.TaskID != current.TaskID ||
+		value.LeaseID != current.LeaseID ||
+		value.ToolName != current.ToolName ||
+		value.IdempotencyKey != current.IdempotencyKey ||
+		value.InputHash != current.InputHash ||
+		value.ExternalRequestID != current.ExternalRequestID {
+		return false, nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return false, err
+	}
+	result, err := dbgen.New(u.tx).ResolveReconcileAttemptCAS(ctx, dbgen.ResolveReconcileAttemptCASParams{
+		Status:   string(value.Status),
+		Data:     data,
+		Kind:     kindAction,
+		Key1:     value.AttemptID,
+		Status_2: string(api.ActionAttemptUnknown),
+	})
+	if err != nil {
+		if isBusy(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
 }
 
 func (u *unitOfWork) SaveAgentProfile(ctx context.Context, value api.AgentProfile) error {

@@ -14,9 +14,9 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 type subagentTurnContext struct {
@@ -86,6 +86,14 @@ func effectiveSubagentTools(roleTools []string, capability string) map[string]bo
 		}
 	}
 	return allowed
+}
+
+func subagentMayRunInBackground(profile effectiveSubagentProfile) bool {
+	if profile.RequestedIsolation != "worktree" {
+		return false
+	}
+	tools := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
+	return tools["coding.edit_hashline"] || tools["coding.write_file"] || tools["coding.gofmt"]
 }
 
 func renderSubagentInstructions(profile effectiveSubagentProfile) string {

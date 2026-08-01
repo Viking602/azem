@@ -169,8 +169,9 @@ Without `-config`, Azem reads `azem/config.yaml` from the operating system's use
 
 | Command | Description |
 |---|---|
+| `/settings` | Configure the plan model, Codex Fast mode, subagent models, concurrency, and interface preferences |
 | `/models` | Search for and select a model |
-| `/model-routing` | Configure models for compaction and each subagent role |
+| `/model-routing` | Configure models for plan mode, compaction, and each subagent role |
 | `/provider [chatgpt\|grok]` | Switch providers |
 | `/reasoning [level]` | Set reasoning effort |
 | `/login [provider]` | Sign in or import provider credentials |
@@ -178,6 +179,7 @@ Without `-config`, Azem reads `azem/config.yaml` from the operating system's use
 | `/skills [reload]` | Inspect or reload Agent Skills |
 | `/skill <name> [instruction]` | Activate a Skill and run one turn |
 | `/team on\|off` | Enable or disable team mode |
+| `/plan [on\|off]` | Enable or disable read-only planning mode |
 | `/agents [cancel <id>]` | Inspect or cancel subagents |
 | `/agent-types` | Inspect available subagent types |
 | `/personas` | Inspect subagent personas |
@@ -232,11 +234,22 @@ auth:
   import_codex: true
   import_grok: true
 
+providers:
+  chatgpt:
+    enabled: true
+    catalog_ttl: 5m
+    fast_mode: false       # supported subscription models only; faster responses use more credits
+  grok:
+    enabled: true
+    catalog_ttl: 5m
+    experimental_oauth: true
+    transport: api
+
 retry:
   enabled: true
-  max_retries: 10         # session-level retries after transport retries are exhausted
-  base_delay: 500ms       # exponential backoff base; randomized to 75%-100%, capped at 8s
-  max_delay: 5m           # fail fast instead of sleeping past this server-requested delay; 0s disables the cap
+  max_retries: 5          # full-engine retries after transport retries are exhausted
+  base_delay: 500ms       # exponential task-retry backoff base
+  max_delay: 5m           # maximum task or server-requested retry delay; 0s disables the cap
 
 agents:
   main:
@@ -246,6 +259,11 @@ agents:
   team:
     max_concurrency: 2
     max_ticks: 12
+  plan:
+    # Empty provider/model inherit the active model and reasoning effort.
+    provider: ""
+    model: ""
+    reasoning: ""
   compaction:
     # Empty provider/model inherit the active model; empty reasoning uses low.
     provider: ""

@@ -5,7 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/venat"
+	"github.com/Viking602/venat/api"
 )
 
 func TestPrepareRecoveryExpiresLeasesAndQuarantinesIncompleteActions(t *testing.T) {
@@ -97,7 +98,13 @@ func TestResolveReconcileAttemptRequiresExplicitTerminalOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt := api.ActionAttempt{AttemptID: "attempt-1", RunID: "run-1", TaskID: "task-1", ToolName: "coding.shell", Status: api.ActionAttemptUnknown, RequiresReconcile: true}
+	attempt := api.ActionAttempt{AttemptID: "attempt-1", ActionID: "action-1", RunID: "run-1", TaskID: "task-1", ToolName: "coding.shell", Status: api.ActionAttemptUnknown, RequiresReconcile: true}
+	if err := uow.Runs().SaveRun(ctx, api.Run{ID: attempt.RunID, RootTaskID: attempt.TaskID, Status: api.RunStatusReconcileRequired}); err != nil {
+		t.Fatal(err)
+	}
+	if err := uow.Tasks().SaveTask(ctx, api.Task{ID: attempt.TaskID, RunID: attempt.RunID, Status: api.TaskStatusReconcileRequired}); err != nil {
+		t.Fatal(err)
+	}
 	if err := uow.ActionAttempts().SaveActionAttempt(ctx, attempt); err != nil {
 		t.Fatal(err)
 	}
@@ -105,10 +112,11 @@ func TestResolveReconcileAttemptRequiresExplicitTerminalOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := store.ResolveReconcileAttempt(ctx, attempt.AttemptID, api.ActionAttemptRunning, ""); err == nil {
+	runner := venat.NewDevelopment(api.Config{StoreProvider: store})
+	if _, err := runner.ResolveActionAttempt(ctx, api.ResolveActionAttemptCommand{AttemptID: attempt.AttemptID, Status: api.ActionAttemptRunning}); err == nil {
 		t.Fatal("nonterminal reconciliation status accepted")
 	}
-	if err := store.ResolveReconcileAttempt(ctx, attempt.AttemptID, api.ActionAttemptSucceeded, "receipt-1"); err != nil {
+	if _, err := runner.ResolveActionAttempt(ctx, api.ResolveActionAttemptCommand{AttemptID: attempt.AttemptID, Status: api.ActionAttemptSucceeded, ExternalResultRef: "receipt-1"}); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := store.ListReconcileAttempts(ctx)
@@ -127,10 +135,21 @@ func TestResolveReconcileAttemptRequiresExplicitTerminalOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if resolved.Status != api.ActionAttemptSucceeded || resolved.RequiresReconcile || resolved.ExternalResultRef != "receipt-1" {
+		t.Fatalf("resolved attempt = %+v", resolved)
+	}
+	run, err := uow.Runs().LoadRun(ctx, attempt.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := uow.Tasks().LoadTask(ctx, attempt.RunID, attempt.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := uow.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if resolved.Status != api.ActionAttemptSucceeded || resolved.RequiresReconcile || resolved.ExternalResultRef != "receipt-1" {
-		t.Fatalf("resolved attempt = %+v", resolved)
+	if run.Status != api.RunStatusRunning || task.Status != api.TaskStatusDispatched {
+		t.Fatalf("reconciled run/task = %s/%s", run.Status, task.Status)
 	}
 }

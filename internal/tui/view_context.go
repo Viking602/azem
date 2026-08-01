@@ -707,6 +707,10 @@ func (m AppModel) renderContextUsage(width int) string {
 
 func (m AppModel) statusReportLines() []string {
 	metrics := m.contextMetrics()
+	agentMode := first(m.agentMode, "single")
+	if m.planMode {
+		agentMode = m.tr("mode.plan")
+	}
 	// Lead with the dense counters users open /status to read, then identity/context.
 	lines := []string{m.tr("overlay.status.section.diagnostics")}
 	if metrics.detailSuffix == "" && m.usage.UncachedInputTokens == 0 && m.usage.ReasoningTokens == 0 &&
@@ -730,10 +734,13 @@ func (m AppModel) statusReportLines() []string {
 		if m.usage.UncachedInputTokens > 0 {
 			lines = append(lines, fmt.Sprintf("  %s (U): %s", m.tr("overlay.status.field.uncached"), formatTokens(m.usage.UncachedInputTokens)))
 		}
-		if m.showsCacheWrite() {
-			write := formatTokens(m.usage.CacheWriteTokens)
-			if m.usage.MainCacheWrite != m.usage.CacheWriteTokens {
-				write = fmt.Sprintf("%s main / %s all", formatTokens(m.usage.MainCacheWrite), formatTokens(m.usage.CacheWriteTokens))
+		if !m.usesAutomaticPromptCache() && (m.usage.CacheModel == "write-tokens" || m.provider == "chatgpt" || m.usage.LastProvider == "chatgpt") {
+			write := m.tr("footer.unavailable")
+			if m.usage.CacheWriteReported {
+				write = formatTokens(m.usage.CacheWriteTokens)
+				if m.usage.MainCacheWrite != m.usage.CacheWriteTokens {
+					write = fmt.Sprintf("%s main / %s all", formatTokens(m.usage.MainCacheWrite), formatTokens(m.usage.CacheWriteTokens))
+				}
 			}
 			lines = append(lines, fmt.Sprintf("  %s (W): %s", m.tr("overlay.status.field.cache_write"), write))
 		}
@@ -790,7 +797,7 @@ func (m AppModel) statusReportLines() []string {
 	lines = append(lines,
 		m.tr("overlay.status.section.session"),
 		"  "+m.tr("overlay.status.field.status")+": "+m.displayState(m.status),
-		"  "+m.tr("overlay.status.field.mode")+": "+first(m.agentMode, "single"),
+		"  "+m.tr("overlay.status.field.mode")+": "+agentMode,
 		"  "+m.tr("overlay.status.field.approval")+": "+m.approvalModeLabel(),
 		"  "+m.tr("overlay.status.field.session")+": "+first(m.sessionID, "—"),
 		m.tr("overlay.status.section.model"),

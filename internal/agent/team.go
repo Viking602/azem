@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
-	hyagent "github.com/Viking602/go-hydaelyn/agent"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/coding"
-	"github.com/Viking602/go-hydaelyn/multiagent"
-	"github.com/Viking602/go-hydaelyn/provider"
-	"github.com/Viking602/go-hydaelyn/tool"
-	"github.com/Viking602/go-hydaelyn/worker"
+	hyagent "github.com/Viking602/venat/agent"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/multiagent"
+	"github.com/Viking602/venat/provider"
+	"github.com/Viking602/venat/tool"
+	"github.com/Viking602/venat/worker"
 )
 
 type TeamModels struct {
@@ -34,6 +34,7 @@ type (
 		BeforeTask     func(context.Context, multiagent.Dispatch, multiagent.AgentClass) error
 		PrepareEngine  func(context.Context, hyagent.Engine, multiagent.Dispatch, multiagent.AgentClass) (hyagent.Engine, error)
 		DecorateEngine TeamEngineDecorator
+		RetryPolicy    api.RetryPolicy
 	}
 )
 
@@ -156,7 +157,7 @@ func (s *Service) codingTeamRunner(prompt string, models TeamModels, providers p
 		byName[class.Name] = class
 		team.AddRole(class)
 	}
-	team.WithScheduler(CodingScheduler{Prompt: prompt, Classes: byName})
+	team.WithScheduler(CodingScheduler{Prompt: prompt, Classes: byName, RetryPolicy: hooks.RetryPolicy})
 	return worker.TeamRunner{
 		Runner:     s.runner,
 		Team:       *team,

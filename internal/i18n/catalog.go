@@ -19,20 +19,21 @@ var localeFiles embed.FS
 
 var placeholders = regexp.MustCompile(`\{[A-Za-z][A-Za-z0-9_]*\}`)
 
+var embeddedMessages, embeddedMessagesErr = load(localeFiles)
+
 type Catalog struct {
 	language string
 	messages map[string]map[string]string
 }
 
 func New(language string) (Catalog, error) {
-	messages, err := load(localeFiles)
-	if err != nil {
-		return Catalog{}, err
+	if embeddedMessagesErr != nil {
+		return Catalog{}, embeddedMessagesErr
 	}
-	if _, ok := messages[language]; !ok {
+	if _, ok := embeddedMessages[language]; !ok {
 		return Catalog{}, fmt.Errorf("unsupported language %q", language)
 	}
-	return Catalog{language: language, messages: messages}, nil
+	return Catalog{language: language, messages: embeddedMessages}, nil
 }
 
 func Must(language string) Catalog {
@@ -45,12 +46,11 @@ func Must(language string) Catalog {
 
 // Languages returns the locale names discovered from the embedded JSON files.
 func Languages() []string {
-	messages, err := load(localeFiles)
-	if err != nil {
-		panic(err)
+	if embeddedMessagesErr != nil {
+		panic(embeddedMessagesErr)
 	}
-	languages := make([]string, 0, len(messages))
-	for language := range messages {
+	languages := make([]string, 0, len(embeddedMessages))
+	for language := range embeddedMessages {
 		languages = append(languages, language)
 	}
 	sort.Strings(languages)

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 const maxSSEFrameBytes = 4 << 20
@@ -75,7 +75,7 @@ type completedResponse struct {
 		TotalTokens        int `json:"total_tokens"`
 		InputTokensDetails struct {
 			CachedTokens     *int `json:"cached_tokens"`
-			CacheWriteTokens int  `json:"cache_write_tokens"`
+			CacheWriteTokens *int `json:"cache_write_tokens"`
 		} `json:"input_tokens_details"`
 		OutputTokensDetails struct {
 			ReasoningTokens int `json:"reasoning_tokens"`
@@ -233,6 +233,11 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 		if cacheReported {
 			cachedTokens = *response.Usage.InputTokensDetails.CachedTokens
 		}
+		cacheWriteTokens := 0
+		cacheWriteReported := response.Usage.InputTokensDetails.CacheWriteTokens != nil
+		if cacheWriteReported {
+			cacheWriteTokens = *response.Usage.InputTokensDetails.CacheWriteTokens
+		}
 		usage := hyprovider.Usage{
 			InputTokens: response.Usage.InputTokens, CachedInputTokens: cachedTokens,
 			OutputTokens: response.Usage.OutputTokens, TotalTokens: response.Usage.TotalTokens,
@@ -240,8 +245,8 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 		if s.reportUsage != nil {
 			s.reportUsage(UsageDetails{
 				ProviderRequestID: response.ID, InputTokens: response.Usage.InputTokens, CachedTokens: cachedTokens, CacheReported: cacheReported,
-				CacheWriteTokens: response.Usage.InputTokensDetails.CacheWriteTokens,
-				OutputTokens:     response.Usage.OutputTokens, ReasoningTokens: response.Usage.OutputTokensDetails.ReasoningTokens,
+				CacheWriteTokens: cacheWriteTokens, CacheWriteReported: cacheWriteReported,
+				OutputTokens: response.Usage.OutputTokens, ReasoningTokens: response.Usage.OutputTokensDetails.ReasoningTokens,
 				TotalTokens: response.Usage.TotalTokens,
 			})
 		}

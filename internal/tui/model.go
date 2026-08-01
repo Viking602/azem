@@ -68,6 +68,7 @@ func defaultToolCollapsed(kind BlockKind, state string) bool {
 type transcriptBlockLayout struct {
 	block          Block
 	selected       bool
+	hovered        bool
 	animationFrame int
 	lines          []string
 }
@@ -153,35 +154,37 @@ type transcriptSelection struct {
 type Overlay string
 
 const (
-	OverlayNone             Overlay = ""
-	OverlayHelp             Overlay = "help"
-	OverlayStatus           Overlay = "status"
-	OverlayContext          Overlay = "context"
-	OverlayCommand          Overlay = "command"
-	OverlayProvider         Overlay = "provider"
-	OverlayModel            Overlay = "model"
-	OverlayModelRoutes      Overlay = "model_routes"
-	OverlaySkills           Overlay = "skills"
-	OverlayLanguage         Overlay = "language"
-	OverlayReasoning        Overlay = "reasoning"
-	OverlaySessions         Overlay = "sessions"
-	OverlayBranches         Overlay = "branches"
-	OverlayBranchConfirm    Overlay = "branch_confirm"
-	OverlayApproval         Overlay = "approval"
-	OverlayCancel           Overlay = "cancel"
-	OverlayDiff             Overlay = "diff"
-	OverlayAgents           Overlay = "agents"
-	OverlayMemory           Overlay = "memory"
-	OverlayRecap            Overlay = "recap"
-	OverlayAgentDetail      Overlay = "agent_detail"
-	OverlayAgentTypes       Overlay = "agent_types"
-	OverlayPersonas         Overlay = "personas"
-	OverlayMCP              Overlay = "mcp"
-	OverlayMCPDetail        Overlay = "mcp_detail"
-	OverlayBackground       Overlay = "background"
-	OverlayBackgroundDetail Overlay = "background_detail"
-	OverlayRecovery         Overlay = "recovery"
-	OverlayError            Overlay = "error"
+	OverlayNone                Overlay = ""
+	OverlayHelp                Overlay = "help"
+	OverlayStatus              Overlay = "status"
+	OverlayContext             Overlay = "context"
+	OverlayCommand             Overlay = "command"
+	OverlayProvider            Overlay = "provider"
+	OverlayModel               Overlay = "model"
+	OverlayModelRoutes         Overlay = "model_routes"
+	OverlaySettings            Overlay = "settings"
+	OverlaySubagentConcurrency Overlay = "subagent_concurrency"
+	OverlaySkills              Overlay = "skills"
+	OverlayLanguage            Overlay = "language"
+	OverlayReasoning           Overlay = "reasoning"
+	OverlaySessions            Overlay = "sessions"
+	OverlayBranches            Overlay = "branches"
+	OverlayBranchConfirm       Overlay = "branch_confirm"
+	OverlayApproval            Overlay = "approval"
+	OverlayCancel              Overlay = "cancel"
+	OverlayDiff                Overlay = "diff"
+	OverlayAgents              Overlay = "agents"
+	OverlayMemory              Overlay = "memory"
+	OverlayRecap               Overlay = "recap"
+	OverlayAgentDetail         Overlay = "agent_detail"
+	OverlayAgentTypes          Overlay = "agent_types"
+	OverlayPersonas            Overlay = "personas"
+	OverlayMCP                 Overlay = "mcp"
+	OverlayMCPDetail           Overlay = "mcp_detail"
+	OverlayBackground          Overlay = "background"
+	OverlayBackgroundDetail    Overlay = "background_detail"
+	OverlayRecovery            Overlay = "recovery"
+	OverlayError               Overlay = "error"
 )
 
 type focusArea uint8
@@ -355,6 +358,7 @@ type UsageView struct {
 	ContextLimit                     int
 	ContextReported                  bool
 	CacheReported                    bool
+	CacheWriteReported               bool
 	MainCacheReported                bool
 	LastRequestKind                  string
 	LastProvider                     string
@@ -374,6 +378,7 @@ type AppModel struct {
 	catalog                  i18n.Catalog
 	composer                 textarea.Model
 	modelSearch              textinput.Model
+	settingsSearch           textinput.Model
 	commandCursor            int
 	width                    int
 	height                   int
@@ -382,10 +387,12 @@ type AppModel struct {
 	lastRunID                string
 	transcript               []Block
 	transcriptLayout         *transcriptLayoutCache
+	agentDetailLayout        *transcriptLayoutCache
 	recapLayout              *recapLayoutCache
 	paint                    *paintCache
 	transcriptTop            int
 	transcriptCursor         int
+	transcriptHover          int
 	transcriptSelection      *transcriptSelection
 	scrollbarDragging        bool
 	overlayScrollbarDragging bool
@@ -397,10 +404,15 @@ type AppModel struct {
 	overlayCursor            int
 	overlayScroll            int
 	overlayPurpose           string
+	settingsCursor           int
+	settingsExpanded         map[string]bool
+	subagentConcurrency      int
+	chatGPTFastMode          bool
 	provider                 string
 	model                    string
 	reasoning                string
 	agentMode                string
+	planMode                 bool
 	workspace                string
 	branch                   string
 	branches                 []app.GitBranchEntry
@@ -504,16 +516,20 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	searchStyles.Cursor.Color = theme.Cursor.GetForeground()
 	searchStyles.Cursor.Shape = tea.CursorBar
 	modelSearch.SetStyles(searchStyles)
+	settingsSearch := modelSearch
+	settingsSearch.Prompt = "/ "
+	settingsSearch.Placeholder = catalog.T("overlay.settings.search_placeholder")
+	settingsSearch.Blur()
 	focus := composer.Focus()
 	sessionID := "default"
 	if len(initialSessionID) > 0 && initialSessionID[0] != "" {
 		sessionID = initialSessionID[0]
 	}
 	return AppModel{
-		runtime: runtime, initialCmd: focus, theme: theme, catalog: catalog, composer: composer, modelSearch: modelSearch,
+		runtime: runtime, initialCmd: focus, theme: theme, catalog: catalog, composer: composer, modelSearch: modelSearch, settingsSearch: settingsSearch,
 		width: 80, height: 24, sessionID: sessionID, provider: provider, model: model,
-		reasoning: reasoning, agentMode: mode, workspace: workspace, branch: resolveGitBranch(workspace), status: "Ready", approvalMode: ApprovalModePrompt,
-		focus: focusComposer, transcriptCursor: -1, transcriptLayout: &transcriptLayoutCache{}, recapLayout: &recapLayoutCache{}, paint: &paintCache{}, contextReportCache: &contextReportRenderCache{},
+		reasoning: reasoning, agentMode: mode, workspace: workspace, branch: resolveGitBranch(workspace), status: "Ready", approvalMode: ApprovalModePrompt, subagentConcurrency: 2,
+		focus: focusComposer, transcriptCursor: -1, transcriptHover: -1, transcriptLayout: &transcriptLayoutCache{}, agentDetailLayout: &transcriptLayoutCache{}, recapLayout: &recapLayoutCache{}, paint: &paintCache{}, contextReportCache: &contextReportRenderCache{}, settingsExpanded: make(map[string]bool),
 		auth: make(map[string]AuthView), modelsByProvider: make(map[string][]ModelChoice),
 		reducedMotion: os.Getenv("AZEM_REDUCED_MOTION") == "1" || os.Getenv("REDUCED_MOTION") == "1",
 	}
@@ -529,8 +545,12 @@ func (m *AppModel) SetLanguage(language string) error {
 	m.composer.Placeholder = catalog.T("composer.placeholder")
 	m.modelSearch.Prompt = catalog.T("search.prompt")
 	m.modelSearch.Placeholder = catalog.T("search.placeholder")
+	m.settingsSearch.Placeholder = catalog.T("overlay.settings.search_placeholder")
 	if m.transcriptLayout != nil {
 		m.transcriptLayout.initialized = false
+	}
+	if m.agentDetailLayout != nil {
+		m.agentDetailLayout.initialized = false
 	}
 	if m.recapLayout != nil {
 		m.recapLayout.initialized = false
@@ -570,6 +590,7 @@ func (m *AppModel) openOverlay(overlay Overlay) {
 	m.focus = focusOverlay
 	m.composer.Blur()
 	m.modelSearch.Blur()
+	m.settingsSearch.Blur()
 	if overlay == OverlayModel {
 		m.pendingSessionModel = nil
 		m.modelSearch.Reset()
@@ -612,9 +633,32 @@ func (m *AppModel) openOverlay(overlay Overlay) {
 			}
 		}
 	}
+	if overlay == OverlaySubagentConcurrency {
+		for index, value := range subagentConcurrencyChoices {
+			if value == m.subagentConcurrency {
+				m.overlayCursor = index
+				break
+			}
+		}
+	}
+	m.restoreSettingsCursor()
 }
 
+func (m *AppModel) restoreSettingsCursor() {
+	if m.overlay != OverlaySettings {
+		return
+	}
+	entries := m.settingsEntries()
+	m.overlayCursor = min(max(0, m.settingsCursor), max(0, len(entries)-1))
+	if len(entries) > 0 && entries[m.overlayCursor].Kind == settingsEntrySection {
+		m.moveSettingsCursor(1)
+	}
+}
+
+var subagentConcurrencyChoices = []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+
 func (m *AppModel) closeOverlay() tea.Cmd {
+	returnToSettings := m.overlayPurpose == "settings" && m.overlay != OverlaySettings
 	if m.overlay == OverlayBackgroundDetail {
 		m.stopBackgroundFollow()
 	}
@@ -623,6 +667,16 @@ func (m *AppModel) closeOverlay() tea.Cmd {
 		m.modelSearch.Blur()
 	}
 	m.pendingSessionModel = nil
+	if returnToSettings {
+		m.openOverlay(OverlaySettings)
+		return nil
+	}
+	if m.overlay == OverlaySettings {
+		m.settingsSearch.Reset()
+		m.settingsSearch.Blur()
+		clear(m.settingsExpanded)
+		m.settingsCursor = 0
+	}
 	m.overlay = OverlayNone
 	m.overlayCursor = 0
 	m.overlayScroll = 0
@@ -721,6 +775,64 @@ func (m AppModel) modelCatalogCount() int {
 		}
 	}
 	return count
+}
+
+func (m AppModel) settingsModelRoutes() []app.ModelRouteEntry {
+	routes := make([]app.ModelRouteEntry, 0, len(m.modelRoutes))
+	for _, entry := range m.modelRoutes {
+		if entry.Scope == "plan" || entry.Scope == "subagent" {
+			routes = append(routes, entry)
+		}
+	}
+	return routes
+}
+
+func (m AppModel) modelRouteOption(entry app.ModelRouteEntry) overlayOption {
+	label := first(strings.TrimSpace(entry.Role), strings.TrimSpace(entry.Label), entry.Scope)
+	if entry.Scope == "plan" {
+		label = m.tr("overlay.model_routes.plan")
+	} else if entry.Scope == "compaction" {
+		label = m.tr("overlay.model_routes.compaction")
+	}
+	detail := m.modelRouteValue(entry)
+	detail += modelRouteLabelSuffix(label, entry.Label)
+	return overlayOption{Label: label, Detail: detail}
+}
+
+func (m AppModel) modelRouteValue(entry app.ModelRouteEntry) string {
+	detail := m.tr("overlay.model_routes.inherit_parent")
+	if entry.Scope == "plan" || entry.Scope == "compaction" {
+		detail = m.tr("overlay.model_routes.inherit_active")
+	}
+	configured := strings.Trim(strings.Join([]string{entry.Route.Provider, entry.Route.Model, entry.Route.Reasoning}, "/"), "/")
+	if configured != "" {
+		detail = configured
+	}
+	return detail
+}
+
+func (m AppModel) settingsRouteDescription(entry app.ModelRouteEntry) string {
+	if entry.Scope == "plan" {
+		return m.tr("overlay.settings.plan_model_description")
+	}
+	defaults := map[string]string{
+		"explore": "Investigate the workspace without changes and return file-backed evidence.",
+		"plan":    "Produce a decision-complete implementation plan without changing the workspace.",
+		"review":  "Review a delegated change for requirement, correctness, and regression risks without editing.",
+		"verify":  "Run governed checks without editing and report exact outcomes.",
+		"worker":  "Implement one scoped coding task end-to-end and return verified evidence.",
+	}
+	if defaultDescription, ok := defaults[entry.Role]; ok && (entry.Label == "" || entry.Label == defaultDescription) {
+		return m.tr("overlay.settings.role." + entry.Role + ".description")
+	}
+	return first(strings.TrimSpace(entry.Label), m.tr("overlay.settings.subagent_model_description"))
+}
+
+func modelRouteLabelSuffix(label, description string) string {
+	if description == "" || description == label {
+		return ""
+	}
+	return " · " + description
 }
 
 func (m AppModel) selectedModelChoice() (ModelChoice, bool) {

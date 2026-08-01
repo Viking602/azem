@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
-	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/venat/api"
 )
 
 type SubagentState string
@@ -36,6 +36,7 @@ type SubagentRun struct {
 	State               SubagentState
 	Summary             string
 	Provider            string
+	AccountID           string
 	Model               string
 	Reasoning           string
 	CapabilityMode      string

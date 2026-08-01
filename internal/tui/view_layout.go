@@ -13,7 +13,7 @@ import (
 )
 
 var commandPaletteOptions = []string{
-	"login", "provider", "models", "model-routing", "skills", "reasoning", "sessions", "new", "recap", "status", "context", "agents", "background", "mcp", "cancel", "help", "quit",
+	"settings", "login", "provider", "models", "model-routing", "skills", "reasoning", "sessions", "new", "recap", "status", "context", "agents", "background", "mcp", "cancel", "help", "quit",
 }
 
 type overlayOption struct {
@@ -37,6 +37,7 @@ const (
 	uiClickStatus
 	uiClickContext
 	uiClickTodos
+	uiClickAgents
 	uiClickModel
 	uiClickReasoning
 	uiClickApprovalMode
@@ -405,10 +406,18 @@ func (m AppModel) View() tea.View {
 	width := max(1, m.width)
 	height := max(1, m.height)
 	if m.overlay != OverlayNone {
-		view := tea.NewView(fitViewport(m.renderOverlay(width, height), width, height))
+		view := tea.NewView(m.renderOverlayView(width, height))
 		if m.overlay == OverlayModel {
 			if cursor := m.modelSearch.Cursor(); cursor != nil {
 				if offsetX, offsetY, visible := m.modelSearchCursorOffset(width, height); visible {
+					cursor.Position.X += offsetX
+					cursor.Position.Y += offsetY
+					view.Cursor = cursor
+				}
+			}
+		} else if m.overlay == OverlaySettings {
+			if cursor := m.settingsSearch.Cursor(); cursor != nil {
+				if offsetX, offsetY, visible := m.settingsSearchCursorOffset(width, height); visible {
 					cursor.Position.X += offsetX
 					cursor.Position.Y += offsetY
 					view.Cursor = cursor
@@ -491,9 +500,61 @@ func (m AppModel) View() tea.View {
 	}
 	view.AltScreen = true
 	view.ReportFocus = true
-	view.MouseMode = tea.MouseModeCellMotion
+	view.MouseMode = tea.MouseModeAllMotion
 	view.WindowTitle = "Azem"
 	return view
+}
+
+func (m AppModel) renderOverlayView(width, height int) string {
+	overlay := fitViewport(m.renderOverlay(width, height), width, height)
+	x, y, boxWidth, boxHeight, fullscreen := m.overlayLayerBounds(width, height)
+	if fullscreen {
+		return overlay
+	}
+	base := m
+	base.overlay = OverlayNone
+	base.overlayPurpose = ""
+	background := fitViewport(base.View().Content, width, height)
+	box := styledViewportRect(overlay, x, y, boxWidth, boxHeight)
+	return fitViewport(lipgloss.NewCompositor(
+		lipgloss.NewLayer(background).Z(0),
+		lipgloss.NewLayer(box).X(x).Y(y).Z(1),
+	).Render(), width, height)
+}
+
+func (m AppModel) overlayLayerBounds(width, height int) (x, y, boxWidth, boxHeight int, fullscreen bool) {
+	if overlayUsesFullScreen(m.overlay, width, height) {
+		return 0, 0, width, height, true
+	}
+	switch m.overlay {
+	case OverlayMCPDetail:
+		boxWidth = min(96, max(3, width-2))
+		boxHeight = max(1, min(height-2, 28)) + 2
+	case OverlayBackgroundDetail:
+		boxWidth = min(118, max(3, width-2))
+		boxHeight = max(1, min(height-2, 32)) + 2
+	default:
+		frame := m.genericOverlayFrame(width, height)
+		return frame.leftPadding, frame.topPadding, frame.boxWidth, frame.innerHeight + 2, false
+	}
+	return max(0, (width-boxWidth)/2), max(0, (height-boxHeight)/2), boxWidth, boxHeight, false
+}
+
+func overlayUsesFullScreen(overlay Overlay, width, height int) bool {
+	return width < 6 || height < 5 || overlay == OverlayAgentDetail
+}
+
+func styledViewportRect(viewport string, x, y, width, height int) string {
+	lines := strings.Split(viewport, "\n")
+	rows := make([]string, height)
+	for row := range rows {
+		line := ""
+		if index := y + row; index >= 0 && index < len(lines) {
+			line = ansi.Cut(lines[index], x, x+width)
+		}
+		rows[row] = padStyledLine(line, width)
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (m AppModel) modelSearchCursorOffset(width, height int) (int, int, bool) {
@@ -515,6 +576,14 @@ func (m AppModel) modelSearchCursorOffset(width, height int) (int, int, bool) {
 	return leftPadding + 2, topPadding + 1 + searchRow, true
 }
 
+func (m AppModel) settingsSearchCursorOffset(width, height int) (int, int, bool) {
+	if width < 6 || height < 5 {
+		return 0, 0, false
+	}
+	frame := m.genericOverlayFrame(width, height)
+	return frame.leftPadding + 2, frame.topPadding + 1, true
+}
+
 // cachedComposer reuses the docked input panel across pure scroll frames.
 // Typing / focus / model / mode changes bust the cache.
 func (m AppModel) cachedComposer(width int) string {
@@ -523,15 +592,10 @@ func (m AppModel) cachedComposer(width int) string {
 	height := m.composer.Height()
 	focused := m.composer.Focused()
 	mode := m.approvalModeLabel()
-	if p != nil &&
-		p.composerRender != "" &&
-		p.composerWidth == width &&
-		p.composerValue == value &&
-		p.composerHeight == height &&
-		p.composerFocused == focused &&
-		p.composerModel == m.model &&
-		p.composerReason == m.reasoning &&
-		p.composerMode == mode {
+	if m.planMode {
+		mode += "\x00plan"
+	}
+	if m.composerCacheMatches(p, width, value, height, focused, mode) {
 		return p.composerRender
 	}
 	rendered := m.renderComposer()
@@ -546,6 +610,12 @@ func (m AppModel) cachedComposer(width int) string {
 		p.composerRender = rendered
 	}
 	return rendered
+}
+
+func (m AppModel) composerCacheMatches(p *paintCache, width int, value string, height int, focused bool, mode string) bool {
+	return p != nil && p.composerRender != "" && p.composerWidth == width &&
+		p.composerValue == value && p.composerHeight == height && p.composerFocused == focused &&
+		p.composerModel == m.model && p.composerReason == m.reasoning && p.composerMode == mode
 }
 
 func (m AppModel) renderComposer() string {
@@ -595,6 +665,12 @@ func (m AppModel) composerCaptionSegments() []uiSegment {
 			target:  uiClickReasoning,
 			content: m.theme.MetaValue.Render(" (" + m.reasoning + ")"),
 		})
+	}
+	if m.planMode {
+		segments = append(segments,
+			uiSegment{content: m.theme.MetaDivider.Render(" · ")},
+			uiSegment{content: m.theme.Warning.Bold(true).Render(m.tr("mode.plan"))},
+		)
 	}
 	return append(segments,
 		uiSegment{content: m.theme.MetaDivider.Render(" · ")},
@@ -718,13 +794,14 @@ func (m AppModel) renderHeaderLeft(width int) string {
 }
 
 func (m AppModel) headerRightSegments() []uiSegment {
-	segments := make([]uiSegment, 0, 5)
+	segments := make([]uiSegment, 0, 7)
 	appendSegment := func(target uiClickTarget, content string) {
 		if len(segments) > 0 {
 			segments = append(segments, uiSegment{content: m.theme.MetaDivider.Render(" │ ")})
 		}
 		segments = append(segments, uiSegment{target: target, content: content})
 	}
+	appendSegment(uiClickAgents, m.renderHeaderAgents())
 	if m.status != "" && m.status != "Ready" && !m.isRunning() {
 		appendSegment(uiClickStatus, m.stateStyle(m.status).Render(
 			stateMark(m.status)+" "+m.displayState(m.status),
@@ -740,6 +817,22 @@ func (m AppModel) headerRightSegments() []uiSegment {
 		appendSegment(uiClickTodos, m.theme.Muted.Render(fmt.Sprintf("%d/%d ✓", completed, total)))
 	}
 	return segments
+}
+func (m AppModel) renderHeaderAgents() string {
+	mark := "○"
+	style := m.theme.Muted
+	active := m.activeAgents()
+	switch {
+	case m.hasRunningAgents():
+		mark = m.agentStateMark("running")
+		style = m.theme.RailAgents
+	case len(active) > 0:
+		mark = stateMark(active[0].State)
+		style = m.theme.RailAgents
+	case len(m.agents) > 0:
+		mark = "✓"
+	}
+	return style.Render(fmt.Sprintf("%s %s %d", mark, m.tr("rail.agents"), len(m.agents)))
 }
 
 func (m AppModel) headerClickTarget(x, y int) uiClickTarget {
@@ -789,6 +882,9 @@ func (m AppModel) renderTranscriptScrollbar(height, transcriptWidth int) string 
 	height = max(1, height)
 	lineCount := len(m.transcriptLines(max(1, transcriptWidth-4)))
 	maxOffset := m.transcriptOffsetLimit(lineCount, height)
+	if maxOffset == 0 {
+		return strings.Repeat(" \n", height-1) + " "
+	}
 	offset := min(maxOffset, max(0, m.transcriptTop))
 	thumbStart, thumbSize := transcriptScrollbarThumb(height, lineCount, maxOffset, offset)
 	rows := make([]string, height)
@@ -1015,11 +1111,13 @@ func (m AppModel) transcriptLines(contentWidth int) []string {
 	lineCount := 0
 	for index, block := range m.transcript {
 		selected := m.focus == focusTranscript && m.transcriptCursor == index
+		hovered := block.Kind == BlockTool && m.transcriptHover == index
 		layout := &cache.blocks[index]
-		animationChanged := transcriptBlockAnimated(block) && layout.animationFrame != m.animationFrame
-		if !cache.initialized || !sameTranscriptBlock(layout.block, block) || layout.selected != selected || animationChanged {
+		animationChanged := (index == m.activeThinkingBlockIndex() || transcriptBlockAnimated(block)) && layout.animationFrame != m.animationFrame
+		if !cache.initialized || !sameTranscriptBlock(layout.block, block) || layout.selected != selected || layout.hovered != hovered || animationChanged {
 			layout.block = block
 			layout.selected = selected
+			layout.hovered = hovered
 			layout.animationFrame = m.animationFrame
 			layout.lines = m.renderBlock(block, index, contentWidth)
 			dirty = true
@@ -1179,34 +1277,18 @@ func (m AppModel) transcriptOffsetLimit(lineCount int, height int) int {
 func (m AppModel) renderTranscriptFooter(width int, maxOffset int, offset int) string {
 	if m.isRunning() {
 		label := strings.ToUpper(m.displayState(m.status))
-		detail := m.tr("status.detail.generating")
-		if offset == 0 {
-			detail = m.runActivitySummary(time.Now())
-		}
-		switch m.status {
-		case "Starting":
-			if m.runStartedAt.IsZero() {
-				detail = m.tr("status.detail.starting")
-			}
-		case "Compacting":
-			if m.runActivity != "retrying" {
-				detail = m.tr("status.detail.compacting")
-			}
-		case "Awaiting approval":
-			detail = m.tr("status.detail.approval")
-		case "Reviewing approval":
-			detail = m.tr("status.detail.reviewing")
-		case "Cancelling":
-			detail = m.tr("status.detail.cancelling")
-		}
 		indicator := "◆"
 		if !m.reducedMotion {
 			frames := [...]string{"◇", "◈", "◆", "◈"}
 			indicator = frames[m.animationFrame%len(frames)]
 		}
-		text := "  " + indicator + " " + label + "  " + detail + "  · " + m.tr("status.cancel_hint")
-		if offset > 0 {
-			text += "  · " + m.tr("status.history_above", map[string]string{"count": fmt.Sprint(offset)})
+		text := "  " + indicator + " " + label
+		if m.status == "Running" {
+			elapsed := "0s"
+			if !m.runStartedAt.IsZero() {
+				elapsed = formatActivityDuration(time.Since(m.runStartedAt))
+			}
+			text += "  " + elapsed
 		}
 		style := m.theme.Selected
 		if m.status == "Reviewing approval" {
@@ -1274,7 +1356,7 @@ func formatActivityDuration(duration time.Duration) string {
 	if minutes < 60 {
 		return fmt.Sprintf("%dm%02ds", minutes, seconds)
 	}
-	return fmt.Sprintf("%dh%02dm", minutes/60, minutes%60)
+	return fmt.Sprintf("%dh%02dm%02ds", minutes/60, minutes%60, seconds)
 }
 
 func (m AppModel) transcriptViewportSize() (int, int) {

@@ -15,21 +15,21 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	hyagent "github.com/Viking602/go-hydaelyn/agent"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/coding"
-	"github.com/Viking602/go-hydaelyn/message"
-	"github.com/Viking602/go-hydaelyn/multiagent"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
-	"github.com/Viking602/go-hydaelyn/stream"
-	"github.com/Viking602/go-hydaelyn/tool"
+	hyagent "github.com/Viking602/venat/agent"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/message"
+	"github.com/Viking602/venat/multiagent"
+	hyprovider "github.com/Viking602/venat/provider"
+	"github.com/Viking602/venat/stream"
+	"github.com/Viking602/venat/tool"
+	hyworker "github.com/Viking602/venat/worker"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/auth"
@@ -90,6 +90,24 @@ func TestMainInstructionsContract(t *testing.T) {
 	sum := sha256.Sum256([]byte(mainInstructions))
 	if want := hex.EncodeToString(sum[:]); mainInstructionFingerprint != want {
 		t.Fatalf("main instruction fingerprint = %q, want %q", mainInstructionFingerprint, want)
+	}
+}
+
+func TestEnableExplicitPromptCacheOnlyForGPT56ChatGPT(t *testing.T) {
+	for _, test := range []struct {
+		provider, model string
+		want            bool
+	}{
+		{provider: "chatgpt", model: "gpt-5.6-sol", want: true},
+		{provider: "chatgpt", model: "gpt-5.5", want: false},
+		{provider: "grok", model: "gpt-5.6-sol", want: false},
+	} {
+		extra := map[string]any{"prompt_cache_key": "stable"}
+		enableExplicitPromptCache(extra, test.provider, test.model)
+		_, got := extra[responses.PromptCacheBreakpointExtraKey]
+		if got != test.want {
+			t.Fatalf("provider=%s model=%s breakpoint=%v", test.provider, test.model, extra)
+		}
 	}
 }
 
@@ -170,311 +188,100 @@ func TestPhase3ArtifactToolRoundTripsBinaryPayloadAsBase64(t *testing.T) {
 	}
 }
 
-func TestExecutionCheckpointFactsCaptureTodoToolsAndWorkspace(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	for _, arguments := range [][]string{
-		{"init"},
-		{"config", "user.email", "test@example.com"},
-		{"config", "user.name", "Azem Test"},
-	} {
-		if _, err := gitOutput(ctx, root, arguments...); err != nil {
-			t.Fatal(err)
-		}
-	}
-	tracked := filepath.Join(root, "tracked.go")
-	if err := os.WriteFile(tracked, []byte("package sample\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := gitOutput(ctx, root, "add", "tracked.go"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := gitOutput(ctx, root, "commit", "-m", "base"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tracked, []byte("package sample\n\nconst Changed = true\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "new.txt"), []byte("new evidence\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	outside := filepath.Join(t.TempDir(), "outside-secret")
-	if err := os.WriteFile(outside, []byte("TOP-SECRET-MUST-NOT-BE-CAPTURED"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(root, "outside-link")); err != nil {
-		t.Fatal(err)
-	}
-	artifacts := map[string][]byte{}
-	manager := turnContext{
-		runID: "run-checkpoint",
-		todo: session.TodoList{Goal: "ship safely", Revision: 7, Phases: []session.TodoPhase{{
-			ID: "build", Items: []session.TodoItem{{ID: "verify", Content: "run tests", Status: session.TodoInProgress}},
-		}}},
-		captureWorkspace: func(ctx context.Context) (workspaceCheckpointWitness, error) {
-			return captureGitWorkspace(ctx, root)
-		},
-		putArtifact: func(_ context.Context, kind string, payload []byte, _ string) (session.ContextArtifact, error) {
-			id := fmt.Sprintf("%s-%d", kind, len(artifacts)+1)
-			artifacts[id] = append([]byte(nil), payload...)
-			return session.ContextArtifact{ID: id}, nil
-		},
-	}
-	omitted := []message.Message{
-		message.NewText(message.RoleUser, "implement the checkpoint"),
-		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "call-1", Name: "shell", Arguments: json.RawMessage(`{"command":"go test ./..."}`)}}},
-		message.NewToolResult(message.ToolResult{ToolCallID: "call-1", Name: "shell", Content: "ok", IsError: false}),
-	}
-	checkpoint, err := manager.buildExecutionCheckpointMessage(ctx, nil, omitted, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	facts, ok := parseExecutionCheckpoint(checkpoint)
-	if !ok {
-		t.Fatalf("invalid checkpoint message: %#v", checkpoint)
-	}
-	if facts.RunID != "run-checkpoint" || facts.Todo.Revision != 7 || len(facts.Tools) != 1 || facts.Tools[0].ResultSHA256 == "" {
-		t.Fatalf("checkpoint facts=%+v", facts)
-	}
-	if !facts.Workspace.Complete || facts.Workspace.Head == "" || len(facts.Workspace.Files) != 3 {
-		t.Fatalf("workspace witness=%+v", facts.Workspace)
-	}
-	encodedFacts, err := json.Marshal(facts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for id, payload := range artifacts {
-		if bytes.Contains(payload, []byte("TOP-SECRET-MUST-NOT-BE-CAPTURED")) {
-			t.Fatalf("artifact %s captured secret content: %q", id, payload)
-		}
-	}
-	if bytes.Contains(encodedFacts, []byte("TOP-SECRET-MUST-NOT-BE-CAPTURED")) ||
-		bytes.Contains(encodedFacts, []byte("const Changed = true")) || bytes.Contains(encodedFacts, []byte("new evidence")) {
-		t.Fatalf("workspace witness captured file contents: %s", encodedFacts)
-	}
-	if len(facts.SourceArtifacts) != 1 || len(artifacts[facts.SourceArtifacts[0].ID]) == 0 {
-		t.Fatalf("source evidence=%+v artifacts=%+v", facts.SourceArtifacts, artifacts)
-	}
-}
-
-func TestRunStepCheckpointPersistsOnlyProtocolCompleteBoundaries(t *testing.T) {
-	var saved [][]message.Message
-	recorder := &runStepCheckpoint{save: func(_ context.Context, history []message.Message, _ *int64) error {
-		saved = append(saved, append([]message.Message(nil), history...))
-		return nil
-	}}
-	base := []message.Message{message.NewText(message.RoleSystem, "rules"), message.NewText(message.RoleUser, "continue")}
-	request := hyprovider.Request{Messages: base}
-	if err := recorder.BeforeModelCall(context.Background(), &request); err != nil {
-		t.Fatal(err)
-	}
-	call := message.ToolCall{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a.go"}`)}
-	for _, event := range []hyprovider.Event{
-		{Kind: hyprovider.EventToolCall, ToolCall: &call},
-		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonToolUse, ProviderState: json.RawMessage(`[{"id":"provider-turn"}]`)},
-	} {
-		if err := recorder.OnEvent(context.Background(), event); err != nil {
-			t.Fatal(err)
-		}
-	}
-	result := message.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: "contents"}
-	if err := recorder.Emit(context.Background(), stream.Frame{Kind: stream.FrameToolResult, ToolResult: &result}); err != nil {
-		t.Fatal(err)
-	}
-	if err := recorder.RecordStep(context.Background(), hyagent.Step{Index: 0, Decision: hyagent.StepDecisionContinue}); err != nil {
-		t.Fatal(err)
-	}
-	if len(saved) != 2 {
-		t.Fatalf("checkpoint saves = %d, want initial boundary and finalized tool turn", len(saved))
-	}
-	got := saved[1]
-	if err := message.ValidateCompleteTurns(got); err != nil {
-		t.Fatalf("saved protocol is incomplete: %v\n%#v", err, got)
-	}
-	if len(got) != 4 || len(got[2].ToolCalls) != 1 || got[3].ToolResult == nil ||
-		string(got[2].ProviderState) != `[{"id":"provider-turn"}]` {
-		t.Fatalf("saved tool boundary = %#v", got)
-	}
-}
-
-func TestRunStepCheckpointPersistsFinalAssistantAtFinishDecision(t *testing.T) {
-	var saved []message.Message
-	recorder := &runStepCheckpoint{save: func(_ context.Context, history []message.Message, _ *int64) error {
-		saved = append([]message.Message(nil), history...)
-		return nil
-	}}
-	request := hyprovider.Request{Messages: []message.Message{message.NewText(message.RoleUser, "finish")}}
-	if err := recorder.BeforeModelCall(context.Background(), &request); err != nil {
-		t.Fatal(err)
-	}
-	_ = recorder.OnEvent(context.Background(), hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: "done"})
-	_ = recorder.OnEvent(context.Background(), hyprovider.Event{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete})
-	if err := recorder.RecordStep(context.Background(), hyagent.Step{Decision: hyagent.StepDecisionFinish}); err != nil {
-		t.Fatal(err)
-	}
-	if len(saved) != 2 || saved[1].Role != message.RoleAssistant || saved[1].Text != "done" {
-		t.Fatalf("final checkpoint = %#v", saved)
-	}
-}
-
 func TestSingleRunManifestAcceptsEmptyResolvedSkillSet(t *testing.T) {
 	manifest := singleRunManifest{
-		Version: 1, Provider: "chatgpt", Model: "model", Reasoning: "minimal",
-		ActiveSkills: []string{}, StaticIdentity: "identity", StartedAt: time.Now().UTC(),
+		Version: 2, Provider: "chatgpt", AccountID: "account-1", Model: "model", Reasoning: "minimal",
+		ActiveSkills: []string{}, PlanMode: true, StaticIdentity: "identity", StartedAt: time.Now().UTC(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	decoded, err := decodeSingleRunManifest(string(encoded))
-	if err != nil || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
+	if err != nil || decoded.AccountID != manifest.AccountID || !decoded.PlanMode || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
 		t.Fatalf("decoded empty-skill manifest=%+v error=%v", decoded, err)
 	}
 }
 
-func TestRunStepCheckpointPersistsGuardrailRetryContext(t *testing.T) {
-	var saved []message.Message
-	recorder := &runStepCheckpoint{save: func(_ context.Context, history []message.Message, _ *int64) error {
-		saved = append([]message.Message(nil), history...)
-		return nil
-	}}
-	request := hyprovider.Request{Messages: []message.Message{message.NewText(message.RoleUser, "original")}}
-	if err := recorder.BeforeModelCall(context.Background(), &request); err != nil {
-		t.Fatal(err)
+type planModeTestDriver struct{ definition tool.Definition }
+
+func (d planModeTestDriver) Definition() tool.Definition { return d.definition }
+func (planModeTestDriver) Execute(context.Context, tool.Call, tool.UpdateSink) (tool.Result, error) {
+	return tool.Result{}, nil
+}
+
+func TestPlanModeToolDriversKeepOnlyReadOnlyOperations(t *testing.T) {
+	drivers := []tool.Driver{
+		planModeTestDriver{tool.Definition{Name: "coding.read_file", EffectType: tool.EffectReadOnly}},
+		planModeTestDriver{tool.Definition{Name: subagentSpawnTool, EffectType: tool.EffectReadOnly}},
+		planModeTestDriver{tool.Definition{Name: subagentKillTool, EffectType: tool.EffectReadOnly}},
+		planModeTestDriver{tool.Definition{Name: "coding.write_file", EffectType: tool.EffectWrite}},
+		planModeTestDriver{tool.Definition{Name: "coding.shell", EffectType: tool.EffectExternalSideEffect}},
 	}
-	guardrail := checkpointGuardrail{recorder: recorder, inner: hyagent.NewOutputGuardrail("retry", func(context.Context, hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
-		return hyagent.RetryOutput(message.NewText(message.RoleUser, "late guidance")), nil
-	})}
-	if _, err := guardrail.Check(context.Background(), hyagent.OutputGuardrailInput{}); err != nil {
-		t.Fatal(err)
+	if got, want := toolDriverNames(planModeToolDrivers(drivers)), []string{"coding.read_file", subagentSpawnTool}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("plan mode tools = %v, want %v", got, want)
 	}
-	_ = recorder.OnEvent(context.Background(), hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: "rejected"})
-	_ = recorder.OnEvent(context.Background(), hyprovider.Event{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete})
-	if err := recorder.RecordStep(context.Background(), hyagent.Step{Decision: hyagent.StepDecisionContinue}); err != nil {
-		t.Fatal(err)
+	for _, required := range []string{"read-only", "read-only subagents", "Do not write implementation code"} {
+		if !strings.Contains(planModeInstructions, required) {
+			t.Fatalf("plan mode instructions omit %q", required)
+		}
 	}
-	if len(saved) != 2 || saved[1].Role != message.RoleUser || saved[1].Text != "late guidance" {
-		t.Fatalf("guardrail retry checkpoint=%#v", saved)
+	planInstructions, planFingerprint := turnInstructions(true)
+	_, normalFingerprint := turnInstructions(false)
+	if planFingerprint == normalFingerprint || !strings.Contains(planInstructions, planModeInstructions) {
+		t.Fatalf("plan instruction identity was not isolated from normal mode")
 	}
 }
 
-func TestExecutionCheckpointRefreshHasStableIdentity(t *testing.T) {
-	ctx := context.Background()
-	artifactWrites := 0
-	manager := turnContext{
-		runID: "run-stable",
-		todo:  session.TodoList{Goal: "continue", Revision: 2},
-		putArtifact: func(_ context.Context, _ string, _ []byte, _ string) (session.ContextArtifact, error) {
-			artifactWrites++
-			return session.ContextArtifact{ID: "source-stable"}, nil
-		},
+func TestPlanModeModelRouteOverridesOnlyPlanTurns(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents.Plan = config.ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
+	runtime := &ProviderRuntime{cfg: cfg}
+	normal := TurnRequest{Provider: "chatgpt", Model: "gpt-main", Reasoning: "medium"}
+	if got := runtime.routeTurn(normal); got.Provider != normal.Provider || got.Model != normal.Model || got.Reasoning != normal.Reasoning {
+		t.Fatalf("normal route changed: %#v", got)
 	}
-	omitted := []message.Message{
-		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "call-stable", Name: "read", Arguments: json.RawMessage(`{"path":"stable.go"}`)}}},
-		message.NewToolResult(message.ToolResult{ToolCallID: "call-stable", Name: "read", Content: "stable result"}),
+	plan := normal
+	plan.PlanMode = true
+	if got := runtime.routeTurn(plan); got.Provider != "grok" || got.Model != "grok-plan" || got.Reasoning != "high" {
+		t.Fatalf("plan route = %#v", got)
 	}
-	checkpoint, err := manager.buildExecutionCheckpointMessage(ctx, nil, omitted, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	summary := message.NewText(message.RoleAssistant, "stable semantic summary")
-	summary.Kind = message.KindCompactionSummary
-	summary.Visibility = message.VisibilityPrivate
-	history := []message.Message{summary, executionCheckpointPolicyMessage(), checkpoint}
-	first, err := manager.refreshExecutionCheckpoint(ctx, history)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := manager.refreshExecutionCheckpoint(ctx, first)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if firstHash, secondHash := session.ModelCheckpointHash(first), session.ModelCheckpointHash(second); firstHash == "" || firstHash != secondHash {
-		t.Fatalf("checkpoint identity changed across equivalent refreshes: first=%q second=%q", firstHash, secondHash)
-	}
-	if artifactWrites != 1 {
-		t.Fatalf("equivalent refresh persisted %d source artifacts, want 1", artifactWrites)
+	runtime.cfg.Agents.Plan.Reasoning = ""
+	if got := runtime.routeTurn(plan); got.Reasoning != normal.Reasoning {
+		t.Fatalf("plan route did not inherit reasoning: %#v", got)
 	}
 }
 
-func TestExecutionCheckpointFactsDoNotCrossRunBoundary(t *testing.T) {
-	old := executionCheckpointFacts{Version: 1, RunID: "run-old", Tools: []checkpointToolFact{{
-		CallID: "call-old", Name: "shell", Outcome: "terminal_success_do_not_replay",
-	}}}
-	encoded, err := json.Marshal(old)
-	if err != nil {
-		t.Fatal(err)
-	}
-	facts := message.NewText(message.RoleAssistant, executionCheckpointFactsPrefix+string(encoded))
-	facts.Kind = message.KindCustom
-	facts.Visibility = message.VisibilityPrivate
-	facts.Metadata = map[string]string{executionCheckpointMetadataKey: "1"}
-	summary := message.NewText(message.RoleAssistant, "preserve semantic history")
-	summary.Kind = message.KindCompactionSummary
-	history := []message.Message{summary, executionCheckpointPolicyMessage(), facts}
-
-	filtered := checkpointMessagesForRun(history, "run-new")
-	if len(filtered) != 1 || filtered[0].Kind != message.KindCompactionSummary {
-		t.Fatalf("cross-run checkpoint facts survived: %#v", filtered)
-	}
+type retryConfiguredDriver struct {
+	maxDelay time.Duration
+	observer hyprovider.RetryObserver
 }
 
-func TestWorkspaceEvidenceRejectsOversizedFileWithoutReadingIt(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "large.bin")
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Truncate(path, maxWorkspaceFileBytes+1); err != nil {
-		t.Fatal(err)
-	}
-	remaining := int64(maxWorkspaceTotalBytes)
-	if _, err := readWorkspaceEvidence(root, "large.bin", &remaining); !errors.Is(err, errWorkspaceEvidenceLimit) {
-		t.Fatalf("oversized workspace evidence error=%v", err)
-	}
-	if remaining != maxWorkspaceTotalBytes {
-		t.Fatalf("oversized file consumed evidence budget: %d", remaining)
-	}
+func (d *retryConfiguredDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "retry-configured"}
 }
 
-func TestIncompleteWorkspaceWitnessUsesFailClosedPolicy(t *testing.T) {
-	savedFacts := executionCheckpointFacts{
-		Version: 1, RunID: "run", Workspace: workspaceCheckpointWitness{
-			VCS: "git", Head: "old", Complete: false, ErrorCode: "limit_exceeded",
-		},
-	}
-	encoded, err := json.Marshal(savedFacts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpoint := message.NewText(message.RoleAssistant, executionCheckpointFactsPrefix+string(encoded))
-	checkpoint.Kind = message.KindCustom
-	checkpoint.Visibility = message.VisibilityPrivate
-	checkpoint.Metadata = map[string]string{executionCheckpointMetadataKey: "1"}
-	manager := turnContext{runID: "run", captureWorkspace: func(context.Context) (workspaceCheckpointWitness, error) {
-		return workspaceCheckpointWitness{VCS: "git", Head: "new", Complete: false, ErrorCode: "capture_failed"}, errors.New("private local path")
-	}}
-	messages := manager.workspaceReconciliationMessages(context.Background(), []message.Message{checkpoint})
-	if len(messages) != 2 || messages[0].Text != workspaceUnverifiedPolicy || strings.Contains(messages[1].Text, "private local path") {
-		t.Fatalf("incomplete workspace reconciliation=%#v", messages)
-	}
+func (d *retryConfiguredDriver) Stream(context.Context, hyprovider.Request) (hyprovider.Stream, error) {
+	return nil, errors.New("not used")
 }
 
-func TestWorkspaceCheckpointDriftTargetsOnlyChangedPaths(t *testing.T) {
-	saved := workspaceCheckpointWitness{Head: "head", Files: []workspaceFileWitness{
-		{Path: "stable.go", Status: " M", CurrentSHA256: "same", BaseSHA256: "base"},
-		{Path: "changed.go", Status: " M", CurrentSHA256: "old", BaseSHA256: "base"},
-	}}
-	current := workspaceCheckpointWitness{Head: "head", Files: []workspaceFileWitness{
-		{Path: "stable.go", Status: " M", CurrentSHA256: "same", BaseSHA256: "base"},
-		{Path: "changed.go", Status: " M", CurrentSHA256: "new", BaseSHA256: "base"},
-		{Path: "added.go", Status: "??", CurrentSHA256: "added"},
-	}}
-	got := workspaceDriftPaths(saved, current)
-	slices.Sort(got)
-	want := []string{"added.go", "changed.go"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("stale paths=%v want=%v", got, want)
+func (d *retryConfiguredDriver) SetMaxRetryDelay(maxDelay time.Duration) {
+	d.maxDelay = maxDelay
+}
+
+func (d *retryConfiguredDriver) SetRetryObserver(observer hyprovider.RetryObserver) {
+	d.observer = observer
+}
+
+func TestObserveProviderRetriesBindsConfiguredDelayCap(t *testing.T) {
+	host := &Service{cfg: config.Default()}
+	host.cfg.Retry.MaxDelayDuration = 37 * time.Second
+	driver := &retryConfiguredDriver{}
+
+	observeProviderRetries(context.Background(), host, "session", "run", "provider", driver)
+
+	if driver.maxDelay != host.cfg.Retry.MaxDelayDuration || driver.observer == nil {
+		t.Fatalf("retry configuration maxDelay=%s observer=%v", driver.maxDelay, driver.observer != nil)
 	}
 }
 
@@ -539,40 +346,6 @@ func TestDurableToolTimelineCapturesCompletedReadObservation(t *testing.T) {
 		len(projection.ToolRecords[0].Observations) != 1 ||
 		projection.ToolRecords[0].Observations[0].SHA256 != sha256Hex([]byte("durable note\n")) {
 		t.Fatalf("durable tool record=%#v", projection.ToolRecords)
-	}
-}
-
-func TestWorkspaceReconciliationBaselineAdvancesOnlyAfterSuccessfulTargetedRead(t *testing.T) {
-	oldWitness := workspaceCheckpointWitness{VCS: "git", Head: "old", Complete: true, Files: []workspaceFileWitness{{Path: "a.go", CurrentSHA256: "old"}}}
-	newWitness := workspaceCheckpointWitness{VCS: "git", Head: "new", Complete: true, Files: []workspaceFileWitness{{Path: "a.go", CurrentSHA256: "new"}}}
-	manager := turnContext{
-		runID: "run", executionCheckpoints: true, pendingWorkspacePaths: []string{"a.go"},
-		captureWorkspace: func(context.Context) (workspaceCheckpointWitness, error) { return newWitness, nil },
-	}
-	first, err := manager.buildExecutionCheckpointMessage(context.Background(), []executionCheckpointFacts{{Version: 1, RunID: "run", Workspace: oldWitness}}, nil, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstFacts, ok := parseExecutionCheckpoint(first)
-	if !ok || !reflect.DeepEqual(firstFacts.WorkspacePending, []string{"a.go"}) || firstFacts.Workspace.Head != "old" {
-		t.Fatalf("pending reconciliation advanced baseline: %+v", firstFacts)
-	}
-	manager.captureWorkspace = func(context.Context) (workspaceCheckpointWitness, error) { return oldWitness, nil }
-	regenerated := manager.workspaceReconciliationMessages(context.Background(), []message.Message{first})
-	if len(regenerated) != 2 || !strings.Contains(regenerated[1].Text, `"a.go"`) {
-		t.Fatalf("durable pending path was not regenerated after interruption: %#v", regenerated)
-	}
-	manager.captureWorkspace = func(context.Context) (workspaceCheckpointWitness, error) { return newWitness, nil }
-	call := message.ToolCall{ID: "read-a", Name: "coding.read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)}
-	history := []message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{call}}, message.NewToolResult(message.ToolResult{ToolCallID: call.ID, Name: call.Name, Content: "current"})}
-	manager.pendingWorkspacePaths = nil
-	second, err := manager.buildExecutionCheckpointMessage(context.Background(), []executionCheckpointFacts{firstFacts}, history, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondFacts, ok := parseExecutionCheckpoint(second)
-	if !ok || len(secondFacts.WorkspacePending) != 0 || secondFacts.Workspace.Head != "new" {
-		t.Fatalf("completed reconciliation did not advance baseline: %+v", secondFacts)
 	}
 }
 
@@ -739,60 +512,6 @@ func TestPhase3CompactsCompletedToolGroupsWithinLatestUserTurn(t *testing.T) {
 	}
 	if len(inputs) < 2 {
 		t.Fatalf("summarizer calls=%d, want rolling calls", len(inputs))
-	}
-}
-
-func TestPhase3RollingCompactionCarriesTrustedExecutionFacts(t *testing.T) {
-	manager := turnContext{
-		runID: "run-facts", executionCheckpoints: true, compactTargetTokens: 2600,
-		todo:      session.TodoList{Goal: "continue without rereading", Revision: 3},
-		summarize: func(context.Context, string) (string, error) { return "semantic state", nil },
-	}
-	latest := message.NewText(message.RoleUser, "implement everything")
-	history := []message.Message{message.NewText(message.RoleSystem, "rules"), latest}
-	for index := range 10 {
-		id := fmt.Sprintf("fact-call-%d", index)
-		history = append(history,
-			message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: id, Name: "shell", Arguments: json.RawMessage(fmt.Sprintf(`{"command":"step-%d"}`, index))}}},
-			message.NewToolResult(message.ToolResult{ToolCallID: id, Name: "shell", Content: strings.Repeat("result ", 300)}),
-		)
-	}
-	first, err := manager.CompactTo(context.Background(), history, 3500)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var firstFacts executionCheckpointFacts
-	for _, current := range first {
-		if parsed, ok := parseExecutionCheckpoint(current); ok {
-			firstFacts = parsed
-		}
-	}
-	if firstFacts.Version != 1 || firstFacts.RunID != "run-facts" || firstFacts.Todo.Revision != 3 || len(firstFacts.Tools) == 0 {
-		t.Fatalf("first execution facts=%+v history=%+v", firstFacts, first)
-	}
-	secondSource := append([]message.Message(nil), first...)
-	for index := 10; index < 16; index++ {
-		id := fmt.Sprintf("fact-call-%d", index)
-		secondSource = append(secondSource,
-			message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: id, Name: "shell"}}},
-			message.NewToolResult(message.ToolResult{ToolCallID: id, Name: "shell", Content: strings.Repeat("new result ", 300)}),
-		)
-	}
-	second, err := manager.CompactTo(context.Background(), secondSource, 3500)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var secondFacts executionCheckpointFacts
-	for _, current := range second {
-		if parsed, ok := parseExecutionCheckpoint(current); ok {
-			secondFacts = parsed
-		}
-	}
-	if secondFacts.Version != 1 || len(secondFacts.Tools) < len(firstFacts.Tools) {
-		t.Fatalf("rolling execution facts regressed: first=%+v second=%+v", firstFacts, secondFacts)
-	}
-	if err := message.ValidateCompleteTurns(second); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -1022,6 +741,96 @@ func TestFailedProviderTurnPersistsStreamedBreakpoint(t *testing.T) {
 	}
 }
 
+func TestProviderTurnSuspensionEmitsRecoveryWithoutTerminalFailure(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coding, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "suspended-session", Title: "Suspended"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := coding.StartRun(ctx, "perform one durable write")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, coding)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	driver := &uncertainActionDriver{}
+	engine := service.bindProviderEngine(hyagent.Engine{
+		Provider: &compactionTestDriver{streams: [][]hyprovider.Event{{
+			{Kind: hyprovider.EventToolCall, ToolCall: &message.ToolCall{
+				ID: "durable-write", Name: "durable.write", Arguments: json.RawMessage(`{"value":1}`),
+			}},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonToolUse},
+		}}},
+		Model: "test", ContextBuilder: turnContext{instructions: "test"}, Tools: tool.NewBus(driver),
+	})
+
+	service.wg.Add(1)
+	service.runProviderTurn(ctx, TurnRequest{
+		SessionID: "suspended-session", Prompt: "perform one durable write", Provider: "test", Model: "test",
+	}, run, engine)
+
+	var recovery Event
+	for {
+		eventCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		event, eventErr := service.NextEvent(eventCtx)
+		cancel()
+		if eventErr != nil {
+			break
+		}
+		switch event.Kind {
+		case EventRecoveryState:
+			recovery = event
+		case EventRunFailed, EventRunFinished:
+			t.Fatalf("suspended turn emitted terminal event: %#v", event)
+		}
+	}
+	if recovery.State != "suspended" || recovery.Data["kind"] != string(hyworker.SuspensionReconciliation) {
+		t.Fatalf("recovery event = %#v", recovery)
+	}
+	if driver.calls != 1 {
+		t.Fatalf("durable side effect calls = %d, want one", driver.calls)
+	}
+	task, err := coding.Runner().Task(ctx, run.RunID, run.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != api.TaskStatusReconcileRequired {
+		t.Fatalf("durable task status = %q, want reconcile_required", task.Status)
+	}
+}
+
+type uncertainActionDriver struct {
+	calls int
+}
+
+func (*uncertainActionDriver) Definition() tool.Definition {
+	return tool.Definition{
+		Name:               "durable.write",
+		EffectType:         tool.EffectExternalSideEffect,
+		RequiresActionTask: true,
+	}
+}
+
+func (d *uncertainActionDriver) Execute(_ context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
+	d.calls++
+	return tool.Result{ToolCallID: call.ID, Name: call.Name}, errors.New("connection lost after write")
+}
+
 func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
@@ -1036,7 +845,9 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "retry-session", Title: "Retry"}); err != nil {
 		t.Fatal(err)
 	}
-	run, err := coding.StartRun(ctx, "recover this turn")
+	run, err := coding.StartRunWithMetadata(ctx, "recover this turn", nil, agentservice.RunExecutionPolicy{
+		RetryPolicy: api.RetryPolicy{MaxAttempts: 3},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1090,39 +901,6 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	}
 	if err := message.ValidateCompleteTurns(projection.ModelHistory.Messages); err != nil {
 		t.Fatalf("recovered model history is incomplete: %v", err)
-	}
-}
-
-func TestProviderRetryContinuationRejectsIncompleteToolTurn(t *testing.T) {
-	result := hyagent.Result{
-		Failure: (&hyagent.AgentFailure{Kind: hyagent.FailureKindEngineError, Reason: "server error", Retryable: true}).
-			WithCause(&responses.APIError{Kind: responses.ErrorServer, Code: "server_error"}),
-		Messages: []message.Message{
-			message.NewText(message.RoleSystem, "system"),
-			message.NewText(message.RoleUser, "do not replay tools"),
-			{
-				Role: message.RoleAssistant,
-				ToolCalls: []message.ToolCall{{
-					ID: "partial-call", Name: "lookup", Arguments: json.RawMessage(`{"query":"state"}`),
-				}},
-			},
-		},
-	}
-	_, resetPartial, retryable := providerRetryContinuation(result)
-	if resetPartial || retryable {
-		t.Fatalf("incomplete tool turn accepted for replay: reset=%v retryable=%v", resetPartial, retryable)
-	}
-}
-
-func TestProviderAutoRetryBackoffMatchesOMPCapAndJitter(t *testing.T) {
-	if got := providerAutoRetryDelayWithJitter(500*time.Millisecond, 1, 0); got != 375*time.Millisecond {
-		t.Fatalf("first retry delay = %s, want 375ms", got)
-	}
-	if got := providerAutoRetryDelayWithJitter(500*time.Millisecond, 5, 1); got != 8*time.Second {
-		t.Fatalf("capped retry delay = %s, want 8s", got)
-	}
-	if got := providerAutoRetryDelayWithJitter(500*time.Millisecond, 8, 0); got != 6*time.Second {
-		t.Fatalf("downward jitter at cap = %s, want 6s", got)
 	}
 }
 
@@ -1258,6 +1036,14 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	runID, err := service.StartConfiguredTurn(TurnRequest{SessionID: "default", Prompt: "create created.txt", Provider: "chatgpt", Model: "gpt-test", Reasoning: "minimal", AgentMode: "single"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	durable, err := coding.Runner().Run(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := decodeSingleRunManifest(durable.Metadata["single_run_manifest"])
+	if err != nil || manifest.AccountID != "acct" {
+		t.Fatalf("durable account binding=%q error=%v", manifest.AccountID, err)
 	}
 	var output strings.Builder
 	approved := false
@@ -3182,7 +2968,7 @@ func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
 			t.Errorf("automatic reviewer received tools: %v", body["tools"])
 		}
 		input, _ := body["input"].([]any)
-		entry, _ := input[0].(map[string]any)
+		entry, _ := input[len(input)-1].(map[string]any)
 		content, _ := entry["content"].([]any)
 		part, _ := content[0].(map[string]any)
 		var evidence map[string]any
@@ -3195,7 +2981,7 @@ func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
 			t.Errorf("review evidence=%v", evidence)
 		}
 		requestChecked.Store(true)
-		writeAutomaticReview(writer, `{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized bounded write"}`, true)
+		writeAutomaticReviewWithUsage(writer, `{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized bounded write"}`)
 	})
 	modeEvent := nextApprovalEvent(t, harness.host, EventApprovalMode)
 	if modeEvent.State != "auto_review" || modeEvent.Data["auto_review_available"] != "true" {
@@ -3229,6 +3015,10 @@ func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
 	}
 	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != codex.ApprovalReviewerModel {
 		t.Fatalf("durable decider=%q", decider)
+	}
+	usage, err := harness.host.sessions.ProviderUsageSnapshot(context.Background(), "session", harness.run.RunID)
+	if err != nil || usage.CacheInputTokens != 11 || usage.CachedInputTokens != 0 || usage.CacheWriteTokens != 0 || !usage.CacheWriteReported {
+		t.Fatalf("review usage=%+v error=%v", usage, err)
 	}
 }
 
@@ -3553,8 +3343,14 @@ func TestAutoReviewCallerDeadlineStopsWithoutRetryOrManualApproval(t *testing.T)
 	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
 	noEventCtx, noEventCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer noEventCancel()
-	if event, nextErr := harness.host.NextEvent(noEventCtx); nextErr == nil {
-		t.Fatalf("caller deadline emitted follow-up approval event=%+v", event)
+	for {
+		event, nextErr := harness.host.NextEvent(noEventCtx)
+		if nextErr != nil {
+			break
+		}
+		if event.Kind == EventApprovalRequested || event.Kind == EventApprovalResolved {
+			t.Fatalf("caller deadline emitted follow-up approval event=%+v", event)
+		}
 	}
 	events, listErr := harness.coding.Runner().ListEvents(context.Background(), harness.run.RunID)
 	if listErr != nil {
@@ -3783,7 +3579,11 @@ func newAutoReviewHarness(t *testing.T, handler http.HandlerFunc) autoReviewHarn
 	}
 	runtime.ChatGPTEndpoint = server.URL
 	host := NewService(ctx, cfg)
-	host.AttachDurable(nil, coding)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session"}); err != nil {
+		t.Fatal(err)
+	}
+	host.AttachDurable(sessions, coding)
 	host.AttachAuth(authentication, nil)
 	host.AttachProviderRuntime(runtime)
 	if err := host.setApprovalMode(ctx, ApprovalModeAutoReview); err != nil {
@@ -3819,6 +3619,13 @@ func writeAutomaticReview(writer http.ResponseWriter, output string, completed b
 	if completed {
 		_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
 	}
+}
+
+func writeAutomaticReviewWithUsage(writer http.ResponseWriter, output string) {
+	writer.Header().Set("Content-Type", "text/event-stream")
+	delta, _ := json.Marshal(map[string]any{"type": "response.output_text.delta", "delta": output})
+	_, _ = fmt.Fprintf(writer, "data: %s\n\n", delta)
+	_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":11,\"output_tokens\":2,\"total_tokens\":13,\"input_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0}}}}\n\n")
 }
 
 func nextApprovalEvent(t *testing.T, service *Service, kind EventKind) Event {
@@ -3916,20 +3723,10 @@ func TestTurnContextBuildReplaysCompatibleHistoryAndAppendsDynamicTail(t *testin
 func TestTurnContextResumeDoesNotDuplicateCheckpointedUser(t *testing.T) {
 	boundary := int64(1)
 	staticIdentity := "static-resume"
-	factsValue := executionCheckpointFacts{Version: 1, RunID: "run-resume"}
-	encoded, err := json.Marshal(factsValue)
-	if err != nil {
-		t.Fatal(err)
-	}
-	facts := message.NewText(message.RoleAssistant, executionCheckpointFactsPrefix+string(encoded))
-	facts.Kind = message.KindCustom
-	facts.Visibility = message.VisibilityPrivate
-	facts.Metadata = map[string]string{executionCheckpointMetadataKey: "1"}
 	saved := []message.Message{
 		message.NewText(message.RoleSystem, mainInstructions),
 		message.NewText(message.RoleUser, "original request"),
 		message.NewText(message.RoleAssistant, "semantic checkpoint"),
-		executionCheckpointPolicyMessage(), facts,
 	}
 	saved[2].Kind = message.KindCompactionSummary
 	manager := turnContext{
@@ -3997,6 +3794,9 @@ func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testin
 	service := NewService(context.Background(), config.Default())
 	recovery := &agentservice.EditRecovery{}
 	hooks := service.teamHooks(TurnRequest{SessionID: "session-1", Provider: "chatgpt", Model: "gpt-team"}, "team-parent", teamExecutionPolicy{}, recovery)
+	if hooks.RetryPolicy.MaxBackoff != service.cfg.Retry.MaxDelayDuration {
+		t.Fatalf("team retry max backoff = %v, want %v", hooks.RetryPolicy.MaxBackoff, service.cfg.Retry.MaxDelayDuration)
+	}
 	base := hyagent.Engine{ExtraBody: map[string]any{"parallel_tool_calls": false}}
 	prepare := func(runID, role string) hyagent.Engine {
 		t.Helper()

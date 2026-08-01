@@ -61,7 +61,9 @@ type overlayFrameLayout struct {
 
 func (m AppModel) genericOverlayFrame(width, height int) overlayFrameLayout {
 	maxBoxWidth := 82
-	if m.overlay == OverlayAgentTypes || m.overlay == OverlayPersonas || m.overlay == OverlaySkills || m.overlay == OverlayMemory || m.overlay == OverlayRecap || m.overlay == OverlayModelRoutes || m.overlay == OverlayStatus || m.overlay == OverlayContext || m.overlay == OverlayBackground {
+	switch m.overlay {
+	case OverlayAgentTypes, OverlayPersonas, OverlaySkills, OverlayMemory, OverlayRecap,
+		OverlayModelRoutes, OverlaySettings, OverlayStatus, OverlayContext, OverlayBackground:
 		maxBoxWidth = 110
 	}
 	boxWidth := min(maxBoxWidth, max(3, width-2))
@@ -118,8 +120,10 @@ type overlayScrollbarGeometry struct {
 }
 
 func (m AppModel) overlayScrollbar(width, height int) (overlayScrollbarGeometry, bool) {
+	if m.overlay == OverlayAgentDetail {
+		return m.agentDetailScrollbar(width, height)
+	}
 	if width < 6 || height < 5 ||
-		m.overlay == OverlayAgentDetail ||
 		m.overlay == OverlayMCPDetail ||
 		m.overlay == OverlayBackgroundDetail ||
 		len(m.overlayOptions()) > 0 {
@@ -194,6 +198,9 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	}
 	if m.overlay == OverlayBackgroundDetail {
 		return m.renderBackgroundDetailOverlay(width, height)
+	}
+	if m.overlay == OverlaySettings {
+		return m.renderSettingsOverlay(width, height)
 	}
 	frame := m.genericOverlayFrame(width, height)
 	innerWidth := frame.innerWidth
@@ -300,12 +307,12 @@ func (m AppModel) renderOverlay(width int, height int) string {
 	}
 	box = append(box, bottom)
 
-	topPadding := frame.topPadding
+	return positionOverlayBox(box, frame, height)
+}
+
+func positionOverlayBox(box []string, frame overlayFrameLayout, height int) string {
+	output := make([]string, frame.topPadding, height)
 	leftPadding := strings.Repeat(" ", frame.leftPadding)
-	output := make([]string, 0, height)
-	for range topPadding {
-		output = append(output, "")
-	}
 	for _, line := range box {
 		output = append(output, leftPadding+line)
 	}
@@ -313,6 +320,136 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		output = append(output, "")
 	}
 	return strings.Join(output[:height], "\n")
+}
+
+type settingsEntryKind uint8
+
+const (
+	settingsEntrySection settingsEntryKind = iota
+	settingsEntryRoute
+	settingsEntryConcurrency
+	settingsEntryFastMode
+	settingsEntryLanguage
+)
+
+const (
+	settingsSectionModels    = "models"
+	settingsSectionRuntime   = "runtime"
+	settingsSectionCodex     = "codex"
+	settingsSectionInterface = "interface"
+)
+
+type settingsEntry struct {
+	Kind        settingsEntryKind
+	Section     string
+	Key         string
+	RouteIndex  int
+	Option      overlayOption
+	Description string
+}
+
+func (m AppModel) renderSettingsOverlay(width, height int) string {
+	frame := m.genericOverlayFrame(width, height)
+	title, _ := m.overlayHeading()
+	entries := m.settingsEntries()
+	visualRows := make([]string, 0, len(entries)*2)
+	selectedVisualRow := 0
+	for index, entry := range entries {
+		if entry.Kind == settingsEntrySection && len(visualRows) > 0 {
+			visualRows = append(visualRows, m.boxRow("", frame.innerWidth, m.theme.Assistant, false))
+		}
+		if index == m.overlayCursor {
+			selectedVisualRow = len(visualRows)
+		}
+		visualRows = append(visualRows, m.settingsEntryRow(entry, frame.innerWidth, index == m.overlayCursor))
+		if entry.Kind != settingsEntrySection && m.settingsExpanded[entry.Key] {
+			visualRows = append(visualRows, m.settingsDescriptionRows(entry, frame.innerWidth)...)
+		}
+	}
+	optionRows := max(1, frame.innerHeight-4)
+	start := optionWindowStart(selectedVisualRow, len(visualRows), optionRows)
+	end := min(len(visualRows), start+optionRows)
+	search := m.settingsSearch
+	search.SetWidth(max(1, frame.innerWidth-4))
+	rows := []string{
+		m.boxRow(" "+search.View(), frame.innerWidth, m.theme.Assistant, false),
+		m.boxRow(" "+strings.Repeat("─", max(0, frame.innerWidth-2)), frame.innerWidth, m.theme.Border, false),
+	}
+	rows = append(rows, visualRows[start:end]...)
+	rows = m.completeSettingsRows(rows, frame.innerWidth, frame.innerHeight)
+
+	return positionOverlayBox(m.settingsOverlayBox(title, rows, frame), frame, height)
+}
+
+func (m AppModel) completeSettingsRows(rows []string, width, height int) []string {
+	for len(rows) < height-2 {
+		rows = append(rows, m.boxRow("", width, m.theme.Assistant, false))
+	}
+	footer := m.boxRow(" "+m.overlayFooterForWidth(max(1, width-1)), width, m.theme.OverlayFooter, false)
+	rows = append(rows,
+		m.boxRow(" "+strings.Repeat("─", max(0, width-2)), width, m.theme.Border, false),
+		footer,
+	)
+	if len(rows) > height {
+		return append(rows[:height-1], footer)
+	}
+	return rows
+}
+
+func (m AppModel) settingsOverlayBox(title string, rows []string, frame overlayFrameLayout) []string {
+	box := []string{m.settingsTopBorder(title, frame.boxWidth)}
+	for _, row := range rows {
+		box = append(box, m.theme.Border.Render("│")+row+m.theme.Border.Render("│"))
+	}
+	return append(box, m.theme.Border.Render("└"+strings.Repeat("─", frame.innerWidth)+"┘"))
+}
+
+func (m AppModel) settingsTopBorder(title string, width int) string {
+	if width < 12 {
+		return m.theme.Border.Render("┌" + strings.Repeat("─", max(0, width-2)) + "┐")
+	}
+	title = truncateStyledFallback(title, width-10)
+	filler := strings.Repeat("─", max(0, width-10-lipgloss.Width(title)))
+	return m.theme.Border.Render("┌─ ") + m.theme.OverlayTitle.Render(title) +
+		m.theme.Border.Render(" "+filler) + m.theme.Muted.Render("[×]") + m.theme.Border.Render(" ─┐")
+}
+
+func (m AppModel) settingsEntryRow(entry settingsEntry, width int, selected bool) string {
+	if entry.Kind == settingsEntrySection {
+		label := " " + entry.Option.Label + " "
+		rule := strings.Repeat("─", max(0, width-lipgloss.Width(label)-1))
+		return m.boxRow(label+rule, width, m.theme.Muted.Bold(true), false)
+	}
+	value := entry.Option.Detail
+	mark := "▸"
+	if m.settingsExpanded[entry.Key] {
+		mark = "▾"
+	}
+	left := mark + " " + entry.Option.Label
+	if entry.Kind != settingsEntryFastMode {
+		value += "  ›"
+	}
+	contentWidth := max(1, width-2)
+	if selected {
+		content := " " + joinSides(left, value, contentWidth) + " "
+		return m.theme.OverlaySelected.Render(padOrTrim(content, width))
+	}
+	leftStyled := m.theme.Assistant.Render(left)
+	right := m.theme.Muted.Render(value)
+	return m.boxRow(" "+joinSides(leftStyled, right, contentWidth)+" ", width, lipgloss.NewStyle(), false)
+}
+
+func (m AppModel) settingsDescriptionRows(entry settingsEntry, width int) []string {
+	if strings.TrimSpace(entry.Description) == "" {
+		return nil
+	}
+	lines := wrapText(entry.Description, max(4, width-7))
+	rows := make([]string, 0, len(lines))
+	style := m.theme.Muted.Italic(true)
+	for _, line := range lines {
+		rows = append(rows, m.boxRow("    "+line, width, style, false))
+	}
+	return rows
 }
 
 func (m AppModel) recapDescriptionLines(contentWidth int) []string {
@@ -364,98 +501,104 @@ func (m *AppModel) scrollRecap(delta int) {
 	m.overlayScroll = min(m.recapScrollLimit(), max(0, m.overlayScroll+delta))
 }
 
-func (m AppModel) renderAgentDetailOverlay(width, height int) string {
-	boxWidth := min(96, max(3, width-2))
-	innerWidth := max(1, boxWidth-2)
-	innerHeight := max(1, min(height-2, 28))
+func agentDetailBodyHeight(height int) int {
+	return max(1, height-3)
+}
+
+func (m AppModel) agentDetailTranscript(agent AgentView) AppModel {
+	details := []string{fmt.Sprintf("ID %s", agent.ID)}
+	if agent.Description != "" {
+		details = append(details, m.tr("agent.goal", map[string]string{"value": agent.Description}))
+	}
+	if agent.Activity != "" {
+		details = append(details, m.tr("agent.activity", map[string]string{"value": agent.Activity}))
+	}
+	details = append(details,
+		m.tr("agent.model", map[string]string{"model": first(agent.Model, m.tr("value.inherit")), "capability": first(agent.CapabilityMode, m.tr("value.inherit")), "background": fmt.Sprint(agent.Background)}),
+		m.tr("agent.isolation", map[string]string{"value": first(agent.Isolation, m.tr("value.none")), "requested": first(agent.RequestedIsolation, m.tr("value.none"))}),
+		m.tr("agent.stats", map[string]string{"tools": strconv.Itoa(agent.ToolCalls), "turns": strconv.Itoa(agent.Turns), "tokens": strconv.Itoa(agent.TokensUsed), "seconds": fmt.Sprintf("%.1f", float64(agent.ElapsedMS)/1000)}),
+	)
+	if agent.CWD != "" {
+		details = append(details, "CWD: "+agent.CWD)
+	}
+	if agent.Warning != "" {
+		details = append(details, m.tr("agent.warning", map[string]string{"value": agent.Warning}))
+	}
+	if agent.WorktreePath != "" {
+		details = append(details, "Worktree: "+agent.WorktreePath)
+	}
+	blocks := []Block{{
+		ID: "agent-detail-" + agent.ID, Kind: BlockAgent, Title: first(agent.Role, m.tr("block.subagent")),
+		Content: strings.Join(details, "\n"), State: first(agent.State, "completed"),
+	}}
+	blocks = append(blocks, agent.Blocks...)
+	detail := m
+	detail.transcript = blocks
+	detail.transcriptTop = m.overlayScroll
+	detail.transcriptCursor = -1
+	detail.transcriptHover = -1
+	detail.focus = focusOverlay
+	detail.status = "Ready"
+	detail.runID = ""
+	detail.transcriptLayout = m.agentDetailLayout
+	if detail.transcriptLayout == nil {
+		detail.transcriptLayout = &transcriptLayoutCache{}
+	}
+	return detail
+}
+
+func (m AppModel) agentDetailScrollLimitFor(width, height int) int {
+	if width < 6 || height < 5 {
+		return 0
+	}
 	agent, found := m.agentDetail()
-	content := make([]string, 0)
 	if !found {
-		content = append(content, m.tr("overlay.agent_detail.unavailable"))
-	} else {
-		content = append(content,
-			fmt.Sprintf("%s · %s", first(agent.Role, m.tr("block.subagent")), strings.ToUpper(first(agent.State, m.tr("value.unknown")))),
-			fmt.Sprintf("ID %s", agent.ID),
-		)
-		if agent.Description != "" {
-			content = append(content, m.tr("agent.goal", map[string]string{"value": agent.Description}))
-		}
-		if agent.Activity != "" {
-			content = append(content, m.tr("agent.activity", map[string]string{"value": agent.Activity}))
-		}
-		content = append(content,
-			m.tr("agent.model", map[string]string{"model": first(agent.Model, m.tr("value.inherit")), "capability": first(agent.CapabilityMode, m.tr("value.inherit")), "background": fmt.Sprint(agent.Background)}),
-			m.tr("agent.isolation", map[string]string{"value": first(agent.Isolation, m.tr("value.none")), "requested": first(agent.RequestedIsolation, m.tr("value.none"))}),
-			m.tr("agent.stats", map[string]string{"tools": strconv.Itoa(agent.ToolCalls), "turns": strconv.Itoa(agent.Turns), "tokens": strconv.Itoa(agent.TokensUsed), "seconds": fmt.Sprintf("%.1f", float64(agent.ElapsedMS)/1000)}),
-		)
-		if agent.CWD != "" {
-			content = append(content, "CWD: "+agent.CWD)
-		}
-		if agent.Warning != "" {
-			content = append(content, m.tr("agent.warning", map[string]string{"value": agent.Warning}))
-		}
-		if agent.WorktreePath != "" {
-			content = append(content, "Worktree: "+agent.WorktreePath)
-		}
-		content = append(content, strings.Repeat("─", max(0, innerWidth-4)))
-		if len(agent.Blocks) == 0 {
-			content = append(content, m.tr("overlay.agent_detail.empty"))
-		} else {
-			for _, block := range agent.Blocks {
-				if block.Kind == BlockHook {
-					content = append(content, m.renderHookPrompt(block, false, max(4, innerWidth-2))...)
-					continue
-				}
-				title := first(block.Title, string(block.Kind))
-				if block.Kind == BlockTool {
-					title = m.toolDisplayName(title)
-				}
-				content = append(content, fmt.Sprintf("%s · %s", strings.ToUpper(title), strings.ToUpper(first(block.State, "completed"))))
-				for _, line := range wrapText(block.Content, max(4, innerWidth-4)) {
-					content = append(content, "  "+line)
-				}
-			}
-		}
+		return 0
 	}
-	rowsAvailable := max(1, innerHeight-4)
-	start := min(max(0, m.overlayScroll), max(0, len(content)-rowsAvailable))
-	end := min(len(content), start+rowsAvailable)
-	rows := []string{
-		m.boxRow(" ◈ "+strings.ToUpper(m.tr("overlay.agent_detail.title")), innerWidth, m.theme.OverlayTitle, false),
-		m.boxRow(" "+first(agent.Description, agent.ID, m.tr("overlay.agent_detail.child_execution")), innerWidth, m.theme.Muted, false),
-		m.boxRow(" "+strings.Repeat("─", max(0, innerWidth-2)), innerWidth, m.theme.Border, false),
+	bodyHeight := agentDetailBodyHeight(height)
+	detail := m.agentDetailTranscript(agent)
+	lineCount := len(detail.transcriptLines(transcriptContentWidth(width, bodyHeight)))
+	return detail.transcriptOffsetLimit(lineCount, bodyHeight)
+}
+
+func (m AppModel) agentDetailScrollLimit() int {
+	return m.agentDetailScrollLimitFor(max(1, m.width), max(1, m.height))
+}
+
+func (m AppModel) agentDetailScrollbar(width, height int) (overlayScrollbarGeometry, bool) {
+	maxOffset := m.agentDetailScrollLimitFor(width, height)
+	if maxOffset == 0 {
+		return overlayScrollbarGeometry{}, false
 	}
-	for _, line := range content[start:end] {
-		rows = append(rows, m.boxRow(" "+line, innerWidth, m.theme.Assistant, false))
+	return overlayScrollbarGeometry{
+		x: width - 1, y: 2, height: agentDetailBodyHeight(height),
+		maxOffset: maxOffset, offset: min(maxOffset, max(0, m.overlayScroll)),
+	}, true
+}
+
+func (m AppModel) renderAgentDetailOverlay(width, height int) string {
+	agent, found := m.agentDetail()
+	left := m.theme.Header.Render("⌁ " + strings.ToUpper(m.tr("overlay.agent_detail.title")))
+	if found {
+		left += m.theme.Muted.Render("  " + first(agent.Description, agent.ID, m.tr("overlay.agent_detail.child_execution")))
 	}
-	for len(rows) < innerHeight-1 {
-		rows = append(rows, m.boxRow("", innerWidth, m.theme.Assistant, false))
+	right := ""
+	if found {
+		right = m.theme.Muted.Render(first(agent.Model, m.tr("value.inherit"))) + m.theme.MetaDivider.Render(" │ ") +
+			m.stateStyle(agent.State).Render(stateMark(agent.State)+" "+strings.ToUpper(m.displayState(agent.State)))
 	}
-	footer := m.boxRow(" "+m.overlayFooterForWidth(max(1, innerWidth-1)), innerWidth, m.theme.OverlayFooter, false)
-	rows = append(rows, footer)
-	if len(rows) > innerHeight {
-		rows = append(rows[:innerHeight-1], footer)
+	header := renderSurface(m.theme.Chrome, joinSides(left, right, width))
+	bodyHeight := agentDetailBodyHeight(height)
+	body := fitViewport(m.theme.Muted.Render("  "+m.tr("overlay.agent_detail.unavailable")), width, bodyHeight)
+	if found {
+		detail := m.agentDetailTranscript(agent)
+		detail.transcriptTop = min(detail.transcriptOffsetLimit(
+			len(detail.transcriptLines(transcriptContentWidth(width, bodyHeight))), bodyHeight,
+		), max(0, m.overlayScroll))
+		body = detail.renderBody(width, bodyHeight)
 	}
-	top := m.theme.Border.Render("┌" + strings.Repeat("─", innerWidth) + "┐")
-	bottom := m.theme.Border.Render("└" + strings.Repeat("─", innerWidth) + "┘")
-	box := []string{top}
-	for _, row := range rows {
-		box = append(box, m.theme.Border.Render("│")+row+m.theme.Border.Render("│"))
-	}
-	box = append(box, bottom)
-	topPadding := max(0, (height-len(box))/2)
-	leftPadding := strings.Repeat(" ", max(0, (width-boxWidth)/2))
-	output := make([]string, 0, height)
-	for range topPadding {
-		output = append(output, "")
-	}
-	for _, line := range box {
-		output = append(output, leftPadding+line)
-	}
-	for len(output) < height {
-		output = append(output, "")
-	}
-	return strings.Join(output[:height], "\n")
+	footer := m.theme.OverlayFooter.Render(padOrTrim(" "+m.overlayFooterForWidth(max(1, width-1)), width))
+	return fitViewport(strings.Join([]string{header, padStyledLine("", width), body, footer}, "\n"), width, height)
 }
 
 func (m AppModel) renderMCPDetailOverlay(width, height int) string {
@@ -689,6 +832,10 @@ func (m AppModel) overlayHeading() (string, string) {
 		return m.tr("overlay.model.title"), m.tr("overlay.model.catalogs", map[string]string{"count": strconv.Itoa(count)})
 	case OverlayModelRoutes:
 		return m.tr("overlay.model_routes.title"), m.tr("overlay.model_routes.subtitle")
+	case OverlaySettings:
+		return m.tr("overlay.settings.title"), m.tr("overlay.settings.subtitle")
+	case OverlaySubagentConcurrency:
+		return m.tr("overlay.subagent_concurrency.title"), m.tr("overlay.subagent_concurrency.subtitle")
 	case OverlaySkills:
 		return m.tr("overlay.skills.title"), m.tr("overlay.skills.subtitle")
 	case OverlayLanguage:
@@ -754,6 +901,10 @@ func (m AppModel) overlayDescription() []string {
 	switch m.overlay {
 	case OverlayModelRoutes:
 		return []string{m.tr("overlay.model_routes.description")}
+	case OverlaySettings:
+		return []string{m.tr("overlay.settings.description")}
+	case OverlaySubagentConcurrency:
+		return []string{m.tr("overlay.subagent_concurrency.description")}
 	case OverlayMemory:
 		if len(m.memories) == 0 {
 			return []string{m.tr("overlay.memory.empty")}
@@ -771,8 +922,8 @@ func (m AppModel) overlayDescription() []string {
 	case OverlayHelp:
 		return []string{
 			m.tr("overlay.help.line1"), m.tr("overlay.help.line2"), m.tr("overlay.help.line3"), m.tr("overlay.help.line4"),
-			"/login /logout /provider /models /skills /skill /new /sessions /resume /compact",
-			"/team /agents /mcp /status /context /reconcile /cancel /help /quit",
+			"/settings /login /logout /provider /models /skills /skill /new /sessions /resume /compact",
+			"/plan /team /agents /mcp /status /context /reconcile /cancel /help /quit",
 		}
 	case OverlayStatus:
 		return m.statusReportLines()
@@ -865,6 +1016,79 @@ func (m AppModel) overlayDescription() []string {
 	return nil
 }
 
+func (m AppModel) settingsEntries() []settingsEntry {
+	entries := m.allSettingsEntries()
+	query := strings.ToLower(strings.TrimSpace(m.settingsSearch.Value()))
+	if query == "" {
+		return entries
+	}
+	filtered := make([]settingsEntry, 0, len(entries))
+	var section settingsEntry
+	sectionAdded := false
+	for _, entry := range entries {
+		if entry.Kind == settingsEntrySection {
+			section = entry
+			sectionAdded = false
+			continue
+		}
+		searchable := strings.ToLower(strings.Join([]string{section.Option.Label, entry.Option.Label, entry.Option.Detail, entry.Description}, " "))
+		if !strings.Contains(searchable, query) {
+			continue
+		}
+		if !sectionAdded {
+			filtered = append(filtered, section)
+			sectionAdded = true
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func (m AppModel) allSettingsEntries() []settingsEntry {
+	routes := m.settingsModelRoutes()
+	fastDetail := m.tr("overlay.settings.fast_mode_value_off")
+	fastState := ""
+	if m.chatGPTFastMode {
+		fastDetail = m.tr("overlay.settings.fast_mode_value_on")
+		fastState = "enabled"
+	}
+	entries := []settingsEntry{{
+		Kind: settingsEntrySection, Section: settingsSectionModels,
+		Option: overlayOption{Label: m.tr("overlay.settings.category.models")},
+	}}
+	for index, route := range routes {
+		option := m.modelRouteOption(route)
+		option.Detail = m.modelRouteValue(route)
+		entries = append(entries, settingsEntry{
+			Kind: settingsEntryRoute, Section: settingsSectionModels, Key: "route:" + route.Scope + ":" + route.Role,
+			RouteIndex: index, Option: option, Description: m.settingsRouteDescription(route),
+		})
+	}
+	entries = append(entries, settingsEntry{
+		Kind: settingsEntrySection, Section: settingsSectionRuntime,
+		Option: overlayOption{Label: m.tr("overlay.settings.category.runtime")},
+	})
+	entries = append(entries, settingsEntry{Kind: settingsEntryConcurrency, Section: settingsSectionRuntime, Key: "subagent:max_concurrency", Option: overlayOption{
+		Label: m.tr("overlay.settings.concurrency"), Detail: strconv.Itoa(m.subagentConcurrency),
+	}, Description: m.tr("overlay.settings.concurrency_description")})
+	entries = append(entries, settingsEntry{
+		Kind: settingsEntrySection, Section: settingsSectionCodex,
+		Option: overlayOption{Label: m.tr("overlay.settings.category.codex")},
+	})
+	entries = append(entries, settingsEntry{Kind: settingsEntryFastMode, Section: settingsSectionCodex, Key: "chatgpt:fast_mode", Option: overlayOption{
+		Label: m.tr("overlay.settings.fast_mode"), Detail: fastDetail, State: fastState,
+	}, Description: m.tr("overlay.settings.fast_mode_description")})
+	languageDetail := m.tr("language.name") + " · " + m.catalog.Language()
+	entries = append(entries, settingsEntry{
+		Kind: settingsEntrySection, Section: settingsSectionInterface,
+		Option: overlayOption{Label: m.tr("overlay.settings.category.interface")},
+	})
+	entries = append(entries, settingsEntry{Kind: settingsEntryLanguage, Section: settingsSectionInterface, Key: "ui:language", Option: overlayOption{
+		Label: m.tr("overlay.settings.language"), Detail: languageDetail,
+	}, Description: m.tr("overlay.settings.language_description")})
+	return entries
+}
+
 func (m AppModel) overlayOptions() []overlayOption {
 	switch m.overlay {
 	case OverlayMemory:
@@ -880,20 +1104,24 @@ func (m AppModel) overlayOptions() []overlayOption {
 	case OverlayModelRoutes:
 		options := make([]overlayOption, 0, len(m.modelRoutes))
 		for _, entry := range m.modelRoutes {
-			label := entry.Role
-			inherit := m.tr("overlay.model_routes.inherit_parent")
-			if entry.Scope == "compaction" {
-				label = m.tr("overlay.model_routes.compaction")
-				inherit = m.tr("overlay.model_routes.inherit_active")
+			options = append(options, m.modelRouteOption(entry))
+		}
+		return options
+	case OverlaySettings:
+		entries := m.settingsEntries()
+		options := make([]overlayOption, 0, len(entries))
+		for _, entry := range entries {
+			options = append(options, entry.Option)
+		}
+		return options
+	case OverlaySubagentConcurrency:
+		options := make([]overlayOption, 0, len(subagentConcurrencyChoices))
+		for _, value := range subagentConcurrencyChoices {
+			state := ""
+			if value == m.subagentConcurrency {
+				state = "selected"
 			}
-			detail := inherit
-			if entry.Route.Provider != "" || entry.Route.Model != "" || entry.Route.Reasoning != "" {
-				detail = strings.Trim(strings.Join([]string{entry.Route.Provider, entry.Route.Model, entry.Route.Reasoning}, "/"), "/")
-			}
-			if entry.Label != "" && entry.Label != label {
-				detail += " · " + entry.Label
-			}
-			options = append(options, overlayOption{Label: label, Detail: detail})
+			options = append(options, overlayOption{Label: strconv.Itoa(value), Detail: m.tr("overlay.subagent_concurrency.option", map[string]string{"count": strconv.Itoa(value)}), State: state})
 		}
 		return options
 	case OverlayCommand:
@@ -1121,6 +1349,10 @@ func (m AppModel) overlayFooter() string {
 		return m.tr("overlay.footer.working")
 	}
 	switch m.overlay {
+	case OverlaySettings:
+		return m.tr("overlay.settings.footer")
+	case OverlaySubagentConcurrency:
+		return m.tr("overlay.subagent_concurrency.footer")
 	case OverlayModelRoutes:
 		return m.tr("overlay.model_routes.footer")
 	case OverlayModel:
@@ -1170,6 +1402,10 @@ func (m AppModel) overlayFooterForWidth(width int) string {
 		return footer
 	}
 	switch m.overlay {
+	case OverlaySettings:
+		return m.tr("overlay.settings.footer_short")
+	case OverlaySubagentConcurrency:
+		return m.tr("overlay.subagent_concurrency.footer_short")
 	case OverlayModelRoutes:
 		return m.tr("overlay.model_routes.footer_short")
 	case OverlayApproval:

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/go-hydaelyn/message"
+	"github.com/Viking602/venat/message"
 )
 
 func TestPhase4ProviderFactsAreIdempotentIsolatedAndDurable(t *testing.T) {
@@ -58,6 +58,9 @@ func TestPhase4ProviderFactsAreIdempotentIsolatedAndDurable(t *testing.T) {
 		{RequestID: "compact", SessionID: "s", RunID: "run", RequestKind: "compaction", Status: "completed", StartedAt: now, CompletedAt: now, InputTokens: 30, CachedTokens: 3, CacheReported: true},
 		{RequestID: "team", SessionID: "s", RunID: "run", RequestKind: "team", Status: "completed", StartedAt: now, CompletedAt: now, InputTokens: 40},
 		{RequestID: "sub", SessionID: "s", RunID: "run", RequestKind: "subagent", Status: "completed", StartedAt: now, CompletedAt: now, InputTokens: 50, CachedTokens: 5, CacheReported: true},
+		{RequestID: "review", SessionID: "s", RunID: "run", RequestKind: "review", Status: "completed", StartedAt: now, CompletedAt: now, InputTokens: 60, CachedTokens: 30, CacheReported: true, CacheWriteReported: true},
+		{RequestID: "other-run", SessionID: "s", RunID: "other", RequestKind: "review", Status: "completed", StartedAt: now, CompletedAt: now, InputTokens: 1_000, CachedTokens: 1_000, CacheReported: true, CacheWriteTokens: 99, CacheWriteReported: true},
+		{RequestID: "other-compact", SessionID: "s", RunID: "other", RequestKind: "compaction", Status: "completed", StartedAt: now, CompletedAt: now, InputTokens: 900, CachedTokens: 900, CacheReported: true},
 	}
 	for _, fact := range facts {
 		if err = svc.UpsertProviderRequest(ctx, fact); err != nil {
@@ -73,6 +76,9 @@ func TestPhase4ProviderFactsAreIdempotentIsolatedAndDurable(t *testing.T) {
 	}
 	if snap.TeamReportedInput != 0 || snap.TeamCacheReported || snap.CompactionReportedInput != 30 || snap.CompactionCached != 3 {
 		t.Fatalf("reported denominators failed: %#v", snap)
+	}
+	if snap.MainCacheInput != 10 || snap.MainCachedInput != 4 || snap.CacheInputTokens != 150 || snap.CachedInputTokens != 42 || snap.CacheWriteTokens != 0 || !snap.CacheWriteReported {
+		t.Fatalf("main/all cache aggregation failed: %#v", snap)
 	}
 	if err = store.Close(ctx); err != nil {
 		t.Fatal(err)

@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/go-hydaelyn/message"
+	"github.com/Viking602/venat/message"
 )
 
 const (
@@ -136,7 +136,6 @@ func (s AttachmentStore) Import(sessionID, sourcePath string) (session.Attachmen
 		Size: written,
 	}, nil
 }
-
 
 func (s AttachmentStore) ImportBytes(sessionID, name, mimeType string, data []byte) (session.Attachment, error) {
 	if strings.TrimSpace(s.Root) == "" {

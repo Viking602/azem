@@ -9,9 +9,9 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/go-hydaelyn/api"
-	"github.com/Viking602/go-hydaelyn/stream"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/stream"
+	"github.com/Viking602/venat/tool"
 )
 
 func (r *subagentRuntime) Query(ctx context.Context, sessionID string, ids []string, timeout time.Duration) []agentservice.SubagentSnapshot {
@@ -375,9 +375,7 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		if event.Kind == EventContextUsage {
 			event.Data["transport"] = parent.providerTransport(providerID)
 		}
-		if !parent.emit(parent.ctx, event) {
-			r.Cancel(sessionID, id)
-		}
+		parent.emit(parent.ctx, event)
 	}
 }
 

@@ -11,8 +11,8 @@ import (
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
-	"github.com/Viking602/go-hydaelyn/stream"
+	hyprovider "github.com/Viking602/venat/provider"
+	"github.com/Viking602/venat/stream"
 )
 
 type phase4MeteringDriver struct{ calls int }
@@ -153,12 +153,12 @@ func TestMeteredProviderDriverZerosAutomaticCacheWrites(t *testing.T) {
 	if _, err = stream.Recv(); err != nil {
 		t.Fatal(err)
 	}
-	var write int
-	if err = store.DB().QueryRow(`SELECT cache_write_tokens FROM provider_requests`).Scan(&write); err != nil {
+	var write, reported int
+	if err = store.DB().QueryRow(`SELECT cache_write_tokens,cache_write_reported FROM provider_requests`).Scan(&write, &reported); err != nil {
 		t.Fatal(err)
 	}
-	if write != 0 {
-		t.Fatalf("automatic cache fact write=%d", write)
+	if write != 0 || reported != 0 {
+		t.Fatalf("automatic cache fact write=%d reported=%d", write, reported)
 	}
 }
 
@@ -170,7 +170,7 @@ func (writeTokenNoiseDriver) Stream(_ context.Context, request hyprovider.Reques
 		// Simulate a noisy peer field that automatic caches must drop even without a driver wrap.
 		reporter(responses.UsageDetails{
 			ProviderRequestID: "upstream", InputTokens: 20, CachedTokens: 12, CacheWriteTokens: 8,
-			OutputTokens: 4, TotalTokens: 24, CacheReported: true, CacheModel: responses.CacheModelAutomatic,
+			OutputTokens: 4, TotalTokens: 24, CacheReported: true, CacheWriteReported: true, CacheModel: responses.CacheModelAutomatic,
 		})
 	}
 	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 20, CachedInputTokens: 12, OutputTokens: 4, TotalTokens: 24}}}), nil
@@ -196,7 +196,7 @@ func TestMeteredProviderDriverDoesNotInferMissingCacheFieldAsZero(t *testing.T) 
 		t.Fatal(err)
 	}
 	snapshot, err := svc.ProviderUsageSnapshot(ctx, "s", "r")
-	if err != nil || snapshot.CurrentEpochMainReported || snapshot.CurrentEpochMainReportedRequests != 0 {
+	if err != nil || snapshot.CurrentEpochMainReported || snapshot.CurrentEpochMainReportedRequests != 0 || snapshot.CacheWriteReported {
 		t.Fatalf("missing cache field snapshot=%+v err=%v", snapshot, err)
 	}
 }

@@ -134,16 +134,21 @@ func finalizeSubagentWorktree(run *agentservice.SubagentRun, repoRoot string) {
 
 type boundedGitBuffer struct {
 	bytes.Buffer
+	limit int
 }
 
 func (buffer *boundedGitBuffer) Write(data []byte) (int, error) {
-	remaining := maxGitCommandOutput - buffer.Len()
+	limit := buffer.limit
+	if limit <= 0 {
+		limit = maxGitCommandOutput
+	}
+	remaining := limit - buffer.Len()
 	if remaining <= 0 {
-		return 0, fmt.Errorf("Git command output exceeds %d bytes", maxGitCommandOutput)
+		return 0, fmt.Errorf("Git command output exceeds %d bytes", limit)
 	}
 	if len(data) > remaining {
 		_, _ = buffer.Buffer.Write(data[:remaining])
-		return remaining, fmt.Errorf("Git command output exceeds %d bytes", maxGitCommandOutput)
+		return remaining, fmt.Errorf("Git command output exceeds %d bytes", limit)
 	}
 	return buffer.Buffer.Write(data)
 }
@@ -162,4 +167,20 @@ func runGit(ctx context.Context, directory string, extraEnv []string, arguments 
 		return "", fmt.Errorf("git %s: %s", strings.Join(arguments, " "), message)
 	}
 	return output.String(), nil
+}
+
+func gitOutputLimited(ctx context.Context, directory string, limit int, arguments ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, "git", append([]string{"-C", directory}, arguments...)...)
+	var output boundedGitBuffer
+	output.limit = limit
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Run(); err != nil {
+		message := strings.TrimSpace(output.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return nil, fmt.Errorf("git %s: %s", strings.Join(arguments, " "), message)
+	}
+	return output.Bytes(), nil
 }

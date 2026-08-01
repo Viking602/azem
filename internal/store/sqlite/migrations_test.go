@@ -260,3 +260,42 @@ func TestMigrationV8AddsSubagentProviderWithLegacyDefault(t *testing.T) {
 		t.Fatalf("legacy provider = %q, want empty inherit value", got)
 	}
 }
+
+func TestMigrationV16BackfillsKnownCacheWrites(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache-write-reported.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 15; version++ {
+		if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
+			t.Fatalf("apply migration %d: %v", version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version=15;
+		INSERT INTO sessions(id,created_at,updated_at) VALUES('s',1,1);
+		INSERT INTO provider_requests(request_id,session_id,request_kind,cache_write_tokens,status,started_at) VALUES
+			('written','s','main',7,'completed',1),
+			('unknown','s','main',0,'completed',2);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	for requestID, want := range map[string]int{"written": 1, "unknown": 0} {
+		var got int
+		if err := provider.db.QueryRowContext(ctx, `SELECT cache_write_reported FROM provider_requests WHERE request_id=?`, requestID).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("request %q cache_write_reported=%d, want %d", requestID, got, want)
+		}
+	}
+}

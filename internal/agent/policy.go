@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/Viking602/go-hydaelyn/api"
+	"github.com/Viking602/venat/api"
 )
 
 type invocationScope struct {
@@ -55,6 +55,13 @@ func (p *ApprovalPolicy) sessionGranted(fingerprint string) bool {
 func withAuthorizedInvocation(ctx context.Context, scope invocationScope) context.Context {
 	scope.Authorized = true
 	return context.WithValue(ctx, invocationScopeKey{}, scope)
+}
+
+// DelegatedApprovalContext tells Venat that the enclosing Azem tool adapter
+// owns the interactive approval prompt. Venat still owns action-attempt
+// persistence, idempotency, and reconciliation around the driver call.
+func DelegatedApprovalContext(ctx context.Context) context.Context {
+	return withAuthorizedInvocation(ctx, invocationScope{})
 }
 
 func sideEffect(request api.PolicyRequest) bool {

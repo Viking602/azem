@@ -16,8 +16,8 @@ import (
 
 	"github.com/creack/pty"
 
-	"github.com/Viking602/go-hydaelyn/coding"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/tool"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -237,7 +237,7 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 	if _, err := terminal.Write([]byte{27}); err != nil {
 		t.Fatalf("close skills overlay: %v", err)
 	}
-	readUntil(t, reads, output, "READY FOR A TASK", 5*time.Second)
+	readUntil(t, reads, output, "Build anything", 5*time.Second)
 	if _, err := terminal.Write([]byte{3}); err != nil {
 		t.Fatalf("exit skills PTY: %v", err)
 	}

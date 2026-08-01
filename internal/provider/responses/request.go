@@ -12,22 +12,27 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Viking602/go-hydaelyn/message"
-	hyprovider "github.com/Viking602/go-hydaelyn/provider"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 )
 
 type BuildOptions struct {
-	IncludeEncryptedReasoning bool
-	DefaultParallelTools      bool
-	DefaultReasoningEffort    string
-	ToolCallItemID            func(string) string
+	IncludeEncryptedReasoning      bool
+	DefaultParallelTools           bool
+	DefaultReasoningEffort         string
+	ServiceTier                    string
+	SupportsPromptCacheBreakpoints bool
+	ToolCallItemID                 func(string) string
 }
 
 const (
-	UsageReporterExtraKey  = "azem_usage_reporter"
-	AttachmentRootExtraKey = "azem_attachment_root"
-	maxWireImages          = 6
-	maxWireImageBytes      = 8 << 20
+	UsageReporterExtraKey          = "azem_usage_reporter"
+	AttachmentRootExtraKey         = "azem_attachment_root"
+	PromptCacheBreakpointExtraKey  = "azem_prompt_cache_breakpoint"
+	PromptCacheBreakpointLastUser  = "last-user"
+	PromptCacheBreakpointFirstItem = "first-item"
+	maxWireImages                  = 6
+	maxWireImageBytes              = 8 << 20
 )
 
 // Prompt-cache models describe provider-specific billing/reporting semantics.
@@ -39,11 +44,12 @@ const (
 )
 
 type UsageDetails struct {
-	ProviderRequestID string
-	InputTokens       int
-	CachedTokens      int
-	CacheReported     bool
-	CacheWriteTokens  int
+	ProviderRequestID  string
+	InputTokens        int
+	CachedTokens       int
+	CacheReported      bool
+	CacheWriteTokens   int
+	CacheWriteReported bool
 	// CacheModel is set by provider drivers (not by the shared stream parser).
 	CacheModel      string
 	OutputTokens    int
@@ -64,6 +70,7 @@ func NormalizeUsage(details UsageDetails, cacheModel string) UsageDetails {
 	details.CacheModel = cacheModel
 	if cacheModel == CacheModelAutomatic {
 		details.CacheWriteTokens = 0
+		details.CacheWriteReported = false
 	}
 	return details
 }
@@ -94,13 +101,21 @@ type wireRequest struct {
 	Stream            bool              `json:"stream"`
 	Include           []string          `json:"include,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`
+	ServiceTier       string            `json:"service_tier,omitempty"`
 }
 
 func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
 	if strings.TrimSpace(request.Model) == "" {
 		return nil, fmt.Errorf("responses request model is empty")
 	}
-	instructions, input, err := buildInput(request.Messages, options.ToolCallItemID, strings.TrimSpace(stringExtra(request, AttachmentRootExtraKey)))
+	breakpoint := ""
+	if options.SupportsPromptCacheBreakpoints {
+		breakpoint = strings.TrimSpace(stringExtra(request, PromptCacheBreakpointExtraKey))
+		if breakpoint != "" && !SupportsExplicitPromptCaching(request.Model) {
+			return nil, fmt.Errorf("model %q does not support explicit prompt cache breakpoints", request.Model)
+		}
+	}
+	instructions, input, err := buildInput(request.Messages, options.ToolCallItemID, strings.TrimSpace(stringExtra(request, AttachmentRootExtraKey)), breakpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +140,7 @@ func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
 		Model: request.Model, PromptCacheKey: strings.TrimSpace(stringExtra(request, "prompt_cache_key")),
 		Instructions: instructions, Input: input, Tools: tools,
 		ParallelToolCalls: parallel, Reasoning: reasoning, MaxOutputTokens: maxOutput,
-		Store: false, Stream: true, Metadata: sanitizedMetadata(request.Metadata),
+		Store: false, Stream: true, Metadata: sanitizedMetadata(request.Metadata), ServiceTier: strings.TrimSpace(options.ServiceTier),
 	}
 	if len(tools) > 0 {
 		wire.ToolChoice = "auto"
@@ -147,17 +162,21 @@ func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
 	return json.Marshal(wire)
 }
 
-func buildInput(messages []message.Message, toolCallItemID func(string) string, attachmentRoot string) (string, []any, error) {
+func buildInput(messages []message.Message, toolCallItemID func(string) string, attachmentRoot, breakpoint string) (string, []any, error) {
 	instructions := make([]string, 0, 2)
 	input := make([]any, 0, len(messages))
-	for _, current := range messages {
+	breakpointIndex := promptCacheBreakpointIndex(messages, breakpoint)
+	marked := false
+	for index, current := range messages {
+		mark := index == breakpointIndex
 		switch current.Role {
 		case message.RoleSystem:
 			if current.Text == "" {
 				continue
 			}
 			if current.Visibility == message.VisibilityPrivate {
-				input = append(input, wireMessage("developer", "input_text", current.Text))
+				input = append(input, wireMessage("developer", "input_text", current.Text, mark))
+				marked = marked || mark
 			} else {
 				instructions = append(instructions, current.Text)
 			}
@@ -182,7 +201,7 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string, 
 				continue
 			}
 			if current.Text != "" {
-				input = append(input, wireMessage("assistant", "output_text", current.Text))
+				input = append(input, wireMessage("assistant", "output_text", current.Text, false))
 			}
 			for _, call := range current.ToolCalls {
 				arguments := call.Arguments
@@ -203,18 +222,44 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string, 
 				input = append(input, item)
 			}
 		case message.RoleUser, message.RoleCustom:
-			item, ok, err := wireUserMessage(current, attachmentRoot)
+			item, ok, err := wireUserMessage(current, attachmentRoot, mark)
 			if err != nil {
 				return "", nil, err
 			}
 			if ok {
 				input = append(input, item)
+				marked = marked || mark
 			}
 		default:
 			return "", nil, fmt.Errorf("unsupported message role %q", current.Role)
 		}
 	}
+	if breakpoint != "" && !marked {
+		return "", nil, fmt.Errorf("explicit prompt cache breakpoint %q has no cacheable content block", breakpoint)
+	}
 	return strings.Join(instructions, "\n\n"), input, nil
+}
+
+func SupportsExplicitPromptCaching(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gpt-5.6")
+}
+
+func promptCacheBreakpointIndex(messages []message.Message, breakpoint string) int {
+	switch breakpoint {
+	case PromptCacheBreakpointLastUser:
+		for index := len(messages) - 1; index >= 0; index-- {
+			if messages[index].Role == message.RoleUser || messages[index].Role == message.RoleCustom {
+				return index
+			}
+		}
+	case PromptCacheBreakpointFirstItem:
+		for index, current := range messages {
+			if (current.Role == message.RoleSystem && current.Visibility == message.VisibilityPrivate) || current.Role == message.RoleUser || current.Role == message.RoleCustom {
+				return index
+			}
+		}
+	}
+	return -1
 }
 
 func decodeProviderState(state json.RawMessage) ([]json.RawMessage, error) {
@@ -229,8 +274,12 @@ func decodeProviderState(state json.RawMessage) ([]json.RawMessage, error) {
 	return items, nil
 }
 
-func wireMessage(role string, contentType string, text string) map[string]any {
-	return map[string]any{"type": "message", "role": role, "content": []any{map[string]any{"type": contentType, "text": text}}}
+func wireMessage(role string, contentType string, text string, breakpoint bool) map[string]any {
+	content := map[string]any{"type": contentType, "text": text}
+	if breakpoint {
+		content["prompt_cache_breakpoint"] = map[string]string{"mode": "explicit"}
+	}
+	return map[string]any{"type": "message", "role": role, "content": []any{content}}
 }
 
 type wireAttachment struct {
@@ -241,7 +290,7 @@ type wireAttachment struct {
 	Size int64  `json:"size,omitempty"`
 }
 
-func wireUserMessage(current message.Message, attachmentRoot string) (map[string]any, bool, error) {
+func wireUserMessage(current message.Message, attachmentRoot string, breakpoint bool) (map[string]any, bool, error) {
 	content := make([]any, 0, 4)
 	if text := strings.TrimSpace(current.Text); text != "" {
 		content = append(content, map[string]any{"type": "input_text", "text": text})
@@ -262,6 +311,9 @@ func wireUserMessage(current message.Message, attachmentRoot string) (map[string
 	}
 	if len(content) == 0 {
 		return nil, false, nil
+	}
+	if breakpoint {
+		content[len(content)-1].(map[string]any)["prompt_cache_breakpoint"] = map[string]string{"mode": "explicit"}
 	}
 	return map[string]any{"type": "message", "role": "user", "content": content}, true, nil
 }

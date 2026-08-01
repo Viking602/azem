@@ -18,6 +18,16 @@ func TestEmbeddedCatalogsAndFormatting(t *testing.T) {
 	}
 }
 
+func TestNewReusesEmbeddedCatalogData(t *testing.T) {
+	if allocations := testing.AllocsPerRun(10, func() {
+		if _, err := New(DefaultLanguage); err != nil {
+			panic(err)
+		}
+	}); allocations > 1 {
+		t.Fatalf("New allocations = %.0f, want at most 1", allocations)
+	}
+}
+
 func TestStrictCatalogValidation(t *testing.T) {
 	cases := []string{
 		`{"a":"x","a":"y"}`,

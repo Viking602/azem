@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/tool"
 )
 
 func TestDiscoveryTrustOrderingDiagnosticsAndDedup(t *testing.T) {

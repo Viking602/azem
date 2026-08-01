@@ -14,8 +14,8 @@ import (
 	"time"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/go-hydaelyn/coding"
-	"github.com/Viking602/go-hydaelyn/tool"
+	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/tool"
 )
 
 func TestShellUsesWorkspaceAndReturnsStructuredExit(t *testing.T) {
@@ -368,7 +368,7 @@ func TestWorkspaceExposesShellAccordingToPolicy(t *testing.T) {
 	}
 }
 
-func TestShellRequiresApprovalAndPersistsActionAttempt(t *testing.T) {
+func TestShellRequiresApprovalAndExecutesAfterDecision(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
@@ -408,13 +408,6 @@ func TestShellRequiresApprovalAndPersistsActionAttempt(t *testing.T) {
 	}
 	if err := service.CompleteRun(ctx, run, "done", nil); err != nil {
 		t.Fatal(err)
-	}
-	var attempts int
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind='action_attempt'`).Scan(&attempts); err != nil {
-		t.Fatal(err)
-	}
-	if attempts != 1 {
-		t.Fatalf("durable shell action attempts=%d", attempts)
 	}
 	if err := service.Close(ctx); err != nil {
 		t.Fatal(err)
