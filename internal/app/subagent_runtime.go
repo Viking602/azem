@@ -43,6 +43,7 @@ type subagentParentRuntime struct {
 	AccountID               string
 	ModelID                 string
 	Reasoning               string
+	PlanMode                bool
 	ContextTokenTarget      int
 	ContextConfig           config.ContextConfig
 	WorkspaceRoot           string
@@ -173,6 +174,7 @@ func (r *subagentRuntime) recoverInterrupted(parent subagentParentRuntime) error
 		profile.RequestedIsolation = run.RequestedIsolation
 		profile.Isolation = run.Isolation
 		profile.CWD = run.CWD
+		run.Background = run.Background && subagentMayRunInBackground(profile)
 
 		run.State = agentservice.SubagentQueued
 		run.Summary = "queued after process restart"
@@ -225,6 +227,13 @@ func (r *subagentRuntime) updateModelRoute(roleName string, route config.ModelRo
 	}
 }
 
+func (r *subagentRuntime) updateMaxConcurrency(maxConcurrency int) {
+	r.mu.Lock()
+	r.cfg.MaxConcurrency = maxConcurrency
+	r.pumpLocked()
+	r.mu.Unlock()
+}
+
 func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, parent subagentParentRuntime) (agentservice.SubagentRun, error) {
 	return r.spawn(input, parent, nil)
 }
@@ -254,7 +263,7 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 		State: agentservice.SubagentInitializing, Summary: "initializing", Provider: profile.Provider, Model: profile.Model, Reasoning: profile.Reasoning,
 		AccountID:      profile.AccountID,
 		CapabilityMode: profile.CapabilityMode, RequestedIsolation: profile.RequestedIsolation, Isolation: profile.Isolation,
-		CWD: profile.CWD, Background: input.Background, StartedAt: now,
+		CWD: profile.CWD, Background: input.Background && subagentMayRunInBackground(profile), StartedAt: now,
 	}
 	if parent.Host != nil {
 		metadata := hooks.Metadata{SessionID: run.SessionID, RunID: run.ParentRunID, AgentID: run.ID, AgentType: run.Type, ParentRunID: run.ParentRunID, ParentToolCallID: run.ParentToolCallID, CWD: run.CWD}
@@ -376,6 +385,10 @@ func (r *subagentRuntime) resolveProfile(input subagentSpawnInput, parent subage
 	}
 	capability := firstNonempty(input.CapabilityMode, role.CapabilityMode, "read-only")
 	isolation := firstNonempty(input.Isolation, role.Isolation, persona.Isolation, "none")
+	if parent.PlanMode {
+		capability = "read-only"
+		isolation = "none"
+	}
 	cwd := parent.WorkspaceRoot
 	if input.CWD != "" {
 		resolved, resolveErr := resolveSubagentCWD(parent.WorkspaceRoot, input.CWD)
@@ -495,6 +508,10 @@ func (r *subagentRuntime) resolveResumeProfile(sourceID string, parent subagentP
 	profile.Isolation = "none"
 	profile.CWD = cwd
 	profile.Seed = seed
+	if parent.PlanMode {
+		profile.CapabilityMode = "read-only"
+		profile.RequestedIsolation = "none"
+	}
 	return profile, nil
 }
 
@@ -753,6 +770,7 @@ func (r *subagentRuntime) execute(id string) {
 		},
 		ExtraBody: map[string]any{"prompt_cache_key": childRun.RunID},
 	}
+	enableExplicitPromptCache(spec.ExtraBody, profile.Provider, childModel)
 	if parent.Host != nil && strings.TrimSpace(parent.Host.attachments.Root) != "" {
 		spec.ExtraBody[responses.AttachmentRootExtraKey] = parent.Host.attachments.Root
 	}

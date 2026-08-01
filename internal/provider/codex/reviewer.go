@@ -88,8 +88,9 @@ func ReviewFailure(err error) ReviewFailureKind {
 }
 
 type Reviewer struct {
-	driver  *Driver
-	timeout time.Duration
+	driver       *Driver
+	streamDriver hyprovider.Driver
+	timeout      time.Duration
 }
 
 func NewReviewer(driver *Driver, timeout ...time.Duration) (*Reviewer, error) {
@@ -100,11 +101,17 @@ func NewReviewer(driver *Driver, timeout ...time.Duration) (*Reviewer, error) {
 	if len(timeout) > 0 && timeout[0] > 0 {
 		reviewTimeout = timeout[0]
 	}
-	return &Reviewer{driver: driver, timeout: reviewTimeout}, nil
+	return &Reviewer{driver: driver, streamDriver: driver, timeout: reviewTimeout}, nil
+}
+
+func (r *Reviewer) WithDriver(driver hyprovider.Driver) *Reviewer {
+	clone := *r
+	clone.streamDriver = driver
+	return &clone
 }
 
 func (r *Reviewer) Review(ctx context.Context, request ApprovalReviewRequest) (ApprovalReview, error) {
-	if r == nil || r.driver == nil {
+	if r == nil || r.driver == nil || r.streamDriver == nil {
 		return ApprovalReview{}, reviewError(ReviewFailureProvider, errors.New("reviewer is not configured"))
 	}
 	if len(request.Arguments) == 0 || !json.Valid(request.Arguments) {
@@ -200,7 +207,7 @@ func (r *Reviewer) reviewOnce(ctx context.Context, request ApprovalReviewRequest
 			"prompt_cache_key":    "azem-approval-review-v1",
 		},
 	}
-	stream, err := r.driver.Stream(ctx, providerRequest)
+	stream, err := r.streamDriver.Stream(ctx, providerRequest)
 	if err != nil {
 		kind, retryable := classifyReviewFailure(err)
 		return ApprovalReview{}, retryable, reviewError(kind, err)

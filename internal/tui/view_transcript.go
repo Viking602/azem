@@ -49,7 +49,7 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	case BlockHook:
 		return m.renderHookPrompt(block, selected, width)
 	case BlockTool:
-		header := m.renderToolHeader(block, selector, width, selected)
+		header := m.renderToolHeader(block, width, selected, m.transcriptHover == index)
 		lines := []string{header}
 		if block.Collapsed {
 			return lines
@@ -77,7 +77,7 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	case BlockUser:
 		return m.renderUserMessage(block.Content, width)
 	case BlockThinking:
-		return m.renderThinkingMessage(block, width)
+		return m.renderThinkingMessage(block, index, width)
 	case BlockAssistant:
 		if block.State == "streaming" && !strings.Contains(block.Content, "\n") {
 			return renderProseBlock(m.theme.Assistant, "", block.Content, width)
@@ -88,7 +88,7 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 	}
 }
 
-func (m AppModel) renderToolHeader(block Block, selector string, width int, selected bool) string {
+func (m AppModel) renderToolHeader(block Block, width int, selected, hovered bool) string {
 	summary := m.toolDisplayName(block.Title)
 	if detail := toolArgumentSummary(block); detail != "" {
 		summary += " " + detail
@@ -104,19 +104,20 @@ func (m AppModel) renderToolHeader(block Block, selector string, width int, sele
 		}
 	}
 
-	prefix := "  "
-	if selected {
-		prefix = "› "
-	}
 	indicator := stateMark(block.State)
-	if strings.EqualFold(block.State, "running") {
+	switch {
+	case strings.EqualFold(block.State, "running"):
 		indicator = "◆"
 		if !m.reducedMotion {
 			frames := [...]string{"◇", "◈", "◆", "◈"}
 			indicator = frames[m.animationFrame%len(frames)]
 		}
+	case !block.Collapsed:
+		indicator = ""
+	case hovered:
+		indicator = ""
 	}
-	line := m.theme.Tool.Render(prefix + indicator + " " + summary)
+	line := m.theme.Tool.Render("  " + indicator + " " + summary)
 	if block.State != "" && block.State != "completed" && block.State != "running" {
 		line += m.theme.MetaDivider.Render("  ·  ") +
 			m.stateStyle(block.State).Render(stateMark(block.State)+" "+m.displayState(block.State))
@@ -126,7 +127,10 @@ func (m AppModel) renderToolHeader(block Block, selector string, width int, sele
 	}
 	line = padOrTrim(line, width)
 	if selected {
-		return m.theme.Selected.Render(line)
+		return m.theme.Selected.Background(m.theme.UserSurface.GetBackground()).Render(ansi.Strip(line))
+	}
+	if hovered {
+		return m.theme.Tool.Background(m.theme.UserSurface.GetBackground()).Render(ansi.Strip(line))
 	}
 	return line
 }
@@ -167,9 +171,34 @@ func toolArgumentSummary(block Block) string {
 	return value("path", "query", "command")
 }
 
-func (m AppModel) renderThinkingMessage(block Block, width int) []string {
-	label := m.tr("block.thinking")
-	header := m.theme.ThinkingTag.Render("  ◆ " + label)
+func (m AppModel) activeThinkingBlockIndex() int {
+	index := len(m.transcript) - 1
+	if index < 0 {
+		return -1
+	}
+	block := m.transcript[index]
+	if m.status != "Running" || m.runActivity != "thinking" ||
+		block.Kind != BlockThinking || !strings.EqualFold(block.State, "streaming") ||
+		(m.runID != "" && block.RunID != "" && m.runID != block.RunID) {
+		return -1
+	}
+	return index
+}
+
+func (m AppModel) thinkingHeaderSegments(index int) []uiSegment {
+	active := index == m.activeThinkingBlockIndex()
+	indicator := "◆"
+	style := m.theme.ThinkingTag
+	if active && !m.reducedMotion {
+		frames := [...]string{"◇", "◈", "◆", "◈"}
+		indicator = frames[m.animationFrame%len(frames)]
+		style = style.Faint((m.animationFrame/2)%2 == 1)
+	}
+	return []uiSegment{{content: style.Render("  " + indicator + " " + m.tr("block.thinking"))}}
+}
+
+func (m AppModel) renderThinkingMessage(block Block, index, width int) []string {
+	header := truncateStyledFallback(renderUISegments(m.thinkingHeaderSegments(index)), width)
 	content := strings.ReplaceAll(block.Content, "****", "**\n\n**")
 	body := renderMarkdownBlock(m.theme.Thinking, "", content, max(4, width-4))
 	if len(body) == 0 {
@@ -306,8 +335,7 @@ func (m AppModel) renderToolContent(block Block, width int) []string {
 	case "coding.list_files":
 		return m.renderPathList(block.Content, width)
 	}
-	_, accent := m.toolStyles(block.Title)
-	return m.renderBlockContent(block.Content, width, accent)
+	return m.renderBlockContent(block.Content, width, m.theme.Tool)
 }
 
 func (m AppModel) renderPathList(content string, width int) []string {
@@ -315,7 +343,7 @@ func (m AppModel) renderPathList(content string, width int) []string {
 	textWidth := max(1, width-ansi.StringWidth(rail))
 	rows := make([]string, 0)
 	for _, source := range strings.Split(content, "\n") {
-		style := m.theme.ToolRead
+		style := m.theme.Tool
 		if strings.HasPrefix(strings.TrimSpace(source), "…") || strings.HasPrefix(strings.TrimSpace(source), "[") {
 			style = m.theme.Muted
 		}
@@ -741,14 +769,16 @@ func (m AppModel) renderDiffRows(content string, width int, prefix string) []str
 			m.theme.Error.Render(fmt.Sprintf(" -%d", file.Deleted))
 		rows = append(rows, padOrTrim(header, width))
 		rows = append(rows, prefix)
+		maxLine := 0
 		for _, hunk := range file.Hunks {
-			rows = append(rows, m.theme.DiffHunk.Render(padOrTrim(prefix+hunk.Header, width)))
-			maxLine := 0
 			for _, line := range hunk.Lines {
 				maxLine = max(maxLine, line.OldLine, line.NewLine)
 			}
-			gutterWidth := len(strconv.Itoa(max(1, maxLine)))
-			showNumbers := width-ansi.StringWidth(prefix) >= 30
+		}
+		gutterWidth := len(strconv.Itoa(max(1, maxLine)))
+		showNumbers := width-ansi.StringWidth(prefix) >= 30
+		for _, hunk := range file.Hunks {
+			rows = append(rows, m.theme.DiffHunk.Render(padOrTrim(prefix+hunk.Header, width)))
 			for _, line := range hunk.Lines {
 				mark := " "
 				style := m.theme.Assistant
@@ -913,8 +943,10 @@ func unifiedHunkStarts(source string) (int, int, bool) {
 }
 
 func toolDisplayName(name string, catalogs ...i18n.Catalog) string {
-	catalog := i18n.Must(i18n.DefaultLanguage)
-	if len(catalogs) > 0 {
+	var catalog i18n.Catalog
+	if len(catalogs) == 0 {
+		catalog = i18n.Must(i18n.DefaultLanguage)
+	} else {
 		catalog = catalogs[0]
 	}
 	keys := map[string]string{
@@ -922,6 +954,7 @@ func toolDisplayName(name string, catalogs ...i18n.Catalog) string {
 		"coding.search": "tool.search", "coding.list_files": "tool.list_files", "coding.shell": "tool.shell",
 		"coding.go_test": "tool.go_test", "coding.gofmt": "tool.gofmt", "coding.git_diff": "tool.git_diff",
 		"hydaelyn_activate_skill": "tool.activate_skill", "subagent.spawn": "tool.spawn",
+		"subagent.get_output": "tool.get_subagent_output", "subagent.kill": "tool.stop_subagent",
 		"context.read_artifact": "tool.read_artifact",
 	}
 	if key := keys[name]; key != "" {

@@ -509,6 +509,21 @@ func (m *AppModel) updateUsage(data map[string]string) {
 	}
 	if data["factSnapshot"] == "true" && data["usageSnapshot"] != "" {
 		m.restoreUsage(data["usageSnapshot"])
+		if data["cacheModel"] != "" {
+			m.usage.CacheModel = data["cacheModel"]
+		}
+		if data["requestKind"] != "" {
+			m.usage.LastRequestKind = data["requestKind"]
+		}
+		if data["provider"] != "" {
+			m.usage.LastProvider = data["provider"]
+		}
+		if data["model"] != "" {
+			m.usage.LastModel = data["model"]
+		}
+		if data["transport"] != "" {
+			m.usage.LastTransport = data["transport"]
+		}
 		return
 	}
 	requestKind := data["requestKind"]
@@ -556,6 +571,9 @@ func (m *AppModel) updateUsage(data map[string]string) {
 		// Automatic caches (xAI) have no write counters; ignore residual values.
 		if !m.usesAutomaticPromptCache() {
 			m.usage.CacheWriteTokens += value
+			if value > 0 {
+				m.usage.CacheWriteReported = true
+			}
 			if requestKind == "main" {
 				m.usage.MainCacheWrite += value
 			}
@@ -565,6 +583,9 @@ func (m *AppModel) updateUsage(data map[string]string) {
 				m.usage.TeamCacheWrite += value
 			}
 		}
+	}
+	if data["cacheWriteStatus"] == "reported" {
+		m.usage.CacheWriteReported = true
 	}
 	if value, err := strconv.Atoi(data["outputTokens"]); err == nil && data["outputTokens"] != "" {
 		if data["aggregateOnly"] != "true" {
@@ -637,7 +658,9 @@ func (m *AppModel) resetTurnUsage() {
 	m.usage.TeamReasoning = 0
 	m.usage.TeamUncached = 0
 	m.usage.CacheReported = false
+	m.usage.CacheWriteReported = false
 	m.usage.MainCacheReported = false
+	m.usage.CacheModel = ""
 }
 
 func (m *AppModel) restoreUsage(raw string) {
@@ -690,6 +713,7 @@ func (m *AppModel) restoreUsage(raw string) {
 	m.usage.TeamReasoning = usage.TeamReasoning
 	m.usage.TeamUncached = usage.TeamUncached
 	m.usage.CacheReported = usage.CacheReported
+	m.usage.CacheWriteReported = usage.CacheWriteReported
 	m.usage.MainCacheReported = usage.MainCacheReported
 	m.usage.ContextReported = usage.InputTokens > 0 && usage.CurrentTurnMainReported
 	m.usage.LastRequestKind = usage.LastRequestKind

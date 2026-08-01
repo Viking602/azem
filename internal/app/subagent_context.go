@@ -88,6 +88,14 @@ func effectiveSubagentTools(roleTools []string, capability string) map[string]bo
 	return allowed
 }
 
+func subagentMayRunInBackground(profile effectiveSubagentProfile) bool {
+	if profile.RequestedIsolation != "worktree" {
+		return false
+	}
+	tools := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
+	return tools["coding.edit_hashline"] || tools["coding.write_file"] || tools["coding.gofmt"]
+}
+
 func renderSubagentInstructions(profile effectiveSubagentProfile) string {
 	var rendered strings.Builder
 	fmt.Fprintf(&rendered, "You are the %s subagent.", profile.Type)

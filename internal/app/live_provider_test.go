@@ -13,6 +13,7 @@ import (
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/provider/catalog"
+	"github.com/Viking602/azem/internal/provider/codex"
 )
 
 func TestLiveSubscriptionReadTurns(t *testing.T) {
@@ -24,6 +25,14 @@ func TestLiveSubscriptionReadTurns(t *testing.T) {
 	for _, providerID := range []string{"chatgpt", "grok"} {
 		t.Run(providerID, func(t *testing.T) {
 			account, model, reasoning := liveProviderSelection(t, ctx, boot.Service, providerID)
+			if providerID == "chatgpt" {
+				if override := strings.TrimSpace(os.Getenv("AZEM_LIVE_CHATGPT_MODEL")); override != "" {
+					model.ID = override
+				}
+				if override := strings.TrimSpace(os.Getenv("AZEM_LIVE_CHATGPT_REASONING")); override != "" {
+					reasoning = override
+				}
+			}
 			marker := "AZEM_LIVE_" + strings.ToUpper(providerID) + "_OK"
 			runID, err := boot.Service.StartConfiguredTurn(TurnRequest{
 				SessionID: "default", Prompt: "Reply with exactly " + marker + ". Do not call any tools.",
@@ -57,6 +66,63 @@ func TestLiveSubscriptionReadTurns(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLiveChatGPTFastMode(t *testing.T) {
+	if os.Getenv("AZEM_LIVE_ACCEPTANCE") != "1" {
+		t.Skip("set AZEM_LIVE_ACCEPTANCE=1 to use local subscription credentials")
+	}
+	ctx, boot, _ := liveBootstrap(t)
+	account, selected, reasoning := liveProviderSelection(t, ctx, boot.Service, "chatgpt")
+	models, err := boot.Service.Catalog().List(ctx, "chatgpt", account.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selected.SupportsServiceTier(codex.FastServiceTier) {
+		for _, model := range models.Models {
+			if model.SupportsServiceTier(codex.FastServiceTier) {
+				selected = model
+				reasoning = firstNonempty(model.DefaultReasoning, "minimal")
+				break
+			}
+		}
+	}
+	if !selected.SupportsServiceTier(codex.FastServiceTier) {
+		t.Fatalf("ChatGPT catalog has no model supporting %q", codex.FastServiceTier)
+	}
+	if err := boot.Service.ExecuteAction(ctx, Action{Kind: ActionSetChatGPTFastMode, Target: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "AZEM_LIVE_CHATGPT_FAST_OK"
+	runID, err := boot.Service.StartConfiguredTurn(TurnRequest{
+		SessionID: "default", Prompt: "Reply with exactly " + marker + ". Do not call any tools.",
+		Provider: "chatgpt", Model: selected.ID, Reasoning: reasoning, AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	for {
+		event, err := boot.Service.NextEvent(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.RunID != runID {
+			continue
+		}
+		switch event.Kind {
+		case EventTextDelta:
+			output.WriteString(event.Text)
+		case EventRunFailed:
+			t.Fatalf("ChatGPT Fast live turn failed: %s", event.Text)
+		case EventRunFinished:
+			if !strings.Contains(output.String(), marker) {
+				t.Fatalf("ChatGPT Fast response=%q", output.String())
+			}
+			t.Logf("ChatGPT account %s model %s completed a Fast subscription turn", account.ID, selected.ID)
+			return
+		}
 	}
 }
 

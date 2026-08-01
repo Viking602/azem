@@ -546,6 +546,9 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	if err := ValidateTurnAttachments(request.Images); err != nil {
 		return "", err
 	}
+	if request.PlanMode && request.AgentMode != "single" {
+		return "", fmt.Errorf("plan mode requires single-agent mode")
+	}
 	if request.AgentMode == "team" && len(request.ActiveSkills) > 0 {
 		return "", fmt.Errorf("active skills require single-agent mode")
 	}
@@ -621,6 +624,10 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		writeSessionHookTranscript(request.SessionID, []session.Block{{Kind: "user", Content: request.Prompt, State: "submitted"}})
 	}
 	request.historicalContext = s.loadTurnHistoricalContext(s.ctx, request.SessionID, request.Prompt, historicalRetrievalBoundary(request.modelHistory))
+	sessionPreferences := request
+	if s.providers != nil {
+		request = s.providers.routeTurn(request)
+	}
 	if err := s.switchSessionHooks(runCtx, request.SessionID, sessionSource, request.Model); err != nil {
 		cancel()
 		s.clearRun("starting")
@@ -710,7 +717,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		s.clearRun("starting")
 		return "", err
 	}
-	if err := s.persistSessionPreferences(s.ctx, request); err != nil {
+	if err := s.persistSessionPreferences(s.ctx, sessionPreferences); err != nil {
 		cancel()
 		_ = s.coding.CompleteRun(context.WithoutCancel(s.ctx), durableRun, err.Error(), err)
 		s.clearRun("starting")

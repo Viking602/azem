@@ -64,6 +64,34 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 	}
 }
 
+func TestDriverFastModeSendsPriorityServiceTier(t *testing.T) {
+	var serviceTier string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		serviceTier, _ = payload["service_tier"].(string)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	driver := newTestDriver(t, server.URL)
+	driver.SetServiceTier(FastServiceTier)
+	stream, err := driver.Stream(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if event, err := stream.Recv(); err != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("event=%#v error=%v", event, err)
+	}
+	if serviceTier != "priority" {
+		t.Fatalf("service_tier = %q", serviceTier)
+	}
+}
+
 func TestProviderStreamRetryDelayCoversTransientOutage(t *testing.T) {
 	want := []time.Duration{
 		500 * time.Millisecond,

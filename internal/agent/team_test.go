@@ -28,7 +28,8 @@ func TestCodingSchedulerReplaysOneRevisionDeterministically(t *testing.T) {
 	for _, class := range classes {
 		byName[class.Name] = class
 	}
-	scheduler := CodingScheduler{Prompt: "fix it", Classes: byName}
+	retryPolicy := api.RetryPolicy{MaxAttempts: 3}
+	scheduler := CodingScheduler{Prompt: "fix it", Classes: byName, RetryPolicy: retryPolicy}
 	state := multiagent.TeamState{RunID: "run-team"}
 
 	planner := nextDispatch(t, scheduler, state, PlannerClass)
@@ -37,6 +38,9 @@ func TestCodingSchedulerReplaysOneRevisionDeterministically(t *testing.T) {
 	}
 	if planner.Task.Budget == nil || planner.Task.Budget.MaxTokens != 0 || planner.Task.Budget.MaxToolCalls != 0 || planner.Task.Budget.MaxWallClock != 0 {
 		t.Fatalf("planner task budget = %#v, want unbounded", planner.Task.Budget)
+	}
+	if planner.Task.RetryPolicy != retryPolicy {
+		t.Fatalf("planner retry policy = %#v, want %#v", planner.Task.RetryPolicy, retryPolicy)
 	}
 	if !byName[PlannerClass].LoopPolicy.UnlimitedIterations || byName[PlannerClass].LoopPolicy.MaxWallClock != 0 {
 		t.Fatalf("planner loop policy = %#v, want unbounded", byName[PlannerClass].LoopPolicy)

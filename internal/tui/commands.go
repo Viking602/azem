@@ -31,37 +31,39 @@ const (
 )
 
 const (
-	ActionLogin            = app.ActionLogin
-	ActionLogout           = app.ActionLogout
-	ActionNewSession       = app.ActionNewSession
-	ActionListSessions     = app.ActionListSessions
-	ActionResumeSession    = app.ActionResumeSession
-	ActionCompact          = app.ActionCompact
-	ActionResolveApproval  = app.ActionResolveApproval
-	ActionSetApprovalMode  = app.ActionSetApprovalMode
-	ActionSetLanguage      = app.ActionSetLanguage
-	ActionReconcileAttempt = app.ActionReconcileAttempt
-	ActionInspectAgent     = app.ActionInspectAgent
-	ActionListAgentTypes   = app.ActionListAgentTypes
-	ActionListPersonas     = app.ActionListPersonas
-	ActionCancelAgent      = app.ActionCancelAgent
-	ActionRefreshMCP       = app.ActionRefreshMCP
-	ActionReconnectMCP     = app.ActionReconnectMCP
-	ActionListSkills       = app.ActionListSkills
-	ActionReloadSkills     = app.ActionReloadSkills
-	ActionListMemories     = app.ActionListMemories
-	ActionRemember         = app.ActionRemember
-	ActionForgetMemory     = app.ActionForgetMemory
-	ActionShowRecap        = app.ActionShowRecap
-	ActionListModelRoutes  = app.ActionListModelRoutes
-	ActionSetModelRoute    = app.ActionSetModelRoute
-	ActionResetModelRoute  = app.ActionResetModelRoute
-	ActionListBackground   = app.ActionListBackground
-	ActionStartBackground  = app.ActionStartBackground
-	ActionStopBackground   = app.ActionStopBackground
-	ActionLogsBackground   = app.ActionLogsBackground
-	ActionListGitBranches  = app.ActionListGitBranches
-	ActionSwitchGitBranch  = app.ActionSwitchGitBranch
+	ActionLogin                  = app.ActionLogin
+	ActionLogout                 = app.ActionLogout
+	ActionNewSession             = app.ActionNewSession
+	ActionListSessions           = app.ActionListSessions
+	ActionResumeSession          = app.ActionResumeSession
+	ActionCompact                = app.ActionCompact
+	ActionResolveApproval        = app.ActionResolveApproval
+	ActionSetApprovalMode        = app.ActionSetApprovalMode
+	ActionSetLanguage            = app.ActionSetLanguage
+	ActionReconcileAttempt       = app.ActionReconcileAttempt
+	ActionInspectAgent           = app.ActionInspectAgent
+	ActionListAgentTypes         = app.ActionListAgentTypes
+	ActionListPersonas           = app.ActionListPersonas
+	ActionCancelAgent            = app.ActionCancelAgent
+	ActionRefreshMCP             = app.ActionRefreshMCP
+	ActionReconnectMCP           = app.ActionReconnectMCP
+	ActionListSkills             = app.ActionListSkills
+	ActionReloadSkills           = app.ActionReloadSkills
+	ActionListMemories           = app.ActionListMemories
+	ActionRemember               = app.ActionRemember
+	ActionForgetMemory           = app.ActionForgetMemory
+	ActionShowRecap              = app.ActionShowRecap
+	ActionListModelRoutes        = app.ActionListModelRoutes
+	ActionSetModelRoute          = app.ActionSetModelRoute
+	ActionResetModelRoute        = app.ActionResetModelRoute
+	ActionSetSubagentConcurrency = app.ActionSetSubagentConcurrency
+	ActionSetChatGPTFastMode     = app.ActionSetChatGPTFastMode
+	ActionListBackground         = app.ActionListBackground
+	ActionStartBackground        = app.ActionStartBackground
+	ActionStopBackground         = app.ActionStopBackground
+	ActionLogsBackground         = app.ActionLogsBackground
+	ActionListGitBranches        = app.ActionListGitBranches
+	ActionSwitchGitBranch        = app.ActionSwitchGitBranch
 )
 
 type (
@@ -84,6 +86,7 @@ type SlashCommand struct {
 }
 
 var slashCommands = []SlashCommand{
+	{Name: "settings", Usage: "/settings"},
 	{Name: "models", Usage: "/models"},
 	{Name: "model-routing", Usage: "/model-routing"},
 	{Name: "skills", Usage: "/skills [reload]"},
@@ -92,6 +95,7 @@ var slashCommands = []SlashCommand{
 	{Name: "reasoning", Usage: "/reasoning [level]"},
 	{Name: "login", Usage: "/login [chatgpt|grok]"},
 	{Name: "logout", Usage: "/logout [chatgpt|grok]"},
+	{Name: "plan", Usage: "/plan [on|off]"},
 	{Name: "team", Usage: "/team on|off"},
 	{Name: "agents", Usage: "/agents [cancel <id>]"},
 	{Name: "background", Usage: "/background [start [--name NAME] [--cwd DIR] -- COMMAND | stop <id> | logs <id>]"},

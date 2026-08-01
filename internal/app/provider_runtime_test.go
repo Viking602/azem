@@ -93,6 +93,24 @@ func TestMainInstructionsContract(t *testing.T) {
 	}
 }
 
+func TestEnableExplicitPromptCacheOnlyForGPT56ChatGPT(t *testing.T) {
+	for _, test := range []struct {
+		provider, model string
+		want            bool
+	}{
+		{provider: "chatgpt", model: "gpt-5.6-sol", want: true},
+		{provider: "chatgpt", model: "gpt-5.5", want: false},
+		{provider: "grok", model: "gpt-5.6-sol", want: false},
+	} {
+		extra := map[string]any{"prompt_cache_key": "stable"}
+		enableExplicitPromptCache(extra, test.provider, test.model)
+		_, got := extra[responses.PromptCacheBreakpointExtraKey]
+		if got != test.want {
+			t.Fatalf("provider=%s model=%s breakpoint=%v", test.provider, test.model, extra)
+		}
+	}
+}
+
 func TestTurnContextBuildFallsBackWhenInstructionFingerprintDiffers(t *testing.T) {
 	boundary := int64(2)
 	staleState := json.RawMessage(`[{"type":"reasoning","id":"stale"}]`)
@@ -173,15 +191,64 @@ func TestPhase3ArtifactToolRoundTripsBinaryPayloadAsBase64(t *testing.T) {
 func TestSingleRunManifestAcceptsEmptyResolvedSkillSet(t *testing.T) {
 	manifest := singleRunManifest{
 		Version: 2, Provider: "chatgpt", AccountID: "account-1", Model: "model", Reasoning: "minimal",
-		ActiveSkills: []string{}, StaticIdentity: "identity", StartedAt: time.Now().UTC(),
+		ActiveSkills: []string{}, PlanMode: true, StaticIdentity: "identity", StartedAt: time.Now().UTC(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	decoded, err := decodeSingleRunManifest(string(encoded))
-	if err != nil || decoded.AccountID != manifest.AccountID || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
+	if err != nil || decoded.AccountID != manifest.AccountID || !decoded.PlanMode || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
 		t.Fatalf("decoded empty-skill manifest=%+v error=%v", decoded, err)
+	}
+}
+
+type planModeTestDriver struct{ definition tool.Definition }
+
+func (d planModeTestDriver) Definition() tool.Definition { return d.definition }
+func (planModeTestDriver) Execute(context.Context, tool.Call, tool.UpdateSink) (tool.Result, error) {
+	return tool.Result{}, nil
+}
+
+func TestPlanModeToolDriversKeepOnlyReadOnlyOperations(t *testing.T) {
+	drivers := []tool.Driver{
+		planModeTestDriver{tool.Definition{Name: "coding.read_file", EffectType: tool.EffectReadOnly}},
+		planModeTestDriver{tool.Definition{Name: subagentSpawnTool, EffectType: tool.EffectReadOnly}},
+		planModeTestDriver{tool.Definition{Name: subagentKillTool, EffectType: tool.EffectReadOnly}},
+		planModeTestDriver{tool.Definition{Name: "coding.write_file", EffectType: tool.EffectWrite}},
+		planModeTestDriver{tool.Definition{Name: "coding.shell", EffectType: tool.EffectExternalSideEffect}},
+	}
+	if got, want := toolDriverNames(planModeToolDrivers(drivers)), []string{"coding.read_file", subagentSpawnTool}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("plan mode tools = %v, want %v", got, want)
+	}
+	for _, required := range []string{"read-only", "read-only subagents", "Do not write implementation code"} {
+		if !strings.Contains(planModeInstructions, required) {
+			t.Fatalf("plan mode instructions omit %q", required)
+		}
+	}
+	planInstructions, planFingerprint := turnInstructions(true)
+	_, normalFingerprint := turnInstructions(false)
+	if planFingerprint == normalFingerprint || !strings.Contains(planInstructions, planModeInstructions) {
+		t.Fatalf("plan instruction identity was not isolated from normal mode")
+	}
+}
+
+func TestPlanModeModelRouteOverridesOnlyPlanTurns(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents.Plan = config.ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
+	runtime := &ProviderRuntime{cfg: cfg}
+	normal := TurnRequest{Provider: "chatgpt", Model: "gpt-main", Reasoning: "medium"}
+	if got := runtime.routeTurn(normal); got.Provider != normal.Provider || got.Model != normal.Model || got.Reasoning != normal.Reasoning {
+		t.Fatalf("normal route changed: %#v", got)
+	}
+	plan := normal
+	plan.PlanMode = true
+	if got := runtime.routeTurn(plan); got.Provider != "grok" || got.Model != "grok-plan" || got.Reasoning != "high" {
+		t.Fatalf("plan route = %#v", got)
+	}
+	runtime.cfg.Agents.Plan.Reasoning = ""
+	if got := runtime.routeTurn(plan); got.Reasoning != normal.Reasoning {
+		t.Fatalf("plan route did not inherit reasoning: %#v", got)
 	}
 }
 
@@ -2901,7 +2968,7 @@ func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
 			t.Errorf("automatic reviewer received tools: %v", body["tools"])
 		}
 		input, _ := body["input"].([]any)
-		entry, _ := input[0].(map[string]any)
+		entry, _ := input[len(input)-1].(map[string]any)
 		content, _ := entry["content"].([]any)
 		part, _ := content[0].(map[string]any)
 		var evidence map[string]any
@@ -2914,7 +2981,7 @@ func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
 			t.Errorf("review evidence=%v", evidence)
 		}
 		requestChecked.Store(true)
-		writeAutomaticReview(writer, `{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized bounded write"}`, true)
+		writeAutomaticReviewWithUsage(writer, `{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized bounded write"}`)
 	})
 	modeEvent := nextApprovalEvent(t, harness.host, EventApprovalMode)
 	if modeEvent.State != "auto_review" || modeEvent.Data["auto_review_available"] != "true" {
@@ -2948,6 +3015,10 @@ func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
 	}
 	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != codex.ApprovalReviewerModel {
 		t.Fatalf("durable decider=%q", decider)
+	}
+	usage, err := harness.host.sessions.ProviderUsageSnapshot(context.Background(), "session", harness.run.RunID)
+	if err != nil || usage.CacheInputTokens != 11 || usage.CachedInputTokens != 0 || usage.CacheWriteTokens != 0 || !usage.CacheWriteReported {
+		t.Fatalf("review usage=%+v error=%v", usage, err)
 	}
 }
 
@@ -3272,8 +3343,14 @@ func TestAutoReviewCallerDeadlineStopsWithoutRetryOrManualApproval(t *testing.T)
 	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
 	noEventCtx, noEventCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer noEventCancel()
-	if event, nextErr := harness.host.NextEvent(noEventCtx); nextErr == nil {
-		t.Fatalf("caller deadline emitted follow-up approval event=%+v", event)
+	for {
+		event, nextErr := harness.host.NextEvent(noEventCtx)
+		if nextErr != nil {
+			break
+		}
+		if event.Kind == EventApprovalRequested || event.Kind == EventApprovalResolved {
+			t.Fatalf("caller deadline emitted follow-up approval event=%+v", event)
+		}
 	}
 	events, listErr := harness.coding.Runner().ListEvents(context.Background(), harness.run.RunID)
 	if listErr != nil {
@@ -3502,7 +3579,11 @@ func newAutoReviewHarness(t *testing.T, handler http.HandlerFunc) autoReviewHarn
 	}
 	runtime.ChatGPTEndpoint = server.URL
 	host := NewService(ctx, cfg)
-	host.AttachDurable(nil, coding)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session"}); err != nil {
+		t.Fatal(err)
+	}
+	host.AttachDurable(sessions, coding)
 	host.AttachAuth(authentication, nil)
 	host.AttachProviderRuntime(runtime)
 	if err := host.setApprovalMode(ctx, ApprovalModeAutoReview); err != nil {
@@ -3538,6 +3619,13 @@ func writeAutomaticReview(writer http.ResponseWriter, output string, completed b
 	if completed {
 		_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
 	}
+}
+
+func writeAutomaticReviewWithUsage(writer http.ResponseWriter, output string) {
+	writer.Header().Set("Content-Type", "text/event-stream")
+	delta, _ := json.Marshal(map[string]any{"type": "response.output_text.delta", "delta": output})
+	_, _ = fmt.Fprintf(writer, "data: %s\n\n", delta)
+	_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":11,\"output_tokens\":2,\"total_tokens\":13,\"input_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0}}}}\n\n")
 }
 
 func nextApprovalEvent(t *testing.T, service *Service, kind EventKind) Event {

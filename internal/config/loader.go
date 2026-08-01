@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -69,11 +70,16 @@ func UpdateDefault(path, key, value string) error {
 }
 
 // UpdateModelRoute atomically updates a nested model route while preserving
-// unrelated YAML fields and comments. Supported scopes are "compaction" and
-// "subagent"; role is required only for the latter.
+// unrelated YAML fields and comments. Supported scopes are "plan",
+// "compaction", and "subagent"; role is required only for the latter.
 func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	keys := []string{"agents"}
 	switch scope {
+	case "plan":
+		if role != "" {
+			return fmt.Errorf("role is not valid for plan route")
+		}
+		keys = append(keys, "plan")
 	case "compaction":
 		if role != "" {
 			return fmt.Errorf("role is not valid for compaction route")
@@ -135,6 +141,25 @@ func ResetModelRoute(path, scope, role string) error {
 		if models != nil {
 			deleteMappingValue(models, role)
 		}
+	})
+}
+
+func UpdateSubagentMaxConcurrency(path string, maxConcurrency int) error {
+	if maxConcurrency < 1 {
+		return fmt.Errorf("agents.subagents.max_concurrency must be positive")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		subagents := ensureMappingPath(root, "agents", "subagents")
+		setMappingScalar(subagents, "max_concurrency", strconv.Itoa(maxConcurrency))
+		mappingValue(subagents, "max_concurrency").Tag = "!!int"
+	})
+}
+
+func UpdateChatGPTFastMode(path string, enabled bool) error {
+	return updateYAML(path, func(root *yaml.Node) {
+		chatGPT := ensureMappingPath(root, "providers", "chatgpt")
+		setMappingScalar(chatGPT, "fast_mode", strconv.FormatBool(enabled))
+		mappingValue(chatGPT, "fast_mode").Tag = "!!bool"
 	})
 }
 

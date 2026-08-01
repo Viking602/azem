@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Viking602/venat/api"
@@ -35,37 +36,39 @@ const (
 type ActionKind string
 
 const (
-	ActionLogin            ActionKind = "login"
-	ActionLogout           ActionKind = "logout"
-	ActionNewSession       ActionKind = "new_session"
-	ActionListSessions     ActionKind = "list_sessions"
-	ActionResumeSession    ActionKind = "resume_session"
-	ActionCompact          ActionKind = "compact"
-	ActionResolveApproval  ActionKind = "resolve_approval"
-	ActionSetApprovalMode  ActionKind = "set_approval_mode"
-	ActionSetLanguage      ActionKind = "set_language"
-	ActionReconcileAttempt ActionKind = "reconcile_attempt"
-	ActionInspectAgent     ActionKind = "inspect_agent"
-	ActionListAgentTypes   ActionKind = "list_agent_types"
-	ActionListPersonas     ActionKind = "list_personas"
-	ActionCancelAgent      ActionKind = "cancel_agent"
-	ActionRefreshMCP       ActionKind = "refresh_mcp"
-	ActionReconnectMCP     ActionKind = "reconnect_mcp"
-	ActionListSkills       ActionKind = "list_skills"
-	ActionReloadSkills     ActionKind = "reload_skills"
-	ActionListMemories     ActionKind = "list_memories"
-	ActionRemember         ActionKind = "remember"
-	ActionForgetMemory     ActionKind = "forget_memory"
-	ActionShowRecap        ActionKind = "show_recap"
-	ActionListModelRoutes  ActionKind = "list_model_routes"
-	ActionSetModelRoute    ActionKind = "set_model_route"
-	ActionResetModelRoute  ActionKind = "reset_model_route"
-	ActionListBackground   ActionKind = "list_background"
-	ActionStartBackground  ActionKind = "start_background"
-	ActionStopBackground   ActionKind = "stop_background"
-	ActionLogsBackground   ActionKind = "logs_background"
-	ActionListGitBranches  ActionKind = "list_git_branches"
-	ActionSwitchGitBranch  ActionKind = "switch_git_branch"
+	ActionLogin                  ActionKind = "login"
+	ActionLogout                 ActionKind = "logout"
+	ActionNewSession             ActionKind = "new_session"
+	ActionListSessions           ActionKind = "list_sessions"
+	ActionResumeSession          ActionKind = "resume_session"
+	ActionCompact                ActionKind = "compact"
+	ActionResolveApproval        ActionKind = "resolve_approval"
+	ActionSetApprovalMode        ActionKind = "set_approval_mode"
+	ActionSetLanguage            ActionKind = "set_language"
+	ActionReconcileAttempt       ActionKind = "reconcile_attempt"
+	ActionInspectAgent           ActionKind = "inspect_agent"
+	ActionListAgentTypes         ActionKind = "list_agent_types"
+	ActionListPersonas           ActionKind = "list_personas"
+	ActionCancelAgent            ActionKind = "cancel_agent"
+	ActionRefreshMCP             ActionKind = "refresh_mcp"
+	ActionReconnectMCP           ActionKind = "reconnect_mcp"
+	ActionListSkills             ActionKind = "list_skills"
+	ActionReloadSkills           ActionKind = "reload_skills"
+	ActionListMemories           ActionKind = "list_memories"
+	ActionRemember               ActionKind = "remember"
+	ActionForgetMemory           ActionKind = "forget_memory"
+	ActionShowRecap              ActionKind = "show_recap"
+	ActionListModelRoutes        ActionKind = "list_model_routes"
+	ActionSetModelRoute          ActionKind = "set_model_route"
+	ActionResetModelRoute        ActionKind = "reset_model_route"
+	ActionSetSubagentConcurrency ActionKind = "set_subagent_concurrency"
+	ActionSetChatGPTFastMode     ActionKind = "set_chatgpt_fast_mode"
+	ActionListBackground         ActionKind = "list_background"
+	ActionStartBackground        ActionKind = "start_background"
+	ActionStopBackground         ActionKind = "stop_background"
+	ActionLogsBackground         ActionKind = "logs_background"
+	ActionListGitBranches        ActionKind = "list_git_branches"
+	ActionSwitchGitBranch        ActionKind = "switch_git_branch"
 )
 
 type Action struct {
@@ -131,8 +134,20 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		s.emit(ctx, Event{Kind: EventBackgroundLogs, State: "loaded", BackgroundLogs: &snapshot})
 		return nil
 	case ActionListModelRoutes:
-		s.emit(ctx, Event{Kind: EventModelRoutes, State: "listed", ModelRoutes: s.modelRouteEntries()})
+		s.emit(ctx, s.modelRoutesEvent("listed"))
 		return nil
+	case ActionSetSubagentConcurrency:
+		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))
+		if err != nil || maxConcurrency < 1 {
+			return fmt.Errorf("subagent max concurrency must be positive")
+		}
+		return s.updateSubagentMaxConcurrency(ctx, maxConcurrency)
+	case ActionSetChatGPTFastMode:
+		enabled, err := strconv.ParseBool(strings.TrimSpace(action.Target))
+		if err != nil {
+			return fmt.Errorf("ChatGPT fast mode must be true or false")
+		}
+		return s.updateChatGPTFastMode(ctx, enabled)
 	case ActionSetModelRoute:
 		return s.updateModelRoute(ctx, action.Route, false)
 	case ActionResetModelRoute:
@@ -552,7 +567,10 @@ func (s *Service) emitGitBranchSnapshot(ctx context.Context, state string, branc
 func (s *Service) modelRouteEntries() []ModelRouteEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entries := []ModelRouteEntry{{Scope: "compaction", Label: "Compaction", Route: s.cfg.Agents.Compaction}}
+	entries := []ModelRouteEntry{
+		{Scope: "plan", Label: "Plan", Route: s.cfg.Agents.Plan},
+		{Scope: "compaction", Label: "Compaction", Route: s.cfg.Agents.Compaction},
+	}
 	names := make([]string, 0, len(s.cfg.Agents.Subagents.Roles))
 	for name := range s.cfg.Agents.Subagents.Roles {
 		names = append(names, name)
@@ -563,6 +581,17 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 		entries = append(entries, ModelRouteEntry{Scope: "subagent", Role: name, Label: firstNonempty(role.Description, name), Route: config.ModelRouteConfig{Provider: role.Provider, Model: role.Model, Reasoning: role.Reasoning}})
 	}
 	return entries
+}
+
+func (s *Service) modelRoutesEvent(state string) Event {
+	s.mu.Lock()
+	maxConcurrency := s.cfg.Agents.Subagents.MaxConcurrency
+	fastMode := s.cfg.Providers.ChatGPT.FastMode
+	s.mu.Unlock()
+	return Event{
+		Kind: EventModelRoutes, State: state, ModelRoutes: s.modelRouteEntries(),
+		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
+	}
 }
 
 func (s *Service) emitBackgroundSnapshot(ctx context.Context, state string) error {
@@ -579,11 +608,11 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "compaction" && entry.Scope != "subagent" {
+	if entry.Scope != "plan" && entry.Scope != "compaction" && entry.Scope != "subagent" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
-	if entry.Scope == "compaction" && entry.Role != "" {
-		return fmt.Errorf("role is not valid for compaction route")
+	if entry.Scope != "subagent" && entry.Role != "" {
+		return fmt.Errorf("role is not valid for %s route", entry.Scope)
 	}
 	s.mu.Lock()
 	_, roleExists := s.cfg.Agents.Subagents.Roles[entry.Role]
@@ -622,7 +651,9 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		}
 	}
 	s.mu.Lock()
-	if entry.Scope == "compaction" {
+	if entry.Scope == "plan" {
+		s.cfg.Agents.Plan = route
+	} else if entry.Scope == "compaction" {
 		s.cfg.Agents.Compaction = route
 	} else {
 		role := s.cfg.Agents.Subagents.Roles[entry.Role]
@@ -639,7 +670,63 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	if s.providers != nil {
 		s.providers.UpdateModelRoute(entry.Scope, entry.Role, route)
 	}
-	s.emit(ctx, Event{Kind: EventModelRoutes, State: "updated", ModelRoutes: s.modelRouteEntries()})
+	s.emit(ctx, s.modelRoutesEvent("updated"))
+	return nil
+}
+
+func (s *Service) updateSubagentMaxConcurrency(ctx context.Context, maxConcurrency int) error {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	s.mu.Lock()
+	currentSession := s.currentSession
+	s.mu.Unlock()
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateSubagentMaxConcurrency(s.configPath, maxConcurrency)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.cfg.Agents.Subagents.MaxConcurrency = maxConcurrency
+	s.mu.Unlock()
+	if s.providers != nil {
+		s.providers.UpdateSubagentMaxConcurrency(maxConcurrency)
+	}
+	s.emit(ctx, s.modelRoutesEvent("updated"))
+	return nil
+}
+
+func (s *Service) updateChatGPTFastMode(ctx context.Context, enabled bool) error {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	s.mu.Lock()
+	currentSession := s.currentSession
+	s.mu.Unlock()
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateChatGPTFastMode(s.configPath, enabled)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.cfg.Providers.ChatGPT.FastMode = enabled
+	s.mu.Unlock()
+	if s.providers != nil {
+		s.providers.UpdateChatGPTFastMode(enabled)
+	}
+	s.emit(ctx, s.modelRoutesEvent("updated"))
 	return nil
 }
 

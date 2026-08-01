@@ -33,10 +33,59 @@ type BootstrapResult struct {
 	Service   *Service
 }
 
+type bootstrapAssembly struct {
+	ctx              context.Context
+	cfg              config.Config
+	paths            config.Paths
+	homeDir          string
+	configDir        string
+	startupSessionID string
+
+	store           *sqlitestore.Provider
+	skillCatalog    *skills.Catalog
+	sessions        *session.Service
+	coding          *agentservice.Service
+	subagentRuns    *agentservice.SQLSubagentRunStore
+	authentication  *authservice.Service
+	modelCatalog    *catalog.Service
+	providerRuntime *ProviderRuntime
+
+	service         *Service
+	manager         *mcpruntime.Manager
+	registry        *hooks.Registry
+	recoveryService *recovery.Service
+}
+
 func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
+	assembly := bootstrapAssembly{ctx: ctx}
+	result, err := assembly.build(startupWorkspace, configFile)
+	if err != nil {
+		assembly.close()
+		return BootstrapResult{}, err
+	}
+	return result, nil
+}
+
+func (b *bootstrapAssembly) build(startupWorkspace, configFile string) (BootstrapResult, error) {
+	if err := b.loadConfiguration(startupWorkspace, configFile); err != nil {
+		return BootstrapResult{}, err
+	}
+	if err := b.buildCore(); err != nil {
+		return BootstrapResult{}, err
+	}
+	if err := b.wireService(); err != nil {
+		return BootstrapResult{}, err
+	}
+	if err := b.start(); err != nil {
+		return BootstrapResult{}, err
+	}
+	return BootstrapResult{Config: b.cfg, Paths: b.paths, SessionID: b.startupSessionID, Service: b.service}, nil
+}
+
+func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile string) error {
 	paths, err := config.ResolvePaths(startupWorkspace)
 	if err != nil {
-		return BootstrapResult{}, err
+		return err
 	}
 	if configFile != "" {
 		paths.ConfigFile = configFile
@@ -44,193 +93,234 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	}
 	cfg, err := config.Load(paths.ConfigFile, paths.Workspace)
 	if err != nil {
-		return BootstrapResult{}, err
+		return err
 	}
 	paths.Workspace = cfg.Workspace.Root
 	if err := config.EnsureDirectories(paths); err != nil {
-		return BootstrapResult{}, err
-	}
-	store, err := sqlitestore.Open(ctx, paths.Database)
-	if err != nil {
-		return BootstrapResult{}, err
+		return err
 	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		_ = store.Close(ctx)
-		return BootstrapResult{}, fmt.Errorf("resolve user home for skills: %w", err)
+		return fmt.Errorf("resolve user home for skills: %w", err)
 	}
 	configDir, err := filepath.Abs(filepath.Dir(paths.ConfigFile))
 	if err != nil {
-		_ = store.Close(ctx)
-		return BootstrapResult{}, fmt.Errorf("resolve config directory for skills: %w", err)
+		return fmt.Errorf("resolve config directory for skills: %w", err)
 	}
-	skillCatalog, err := skills.Load(skills.LoadOptions{
-		HomeDir:      homeDir,
-		ConfigDir:    configDir,
-		WorkspaceDir: paths.Workspace,
-		Config:       cfg.Skills,
+	b.cfg, b.paths, b.homeDir, b.configDir = cfg, paths, homeDir, configDir
+	return nil
+}
+
+func (b *bootstrapAssembly) buildCore() error {
+	var err error
+	b.store, err = sqlitestore.Open(b.ctx, b.paths.Database)
+	if err != nil {
+		return err
+	}
+	b.skillCatalog, err = skills.Load(skills.LoadOptions{
+		HomeDir:      b.homeDir,
+		ConfigDir:    b.configDir,
+		WorkspaceDir: b.paths.Workspace,
+		Config:       b.cfg.Skills,
 	})
 	if err != nil {
-		_ = store.Close(ctx)
-		return BootstrapResult{}, fmt.Errorf("load skills: %w", err)
+		return fmt.Errorf("load skills: %w", err)
 	}
-	sessions := session.NewService(store.DB())
-	workspaceAnchor := canonicalWorkspaceAnchor(paths.Workspace)
-	startupSessionID, err := randomID("session")
+	b.sessions = session.NewService(b.store.DB())
+	b.startupSessionID, err = randomID("session")
 	if err != nil {
-		_ = store.Close(ctx)
-		return BootstrapResult{}, fmt.Errorf("create startup session id: %w", err)
+		return fmt.Errorf("create startup session id: %w", err)
 	}
 	shellOptions := agentservice.ShellOptions{
-		MaxContextOutputBytes: cfg.Workspace.Shell.MaxContextOutputBytes, MaxArtifactOutputBytes: cfg.Workspace.Shell.MaxArtifactOutputBytes,
-		StopOnOutputLimit: cfg.Workspace.Shell.StopOnOutputLimit, MaxConcurrency: cfg.Workspace.Shell.MaxConcurrency,
-		ArtifactSink: newShellArtifactSink(sessions),
+		MaxContextOutputBytes: b.cfg.Workspace.Shell.MaxContextOutputBytes, MaxArtifactOutputBytes: b.cfg.Workspace.Shell.MaxArtifactOutputBytes,
+		StopOnOutputLimit: b.cfg.Workspace.Shell.StopOnOutputLimit, MaxConcurrency: b.cfg.Workspace.Shell.MaxConcurrency,
+		ArtifactSink: newShellArtifactSink(b.sessions),
 	}
-	coding, err := agentservice.NewService(store, paths.Workspace,
-		agentservice.WithWorkspacePolicy(cfg.Workspace.AllowWrite, cfg.Workspace.ShellPolicy, cfg.Workspace.AllowNetwork),
+	b.coding, err = agentservice.NewService(b.store, b.paths.Workspace,
+		agentservice.WithWorkspacePolicy(b.cfg.Workspace.AllowWrite, b.cfg.Workspace.ShellPolicy, b.cfg.Workspace.AllowNetwork),
 		agentservice.WithShellOptions(shellOptions),
-		agentservice.WithTeamLimits(cfg.Agents.Team.MaxConcurrency, cfg.Agents.Team.MaxTicks),
-		agentservice.WithSkills(skillCatalog),
+		agentservice.WithTeamLimits(b.cfg.Agents.Team.MaxConcurrency, b.cfg.Agents.Team.MaxTicks),
+		agentservice.WithSkills(b.skillCatalog),
 	)
 	if err != nil {
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
+		return err
 	}
-	subagentRuns, err := agentservice.NewSQLSubagentRunStore(store.DB())
+	b.subagentRuns, err = agentservice.NewSQLSubagentRunStore(b.store.DB())
 	if err != nil {
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
+		return err
 	}
-	fileCredentials, err := authservice.NewFileStore(filepath.Join(paths.StateDir, "credentials.json"))
+	fileCredentials, err := authservice.NewFileStore(filepath.Join(b.paths.StateDir, "credentials.json"))
 	if err != nil {
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
+		return err
 	}
-	credentials, err := authservice.NewRoutedStore(store.DB(), cfg.Auth.Store, map[string]authservice.CredentialStore{
-		"sqlite":  authservice.NewSQLiteStore(store.DB()),
+	credentials, err := authservice.NewRoutedStore(b.store.DB(), b.cfg.Auth.Store, map[string]authservice.CredentialStore{
+		"sqlite":  authservice.NewSQLiteStore(b.store.DB()),
 		"keyring": authservice.NewKeyringStore(),
 		"file":    fileCredentials,
 	})
 	if err != nil {
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
+		return err
 	}
-	authentication := authservice.NewService(store.DB(), credentials, chatgpt.NewClient(), grok.NewClient())
-	importConfiguredCredentials(ctx, cfg, authentication)
-	modelCatalog := catalog.NewService(store.DB(), authentication)
-	modelCatalog.TTL["chatgpt"] = cfg.Providers.ChatGPT.CatalogTTL
-	modelCatalog.TTL["grok"] = cfg.Providers.Grok.CatalogTTL
-	providerRuntime, err := NewProviderRuntime(cfg, authentication, modelCatalog, coding, filepath.Join(paths.DataDir, "subagent-worktrees"))
-	if err != nil {
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
+	b.authentication = authservice.NewService(b.store.DB(), credentials, chatgpt.NewClient(), grok.NewClient())
+	importConfiguredCredentials(b.ctx, b.cfg, b.authentication)
+	b.modelCatalog = catalog.NewService(b.store.DB(), b.authentication)
+	b.modelCatalog.TTL["chatgpt"] = b.cfg.Providers.ChatGPT.CatalogTTL
+	b.modelCatalog.TTL["grok"] = b.cfg.Providers.Grok.CatalogTTL
+	b.providerRuntime, err = NewProviderRuntime(b.cfg, b.authentication, b.modelCatalog, b.coding, filepath.Join(b.paths.DataDir, "subagent-worktrees"))
+	return err
+}
+
+func (b *bootstrapAssembly) wireService() error {
+	b.service = NewService(b.ctx, b.cfg)
+	b.attachHooks()
+	b.service.SetConfigPath(b.paths.ConfigFile)
+	b.service.AttachDurable(b.sessions, b.coding)
+	b.service.SetWorkspaceAnchor(canonicalWorkspaceAnchor(b.paths.Workspace))
+	b.service.AttachAttachments(filepath.Join(b.paths.DataDir, "attachments"))
+	b.service.AttachMemory(memory.NewService(b.store.DB(), b.cfg.Workspace.Root), recap.NewService(b.store.DB(), b.cfg.Workspace.Root))
+	b.service.AttachAuth(b.authentication, b.modelCatalog)
+	b.service.AttachSkills(b.skillCatalog)
+
+	b.manager = mcpruntime.NewManager(b.cfg.MCP.Servers, fmt.Sprintf("azem/%d", config.CurrentVersion), func(_ context.Context, reference string) (string, error) {
+		return config.ResolveReference(reference, os.LookupEnv, authservice.LookupKeyringSecret)
+	}, mcpruntime.Options{Sink: func(event mcpruntime.Event) {
+		b.service.emit(b.service.ctx, Event{Kind: EventMCPState, State: string(event.State), Text: event.Error, Data: map[string]string{"server": event.Server, "state": string(event.State), "error": event.Error}})
+	}, Elicitation: b.service.handleMCPElicitation})
+	b.service.AttachAgentExtensions(b.manager, b.subagentRuns)
+
+	var teamResumer recovery.TeamResumer
+	var runResumer recovery.RunResumer
+	if os.Getenv("AZEM_FAKE_PROVIDER") != "1" {
+		b.service.AttachProviderRuntime(b.providerRuntime)
+		teamResumer, runResumer = b.providerRuntime, b.providerRuntime
 	}
-	service := NewService(ctx, cfg)
-	sources := hookSources(cfg.Hooks, configDir, homeDir, paths.Workspace)
-	hookOptions := hooks.Options{Sources: sources, DefaultTimeout: cfg.Hooks.DefaultTimeoutParsed, FailurePolicy: hooks.FailurePolicy(cfg.Hooks.FailurePolicy)}
-	registry := hooks.Discover(hookOptions)
-	service.AttachHooks(hooks.Dispatcher{Registry: registry, Runner: hooks.Runner{Workspace: paths.Workspace}})
-	service.hookOptions = hookOptions
+	if err := b.attachBackground(); err != nil {
+		return err
+	}
+	return b.attachRecovery(teamResumer, runResumer)
+}
+
+func (b *bootstrapAssembly) attachHooks() {
+	sources := hookSources(b.cfg.Hooks, b.configDir, b.homeDir, b.paths.Workspace)
+	hookOptions := hooks.Options{Sources: sources, DefaultTimeout: b.cfg.Hooks.DefaultTimeoutParsed, FailurePolicy: hooks.FailurePolicy(b.cfg.Hooks.FailurePolicy)}
+	b.registry = hooks.Discover(hookOptions)
+	b.service.AttachHooks(hooks.Dispatcher{Registry: b.registry, Runner: hooks.Runner{Workspace: b.paths.Workspace}})
+	b.service.hookOptions = hookOptions
 	for _, source := range sources {
 		if filepath.Ext(source.Path) != ".json" {
 			continue
 		}
 		kind := "user_settings"
-		if strings.HasPrefix(filepath.Clean(source.Path), filepath.Clean(paths.Workspace)+string(filepath.Separator)) {
+		if strings.HasPrefix(filepath.Clean(source.Path), filepath.Clean(b.paths.Workspace)+string(filepath.Separator)) {
 			kind = "project_settings"
 		}
 		if strings.HasSuffix(source.Path, "settings.local.json") {
 			kind = "local_settings"
 		}
-		service.ensureHookWatcher().watchConfig(source.Path, kind)
+		b.service.ensureHookWatcher().watchConfig(source.Path, kind)
 	}
-	service.SetConfigPath(paths.ConfigFile)
-	service.AttachDurable(sessions, coding)
-	service.SetWorkspaceAnchor(workspaceAnchor)
-	service.AttachAttachments(filepath.Join(paths.DataDir, "attachments"))
-	backgroundManager, err := backgroundservice.NewManager(backgroundservice.Options{
-		Root: paths.Workspace, LogDir: filepath.Join(paths.StateDir, "background"),
+}
+
+func (b *bootstrapAssembly) attachBackground() error {
+	manager, err := backgroundservice.NewManager(backgroundservice.Options{
+		Root: b.paths.Workspace, LogDir: filepath.Join(b.paths.StateDir, "background"),
 	})
 	if err != nil {
-		_ = coding.Close(ctx)
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
+		return err
 	}
-	service.AttachBackground(backgroundManager)
-	service.AttachMemory(memory.NewService(store.DB(), cfg.Workspace.Root), recap.NewService(store.DB(), cfg.Workspace.Root))
-	service.AttachAuth(authentication, modelCatalog)
-	service.AttachSkills(skillCatalog)
-	manager := mcpruntime.NewManager(cfg.MCP.Servers, fmt.Sprintf("azem/%d", config.CurrentVersion), func(_ context.Context, reference string) (string, error) {
-		return config.ResolveReference(reference, os.LookupEnv, authservice.LookupKeyringSecret)
-	}, mcpruntime.Options{Sink: func(event mcpruntime.Event) {
-		service.emit(service.ctx, Event{Kind: EventMCPState, State: string(event.State), Text: event.Error, Data: map[string]string{"server": event.Server, "state": string(event.State), "error": event.Error}})
-	}, Elicitation: service.handleMCPElicitation})
-	service.AttachAgentExtensions(manager, subagentRuns)
-	var teamResumer recovery.TeamResumer
-	var runResumer recovery.RunResumer
-	if os.Getenv("AZEM_FAKE_PROVIDER") != "1" {
-		service.AttachProviderRuntime(providerRuntime)
-		teamResumer = providerRuntime
-		runResumer = providerRuntime
-	}
-	recoveryService, err := recovery.NewService(store, coding, subagentRuns, teamResumer, runResumer)
+	b.service.AttachBackground(manager)
+	return nil
+}
+
+func (b *bootstrapAssembly) attachRecovery(teamResumer recovery.TeamResumer, runResumer recovery.RunResumer) error {
+	var err error
+	b.recoveryService, err = recovery.NewService(b.store, b.coding, b.subagentRuns, teamResumer, runResumer)
 	if err != nil {
-		_ = backgroundManager.Close()
-		_ = coding.Close(ctx)
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
+		return err
 	}
-	recoveryService.SetBeforeResume(func(recoveryCtx context.Context, runs []api.Run) error {
+	b.recoveryService.SetBeforeResume(func(recoveryCtx context.Context, runs []api.Run) error {
 		for _, run := range runs {
-			if err := sessions.InterruptRunningToolRecordsForRun(recoveryCtx, run.ID, time.Now().UTC()); err != nil {
+			if err := b.sessions.InterruptRunningToolRecordsForRun(recoveryCtx, run.ID, time.Now().UTC()); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
-	service.Bootstrap()
-	if err := service.dispatchLifecycle(ctx, hooks.Setup, service.hookMetadata(startupSessionID, ""), func(e *hooks.Envelope) { e.Trigger = "init" }); err != nil {
-		_ = backgroundManager.Close()
-		_ = coding.Close(ctx)
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
+	return nil
+}
+
+func (b *bootstrapAssembly) start() error {
+	b.service.Bootstrap()
+	if err := b.service.dispatchLifecycle(b.ctx, hooks.Setup, b.service.hookMetadata(b.startupSessionID, ""), func(e *hooks.Envelope) { e.Trigger = "init" }); err != nil {
+		return err
 	}
-	recoverySummary, err := recoveryService.Recover(ctx)
+	if err := b.recover(); err != nil {
+		return err
+	}
+	b.emitStartupInstructions()
+	b.startBackgroundRuntimes()
+	return nil
+}
+
+func (b *bootstrapAssembly) recover() error {
+	summary, err := b.recoveryService.Recover(b.ctx)
 	if err != nil {
-		_ = backgroundManager.Close()
-		_ = coding.Close(ctx)
-		_ = store.Close(ctx)
-		return BootstrapResult{}, err
+		return err
 	}
-	service.AttachRecovery(recoverySummary)
-	service.emitRecoveryState()
-	service.AttachReconcileResolver(coding)
-	for _, entry := range skillCatalog.Snapshot().Entries {
+	b.service.AttachRecovery(summary)
+	b.service.emitRecoveryState()
+	b.service.AttachReconcileResolver(b.coding)
+	return nil
+}
+
+func (b *bootstrapAssembly) emitStartupInstructions() {
+	for _, entry := range b.skillCatalog.Snapshot().Entries {
 		if entry.Eager && !entry.Bundled {
-			service.emitInstructionsLoaded(ctx, entry.SourcePath, instructionMemoryType(entry.SourcePath, homeDir, paths.Workspace), "session_start")
+			b.service.emitInstructionsLoaded(b.ctx, entry.SourcePath, instructionMemoryType(entry.SourcePath, b.homeDir, b.paths.Workspace), "session_start")
 		}
 	}
-	for _, role := range cfg.Agents.Subagents.Roles {
-		service.emitInstructionsLoaded(ctx, role.InstructionsFile, instructionMemoryType(role.InstructionsFile, homeDir, paths.Workspace), "session_start")
+	for _, role := range b.cfg.Agents.Subagents.Roles {
+		b.service.emitInstructionsLoaded(b.ctx, role.InstructionsFile, instructionMemoryType(role.InstructionsFile, b.homeDir, b.paths.Workspace), "session_start")
 	}
-	for _, persona := range cfg.Agents.Subagents.Personas {
-		service.emitInstructionsLoaded(ctx, persona.InstructionsFile, instructionMemoryType(persona.InstructionsFile, homeDir, paths.Workspace), "session_start")
+	for _, persona := range b.cfg.Agents.Subagents.Personas {
+		b.service.emitInstructionsLoaded(b.ctx, persona.InstructionsFile, instructionMemoryType(persona.InstructionsFile, b.homeDir, b.paths.Workspace), "session_start")
 	}
-	service.wg.Add(1)
+}
+
+func (b *bootstrapAssembly) startBackgroundRuntimes() {
+	b.service.wg.Add(1)
 	go func() {
-		defer service.wg.Done()
-		_ = manager.Start(service.ctx)
-		_ = service.emitMCPSnapshot(service.ctx)
+		defer b.service.wg.Done()
+		_ = b.manager.Start(b.service.ctx)
+		_ = b.service.emitMCPSnapshot(b.service.ctx)
 	}()
-	for _, diagnostic := range registry.Diagnostics {
-		service.emitHookEvent(Event{Kind: EventHookDiagnostic, State: "failed", Text: diagnostic.Message, Data: map[string]string{"event": string(diagnostic.Event), "source": diagnostic.Source, "reason": diagnostic.Message}})
+	for _, diagnostic := range b.registry.Diagnostics {
+		b.service.emitHookEvent(Event{Kind: EventHookDiagnostic, State: "failed", Text: diagnostic.Message, Data: map[string]string{"event": string(diagnostic.Event), "source": diagnostic.Source, "reason": diagnostic.Message}})
 	}
-	service.wg.Add(1)
+	b.service.wg.Add(1)
 	go func() {
-		defer service.wg.Done()
-		service.emitAuthCatalog(service.ctx)
+		defer b.service.wg.Done()
+		b.service.emitAuthCatalog(b.service.ctx)
 	}()
-	return BootstrapResult{Config: cfg, Paths: paths, SessionID: startupSessionID, Service: service}, nil
+}
+
+func (b *bootstrapAssembly) close() {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(b.ctx), 5*time.Second)
+	defer cancel()
+	if b.service != nil {
+		_ = b.service.Shutdown(cleanupCtx)
+		return
+	}
+	if b.authentication != nil {
+		_ = b.authentication.Close()
+	}
+	if b.coding != nil {
+		_ = b.coding.Close(cleanupCtx)
+		return
+	}
+	if b.store != nil {
+		_ = b.store.Close(cleanupCtx)
+	}
 }
 
 func newShellArtifactSink(sessions *session.Service) func(context.Context, agentservice.ShellExecutionSnapshot, []byte) (agentservice.ShellArtifactResult, error) {

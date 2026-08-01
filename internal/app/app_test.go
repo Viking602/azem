@@ -1110,6 +1110,7 @@ func skillEventEntry(entries []SkillCatalogEntry, name string) (SkillCatalogEntr
 
 func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	cfg := config.Default()
+	cfg.Agents.Plan = config.ModelRouteConfig{Provider: "grok", Model: "architect"}
 	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "summary"}
 	cfg.Agents.Subagents.Roles = map[string]config.SubagentRoleConfig{
 		"zeta":  {Description: "Zeta", Provider: "grok", Model: "z-model"},
@@ -1125,13 +1126,84 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := []string{event.ModelRoutes[0].Scope, event.ModelRoutes[1].Role, event.ModelRoutes[2].Role, event.ModelRoutes[3].Role}; !reflect.DeepEqual(got, []string{"compaction", "alpha", "off", "zeta"}) {
+	if got := []string{event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Role, event.ModelRoutes[3].Role, event.ModelRoutes[4].Role}; !reflect.DeepEqual(got, []string{"plan", "compaction", "alpha", "off", "zeta"}) {
 		t.Fatalf("route order = %v", got)
 	}
 	clone := event.Clone()
 	clone.ModelRoutes[0].Route.Model = "changed"
-	if event.ModelRoutes[0].Route.Model != "summary" {
+	if event.ModelRoutes[0].Route.Model != "architect" {
 		t.Fatal("event clone mutated source routes")
+	}
+	if event.Data["subagent_max_concurrency"] != "2" {
+		t.Fatalf("subagent concurrency = %q", event.Data["subagent_max_concurrency"])
+	}
+	if event.Data["chatgpt_fast_mode"] != "false" {
+		t.Fatalf("ChatGPT fast mode = %q", event.Data["chatgpt_fast_mode"])
+	}
+}
+
+func TestSubagentConcurrencyActionPersistsAndEmits(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	service := NewService(ctx, config.Default())
+	service.SetConfigPath(path)
+	subagents := &subagentRuntime{cfg: config.Default().Agents.Subagents}
+	service.providers = &ProviderRuntime{cfg: config.Default(), subagents: subagents}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentConcurrency, Target: "6"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventModelRoutes || event.Data["subagent_max_concurrency"] != "6" {
+		t.Fatalf("concurrency event = %#v", event)
+	}
+	loaded, err := config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Agents.Subagents.MaxConcurrency != 6 {
+		t.Fatalf("persisted concurrency = %d", loaded.Agents.Subagents.MaxConcurrency)
+	}
+	subagents.mu.Lock()
+	liveConcurrency := subagents.cfg.MaxConcurrency
+	subagents.mu.Unlock()
+	if liveConcurrency != 6 {
+		t.Fatalf("live concurrency = %d", liveConcurrency)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentConcurrency, Target: "0"}); err == nil {
+		t.Fatal("zero concurrency was accepted")
+	}
+}
+
+func TestChatGPTFastModeActionPersistsAndUpdatesRuntime(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	service := NewService(ctx, config.Default())
+	service.SetConfigPath(path)
+	service.providers = &ProviderRuntime{cfg: config.Default()}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetChatGPTFastMode, Target: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventModelRoutes || event.Data["chatgpt_fast_mode"] != "true" {
+		t.Fatalf("fast mode event = %#v", event)
+	}
+	loaded, err := config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Providers.ChatGPT.FastMode || !service.providers.cfg.Providers.ChatGPT.FastMode {
+		t.Fatalf("fast mode was not applied: persisted=%v runtime=%v", loaded.Providers.ChatGPT.FastMode, service.providers.cfg.Providers.ChatGPT.FastMode)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetChatGPTFastMode, Target: "sometimes"}); err == nil {
+		t.Fatal("invalid fast mode was accepted")
 	}
 }
 
@@ -1248,8 +1320,8 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes := service.modelRouteEntries()
-	if routes[1].Route != (config.ModelRouteConfig{}) {
-		t.Fatalf("route not reset: %+v", routes[1])
+	if routes[2].Route != (config.ModelRouteConfig{}) {
+		t.Fatalf("route not reset: %+v", routes[2])
 	}
 	service.mu.Lock()
 	_, legacyExists := service.cfg.Agents.Subagents.Models["explore"]
@@ -1269,7 +1341,7 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetModelRoute, Route: invalid}); err == nil {
 		t.Fatal("incomplete route unexpectedly succeeded")
 	}
-	if got := service.modelRouteEntries()[1].Route; got != (config.ModelRouteConfig{}) {
+	if got := service.modelRouteEntries()[2].Route; got != (config.ModelRouteConfig{}) {
 		t.Fatalf("validation failure mutated route: %+v", got)
 	}
 }

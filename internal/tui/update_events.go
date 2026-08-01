@@ -110,19 +110,30 @@ func (m *AppModel) applyEvent(event app.Event) {
 	case app.EventModelCatalog:
 		m.loadModels(event)
 	case app.EventModelRoutes:
+		if maxConcurrency, err := strconv.Atoi(event.Data["subagent_max_concurrency"]); err == nil && maxConcurrency > 0 {
+			m.subagentConcurrency = maxConcurrency
+		}
+		if fastMode, err := strconv.ParseBool(event.Data["chatgpt_fast_mode"]); err == nil {
+			m.chatGPTFastMode = fastMode
+		}
 		cursorScope, cursorRole := "", ""
-		if m.pendingModelRoute != nil {
+		showSettings := m.overlayPurpose == "settings"
+		if !showSettings && m.pendingModelRoute != nil {
 			cursorScope, cursorRole = m.pendingModelRoute.Entry.Scope, m.pendingModelRoute.Entry.Role
-		} else if m.overlay == OverlayModelRoutes && m.overlayCursor < len(m.modelRoutes) {
+		} else if !showSettings && m.overlay == OverlayModelRoutes && m.overlayCursor < len(m.modelRoutes) {
 			cursorScope, cursorRole = m.modelRoutes[m.overlayCursor].Scope, m.modelRoutes[m.overlayCursor].Role
 		}
 		m.modelRoutes = append([]app.ModelRouteEntry(nil), event.ModelRoutes...)
 		m.pendingModelRoute = nil
-		m.openOverlay(OverlayModelRoutes)
-		for index, entry := range m.modelRoutes {
-			if entry.Scope == cursorScope && entry.Role == cursorRole {
-				m.overlayCursor = index
-				break
+		if showSettings {
+			m.openOverlay(OverlaySettings)
+		} else {
+			m.openOverlay(OverlayModelRoutes)
+			for index, entry := range m.modelRoutes {
+				if entry.Scope == cursorScope && entry.Role == cursorRole {
+					m.overlayCursor = index
+					break
+				}
 			}
 		}
 	case app.EventGitBranches:

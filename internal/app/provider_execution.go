@@ -210,10 +210,11 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		}
 	}
 	if runErr == nil && ctx.Err() == nil && s.sessions != nil && (strings.TrimSpace(result.Text) != "" || len(result.Messages) > 0) {
+		_, instructionFingerprint := turnInstructions(request.PlanMode)
 		history := session.ModelHistory{
 			ProviderID: request.Provider, ModelID: engine.Model,
-			InstructionFingerprint: mainInstructionFingerprint,
-			StaticPrefixHash:       mainInstructionFingerprint,
+			InstructionFingerprint: instructionFingerprint,
+			StaticPrefixHash:       instructionFingerprint,
 			WireVersion:            session.CurrentWireVersion,
 			Messages:               result.Messages,
 		}
@@ -419,6 +420,7 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 			extraBody[key] = value
 		}
 		extraBody["prompt_cache_key"] = roleCacheKey
+		enableExplicitPromptCache(extraBody, request.Provider, request.Model)
 		if strings.TrimSpace(policy.attachmentRoot) != "" {
 			extraBody[responses.AttachmentRootExtraKey] = policy.attachmentRoot
 		}

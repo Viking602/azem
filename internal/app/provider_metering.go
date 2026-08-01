@@ -33,8 +33,12 @@ func (d *meteredProviderDriver) Stream(ctx context.Context, request hyprovider.R
 	if err != nil {
 		return nil, err
 	}
+	model := request.Model
+	if model == "" {
+		model = d.model
+	}
 	fact := session.ProviderRequestFact{RequestID: id, SessionID: d.sessionID, RunID: d.runID, RequestKind: d.kind,
-		Provider: d.provider, Model: d.model, Transport: d.transport, CacheEpoch: projection.CacheEpoch,
+		Provider: d.provider, Model: model, Transport: d.transport, CacheEpoch: projection.CacheEpoch,
 		CheckpointGeneration: projection.CheckpointGeneration, Status: "started", StartedAt: time.Now().UTC()}
 	if err := d.store.UpsertProviderRequest(context.WithoutCancel(ctx), fact); err != nil {
 		return nil, err
@@ -89,10 +93,11 @@ func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) erro
 		if d.InputTokens != 0 || d.OutputTokens != 0 || d.TotalTokens != 0 {
 			f.InputTokens, f.CachedTokens, f.OutputTokens, f.TotalTokens = d.InputTokens, d.CachedTokens, d.OutputTokens, d.TotalTokens
 		}
-		f.CacheWriteTokens, f.ReasoningTokens, f.CacheReported = d.CacheWriteTokens, d.ReasoningTokens, d.CacheReported
+		f.CacheWriteTokens, f.ReasoningTokens, f.CacheReported, f.CacheWriteReported = d.CacheWriteTokens, d.ReasoningTokens, d.CacheReported, d.CacheWriteReported
 		if cacheModelForProvider(f.Provider, d.CacheModel) == responses.CacheModelAutomatic {
 			// Durable facts must not retain write-token noise for automatic caches.
 			f.CacheWriteTokens = 0
+			f.CacheWriteReported = false
 		}
 		s.terminal = &f
 	}
@@ -114,6 +119,7 @@ func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) erro
 		s.finishErr = err
 		return err
 	}
+	u.LastRequestKind, u.LastProvider, u.LastModel, u.LastTransport = f.RequestKind, f.Provider, f.Model, f.Transport
 	if err = s.driver.store.UpdateUsage(ctx, f.SessionID, u); err != nil {
 		s.finishErr = err
 		return err
@@ -133,8 +139,9 @@ func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) erro
 				"inputTokens": fmt.Sprint(f.InputTokens), "cachedInputTokens": fmt.Sprint(f.CachedTokens), "outputTokens": fmt.Sprint(f.OutputTokens),
 				"totalTokens": fmt.Sprint(f.TotalTokens), "cacheWriteTokens": fmt.Sprint(f.CacheWriteTokens), "reasoningTokens": fmt.Sprint(f.ReasoningTokens),
 				"provider": f.Provider, "model": f.Model, "transport": f.Transport,
-				"cacheModel":  cacheModelForProvider(f.Provider, s.detail.CacheModel),
-				"cacheStatus": map[bool]string{true: "reported", false: "unreported"}[f.CacheReported]}})
+				"cacheModel":       cacheModelForProvider(f.Provider, s.detail.CacheModel),
+				"cacheStatus":      map[bool]string{true: "reported", false: "unreported"}[f.CacheReported],
+				"cacheWriteStatus": map[bool]string{true: "reported", false: "unreported"}[f.CacheWriteReported]}})
 	}
 	s.finished = true
 	s.finishErr = nil

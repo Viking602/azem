@@ -20,6 +20,7 @@ import (
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
+	"github.com/Viking602/venat/stream"
 	"github.com/Viking602/venat/tool"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
@@ -446,7 +447,7 @@ func TestDecodeSubagentSpawnInputTracksPresenceAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if minimal.SubagentType != "worker" || minimal.SubagentTypeSet || !minimal.Background || minimal.BackgroundSet || minimal.Isolation != "none" || minimal.IsolationSet {
+	if minimal.SubagentType != "worker" || minimal.SubagentTypeSet || minimal.Background || minimal.BackgroundSet || minimal.Isolation != "none" || minimal.IsolationSet {
 		t.Fatalf("minimal input = %#v", minimal)
 	}
 
@@ -1054,6 +1055,28 @@ func TestDefaultSubagentSpawnResolvesWorker(t *testing.T) {
 	}
 }
 
+func TestPlanModeCapsSubagentAtReadOnly(t *testing.T) {
+	cfg := config.Default().Agents.Subagents
+	runtime := subagentRuntime{cfg: cfg}
+	profile, err := runtime.resolveProfile(subagentSpawnInput{
+		SubagentType: "worker", CapabilityMode: "all", Isolation: "worktree", Background: true,
+	}, subagentParentRuntime{
+		ProviderID: "chatgpt", ModelID: "parent-model", Reasoning: "high", WorkspaceRoot: "/workspace", PlanMode: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.CapabilityMode != "read-only" || profile.RequestedIsolation != "none" || subagentMayRunInBackground(profile) {
+		t.Fatalf("plan subagent profile = %#v", profile)
+	}
+	allowed := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
+	for _, forbidden := range []string{"coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell"} {
+		if allowed[forbidden] {
+			t.Fatalf("plan subagent retained %q: %v", forbidden, allowed)
+		}
+	}
+}
+
 func TestResolveSubagentProfileKeepsRouteLayerAtomic(t *testing.T) {
 	cfg := config.Default().Agents.Subagents
 	cfg.Personas["specialist"] = config.SubagentPersonaConfig{Instructions: "persona", Provider: "chatgpt", Model: "persona-model", Reasoning: "medium"}
@@ -1082,7 +1105,7 @@ func TestResolveSubagentProfileKeepsRouteLayerAtomic(t *testing.T) {
 	}
 }
 
-func TestForegroundWaitStartsAfterQueuedTaskRunsAndPersistsDemotion(t *testing.T) {
+func TestForegroundWaitStartsAfterQueuedTaskRuns(t *testing.T) {
 	ctx := context.Background()
 	providerStore, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
@@ -1135,14 +1158,6 @@ func TestForegroundWaitStartsAfterQueuedTaskRunsAndPersistsDemotion(t *testing.T
 		t.Fatal("foreground wait did not observe running transition")
 	}
 
-	runtime.demote(run.SessionID, run.ID, "foreground wait timed out")
-	persisted, err := store.Get(ctx, run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !persisted.Background || persisted.Warning != "foreground wait timed out" {
-		t.Fatalf("persisted demotion = %#v", persisted)
-	}
 }
 
 type metadataOnlyDriver struct{}
@@ -1155,7 +1170,7 @@ func (metadataOnlyDriver) Stream(context.Context, hyprovider.Request) (hyprovide
 	return hyprovider.NewSliceStream(nil), nil
 }
 
-func TestCancelledForegroundToolWaitLeavesChildRunningInBackground(t *testing.T) {
+func TestReadOnlyBackgroundRequestWaitsAndCancelsWithParentContext(t *testing.T) {
 	ctx := context.Background()
 	providerStore, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
@@ -1182,7 +1197,7 @@ func TestCancelledForegroundToolWaitLeavesChildRunningInBackground(t *testing.T)
 	cancel()
 	call := tool.Call{
 		ID: "spawn", Name: subagentSpawnTool,
-		Arguments: json.RawMessage(`{"prompt":"inspect","description":"queued child","subagent_type":"explore","background":false}`),
+		Arguments: json.RawMessage(`{"prompt":"inspect","description":"queued child","subagent_type":"explore","background":true}`),
 	}
 	result, err := driver.Execute(callCtx, call, nil)
 	if err != nil || result.IsError {
@@ -1192,21 +1207,113 @@ func TestCancelledForegroundToolWaitLeavesChildRunningInBackground(t *testing.T)
 	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["status"] != "queued" || !strings.Contains(fmt.Sprint(payload["warning"]), "continues in background") {
+	if payload["status"] != "cancelled" {
 		t.Fatalf("cancelled wait payload = %#v", payload)
 	}
 	runs, err := store.List(ctx, "session")
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("stored runs=%#v err=%v", runs, err)
 	}
-	if !runs[0].Background || runs[0].State != agentservice.SubagentQueued {
-		t.Fatalf("detached child = %#v", runs[0])
+	if runs[0].Background || runs[0].State != agentservice.SubagentCancelled {
+		t.Fatalf("foreground child = %#v", runs[0])
 	}
 	runtime.mu.Lock()
 	_, active := runtime.active[runs[0].ID]
 	runtime.mu.Unlock()
-	if !active {
-		t.Fatal("tool-call cancellation removed the child task")
+	if active {
+		t.Fatal("cancelled foreground child remained active")
+	}
+}
+
+func TestBackgroundRequiresWriteCapableWorktree(t *testing.T) {
+	cfg := config.Default().Agents.Subagents
+	runtime := subagentRuntime{cfg: cfg}
+	parent := subagentParentRuntime{ProviderID: "chatgpt", ModelID: "model", WorkspaceRoot: t.TempDir()}
+	for _, test := range []struct {
+		name  string
+		input subagentSpawnInput
+		want  bool
+	}{
+		{name: "explore worktree", input: subagentSpawnInput{SubagentType: "explore", Isolation: "worktree"}},
+		{name: "writer shared workspace", input: subagentSpawnInput{SubagentType: "worker", Isolation: "none"}},
+		{name: "writer worktree", input: subagentSpawnInput{SubagentType: "worker", Isolation: "worktree"}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profile, err := runtime.resolveProfile(test.input, parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := subagentMayRunInBackground(profile); got != test.want {
+				t.Fatalf("background eligibility = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSubagentUIBackpressureDoesNotCancelRun(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := newSubagentRuntime(ctx, config.Default().Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.cancel()
+	host := NewService(ctx, config.Default())
+	host.events.maxEvents = 0
+	childCtx, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	run := agentservice.SubagentRun{ID: "child", SessionID: "session", ParentRunID: "parent", ChildRunID: "child-run", State: agentservice.SubagentRunning, StartedAt: time.Now().UTC()}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, profile: effectiveSubagentProfile{Provider: "chatgpt", Model: "model"}, parent: subagentParentRuntime{Host: host},
+		ctx: childCtx, cancel: childCancel, done: make(chan struct{}), toolNames: make(map[string]struct{}),
+	}
+	runtime.handleFrame(run.ID, stream.Frame{Kind: stream.FrameThinking, Thinking: "inspect"})
+	select {
+	case <-childCtx.Done():
+		t.Fatal("UI event backpressure cancelled the child")
+	default:
+	}
+}
+
+func TestNormalParentCompletionKeepsBackgroundWorktreeChild(t *testing.T) {
+	ctx := context.Background()
+	host := NewService(ctx, config.Default())
+	defer host.cancel()
+	runtimeCtx, runtimeCancel := context.WithCancel(ctx)
+	defer runtimeCancel()
+	childCtx, childCancel := context.WithCancel(runtimeCtx)
+	defer childCancel()
+	runtime := &subagentRuntime{
+		ctx: runtimeCtx, cfg: config.SubagentConfig{AutoWake: false},
+		active: map[string]*activeSubagent{"child": {
+			run: agentservice.SubagentRun{ID: "child", SessionID: "session", ParentRunID: "parent", State: agentservice.SubagentRunning, Background: true, RequestedIsolation: "worktree"},
+			ctx: childCtx, cancel: childCancel, done: make(chan struct{}), toolNames: make(map[string]struct{}),
+		}},
+	}
+	host.providers = &ProviderRuntime{subagents: runtime}
+	parentCtx, parentCancel := context.WithCancel(ctx)
+	host.activeRun, host.activeSession, host.activeEnd = "parent", "session", parentCancel
+	host.emitTerminal(ctx, Event{Kind: EventRunFinished, SessionID: "session", RunID: "parent", State: "completed"})
+	select {
+	case <-parentCtx.Done():
+	default:
+		t.Fatal("parent context remained active after completion")
+	}
+	select {
+	case <-childCtx.Done():
+		t.Fatal("normal parent completion cancelled the background worktree child")
+	default:
 	}
 }
 
@@ -1399,7 +1506,7 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 	if spawned.ID == source.ID || spawned.ParentRunID != "new-parent" || spawned.Type != source.Type ||
 		spawned.Provider != source.Provider || spawned.Model != source.Model || spawned.Reasoning != source.Reasoning || spawned.CapabilityMode != source.CapabilityMode ||
 		spawned.RequestedIsolation != source.RequestedIsolation || spawned.CWD != source.CWD || spawned.WorktreePath != "" ||
-		spawned.Description != "new description" || !spawned.Background {
+		spawned.Description != "new description" || spawned.Background {
 		t.Fatalf("resumed run = %#v", spawned)
 	}
 	runtime.mu.Lock()
@@ -1899,6 +2006,53 @@ func TestSubagentCoordinatorEnforcesConcurrencyAndFIFOQueue(t *testing.T) {
 	if peak != cfg.MaxConcurrency {
 		t.Fatalf("peak concurrent streams = %d, want %d", peak, cfg.MaxConcurrency)
 	}
+}
+
+func TestSubagentCoordinatorAppliesConcurrencyUpdate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	coding, err := agentservice.NewService(providerStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.MaxConcurrency = 1
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(ctx)
+	driver := newGatedSubagentDriver()
+	parent := subagentParentRuntime{SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir()}
+	for _, goal := range []string{"one", "two"} {
+		if _, err := runtime.Spawn(ctx, subagentSpawnInput{Prompt: goal, Description: goal, SubagentType: "explore"}, parent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if started := <-driver.started; started != "one" {
+		t.Fatalf("first task = %q", started)
+	}
+	select {
+	case started := <-driver.started:
+		t.Fatalf("second task started before update: %q", started)
+	case <-time.After(50 * time.Millisecond):
+	}
+	runtime.updateMaxConcurrency(2)
+	if started := <-driver.started; started != "two" {
+		t.Fatalf("task started after update = %q", started)
+	}
+	driver.release <- struct{}{}
+	driver.release <- struct{}{}
 }
 
 type recoveringSubagentDriver struct {

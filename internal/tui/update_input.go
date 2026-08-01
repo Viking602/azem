@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,12 +32,17 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = max(1, msg.Width)
 		m.height = max(1, msg.Height)
+		m.transcriptHover = -1
 		// The rounded panel is external to textarea; reserve its border and padding.
 		m.composer.SetWidth(max(1, m.width-m.theme.PanelFocused.GetHorizontalFrameSize()))
 		m.modelSearch.SetWidth(max(1, min(64, m.width-12)))
+		m.settingsSearch.SetWidth(max(1, min(96, m.width-12)))
 		m.transcriptTop = min(m.transcriptTop, m.transcriptMaxOffset())
 		if m.overlay == OverlayRecap {
 			m.overlayScroll = min(m.overlayScroll, m.recapScrollLimit())
+		}
+		if m.overlay == OverlayAgentDetail {
+			m.scrollAgentDetail(0)
 		}
 		if m.isGenericReadOnlyOverlay() {
 			m.scrollReadOnlyOverlay(0)
@@ -47,6 +53,15 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		return m.handleMouseClick(msg.Mouse())
 	case tea.MouseMotionMsg:
+		hover := -1
+		if m.overlay == OverlayNone {
+			_, top, width, height := m.transcriptBounds()
+			index, ok := m.transcriptBlockHeaderAt(msg.Y-top, width, height)
+			if ok && m.transcript[index].Kind == BlockTool {
+				hover = index
+			}
+		}
+		m.transcriptHover = hover
 		if m.overlayScrollbarDragging {
 			m.applyOverlayScrollbarPosition(msg.Y)
 			return m, nil
@@ -70,9 +85,14 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.finishTranscriptSelection(msg.Mouse())
 	case tea.MouseWheelMsg:
 		m.transcriptSelection = nil
+		m.transcriptHover = -1
 		if m.overlay != OverlayNone {
 			switch msg.Button {
 			case tea.MouseWheelUp:
+				if m.overlay == OverlayAgentDetail {
+					m.scrollAgentDetail(3)
+					return m, nil
+				}
 				if m.overlay == OverlayRecap {
 					m.scrollRecap(-3)
 					return m, nil
@@ -88,6 +108,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m.updateOverlayKey("up")
 			case tea.MouseWheelDown:
+				if m.overlay == OverlayAgentDetail {
+					m.scrollAgentDetail(-3)
+					return m, nil
+				}
 				if m.overlay == OverlayRecap {
 					m.scrollRecap(3)
 					return m, nil
@@ -212,7 +236,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			if msg.Action.Kind == ActionSetModelRoute || msg.Action.Kind == ActionResetModelRoute {
 				m.pendingModelRoute = nil
-				if len(m.modelRoutes) > 0 {
+				if m.overlayPurpose == "settings" {
+					m.openOverlay(OverlaySettings)
+				} else if len(m.modelRoutes) > 0 {
 					m.openOverlay(OverlayModelRoutes)
 				}
 			}
@@ -511,6 +537,9 @@ func (m AppModel) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	case uiClickTodos:
 		return m.toggleTodoPane()
+	case uiClickAgents:
+		m.openOverlay(OverlayAgents)
+		return m, nil
 	}
 
 	_, todoTop, todoWidth, todoHeight := m.todoPaneBounds()
@@ -563,6 +592,9 @@ func (m AppModel) handleOverlayClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 		m.applyOverlayScrollbarPosition(mouse.Y)
 		return m, nil
 	}
+	if m.overlay == OverlayAgentDetail {
+		return m, nil
+	}
 	rendered := strings.Split(ansi.Strip(m.renderOverlay(max(1, m.width), max(1, m.height))), "\n")
 	if mouse.Y < 0 || mouse.Y >= len(rendered) {
 		return m, m.closeOverlay()
@@ -577,12 +609,40 @@ func (m AppModel) handleOverlayClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 	if mouse.X <= left || mouse.X >= right {
 		return m, m.closeOverlay()
 	}
+	if m.overlay == OverlaySettings {
+		return m.handleSettingsOverlayClick(mouse, line, left)
+	}
 
 	for index, option := range m.overlayOptions() {
 		if strings.Contains(line, option.Label) {
 			m.overlayCursor = index
 			return m.activateOverlayOption()
 		}
+	}
+	return m, nil
+}
+
+func (m AppModel) handleSettingsOverlayClick(mouse tea.Mouse, line string, left int) (tea.Model, tea.Cmd) {
+	frame := m.genericOverlayFrame(max(1, m.width), max(1, m.height))
+	if mouse.Y == frame.topPadding+1 {
+		return m, m.settingsSearch.Focus()
+	}
+	for index, entry := range m.settingsEntries() {
+		collapsed, expanded := "▸ "+entry.Option.Label, "▾ "+entry.Option.Label
+		if entry.Kind == settingsEntrySection || (!strings.Contains(line, collapsed) && !strings.Contains(line, expanded)) {
+			continue
+		}
+		m.overlayCursor = index
+		m.settingsCursor = index
+		if mouse.X <= left+4 {
+			if m.settingsExpanded[entry.Key] {
+				delete(m.settingsExpanded, entry.Key)
+			} else {
+				m.settingsExpanded[entry.Key] = true
+			}
+			return m, nil
+		}
+		return m.activateOverlayOption()
 	}
 	return m, nil
 }
@@ -601,6 +661,11 @@ func (m *AppModel) scrollReadOnlyOverlay(delta int) {
 	m.overlayScroll = min(limit, max(0, m.overlayScroll+delta))
 }
 
+func (m *AppModel) scrollAgentDetail(delta int) {
+	limit := m.agentDetailScrollLimit()
+	m.overlayScroll = min(limit, max(0, m.overlayScroll+delta))
+}
+
 func (m *AppModel) applyOverlayScrollbarPosition(y int) {
 	scrollbar, ok := m.overlayScrollbar(max(1, m.width), max(1, m.height))
 	if !ok || scrollbar.height <= 1 {
@@ -608,7 +673,12 @@ func (m *AppModel) applyOverlayScrollbarPosition(y int) {
 		return
 	}
 	position := min(max(0, y-scrollbar.y), scrollbar.height-1)
-	m.overlayScroll = (position*scrollbar.maxOffset + (scrollbar.height-1)/2) / (scrollbar.height - 1)
+	fromTop := (position*scrollbar.maxOffset + (scrollbar.height-1)/2) / (scrollbar.height - 1)
+	if m.overlay == OverlayAgentDetail {
+		m.overlayScroll = scrollbar.maxOffset - fromTop
+		return
+	}
+	m.overlayScroll = fromTop
 }
 
 func (m AppModel) commandSuggestionAt(x, y int) (int, bool) {
@@ -856,6 +926,9 @@ func (m AppModel) updateTranscriptKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m AppModel) updateOverlayKeyMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.overlay == OverlaySettings {
+		return m.updateSettingsOverlayKeyMsg(msg)
+	}
 	if m.overlay != OverlayModel {
 		return m.updateOverlayKey(msg.String())
 	}
@@ -878,6 +951,43 @@ func (m AppModel) updateOverlayKeyMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	return m, cmd
 }
 
+func (m AppModel) updateSettingsOverlayKeyMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	if m.settingsSearch.Focused() {
+		return m.updateSettingsSearchKeyMsg(msg)
+	}
+	if key == "/" {
+		return m, m.settingsSearch.Focus()
+	}
+	return m.updateOverlayKey(key)
+}
+
+func (m AppModel) updateSettingsSearchKeyMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	switch key {
+	case "esc":
+		if m.settingsSearch.Value() != "" {
+			m.settingsSearch.Reset()
+			m.selectFirstSettingsEntry()
+			return m, nil
+		}
+		m.settingsSearch.Blur()
+		return m, nil
+	case "enter":
+		m.settingsSearch.Blur()
+		return m, nil
+	case "up", "down", "pgup", "pgdown":
+		return m.updateOverlayKey(key)
+	}
+	previous := m.settingsSearch.Value()
+	var cmd tea.Cmd
+	m.settingsSearch, cmd = m.settingsSearch.Update(msg)
+	if m.settingsSearch.Value() != previous {
+		m.selectFirstSettingsEntry()
+	}
+	return m, cmd
+}
+
 func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 	if m.overlay == OverlayAgentDetail {
 		switch key {
@@ -886,14 +996,16 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 			m.overlayCursor = 0
 			m.overlayScroll = 0
 		case "up", "k":
-			m.overlayScroll = max(0, m.overlayScroll-1)
+			m.scrollAgentDetail(1)
 		case "down", "j":
-			m.overlayScroll++
+			m.scrollAgentDetail(-1)
 		case "pgup":
-			m.overlayScroll = max(0, m.overlayScroll-max(1, m.height/3))
+			m.scrollAgentDetail(max(1, m.height/2))
 		case "pgdown":
-			m.overlayScroll += max(1, m.height/3)
+			m.scrollAgentDetail(-max(1, m.height/2))
 		case "home":
+			m.overlayScroll = m.agentDetailScrollLimit()
+		case "end":
 			m.overlayScroll = 0
 		}
 		return m, nil
@@ -976,7 +1088,11 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 			m.modelSearch.Reset()
 			m.modelSearch.Blur()
 			m.pendingModelRoute = nil
-			m.openOverlay(OverlayModelRoutes)
+			if m.overlayPurpose == "settings" {
+				m.openOverlay(OverlaySettings)
+			} else {
+				m.openOverlay(OverlayModelRoutes)
+			}
 			return m, nil
 		}
 		if m.overlay == OverlayBranchConfirm {
@@ -1038,6 +1154,41 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.overlay == OverlaySettings {
+		switch key {
+		case "right", "l":
+			m.expandSettingsSelection()
+			return m, nil
+		case "left", "h":
+			m.collapseSettingsSelection()
+			return m, nil
+		case "up", "k", "shift+tab":
+			m.moveSettingsCursor(-1)
+			return m, nil
+		case "down", "j", "tab":
+			m.moveSettingsCursor(1)
+			return m, nil
+		case "home":
+			m.selectFirstSettingsEntry()
+			return m, nil
+		case "end":
+			m.selectLastSettingsEntry()
+			return m, nil
+		case "pgup", "pgdown":
+			delta := 1
+			if key == "pgup" {
+				delta = -1
+			}
+			for range max(1, m.height/3) {
+				m.moveSettingsCursor(delta)
+			}
+			return m, nil
+		case "space", " ":
+			return m.activateOverlayOption()
+		case "d", "R":
+			return m.resetSelectedSetting()
+		}
+	}
 	switch key {
 	case "up", "k", "shift+tab":
 		m.moveOverlayCursor(-1, count)
@@ -1089,6 +1240,14 @@ func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
 			return m.beginAction(Action{Kind: ActionRefreshMCP, Target: m.mcpServers[m.overlayCursor].Name})
 		}
 	case "R":
+		if m.overlay == OverlaySettings {
+			entries := m.settingsEntries()
+			if m.overlayCursor >= 0 && m.overlayCursor < len(entries) && entries[m.overlayCursor].Kind == settingsEntryRoute {
+				m.settingsCursor = m.overlayCursor
+				entry := m.settingsModelRoutes()[entries[m.overlayCursor].RouteIndex]
+				return m.beginAction(Action{Kind: ActionResetModelRoute, Route: &entry})
+			}
+		}
 		if m.overlay == OverlayModelRoutes && m.overlayCursor < len(m.modelRoutes) {
 			entry := m.modelRoutes[m.overlayCursor]
 			return m.beginAction(Action{Kind: ActionResetModelRoute, Route: &entry})
@@ -1115,6 +1274,106 @@ func (m *AppModel) moveOverlayCursor(delta int, count int) {
 	}
 }
 
+func (m *AppModel) expandSettingsSelection() {
+	entries := m.settingsEntries()
+	if m.overlayCursor < 0 || m.overlayCursor >= len(entries) {
+		return
+	}
+	selected := entries[m.overlayCursor]
+	if selected.Kind != settingsEntrySection {
+		m.settingsExpanded[selected.Key] = true
+	}
+}
+
+func (m *AppModel) collapseSettingsSelection() {
+	entries := m.settingsEntries()
+	if m.overlayCursor < 0 || m.overlayCursor >= len(entries) {
+		return
+	}
+	selected := entries[m.overlayCursor]
+	if selected.Kind != settingsEntrySection {
+		delete(m.settingsExpanded, selected.Key)
+	}
+}
+
+func (m *AppModel) moveSettingsCursor(delta int) {
+	entries := m.settingsEntries()
+	if len(entries) == 0 || delta == 0 {
+		m.overlayCursor = 0
+		return
+	}
+	for range len(entries) {
+		m.overlayCursor = (m.overlayCursor + delta) % len(entries)
+		if m.overlayCursor < 0 {
+			m.overlayCursor += len(entries)
+		}
+		if entries[m.overlayCursor].Kind != settingsEntrySection {
+			m.settingsCursor = m.overlayCursor
+			return
+		}
+	}
+}
+
+func (m *AppModel) selectFirstSettingsEntry() {
+	entries := m.settingsEntries()
+	for index, entry := range entries {
+		if entry.Kind != settingsEntrySection {
+			m.overlayCursor = index
+			m.settingsCursor = index
+			return
+		}
+	}
+	m.overlayCursor = 0
+	m.settingsCursor = 0
+}
+
+func (m *AppModel) selectLastSettingsEntry() {
+	entries := m.settingsEntries()
+	for index := len(entries) - 1; index >= 0; index-- {
+		if entries[index].Kind != settingsEntrySection {
+			m.overlayCursor = index
+			m.settingsCursor = index
+			return
+		}
+	}
+	m.overlayCursor = 0
+	m.settingsCursor = 0
+}
+
+func (m AppModel) resetSelectedSetting() (tea.Model, tea.Cmd) {
+	entries := m.settingsEntries()
+	if m.overlayCursor < 0 || m.overlayCursor >= len(entries) {
+		return m, nil
+	}
+	m.settingsCursor = m.overlayCursor
+	selected := entries[m.overlayCursor]
+	switch selected.Kind {
+	case settingsEntryRoute:
+		entry := m.settingsModelRoutes()[selected.RouteIndex]
+		return m.beginAction(Action{Kind: ActionResetModelRoute, Route: &entry})
+	default:
+		return m.resetSimpleSetting(selected.Kind)
+	}
+}
+
+func (m AppModel) resetSimpleSetting(kind settingsEntryKind) (tea.Model, tea.Cmd) {
+	switch kind {
+	case settingsEntryConcurrency:
+		if m.subagentConcurrency != 2 {
+			return m.beginAction(Action{Kind: ActionSetSubagentConcurrency, Target: "2"})
+		}
+	case settingsEntryFastMode:
+		if m.chatGPTFastMode {
+			return m.beginAction(Action{Kind: ActionSetChatGPTFastMode, Target: "false"})
+		}
+	case settingsEntryLanguage:
+		if m.catalog.Language() != i18n.DefaultLanguage {
+			return m.beginAction(Action{Kind: ActionSetLanguage, Target: i18n.DefaultLanguage})
+		}
+	}
+	return m, nil
+}
+
 func (m AppModel) overlayOptionCount() int {
 	switch m.overlay {
 	case OverlayCommand:
@@ -1125,6 +1384,10 @@ func (m AppModel) overlayOptionCount() int {
 		return len(m.modelPickerEntries())
 	case OverlayModelRoutes:
 		return len(m.modelRoutes)
+	case OverlaySettings:
+		return len(m.settingsEntries())
+	case OverlaySubagentConcurrency:
+		return len(subagentConcurrencyChoices)
 	case OverlaySkills:
 		return len(m.skills)
 	case OverlayLanguage:
@@ -1335,6 +1598,33 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 		return m, nil
 	case OverlayDiff:
 		return m, m.closeOverlay()
+	case OverlaySettings:
+		entries := m.settingsEntries()
+		if m.overlayCursor < 0 || m.overlayCursor >= len(entries) {
+			return m, nil
+		}
+		m.settingsCursor = m.overlayCursor
+		selected := entries[m.overlayCursor]
+		switch selected.Kind {
+		case settingsEntrySection:
+			return m, nil
+		case settingsEntryRoute:
+			entry := m.settingsModelRoutes()[selected.RouteIndex]
+			m.pendingModelRoute = &pendingModelRoute{Entry: entry, Provider: entry.Route.Provider, Model: entry.Route.Model, Reasoning: entry.Route.Reasoning}
+			m.openOverlay(OverlayModel)
+		case settingsEntryConcurrency:
+			m.openOverlay(OverlaySubagentConcurrency)
+		case settingsEntryFastMode:
+			return m.beginAction(Action{Kind: ActionSetChatGPTFastMode, Target: strconv.FormatBool(!m.chatGPTFastMode)})
+		case settingsEntryLanguage:
+			m.openOverlay(OverlayLanguage)
+		}
+		return m, nil
+	case OverlaySubagentConcurrency:
+		if m.overlayCursor >= 0 && m.overlayCursor < len(subagentConcurrencyChoices) {
+			return m.beginAction(Action{Kind: ActionSetSubagentConcurrency, Target: strconv.Itoa(subagentConcurrencyChoices[m.overlayCursor])})
+		}
+		return m, nil
 	case OverlayModelRoutes:
 		if m.overlayCursor < len(m.modelRoutes) {
 			entry := m.modelRoutes[m.overlayCursor]
@@ -1361,6 +1651,9 @@ func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch commandPaletteOptions[m.overlayCursor] {
+	case "settings":
+		m.overlayPurpose = "settings"
+		return m.beginAction(Action{Kind: ActionListModelRoutes})
 	case "login":
 		m.openOverlay(OverlayProvider)
 		m.overlayPurpose = "login"
@@ -1659,7 +1952,7 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 	m.resetTurnUsage()
 	m.transcriptTop = 0
 	m.beginRunActivity()
-	return m, startTurn(m.runtime, app.TurnRequest{SessionID: m.sessionID, Prompt: input, Provider: m.provider, Model: m.model, Reasoning: m.reasoning, AgentMode: m.agentMode, Images: images})
+	return m, startTurn(m.runtime, app.TurnRequest{SessionID: m.sessionID, Prompt: input, Provider: m.provider, Model: m.model, Reasoning: m.reasoning, AgentMode: m.agentMode, PlanMode: m.planMode, Images: images})
 }
 
 type guidanceResultMsg struct {
@@ -1689,6 +1982,9 @@ func (m AppModel) canGuideActiveRun() bool {
 
 func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 	switch command.Name {
+	case "settings":
+		m.overlayPurpose = "settings"
+		return m.beginAction(Action{Kind: ActionListModelRoutes})
 	case "model-routing":
 		return m.beginAction(Action{Kind: ActionListModelRoutes})
 	case "language":
@@ -1735,6 +2031,32 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		if m.isRunning() {
 			return m.requestTurnCancellation()
 		}
+	case "plan":
+		if m.isRunning() {
+			m.errorBanner = m.tr("error.agent_idle")
+			break
+		}
+		enabled := !m.planMode
+		if len(command.Args) > 1 {
+			m.errorBanner = m.tr("command.usage.plan")
+			break
+		}
+		if len(command.Args) == 1 {
+			switch strings.ToLower(command.Args[0]) {
+			case "on":
+				enabled = true
+			case "off":
+				enabled = false
+			default:
+				m.errorBanner = m.tr("command.usage.plan")
+				return m, nil
+			}
+		}
+		m.planMode = enabled
+		if enabled {
+			m.agentMode = "single"
+		}
+		m.errorBanner = ""
 	case "team":
 		if m.isRunning() {
 			m.errorBanner = m.tr("error.agent_idle")
@@ -1746,6 +2068,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		}
 		if command.Args[0] == "on" {
 			m.agentMode = "team"
+			m.planMode = false
 		} else {
 			m.agentMode = "single"
 		}
@@ -2011,7 +2334,7 @@ func (m AppModel) invokeSkill(name, instruction string) (tea.Model, tea.Cmd) {
 	m.beginRunActivity()
 	return m, startTurn(m.runtime, app.TurnRequest{
 		SessionID: m.sessionID, Prompt: prompt, Provider: m.provider, Model: m.model,
-		Reasoning: m.reasoning, AgentMode: m.agentMode, ActiveSkills: []string{name},
+		Reasoning: m.reasoning, AgentMode: m.agentMode, PlanMode: m.planMode, ActiveSkills: []string{name},
 	})
 }
 
@@ -2066,7 +2389,7 @@ func (m AppModel) invokeExpandedSkill(name, args string, images []session.Attach
 	m.beginRunActivity()
 	return m, startTurn(m.runtime, app.TurnRequest{
 		SessionID: m.sessionID, Prompt: prompt, Provider: m.provider, Model: m.model,
-		Reasoning: m.reasoning, AgentMode: m.agentMode, Images: images,
+		Reasoning: m.reasoning, AgentMode: m.agentMode, PlanMode: m.planMode, Images: images,
 	})
 }
 

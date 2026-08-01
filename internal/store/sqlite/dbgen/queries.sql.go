@@ -24,9 +24,56 @@ func (q *Queries) AdvanceCacheEpochCAS(ctx context.Context, arg AdvanceCacheEpoc
 	return q.db.ExecContext(ctx, advanceCacheEpochCAS, arg.CacheIdentityHash, arg.SessionID, arg.CacheEpoch)
 }
 
-const aggregateCompactionUsage = `-- name: AggregateCompactionUsage :one
-SELECT CAST(COALESCE(SUM(input_tokens),0) AS INTEGER) raw_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN input_tokens ELSE 0 END),0) AS INTEGER) reported_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN cached_tokens ELSE 0 END),0) AS INTEGER) cached,CAST(COALESCE(SUM(cache_write_tokens),0) AS INTEGER) cache_write,CAST(COALESCE(SUM(output_tokens),0) AS INTEGER) output,CAST(COALESCE(SUM(reasoning_tokens),0) AS INTEGER) reasoning,CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) total,COUNT(*) requests,CAST(COALESCE(SUM(cache_reported),0) AS INTEGER) reported_requests,CAST(COALESCE(MAX(cache_reported),0) AS INTEGER) reported FROM provider_requests WHERE session_id=? AND status='completed' AND request_kind='compaction'
+const aggregateAllUsage = `-- name: AggregateAllUsage :one
+SELECT CAST(COALESCE(SUM(input_tokens),0) AS INTEGER) raw_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN input_tokens ELSE 0 END),0) AS INTEGER) reported_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN cached_tokens ELSE 0 END),0) AS INTEGER) cached,CAST(COALESCE(SUM(cache_write_tokens),0) AS INTEGER) cache_write,CAST(COALESCE(SUM(output_tokens),0) AS INTEGER) output,CAST(COALESCE(SUM(reasoning_tokens),0) AS INTEGER) reasoning,CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) total,COUNT(*) requests,CAST(COALESCE(SUM(cache_reported),0) AS INTEGER) reported_requests,CAST(COALESCE(MAX(cache_reported),0) AS INTEGER) reported,CAST(COALESCE(MAX(cache_write_reported),0) AS INTEGER) write_reported FROM provider_requests WHERE session_id=? AND run_id=? AND status='completed'
 `
+
+type AggregateAllUsageParams struct {
+	SessionID string `db:"session_id"`
+	RunID     string `db:"run_id"`
+}
+
+type AggregateAllUsageRow struct {
+	RawInput         int64 `db:"raw_input"`
+	ReportedInput    int64 `db:"reported_input"`
+	Cached           int64 `db:"cached"`
+	CacheWrite       int64 `db:"cache_write"`
+	Output           int64 `db:"output"`
+	Reasoning        int64 `db:"reasoning"`
+	Total            int64 `db:"total"`
+	Requests         int64 `db:"requests"`
+	ReportedRequests int64 `db:"reported_requests"`
+	Reported         int64 `db:"reported"`
+	WriteReported    int64 `db:"write_reported"`
+}
+
+func (q *Queries) AggregateAllUsage(ctx context.Context, arg AggregateAllUsageParams) (AggregateAllUsageRow, error) {
+	row := q.db.QueryRowContext(ctx, aggregateAllUsage, arg.SessionID, arg.RunID)
+	var i AggregateAllUsageRow
+	err := row.Scan(
+		&i.RawInput,
+		&i.ReportedInput,
+		&i.Cached,
+		&i.CacheWrite,
+		&i.Output,
+		&i.Reasoning,
+		&i.Total,
+		&i.Requests,
+		&i.ReportedRequests,
+		&i.Reported,
+		&i.WriteReported,
+	)
+	return i, err
+}
+
+const aggregateCompactionUsage = `-- name: AggregateCompactionUsage :one
+SELECT CAST(COALESCE(SUM(input_tokens),0) AS INTEGER) raw_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN input_tokens ELSE 0 END),0) AS INTEGER) reported_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN cached_tokens ELSE 0 END),0) AS INTEGER) cached,CAST(COALESCE(SUM(cache_write_tokens),0) AS INTEGER) cache_write,CAST(COALESCE(SUM(output_tokens),0) AS INTEGER) output,CAST(COALESCE(SUM(reasoning_tokens),0) AS INTEGER) reasoning,CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) total,COUNT(*) requests,CAST(COALESCE(SUM(cache_reported),0) AS INTEGER) reported_requests,CAST(COALESCE(MAX(cache_reported),0) AS INTEGER) reported FROM provider_requests WHERE session_id=? AND run_id=? AND status='completed' AND request_kind='compaction'
+`
+
+type AggregateCompactionUsageParams struct {
+	SessionID string `db:"session_id"`
+	RunID     string `db:"run_id"`
+}
 
 type AggregateCompactionUsageRow struct {
 	RawInput         int64 `db:"raw_input"`
@@ -41,8 +88,8 @@ type AggregateCompactionUsageRow struct {
 	Reported         int64 `db:"reported"`
 }
 
-func (q *Queries) AggregateCompactionUsage(ctx context.Context, sessionID string) (AggregateCompactionUsageRow, error) {
-	row := q.db.QueryRowContext(ctx, aggregateCompactionUsage, sessionID)
+func (q *Queries) AggregateCompactionUsage(ctx context.Context, arg AggregateCompactionUsageParams) (AggregateCompactionUsageRow, error) {
+	row := q.db.QueryRowContext(ctx, aggregateCompactionUsage, arg.SessionID, arg.RunID)
 	var i AggregateCompactionUsageRow
 	err := row.Scan(
 		&i.RawInput,
@@ -175,8 +222,13 @@ func (q *Queries) AggregateMainUsageByRun(ctx context.Context, arg AggregateMain
 }
 
 const aggregateSubagentUsage = `-- name: AggregateSubagentUsage :one
-SELECT CAST(COALESCE(SUM(input_tokens),0) AS INTEGER) raw_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN input_tokens ELSE 0 END),0) AS INTEGER) reported_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN cached_tokens ELSE 0 END),0) AS INTEGER) cached,CAST(COALESCE(SUM(cache_write_tokens),0) AS INTEGER) cache_write,CAST(COALESCE(SUM(output_tokens),0) AS INTEGER) output,CAST(COALESCE(SUM(reasoning_tokens),0) AS INTEGER) reasoning,CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) total,COUNT(*) requests,CAST(COALESCE(SUM(cache_reported),0) AS INTEGER) reported_requests,CAST(COALESCE(MAX(cache_reported),0) AS INTEGER) reported FROM provider_requests WHERE session_id=? AND status='completed' AND request_kind='subagent'
+SELECT CAST(COALESCE(SUM(input_tokens),0) AS INTEGER) raw_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN input_tokens ELSE 0 END),0) AS INTEGER) reported_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN cached_tokens ELSE 0 END),0) AS INTEGER) cached,CAST(COALESCE(SUM(cache_write_tokens),0) AS INTEGER) cache_write,CAST(COALESCE(SUM(output_tokens),0) AS INTEGER) output,CAST(COALESCE(SUM(reasoning_tokens),0) AS INTEGER) reasoning,CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) total,COUNT(*) requests,CAST(COALESCE(SUM(cache_reported),0) AS INTEGER) reported_requests,CAST(COALESCE(MAX(cache_reported),0) AS INTEGER) reported FROM provider_requests WHERE session_id=? AND run_id=? AND status='completed' AND request_kind='subagent'
 `
+
+type AggregateSubagentUsageParams struct {
+	SessionID string `db:"session_id"`
+	RunID     string `db:"run_id"`
+}
 
 type AggregateSubagentUsageRow struct {
 	RawInput         int64 `db:"raw_input"`
@@ -191,8 +243,8 @@ type AggregateSubagentUsageRow struct {
 	Reported         int64 `db:"reported"`
 }
 
-func (q *Queries) AggregateSubagentUsage(ctx context.Context, sessionID string) (AggregateSubagentUsageRow, error) {
-	row := q.db.QueryRowContext(ctx, aggregateSubagentUsage, sessionID)
+func (q *Queries) AggregateSubagentUsage(ctx context.Context, arg AggregateSubagentUsageParams) (AggregateSubagentUsageRow, error) {
+	row := q.db.QueryRowContext(ctx, aggregateSubagentUsage, arg.SessionID, arg.RunID)
 	var i AggregateSubagentUsageRow
 	err := row.Scan(
 		&i.RawInput,
@@ -210,8 +262,13 @@ func (q *Queries) AggregateSubagentUsage(ctx context.Context, sessionID string) 
 }
 
 const aggregateTeamUsage = `-- name: AggregateTeamUsage :one
-SELECT CAST(COALESCE(SUM(input_tokens),0) AS INTEGER) raw_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN input_tokens ELSE 0 END),0) AS INTEGER) reported_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN cached_tokens ELSE 0 END),0) AS INTEGER) cached,CAST(COALESCE(SUM(cache_write_tokens),0) AS INTEGER) cache_write,CAST(COALESCE(SUM(output_tokens),0) AS INTEGER) output,CAST(COALESCE(SUM(reasoning_tokens),0) AS INTEGER) reasoning,CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) total,COUNT(*) requests,CAST(COALESCE(SUM(cache_reported),0) AS INTEGER) reported_requests,CAST(COALESCE(MAX(cache_reported),0) AS INTEGER) reported FROM provider_requests WHERE session_id=? AND status='completed' AND request_kind='team'
+SELECT CAST(COALESCE(SUM(input_tokens),0) AS INTEGER) raw_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN input_tokens ELSE 0 END),0) AS INTEGER) reported_input,CAST(COALESCE(SUM(CASE WHEN cache_reported=1 THEN cached_tokens ELSE 0 END),0) AS INTEGER) cached,CAST(COALESCE(SUM(cache_write_tokens),0) AS INTEGER) cache_write,CAST(COALESCE(SUM(output_tokens),0) AS INTEGER) output,CAST(COALESCE(SUM(reasoning_tokens),0) AS INTEGER) reasoning,CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) total,COUNT(*) requests,CAST(COALESCE(SUM(cache_reported),0) AS INTEGER) reported_requests,CAST(COALESCE(MAX(cache_reported),0) AS INTEGER) reported FROM provider_requests WHERE session_id=? AND run_id=? AND status='completed' AND request_kind='team'
 `
+
+type AggregateTeamUsageParams struct {
+	SessionID string `db:"session_id"`
+	RunID     string `db:"run_id"`
+}
 
 type AggregateTeamUsageRow struct {
 	RawInput         int64 `db:"raw_input"`
@@ -226,8 +283,8 @@ type AggregateTeamUsageRow struct {
 	Reported         int64 `db:"reported"`
 }
 
-func (q *Queries) AggregateTeamUsage(ctx context.Context, sessionID string) (AggregateTeamUsageRow, error) {
-	row := q.db.QueryRowContext(ctx, aggregateTeamUsage, sessionID)
+func (q *Queries) AggregateTeamUsage(ctx context.Context, arg AggregateTeamUsageParams) (AggregateTeamUsageRow, error) {
+	row := q.db.QueryRowContext(ctx, aggregateTeamUsage, arg.SessionID, arg.RunID)
 	var i AggregateTeamUsageRow
 	err := row.Scan(
 		&i.RawInput,
@@ -1505,7 +1562,7 @@ func (q *Queries) LatestEventSequence(ctx context.Context, runID string) (int64,
 }
 
 const latestMainUsage = `-- name: LatestMainUsage :one
-SELECT input_tokens,output_tokens FROM provider_requests WHERE session_id=? AND run_id=? AND request_kind='main' AND status='completed' ORDER BY completed_at DESC,started_at DESC,request_id DESC LIMIT 1
+SELECT input_tokens,cached_tokens,output_tokens,reasoning_tokens,cache_reported FROM provider_requests WHERE session_id=? AND run_id=? AND request_kind='main' AND status='completed' ORDER BY completed_at DESC,started_at DESC,request_id DESC LIMIT 1
 `
 
 type LatestMainUsageParams struct {
@@ -1514,14 +1571,23 @@ type LatestMainUsageParams struct {
 }
 
 type LatestMainUsageRow struct {
-	InputTokens  int64 `db:"input_tokens"`
-	OutputTokens int64 `db:"output_tokens"`
+	InputTokens     int64 `db:"input_tokens"`
+	CachedTokens    int64 `db:"cached_tokens"`
+	OutputTokens    int64 `db:"output_tokens"`
+	ReasoningTokens int64 `db:"reasoning_tokens"`
+	CacheReported   int64 `db:"cache_reported"`
 }
 
 func (q *Queries) LatestMainUsage(ctx context.Context, arg LatestMainUsageParams) (LatestMainUsageRow, error) {
 	row := q.db.QueryRowContext(ctx, latestMainUsage, arg.SessionID, arg.RunID)
 	var i LatestMainUsageRow
-	err := row.Scan(&i.InputTokens, &i.OutputTokens)
+	err := row.Scan(
+		&i.InputTokens,
+		&i.CachedTokens,
+		&i.OutputTokens,
+		&i.ReasoningTokens,
+		&i.CacheReported,
+	)
 	return i, err
 }
 
@@ -2830,7 +2896,7 @@ func (q *Queries) UpsertLease(ctx context.Context, arg UpsertLeaseParams) error 
 }
 
 const upsertProviderRequest = `-- name: UpsertProviderRequest :exec
-INSERT INTO provider_requests(request_id,provider_request_id,session_id,run_id,request_kind,provider,model,transport,cache_epoch,checkpoint_generation,input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,cache_reported,status,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET provider_request_id=excluded.provider_request_id,session_id=excluded.session_id,run_id=excluded.run_id,request_kind=excluded.request_kind,provider=excluded.provider,model=excluded.model,transport=excluded.transport,cache_epoch=excluded.cache_epoch,checkpoint_generation=excluded.checkpoint_generation,input_tokens=excluded.input_tokens,cached_tokens=excluded.cached_tokens,cache_write_tokens=excluded.cache_write_tokens,output_tokens=excluded.output_tokens,reasoning_tokens=excluded.reasoning_tokens,total_tokens=excluded.total_tokens,cache_reported=excluded.cache_reported,status=excluded.status,started_at=MIN(provider_requests.started_at,excluded.started_at),completed_at=excluded.completed_at
+INSERT INTO provider_requests(request_id,provider_request_id,session_id,run_id,request_kind,provider,model,transport,cache_epoch,checkpoint_generation,input_tokens,cached_tokens,cache_write_tokens,cache_write_reported,output_tokens,reasoning_tokens,total_tokens,cache_reported,status,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET provider_request_id=excluded.provider_request_id,session_id=excluded.session_id,run_id=excluded.run_id,request_kind=excluded.request_kind,provider=excluded.provider,model=excluded.model,transport=excluded.transport,cache_epoch=excluded.cache_epoch,checkpoint_generation=excluded.checkpoint_generation,input_tokens=excluded.input_tokens,cached_tokens=excluded.cached_tokens,cache_write_tokens=excluded.cache_write_tokens,cache_write_reported=excluded.cache_write_reported,output_tokens=excluded.output_tokens,reasoning_tokens=excluded.reasoning_tokens,total_tokens=excluded.total_tokens,cache_reported=excluded.cache_reported,status=excluded.status,started_at=MIN(provider_requests.started_at,excluded.started_at),completed_at=excluded.completed_at
 `
 
 type UpsertProviderRequestParams struct {
@@ -2847,6 +2913,7 @@ type UpsertProviderRequestParams struct {
 	InputTokens          int64  `db:"input_tokens"`
 	CachedTokens         int64  `db:"cached_tokens"`
 	CacheWriteTokens     int64  `db:"cache_write_tokens"`
+	CacheWriteReported   int64  `db:"cache_write_reported"`
 	OutputTokens         int64  `db:"output_tokens"`
 	ReasoningTokens      int64  `db:"reasoning_tokens"`
 	TotalTokens          int64  `db:"total_tokens"`
@@ -2871,6 +2938,7 @@ func (q *Queries) UpsertProviderRequest(ctx context.Context, arg UpsertProviderR
 		arg.InputTokens,
 		arg.CachedTokens,
 		arg.CacheWriteTokens,
+		arg.CacheWriteReported,
 		arg.OutputTokens,
 		arg.ReasoningTokens,
 		arg.TotalTokens,

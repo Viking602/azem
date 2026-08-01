@@ -11,8 +11,8 @@ import (
 )
 
 func TestNormalizeUsageAndWrapReporterApplyCacheModels(t *testing.T) {
-	automatic := NormalizeUsage(UsageDetails{CachedTokens: 10, CacheWriteTokens: 7, CacheReported: true}, CacheModelAutomatic)
-	if automatic.CacheModel != CacheModelAutomatic || automatic.CacheWriteTokens != 0 || automatic.CachedTokens != 10 {
+	automatic := NormalizeUsage(UsageDetails{CachedTokens: 10, CacheWriteTokens: 7, CacheReported: true, CacheWriteReported: true}, CacheModelAutomatic)
+	if automatic.CacheModel != CacheModelAutomatic || automatic.CacheWriteTokens != 0 || automatic.CacheWriteReported || automatic.CachedTokens != 10 {
 		t.Fatalf("automatic normalize=%+v", automatic)
 	}
 	write := NormalizeUsage(UsageDetails{CachedTokens: 10, CacheWriteTokens: 7, CacheReported: true}, CacheModelWriteTokens)
@@ -26,6 +26,46 @@ func TestNormalizeUsageAndWrapReporterApplyCacheModels(t *testing.T) {
 	WrapUsageReporter(func(details UsageDetails) { got = details }, CacheModelAutomatic)(UsageDetails{CacheWriteTokens: 9, CachedTokens: 3})
 	if got.CacheWriteTokens != 0 || got.CachedTokens != 3 || got.CacheModel != CacheModelAutomatic {
 		t.Fatalf("wrapped reporter=%+v", got)
+	}
+}
+
+func TestBuildGatesGPT56ExplicitBreakpointByProviderCapability(t *testing.T) {
+	request := hyprovider.Request{
+		Model: "gpt-5.6-sol",
+		Messages: []message.Message{
+			message.NewText(message.RoleSystem, "stable instructions"),
+			message.NewText(message.RoleUser, "first turn"),
+			message.NewText(message.RoleAssistant, "answer"),
+			message.NewText(message.RoleUser, "current turn"),
+		},
+		ExtraBody: map[string]any{
+			"prompt_cache_key":            "session-1",
+			PromptCacheBreakpointExtraKey: PromptCacheBreakpointLastUser,
+		},
+	}
+	data, err := Build(request, BuildOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsupported := string(data)
+	if !strings.Contains(unsupported, `"prompt_cache_key":"session-1"`) ||
+		strings.Contains(unsupported, `"prompt_cache_options"`) || strings.Contains(unsupported, `"prompt_cache_breakpoint"`) {
+		t.Fatalf("unsupported provider payload=%s", data)
+	}
+
+	data, err = Build(request, BuildOptions{SupportsPromptCacheBreakpoints: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	supported := string(data)
+	if strings.Contains(supported, `"prompt_cache_options"`) || !strings.Contains(supported, `"prompt_cache_breakpoint":{"mode":"explicit"}`) {
+		t.Fatalf("payload=%s", data)
+	}
+	if _, err := Build(hyprovider.Request{
+		Model: "gpt-5.5", Messages: []message.Message{message.NewText(message.RoleUser, "old model")},
+		ExtraBody: map[string]any{PromptCacheBreakpointExtraKey: PromptCacheBreakpointLastUser},
+	}, BuildOptions{SupportsPromptCacheBreakpoints: true}); err == nil {
+		t.Fatal("older model accepted explicit prompt cache breakpoint")
 	}
 }
 

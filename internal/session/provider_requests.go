@@ -18,7 +18,7 @@ type ProviderRequestFact struct {
 	CacheEpoch, CheckpointGeneration                            int64
 	InputTokens, CachedTokens, CacheWriteTokens                 int
 	OutputTokens, ReasoningTokens, TotalTokens                  int
-	CacheReported                                               bool
+	CacheReported, CacheWriteReported                           bool
 	Status                                                      string
 	StartedAt, CompletedAt                                      time.Time
 }
@@ -36,7 +36,7 @@ func (s *Service) UpsertProviderRequest(ctx context.Context, f ProviderRequestFa
 	if !f.CompletedAt.IsZero() {
 		completed = f.CompletedAt.UnixNano()
 	}
-	err := dbgen.New(s.db).UpsertProviderRequest(ctx, dbgen.UpsertProviderRequestParams{RequestID: f.RequestID, ProviderRequestID: f.ProviderRequestID, SessionID: f.SessionID, RunID: f.RunID, RequestKind: f.RequestKind, Provider: f.Provider, Model: f.Model, Transport: f.Transport, CacheEpoch: f.CacheEpoch, CheckpointGeneration: f.CheckpointGeneration, InputTokens: int64(f.InputTokens), CachedTokens: int64(f.CachedTokens), CacheWriteTokens: int64(f.CacheWriteTokens), OutputTokens: int64(f.OutputTokens), ReasoningTokens: int64(f.ReasoningTokens), TotalTokens: int64(f.TotalTokens), CacheReported: requestBoolInt(f.CacheReported), Status: f.Status, StartedAt: f.StartedAt.UnixNano(), CompletedAt: completed})
+	err := dbgen.New(s.db).UpsertProviderRequest(ctx, dbgen.UpsertProviderRequestParams{RequestID: f.RequestID, ProviderRequestID: f.ProviderRequestID, SessionID: f.SessionID, RunID: f.RunID, RequestKind: f.RequestKind, Provider: f.Provider, Model: f.Model, Transport: f.Transport, CacheEpoch: f.CacheEpoch, CheckpointGeneration: f.CheckpointGeneration, InputTokens: int64(f.InputTokens), CachedTokens: int64(f.CachedTokens), CacheWriteTokens: int64(f.CacheWriteTokens), CacheWriteReported: requestBoolInt(f.CacheWriteReported), OutputTokens: int64(f.OutputTokens), ReasoningTokens: int64(f.ReasoningTokens), TotalTokens: int64(f.TotalTokens), CacheReported: requestBoolInt(f.CacheReported), Status: f.Status, StartedAt: f.StartedAt.UnixNano(), CompletedAt: completed})
 	if err != nil {
 		return fmt.Errorf("upsert provider request: %w", err)
 	}
@@ -45,11 +45,19 @@ func (s *Service) UpsertProviderRequest(ctx context.Context, f ProviderRequestFa
 
 type usageAggregate struct {
 	rawInput, reportedInput, cached, write, output, reasoning, total, requests, reportedRequests int
-	reported                                                                                     bool
+	reported, writeReported                                                                      bool
 }
 
 func (s *Service) aggregateUsage(ctx context.Context, sessionID, clause string, args ...any) (usageAggregate, error) {
 	q := dbgen.New(s.db)
+	if clause == "" {
+		row, err := q.AggregateAllUsage(ctx, dbgen.AggregateAllUsageParams{SessionID: sessionID, RunID: args[0].(string)})
+		return usageAggregate{
+			rawInput: int(row.RawInput), reportedInput: int(row.ReportedInput), cached: int(row.Cached), write: int(row.CacheWrite),
+			output: int(row.Output), reasoning: int(row.Reasoning), total: int(row.Total), requests: int(row.Requests),
+			reportedRequests: int(row.ReportedRequests), reported: row.Reported != 0, writeReported: row.WriteReported != 0,
+		}, err
+	}
 	var values [10]int64
 	var err error
 	switch clause {
@@ -66,15 +74,15 @@ func (s *Service) aggregateUsage(ctx context.Context, sessionID, clause string, 
 		err = e
 		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
 	case `AND request_kind='compaction'`:
-		row, e := q.AggregateCompactionUsage(ctx, sessionID)
+		row, e := q.AggregateCompactionUsage(ctx, dbgen.AggregateCompactionUsageParams{SessionID: sessionID, RunID: args[0].(string)})
 		err = e
 		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
 	case `AND request_kind='team'`:
-		row, e := q.AggregateTeamUsage(ctx, sessionID)
+		row, e := q.AggregateTeamUsage(ctx, dbgen.AggregateTeamUsageParams{SessionID: sessionID, RunID: args[0].(string)})
 		err = e
 		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
 	case `AND request_kind='subagent'`:
-		row, e := q.AggregateSubagentUsage(ctx, sessionID)
+		row, e := q.AggregateSubagentUsage(ctx, dbgen.AggregateSubagentUsageParams{SessionID: sessionID, RunID: args[0].(string)})
 		err = e
 		values = aggregateValues(row.RawInput, row.ReportedInput, row.Cached, row.CacheWrite, row.Output, row.Reasoning, row.Total, row.Requests, row.ReportedRequests, row.Reported)
 	default:
@@ -87,12 +95,12 @@ func aggregateValues(rawInput, reportedInput, cached, cacheWrite, output, reason
 	return [10]int64{rawInput, reportedInput, cached, cacheWrite, output, reasoning, total, requests, reportedRequests, reported}
 }
 
-func (s *Service) latestMainUsage(ctx context.Context, sessionID, runID string) (input, output int, err error) {
+func (s *Service) latestMainUsage(ctx context.Context, sessionID, runID string) (input, cached, output, reasoning int, cacheReported bool, err error) {
 	row, err := dbgen.New(s.db).LatestMainUsage(ctx, dbgen.LatestMainUsageParams{SessionID: sessionID, RunID: runID})
 	if err == sql.ErrNoRows {
-		return 0, 0, nil
+		return 0, 0, 0, 0, false, nil
 	}
-	return int(row.InputTokens), int(row.OutputTokens), err
+	return int(row.InputTokens), int(row.CachedTokens), int(row.OutputTokens), int(row.ReasoningTokens), row.CacheReported != 0, err
 }
 
 // ProviderRunTotalTokens returns cumulative provider-reported usage for every
@@ -125,7 +133,7 @@ func (s *Service) ProviderUsageSnapshot(ctx context.Context, sessionID, runID st
 	if err != nil {
 		return Usage{}, err
 	}
-	latestInput, latestOutput, err := s.latestMainUsage(ctx, sessionID, runID)
+	latestInput, latestCached, latestOutput, latestReasoning, latestReported, err := s.latestMainUsage(ctx, sessionID, runID)
 	if err != nil {
 		return Usage{}, err
 	}
@@ -133,15 +141,19 @@ func (s *Service) ProviderUsageSnapshot(ctx context.Context, sessionID, runID st
 	if err != nil {
 		return Usage{}, err
 	}
-	compact, err := s.aggregateUsage(ctx, sessionID, `AND request_kind='compaction'`)
+	compact, err := s.aggregateUsage(ctx, sessionID, `AND request_kind='compaction'`, runID)
 	if err != nil {
 		return Usage{}, err
 	}
-	team, err := s.aggregateUsage(ctx, sessionID, `AND request_kind='team'`)
+	team, err := s.aggregateUsage(ctx, sessionID, `AND request_kind='team'`, runID)
 	if err != nil {
 		return Usage{}, err
 	}
-	sub, err := s.aggregateUsage(ctx, sessionID, `AND request_kind='subagent'`)
+	sub, err := s.aggregateUsage(ctx, sessionID, `AND request_kind='subagent'`, runID)
+	if err != nil {
+		return Usage{}, err
+	}
+	all, err := s.aggregateUsage(ctx, sessionID, "", runID)
 	if err != nil {
 		return Usage{}, err
 	}
@@ -160,12 +172,19 @@ func (s *Service) ProviderUsageSnapshot(ctx context.Context, sessionID, runID st
 	u.TeamCacheReported = team.reported
 	u.SubagentInput, u.SubagentReportedInput, u.SubagentCached, u.SubagentCacheWrite, u.SubagentOutput, u.SubagentReasoning, u.SubagentRequests, u.SubagentReportedRequests = sub.rawInput, sub.reportedInput, sub.cached, sub.write, sub.output, sub.reasoning, sub.requests, sub.reportedRequests
 	u.SubagentCacheReported = sub.reported
-	// Existing presentation fields now reflect the isolated current epoch.
-	// Context occupancy is the latest request's full context, not the sum of
-	// overlapping contexts sent by every model call in the agent loop.
-	u.InputTokens, u.OutputTokens = latestInput, latestOutput
-	u.MainCacheInput, u.MainCachedInput, u.MainCacheWrite, u.MainCacheReported = epoch.reportedInput, epoch.cached, epoch.write, epoch.reported
-	u.CacheInputTokens, u.CachedInputTokens, u.CacheWriteTokens, u.CacheReported = epoch.reportedInput, epoch.cached, epoch.write, epoch.reported
+	// Presentation fields compare main-only and all-provider usage in this run.
+	// Context occupancy is the latest main request, not the sum of overlapping
+	// contexts sent by every model call in the agent loop.
+	u.InputTokens, u.OutputTokens, u.ReasoningTokens = latestInput, latestOutput, latestReasoning
+	u.UncachedInputTokens = 0
+	if latestReported {
+		u.UncachedInputTokens = max(0, latestInput-latestCached)
+	}
+	u.CompactionUncached = max(0, compact.reportedInput-compact.cached)
+	u.TeamUncached = max(0, team.reportedInput-team.cached)
+	u.MainCacheInput, u.MainCachedInput, u.MainCacheWrite, u.MainCacheReported = turn.reportedInput, turn.cached, turn.write, turn.reported
+	u.CacheInputTokens, u.CachedInputTokens, u.CacheWriteTokens, u.CacheReported = all.reportedInput, all.cached, all.write, all.reported
+	u.CacheWriteReported = all.writeReported
 	return u, nil
 }
 

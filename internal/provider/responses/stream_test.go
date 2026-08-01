@@ -83,10 +83,12 @@ func TestStreamAssemblesCrossChunkToolCallAndUsage(t *testing.T) {
 func TestStreamCacheReportedDistinguishesMissingFromExplicitZero(t *testing.T) {
 	for _, tc := range []struct {
 		name, details string
-		reported      bool
+		readReported  bool
+		writeReported bool
 	}{
-		{name: "missing", details: `{}`, reported: false},
-		{name: "explicit zero", details: `{"cached_tokens":0}`, reported: true},
+		{name: "missing", details: `{}`, readReported: false, writeReported: false},
+		{name: "read only", details: `{"cached_tokens":0}`, readReported: true, writeReported: false},
+		{name: "explicit zero", details: `{"cached_tokens":0,"cache_write_tokens":0}`, readReported: true, writeReported: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := `data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":9,"output_tokens":1,"total_tokens":10,"input_tokens_details":` + tc.details + `}}}` + "\n\n"
@@ -97,8 +99,8 @@ func TestStreamCacheReportedDistinguishesMissingFromExplicitZero(t *testing.T) {
 			if err != nil || event.Kind != hyprovider.EventDone {
 				t.Fatalf("event=%#v err=%v", event, err)
 			}
-			if details.CacheReported != tc.reported || details.CachedTokens != 0 {
-				t.Fatalf("details=%#v want reported=%v", details, tc.reported)
+			if details.CacheReported != tc.readReported || details.CacheWriteReported != tc.writeReported || details.CachedTokens != 0 || details.CacheWriteTokens != 0 {
+				t.Fatalf("details=%#v want read=%v write=%v", details, tc.readReported, tc.writeReported)
 			}
 		})
 	}

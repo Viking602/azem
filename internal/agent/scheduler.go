@@ -23,8 +23,9 @@ const (
 // Prompt is immutable run input; every scheduling decision and retry count is
 // otherwise derived from the supplied TeamState snapshot.
 type CodingScheduler struct {
-	Prompt  string
-	Classes map[string]multiagent.AgentClass
+	Prompt      string
+	Classes     map[string]multiagent.AgentClass
+	RetryPolicy api.RetryPolicy
 }
 
 func (s CodingScheduler) Next(ctx context.Context, state multiagent.TeamState) ([]multiagent.Dispatch, error) {
@@ -111,6 +112,7 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 			InputSchema:  class.InputSchema,
 			OutputSchema: class.OutputSchema,
 			Budget:       &api.TaskBudget{},
+			RetryPolicy:  s.RetryPolicy,
 		},
 		Input: raw,
 		OutputPolicy: hyagent.OutputPolicy{

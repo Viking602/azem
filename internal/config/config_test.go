@@ -241,11 +241,12 @@ func TestPersistedBuiltInRoleRouteReloadsWithoutExplicitRoleDefinition(t *testin
 	}
 }
 
-func TestModelRouteValidationAndCompactionLoad(t *testing.T) {
+func TestModelRouteValidationAndPlanLoad(t *testing.T) {
 	cfg := Default()
+	cfg.Agents.Plan = ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
 	cfg.Agents.Compaction = ModelRouteConfig{Provider: "chatgpt", Model: "gpt-test"}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("valid compaction route: %v", err)
+		t.Fatalf("valid model routes: %v", err)
 	}
 	for _, route := range []ModelRouteConfig{
 		{Provider: "chatgpt"},
@@ -254,22 +255,51 @@ func TestModelRouteValidationAndCompactionLoad(t *testing.T) {
 		{Provider: "other", Model: "model"},
 	} {
 		cfg := Default()
-		cfg.Agents.Compaction = route
+		cfg.Agents.Plan = route
 		if err := cfg.Validate(); err == nil {
 			t.Fatalf("accepted invalid route %#v", route)
 		}
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  compaction:\n    provider: grok\n    model: grok-4\n    reasoning: high\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  plan:\n    provider: grok\n    model: grok-plan\n    reasoning: high\n  compaction:\n    provider: chatgpt\n    model: gpt-test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := Load(path, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Agents.Compaction != (ModelRouteConfig{Provider: "grok", Model: "grok-4", Reasoning: "high"}) {
+	if loaded.Agents.Plan != (ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}) {
+		t.Fatalf("plan route = %#v", loaded.Agents.Plan)
+	}
+	if loaded.Agents.Compaction != (ModelRouteConfig{Provider: "chatgpt", Model: "gpt-test"}) {
 		t.Fatalf("compaction route = %#v", loaded.Agents.Compaction)
+	}
+}
+
+func TestUpdatePlanModelRoutePersistsAndResets(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n# keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
+	if err := UpdateModelRoute(path, "plan", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Agents.Plan != route {
+		t.Fatalf("plan route = %#v", loaded.Agents.Plan)
+	}
+	if err := ResetModelRoute(path, "plan", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Plan != (ModelRouteConfig{}) {
+		t.Fatalf("reset plan route = %#v, error=%v", loaded.Agents.Plan, err)
 	}
 }
 
@@ -981,5 +1011,52 @@ func TestSkillsConfigValidation(t *testing.T) {
 	cfg.Skills.Disabled = []string{""}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate accepted an empty disabled skill name")
+	}
+}
+
+func TestUpdateSubagentMaxConcurrencyPreservesConfig(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "version: 1\n# keep this comment\ndefaults:\n  language: zh-CN\nagents:\n  subagents:\n    max_concurrency: 2\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSubagentMaxConcurrency(path, 6); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(updated), "# keep this comment") || !strings.Contains(string(updated), "max_concurrency: 6") || !strings.Contains(string(updated), "language: zh-CN") {
+		t.Fatalf("updated config:\n%s", updated)
+	}
+	if err := UpdateSubagentMaxConcurrency(path, 0); err == nil {
+		t.Fatal("zero concurrency was accepted")
+	}
+}
+
+func TestUpdateChatGPTFastModePersistsBoolean(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("# keep\nversion: 1\nproviders:\n  chatgpt:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateChatGPTFastMode(path, true); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Providers.ChatGPT.FastMode {
+		t.Fatal("ChatGPT fast mode was not persisted")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# keep") || !strings.Contains(string(data), "fast_mode: true") {
+		t.Fatalf("updated config =\n%s", data)
 	}
 }

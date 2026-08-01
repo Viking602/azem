@@ -94,6 +94,7 @@ type singleRunManifest struct {
 	Model            string    `json:"model"`
 	Reasoning        string    `json:"reasoning"`
 	ActiveSkills     []string  `json:"active_skills"`
+	PlanMode         bool      `json:"plan_mode,omitempty"`
 	DisableSubagents bool      `json:"disable_subagents"`
 	StaticIdentity   string    `json:"static_identity"`
 	MaxTokens        int64     `json:"max_tokens"`
@@ -147,10 +148,30 @@ func (r *ProviderRuntime) modelRouteSnapshot() (config.ModelRouteConfig, *subage
 	return r.cfg.Agents.Compaction, r.subagents
 }
 
+func (r *ProviderRuntime) routeTurn(request TurnRequest) TurnRequest {
+	if !request.PlanMode {
+		return request
+	}
+	r.mu.RLock()
+	route := r.cfg.Agents.Plan
+	r.mu.RUnlock()
+	if route.Provider == "" || route.Model == "" {
+		return request
+	}
+	request.Provider, request.Model = route.Provider, route.Model
+	if route.Reasoning != "" {
+		request.Reasoning = route.Reasoning
+	}
+	return request
+}
+
 // UpdateModelRoute updates only the live routing snapshot. Existing runs keep
 // the route captured when their engine or spawn profile was created.
 func (r *ProviderRuntime) UpdateModelRoute(scope, role string, route config.ModelRouteConfig) {
 	r.mu.Lock()
+	if scope == "plan" {
+		r.cfg.Agents.Plan = route
+	}
 	if scope == "compaction" {
 		r.cfg.Agents.Compaction = route
 	}
@@ -170,6 +191,22 @@ func (r *ProviderRuntime) UpdateModelRoute(scope, role string, route config.Mode
 	if scope == "subagent" && subagents != nil {
 		subagents.updateModelRoute(role, route)
 	}
+}
+
+func (r *ProviderRuntime) UpdateSubagentMaxConcurrency(maxConcurrency int) {
+	r.mu.Lock()
+	r.cfg.Agents.Subagents.MaxConcurrency = maxConcurrency
+	subagents := r.subagents
+	r.mu.Unlock()
+	if subagents != nil {
+		subagents.updateMaxConcurrency(maxConcurrency)
+	}
+}
+
+func (r *ProviderRuntime) UpdateChatGPTFastMode(enabled bool) {
+	r.mu.Lock()
+	r.cfg.Providers.ChatGPT.FastMode = enabled
+	r.mu.Unlock()
 }
 
 func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agentservice.Run, hyagent.Engine, error) {
@@ -302,6 +339,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		subagentDrivers, buildErr := subagents.Drivers(subagentParentRuntime{
 			SessionID: request.SessionID, ParentRunID: run.RunID, ParentAgentID: run.HolderID,
 			ProviderID: request.Provider, AccountID: accountID, ModelID: modelID, Reasoning: request.Reasoning, ContextTokenTarget: contextTarget,
+			PlanMode:      request.PlanMode,
 			ContextConfig: r.cfg.Agents.Context,
 			WorkspaceRoot: r.cfg.Workspace.Root, Driver: driver, Coding: r.coding, Host: host,
 			CompactionRoute: compactionRoute,
@@ -336,15 +374,20 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			toolNames = append(toolNames, definition.Name)
 		}
 	}
+	if request.PlanMode {
+		drivers = planModeToolDrivers(drivers)
+		toolNames = toolDriverNames(drivers)
+	}
 	skillSnapshot := r.coding.SkillSnapshot()
 	activeSkills := mergeSkillNames(skillSnapshot.Eager, request.ActiveSkills)
-	instructions := mainInstructions
+	instructions, instructionFingerprint := turnInstructions(request.PlanMode)
 	budgetConfig, err := calculateContextBudget(request.Provider, modelID, contextWindow, estimateToolDefinitionTokens(drivers), r.cfg.Agents.Context)
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
 	extraBody := map[string]any{"prompt_cache_key": request.SessionID}
+	enableExplicitPromptCache(extraBody, request.Provider, modelID)
 	if host != nil && strings.TrimSpace(host.attachments.Root) != "" {
 		extraBody[responses.AttachmentRootExtraKey] = host.attachments.Root
 	}
@@ -370,7 +413,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		},
 	}
 	contextManager := turnContext{
-		instructions: instructions, providerID: request.Provider, modelID: modelID, runID: run.RunID,
+		instructions: instructions, instructionFingerprint: instructionFingerprint, providerID: request.Provider, modelID: modelID, runID: run.RunID,
 		privateContext: request.privateContext, historicalContext: request.historicalContext,
 		resuming: request.resuming,
 		history:  request.History, modelHistory: request.modelHistory, toolRecords: request.toolRecords,
@@ -428,13 +471,13 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		Skills, Tools                                                any
 		RuntimeConfig, CompactionRoute                               any
 		ChatGPTEndpoint, GrokEndpoint, AttachmentRoot                string
-		DisableSubagents                                             bool
+		PlanMode, DisableSubagents                                   bool
 		Wire                                                         int
 	}{
-		request.Provider, accountID, modelID, request.Reasoning, driver.Metadata().Name, mainInstructionFingerprint,
+		request.Provider, accountID, modelID, request.Reasoning, driver.Metadata().Name, instructionFingerprint,
 		resolvedSkills, tool.NewBus(drivers...).Definitions(), r.cfg, compactionRoute,
 		r.ChatGPTEndpoint, r.GrokEndpoint, attachmentRoot,
-		request.DisableSubagents, session.CurrentWireVersion,
+		request.PlanMode, request.DisableSubagents, session.CurrentWireVersion,
 	})
 	if marshalErr != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, marshalErr.Error(), marshalErr)
@@ -470,7 +513,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 				ExpectedHighWater: expectedHighWater,
 				ModelHistory: session.ModelHistory{
 					ProviderID: request.Provider, ModelID: modelID,
-					InstructionFingerprint: mainInstructionFingerprint,
+					InstructionFingerprint: instructionFingerprint,
 					StaticPrefixHash:       contextManager.staticIdentity,
 					WireVersion:            session.CurrentWireVersion,
 					Messages:               messages,
@@ -577,6 +620,25 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	return run, engine, nil
 }
 
+func planModeToolDrivers(drivers []tool.Driver) []tool.Driver {
+	allowed := make([]tool.Driver, 0, len(drivers))
+	for _, driver := range drivers {
+		definition := driver.Definition()
+		if definition.EffectType == tool.EffectReadOnly && definition.Name != subagentKillTool {
+			allowed = append(allowed, driver)
+		}
+	}
+	return allowed
+}
+
+func toolDriverNames(drivers []tool.Driver) []string {
+	names := make([]string, 0, len(drivers))
+	for _, driver := range drivers {
+		names = append(names, driver.Definition().Name)
+	}
+	return names
+}
+
 func (r *ProviderRuntime) persistSingleRunManifest(ctx context.Context, runID string, request TurnRequest, accountID, resolvedModel string, activeSkills []string, staticIdentity string) error {
 	durable, err := r.coding.Runner().Run(ctx, runID)
 	if err != nil {
@@ -587,7 +649,7 @@ func (r *ProviderRuntime) persistSingleRunManifest(ctx context.Context, runID st
 	}
 	manifest := singleRunManifest{
 		Version: 2, Provider: request.Provider, AccountID: accountID, Model: resolvedModel, Reasoning: request.Reasoning,
-		ActiveSkills: append([]string(nil), activeSkills...), DisableSubagents: request.DisableSubagents,
+		ActiveSkills: append([]string(nil), activeSkills...), PlanMode: request.PlanMode, DisableSubagents: request.DisableSubagents,
 		StaticIdentity: staticIdentity, MaxTokens: r.cfg.Agents.Main.MaxTokens, MaxToolCalls: r.cfg.Agents.Main.MaxToolCalls,
 		MaxWallClockNS: int64(r.cfg.Agents.Main.MaxWallClockDuration), StartedAt: durable.CreatedAt.UTC(),
 	}
@@ -1253,14 +1315,20 @@ func (r *ProviderRuntime) responseUsageReporter(host *Service, sessionID, runID,
 	}
 	return func(details responses.UsageDetails) {
 		details = responses.NormalizeUsage(details, cacheModelForProvider(providerID, details.CacheModel))
-		if details.ReasoningTokens == 0 && details.CacheWriteTokens == 0 {
+		if details.ReasoningTokens == 0 && details.CacheWriteTokens == 0 && !details.CacheWriteReported {
 			return
 		}
 		host.emit(host.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{
 			"reasoningTokens": fmt.Sprint(details.ReasoningTokens), "cacheWriteTokens": fmt.Sprint(details.CacheWriteTokens), "uncachedInputTokens": fmt.Sprint(max(0, details.InputTokens-details.CachedTokens)),
 			"aggregateOnly": "true", "requestKind": requestKind, "provider": providerID, "model": modelID, "transport": transport,
-			"cacheModel": details.CacheModel,
+			"cacheModel": details.CacheModel, "cacheWriteStatus": map[bool]string{true: "reported", false: "unreported"}[details.CacheWriteReported],
 		}})
+	}
+}
+
+func enableExplicitPromptCache(extraBody map[string]any, provider, model string) {
+	if provider == "chatgpt" && responses.SupportsExplicitPromptCaching(model) {
+		extraBody[responses.PromptCacheBreakpointExtraKey] = responses.PromptCacheBreakpointLastUser
 	}
 }
 
@@ -1421,9 +1489,20 @@ func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context, sessionID, runID
 	}
 	r.mu.RLock()
 	host := r.host
+	fastMode := r.cfg.Providers.ChatGPT.FastMode
 	r.mu.RUnlock()
+	if fastMode {
+		driver.SetServiceTier(codex.FastServiceTier)
+	}
 	observeProviderRetries(ctx, host, sessionID, runID, "chatgpt", driver)
-	return codex.NewReviewer(driver, r.approvalReviewTimeout)
+	reviewer, err := codex.NewReviewer(driver, r.approvalReviewTimeout)
+	if err != nil || host == nil || host.sessions == nil {
+		return reviewer, err
+	}
+	return reviewer.WithDriver(&meteredProviderDriver{
+		inner: driver, store: host.sessions, host: host, sessionID: sessionID, runID: runID,
+		kind: "review", provider: "chatgpt", model: codex.ApprovalReviewerModel, transport: driver.Metadata().Name,
+	}), nil
 }
 
 // ResumeRun rebuilds a single-agent engine around the durable run and task
@@ -1479,6 +1558,7 @@ func (r *ProviderRuntime) ResumeRun(_ context.Context, runID string) error {
 		checkpointBoundary: projection.ModelHistory.CoveredThroughSequence, resuming: true,
 	}
 	request.ActiveSkills = append([]string(nil), manifest.ActiveSkills...)
+	request.PlanMode = manifest.PlanMode
 	request.DisableSubagents = manifest.DisableSubagents
 	request.immutableIdentity = manifest.StaticIdentity
 	request.budgetRestored = true
@@ -1710,6 +1790,12 @@ func (r *ProviderRuntime) resolveDriverForAccount(ctx context.Context, providerI
 	switch providerID {
 	case "chatgpt":
 		driver, err := codex.New(r.auth, account.ID, r.ChatGPTEndpoint, modelIDs, reasoningEffort)
+		r.mu.RLock()
+		fastMode := r.cfg.Providers.ChatGPT.FastMode
+		r.mu.RUnlock()
+		if err == nil && fastMode && selectedModel.SupportsServiceTier(codex.FastServiceTier) {
+			driver.SetServiceTier(codex.FastServiceTier)
+		}
 		return account, modelID, selectedModel.ContextWindow, driver, err
 	case "grok":
 		var transport xai.Transport

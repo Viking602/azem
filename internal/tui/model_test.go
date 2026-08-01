@@ -33,6 +33,22 @@ func (inertRuntime) NextEvent(context.Context) (app.Event, error) {
 func (inertRuntime) StartTurn(string) (string, error) { return "run_test", nil }
 func (inertRuntime) CancelActive() bool               { return true }
 
+func assertTranscriptStatusOnly(t *testing.T, footer, label string) {
+	t.Helper()
+	fields := strings.Fields(ansi.Strip(footer))
+	if len(fields) != 2 || fields[1] != label {
+		t.Fatalf("transcript status is too detailed: %q", ansi.Strip(footer))
+	}
+}
+
+func assertTranscriptTimedStatus(t *testing.T, footer, label string) {
+	t.Helper()
+	fields := strings.Fields(ansi.Strip(footer))
+	if len(fields) != 3 || fields[1] != label || !strings.HasSuffix(fields[2], "s") {
+		t.Fatalf("transcript status timer is missing or too detailed: %q", ansi.Strip(footer))
+	}
+}
+
 func TestTextInputsUseBarCursors(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	if model.composer.VirtualCursor() || model.composer.Styles().Cursor.Shape != tea.CursorBar {
@@ -40,6 +56,9 @@ func TestTextInputsUseBarCursors(t *testing.T) {
 	}
 	if model.modelSearch.VirtualCursor() || model.modelSearch.Styles().Cursor.Shape != tea.CursorBar {
 		t.Fatalf("search cursor = virtual:%v shape:%v, want real bar", model.modelSearch.VirtualCursor(), model.modelSearch.Styles().Cursor.Shape)
+	}
+	if model.settingsSearch.VirtualCursor() || model.settingsSearch.Styles().Cursor.Shape != tea.CursorBar {
+		t.Fatalf("settings search cursor = virtual:%v shape:%v, want real bar", model.settingsSearch.VirtualCursor(), model.settingsSearch.Styles().Cursor.Shape)
 	}
 	view := model.View()
 	if view.Cursor == nil || view.Cursor.Shape != tea.CursorBar {
@@ -49,6 +68,13 @@ func TestTextInputsUseBarCursors(t *testing.T) {
 	view = model.View()
 	if view.Cursor == nil || view.Cursor.Shape != tea.CursorBar {
 		t.Fatalf("model search cursor = %#v, want visible bar", view.Cursor)
+	}
+	model.openOverlay(OverlaySettings)
+	updated, _ := model.updateOverlayKeyMsg(tea.KeyPressMsg{Code: '/', Text: "/"})
+	model = updated.(AppModel)
+	view = model.View()
+	if view.Cursor == nil || view.Cursor.Shape != tea.CursorBar {
+		t.Fatalf("settings search cursor = %#v, want visible bar", view.Cursor)
 	}
 }
 
@@ -365,6 +391,25 @@ func TestViewUsesAltScreenAndResponsiveSizes(t *testing.T) {
 	}
 }
 
+func TestModalOverlayRetainsMainViewAndFullScreenDetailReplacesIt(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/main-background", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 32})
+	model = updated.(AppModel)
+	model.openOverlay(OverlayHelp)
+	modal := ansi.Strip(model.View().Content)
+	if !strings.Contains(modal, "/tmp/main-background") || !strings.Contains(modal, "HELP") {
+		t.Fatalf("modal did not preserve main view behind overlay:\n%s", modal)
+	}
+
+	model.agents = []AgentView{{ID: "agent-1", Role: "explore", State: "running"}}
+	model.detailAgentID = "agent-1"
+	model.openOverlay(OverlayAgentDetail)
+	fullscreen := ansi.Strip(model.View().Content)
+	if strings.Contains(fullscreen, "/tmp/main-background") || !strings.Contains(fullscreen, "TASK DETAIL") {
+		t.Fatalf("full-screen detail did not replace main view:\n%s", fullscreen)
+	}
+}
+
 func TestSlashCommandFuzzyRanking(t *testing.T) {
 	matches := commandSuggestions("/mod")
 	if len(matches) != 2 || matches[0].Name != "models" || matches[1].Name != "model-routing" {
@@ -444,6 +489,38 @@ func TestSlashCommandCompletionAndExecution(t *testing.T) {
 	model = updated.(AppModel)
 	if model.overlay != OverlayNone || model.errorBanner != "usage: /models" {
 		t.Fatalf("models argument handling = overlay:%q error:%q", model.overlay, model.errorBanner)
+	}
+}
+
+func TestPlanModeTogglesAndPropagatesToTurn(t *testing.T) {
+	runtime := &configuredTurnRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "team")
+
+	updated, _ := model.executeCommand(Command{Name: "plan"})
+	model = updated.(AppModel)
+	if !model.planMode || model.agentMode != "single" {
+		t.Fatalf("enabled plan mode = plan:%v agent:%q", model.planMode, model.agentMode)
+	}
+	if rendered := ansi.Strip(model.renderComposer()); !strings.Contains(rendered, "PLAN") {
+		t.Fatalf("plan mode is not visible in composer: %q", rendered)
+	}
+
+	model.composer.SetValue("inspect the cache path and plan a fix")
+	updated, cmd := model.submit()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("plan prompt did not start a turn")
+	}
+	cmd()
+	if !runtime.request.PlanMode || runtime.request.AgentMode != "single" {
+		t.Fatalf("plan turn request = %+v", runtime.request)
+	}
+
+	model.status = "Ready"
+	updated, _ = model.executeCommand(Command{Name: "team", Args: []string{"on"}})
+	model = updated.(AppModel)
+	if model.planMode || model.agentMode != "team" {
+		t.Fatalf("team mode did not exit plan mode = plan:%v agent:%q", model.planMode, model.agentMode)
 	}
 }
 
@@ -614,11 +691,37 @@ func TestContextArtifactToolUsesLocalizedDisplayName(t *testing.T) {
 	}
 }
 
+func TestSubagentToolsUseLocalizedDisplayNames(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	tests := []struct {
+		name    string
+		english string
+		chinese string
+	}{
+		{name: "subagent.spawn", english: "Start Subagent", chinese: "启动子代理"},
+		{name: "subagent.get_output", english: "Get Subagent Output", chinese: "获取子代理输出"},
+		{name: "subagent.kill", english: "Stop Subagent", chinese: "停止子代理"},
+	}
+	for _, test := range tests {
+		if got := model.toolDisplayName(test.name); got != test.english {
+			t.Fatalf("English display name for %s = %q, want %q", test.name, got, test.english)
+		}
+	}
+	if err := model.SetLanguage("zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range tests {
+		if got := model.toolDisplayName(test.name); got != test.chinese {
+			t.Fatalf("Chinese display name for %s = %q, want %q", test.name, got, test.chinese)
+		}
+	}
+}
+
 func TestTranscriptCardsAreKeyboardExpandable(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.transcript = []Block{{ID: "call-1", Kind: BlockTool, Title: "coding.read_file", Content: "result", State: "completed"}}
 	model.width = 100
-	if content := ansi.Strip(model.View().Content); !strings.Contains(content, "✓ Read File") || strings.Contains(content, "coding.read_file") {
+	if content := ansi.Strip(model.View().Content); !strings.Contains(content, " Read File") || strings.Contains(content, "coding.read_file") {
 		t.Fatalf("tool alias was not used:\n%s", content)
 	}
 
@@ -715,23 +818,56 @@ func TestToolHeaderAnimatesThenSettlesToCheckmark(t *testing.T) {
 	if !transcriptBlockAnimated(running) {
 		t.Fatal("running tool was excluded from transcript animation invalidation")
 	}
-	before := ansi.Strip(model.renderToolHeader(running, " ", 80, false))
+	before := ansi.Strip(model.renderToolHeader(running, 80, false, false))
 	model.animationFrame++
-	after := ansi.Strip(model.renderToolHeader(running, " ", 80, false))
+	after := ansi.Strip(model.renderToolHeader(running, 80, false, false))
 	if before == after || !strings.Contains(before, "◇ Run Command") || !strings.Contains(after, "◈ Run Command") {
 		t.Fatalf("running tool indicator did not animate: before=%q after=%q", before, after)
 	}
 	completed := running
 	completed.State = "completed"
-	if header := ansi.Strip(model.renderToolHeader(completed, " ", 80, false)); !strings.Contains(header, "✓ Run Command") {
+	if header := ansi.Strip(model.renderToolHeader(completed, 80, false, false)); !strings.Contains(header, " Run Command") {
 		t.Fatalf("completed tool header=%q", header)
 	}
+	completed.Collapsed = true
+	if header := ansi.Strip(model.renderToolHeader(completed, 80, false, false)); !strings.Contains(header, "✓ Run Command") || strings.Contains(header, "›") {
+		t.Fatalf("collapsed tool header=%q", header)
+	}
+	hovered := model.renderToolHeader(completed, 80, false, true)
+	if header := ansi.Strip(hovered); !strings.Contains(header, " Run Command") || strings.Contains(header, "✓") {
+		t.Fatalf("hovered tool header=%q", header)
+	}
+	wantHovered := model.theme.Tool.Background(model.theme.UserSurface.GetBackground()).Render(padOrTrim("   Run Command", 80))
+	if hovered != wantHovered {
+		t.Fatalf("hovered tool header did not use the hover surface: %q", hovered)
+	}
+	unselected := model.renderToolHeader(completed, 80, false, false)
+	wantSelected := model.theme.Selected.Background(model.theme.UserSurface.GetBackground()).Render(ansi.Strip(unselected))
+	if selected := model.renderToolHeader(completed, 80, true, false); selected != wantSelected {
+		t.Fatalf("selected tool header did not use normal text on selected surface: %q", selected)
+	}
 	model.reducedMotion = true
-	if header := ansi.Strip(model.renderToolHeader(running, " ", 80, false)); !strings.Contains(header, "◆ Run Command") {
+	if header := ansi.Strip(model.renderToolHeader(running, 80, false, false)); !strings.Contains(header, "◆ Run Command") {
 		t.Fatalf("reduced-motion running header=%q", header)
 	}
 	if got, want := model.theme.Tool.GetForeground(), model.theme.Thinking.GetForeground(); got != want {
 		t.Fatalf("tool foreground=%v want subdued gray=%v", got, want)
+	}
+}
+
+func TestNonSourceToolOutputsUseSubduedGray(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	want := model.theme.BlockRail.Render("      │ ") + model.theme.Tool.Render("tool output")
+	for _, title := range []string{"coding.shell", "coding.go_test", "coding.gofmt", "todo", "memory.search", "subagent.spawn"} {
+		rows := model.renderToolContent(Block{Kind: BlockTool, Title: title, Content: "tool output", State: "completed"}, 80)
+		if len(rows) != 1 || rows[0] != want {
+			t.Fatalf("%s output=%q, want subdued gray %q", title, rows, want)
+		}
+	}
+	listRows := model.renderToolContent(Block{Kind: BlockTool, Title: "coding.list_files", Content: "main.go", State: "completed"}, 80)
+	wantList := model.theme.MetaDivider.Render("      │ ") + model.theme.Tool.Render("main.go")
+	if len(listRows) != 1 || listRows[0] != wantList {
+		t.Fatalf("list output=%q, want subdued gray %q", listRows, wantList)
 	}
 }
 
@@ -779,13 +915,13 @@ func TestTranscriptToolHeaderTogglesWithMouseClick(t *testing.T) {
 	if model.transcript[0].Collapsed || command != nil {
 		t.Fatalf("first click = collapsed:%v command:%v, want expanded without copy", model.transcript[0].Collapsed, command != nil)
 	}
-	if content := ansi.Strip(model.renderTranscript(width, height)); !strings.Contains(content, "mouse result") {
+	if content := ansi.Strip(model.renderTranscript(width, height)); !strings.Contains(content, " Run Command") || !strings.Contains(content, "mouse result") {
 		t.Fatalf("expanded tool result is not visible:\n%s", content)
 	}
 
 	rows = strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n")
 	for index, row := range rows {
-		if strings.Contains(row, "✓ Run Command") {
+		if strings.Contains(row, " Run Command") {
 			headerRow = index
 			break
 		}
@@ -797,6 +933,41 @@ func TestTranscriptToolHeaderTogglesWithMouseClick(t *testing.T) {
 	model = updated.(AppModel)
 	if !model.transcript[0].Collapsed || command != nil {
 		t.Fatalf("second click = collapsed:%v command:%v, want collapsed without copy", model.transcript[0].Collapsed, command != nil)
+	}
+}
+
+func TestToolHeaderHoverSwapsCheckmarkForExpandIndicator(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model = updated.(AppModel)
+	model.transcript = []Block{
+		{ID: "call-1", Kind: BlockTool, Title: "coding.shell", State: "completed", Collapsed: true},
+		{Kind: BlockAssistant, Content: "## Stable assistant output", State: "completed"},
+	}
+	_, top, width, height := model.transcriptBounds()
+	headerRow := -1
+	for index, row := range strings.Split(ansi.Strip(model.renderTranscript(width, height)), "\n") {
+		if strings.Contains(row, "✓ Run Command") {
+			headerRow = index
+			break
+		}
+	}
+	if headerRow < 0 {
+		t.Fatal("collapsed tool header was not rendered")
+	}
+	stableAssistantLine := &model.transcriptLayout.blocks[1].lines[0]
+	updated, _ = model.Update(tea.MouseMotionMsg{X: 4, Y: top + headerRow})
+	model = updated.(AppModel)
+	if content := ansi.Strip(model.renderTranscript(width, height)); !strings.Contains(content, " Run Command") || strings.Contains(content, "✓ Run Command") {
+		t.Fatalf("hovered collapsed tool did not replace the checkmark:\n%s", content)
+	}
+	if stableAssistantLine != &model.transcriptLayout.blocks[1].lines[0] {
+		t.Fatal("hovering a tool rerendered an unrelated transcript block")
+	}
+	updated, _ = model.Update(tea.MouseMotionMsg{X: 4, Y: top + height})
+	model = updated.(AppModel)
+	if content := ansi.Strip(model.renderTranscript(width, height)); !strings.Contains(content, "✓ Run Command") || strings.Contains(content, " Run Command") {
+		t.Fatalf("tool did not restore the checkmark after hover left:\n%s", content)
 	}
 }
 
@@ -812,8 +983,12 @@ func TestSecondCompactToolCanExpandAndCollapseWithMouse(t *testing.T) {
 	toggleSecond := func(current AppModel) AppModel {
 		rows := strings.Split(ansi.Strip(current.renderTranscript(width, height)), "\n")
 		headerRow := -1
+		header := "✓ Search Code"
+		if !current.transcript[1].Collapsed {
+			header = " Search Code"
+		}
 		for index, row := range rows {
-			if strings.Contains(row, "✓ Search Code") {
+			if strings.Contains(row, header) {
 				headerRow = index
 				break
 			}
@@ -1249,10 +1424,7 @@ func TestManualCompactShowsModelProgressAndRestoresReadyOnNoop(t *testing.T) {
 	if cmd == nil || !model.actionBusy || model.status != "Compacting" || !model.isRunning() {
 		t.Fatalf("compact start = cmd:%v busy:%v status:%q running:%v", cmd != nil, model.actionBusy, model.status, model.isRunning())
 	}
-	footer := ansi.Strip(model.renderTranscriptFooter(100, 0, 0))
-	if !strings.Contains(footer, "COMPACTING") || !strings.Contains(footer, "Waiting for the compaction model") {
-		t.Fatalf("compact footer = %q", footer)
-	}
+	assertTranscriptStatusOnly(t, model.renderTranscriptFooter(100, 0, 0), "COMPACTING")
 
 	updated, _ = model.Update(actionResultMsg{Action: Action{Kind: ActionCompact}, Err: app.ErrNothingToCompact})
 	model = updated.(AppModel)
@@ -1883,6 +2055,19 @@ func TestDiffRendererSeparatesFilesHunksAndLineNumbers(t *testing.T) {
 	if strings.Contains(shifted, "75 78") {
 		t.Fatalf("shifted context rendered two line-number columns:\n%s", shifted)
 	}
+	aligned := strings.Split(ansi.Strip(strings.Join(model.renderDiffContent(
+		"diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -53 +66 @@\n+first\n@@ -60 +106 @@\n+second",
+		72,
+	), "\n")), "\n")
+	markerColumns := make([]int, 0, 2)
+	for _, row := range aligned {
+		if strings.Contains(row, "+ first") || strings.Contains(row, "+ second") {
+			markerColumns = append(markerColumns, strings.Index(row, "+"))
+		}
+	}
+	if len(markerColumns) != 2 || markerColumns[0] != markerColumns[1] {
+		t.Fatalf("diff marker columns are not aligned: %v\n%s", markerColumns, strings.Join(aligned, "\n"))
+	}
 }
 
 func TestGitDiffToolUsesAccessibleForegroundChangeStyling(t *testing.T) {
@@ -2334,6 +2519,22 @@ func TestGrokAutomaticCacheHidesWriteCounters(t *testing.T) {
 	}
 }
 
+func TestFactSnapshotPreservesExplicitZeroCacheWriteTelemetry(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-5.6-sol", "high", "single")
+	model.updateUsage(map[string]string{
+		"factSnapshot": "true", "usageSnapshot": `{"cacheWriteReported":true,"lastProvider":"chatgpt"}`,
+		"requestKind": "review", "provider": "chatgpt", "model": "gpt-5.6-luna",
+		"transport": "chatgpt-codex-responses", "cacheModel": "write-tokens",
+	})
+	if !model.usage.CacheWriteReported || model.usage.CacheModel != "write-tokens" || model.usage.LastRequestKind != "review" || model.usage.LastModel != "gpt-5.6-luna" {
+		t.Fatalf("fact snapshot metadata=%+v", model.usage)
+	}
+	report := strings.Join(model.statusReportLines(), "\n")
+	if !strings.Contains(report, "Cache write (W): 0") || strings.Contains(report, "Cache write (W): N/A") {
+		t.Fatalf("explicit zero cache write was not distinguished from missing telemetry:\n%s", report)
+	}
+}
+
 func TestStatusReportShowsActiveShellOwnerAndProcess(t *testing.T) {
 	runtime := &recordedRuntime{shells: []agentservice.ShellExecutionSnapshot{{
 		AgentID: "background-reviewer", ToolCallID: "shell-17", PID: 123, PGID: 123,
@@ -2475,19 +2676,340 @@ func TestModelRoutingCommandRendersConfiguredAndInheritedRoutes(t *testing.T) {
 		t.Fatalf("model routing list action = %#v", runtime.actions)
 	}
 
-	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
+	model.applyEvent(app.Event{Kind: app.EventModelRoutes, Data: map[string]string{"subagent_max_concurrency": "2"}, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "plan", Label: "Plan"},
 		{Scope: "compaction", Label: "Compaction"},
 		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("grok", "grok-4.5", "low")},
 	}})
-	if model.overlay != OverlayModelRoutes || len(model.overlayOptions()) != 2 {
+	if model.overlay != OverlayModelRoutes || len(model.overlayOptions()) != 3 {
 		t.Fatalf("model routes overlay = %q options=%#v", model.overlay, model.overlayOptions())
 	}
 	rendered := ansi.Strip(model.renderOverlay(100, 24))
-	for _, wanted := range []string{"MODEL ROUTING", "Compaction", "Inherit from active agent", "explore", "grok/grok-4.5/low"} {
+	for _, wanted := range []string{"MODEL ROUTING", "Plan model", "Compaction", "Inherit from active agent", "explore", "grok/grok-4.5/low"} {
 		if !strings.Contains(rendered, wanted) {
 			t.Fatalf("model routes missing %q:\n%s", wanted, rendered)
 		}
 	}
+}
+
+func settingsMenuModel(t *testing.T) (AppModel, *recordedRuntime) {
+	t.Helper()
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	model.modelsByProvider = map[string][]ModelChoice{
+		"grok": {{ID: "grok-fast", SupportsReasoning: false}},
+	}
+	model.openOverlay(OverlayCommand)
+	options := model.overlayOptions()
+	if len(options) == 0 {
+		t.Fatalf("settings menu entry = %#v", options)
+	}
+	if options[0].Label != "Settings" {
+		t.Fatalf("settings menu label = %q", options[0].Label)
+	}
+	updated, cmd := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("settings menu did not load routes")
+	}
+	if model.overlayPurpose != "settings" {
+		t.Fatalf("settings purpose = %q", model.overlayPurpose)
+	}
+	result := cmd()
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 1 {
+		t.Fatalf("settings list action = %#v", runtime.actions)
+	}
+	if runtime.actions[0].Kind != ActionListModelRoutes {
+		t.Fatalf("settings list action kind = %q", runtime.actions[0].Kind)
+	}
+	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "plan", Label: "Plan"},
+		{Scope: "compaction", Label: "Compaction"},
+		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("chatgpt", "old-worker", "high")},
+	}})
+	return model, runtime
+}
+
+func assertTextContainsAll(t *testing.T, text string, values ...string) {
+	t.Helper()
+	for _, value := range values {
+		if !strings.Contains(text, value) {
+			t.Fatalf("text missing %q:\n%s", value, text)
+		}
+	}
+}
+
+func settingsEntryCursor(t *testing.T, model AppModel, kind settingsEntryKind, section string, routeIndex int) int {
+	t.Helper()
+	for index, entry := range model.settingsEntries() {
+		if entry.Kind == kind && entry.Section == section && (kind != settingsEntryRoute || entry.RouteIndex == routeIndex) {
+			return index
+		}
+	}
+	t.Fatalf("settings entry kind=%d section=%q route=%d not found", kind, section, routeIndex)
+	return 0
+}
+
+func expandSettingsEntry(t *testing.T, model AppModel, kind settingsEntryKind, section string, routeIndex int) AppModel {
+	t.Helper()
+	model.overlayCursor = settingsEntryCursor(t, model, kind, section, routeIndex)
+	entry := model.settingsEntries()[model.overlayCursor]
+	updated, cmd := model.updateOverlayKey("right")
+	model = updated.(AppModel)
+	if cmd != nil || !model.settingsExpanded[entry.Key] {
+		t.Fatalf("settings entry %q did not expand: expanded=%v cmd=%v", entry.Key, model.settingsExpanded, cmd != nil)
+	}
+	return model
+}
+
+func TestSettingsMenuRendersFunctionalCategoriesAndRoleModels(t *testing.T) {
+	model, _ := settingsMenuModel(t)
+	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "plan", Label: "Plan"},
+		{Scope: "compaction", Label: "Compaction"},
+		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("chatgpt", "old-worker", "high")},
+		{Scope: "subagent", Role: "plan", Label: "Produce a decision-complete implementation plan without changing the workspace."},
+		{Scope: "subagent", Role: "review", Label: "Review a delegated change for requirement, correctness, and regression risks without editing."},
+		{Scope: "subagent", Role: "verify", Label: "Run governed checks without editing and report exact outcomes."},
+		{Scope: "subagent", Role: "worker", Label: "Implement one scoped coding task end-to-end and return verified evidence."},
+	}})
+	options := model.overlayOptions()
+	if model.overlay != OverlaySettings {
+		t.Fatalf("settings overlay = %q", model.overlay)
+	}
+	if len(options) != 13 {
+		t.Fatalf("settings options = %#v", options)
+	}
+	for _, wanted := range []string{"Role models", "Plan model", "explore", "plan", "review", "verify", "worker", "Subagent runtime", "Max concurrency", "Codex subscription", "Fast mode", "Interface", "Language"} {
+		found := false
+		for _, option := range options {
+			found = found || option.Label == wanted
+		}
+		if !found {
+			t.Fatalf("settings options missing %q: %#v", wanted, options)
+		}
+	}
+	rendered := ansi.Strip(model.renderOverlay(100, 24))
+	assertTextContainsAll(t, rendered, "Settings", "[×]", "/ to search settings", "Role models", "Plan model", "Inherit from active agent", "explore", "chatgpt/old-worker/high", "Subagent runtime", "Codex subscription", "Interface")
+	if strings.Contains(rendered, "Inspect the workspace") {
+		t.Fatalf("collapsed setting leaked its description into the value column:\n%s", rendered)
+	}
+
+	model = expandSettingsEntry(t, model, settingsEntryRoute, settingsSectionModels, 1)
+	expanded := ansi.Strip(model.renderOverlay(100, 24))
+	assertTextContainsAll(t, expanded, "▾ explore", "Inspect the workspace")
+	updated, _ := model.updateOverlayKey("left")
+	model = updated.(AppModel)
+	if len(model.settingsExpanded) != 0 {
+		t.Fatalf("left did not collapse the focused setting: %v", model.settingsExpanded)
+	}
+	model = expandSettingsEntry(t, model, settingsEntryRoute, settingsSectionModels, 2)
+	model.width, model.height = 100, 24
+	descriptionClicked := false
+	for row, line := range strings.Split(ansi.Strip(model.renderOverlay(model.width, model.height)), "\n") {
+		if !strings.Contains(line, "decision-complete implementation plan") {
+			continue
+		}
+		descriptionClicked = true
+		left := strings.IndexRune(line, '│')
+		updated, cmd := model.handleOverlayClick(tea.Mouse{X: left + 8, Y: row, Button: tea.MouseLeft})
+		model = updated.(AppModel)
+		if cmd != nil || model.pendingModelRoute != nil || model.overlay != OverlaySettings {
+			t.Fatalf("clicking an expanded description activated its setting: cmd=%v pending=%#v overlay=%q", cmd != nil, model.pendingModelRoute, model.overlay)
+		}
+		break
+	}
+	if !descriptionClicked {
+		t.Fatal("expanded plan description was not rendered")
+	}
+
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, "Plan model") {
+			if !strings.Contains(line, "›") || strings.Index(line, "Inherit from active agent")-strings.Index(line, "Plan model") < 8 {
+				t.Fatalf("settings row is not a left-label/right-value layout: %q", line)
+			}
+			break
+		}
+	}
+	if background := fmt.Sprint(model.theme.OverlaySelected.GetBackground()); background == fmt.Sprint(lipgloss.NewStyle().GetBackground()) {
+		t.Fatal("settings selection has no highlighted background")
+	}
+	for _, viewport := range [][2]int{{40, 12}, {16, 8}, {8, 6}} {
+		for row, line := range strings.Split(model.renderOverlay(viewport[0], viewport[1]), "\n") {
+			if width := ansi.StringWidth(line); width > viewport[0] {
+				t.Fatalf("settings viewport %dx%d row %d width=%d: %q", viewport[0], viewport[1], row, width, ansi.Strip(line))
+			}
+		}
+	}
+	if strings.Contains(rendered, "Compaction") {
+		t.Fatalf("settings exposed non-subagent route:\n%s", rendered)
+	}
+	updated, _ = model.updateOverlayKeyMsg(tea.KeyPressMsg{Code: '/', Text: "/"})
+	model = updated.(AppModel)
+	for _, key := range "explore" {
+		updated, _ = model.updateOverlayKeyMsg(tea.KeyPressMsg{Code: key, Text: string(key)})
+		model = updated.(AppModel)
+	}
+	filtered := ansi.Strip(model.renderOverlay(100, 24))
+	assertTextContainsAll(t, filtered, "Role models", "explore")
+	if strings.Contains(filtered, "Plan model") || strings.Contains(filtered, "Subagent runtime") || strings.Contains(filtered, "Codex subscription") {
+		t.Fatalf("settings search retained non-matching rows:\n%s", filtered)
+	}
+	updated, _ = model.updateOverlayKeyMsg(tea.KeyPressMsg{Code: tea.KeyEsc})
+	model = updated.(AppModel)
+	if model.settingsSearch.Value() != "" {
+		t.Fatalf("settings search did not clear: %q", model.settingsSearch.Value())
+	}
+	if err := model.SetLanguage("zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	assertTextContainsAll(t, ansi.Strip(model.renderOverlay(100, 24)), "设置", "搜索设置", "角色模型", "规划模型", "子代理运行", "Codex 订阅", "界面")
+}
+
+func TestSettingsMenuUpdatesPlanModelAndReturns(t *testing.T) {
+	model, runtime := settingsMenuModel(t)
+	model.overlayCursor = settingsEntryCursor(t, model, settingsEntryRoute, settingsSectionModels, 0)
+	updated, _ := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if model.pendingModelRoute == nil {
+		t.Fatal("settings did not select the plan route")
+	}
+	if model.pendingModelRoute.Entry.Scope != "plan" || model.pendingModelRoute.Entry.Role != "" {
+		t.Fatalf("selected route = %#v", model.pendingModelRoute)
+	}
+	updated, cmd := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("settings model selection did not save")
+	}
+	result := cmd()
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 2 {
+		t.Fatalf("settings model save action = %#v", runtime.actions)
+	}
+	if runtime.actions[1].Kind != ActionSetModelRoute {
+		t.Fatalf("settings model save kind = %q", runtime.actions[1].Kind)
+	}
+	if runtime.actions[1].Route == nil {
+		t.Fatal("settings model save route is nil")
+	}
+	if runtime.actions[1].Route.Scope != "plan" || runtime.actions[1].Route.Route.Model != "grok-fast" {
+		t.Fatalf("settings model save route = %#v", runtime.actions[1].Route)
+	}
+	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "plan", Label: "Plan", Route: appModelRoute("grok", "grok-fast", "")},
+		{Scope: "compaction", Label: "Compaction"},
+		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("chatgpt", "old-worker", "high")},
+	}})
+	if model.overlay != OverlaySettings {
+		t.Fatalf("settings return after save = %q", model.overlay)
+	}
+}
+
+func TestSettingsMenuReturnsFromLanguageAndResetsToInherit(t *testing.T) {
+	model, runtime := settingsMenuModel(t)
+	model.overlayCursor = settingsEntryCursor(t, model, settingsEntryLanguage, settingsSectionInterface, -1)
+	languageCursor := model.overlayCursor
+	updated, _ := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if model.overlay != OverlayLanguage {
+		t.Fatalf("settings language picker = %q", model.overlay)
+	}
+	updated, _ = model.updateOverlayKey("esc")
+	model = updated.(AppModel)
+	if model.overlay != OverlaySettings {
+		t.Fatalf("settings language return = %q", model.overlay)
+	}
+	if model.overlayCursor != languageCursor {
+		t.Fatalf("settings language cursor = %d", model.overlayCursor)
+	}
+
+	model.overlayCursor = settingsEntryCursor(t, model, settingsEntryRoute, settingsSectionModels, 0)
+	updated, cmd := model.updateOverlayKey("d")
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("settings inherit reset did not start")
+	}
+	result := cmd()
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 2 {
+		t.Fatalf("settings reset action = %#v", runtime.actions)
+	}
+	if runtime.actions[1].Kind != ActionResetModelRoute {
+		t.Fatalf("settings reset kind = %q", runtime.actions[1].Kind)
+	}
+	if runtime.actions[1].Route == nil {
+		t.Fatal("settings reset route is nil")
+	}
+	if runtime.actions[1].Route.Scope != "plan" || runtime.actions[1].Route.Role != "" {
+		t.Fatalf("settings reset route = %#v", runtime.actions[1].Route)
+	}
+}
+
+func TestSettingsMenuUpdatesSubagentConcurrencyAndReturns(t *testing.T) {
+	model, runtime := settingsMenuModel(t)
+	model.overlayCursor = settingsEntryCursor(t, model, settingsEntryConcurrency, settingsSectionRuntime, -1)
+	settingsCursor := model.overlayCursor
+	updated, _ := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if model.overlay != OverlaySubagentConcurrency || model.overlayCursor != 1 {
+		t.Fatalf("concurrency picker = overlay:%q cursor:%d", model.overlay, model.overlayCursor)
+	}
+	model.overlayCursor = 5
+	updated, cmd := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("concurrency selection did not save")
+	}
+	result := cmd()
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 2 || runtime.actions[1].Kind != ActionSetSubagentConcurrency || runtime.actions[1].Target != "6" {
+		t.Fatalf("concurrency action = %#v", runtime.actions)
+	}
+	model.applyEvent(app.Event{Kind: app.EventModelRoutes, Data: map[string]string{"subagent_max_concurrency": "6"}, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "plan", Label: "Plan"},
+		{Scope: "compaction", Label: "Compaction"},
+		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace"},
+	}})
+	if model.overlay != OverlaySettings || model.subagentConcurrency != 6 || model.overlayCursor != settingsCursor {
+		t.Fatalf("settings return = overlay:%q concurrency:%d cursor:%d", model.overlay, model.subagentConcurrency, model.overlayCursor)
+	}
+}
+
+func TestSettingsMenuTogglesChatGPTFastMode(t *testing.T) {
+	model, runtime := settingsMenuModel(t)
+	model.overlayCursor = settingsEntryCursor(t, model, settingsEntryFastMode, settingsSectionCodex, -1)
+	settingsCursor := model.overlayCursor
+	updated, cmd := model.activateOverlayOption()
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("fast mode toggle did not save")
+	}
+	result := cmd()
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 2 || runtime.actions[1].Kind != ActionSetChatGPTFastMode || runtime.actions[1].Target != "true" {
+		t.Fatalf("fast mode action = %#v", runtime.actions)
+	}
+	model.applyEvent(app.Event{Kind: app.EventModelRoutes, Data: map[string]string{"chatgpt_fast_mode": "true"}, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "plan", Label: "Plan"},
+		{Scope: "subagent", Role: "explore"},
+	}})
+	if model.overlay != OverlaySettings || !model.chatGPTFastMode || model.overlayCursor != settingsCursor {
+		t.Fatalf("fast mode return = overlay:%q enabled:%v cursor:%d", model.overlay, model.chatGPTFastMode, model.overlayCursor)
+	}
+	collapsed := ansi.Strip(model.renderOverlay(100, 24))
+	assertTextContainsAll(t, collapsed, "Fast mode", "On")
+	if strings.Contains(collapsed, "1.5x") {
+		t.Fatalf("collapsed fast mode leaked description:\n%s", collapsed)
+	}
+	model = expandSettingsEntry(t, model, settingsEntryFastMode, settingsSectionCodex, -1)
+	assertTextContainsAll(t, ansi.Strip(model.renderOverlay(100, 24)), "1.5x faster")
 }
 
 func TestModelRoutingSelectionDoesNotMutateMainModel(t *testing.T) {
@@ -2665,6 +3187,49 @@ func TestHeaderPathRemainsSeparateFromBranchClick(t *testing.T) {
 	}
 }
 
+func TestToolAndThinkingIndicatorsShareColumn(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	tool := ansi.Strip(model.renderToolHeader(Block{Kind: BlockTool, Title: "coding.shell", State: "completed", Collapsed: true}, 80, false, false))
+	thinking := ansi.Strip(model.renderThinkingMessage(Block{Kind: BlockThinking, State: "completed"}, 0, 80)[0])
+	if !strings.HasPrefix(tool, "  ✓ ") || !strings.HasPrefix(thinking, "  ◆ ") {
+		t.Fatalf("indicator columns differ: tool=%q thinking=%q", tool, thinking)
+	}
+}
+
+func TestHeaderAgentsEntryIsAlwaysVisibleAndClickable(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "team")
+	if err := model.SetLanguage("zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	model.width, model.height = 100, 24
+	model.status, model.runID, model.runActivity = "Running", "run-1", "thinking"
+	model.agents = []AgentView{{ID: "worker-1", State: "running"}, {ID: "reviewer-1", State: "completed"}}
+	model.transcript = []Block{{Kind: BlockThinking, RunID: "run-1", State: "streaming", Content: "分析实现路径"}}
+	header := ansi.Strip(model.renderHeader(model.width))
+	entryByte := strings.Index(header, "子代理 2")
+	if entryByte < 0 {
+		t.Fatalf("header lacks the subagent entry while thinking: %q", header)
+	}
+	entryX := ansi.StringWidth(header[:entryByte])
+	updated, command := model.handleMouseClick(tea.Mouse{X: entryX, Y: 0, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if command != nil || model.overlay != OverlayAgents {
+		t.Fatalf("header subagent click = overlay:%q command:%v", model.overlay, command != nil)
+	}
+}
+
+func TestActiveThinkingIndicatorAnimates(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "team")
+	model.status, model.runID, model.runActivity = "Running", "run-1", "thinking"
+	model.transcript = []Block{{Kind: BlockThinking, RunID: "run-1", State: "streaming", Content: "Inspecting"}}
+	before := model.renderThinkingMessage(model.transcript[0], 0, 80)[0]
+	model.animationFrame++
+	after := model.renderThinkingMessage(model.transcript[0], 0, 80)[0]
+	if before == after {
+		t.Fatalf("active thinking indicator did not animate: %q", ansi.Strip(before))
+	}
+}
+
 func TestCompactOverlayFitsMinimumTerminal(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/a/very/long/workspace/path", "chatgpt", strings.Repeat("model-", 20), "xhigh", "single")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
@@ -2688,7 +3253,7 @@ func TestViewFitsRealTerminalBoundsAcrossResponsiveLayouts(t *testing.T) {
 		height int
 	}{{1, 1}, {5, 4}, {12, 5}, {20, 8}, {39, 12}, {40, 12}, {80, 24}, {120, 40}}
 	overlays := []Overlay{
-		OverlayNone, OverlayHelp, OverlayStatus, OverlayCommand, OverlayProvider, OverlayModel, OverlayModelRoutes, OverlaySkills,
+		OverlayNone, OverlayHelp, OverlayStatus, OverlayCommand, OverlayProvider, OverlayModel, OverlayModelRoutes, OverlaySettings, OverlaySubagentConcurrency, OverlaySkills,
 		OverlayReasoning, OverlaySessions, OverlayBranches, OverlayBranchConfirm, OverlayApproval, OverlayCancel, OverlayDiff, OverlayAgents,
 		OverlayAgentDetail, OverlayAgentTypes, OverlayPersonas, OverlayMCP, OverlayMCPDetail, OverlayBackground, OverlayBackgroundDetail,
 		OverlayRecovery, OverlayError,
@@ -2768,8 +3333,8 @@ func TestWideColumnsKeepTheirDeclaredAlignment(t *testing.T) {
 		if width := ansi.StringWidth(line); width != 120 {
 			t.Fatalf("body line %d width=%d, want 120: %q", index, width, line)
 		}
-		if divider := strings.Index(line, "│"); divider != 119 {
-			t.Fatalf("body line %d divider=%d, want 119: %q", index, divider, line)
+		if edge := ansi.Cut(line, 119, 120); edge != " " {
+			t.Fatalf("body line %d right edge=%q, want blank without overflow: %q", index, edge, line)
 		}
 	}
 	header := model.renderHeader(120)
@@ -3347,6 +3912,59 @@ func TestChildStreamsStayNestedAndDetailReplacesSnapshot(t *testing.T) {
 			t.Fatalf("detail overlay missing %q:\n%s", wanted, content)
 		}
 	}
+	if firstLine := strings.Split(content, "\n")[0]; !strings.Contains(firstLine, "TASK DETAIL") || strings.Contains(content, "┌") {
+		t.Fatalf("agent detail is still a centered modal instead of a full-size workspace:\n%s", content)
+	}
+}
+
+func TestAgentDetailUsesMainTranscriptRendering(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.detailAgentID = "child-1"
+	model.agents = []AgentView{{
+		ID: "child-1", Role: "review", State: "running", Description: "review provider changes",
+		Blocks: []Block{{
+			Kind: BlockTool, Title: "coding.git_diff", State: "running",
+			Content: "diff --git a/main.go b/main.go\n--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-old\n+new",
+		}},
+	}}
+	model.openOverlay(OverlayAgentDetail)
+	rendered := ansi.Strip(model.renderOverlay(120, 32))
+	if !strings.Contains(rendered, "View Git Diff") || strings.Contains(rendered, "VIEW GIT DIFF · RUNNING") {
+		t.Fatalf("agent detail did not reuse the main transcript tool renderer:\n%s", rendered)
+	}
+	for _, viewport := range [][2]int{{120, 32}, {40, 12}} {
+		output := model.renderOverlay(viewport[0], viewport[1])
+		lines := strings.Split(output, "\n")
+		if len(lines) != viewport[1] {
+			t.Fatalf("agent detail height at %dx%d = %d", viewport[0], viewport[1], len(lines))
+		}
+		for _, line := range lines {
+			if ansi.StringWidth(line) != viewport[0] {
+				t.Fatalf("agent detail width at %dx%d = %d", viewport[0], viewport[1], ansi.StringWidth(line))
+			}
+		}
+	}
+}
+
+func TestAgentDetailPreservesToolCollapseState(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	agent := AgentView{ID: "child-1", Blocks: []Block{
+		{Kind: BlockTool, Title: "coding.shell", State: "completed", Collapsed: true},
+		{Kind: BlockTool, Title: "coding.shell", State: "running"},
+	}}
+	detail := model.agentDetailTranscript(agent)
+	if !detail.transcript[1].Collapsed || detail.transcript[2].Collapsed {
+		t.Fatalf("agent detail changed tool collapse state: %#v", detail.transcript[1:])
+	}
+}
+
+func TestToolDisplayNameReusesProvidedCatalog(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if allocations := testing.AllocsPerRun(10, func() {
+		_ = model.toolDisplayName("coding.shell")
+	}); allocations > 10 {
+		t.Fatalf("tool display name allocations = %.0f, want at most 10", allocations)
+	}
 }
 
 func TestSessionReloadRebuildsTypedTasksWithoutDuplicateLifecycleCards(t *testing.T) {
@@ -3513,6 +4131,33 @@ func TestTranscriptScrollbarTracksHistoryPositionAtPaneRightEdge(t *testing.T) {
 	}
 }
 
+func TestTranscriptScrollbarAppearsOnlyWhenHistoryOverflows(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(AppModel)
+	model.transcript = []Block{{Kind: BlockAssistant, Content: "short history", State: "completed"}}
+	_, _, transcriptWidth, transcriptHeight := model.transcriptBounds()
+
+	rightEdge := func() string {
+		var edge strings.Builder
+		for _, line := range strings.Split(ansi.Strip(model.renderBody(model.width, transcriptHeight)), "\n") {
+			edge.WriteString(ansi.Cut(line, transcriptWidth, transcriptWidth+1))
+		}
+		return edge.String()
+	}
+	if edge := rightEdge(); strings.TrimSpace(edge) != "" {
+		t.Fatalf("non-overflowing transcript rendered a scrollbar: %q", edge)
+	}
+
+	model.transcript = nil
+	for range 80 {
+		model.transcript = append(model.transcript, Block{Kind: BlockAssistant, Content: "history line", State: "completed"})
+	}
+	if edge := rightEdge(); !strings.ContainsAny(edge, "▁▂▃▄▅▆▇█") {
+		t.Fatalf("overflowing transcript lacks a scrollbar thumb: %q", edge)
+	}
+}
+
 func TestScrollbarThumbAdvancesByEighthCell(t *testing.T) {
 	start, startSize := transcriptScrollbarThumb(20, 1000, 982, 0)
 	next, nextSize := transcriptScrollbarThumb(20, 1000, 982, 6)
@@ -3534,7 +4179,9 @@ func TestTranscriptScrollbarReservesRightmostColumnWithoutContextRail(t *testing
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	model = updated.(AppModel)
-	model.transcript = []Block{{Kind: BlockAssistant, Content: strings.Repeat("history line\n", 80), State: "completed"}}
+	for range 80 {
+		model.transcript = append(model.transcript, Block{Kind: BlockAssistant, Content: "history line", State: "completed"})
+	}
 	_, _, transcriptWidth, transcriptHeight := model.transcriptBounds()
 	if transcriptWidth != model.width-1 {
 		t.Fatalf("transcript width = %d, want scrollbar-reserved width %d", transcriptWidth, model.width-1)
@@ -3555,7 +4202,7 @@ func TestTranscriptDragSelectionClampsToConversationPaneAndCopies(t *testing.T) 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	model = updated.(AppModel)
 	model.transcript = []Block{{Kind: BlockAssistant, Content: "dialogue only\nsecond dialogue line", State: "completed"}}
-	if view := model.View(); view.MouseMode != tea.MouseModeCellMotion {
+	if view := model.View(); view.MouseMode != tea.MouseModeAllMotion {
 		t.Fatalf("default view mouse mode = %v", view.MouseMode)
 	}
 	if status := ansi.Strip(model.renderStatus(140)); !strings.Contains(status, "Drag copy") {
@@ -3683,14 +4330,66 @@ func TestTranscriptNarrowViewportUsesRenderedVisualLineCount(t *testing.T) {
 	}
 }
 
-func TestMouseWheelScrollsOverlayWithoutChangingTranscriptOffset(t *testing.T) {
+func overflowingAgentDetailModel() AppModel {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
-	model.overlay = OverlayAgentDetail
+	model.width, model.height = 80, 20
+	model.detailAgentID = "child-1"
+	model.agents = []AgentView{{
+		ID: "child-1", Role: "review", State: "running", Description: "inspect changes",
+		Blocks: []Block{{Kind: BlockAssistant, State: "completed", Content: strings.Repeat("detail output line\n", 120)}},
+	}}
+	model.openOverlay(OverlayAgentDetail)
+	return model
+}
+
+func TestMouseWheelScrollsAgentDetailLikeMainTranscript(t *testing.T) {
+	model := overflowingAgentDetailModel()
 	model.transcriptTop = 7
-	updated, _ := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	updated, _ := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
 	model = updated.(AppModel)
-	if model.overlayScroll != 1 || model.transcriptTop != 7 {
-		t.Fatalf("wheel scroll state = overlay:%d transcript:%d", model.overlayScroll, model.transcriptTop)
+	if model.overlayScroll != 3 || model.transcriptTop != 7 {
+		t.Fatalf("wheel-up scroll state = overlay:%d transcript:%d", model.overlayScroll, model.transcriptTop)
+	}
+	for range 500 {
+		updated, _ = model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+		model = updated.(AppModel)
+	}
+	atTop := model.overlayScroll
+	updated, _ = model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	model = updated.(AppModel)
+	if atTop == 0 || model.overlayScroll != atTop {
+		t.Fatalf("agent detail scroll escaped its top bound: %d -> %d", atTop, model.overlayScroll)
+	}
+	updated, _ = model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	model = updated.(AppModel)
+	if model.overlayScroll != atTop-3 {
+		t.Fatalf("agent detail wheel-down remained stuck after reaching top: %d", model.overlayScroll)
+	}
+	updated, _ = model.updateOverlayKey("end")
+	model = updated.(AppModel)
+	if model.overlayScroll != 0 {
+		t.Fatalf("agent detail End offset = %d, want latest output", model.overlayScroll)
+	}
+}
+
+func TestAgentDetailScrollbarClickAndDrag(t *testing.T) {
+	model := overflowingAgentDetailModel()
+	scrollbar, ok := model.overlayScrollbar(model.width, model.height)
+	if !ok {
+		t.Fatal("overflowing agent detail has no scrollbar geometry")
+	}
+	updated, _ := model.Update(tea.MouseClickMsg{X: scrollbar.x, Y: scrollbar.y, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.overlayScroll != scrollbar.maxOffset || !model.overlayScrollbarDragging {
+		t.Fatalf("top scrollbar click = offset:%d dragging:%v want:%d", model.overlayScroll, model.overlayScrollbarDragging, scrollbar.maxOffset)
+	}
+	bottom := scrollbar.y + scrollbar.height - 1
+	updated, _ = model.Update(tea.MouseMotionMsg{X: scrollbar.x, Y: bottom, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	updated, _ = model.Update(tea.MouseReleaseMsg{X: scrollbar.x, Y: bottom, Button: tea.MouseLeft})
+	model = updated.(AppModel)
+	if model.overlayScroll != 0 || model.overlayScrollbarDragging {
+		t.Fatalf("bottom scrollbar drag = offset:%d dragging:%v", model.overlayScroll, model.overlayScrollbarDragging)
 	}
 }
 
@@ -3794,9 +4493,7 @@ func TestRunningIndicatorStaysVisibleInTranscript(t *testing.T) {
 		t.Fatalf("running transcript height = %d, want 8", len(lines))
 	}
 	last := lines[len(lines)-1]
-	if !strings.Contains(last, "RUNNING") || !strings.Contains(last, "Ctrl+C cancel") {
-		t.Fatalf("running indicator is not fixed inside output viewport: %q", last)
-	}
+	assertTranscriptTimedStatus(t, last, "RUNNING")
 	if strings.TrimSpace(lines[len(lines)-2]) != "" {
 		t.Fatalf("running indicator touches transcript body: %q", lines[len(lines)-2])
 	}
@@ -3827,8 +4524,22 @@ func TestRunActivitySummaryShowsPhaseElapsedAndSilence(t *testing.T) {
 			t.Fatalf("activity summary missing %q: %q", wanted, summary)
 		}
 	}
-	if footer := ansi.Strip(model.renderTranscriptFooter(120, 0, 0)); !strings.Contains(footer, "todo finished; waiting for model") {
-		t.Fatalf("activity phase is not visible in transcript footer: %q", footer)
+	assertTranscriptTimedStatus(t, model.renderTranscriptFooter(120, 0, 0), "RUNNING")
+}
+
+func TestActivityDurationFormatsSecondsMinutesAndHours(t *testing.T) {
+	tests := []struct {
+		duration time.Duration
+		want     string
+	}{
+		{duration: 8 * time.Second, want: "8s"},
+		{duration: 3*time.Minute + 8*time.Second, want: "3m08s"},
+		{duration: time.Hour + 2*time.Minute + 3*time.Second, want: "1h02m03s"},
+	}
+	for _, test := range tests {
+		if got := formatActivityDuration(test.duration); got != test.want {
+			t.Fatalf("formatActivityDuration(%s) = %q, want %q", test.duration, got, test.want)
+		}
 	}
 }
 
@@ -4106,6 +4817,71 @@ func BenchmarkLongTranscriptScroll(b *testing.B) {
 	for range b.N {
 		model.scrollTranscript(3)
 		_ = model.View()
+	}
+}
+
+func BenchmarkLongTranscriptHover(b *testing.B) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	model = updated.(AppModel)
+	for index := range 120 {
+		model.transcript = append(model.transcript, Block{
+			Kind:    BlockAssistant,
+			Content: fmt.Sprintf("## Finding %d\n\n- first detail\n- second detail\n- third detail", index),
+			State:   "completed",
+		})
+	}
+	model.transcript = append(model.transcript,
+		Block{Kind: BlockTool, Title: "coding.shell", Arguments: `{"command":"first"}`, State: "completed", Collapsed: true},
+		Block{Kind: BlockTool, Title: "coding.shell", Arguments: `{"command":"second"}`, State: "completed", Collapsed: true},
+	)
+	_ = model.View()
+	_, top, width, height := model.transcriptBounds()
+	headerRows := make([]int, 0, 2)
+	for row := range height {
+		index, ok := model.transcriptBlockHeaderAt(row, width, height)
+		if ok && index >= len(model.transcript)-2 {
+			headerRows = append(headerRows, row)
+		}
+	}
+	if len(headerRows) != 2 {
+		b.Fatalf("visible tool headers=%v", headerRows)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := range b.N {
+		updated, _ = model.Update(tea.MouseMotionMsg{X: 4, Y: top + headerRows[index%2]})
+		model = updated.(AppModel)
+		_ = model.View()
+	}
+}
+
+func BenchmarkAgentDetailToolChurn(b *testing.B) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.width, model.height = 200, 60
+	blocks := make([]Block, 0, 49)
+	output := strings.Repeat("tool output line with enough content to render\n", 40)
+	for index := range 48 {
+		blocks = append(blocks, Block{
+			ID: fmt.Sprintf("completed-%d", index), Kind: BlockTool, Title: "coding.shell",
+			Content: output, State: "completed", Collapsed: true,
+		})
+	}
+	blocks = append(blocks, Block{ID: "running", Kind: BlockTool, Title: "coding.shell", State: "running"})
+	model.detailAgentID = "child-1"
+	model.agents = []AgentView{{ID: "child-1", State: "running", Blocks: blocks}}
+	model.openOverlay(OverlayAgentDetail)
+	_ = model.renderOverlay(model.width, model.height)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := range b.N {
+		model.agents[0].Blocks[len(blocks)-1].Content = fmt.Sprintf("progress %d\n%s", index, output)
+		delta := 3
+		if index%2 == 1 {
+			delta = -3
+		}
+		model.scrollAgentDetail(delta)
+		_ = model.renderOverlay(model.width, model.height)
 	}
 }
 
@@ -4452,12 +5228,7 @@ func TestZhCNCoreTUIRendering(t *testing.T) {
 		Kind: app.EventApprovalRequested, RunID: "run-zh", ToolCallID: "edit-zh", ApprovalID: "approval-zh", State: "reviewing",
 		Data: map[string]string{"tool": "coding.edit_hashline", "target": "README.md"},
 	})
-	reviewing := ansi.Strip(model.renderTranscriptFooter(48, 0, 0))
-	for _, wanted := range []string{"正在审查", "正在检查此操作"} {
-		if !strings.Contains(reviewing, wanted) {
-			t.Fatalf("localized standalone approval status missing %q:\n%s", wanted, reviewing)
-		}
-	}
+	assertTranscriptStatusOnly(t, model.renderTranscriptFooter(48, 0, 0), "正在审查")
 	model.applyEvent(app.Event{
 		Kind: app.EventApprovalResolved, RunID: "run-zh", ToolCallID: "edit-zh", ApprovalID: "approval-zh", State: "auto_approved",
 		Data: map[string]string{"tool": "coding.edit_hashline", "target": "README.md", "risk": "low", "rationale": "bounded edit"},
@@ -5510,12 +6281,7 @@ func TestChineseGeneratedUIPaths(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "grok", "grok-4", "high", "single", "session-zh")
 	model.SetLanguage("zh-CN")
 	model.status = "Running"
-	footer := ansi.Strip(model.renderTranscriptFooter(120, 0, 0))
-	for _, wanted := range []string{"运行中", "Azem 正在生成", "Ctrl+C 取消"} {
-		if !strings.Contains(footer, wanted) {
-			t.Fatalf("running footer missing %q: %q", wanted, footer)
-		}
-	}
+	assertTranscriptTimedStatus(t, model.renderTranscriptFooter(120, 0, 0), "运行中")
 	model.overlay = OverlayHelp
 	heading, subtitle := model.overlayHeading()
 	if heading != "键盘帮助" || subtitle != "所有操作均可通过键盘完成" || !strings.Contains(model.overlayFooter(), "关闭") {

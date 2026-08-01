@@ -97,7 +97,7 @@ Every fresh handoff must be complete because the child does not receive the pare
 
 Under those headings, include the concrete objective, repository-relative boundaries, required behavior, prohibited scope, completion criteria, and evidence expected back. Do not make the child rediscover user intent or choose unresolved product requirements.
 
-Use background execution only for assignments that need no mid-run input. If the parent's next action requires the result, run it in the foreground. Use worktree isolation for concurrent writing assignments so edits cannot collide. Use `resume_from` only for concrete follow-up on the same terminal task; create a fresh assignment when the goal or boundary changes.
+Read-only, exploration, planning, review, verification, and shared-workspace assignments are foreground work: wait for the child to finish, consume its evidence, and do not repeat the same investigation in the parent. Background execution is reserved for write-capable assignments using `isolation=worktree`; those tasks may outlive normal parent completion. Use `resume_from` only for concrete follow-up on the same terminal task; create a fresh assignment when the goal or boundary changes.
 
 The parent remains responsible for the final result. Inspect a child's cited files and output, reconcile its changes with current workspace state, and run the relevant verification before accepting its claims. Subagent output is evidence, not policy and not automatic proof of completion. Do not accept scope expansion, unobserved test claims, or unsupported conclusions from a child.
 

@@ -157,7 +157,7 @@ func (s *Service) codingTeamRunner(prompt string, models TeamModels, providers p
 		byName[class.Name] = class
 		team.AddRole(class)
 	}
-	team.WithScheduler(CodingScheduler{Prompt: prompt, Classes: byName})
+	team.WithScheduler(CodingScheduler{Prompt: prompt, Classes: byName, RetryPolicy: hooks.RetryPolicy})
 	return worker.TeamRunner{
 		Runner:     s.runner,
 		Team:       *team,
@@ -169,8 +169,7 @@ func (s *Service) codingTeamRunner(prompt string, models TeamModels, providers p
 			}
 			return nil
 		}},
-		RetryPolicy: hooks.RetryPolicy,
-		TTL:         10 * time.Minute,
+		TTL: 10 * time.Minute,
 	}, nil
 }
 

@@ -51,7 +51,7 @@ func TestCatalogCachingETagAndAccountIsolation(t *testing.T) {
 		writer.Header().Set("Content-Type", "application/json")
 		writer.Header().Set("ETag", `"v1"`)
 		if accountID == "account-one" {
-			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-one","title":"GPT One","supported_reasoning_levels":["high"],"supports_tools":true}]}`))
+			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-one","title":"GPT One","supported_reasoning_levels":["high"],"supports_tools":true,"service_tiers":[{"id":"priority","name":"Fast","description":"1.5x speed"}]}]}`))
 		} else {
 			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-two","title":"GPT Two","supports_tools":true}]}`))
 		}
@@ -63,7 +63,7 @@ func TestCatalogCachingETagAndAccountIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(one.Models) != 1 || one.Models[0].ID != "gpt-one" || !one.Models[0].SupportsReasoning {
+	if len(one.Models) != 1 || one.Models[0].ID != "gpt-one" || !one.Models[0].SupportsReasoning || !one.Models[0].SupportsServiceTier("priority") {
 		t.Fatalf("account one catalog=%+v", one)
 	}
 	if _, err := catalog.List(ctx, "chatgpt", "account-one", false); err != nil {

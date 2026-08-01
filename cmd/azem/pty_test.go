@@ -237,7 +237,7 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 	if _, err := terminal.Write([]byte{27}); err != nil {
 		t.Fatalf("close skills overlay: %v", err)
 	}
-	readUntil(t, reads, output, "READY FOR A TASK", 5*time.Second)
+	readUntil(t, reads, output, "Build anything", 5*time.Second)
 	if _, err := terminal.Write([]byte{3}); err != nil {
 		t.Fatalf("exit skills PTY: %v", err)
 	}

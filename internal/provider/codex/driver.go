@@ -15,7 +15,10 @@ import (
 	"github.com/Viking602/azem/internal/provider/responses"
 )
 
-const DefaultEndpoint = "https://chatgpt.com/backend-api/codex/responses"
+const (
+	DefaultEndpoint = "https://chatgpt.com/backend-api/codex/responses"
+	FastServiceTier = "priority"
+)
 
 type Driver struct {
 	auth            *auth.Service
@@ -25,6 +28,7 @@ type Driver struct {
 	toolIDsMu       sync.RWMutex
 	toolItemIDs     map[string]string
 	reasoningEffort string
+	serviceTier     string
 	retryDelay      func(int) time.Duration
 	maxRetryDelay   time.Duration
 	retryObserver   hyprovider.RetryObserver
@@ -60,18 +64,22 @@ func (d *Driver) SetMaxRetryDelay(delay time.Duration) {
 	d.maxRetryDelay = delay
 }
 
+func (d *Driver) SetServiceTier(tier string) {
+	d.serviceTier = strings.TrimSpace(tier)
+}
+
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
 	cacheKey := promptCacheKey(request)
 	request, reverseNames := mapToolNames(request)
 	payload, err := responses.Build(request, responses.BuildOptions{
 		IncludeEncryptedReasoning: true, DefaultParallelTools: true, ToolCallItemID: d.toolItemID,
-		DefaultReasoningEffort: d.reasoningEffort,
+		DefaultReasoningEffort: d.reasoningEffort, ServiceTier: d.serviceTier,
 	})
 	if err != nil {
 		return nil, err
 	}
-	// ChatGPT/Codex reports explicit cache write counters; tag metering so UI and
-	// facts stay on the write-token model without coupling to xAI automatic cache.
+	// ChatGPT/Codex can report explicit cache write counters; tag their semantics
+	// while preserving whether the upstream field was actually present.
 	reporter := responses.WrapUsageReporter(responses.RequestUsageReporter(request), responses.CacheModelWriteTokens)
 	open := func() (hyprovider.Stream, error) {
 		return d.openStream(ctx, payload, reverseNames, cacheKey, reporter)
