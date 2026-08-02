@@ -2,6 +2,7 @@ import { Call, Events } from "@wailsio/runtime";
 import type { ActionRequest, Attachment, RuntimeEvent, Snapshot, TurnRequest } from "./types";
 
 const EVENT_NAME = "azem:event";
+const SESSION_MENU_EVENT = "azem:session-menu";
 const bridgeName = "github.com/Viking602/azem/internal/desktop.Bridge";
 
 export const isDesktopRuntime = () =>
@@ -60,6 +61,20 @@ export function subscribe(onEvent: (event: RuntimeEvent) => void): () => void {
   return Events.On(EVENT_NAME, (payload: unknown) => {
     const value = payload as Record<string, unknown>;
     onEvent((value.data ?? payload) as RuntimeEvent);
+  });
+}
+
+export interface SessionMenuEvent {
+  action: "rename" | "error";
+  sessionId?: string;
+  error?: string;
+}
+
+export function subscribeSessionMenu(onEvent: (event: SessionMenuEvent) => void): () => void {
+  if (!isDesktopRuntime()) return () => undefined;
+  return Events.On(SESSION_MENU_EVENT, (payload: unknown) => {
+    const value = payload as Record<string, unknown>;
+    onEvent((value.data ?? payload) as SessionMenuEvent);
   });
 }
 

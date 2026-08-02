@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { initialise, isDesktopRuntime, subscribe } from "./bridge";
+import { execute, initialise, isDesktopRuntime, subscribe } from "./bridge";
 import CommandPalette from "./components/CommandPalette";
 import Inspector from "./components/Inspector";
 import Pages from "./components/Pages";
@@ -40,7 +40,11 @@ export default function App() {
       if (!frame.current) frame.current = requestAnimationFrame(flush);
     });
     initialise()
-      .then((value) => hydrate(value, !isDesktopRuntime()))
+      .then(async (value) => {
+        hydrate(value, !isDesktopRuntime());
+        const sessionId = new URLSearchParams(location.search).get("session");
+        if (sessionId && isDesktopRuntime()) await execute({ kind: "resume_session", target: sessionId, sessionId });
+      })
       .catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
     return () => {
       unsubscribe();

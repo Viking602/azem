@@ -14,6 +14,7 @@ import (
 	azemapp "github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/desktop"
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
 var (
@@ -29,9 +30,12 @@ func main() {
 }
 
 func run() error {
-	var configFile string
-	var showVersion bool
+	var configFile, initialSession, workspaceOverride string
+	var showVersion, newWindow bool
 	flag.StringVar(&configFile, "config", "", "path to config.yaml")
+	flag.StringVar(&initialSession, "session", "", "session to open")
+	flag.StringVar(&workspaceOverride, "workspace", "", "workspace to open")
+	flag.BoolVar(&newWindow, "new-window", false, "open an independent window")
 	flag.BoolVar(&showVersion, "version", false, "print version")
 	flag.Parse()
 	if showVersion {
@@ -43,7 +47,7 @@ func run() error {
 		return fmt.Errorf("get startup workspace: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	boot, err := azemapp.Bootstrap(ctx, workspace, configFile)
+	boot, err := bootstrapDesktop(ctx, workspace, workspaceOverride, configFile)
 	if err != nil {
 		cancel()
 		return err
@@ -55,19 +59,11 @@ func run() error {
 
 	var bridge *desktop.Bridge
 	var mainWindow *application.WebviewWindow
-	desktopApp := application.New(application.Options{
+	var handleDeepLink func(string)
+	options := application.Options{
 		Name: "Azem", Description: "Project-first agent workspace",
 		Assets: application.AssetOptions{Handler: application.AssetFileServerFS(azemfrontend.Assets)},
 		Mac:    application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
-		SingleInstance: &application.SingleInstanceOptions{
-			UniqueID: "com.viking602.azem",
-			OnSecondInstanceLaunch: func(application.SecondInstanceData) {
-				if mainWindow != nil {
-					mainWindow.Restore()
-					mainWindow.Focus()
-				}
-			},
-		},
 		OnShutdown: func() {
 			if bridge != nil {
 				bridge.Close()
@@ -77,12 +73,14 @@ func run() error {
 			_ = boot.Service.Shutdown(shutdownCtx)
 			cancel()
 		},
-	})
+	}
+	options.SingleInstance = sessionSingleInstance(newWindow, &mainWindow, &handleDeepLink)
+	desktopApp := application.New(options)
 	bridge = desktop.NewBridge(ctx, boot, desktopApp.Event.Emit)
 	desktopApp.RegisterService(application.NewService(bridge))
 	mainWindow = desktopApp.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name: "main", Title: "Azem", Width: 1440, Height: 920,
-		MinWidth: 880, MinHeight: 640, URL: "/",
+		MinWidth: 880, MinHeight: 640, URL: sessionWindowURL(initialSession),
 		BackgroundColour: application.NewRGB(245, 245, 243),
 		Mac: application.MacWindow{
 			InvisibleTitleBarHeight: 46,
@@ -90,5 +88,37 @@ func run() error {
 			TitleBar:                application.MacTitleBarHiddenInset,
 		},
 	})
+	registerSessionContextMenus(desktopApp, bridge, boot.Paths.Workspace, boot.Paths.DataDir, configFile, boot.Config.Defaults.Language)
+	handleDeepLink = sessionDeepLinkHandler(bridge, mainWindow, boot.Paths.Workspace, configFile)
+	desktopApp.Event.OnApplicationEvent(events.Common.ApplicationLaunchedWithUrl, func(event *application.ApplicationEvent) {
+		handleDeepLink(event.Context().URL())
+	})
 	return desktopApp.Run()
+}
+
+func bootstrapDesktop(ctx context.Context, startupWorkspace, workspaceOverride, configFile string) (azemapp.BootstrapResult, error) {
+	if workspaceOverride != "" {
+		return azemapp.BootstrapAtWorkspace(ctx, workspaceOverride, configFile)
+	}
+	return azemapp.Bootstrap(ctx, startupWorkspace, configFile)
+}
+
+func sessionSingleInstance(newWindow bool, mainWindow **application.WebviewWindow, handleDeepLink *func(string)) *application.SingleInstanceOptions {
+	if newWindow {
+		return nil
+	}
+	return &application.SingleInstanceOptions{
+		UniqueID: "com.viking602.azem",
+		OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
+			if *handleDeepLink != nil {
+				if raw := sessionURLFromArgs(data.Args); raw != "" {
+					(*handleDeepLink)(raw)
+				}
+			}
+			if *mainWindow != nil {
+				(*mainWindow).Restore()
+				(*mainWindow).Focus()
+			}
+		},
+	}
 }

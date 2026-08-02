@@ -57,8 +57,16 @@ type bootstrapAssembly struct {
 }
 
 func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
+	return bootstrap(ctx, startupWorkspace, configFile, false)
+}
+
+func BootstrapAtWorkspace(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
+	return bootstrap(ctx, startupWorkspace, configFile, true)
+}
+
+func bootstrap(ctx context.Context, startupWorkspace, configFile string, forceWorkspace bool) (BootstrapResult, error) {
 	assembly := bootstrapAssembly{ctx: ctx}
-	result, err := assembly.build(startupWorkspace, configFile)
+	result, err := assembly.build(startupWorkspace, configFile, forceWorkspace)
 	if err != nil {
 		assembly.close()
 		return BootstrapResult{}, err
@@ -66,8 +74,8 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	return result, nil
 }
 
-func (b *bootstrapAssembly) build(startupWorkspace, configFile string) (BootstrapResult, error) {
-	if err := b.loadConfiguration(startupWorkspace, configFile); err != nil {
+func (b *bootstrapAssembly) build(startupWorkspace, configFile string, forceWorkspace bool) (BootstrapResult, error) {
+	if err := b.loadConfiguration(startupWorkspace, configFile, forceWorkspace); err != nil {
 		return BootstrapResult{}, err
 	}
 	if err := b.buildCore(); err != nil {
@@ -82,7 +90,7 @@ func (b *bootstrapAssembly) build(startupWorkspace, configFile string) (Bootstra
 	return BootstrapResult{Config: b.cfg, Paths: b.paths, SessionID: b.startupSessionID, Service: b.service}, nil
 }
 
-func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile string) error {
+func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile string, forceWorkspace bool) error {
 	paths, err := config.ResolvePaths(startupWorkspace)
 	if err != nil {
 		return err
@@ -94,6 +102,9 @@ func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile strin
 	cfg, err := config.Load(paths.ConfigFile, paths.Workspace)
 	if err != nil {
 		return err
+	}
+	if forceWorkspace {
+		cfg.Workspace.Root = paths.Workspace
 	}
 	paths.Workspace = cfg.Workspace.Root
 	if err := config.EnsureDirectories(paths); err != nil {

@@ -796,3 +796,53 @@ func TestToolTimelineAndWorkspaceSessionSurviveReopen(t *testing.T) {
 		t.Fatalf("workspace session=%q", sessionID)
 	}
 }
+
+func TestSessionMenuStateAndForkPersist(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "session-menu.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	prepareSessionMenuTest(t, ctx, service)
+
+	listed, err := service.List(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != "source" || listed[0].Title != "Renamed" || !listed[0].Pinned || !listed[0].Archived || !listed[0].Unread {
+		t.Fatalf("session menu state=%#v", listed)
+	}
+	projection, err := service.LoadProjection(ctx, "forked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Session.Title != "Renamed" || len(projection.Blocks) != 1 || projection.Blocks[0].Content != "keep this context" {
+		t.Fatalf("forked projection=%#v", projection)
+	}
+}
+
+func prepareSessionMenuTest(t *testing.T, ctx context.Context, service *Service) {
+	t.Helper()
+	if _, err := service.Ensure(ctx, Session{ID: "source", Title: "Original"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "source", Block{Kind: "user", Content: "keep this context"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Ensure(ctx, Session{ID: "newer", Title: "Newer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Rename(ctx, "source", " Renamed "); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"pinned", "archived", "unread"} {
+		if err := service.SetUIState(ctx, "source", field, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.Fork(ctx, "source", "forked"); err != nil {
+		t.Fatal(err)
+	}
+}

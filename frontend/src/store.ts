@@ -176,6 +176,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "session_loaded":
       if (event.state === "list") {
         next.sessions = parseArray(data.sessions).map(normalizeSession);
+        next.currentTitle = next.sessions.find((item) => item.id === next.currentSessionId)?.title ?? next.currentTitle;
       } else if (event.sessionId) {
         next.currentSessionId = event.sessionId;
         next.snapshot = {
@@ -424,6 +425,7 @@ function normalizeSession(raw: Record<string, unknown>): Session {
     id: stringValue(raw, "id", "ID"), title: stringValue(raw, "title", "Title") || "New session",
     providerId: stringValue(raw, "providerId", "ProviderID"), modelId: stringValue(raw, "modelId", "ModelID"),
     reasoning: stringValue(raw, "reasoning", "Reasoning"), agentMode: stringValue(raw, "agentMode", "AgentMode"),
+    pinned: Boolean(raw.pinned ?? raw.Pinned), archived: Boolean(raw.archived ?? raw.Archived), unread: Boolean(raw.unread ?? raw.Unread),
     updatedAt: stringValue(raw, "updatedAt", "UpdatedAt"),
   };
 }

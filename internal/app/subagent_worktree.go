@@ -23,6 +23,28 @@ type preparedSubagentWorktree struct {
 	Warning   string
 }
 
+type SessionWorktree struct {
+	CWD      string
+	Path     string
+	RepoRoot string
+}
+
+func PrepareSessionWorktree(ctx context.Context, workspaceRoot, worktreeRoot, id string) (SessionWorktree, error) {
+	prepared, err := prepareSubagentWorktree(ctx, workspaceRoot, worktreeRoot, id)
+	if err != nil {
+		return SessionWorktree{}, err
+	}
+	return SessionWorktree{CWD: prepared.CWD, Path: prepared.Path, RepoRoot: prepared.RepoRoot}, nil
+}
+
+func (worktree SessionWorktree) Remove(ctx context.Context) error {
+	if worktree.Path == "" || worktree.RepoRoot == "" {
+		return nil
+	}
+	_, err := runGit(ctx, worktree.RepoRoot, nil, "worktree", "remove", "--force", worktree.Path)
+	return err
+}
+
 func prepareSubagentWorktree(ctx context.Context, workspaceRoot, worktreeRoot, taskID string) (preparedSubagentWorktree, error) {
 	fail := func(err error) (preparedSubagentWorktree, error) {
 		return preparedSubagentWorktree{}, fmt.Errorf("worktree isolation unavailable: %w", err)

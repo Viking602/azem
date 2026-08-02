@@ -6,7 +6,7 @@ import { useRuntimeStore } from "../store";
 import type { Session, Snapshot } from "../types";
 import Sidebar from "./Sidebar";
 
-vi.mock("../bridge", () => ({ execute: vi.fn() }));
+vi.mock("../bridge", () => ({ execute: vi.fn(), subscribeSessionMenu: vi.fn(() => () => undefined) }));
 
 const snapshot: Snapshot = {
   workspace: "/workspace/azem", sessionId: "session-1", provider: "chatgpt", model: "gpt-5.6-sol",

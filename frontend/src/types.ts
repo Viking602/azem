@@ -55,6 +55,9 @@ export interface Session {
   modelId: string;
   reasoning: string;
   agentMode: string;
+  pinned?: boolean;
+  archived?: boolean;
+  unread?: boolean;
   updatedAt: string;
 }
 

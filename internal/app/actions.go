@@ -41,6 +41,10 @@ const (
 	ActionNewSession             ActionKind = "new_session"
 	ActionListSessions           ActionKind = "list_sessions"
 	ActionResumeSession          ActionKind = "resume_session"
+	ActionRenameSession          ActionKind = "rename_session"
+	ActionPinSession             ActionKind = "pin_session"
+	ActionArchiveSession         ActionKind = "archive_session"
+	ActionMarkSessionUnread      ActionKind = "mark_session_unread"
 	ActionCompact                ActionKind = "compact"
 	ActionResolveApproval        ActionKind = "resolve_approval"
 	ActionSetApprovalMode        ActionKind = "set_approval_mode"
@@ -317,8 +321,38 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	case ActionNewSession:
 		return s.createSession(ctx, action.Target)
 	case ActionResumeSession:
-		return s.emitSession(ctx, action.Target)
+		if err := s.sessions.SetUIState(ctx, action.Target, "unread", false); err != nil {
+			return err
+		}
+		if err := s.emitSession(ctx, action.Target); err != nil {
+			return err
+		}
+		return s.emitSessionList(ctx)
 	case ActionListSessions:
+		return s.emitSessionList(ctx)
+	case ActionRenameSession:
+		if err := s.sessions.Rename(ctx, action.Target, action.Name); err != nil {
+			return err
+		}
+		return s.emitSessionList(ctx)
+	case ActionPinSession:
+		enabled, err := strconv.ParseBool(action.Decision)
+		if err != nil {
+			return fmt.Errorf("pin state must be true or false")
+		}
+		if err := s.sessions.SetUIState(ctx, action.Target, "pinned", enabled); err != nil {
+			return err
+		}
+		return s.emitSessionList(ctx)
+	case ActionArchiveSession:
+		if err := s.sessions.SetUIState(ctx, action.Target, "archived", true); err != nil {
+			return err
+		}
+		return s.emitSessionList(ctx)
+	case ActionMarkSessionUnread:
+		if err := s.sessions.SetUIState(ctx, action.Target, "unread", true); err != nil {
+			return err
+		}
 		return s.emitSessionList(ctx)
 	case ActionCompact:
 		if s.sessions == nil {
@@ -834,6 +868,28 @@ func (s *Service) createSession(ctx context.Context, title string) error {
 	s.mu.Unlock()
 	_ = s.emitContextProfile(ctx, id)
 	return nil
+}
+
+func (s *Service) ForkSession(ctx context.Context, sourceID string, activate bool) (string, error) {
+	if s.sessions == nil {
+		return "", fmt.Errorf("session store is unavailable")
+	}
+	id, err := randomID("session")
+	if err != nil {
+		return "", err
+	}
+	if err := s.sessions.Fork(ctx, sourceID, id); err != nil {
+		return "", err
+	}
+	if activate {
+		if err := s.emitSession(ctx, id); err != nil {
+			return "", err
+		}
+	}
+	if err := s.emitSessionList(ctx); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func (s *Service) emitSession(ctx context.Context, id string) error {

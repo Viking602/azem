@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +23,9 @@ type Session struct {
 	ModelID    string
 	Reasoning  string
 	AgentMode  string
+	Pinned     bool
+	Archived   bool
+	Unread     bool
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
@@ -296,6 +300,102 @@ func (s *Service) UpdatePreferences(ctx context.Context, id, providerID, modelID
 	if err != nil {
 		return fmt.Errorf("update session preferences: %w", err)
 	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("session %q not found", id)
+	}
+	return nil
+}
+
+func (s *Service) Rename(ctx context.Context, id, title string) error {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return fmt.Errorf("session title is required")
+	}
+	if len([]rune(title)) > 200 {
+		return fmt.Errorf("session title is too long")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET title=? WHERE id=?`, title, id)
+	if err != nil {
+		return fmt.Errorf("rename session: %w", err)
+	}
+	return requireOneSession(result, id)
+}
+
+func (s *Service) SetUIState(ctx context.Context, id, field string, enabled bool) error {
+	column := ""
+	switch field {
+	case "pinned", "archived", "unread":
+		column = field
+	default:
+		return fmt.Errorf("unsupported session UI field %q", field)
+	}
+	if _, err := s.LoadSession(ctx, id); err != nil {
+		return err
+	}
+	value := 0
+	if enabled {
+		value = 1
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO session_ui_state(session_id,`+column+`) VALUES(?,?)
+		ON CONFLICT(session_id) DO UPDATE SET `+column+`=excluded.`+column, id, value)
+	if err != nil {
+		return fmt.Errorf("update session %s: %w", field, err)
+	}
+	return nil
+}
+
+func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
+	if err := validateSessionForkIDs(sourceID, targetID); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().UnixNano()
+	result, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at)
+		SELECT ?,title,provider_id,model_id,reasoning,agent_mode,?,? FROM sessions WHERE id=?`, targetID, now, now, sourceID)
+	if err != nil {
+		return fmt.Errorf("fork session: %w", err)
+	}
+	if err := requireOneSession(result, sourceID); err != nil {
+		return err
+	}
+	copies := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{"projection", `INSERT INTO session_projections(session_id,last_run_id,blocks,updated_at,model_history,usage,checkpoint_generation,cache_epoch,cache_identity_hash)
+			SELECT ?,'',blocks,?,model_history,'{}',checkpoint_generation,0,'' FROM session_projections WHERE session_id=?`, []any{targetID, now, sourceID}},
+		{"blocks", `INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data)
+			SELECT ?,sequence,kind,run_id,agent_id,data FROM session_blocks WHERE session_id=?`, []any{targetID, sourceID}},
+		{"todo", `INSERT INTO session_todos(session_id,goal,revision,phases,updated_at)
+			SELECT ?,goal,revision,phases,? FROM session_todos WHERE session_id=?`, []any{targetID, now, sourceID}},
+		{"recap", `INSERT INTO recaps(session_id,anchor,covered_boundary,revision,goal,summary,open_items,updated_at)
+			SELECT ?,anchor,covered_boundary,revision,goal,summary,open_items,? FROM recaps WHERE session_id=?`, []any{targetID, now, sourceID}},
+	}
+	for _, copy := range copies {
+		if _, err := tx.ExecContext(ctx, copy.query, copy.args...); err != nil {
+			return fmt.Errorf("fork session %s: %w", copy.name, err)
+		}
+	}
+	return tx.Commit()
+}
+
+func validateSessionForkIDs(sourceID, targetID string) error {
+	if strings.TrimSpace(sourceID) == "" || strings.TrimSpace(targetID) == "" || sourceID == targetID {
+		return fmt.Errorf("source and target session IDs are required and must differ")
+	}
+	return nil
+}
+
+func requireOneSession(result sql.Result, id string) error {
 	changed, err := result.RowsAffected()
 	if err != nil {
 		return err
@@ -699,13 +799,8 @@ func firstSessionValue(values ...string) string {
 
 func (s *Service) List(ctx context.Context, limit int) ([]Session, error) {
 	queries := dbgen.New(s.db)
-	var rows []dbgen.Session
-	var err error
-	if limit > 0 {
-		rows, err = queries.ListSessionsLimited(ctx, int64(limit))
-	} else {
-		rows, err = queries.ListSessions(ctx)
-	}
+	// ponytail: session history is user-local; move pin ordering into SQL if lists grow into thousands.
+	rows, err := queries.ListSessions(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -713,5 +808,35 @@ func (s *Service) List(ctx context.Context, limit int) ([]Session, error) {
 	for _, row := range rows {
 		values = append(values, sessionFromDB(row))
 	}
+	states, err := s.sessionUIStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range values {
+		state := states[values[index].ID]
+		values[index].Pinned, values[index].Archived, values[index].Unread = state[0], state[1], state[2]
+	}
+	sort.SliceStable(values, func(left, right int) bool { return values[left].Pinned && !values[right].Pinned })
+	if limit > 0 && len(values) > limit {
+		values = values[:limit]
+	}
 	return values, nil
+}
+
+func (s *Service) sessionUIStates(ctx context.Context) (map[string][3]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT session_id,pinned,archived,unread FROM session_ui_state`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := make(map[string][3]bool)
+	for rows.Next() {
+		var id string
+		var pinned, archived, unread int
+		if err := rows.Scan(&id, &pinned, &archived, &unread); err != nil {
+			return nil, err
+		}
+		states[id] = [3]bool{pinned != 0, archived != 0, unread != 0}
+	}
+	return states, rows.Err()
 }

@@ -177,6 +177,10 @@ func (b *Bridge) Execute(request ActionRequest) error {
 	})
 }
 
+func (b *Bridge) ForkSession(sessionID string, activate bool) (string, error) {
+	return b.runtime.ForkSession(b.ctx, sessionID, activate)
+}
+
 func (b *Bridge) Close() { b.cancel() }
 
 func (b *Bridge) prime() {
@@ -234,6 +238,7 @@ func allowedAction(kind azemapp.ActionKind) bool {
 	switch kind {
 	case azemapp.ActionLogin, azemapp.ActionLogout,
 		azemapp.ActionNewSession, azemapp.ActionListSessions, azemapp.ActionResumeSession,
+		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionMarkSessionUnread,
 		azemapp.ActionCompact, azemapp.ActionResolveApproval, azemapp.ActionSetApprovalMode,
 		azemapp.ActionSetLanguage, azemapp.ActionReconcileAttempt,
 		azemapp.ActionInspectAgent, azemapp.ActionListAgentTypes, azemapp.ActionListPersonas,

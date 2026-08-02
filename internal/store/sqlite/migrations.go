@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 16
+const schemaVersion = 17
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -317,6 +317,12 @@ var migrations = []string{
 	);`,
 	`ALTER TABLE provider_requests ADD COLUMN cache_write_reported INTEGER NOT NULL DEFAULT 0;
 	UPDATE provider_requests SET cache_write_reported=1 WHERE cache_write_tokens<>0;`,
+	`CREATE TABLE session_ui_state (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+		pinned INTEGER NOT NULL DEFAULT 0,
+		archived INTEGER NOT NULL DEFAULT 0,
+		unread INTEGER NOT NULL DEFAULT 0
+	);`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
