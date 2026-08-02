@@ -25,7 +25,6 @@ export default function App() {
   const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
   const theme = useRuntimeStore((state) => state.theme);
   const [sidebarWidth, setSidebarWidth] = useState(238);
-  const [inspectorWidth, setInspectorWidth] = useState(304);
   const queue = useRef<RuntimeEvent[]>([]);
   const frame = useRef(0);
 
@@ -98,19 +97,14 @@ export default function App() {
   const hasContext = blocks.length > 0 || running;
   const showInspector = view === "thread" && hasContext && inspectorOpen;
   return (
-    <div className="desktop-shell" data-runtime={String(isDesktopRuntime())} data-platform={navigator.platform} style={{ "--sidebar-width": `${sidebarWidth}px`, "--inspector-width": `${inspectorWidth}px` } as React.CSSProperties}>
-      <div className={`workspace-grid ${showInspector ? "with-inspector" : ""}`}>
+    <div className="desktop-shell" data-runtime={String(isDesktopRuntime())} data-platform={navigator.platform} style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}>
+      <div className="workspace-grid">
         <Sidebar />
-        <ResizeHandle side="left" value={sidebarWidth} setValue={setSidebarWidth} min={210} max={320} />
+        <ResizeHandle value={sidebarWidth} setValue={setSidebarWidth} min={210} max={320} />
         <main className="workspace-main">
           {view === "thread" ? <ThreadSurface /> : <Pages view={view} />}
         </main>
-        {showInspector && (
-          <>
-            <ResizeHandle side="right" value={inspectorWidth} setValue={setInspectorWidth} min={280} max={420} />
-            <Inspector />
-          </>
-        )}
+        {showInspector && <Inspector />}
       </div>
       {settingsOpen && <SettingsDialog />}
       {commandOpen && <CommandPalette />}
@@ -118,14 +112,14 @@ export default function App() {
   );
 }
 
-function ResizeHandle({ side, value, setValue, min, max }: { side: "left" | "right"; value: number; setValue: (value: number) => void; min: number; max: number }) {
+function ResizeHandle({ value, setValue, min, max }: { value: number; setValue: (value: number) => void; min: number; max: number }) {
   const onPointerDown = (event: React.PointerEvent) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     const start = event.clientX;
     const initial = value;
     const move = (moveEvent: PointerEvent) => {
       const delta = moveEvent.clientX - start;
-      setValue(Math.min(max, Math.max(min, initial + (side === "left" ? delta : -delta))));
+      setValue(Math.min(max, Math.max(min, initial + delta)));
     };
     const stop = () => {
       window.removeEventListener("pointermove", move);
@@ -134,5 +128,5 @@ function ResizeHandle({ side, value, setValue, min, max }: { side: "left" | "rig
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop);
   };
-  return <div className={`resize-handle resize-${side}`} onPointerDown={onPointerDown} />;
+  return <div className="resize-handle resize-left" onPointerDown={onPointerDown} />;
 }
