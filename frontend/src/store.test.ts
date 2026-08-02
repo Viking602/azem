@@ -26,6 +26,17 @@ function state(): RuntimeData {
 }
 
 describe("runtime event projection", () => {
+  it("keeps bootstrap events emitted before initialise returns", () => {
+    useRuntimeStore.setState(state());
+    useRuntimeStore.getState().hydrate({ ...snapshot, sequence: 6 });
+    useRuntimeStore.getState().applyEvents([{
+      sequence: 4,
+      kind: "model_routes",
+      modelRoutes: [{ Scope: "plan", Role: "", Label: "Plan", Route: {} }],
+    }]);
+    expect(useRuntimeStore.getState().modelRoutes).toHaveLength(1);
+  });
+
   it("coalesces streaming deltas and ignores replayed sequence numbers", () => {
     const projected = reduceEvents(state(), [
       { sequence: 1, kind: "run_started", runId: "r1" },

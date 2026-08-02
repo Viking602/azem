@@ -354,7 +354,6 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
     snapshot,
     currentSessionId: snapshot.sessionId,
     approvalMode: snapshot.approvalMode,
-    lastSequence: snapshot.sequence,
   };
   const mode = new URLSearchParams(location.search).get("demo") ?? "running";
   const session: Session = {
