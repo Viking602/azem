@@ -96,22 +96,23 @@ type Event struct {
 }
 
 type Bridge struct {
-	runtime   *azemapp.Service
-	cfg       config.Config
-	workspace string
-	sessionID string
-	emit      EventEmitter
-	ctx       context.Context
-	cancel    context.CancelFunc
-	start     sync.Once
-	sequence  atomic.Uint64
+	runtime     *azemapp.Service
+	cfg         config.Config
+	workspace   string
+	sessionID   string
+	openProject func(string) error
+	emit        EventEmitter
+	ctx         context.Context
+	cancel      context.CancelFunc
+	start       sync.Once
+	sequence    atomic.Uint64
 }
 
-func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventEmitter) *Bridge {
+func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventEmitter, openProject func(string) error) *Bridge {
 	ctx, cancel := context.WithCancel(parent)
 	return &Bridge{
 		runtime: boot.Service, cfg: boot.Config, workspace: boot.Paths.Workspace,
-		sessionID: boot.SessionID, emit: emit, ctx: ctx, cancel: cancel,
+		sessionID: boot.SessionID, openProject: openProject, emit: emit, ctx: ctx, cancel: cancel,
 	}
 }
 

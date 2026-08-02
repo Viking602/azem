@@ -1,12 +1,15 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { execute } from "../bridge";
+import { execute, openProject, selectProjectFolder } from "../bridge";
 import { useRuntimeStore } from "../store";
 import type { Session, Snapshot } from "../types";
 import Sidebar from "./Sidebar";
 
-vi.mock("../bridge", () => ({ execute: vi.fn(), subscribeSessionMenu: vi.fn(() => () => undefined) }));
+vi.mock("../bridge", () => ({
+  createProject: vi.fn(), execute: vi.fn(), openProject: vi.fn(), selectProjectFolder: vi.fn(),
+  subscribeSessionMenu: vi.fn(() => () => undefined),
+}));
 
 const snapshot: Snapshot = {
   workspace: "/workspace/azem", sessionId: "session-1", provider: "chatgpt", model: "gpt-5.6-sol",
@@ -34,6 +37,20 @@ describe("Sidebar project sessions", () => {
 
     await act(async () => container.querySelector<HTMLButtonElement>('.project-action[aria-label="新会话"]')!.click());
     expect(execute).toHaveBeenCalledWith({ kind: "new_session", target: "", sessionId: "session-1" });
+    await act(async () => root.unmount());
+  });
+
+  it("opens a selected project folder in a new Azem window", async () => {
+    useRuntimeStore.setState({ snapshot, sessions: [], currentSessionId: "session-1", view: "thread" });
+    vi.mocked(selectProjectFolder).mockResolvedValueOnce("/workspace/next");
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(<Sidebar />));
+    await act(async () => container.querySelector<HTMLButtonElement>(".project-add-button")!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('.project-add-menu [role="menuitem"]')!.click());
+
+    expect(openProject).toHaveBeenCalledWith("/workspace/next");
     await act(async () => root.unmount());
   });
 });

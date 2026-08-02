@@ -1,4 +1,4 @@
-import { Call, Events } from "@wailsio/runtime";
+import { Call, Dialogs, Events } from "@wailsio/runtime";
 import type { ActionRequest, Attachment, RuntimeEvent, Snapshot, TurnRequest } from "./types";
 
 const EVENT_NAME = "azem:event";
@@ -36,6 +36,29 @@ export async function startTurn(request: TurnRequest): Promise<string> {
 export async function execute(request: ActionRequest): Promise<void> {
   if (!isDesktopRuntime()) return;
   await Call.ByName(`${bridgeName}.Execute`, request);
+}
+
+export async function selectProjectFolder(title: string, buttonText: string): Promise<string> {
+  if (!isDesktopRuntime()) return "";
+  return Dialogs.OpenFile({
+    AllowsMultipleSelection: false,
+    ButtonText: buttonText,
+    CanChooseDirectories: true,
+    CanChooseFiles: false,
+    CanCreateDirectories: true,
+    ResolvesAliases: true,
+    Title: title,
+  });
+}
+
+export async function createProject(name: string): Promise<string> {
+  if (!isDesktopRuntime()) return "";
+  return Call.ByName(`${bridgeName}.CreateProject`, name) as Promise<string>;
+}
+
+export async function openProject(path: string): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await Call.ByName(`${bridgeName}.OpenProject`, path);
 }
 
 export async function cancelActive(includeChildren = false): Promise<boolean> {

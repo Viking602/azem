@@ -1,9 +1,10 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import {
-  Bot, Box, CircleDotDashed, Command, Folder, FolderOpen, History,
+  Bot, Box, CircleDotDashed, Command, Folder, FolderOpen, FolderPlus, History,
   MoreHorizontal, Plus, Search, Settings, SquarePen,
 } from "lucide-react";
-import { execute, subscribeSessionMenu } from "../bridge";
+import { createProject, execute, openProject, selectProjectFolder, subscribeSessionMenu } from "../bridge";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 import type { View } from "../types";
@@ -75,7 +76,10 @@ export default function Sidebar() {
         {nav.map((item) => <button key={item.view} className={view === item.view ? "active" : ""} onClick={() => setView(item.view)}><item.icon size={15} />{item.label}</button>)}
       </nav>
       <section className="project-tree">
-        <div className="sidebar-section-title">{t("projects")}</div>
+        <div className="sidebar-section-header">
+          <div className="sidebar-section-title">{t("projects")}</div>
+          <ProjectLauncher language={snapshot.language} setError={setError} />
+        </div>
         <div className="project-heading">
           <button className="project-toggle" aria-expanded={projectOpen} onClick={() => setProjectOpen((open) => !open)}>
             {projectOpen ? <FolderOpen size={16} /> : <Folder size={16} />}<span>{project}</span>
@@ -109,4 +113,88 @@ export default function Sidebar() {
 
 function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
+}
+
+function ProjectLauncher({ language, setError }: { language: "en" | "zh-CN"; setError: (message: string) => void }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const t = translator(language);
+
+  useEffect(() => {
+    if (!menuOpen && !creating) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (menuOpen && root.current && !root.current.contains(event.target as Node)) setMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) {
+        setMenuOpen(false);
+        setCreating(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [busy, creating, menuOpen]);
+
+  const chooseFolder = async () => {
+    setMenuOpen(false);
+    setBusy(true);
+    try {
+      const path = await selectProjectFolder(t("chooseProjectFolder"), t("openProject"));
+      if (path) await openProject(path);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitProject = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const path = await createProject(name);
+      await openProject(path);
+      setCreating(false);
+      setName("");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <div className="project-launcher" ref={root}>
+    <button className="project-add-button" aria-label={t("addProject")} aria-expanded={menuOpen} aria-haspopup="menu" title={t("addProject")}
+      disabled={busy} onClick={() => setMenuOpen((open) => !open)}><Plus size={14} /></button>
+    {menuOpen && <div className="project-add-menu" role="menu">
+      <button role="menuitem" onClick={() => void chooseFolder()}>
+        <FolderOpen size={16} /><span><strong>{t("chooseProjectFolder")}</strong><small>{t("chooseProjectFolderHint")}</small></span>
+      </button>
+      <button role="menuitem" onClick={() => { setMenuOpen(false); setCreating(true); }}>
+        <FolderPlus size={16} /><span><strong>{t("newProject")}</strong><small>{t("newProjectHint")}</small></span>
+      </button>
+    </div>}
+    {creating && createPortal(<div className="project-create-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !busy) setCreating(false);
+    }}>
+      <form className="project-create-dialog" role="dialog" aria-modal="true" aria-labelledby="project-create-title" onSubmit={submitProject}>
+        <h2 id="project-create-title">{t("newProject")}</h2>
+        <p>{t("newProjectLocation")}</p>
+        <label htmlFor="project-name">{t("projectName")}</label>
+        <input id="project-name" autoFocus maxLength={100} required value={name} placeholder={t("projectNamePlaceholder")}
+          onChange={(event) => setName(event.target.value)} />
+        <footer>
+          <button type="button" className="small-button" disabled={busy} onClick={() => setCreating(false)}>{t("cancel")}</button>
+          <button type="submit" className="primary-button" disabled={busy || !name.trim()}>{t("createProject")}</button>
+        </footer>
+      </form>
+    </div>, document.body)}
+  </div>;
 }

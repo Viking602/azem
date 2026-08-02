@@ -76,7 +76,9 @@ func run() error {
 	}
 	options.SingleInstance = sessionSingleInstance(newWindow, &mainWindow, &handleDeepLink)
 	desktopApp := application.New(options)
-	bridge = desktop.NewBridge(ctx, boot, desktopApp.Event.Emit)
+	bridge = desktop.NewBridge(ctx, boot, desktopApp.Event.Emit, func(workspace string) error {
+		return launchSessionWindow(configFile, "", workspace, true)
+	})
 	desktopApp.RegisterService(application.NewService(bridge))
 	mainWindow = desktopApp.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name: "main", Title: "Azem", Width: 1440, Height: 920,

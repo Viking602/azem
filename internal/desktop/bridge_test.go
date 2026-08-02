@@ -19,7 +19,7 @@ func TestBridgeInitialiseAndEventProjection(t *testing.T) {
 	}, func(_ string, data ...any) bool {
 		events <- data[0].(Event)
 		return false
-	})
+	}, nil)
 	t.Cleanup(bridge.Close)
 
 	snapshot := bridge.Initialise()

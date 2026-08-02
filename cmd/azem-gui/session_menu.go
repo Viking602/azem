@@ -180,7 +180,10 @@ func launchSessionWindow(configFile, sessionID, workspace string, forceWorkspace
 	if err != nil {
 		return fmt.Errorf("locate Azem executable: %w", err)
 	}
-	arguments := []string{"--new-window", "--session", sessionID}
+	arguments := []string{"--new-window"}
+	if strings.TrimSpace(sessionID) != "" {
+		arguments = append(arguments, "--session", sessionID)
+	}
 	if configFile != "" {
 		absoluteConfig, err := filepath.Abs(configFile)
 		if err != nil {

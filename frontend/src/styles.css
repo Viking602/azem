@@ -80,8 +80,24 @@ pre, code, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Men
 .primary-nav button, .sidebar-footer > button { min-height: 30px; display: flex; align-items: center; gap: 9px; padding: 0 8px; border-radius: 8px; text-align: left; color: var(--muted); }
 .primary-nav button:hover, .primary-nav button.active, .sidebar-footer > button:hover { background: var(--hover); color: var(--ink); }
 kbd { margin-left: auto; color: var(--faint); font-size: 10px; font-weight: 400; }
-.project-tree { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.sidebar-section-title { margin: 17px 8px 5px; color: var(--faint); font-size: 10px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
+.project-tree { min-height: 0; display: flex; flex-direction: column; overflow: visible; }
+.sidebar-section-header { position: relative; z-index: 12; min-height: 35px; display: flex; align-items: flex-end; }
+.sidebar-section-title { flex: 1; margin: 17px 8px 5px; color: var(--faint); font-size: 10px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
+.project-launcher { position: relative; margin: 0 4px 2px 0; }
+.project-add-button { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 7px; color: var(--faint); }
+.project-add-button:hover, .project-add-button[aria-expanded="true"] { background: var(--hover); color: var(--ink); }
+.project-add-menu { position: absolute; z-index: 20; top: calc(100% + 4px); right: 0; width: 220px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--paper); box-shadow: var(--shadow-float); }
+.project-add-menu button { width: 100%; min-height: 46px; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 7px; padding: 5px 8px; border-radius: 8px; color: var(--muted); text-align: left; }
+.project-add-menu button:hover, .project-add-menu button:focus-visible { background: var(--paper-muted); color: var(--ink); }
+.project-add-menu span, .project-add-menu strong, .project-add-menu small { min-width: 0; display: block; }
+.project-add-menu strong { color: var(--ink); font-size: 11px; font-weight: 620; }
+.project-add-menu small { margin-top: 2px; overflow: hidden; color: var(--faint); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.project-create-backdrop { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(24 24 20 / 18%); backdrop-filter: blur(2px); }
+.project-create-dialog { width: min(360px, calc(100vw - 48px)); padding: 19px; border: 1px solid var(--line-strong); border-radius: 15px; background: var(--paper); box-shadow: var(--shadow-float); }
+.project-create-dialog h2 { margin: 0; font-size: 16px; letter-spacing: -.02em; }.project-create-dialog p { margin: 5px 0 17px; color: var(--muted); font-size: 11px; }
+.project-create-dialog label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 10px; font-weight: 620; }
+.project-create-dialog input { width: 100%; height: 34px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 9px; outline: 0; background: var(--paper); }
+.project-create-dialog footer { display: flex; justify-content: flex-end; gap: 7px; margin-top: 17px; }
 .project-heading { min-height: 34px; display: flex; align-items: center; width: 100%; gap: 2px; padding: 0 4px 0 8px; border-radius: 9px; }
 .project-heading:hover, .project-heading:focus-within { background: var(--hover); }
 .project-toggle { min-width: 0; min-height: 34px; flex: 1; display: flex; align-items: center; gap: 9px; padding: 0; text-align: left; font-weight: 630; }
