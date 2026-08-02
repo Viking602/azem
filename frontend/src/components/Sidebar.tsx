@@ -1,6 +1,6 @@
 import {
   Bot, Box, ChevronDown, CircleDotDashed, Command, FolderGit2, History,
-  Plus, RotateCcw, Search, Settings, Sparkles,
+  Plus, RotateCcw, Search, Settings,
 } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
@@ -61,7 +61,6 @@ export default function Sidebar() {
         </div>
       </section>
       <div className="sidebar-footer">
-        <div className="runtime-summary"><Sparkles size={13} /><span>{snapshot.model}</span><small>{snapshot.reasoning}</small></div>
         <button onClick={() => setSettingsOpen(true)}><Settings size={15} />{t("settings")}<kbd>⌘,</kbd></button>
       </div>
     </aside>
