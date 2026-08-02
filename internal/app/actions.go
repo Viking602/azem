@@ -486,7 +486,17 @@ func (s *Service) emitGitBranches(ctx context.Context, state string) error {
 	if err != nil {
 		return err
 	}
-	s.emitGitBranchSnapshot(ctx, state, branches, current, dirty)
+	additions, deletions := 0, 0
+	if dirty {
+		s.mu.Lock()
+		root := s.cfg.Workspace.Root
+		s.mu.Unlock()
+		additions, deletions, err = gitWorkspaceLineChanges(ctx, root)
+		if err != nil {
+			return err
+		}
+	}
+	s.emitGitBranchSnapshot(ctx, state, branches, current, dirty, additions, deletions)
 	return nil
 }
 
@@ -520,6 +530,13 @@ func (s *Service) switchGitBranch(ctx context.Context, target string, confirmDir
 	if err != nil {
 		return err
 	}
+	additions, deletions := 0, 0
+	if dirty {
+		additions, deletions, err = gitWorkspaceLineChanges(ctx, root)
+		if err != nil {
+			return err
+		}
+	}
 	found := false
 	for _, branch := range branches {
 		if branch.Name == target {
@@ -531,11 +548,11 @@ func (s *Service) switchGitBranch(ctx context.Context, target string, confirmDir
 		return fmt.Errorf("unknown local git branch %q", target)
 	}
 	if target == current {
-		s.emitGitBranchSnapshot(ctx, "switched", branches, current, dirty)
+		s.emitGitBranchSnapshot(ctx, "switched", branches, current, dirty, additions, deletions)
 		return nil
 	}
 	if dirty && !confirmDirty {
-		s.emitGitBranchSnapshot(ctx, "dirty_confirmation_required", branches, current, true)
+		s.emitGitBranchSnapshot(ctx, "dirty_confirmation_required", branches, current, true, additions, deletions)
 		return ErrDirtyWorkspace
 	}
 	if _, err := gitOutputLimited(ctx, root, 64*1024, "switch", "--no-guess", "--", target); err != nil {
@@ -595,10 +612,11 @@ func gitBranchSnapshot(ctx context.Context, root string) ([]GitBranchEntry, stri
 	return branches, current, len(status) > 0, nil
 }
 
-func (s *Service) emitGitBranchSnapshot(ctx context.Context, state string, branches []GitBranchEntry, current string, dirty bool) {
+func (s *Service) emitGitBranchSnapshot(ctx context.Context, state string, branches []GitBranchEntry, current string, dirty bool, additions, deletions int) {
 	s.emit(ctx, Event{
 		Kind: EventGitBranches, State: state, Text: current,
 		GitBranches: branches, WorkspaceDirty: dirty,
+		Data: map[string]string{"additions": strconv.Itoa(additions), "deletions": strconv.Itoa(deletions)},
 	})
 }
 

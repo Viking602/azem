@@ -45,6 +45,8 @@ export interface RuntimeData {
   activity: string;
   approvalMode: string;
   workspaceDirty: boolean;
+  workspaceAdditions: number;
+  workspaceDeletions: number;
   lastSequence: number;
   error: string;
   view: View;
@@ -103,6 +105,8 @@ const initialData: RuntimeData = {
   activity: "",
   approvalMode: "prompt",
   workspaceDirty: false,
+  workspaceAdditions: 0,
+  workspaceDeletions: 0,
   lastSequence: 0,
   error: "",
   view: "thread",
@@ -283,6 +287,8 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "git_branches":
       next.branches = (event.gitBranches ?? []).map(normalizeBranch);
       next.workspaceDirty = Boolean(event.workspaceDirty);
+      next.workspaceAdditions = numberValue(data.additions, 0);
+      next.workspaceDeletions = numberValue(data.deletions, 0);
       break;
     case "recovery_state":
       if (data.items) next.recovery = parseArray(data.items);

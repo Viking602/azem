@@ -15,6 +15,8 @@ export default function Inspector() {
   const setOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const blocks = useRuntimeStore((state) => state.blocks);
   const branches = useRuntimeStore((state) => state.branches);
+  const workspaceAdditions = useRuntimeStore((state) => state.workspaceAdditions);
+  const workspaceDeletions = useRuntimeStore((state) => state.workspaceDeletions);
   const agents = useRuntimeStore((state) => state.agents);
   const context = useRuntimeStore((state) => state.contextProfile);
   const todo = useRuntimeStore((state) => state.todo);
@@ -39,7 +41,7 @@ export default function Inspector() {
       <div className="inspector-scroll">
         {tab === "environment" && <>
           <section className="inspector-card">
-            <InspectorRow icon={FileDiff} label={t("changes")}><span className="plus">+{sum(diffs, "additions")}</span><span className="minus">−{sum(diffs, "deletions")}</span></InspectorRow>
+            <InspectorRow icon={FileDiff} label={t("changes")}>{workspaceAdditions + workspaceDeletions > 0 && <><span className="plus">+{workspaceAdditions}</span><span className="minus">−{workspaceDeletions}</span></>}</InspectorRow>
             <InspectorRow icon={FolderGit2} label={basename(snapshot.workspace)}><span>{t("local")}</span></InspectorRow>
             <InspectorRow icon={GitBranch} label={t("branch")}><select value={branches.find((branch) => branch.current)?.name || ""} onChange={(event) => action("switch_git_branch", event.target.value)}>{branches.map((branch) => <option key={branch.name}>{branch.name}</option>)}</select></InspectorRow>
             <InspectorRow icon={CheckCircle2} label={t("runtimeHealthy")}><span className="status-dot success" /></InspectorRow>
@@ -71,10 +73,6 @@ function InspectorRow({ icon: Icon, label, children }: { icon: typeof Wrench; la
 
 function Empty({ icon: Icon, text }: { icon: typeof Square; text: string }) {
   return <div className="inspector-empty"><Icon size={18} /><span>{text}</span></div>;
-}
-
-function sum(blocks: ReturnType<typeof useRuntimeStore.getState>["blocks"], key: "additions" | "deletions") {
-  return blocks.reduce((total, block) => total + Number(block.data?.[key] || 0), 0);
 }
 
 function basename(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) || "workspace"; }

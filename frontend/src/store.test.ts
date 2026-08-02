@@ -1,6 +1,9 @@
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { describe, expect, it } from "vitest";
 import { reduceEvents, type RuntimeData, useRuntimeStore } from "./store";
 import type { Snapshot } from "./types";
+import Inspector from "./components/Inspector";
 import { approvalPresentation, formatDuration } from "./components/ThreadSurface";
 import { toolDisplayName } from "./i18n";
 
@@ -15,6 +18,7 @@ function state(): RuntimeData {
     snapshot, sessions: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
     skills: [], branches: [], modelRoutes: [], modelsByProvider: {}, contextProfile: null, todo: null, recovery: [],
     runId: "", running: false, runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
+    workspaceAdditions: 0, workspaceDeletions: 0,
     lastSequence: 0, error: "", view: "thread", inspectorTab: "environment", inspectorOpen: true,
     settingsOpen: false, commandOpen: false, planMode: false, attachments: [], theme: "system",
   };
@@ -110,5 +114,25 @@ describe("runtime event projection", () => {
       { id: "gpt-5.6-sol", name: "5.6 Sol", reasoningLevels: ["medium", "high"], defaultReasoning: "high" },
       { id: "gpt-5.6-terra", name: "5.6 Terra", reasoningLevels: ["low", "medium"], defaultReasoning: "" },
     ]);
+  });
+
+  it("projects current workspace line changes from git status events", async () => {
+    const changed = reduceEvents(state(), [{
+      sequence: 1, kind: "git_branches", workspaceDirty: true,
+      data: { additions: "21", deletions: "4" },
+    }]);
+    expect(changed).toMatchObject({ workspaceDirty: true, workspaceAdditions: 21, workspaceDeletions: 4 });
+    useRuntimeStore.setState(changed);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(Inspector)));
+    expect(container.textContent).toContain("+21");
+
+    const clean = reduceEvents(changed, [{ sequence: 2, kind: "git_branches", workspaceDirty: false, data: { additions: "0", deletions: "0" } }]);
+    expect(clean).toMatchObject({ workspaceDirty: false, workspaceAdditions: 0, workspaceDeletions: 0 });
+    await act(async () => useRuntimeStore.setState(clean));
+    expect(container.textContent).not.toContain("+0");
+    expect(container.textContent).not.toContain("−0");
+    await act(async () => root.unmount());
   });
 });

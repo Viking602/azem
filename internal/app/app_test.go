@@ -1246,6 +1246,9 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	if listed.Kind != EventGitBranches || listed.State != "listed" || listed.Text != "main" || listed.WorkspaceDirty {
 		t.Fatalf("listed branch event = %#v", listed)
 	}
+	if listed.Data["additions"] != "0" || listed.Data["deletions"] != "0" {
+		t.Fatalf("clean workspace line changes = %#v", listed.Data)
+	}
 	if got := []GitBranchEntry{{Name: "feature"}, {Name: "main", Current: true}}; !reflect.DeepEqual(listed.GitBranches, got) {
 		t.Fatalf("branches = %#v, want %#v", listed.GitBranches, got)
 	}
@@ -1258,6 +1261,9 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	if err := os.WriteFile(tracked, []byte("dirty\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "untracked.txt"), []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	err = service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "feature"})
 	if !errors.Is(err, ErrDirtyWorkspace) {
 		t.Fatalf("dirty switch error = %v", err)
@@ -1268,6 +1274,9 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	}
 	if blocked.Kind != EventGitBranches || blocked.State != "dirty_confirmation_required" || !blocked.WorkspaceDirty || blocked.Text != "main" {
 		t.Fatalf("dirty branch event = %#v", blocked)
+	}
+	if blocked.Data["additions"] != "3" || blocked.Data["deletions"] != "1" {
+		t.Fatalf("dirty workspace line changes = %#v", blocked.Data)
 	}
 
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "feature", Decision: "confirm_dirty"}); err != nil {

@@ -30,6 +30,11 @@ export default function App() {
   const frame = useRef(0);
 
   useEffect(() => {
+    let gitRefreshTimer = 0;
+    const refreshGit = () => {
+      window.clearTimeout(gitRefreshTimer);
+      gitRefreshTimer = window.setTimeout(() => void execute({ kind: "list_git_branches" }).catch(() => undefined), 120);
+    };
     const flush = () => {
       frame.current = 0;
       const events = queue.current.splice(0);
@@ -38,7 +43,11 @@ export default function App() {
     const unsubscribe = subscribe((event) => {
       queue.current.push(event);
       if (!frame.current) frame.current = requestAnimationFrame(flush);
+      const tool = event.data?.name ?? "";
+      if (["run_finished", "run_failed", "run_cancelled"].includes(event.kind) ||
+          (event.kind === "tool_finished" && ["coding.edit_hashline", "coding.write_file", "coding.gofmt"].includes(tool))) refreshGit();
     });
+    window.addEventListener("focus", refreshGit);
     initialise()
       .then(async (value) => {
         hydrate(value, !isDesktopRuntime());
@@ -49,6 +58,8 @@ export default function App() {
     return () => {
       unsubscribe();
       if (frame.current) cancelAnimationFrame(frame.current);
+      window.clearTimeout(gitRefreshTimer);
+      window.removeEventListener("focus", refreshGit);
     };
   }, [applyEvents, hydrate, setError]);
 
