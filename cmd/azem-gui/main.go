@@ -54,10 +54,20 @@ func run() error {
 	}
 
 	var bridge *desktop.Bridge
+	var mainWindow *application.WebviewWindow
 	desktopApp := application.New(application.Options{
 		Name: "Azem", Description: "Project-first agent workspace",
 		Assets: application.AssetOptions{Handler: application.AssetFileServerFS(azemfrontend.Assets)},
 		Mac:    application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
+		SingleInstance: &application.SingleInstanceOptions{
+			UniqueID: "com.viking602.azem",
+			OnSecondInstanceLaunch: func(application.SecondInstanceData) {
+				if mainWindow != nil {
+					mainWindow.Restore()
+					mainWindow.Focus()
+				}
+			},
+		},
 		OnShutdown: func() {
 			if bridge != nil {
 				bridge.Close()
@@ -70,7 +80,7 @@ func run() error {
 	})
 	bridge = desktop.NewBridge(ctx, boot, desktopApp.Event.Emit)
 	desktopApp.RegisterService(application.NewService(bridge))
-	desktopApp.Window.NewWithOptions(application.WebviewWindowOptions{
+	mainWindow = desktopApp.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name: "main", Title: "Azem", Width: 1440, Height: 920,
 		MinWidth: 880, MinHeight: 640, URL: "/",
 		BackgroundColour: application.NewRGB(245, 245, 243),
