@@ -47,7 +47,7 @@ To build the Wails desktop app, install [Bun](https://bun.sh/) and run:
 
 ```bash
 make gui
-./azem-gui
+open dist/Azem.app
 ```
 
 The desktop app and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. The React UI receives a bounded event projection; it does not expose arbitrary shell or filesystem bindings.

@@ -13,7 +13,13 @@ frontend:
 	cd frontend && bun install --frozen-lockfile && bun run build
 
 gui: frontend
+ifeq ($(shell uname -s),Darwin)
+	mkdir -p dist/Azem.app/Contents/MacOS
+	cp cmd/azem-gui/Info.plist dist/Azem.app/Contents/Info.plist
+	go build -ldflags "$(LDFLAGS)" -o dist/Azem.app/Contents/MacOS/Azem ./cmd/azem-gui
+else
 	go build -ldflags "$(LDFLAGS)" -o azem-gui ./cmd/azem-gui
+endif
 
 test:
 	go test ./...
