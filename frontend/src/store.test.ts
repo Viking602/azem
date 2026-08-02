@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { reduceEvents, type RuntimeData, useRuntimeStore } from "./store";
 import type { Snapshot } from "./types";
 import { approvalPresentation, formatDuration } from "./components/ThreadSurface";
+import { toolDisplayName } from "./i18n";
 
 const snapshot: Snapshot = {
   workspace: "/tmp/azem", sessionId: "s1", provider: "chatgpt", model: "gpt-5.6-sol",
@@ -62,8 +63,14 @@ describe("runtime event projection", () => {
 
   it("builds approval UI fields without exposing the structured payload", () => {
     const details = approvalPresentation({ id: "a1", kind: "approval", content: "{\"command\":\"secret raw payload\"}", data: { tool: "coding.shell", target: "git status --short", effect: "external_side_effect", risk: "high" } }, "zh-CN");
-    expect(details).toMatchObject({ tool: "coding.shell", target: "git status --short", riskLabel: "高风险", description: "此操作可能影响工作区之外的系统。" });
+    expect(details).toMatchObject({ tool: "运行命令", target: "git status --short", riskLabel: "高风险", description: "此操作可能影响工作区之外的系统。" });
     expect(JSON.stringify(details)).not.toContain("secret raw payload");
+  });
+
+  it("uses the same localized tool names as the TUI", () => {
+    expect(toolDisplayName("coding.shell", "zh-CN")).toBe("运行命令");
+    expect(toolDisplayName("coding.git_diff", "en")).toBe("View Git Diff");
+    expect(toolDisplayName("custom.tool", "zh-CN")).toBe("custom.tool");
   });
 
   it("formats elapsed time through hours without dropping seconds", () => {

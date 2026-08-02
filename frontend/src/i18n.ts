@@ -21,6 +21,9 @@ const messages = {
     approvalWrite: "此操作将修改工作区内容。", approvalExternal: "此操作可能影响工作区之外的系统。",
     approvalReadOnly: "此操作将读取受保护内容。", approvalConfirm: "此操作需要你的确认。", approveSession: "本会话允许",
     riskLow: "低风险", riskMedium: "中风险", riskHigh: "高风险",
+    toolGeneric: "调用工具", toolReadFile: "读取文件", toolReadArtifact: "读取工件", toolWriteFile: "写入文件", toolEditFile: "编辑文件",
+    toolSearch: "搜索代码", toolListFiles: "列出文件", toolShell: "运行命令", toolGoTest: "运行 Go 测试", toolGofmt: "格式化 Go 代码",
+    toolGitDiff: "查看 Git 差异", toolActivateSkill: "加载技能", toolSpawn: "启动子代理", toolGetSubagentOutput: "获取子代理输出", toolStopSubagent: "停止子代理",
   },
   en: {
     newSession: "New thread", search: "Search", runs: "Runs", agents: "Agents", extensions: "Extensions",
@@ -44,11 +47,26 @@ const messages = {
     approvalWrite: "This operation will modify workspace content.", approvalExternal: "This operation may affect systems outside the workspace.",
     approvalReadOnly: "This operation will read protected content.", approvalConfirm: "This operation requires your confirmation.", approveSession: "Allow for session",
     riskLow: "Low risk", riskMedium: "Medium risk", riskHigh: "High risk",
+    toolGeneric: "Use tool", toolReadFile: "Read File", toolReadArtifact: "Read Artifact", toolWriteFile: "Write File", toolEditFile: "Edit File",
+    toolSearch: "Search Code", toolListFiles: "List Files", toolShell: "Run Command", toolGoTest: "Run Go Tests", toolGofmt: "Format Go Code",
+    toolGitDiff: "View Git Diff", toolActivateSkill: "Load Skill", toolSpawn: "Start Subagent", toolGetSubagentOutput: "Get Subagent Output", toolStopSubagent: "Stop Subagent",
   },
 } as const;
 
 export type MessageKey = keyof (typeof messages)["zh-CN"];
 
+const toolNameKeys: Record<string, MessageKey> = {
+  "coding.read_file": "toolReadFile", "context.read_artifact": "toolReadArtifact", "coding.write_file": "toolWriteFile", "coding.edit_hashline": "toolEditFile",
+  "coding.search": "toolSearch", "coding.list_files": "toolListFiles", "coding.shell": "toolShell", "coding.go_test": "toolGoTest",
+  "coding.gofmt": "toolGofmt", "coding.git_diff": "toolGitDiff", hydaelyn_activate_skill: "toolActivateSkill",
+  "subagent.spawn": "toolSpawn", "subagent.get_output": "toolGetSubagentOutput", "subagent.kill": "toolStopSubagent",
+};
+
 export function translator(language: "en" | "zh-CN") {
   return (key: MessageKey) => messages[language][key] ?? messages["zh-CN"][key];
+}
+
+export function toolDisplayName(name: string, language: "en" | "zh-CN") {
+  const key = toolNameKeys[name];
+  return key ? translator(language)(key) : name;
 }

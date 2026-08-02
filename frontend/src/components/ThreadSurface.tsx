@@ -7,7 +7,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cancelActive, execute, guide, importAttachment, startTurn } from "../bridge";
-import { translator } from "../i18n";
+import { toolDisplayName, translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 import type { Block, Snapshot } from "../types";
 
@@ -109,7 +109,7 @@ export default function ThreadSurface() {
             setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 72);
           }}>
             <div className="transcript">
-              {blocks.map((block) => <TimelineBlock key={block.id} block={block} />)}
+              {blocks.map((block) => <TimelineBlock key={block.id} block={block} language={snapshot.language} />)}
               {running && <div className="run-status"><LoaderCircle className="spin" size={15} /><span>{activityLabel(activity, snapshot.language)}</span><time>{elapsed}</time></div>}
               {error && <div className="inline-error" role="alert">{error}</div>}
             </div>
@@ -215,11 +215,11 @@ function ModelControls({ running, models, selectedModel, selectedModelName, reas
   </div></details>;
 }
 
-function TimelineBlock({ block }: { block: Block }) {
+function TimelineBlock({ block, language }: { block: Block; language: Snapshot["language"] }) {
   if (block.kind === "user") return <article className="user-block">{block.attachments?.length ? <div className="user-attachments">{block.attachments.map((item) => <span key={item.id}><ImagePlus size={13} />{item.name}</span>)}</div> : null}<p>{block.content}</p></article>;
   if (block.kind === "assistant") return <article className="assistant-block markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content || ""}</ReactMarkdown></article>;
   if (block.kind === "thinking") return <details className="thinking-block" open={block.state === "streaming"}><summary><Sparkles size={14} /><strong>{block.title || "思考中"}</strong>{block.state === "streaming" && <span className="live-dot" />}</summary><div className="thinking-content">{block.content}</div></details>;
-  if (block.kind === "tool") return <details className="tool-block" open={block.state === "running"}><summary><span className="tool-state">{block.state === "running" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}</span><span className="tool-chevron"><ChevronRight className="closed-chevron" size={15} /><ChevronDown className="open-chevron" size={15} /></span><strong>{block.title || "调用工具"}</strong><span>{stateLabel(block.state)}</span></summary>{block.content && <pre>{block.content}</pre>}</details>;
+  if (block.kind === "tool") return <details className="tool-block" open={block.state === "running"}><summary><span className="tool-state">{block.state === "running" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}</span><span className="tool-chevron"><ChevronRight className="closed-chevron" size={15} /><ChevronDown className="open-chevron" size={15} /></span><strong>{block.title ? toolDisplayName(block.title, language) : translator(language)("toolGeneric")}</strong><span>{stateLabel(block.state)}</span></summary>{block.content && <pre>{block.content}</pre>}</details>;
   if (block.kind === "diff") return <DiffBlock block={block} />;
   if (block.kind === "approval") return <ApprovalBlock block={block} />;
   if (block.kind === "error") return <article className="error-block"><CircleStop size={16} /><div><strong>{block.title}</strong><p>{block.content}</p></div></article>;
@@ -266,7 +266,7 @@ export function approvalPresentation(block: Block, language: Snapshot["language"
   const effect = block.data?.effect;
   const description = effect === "write" ? t("approvalWrite") : effect === "external_side_effect" ? t("approvalExternal") : effect === "read_only" ? t("approvalReadOnly") : t("approvalConfirm");
   return {
-    tool: block.data?.tool || t("approvalOperation"),
+    tool: block.data?.tool ? toolDisplayName(block.data.tool, language) : t("approvalOperation"),
     target: block.data?.target?.trim() || t("approvalWorkspace"),
     riskTone,
     riskLabel,
