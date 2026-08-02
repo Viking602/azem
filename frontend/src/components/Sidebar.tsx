@@ -38,7 +38,6 @@ export default function Sidebar() {
   return (
     <aside className="workspace-sidebar">
       <div className="sidebar-brand titlebar-region">
-        <button className="brand-button"><span className="brand-glyph">A</span><span>Azem</span><ChevronDown size={13} /></button>
         <button className="icon-button" aria-label={t("search")} onClick={() => setCommandOpen(true)}><Command size={15} /></button>
       </div>
       <div className="sidebar-switcher" role="tablist">

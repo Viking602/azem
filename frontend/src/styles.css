@@ -71,11 +71,8 @@ pre, code, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Men
 .resize-left { grid-column: 2; }.resize-right { grid-column: 4; }
 .resize-handle:hover::after { background: var(--blue); }
 
-.sidebar-brand { height: 46px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 0 4px; transition: padding-left .18s ease; }
+.sidebar-brand { height: 46px; flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; padding: 0 4px; transition: padding-left .18s ease; }
 .desktop-shell[data-runtime="true"][data-platform*="mac" i] .sidebar-brand { padding-left: 78px; }
-.brand-button { height: 30px; display: flex; align-items: center; gap: 8px; border-radius: 8px; padding: 0 5px; font-weight: 680; letter-spacing: -.01em; }
-.brand-button:hover { background: var(--hover); }
-.brand-glyph { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 7px; background: var(--ink); color: var(--paper); font-size: 11px; font-weight: 800; }
 .sidebar-switcher { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 2px; margin: 8px 3px 11px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--hover) 72%, transparent); }
 .sidebar-switcher button { height: 25px; border-radius: 7px; color: var(--muted); font-size: 11px; }
 .sidebar-switcher button.active { background: var(--paper); color: var(--ink); box-shadow: 0 1px 4px rgb(0 0 0 / 8%); }
