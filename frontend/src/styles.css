@@ -82,13 +82,18 @@ pre, code, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Men
 kbd { margin-left: auto; color: var(--faint); font-size: 10px; font-weight: 400; }
 .project-tree { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .sidebar-section-title { margin: 17px 8px 5px; color: var(--faint); font-size: 10px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
-.project-heading { min-height: 30px; display: flex; align-items: center; width: 100%; gap: 8px; padding: 0 8px; border-radius: 8px; text-align: left; font-weight: 630; }
-.project-heading span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-heading:hover { background: var(--hover); }
+.project-heading { min-height: 34px; display: flex; align-items: center; width: 100%; gap: 2px; padding: 0 4px 0 8px; border-radius: 9px; }
+.project-heading:hover, .project-heading:focus-within { background: var(--hover); }
+.project-toggle { min-width: 0; min-height: 34px; flex: 1; display: flex; align-items: center; gap: 9px; padding: 0; text-align: left; font-weight: 630; }
+.project-toggle span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-action { width: 27px; height: 27px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 7px; color: var(--faint); }
+.project-action:hover { background: color-mix(in srgb, var(--paper) 65%, transparent); color: var(--ink); }
 .thread-list { min-height: 0; overflow-y: auto; padding-left: 21px; }
 .thread-list button { display: block; width: 100%; min-height: 29px; padding: 5px 8px; border-radius: 7px; text-align: left; color: var(--muted); overflow: hidden; }
 .thread-list button span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .thread-list button:hover, .thread-list button.active { background: var(--hover); color: var(--ink); }
+.thread-list .show-more-sessions { color: var(--faint); }
+.thread-list .show-more-sessions:hover { background: transparent; color: var(--muted); }
 .empty-sidebar { display: flex; gap: 7px; align-items: center; padding: 7px 8px; color: var(--faint); font-size: 11px; }
 .sidebar-footer { margin-top: auto; padding-top: 9px; border-top: 1px solid var(--line); }
 .sidebar-footer > button { width: 100%; }

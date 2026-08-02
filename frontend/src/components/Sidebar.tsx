@@ -1,6 +1,7 @@
+import { useState } from "react";
 import {
-  Bot, Box, ChevronDown, CircleDotDashed, Command, FolderGit2, History,
-  Plus, RotateCcw, Search, Settings,
+  Bot, Box, CircleDotDashed, Command, Folder, FolderOpen, History,
+  MoreHorizontal, Plus, RotateCcw, Search, Settings, SquarePen,
 } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
@@ -8,6 +9,8 @@ import { useRuntimeStore } from "../store";
 import type { View } from "../types";
 
 export default function Sidebar() {
+  const [projectOpen, setProjectOpen] = useState(true);
+  const [showAllSessions, setShowAllSessions] = useState(false);
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const sessions = useRuntimeStore((state) => state.sessions);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
@@ -18,6 +21,7 @@ export default function Sidebar() {
   const setError = useRuntimeStore((state) => state.setError);
   const t = translator(snapshot.language);
   const project = basename(snapshot.workspace);
+  const visibleSessions = showAllSessions ? sessions : sessions.slice(0, 5);
 
   const run = async (kind: string, target = "") => {
     try {
@@ -50,15 +54,22 @@ export default function Sidebar() {
       </nav>
       <section className="project-tree">
         <div className="sidebar-section-title">{t("projects")}</div>
-        <button className="project-heading" onClick={() => setView("projects")}><FolderGit2 size={15} /><span>{project}</span><ChevronDown size={13} /></button>
-        <div className="thread-list">
+        <div className="project-heading">
+          <button className="project-toggle" aria-expanded={projectOpen} onClick={() => setProjectOpen((open) => !open)}>
+            {projectOpen ? <FolderOpen size={16} /> : <Folder size={16} />}<span>{project}</span>
+          </button>
+          <button className="project-action" aria-label={t("projectDetails")} title={t("projectDetails")} onClick={() => setView("projects")}><MoreHorizontal size={16} /></button>
+          <button className="project-action" aria-label={t("newSession")} title={t("newSession")} onClick={() => run("new_session")}><SquarePen size={15} /></button>
+        </div>
+        {projectOpen && <div className="thread-list">
           {sessions.length === 0 && <div className="empty-sidebar"><CircleDotDashed size={13} />{t("noSessions")}</div>}
-          {sessions.map((session) => (
+          {visibleSessions.map((session) => (
             <button key={session.id} className={session.id === currentSessionId && view === "thread" ? "active" : ""} onClick={() => run("resume_session", session.id)} title={session.title}>
               <span>{session.title || t("newSession")}</span>
             </button>
           ))}
-        </div>
+          {sessions.length > 5 && <button className="show-more-sessions" onClick={() => setShowAllSessions((show) => !show)}>{t(showAllSessions ? "showLess" : "showMore")}</button>}
+        </div>}
       </section>
       <div className="sidebar-footer">
         <button onClick={() => setSettingsOpen(true)}><Settings size={15} />{t("settings")}<kbd>⌘,</kbd></button>
