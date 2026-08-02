@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   Bot, Box, CircleDotDashed, Command, Folder, FolderOpen, History,
-  MoreHorizontal, Plus, RotateCcw, Search, Settings, SquarePen,
+  MoreHorizontal, Plus, Search, Settings, SquarePen,
 } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
@@ -36,7 +36,6 @@ export default function Sidebar() {
     { view: "runs", label: t("runs"), icon: History },
     { view: "agents", label: t("agents"), icon: Bot },
     { view: "extensions", label: t("extensions"), icon: Box },
-    { view: "recovery", label: t("recovery"), icon: RotateCcw },
   ];
 
   return (
