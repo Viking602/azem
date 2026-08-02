@@ -208,6 +208,13 @@ function ModelControls({ running, models, selectedModel, selectedModelName, reas
   modelLabel: string; reasoningLabel: string; speedLabel: string; standardSpeed: string; fastSpeed: string; fastHint: string;
 }) {
   const controls = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (controls.current && !controls.current.contains(event.target as Node)) controls.current.open = false;
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+  }, []);
   const groups = [
     { label: modelLabel, current: selectedModelName, selected: selectedModel, options: models.map((model) => ({ value: modelKey(model.provider, model.id), label: model.name })), select: onModelChange },
     { label: reasoningLabel, current: selectedReasoningName, selected: selectedReasoning, options: reasoningLevels.map((level) => ({ value: level, label: reasoningNames[level] ?? level })), select: onReasoningChange },
