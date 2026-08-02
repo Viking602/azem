@@ -108,7 +108,7 @@ kbd { margin-left: auto; color: var(--faint); font-size: 10px; font-weight: 400;
 .empty-composer-wrap h1 { margin: 0 0 18px; font-size: 22px; font-weight: 520; letter-spacing: -.035em; }
 .azem-symbol { position: relative; width: 38px; height: 38px; margin-bottom: 15px; }.azem-symbol span { position: absolute; top: 3px; width: 11px; height: 29px; border-radius: 2px; background: var(--ink); }.azem-symbol span:first-child { left: 8px; transform: rotate(45deg); }.azem-symbol span:last-child { right: 8px; transform: rotate(-45deg); }
 
-.composer-card { width: min(680px, calc(100vw - var(--sidebar-width) - 54px)); overflow: hidden; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--paper); box-shadow: var(--shadow); }
+.composer-card { width: min(680px, calc(100vw - var(--sidebar-width) - 54px)); overflow: visible; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--paper); box-shadow: var(--shadow); }
 .composer-card textarea { width: 100%; min-height: 66px; max-height: 190px; resize: vertical; border: 0; outline: 0; padding: 14px 15px 7px; background: transparent; line-height: 1.5; }
 .composer-card textarea::placeholder { color: var(--faint); }
 .attachment-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px 10px 0; }
@@ -120,14 +120,17 @@ kbd { margin-left: auto; color: var(--faint); font-size: 10px; font-weight: 400;
 .mode-chip { height: 27px; display: flex; align-items: center; gap: 5px; border-radius: 8px; padding: 0 7px; color: var(--muted); font-size: 11px; }.mode-chip:hover, .mode-chip.active { background: var(--accent-soft); color: var(--accent); }
 .toolbar-spacer { flex: 1; }
 .composer-toolbar > select:not(.accent-select) { max-width: 104px; border: 0; background: transparent; color: var(--muted); font-size: 11px; }
-.model-picker { min-width: 0; max-width: 152px; height: 27px; display: flex; align-items: center; gap: 3px; padding: 0 5px 0 7px; border-radius: 8px; color: var(--muted); }
-.model-picker:hover, .reasoning-picker:hover { background: var(--paper-muted); color: var(--ink); }
-.model-picker select { min-width: 0; max-width: 132px; height: 100%; appearance: none; overflow: hidden; border: 0; outline: 0; background: transparent; color: inherit; font-size: 11px; text-overflow: ellipsis; }
-.model-picker svg { flex: 0 0 auto; color: var(--faint); pointer-events: none; }
-.reasoning-picker { height: 27px; display: flex; align-items: center; border-radius: 8px; }
-.reasoning-picker select { width: 64px; height: 100%; border: 0; outline: 0; background: transparent; color: var(--faint); font-size: 10px; }
+.model-controls { position: relative; min-width: 0; color: var(--muted); }
+.model-controls > summary { max-width: 190px; height: 27px; display: flex; align-items: center; gap: 5px; padding: 0 6px 0 8px; border-radius: 8px; cursor: pointer; list-style: none; white-space: nowrap; }
+.model-controls > summary::-webkit-details-marker { display: none; }.model-controls > summary:hover, .model-controls[open] > summary { background: var(--paper-muted); color: var(--ink); }
+.model-controls > summary span { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }.model-controls > summary small { color: var(--faint); font-size: 10px; }.model-controls > summary svg { flex: 0 0 auto; transition: transform .14s ease; }
+.model-controls[open] > summary svg { transform: rotate(180deg); }.model-controls[data-disabled="true"] > summary { pointer-events: none; opacity: .45; }
+.model-control-menu { position: absolute; z-index: 20; right: 0; bottom: calc(100% + 8px); width: 284px; padding: 6px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper); box-shadow: var(--shadow-float); }
+.model-control-menu label { min-height: 36px; display: grid; grid-template-columns: 88px minmax(0, 1fr) 14px; align-items: center; gap: 6px; padding: 0 8px; border-radius: 8px; }.model-control-menu label:hover { background: var(--paper-muted); }
+.model-control-menu label > span { color: var(--ink); font-size: 11px; font-weight: 620; }.model-control-menu select { min-width: 0; appearance: none; border: 0; outline: 0; background: transparent; color: var(--muted); font-size: 11px; text-align: right; text-overflow: ellipsis; }.model-control-menu label > svg { color: var(--faint); pointer-events: none; }
+.model-control-menu p { margin: 5px 8px 3px; color: var(--faint); font-size: 9px; line-height: 1.4; }
 .send-button, .cancel-button { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: var(--ink); color: var(--paper); }.cancel-button { background: var(--red); color: white; }
-.composer-meta { min-height: 29px; display: flex; align-items: center; gap: 14px; padding: 0 11px; border-top: 1px solid var(--line); background: var(--paper-muted); color: var(--muted); font-size: 10px; }
+.composer-meta { min-height: 29px; display: flex; align-items: center; gap: 14px; padding: 0 11px; border-top: 1px solid var(--line); border-radius: 0 0 13px 13px; background: var(--paper-muted); color: var(--muted); font-size: 10px; }
 .composer-meta label { display: flex; align-items: center; gap: 4px; }.composer-meta select { max-width: 150px; border: 0; background: transparent; outline: 0; color: inherit; font-size: 10px; }
 .composer-dock { position: absolute; z-index: 6; left: 50%; bottom: 14px; transform: translateX(-50%); }.composer-dock .composer-card { box-shadow: 0 9px 30px rgb(24 24 20 / 13%); }
 

@@ -58,5 +58,12 @@ describe("runtime event projection", () => {
     useRuntimeStore.getState().hydrate(snapshot);
     useRuntimeStore.getState().setSessionModel("chatgpt", "gpt-5.6-luna", "low");
     expect(useRuntimeStore.getState().snapshot).toMatchObject({ provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" });
+    useRuntimeStore.getState().setChatGPTFastMode(true);
+    expect(useRuntimeStore.getState().snapshot?.chatgptFastMode).toBe(true);
+  });
+
+  it("projects the persisted Codex speed into the composer state", () => {
+    const projected = reduceEvents(state(), [{ sequence: 1, kind: "model_routes", data: { chatgpt_fast_mode: "true" } }]);
+    expect(projected.snapshot?.chatgptFastMode).toBe(true);
   });
 });

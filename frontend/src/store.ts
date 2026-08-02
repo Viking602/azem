@@ -70,6 +70,7 @@ interface RuntimeActions {
   setTheme: (theme: RuntimeData["theme"]) => void;
   setLanguage: (language: "en" | "zh-CN") => void;
   setSessionModel: (provider: string, model: string, reasoning: string) => void;
+  setChatGPTFastMode: (enabled: boolean) => void;
   addOptimisticUser: (content: string) => void;
   setRunId: (runId: string) => void;
   failRun: (message: string) => void;
@@ -134,6 +135,9 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   })),
   setSessionModel: (provider, model, reasoning) => set((state) => ({
     snapshot: state.snapshot ? { ...state.snapshot, provider, model, reasoning } : state.snapshot,
+  })),
+  setChatGPTFastMode: (chatgptFastMode) => set((state) => ({
+    snapshot: state.snapshot ? { ...state.snapshot, chatgptFastMode } : state.snapshot,
   })),
   addOptimisticUser: (content) => set((state) => ({
     blocks: [...state.blocks, { id: `user-${Date.now()}`, kind: "user", content, state: "submitted", attachments: state.attachments }],

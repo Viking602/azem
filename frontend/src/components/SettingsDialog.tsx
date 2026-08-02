@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, ChevronRight, Gauge, Languages, Palette, RefreshCw, Settings2, Sparkles, X } from "lucide-react";
+import { Bot, ChevronRight, Gauge, Languages, Palette, RefreshCw, Settings2, X } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
@@ -36,10 +36,6 @@ export default function SettingsDialog() {
         <details className="setting-section">
           <summary><Gauge size={16} /><strong>{t("subagentRuntime")}</strong><span>最多同时运行 {snapshot.subagentConcurrency} 个任务</span><ChevronRight size={15} /></summary>
           <div className="setting-body"><SettingRow label={t("concurrency")} description="只限制同时运行数量；排队任务会等待空闲槽位。"><input className="number-input" type="number" min={1} max={64} value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))} /><button className="small-button" onClick={() => action("set_subagent_concurrency", String(concurrency))}>保存</button></SettingRow></div>
-        </details>
-        <details className="setting-section">
-          <summary><Sparkles size={16} /><strong>{t("codexSubscription")}</strong><span>{snapshot.chatgptFastMode ? "已开启 · Fast" : "已关闭 · 标准速度"}</span><ChevronRight size={15} /></summary>
-          <div className="setting-body"><SettingRow label={t("fastMode")} description="仅对支持订阅加速的 ChatGPT/Codex 请求生效。"><label className="switch"><input type="checkbox" checked={snapshot.chatgptFastMode} onChange={(event) => action("set_chatgpt_fast_mode", String(event.target.checked))} /><span /></label></SettingRow></div>
         </details>
         <details className="setting-section">
           <summary><Settings2 size={16} /><strong>运行治理</strong><span>{approvalLabel(approvalMode)}</span><ChevronRight size={15} /></summary>

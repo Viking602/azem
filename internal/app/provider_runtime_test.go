@@ -970,15 +970,17 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 		switch request.URL.Path {
 		case "/models":
 			writer.Header().Set("Content-Type", "application/json")
-			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-test","title":"GPT Test","context_window":128000,"supported_reasoning_levels":["minimal","high"],"default_reasoning_level":"high","supports_tools":true}]}`))
+			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-test","title":"GPT Test","context_window":128000,"supported_reasoning_levels":["minimal","high"],"default_reasoning_level":"high","supports_tools":true,"service_tiers":[{"id":"priority","name":"Fast"}]}]}`))
 		case "/responses":
 			var payload struct {
-				Reasoning map[string]any `json:"reasoning"`
+				Model       string         `json:"model"`
+				Reasoning   map[string]any `json:"reasoning"`
+				ServiceTier string         `json:"service_tier"`
 			}
 			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 				t.Errorf("decode provider request: %v", err)
-			} else if payload.Reasoning["effort"] != "minimal" {
-				t.Errorf("reasoning effort = %v, want minimal", payload.Reasoning)
+			} else if payload.Model != "gpt-test" || payload.Reasoning["effort"] != "minimal" || payload.ServiceTier != "priority" {
+				t.Errorf("provider selection = model:%q reasoning:%v service_tier:%q", payload.Model, payload.Reasoning, payload.ServiceTier)
 			}
 			writer.Header().Set("Content-Type", "text/event-stream")
 			if responseCalls.Add(1) == 1 {
@@ -1019,6 +1021,7 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	}
 	cfg := config.Default()
 	cfg.Workspace.Root = workspace
+	cfg.Providers.ChatGPT.FastMode = true
 	providerRuntime, err := NewProviderRuntime(cfg, authentication, modelCatalog, coding, t.TempDir())
 	if err != nil {
 		t.Fatal(err)

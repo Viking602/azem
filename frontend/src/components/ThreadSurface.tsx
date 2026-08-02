@@ -161,7 +161,11 @@ function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, 
   const removeAttachment = useRuntimeStore((state) => state.removeAttachment);
   const setError = useRuntimeStore((state) => state.setError);
   const t = translator(snapshot.language);
-  const { modelChoices, reasoningLevels, changeModel, changeReasoning } = useComposerModels(snapshot);
+  const { modelChoices, reasoningLevels, selectedModelName, changeModel, changeReasoning, changeSpeed } = useComposerModels(snapshot);
+  const reasoningNames: Record<string, string> = snapshot.language === "zh-CN"
+    ? { minimal: "最小", low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高", ultra: "超高" }
+    : { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Maximum", ultra: "Ultra" };
+  const selectedReasoningName = reasoningNames[snapshot.reasoning] ?? snapshot.reasoning;
   const switchBranch = async (target: string) => {
     try { await execute({ kind: "switch_git_branch", target }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
@@ -185,8 +189,12 @@ function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, 
         <button className={planMode ? "mode-chip active" : "mode-chip"} onClick={() => setPlanMode(!planMode)}><Circle size={11} />{t("plan")}</button>
         <span className="toolbar-spacer" />
         <select value={agentMode} onChange={(event) => setAgentMode(event.target.value)} aria-label="Agent mode"><option value="single">{t("single")}</option><option value="team">{t("team")}</option></select>
-        <ModelPicker running={running} models={modelChoices} selected={modelKey(snapshot.provider, snapshot.model)} label={t("model")} title={`${snapshot.provider} · ${snapshot.model}`} onChange={changeModel} />
-        <ReasoningPicker running={running} levels={reasoningLevels} selected={snapshot.reasoning} label={t("reasoning")} onChange={changeReasoning} />
+        <ModelControls
+          running={running} models={modelChoices} selectedModel={modelKey(snapshot.provider, snapshot.model)} selectedModelName={selectedModelName}
+          reasoningLevels={reasoningLevels} selectedReasoning={snapshot.reasoning} selectedReasoningName={selectedReasoningName}
+          fast={snapshot.chatgptFastMode} reasoningNames={reasoningNames} onModelChange={changeModel} onReasoningChange={changeReasoning} onSpeedChange={changeSpeed}
+          modelLabel={t("model")} reasoningLabel={t("reasoning")} speedLabel={t("speed")} standardSpeed={t("standardSpeed")} fastSpeed={t("fastSpeed")} fastHint={t("fastModeHint")}
+        />
         {running && cancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={submit} disabled={!prompt.trim()} title={t("send")}><Send size={15} /></button>}
       </div>
       <div className="composer-meta"><span><FolderName path={snapshot.workspace} /></span><span>▰ {t("local")}</span><label><GitBranch size={12} /><select disabled={running} value={branches.find((branch) => branch.current)?.name || ""} onChange={(event) => switchBranch(event.target.value)}>{branches.map((branch) => <option key={branch.name}>{branch.name}</option>)}</select></label><span className="toolbar-spacer" />⌘↵ {t("send")}</div>
@@ -194,12 +202,17 @@ function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, 
   );
 }
 
-function ModelPicker({ running, models, selected, label, title, onChange }: { running: boolean; models: ComposerModel[]; selected: string; label: string; title: string; onChange: (value: string) => void }) {
-  return <label className="model-picker" title={title}><select disabled={running} aria-label={label} value={selected} onChange={(event) => onChange(event.target.value)}>{models.map((model) => <option key={modelKey(model.provider, model.id)} value={modelKey(model.provider, model.id)}>{model.name}</option>)}</select><ChevronDown size={12} /></label>;
-}
-
-function ReasoningPicker({ running, levels, selected, label, onChange }: { running: boolean; levels: string[]; selected: string; label: string; onChange: (value: string) => void }) {
-  return <label className="reasoning-picker"><select disabled={running} aria-label={label} value={selected} onChange={(event) => onChange(event.target.value)}>{levels.map((level) => <option key={level}>{level}</option>)}</select></label>;
+function ModelControls({ running, models, selectedModel, selectedModelName, reasoningLevels, selectedReasoning, selectedReasoningName, fast, reasoningNames, onModelChange, onReasoningChange, onSpeedChange, modelLabel, reasoningLabel, speedLabel, standardSpeed, fastSpeed, fastHint }: {
+  running: boolean; models: ComposerModel[]; selectedModel: string; selectedModelName: string; reasoningLevels: string[]; selectedReasoning: string; selectedReasoningName: string;
+  fast: boolean; reasoningNames: Record<string, string>; onModelChange: (value: string) => void; onReasoningChange: (value: string) => void; onSpeedChange: (value: string) => void;
+  modelLabel: string; reasoningLabel: string; speedLabel: string; standardSpeed: string; fastSpeed: string; fastHint: string;
+}) {
+  return <details className="model-controls" data-disabled={String(running)}><summary aria-disabled={running}><span>{selectedModelName}</span><small>{selectedReasoningName}</small><ChevronDown size={12} /></summary><div className="model-control-menu">
+    <label><span>{modelLabel}</span><select disabled={running} aria-label={modelLabel} value={selectedModel} onChange={(event) => onModelChange(event.target.value)}>{models.map((model) => <option key={modelKey(model.provider, model.id)} value={modelKey(model.provider, model.id)}>{model.name}</option>)}</select><ChevronRight size={13} /></label>
+    <label><span>{reasoningLabel}</span><select disabled={running} aria-label={reasoningLabel} value={selectedReasoning} onChange={(event) => onReasoningChange(event.target.value)}>{reasoningLevels.map((level) => <option key={level} value={level}>{reasoningNames[level] ?? level}</option>)}</select><ChevronRight size={13} /></label>
+    <label><span>{speedLabel}</span><select disabled={running} aria-label={speedLabel} value={fast ? "fast" : "standard"} onChange={(event) => onSpeedChange(event.target.value)}><option value="standard">{standardSpeed}</option><option value="fast">{fastSpeed}</option></select><ChevronRight size={13} /></label>
+    <p>{fastHint}</p>
+  </div></details>;
 }
 
 function TimelineBlock({ block }: { block: Block }) {
@@ -278,19 +291,31 @@ type ComposerModel = { provider: string; id: string; name: string; reasoningLeve
 function useComposerModels(snapshot: Snapshot) {
   const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
   const setSessionModel = useRuntimeStore((state) => state.setSessionModel);
+  const setChatGPTFastMode = useRuntimeStore((state) => state.setChatGPTFastMode);
+  const setError = useRuntimeStore((state) => state.setError);
   const fallbackModel: ComposerModel = { provider: snapshot.provider, id: snapshot.model, name: snapshot.model, reasoningLevels: [snapshot.reasoning].filter(Boolean) };
   const catalogModels = Object.entries(modelsByProvider).flatMap(([provider, models]) => models.map((model) => ({ ...model, provider })));
   const modelChoices = [...new Map([fallbackModel, ...catalogModels].map((model) => [modelKey(model.provider, model.id), model])).values()];
   const providerModels = modelsByProvider[snapshot.provider] ?? [];
   const catalogLevels = providerModels.find((model) => model.id === snapshot.model)?.reasoningLevels ?? ["minimal", "low", "medium", "high", "xhigh"];
   const reasoningLevels = [...new Set([snapshot.reasoning, ...catalogLevels])].filter(Boolean);
+  const selectedModelName = modelChoices.find((model) => modelKey(model.provider, model.id) === modelKey(snapshot.provider, snapshot.model))?.name ?? snapshot.model;
   const changeModel = (value: string) => {
     const choice = modelChoices.find((model) => modelKey(model.provider, model.id) === value)!;
     const reasoning = [choice.defaultReasoning, ...choice.reasoningLevels, snapshot.reasoning].filter(Boolean)[0]!;
     setSessionModel(choice.provider, choice.id, reasoning);
   };
   const changeReasoning = (reasoning: string) => setSessionModel(snapshot.provider, snapshot.model, reasoning);
-  return { modelChoices, reasoningLevels, changeModel, changeReasoning };
+  const changeSpeed = (speed: string) => {
+    const enabled = speed === "fast";
+    const previous = snapshot.chatgptFastMode;
+    setChatGPTFastMode(enabled);
+    execute({ kind: "set_chatgpt_fast_mode", target: String(enabled) }).catch((cause) => {
+      setChatGPTFastMode(previous);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    });
+  };
+  return { modelChoices, reasoningLevels, selectedModelName, changeModel, changeReasoning, changeSpeed };
 }
 
 function modelKey(provider: string, model: string) { return `${provider}/${model}`; }
