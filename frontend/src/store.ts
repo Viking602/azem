@@ -297,17 +297,19 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       break;
     case "run_finished":
     case "run_cancelled":
+    case "run_failed": {
+      const terminalState = event.kind === "run_finished" ? "completed" : event.kind === "run_cancelled" ? "cancelled" : "failed";
+      const terminalRunId = event.runId || next.runId;
       next.running = false;
-      next.activity = event.kind === "run_finished" ? "completed" : "cancelled";
+      next.activity = terminalState;
+      if (terminalRunId) next.blocks = next.blocks.map((block) => block.runId === terminalRunId && block.state === "streaming" ? { ...block, state: terminalState } : block);
       next.runId = "";
+      if (event.kind === "run_failed") {
+        next.error = event.text ?? "Run failed";
+        next.blocks = [...next.blocks, { id: `error-${event.sequence}`, kind: "error", title: "运行失败", content: event.text, state: "failed" }];
+      }
       break;
-    case "run_failed":
-      next.running = false;
-      next.activity = "failed";
-      next.error = event.text ?? "Run failed";
-      next.runId = "";
-      next.blocks = [...next.blocks, { id: `error-${event.sequence}`, kind: "error", title: "运行失败", content: event.text, state: "failed" }];
-      break;
+    }
     case "bridge_error":
       next.error = event.text ?? "Desktop bridge failed";
       break;

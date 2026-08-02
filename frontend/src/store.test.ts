@@ -32,6 +32,16 @@ describe("runtime event projection", () => {
     expect(projected.blocks[0]?.content).toBe("先检查事件模型");
   });
 
+  it("stops the thinking animation when the run finishes", () => {
+    const projected = reduceEvents(state(), [
+      { sequence: 1, kind: "run_started", runId: "r1" },
+      { sequence: 2, kind: "thinking_delta", runId: "r1", text: "检查状态" },
+      { sequence: 3, kind: "run_finished", runId: "r1" },
+    ]);
+    expect(projected.running).toBe(false);
+    expect(projected.blocks[0]).toMatchObject({ kind: "thinking", runId: "r1", state: "completed" });
+  });
+
   it("keeps approval beside the tool timeline and resolves it in place", () => {
     const projected = reduceEvents(state(), [
       { sequence: 1, kind: "approval_requested", approvalId: "a1", toolCallId: "t1", text: "write file" },
