@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reduceEvents, type RuntimeData } from "./store";
+import { reduceEvents, type RuntimeData, useRuntimeStore } from "./store";
 import type { Snapshot } from "./types";
 import { formatDuration } from "./components/ThreadSurface";
 
@@ -43,5 +43,20 @@ describe("runtime event projection", () => {
   it("formats elapsed time through hours without dropping seconds", () => {
     expect(formatDuration(3_000)).toBe("3s");
     expect(formatDuration(3_723_000)).toBe("1h02m03s");
+  });
+
+  it("restores and changes the active session model", () => {
+    const projected = reduceEvents(state(), [{
+      sequence: 1,
+      kind: "session_loaded",
+      sessionId: "s2",
+      state: "loaded",
+      data: { blocks: "[]", provider: "grok", model: "grok-4.20", reasoning: "medium", agentMode: "team" },
+    }]);
+    expect(projected.snapshot).toMatchObject({ provider: "grok", model: "grok-4.20", reasoning: "medium", agentMode: "team" });
+
+    useRuntimeStore.getState().hydrate(snapshot);
+    useRuntimeStore.getState().setSessionModel("chatgpt", "gpt-5.6-luna", "low");
+    expect(useRuntimeStore.getState().snapshot).toMatchObject({ provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" });
   });
 });

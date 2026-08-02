@@ -19,6 +19,7 @@ export interface ModelOption {
   id: string;
   name: string;
   reasoningLevels: string[];
+  defaultReasoning?: string;
 }
 
 export interface RuntimeData {
@@ -68,6 +69,7 @@ interface RuntimeActions {
   setPlanMode: (enabled: boolean) => void;
   setTheme: (theme: RuntimeData["theme"]) => void;
   setLanguage: (language: "en" | "zh-CN") => void;
+  setSessionModel: (provider: string, model: string, reasoning: string) => void;
   addOptimisticUser: (content: string) => void;
   setRunId: (runId: string) => void;
   failRun: (message: string) => void;
@@ -130,6 +132,9 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   setLanguage: (language) => set((state) => ({
     snapshot: state.snapshot ? { ...state.snapshot, language } : state.snapshot,
   })),
+  setSessionModel: (provider, model, reasoning) => set((state) => ({
+    snapshot: state.snapshot ? { ...state.snapshot, provider, model, reasoning } : state.snapshot,
+  })),
   addOptimisticUser: (content) => set((state) => ({
     blocks: [...state.blocks, { id: `user-${Date.now()}`, kind: "user", content, state: "submitted", attachments: state.attachments }],
     running: true,
@@ -169,6 +174,13 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         next.sessions = parseArray(data.sessions).map(normalizeSession);
       } else if (event.sessionId) {
         next.currentSessionId = event.sessionId;
+        next.snapshot = {
+          ...next.snapshot!,
+          provider: data.provider,
+          model: data.model,
+          reasoning: data.reasoning,
+          agentMode: data.agentMode,
+        };
         next.blocks = parseArray(data.blocks).map(normalizeBlock);
         next.runId = data.lastRunID ?? "";
         next.currentTitle = next.sessions.find((item) => item.id === event.sessionId)?.title ?? next.currentTitle;
@@ -333,6 +345,13 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
       { Scope: "subagent", Role: "review", Label: "Review", Route: {} },
       { Scope: "subagent", Role: "verify", Label: "Verify", Route: {} },
     ],
+    modelsByProvider: {
+      chatgpt: [
+        { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high" },
+        { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "medium" },
+      ],
+      grok: [{ id: "grok-4.20", name: "Grok 4.20", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high" }],
+    },
     contextProfile: {
       source: "estimated", estimated: true,
       contributions: [
@@ -451,9 +470,11 @@ function normalizeBranch(raw: Record<string, unknown>): GitBranch {
 }
 
 function normalizeModel(raw: Record<string, unknown>): ModelOption {
+  const id = stringValue(raw, "id", "ID");
   return {
-    id: stringValue(raw, "id", "ID"), name: stringValue(raw, "name", "Name"),
+    id, name: [stringValue(raw, "name", "Name"), id].filter(Boolean)[0]!,
     reasoningLevels: ((raw.reasoningLevels ?? raw.ReasoningLevels ?? []) as unknown[]).map(String),
+    defaultReasoning: stringValue(raw, "defaultReasoning", "DefaultReasoning"),
   };
 }
 

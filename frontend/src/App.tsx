@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { initialise, isDesktopRuntime, subscribe } from "./bridge";
 import CommandPalette from "./components/CommandPalette";
 import Inspector from "./components/Inspector";
@@ -84,17 +83,7 @@ export default function App() {
   const hasContext = blocks.length > 0 || running;
   const showInspector = view === "thread" && hasContext && inspectorOpen;
   return (
-    <div className="desktop-shell" style={{ "--sidebar-width": `${sidebarWidth}px`, "--inspector-width": `${inspectorWidth}px` } as React.CSSProperties}>
-      <header className="native-titlebar">
-        <div className="traffic-lights" aria-hidden="true"><i /><i /><i /></div>
-        <div className="window-history" aria-hidden="true">‹　›</div>
-        <div className="window-drag-region" />
-        {hasContext && view === "thread" && (
-          <button className="icon-button" title="上下文检查器" onClick={() => setInspectorOpen(!inspectorOpen)}>
-            {inspectorOpen ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
-          </button>
-        )}
-      </header>
+    <div className="desktop-shell" data-runtime={String(isDesktopRuntime())} data-platform={navigator.platform} style={{ "--sidebar-width": `${sidebarWidth}px`, "--inspector-width": `${inspectorWidth}px` } as React.CSSProperties}>
       <div className={`workspace-grid ${showInspector ? "with-inspector" : ""}`}>
         <Sidebar />
         <ResizeHandle side="left" value={sidebarWidth} setValue={setSidebarWidth} min={210} max={320} />

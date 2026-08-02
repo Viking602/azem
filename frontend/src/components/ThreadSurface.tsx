@@ -2,20 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowDown, ArrowUp, Bot, Check, ChevronDown, ChevronRight, Circle, CircleStop,
   FileCode2, GitBranch, ImagePlus, LoaderCircle, Paperclip, Send, ShieldCheck,
-  Sparkles, Users, X,
+  PanelRightClose, PanelRightOpen, Sparkles, Users, X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cancelActive, execute, guide, importAttachment, startTurn } from "../bridge";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
-import type { Block } from "../types";
+import type { Block, Snapshot } from "../types";
 
 export default function ThreadSurface() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const blocks = useRuntimeStore((state) => state.blocks);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
-  const title = useRuntimeStore((state) => state.currentTitle);
   const running = useRuntimeStore((state) => state.running);
   const runId = useRuntimeStore((state) => state.runId);
   const runStartedAt = useRuntimeStore((state) => state.runStartedAt);
@@ -32,9 +31,9 @@ export default function ThreadSurface() {
   const clearAttachments = useRuntimeStore((state) => state.clearAttachments);
   const setError = useRuntimeStore((state) => state.setError);
   const setPlanMode = useRuntimeStore((state) => state.setPlanMode);
-  const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
   const [prompt, setPrompt] = useState("");
-  const [agentMode, setAgentMode] = useState(snapshot.agentMode || "single");
+  const snapshotAgentMode = snapshot.agentMode || "single";
+  const [agentMode, setAgentMode] = useState(snapshotAgentMode);
   const [following, setFollowing] = useState(true);
   const viewport = useRef<HTMLDivElement>(null);
   const t = translator(snapshot.language);
@@ -44,6 +43,8 @@ export default function ThreadSurface() {
   useEffect(() => {
     if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: "smooth" });
   }, [blocks, following]);
+
+  useEffect(() => setAgentMode(snapshotAgentMode), [currentSessionId, snapshotAgentMode]);
 
   const submit = async () => {
     const text = prompt.trim();
@@ -90,14 +91,7 @@ export default function ThreadSurface() {
 
   return (
     <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`}>
-      <header className="thread-header">
-        <div><strong>{empty ? t("newSession") : title || t("newSession")}</strong>{!empty && <span>{running ? `${t("running")} · ${elapsed}` : t("ready")}</span>}</div>
-        <div className="thread-actions">
-          {!empty && <button className="subtle-button" onClick={() => execute({ kind: "compact", target: currentSessionId }).catch((cause) => setError(String(cause)))}>{t("compact")}</button>}
-          <button className="subtle-button" onClick={() => setAgentMode("team")}><Users size={14} />{agentMode === "team" ? t("team") : t("handoff")}</button>
-          <button className="subtle-button" onClick={() => setCommandOpen(true)}><Sparkles size={14} />{t("actions")}</button>
-        </div>
-      </header>
+      <ThreadHeader empty={empty} elapsed={elapsed} agentMode={agentMode} setAgentMode={setAgentMode} />
       {empty ? (
         <div className="empty-composer-wrap">
           <div className="azem-symbol" aria-hidden="true"><span /><span /></div>
@@ -134,6 +128,29 @@ export default function ThreadSurface() {
   );
 }
 
+function ThreadHeader({ empty, elapsed, agentMode, setAgentMode }: { empty: boolean; elapsed: string; agentMode: string; setAgentMode: (value: string) => void }) {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const title = useRuntimeStore((state) => state.currentTitle);
+  const running = useRuntimeStore((state) => state.running);
+  const t = translator(snapshot.language);
+  const heading = empty ? t("newSession") : title || t("newSession");
+  const status = headerStatus(running, elapsed, t);
+  return <header className="thread-header titlebar-region"><div><strong>{heading}</strong><span hidden={empty}>{status}</span></div><HeaderActions empty={empty} agentMode={agentMode} setAgentMode={setAgentMode} /></header>;
+}
+
+function headerStatus(running: boolean, elapsed: string, t: ReturnType<typeof translator>) { return running ? `${t("running")} · ${elapsed}` : t("ready"); }
+
+function HeaderActions({ empty, agentMode, setAgentMode }: { empty: boolean; agentMode: string; setAgentMode: (value: string) => void }) {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
+  const inspectorOpen = useRuntimeStore((state) => state.inspectorOpen);
+  const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
+  const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
+  const setError = useRuntimeStore((state) => state.setError);
+  const t = translator(snapshot.language);
+  return <div className="thread-actions"><button hidden={empty} className="subtle-button" onClick={() => execute({ kind: "compact", target: currentSessionId }).catch((cause) => setError(String(cause)))}>{t("compact")}</button><button className="subtle-button" onClick={() => setAgentMode("team")}><Users size={14} />{agentMode === "team" ? t("team") : t("handoff")}</button><button className="subtle-button" onClick={() => setCommandOpen(true)}><Sparkles size={14} />{t("actions")}</button><button hidden={empty} className="icon-button inspector-toggle" data-open={String(inspectorOpen)} title={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}><PanelRightClose className="inspector-open-icon" size={15} /><PanelRightOpen className="inspector-closed-icon" size={15} /></button></div>;
+}
+
 function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, planMode, setPlanMode, approvalMode, branches, running, cancel }: {
   prompt: string; setPrompt: (value: string) => void; submit: () => void; attach: (files: FileList | null) => void;
   agentMode: string; setAgentMode: (value: string) => void; planMode: boolean; setPlanMode: (value: boolean) => void;
@@ -144,6 +161,7 @@ function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, 
   const removeAttachment = useRuntimeStore((state) => state.removeAttachment);
   const setError = useRuntimeStore((state) => state.setError);
   const t = translator(snapshot.language);
+  const { modelChoices, reasoningLevels, changeModel, changeReasoning } = useComposerModels(snapshot);
   const switchBranch = async (target: string) => {
     try { await execute({ kind: "switch_git_branch", target }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
@@ -167,12 +185,21 @@ function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, 
         <button className={planMode ? "mode-chip active" : "mode-chip"} onClick={() => setPlanMode(!planMode)}><Circle size={11} />{t("plan")}</button>
         <span className="toolbar-spacer" />
         <select value={agentMode} onChange={(event) => setAgentMode(event.target.value)} aria-label="Agent mode"><option value="single">{t("single")}</option><option value="team">{t("team")}</option></select>
-        <span className="model-label">{snapshot.model}<small>{snapshot.reasoning}</small></span>
+        <ModelPicker running={running} models={modelChoices} selected={modelKey(snapshot.provider, snapshot.model)} label={t("model")} title={`${snapshot.provider} · ${snapshot.model}`} onChange={changeModel} />
+        <ReasoningPicker running={running} levels={reasoningLevels} selected={snapshot.reasoning} label={t("reasoning")} onChange={changeReasoning} />
         {running && cancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={submit} disabled={!prompt.trim()} title={t("send")}><Send size={15} /></button>}
       </div>
       <div className="composer-meta"><span><FolderName path={snapshot.workspace} /></span><span>▰ {t("local")}</span><label><GitBranch size={12} /><select disabled={running} value={branches.find((branch) => branch.current)?.name || ""} onChange={(event) => switchBranch(event.target.value)}>{branches.map((branch) => <option key={branch.name}>{branch.name}</option>)}</select></label><span className="toolbar-spacer" />⌘↵ {t("send")}</div>
     </div>
   );
+}
+
+function ModelPicker({ running, models, selected, label, title, onChange }: { running: boolean; models: ComposerModel[]; selected: string; label: string; title: string; onChange: (value: string) => void }) {
+  return <label className="model-picker" title={title}><select disabled={running} aria-label={label} value={selected} onChange={(event) => onChange(event.target.value)}>{models.map((model) => <option key={modelKey(model.provider, model.id)} value={modelKey(model.provider, model.id)}>{model.name}</option>)}</select><ChevronDown size={12} /></label>;
+}
+
+function ReasoningPicker({ running, levels, selected, label, onChange }: { running: boolean; levels: string[]; selected: string; label: string; onChange: (value: string) => void }) {
+  return <label className="reasoning-picker"><select disabled={running} aria-label={label} value={selected} onChange={(event) => onChange(event.target.value)}>{levels.map((level) => <option key={level}>{level}</option>)}</select></label>;
 }
 
 function TimelineBlock({ block }: { block: Block }) {
@@ -245,3 +272,25 @@ function stateLabel(state?: string) {
 function FolderName({ path }: { path: string }) {
   return <>{path.split(/[\\/]/).filter(Boolean).at(-1) || "workspace"}</>;
 }
+
+type ComposerModel = { provider: string; id: string; name: string; reasoningLevels: string[]; defaultReasoning?: string };
+
+function useComposerModels(snapshot: Snapshot) {
+  const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
+  const setSessionModel = useRuntimeStore((state) => state.setSessionModel);
+  const fallbackModel: ComposerModel = { provider: snapshot.provider, id: snapshot.model, name: snapshot.model, reasoningLevels: [snapshot.reasoning].filter(Boolean) };
+  const catalogModels = Object.entries(modelsByProvider).flatMap(([provider, models]) => models.map((model) => ({ ...model, provider })));
+  const modelChoices = [...new Map([fallbackModel, ...catalogModels].map((model) => [modelKey(model.provider, model.id), model])).values()];
+  const providerModels = modelsByProvider[snapshot.provider] ?? [];
+  const catalogLevels = providerModels.find((model) => model.id === snapshot.model)?.reasoningLevels ?? ["minimal", "low", "medium", "high", "xhigh"];
+  const reasoningLevels = [...new Set([snapshot.reasoning, ...catalogLevels])].filter(Boolean);
+  const changeModel = (value: string) => {
+    const choice = modelChoices.find((model) => modelKey(model.provider, model.id) === value)!;
+    const reasoning = [choice.defaultReasoning, ...choice.reasoningLevels, snapshot.reasoning].filter(Boolean)[0]!;
+    setSessionModel(choice.provider, choice.id, reasoning);
+  };
+  const changeReasoning = (reasoning: string) => setSessionModel(snapshot.provider, snapshot.model, reasoning);
+  return { modelChoices, reasoningLevels, changeModel, changeReasoning };
+}
+
+function modelKey(provider: string, model: string) { return `${provider}/${model}`; }
