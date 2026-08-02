@@ -225,6 +225,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       }];
       break;
     case "approval_requested":
+      if (event.state === "reviewing") break;
       next.blocks = [...next.blocks, {
         id: event.approvalId || `approval-${event.sequence}`,
         kind: "approval",
@@ -239,7 +240,8 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       next.activity = "approval";
       break;
     case "approval_resolved":
-      next.blocks = next.blocks.map((block) => block.approvalId === event.approvalId ? { ...block, state: event.state || data.decision || "resolved" } : block);
+      if (event.state?.startsWith("auto_")) next.blocks = next.blocks.filter((block) => block.approvalId !== event.approvalId);
+      else next.blocks = next.blocks.map((block) => block.approvalId === event.approvalId ? { ...block, state: event.state || data.decision || "resolved" } : block);
       next.activity = "waiting_model";
       break;
     case "agent_state":

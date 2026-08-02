@@ -17,6 +17,10 @@ const messages = {
     keyboardTip: "↑↓ 选择 · Enter 打开 · Esc 关闭", loading: "正在加载 Azem…",
     attach: "添加图片", compact: "压缩会话", reviewChanges: "审查变更", resume: "继续会话",
     retry: "重试", reconnect: "重新连接", reload: "重新加载", modelInherit: "继承父代理",
+    approvalTitle: "需要确认", approvalTarget: "即将执行", approvalWorkspace: "当前工作区", approvalOperation: "受限操作",
+    approvalWrite: "此操作将修改工作区内容。", approvalExternal: "此操作可能影响工作区之外的系统。",
+    approvalReadOnly: "此操作将读取受保护内容。", approvalConfirm: "此操作需要你的确认。", approveSession: "本会话允许",
+    riskLow: "低风险", riskMedium: "中风险", riskHigh: "高风险",
   },
   en: {
     newSession: "New thread", search: "Search", runs: "Runs", agents: "Agents", extensions: "Extensions",
@@ -36,6 +40,10 @@ const messages = {
     keyboardTip: "↑↓ select · Enter open · Esc close", loading: "Loading Azem…",
     attach: "Add image", compact: "Compact thread", reviewChanges: "Review changes", resume: "Resume thread",
     retry: "Retry", reconnect: "Reconnect", reload: "Reload", modelInherit: "Inherit parent agent",
+    approvalTitle: "Confirmation required", approvalTarget: "About to run", approvalWorkspace: "Current workspace", approvalOperation: "Restricted operation",
+    approvalWrite: "This operation will modify workspace content.", approvalExternal: "This operation may affect systems outside the workspace.",
+    approvalReadOnly: "This operation will read protected content.", approvalConfirm: "This operation requires your confirmation.", approveSession: "Allow for session",
+    riskLow: "Low risk", riskMedium: "Medium risk", riskHigh: "High risk",
   },
 } as const;
 

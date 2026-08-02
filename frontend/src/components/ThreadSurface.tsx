@@ -241,13 +241,37 @@ function DiffBlock({ block }: { block: Block }) {
 }
 
 function ApprovalBlock({ block }: { block: Block }) {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const setError = useRuntimeStore((state) => state.setError);
+  const t = translator(snapshot.language);
+  const details = approvalPresentation(block, snapshot.language);
   const resolve = async (decision: string) => {
     try { await execute({ kind: "resolve_approval", target: block.approvalId, decision }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
   const pending = block.state === "pending";
-  return <article className={`approval-block ${pending ? "pending" : "resolved"}`}><ShieldCheck size={17} /><div><strong>{block.title}</strong><p>{block.content}</p>{block.data?.risk && <small>风险：{block.data.risk}</small>}</div><div className="approval-actions">{pending ? <><button onClick={() => resolve("deny")}>拒绝</button><button onClick={() => resolve("once")}>仅本次</button><button className="primary" onClick={() => resolve("session")}>允许</button></> : <span><Check size={14} />{block.state}</span>}</div></article>;
+  const denied = block.state === "deny" || block.state === "denied";
+  const resolvedLabel = denied ? t("deny") : block.state === "session" ? t("approveSession") : t("approveOnce");
+  return <article className={`approval-block ${pending ? "pending" : "resolved"}`} data-risk={details.riskTone}>
+    <header className="approval-heading"><span className="approval-icon"><ShieldCheck size={17} /></span><div><small>{t("approvalTitle")}</small><strong>{details.tool}</strong></div><span className="approval-risk">{details.riskLabel}</span></header>
+    <div className="approval-target"><span>{t("approvalTarget")}</span><code>{details.target}</code></div>
+    <footer className="approval-footer"><p>{details.description}</p><div className="approval-actions">{pending ? <><button onClick={() => resolve("deny")}>{t("deny")}</button><button onClick={() => resolve("once")}>{t("approveOnce")}</button><button className="primary" onClick={() => resolve("session")}>{t("approveSession")}</button></> : <span className={denied ? "denied" : "approved"}>{denied ? <X size={14} /> : <Check size={14} />}{resolvedLabel}</span>}</div></footer>
+  </article>;
+}
+
+export function approvalPresentation(block: Block, language: Snapshot["language"]) {
+  const t = translator(language);
+  const riskTone = block.data?.risk === "low" || block.data?.risk === "high" ? block.data.risk : "medium";
+  const riskLabel = riskTone === "low" ? t("riskLow") : riskTone === "high" ? t("riskHigh") : t("riskMedium");
+  const effect = block.data?.effect;
+  const description = effect === "write" ? t("approvalWrite") : effect === "external_side_effect" ? t("approvalExternal") : effect === "read_only" ? t("approvalReadOnly") : t("approvalConfirm");
+  return {
+    tool: block.data?.tool || t("approvalOperation"),
+    target: block.data?.target?.trim() || t("approvalWorkspace"),
+    riskTone,
+    riskLabel,
+    description,
+  };
 }
 
 function useElapsed(start: number, running: boolean) {

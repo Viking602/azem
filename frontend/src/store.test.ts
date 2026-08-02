@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { reduceEvents, type RuntimeData, useRuntimeStore } from "./store";
 import type { Snapshot } from "./types";
-import { formatDuration } from "./components/ThreadSurface";
+import { approvalPresentation, formatDuration } from "./components/ThreadSurface";
 
 const snapshot: Snapshot = {
   workspace: "/tmp/azem", sessionId: "s1", provider: "chatgpt", model: "gpt-5.6-sol",
@@ -38,6 +38,22 @@ describe("runtime event projection", () => {
       { sequence: 2, kind: "approval_resolved", approvalId: "a1", state: "approved" },
     ]);
     expect(projected.blocks[0]).toMatchObject({ kind: "approval", approvalId: "a1", state: "approved" });
+  });
+
+  it("hides automatic approval reviews and keeps the later user prompt", () => {
+    const reviewed = reduceEvents(state(), [
+      { sequence: 1, kind: "approval_requested", approvalId: "a1", state: "reviewing", text: "{\"command\":\"git status\"}" },
+      { sequence: 2, kind: "approval_resolved", approvalId: "a1", state: "auto_approved" },
+    ]);
+    expect(reviewed.blocks).toHaveLength(0);
+    const prompted = reduceEvents(reviewed, [{ sequence: 3, kind: "approval_requested", approvalId: "a1", state: "pending", data: { tool: "coding.shell", target: "git status", effect: "external_side_effect", risk: "high" } }]);
+    expect(prompted.blocks[0]).toMatchObject({ kind: "approval", approvalId: "a1", state: "pending" });
+  });
+
+  it("builds approval UI fields without exposing the structured payload", () => {
+    const details = approvalPresentation({ id: "a1", kind: "approval", content: "{\"command\":\"secret raw payload\"}", data: { tool: "coding.shell", target: "git status --short", effect: "external_side_effect", risk: "high" } }, "zh-CN");
+    expect(details).toMatchObject({ tool: "coding.shell", target: "git status --short", riskLabel: "高风险", description: "此操作可能影响工作区之外的系统。" });
+    expect(JSON.stringify(details)).not.toContain("secret raw payload");
   });
 
   it("formats elapsed time through hours without dropping seconds", () => {
