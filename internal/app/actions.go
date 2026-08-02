@@ -58,6 +58,7 @@ const (
 	ActionRemember               ActionKind = "remember"
 	ActionForgetMemory           ActionKind = "forget_memory"
 	ActionShowRecap              ActionKind = "show_recap"
+	ActionListModels             ActionKind = "list_models"
 	ActionListModelRoutes        ActionKind = "list_model_routes"
 	ActionSetModelRoute          ActionKind = "set_model_route"
 	ActionResetModelRoute        ActionKind = "reset_model_route"
@@ -135,6 +136,9 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		return nil
 	case ActionListModelRoutes:
 		s.emit(ctx, s.modelRoutesEvent("listed"))
+		return nil
+	case ActionListModels:
+		s.emitAuthCatalog(ctx)
 		return nil
 	case ActionSetSubagentConcurrency:
 		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))

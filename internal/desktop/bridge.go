@@ -183,6 +183,7 @@ func (b *Bridge) prime() {
 	actions := []azemapp.Action{
 		{Kind: azemapp.ActionListSessions},
 		{Kind: azemapp.ActionListGitBranches},
+		{Kind: azemapp.ActionListModels},
 		{Kind: azemapp.ActionListModelRoutes},
 		{Kind: azemapp.ActionListAgentTypes, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListSkills, SessionID: b.sessionID},
@@ -239,7 +240,7 @@ func allowedAction(kind azemapp.ActionKind) bool {
 		azemapp.ActionCancelAgent, azemapp.ActionRefreshMCP, azemapp.ActionReconnectMCP,
 		azemapp.ActionListSkills, azemapp.ActionReloadSkills,
 		azemapp.ActionListMemories, azemapp.ActionRemember, azemapp.ActionForgetMemory,
-		azemapp.ActionShowRecap, azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
+		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
 		azemapp.ActionResetModelRoute, azemapp.ActionSetSubagentConcurrency,
 		azemapp.ActionSetChatGPTFastMode, azemapp.ActionListBackground,
 		azemapp.ActionStartBackground, azemapp.ActionStopBackground, azemapp.ActionLogsBackground,

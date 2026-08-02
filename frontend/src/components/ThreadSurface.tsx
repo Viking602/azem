@@ -207,10 +207,24 @@ function ModelControls({ running, models, selectedModel, selectedModelName, reas
   fast: boolean; reasoningNames: Record<string, string>; onModelChange: (value: string) => void; onReasoningChange: (value: string) => void; onSpeedChange: (value: string) => void;
   modelLabel: string; reasoningLabel: string; speedLabel: string; standardSpeed: string; fastSpeed: string; fastHint: string;
 }) {
-  return <details className="model-controls" data-disabled={String(running)}><summary aria-disabled={running}><span>{selectedModelName}</span><small>{selectedReasoningName}</small><ChevronDown size={12} /></summary><div className="model-control-menu">
-    <label><span>{modelLabel}</span><select disabled={running} aria-label={modelLabel} value={selectedModel} onChange={(event) => onModelChange(event.target.value)}>{models.map((model) => <option key={modelKey(model.provider, model.id)} value={modelKey(model.provider, model.id)}>{model.name}</option>)}</select><ChevronRight size={13} /></label>
-    <label><span>{reasoningLabel}</span><select disabled={running} aria-label={reasoningLabel} value={selectedReasoning} onChange={(event) => onReasoningChange(event.target.value)}>{reasoningLevels.map((level) => <option key={level} value={level}>{reasoningNames[level] ?? level}</option>)}</select><ChevronRight size={13} /></label>
-    <label><span>{speedLabel}</span><select disabled={running} aria-label={speedLabel} value={fast ? "fast" : "standard"} onChange={(event) => onSpeedChange(event.target.value)}><option value="standard">{standardSpeed}</option><option value="fast">{fastSpeed}</option></select><ChevronRight size={13} /></label>
+  const controls = useRef<HTMLDetailsElement>(null);
+  const groups = [
+    { label: modelLabel, current: selectedModelName, selected: selectedModel, options: models.map((model) => ({ value: modelKey(model.provider, model.id), label: model.name })), select: onModelChange },
+    { label: reasoningLabel, current: selectedReasoningName, selected: selectedReasoning, options: reasoningLevels.map((level) => ({ value: level, label: reasoningNames[level] ?? level })), select: onReasoningChange },
+    { label: speedLabel, current: fast ? fastSpeed : standardSpeed, selected: fast ? "fast" : "standard", options: [{ value: "standard", label: standardSpeed }, { value: "fast", label: fastSpeed }], select: onSpeedChange },
+  ];
+  const choose = (select: (value: string) => void, value: string) => {
+    select(value);
+    if (controls.current) controls.current.open = false;
+  };
+  return <details ref={controls} className="model-controls" data-disabled={String(running)}><summary aria-disabled={running}><span>{selectedModelName}</span><small>{selectedReasoningName}</small><ChevronDown size={12} /></summary><div className="model-control-menu">
+    {groups.map((group) => <div className="model-control-item" key={group.label}>
+      <button type="button" className="model-control-row" disabled={running} aria-haspopup="menu"><span>{group.label}</span><small>{group.current}</small><ChevronRight size={13} /></button>
+      <div className="model-control-submenu" role="menu" aria-label={group.label}>{group.options.map((option) => <button
+        type="button" role="menuitemradio" aria-checked={group.selected === option.value} disabled={running}
+        className={group.selected === option.value ? "selected" : ""} key={option.value} onClick={() => choose(group.select, option.value)}
+      ><Check size={13} /><span>{option.label}</span></button>)}</div>
+    </div>)}
     <p>{fastHint}</p>
   </div></details>;
 }

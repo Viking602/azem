@@ -99,4 +99,16 @@ describe("runtime event projection", () => {
     const projected = reduceEvents(state(), [{ sequence: 1, kind: "model_routes", data: { chatgpt_fast_mode: "true" } }]);
     expect(projected.snapshot?.chatgptFastMode).toBe(true);
   });
+
+  it("projects the model catalog used by the composer switcher", () => {
+    const projected = reduceEvents(state(), [{
+      sequence: 1,
+      kind: "model_catalog",
+      data: { provider: "chatgpt", models: JSON.stringify([{ id: "gpt-5.6-sol", name: "5.6 Sol", reasoningLevels: ["medium", "high"], defaultReasoning: "high" }, { id: "gpt-5.6-terra", name: "5.6 Terra", reasoningLevels: ["low", "medium"] }]) },
+    }]);
+    expect(projected.modelsByProvider.chatgpt).toEqual([
+      { id: "gpt-5.6-sol", name: "5.6 Sol", reasoningLevels: ["medium", "high"], defaultReasoning: "high" },
+      { id: "gpt-5.6-terra", name: "5.6 Terra", reasoningLevels: ["low", "medium"], defaultReasoning: "" },
+    ]);
+  });
 });

@@ -51,6 +51,9 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionResolveApproval) {
 		t.Fatal("approval resolution must be available to the desktop")
 	}
+	if !allowedAction(azemapp.ActionListModels) {
+		t.Fatal("model catalog must be available to the desktop")
+	}
 	if allowedAction(azemapp.ActionKind("arbitrary_shell")) {
 		t.Fatal("unknown desktop actions must be rejected")
 	}
