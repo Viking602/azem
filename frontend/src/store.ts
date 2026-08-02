@@ -20,6 +20,14 @@ export interface ModelOption {
   name: string;
   reasoningLevels: string[];
   defaultReasoning?: string;
+  contextWindow?: number;
+}
+
+export interface ContextUsage {
+  inputTokens: number;
+  outputTokens: number;
+  contextLimit: number;
+  reported: boolean;
 }
 
 export interface RuntimeData {
@@ -37,6 +45,7 @@ export interface RuntimeData {
   modelRoutes: ModelRoute[];
   modelsByProvider: Record<string, ModelOption[]>;
   contextProfile: ContextProfile | null;
+  contextUsage: ContextUsage;
   todo: unknown;
   recovery: Array<Record<string, unknown>>;
   runId: string;
@@ -97,6 +106,7 @@ const initialData: RuntimeData = {
   modelRoutes: [],
   modelsByProvider: {},
   contextProfile: null,
+  contextUsage: emptyContextUsage(),
   todo: null,
   recovery: [],
   runId: "",
@@ -137,9 +147,14 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   setLanguage: (language) => set((state) => ({
     snapshot: state.snapshot ? { ...state.snapshot, language } : state.snapshot,
   })),
-  setSessionModel: (provider, model, reasoning) => set((state) => ({
-    snapshot: state.snapshot ? { ...state.snapshot, provider, model, reasoning } : state.snapshot,
-  })),
+  setSessionModel: (provider, model, reasoning) => set((state) => {
+    const modelChanged = state.snapshot?.provider !== provider || state.snapshot?.model !== model;
+    const contextLimit = state.modelsByProvider[provider]?.find((item) => item.id === model)?.contextWindow ?? 0;
+    return {
+      snapshot: state.snapshot ? { ...state.snapshot, provider, model, reasoning } : state.snapshot,
+      contextUsage: modelChanged ? emptyContextUsage(contextLimit) : state.contextUsage,
+    };
+  }),
   setChatGPTFastMode: (chatgptFastMode) => set((state) => ({
     snapshot: state.snapshot ? { ...state.snapshot, chatgptFastMode } : state.snapshot,
   })),
@@ -195,6 +210,9 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         next.currentTitle = next.sessions.find((item) => item.id === event.sessionId)?.title ?? next.currentTitle;
         next.agents = (event.agentSnapshots ?? []).map(normalizeAgentSnapshot);
         next.attachments = [];
+        next.contextProfile = null;
+        const contextLimit = next.modelsByProvider[data.provider]?.find((item) => item.id === data.model)?.contextWindow ?? 0;
+        next.contextUsage = parseContextUsage(data.usage, contextLimit);
       }
       break;
     case "run_started":
@@ -265,6 +283,9 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "context_profile":
       next.contextProfile = event.contextProfile ?? null;
       break;
+    case "context_usage":
+      if (!event.sessionId || event.sessionId === next.currentSessionId) next.contextUsage = projectContextUsage(next.contextUsage, data, event.state);
+      break;
     case "todo_updated":
       next.todo = event.todo ?? null;
       break;
@@ -279,6 +300,10 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "model_catalog": {
       const provider = data.provider || "unknown";
       next.modelsByProvider = { ...next.modelsByProvider, [provider]: parseArray(data.models).map(normalizeModel) };
+      if (next.snapshot?.provider === provider && next.contextUsage.contextLimit === 0) {
+        const contextLimit = next.modelsByProvider[provider]?.find((item) => item.id === next.snapshot?.model)?.contextWindow ?? 0;
+        if (contextLimit > 0) next.contextUsage = { ...next.contextUsage, contextLimit };
+      }
       break;
     }
     case "approval_mode":
@@ -375,6 +400,7 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
         { category: "builtin_tools", name: "Tools", tokens: 2280 },
       ],
     },
+    contextUsage: { inputTokens: 68_000, outputTokens: 4_000, contextLimit: 272_000, reported: true },
   };
 }
 
@@ -487,10 +513,45 @@ function normalizeBranch(raw: Record<string, unknown>): GitBranch {
 
 function normalizeModel(raw: Record<string, unknown>): ModelOption {
   const id = stringValue(raw, "id", "ID");
+  const contextWindow = numberValue(raw.contextWindow ?? raw.ContextWindow);
   return {
     id, name: [stringValue(raw, "name", "Name"), id].filter(Boolean)[0]!,
     reasoningLevels: ((raw.reasoningLevels ?? raw.ReasoningLevels ?? []) as unknown[]).map(String),
     defaultReasoning: stringValue(raw, "defaultReasoning", "DefaultReasoning"),
+    ...(contextWindow > 0 ? { contextWindow } : {}),
+  };
+}
+
+function emptyContextUsage(contextLimit = 0): ContextUsage {
+  return { inputTokens: 0, outputTokens: 0, contextLimit, reported: false };
+}
+
+function parseContextUsage(raw: string | undefined, fallbackLimit = 0): ContextUsage {
+  if (!raw) return emptyContextUsage(fallbackLimit);
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    const inputTokens = numberValue(value.inputTokens ?? value.InputTokens);
+    const outputTokens = numberValue(value.outputTokens ?? value.OutputTokens);
+    return {
+      inputTokens,
+      outputTokens,
+      contextLimit: numberValue(value.contextLimit ?? value.ContextLimit, fallbackLimit) || fallbackLimit,
+      reported: Boolean(value.currentTurnMainReported ?? value.CurrentTurnMainReported ?? inputTokens > 0),
+    };
+  } catch {
+    return emptyContextUsage(fallbackLimit);
+  }
+}
+
+function projectContextUsage(current: ContextUsage, data: Record<string, string>, state?: string): ContextUsage {
+  if (data.factSnapshot === "true" && data.usageSnapshot) return parseContextUsage(data.usageSnapshot, current.contextLimit);
+  const requestKind = data.requestKind || "main";
+  if (requestKind !== "main" || data.aggregateOnly === "true") return current;
+  return {
+    inputTokens: data.inputTokens === undefined ? current.inputTokens : numberValue(data.inputTokens),
+    outputTokens: data.outputTokens === undefined ? current.outputTokens : numberValue(data.outputTokens),
+    contextLimit: data.contextLimit === undefined ? current.contextLimit : numberValue(data.contextLimit, current.contextLimit),
+    reported: current.reported || state === "reported" || data.cacheStatus === "reported",
   };
 }
 

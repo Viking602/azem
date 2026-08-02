@@ -8,8 +8,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cancelActive, execute, guide, importAttachment, startTurn } from "../bridge";
 import { toolDisplayName, translator } from "../i18n";
-import { useRuntimeStore } from "../store";
-import type { Block, Snapshot } from "../types";
+import { useRuntimeStore, type ContextUsage } from "../store";
+import type { Block, ContextProfile, Snapshot } from "../types";
 
 export default function ThreadSurface() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
@@ -188,6 +188,7 @@ function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, 
         </select>
         <button className={planMode ? "mode-chip active" : "mode-chip"} onClick={() => setPlanMode(!planMode)}><Circle size={11} />{t("plan")}</button>
         <span className="toolbar-spacer" />
+        <ContextMeter />
         <select value={agentMode} onChange={(event) => setAgentMode(event.target.value)} aria-label="Agent mode"><option value="single">{t("single")}</option><option value="team">{t("team")}</option></select>
         <ModelControls
           running={running} models={modelChoices} selectedModel={modelKey(snapshot.provider, snapshot.model)} selectedModelName={selectedModelName}
@@ -234,6 +235,55 @@ function ModelControls({ running, models, selectedModel, selectedModelName, reas
     </div>)}
     <p>{fastHint}</p>
   </div></details>;
+}
+
+export function ContextMeter() {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const usage = useRuntimeStore((state) => state.contextUsage);
+  const profile = useRuntimeStore((state) => state.contextProfile);
+  const details = useRef<HTMLDetailsElement>(null);
+  const t = translator(snapshot.language);
+  const metrics = contextOccupancy(usage, profile);
+  const tone = metrics.percentage >= 90 ? "critical" : metrics.percentage >= 75 ? "warning" : "normal";
+  useEffect(() => {
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (details.current && !details.current.contains(event.target as Node)) details.current.open = false;
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+  }, []);
+  const label = metrics.limit > 0 ? `${t("contextUsage")} ${metrics.percentage}%` : t("contextUnavailable");
+  return <details ref={details} className="context-meter" data-tone={tone}>
+    <summary title={label} aria-label={label}>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><circle className="context-ring-track" cx="10" cy="10" r="7.5" pathLength="100" /><circle className="context-ring-value" cx="10" cy="10" r="7.5" pathLength="100" strokeDasharray={`${metrics.percentage} 100`} /></svg>
+    </summary>
+    <div className="context-meter-popover">
+      <header><strong>{t("contextUsage")}</strong><span>{metrics.limit > 0 ? `${metrics.estimated ? "~" : ""}${metrics.percentage}%` : "—"}</span></header>
+      <div className="context-progress" role="progressbar" aria-label={t("contextUsage")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={metrics.percentage}><span style={{ width: `${metrics.percentage}%` }} /></div>
+      <footer>{metrics.limit > 0 ? <><span>{metrics.estimated ? "~" : ""}{formatTokens(metrics.used)} / {formatTokens(metrics.limit)}</span><span>{t("contextRemaining")} {formatTokens(metrics.remaining)}</span></> : <span>{t("contextUnavailable")}</span>}</footer>
+    </div>
+  </details>;
+}
+
+export function contextOccupancy(usage: ContextUsage, profile: ContextProfile | null) {
+  let used = (profile?.contributions ?? []).reduce((total, item) => total + Math.max(0, item.tokens), 0) + Math.max(0, usage.outputTokens);
+  let estimated = Boolean(profile?.estimated);
+  if ((profile?.reportedInputTokens ?? 0) > 0) {
+    used = Math.max(0, profile!.reportedInputTokens!) + Math.max(0, profile!.reportedOutputTokens ?? 0);
+    estimated = false;
+  } else if (usage.inputTokens > 0) {
+    used = Math.max(0, usage.inputTokens) + Math.max(0, usage.outputTokens);
+    estimated = !usage.reported;
+  }
+  const limit = Math.max(0, usage.contextLimit);
+  const percentage = limit > 0 ? Math.min(100, Math.round(used * 100 / limit)) : 0;
+  return { used, limit, percentage, remaining: Math.max(0, limit - used), estimated };
+}
+
+function formatTokens(tokens: number) {
+  if (tokens >= 1_000_000) return `${Number((tokens / 1_000_000).toFixed(tokens < 10_000_000 ? 1 : 0))}M`;
+  if (tokens >= 1_000) return `${Number((tokens / 1_000).toFixed(tokens < 10_000 ? 1 : 0))}K`;
+  return String(tokens);
 }
 
 function TimelineBlock({ block, language }: { block: Block; language: Snapshot["language"] }) {

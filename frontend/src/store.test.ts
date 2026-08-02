@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { reduceEvents, type RuntimeData, useRuntimeStore } from "./store";
 import type { Snapshot } from "./types";
 import Inspector from "./components/Inspector";
-import { approvalPresentation, formatDuration } from "./components/ThreadSurface";
+import { approvalPresentation, ContextMeter, contextOccupancy, formatDuration } from "./components/ThreadSurface";
 import { toolDisplayName } from "./i18n";
 
 const snapshot: Snapshot = {
@@ -16,7 +16,8 @@ const snapshot: Snapshot = {
 function state(): RuntimeData {
   return {
     snapshot, sessions: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
-    skills: [], branches: [], modelRoutes: [], modelsByProvider: {}, contextProfile: null, todo: null, recovery: [],
+    skills: [], branches: [], modelRoutes: [], modelsByProvider: {}, contextProfile: null,
+    contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recovery: [],
     runId: "", running: false, runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0,
     lastSequence: 0, error: "", view: "thread", inspectorTab: "environment", inspectorOpen: true,
@@ -108,12 +109,43 @@ describe("runtime event projection", () => {
     const projected = reduceEvents(state(), [{
       sequence: 1,
       kind: "model_catalog",
-      data: { provider: "chatgpt", models: JSON.stringify([{ id: "gpt-5.6-sol", name: "5.6 Sol", reasoningLevels: ["medium", "high"], defaultReasoning: "high" }, { id: "gpt-5.6-terra", name: "5.6 Terra", reasoningLevels: ["low", "medium"] }]) },
+      data: { provider: "chatgpt", models: JSON.stringify([{ id: "gpt-5.6-sol", name: "5.6 Sol", contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high" }, { id: "gpt-5.6-terra", name: "5.6 Terra", reasoningLevels: ["low", "medium"] }]) },
     }]);
     expect(projected.modelsByProvider.chatgpt).toEqual([
-      { id: "gpt-5.6-sol", name: "5.6 Sol", reasoningLevels: ["medium", "high"], defaultReasoning: "high" },
+      { id: "gpt-5.6-sol", name: "5.6 Sol", contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high" },
       { id: "gpt-5.6-terra", name: "5.6 Terra", reasoningLevels: ["low", "medium"], defaultReasoning: "" },
     ]);
+    expect(projected.contextUsage.contextLimit).toBe(272_000);
+  });
+
+  it("restores and renders the current conversation context occupancy", async () => {
+    const restored = reduceEvents(state(), [{
+      sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded",
+      data: { blocks: "[]", provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", usage: JSON.stringify({ inputTokens: 68_000, outputTokens: 4_000, contextLimit: 288_000, currentTurnMainReported: true }) },
+    }]);
+    expect(restored.contextUsage).toEqual({ inputTokens: 68_000, outputTokens: 4_000, contextLimit: 288_000, reported: true });
+    expect(contextOccupancy(restored.contextUsage, null)).toMatchObject({ used: 72_000, limit: 288_000, percentage: 25, remaining: 216_000, estimated: false });
+
+    useRuntimeStore.setState(restored);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ContextMeter)));
+    expect(container.querySelector("summary")?.getAttribute("aria-label")).toBe("上下文占用 25%");
+    expect(container.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("25");
+    expect(container.textContent).toContain("72K / 288K");
+    const details = container.querySelector("details")!;
+    details.open = true;
+    await act(async () => document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+    expect(details.open).toBe(false);
+    await act(async () => root.unmount());
+  });
+
+  it("updates context occupancy from provider fact snapshots", () => {
+    const projected = reduceEvents(state(), [{
+      sequence: 1, kind: "context_usage", sessionId: "s1", state: "reported",
+      data: { factSnapshot: "true", usageSnapshot: JSON.stringify({ inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, currentTurnMainReported: true }) },
+    }]);
+    expect(projected.contextUsage).toEqual({ inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, reported: true });
   });
 
   it("projects current workspace line changes from git status events", async () => {
