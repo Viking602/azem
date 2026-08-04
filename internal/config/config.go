@@ -59,6 +59,7 @@ type DefaultsConfig struct {
 	Theme        string `yaml:"theme"`
 	Language     string `yaml:"language"`
 	ApprovalMode string `yaml:"approval_mode"`
+	QueueMode    string `yaml:"queue_mode"`
 }
 
 type WorkspaceConfig struct {
@@ -259,7 +260,7 @@ func Default() Config {
 	return Config{
 		Version: CurrentVersion,
 		Defaults: DefaultsConfig{
-			Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single", Theme: "system", Language: "en", ApprovalMode: "prompt",
+			Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single", Theme: "system", Language: "en", ApprovalMode: "prompt", QueueMode: "queue",
 		},
 		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt", Shell: ShellConfig{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2}},
 		Auth:      AuthConfig{Store: "sqlite", ImportCodex: true, ImportGrok: true},
@@ -366,6 +367,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Defaults.ApprovalMode != "prompt" && c.Defaults.ApprovalMode != "auto_review" && c.Defaults.ApprovalMode != "yolo" {
 		return fmt.Errorf("defaults.approval_mode must be prompt, auto_review, or yolo")
+	}
+	if c.Defaults.QueueMode != "queue" && c.Defaults.QueueMode != "guide" {
+		return fmt.Errorf("defaults.queue_mode must be queue or guide")
 	}
 	if c.Auth.Store != "sqlite" && c.Auth.Store != "keyring" && c.Auth.Store != "file" {
 		return fmt.Errorf("auth.store must be sqlite, keyring, or file")

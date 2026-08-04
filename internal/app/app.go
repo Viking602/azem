@@ -314,6 +314,21 @@ func (s *Service) StartTurn(prompt string) (string, error) {
 	return s.StartConfiguredTurn(TurnRequest{Prompt: prompt})
 }
 
+// StartAutomatedTurn creates a dedicated durable session for a user-enabled
+// automation such as pull request repair. It uses the configured defaults and
+// still observes the normal approval policy.
+func (s *Service) StartAutomatedTurn(prompt string) (string, string, error) {
+	sessionID, err := randomID("session")
+	if err != nil {
+		return "", "", err
+	}
+	runID, err := s.StartConfiguredTurn(TurnRequest{SessionID: sessionID, Prompt: prompt})
+	if err != nil {
+		return "", "", err
+	}
+	return sessionID, runID, nil
+}
+
 type historicalEvidence struct {
 	Recap    *historicalRecap        `json:"recap,omitempty"`
 	Memories []historicalMemory      `json:"memories,omitempty"`

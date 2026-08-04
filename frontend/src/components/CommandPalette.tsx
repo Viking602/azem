@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Command, Plus, Search, Settings, X } from "lucide-react";
+import { Command, Plus, Search, Settings, X } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
@@ -17,7 +17,6 @@ export default function CommandPalette() {
   const close = () => setCommandOpen(false);
   const commands = useMemo(() => [
     { id: "new", label: t("newSession"), hint: "⌘N", icon: Plus, run: () => execute({ kind: "new_session" }).then(() => setView("thread")) },
-    { id: "agents", label: t("agents"), hint: "", icon: Bot, run: () => setView("agents") },
     { id: "settings", label: t("settings"), hint: "⌘,", icon: Settings, run: () => setSettingsOpen(true) },
     ...sessions.map((session) => ({ id: session.id, label: session.title || t("newSession"), hint: session.modelId, icon: Command, run: () => execute({ kind: "resume_session", target: session.id }).then(() => setView("thread")) })),
   ], [sessions, setSettingsOpen, setView, t]);

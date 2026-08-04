@@ -7,6 +7,7 @@ import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 import type { View } from "../types";
 import { formatDuration } from "./ThreadSurface";
+import PullRequestsPage from "./PullRequestsPage";
 
 export default function Pages({ view }: { view: Exclude<View, "thread"> }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
@@ -18,6 +19,7 @@ export default function Pages({ view }: { view: Exclude<View, "thread"> }) {
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
 
+  if (view === "pullRequests") return <PullRequestsPage />;
   if (view === "agents") return <AgentsPage action={action} />;
   if (view === "extensions") return <ExtensionsPage action={action} />;
   if (view === "recovery") return <RecoveryPage action={action} />;

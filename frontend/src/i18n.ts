@@ -4,16 +4,38 @@ const messages = {
     projects: "项目", workbench: "工作台", workspace: "工作区", settings: "设置",
     recovery: "恢复中心", promptTitle: "今天要在 Azem 中完成什么？",
     promptPlaceholder: "描述任务、附加图片或引用文件…", send: "发送", cancel: "取消",
-    handoff: "转交", actions: "操作", environment: "环境", changes: "变更", context: "上下文",
+    deliveryMode: "运行中消息模式", queue: "队列", guide: "引导", queuedMessages: "已排队消息",
+    queuePlaceholder: "输入下一轮消息…", guidePlaceholder: "输入对当前任务的引导…",
+    editMessage: "编辑消息", deleteMessage: "删除消息", closeQueue: "关闭排队", moreActions: "更多操作",
+    guideAttachmentHint: "引导暂不支持附件，请改用队列模式。", runningMessageMode: "运行中消息",
+    runningMessageModeHint: "队列会在当前任务结束后自动开始下一轮；引导会交给当前任务继续执行。",
+    handoff: "转交", actions: "操作", environment: "环境", environmentInfo: "环境信息", changes: "变更", context: "上下文",
+    backgroundProcesses: "后台进程", backgroundTerminal: "后台终端", sources: "来源",
     contextUsage: "上下文占用", contextRemaining: "剩余", contextUnavailable: "上下文用量暂不可用",
-    runtimeHealthy: "Runtime 正常", noChanges: "暂无变更", branch: "分支", local: "本地",
-    running: "运行中", ready: "就绪", failed: "失败", completed: "完成", cancelled: "已取消",
-    autoReview: "自动审查", promptApproval: "逐次审批", yolo: "始终允许", plan: "计划模式",
+    runtimeHealthy: "Runtime 正常", noChanges: "暂无变更", clean: "无变更", branch: "分支", local: "本地",
+    switchProject: "切换项目", noBranches: "无分支",
+    searchBranches: "搜索分支", branchesSection: "分支",
+    uncommittedFiles: "未提交：{count} 个文件",
+    createCheckoutBranch: "创建并检出新分支…",
+    newBranchPlaceholder: "新分支名称",
+    createBranch: "创建",
+    dirtySwitchConfirm: "工作区有未提交变更。仍要切换到 “{branch}” 吗？",
+    noMatchingBranches: "没有匹配的分支",
+    running: "运行中", ready: "就绪", failed: "失败", completed: "完成", cancelled: "已取消", idle: "空闲", queued: "排队中",
+    // Codex-style approval modes
+    autoReview: "替我审批", promptApproval: "请求批准", yolo: "完全访问权限",
+    approvalMenuTitle: "应如何批准操作？",
+    approvalAskHint: "编辑外部文件和使用互联网时始终询问",
+    approvalAutoHint: "仅对检测到的风险操作请求批准",
+    approvalFullHint: "可不受限制地访问互联网和您电脑上的任何文件",
+    plan: "计划模式", planLabel: "计划",
+    planHint: "只规划不实施：调查工作区并输出可执行计划",
     team: "团队模式", single: "默认模式", model: "模型", reasoning: "推理强度", approve: "允许", deny: "拒绝", approveOnce: "仅本次允许",
     roleModels: "角色模型", subagentRuntime: "子代理运行", codexSubscription: "Codex 订阅", appearance: "界面",
     planModel: "规划模型", concurrency: "最大并发任务", fastMode: "Fast 模式", language: "语言",
     speed: "速度", standardSpeed: "标准", fastSpeed: "快速", fastModeHint: "快速模式仅对部分模型生效。",
-    theme: "主题", light: "浅色", dark: "深色", system: "跟随系统", inspector: "上下文检查器",
+    theme: "主题", light: "浅色", dark: "深色", system: "跟随系统", inspector: "环境信息",
+    sideChat: "侧边聊天", closeSideChat: "关闭侧边聊天",
     noAgents: "当前没有子代理", noSessions: "还没有历史会话", command: "搜索命令或会话…",
     projectDetails: "项目详情", showMore: "展开显示", showLess: "收起显示",
     addProject: "添加项目", chooseProjectFolder: "选择项目文件夹", chooseProjectFolderHint: "打开已有文件夹", openProject: "打开项目",
@@ -29,22 +51,124 @@ const messages = {
     toolGeneric: "调用工具", toolReadFile: "读取文件", toolReadArtifact: "读取工件", toolWriteFile: "写入文件", toolEditFile: "编辑文件",
     toolSearch: "搜索代码", toolListFiles: "列出文件", toolShell: "运行命令", toolGoTest: "运行 Go 测试", toolGofmt: "格式化 Go 代码",
     toolGitDiff: "查看 Git 差异", toolActivateSkill: "加载技能", toolSpawn: "启动子代理", toolGetSubagentOutput: "获取子代理输出", toolStopSubagent: "停止子代理",
+    // Timeline / process
+    thinking: "思考", processed: "已处理", processedFor: "已处理 {duration}", toolExecuting: "正在执行…",
+    toolStatusRunning: "运行中", toolStatusFailed: "失败", toolStatusDone: "完成",
+    jumpLatest: "返回最新",
+    // Tool group summaries ({n} = count)
+    toolGroupSearch: "搜索了 {n} 次", toolGroupRead: "读取了 {n} 个文件", toolGroupEdit: "编辑了 {n} 个文件",
+    toolGroupDiff: "查看了 {n} 处差异", toolGroupShell: "运行了 {n} 条命令", toolGroupAgent: "调用了 {n} 个子代理",
+    toolGroupOtherSole: "调用了 {n} 个工具", toolGroupOther: "{n} 个其他工具",
+    // Tool field labels
+    fieldPath: "路径", fieldPaths: "路径", fieldQuery: "查询", fieldCommand: "命令", fieldCwd: "目录",
+    fieldArtifact: "工件", fieldSkill: "技能", fieldDetail: "说明",
+    // Side chat / agents
+    syncingAgentTimeline: "正在同步子代理时间线…", emptySideChat: "此侧边聊天还没有消息",
+    subagents: "子代理", inheritModel: "继承模型", toolsLabel: "工具",
+    noAttachments: "还没有图片附件",
+    agentCompleted: "已完成", agentFailed: "失败", agentCancelled: "已取消", agentQueued: "排队中", agentIdle: "空闲",
+    // Composer / slash
+    slashCommands: "斜杠命令", skills: "技能", skillUseHint: "使用此技能处理当前任务",
+    skillBuiltin: "内置", skillPersonal: "个人", agentMode: "代理模式",
+    // Reasoning levels
+    reasoningMinimal: "最小", reasoningLow: "轻度", reasoningMedium: "中", reasoningHigh: "高",
+    reasoningXHigh: "极高", reasoningMax: "最高", reasoningUltra: "超高",
+    reasoningMaxHint: "更快消耗使用额度",
+    reasoningFaster: "更高效", reasoningSmarter: "更智能", reasoningAdvanced: "高级",
+    reasoningBack: "返回",
+    fastBoostTitle: "1.5 倍速", fastBoostDetail: "用量更多",
+    // Sidebar / sessions
+    renameChat: "重命名聊天", unread: "未读", sessionActionFailed: "会话操作失败",
+    // Pull requests
+    pullRequests: "拉取请求", currentPullRequest: "当前分支", createdByMe: "我创建的",
+    needsMyReview: "请求我审查", allOpenPullRequests: "所有开放 PR", noPullRequests: "没有开放的拉取请求",
+    noCurrentPullRequest: "当前分支没有关联的开放 PR", pullRequestDetails: "拉取请求详情",
+    loadingPullRequests: "正在读取 GitHub…", refreshPullRequests: "刷新拉取请求",
+    prUnavailable: "GitHub 拉取请求不可用", prNotInstalled: "请先安装 GitHub CLI（gh），然后重试。",
+    prUnauthenticated: "请运行 gh auth login 登录 GitHub，然后重试。", prNoRepository: "当前项目没有可识别的 GitHub 远程仓库。",
+    prOffline: "暂时无法连接 GitHub，请检查网络后重试。", openGitHub: "在 GitHub 中打开",
+    closePullRequestPanel: "关闭拉取请求面板", closeDialog: "关闭对话框", description: "描述", checks: "检查", activityLog: "活动", comments: "评论",
+    noComments: "暂无评论", noChecks: "无 CI 检查", requestedReviewers: "审查者", requestReview: "请求审查",
+    removeReviewer: "移除审查者", reviewerPlaceholder: "GitHub 用户名或组织/团队",
+    editPullRequest: "编辑 PR", prTitle: "标题", prBody: "描述", postComment: "发表评论",
+    commentPlaceholder: "留下评论…", review: "审查", approvePR: "批准", requestChanges: "请求修改",
+    reviewComment: "仅评论", reviewBodyPlaceholder: "填写审查说明…", readyForReview: "可供审查",
+    convertToDraft: "转为草稿", closePullRequest: "关闭 PR", reopenPullRequest: "重新打开 PR",
+    monitorAndFixPR: "监控并修复 PR", stopMonitoring: "停止监控", monitorWatching: "正在监控",
+    monitorPending: "等待修复条件", monitorRepairing: "正在自动修复", monitorCompleted: "修复会话已完成",
+    monitorError: "监控出错", openRepairSession: "打开修复会话", merge: "合并",
+    enableAutoMerge: "启用自动合并", disableAutoMerge: "关闭自动合并", mergeCommit: "创建合并提交",
+    squashMerge: "压缩并合并", rebaseMerge: "变基并合并", confirmMerge: "确认合并",
+    confirmExternalAction: "确认 GitHub 操作", mergeWarning: "此操作会修改 GitHub，且合并后不可撤销。",
+    changedFiles: "个文件", reviewers: "审查", ciChecks: "检查", openStatus: "开放",
+    draftStatus: "草稿", closedStatus: "已关闭", mergedStatus: "已合并",
+    checkPending: "进行中", checkPassing: "通过", checkFailing: "失败",
+    // Settings
+    searchSettings: "搜索设置…", closeSettings: "关闭设置", save: "保存", refresh: "刷新",
+    backToApp: "返回应用", loadingRoles: "正在加载可配置角色…",
+    resetInherit: "恢复继承",
+    routePlan: "计划模式", routeCompaction: "上下文压缩",
+    routePlanHint: "调查工作区并输出可执行计划，不修改文件。",
+    routeCompactionHint: "长会话压缩与上下文续接使用的模型。",
+    routeSubagentHint: "{role} 子代理的模型路由。",
+    settingsModels: "模型路由", settingsModelsHint: "为计划模式、上下文压缩和每个子代理选择独立模型；不设置时继承当前会话。",
+    settingsSubagents: "子代理运行", settingsSubagentsHint: "控制任务的并发上限，超出上限的任务会自动排队。",
+    settingsGovernance: "运行治理", settingsGovernanceHint: "配置默认审批方式以及主任务运行时的新消息处理方式。",
+    settingsAppearance: "界面", settingsAppearanceHint: "调整应用语言与显示主题。",
+    settingsExtensions: "Skills 与扩展", settingsExtensionsHint: "查看运行时发现的本地能力目录。",
+    settingsNavModels: "计划、压缩与各子代理模型", settingsNavSubagents: "并发与任务调度",
+    settingsNavGovernance: "审批与运行中消息", settingsNavAppearance: "语言与主题",
+    settingsNavExtensions: "运行时能力目录",
+    defaultApprovalMode: "默认审批模式", defaultApprovalModeHint: "高风险操作仍由 Go 运行时执行最终校验。",
+    languageHint: "同步修改运行时语言与桌面界面。", themeHint: "只保存桌面视觉偏好，不改变运行时配置。",
+    concurrencyHint: "最多同时运行的子代理数量。",
+    noSkills: "没有发现可用 Skill。", skillDisabled: "已停用", skillEager: "默认加载", skillOnDemand: "按需加载",
+    routeInherited: "继承当前会话", routeCustom: "独立设置",
+    provider: "提供商", reasoningEffort: "推理强度",
+    langZh: "简体中文", langEn: "English",
+    // Errors / misc
+    runFailed: "运行失败", change: "变更", needApproval: "需要审批",
+    waiting: "等待", viewThread: "查看会话 →", recentRun: "最近一次运行",
+    status: "状态", toolCalls: "工具调用", pendingApprovals: "待审批",
+    timelineBlocks: "{blocks} 个时间线块 · {tools} 次工具调用",
   },
   en: {
     newSession: "New thread", search: "Search", runs: "Runs", agents: "Agents", extensions: "Extensions",
     projects: "Projects", workbench: "Workbench", workspace: "Workspace", settings: "Settings",
     recovery: "Recovery", promptTitle: "What do you want to build in Azem?",
     promptPlaceholder: "Describe a task, attach an image, or reference a file…", send: "Send", cancel: "Cancel",
-    handoff: "Handoff", actions: "Actions", environment: "Environment", changes: "Changes", context: "Context",
+    deliveryMode: "In-run message mode", queue: "Queue", guide: "Guide", queuedMessages: "Queued messages",
+    queuePlaceholder: "Add a message for the next turn…", guidePlaceholder: "Guide the current task…",
+    editMessage: "Edit message", deleteMessage: "Delete message", closeQueue: "Close queue", moreActions: "More actions",
+    guideAttachmentHint: "Guidance does not support attachments; use queue mode instead.", runningMessageMode: "Messages while running",
+    runningMessageModeHint: "Queue starts the next turn after the current task; Guide updates the current task.",
+    handoff: "Handoff", actions: "Actions", environment: "Environment", environmentInfo: "Environment", changes: "Changes", context: "Context",
+    backgroundProcesses: "Background processes", backgroundTerminal: "Background terminal", sources: "Sources",
     contextUsage: "Context usage", contextRemaining: "Remaining", contextUnavailable: "Context usage unavailable",
-    runtimeHealthy: "Runtime healthy", noChanges: "No changes", branch: "Branch", local: "Local",
-    running: "Running", ready: "Ready", failed: "Failed", completed: "Completed", cancelled: "Cancelled",
-    autoReview: "Auto review", promptApproval: "Ask first", yolo: "Always allow", plan: "Plan mode",
+    runtimeHealthy: "Runtime healthy", noChanges: "No changes", clean: "Clean", branch: "Branch", local: "Local",
+    switchProject: "Switch project", noBranches: "No branches",
+    searchBranches: "Search branches", branchesSection: "Branches",
+    uncommittedFiles: "Uncommitted: {count} files",
+    createCheckoutBranch: "Create and check out new branch…",
+    newBranchPlaceholder: "New branch name",
+    createBranch: "Create",
+    dirtySwitchConfirm: "Workspace has uncommitted changes. Switch to “{branch}” anyway?",
+    noMatchingBranches: "No matching branches",
+    running: "Running", ready: "Ready", failed: "Failed", completed: "Completed", cancelled: "Cancelled", idle: "Idle", queued: "Queued",
+    // Codex-style approval modes
+    autoReview: "On your behalf", promptApproval: "Ask for approval", yolo: "Full access",
+    approvalMenuTitle: "How should operations be approved?",
+    approvalAskHint: "Always ask when editing outside files or using the internet",
+    approvalAutoHint: "Only ask for approval on detected risky operations",
+    approvalFullHint: "Unrestricted access to the internet and any file on your computer",
+    plan: "Plan mode", planLabel: "Plan",
+    planHint: "Plan without implementing: inspect the workspace and produce an actionable plan",
     team: "Team mode", single: "Default mode", model: "Model", reasoning: "Reasoning effort", approve: "Allow", deny: "Deny", approveOnce: "Allow once",
     roleModels: "Role models", subagentRuntime: "Subagent runtime", codexSubscription: "Codex subscription", appearance: "Appearance",
     planModel: "Plan model", concurrency: "Max concurrent tasks", fastMode: "Fast mode", language: "Language",
     speed: "Speed", standardSpeed: "Standard", fastSpeed: "Fast", fastModeHint: "Fast mode only applies to some models.",
-    theme: "Theme", light: "Light", dark: "Dark", system: "System", inspector: "Context inspector",
+    theme: "Theme", light: "Light", dark: "Dark", system: "System", inspector: "Environment",
+    sideChat: "Side chat", closeSideChat: "Close side chat",
     noAgents: "No subagents for this thread", noSessions: "No previous threads", command: "Search commands or threads…",
     projectDetails: "Project details", showMore: "Show more", showLess: "Show less",
     addProject: "Add project", chooseProjectFolder: "Choose project folder", chooseProjectFolderHint: "Open an existing folder", openProject: "Open project",
@@ -60,10 +184,82 @@ const messages = {
     toolGeneric: "Use tool", toolReadFile: "Read File", toolReadArtifact: "Read Artifact", toolWriteFile: "Write File", toolEditFile: "Edit File",
     toolSearch: "Search Code", toolListFiles: "List Files", toolShell: "Run Command", toolGoTest: "Run Go Tests", toolGofmt: "Format Go Code",
     toolGitDiff: "View Git Diff", toolActivateSkill: "Load Skill", toolSpawn: "Start Subagent", toolGetSubagentOutput: "Get Subagent Output", toolStopSubagent: "Stop Subagent",
+    thinking: "Thinking", processed: "Worked", processedFor: "Worked for {duration}", toolExecuting: "Running…",
+    toolStatusRunning: "Running", toolStatusFailed: "Failed", toolStatusDone: "Done",
+    jumpLatest: "Jump to latest",
+    toolGroupSearch: "Searched {n} times", toolGroupRead: "Read {n} files", toolGroupEdit: "Edited {n} files",
+    toolGroupDiff: "Viewed {n} diffs", toolGroupShell: "Ran {n} commands", toolGroupAgent: "Ran {n} agent tasks",
+    toolGroupOtherSole: "Used {n} tools", toolGroupOther: "{n} other tool calls",
+    fieldPath: "Path", fieldPaths: "Paths", fieldQuery: "Query", fieldCommand: "Command", fieldCwd: "Cwd",
+    fieldArtifact: "Artifact", fieldSkill: "Skill", fieldDetail: "Detail",
+    syncingAgentTimeline: "Syncing subagent timeline…", emptySideChat: "No messages in this side chat yet",
+    subagents: "Subagents", inheritModel: "inherit model", toolsLabel: "tools",
+    noAttachments: "No image attachments yet",
+    agentCompleted: "completed", agentFailed: "failed", agentCancelled: "cancelled", agentQueued: "queued", agentIdle: "idle",
+    slashCommands: "Slash commands", skills: "Skills", skillUseHint: "Use this skill for the current task",
+    skillBuiltin: "Built-in", skillPersonal: "Personal", agentMode: "Agent mode",
+    reasoningMinimal: "Minimal", reasoningLow: "Low", reasoningMedium: "Medium", reasoningHigh: "High",
+    reasoningXHigh: "Extra high", reasoningMax: "Maximum", reasoningUltra: "Ultra",
+    reasoningMaxHint: "Uses your limit faster",
+    reasoningFaster: "More efficient", reasoningSmarter: "Smarter", reasoningAdvanced: "Advanced",
+    reasoningBack: "Back",
+    fastBoostTitle: "1.5× speed", fastBoostDetail: "Uses more quota",
+    renameChat: "Rename chat", unread: "Unread", sessionActionFailed: "Session action failed",
+    // Pull requests
+    pullRequests: "Pull requests", currentPullRequest: "Current branch", createdByMe: "Created by me",
+    needsMyReview: "Review requested", allOpenPullRequests: "All open pull requests", noPullRequests: "No open pull requests",
+    noCurrentPullRequest: "The current branch has no open pull request", pullRequestDetails: "Pull request details",
+    loadingPullRequests: "Reading GitHub…", refreshPullRequests: "Refresh pull requests",
+    prUnavailable: "GitHub pull requests unavailable", prNotInstalled: "Install GitHub CLI (gh), then retry.",
+    prUnauthenticated: "Run gh auth login, then retry.", prNoRepository: "This project has no recognized GitHub remote.",
+    prOffline: "GitHub is temporarily unreachable. Check the network and retry.", openGitHub: "Open on GitHub",
+    closePullRequestPanel: "Close pull request panel", closeDialog: "Close dialog", description: "Description", checks: "Checks", activityLog: "Activity", comments: "Comments",
+    noComments: "No comments", noChecks: "No CI checks", requestedReviewers: "Reviewers", requestReview: "Request review",
+    removeReviewer: "Remove reviewer", reviewerPlaceholder: "GitHub login or organization/team",
+    editPullRequest: "Edit PR", prTitle: "Title", prBody: "Description", postComment: "Post comment",
+    commentPlaceholder: "Leave a comment…", review: "Review", approvePR: "Approve", requestChanges: "Request changes",
+    reviewComment: "Comment only", reviewBodyPlaceholder: "Add review notes…", readyForReview: "Ready for review",
+    convertToDraft: "Convert to draft", closePullRequest: "Close PR", reopenPullRequest: "Reopen PR",
+    monitorAndFixPR: "Monitor and fix PR", stopMonitoring: "Stop monitoring", monitorWatching: "Monitoring",
+    monitorPending: "Waiting to repair", monitorRepairing: "Repairing automatically", monitorCompleted: "Repair session completed",
+    monitorError: "Monitor error", openRepairSession: "Open repair session", merge: "Merge",
+    enableAutoMerge: "Enable auto-merge", disableAutoMerge: "Disable auto-merge", mergeCommit: "Create merge commit",
+    squashMerge: "Squash and merge", rebaseMerge: "Rebase and merge", confirmMerge: "Confirm merge",
+    confirmExternalAction: "Confirm GitHub action", mergeWarning: "This changes GitHub and a merge cannot be undone.",
+    changedFiles: "files", reviewers: "Reviews", ciChecks: "Checks", openStatus: "Open",
+    draftStatus: "Draft", closedStatus: "Closed", mergedStatus: "Merged",
+    checkPending: "Pending", checkPassing: "Passing", checkFailing: "Failing",
+    searchSettings: "Search settings…", closeSettings: "Close settings", save: "Save", refresh: "Refresh",
+    backToApp: "Back to app", loadingRoles: "Loading configurable roles…",
+    resetInherit: "Reset to inherit",
+    routePlan: "Plan mode", routeCompaction: "Context compaction",
+    routePlanHint: "Survey the workspace and produce an executable plan without editing files.",
+    routeCompactionHint: "Model used for long-session compaction and context continuation.",
+    routeSubagentHint: "Model route for the {role} subagent.",
+    settingsModels: "Model routes", settingsModelsHint: "Pick independent models for plan mode, compaction, and each subagent; unset routes inherit the current session.",
+    settingsSubagents: "Subagent runtime", settingsSubagentsHint: "Cap concurrent subagent tasks; extras queue automatically.",
+    settingsGovernance: "Run governance", settingsGovernanceHint: "Default approval policy and how new messages are handled while a turn is running.",
+    settingsAppearance: "Appearance", settingsAppearanceHint: "Language and display theme.",
+    settingsExtensions: "Skills & extensions", settingsExtensionsHint: "Local capabilities discovered by the runtime.",
+    settingsNavModels: "Plan, compaction, and subagent models", settingsNavSubagents: "Concurrency and scheduling",
+    settingsNavGovernance: "Approvals and in-run messages", settingsNavAppearance: "Language and theme",
+    settingsNavExtensions: "Runtime capability catalog",
+    defaultApprovalMode: "Default approval mode", defaultApprovalModeHint: "High-risk operations are still enforced by the Go runtime.",
+    languageHint: "Updates both the runtime language and the desktop UI.", themeHint: "Desktop visual preference only; does not change runtime config.",
+    concurrencyHint: "Maximum number of subagents that may run at once.",
+    noSkills: "No skills discovered.", skillDisabled: "Disabled", skillEager: "Eager", skillOnDemand: "On demand",
+    routeInherited: "Inherit session", routeCustom: "Custom",
+    provider: "Provider", reasoningEffort: "Reasoning",
+    langZh: "简体中文", langEn: "English",
+    runFailed: "Run failed", change: "Change", needApproval: "Needs approval",
+    waiting: "Waiting", viewThread: "Open thread →", recentRun: "Latest run",
+    status: "Status", toolCalls: "Tool calls", pendingApprovals: "Pending approvals",
+    timelineBlocks: "{blocks} timeline blocks · {tools} tool calls",
   },
 } as const;
 
 export type MessageKey = keyof (typeof messages)["zh-CN"];
+export type Language = "en" | "zh-CN";
 
 const toolNameKeys: Record<string, MessageKey> = {
   "coding.read_file": "toolReadFile", "context.read_artifact": "toolReadArtifact", "coding.write_file": "toolWriteFile", "coding.edit_hashline": "toolEditFile",
@@ -72,11 +268,61 @@ const toolNameKeys: Record<string, MessageKey> = {
   "subagent.spawn": "toolSpawn", "subagent.get_output": "toolGetSubagentOutput", "subagent.kill": "toolStopSubagent",
 };
 
-export function translator(language: "en" | "zh-CN") {
-  return (key: MessageKey) => messages[language][key] ?? messages["zh-CN"][key];
+export function translator(language: Language) {
+  return (key: MessageKey): string => messages[language][key] ?? messages["zh-CN"][key];
 }
 
-export function toolDisplayName(name: string, language: "en" | "zh-CN") {
+export function tFormat(language: Language, key: MessageKey, vars: Record<string, string | number>): string {
+  let text: string = translator(language)(key);
+  for (const [name, value] of Object.entries(vars)) {
+    text = text.replaceAll(`{${name}}`, String(value));
+  }
+  return text;
+}
+
+export function toolDisplayName(name: string, language: Language) {
   const key = toolNameKeys[name];
   return key ? translator(language)(key) : name;
+}
+
+/** Canonical low → high order (Codex-style). */
+export const REASONING_LEVEL_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+
+export function sortReasoningLevels(levels: string[]): string[] {
+  return [...new Set(levels.filter(Boolean))].sort((a, b) => {
+    const ia = (REASONING_LEVEL_ORDER as readonly string[]).indexOf(a);
+    const ib = (REASONING_LEVEL_ORDER as readonly string[]).indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
+export function reasoningLabel(level: string, language: Language) {
+  const map: Record<string, MessageKey> = {
+    minimal: "reasoningMinimal", low: "reasoningLow", medium: "reasoningMedium",
+    high: "reasoningHigh", xhigh: "reasoningXHigh", max: "reasoningMax", ultra: "reasoningUltra",
+  };
+  const key = map[level];
+  return key ? translator(language)(key) : level;
+}
+
+export function reasoningHint(level: string, language: Language): string | undefined {
+  // Codex shows the usage-limit hint from 极高 (xhigh) upward.
+  if (level === "xhigh" || level === "max" || level === "ultra") return translator(language)("reasoningMaxHint");
+  return undefined;
+}
+
+export type ToolCategory = "search" | "read" | "edit" | "diff" | "shell" | "agent" | "other";
+
+export function toolGroupLabel(category: ToolCategory, count: number, language: Language, sole: boolean) {
+  const key: MessageKey = category === "search" ? "toolGroupSearch"
+    : category === "read" ? "toolGroupRead"
+      : category === "edit" ? "toolGroupEdit"
+        : category === "diff" ? "toolGroupDiff"
+          : category === "shell" ? "toolGroupShell"
+            : category === "agent" ? "toolGroupAgent"
+              : sole ? "toolGroupOtherSole" : "toolGroupOther";
+  return tFormat(language, key, { n: count });
 }

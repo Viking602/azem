@@ -34,27 +34,63 @@ type appFakeMCPClient struct {
 func (c *appFakeMCPClient) Initialize(context.Context, string, string) (mcpcontract.InitializeResult, error) {
 	return mcpcontract.InitializeResult{ProtocolVersion: "2025-06-18"}, nil
 }
+
 func (c *appFakeMCPClient) ListTools(context.Context) ([]message.ToolDefinition, error) {
 	return []message.ToolDefinition{{Name: "status", Description: "return status", InputSchema: message.JSONSchema{Type: "object"}}}, nil
 }
+
 func (c *appFakeMCPClient) CallTool(_ context.Context, name string, _ map[string]any) (mcpcontract.CallToolResult, error) {
 	c.calls.Add(1)
 	c.lastTool = name
 	return mcpcontract.CallToolResult{Content: []mcpcontract.ContentBlock{{Type: "text", Text: "remote ok"}}}, nil
 }
+
 func (c *appFakeMCPClient) ListResources(context.Context) ([]mcpcontract.Resource, error) {
 	return nil, nil
 }
+
 func (c *appFakeMCPClient) ReadResource(context.Context, string) ([]mcpcontract.ResourceContent, error) {
 	return nil, nil
 }
+
 func (c *appFakeMCPClient) ListPrompts(context.Context) ([]mcpcontract.Prompt, error) {
 	return nil, nil
 }
+
 func (c *appFakeMCPClient) GetPrompt(context.Context, string, map[string]string) ([]mcpcontract.PromptMessage, error) {
 	return nil, nil
 }
 func (c *appFakeMCPClient) Close() error { return nil }
+
+func TestRefreshMCPActionWithoutTargetRefreshesConnectedServers(t *testing.T) {
+	ctx := context.Background()
+	client := &appFakeMCPClient{}
+	manager := mcpruntime.NewManager(map[string]config.MCPServerConfig{
+		"demo": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
+	}, "test", nil, mcpruntime.Options{
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+			return client, nil
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = manager.Close() }()
+
+	service := NewService(ctx, config.Default())
+	service.AttachAgentExtensions(manager, nil)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionRefreshMCP}); err != nil {
+		t.Fatalf("empty-target MCP refresh error = %v", err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventMCPState || event.State != "snapshot" {
+		t.Fatalf("MCP refresh event = %#v", event)
+	}
+}
 
 func TestConfiguredTurnSnapshotsAndGovernsMCPTool(t *testing.T) {
 	var responseCalls atomic.Int32

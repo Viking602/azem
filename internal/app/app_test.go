@@ -122,6 +122,27 @@ func TestUIPreferencesPersistAndRestore(t *testing.T) {
 	}
 }
 
+func TestQueueModePreferencePersistsAndRestores(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	service := NewService(context.Background(), config.Default())
+	service.SetConfigPath(configPath)
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetQueueMode, Target: "guide"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetQueueMode, Target: "later"}); err == nil {
+		t.Fatal("invalid queue mode accepted")
+	}
+	persisted, err := config.Load(configPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewService(context.Background(), persisted)
+	if restarted.cfg.Defaults.QueueMode != "guide" {
+		t.Fatalf("restored queue mode = %q", restarted.cfg.Defaults.QueueMode)
+	}
+}
+
 func TestHistoricalEvidenceIsBoundedStructuredDataAndExcludedFromTeamPrompt(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
@@ -1207,6 +1228,62 @@ func TestChatGPTFastModeActionPersistsAndUpdatesRuntime(t *testing.T) {
 	}
 }
 
+func TestSessionPreferencesActionPersistsDefaultsAndSession(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	store, err := sqlitestore.Open(ctx, filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close(ctx) })
+	sessions := session.NewService(store.DB())
+	service := NewService(ctx, config.Default())
+	service.SetConfigPath(path)
+	service.AttachDurable(sessions, nil)
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "session-prefs", Title: "Prefs", ProviderID: "chatgpt", ModelID: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(ctx, Action{
+		Kind: ActionSetSessionPreferences, SessionID: "session-prefs",
+		Route: &ModelRouteEntry{Route: config.ModelRouteConfig{Provider: "grok", Model: "grok-4.20", Reasoning: "medium"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if service.cfg.Defaults.Provider != "grok" || service.cfg.Defaults.Model != "grok-4.20" || service.cfg.Defaults.Reasoning != "medium" {
+		t.Fatalf("in-memory defaults = %#v", service.cfg.Defaults)
+	}
+	loaded, err := config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Defaults.Provider != "grok" || loaded.Defaults.Model != "grok-4.20" || loaded.Defaults.Reasoning != "medium" {
+		t.Fatalf("persisted defaults = %#v", loaded.Defaults)
+	}
+	row, err := sessions.LoadSession(ctx, "session-prefs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ProviderID != "grok" || row.ModelID != "grok-4.20" || row.Reasoning != "medium" || row.AgentMode != "single" {
+		t.Fatalf("session preferences = %#v", row)
+	}
+	// Blank sessions (not yet in the store) should still update defaults without error.
+	if err := service.ExecuteAction(ctx, Action{
+		Kind: ActionSetSessionPreferences, SessionID: "ephemeral-blank",
+		Route: &ModelRouteEntry{Route: config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if service.cfg.Defaults.Model != "gpt-5.6-luna" || service.cfg.Defaults.Reasoning != "low" {
+		t.Fatalf("blank-session defaults = %#v", service.cfg.Defaults)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSessionPreferences}); err == nil {
+		t.Fatal("missing route was accepted")
+	}
+}
+
 func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1246,7 +1323,7 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	if listed.Kind != EventGitBranches || listed.State != "listed" || listed.Text != "main" || listed.WorkspaceDirty {
 		t.Fatalf("listed branch event = %#v", listed)
 	}
-	if listed.Data["additions"] != "0" || listed.Data["deletions"] != "0" {
+	if listed.Data["additions"] != "0" || listed.Data["deletions"] != "0" || listed.Data["changed_files"] != "0" {
 		t.Fatalf("clean workspace line changes = %#v", listed.Data)
 	}
 	if got := []GitBranchEntry{{Name: "feature"}, {Name: "main", Current: true}}; !reflect.DeepEqual(listed.GitBranches, got) {
@@ -1275,7 +1352,7 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	if blocked.Kind != EventGitBranches || blocked.State != "dirty_confirmation_required" || !blocked.WorkspaceDirty || blocked.Text != "main" {
 		t.Fatalf("dirty branch event = %#v", blocked)
 	}
-	if blocked.Data["additions"] != "3" || blocked.Data["deletions"] != "1" {
+	if blocked.Data["additions"] != "3" || blocked.Data["deletions"] != "1" || blocked.Data["changed_files"] != "2" {
 		t.Fatalf("dirty workspace line changes = %#v", blocked.Data)
 	}
 
@@ -1309,6 +1386,51 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	service.mu.Unlock()
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "main"}); err == nil || !strings.Contains(err.Error(), "workspace.allow_write") {
 		t.Fatalf("read-only switch error = %v", err)
+	}
+}
+
+func TestCreateGitBranchAction(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for _, arguments := range [][]string{
+		{"init", "--initial-branch=main"},
+		{"config", "user.email", "azem@example.test"},
+		{"config", "user.name", "Azem Test"},
+	} {
+		if _, err := gitOutput(ctx, root, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		{"add", "tracked.txt"},
+		{"commit", "-m", "base"},
+	} {
+		if _, err := gitOutput(ctx, root, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Default()
+	cfg.Workspace.Root = root
+	service := NewService(ctx, cfg)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionCreateGitBranch, Target: "codex/gui-desktop-experience"}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Kind != EventGitBranches || created.State != "created" || created.Text != "codex/gui-desktop-experience" {
+		t.Fatalf("created branch event = %#v", created)
+	}
+	current, err := gitOutput(ctx, root, "branch", "--show-current")
+	if err != nil || strings.TrimSpace(string(current)) != "codex/gui-desktop-experience" {
+		t.Fatalf("current branch = %q, error=%v", current, err)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionCreateGitBranch, Target: "bad branch name"}); err == nil {
+		t.Fatal("invalid branch name was accepted")
 	}
 }
 

@@ -344,6 +344,39 @@ func TestManagerRefreshUsesImmutableTurnSnapshot(t *testing.T) {
 	}
 }
 
+func TestManagerRefreshWithoutNameRefreshesEveryReadyServer(t *testing.T) {
+	ctx := context.Background()
+	clients := map[string]*fakeClient{
+		"first":  {tools: []message.ToolDefinition{{Name: "before", InputSchema: message.JSONSchema{Type: "object"}}}},
+		"second": {tools: []message.ToolDefinition{{Name: "before", InputSchema: message.JSONSchema{Type: "object"}}}},
+	}
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"first":  {Enabled: true, Transport: "stdio", Command: "first", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
+		"second": {Enabled: true, Transport: "stdio", Command: "second", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
+	}, "test", nil, Options{
+		Dial: func(_ context.Context, name string, _ config.MCPServerConfig, _ map[string]string, _ http.Header) (mcpcontract.Client, error) {
+			return clients[name], nil
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = manager.Close() }()
+	clients["first"].setTools([]message.ToolDefinition{{Name: "after", InputSchema: message.JSONSchema{Type: "object"}}})
+	clients["second"].setTools([]message.ToolDefinition{{Name: "after", InputSchema: message.JSONSchema{Type: "object"}}})
+
+	if err := manager.Refresh(ctx, ""); err != nil {
+		t.Fatalf("Refresh() with no server error = %v", err)
+	}
+	if clients["first"].listCalls() != 2 || clients["second"].listCalls() != 2 {
+		t.Fatalf("list calls first=%d second=%d", clients["first"].listCalls(), clients["second"].listCalls())
+	}
+	if got := definitionNames(manager.Snapshot()); !reflect.DeepEqual(got, []string{"mcp__first__after", "mcp__second__after"}) {
+		t.Fatalf("refreshed catalog = %v", got)
+	}
+}
+
 func TestManagerRetriesConnectionWithBoundedBackoff(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{}
@@ -559,6 +592,7 @@ type fakeClient struct {
 	initializedName    string
 	initializedVersion string
 	lastTool           string
+	listCount          int
 	callCount          int
 	callErr            error
 	callResult         *mcpcontract.CallToolResult
@@ -582,11 +616,14 @@ func (c *fakeClient) Initialize(_ context.Context, name, version string) (mcpcon
 	c.initializedName, c.initializedVersion = name, version
 	return mcpcontract.InitializeResult{ServerInfo: mcpcontract.ServerInfo{Name: "fake", Version: "1"}}, nil
 }
+
 func (c *fakeClient) ListTools(context.Context) ([]message.ToolDefinition, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.listCount++
 	return append([]message.ToolDefinition(nil), c.tools...), nil
 }
+
 func (c *fakeClient) CallTool(_ context.Context, name string, _ map[string]any) (mcpcontract.CallToolResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -608,6 +645,7 @@ func (*fakeClient) ListPrompts(context.Context) ([]mcpcontract.Prompt, error) { 
 func (*fakeClient) GetPrompt(context.Context, string, map[string]string) ([]mcpcontract.PromptMessage, error) {
 	return nil, nil
 }
+
 func (c *fakeClient) Close() error {
 	if c.closeStarted != nil {
 		c.closeStarted <- struct{}{}
@@ -623,10 +661,17 @@ func (c *fakeClient) Close() error {
 	c.closed = true
 	return nil
 }
+
 func (c *fakeClient) setTools(tools []message.ToolDefinition) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tools = append([]message.ToolDefinition(nil), tools...)
+}
+
+func (c *fakeClient) listCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.listCount
 }
 
 func (c *fakeClient) setCallResult(result *mcpcontract.CallToolResult) {

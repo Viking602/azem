@@ -1,5 +1,6 @@
-export type View = "thread" | "projects" | "runs" | "agents" | "extensions" | "recovery";
+export type View = "thread" | "projects" | "pullRequests" | "runs" | "agents" | "extensions" | "recovery";
 export type InspectorTab = "environment" | "changes" | "agents" | "context";
+export type DeliveryMode = "queue" | "guide";
 
 export interface Snapshot {
   workspace: string;
@@ -10,9 +11,11 @@ export interface Snapshot {
   agentMode: string;
   language: "en" | "zh-CN";
   approvalMode: string;
+  queueMode: DeliveryMode;
   subagentConcurrency: number;
   chatgptFastMode: boolean;
   sequence: number;
+  pullRequestMonitors?: PullRequestMonitorState[];
 }
 
 export interface Attachment {
@@ -21,6 +24,12 @@ export interface Attachment {
   mimeType: string;
   path: string;
   size: number;
+}
+
+export interface QueuedPrompt {
+  id: string;
+  text: string;
+  attachments: Attachment[];
 }
 
 export interface TurnRequest {
@@ -98,6 +107,19 @@ export interface AgentState {
   summary: string;
 }
 
+export interface BackgroundProcess {
+  id: string;
+  name: string;
+  command: string;
+  cwd: string;
+  pid: number;
+  state: string;
+  exitCode: number;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+}
+
 export interface AgentCatalogEntry {
   name: string;
   description: string;
@@ -113,6 +135,7 @@ export interface SkillEntry {
   name: string;
   description: string;
   sourcePath: string;
+  bundled: boolean;
   eager: boolean;
   disabled: boolean;
   resourceCount: number;
@@ -122,6 +145,173 @@ export interface GitBranch {
   name: string;
   current: boolean;
 }
+export interface PullRequestCapability {
+  available: boolean;
+  code?: "not_installed" | "unauthenticated" | "no_repository" | "offline" | "error";
+  message?: string;
+}
+
+export interface PullRequestRepository {
+  nameWithOwner: string;
+  url: string;
+  defaultBranch: string;
+  viewerPermission: string;
+  viewerLogin: string;
+  allowedMergeMethods: Array<"merge" | "squash" | "rebase">;
+}
+
+export interface PullRequestActor {
+  login: string;
+  name?: string;
+  url?: string;
+  avatarUrl?: string;
+  bot?: boolean;
+}
+
+export interface PullRequestCheckSummary {
+  total: number;
+  pending: number;
+  passing: number;
+  failing: number;
+  neutral: number;
+  skipped: number;
+}
+
+export interface PullRequestCheck {
+  name: string;
+  workflow?: string;
+  status?: string;
+  conclusion?: string;
+  category: "pending" | "passing" | "failing" | "neutral" | "skipped";
+  url?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface PullRequestSummary {
+  number: number;
+  title: string;
+  state: string;
+  draft: boolean;
+  author: PullRequestActor;
+  headRefName: string;
+  headRefOid?: string;
+  baseRefName: string;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  reviewDecision?: string;
+  mergeable?: string;
+  mergeStateStatus?: string;
+  url: string;
+  updatedAt: string;
+  checks: PullRequestCheckSummary;
+}
+
+export interface PullRequestReview {
+  id?: string;
+  author: PullRequestActor;
+  state: string;
+  body?: string;
+  submittedAt?: string;
+  url?: string;
+}
+
+export interface PullRequestComment {
+  id?: string;
+  author: PullRequestActor;
+  body: string;
+  createdAt: string;
+  updatedAt?: string;
+  url?: string;
+  viewerCanEdit?: boolean;
+  viewerCanDelete?: boolean;
+}
+
+export interface PullRequestCommit {
+  oid: string;
+  headline: string;
+  body?: string;
+  authoredAt?: string;
+  committedAt?: string;
+  authors?: PullRequestActor[];
+}
+
+export interface PullRequestFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface PullRequestActivity {
+  kind: "created" | "commit" | "review" | "comment" | "merged" | "closed";
+  actor: PullRequestActor;
+  title: string;
+  body?: string;
+  state?: string;
+  url?: string;
+  oid?: string;
+  at: string;
+}
+
+export interface PullRequest extends PullRequestSummary {
+  body: string;
+  createdAt: string;
+  closedAt?: string;
+  mergedAt?: string;
+  maintainerCanModify: boolean;
+  autoMergeEnabled: boolean;
+  autoMergeMethod?: string;
+  reviewRequests: PullRequestActor[];
+  reviews: PullRequestReview[];
+  comments: PullRequestComment[];
+  commits: PullRequestCommit[];
+  files: PullRequestFile[];
+  checksDetail: PullRequestCheck[];
+  activity: PullRequestActivity[];
+  allowedMergeMethods: Array<"merge" | "squash" | "rebase">;
+}
+
+export interface PullRequestDashboard {
+  capability: PullRequestCapability;
+  repository?: PullRequestRepository;
+  currentBranch?: string;
+  current?: PullRequestSummary;
+  createdByViewer: PullRequestSummary[];
+  needsReview: PullRequestSummary[];
+  open: PullRequestSummary[];
+  refreshedAt: string;
+}
+
+export interface PullRequestMonitorState {
+  number: number;
+  enabled: boolean;
+  status: "disabled" | "watching" | "pending" | "repairing" | "completed" | "error";
+  message?: string;
+  sessionId?: string;
+  conflict?: boolean;
+  failingChecks?: string[];
+  fingerprint?: string;
+  lastCheckedAt?: string;
+  lastTriggeredAt?: string;
+}
+
+export interface PullRequestDetailResponse {
+  pullRequest: PullRequest;
+  monitor: PullRequestMonitorState;
+}
+
+export interface PullRequestMutationRequest {
+  number: number;
+  kind: "edit" | "add_reviewer" | "remove_reviewer" | "comment" | "review" | "ready" | "draft" | "close" | "reopen" | "merge" | "enable_auto_merge" | "disable_auto_merge";
+  title?: string;
+  body?: string;
+  login?: string;
+  reviewKind?: "approve" | "comment" | "request_changes";
+  mergeMethod?: "merge" | "squash" | "rebase";
+  expectedHeadOid?: string;
+}
+
 
 export interface ModelRouteConfig {
   provider?: string;
@@ -170,6 +360,7 @@ export interface RuntimeEvent {
   todo?: unknown;
   recap?: unknown;
   modelRoutes?: ModelRoute[];
+  background?: Array<Record<string, unknown>>;
   gitBranches?: Array<Record<string, unknown>>;
   workspaceDirty?: boolean;
   at?: string;

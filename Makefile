@@ -12,11 +12,19 @@ build:
 frontend:
 	cd frontend && bun install --frozen-lockfile && bun run build
 
+# Match LSMinimumSystemVersion in Info.plist; keeps CGO objects and the Go
+# linker on the same deployment target (avoids "built for newer macOS than linked").
+MACOSX_DEPLOYMENT_TARGET ?= 12.0
+
 gui: frontend
 ifeq ($(shell uname -s),Darwin)
 	mkdir -p dist/Azem.app/Contents/MacOS
 	cp cmd/azem-gui/Info.plist dist/Azem.app/Contents/Info.plist
-	go build -ldflags "$(LDFLAGS)" -o dist/Azem.app/Contents/MacOS/Azem ./cmd/azem-gui
+	MACOSX_DEPLOYMENT_TARGET=$(MACOSX_DEPLOYMENT_TARGET) \
+		CGO_CFLAGS="-mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)" \
+		CGO_LDFLAGS="-mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)" \
+		go build -ldflags "$(LDFLAGS)" -o azem-gui ./cmd/azem-gui
+	cp azem-gui dist/Azem.app/Contents/MacOS/Azem
 else
 	go build -ldflags "$(LDFLAGS)" -o azem-gui ./cmd/azem-gui
 endif

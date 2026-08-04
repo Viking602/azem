@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -16,7 +17,7 @@ import (
 // UpdateDefault atomically updates one persisted UI default while preserving
 // unrelated YAML fields and comments in the user's configuration file.
 func UpdateDefault(path, key, value string) error {
-	if key != "language" && key != "approval_mode" {
+	if !slices.Contains([]string{"language", "approval_mode", "queue_mode", "provider", "model", "reasoning"}, key) {
 		return fmt.Errorf("unsupported default %q", key)
 	}
 	var document yaml.Node
@@ -160,6 +161,22 @@ func UpdateChatGPTFastMode(path string, enabled bool) error {
 		chatGPT := ensureMappingPath(root, "providers", "chatgpt")
 		setMappingScalar(chatGPT, "fast_mode", strconv.FormatBool(enabled))
 		mappingValue(chatGPT, "fast_mode").Tag = "!!bool"
+	})
+}
+
+// UpdateSessionModelDefaults atomically writes the selected provider/model/reasoning
+// defaults so new sessions and app restarts restore the last UI selection.
+func UpdateSessionModelDefaults(path, provider, model, reasoning string) error {
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return fmt.Errorf("provider and model are required")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		defaults := ensureMappingPath(root, "defaults")
+		setMappingScalar(defaults, "provider", provider)
+		setMappingScalar(defaults, "model", model)
+		setMappingScalar(defaults, "reasoning", strings.TrimSpace(reasoning))
 	})
 }
 

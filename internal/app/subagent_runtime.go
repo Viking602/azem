@@ -94,6 +94,8 @@ type activeSubagent struct {
 	toolNames           map[string]struct{}
 	lastActivityPersist time.Time
 	persistedActivity   string
+	lastStateEmit       time.Time
+	lastEmittedTools    int
 }
 
 type subagentRuntime struct {

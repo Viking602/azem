@@ -1,80 +1,209 @@
+import { useEffect, useMemo, useState } from "react";
 import {
-  Bot, CheckCircle2, CircleDot, FileDiff, FolderGit2, GitBranch, Layers3,
-  MemoryStick, PanelRightClose, Square, Wrench,
+  Bot, FileDiff, FileImage, FolderGit2, GitBranch, Plus, SquareTerminal, Wrench,
 } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
-import type { InspectorTab } from "../types";
-import { formatDuration } from "./ThreadSurface";
+import type { AgentState, Snapshot } from "../types";
+import MenuSelect from "./MenuSelect";
+
+const AGENT_ACCENTS = [
+  "#3478f6", "#ef4444", "#f59e0b", "#10b981", "#8b5cf6",
+  "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1",
+  "#14b8a6", "#a855f7", "#e11d48", "#0ea5e9", "#d946ef",
+];
+const AGENT_LIST_PREVIEW = 12;
 
 export default function Inspector() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
-  const tab = useRuntimeStore((state) => state.inspectorTab);
-  const setTab = useRuntimeStore((state) => state.setInspectorTab);
-  const setOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const blocks = useRuntimeStore((state) => state.blocks);
   const branches = useRuntimeStore((state) => state.branches);
   const workspaceAdditions = useRuntimeStore((state) => state.workspaceAdditions);
   const workspaceDeletions = useRuntimeStore((state) => state.workspaceDeletions);
   const agents = useRuntimeStore((state) => state.agents);
-  const context = useRuntimeStore((state) => state.contextProfile);
-  const todo = useRuntimeStore((state) => state.todo);
-  const recovery = useRuntimeStore((state) => state.recovery);
+  const backgroundProcesses = useRuntimeStore((state) => state.backgroundProcesses);
   const selectedAgentId = useRuntimeStore((state) => state.selectedAgentId);
-  const agentBlocks = useRuntimeStore((state) => state.agentBlocks);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
+  const selectAgent = useRuntimeStore((state) => state.selectAgent);
   const setError = useRuntimeStore((state) => state.setError);
   const t = translator(snapshot.language);
-  const tabs: Array<[InspectorTab, string]> = [["environment", t("environment")], ["changes", t("changes")], ["agents", t("agents")], ["context", t("context")]];
-  const diffs = blocks.filter((block) => block.kind === "diff");
+  const sources = Array.from(new Map(blocks.flatMap((block) => block.attachments ?? []).map((item) => [item.id || item.path, item])).values());
 
   const action = async (kind: string, target = "", decision = "") => {
     try { await execute({ kind, target, decision, sessionId: currentSessionId }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
 
+  useEffect(() => {
+    void execute({ kind: "list_background", sessionId: currentSessionId }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  }, [currentSessionId, setError]);
+
+  const openAgent = (id: string) => {
+    selectAgent(id);
+    void action("inspect_agent", id);
+  };
+
   return (
-    <aside className="context-inspector">
-      <header><span>{t("inspector")}</span><button className="icon-button" onClick={() => setOpen(false)}><PanelRightClose size={15} /></button></header>
-      <div className="inspector-tabs" role="tablist">{tabs.map(([value, label]) => <button key={value} role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{label}</button>)}</div>
+    <aside className="context-inspector" aria-label={t("inspector")}>
       <div className="inspector-scroll">
-        {tab === "environment" && <>
-          <section className="inspector-card">
-            <InspectorRow icon={FileDiff} label={t("changes")}>{workspaceAdditions + workspaceDeletions > 0 && <><span className="plus">+{workspaceAdditions}</span><span className="minus">−{workspaceDeletions}</span></>}</InspectorRow>
-            <InspectorRow icon={FolderGit2} label={basename(snapshot.workspace)}><span>{t("local")}</span></InspectorRow>
-            <InspectorRow icon={GitBranch} label={t("branch")}><select value={branches.find((branch) => branch.current)?.name || ""} onChange={(event) => action("switch_git_branch", event.target.value)}>{branches.map((branch) => <option key={branch.name}>{branch.name}</option>)}</select></InspectorRow>
-            <InspectorRow icon={CheckCircle2} label={t("runtimeHealthy")}><span className="status-dot success" /></InspectorRow>
-          </section>
-          {recovery.length > 0 && <section className="inspector-card warning-card"><h3>需要处理</h3><p>{recovery.length} 个恢复项正在等待确认。</p></section>}
-          <AgentList agents={agents} selectedAgentId={selectedAgentId} inspect={(id) => action("inspect_agent", id)} />
-        </>}
-        {tab === "changes" && <section className="inspector-card"><h3>{t("changes")}</h3>{diffs.length ? diffs.map((diff) => <button className="change-row" key={diff.id}><FileDiff size={14} /><span>{diff.title}</span><small><b className="plus">+{diff.data?.additions || 0}</b> <b className="minus">−{diff.data?.deletions || 0}</b></small></button>) : <Empty icon={FileDiff} text={t("noChanges")} />}</section>}
-        {tab === "agents" && <>
-          <AgentList agents={agents} selectedAgentId={selectedAgentId} inspect={(id) => action("inspect_agent", id)} />
-          {selectedAgentId && <section className="inspector-card agent-transcript"><h3>Agent timeline</h3>{agentBlocks.length ? agentBlocks.map((block) => <div key={block.id}><span>{block.title || block.kind}</span><p>{block.content}</p></div>) : <p className="muted-copy">正在读取 Agent 时间线…</p>}<button className="danger-text" onClick={() => action("cancel_agent", selectedAgentId)}>取消这个 Agent</button></section>}
-        </>}
-        {tab === "context" && <>
-          <section className="inspector-card"><h3><MemoryStick size={14} />上下文</h3>{context?.contributions?.length ? context.contributions.map((item) => <div className="context-row" key={`${item.category}-${item.name}`}><span>{item.name}</span><b>{formatTokens(item.tokens)}</b><i style={{ width: `${Math.min(100, item.tokens / Math.max(1, totalTokens(context.contributions)) * 100)}%` }} /></div>) : <Empty icon={Layers3} text="等待上下文快照" />}</section>
-          <section className="inspector-card"><h3><CircleDot size={14} />Todo</h3>{todo ? <pre className="json-preview">{JSON.stringify(todo, null, 2)}</pre> : <p className="muted-copy">当前没有任务清单。</p>}</section>
-        </>}
+        <section className="inspector-section">
+          <header className="inspector-section-header"><h2>{t("environmentInfo")}</h2></header>
+          <div className="inspector-stack">
+            <InspectorRow icon={FileDiff} label={t("changes")}>
+              {workspaceAdditions + workspaceDeletions > 0
+                ? <><span className="plus">+{workspaceAdditions}</span><span className="minus">−{workspaceDeletions}</span></>
+                : <span className="inspector-muted">{t("clean")}</span>}
+            </InspectorRow>
+            <InspectorRow icon={FolderGit2} label={t("local")}>
+              <span className="inspector-value" title={snapshot.workspace}>{basename(snapshot.workspace)}</span>
+            </InspectorRow>
+            <div className="inspector-field">
+              <div className="inspector-field-label"><GitBranch size={14} /><span>{t("branch")}</span></div>
+              <MenuSelect
+                className="inspector-branch-select"
+                fit="full"
+                placement="bottom"
+                value={branches.find((branch) => branch.current)?.name || ""}
+                options={branches.map((branch) => ({ value: branch.name, label: branch.name }))}
+                onChange={(value) => void action("switch_git_branch", value)}
+                ariaLabel={t("branch")}
+              />
+            </div>
+          </div>
+        </section>
+        {backgroundProcesses.length > 0 && <section className="inspector-section"><header className="inspector-section-header"><h2>{t("backgroundProcesses")}</h2></header>{backgroundProcesses.map((process) => <div className="process-row" key={process.id}><SquareTerminal size={14} /><span><strong>{process.name || t("backgroundTerminal")}</strong><small title={process.command}>{process.command}</small></span><em data-state={process.state}>{process.state === "running" ? t("running") : process.state}</em></div>)}</section>}
+        {agents.length > 0 && <AgentList agents={agents} selectedAgentId={selectedAgentId} inspect={openAgent} language={snapshot.language} />}
+        <section className="inspector-section">
+          <header className="inspector-section-header">
+            <h2>{t("sources")}</h2>
+            <button className="icon-button" title={t("attach")} aria-label={t("attach")} onClick={() => document.querySelector<HTMLInputElement>(".attach-button input")?.click()}><Plus size={15} /></button>
+          </header>
+          {sources.length > 0
+            ? sources.map((source) => <div className="source-row" key={source.id || source.path}><FileImage size={14} /><span title={source.name}>{source.name}</span></div>)
+            : <p className="muted-copy">{t("noAttachments")}</p>}
+        </section>
       </div>
     </aside>
   );
 }
 
-function AgentList({ agents, selectedAgentId, inspect }: { agents: ReturnType<typeof useRuntimeStore.getState>["agents"]; selectedAgentId: string; inspect: (id: string) => void }) {
-  return <section className="inspector-card"><h3><Bot size={14} />Agents</h3>{agents.length ? agents.map((agent) => <button key={agent.id} className={`agent-row ${selectedAgentId === agent.id ? "active" : ""}`} onClick={() => inspect(agent.id)}><span className="agent-avatar">{(agent.type || "A").slice(0, 1).toUpperCase()}</span><span><strong>{agent.type || agent.id}</strong><small>{agent.summary || agent.activity || agent.description}</small><i><em style={{ width: agent.state === "completed" ? "100%" : agent.state === "running" ? "64%" : "10%" }} /></i></span><time>{agent.elapsedMs ? formatDuration(agent.elapsedMs) : agent.state}</time></button>) : <Empty icon={Bot} text="当前没有子代理" />}</section>;
+/** Codex-style dense Subagents roster: colored glyph + nickname, scales to dozens. */
+function AgentList({ agents, selectedAgentId, inspect, language }: {
+  agents: AgentState[];
+  selectedAgentId: string;
+  inspect: (id: string) => void;
+  language: Snapshot["language"];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const labels = useMemo(() => agentRosterLabels(agents, language), [agents, language]);
+  const visible = expanded || agents.length <= AGENT_LIST_PREVIEW
+    ? agents
+    : agents.slice(0, AGENT_LIST_PREVIEW);
+  const hidden = Math.max(0, agents.length - visible.length);
+  const title = language === "zh-CN" ? "子代理" : "Subagents";
+
+  return <section className="inspector-section subagents-section">
+    <header className="inspector-section-header">
+      <h2>{title}</h2>
+      <small>{agents.length}</small>
+    </header>
+    <div className="agent-roster" role="list">
+      {visible.map((agent) => {
+        const label = labels.get(agent.id) || agent.type || agent.id;
+        const accent = agentAccent(agent.id);
+        const summary = agent.summary || agent.activity || agent.description || "";
+        const status = agentStateLabel(agent.state, language);
+        return <button
+          key={agent.id}
+          type="button"
+          role="listitem"
+          className={`agent-roster-row ${selectedAgentId === agent.id ? "active" : ""}`}
+          data-state={agent.state}
+          onClick={() => inspect(agent.id)}
+          title={[label, status, summary].filter(Boolean).join(" · ")}
+        >
+          <span className="agent-glyph" style={{ color: accent }} data-state={agent.state} aria-hidden="true">
+            <span className="agent-glyph-mark">{glyphFor(agent)}</span>
+          </span>
+          <span className="agent-roster-name">{label}</span>
+          {(agent.state === "running" || agent.state === "started") && <span className="agent-live-dot" aria-label={status} />}
+        </button>;
+      })}
+    </div>
+    {hidden > 0 && (
+      <button type="button" className="agent-show-more" onClick={() => setExpanded(true)}>
+        {language === "zh-CN" ? `显示另外 ${hidden} 个` : `Show ${hidden} more`}
+      </button>
+    )}
+    {expanded && agents.length > AGENT_LIST_PREVIEW && (
+      <button type="button" className="agent-show-more" onClick={() => setExpanded(false)}>
+        {language === "zh-CN" ? "收起" : "Show less"}
+      </button>
+    )}
+  </section>;
+}
+
+function agentRosterLabels(agents: AgentState[], language: Snapshot["language"]) {
+  const typeCounts = new Map<string, number>();
+  const typeIndex = new Map<string, number>();
+  for (const agent of agents) {
+    const key = (agent.type || "agent").toLowerCase();
+    typeCounts.set(key, (typeCounts.get(key) || 0) + 1);
+  }
+  const labels = new Map<string, string>();
+  for (const agent of agents) {
+    const key = (agent.type || "agent").toLowerCase();
+    const total = typeCounts.get(key) || 1;
+    const next = (typeIndex.get(key) || 0) + 1;
+    typeIndex.set(key, next);
+    const role = agent.type || "agent";
+    if (total <= 1) {
+      labels.set(agent.id, role);
+      continue;
+    }
+    // Codex-style ordinal nicknames: "Executor the 17th"
+    labels.set(agent.id, language === "zh-CN"
+      ? `${role} · ${next}`
+      : `${role} the ${ordinal(next)}`);
+  }
+  return labels;
+}
+
+function ordinal(n: number) {
+  const v = n % 100;
+  if (v >= 11 && v <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1: return `${n}st`;
+    case 2: return `${n}nd`;
+    case 3: return `${n}rd`;
+    default: return `${n}th`;
+  }
+}
+
+function agentAccent(id: string) {
+  let hash = 0;
+  for (let i = 0; i < id.length; i += 1) hash = (hash * 33 + id.charCodeAt(i)) >>> 0;
+  return AGENT_ACCENTS[hash % AGENT_ACCENTS.length]!;
+}
+
+function glyphFor(agent: AgentState) {
+  const role = (agent.type || "A").trim();
+  return role.slice(0, 1).toUpperCase() || "A";
+}
+
+function agentStateLabel(state: string | undefined, language: Snapshot["language"]) {
+  const t = translator(language);
+  if (state === "running" || state === "started") return t("running");
+  if (state === "completed") return t("agentCompleted");
+  if (state === "failed") return t("agentFailed");
+  if (state === "cancelled" || state === "canceled") return t("agentCancelled");
+  if (state === "queued") return t("agentQueued");
+  return state || t("agentIdle");
 }
 
 function InspectorRow({ icon: Icon, label, children }: { icon: typeof Wrench; label: string; children: React.ReactNode }) {
   return <div className="inspector-row"><Icon size={14} /><strong>{label}</strong><span className="toolbar-spacer" />{children}</div>;
 }
 
-function Empty({ icon: Icon, text }: { icon: typeof Square; text: string }) {
-  return <div className="inspector-empty"><Icon size={18} /><span>{text}</span></div>;
-}
-
 function basename(path: string) { return path.split(/[\\/]/).filter(Boolean).at(-1) || "workspace"; }
-function formatTokens(value: number) { return value > 999 ? `${(value / 1000).toFixed(1)}k` : String(value); }
-function totalTokens(items: Array<{ tokens: number }>) { return items.reduce((total, item) => total + item.tokens, 0); }

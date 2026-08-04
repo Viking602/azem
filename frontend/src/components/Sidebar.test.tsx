@@ -14,7 +14,7 @@ vi.mock("../bridge", () => ({
 const snapshot: Snapshot = {
   workspace: "/workspace/azem", sessionId: "session-1", provider: "chatgpt", model: "gpt-5.6-sol",
   reasoning: "high", agentMode: "single", language: "zh-CN", approvalMode: "auto_review",
-  subagentConcurrency: 2, chatgptFastMode: false, sequence: 0,
+  queueMode: "queue", subagentConcurrency: 2, chatgptFastMode: false, sequence: 0,
 };
 
 describe("Sidebar project sessions", () => {

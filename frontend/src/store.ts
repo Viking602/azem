@@ -1,13 +1,21 @@
 import { create } from "zustand";
+import { translator } from "./i18n";
 import type {
   AgentCatalogEntry,
   AgentState,
   Attachment,
+  BackgroundProcess,
   Block,
   ContextProfile,
+  DeliveryMode,
   GitBranch,
   InspectorTab,
   ModelRoute,
+  QueuedPrompt,
+  PullRequest,
+  PullRequestDashboard,
+  PullRequestDetailResponse,
+  PullRequestMonitorState,
   RuntimeEvent,
   Session,
   SkillEntry,
@@ -37,12 +45,20 @@ export interface RuntimeData {
   currentTitle: string;
   blocks: Block[];
   agents: AgentState[];
+  backgroundProcesses: BackgroundProcess[];
   selectedAgentId: string;
   agentBlocks: Block[];
   agentCatalog: AgentCatalogEntry[];
   skills: SkillEntry[];
   branches: GitBranch[];
   modelRoutes: ModelRoute[];
+  pullRequestDashboard: PullRequestDashboard | null;
+  selectedPullRequestNumber: number | null;
+  pullRequestDetail: PullRequest | null;
+  pullRequestMonitors: Map<number, PullRequestMonitorState>;
+  pullRequestLoading: boolean;
+  pullRequestMutating: boolean;
+  pullRequestError: string;
   modelsByProvider: Record<string, ModelOption[]>;
   contextProfile: ContextProfile | null;
   contextUsage: ContextUsage;
@@ -56,6 +72,7 @@ export interface RuntimeData {
   workspaceDirty: boolean;
   workspaceAdditions: number;
   workspaceDeletions: number;
+  workspaceChangedFiles: number;
   lastSequence: number;
   error: string;
   view: View;
@@ -65,6 +82,8 @@ export interface RuntimeData {
   commandOpen: boolean;
   planMode: boolean;
   attachments: Attachment[];
+  // ponytail: queue is process-local; persist it with session blocks if crash recovery becomes necessary.
+  queuedPrompts: QueuedPrompt[];
   theme: "system" | "light" | "dark";
 }
 
@@ -77,18 +96,29 @@ interface RuntimeActions {
   selectAgent: (agentId: string) => void;
   setSettingsOpen: (open: boolean) => void;
   setCommandOpen: (open: boolean) => void;
+  setPullRequestDashboard: (dashboard: PullRequestDashboard) => void;
+  selectPullRequest: (number: number | null) => void;
+  setPullRequestDetail: (response: PullRequestDetailResponse) => void;
+  setPullRequestLoading: (loading: boolean) => void;
+  setPullRequestMutating: (mutating: boolean) => void;
+  setPullRequestError: (message: string) => void;
+  updatePullRequestMonitor: (monitor: PullRequestMonitorState) => void;
   setPlanMode: (enabled: boolean) => void;
   setTheme: (theme: RuntimeData["theme"]) => void;
   setLanguage: (language: "en" | "zh-CN") => void;
   setSessionModel: (provider: string, model: string, reasoning: string) => void;
   setChatGPTFastMode: (enabled: boolean) => void;
-  addOptimisticUser: (content: string) => void;
+  setQueueMode: (mode: DeliveryMode) => void;
+  addOptimisticUser: (content: string, attachments?: Attachment[]) => void;
   setRunId: (runId: string) => void;
   failRun: (message: string) => void;
   setError: (message: string) => void;
   addAttachment: (attachment: Attachment) => void;
   removeAttachment: (id: string) => void;
+  replaceAttachments: (attachments: Attachment[]) => void;
   clearAttachments: () => void;
+  enqueuePrompt: (text: string, attachments: Attachment[]) => void;
+  removeQueuedPrompt: (id: string) => void;
 }
 
 const initialData: RuntimeData = {
@@ -98,12 +128,20 @@ const initialData: RuntimeData = {
   currentTitle: "",
   blocks: [],
   agents: [],
+  backgroundProcesses: [],
   selectedAgentId: "",
   agentBlocks: [],
   agentCatalog: [],
   skills: [],
   branches: [],
   modelRoutes: [],
+  pullRequestDashboard: null,
+  selectedPullRequestNumber: null,
+  pullRequestDetail: null,
+  pullRequestMonitors: new Map(),
+  pullRequestLoading: false,
+  pullRequestMutating: false,
+  pullRequestError: "",
   modelsByProvider: {},
   contextProfile: null,
   contextUsage: emptyContextUsage(),
@@ -117,6 +155,7 @@ const initialData: RuntimeData = {
   workspaceDirty: false,
   workspaceAdditions: 0,
   workspaceDeletions: 0,
+  workspaceChangedFiles: 0,
   lastSequence: 0,
   error: "",
   view: "thread",
@@ -126,6 +165,7 @@ const initialData: RuntimeData = {
   commandOpen: false,
   planMode: false,
   attachments: [],
+  queuedPrompts: [],
   theme: "system",
 };
 
@@ -139,9 +179,43 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   setView: (view) => set({ view, commandOpen: false }),
   setInspectorTab: (inspectorTab) => set({ inspectorTab, inspectorOpen: true }),
   setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
-  selectAgent: (selectedAgentId) => set({ selectedAgentId, inspectorTab: "agents", inspectorOpen: true }),
+  selectAgent: (selectedAgentId) => set((state) => ({
+    selectedAgentId,
+    selectedPullRequestNumber: selectedAgentId ? null : state.selectedPullRequestNumber,
+    agentBlocks: selectedAgentId ? state.agentBlocks : [],
+    inspectorTab: selectedAgentId ? "agents" : state.inspectorTab,
+    // Side chat is driven by selectedAgentId; keep env inspector closed while open.
+    inspectorOpen: selectedAgentId ? false : state.inspectorOpen,
+  })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen, commandOpen: false }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
+  setPullRequestDashboard: (pullRequestDashboard) => set({ pullRequestDashboard, pullRequestLoading: false, pullRequestError: "" }),
+  selectPullRequest: (selectedPullRequestNumber) => set((state) => ({
+    selectedPullRequestNumber,
+    pullRequestDetail: state.pullRequestDetail?.number === selectedPullRequestNumber ? state.pullRequestDetail : null,
+    selectedAgentId: selectedPullRequestNumber ? "" : state.selectedAgentId,
+    agentBlocks: selectedPullRequestNumber ? [] : state.agentBlocks,
+    inspectorOpen: selectedPullRequestNumber ? false : state.inspectorOpen,
+  })),
+  setPullRequestDetail: ({ pullRequest, monitor }) => set((state) => {
+    const pullRequestMonitors = new Map(state.pullRequestMonitors);
+    pullRequestMonitors.set(monitor.number, monitor);
+    return {
+      pullRequestDetail: pullRequest,
+      pullRequestMonitors,
+      pullRequestLoading: false,
+      pullRequestMutating: false,
+      pullRequestError: "",
+    };
+  }),
+  setPullRequestLoading: (pullRequestLoading) => set({ pullRequestLoading }),
+  setPullRequestMutating: (pullRequestMutating) => set({ pullRequestMutating }),
+  setPullRequestError: (pullRequestError) => set({ pullRequestError, pullRequestLoading: false, pullRequestMutating: false }),
+  updatePullRequestMonitor: (monitor) => set((state) => {
+    const pullRequestMonitors = new Map(state.pullRequestMonitors);
+    pullRequestMonitors.set(monitor.number, monitor);
+    return { pullRequestMonitors };
+  }),
   setPlanMode: (planMode) => set({ planMode }),
   setTheme: (theme) => set({ theme }),
   setLanguage: (language) => set((state) => ({
@@ -158,10 +232,13 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   setChatGPTFastMode: (chatgptFastMode) => set((state) => ({
     snapshot: state.snapshot ? { ...state.snapshot, chatgptFastMode } : state.snapshot,
   })),
-  addOptimisticUser: (content) => set((state) => ({
-    blocks: [...state.blocks, { id: `user-${Date.now()}`, kind: "user", content, state: "submitted", attachments: state.attachments }],
+  setQueueMode: (queueMode) => set((state) => ({
+    snapshot: state.snapshot ? { ...state.snapshot, queueMode } : state.snapshot,
+  })),
+  addOptimisticUser: (content, attachments) => set((state) => ({
+    blocks: [...state.blocks, { id: `user-${Date.now()}`, kind: "user", content, state: "submitted", attachments: attachments ?? state.attachments }],
     running: true,
-    runStartedAt: Date.now(),
+    runStartedAt: state.running ? state.runStartedAt : Date.now(),
     activity: "waiting_model",
     error: "",
   })),
@@ -169,13 +246,37 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   failRun: (message) => set((state) => ({
     running: false,
     error: message,
-    blocks: [...state.blocks, { id: `error-${Date.now()}`, kind: "error", title: "运行失败", content: message, state: "failed" }],
+    blocks: [...state.blocks, { id: `error-${Date.now()}`, kind: "error", title: translator(state.snapshot?.language === "en" ? "en" : "zh-CN")("runFailed"), content: message, state: "failed" }],
   })),
   setError: (error) => set({ error }),
   addAttachment: (attachment) => set((state) => ({ attachments: [...state.attachments, attachment] })),
   removeAttachment: (id) => set((state) => ({ attachments: state.attachments.filter((item) => item.id !== id) })),
+  replaceAttachments: (attachments) => set({ attachments }),
   clearAttachments: () => set({ attachments: [] }),
+  enqueuePrompt: (text, attachments) => set((state) => ({
+    queuedPrompts: [...state.queuedPrompts, { id: crypto.randomUUID(), text, attachments: [...attachments] }],
+  })),
+  removeQueuedPrompt: (id) => set((state) => ({ queuedPrompts: state.queuedPrompts.filter((item) => item.id !== id) })),
 }));
+
+const SESSION_SCOPED_EVENTS: Record<string, true> = {
+  run_started: true,
+  thinking_delta: true,
+  text_delta: true,
+  tool_started: true,
+  tool_update: true,
+  tool_finished: true,
+  diff_ready: true,
+  approval_requested: true,
+  approval_resolved: true,
+  agent_state: true,
+  context_profile: true,
+  context_usage: true,
+  todo_updated: true,
+  run_finished: true,
+  run_cancelled: true,
+  run_failed: true,
+};
 
 export function reduceEvents<T extends RuntimeData>(state: T, events: RuntimeEvent[]): T {
   let next = { ...state, blocks: [...state.blocks], sessions: [...state.sessions], agents: [...state.agents] };
@@ -187,6 +288,8 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
   if (event.sequence && event.sequence <= state.lastSequence) return state;
   let next = { ...state, lastSequence: Math.max(state.lastSequence, event.sequence || 0) };
   const data = event.data ?? {};
+  if (event.sessionId && event.sessionId !== state.currentSessionId && SESSION_SCOPED_EVENTS[event.kind]) return next;
+
 
   switch (event.kind) {
     case "bootstrap_done":
@@ -205,11 +308,23 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
           reasoning: data.reasoning,
           agentMode: data.agentMode,
         };
-        next.blocks = parseArray(data.blocks).map(normalizeBlock);
-        next.runId = data.lastRunID ?? "";
+        // Restore the process trail: session blocks alone drop tools; merge durable toolRecords.
+        next.blocks = mergeSessionTranscript(
+          parseArray(data.blocks).map(normalizeBlock),
+          parseJSONValue(data.blockSequences),
+          parseJSONValue(data.toolRecords),
+        );
+        next.runId = data.activeRunID || data.lastRunID || "";
+        next.running = data.active === "true";
+        next.runStartedAt = next.running ? Date.now() : 0;
+        next.activity = next.running ? "waiting_model" : "";
+        next.error = "";
+        next.selectedAgentId = "";
+        next.agentBlocks = [];
         next.currentTitle = next.sessions.find((item) => item.id === event.sessionId)?.title ?? next.currentTitle;
         next.agents = (event.agentSnapshots ?? []).map(normalizeAgentSnapshot);
         next.attachments = [];
+        next.queuedPrompts = [];
         next.contextProfile = null;
         const contextLimit = next.modelsByProvider[data.provider]?.find((item) => item.id === data.model)?.contextWindow ?? 0;
         next.contextUsage = parseContextUsage(data.usage, contextLimit);
@@ -221,31 +336,68 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       next.runStartedAt = Date.now();
       next.activity = "waiting_model";
       break;
-    case "thinking_delta":
-      next.blocks = appendDelta(next.blocks, event, "thinking", "思考中");
-      next.activity = "thinking";
+    case "thinking_delta": {
+      const thinkingTitle = translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("thinking");
+      // Subagent frames carry agentId — stream them into the side chat, not the main feed.
+      if (event.agentId) {
+        if (event.agentId === next.selectedAgentId) {
+          next.agentBlocks = appendDelta(next.agentBlocks, event, "thinking", thinkingTitle);
+        }
+      } else {
+        next.blocks = appendDelta(next.blocks, event, "thinking", thinkingTitle);
+        next.activity = "thinking";
+      }
       break;
+    }
     case "text_delta":
-      next.blocks = appendDelta(next.blocks, event, "assistant", "Azem");
-      next.activity = "responding";
+      if (event.agentId) {
+        if (event.agentId === next.selectedAgentId) {
+          next.agentBlocks = appendDelta(next.agentBlocks, event, "assistant", "Azem");
+        }
+      } else {
+        next.blocks = appendDelta(next.blocks, event, "assistant", "Azem");
+        next.activity = "responding";
+      }
       break;
     case "tool_started":
     case "tool_update":
     case "tool_finished":
-      next.blocks = updateTool(next.blocks, event);
-      next.activity = event.kind === "tool_finished" ? "waiting_model" : "tool";
+      if (event.agentId) {
+        if (event.agentId === next.selectedAgentId) {
+          next.agentBlocks = updateTool(next.agentBlocks, event);
+        }
+      } else {
+        next.blocks = updateTool(next.blocks, event);
+        next.activity = event.kind === "tool_finished" ? "waiting_model" : "tool";
+      }
       break;
     case "diff_ready":
-      next.blocks = [...next.blocks, {
-        id: event.toolCallId || `diff-${event.sequence}`,
-        kind: "diff",
-        runId: event.runId,
-        toolCallId: event.toolCallId,
-        title: data.path || "变更",
-        content: event.text ?? "",
-        state: event.state || "ready",
-        data,
-      }];
+      if (event.agentId) {
+        if (event.agentId === next.selectedAgentId) {
+          next.agentBlocks = [...next.agentBlocks, {
+            id: event.toolCallId || `diff-${event.sequence}`,
+            kind: "diff",
+            runId: event.runId,
+            agentId: event.agentId,
+            toolCallId: event.toolCallId,
+            title: data.path || translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("change"),
+            content: event.text ?? "",
+            state: event.state || "ready",
+            data,
+          }];
+        }
+      } else {
+        next.blocks = [...next.blocks, {
+          id: event.toolCallId || `diff-${event.sequence}`,
+          kind: "diff",
+          runId: event.runId,
+          toolCallId: event.toolCallId,
+          title: data.path || translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("change"),
+          content: event.text ?? "",
+          state: event.state || "ready",
+          data,
+        }];
+      }
       break;
     case "approval_requested":
       if (event.state === "reviewing") break;
@@ -255,8 +407,8 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         runId: event.runId,
         toolCallId: event.toolCallId,
         approvalId: event.approvalId,
-        title: data.action || data.name || "需要审批",
-        content: event.text || data.reason || "此操作需要你的确认。",
+        title: data.action || data.name || translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("needApproval"),
+        content: event.text || data.reason || translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("approvalConfirm"),
         state: "pending",
         data,
       }];
@@ -269,6 +421,9 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       break;
     case "agent_state":
       if (event.agent) next.agents = upsertAgent(next.agents, normalizeAgent(event.agentId ?? "", event.agent, event.state, event.text));
+      break;
+    case "background_state":
+      next.backgroundProcesses = (event.background ?? []).map(normalizeBackgroundProcess);
       break;
     case "agent_detail":
       if (event.state === "agent_types") next.agentCatalog = (event.agentCatalog ?? []).map(normalizeAgentCatalog);
@@ -314,6 +469,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       next.workspaceDirty = Boolean(event.workspaceDirty);
       next.workspaceAdditions = numberValue(data.additions, 0);
       next.workspaceDeletions = numberValue(data.deletions, 0);
+      next.workspaceChangedFiles = numberValue(data.changed_files, 0);
       break;
     case "recovery_state":
       if (data.items) next.recovery = parseArray(data.items);
@@ -332,13 +488,30 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "run_failed": {
       const terminalState = event.kind === "run_finished" ? "completed" : event.kind === "run_cancelled" ? "cancelled" : "failed";
       const terminalRunId = event.runId || next.runId;
+      const elapsedMs = next.runStartedAt ? Math.max(0, Date.now() - next.runStartedAt) : 0;
       next.running = false;
       next.activity = terminalState;
-      if (terminalRunId) next.blocks = next.blocks.map((block) => block.runId === terminalRunId && block.state === "streaming" ? { ...block, state: terminalState } : block);
+      if (terminalRunId) {
+        next.blocks = next.blocks.map((block) => {
+          if (block.runId !== terminalRunId) return block;
+          const stamped = stampProcessElapsed(block, elapsedMs);
+          // Settle streaming text and tools still marked running when the run ends.
+          if (["streaming", "running", "started"].includes(stamped.state || "")) {
+            return { ...stamped, state: terminalState === "completed" && stamped.kind === "tool" ? "completed" : terminalState };
+          }
+          return stamped;
+        });
+        if (next.selectedAgentId) {
+          next.agentBlocks = next.agentBlocks.map((block) => {
+            if (!["streaming", "running", "started"].includes(block.state || "")) return block;
+            return { ...block, state: terminalState === "completed" && block.kind === "tool" ? "completed" : terminalState };
+          });
+        }
+      }
       next.runId = "";
       if (event.kind === "run_failed") {
         next.error = event.text ?? "Run failed";
-        next.blocks = [...next.blocks, { id: `error-${event.sequence}`, kind: "error", title: "运行失败", content: event.text, state: "failed" }];
+        next.blocks = [...next.blocks, { id: `error-${event.sequence}`, kind: "error", title: translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("runFailed"), content: event.text, state: "failed" }];
       }
       break;
     }
@@ -354,6 +527,7 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
     snapshot,
     currentSessionId: snapshot.sessionId,
     approvalMode: snapshot.approvalMode,
+    pullRequestMonitors: new Map((snapshot.pullRequestMonitors ?? []).map((monitor) => [monitor.number, monitor])),
   };
   const mode = new URLSearchParams(location.search).get("demo") ?? "running";
   const session: Session = {
@@ -373,9 +547,10 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
     runStartedAt: Date.now() - 402_000,
     activity: mode === "running" ? "tool" : "completed",
     approvalMode: snapshot.approvalMode,
-    branches: [{ name: "feat/gui-wails-v3", current: true }, { name: "main", current: false }],
+    pullRequestMonitors: new Map((snapshot.pullRequestMonitors ?? []).map((monitor) => [monitor.number, monitor])),
+    branches: [{ name: "codex/gui-desktop-experience", current: true }, { name: "main", current: false }],
     agents: demoAgents(),
-    skills: [{ name: "frontend-design", description: "Production UI design guidance", sourcePath: "~/.agents/skills/frontend-design", eager: true, disabled: false, resourceCount: 4 }],
+    skills: [{ name: "frontend-design", description: "Production UI design guidance", sourcePath: "~/.agents/skills/frontend-design", bundled: false, eager: true, disabled: false, resourceCount: 4 }],
     modelRoutes: [
       { Scope: "plan", Role: "", Label: "Plan", Route: {} },
       { Scope: "compaction", Role: "", Label: "Compaction", Route: {} },
@@ -405,15 +580,15 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
 
 function demoBlocks(review: boolean): Block[] {
   const blocks: Block[] = [
-    { id: "user-demo", kind: "user", content: "参考 Synara UI 与 Codex App，重新设计 Azem GUI，并保留现有 Agent 治理和会话恢复能力。", state: "submitted" },
-    { id: "thinking-demo", kind: "thinking", title: "思考中", content: "先检查现有事件模型和 TUI Block 结构，再建立桌面端的信息架构、状态投影和视觉规范。", state: "completed" },
-    { id: "tool-demo", kind: "tool", title: "检查桌面事件投影", content: "internal/app/events.go · internal/app/event_broker.go · internal/session/service.go", state: "completed" },
-    { id: "assistant-demo", kind: "assistant", content: "界面采用两种密度状态：新会话时居中输入；开始执行后 Composer 固定到底部，并显示会话时间线与右侧 Inspector。", state: "completed" },
+    { id: "user-demo", kind: "user", runId: "demo-run", content: "参考 Synara UI 与 Codex App，重新设计 Azem GUI，并保留现有 Agent 治理和会话恢复能力。", state: "submitted" },
+    { id: "thinking-demo", kind: "thinking", runId: "demo-run", title: "思考中", content: "先检查现有事件模型和 TUI Block 结构，再建立桌面端的信息架构、状态投影和视觉规范。", state: "completed", data: { elapsedMs: "154000" } },
+    { id: "tool-demo", kind: "tool", runId: "demo-run", title: "检查桌面事件投影", content: "internal/app/events.go · internal/app/event_broker.go · internal/session/service.go", state: "completed", data: { elapsedMs: "154000" } },
+    { id: "assistant-demo", kind: "assistant", runId: "demo-run", content: "界面采用两种密度状态：新会话时居中输入；开始执行后 Composer 固定到底部，并显示会话时间线与右侧 Inspector。", state: "completed" },
   ];
   if (review) {
     blocks.push(
-      { id: "diff-demo", kind: "diff", title: "internal/desktop/bridge.go", content: "@@ -18,6 +18,10 @@\n type Bridge struct {\n+  sequence atomic.Uint64\n+  emit EventEmitter\n }", state: "ready", data: { additions: "4", deletions: "0" } },
-      { id: "approval-demo", kind: "approval", approvalId: "approval-demo", title: "写入桌面入口", content: "创建 Wails v3 桌面入口并更新 Go 模块依赖。", state: "pending", data: { risk: "medium" } },
+      { id: "diff-demo", kind: "diff", runId: "demo-run", title: "internal/desktop/bridge.go", content: "@@ -18,6 +18,10 @@\n type Bridge struct {\n+  sequence atomic.Uint64\n+  emit EventEmitter\n }", state: "ready", data: { additions: "4", deletions: "0" } },
+      { id: "approval-demo", kind: "approval", runId: "demo-run", approvalId: "approval-demo", title: "写入桌面入口", content: "创建 Wails v3 桌面入口并更新 Go 模块依赖。", state: "pending", data: { risk: "medium" } },
     );
   }
   return blocks;
@@ -428,10 +603,39 @@ function demoAgents(): AgentState[] {
 }
 
 function appendDelta(blocks: Block[], event: RuntimeEvent, kind: "thinking" | "assistant", title: string): Block[] {
-  const id = `${kind}-${event.runId || "current"}`;
+  const id = `${kind}-${event.runId || event.agentId || "current"}`;
   const index = blocks.findIndex((block) => block.id === id);
-  if (index < 0) return [...blocks, { id, kind, runId: event.runId, title, content: event.text ?? "", state: "streaming" }];
-  return blocks.map((block, current) => current === index ? { ...block, content: `${block.content ?? ""}${event.text ?? ""}`, state: event.state || "streaming" } : block);
+  const chunk = event.text ?? "";
+  if (index < 0) {
+    return [...blocks, {
+      id, kind, runId: event.runId, agentId: event.agentId, title,
+      content: chunk, state: "streaming",
+    }];
+  }
+  return blocks.map((block, current) => current === index ? {
+    ...block,
+    content: kind === "thinking"
+      ? joinThinkingContent(block.content ?? "", chunk)
+      : `${block.content ?? ""}${chunk}`,
+    state: event.state || "streaming",
+    title: block.title || title,
+  } : block);
+}
+
+/**
+ * Models often emit discrete thinking blurbs as separate deltas, each wrapped in
+ * **bold**. Naïve concatenation yields `**A****B**`; insert paragraph breaks so
+ * markdown can render them as separate lines.
+ */
+function joinThinkingContent(existing: string, next: string) {
+  if (!existing) return next;
+  if (!next) return existing;
+  const left = existing.replace(/[ \t]+$/u, "");
+  const right = next.replace(/^[ \t]+/u, "");
+  if (left.endsWith("**") && right.startsWith("**")) return `${left}\n\n${right}`;
+  // New markdown block / list item arriving as a whole segment.
+  if (!/\s$/u.test(left) && /^(?:#{1,6}\s|[-*+]\s|\d+\.\s)/u.test(right)) return `${left}\n\n${right}`;
+  return existing + next;
 }
 
 function updateTool(blocks: Block[], event: RuntimeEvent): Block[] {
@@ -439,16 +643,49 @@ function updateTool(blocks: Block[], event: RuntimeEvent): Block[] {
   const index = blocks.findIndex((block) => block.toolCallId === id || block.id === id);
   const data = event.data ?? {};
   const text = event.text ?? "";
-  if (index < 0) return [...blocks, {
-    id, kind: "tool", runId: event.runId, toolCallId: id,
-    title: data.name || "调用工具", content: text, state: event.state || (event.kind === "tool_finished" ? "completed" : "running"), data,
-  }];
-  return blocks.map((block, current) => current === index ? {
-    ...block,
-    content: text ? [block.content, text].filter(Boolean).join(block.content?.endsWith("\n") ? "" : "\n") : block.content,
-    state: event.state || (event.kind === "tool_finished" ? "completed" : block.state),
-    data: { ...block.data, ...data },
-  } : block);
+  const argumentsText = typeof data.arguments === "string" ? data.arguments : "";
+  const nextState = event.state
+    || (event.kind === "tool_finished" ? "completed" : event.kind === "tool_started" ? "running" : "");
+
+  if (index < 0) {
+    // Seed content from arguments so the timeline can preview path/command while running.
+    const content = text
+      ? (argumentsText ? `${argumentsText}\n${text}` : text)
+      : argumentsText;
+    return [...blocks, {
+      id, kind: "tool", runId: event.runId, agentId: event.agentId, toolCallId: id,
+      title: data.name || "",
+      content,
+      state: nextState || "running",
+      data: argumentsText ? { ...data, arguments: argumentsText } : data,
+    }];
+  }
+
+  return blocks.map((block, current) => {
+    if (current !== index) return block;
+    const priorArgs = block.data?.arguments || "";
+    const mergedArgs = argumentsText || priorArgs;
+    let content = block.content || mergedArgs;
+    if (text) {
+      if (mergedArgs && (!content || content === mergedArgs)) content = `${mergedArgs}\n${text}`;
+      else if (content && !content.endsWith(text)) {
+        content = content.endsWith("\n") ? `${content}${text}` : `${content}\n${text}`;
+      } else if (!content) content = text;
+    } else if (!content && mergedArgs) {
+      content = mergedArgs;
+    }
+    return {
+      ...block,
+      title: data.name || block.title,
+      content,
+      state: nextState || block.state,
+      data: {
+        ...block.data,
+        ...data,
+        ...(mergedArgs ? { arguments: mergedArgs } : {}),
+      },
+    };
+  });
 }
 
 function normalizeSession(raw: Record<string, unknown>): Session {
@@ -462,18 +699,132 @@ function normalizeSession(raw: Record<string, unknown>): Session {
 }
 
 function normalizeBlock(raw: Record<string, unknown>, index: number): Block {
+  const data = raw.data && typeof raw.data === "object" && !Array.isArray(raw.data)
+    ? Object.fromEntries(Object.entries(raw.data as Record<string, unknown>).map(([key, value]) => [key, String(value ?? "")]))
+    : undefined;
   return {
     id: String(raw.id ?? raw.Sequence ?? `block-${index}`),
     kind: String(raw.kind ?? raw.Kind ?? "assistant") as Block["kind"],
     runId: stringValue(raw, "runId", "RunID"), agentId: stringValue(raw, "agentId", "AgentID"),
     toolCallId: stringValue(raw, "toolCallId", "ToolCallID"), title: stringValue(raw, "title", "Title"),
     content: stringValue(raw, "content", "Content"), state: stringValue(raw, "state", "State"),
-    collapsed: Boolean(raw.collapsed ?? raw.Collapsed), attachments: (raw.attachments ?? raw.Attachments) as Attachment[] | undefined,
+    collapsed: Boolean(raw.collapsed ?? raw.Collapsed),
+    data,
+    attachments: (raw.attachments ?? raw.Attachments) as Attachment[] | undefined,
   };
+}
+
+/** Rebuild the live timeline when loading a session: blocks + durable toolRecords. */
+export function mergeSessionTranscript(
+  blocks: Block[],
+  blockSequences: unknown,
+  toolRecords: unknown,
+): Block[] {
+  const sequences = Array.isArray(blockSequences)
+    ? blockSequences.map((value) => Number(value)).map((value, index) => Number.isFinite(value) ? value : index)
+    : blocks.map((_, index) => index);
+  const tools = (Array.isArray(toolRecords) ? toolRecords : []).map((raw, index) => normalizeToolRecord(raw as Record<string, unknown>, index));
+  tools.sort((left, right) => left.anchorSequence - right.anchorSequence
+    || left.startedAt - right.startedAt
+    || left.block.id.localeCompare(right.block.id));
+
+  const byAnchor = new Map<number, Block[]>();
+  for (const tool of tools) {
+    const list = byAnchor.get(tool.anchorSequence) ?? [];
+    list.push(tool.block);
+    byAnchor.set(tool.anchorSequence, list);
+  }
+
+  const result: Block[] = [];
+  const usedAnchors = new Set<number>();
+  blocks.forEach((block, index) => {
+    result.push(block);
+    const sequence = sequences[index] ?? index;
+    const anchored = byAnchor.get(sequence);
+    if (!anchored) return;
+    result.push(...anchored);
+    usedAnchors.add(sequence);
+  });
+  for (const [anchor, list] of byAnchor) {
+    if (!usedAnchors.has(anchor)) result.push(...list);
+  }
+  return result;
+}
+
+function normalizeToolRecord(raw: Record<string, unknown>, index: number) {
+  const toolCallId = stringValue(raw, "toolCallId", "ToolCallID") || `tool-record-${index}`;
+  const argumentsRaw = raw.arguments ?? raw.Arguments;
+  const argumentText = typeof argumentsRaw === "string"
+    ? argumentsRaw
+    : argumentsRaw != null ? JSON.stringify(argumentsRaw) : "";
+  const content = stringValue(raw, "content", "Content");
+  const startedAt = parseTimestamp(raw.startedAt ?? raw.StartedAt);
+  const completedAt = parseTimestamp(raw.completedAt ?? raw.CompletedAt);
+  const elapsedMs = startedAt && completedAt && completedAt >= startedAt ? completedAt - startedAt : 0;
+  const state = stringValue(raw, "state", "State") || "completed";
+  const data: Record<string, string> = {};
+  if (elapsedMs > 0) data.elapsedMs = String(elapsedMs);
+  if (startedAt > 0) data.startedAt = String(startedAt);
+  if (completedAt > 0) data.completedAt = String(completedAt);
+  return {
+    anchorSequence: numberValue(raw.anchorSequence ?? raw.AnchorSequence, -1),
+    startedAt: startedAt || index,
+    block: {
+      id: `tool-${toolCallId}`,
+      kind: "tool" as const,
+      runId: stringValue(raw, "runId", "RunID"),
+      toolCallId,
+      title: stringValue(raw, "name", "Name"),
+      content: [argumentText, content].filter(Boolean).join(argumentText && content ? "\n" : ""),
+      state,
+      data: Object.keys(data).length ? data : undefined,
+    } satisfies Block,
+  };
+}
+
+function parseTimestamp(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    // Go may emit unix nanos for unfinished paths; treat huge numbers as nanos.
+    return value > 1e15 ? Math.floor(value / 1e6) : value > 1e12 ? value : value * 1000;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function stampProcessElapsed(block: Block, elapsedMs: number): Block {
+  if (!elapsedMs || (block.kind !== "thinking" && block.kind !== "tool")) return block;
+  if (block.data?.elapsedMs) return block;
+  return { ...block, data: { ...block.data, elapsedMs: String(elapsedMs) } };
+}
+
+function parseJSONValue(raw: unknown) {
+  if (raw == null || raw === "") return [];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function normalizeAgentSnapshot(raw: Record<string, unknown>): AgentState {
   return normalizeAgent(stringValue(raw, "id", "ID"), (raw.agent ?? raw.Agent ?? {}) as Record<string, unknown>, stringValue(raw, "state", "State"), stringValue(raw, "summary", "Summary"));
+}
+
+function normalizeBackgroundProcess(raw: Record<string, unknown>): BackgroundProcess {
+  return {
+    id: stringValue(raw, "id", "ID"), name: stringValue(raw, "name", "Name"),
+    command: stringValue(raw, "command", "Command"), cwd: stringValue(raw, "cwd", "CWD"),
+    pid: numberValue(raw.pid ?? raw.PID), state: stringValue(raw, "state", "State"),
+    exitCode: numberValue(raw.exitCode ?? raw.ExitCode), startedAt: stringValue(raw, "startedAt", "StartedAt"),
+    finishedAt: stringValue(raw, "finishedAt", "FinishedAt") || undefined,
+    error: stringValue(raw, "error", "Error") || undefined,
+  };
 }
 
 function normalizeAgent(id: string, raw: Record<string, unknown>, state = "", summary = ""): AgentState {
@@ -501,8 +852,9 @@ function normalizeAgentCatalog(raw: Record<string, unknown>): AgentCatalogEntry 
 function normalizeSkill(raw: Record<string, unknown>): SkillEntry {
   return {
     name: stringValue(raw, "name", "Name"), description: stringValue(raw, "description", "Description"),
-    sourcePath: stringValue(raw, "sourcePath", "SourcePath"), eager: Boolean(raw.eager ?? raw.Eager),
-    disabled: Boolean(raw.disabled ?? raw.Disabled), resourceCount: numberValue(raw.resourceCount ?? raw.ResourceCount),
+    sourcePath: stringValue(raw, "sourcePath", "SourcePath"), bundled: Boolean(raw.bundled ?? raw.Bundled),
+    eager: Boolean(raw.eager ?? raw.Eager), disabled: Boolean(raw.disabled ?? raw.Disabled),
+    resourceCount: numberValue(raw.resourceCount ?? raw.ResourceCount),
   };
 }
 
@@ -557,7 +909,30 @@ function projectContextUsage(current: ContextUsage, data: Record<string, string>
 function upsertAgent(agents: AgentState[], agent: AgentState): AgentState[] {
   const index = agents.findIndex((current) => current.id === agent.id);
   if (index < 0) return [...agents, agent];
-  return agents.map((current, currentIndex) => currentIndex === index ? { ...current, ...agent } : current);
+  return agents.map((current, currentIndex) => {
+    if (currentIndex !== index) return current;
+    // Partial agent_state payloads (e.g. team lifecycle) often omit counters;
+    // never let a sparse update wipe live tool/elapsed stats.
+    return {
+      ...current,
+      ...agent,
+      type: agent.type || current.type,
+      description: agent.description || current.description,
+      model: agent.model || current.model,
+      capabilityMode: agent.capabilityMode || current.capabilityMode,
+      isolation: agent.isolation || current.isolation,
+      cwd: agent.cwd || current.cwd,
+      activity: agent.activity || current.activity,
+      warning: agent.warning || current.warning,
+      worktreePath: agent.worktreePath || current.worktreePath,
+      summary: agent.summary || current.summary,
+      state: agent.state || current.state,
+      toolCalls: Math.max(current.toolCalls, agent.toolCalls),
+      turns: Math.max(current.turns, agent.turns),
+      tokensUsed: Math.max(current.tokensUsed, agent.tokensUsed),
+      elapsedMs: Math.max(current.elapsedMs, agent.elapsedMs),
+    };
+  });
 }
 
 function parseArray(value: string | undefined): Array<Record<string, unknown>> {

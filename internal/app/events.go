@@ -63,24 +63,24 @@ type GitBranchEntry struct {
 }
 
 type AgentStatePayload struct {
-	Type               string
-	Description        string
-	Model              string
-	Background         bool
-	CapabilityMode     string
-	RequestedIsolation string
-	Isolation          string
-	CWD                string
-	ParentRunID        string
-	ParentToolCallID   string
-	ChildRunID         string
-	Activity           string
-	Warning            string
-	WorktreePath       string
-	ToolCalls          int
-	Turns              int
-	TokensUsed         int
-	ElapsedMS          int64
+	Type               string `json:"type"`
+	Description        string `json:"description,omitempty"`
+	Model              string `json:"model,omitempty"`
+	Background         bool   `json:"background,omitempty"`
+	CapabilityMode     string `json:"capabilityMode,omitempty"`
+	RequestedIsolation string `json:"requestedIsolation,omitempty"`
+	Isolation          string `json:"isolation,omitempty"`
+	CWD                string `json:"cwd,omitempty"`
+	ParentRunID        string `json:"parentRunId,omitempty"`
+	ParentToolCallID   string `json:"parentToolCallId,omitempty"`
+	ChildRunID         string `json:"childRunId,omitempty"`
+	Activity           string `json:"activity,omitempty"`
+	Warning            string `json:"warning,omitempty"`
+	WorktreePath       string `json:"worktreePath,omitempty"`
+	ToolCalls          int    `json:"toolCalls"`
+	Turns              int    `json:"turns"`
+	TokensUsed         int    `json:"tokensUsed"`
+	ElapsedMS          int64  `json:"elapsedMs"`
 }
 
 type AgentTranscriptBlock struct {

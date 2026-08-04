@@ -59,12 +59,16 @@ func run() error {
 
 	var bridge *desktop.Bridge
 	var mainWindow *application.WebviewWindow
+	var windowTracker *windowStateTracker
 	var handleDeepLink func(string)
 	options := application.Options{
 		Name: "Azem", Description: "Project-first agent workspace",
 		Assets: application.AssetOptions{Handler: application.AssetFileServerFS(azemfrontend.Assets)},
 		Mac:    application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
 		OnShutdown: func() {
+			if windowTracker != nil {
+				windowTracker.Flush()
+			}
 			if bridge != nil {
 				bridge.Close()
 			}
@@ -80,16 +84,21 @@ func run() error {
 		return launchSessionWindow(configFile, "", workspace, true)
 	})
 	desktopApp.RegisterService(application.NewService(bridge))
-	mainWindow = desktopApp.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name: "main", Title: "Azem", Width: 1440, Height: 920,
-		MinWidth: 880, MinHeight: 640, URL: sessionWindowURL(initialSession),
+	geometry := loadMainWindowGeometry(desktopApp, boot.Paths.StateDir)
+	windowOptions := application.WebviewWindowOptions{
+		Name: "main", Title: "Azem",
+		URL:              sessionWindowURL(initialSession),
 		BackgroundColour: application.NewRGB(245, 245, 243),
 		Mac: application.MacWindow{
 			InvisibleTitleBarHeight: 46,
 			Backdrop:                application.MacBackdropTranslucent,
 			TitleBar:                application.MacTitleBarHiddenInset,
 		},
-	})
+	}
+	applyWindowGeometry(&windowOptions, geometry)
+	mainWindow = desktopApp.Window.NewWithOptions(windowOptions)
+	windowTracker = newWindowStateTracker(desktop.WindowStatePath(boot.Paths.StateDir), desktopApp, geometry)
+	bindWindowStatePersistence(mainWindow, windowTracker)
 	registerSessionContextMenus(desktopApp, bridge, boot.Paths.Workspace, boot.Paths.DataDir, configFile, boot.Config.Defaults.Language)
 	handleDeepLink = sessionDeepLinkHandler(bridge, mainWindow, boot.Paths.Workspace, configFile)
 	desktopApp.Event.OnApplicationEvent(events.Common.ApplicationLaunchedWithUrl, func(event *application.ApplicationEvent) {

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import {
-  Bot, Box, CircleDotDashed, Command, Folder, FolderOpen, FolderPlus, History,
-  MoreHorizontal, Plus, Search, Settings, SquarePen,
+  Box, CircleDotDashed, Command, Folder, FolderOpen, FolderPlus, GitBranch, Github,
+  GitPullRequest, MoreHorizontal, Plus, Search, Settings, SquarePen,
 } from "lucide-react";
-import { createProject, execute, openProject, selectProjectFolder, subscribeSessionMenu } from "../bridge";
+import { createProject, execute, openExternalURL, openProject, selectProjectFolder, subscribeSessionMenu } from "../bridge";
 import { translator } from "../i18n";
+import { openPullRequest, refreshPullRequestDashboard } from "../pullRequests";
 import { useRuntimeStore } from "../store";
 import type { View } from "../types";
 
@@ -21,14 +22,19 @@ export default function Sidebar() {
   const setSettingsOpen = useRuntimeStore((state) => state.setSettingsOpen);
   const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
   const setError = useRuntimeStore((state) => state.setError);
+  const pullRequestDashboard = useRuntimeStore((state) => state.pullRequestDashboard);
+  const branches = useRuntimeStore((state) => state.branches);
+  const selectPullRequest = useRuntimeStore((state) => state.selectPullRequest);
   const t = translator(snapshot.language);
   const project = basename(snapshot.workspace);
   const projectSessions = sessions.filter((session) => !session.archived);
   const visibleSessions = showAllSessions ? projectSessions : projectSessions.slice(0, 5);
+  const currentBranch = pullRequestDashboard?.currentBranch || branches.find((branch) => branch.current)?.name || "";
+  const currentPullRequest = pullRequestDashboard?.current;
 
   useEffect(() => subscribeSessionMenu((event) => {
     if (event.action === "error") {
-      setError(event.error || "会话操作失败");
+      setError(event.error || t("sessionActionFailed"));
       return;
     }
     const session = sessions.find((item) => item.id === event.sessionId);
@@ -50,17 +56,12 @@ export default function Sidebar() {
   const run = async (kind: string, target = "") => {
     try {
       await execute({ kind, target, sessionId: currentSessionId });
+      selectPullRequest(null);
       setView("thread");
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     }
   };
-
-  const nav: Array<{ view: View; label: string; icon: typeof History }> = [
-    { view: "runs", label: t("runs"), icon: History },
-    { view: "agents", label: t("agents"), icon: Bot },
-    { view: "extensions", label: t("extensions"), icon: Box },
-  ];
 
   return (
     <aside className="workspace-sidebar">
@@ -68,12 +69,13 @@ export default function Sidebar() {
         <button className="icon-button" aria-label={t("search")} onClick={() => setCommandOpen(true)}><Command size={15} /></button>
       </div>
       <div className="sidebar-switcher" role="tablist">
-        {[[t("workbench"), "runs"], [t("projects"), "thread"], [t("workspace"), "projects"]].map(([label, target]) => <button key={label} className={view === target ? "active" : ""} onClick={() => setView(target as View)}>{label}</button>)}
+        {[[t("projects"), "thread"], [t("workspace"), "projects"]].map(([label, target]) => <button key={label} className={view === target ? "active" : ""} onClick={() => setView(target as View)}>{label}</button>)}
       </div>
       <nav className="primary-nav" aria-label="Primary">
         <button className={view === "thread" && !currentSessionId ? "active" : ""} onClick={() => run("new_session")}><Plus size={15} />{t("newSession")}</button>
         <button onClick={() => setCommandOpen(true)}><Search size={15} />{t("search")}<kbd>⌘K</kbd></button>
-        {nav.map((item) => <button key={item.view} className={view === item.view ? "active" : ""} onClick={() => setView(item.view)}><item.icon size={15} />{item.label}</button>)}
+        <button className={view === "pullRequests" ? "active" : ""} onClick={() => { setView("pullRequests"); void refreshPullRequestDashboard(); }}><GitPullRequest size={15} />{t("pullRequests")}</button>
+        <button className={view === "extensions" ? "active" : ""} onClick={() => setView("extensions")}><Box size={15} />{t("extensions")}</button>
       </nav>
       <section className="project-tree">
         <div className="sidebar-section-header">
@@ -87,22 +89,31 @@ export default function Sidebar() {
           <button className="project-action" aria-label={t("projectDetails")} title={t("projectDetails")} onClick={() => setView("projects")}><MoreHorizontal size={16} /></button>
           <button className="project-action" aria-label={t("newSession")} title={t("newSession")} onClick={() => run("new_session")}><SquarePen size={15} /></button>
         </div>
-        {projectOpen && <div className="thread-list">
-          {projectSessions.length === 0 && <div className="empty-sidebar"><CircleDotDashed size={13} />{t("noSessions")}</div>}
-          {visibleSessions.map((session) => renaming?.id === session.id ? (
-            <form key={session.id} className="thread-rename" onSubmit={(event) => { event.preventDefault(); void commitRename(); }}>
-              <input autoFocus value={renaming.title} onChange={(event) => setRenaming({ id: session.id, title: event.target.value })}
-                onBlur={() => setRenaming(null)} onKeyDown={(event) => { if (event.key === "Escape") setRenaming(null); }} aria-label={snapshot.language === "zh-CN" ? "重命名聊天" : "Rename chat"} />
-            </form>
-          ) : (
-            <button key={session.id} className={session.id === currentSessionId && view === "thread" ? "active" : ""} onClick={() => run("resume_session", session.id)} title={session.title}
-              style={{ "--custom-contextmenu": session.pinned ? "session-pinned" : "session", "--custom-contextmenu-data": session.id } as CSSProperties}>
-              <span>{session.title || t("newSession")}</span>
-              {session.unread && <i className="session-unread" title={snapshot.language === "zh-CN" ? "未读" : "Unread"} />}
+        {projectOpen && <>
+          {currentBranch && <div className="sidebar-branch-row"><GitBranch size={13} /><span>{currentBranch}</span></div>}
+          {currentPullRequest && <div className="sidebar-pr-row">
+            <button type="button" className="sidebar-pr-main" title={currentPullRequest.title} onClick={() => void openPullRequest(currentPullRequest.number)}>
+              <span className="sidebar-pr-icon"><GitPullRequest size={14} /><i /></span><span>{currentPullRequest.title}</span><small>#{currentPullRequest.number}</small>
             </button>
-          ))}
-          {projectSessions.length > 5 && <button className="show-more-sessions" onClick={() => setShowAllSessions((show) => !show)}>{t(showAllSessions ? "showLess" : "showMore")}</button>}
-        </div>}
+            <button type="button" className="sidebar-pr-github" aria-label={t("openGitHub")} title={t("openGitHub")} onClick={() => void openExternalURL(currentPullRequest.url)}><Github size={14} /></button>
+          </div>}
+          <div className="thread-list">
+            {projectSessions.length === 0 && <div className="empty-sidebar"><CircleDotDashed size={13} />{t("noSessions")}</div>}
+            {visibleSessions.map((session) => renaming?.id === session.id ? (
+              <form key={session.id} className="thread-rename" onSubmit={(event) => { event.preventDefault(); void commitRename(); }}>
+                <input autoFocus value={renaming.title} onChange={(event) => setRenaming({ id: session.id, title: event.target.value })}
+                  onBlur={() => setRenaming(null)} onKeyDown={(event) => { if (event.key === "Escape") setRenaming(null); }} aria-label={t("renameChat")} />
+              </form>
+            ) : (
+              <button key={session.id} className={session.id === currentSessionId && view === "thread" ? "active" : ""} onClick={() => run("resume_session", session.id)} title={session.title}
+                style={{ "--custom-contextmenu": session.pinned ? "session-pinned" : "session", "--custom-contextmenu-data": session.id } as CSSProperties}>
+                <span>{session.title || t("newSession")}</span>
+                {session.unread && <i className="session-unread" title={t("unread")} />}
+              </button>
+            ))}
+            {projectSessions.length > 5 && <button className="show-more-sessions" onClick={() => setShowAllSessions((show) => !show)}>{t(showAllSessions ? "showLess" : "showMore")}</button>}
+          </div>
+        </>}
       </section>
       <div className="sidebar-footer">
         <button onClick={() => setSettingsOpen(true)}><Settings size={15} />{t("settings")}<kbd>⌘,</kbd></button>

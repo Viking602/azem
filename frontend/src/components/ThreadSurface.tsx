@@ -1,15 +1,188 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
+import { createPortal } from "react-dom";
 import {
-  ArrowDown, ArrowUp, Bot, Check, ChevronDown, ChevronRight, Circle, CircleStop,
-  FileCode2, GitBranch, ImagePlus, LoaderCircle, Paperclip, Send, ShieldCheck,
-  PanelRightClose, PanelRightOpen, Sparkles, Users, X,
+  ArrowDown, Bot, Box, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot, CircleStop,
+  CornerUpRight, Folder, GitBranch, Hand, HardDrive, ImagePlus, Lightbulb, ListX, Minimize2, MoreHorizontal,
+  Pencil, Plug, Plus, RefreshCw, Search, Send, Settings, ShieldAlert, ShieldCheck, Sparkles, Trash2, Zap,
+  PanelRightClose, PanelRightOpen, X,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { cancelActive, execute, guide, importAttachment, startTurn } from "../bridge";
-import { toolDisplayName, translator } from "../i18n";
+import { cancelActive, execute, guide, importAttachment, openProject, selectProjectFolder, startTurn } from "../bridge";
+import { reasoningHint, sortReasoningLevels, tFormat, translator } from "../i18n";
 import { useRuntimeStore, type ContextUsage } from "../store";
-import type { Block, ContextProfile, Snapshot } from "../types";
+import type { Attachment, Block, ContextProfile, DeliveryMode, QueuedPrompt, SkillEntry, Snapshot } from "../types";
+import MenuSelect from "./MenuSelect";
+import ReasoningEffortSlider, { isHighCostReasoning } from "./ReasoningEffortSlider";
+import { TimelineFeed } from "./Timeline";
+import { formatDuration } from "./toolTimeline";
+export { approvalPresentation } from "./Timeline";
+export { formatDuration } from "./toolTimeline";
+
+type SlashAction =
+  | "new" | "compact" | "settings" | "skills" | "plan" | "fast"
+  | "reasoning" | "approval" | "agents" | "mcp" | "reload-skills" | "inspector";
+type SlashIcon = ComponentType<{ size?: number; className?: string }>;
+type SlashSuggestion = {
+  value: string;
+  label: string;
+  detail: string;
+  kind: "command" | "skill";
+  action?: SlashAction;
+  skill?: string;
+  badge?: string;
+  icon: SlashIcon;
+};
+type SlashContext = {
+  reasoningLabel?: string;
+  approvalLabel?: string;
+  planMode?: boolean;
+  agentMode?: string;
+  fast?: boolean;
+  contextPercent?: number;
+  provider?: string;
+};
+
+const slashCommands: Array<{
+  action: SlashAction;
+  aliases: string[];
+  zh: string;
+  en: string;
+  zhDetail: string;
+  enDetail: string;
+  icon: SlashIcon;
+  when?: (context: SlashContext) => boolean;
+  detail?: (context: SlashContext, language: Snapshot["language"]) => string;
+}> = [
+  {
+    action: "mcp", aliases: ["mcp", "plugins"], zh: "MCP", en: "MCP",
+    zhDetail: "刷新 MCP 服务器状态", enDetail: "Refresh MCP server status", icon: Plug,
+  },
+  {
+    action: "compact", aliases: ["compact", "compress", "压缩"], zh: "压缩", en: "Compact",
+    zhDetail: "压缩当前会话的上下文", enDetail: "Compact the current conversation context", icon: Minimize2,
+    detail: (context, language) => context.contextPercent != null && context.contextPercent > 0
+      ? (language === "zh-CN" ? `压缩此聊天的上下文（已使用 ${context.contextPercent}%）` : `Compact this chat context (${context.contextPercent}% used)`)
+      : (language === "zh-CN" ? "压缩当前会话的上下文" : "Compact the current conversation context"),
+  },
+  {
+    action: "settings", aliases: ["settings", "config", "设置"], zh: "设置", en: "Settings",
+    zhDetail: "打开 Azem 设置", enDetail: "Open Azem settings", icon: Settings,
+  },
+  {
+    action: "skills", aliases: ["skills", "extensions", "技能", "扩展"], zh: "技能", en: "Skills",
+    zhDetail: "查看可用技能目录", enDetail: "Browse available skills", icon: Sparkles,
+  },
+  {
+    action: "reload-skills", aliases: ["reload", "reload-skills", "重新加载"], zh: "重新加载技能", en: "Reload skills",
+    zhDetail: "重新扫描本地技能目录", enDetail: "Rescan local skill directories", icon: RefreshCw,
+  },
+  {
+    action: "plan", aliases: ["plan", "计划"], zh: "计划模式", en: "Plan mode",
+    zhDetail: "切换只规划不实施的模式", enDetail: "Toggle planning without implementation", icon: CircleDot,
+    detail: (context, language) => language === "zh-CN"
+      ? (context.planMode ? "关闭计划模式" : "开启只规划不实施的模式")
+      : (context.planMode ? "Turn off plan mode" : "Plan without implementing"),
+  },
+  // Team mode UI is intentionally unavailable until multi-agent is designed.
+  {
+    action: "agents", aliases: ["subagents", "代理"], zh: "子代理", en: "Agents",
+    zhDetail: "查看当前子代理任务", enDetail: "Inspect current subagent tasks", icon: Bot,
+  },
+  {
+    action: "approval", aliases: ["approval", "approve", "审批", "yolo"], zh: "审批模式", en: "Approval",
+    zhDetail: "切换默认审批策略", enDetail: "Cycle the default approval policy", icon: ShieldCheck,
+    detail: (context, language) => language === "zh-CN"
+      ? `当前：${context.approvalLabel || "逐次审批"} · 点击切换`
+      : `Current: ${context.approvalLabel || "Ask first"} · click to cycle`,
+  },
+  {
+    action: "fast", aliases: ["fast", "speed", "快速"], zh: "快速", en: "Fast",
+    zhDetail: "切换 ChatGPT 标准与快速速度", enDetail: "Toggle standard and fast ChatGPT speed", icon: Zap,
+    when: (context) => context.provider === "chatgpt",
+    detail: (context, language) => language === "zh-CN"
+      ? (context.fast ? "当前快速模式 · 点击切回标准" : "1.5x 速度，用量更高")
+      : (context.fast ? "Fast mode on · click for standard" : "1.5x speed, increased usage"),
+  },
+  {
+    action: "reasoning", aliases: ["reasoning", "reason", "推理"], zh: "推理", en: "Reasoning",
+    zhDetail: "循环切换推理强度", enDetail: "Cycle reasoning effort", icon: Brain,
+    detail: (context, language) => language === "zh-CN"
+      ? (context.reasoningLabel || "中")
+      : (context.reasoningLabel || "Medium"),
+  },
+  {
+    action: "inspector", aliases: ["inspector", "context", "环境"], zh: "环境信息", en: "Inspector",
+    zhDetail: "打开右侧环境与变更面板", enDetail: "Open the environment and changes panel", icon: PanelRightOpen,
+  },
+  {
+    action: "new", aliases: ["new", "chat", "新聊天", "新建"], zh: "新聊天", en: "New chat",
+    zhDetail: "在同一工作区开启空白聊天", enDetail: "Start a blank chat in this workspace", icon: Plus,
+  },
+];
+
+export function slashSuggestions(input: string, skills: SkillEntry[], language: Snapshot["language"], context: SlashContext = {}): SlashSuggestion[] {
+  if (!input.startsWith("/") || /\s/.test(input.slice(1))) return [];
+  const query = input.slice(1).toLowerCase();
+  const commands = slashCommands
+    .filter((item) => (item.when ? item.when(context) : true))
+    .filter((item) => [item.action, ...item.aliases, item.zh, item.en].some((candidate) => slashMatch(candidate, query)))
+    .map((item) => ({
+      value: `/${item.action}`,
+      label: language === "zh-CN" ? item.zh : item.en,
+      detail: item.detail?.(context, language) ?? (language === "zh-CN" ? item.zhDetail : item.enDetail),
+      kind: "command" as const,
+      action: item.action,
+      icon: item.icon,
+    }));
+  const skillItems = skills
+    .filter((skill) => !skill.disabled)
+    .filter((skill) => matchSkill(skill, query))
+    .map((skill) => ({
+      value: `/skill:${skill.name}`,
+      label: skillTitle(skill.name),
+      detail: skill.description || translator(language)("skillUseHint"),
+      kind: "skill" as const,
+      skill: skill.name,
+      badge: skill.bundled ? translator(language)("skillBuiltin") : translator(language)("skillPersonal"),
+      icon: Box,
+    }));
+  return [...commands, ...skillItems];
+}
+
+function matchSkill(skill: SkillEntry, query: string) {
+  if (!query) return true;
+  return [
+    skill.name,
+    skillTitle(skill.name),
+    skill.description,
+    `skill:${skill.name}`,
+    skill.name.replace(/[-_]/g, " "),
+  ].some((candidate) => slashMatch(candidate, query));
+}
+
+export function skillTitle(name: string) {
+  return name
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function slashMatch(candidate: string, query: string) {
+  if (!query) return true;
+  const value = candidate.toLowerCase();
+  if (value.includes(query)) return true;
+  return value.split(/[-_\s:/]+/).some((part) => part.startsWith(query));
+}
+
+export function parseSkillPrompt(input: string, language: Snapshot["language"]) {
+  const match = /^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/.exec(input.trim());
+  if (!match) return null;
+  const name = match[1];
+  const instruction = match[2]?.trim() || (language === "zh-CN" ? `使用“${name}”技能处理当前工作区并报告结果。` : `Apply the "${name}" skill to the current workspace and report the result.`);
+  return { name, instruction };
+}
+
+const approvalCycle = ["prompt", "auto_review", "yolo"] as const;
 
 export default function ThreadSurface() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
@@ -18,22 +191,22 @@ export default function ThreadSurface() {
   const running = useRuntimeStore((state) => state.running);
   const runId = useRuntimeStore((state) => state.runId);
   const runStartedAt = useRuntimeStore((state) => state.runStartedAt);
-  const activity = useRuntimeStore((state) => state.activity);
   const error = useRuntimeStore((state) => state.error);
-  const approvalMode = useRuntimeStore((state) => state.approvalMode) || snapshot.approvalMode;
   const planMode = useRuntimeStore((state) => state.planMode);
   const attachments = useRuntimeStore((state) => state.attachments);
-  const branches = useRuntimeStore((state) => state.branches);
-  const skills = useRuntimeStore((state) => state.skills);
+  const queuedPrompts = useRuntimeStore((state) => state.queuedPrompts);
   const addOptimisticUser = useRuntimeStore((state) => state.addOptimisticUser);
-  const setRunId = useRuntimeStore((state) => state.setRunId);
-  const failRun = useRuntimeStore((state) => state.failRun);
   const clearAttachments = useRuntimeStore((state) => state.clearAttachments);
+  const replaceAttachments = useRuntimeStore((state) => state.replaceAttachments);
+  const enqueuePrompt = useRuntimeStore((state) => state.enqueuePrompt);
+  const removeQueuedPrompt = useRuntimeStore((state) => state.removeQueuedPrompt);
   const setError = useRuntimeStore((state) => state.setError);
   const setPlanMode = useRuntimeStore((state) => state.setPlanMode);
   const [prompt, setPrompt] = useState("");
-  const snapshotAgentMode = snapshot.agentMode || "single";
-  const [agentMode, setAgentMode] = useState(snapshotAgentMode);
+  const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>(snapshot.queueMode ?? "queue");
+  // Team mode is not productized yet — keep the composer on single-agent only.
+  const agentMode = "single";
+  const setAgentMode = (_value: string) => undefined;
   const [following, setFollowing] = useState(true);
   const viewport = useRef<HTMLDivElement>(null);
   const t = translator(snapshot.language);
@@ -44,30 +217,53 @@ export default function ThreadSurface() {
     if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: "smooth" });
   }, [blocks, following]);
 
-  useEffect(() => setAgentMode(snapshotAgentMode), [currentSessionId, snapshotAgentMode]);
+  useEffect(() => setDeliveryMode(snapshot.queueMode ?? "queue"), [currentSessionId, snapshot.queueMode]);
+  const beginTurn = useTurnStarter(agentMode, planMode, setFollowing);
+  useQueuedTurnRunner(queuedPrompts, running, beginTurn, removeQueuedPrompt);
+
+  const resetComposer = () => { setPrompt(""); clearAttachments(); };
 
   const submit = async () => {
     const text = prompt.trim();
     if (!text) return;
-    setPrompt("");
-    addOptimisticUser(text);
-    try {
-      if (running && runId) await guide(currentSessionId, runId, text);
-      else {
-        const nextRun = await startTurn({
-          sessionId: currentSessionId, prompt: text, provider: snapshot.provider,
-          model: snapshot.model, reasoning: snapshot.reasoning, agentMode,
-          planMode, disableSubagents: false,
-          activeSkills: skills.filter((skill) => skill.eager && !skill.disabled).map((skill) => skill.name),
-          images: attachments,
-        });
-        setRunId(nextRun);
-      }
-      clearAttachments();
-      setFollowing(true);
-    } catch (cause) {
-      failRun(cause instanceof Error ? cause.message : String(cause));
+    const images = [...attachments];
+    // Idle: start a new turn.
+    if (!running) {
+      resetComposer();
+      return void beginTurn(text, images);
     }
+    // Starting (optimistic running, bridge has not returned runId yet): never start a concurrent turn.
+    // Queue the message so it runs after the active turn finishes.
+    if (!runId || deliveryMode === "queue") {
+      resetComposer();
+      enqueuePrompt(text, images);
+      setFollowing(true);
+      return;
+    }
+    if (images.length > 0) {
+      setError(t("guideAttachmentHint"));
+      return;
+    }
+    resetComposer();
+    await sendGuidance(currentSessionId, runId, text, () => {
+      addOptimisticUser(text, images);
+      setFollowing(true);
+    }, setError);
+  };
+
+  const editQueued = (item: QueuedPrompt) => {
+    removeQueuedPrompt(item.id);
+    setPrompt(item.text);
+    replaceAttachments(item.attachments);
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#azem-composer")?.focus());
+  };
+
+  const guideQueued = async (item: QueuedPrompt) => {
+    if ([!running, !runId, item.attachments.length > 0].some(Boolean)) return;
+    await sendGuidance(currentSessionId, runId, item.text, () => {
+      removeQueuedPrompt(item.id);
+      addOptimisticUser(item.text, item.attachments);
+    }, setError);
   };
 
   const attach = async (files: FileList | null) => {
@@ -83,7 +279,7 @@ export default function ThreadSurface() {
 
   const cancel = async () => {
     try {
-      await cancelActive(agentMode === "team");
+      await cancelActive(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -91,7 +287,7 @@ export default function ThreadSurface() {
 
   return (
     <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`}>
-      <ThreadHeader empty={empty} elapsed={elapsed} agentMode={agentMode} setAgentMode={setAgentMode} />
+      <ThreadHeader empty={empty} elapsed={elapsed} />
       {empty ? (
         <div className="empty-composer-wrap">
           <div className="azem-symbol" aria-hidden="true"><span /><span /></div>
@@ -99,7 +295,9 @@ export default function ThreadSurface() {
           <Composer
             prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach}
             agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
-            approvalMode={approvalMode} branches={branches} running={running}
+            running={running}
+            deliveryMode={deliveryMode} setDeliveryMode={setDeliveryMode}
+            showContextBar
           />
         </div>
       ) : (
@@ -109,17 +307,18 @@ export default function ThreadSurface() {
             setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 72);
           }}>
             <div className="transcript">
-              {blocks.map((block) => <TimelineBlock key={block.id} block={block} language={snapshot.language} />)}
-              {running && <div className="run-status"><LoaderCircle className="spin" size={15} /><span>{activityLabel(activity, snapshot.language)}</span><time>{elapsed}</time></div>}
+              <TimelineFeed blocks={blocks} language={snapshot.language} activeRunId={runId} running={running} />
+              {queuedPrompts.length > 0 && <QueuedPrompts items={queuedPrompts} running={running} onGuide={guideQueued} onDelete={removeQueuedPrompt} onEdit={editQueued} onCloseQueue={() => setDeliveryMode("guide")} />}
               {error && <div className="inline-error" role="alert">{error}</div>}
             </div>
           </div>
-          {!following && <button className="jump-latest" onClick={() => setFollowing(true)}><ArrowDown size={14} />返回最新</button>}
+          {!following && <button className="jump-latest" aria-label={t("jumpLatest")} title={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
           <div className="composer-dock">
             <Composer
               prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach}
               agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
-              approvalMode={approvalMode} branches={branches} running={running} cancel={cancel}
+              running={running} cancel={cancel}
+              deliveryMode={deliveryMode} setDeliveryMode={setDeliveryMode}
             />
           </div>
         </>
@@ -128,113 +327,1003 @@ export default function ThreadSurface() {
   );
 }
 
-function ThreadHeader({ empty, elapsed, agentMode, setAgentMode }: { empty: boolean; elapsed: string; agentMode: string; setAgentMode: (value: string) => void }) {
+async function sendGuidance(sessionId: string, runId: string, text: string, onSuccess: () => void, onError: (message: string) => void) {
+  try {
+    await guide(sessionId, runId, text);
+    onSuccess();
+  } catch (cause) {
+    onError(cause instanceof Error ? cause.message : String(cause));
+  }
+}
+
+function useTurnStarter(agentMode: string, planMode: boolean, setFollowing: (following: boolean) => void) {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
+  const skills = useRuntimeStore((state) => state.skills);
+  const addOptimisticUser = useRuntimeStore((state) => state.addOptimisticUser);
+  const setRunId = useRuntimeStore((state) => state.setRunId);
+  const failRun = useRuntimeStore((state) => state.failRun);
+  return useCallback(async (text: string, images: Attachment[]): Promise<boolean> => {
+    const invocation = parseSkillPrompt(text, snapshot.language);
+    const invokedSkill = invocation ? skills.find((skill) => !skill.disabled && skill.name.toLowerCase() === invocation.name.toLowerCase())?.name ?? "" : "";
+    const prompt = invokedSkill ? invocation!.instruction : text;
+    const activeSkills = [...new Set([...skills.filter((skill) => skill.eager && !skill.disabled).map((skill) => skill.name), ...(invokedSkill ? [invokedSkill] : [])])];
+    addOptimisticUser(prompt, images);
+    try {
+      const nextRun = await startTurn({
+        sessionId: currentSessionId, prompt, provider: snapshot.provider,
+        model: snapshot.model, reasoning: snapshot.reasoning, agentMode,
+        planMode, disableSubagents: false,
+        activeSkills,
+        images,
+      });
+      setRunId(nextRun);
+      setFollowing(true);
+      return true;
+    } catch (cause) {
+      failRun(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+  }, [addOptimisticUser, agentMode, currentSessionId, failRun, planMode, setFollowing, setRunId, skills, snapshot.language, snapshot.model, snapshot.provider, snapshot.reasoning]);
+}
+
+function useQueuedTurnRunner(
+  queuedPrompts: QueuedPrompt[],
+  running: boolean,
+  beginTurn: (text: string, images: Attachment[]) => Promise<boolean>,
+  removeQueuedPrompt: (id: string) => void,
+) {
+  const startingQueued = useRef("");
+  // Avoid tight auto-retry loops when StartTurn keeps failing for the same head item.
+  const blockedQueued = useRef("");
+  useEffect(() => {
+    const next = queuedPrompts[0];
+    if (!next) {
+      blockedQueued.current = "";
+      return;
+    }
+    if (blockedQueued.current && blockedQueued.current !== next.id) blockedQueued.current = "";
+    if (running || startingQueued.current || blockedQueued.current === next.id) return;
+    startingQueued.current = next.id;
+    void beginTurn(next.text, next.attachments)
+      .then((ok) => {
+        if (ok) {
+          removeQueuedPrompt(next.id);
+          blockedQueued.current = "";
+        } else {
+          // Keep the message in the queue for retry/edit after the failure is visible.
+          blockedQueued.current = next.id;
+        }
+      })
+      .finally(() => { startingQueued.current = ""; });
+  }, [beginTurn, queuedPrompts, removeQueuedPrompt, running]);
+}
+
+function ThreadHeader({ empty, elapsed }: { empty: boolean; elapsed: string }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const title = useRuntimeStore((state) => state.currentTitle);
   const running = useRuntimeStore((state) => state.running);
   const t = translator(snapshot.language);
   const heading = empty ? t("newSession") : title || t("newSession");
   const status = headerStatus(running, elapsed, t);
-  return <header className="thread-header titlebar-region"><div><strong>{heading}</strong><span hidden={empty}>{status}</span></div><HeaderActions empty={empty} agentMode={agentMode} setAgentMode={setAgentMode} /></header>;
+  return <header className="thread-header titlebar-region"><div><strong>{heading}</strong><span hidden={empty}>{status}</span></div><HeaderActions empty={empty} /></header>;
 }
 
 function headerStatus(running: boolean, elapsed: string, t: ReturnType<typeof translator>) { return running ? `${t("running")} · ${elapsed}` : t("ready"); }
 
-function HeaderActions({ empty, agentMode, setAgentMode }: { empty: boolean; agentMode: string; setAgentMode: (value: string) => void }) {
+function HeaderActions({ empty }: { empty: boolean }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
-  const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
   const inspectorOpen = useRuntimeStore((state) => state.inspectorOpen);
   const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
-  const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
-  const setError = useRuntimeStore((state) => state.setError);
   const t = translator(snapshot.language);
-  return <div className="thread-actions"><button hidden={empty} className="subtle-button" onClick={() => execute({ kind: "compact", target: currentSessionId }).catch((cause) => setError(String(cause)))}>{t("compact")}</button><button className="subtle-button" onClick={() => setAgentMode("team")}><Users size={14} />{agentMode === "team" ? t("team") : t("handoff")}</button><button className="subtle-button" onClick={() => setCommandOpen(true)}><Sparkles size={14} />{t("actions")}</button><button hidden={empty} className="icon-button inspector-toggle" data-open={String(inspectorOpen)} title={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}><PanelRightClose className="inspector-open-icon" size={15} /><PanelRightOpen className="inspector-closed-icon" size={15} /></button></div>;
+  return <div className="thread-actions"><button hidden={empty} className="icon-button inspector-toggle" data-open={String(inspectorOpen)} title={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}><PanelRightClose className="inspector-open-icon" size={15} /><PanelRightOpen className="inspector-closed-icon" size={15} /></button></div>;
 }
 
-function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, planMode, setPlanMode, approvalMode, branches, running, cancel }: {
+function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, planMode, setPlanMode, running, cancel, deliveryMode, setDeliveryMode, showContextBar = false }: {
   prompt: string; setPrompt: (value: string) => void; submit: () => void; attach: (files: FileList | null) => void;
   agentMode: string; setAgentMode: (value: string) => void; planMode: boolean; setPlanMode: (value: boolean) => void;
-  approvalMode: string; branches: Array<{ name: string; current: boolean }>; running: boolean; cancel?: () => void;
+  running: boolean; cancel?: () => void;
+  deliveryMode: DeliveryMode; setDeliveryMode: (value: DeliveryMode) => void;
+  /** Project / local / branch chips — empty welcome only; hide during active threads. */
+  showContextBar?: boolean;
 }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const attachments = useRuntimeStore((state) => state.attachments);
+  const skills = useRuntimeStore((state) => state.skills);
+  const approvalMode = useRuntimeStore((state) => state.approvalMode) || snapshot.approvalMode;
+  const contextUsage = useRuntimeStore((state) => state.contextUsage);
+  const contextProfile = useRuntimeStore((state) => state.contextProfile);
+  const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
+  const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
   const removeAttachment = useRuntimeStore((state) => state.removeAttachment);
   const setError = useRuntimeStore((state) => state.setError);
+  const setView = useRuntimeStore((state) => state.setView);
+  const setSettingsOpen = useRuntimeStore((state) => state.setSettingsOpen);
+  const slashMenu = useRef<HTMLDivElement>(null);
+  const [slashCursor, setSlashCursor] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
   const t = translator(snapshot.language);
   const { modelChoices, reasoningLevels, selectedModelName, changeModel, changeReasoning, changeSpeed } = useComposerModels(snapshot);
-  const reasoningNames: Record<string, string> = snapshot.language === "zh-CN"
-    ? { minimal: "最小", low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高", ultra: "超高" }
-    : { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Maximum", ultra: "Ultra" };
+  const reasoningNames: Record<string, string> = {
+    minimal: t("reasoningMinimal"), low: t("reasoningLow"), medium: t("reasoningMedium"),
+    high: t("reasoningHigh"), xhigh: t("reasoningXHigh"), max: t("reasoningMax"), ultra: t("reasoningUltra"),
+  };
+  const approvalLabels: Record<string, string> = {
+    prompt: t("promptApproval"), auto_review: t("autoReview"), yolo: t("yolo"),
+  };
   const selectedReasoningName = reasoningNames[snapshot.reasoning] ?? snapshot.reasoning;
-  const switchBranch = async (target: string) => {
-    try { await execute({ kind: "switch_git_branch", target }); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  const contextPercent = contextOccupancy(contextUsage, contextProfile).percentage;
+  const slashItems = slashSuggestions(prompt, skills, snapshot.language, {
+    reasoningLabel: selectedReasoningName,
+    approvalLabel: approvalLabels[approvalMode] ?? approvalMode,
+    planMode,
+    agentMode,
+    fast: snapshot.chatgptFastMode,
+    contextPercent,
+    provider: snapshot.provider,
+  });
+  const slashOpen = !running && !slashDismissed && slashItems.length > 0;
+  const commandItems = slashItems.map((item, index) => ({ item, index })).filter(({ item }) => item.kind === "command");
+  const skillItems = slashItems.map((item, index) => ({ item, index })).filter(({ item }) => item.kind === "skill");
+  useEffect(() => { setSlashCursor(0); setSlashDismissed(false); }, [prompt]);
+  useEffect(() => {
+    if (slashOpen) slashMenu.current?.querySelector<HTMLElement>(`[data-index="${slashCursor}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [slashCursor, slashOpen]);
+  const showCancel = cancelVisible(running, cancel, prompt);
+  const cycleApproval = async () => {
+    const index = Math.max(0, approvalCycle.indexOf(approvalMode as typeof approvalCycle[number]));
+    const next = approvalCycle[(index + 1) % approvalCycle.length];
+    await execute({ kind: "set_approval_mode", target: next });
   };
-  const setApproval = async (target: string) => {
-    try { await execute({ kind: "set_approval_mode", target }); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  const cycleReasoning = () => {
+    if (!reasoningLevels.length) return;
+    const index = Math.max(0, reasoningLevels.indexOf(snapshot.reasoning));
+    changeReasoning(reasoningLevels[(index + 1) % reasoningLevels.length]!);
   };
+  const chooseSlash = (item: SlashSuggestion) => {
+    setSlashDismissed(true);
+    if (item.kind === "skill") {
+      setPrompt(`${item.value} `);
+      requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#azem-composer")?.focus());
+      return;
+    }
+    setPrompt("");
+    const run = async () => {
+      switch (item.action) {
+        case "new": await execute({ kind: "new_session" }); setView("thread"); break;
+        case "compact": await execute({ kind: "compact", target: currentSessionId }); break;
+        case "settings": setSettingsOpen(true); break;
+        case "skills": setView("extensions"); break;
+        case "reload-skills": await execute({ kind: "reload_skills" }); break;
+        case "plan": setPlanMode(!planMode); break;
+        case "agents": setView("agents"); break;
+        case "approval": await cycleApproval(); break;
+        case "fast": changeSpeed(snapshot.chatgptFastMode ? "standard" : "fast"); break;
+        case "reasoning": cycleReasoning(); break;
+        case "mcp": await execute({ kind: "refresh_mcp" }); break;
+        case "inspector": setView("thread"); setInspectorOpen(true); break;
+      }
+    };
+    void run().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  };
+  const chooseCurrentSlash = () => {
+    const item = slashItems[Math.min(slashCursor, slashItems.length - 1)];
+    if (item) chooseSlash(item);
+  };
+  const submitOrChooseSlash = () => slashOpen ? chooseCurrentSlash() : submit();
 
   return (
-    <div className="composer-card">
-      {attachments.length > 0 && <div className="attachment-row">{attachments.map((item) => <span key={item.id}><ImagePlus size={13} />{item.name}<button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.id)}><X size={12} /></button></span>)}</div>}
-      <textarea id="azem-composer" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={running ? "继续输入…" : t("promptPlaceholder")} rows={2} onKeyDown={(event) => {
-        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submit(); }
-      }} />
-      <div className="composer-toolbar">
-        <label className="icon-button attach-button" title={t("attach")}><Paperclip size={15} /><input type="file" accept="image/*" multiple onChange={(event) => { attach(event.target.files); event.target.value = ""; }} /></label>
-        <select className="accent-select" value={approvalMode} onChange={(event) => setApproval(event.target.value)} aria-label="Approval mode">
-          <option value="prompt">{t("promptApproval")}</option><option value="auto_review">{t("autoReview")}</option><option value="yolo">{t("yolo")}</option>
-        </select>
-        <button className={planMode ? "mode-chip active" : "mode-chip"} onClick={() => setPlanMode(!planMode)}><Circle size={11} />{t("plan")}</button>
-        <span className="toolbar-spacer" />
-        <ContextMeter />
-        <select value={agentMode} onChange={(event) => setAgentMode(event.target.value)} aria-label="Agent mode"><option value="single">{t("single")}</option><option value="team">{t("team")}</option></select>
-        <ModelControls
-          running={running} models={modelChoices} selectedModel={modelKey(snapshot.provider, snapshot.model)} selectedModelName={selectedModelName}
-          reasoningLevels={reasoningLevels} selectedReasoning={snapshot.reasoning} selectedReasoningName={selectedReasoningName}
-          fast={snapshot.chatgptFastMode} reasoningNames={reasoningNames} onModelChange={changeModel} onReasoningChange={changeReasoning} onSpeedChange={changeSpeed}
-          modelLabel={t("model")} reasoningLabel={t("reasoning")} speedLabel={t("speed")} standardSpeed={t("standardSpeed")} fastSpeed={t("fastSpeed")} fastHint={t("fastModeHint")}
-        />
-        {running && cancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={submit} disabled={!prompt.trim()} title={t("send")}><Send size={15} /></button>}
+    <div className="composer-shell">
+      {showContextBar ? <ComposerContextBar /> : null}
+      <div className="composer-card">
+        {slashOpen && <div id="slash-menu" ref={slashMenu} className="slash-menu" role="listbox" aria-label={t("slashCommands")}>
+          {commandItems.length > 0 && <section className="slash-commands">
+            {commandItems.map(({ item, index }) => {
+              const Icon = item.icon;
+              return <button
+                type="button" id={`slash-option-${index}`} data-index={index} role="option" aria-selected={slashCursor === index}
+                className={slashCursor === index ? "active" : ""} key={item.value}
+                onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSlashCursor(index)} onClick={() => chooseSlash(item)}
+              ><Icon size={15} /><span className="slash-label">{item.label}</span><span className="slash-detail">{item.detail}</span></button>;
+            })}
+          </section>}
+          {skillItems.length > 0 && <section className="slash-skills">
+            <header>{t("skills")}</header>
+            {skillItems.map(({ item, index }) => {
+              const Icon = item.icon;
+              return <button
+                type="button" id={`slash-option-${index}`} data-index={index} role="option" aria-selected={slashCursor === index}
+                className={slashCursor === index ? "active" : ""} key={item.value}
+                onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setSlashCursor(index)} onClick={() => chooseSlash(item)}
+              ><Icon size={15} /><span className="slash-skill-main"><span className="slash-label">{item.label}</span><span className="slash-detail">{item.detail}</span></span>{item.badge && <em className="slash-badge">{item.badge}</em>}</button>;
+            })}
+          </section>}
+        </div>}
+        {attachments.length > 0 && <div className="attachment-row">{attachments.map((item) => <span key={item.id}><ImagePlus size={13} />{item.name}<button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.id)}><X size={12} /></button></span>)}</div>}
+        <textarea id="azem-composer" value={prompt} onChange={(event) => setPrompt(event.target.value)} onFocus={() => setSlashDismissed(false)} onBlur={() => setSlashDismissed(true)}
+          aria-autocomplete="list" aria-expanded={slashOpen} aria-controls={slashOpen ? "slash-menu" : undefined} aria-activedescendant={slashOpen ? `slash-option-${slashCursor}` : undefined}
+          placeholder={running ? deliveryMode === "queue" ? t("queuePlaceholder") : t("guidePlaceholder") : t("promptPlaceholder")} rows={2} onKeyDown={(event) => {
+          if (slashOpen && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) {
+            event.preventDefault();
+            if (event.key === "ArrowDown") setSlashCursor((slashCursor + 1) % slashItems.length);
+            else if (event.key === "ArrowUp") setSlashCursor((slashCursor - 1 + slashItems.length) % slashItems.length);
+            else if (event.key === "Escape") setSlashDismissed(true);
+            else chooseCurrentSlash();
+            return;
+          }
+          // Enter sends; Shift+Enter inserts a newline (IME composition still uses Enter to confirm).
+          if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            submitOrChooseSlash();
+          }
+        }} />
+        <div className="composer-toolbar">
+          <label className="icon-button attach-button" title={t("attach")}>
+            <Plus size={15} />
+            <input type="file" accept="image/*" multiple onChange={(event) => { attach(event.target.files); event.target.value = ""; }} />
+          </label>
+          <ApprovalPicker value={approvalMode} disabled={running} language={snapshot.language} onChange={(mode) => void execute({ kind: "set_approval_mode", target: mode }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))} />
+          <button
+            type="button"
+            className="plan-mode-toggle"
+            data-active={String(planMode)}
+            disabled={running}
+            title={planMode ? t("plan") : t("planHint")}
+            aria-pressed={planMode}
+            aria-label={t("plan")}
+            onClick={() => setPlanMode(!planMode)}
+          >
+            <Lightbulb size={15} />
+            {planMode ? <span>{t("planLabel")}</span> : null}
+          </button>
+          <span className="toolbar-spacer" />
+          {running && <MenuSelect className="composer-menu delivery-menu" placement="top" value={deliveryMode} options={[{ value: "queue", label: t("queue") }, { value: "guide", label: t("guide") }]} onChange={(value) => setDeliveryMode(value as DeliveryMode)} ariaLabel={t("deliveryMode")} />}
+          <ContextMeter />
+          <ModelControls
+            running={running} models={modelChoices} selectedModel={modelKey(snapshot.provider, snapshot.model)} selectedModelName={selectedModelName}
+            reasoningLevels={reasoningLevels} selectedReasoning={snapshot.reasoning} selectedReasoningName={selectedReasoningName}
+            fast={snapshot.chatgptFastMode} reasoningNames={reasoningNames} onModelChange={changeModel} onReasoningChange={changeReasoning} onSpeedChange={changeSpeed}
+            modelLabel={t("model")} reasoningLabel={t("reasoning")} speedLabel={t("speed")} standardSpeed={t("standardSpeed")} fastSpeed={t("fastSpeed")} fastHint={t("fastModeHint")}
+            fasterLabel={t("reasoningFaster")} smarterLabel={t("reasoningSmarter")} advancedLabel={t("reasoningAdvanced")} backLabel={t("reasoningBack")}
+            highCostHint={t("reasoningMaxHint")} fastBoostTitle={t("fastBoostTitle")} fastBoostDetail={t("fastBoostDetail")} language={snapshot.language}
+          />
+          {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={submitOrChooseSlash} disabled={!prompt.trim()} title={running ? deliveryMode === "queue" ? t("queue") : t("guide") : t("send")}><Send size={15} /></button>}
+        </div>
       </div>
-      <div className="composer-meta"><span><FolderName path={snapshot.workspace} /></span><span>▰ {t("local")}</span><label><GitBranch size={12} /><select disabled={running} value={branches.find((branch) => branch.current)?.name || ""} onChange={(event) => switchBranch(event.target.value)}>{branches.map((branch) => <option key={branch.name}>{branch.name}</option>)}</select></label><span className="toolbar-spacer" />⌘↵ {t("send")}</div>
     </div>
   );
 }
 
-function ModelControls({ running, models, selectedModel, selectedModelName, reasoningLevels, selectedReasoning, selectedReasoningName, fast, reasoningNames, onModelChange, onReasoningChange, onSpeedChange, modelLabel, reasoningLabel, speedLabel, standardSpeed, fastSpeed, fastHint }: {
+function workspaceBasename(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
+}
+
+/** Codex-style chips: project · local · branch */
+function ComposerContextBar() {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const branches = useRuntimeStore((state) => state.branches);
+  const workspaceDirty = useRuntimeStore((state) => state.workspaceDirty);
+  const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
+  const setError = useRuntimeStore((state) => state.setError);
+  const t = translator(snapshot.language);
+  const project = workspaceBasename(snapshot.workspace);
+  const currentBranch = branches.find((branch) => branch.current)?.name || "";
+  const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [newBranch, setNewBranch] = useState("");
+  const [creatingBusy, setCreatingBusy] = useState(false);
+  const branchMenu = useRef<HTMLDetailsElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const createRef = useRef<HTMLInputElement>(null);
+
+  const filteredBranches = branches
+    .filter((branch) => !query.trim() || branch.name.toLowerCase().includes(query.trim().toLowerCase()))
+    .slice()
+    .sort((left, right) => Number(right.current) - Number(left.current) || left.name.localeCompare(right.name));
+
+  useEffect(() => {
+    const close = (event: PointerEvent) => {
+      const node = branchMenu.current;
+      if (!node?.open || node.contains(event.target as Node)) return;
+      node.open = false;
+      setQuery("");
+      setCreating(false);
+      setNewBranch("");
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, []);
+
+  useEffect(() => {
+    const node = branchMenu.current;
+    if (!node) return;
+    const onToggle = () => {
+      if (node.open) {
+        requestAnimationFrame(() => searchRef.current?.focus());
+      } else {
+        setQuery("");
+        setCreating(false);
+        setNewBranch("");
+      }
+    };
+    node.addEventListener("toggle", onToggle);
+    return () => node.removeEventListener("toggle", onToggle);
+  }, []);
+
+  useEffect(() => {
+    if (creating) requestAnimationFrame(() => createRef.current?.focus());
+  }, [creating]);
+
+  const switchProject = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const path = await selectProjectFolder(t("chooseProjectFolder"), t("openProject"));
+      if (path) await openProject(path);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const switchBranch = async (name: string, confirmDirty = false) => {
+    if (!name || name === currentBranch) return;
+    try {
+      await execute({
+        kind: "switch_git_branch",
+        target: name,
+        decision: confirmDirty ? "confirm_dirty" : undefined,
+      });
+      if (branchMenu.current) branchMenu.current.open = false;
+      setQuery("");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!confirmDirty && /uncommitted changes/i.test(message)) {
+        const ok = window.confirm(tFormat(snapshot.language, "dirtySwitchConfirm", { branch: name }));
+        if (ok) await switchBranch(name, true);
+        return;
+      }
+      setError(message);
+    }
+  };
+
+  const createBranch = async () => {
+    const name = newBranch.trim();
+    if (!name || creatingBusy) return;
+    setCreatingBusy(true);
+    try {
+      await execute({ kind: "create_git_branch", target: name });
+      if (branchMenu.current) branchMenu.current.open = false;
+      setCreating(false);
+      setNewBranch("");
+      setQuery("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCreatingBusy(false);
+    }
+  };
+
+  return (
+    <div className="composer-context-bar" aria-label={t("workspace")}>
+      <button type="button" className="composer-chip composer-chip-action" title={`${t("switchProject")}: ${snapshot.workspace}`} disabled={busy} onClick={() => void switchProject()}>
+        <Folder size={13} />
+        <span>{project}</span>
+      </button>
+      <span className="composer-chip" title={snapshot.workspace}>
+        <HardDrive size={13} />
+        <span>{t("local")}</span>
+      </span>
+      {branches.length > 0 ? (
+        <details ref={branchMenu} className="composer-branch-menu">
+          <summary className="composer-chip composer-chip-action" title={t("branch")}>
+            <GitBranch size={13} />
+            <span>{currentBranch || t("branch")}</span>
+            <ChevronDown size={11} />
+          </summary>
+          <div className="composer-branch-panel" role="listbox" aria-label={t("branch")}>
+            <label className="composer-branch-search">
+              <Search size={14} />
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={t("searchBranches")}
+                aria-label={t("searchBranches")}
+              />
+            </label>
+            <div className="composer-branch-section">{t("branchesSection")}</div>
+            <div className="composer-branch-options">
+              {filteredBranches.length === 0 ? (
+                <div className="composer-branch-empty">{t("noMatchingBranches")}</div>
+              ) : filteredBranches.map((branch) => (
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={branch.current}
+                  className={branch.current ? "selected" : ""}
+                  key={branch.name}
+                  title={branch.name}
+                  onClick={() => void switchBranch(branch.name)}
+                >
+                  <GitBranch size={14} />
+                  <span className="composer-branch-meta">
+                    <strong>{branch.name}</strong>
+                    {branch.current && workspaceDirty && workspaceChangedFiles > 0 ? (
+                      <small>{tFormat(snapshot.language, "uncommittedFiles", { count: workspaceChangedFiles })}</small>
+                    ) : null}
+                  </span>
+                  {branch.current ? <Check size={15} className="composer-branch-check" /> : <span className="composer-branch-check" />}
+                </button>
+              ))}
+            </div>
+            <div className="composer-branch-footer">
+              {creating ? (
+                <form
+                  className="composer-branch-create-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void createBranch();
+                  }}
+                >
+                  <GitBranch size={14} />
+                  <input
+                    ref={createRef}
+                    value={newBranch}
+                    onChange={(event) => setNewBranch(event.target.value)}
+                    placeholder={t("newBranchPlaceholder")}
+                    aria-label={t("newBranchPlaceholder")}
+                    disabled={creatingBusy}
+                  />
+                  <button type="submit" disabled={creatingBusy || !newBranch.trim()}>{t("createBranch")}</button>
+                </form>
+              ) : (
+                <button type="button" className="composer-branch-create" onClick={() => setCreating(true)}>
+                  <Plus size={14} />
+                  <span>{t("createCheckoutBranch")}</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </details>
+      ) : (
+        <span className="composer-chip composer-chip-muted" title={t("noBranches")}>
+          <GitBranch size={13} />
+          <span>{t("noBranches")}</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
+const approvalModes = [
+  { value: "prompt", labelKey: "promptApproval" as const, hintKey: "approvalAskHint" as const, Icon: Hand, danger: false },
+  { value: "auto_review", labelKey: "autoReview" as const, hintKey: "approvalAutoHint" as const, Icon: ShieldCheck, danger: false },
+  { value: "yolo", labelKey: "yolo" as const, hintKey: "approvalFullHint" as const, Icon: ShieldAlert, danger: true },
+] as const;
+
+/** Codex-style approval / permissions menu in the composer toolbar. */
+function ApprovalPicker({ value, disabled, language, onChange }: {
+  value: string;
+  disabled?: boolean;
+  language: Snapshot["language"];
+  onChange: (mode: string) => void;
+}) {
+  const details = useRef<HTMLDetailsElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const summary = useRef<HTMLElement>(null);
+  const [open, setOpen] = useState(false);
+  const [box, setBox] = useState<{ top?: number; bottom?: number; left: number; width: number } | null>(null);
+  const t = translator(language);
+  const current = approvalModes.find((mode) => mode.value === value) ?? approvalModes[0];
+  const CurrentIcon = current.Icon;
+
+  const place = useCallback(() => {
+    const el = summary.current;
+    if (!el || !details.current?.open) {
+      setBox(null);
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    const width = Math.min(340, window.innerWidth - 16);
+    const left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8);
+    const spaceAbove = rect.top - 8;
+    const openUp = spaceAbove >= 220 || spaceAbove > window.innerHeight - rect.bottom;
+    setBox(openUp
+      ? { bottom: window.innerHeight - rect.top + 8, left, width }
+      : { top: rect.bottom + 8, left, width });
+  }, []);
+
+  useEffect(() => {
+    const close = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (details.current?.contains(target) || panel.current?.contains(target)) return;
+      if (details.current) details.current.open = false;
+      setOpen(false);
+      setBox(null);
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    place();
+    const onReposition = () => place();
+    window.addEventListener("resize", onReposition);
+    window.addEventListener("scroll", onReposition, true);
+    return () => {
+      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onReposition, true);
+    };
+  }, [open, place]);
+
+  const menu = open && box ? createPortal(
+    <div
+      ref={panel}
+      className="approval-picker-menu"
+      role="menu"
+      aria-label={t("approvalMenuTitle")}
+      style={{ position: "fixed", top: box.top, bottom: box.bottom, left: box.left, width: box.width, zIndex: 220 }}
+    >
+      <header className="approval-picker-heading">
+        <span>{t("approvalMenuTitle")}</span>
+      </header>
+      {approvalModes.map((mode) => {
+        const Icon = mode.Icon;
+        const selected = mode.value === value;
+        return (
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={selected}
+            className={`approval-picker-option ${selected ? "selected" : ""} ${mode.danger ? "danger" : ""}`}
+            key={mode.value}
+            onClick={() => {
+              onChange(mode.value);
+              if (details.current) details.current.open = false;
+              setOpen(false);
+              setBox(null);
+            }}
+          >
+            <Icon size={16} />
+            <span className="approval-picker-copy">
+              <strong>{t(mode.labelKey)}</strong>
+              <small>{t(mode.hintKey)}</small>
+            </span>
+            <Check size={14} className="approval-picker-check" />
+          </button>
+        );
+      })}
+    </div>,
+    document.body,
+  ) : null;
+
+  return <>
+    <details
+      ref={details}
+      className="approval-picker"
+      data-disabled={String(Boolean(disabled))}
+      data-mode={current.value}
+      onToggle={(event) => {
+        if (disabled) {
+          event.currentTarget.open = false;
+          setOpen(false);
+          setBox(null);
+          return;
+        }
+        const next = event.currentTarget.open;
+        setOpen(next);
+        if (next) requestAnimationFrame(place);
+        else setBox(null);
+      }}
+    >
+      <summary
+        ref={summary as React.RefObject<HTMLElement>}
+        aria-label={t(current.labelKey)}
+        aria-disabled={disabled}
+        title={t(current.labelKey)}
+      >
+        <CurrentIcon size={14} />
+        <span>{t(current.labelKey)}</span>
+      </summary>
+    </details>
+    {menu}
+  </>;
+}
+
+function cancelVisible(running: boolean, cancel: (() => void) | undefined, prompt: string) {
+  return running && Boolean(cancel) && !prompt.trim();
+}
+
+function QueuedPrompts({ items, running, onGuide, onDelete, onEdit, onCloseQueue }: {
+  items: QueuedPrompt[]; running: boolean; onGuide: (item: QueuedPrompt) => Promise<void>;
+  onDelete: (id: string) => void; onEdit: (item: QueuedPrompt) => void; onCloseQueue: () => void;
+}) {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const t = translator(snapshot.language);
+  return <section className="queued-prompts" aria-label={t("queuedMessages")}>
+    <header><span>{t("queuedMessages")}</span><small>{items.length}</small></header>
+    {items.map((item) => <div className="queued-prompt" key={item.id}>
+      <button className="queued-prompt-content" onClick={() => onEdit(item)} title={t("editMessage")}><CornerUpRight size={14} /><span>{item.text}</span></button>
+      <button className="queued-guide" disabled={!running || item.attachments.length > 0} title={t("guide")} onClick={() => void onGuide(item)}><CornerUpRight size={14} />{t("guide")}</button>
+      <button className="queued-icon" title={t("deleteMessage")} aria-label={t("deleteMessage")} onClick={() => onDelete(item.id)}><Trash2 size={14} /></button>
+      <QueueMenu item={item} onEdit={onEdit} onCloseQueue={onCloseQueue} />
+    </div>)}
+  </section>;
+}
+
+function QueueMenu({ item, onEdit, onCloseQueue }: { item: QueuedPrompt; onEdit: (item: QueuedPrompt) => void; onCloseQueue: () => void }) {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const details = useRef<HTMLDetailsElement>(null);
+  const t = translator(snapshot.language);
+  useEffect(() => {
+    const close = (event: PointerEvent) => {
+      if (details.current && !details.current.contains(event.target as Node)) details.current.open = false;
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, []);
+  const choose = (action: () => void) => {
+    action();
+    if (details.current) details.current.open = false;
+  };
+  return <details ref={details} className="queue-menu"><summary aria-label={t("moreActions")} title={t("moreActions")}><MoreHorizontal size={15} /></summary><div>
+    <button onClick={() => choose(() => onEdit(item))}><Pencil size={14} />{t("editMessage")}</button>
+    <button onClick={() => choose(onCloseQueue)}><ListX size={14} />{t("closeQueue")}</button>
+  </div></details>;
+}
+
+type ModelControlOption = { value: string; label: string; hint?: string };
+type ModelControlGroup = {
+  label: string;
+  current: string;
+  selected: string;
+  options: ModelControlOption[];
+  select: (value: string) => void;
+};
+
+function ModelControls({ running, models, selectedModel, selectedModelName, reasoningLevels, selectedReasoning, selectedReasoningName, fast, reasoningNames, onModelChange, onReasoningChange, onSpeedChange, modelLabel, reasoningLabel, speedLabel, standardSpeed, fastSpeed, fastHint, fasterLabel, smarterLabel, advancedLabel, backLabel, highCostHint, fastBoostTitle, fastBoostDetail, language }: {
   running: boolean; models: ComposerModel[]; selectedModel: string; selectedModelName: string; reasoningLevels: string[]; selectedReasoning: string; selectedReasoningName: string;
   fast: boolean; reasoningNames: Record<string, string>; onModelChange: (value: string) => void; onReasoningChange: (value: string) => void; onSpeedChange: (value: string) => void;
   modelLabel: string; reasoningLabel: string; speedLabel: string; standardSpeed: string; fastSpeed: string; fastHint: string;
+  fasterLabel: string; smarterLabel: string; advancedLabel: string; backLabel: string; highCostHint: string;
+  fastBoostTitle: string; fastBoostDetail: string;
+  language: Snapshot["language"];
 }) {
-  const controls = useRef<HTMLDetailsElement>(null);
-  useEffect(() => {
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (controls.current && !controls.current.contains(event.target as Node)) controls.current.open = false;
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer, true);
-    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
-  }, []);
-  const groups = [
+  const root = useRef<HTMLDetailsElement>(null);
+  const summary = useRef<HTMLElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const rowRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [open, setOpen] = useState(false);
+  // Plan A: effort slider is the default surface; advanced keeps the classic menus.
+  const [view, setView] = useState<"effort" | "advanced">("effort");
+  const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [menuBox, setMenuBox] = useState<{ top?: number; bottom?: number; left: number; width: number } | null>(null);
+  const [subBox, setSubBox] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
+
+  const levels = sortReasoningLevels(reasoningLevels);
+  const groups: ModelControlGroup[] = [
     { label: modelLabel, current: selectedModelName, selected: selectedModel, options: models.map((model) => ({ value: modelKey(model.provider, model.id), label: model.name })), select: onModelChange },
-    { label: reasoningLabel, current: selectedReasoningName, selected: selectedReasoning, options: reasoningLevels.map((level) => ({ value: level, label: reasoningNames[level] ?? level })), select: onReasoningChange },
+    {
+      label: reasoningLabel,
+      current: selectedReasoningName,
+      selected: selectedReasoning,
+      options: levels.map((level) => ({
+        value: level,
+        label: reasoningNames[level] ?? level,
+        hint: reasoningHint(level, language),
+      })),
+      select: onReasoningChange,
+    },
     { label: speedLabel, current: fast ? fastSpeed : standardSpeed, selected: fast ? "fast" : "standard", options: [{ value: "standard", label: standardSpeed }, { value: "fast", label: fastSpeed }], select: onSpeedChange },
   ];
+
+  const placeMenu = useCallback(() => {
+    const el = summary.current;
+    if (!el || !root.current?.open) {
+      setMenuBox(null);
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    // Reverse-engineered from Codex model-picker menu: compact chip, not a wide sheet.
+    const preferred = view === "effort" ? 248 : Math.max(280, rect.width + 40);
+    const width = Math.min(preferred, Math.min(320, window.innerWidth - 16));
+    const spaceAbove = rect.top - 8;
+    const spaceBelow = window.innerHeight - rect.bottom - 8;
+    const openUp = spaceAbove >= 160 || spaceAbove > spaceBelow;
+    const left = Math.min(Math.max(8, rect.right - width), window.innerWidth - width - 8);
+    setMenuBox(openUp
+      ? { bottom: window.innerHeight - rect.top + 8, left, width }
+      : { top: rect.bottom + 8, left, width });
+  }, [view]);
+
+  const placeSubmenu = useCallback((label: string) => {
+    const row = rowRefs.current[label];
+    const panel = menu.current;
+    if (!row || !panel) {
+      setSubBox(null);
+      return;
+    }
+    const rowRect = row.getBoundingClientRect();
+    const menuRect = panel.getBoundingClientRect();
+    const group = groups.find((item) => item.label === label);
+    const options = group?.options ?? [];
+    const longest = options.reduce((max, option) => Math.max(max, option.label.length + (option.hint?.length ? 4 : 0)), 0) || 12;
+    const width = Math.min(Math.max(180, longest * 9 + 56), Math.min(320, window.innerWidth - 16));
+    const spaceLeft = menuRect.left - 8;
+    const spaceRight = window.innerWidth - menuRect.right - 8;
+    const openRight = spaceRight >= width || spaceRight >= spaceLeft;
+    const left = openRight
+      ? Math.min(menuRect.right + 8, window.innerWidth - width - 8)
+      : Math.max(8, menuRect.left - width - 8);
+    const titleH = 28;
+    const pad = 12;
+    const rowH = options.reduce((sum, option) => sum + (option.hint ? 48 : 36), 0);
+    const contentHeight = titleH + pad + rowH;
+    const maxHeight = Math.min(Math.max(contentHeight, 80), window.innerHeight - 16);
+    let top = rowRect.top - 8;
+    if (top + Math.min(contentHeight, maxHeight) > window.innerHeight - 8) {
+      top = Math.max(8, window.innerHeight - 8 - Math.min(contentHeight, maxHeight));
+    }
+    top = Math.max(8, top);
+    setSubBox({ top, left, width, maxHeight });
+  }, [groups]);
+
+  const resetClosed = useCallback(() => {
+    setOpen(false);
+    setView("effort");
+    setActiveGroup(null);
+    setMenuBox(null);
+    setSubBox(null);
+  }, []);
+
+  useEffect(() => {
+    const close = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (root.current?.contains(target) || menu.current?.contains(target)) return;
+      if ((target as HTMLElement).closest?.(".model-control-submenu-portal")) return;
+      if (root.current) root.current.open = false;
+      resetClosed();
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, [resetClosed]);
+
+  useEffect(() => {
+    if (!open) return;
+    placeMenu();
+    const onReposition = () => {
+      placeMenu();
+      if (view === "advanced" && activeGroup) placeSubmenu(activeGroup);
+    };
+    window.addEventListener("resize", onReposition);
+    window.addEventListener("scroll", onReposition, true);
+    return () => {
+      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onReposition, true);
+    };
+  }, [open, view, activeGroup, placeMenu, placeSubmenu]);
+
+  useEffect(() => {
+    if (!open || view !== "advanced" || !activeGroup) {
+      setSubBox(null);
+      return;
+    }
+    const frame = requestAnimationFrame(() => placeSubmenu(activeGroup));
+    return () => cancelAnimationFrame(frame);
+  }, [open, view, activeGroup, placeSubmenu]);
+
+  const closeAll = () => {
+    if (root.current) root.current.open = false;
+    resetClosed();
+    summary.current?.focus();
+  };
   const choose = (select: (value: string) => void, value: string) => {
     select(value);
-    if (controls.current) controls.current.open = false;
+    // Keep the advanced panel open when changing model so the user can also adjust effort.
+    if (view === "advanced") {
+      setActiveGroup(null);
+      setSubBox(null);
+      return;
+    }
+    closeAll();
   };
-  return <details ref={controls} className="model-controls" data-disabled={String(running)}><summary aria-disabled={running}><span>{selectedModelName}</span><small>{selectedReasoningName}</small><ChevronDown size={12} /></summary><div className="model-control-menu">
-    {groups.map((group) => <div className="model-control-item" key={group.label}>
-      <button type="button" className="model-control-row" disabled={running} aria-haspopup="menu"><span>{group.label}</span><small>{group.current}</small><ChevronRight size={13} /></button>
-      <div className="model-control-submenu" role="menu" aria-label={group.label}>{group.options.map((option) => <button
-        type="button" role="menuitemradio" aria-checked={group.selected === option.value} disabled={running}
-        className={group.selected === option.value ? "selected" : ""} key={option.value} onClick={() => choose(group.select, option.value)}
-      ><Check size={13} /><span>{option.label}</span></button>)}</div>
-    </div>)}
-    <p>{fastHint}</p>
-  </div></details>;
+
+  const active = groups.find((group) => group.label === activeGroup) ?? null;
+  const highEffort = isHighCostReasoning(selectedReasoning);
+
+  const menuPortal = open && menuBox ? createPortal(
+    <div
+      ref={menu}
+      className={`model-control-menu model-control-menu-portal model-control-menu-${view}`}
+      style={{
+        position: "fixed",
+        top: menuBox.top,
+        bottom: menuBox.bottom,
+        left: menuBox.left,
+        width: menuBox.width,
+        zIndex: 210,
+      }}
+    >
+      {view === "effort" ? (
+        <div className="effort-panel">
+          <div className="effort-panel-toolbar">
+            <button
+              type="button"
+              className="effort-panel-advanced"
+              disabled={running}
+              onClick={() => {
+                setView("advanced");
+                setActiveGroup(null);
+                setSubBox(null);
+                requestAnimationFrame(placeMenu);
+              }}
+            >
+              <span>{advancedLabel}</span>
+              <ChevronRight size={12} />
+            </button>
+            <div className={`effort-panel-speed-wrap ${fast ? "active" : ""}`}>
+              <button
+                type="button"
+                className={`effort-panel-speed ${fast ? "active" : ""}`}
+                disabled={running}
+                title={fast ? `${fastBoostTitle} · ${fastBoostDetail}` : `${standardSpeed} · ${fastHint}`}
+                aria-label={speedLabel}
+                aria-pressed={fast}
+                onClick={() => onSpeedChange(fast ? "standard" : "fast")}
+              >
+                <Zap size={16} />
+              </button>
+              <div className="effort-speed-tip" role="tooltip">
+                <strong>{fastBoostTitle}</strong>
+                <span>{fastBoostDetail}</span>
+              </div>
+            </div>
+          </div>
+          {levels.length > 1 ? (
+            <ReasoningEffortSlider
+              levels={levels}
+              value={selectedReasoning}
+              onChange={onReasoningChange}
+              labels={reasoningNames}
+              fasterLabel={fasterLabel}
+              smarterLabel={smarterLabel}
+              highCostHint={highCostHint}
+              fast={fast}
+              disabled={running}
+              ariaLabel={reasoningLabel}
+            />
+          ) : (
+            <p className="effort-panel-single">{selectedReasoningName || reasoningLabel}</p>
+          )}
+        </div>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="model-control-back"
+            onClick={() => {
+              setView("effort");
+              setActiveGroup(null);
+              setSubBox(null);
+            }}
+          >
+            <ChevronLeft size={13} />
+            <span>{backLabel}</span>
+            <small>{reasoningLabel}</small>
+          </button>
+          {groups.map((group) => (
+            <div
+              className={`model-control-item ${activeGroup === group.label ? "open" : ""}`}
+              key={group.label}
+              onMouseEnter={() => !running && setActiveGroup(group.label)}
+              onFocus={() => !running && setActiveGroup(group.label)}
+            >
+              <button
+                type="button"
+                ref={(node) => { rowRefs.current[group.label] = node; }}
+                className="model-control-row"
+                disabled={running}
+                aria-haspopup="menu"
+                aria-expanded={activeGroup === group.label}
+                onClick={() => !running && setActiveGroup((current) => current === group.label ? null : group.label)}
+              >
+                <span>{group.label}</span>
+                <small title={group.current}>{group.current}</small>
+                <ChevronRight size={13} />
+              </button>
+            </div>
+          ))}
+          <p>{fastHint}</p>
+        </>
+      )}
+    </div>,
+    document.body,
+  ) : null;
+
+  const subPortal = open && view === "advanced" && active && subBox ? createPortal(
+    <div
+      className="model-control-submenu model-control-submenu-portal"
+      role="menu"
+      aria-label={active.label}
+      style={{
+        position: "fixed",
+        top: subBox.top,
+        left: subBox.left,
+        width: subBox.width,
+        maxHeight: subBox.maxHeight,
+        zIndex: 211,
+      }}
+      onMouseEnter={() => setActiveGroup(active.label)}
+    >
+      <header className="model-control-submenu-title">{active.label}</header>
+      {active.options.map((option) => (
+        <button
+          type="button"
+          role="menuitemradio"
+          aria-checked={active.selected === option.value}
+          disabled={running}
+          className={active.selected === option.value ? "selected" : ""}
+          key={option.value}
+          title={option.hint ? `${option.label} — ${option.hint}` : option.label}
+          onClick={() => choose(active.select, option.value)}
+        >
+          <span className="model-control-option-copy">
+            <span>{option.label}</span>
+            {option.hint ? <small>{option.hint}</small> : null}
+          </span>
+          <Check size={13} />
+        </button>
+      ))}
+    </div>,
+    document.body,
+  ) : null;
+
+  return <>
+    <details
+      ref={root}
+      className="model-controls"
+      data-disabled={String(running)}
+      data-open={String(open)}
+      onToggle={(event) => {
+        if (running) {
+          event.currentTarget.open = false;
+          resetClosed();
+          return;
+        }
+        const next = event.currentTarget.open;
+        setOpen(next);
+        if (next) {
+          setView("effort");
+          setActiveGroup(null);
+          requestAnimationFrame(placeMenu);
+        } else {
+          resetClosed();
+        }
+      }}
+    >
+      <summary
+        ref={summary as React.RefObject<HTMLElement>}
+        aria-disabled={running}
+        aria-expanded={open}
+        title={fast
+          ? `${fastBoostTitle} · ${selectedModelName} · ${selectedReasoningName}`
+          : `${selectedModelName} · ${selectedReasoningName}`}
+        data-fast={String(fast)}
+        data-high={String(highEffort)}
+      >
+        {fast ? <Zap size={12} className="model-controls-fast-icon" aria-hidden="true" /> : null}
+        <span>{selectedModelName}</span>
+        <small data-high={String(highEffort)}>{selectedReasoningName}</small>
+        <ChevronDown size={12} className="model-controls-chevron" />
+      </summary>
+    </details>
+    {menuPortal}
+    {subPortal}
+  </>;
 }
 
 export function ContextMeter() {
@@ -244,7 +1333,8 @@ export function ContextMeter() {
   const details = useRef<HTMLDetailsElement>(null);
   const t = translator(snapshot.language);
   const metrics = contextOccupancy(usage, profile);
-  const tone = metrics.percentage >= 90 ? "critical" : metrics.percentage >= 75 ? "warning" : "normal";
+  // Blue by default; only turn red when nearly full.
+  const tone = metrics.percentage >= 90 ? "critical" : "normal";
   useEffect(() => {
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (details.current && !details.current.contains(event.target as Node)) details.current.open = false;
@@ -286,65 +1376,6 @@ function formatTokens(tokens: number) {
   return String(tokens);
 }
 
-function TimelineBlock({ block, language }: { block: Block; language: Snapshot["language"] }) {
-  if (block.kind === "user") return <article className="user-block">{block.attachments?.length ? <div className="user-attachments">{block.attachments.map((item) => <span key={item.id}><ImagePlus size={13} />{item.name}</span>)}</div> : null}<p>{block.content}</p></article>;
-  if (block.kind === "assistant") return <article className="assistant-block markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content || ""}</ReactMarkdown></article>;
-  if (block.kind === "thinking") return <details className="thinking-block" open={block.state === "streaming"}><summary><Sparkles size={14} /><strong>{block.title || "思考中"}</strong>{block.state === "streaming" && <span className="live-dot" />}</summary><div className="thinking-content">{block.content}</div></details>;
-  if (block.kind === "tool") return <details className="tool-block" open={block.state === "running"}><summary><span className="tool-state">{block.state === "running" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}</span><span className="tool-chevron"><ChevronRight className="closed-chevron" size={15} /><ChevronDown className="open-chevron" size={15} /></span><strong>{block.title ? toolDisplayName(block.title, language) : translator(language)("toolGeneric")}</strong><span>{stateLabel(block.state)}</span></summary>{block.content && <pre>{block.content}</pre>}</details>;
-  if (block.kind === "diff") return <DiffBlock block={block} />;
-  if (block.kind === "approval") return <ApprovalBlock block={block} />;
-  if (block.kind === "error") return <article className="error-block"><CircleStop size={16} /><div><strong>{block.title}</strong><p>{block.content}</p></div></article>;
-  return <article className="event-block"><Bot size={14} /><div><strong>{block.title || block.kind}</strong><p>{block.content}</p></div></article>;
-}
-
-function DiffBlock({ block }: { block: Block }) {
-  const lines = (block.content || "").split("\n");
-  let oldLine = 0;
-  let newLine = 0;
-  return <article className="diff-block"><header><FileCode2 size={15} /><strong>{block.title}</strong><span className="toolbar-spacer" /><span className="plus">+{block.data?.additions || lines.filter((line) => line.startsWith("+")).length}</span><span className="minus">−{block.data?.deletions || lines.filter((line) => line.startsWith("-")).length}</span></header><pre>{lines.map((line, index) => {
-    const hunk = line.startsWith("@@");
-    const add = line.startsWith("+") && !line.startsWith("+++");
-    const del = line.startsWith("-") && !line.startsWith("---");
-    if (hunk) { const match = /@@ -(\d+)/.exec(line); oldLine = Number(match?.[1] || 0); const next = /\+(\d+)/.exec(line); newLine = Number(next?.[1] || 0); }
-    else if (add) newLine += 1; else if (del) oldLine += 1; else { oldLine += 1; newLine += 1; }
-    return <span key={`${index}-${line}`} className={hunk ? "hunk" : add ? "added" : del ? "deleted" : "context"}><i>{hunk ? "" : del ? oldLine : add ? newLine : newLine}</i><b>{hunk ? "" : add ? "+" : del ? "−" : " "}</b><code>{line.replace(/^[+-]/, "")}</code></span>;
-  })}</pre></article>;
-}
-
-function ApprovalBlock({ block }: { block: Block }) {
-  const snapshot = useRuntimeStore((state) => state.snapshot)!;
-  const setError = useRuntimeStore((state) => state.setError);
-  const t = translator(snapshot.language);
-  const details = approvalPresentation(block, snapshot.language);
-  const resolve = async (decision: string) => {
-    try { await execute({ kind: "resolve_approval", target: block.approvalId, decision }); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-  };
-  const pending = block.state === "pending";
-  const denied = block.state === "deny" || block.state === "denied";
-  const resolvedLabel = denied ? t("deny") : block.state === "session" ? t("approveSession") : t("approveOnce");
-  return <article className={`approval-block ${pending ? "pending" : "resolved"}`} data-risk={details.riskTone}>
-    <header className="approval-heading"><span className="approval-icon"><ShieldCheck size={17} /></span><div><small>{t("approvalTitle")}</small><strong>{details.tool}</strong></div><span className="approval-risk">{details.riskLabel}</span></header>
-    <div className="approval-target"><span>{t("approvalTarget")}</span><code>{details.target}</code></div>
-    <footer className="approval-footer"><p>{details.description}</p><div className="approval-actions">{pending ? <><button onClick={() => resolve("deny")}>{t("deny")}</button><button onClick={() => resolve("once")}>{t("approveOnce")}</button><button className="primary" onClick={() => resolve("session")}>{t("approveSession")}</button></> : <span className={denied ? "denied" : "approved"}>{denied ? <X size={14} /> : <Check size={14} />}{resolvedLabel}</span>}</div></footer>
-  </article>;
-}
-
-export function approvalPresentation(block: Block, language: Snapshot["language"]) {
-  const t = translator(language);
-  const riskTone = block.data?.risk === "low" || block.data?.risk === "high" ? block.data.risk : "medium";
-  const riskLabel = riskTone === "low" ? t("riskLow") : riskTone === "high" ? t("riskHigh") : t("riskMedium");
-  const effect = block.data?.effect;
-  const description = effect === "write" ? t("approvalWrite") : effect === "external_side_effect" ? t("approvalExternal") : effect === "read_only" ? t("approvalReadOnly") : t("approvalConfirm");
-  return {
-    tool: block.data?.tool ? toolDisplayName(block.data.tool, language) : t("approvalOperation"),
-    target: block.data?.target?.trim() || t("approvalWorkspace"),
-    riskTone,
-    riskLabel,
-    description,
-  };
-}
-
 function useElapsed(start: number, running: boolean) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -355,36 +1386,11 @@ function useElapsed(start: number, running: boolean) {
   return formatDuration(start ? Math.max(0, now - start) : 0);
 }
 
-export function formatDuration(milliseconds: number) {
-  const seconds = Math.floor(milliseconds / 1000);
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const rest = seconds % 60;
-  return hours ? `${hours}h${String(minutes).padStart(2, "0")}m${String(rest).padStart(2, "0")}s` : minutes ? `${minutes}m${String(rest).padStart(2, "0")}s` : `${rest}s`;
-}
-
-function activityLabel(activity: string, language: "en" | "zh-CN") {
-  const labels: Record<string, [string, string]> = {
-    waiting_model: ["正在等待模型", "Waiting for model"], thinking: ["思考中", "Thinking"],
-    responding: ["正在接收回复", "Receiving response"], tool: ["正在调用工具", "Running tool"], approval: ["等待审批", "Waiting for approval"],
-  };
-  return (labels[activity] || ["运行中", "Running"])[language === "en" ? 1 : 0];
-}
-
-function stateLabel(state?: string) {
-  if (state === "running" || state === "started") return "运行中";
-  if (state === "failed") return "失败";
-  return "完成";
-}
-
-function FolderName({ path }: { path: string }) {
-  return <>{path.split(/[\\/]/).filter(Boolean).at(-1) || "workspace"}</>;
-}
-
 type ComposerModel = { provider: string; id: string; name: string; reasoningLevels: string[]; defaultReasoning?: string };
 
 function useComposerModels(snapshot: Snapshot) {
   const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
+  const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
   const setSessionModel = useRuntimeStore((state) => state.setSessionModel);
   const setChatGPTFastMode = useRuntimeStore((state) => state.setChatGPTFastMode);
   const setError = useRuntimeStore((state) => state.setError);
@@ -392,15 +1398,32 @@ function useComposerModels(snapshot: Snapshot) {
   const catalogModels = Object.entries(modelsByProvider).flatMap(([provider, models]) => models.map((model) => ({ ...model, provider })));
   const modelChoices = [...new Map([fallbackModel, ...catalogModels].map((model) => [modelKey(model.provider, model.id), model])).values()];
   const providerModels = modelsByProvider[snapshot.provider] ?? [];
-  const catalogLevels = providerModels.find((model) => model.id === snapshot.model)?.reasoningLevels ?? ["minimal", "low", "medium", "high", "xhigh"];
-  const reasoningLevels = [...new Set([snapshot.reasoning, ...catalogLevels])].filter(Boolean);
+  const catalogLevels = providerModels.find((model) => model.id === snapshot.model)?.reasoningLevels ?? ["low", "medium", "high", "xhigh", "max"];
+  // Keep Codex order (轻度→最高); never pin the current value to the top of the list.
+  const reasoningLevels = sortReasoningLevels([snapshot.reasoning, ...catalogLevels]);
   const selectedModelName = modelChoices.find((model) => modelKey(model.provider, model.id) === modelKey(snapshot.provider, snapshot.model))?.name ?? snapshot.model;
+  const persistSessionPreferences = (provider: string, model: string, reasoning: string, previous: { provider: string; model: string; reasoning: string }) => {
+    execute({
+      kind: "set_session_preferences",
+      sessionId: currentSessionId,
+      route: { Scope: "session", Role: "", Label: "", Route: { provider, model, reasoning } },
+    }).catch((cause) => {
+      setSessionModel(previous.provider, previous.model, previous.reasoning);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    });
+  };
   const changeModel = (value: string) => {
     const choice = modelChoices.find((model) => modelKey(model.provider, model.id) === value)!;
     const reasoning = [choice.defaultReasoning, ...choice.reasoningLevels, snapshot.reasoning].filter(Boolean)[0]!;
+    const previous = { provider: snapshot.provider, model: snapshot.model, reasoning: snapshot.reasoning };
     setSessionModel(choice.provider, choice.id, reasoning);
+    persistSessionPreferences(choice.provider, choice.id, reasoning, previous);
   };
-  const changeReasoning = (reasoning: string) => setSessionModel(snapshot.provider, snapshot.model, reasoning);
+  const changeReasoning = (reasoning: string) => {
+    const previous = { provider: snapshot.provider, model: snapshot.model, reasoning: snapshot.reasoning };
+    setSessionModel(snapshot.provider, snapshot.model, reasoning);
+    persistSessionPreferences(snapshot.provider, snapshot.model, reasoning, previous);
+  };
   const changeSpeed = (speed: string) => {
     const enabled = speed === "fast";
     const previous = snapshot.chatgptFastMode;

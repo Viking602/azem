@@ -227,6 +227,7 @@ defaults:
   model: gpt-5.6-sol
   reasoning: high
   agent_mode: single       # single | team
+  queue_mode: queue        # queue | guide
 
 workspace:
   root: .
