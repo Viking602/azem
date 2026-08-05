@@ -59,6 +59,7 @@ type PullRequestSummary struct {
 	Author           Actor        `json:"author"`
 	HeadRefName      string       `json:"headRefName"`
 	HeadRefOID       string       `json:"headRefOid,omitempty"`
+	HeadRepository   string       `json:"headRepository,omitempty"`
 	BaseRefName      string       `json:"baseRefName"`
 	Additions        int          `json:"additions"`
 	Deletions        int          `json:"deletions"`
@@ -156,14 +157,15 @@ type Dashboard struct {
 
 // MutationRequest is the closed set of GitHub mutations exposed to the WebView.
 type MutationRequest struct {
-	Number          int    `json:"number"`
-	Kind            string `json:"kind"`
-	Title           string `json:"title,omitempty"`
-	Body            string `json:"body,omitempty"`
-	Login           string `json:"login,omitempty"`
-	ReviewKind      string `json:"reviewKind,omitempty"`
-	MergeMethod     string `json:"mergeMethod,omitempty"`
-	ExpectedHeadOID string `json:"expectedHeadOid,omitempty"`
+	Number             int    `json:"number"`
+	Kind               string `json:"kind"`
+	Title              string `json:"title,omitempty"`
+	Body               string `json:"body,omitempty"`
+	Login              string `json:"login,omitempty"`
+	ReviewKind         string `json:"reviewKind,omitempty"`
+	MergeMethod        string `json:"mergeMethod,omitempty"`
+	ExpectedHeadOID    string `json:"expectedHeadOid,omitempty"`
+	ExpectedRepository string `json:"expectedRepository,omitempty"`
 }
 
 const (

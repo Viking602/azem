@@ -72,9 +72,9 @@ export async function cancelActive(includeChildren = false): Promise<boolean> {
   return Call.ByName(`${bridgeName}.CancelActive`, includeChildren) as Promise<boolean>;
 }
 
-export async function guide(sessionId: string, runId: string, text: string): Promise<void> {
+export async function guide(sessionId: string, runId: string, text: string, attachments: Attachment[] = []): Promise<void> {
   if (!isDesktopRuntime()) return;
-  await Call.ByName(`${bridgeName}.Guide`, sessionId, runId, text);
+  await Call.ByName(`${bridgeName}.Guide`, sessionId, runId, text, attachments);
 }
 
 export async function importAttachment(sessionId: string, file: File): Promise<Attachment> {

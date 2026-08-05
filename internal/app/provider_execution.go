@@ -64,7 +64,7 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 				}
 				data["name"] = frame.ToolCall.Name
 				data["arguments"] = string(frame.ToolCall.Arguments)
-				if !s.emit(ctx, Event{Kind: EventToolStarted, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolCall.ID, State: "running", Data: data}) {
+				if !s.emit(ctx, Event{Kind: EventToolStarted, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolCall.ID, State: "queued", Data: data}) {
 					return eventDeliveryError(ctx)
 				}
 			}
@@ -476,15 +476,16 @@ func (s *Service) runProviderTeam(ctx context.Context, request TurnRequest, runI
 		return
 	}
 	execution, err := s.coding.StartTeamWithIDAndToolsMetadataHooks(agentservice.DelegatedApprovalContext(ctx), runID, goal, models, resolution.resolver, toolBus, map[string]string{
-		"session_id":           request.SessionID,
-		"provider":             request.Provider,
-		"account_id":           resolution.accountID,
-		"team":                 "true",
-		"model":                resolution.modelID,
-		"reasoning":            request.Reasoning,
-		"original_prompt":      request.Prompt,
-		"hook_private_context": request.privateContext,
-		"attachments":          EncodeAttachmentsMeta(request.Images),
+		"session_id":                request.SessionID,
+		"provider":                  request.Provider,
+		"account_id":                resolution.accountID,
+		"team":                      "true",
+		"model":                     resolution.modelID,
+		"reasoning":                 request.Reasoning,
+		"original_prompt":           request.Prompt,
+		"hook_private_context":      request.privateContext,
+		"attachments":               EncodeAttachmentsMeta(request.Images),
+		teamWorkspaceAnchorMetadata: canonicalWorkspaceAnchor(s.cfg.Workspace.Root),
 	}, s.teamHooks(request, runID, policy, editRecovery), func(state multiagent.TeamState) {
 		for _, instance := range state.Instances {
 			s.emit(ctx, Event{

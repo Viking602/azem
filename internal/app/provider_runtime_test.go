@@ -1199,6 +1199,7 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	var contextUsage [][3]string
 	var cacheWrites []string
 	estimatedUsage := 0
+	var toolLifecycle []string
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	for {
@@ -1223,6 +1224,11 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 			} else if event.State == "estimated" {
 				estimatedUsage++
 			}
+		case EventToolStarted, EventToolUpdate:
+			if event.ToolCallID == "write-1" &&
+				(event.State == "queued" || event.State == "awaiting_approval" || event.State == "running") {
+				toolLifecycle = append(toolLifecycle, event.State)
+			}
 		case EventApprovalRequested:
 			if event.ToolCallID != "write-1" || event.Data["tool"] != "coding.write_file" {
 				t.Fatalf("approval event = %+v", event)
@@ -1241,6 +1247,9 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 finished:
 	if !approved || output.String() != "Created and verified." || responseCalls.Load() != 2 {
 		t.Fatalf("turn = approved:%v output:%q response calls:%d", approved, output.String(), responseCalls.Load())
+	}
+	if want := []string{"queued", "awaiting_approval", "running"}; !reflect.DeepEqual(toolLifecycle, want) {
+		t.Fatalf("tool lifecycle = %v, want %v", toolLifecycle, want)
 	}
 	if want := [][3]string{{"10", "6", "4"}, {"20", "15", "6"}}; !reflect.DeepEqual(contextUsage, want) {
 		t.Fatalf("context usage events = %v, want %v", contextUsage, want)
@@ -1349,13 +1358,13 @@ func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
 	if err := service.GuideActiveTurn("session-guided", "run-guided", "terminal correction"); err != nil {
 		t.Fatal(err)
 	}
-	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0] != "terminal correction" {
+	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0].Text != "terminal correction" {
 		t.Fatalf("terminal guidance = %#v", pending)
 	}
 	if err := service.GuideActiveTurn("session-guided", "run-guided", "accepted after retry"); err != nil {
 		t.Fatalf("guidance closed while terminal retry was required: %v", err)
 	}
-	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0] != "accepted after retry" {
+	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0].Text != "accepted after retry" {
 		t.Fatalf("guidance after terminal retry = %#v", pending)
 	}
 	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 0 {
@@ -1366,6 +1375,60 @@ func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
 	}
 	if err := service.GuideActiveTurn("session-guided", "stale-run", "wrong run"); err == nil {
 		t.Fatal("stale run accepted guidance")
+	}
+}
+
+func TestActiveGuidanceKeepsImageAttachments(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachAttachments(filepath.Join(t.TempDir(), "attachments"))
+	image, err := service.ImportImageBytes("session-guided", "guidance.png", "image/png", minimalPNG())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	service.activeRun = "run-guided"
+	service.activeSession = "session-guided"
+	service.guidanceOpen = true
+	service.mu.Unlock()
+	if err := service.GuideActiveTurnWithAttachments("session-guided", "run-guided", "inspect this update", []session.Attachment{image}); err != nil {
+		t.Fatal(err)
+	}
+	pending := service.finishActiveGuidance("session-guided", "run-guided")
+	messages := guidanceMessages(pending)
+	if len(messages) != 1 || messages[0].Text != "inspect this update" {
+		t.Fatalf("guidance messages = %#v", messages)
+	}
+	attachments := AttachmentsFromMessage(messages[0])
+	if len(attachments) != 1 || attachments[0] != image {
+		t.Fatalf("guidance attachments = %#v", attachments)
+	}
+}
+
+func TestActiveGuidanceAppearsAtEveryPendingModelBoundary(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.mu.Lock()
+	service.activeRun = "run-guided"
+	service.activeSession = "session-guided"
+	service.guidanceOpen = true
+	service.activeGuidance = []activeGuidanceMessage{{Text: "change direction"}}
+	service.mu.Unlock()
+	hook := activeGuidanceModelHook{
+		peek: func() activeGuidanceSnapshot {
+			return service.peekActiveGuidance("session-guided", "run-guided")
+		},
+	}
+	history := []message.Message{message.NewText(message.RoleUser, "original task")}
+	for boundary := range 2 {
+		got, err := hook.TransformContext(context.Background(), history)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || got[1].Role != message.RoleUser || got[1].Text != "change direction" {
+			t.Fatalf("boundary %d messages = %#v", boundary, got)
+		}
+		if len(history) != 1 {
+			t.Fatalf("hook mutated engine history: %#v", history)
+		}
 	}
 }
 
@@ -2342,7 +2405,7 @@ func TestPhase5CancelledOrFailedPreparationPreservesHistoryWithoutPostHook(t *te
 }
 
 func TestActiveGuidanceSurvivesGeneratedCompaction(t *testing.T) {
-	snapshot := activeGuidanceSnapshot{values: []string{"first correction", "second correction"}}
+	snapshot := activeGuidanceSnapshot{values: []activeGuidanceMessage{{Text: "first correction"}, {Text: "second correction"}}}
 	acknowledged := false
 	manager := activeGuidanceContext{
 		inner: turnContext{summarize: func(context.Context, string) (string, error) { return "Objective: retain guidance", nil }},
@@ -2394,7 +2457,7 @@ func TestActiveGuidanceRemainsQueuedWhenCompactionFails(t *testing.T) {
 		t.Fatal("expected compaction failure")
 	}
 	remaining := service.drainActiveGuidance("session-guided", "run-guided")
-	if len(remaining) != 1 || remaining[0] != "do not lose this" {
+	if len(remaining) != 1 || remaining[0].Text != "do not lose this" {
 		t.Fatalf("guidance after failed compaction = %#v", remaining)
 	}
 }
@@ -2641,9 +2704,9 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 	}
 
 	first := await(tool.Call{ID: "write-1", Name: definition.Name})
-	requested, err := service.NextEvent(ctx)
-	if err != nil || requested.Kind != EventApprovalRequested || requested.ToolCallID != "write-1" {
-		t.Fatalf("initial prompt = event:%+v err:%v", requested, err)
+	requested := nextApprovalEvent(t, service, EventApprovalRequested)
+	if requested.ToolCallID != "write-1" {
+		t.Fatalf("initial prompt = event:%+v", requested)
 	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetApprovalMode, Target: string(ApprovalModeYolo)}); err != nil {
 		t.Fatal(err)
@@ -2651,9 +2714,9 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 	if result := <-first; result.err != nil || result.mode != agentservice.ApprovalOnce {
 		t.Fatalf("drained approval = mode:%q err:%v", result.mode, result.err)
 	}
-	resolved, err := service.NextEvent(ctx)
-	if err != nil || resolved.Kind != EventApprovalResolved || resolved.ApprovalID != requested.ApprovalID {
-		t.Fatalf("drained event = event:%+v err:%v", resolved, err)
+	resolved := nextApprovalEvent(t, service, EventApprovalResolved)
+	if resolved.ApprovalID != requested.ApprovalID {
+		t.Fatalf("drained event = event:%+v", resolved)
 	}
 	modeEvent, err := service.NextEvent(ctx)
 	if err != nil || modeEvent.Kind != EventApprovalMode || modeEvent.State != "yolo" {
@@ -2672,9 +2735,9 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 		t.Fatalf("prompt mode event=%+v error=%v", modeEvent, err)
 	}
 	third := await(tool.Call{ID: "write-3", Name: definition.Name})
-	requested, err = service.NextEvent(ctx)
-	if err != nil || requested.Kind != EventApprovalRequested || requested.ToolCallID != "write-3" {
-		t.Fatalf("restored prompt = event:%+v err:%v", requested, err)
+	requested = nextApprovalEvent(t, service, EventApprovalRequested)
+	if requested.ToolCallID != "write-3" {
+		t.Fatalf("restored prompt = event:%+v", requested)
 	}
 	if _, err := service.resolveLiveApproval(ctx, requested.ApprovalID, "once", "user"); err != nil {
 		t.Fatal(err)

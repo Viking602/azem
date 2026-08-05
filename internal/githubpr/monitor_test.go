@@ -9,24 +9,45 @@ import (
 )
 
 type monitorRunner struct {
-	headOID    string
-	branch     string
-	dirty      bool
-	conclusion string
+	headOID            string
+	branch             string
+	localHeadOID       string
+	upstreamRepository string
+	repository         string
+	dirty              bool
+	conclusion         string
+	detailStarted      chan<- struct{}
+	detailRelease      <-chan struct{}
 }
 
-func (run *monitorRunner) Run(_ context.Context, _ string, _ string, name string, args ...string) ([]byte, error) {
+func (run *monitorRunner) Run(ctx context.Context, _ string, _ string, name string, args ...string) ([]byte, error) {
 	command := name + " " + strings.Join(args, " ")
 	switch {
 	case strings.HasPrefix(command, "gh repo view "):
-		return []byte(`{"nameWithOwner":"octo/demo","mergeCommitAllowed":true,"squashMergeAllowed":true}`), nil
+		repository := run.repository
+		if repository == "" {
+			repository = "octo/demo"
+		}
+		return json.Marshal(map[string]any{"nameWithOwner": repository, "mergeCommitAllowed": true, "squashMergeAllowed": true})
 	case command == "gh api user --jq .login":
 		return []byte("octocat\n"), nil
 	case strings.HasPrefix(command, "gh pr view "):
+		if run.detailStarted != nil {
+			run.detailStarted <- struct{}{}
+		}
+		if run.detailRelease != nil {
+			select {
+			case <-run.detailRelease:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		payload := map[string]any{
 			"number": 42, "title": "Repair me", "state": "OPEN",
-			"headRefName": "feature/repair", "headRefOid": run.headOID, "baseRefName": "main",
-			"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY",
+			"headRefName": "feature/repair", "headRefOid": run.headOID,
+			"headRepository": map[string]any{"name": "demo"}, "headRepositoryOwner": map[string]any{"login": "octo"},
+			"baseRefName": "main",
+			"mergeable":   "CONFLICTING", "mergeStateStatus": "DIRTY",
 			"statusCheckRollup": []map[string]any{{"name": "unit", "workflowName": "CI", "status": "COMPLETED", "conclusion": run.conclusion}},
 		}
 		return json.Marshal(payload)
@@ -37,6 +58,19 @@ func (run *monitorRunner) Run(_ context.Context, _ string, _ string, name string
 			return []byte(" M local.go\x00"), nil
 		}
 		return nil, nil
+	case command == "git rev-parse HEAD":
+		if run.localHeadOID != "" {
+			return []byte(run.localHeadOID + "\n"), nil
+		}
+		return []byte(run.headOID + "\n"), nil
+	case strings.HasPrefix(command, "git config --get branch.") && strings.HasSuffix(command, ".remote"):
+		return []byte("origin\n"), nil
+	case command == "git remote get-url origin":
+		repository := run.upstreamRepository
+		if repository == "" {
+			repository = "octo/demo"
+		}
+		return []byte("https://github.com/" + repository + ".git\n"), nil
 	default:
 		return nil, &commandError{Name: name, Args: append([]string(nil), args...), Stderr: "unexpected test command"}
 	}
@@ -100,6 +134,26 @@ func TestMonitorDeduplicatesRepairsAndRestoresLifecycle(t *testing.T) {
 	}
 }
 
+func TestMonitorRetainsTerminalEventBeforeRepairStarterReturns(t *testing.T) {
+	runner := &monitorRunner{headOID: "aaaaaaaaaaaaaaaa", branch: "feature/repair", conclusion: "FAILURE"}
+	var monitor *Monitor
+	repair := func(context.Context, PullRequest, RepairIssue) (string, error) {
+		monitor.ObserveSession("session-fast", "run_finished")
+		return "session-fast", nil
+	}
+	monitor = NewMonitor(context.Background(), NewClientWithRunner(t.TempDir(), runner), "", repair, nil)
+	defer monitor.Close()
+	if _, err := monitor.Set(42, true); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if err := monitor.check(42); err != nil {
+		t.Fatalf("check error = %v", err)
+	}
+	if state := monitor.State(42); state.Status != MonitorCompleted || state.SessionID != "session-fast" {
+		t.Fatalf("fast terminal state = %+v", state)
+	}
+}
+
 func TestMonitorWaitsForMatchingCleanWorkspace(t *testing.T) {
 	runner := &monitorRunner{headOID: "aaaaaaaaaaaaaaaa", branch: "main", conclusion: "FAILURE"}
 	client := NewClientWithRunner(t.TempDir(), runner)
@@ -132,10 +186,141 @@ func TestMonitorWaitsForMatchingCleanWorkspace(t *testing.T) {
 	}
 
 	runner.dirty = false
+	runner.localHeadOID = "bbbbbbbbbbbbbbbb"
+	if err := monitor.check(42); err != nil {
+		t.Fatalf("head guard check error = %v", err)
+	}
+	if state := monitor.State(42); state.Status != MonitorPending || !strings.Contains(state.Message, "head commit") {
+		t.Fatalf("head guard state = %+v", state)
+	}
+	runner.localHeadOID = ""
+	runner.upstreamRepository = "other/demo"
+	if err := monitor.check(42); err != nil {
+		t.Fatalf("upstream guard check error = %v", err)
+	}
+	if state := monitor.State(42); state.Status != MonitorPending || !strings.Contains(state.Message, "head repository") {
+		t.Fatalf("upstream guard state = %+v", state)
+	}
+	runner.upstreamRepository = ""
 	if err := monitor.check(42); err != nil {
 		t.Fatalf("clean workspace check error = %v", err)
 	}
 	if repairs != 1 || monitor.State(42).Status != MonitorRepairing {
 		t.Fatalf("clean workspace repairs=%d state=%+v", repairs, monitor.State(42))
+	}
+}
+
+func TestMonitorDisableWinsAgainstInFlightCheck(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	runner := &monitorRunner{
+		headOID: "aaaaaaaaaaaaaaaa", branch: "feature/repair", conclusion: "FAILURE",
+		detailStarted: started, detailRelease: release,
+	}
+	repairs := 0
+	monitor := NewMonitor(context.Background(), NewClientWithRunner(t.TempDir(), runner), "", func(context.Context, PullRequest, RepairIssue) (string, error) {
+		repairs++
+		return "repair-session", nil
+	}, nil)
+	defer monitor.Close()
+	if _, err := monitor.Set(42, true); err != nil {
+		t.Fatalf("Set(true) error = %v", err)
+	}
+
+	checked := make(chan error, 1)
+	go func() { checked <- monitor.check(42) }()
+	<-started
+	if _, err := monitor.Set(42, false); err != nil {
+		t.Fatalf("Set(false) error = %v", err)
+	}
+	close(release)
+	if err := <-checked; err != nil {
+		t.Fatalf("in-flight check error = %v", err)
+	}
+	if state := monitor.State(42); state.Enabled || state.Status != MonitorDisabled {
+		t.Fatalf("disabled state was overwritten: %+v", state)
+	}
+	if repairs != 0 {
+		t.Fatalf("disabled monitor started %d repairs", repairs)
+	}
+}
+
+func TestMonitorRetriesInterruptedRepairAfterRestart(t *testing.T) {
+	runner := &monitorRunner{headOID: "aaaaaaaaaaaaaaaa", branch: "feature/repair", conclusion: "FAILURE"}
+	client := NewClientWithRunner(t.TempDir(), runner)
+	statePath := t.TempDir() + "/pr-monitors.json"
+	repairs := 0
+	repair := func(context.Context, PullRequest, RepairIssue) (string, error) {
+		repairs++
+		return "session-" + strconv.Itoa(repairs), nil
+	}
+	monitor := NewMonitor(context.Background(), client, statePath, repair, nil)
+	if _, err := monitor.Set(42, true); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if err := monitor.check(42); err != nil {
+		t.Fatalf("initial check error = %v", err)
+	}
+	monitor.Close()
+
+	restored := NewMonitor(context.Background(), client, statePath, repair, nil)
+	defer restored.Close()
+	if state := restored.State(42); state.Status != MonitorPending || state.SessionID != "" {
+		t.Fatalf("interrupted repair state = %+v", state)
+	}
+	if err := restored.check(42); err != nil {
+		t.Fatalf("retry check error = %v", err)
+	}
+	if state := restored.State(42); repairs != 2 || state.Status != MonitorRepairing || state.SessionID != "session-2" {
+		t.Fatalf("retried repair count=%d state=%+v", repairs, state)
+	}
+}
+
+func TestMonitorDisablesPersistedConsentWhenRepositoryChanges(t *testing.T) {
+	statePath := t.TempDir() + "/pr-monitors.json"
+	originalRunner := &monitorRunner{
+		headOID: "aaaaaaaaaaaaaaaa", branch: "feature/repair", conclusion: "FAILURE",
+		repository: "octo/demo",
+	}
+	monitor := NewMonitor(
+		context.Background(),
+		NewClientWithRunner(t.TempDir(), originalRunner),
+		statePath,
+		func(context.Context, PullRequest, RepairIssue) (string, error) { return "unexpected", nil },
+		nil,
+	)
+	if _, err := monitor.Set(42, true); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	monitor.Close()
+
+	repairs := 0
+	changedRunner := &monitorRunner{
+		headOID: "aaaaaaaaaaaaaaaa", branch: "feature/repair", conclusion: "FAILURE",
+		repository: "other/repository",
+	}
+	restored := NewMonitor(
+		context.Background(),
+		NewClientWithRunner(t.TempDir(), changedRunner),
+		statePath,
+		func(context.Context, PullRequest, RepairIssue) (string, error) {
+			repairs++
+			return "repair-session", nil
+		},
+		nil,
+	)
+	defer restored.Close()
+	if state := restored.State(42); !state.Enabled {
+		t.Fatalf("persisted monitor was not restored before repository validation: %+v", state)
+	}
+	if err := restored.check(42); err != nil {
+		t.Fatalf("repository validation check error = %v", err)
+	}
+	state := restored.State(42)
+	if state.Enabled || state.Status != MonitorDisabled || !strings.Contains(state.Message, "repository changed") {
+		t.Fatalf("repository mismatch state = %+v", state)
+	}
+	if repairs != 0 {
+		t.Fatalf("repository mismatch started %d repairs", repairs)
 	}
 }

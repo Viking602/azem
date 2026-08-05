@@ -31,6 +31,9 @@ export interface QueuedPrompt {
   id: string;
   text: string;
   attachments: Attachment[];
+  sessionId: string;
+  state?: "queued" | "failed";
+  error?: string;
 }
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
@@ -227,6 +230,7 @@ export interface PullRequestSummary {
   author: PullRequestActor;
   headRefName: string;
   headRefOid?: string;
+  headRepository?: string;
   baseRefName: string;
   additions: number;
   deletions: number;
@@ -341,6 +345,7 @@ export interface PullRequestMutationRequest {
   reviewKind?: "approve" | "comment" | "request_changes";
   mergeMethod?: "merge" | "squash" | "rebase";
   expectedHeadOid?: string;
+  expectedRepository?: string;
 }
 
 

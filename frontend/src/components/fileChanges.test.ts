@@ -34,6 +34,19 @@ describe("file change extraction", () => {
     });
   });
 
+  it("does not present an unexecuted write as an edited file", () => {
+    for (const state of ["queued", "awaiting_approval", "reviewing_approval", "running", "failed", "cancelled", "interrupted"]) {
+      const block: Block = {
+        id: state,
+        kind: "tool",
+        title: "coding.write_file",
+        state,
+        data: { arguments: JSON.stringify({ path: "src/not-written.go", content: "package pending\n" }) },
+      };
+      expect(fileChangesForBlock(block)).toEqual([]);
+    }
+  });
+
   it("falls back to the compact edit result stored in durable tool output", () => {
     const block: Block = {
       id: "edit", kind: "tool", title: "coding.edit_hashline", state: "completed",

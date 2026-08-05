@@ -1106,10 +1106,15 @@ func (s *Service) emitSession(ctx context.Context, id string) error {
 	s.mu.Lock()
 	active := s.activeRun != "" && s.activeSession == id
 	activeRunID := s.activeRun
+	activeSessionID := s.activeSession
 	s.mu.Unlock()
 	data["active"] = strconv.FormatBool(active)
 	if active {
 		data["activeRunID"] = activeRunID
+	}
+	if activeRunID != "" && activeSessionID != "" {
+		data["globalActiveRunID"] = activeRunID
+		data["globalActiveSessionID"] = activeSessionID
 	}
 	s.emit(ctx, Event{
 		Kind: EventSessionLoaded, SessionID: id, State: "loaded",

@@ -220,7 +220,9 @@ finished:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if durableRun.Metadata["session_id"] != "default" || durableRun.Metadata["provider"] != "chatgpt" || durableRun.Metadata["model"] != "gpt-team" {
+	if durableRun.Metadata["session_id"] != "default" || durableRun.Metadata["provider"] != "chatgpt" ||
+		durableRun.Metadata["model"] != "gpt-team" ||
+		durableRun.Metadata[teamWorkspaceAnchorMetadata] != canonicalWorkspaceAnchor(workspace) {
 		t.Fatalf("team routing metadata=%v", durableRun.Metadata)
 	}
 	if projection.Run.Status != "completed" {
@@ -250,5 +252,54 @@ finished:
 	defer shutdownCancel()
 	if err := service.Shutdown(shutdownCtx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResumeTeamRequiresMatchingWorkspace(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		includeBinding bool
+	}{
+		{name: "missing"},
+		{name: "different", includeBinding: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := sqlitestore.Open(ctx, ":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close(ctx)
+			sourceWorkspace := t.TempDir()
+			currentWorkspace := t.TempDir()
+			coding, err := agentservice.NewService(store, sourceWorkspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata := map[string]string{"team": "true", "account_id": "account"}
+			if test.includeBinding {
+				metadata[teamWorkspaceAnchorMetadata] = canonicalWorkspaceAnchor(sourceWorkspace)
+			}
+			run, err := coding.StartRunWithMetadata(ctx, "recover team", metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := coding.ReleaseRun(ctx, run); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Default()
+			cfg.Workspace.Root = currentWorkspace
+			runtime := &ProviderRuntime{cfg: cfg, coding: coding}
+			if err := runtime.ResumeTeam(ctx, run.RunID); err != nil {
+				t.Fatalf("ResumeTeam() error = %v", err)
+			}
+			durable, err := coding.Runner().Run(ctx, run.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(durable.Status) != "reconcile_required" {
+				t.Fatalf("cross-workspace team status = %q", durable.Status)
+			}
+		})
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 	"github.com/Viking602/venat/api"
+	"github.com/google/uuid"
 )
 
 func (u *unitOfWork) LoadTraceSpan(ctx context.Context, id string) (api.TraceSpan, error) {
@@ -377,18 +378,34 @@ func (u *unitOfWork) ListCapabilities(ctx context.Context, selector api.Capabili
 	return limit(filtered, selector.Limit), nil
 }
 
+func normalizeUsageRecord(value api.UsageRecord) api.UsageRecord {
+	if value.Kind == "" {
+		value.Kind = api.UsageKindLegacyExecution
+	}
+	return value
+}
+
 func (u *unitOfWork) AppendUsage(ctx context.Context, value api.UsageRecord) error {
-	normalizeUsageRecord(&value)
+	if value.ID == "" {
+		value.ID = uuid.NewString()
+	}
+	value = normalizeUsageRecord(value)
 	existing, err := loadRecord[api.UsageRecord](ctx, u.tx, kindUsage, value.ID, "")
 	if err == nil {
-		normalizeUsageRecord(&existing)
+		existing = normalizeUsageRecord(existing)
+		if value.CreatedAt.IsZero() {
+			value.CreatedAt = existing.CreatedAt
+		}
 		if reflect.DeepEqual(existing, value) {
 			return nil
 		}
-		return fmt.Errorf("usage record %q: %w", value.ID, api.ErrIdempotencyConflict)
+		return fmt.Errorf("append usage %q: %w", value.ID, api.ErrIdempotencyConflict)
 	}
 	if !errors.Is(err, api.ErrNotFound) {
 		return err
+	}
+	if value.CreatedAt.IsZero() {
+		value.CreatedAt = time.Now().UTC()
 	}
 	return u.save(ctx, kindUsage, value.ID, "", value.RunID, value.TaskID, "", value.CreatedAt, "", "", value, false)
 }
@@ -400,7 +417,7 @@ func (u *unitOfWork) QueryUsage(ctx context.Context, selector api.UsageSelector)
 	}
 	filtered := values[:0]
 	for _, value := range values {
-		normalizeUsageRecord(&value)
+		value = normalizeUsageRecord(value)
 		if selector.TaskID != "" && value.TaskID != selector.TaskID ||
 			selector.AgentID != "" && value.AgentID != selector.AgentID ||
 			selector.Kind != "" && value.Kind != selector.Kind ||
@@ -425,12 +442,6 @@ func (u *unitOfWork) SumCredits(ctx context.Context, selector api.UsageSelector)
 		total += value.Credits
 	}
 	return total, nil
-}
-
-func normalizeUsageRecord(value *api.UsageRecord) {
-	if value.Kind == "" {
-		value.Kind = api.UsageKindLegacyExecution
-	}
 }
 
 func (u *unitOfWork) AppendDeadLetter(ctx context.Context, value api.DeadLetterEntry) error {

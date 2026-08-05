@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
 import {
-  ArrowDown, Bot, Box, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot, CircleStop,
-  CornerUpRight, Folder, GitBranch, Hand, HardDrive, ImagePlus, Lightbulb, ListX, Minimize2, MoreHorizontal,
-  Pencil, Plug, Plus, RefreshCw, Search, Send, Settings, ShieldAlert, ShieldCheck, Sparkles, Trash2, Zap,
-  PanelRightClose, PanelRightOpen, X,
+  ArrowDown, ArrowUp, Bot, Box, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot, CircleStop,
+  CornerUpRight, Folder, GitBranch, GripVertical, Hand, HardDrive, ImagePlus, Lightbulb, ListX, Minimize2,
+  MoreHorizontal, Pencil, Plug, Plus, RefreshCw, RotateCcw, Search, Send, Settings, ShieldAlert, ShieldCheck,
+  Sparkles, Trash2, Zap, PanelRightClose, PanelRightOpen, X,
 } from "lucide-react";
 import { cancelActive, execute, guide, importAttachment, importClipboardImage, openProject, selectProjectFolder, startTurn } from "../bridge";
 import { reasoningHint, sortReasoningLevels, tFormat, translator } from "../i18n";
@@ -194,20 +194,30 @@ export default function ThreadSurface() {
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
   const running = useRuntimeStore((state) => state.running);
   const runId = useRuntimeStore((state) => state.runId);
+  const globalRunSessionId = useRuntimeStore((state) => state.globalRunSessionId);
   const runStartedAt = useRuntimeStore((state) => state.runStartedAt);
   const activity = useRuntimeStore((state) => state.activity);
   const error = useRuntimeStore((state) => state.error);
   const planMode = useRuntimeStore((state) => state.planMode);
   const attachments = useRuntimeStore((state) => state.attachments);
-  const queuedPrompts = useRuntimeStore((state) => state.queuedPrompts);
+  const allQueuedPrompts = useRuntimeStore((state) => state.queuedPrompts);
+  const queuedPrompts = allQueuedPrompts.filter((item) => item.sessionId === currentSessionId);
+  const queuePauseReason = useRuntimeStore((state) => state.queuePauseReasons[currentSessionId]);
   const addOptimisticUser = useRuntimeStore((state) => state.addOptimisticUser);
   const clearAttachments = useRuntimeStore((state) => state.clearAttachments);
   const replaceAttachments = useRuntimeStore((state) => state.replaceAttachments);
   const enqueuePrompt = useRuntimeStore((state) => state.enqueuePrompt);
   const removeQueuedPrompt = useRuntimeStore((state) => state.removeQueuedPrompt);
+  const updateQueuedPrompt = useRuntimeStore((state) => state.updateQueuedPrompt);
+  const failQueuedPrompt = useRuntimeStore((state) => state.failQueuedPrompt);
+  const retryQueuedPrompt = useRuntimeStore((state) => state.retryQueuedPrompt);
+  const reorderQueuedPrompt = useRuntimeStore((state) => state.reorderQueuedPrompt);
+  const resumeQueuedPrompts = useRuntimeStore((state) => state.resumeQueuedPrompts);
+  const setQueueMode = useRuntimeStore((state) => state.setQueueMode);
   const setError = useRuntimeStore((state) => state.setError);
   const setPlanMode = useRuntimeStore((state) => state.setPlanMode);
   const [prompt, setPrompt] = useState("");
+  const [editingQueuedId, setEditingQueuedId] = useState<string | null>(null);
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>(snapshot.queueMode ?? "queue");
   // Team mode is not productized yet — keep the composer on single-agent only.
   const agentMode = "single";
@@ -217,70 +227,114 @@ export default function ThreadSurface() {
   const t = translator(snapshot.language);
   const empty = blocks.length === 0 && !running;
   const elapsed = useElapsed(runStartedAt, running);
+  const runtimeBusy = running || Boolean(globalRunSessionId);
 
   useEffect(() => {
     if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: "smooth" });
   }, [blocks, following]);
 
   useEffect(() => setDeliveryMode(snapshot.queueMode ?? "queue"), [currentSessionId, snapshot.queueMode]);
+  useEffect(() => {
+    setPrompt("");
+    clearAttachments();
+    setEditingQueuedId(null);
+  }, [clearAttachments, currentSessionId]);
   const beginTurn = useTurnStarter(agentMode, planMode, setFollowing);
-  useQueuedTurnRunner(queuedPrompts, running, beginTurn, removeQueuedPrompt);
+  useQueuedTurnRunner(
+    queuedPrompts, runtimeBusy, queuePauseReason, editingQueuedId, beginTurn, removeQueuedPrompt, failQueuedPrompt,
+  );
 
-  const resetComposer = () => { setPrompt(""); clearAttachments(); };
+  const resetComposer = () => {
+    setPrompt("");
+    clearAttachments();
+    setEditingQueuedId(null);
+  };
 
-  const submit = async () => {
+  const changeDeliveryMode = (mode: DeliveryMode) => {
+    const previous = snapshot.queueMode;
+    setDeliveryMode(mode);
+    setQueueMode(mode);
+    void execute({ kind: "set_queue_mode", target: mode, sessionId: currentSessionId }).catch((cause) => {
+      setDeliveryMode(previous);
+      setQueueMode(previous);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    });
+  };
+
+  const submit = async (modeOverride?: DeliveryMode) => {
     const text = prompt.trim();
-    if (!text) return;
     const images = [...attachments];
-    // Idle: start a new turn.
-    if (!running) {
+    if (!text && images.length === 0) return;
+    if (editingQueuedId) {
+      updateQueuedPrompt(currentSessionId, editingQueuedId, text, images);
+      resetComposer();
+      setFollowing(true);
+      return;
+    }
+    // The Go runtime admits one main run process-wide. A prompt composed in another
+    // session while that run is active must remain queued until its terminal event.
+    if (!runtimeBusy) {
       resetComposer();
       return void beginTurn(text, images);
     }
-    // Starting (optimistic running, bridge has not returned runId yet): never start a concurrent turn.
-    // Queue the message so it runs after the active turn finishes.
-    if (!runId || deliveryMode === "queue") {
+    // Starting (the bridge has not returned runId yet), another session is active,
+    // or Queue is selected: never attempt a concurrent turn.
+    if (!running || !runId || (modeOverride ?? deliveryMode) === "queue") {
       resetComposer();
       enqueuePrompt(text, images);
       setFollowing(true);
       return;
     }
-    if (images.length > 0) {
-      setError(t("guideAttachmentHint"));
-      return;
-    }
+    const sessionId = currentSessionId;
     resetComposer();
-    await sendGuidance(currentSessionId, runId, text, () => {
+    await sendGuidance(sessionId, runId, text, images, () => {
+      if (!isCurrentSession(sessionId)) return;
       addOptimisticUser(text, images);
       setFollowing(true);
-    }, setError);
+    }, (message) => {
+      if (!isCurrentSession(sessionId)) return;
+      setError(message);
+      setPrompt((current) => current || text);
+      if (useRuntimeStore.getState().attachments.length === 0) replaceAttachments(images);
+    });
   };
 
   const editQueued = (item: QueuedPrompt) => {
-    removeQueuedPrompt(item.id);
+    if (item.sessionId !== currentSessionId) return;
+    setEditingQueuedId(item.id);
     setPrompt(item.text);
     replaceAttachments(item.attachments);
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#azem-composer")?.focus());
   };
 
+  const deleteQueued = (item: QueuedPrompt) => {
+    if (editingQueuedId === item.id) resetComposer();
+    removeQueuedPrompt(item.sessionId, item.id);
+  };
+
   const guideQueued = async (item: QueuedPrompt) => {
-    if ([!running, !runId, item.attachments.length > 0].some(Boolean)) return;
-    await sendGuidance(currentSessionId, runId, item.text, () => {
-      removeQueuedPrompt(item.id);
-      addOptimisticUser(item.text, item.attachments);
-    }, setError);
+    if (!running || !runId || item.sessionId !== currentSessionId) return;
+    const sessionId = item.sessionId;
+    await sendGuidance(sessionId, runId, item.text, item.attachments, () => {
+      removeQueuedPrompt(sessionId, item.id);
+      if (isCurrentSession(sessionId)) addOptimisticUser(item.text, item.attachments);
+    }, (message) => {
+      if (isCurrentSession(sessionId)) setError(message);
+    });
   };
 
   const attach = async (files: Iterable<File> | null) => {
     if (!files) return;
+    const sessionId = currentSessionId;
     const timestamp = new Date();
     for (const [index, file] of Array.from(files).entries()) {
       if (!file.type.startsWith("image/")) continue;
       try {
         const image = file.name ? file : namedClipboardImage(file, timestamp, index);
-        useRuntimeStore.getState().addAttachment(await importAttachment(currentSessionId, image));
+        const imported = await importAttachment(sessionId, image);
+        if (isCurrentSession(sessionId)) useRuntimeStore.getState().addAttachment(imported);
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        if (isCurrentSession(sessionId)) setError(cause instanceof Error ? cause.message : String(cause));
       }
     }
   };
@@ -290,11 +344,12 @@ export default function ThreadSurface() {
       await attach(files);
       return;
     }
+    const sessionId = currentSessionId;
     try {
-      const image = await importClipboardImage(currentSessionId);
-      if (image) useRuntimeStore.getState().addAttachment(image);
+      const image = await importClipboardImage(sessionId);
+      if (image && isCurrentSession(sessionId)) useRuntimeStore.getState().addAttachment(image);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (isCurrentSession(sessionId)) setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -306,6 +361,16 @@ export default function ThreadSurface() {
     }
   };
 
+  const queue = queuedPrompts.length > 0 ? <QueuedPrompts
+    items={queuedPrompts} running={running} pauseReason={queuePauseReason} editingId={editingQueuedId}
+    deliveryMode={deliveryMode} onGuide={guideQueued}
+    onRetry={(id) => retryQueuedPrompt(currentSessionId, id)}
+    onDelete={deleteQueued} onEdit={editQueued}
+    onReorder={(id, beforeId) => reorderQueuedPrompt(currentSessionId, id, beforeId)}
+    onResume={() => resumeQueuedPrompts(currentSessionId)}
+    onToggleQueue={() => changeDeliveryMode(deliveryMode === "queue" ? "guide" : "queue")}
+  /> : null;
+
   return (
     <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`}>
       <ThreadHeader empty={empty} elapsed={elapsed} />
@@ -313,13 +378,17 @@ export default function ThreadSurface() {
         <div className="empty-composer-wrap">
           <div className="azem-symbol" aria-hidden="true"><span /><span /></div>
           <h1>{t("promptTitle")}</h1>
-          <Composer
-            prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
-            agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
-            running={running}
-            deliveryMode={deliveryMode} setDeliveryMode={setDeliveryMode}
-            showContextBar
-          />
+          <div className="composer-stack">
+            {queue}
+            <Composer
+              prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
+              agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
+              running={running}
+              busy={runtimeBusy}
+              deliveryMode={deliveryMode} setDeliveryMode={changeDeliveryMode}
+              showContextBar
+            />
+          </div>
         </div>
       ) : (
         <>
@@ -335,18 +404,21 @@ export default function ThreadSurface() {
                 running={running}
                 waitingForModel={running && (activity === "waiting_model" || activity === "thinking")}
               />
-              {queuedPrompts.length > 0 && <QueuedPrompts items={queuedPrompts} running={running} onGuide={guideQueued} onDelete={removeQueuedPrompt} onEdit={editQueued} onCloseQueue={() => setDeliveryMode("guide")} />}
               {error && <div className="inline-error" role="alert">{error}</div>}
             </div>
           </div>
           {!following && <button className="jump-latest" aria-label={t("jumpLatest")} title={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
           <div className="composer-dock">
-            <Composer
-              prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
-              agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
-              running={running} cancel={cancel}
-              deliveryMode={deliveryMode} setDeliveryMode={setDeliveryMode}
-            />
+            <div className="composer-stack">
+              {queue}
+              <Composer
+                prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
+                agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
+                running={running} cancel={cancel}
+                busy={runtimeBusy}
+                deliveryMode={deliveryMode} setDeliveryMode={changeDeliveryMode}
+              />
+            </div>
           </div>
         </>
       )}
@@ -354,9 +426,21 @@ export default function ThreadSurface() {
   );
 }
 
-async function sendGuidance(sessionId: string, runId: string, text: string, onSuccess: () => void, onError: (message: string) => void) {
+function isCurrentSession(sessionId: string): boolean {
+  const state = useRuntimeStore.getState();
+  return (state.currentSessionId || state.snapshot?.sessionId || "") === sessionId;
+}
+
+async function sendGuidance(
+  sessionId: string,
+  runId: string,
+  text: string,
+  attachments: Attachment[],
+  onSuccess: () => void,
+  onError: (message: string) => void,
+) {
   try {
-    await guide(sessionId, runId, text);
+    await guide(sessionId, runId, text, attachments);
     onSuccess();
   } catch (cause) {
     onError(cause instanceof Error ? cause.message : String(cause));
@@ -370,7 +454,7 @@ function useTurnStarter(agentMode: string, planMode: boolean, setFollowing: (fol
   const addOptimisticUser = useRuntimeStore((state) => state.addOptimisticUser);
   const setRunId = useRuntimeStore((state) => state.setRunId);
   const failRun = useRuntimeStore((state) => state.failRun);
-  return useCallback(async (text: string, images: Attachment[]): Promise<boolean> => {
+  return useCallback(async (text: string, images: Attachment[]): Promise<string | null> => {
     const invocation = parseSkillPrompt(text, snapshot.language);
     const invokedSkill = invocation ? skills.find((skill) => !skill.disabled && skill.name.toLowerCase() === invocation.name.toLowerCase())?.name ?? "" : "";
     const prompt = invokedSkill ? invocation!.instruction : text;
@@ -384,46 +468,43 @@ function useTurnStarter(agentMode: string, planMode: boolean, setFollowing: (fol
         activeSkills,
         images,
       });
-      setRunId(nextRun);
-      setFollowing(true);
-      return true;
+      if (isCurrentSession(currentSessionId)) {
+        setRunId(nextRun);
+        setFollowing(true);
+      }
+      return null;
     } catch (cause) {
-      failRun(cause instanceof Error ? cause.message : String(cause));
-      return false;
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (isCurrentSession(currentSessionId)) failRun(message);
+      return message;
     }
   }, [addOptimisticUser, agentMode, currentSessionId, failRun, planMode, setFollowing, setRunId, skills, snapshot.language, snapshot.model, snapshot.provider, snapshot.reasoning]);
 }
 
 function useQueuedTurnRunner(
   queuedPrompts: QueuedPrompt[],
-  running: boolean,
-  beginTurn: (text: string, images: Attachment[]) => Promise<boolean>,
-  removeQueuedPrompt: (id: string) => void,
+  busy: boolean,
+  pauseReason: "interrupted" | undefined,
+  editingQueuedId: string | null,
+  beginTurn: (text: string, images: Attachment[]) => Promise<string | null>,
+  removeQueuedPrompt: (sessionId: string, id: string) => void,
+  failQueuedPrompt: (sessionId: string, id: string, message: string) => void,
 ) {
   const startingQueued = useRef("");
-  // Avoid tight auto-retry loops when StartTurn keeps failing for the same head item.
-  const blockedQueued = useRef("");
   useEffect(() => {
     const next = queuedPrompts[0];
-    if (!next) {
-      blockedQueued.current = "";
-      return;
-    }
-    if (blockedQueued.current && blockedQueued.current !== next.id) blockedQueued.current = "";
-    if (running || startingQueued.current || blockedQueued.current === next.id) return;
+    if (!next || busy || pauseReason || startingQueued.current || next.state === "failed" || next.id === editingQueuedId) return;
     startingQueued.current = next.id;
     void beginTurn(next.text, next.attachments)
-      .then((ok) => {
-        if (ok) {
-          removeQueuedPrompt(next.id);
-          blockedQueued.current = "";
-        } else {
-          // Keep the message in the queue for retry/edit after the failure is visible.
-          blockedQueued.current = next.id;
+      .then((error) => {
+        if (!error) {
+          removeQueuedPrompt(next.sessionId, next.id);
+          return;
         }
+        failQueuedPrompt(next.sessionId, next.id, error);
       })
       .finally(() => { startingQueued.current = ""; });
-  }, [beginTurn, queuedPrompts, removeQueuedPrompt, running]);
+  }, [beginTurn, busy, editingQueuedId, failQueuedPrompt, pauseReason, queuedPrompts, removeQueuedPrompt]);
 }
 
 function ThreadHeader({ empty, elapsed }: { empty: boolean; elapsed: string }) {
@@ -446,11 +527,11 @@ function HeaderActions({ empty }: { empty: boolean }) {
   return <div className="thread-actions"><button hidden={empty} className="icon-button inspector-toggle" data-open={String(inspectorOpen)} title={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}><PanelRightClose className="inspector-open-icon" size={15} /><PanelRightOpen className="inspector-closed-icon" size={15} /></button></div>;
 }
 
-function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMode, setAgentMode, planMode, setPlanMode, running, cancel, deliveryMode, setDeliveryMode, showContextBar = false }: {
-  prompt: string; setPrompt: (value: string) => void; submit: () => void;
+function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMode, setAgentMode, planMode, setPlanMode, running, busy, cancel, deliveryMode, setDeliveryMode, showContextBar = false }: {
+  prompt: string; setPrompt: (value: string) => void; submit: (modeOverride?: DeliveryMode) => void;
   attach: (files: Iterable<File> | null) => void; attachClipboard: (files: File[]) => void;
   agentMode: string; setAgentMode: (value: string) => void; planMode: boolean; setPlanMode: (value: boolean) => void;
-  running: boolean; cancel?: () => void;
+  running: boolean; busy: boolean; cancel?: () => void;
   deliveryMode: DeliveryMode; setDeliveryMode: (value: DeliveryMode) => void;
   /** Project / local / branch chips — empty welcome only; hide during active threads. */
   showContextBar?: boolean;
@@ -490,14 +571,14 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
     contextPercent,
     provider: snapshot.provider,
   });
-  const slashOpen = !running && !slashDismissed && slashItems.length > 0;
+  const slashOpen = !busy && !slashDismissed && slashItems.length > 0;
   const commandItems = slashItems.map((item, index) => ({ item, index })).filter(({ item }) => item.kind === "command");
   const skillItems = slashItems.map((item, index) => ({ item, index })).filter(({ item }) => item.kind === "skill");
   useEffect(() => { setSlashCursor(0); setSlashDismissed(false); }, [prompt]);
   useEffect(() => {
     if (slashOpen) slashMenu.current?.querySelector<HTMLElement>(`[data-index="${slashCursor}"]`)?.scrollIntoView({ block: "nearest" });
   }, [slashCursor, slashOpen]);
-  const showCancel = cancelVisible(running, cancel, prompt);
+  const showCancel = cancelVisible(running, cancel, prompt, attachments.length);
   const cycleApproval = async () => {
     const index = Math.max(0, approvalCycle.indexOf(approvalMode as typeof approvalCycle[number]));
     const next = approvalCycle[(index + 1) % approvalCycle.length];
@@ -538,7 +619,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
     const item = slashItems[Math.min(slashCursor, slashItems.length - 1)];
     if (item) chooseSlash(item);
   };
-  const submitOrChooseSlash = () => slashOpen ? chooseCurrentSlash() : submit();
+  const submitOrChooseSlash = (modeOverride?: DeliveryMode) => slashOpen ? chooseCurrentSlash() : submit(modeOverride);
 
   return (
     <div className="composer-shell">
@@ -581,7 +662,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
           void attachClipboard([]);
         }} onFocus={() => setSlashDismissed(false)} onBlur={() => setSlashDismissed(true)}
           aria-autocomplete="list" aria-expanded={slashOpen} aria-controls={slashOpen ? "slash-menu" : undefined} aria-activedescendant={slashOpen ? `slash-option-${slashCursor}` : undefined}
-          placeholder={running ? deliveryMode === "queue" ? t("queuePlaceholder") : t("guidePlaceholder") : t("promptPlaceholder")} rows={2} onKeyDown={(event) => {
+          placeholder={busy ? running && deliveryMode === "guide" ? t("guidePlaceholder") : t("queuePlaceholder") : t("promptPlaceholder")} rows={2} onKeyDown={(event) => {
           if (slashOpen && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) {
             event.preventDefault();
             if (event.key === "ArrowDown") setSlashCursor((slashCursor + 1) % slashItems.length);
@@ -590,8 +671,15 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
             else chooseCurrentSlash();
             return;
           }
-          // Enter sends; Shift+Enter inserts a newline (IME composition still uses Enter to confirm).
-          if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing) {
+          if (event.nativeEvent.isComposing) return;
+          // Codex-style one-shot inversion: Cmd/Ctrl+Shift+Enter uses the opposite active-run mode.
+          if (running && event.key === "Enter" && event.shiftKey && (event.metaKey || event.ctrlKey) && !event.altKey) {
+            event.preventDefault();
+            submitOrChooseSlash(deliveryMode === "queue" ? "guide" : "queue");
+            return;
+          }
+          // Enter sends; Shift+Enter inserts a newline.
+          if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
             event.preventDefault();
             submitOrChooseSlash();
           }
@@ -626,7 +714,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
             fasterLabel={t("reasoningFaster")} smarterLabel={t("reasoningSmarter")} advancedLabel={t("reasoningAdvanced")} backLabel={t("reasoningBack")}
             highCostHint={t("reasoningMaxHint")} fastBoostTitle={t("fastBoostTitle")} fastBoostDetail={t("fastBoostDetail")} language={snapshot.language}
           />
-          {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={submitOrChooseSlash} disabled={!prompt.trim()} title={running ? deliveryMode === "queue" ? t("queue") : t("guide") : t("send")}><Send size={15} /></button>}
+          {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={() => submitOrChooseSlash()} disabled={!prompt.trim() && attachments.length === 0} title={busy ? running && deliveryMode === "guide" ? t("guide") : t("queue") : t("send")}><Send size={15} /></button>}
         </div>
       </div>
     </div>
@@ -994,46 +1082,144 @@ function ApprovalPicker({ value, disabled, language, onChange }: {
   </>;
 }
 
-function cancelVisible(running: boolean, cancel: (() => void) | undefined, prompt: string) {
-  return running && Boolean(cancel) && !prompt.trim();
+function cancelVisible(running: boolean, cancel: (() => void) | undefined, prompt: string, attachmentCount = 0) {
+  return running && Boolean(cancel) && !prompt.trim() && attachmentCount === 0;
 }
 
-function QueuedPrompts({ items, running, onGuide, onDelete, onEdit, onCloseQueue }: {
-  items: QueuedPrompt[]; running: boolean; onGuide: (item: QueuedPrompt) => Promise<void>;
-  onDelete: (id: string) => void; onEdit: (item: QueuedPrompt) => void; onCloseQueue: () => void;
+function QueuedPrompts({ items, running, pauseReason, editingId, deliveryMode, onGuide, onRetry, onDelete, onEdit, onReorder, onResume, onToggleQueue }: {
+  items: QueuedPrompt[];
+  running: boolean;
+  pauseReason: "interrupted" | undefined;
+  editingId: string | null;
+  deliveryMode: DeliveryMode;
+  onGuide: (item: QueuedPrompt) => Promise<void>;
+  onRetry: (id: string) => void;
+  onDelete: (item: QueuedPrompt) => void;
+  onEdit: (item: QueuedPrompt) => void;
+  onReorder: (id: string, targetId: string) => void;
+  onResume: () => void;
+  onToggleQueue: () => void;
 }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const [draggedId, setDraggedId] = useState("");
   const t = translator(snapshot.language);
-  return <section className="queued-prompts" aria-label={t("queuedMessages")}>
-    <header><span>{t("queuedMessages")}</span><small>{items.length}</small></header>
-    {items.map((item) => <div className="queued-prompt" key={item.id}>
-      <button className="queued-prompt-content" onClick={() => onEdit(item)} title={t("editMessage")}><CornerUpRight size={14} /><span>{item.text}</span></button>
-      <button className="queued-guide" disabled={!running || item.attachments.length > 0} title={t("guide")} onClick={() => void onGuide(item)}><CornerUpRight size={14} />{t("guide")}</button>
-      <button className="queued-icon" title={t("deleteMessage")} aria-label={t("deleteMessage")} onClick={() => onDelete(item.id)}><Trash2 size={14} /></button>
-      <QueueMenu item={item} onEdit={onEdit} onCloseQueue={onCloseQueue} />
-    </div>)}
+  return <section className="queued-prompts" aria-label={`${t("queuedMessages")} (${items.length})`}>
+    {pauseReason === "interrupted" && <header className="queue-paused" role="status">
+      <span>{t("queueInterrupted")}</span>
+      <button type="button" onClick={onResume}>{t("resumeQueue")}</button>
+    </header>}
+    <div className="queued-prompt-scroll">
+      {items.map((item, index) => <div
+        className="queued-prompt"
+        data-state={item.state ?? "queued"}
+        data-editing={String(item.id === editingId)}
+        draggable
+        key={item.id}
+        onDragStart={(event) => {
+          setDraggedId(item.id);
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", item.id);
+        }}
+        onDragEnd={() => setDraggedId("")}
+        onDragOver={(event) => {
+          if (draggedId && draggedId !== item.id) event.preventDefault();
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          const source = draggedId || event.dataTransfer.getData("text/plain");
+          if (source && source !== item.id) onReorder(source, item.id);
+          setDraggedId("");
+        }}
+      >
+        <span className="queue-drag" aria-hidden="true"><GripVertical size={14} /></span>
+        <button className="queued-prompt-content" onClick={() => onEdit(item)} title={item.error || t("editMessage")}>
+          {item.attachments.length > 0 && <ImagePlus size={14} />}
+          <span>{item.text || item.attachments[0]?.name}</span>
+        </button>
+        {item.state === "failed"
+          ? <button className="queued-guide" title={item.error || t("queuedMessageFailed")} onClick={() => onRetry(item.id)}><RotateCcw size={14} />{t("retryMessage")}</button>
+          : <button className="queued-guide" disabled={!running} title={t("steerTooltip")} onClick={() => void onGuide(item)}><CornerUpRight size={14} />{t("guide")}</button>}
+        <button className="queued-icon" title={t("deleteMessage")} aria-label={t("deleteMessage")} onClick={() => onDelete(item)}><Trash2 size={14} /></button>
+        <QueueMenu
+          item={item}
+          queueing={deliveryMode === "queue"}
+          canMoveUp={index > 0}
+          canMoveDown={index < items.length - 1}
+          onEdit={onEdit}
+          onMoveUp={() => onReorder(item.id, items[index - 1]!.id)}
+          onMoveDown={() => onReorder(item.id, items[index + 1]!.id)}
+          onToggleQueue={onToggleQueue}
+        />
+      </div>)}
+    </div>
   </section>;
 }
 
-function QueueMenu({ item, onEdit, onCloseQueue }: { item: QueuedPrompt; onEdit: (item: QueuedPrompt) => void; onCloseQueue: () => void }) {
+function QueueMenu({ item, queueing, canMoveUp, canMoveDown, onEdit, onMoveUp, onMoveDown, onToggleQueue }: {
+  item: QueuedPrompt;
+  queueing: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  onEdit: (item: QueuedPrompt) => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onToggleQueue: () => void;
+}) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const details = useRef<HTMLDetailsElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const [menuBox, setMenuBox] = useState<{ bottom: number; left: number; width: number } | null>(null);
   const t = translator(snapshot.language);
+  const place = useCallback(() => {
+    const summary = details.current?.querySelector("summary");
+    if (!details.current?.open || !summary) {
+      setMenuBox(null);
+      return;
+    }
+    const rect = summary.getBoundingClientRect();
+    const width = 180;
+    setMenuBox({
+      bottom: Math.max(8, window.innerHeight - rect.top + 4),
+      left: Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)),
+      width,
+    });
+  }, []);
   useEffect(() => {
     const close = (event: PointerEvent) => {
-      if (details.current && !details.current.contains(event.target as Node)) details.current.open = false;
+      const target = event.target as Node;
+      if (details.current?.contains(target) || menu.current?.contains(target)) return;
+      if (details.current) details.current.open = false;
+      setMenuBox(null);
     };
     document.addEventListener("pointerdown", close, true);
     return () => document.removeEventListener("pointerdown", close, true);
   }, []);
+  useEffect(() => {
+    if (!menuBox) return;
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [menuBox, place]);
   const choose = (action: () => void) => {
     action();
     if (details.current) details.current.open = false;
+    setMenuBox(null);
   };
-  return <details ref={details} className="queue-menu"><summary aria-label={t("moreActions")} title={t("moreActions")}><MoreHorizontal size={15} /></summary><div>
+  const actions = <div ref={menu} className="queue-menu-popover" style={menuBox ?? undefined}>
     <button onClick={() => choose(() => onEdit(item))}><Pencil size={14} />{t("editMessage")}</button>
-    <button onClick={() => choose(onCloseQueue)}><ListX size={14} />{t("closeQueue")}</button>
-  </div></details>;
+    <button disabled={!canMoveUp} onClick={() => choose(onMoveUp)}><ArrowUp size={14} />{t("moveMessageUp")}</button>
+    <button disabled={!canMoveDown} onClick={() => choose(onMoveDown)}><ArrowDown size={14} />{t("moveMessageDown")}</button>
+    <button onClick={() => choose(onToggleQueue)}><ListX size={14} />{t(queueing ? "turnOffQueueing" : "turnOnQueueing")}</button>
+  </div>;
+  return <>
+    <details ref={details} className="queue-menu" onToggle={() => requestAnimationFrame(place)}>
+      <summary aria-label={t("moreActions")} title={t("moreActions")}><MoreHorizontal size={15} /></summary>
+    </details>
+    {menuBox ? createPortal(actions, document.body) : null}
+  </>;
 }
 
 type ModelControlOption = { value: string; label: string; hint?: string };

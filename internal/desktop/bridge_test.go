@@ -110,3 +110,20 @@ func TestAllowedDesktopActions(t *testing.T) {
 		t.Fatal("unknown desktop actions must be rejected")
 	}
 }
+
+func TestPullRequestMonitorStateIsScopedToWorkspace(t *testing.T) {
+	stateDir := t.TempDir()
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	pathA := pullRequestMonitorStatePath(stateDir, workspaceA)
+	pathB := pullRequestMonitorStatePath(stateDir, workspaceB)
+	if pathA == pathB {
+		t.Fatalf("workspace monitor paths collided: %q", pathA)
+	}
+	if filepath.Dir(pathA) != stateDir || filepath.Dir(pathB) != stateDir {
+		t.Fatalf("monitor paths escaped state directory: %q %q", pathA, pathB)
+	}
+	if filepath.Base(pathA) == "pr-monitors.json" || filepath.Base(pathB) == "pr-monitors.json" {
+		t.Fatalf("monitor path is not workspace-scoped: %q %q", pathA, pathB)
+	}
+}

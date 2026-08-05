@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Viking602/azem/internal/session"
@@ -31,8 +32,11 @@ func TestImportBytesStoresImage(t *testing.T) {
 	if _, err := os.Stat(att.Path); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateTurnAttachments([]session.Attachment{att}); err != nil {
+	if err := store.ValidateSessionAttachments("session-1", []session.Attachment{att}); err != nil {
 		t.Fatal(err)
+	}
+	if err := store.ValidateSessionAttachments("session-2", []session.Attachment{att}); err == nil || !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("cross-session attachment validation = %v", err)
 	}
 }
 

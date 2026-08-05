@@ -100,7 +100,7 @@ func run() error {
 	windowTracker = newWindowStateTracker(desktop.WindowStatePath(boot.Paths.StateDir), desktopApp, geometry)
 	bindWindowStatePersistence(mainWindow, windowTracker)
 	registerSessionContextMenus(desktopApp, bridge, boot.Paths.Workspace, boot.Paths.DataDir, configFile, boot.Config.Defaults.Language)
-	handleDeepLink = sessionDeepLinkHandler(bridge, mainWindow, boot.Paths.Workspace, configFile)
+	handleDeepLink = sessionDeepLinkHandler(bridge, mainWindow, boot.Paths.Workspace)
 	desktopApp.Event.OnApplicationEvent(events.Common.ApplicationLaunchedWithUrl, func(event *application.ApplicationEvent) {
 		handleDeepLink(event.Context().URL())
 	})

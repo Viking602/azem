@@ -16,7 +16,7 @@ import (
 const (
 	defaultMonitorInterval = 60 * time.Second
 	maxMonitorBackoff      = 5 * time.Minute
-	monitorStateVersion    = 2
+	monitorStateVersion    = 3
 )
 
 // RepairStarter starts an isolated Azem session for one PR failure fingerprint.
@@ -42,15 +42,18 @@ type Monitor struct {
 	emit      MonitorEmitter
 	interval  time.Duration
 
-	mu      sync.Mutex
-	states  map[int]MonitorState
-	handled map[int]string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wake    chan struct{}
-	wg      sync.WaitGroup
-	start   sync.Once
-	close   sync.Once
+	mu               sync.Mutex
+	states           map[int]MonitorState
+	handled          map[int]string
+	repositories     map[int]string
+	launchingRepairs int
+	pendingTerminals map[string]string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wake             chan struct{}
+	wg               sync.WaitGroup
+	start            sync.Once
+	close            sync.Once
 }
 
 type monitorFile struct {
@@ -65,6 +68,7 @@ type monitorEntry struct {
 	Message            string    `json:"message,omitempty"`
 	SessionID          string    `json:"sessionId,omitempty"`
 	Fingerprint        string    `json:"fingerprint,omitempty"`
+	Repository         string    `json:"repository"`
 	HandledFingerprint string    `json:"handledFingerprint,omitempty"`
 	FailingChecks      []string  `json:"failingChecks,omitempty"`
 	Conflict           bool      `json:"conflict,omitempty"`
@@ -80,6 +84,7 @@ func NewMonitor(parent context.Context, client *Client, statePath string, repair
 	monitor := &Monitor{
 		client: client, statePath: strings.TrimSpace(statePath), repair: repair, emit: emit,
 		interval: defaultMonitorInterval, states: make(map[int]MonitorState), handled: make(map[int]string),
+		repositories: make(map[int]string), pendingTerminals: make(map[string]string),
 		ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1),
 	}
 	monitor.load()
@@ -104,6 +109,17 @@ func (m *Monitor) Set(number int, enabled bool) (MonitorState, error) {
 	if number <= 0 {
 		return MonitorState{}, fmt.Errorf("pull request number must be positive")
 	}
+	repository := ""
+	if enabled {
+		if m.client == nil {
+			return MonitorState{}, fmt.Errorf("pull request monitor has no GitHub client")
+		}
+		var err error
+		repository, err = m.client.currentRepositoryName(m.ctx)
+		if err != nil {
+			return MonitorState{}, err
+		}
+	}
 	m.mu.Lock()
 	state := m.states[number]
 	state.Number = number
@@ -115,6 +131,7 @@ func (m *Monitor) Set(number int, enabled bool) (MonitorState, error) {
 		state.Fingerprint = ""
 		state.FailingChecks = nil
 		state.Conflict = false
+		m.repositories[number] = repository
 		delete(m.handled, number)
 	} else {
 		state.Status = MonitorDisabled
@@ -122,6 +139,7 @@ func (m *Monitor) Set(number int, enabled bool) (MonitorState, error) {
 		state.Fingerprint = ""
 		state.FailingChecks = nil
 		state.Conflict = false
+		delete(m.repositories, number)
 		delete(m.handled, number)
 	}
 	m.states[number] = state
@@ -162,25 +180,23 @@ func (m *Monitor) ObserveSession(sessionID, eventKind string) {
 	}
 	var changed []MonitorState
 	m.mu.Lock()
+	matched := false
 	for number, state := range m.states {
 		if state.SessionID != sessionID || state.Status != MonitorRepairing {
 			continue
 		}
-		switch eventKind {
-		case "run_finished":
-			state.Status = MonitorCompleted
-			state.Message = "repair session completed"
-		case "run_failed":
-			state.Status = MonitorError
-			state.Message = "repair session failed"
-		case "run_cancelled":
-			state.Status = MonitorError
-			state.Message = "repair session was cancelled"
-		default:
+		terminal, ok := monitorTerminalState(state, eventKind)
+		if !ok {
 			continue
 		}
-		m.states[number] = state
-		changed = append(changed, cloneMonitorState(state))
+		matched = true
+		m.states[number] = terminal
+		changed = append(changed, cloneMonitorState(terminal))
+	}
+	// StartAutomatedTurn launches asynchronously before its starter returns. Keep
+	// a terminal event emitted in that narrow window until check records SessionID.
+	if !matched && m.launchingRepairs > 0 && isMonitorTerminalEvent(eventKind) {
+		m.pendingTerminals[sessionID] = eventKind
 	}
 	_ = m.saveLocked()
 	m.mu.Unlock()
@@ -266,7 +282,36 @@ func (m *Monitor) checkAll() bool {
 }
 
 func (m *Monitor) check(number int) error {
+	if !m.enabled(number) {
+		return nil
+	}
+	expectedRepository := m.repository(number)
+	currentRepository, err := m.client.currentRepositoryName(m.ctx)
+	if !m.enabled(number) {
+		return nil
+	}
+	if expectedRepository != m.repository(number) {
+		return nil
+	}
+	if err != nil {
+		state := m.update(number, func(state MonitorState) MonitorState {
+			state.Status = MonitorError
+			state.Message = err.Error()
+			state.LastCheckedAt = time.Now().UTC()
+			return state
+		})
+		m.publish(state)
+		return err
+	}
+	if expectedRepository == "" || !strings.EqualFold(expectedRepository, currentRepository) {
+		state := m.disableForRepositoryMismatch(number, expectedRepository, currentRepository)
+		m.publish(state)
+		return nil
+	}
 	pr, err := m.client.Detail(m.ctx, number)
+	if !m.enabled(number) {
+		return nil
+	}
 	if err != nil {
 		state := m.update(number, func(state MonitorState) MonitorState {
 			state.Status = MonitorError
@@ -287,6 +332,7 @@ func (m *Monitor) check(number int) error {
 		})
 		m.mu.Lock()
 		delete(m.handled, number)
+		delete(m.repositories, number)
 		_ = m.saveLocked()
 		m.mu.Unlock()
 		m.publish(state)
@@ -333,19 +379,32 @@ func (m *Monitor) check(number int) error {
 		return nil
 	}
 
-	branch, dirty, err := m.client.workspaceState(m.ctx)
+	workspace, err := m.client.workspaceState(m.ctx)
+	if !m.enabled(number) {
+		return nil
+	}
 	if err != nil {
 		state := m.pending(number, issue, now, err.Error())
 		m.publish(state)
 		return err
 	}
-	if branch != pr.HeadRefName {
+	if workspace.Branch != pr.HeadRefName {
 		state := m.pending(number, issue, now, fmt.Sprintf("switch to %s to start repair", pr.HeadRefName))
 		m.publish(state)
 		return nil
 	}
-	if dirty {
+	if workspace.Dirty {
 		state := m.pending(number, issue, now, "commit or discard workspace changes to start repair")
+		m.publish(state)
+		return nil
+	}
+	if pr.HeadRefOID == "" || workspace.HeadOID != pr.HeadRefOID {
+		state := m.pending(number, issue, now, "local HEAD does not match the pull request head commit")
+		m.publish(state)
+		return nil
+	}
+	if pr.HeadRepository == "" || !strings.EqualFold(workspace.UpstreamRepository, pr.HeadRepository) {
+		state := m.pending(number, issue, now, "local branch upstream does not match the pull request head repository")
 		m.publish(state)
 		return nil
 	}
@@ -354,9 +413,19 @@ func (m *Monitor) check(number int) error {
 		m.publish(state)
 		return nil
 	}
+	if !m.enabled(number) {
+		return nil
+	}
 
+	m.mu.Lock()
+	m.launchingRepairs++
+	m.mu.Unlock()
 	sessionID, err := m.repair(m.ctx, pr, issue)
 	if err != nil {
+		m.abandonRepairLaunch(sessionID)
+		if !m.enabled(number) {
+			return nil
+		}
 		var pending *PendingError
 		if errors.As(err, &pending) {
 			state := m.pending(number, issue, now, pending.Reason)
@@ -376,23 +445,80 @@ func (m *Monitor) check(number int) error {
 		return err
 	}
 
-	state := m.update(number, func(state MonitorState) MonitorState {
-		state.Status = MonitorRepairing
-		state.Message = "repair session started"
-		state.SessionID = sessionID
-		state.Conflict = issue.Conflict
-		state.FailingChecks = append([]string(nil), issue.FailingChecks...)
-		state.Fingerprint = issue.Fingerprint
-		state.LastCheckedAt = now
-		state.LastTriggeredAt = now
-		return state
-	})
-	m.mu.Lock()
-	m.handled[number] = issue.Fingerprint
-	_ = m.saveLocked()
-	m.mu.Unlock()
+	state, enabled := m.finishRepairLaunch(number, sessionID, issue, now)
+	if !enabled {
+		return nil
+	}
 	m.publish(state)
 	return nil
+}
+
+func (m *Monitor) abandonRepairLaunch(sessionID string) {
+	m.mu.Lock()
+	if m.launchingRepairs > 0 {
+		m.launchingRepairs--
+	}
+	delete(m.pendingTerminals, sessionID)
+	if m.launchingRepairs == 0 {
+		clear(m.pendingTerminals)
+	}
+	m.mu.Unlock()
+}
+
+func (m *Monitor) finishRepairLaunch(number int, sessionID string, issue RepairIssue, now time.Time) (MonitorState, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.launchingRepairs > 0 {
+		m.launchingRepairs--
+	}
+	state, enabled := m.states[number]
+	if !enabled || !state.Enabled {
+		delete(m.pendingTerminals, sessionID)
+		if m.launchingRepairs == 0 {
+			clear(m.pendingTerminals)
+		}
+		return cloneMonitorState(state), false
+	}
+	state.Status = MonitorRepairing
+	state.Message = "repair session started"
+	state.SessionID = sessionID
+	state.Conflict = issue.Conflict
+	state.FailingChecks = append([]string(nil), issue.FailingChecks...)
+	state.Fingerprint = issue.Fingerprint
+	state.LastCheckedAt = now
+	state.LastTriggeredAt = now
+	m.handled[number] = issue.Fingerprint
+	if eventKind, ok := m.pendingTerminals[sessionID]; ok {
+		state, _ = monitorTerminalState(state, eventKind)
+	}
+	m.states[number] = state
+	delete(m.pendingTerminals, sessionID)
+	if m.launchingRepairs == 0 {
+		clear(m.pendingTerminals)
+	}
+	_ = m.saveLocked()
+	return cloneMonitorState(state), true
+}
+
+func isMonitorTerminalEvent(eventKind string) bool {
+	return eventKind == "run_finished" || eventKind == "run_failed" || eventKind == "run_cancelled"
+}
+
+func monitorTerminalState(state MonitorState, eventKind string) (MonitorState, bool) {
+	switch eventKind {
+	case "run_finished":
+		state.Status = MonitorCompleted
+		state.Message = "repair session completed"
+	case "run_failed":
+		state.Status = MonitorError
+		state.Message = "repair session failed"
+	case "run_cancelled":
+		state.Status = MonitorError
+		state.Message = "repair session was cancelled"
+	default:
+		return state, false
+	}
+	return state, true
 }
 
 func (m *Monitor) pending(number int, issue RepairIssue, checkedAt time.Time, message string) MonitorState {
@@ -409,13 +535,47 @@ func (m *Monitor) pending(number int, issue RepairIssue, checkedAt time.Time, me
 
 func (m *Monitor) update(number int, mutate func(MonitorState) MonitorState) MonitorState {
 	m.mu.Lock()
-	state := m.states[number]
+	state, ok := m.states[number]
+	if !ok || !state.Enabled {
+		m.mu.Unlock()
+		return cloneMonitorState(state)
+	}
 	state.Number = number
-	state.Enabled = true
 	state = mutate(state)
 	m.states[number] = state
 	_ = m.saveLocked()
 	m.mu.Unlock()
+	return cloneMonitorState(state)
+}
+
+func (m *Monitor) enabled(number int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.states[number].Enabled
+}
+
+func (m *Monitor) repository(number int) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.repositories[number]
+}
+
+func (m *Monitor) disableForRepositoryMismatch(number int, expected, current string) MonitorState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.states[number]
+	if !state.Enabled || m.repositories[number] != expected {
+		return cloneMonitorState(state)
+	}
+	state.Enabled = false
+	state.Status = MonitorDisabled
+	state.SessionID = ""
+	state.Message = fmt.Sprintf("monitor repository changed from %s to %s; enable it again to confirm", expected, current)
+	state.LastCheckedAt = time.Now().UTC()
+	m.states[number] = state
+	delete(m.handled, number)
+	delete(m.repositories, number)
+	_ = m.saveLocked()
 	return cloneMonitorState(state)
 }
 
@@ -441,11 +601,14 @@ func (m *Monitor) load() {
 		return
 	}
 	var file monitorFile
-	if json.Unmarshal(data, &file) != nil || (file.Version != 1 && file.Version != monitorStateVersion) {
+	if json.Unmarshal(data, &file) != nil || file.Version != monitorStateVersion {
 		return
 	}
 	for _, entry := range file.Entries {
 		if entry.Number <= 0 || !entry.Enabled {
+			continue
+		}
+		if strings.TrimSpace(entry.Repository) == "" {
 			continue
 		}
 		status := entry.Status
@@ -457,13 +620,20 @@ func (m *Monitor) load() {
 				status = MonitorRepairing
 			}
 		}
+		interrupted := status == MonitorRepairing
+		if interrupted {
+			status = MonitorPending
+			entry.Message = "repair session was interrupted; checking again"
+			entry.SessionID = ""
+		}
 		m.states[entry.Number] = MonitorState{
 			Number: entry.Number, Enabled: true, Status: status, Message: entry.Message,
 			SessionID: entry.SessionID, Fingerprint: entry.Fingerprint,
 			FailingChecks: append([]string(nil), entry.FailingChecks...), Conflict: entry.Conflict,
 			LastCheckedAt: entry.LastCheckedAt, LastTriggeredAt: entry.LastTriggeredAt,
 		}
-		if entry.HandledFingerprint != "" {
+		m.repositories[entry.Number] = strings.TrimSpace(entry.Repository)
+		if entry.HandledFingerprint != "" && !interrupted {
 			m.handled[entry.Number] = entry.HandledFingerprint
 		}
 	}
@@ -481,6 +651,7 @@ func (m *Monitor) saveLocked() error {
 		entries = append(entries, monitorEntry{
 			Number: number, Enabled: true, Status: state.Status, Message: state.Message,
 			SessionID: state.SessionID, Fingerprint: state.Fingerprint,
+			Repository:         m.repositories[number],
 			HandledFingerprint: m.handled[number],
 			FailingChecks:      append([]string(nil), state.FailingChecks...), Conflict: state.Conflict,
 			LastCheckedAt: state.LastCheckedAt, LastTriggeredAt: state.LastTriggeredAt,

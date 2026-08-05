@@ -142,6 +142,11 @@ func (d *governedAgentTool) Prepare(ctx context.Context, call tool.Call, sink to
 	return tool.PreparedExecution{
 		Call: call,
 		Execute: func(runCtx context.Context) (tool.Result, error) {
+			if updateErr := updates(tool.Update{Kind: "running"}); updateErr != nil {
+				return tool.Result{
+					ToolCallID: call.ID, Name: call.Name, Content: updateErr.Error(), IsError: true,
+				}, updateErr
+			}
 			executed, executeErr := d.coding.ExecutePreparedDriver(runCtx, d.run, d.driver, call, updates)
 			return executed.Result, executeErr
 		},
@@ -503,6 +508,12 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 	s.liveApprovals[approvalID] = live
 	s.mu.Unlock()
 	defer s.finishLiveApproval(live)
+	if !s.emit(ctx, Event{
+		Kind: EventToolUpdate, SessionID: sessionID, RunID: runID, ToolCallID: call.ID,
+		State: "awaiting_approval",
+	}) {
+		return approvalResolution{}, eventDeliveryError(ctx)
+	}
 	event.State = "pending"
 	s.notifyHook(s.ctx, metadata, "permission_prompt", "Approval required", action)
 	if !s.emit(ctx, event) {
@@ -614,6 +625,12 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 	s.liveApprovals[approvalID] = live
 	s.mu.Unlock()
 	defer s.finishLiveApproval(live)
+	if !s.emit(ctx, Event{
+		Kind: EventToolUpdate, SessionID: sessionID, RunID: run.RunID, AgentID: agentID,
+		ToolCallID: call.ID, State: "awaiting_approval",
+	}) {
+		return approvalResolution{}, eventDeliveryError(ctx)
+	}
 	event.State = "pending"
 	s.notifyHook(s.ctx, metadata, "permission_prompt", "Approval required", pending.Request.RequestedAction)
 	if !s.emit(ctx, event) {

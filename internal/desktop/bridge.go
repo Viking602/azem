@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -131,12 +132,24 @@ func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventE
 		sessionID: boot.SessionID, openProject: openProject, emit: emit, ctx: ctx, cancel: cancel,
 	}
 	bridge.pullRequests = githubpr.NewClient(bridge.workspace)
-	statePath := ""
-	if boot.Paths.StateDir != "" {
-		statePath = filepath.Join(boot.Paths.StateDir, "pr-monitors.json")
-	}
+	statePath := pullRequestMonitorStatePath(boot.Paths.StateDir, bridge.workspace)
 	bridge.prMonitor = githubpr.NewMonitor(ctx, bridge.pullRequests, statePath, bridge.startPullRequestRepair, bridge.emitPullRequestMonitor)
 	return bridge
+}
+
+func pullRequestMonitorStatePath(stateDir, workspace string) string {
+	stateDir = strings.TrimSpace(stateDir)
+	if stateDir == "" {
+		return ""
+	}
+	if absolute, err := filepath.Abs(workspace); err == nil {
+		workspace = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(workspace); err == nil {
+		workspace = resolved
+	}
+	digest := sha256.Sum256([]byte(filepath.Clean(workspace)))
+	return filepath.Join(stateDir, fmt.Sprintf("pr-monitors-%x.json", digest[:16]))
 }
 
 func (b *Bridge) Initialise() Snapshot {
@@ -159,9 +172,6 @@ func (b *Bridge) Initialise() Snapshot {
 }
 
 func (b *Bridge) StartTurn(request TurnRequest) (string, error) {
-	if strings.TrimSpace(request.Prompt) == "" {
-		return "", fmt.Errorf("prompt is empty")
-	}
 	return b.runtime.StartConfiguredTurn(azemapp.TurnRequest{
 		SessionID: request.SessionID, Prompt: request.Prompt,
 		Provider: request.Provider, Model: request.Model, Reasoning: request.Reasoning,
@@ -210,8 +220,8 @@ func (b *Bridge) ImportClipboardImage(sessionID string) (*Attachment, error) {
 	return &attachment, nil
 }
 
-func (b *Bridge) Guide(sessionID, runID, text string) error {
-	return b.runtime.GuideActiveTurn(sessionID, runID, text)
+func (b *Bridge) Guide(sessionID, runID, text string, attachments []Attachment) error {
+	return b.runtime.GuideActiveTurnWithAttachments(sessionID, runID, text, attachmentsToSession(attachments))
 }
 
 func (b *Bridge) CancelActive(includeChildren bool) bool {

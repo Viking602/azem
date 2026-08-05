@@ -2,7 +2,11 @@
 
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestValidSessionID(t *testing.T) {
 	tests := []struct {
@@ -26,5 +30,20 @@ func TestValidSessionID(t *testing.T) {
 				t.Fatalf("validSessionID(%q) = %t, want %t", test.id, got, test.want)
 			}
 		})
+	}
+}
+
+func TestSameWorkspaceRejectsDifferentDeepLinkWorkspace(t *testing.T) {
+	trusted := t.TempDir()
+	untrusted := t.TempDir()
+	if sameWorkspace(untrusted, trusted) {
+		t.Fatal("different workspace was accepted")
+	}
+	link := filepath.Join(t.TempDir(), "trusted-link")
+	if err := os.Symlink(trusted, link); err != nil {
+		t.Fatal(err)
+	}
+	if !sameWorkspace(link, trusted) {
+		t.Fatal("canonical path to the same workspace was rejected")
 	}
 }

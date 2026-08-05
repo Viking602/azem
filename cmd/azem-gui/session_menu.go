@@ -149,7 +149,7 @@ func sessionURLFromArgs(arguments []string) string {
 	return ""
 }
 
-func sessionDeepLinkHandler(bridge *desktop.Bridge, window *application.WebviewWindow, workspace, configFile string) func(string) {
+func sessionDeepLinkHandler(bridge *desktop.Bridge, window *application.WebviewWindow, workspace string) func(string) {
 	return func(raw string) {
 		value, err := url.Parse(raw)
 		if err != nil || value.Scheme != "azem" || value.Host != "session" {
@@ -160,10 +160,11 @@ func sessionDeepLinkHandler(bridge *desktop.Bridge, window *application.WebviewW
 			return
 		}
 		targetWorkspace := value.Query().Get("workspace")
-		if targetWorkspace != "" && filepath.Clean(targetWorkspace) != filepath.Clean(workspace) {
-			if err := launchSessionWindow(configFile, id, targetWorkspace, true); err != nil {
-				window.EmitEvent(sessionMenuEvent, map[string]string{"action": "error", "error": err.Error()})
-			}
+		if targetWorkspace != "" && !sameWorkspace(targetWorkspace, workspace) {
+			window.EmitEvent(sessionMenuEvent, map[string]string{
+				"action": "error",
+				"error":  "session deep link belongs to a different workspace",
+			})
 			return
 		}
 		if err := bridge.Execute(desktop.ActionRequest{Kind: string(azemapp.ActionResumeSession), Target: id, SessionID: id}); err != nil {
@@ -173,6 +174,23 @@ func sessionDeepLinkHandler(bridge *desktop.Bridge, window *application.WebviewW
 		window.Restore()
 		window.Focus()
 	}
+}
+
+func sameWorkspace(left, right string) bool {
+	canonical := func(path string) (string, error) {
+		absolute, err := filepath.Abs(strings.TrimSpace(path))
+		if err != nil {
+			return "", err
+		}
+		resolved, err := filepath.EvalSymlinks(absolute)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Clean(resolved), nil
+	}
+	left, leftErr := canonical(left)
+	right, rightErr := canonical(right)
+	return leftErr == nil && rightErr == nil && left == right
 }
 
 func validSessionID(id string) bool {

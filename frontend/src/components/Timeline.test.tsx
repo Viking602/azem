@@ -40,6 +40,37 @@ describe("Codex-style process timeline", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  it("groups settled work without hiding queued and approval-bound tools", async () => {
+    const blocks: Block[] = [
+      { id: "read-1", kind: "tool", runId: "run-pending", title: "coding.read_file", state: "completed" },
+      { id: "read-2", kind: "tool", runId: "run-pending", title: "coding.read_file", state: "completed" },
+      {
+        id: "write-1", kind: "tool", runId: "run-pending", title: "coding.write_file", state: "awaiting_approval",
+        data: { arguments: JSON.stringify({ path: "src/new.go", content: "package main\n" }) },
+      },
+      { id: "shell-1", kind: "tool", runId: "run-pending", title: "coding.shell", state: "queued" },
+      { id: "search-1", kind: "tool", runId: "run-pending", title: "coding.search", state: "completed" },
+      { id: "search-2", kind: "tool", runId: "run-pending", title: "coding.search", state: "completed" },
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks, language: "zh-CN", activeRunId: "run-pending", running: true,
+    })));
+
+    expect(container.querySelectorAll(".tool-group")).toHaveLength(2);
+    expect(container.querySelectorAll(".process-entries > .tool-block")).toHaveLength(2);
+    expect(container.textContent).toContain("需要审批");
+    expect(container.textContent).toContain("排队中");
+    expect(container.querySelector(".file-change-entry")).toBeNull();
+    expect(container.querySelector(".tool-block .spin")).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
   it("replaces the model-wait placeholder with live reasoning without reopening a user-collapsed trace", async () => {
     const user: Block = { id: "user", kind: "user", runId: "run-live", content: "检查推理", state: "submitted" };
     const container = document.createElement("div");
@@ -60,6 +91,8 @@ describe("Codex-style process timeline", () => {
     })));
     expect(container.querySelector(".reasoning-placeholder")).toBeNull();
     expect(container.querySelector(".reasoning-trace.streaming")?.textContent).toContain("确认流式内容逐段出现");
+    expect(container.querySelector(".reasoning-label-sweep")).not.toBeNull();
+    expect(container.querySelector(".reasoning-spark.active")).not.toBeNull();
     const summary = container.querySelector<HTMLButtonElement>(".reasoning-summary")!;
     expect(summary.textContent).toContain("思考中");
 
@@ -80,6 +113,8 @@ describe("Codex-style process timeline", () => {
       language: "zh-CN", activeRunId: "", running: false,
     })));
     expect(container.querySelector(".reasoning-trace.completed")?.textContent).toContain("思考了 4s");
+    expect(container.querySelector(".reasoning-label-sweep")).toBeNull();
+    expect(container.querySelector(".reasoning-spark.active")).toBeNull();
 
     await act(async () => root.unmount());
     container.remove();

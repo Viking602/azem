@@ -613,6 +613,49 @@ func TestNewSessionStaysEphemeralUntilFirstTurn(t *testing.T) {
 	}
 }
 
+func TestResumeSessionProjectsGlobalActiveRunOwner(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB())
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		if err := store.Close(shutdownCtx); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	for _, id := range []string{"session-a", "session-b"} {
+		if _, err := sessions.Ensure(ctx, session.Session{ID: id, Title: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.mu.Lock()
+	service.activeRun = "run-a"
+	service.activeSession = "session-a"
+	service.mu.Unlock()
+	if err := service.emitSession(ctx, "session-b"); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventSessionLoaded || event.SessionID != "session-b" ||
+		event.Data["active"] != "false" ||
+		event.Data["globalActiveRunID"] != "run-a" ||
+		event.Data["globalActiveSessionID"] != "session-a" {
+		t.Fatalf("foreign active-run projection = %+v", event)
+	}
+}
+
 func TestResumeSessionIncludesPersistedRecap(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")

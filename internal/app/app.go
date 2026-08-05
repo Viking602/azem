@@ -34,6 +34,11 @@ var (
 	ErrDirtyWorkspace   = errors.New("workspace has uncommitted changes")
 )
 
+type activeGuidanceMessage struct {
+	Text        string
+	Attachments []session.Attachment
+}
+
 type Service struct {
 	cfg                config.Config
 	configPath         string
@@ -43,7 +48,7 @@ type Service struct {
 	mu                 sync.Mutex
 	activeRun          string
 	activeSession      string
-	activeGuidance     []string
+	activeGuidance     []activeGuidanceMessage
 	guidanceGeneration uint64
 	guidanceOpen       bool
 	currentSession     string
@@ -594,7 +599,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	if request.Prompt == "" && len(request.Images) == 0 {
 		return "", fmt.Errorf("prompt is empty")
 	}
-	if err := ValidateTurnAttachments(request.Images); err != nil {
+	if err := s.attachments.ValidateSessionAttachments(request.SessionID, request.Images); err != nil {
 		return "", err
 	}
 	if request.PlanMode && request.AgentMode != "single" {
@@ -808,12 +813,22 @@ func (s *Service) persistSessionPreferences(ctx context.Context, request TurnReq
 	return s.sessions.UpdatePreferences(ctx, request.SessionID, request.Provider, request.Model, request.Reasoning, request.AgentMode)
 }
 
-// GuideActiveTurn queues a user message for the next model boundary of the
-// matching active single-agent run without cancelling or replaying completed tools.
+// GuideActiveTurn queues a text-only user message for the next model boundary
+// of the matching active single-agent run.
 func (s *Service) GuideActiveTurn(sessionID, runID, text string) error {
+	return s.GuideActiveTurnWithAttachments(sessionID, runID, text, nil)
+}
+
+// GuideActiveTurnWithAttachments steers the matching active run without
+// cancelling it or replaying completed tools.
+func (s *Service) GuideActiveTurnWithAttachments(sessionID, runID, text string, attachments []session.Attachment) error {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	attachments = CloneAttachments(attachments)
+	if text == "" && len(attachments) == 0 {
 		return fmt.Errorf("guidance message is empty")
+	}
+	if err := s.attachments.ValidateSessionAttachments(sessionID, attachments); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -829,28 +844,29 @@ func (s *Service) GuideActiveTurn(sessionID, runID, text string) error {
 	if s.sessions != nil {
 		if _, err := s.sessions.AppendBlock(s.ctx, sessionID, session.Block{
 			Kind: "user", RunID: s.activeRun, Title: "Guidance", Content: text, State: "guidance",
+			Attachments: CloneAttachments(attachments),
 		}); err != nil {
 			return fmt.Errorf("persist guidance message: %w", err)
 		}
 	}
-	s.activeGuidance = append(s.activeGuidance, text)
+	s.activeGuidance = append(s.activeGuidance, activeGuidanceMessage{Text: text, Attachments: attachments})
 	return nil
 }
 
-func (s *Service) drainActiveGuidance(sessionID, runID string) []string {
+func (s *Service) drainActiveGuidance(sessionID, runID string) []activeGuidanceMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID || len(s.activeGuidance) == 0 {
 		return nil
 	}
-	messages := append([]string(nil), s.activeGuidance...)
+	messages := cloneActiveGuidance(s.activeGuidance)
 	s.activeGuidance = nil
 	s.guidanceGeneration++
 	return messages
 }
 
 type activeGuidanceSnapshot struct {
-	values     []string
+	values     []activeGuidanceMessage
 	generation uint64
 }
 
@@ -861,7 +877,7 @@ func (s *Service) peekActiveGuidance(sessionID, runID string) activeGuidanceSnap
 		return activeGuidanceSnapshot{}
 	}
 	return activeGuidanceSnapshot{
-		values: append([]string(nil), s.activeGuidance...), generation: s.guidanceGeneration,
+		values: cloneActiveGuidance(s.activeGuidance), generation: s.guidanceGeneration,
 	}
 }
 
@@ -871,24 +887,32 @@ func (s *Service) acknowledgeActiveGuidance(sessionID, runID string, snapshot ac
 	if snapshot.generation != s.guidanceGeneration || s.activeSession != sessionID || s.activeRun != runID || len(snapshot.values) > len(s.activeGuidance) {
 		return
 	}
-	s.activeGuidance = append([]string(nil), s.activeGuidance[len(snapshot.values):]...)
+	s.activeGuidance = cloneActiveGuidance(s.activeGuidance[len(snapshot.values):])
 	s.guidanceGeneration++
 }
 
-func (s *Service) finishActiveGuidance(sessionID, runID string) []string {
+func (s *Service) finishActiveGuidance(sessionID, runID string) []activeGuidanceMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID {
 		return nil
 	}
 	if len(s.activeGuidance) > 0 {
-		messages := append([]string(nil), s.activeGuidance...)
+		messages := cloneActiveGuidance(s.activeGuidance)
 		s.activeGuidance = nil
 		s.guidanceGeneration++
 		return messages
 	}
 	s.guidanceOpen = false
 	return nil
+}
+
+func cloneActiveGuidance(values []activeGuidanceMessage) []activeGuidanceMessage {
+	cloned := make([]activeGuidanceMessage, len(values))
+	for index, value := range values {
+		cloned[index] = activeGuidanceMessage{Text: value.Text, Attachments: CloneAttachments(value.Attachments)}
+	}
+	return cloned
 }
 
 func (s *Service) CancelActive() bool {

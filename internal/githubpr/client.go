@@ -16,7 +16,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -27,7 +26,7 @@ const (
 )
 
 const (
-	summaryFields = "number,title,state,isDraft,author,headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,reviewDecision,mergeable,mergeStateStatus,url,updatedAt,statusCheckRollup"
+	summaryFields = "number,title,state,isDraft,author,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,baseRefName,additions,deletions,changedFiles,reviewDecision,mergeable,mergeStateStatus,url,updatedAt,statusCheckRollup"
 	detailFields  = summaryFields + ",body,createdAt,closedAt,mergedAt,maintainerCanModify,autoMergeRequest,reviewRequests,reviews,comments,commits,files"
 )
 
@@ -91,10 +90,8 @@ func (execRunner) Run(ctx context.Context, cwd, stdin, name string, args ...stri
 
 // Client projects GitHub CLI data into stable desktop contracts.
 type Client struct {
-	workspace  string
-	runner     Runner
-	mu         sync.RWMutex
-	repository *Repository
+	workspace string
+	runner    Runner
 }
 
 func NewClient(workspace string) *Client {
@@ -118,7 +115,7 @@ func (c *Client) Dashboard(ctx context.Context) (Dashboard, error) {
 	dashboard.Capability = Capability{Available: true}
 	dashboard.Repository = repository
 
-	branch, _, branchErr := c.workspaceState(ctx)
+	branch, branchErr := c.currentBranch(ctx)
 	if branchErr == nil {
 		dashboard.CurrentBranch = branch
 	}
@@ -201,6 +198,10 @@ func (c *Client) Mutate(ctx context.Context, request MutationRequest) (PullReque
 	if err != nil {
 		return PullRequest{}, err
 	}
+	expectedRepository := strings.TrimSpace(request.ExpectedRepository)
+	if expectedRepository == "" || !strings.EqualFold(expectedRepository, repository.NameWithOwner) {
+		return PullRequest{}, fmt.Errorf("pull request repository changed from %q to %q; refresh before continuing", expectedRepository, repository.NameWithOwner)
+	}
 	number := strconv.Itoa(request.Number)
 	args := []string{"pr"}
 	stdin := ""
@@ -231,25 +232,37 @@ func (c *Client) Mutate(ctx context.Context, request MutationRequest) (PullReque
 		stdin = request.Body
 	case MutationReview:
 		reviewKind := strings.TrimSpace(request.ReviewKind)
-		flag := ""
+		event := ""
 		switch reviewKind {
 		case "approve":
-			flag = "--approve"
+			event = "APPROVE"
 		case "comment":
-			flag = "--comment"
+			event = "COMMENT"
 		case "request_changes":
-			flag = "--request-changes"
+			event = "REQUEST_CHANGES"
 		default:
 			return PullRequest{}, fmt.Errorf("unsupported review kind %q", reviewKind)
 		}
 		if reviewKind != "approve" && strings.TrimSpace(request.Body) == "" {
 			return PullRequest{}, fmt.Errorf("review body is required")
 		}
-		args = append(args, "review", number, "--repo", repository.NameWithOwner, flag)
-		if request.Body != "" {
-			args = append(args, "--body-file", "-")
-			stdin = request.Body
+		headOID := strings.TrimSpace(request.ExpectedHeadOID)
+		if !validOID(headOID) {
+			return PullRequest{}, fmt.Errorf("a valid expected head commit is required")
 		}
+		currentHeadOID, err := c.pullRequestHeadOID(ctx, repository.NameWithOwner, request.Number)
+		if err != nil {
+			return PullRequest{}, err
+		}
+		if !strings.EqualFold(currentHeadOID, headOID) {
+			return PullRequest{}, fmt.Errorf("pull request head changed from %s to %s; refresh before reviewing", headOID, currentHeadOID)
+		}
+		payload, err := json.Marshal(map[string]string{"body": request.Body, "commit_id": headOID, "event": event})
+		if err != nil {
+			return PullRequest{}, fmt.Errorf("encode pull request review: %w", err)
+		}
+		args = []string{"api", "--method", "POST", "repos/" + repository.NameWithOwner + "/pulls/" + number + "/reviews", "--input", "-"}
+		stdin = string(payload)
 	case MutationReady:
 		args = append(args, "ready", number, "--repo", repository.NameWithOwner)
 	case MutationDraft:
@@ -286,15 +299,6 @@ func (c *Client) Mutate(ctx context.Context, request MutationRequest) (PullReque
 }
 
 func (c *Client) resolveRepository(ctx context.Context) (*Repository, error) {
-	c.mu.RLock()
-	cached := c.repository
-	c.mu.RUnlock()
-	if cached != nil {
-		copy := *cached
-		copy.AllowedMergeMethods = append([]string(nil), cached.AllowedMergeMethods...)
-		return &copy, nil
-	}
-
 	readCtx, cancel := context.WithTimeout(ctx, defaultReadTimeout)
 	defer cancel()
 	output, err := c.runner.Run(readCtx, c.workspace, "", "gh", "repo", "view", "--json", "nameWithOwner,url,defaultBranchRef,viewerPermission,mergeCommitAllowed,rebaseMergeAllowed,squashMergeAllowed")
@@ -329,26 +333,116 @@ func (c *Client) resolveRepository(ctx context.Context) (*Repository, error) {
 	if viewerErr == nil {
 		repository.ViewerLogin = strings.TrimSpace(string(viewerOutput))
 	}
-	c.mu.Lock()
-	c.repository = repository
-	c.mu.Unlock()
-	copy := *repository
-	copy.AllowedMergeMethods = append([]string(nil), repository.AllowedMergeMethods...)
-	return &copy, nil
+	return repository, nil
 }
 
-func (c *Client) workspaceState(ctx context.Context) (string, bool, error) {
+func (c *Client) currentRepositoryName(ctx context.Context) (string, error) {
 	readCtx, cancel := context.WithTimeout(ctx, defaultReadTimeout)
 	defer cancel()
-	branchOutput, err := c.runner.Run(readCtx, c.workspace, "", "git", "branch", "--show-current")
+	output, err := c.runner.Run(readCtx, c.workspace, "", "gh", "repo", "view", "--json", "nameWithOwner")
 	if err != nil {
-		return "", false, fmt.Errorf("read current git branch: %w", err)
+		return "", fmt.Errorf("resolve current GitHub repository: %w", err)
 	}
+	var raw rawRepository
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return "", fmt.Errorf("decode current GitHub repository: %w", err)
+	}
+	name := strings.TrimSpace(raw.NameWithOwner)
+	if name == "" {
+		return "", fmt.Errorf("current GitHub repository has no owner/name")
+	}
+	return name, nil
+}
+
+func (c *Client) pullRequestHeadOID(ctx context.Context, repository string, number int) (string, error) {
+	readCtx, cancel := context.WithTimeout(ctx, defaultReadTimeout)
+	defer cancel()
+	output, err := c.runner.Run(readCtx, c.workspace, "", "gh", "pr", "view", strconv.Itoa(number), "--repo", repository, "--json", "headRefOid")
+	if err != nil {
+		return "", fmt.Errorf("read pull request #%d head: %w", number, err)
+	}
+	var raw struct {
+		HeadRefOID string `json:"headRefOid"`
+	}
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return "", fmt.Errorf("decode pull request #%d head: %w", number, err)
+	}
+	headOID := strings.TrimSpace(raw.HeadRefOID)
+	if !validOID(headOID) {
+		return "", fmt.Errorf("pull request #%d has no valid head commit", number)
+	}
+	return headOID, nil
+}
+
+type workspaceState struct {
+	Branch             string
+	Dirty              bool
+	HeadOID            string
+	UpstreamRepository string
+}
+
+func (c *Client) currentBranch(ctx context.Context) (string, error) {
+	readCtx, cancel := context.WithTimeout(ctx, defaultReadTimeout)
+	defer cancel()
+	output, err := c.runner.Run(readCtx, c.workspace, "", "git", "branch", "--show-current")
+	if err != nil {
+		return "", fmt.Errorf("read current git branch: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func (c *Client) workspaceState(ctx context.Context) (workspaceState, error) {
+	branch, err := c.currentBranch(ctx)
+	if err != nil {
+		return workspaceState{}, err
+	}
+	readCtx, cancel := context.WithTimeout(ctx, defaultReadTimeout)
+	defer cancel()
 	statusOutput, err := c.runner.Run(readCtx, c.workspace, "", "git", "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
-		return "", false, fmt.Errorf("read git workspace status: %w", err)
+		return workspaceState{}, fmt.Errorf("read git workspace status: %w", err)
 	}
-	return strings.TrimSpace(string(branchOutput)), len(statusOutput) > 0, nil
+	headOutput, err := c.runner.Run(readCtx, c.workspace, "", "git", "rev-parse", "HEAD")
+	if err != nil {
+		return workspaceState{}, fmt.Errorf("read git HEAD: %w", err)
+	}
+	remoteOutput, err := c.runner.Run(readCtx, c.workspace, "", "git", "config", "--get", "branch."+branch+".remote")
+	if err != nil {
+		return workspaceState{}, fmt.Errorf("read git branch remote: %w", err)
+	}
+	remote := strings.TrimSpace(string(remoteOutput))
+	remoteURLOutput, err := c.runner.Run(readCtx, c.workspace, "", "git", "remote", "get-url", remote)
+	if err != nil {
+		return workspaceState{}, fmt.Errorf("read git branch remote URL: %w", err)
+	}
+	upstreamRepository := githubRepositoryFromRemote(strings.TrimSpace(string(remoteURLOutput)))
+	if upstreamRepository == "" {
+		return workspaceState{}, fmt.Errorf("git branch remote is not a GitHub repository")
+	}
+	return workspaceState{
+		Branch: branch, Dirty: len(statusOutput) > 0, HeadOID: strings.TrimSpace(string(headOutput)),
+		UpstreamRepository: upstreamRepository,
+	}, nil
+}
+
+func githubRepositoryFromRemote(remote string) string {
+	remote = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(remote, "/"), ".git"))
+	if strings.HasPrefix(remote, "git@github.com:") {
+		return validGitHubRepositoryName(strings.TrimPrefix(remote, "git@github.com:"))
+	}
+	parsed, err := url.Parse(remote)
+	if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") {
+		return ""
+	}
+	return validGitHubRepositoryName(strings.TrimPrefix(parsed.Path, "/"))
+}
+
+func validGitHubRepositoryName(value string) string {
+	parts := strings.Split(strings.Trim(value, "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || parts[0] == "." || parts[1] == "." {
+		return ""
+	}
+	return parts[0] + "/" + parts[1]
 }
 
 func (c *Client) repairIssue(pr PullRequest) RepairIssue {
@@ -410,35 +504,41 @@ type rawActor struct {
 	IsBot     bool   `json:"is_bot"`
 }
 
+type rawHeadRepository struct {
+	Name          string `json:"name"`
+	NameWithOwner string `json:"nameWithOwner"`
+}
 type rawPullRequest struct {
-	Number              int              `json:"number"`
-	Title               string           `json:"title"`
-	Body                string           `json:"body"`
-	State               string           `json:"state"`
-	IsDraft             bool             `json:"isDraft"`
-	Author              rawActor         `json:"author"`
-	HeadRefName         string           `json:"headRefName"`
-	HeadRefOID          string           `json:"headRefOid"`
-	BaseRefName         string           `json:"baseRefName"`
-	Additions           int              `json:"additions"`
-	Deletions           int              `json:"deletions"`
-	ChangedFiles        int              `json:"changedFiles"`
-	ReviewDecision      string           `json:"reviewDecision"`
-	Mergeable           string           `json:"mergeable"`
-	MergeStateStatus    string           `json:"mergeStateStatus"`
-	URL                 string           `json:"url"`
-	CreatedAt           time.Time        `json:"createdAt"`
-	UpdatedAt           time.Time        `json:"updatedAt"`
-	ClosedAt            time.Time        `json:"closedAt"`
-	MergedAt            time.Time        `json:"mergedAt"`
-	MaintainerCanModify bool             `json:"maintainerCanModify"`
-	AutoMergeRequest    *rawAutoMerge    `json:"autoMergeRequest"`
-	ReviewRequests      []rawActor       `json:"reviewRequests"`
-	Reviews             []rawReview      `json:"reviews"`
-	Comments            []rawComment     `json:"comments"`
-	Commits             []rawCommit      `json:"commits"`
-	Files               []rawFile        `json:"files"`
-	StatusCheckRollup   []map[string]any `json:"statusCheckRollup"`
+	Number              int               `json:"number"`
+	Title               string            `json:"title"`
+	Body                string            `json:"body"`
+	State               string            `json:"state"`
+	IsDraft             bool              `json:"isDraft"`
+	Author              rawActor          `json:"author"`
+	HeadRefName         string            `json:"headRefName"`
+	HeadRefOID          string            `json:"headRefOid"`
+	HeadRepository      rawHeadRepository `json:"headRepository"`
+	HeadRepositoryOwner rawActor          `json:"headRepositoryOwner"`
+	BaseRefName         string            `json:"baseRefName"`
+	Additions           int               `json:"additions"`
+	Deletions           int               `json:"deletions"`
+	ChangedFiles        int               `json:"changedFiles"`
+	ReviewDecision      string            `json:"reviewDecision"`
+	Mergeable           string            `json:"mergeable"`
+	MergeStateStatus    string            `json:"mergeStateStatus"`
+	URL                 string            `json:"url"`
+	CreatedAt           time.Time         `json:"createdAt"`
+	UpdatedAt           time.Time         `json:"updatedAt"`
+	ClosedAt            time.Time         `json:"closedAt"`
+	MergedAt            time.Time         `json:"mergedAt"`
+	MaintainerCanModify bool              `json:"maintainerCanModify"`
+	AutoMergeRequest    *rawAutoMerge     `json:"autoMergeRequest"`
+	ReviewRequests      []rawActor        `json:"reviewRequests"`
+	Reviews             []rawReview       `json:"reviews"`
+	Comments            []rawComment      `json:"comments"`
+	Commits             []rawCommit       `json:"commits"`
+	Files               []rawFile         `json:"files"`
+	StatusCheckRollup   []map[string]any  `json:"statusCheckRollup"`
 }
 
 type rawStatus struct {
@@ -499,11 +599,22 @@ func normalizeSummary(raw rawPullRequest) PullRequestSummary {
 	return PullRequestSummary{
 		Number: raw.Number, Title: raw.Title, State: strings.ToUpper(raw.State), Draft: raw.IsDraft,
 		Author: normalizeActor(raw.Author), HeadRefName: raw.HeadRefName, HeadRefOID: raw.HeadRefOID,
-		BaseRefName: raw.BaseRefName, Additions: raw.Additions, Deletions: raw.Deletions,
+		HeadRepository: normalizeHeadRepository(raw.HeadRepository, raw.HeadRepositoryOwner),
+		BaseRefName:    raw.BaseRefName, Additions: raw.Additions, Deletions: raw.Deletions,
 		ChangedFiles: raw.ChangedFiles, ReviewDecision: strings.ToUpper(raw.ReviewDecision),
 		Mergeable: strings.ToUpper(raw.Mergeable), MergeStateStatus: strings.ToUpper(raw.MergeStateStatus),
 		URL: raw.URL, UpdatedAt: raw.UpdatedAt, Checks: summarizeChecks(checks),
 	}
+}
+
+func normalizeHeadRepository(repository rawHeadRepository, owner rawActor) string {
+	if value := validGitHubRepositoryName(repository.NameWithOwner); value != "" {
+		return value
+	}
+	if strings.TrimSpace(owner.Login) == "" || strings.TrimSpace(repository.Name) == "" {
+		return ""
+	}
+	return validGitHubRepositoryName(owner.Login + "/" + repository.Name)
 }
 
 func normalizePullRequest(raw rawPullRequest, allowedMergeMethods []string) PullRequest {

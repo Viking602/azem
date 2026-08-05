@@ -179,10 +179,16 @@ export type TimelineEntry =
 export function isRunningTool(block: Block) {
   return block.kind === "tool" && ["running", "started", "streaming", "progress"].includes(block.state || "");
 }
+function isPendingTool(block: Block) {
+  return block.kind === "tool"
+    && ["queued", "awaiting_approval", "reviewing_approval"].includes(block.state || "");
+}
+
 
 export function isCollapsibleTool(block: Block) {
   return block.kind === "tool"
     && !isRunningTool(block)
+    && !isPendingTool(block)
     && !isFileChangeTool(block.title || block.data?.name || "");
 }
 

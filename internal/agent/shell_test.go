@@ -154,6 +154,31 @@ func TestShellOutputActivityExtendsTimeoutAndStreamsLogs(t *testing.T) {
 	}
 }
 
+func TestShellWallClockLimitCannotBeExtendedByOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell command")
+	}
+	shellRuntime := newShellRuntime(context.Background(), ShellOptions{MaxWallClockDuration: 350 * time.Millisecond})
+	driver := newRuntimeShellDriver(t.TempDir(), "allow", "deny", shellRuntime)
+	arguments, _ := json.Marshal(shellInput{
+		Command:        `i=0; while [ "$i" -lt 40 ]; do i=$((i+1)); printf 'tick\n'; sleep 0.05; done`,
+		TimeoutSeconds: 1,
+	})
+
+	started := time.Now()
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "wall-clock", Name: ToolShell, Arguments: arguments}, nil)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(result.Content, "command stopped: wall_clock_timeout") {
+		t.Fatalf("wall-clock shell result=%+v", result)
+	}
+	if elapsed < 250*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("wall-clock shell returned after %s", elapsed)
+	}
+}
+
 func TestShellTerminatesAfterOutputInactivityTimeout(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a POSIX shell command")

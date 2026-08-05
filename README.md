@@ -52,6 +52,12 @@ open dist/Azem.app
 
 The desktop app and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. The React UI receives a bounded event projection; it does not expose arbitrary shell or filesystem bindings.
 
+While a desktop turn is running, the composer supports Codex-style **Queue** and **Steer** delivery. Queue holds ordered, editable follow-ups for the next turn; Steer injects text or image guidance at the next model boundary without cancelling completed tool work. `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` elsewhere uses the opposite mode for one message. Queues are session-scoped, stay in order, and pause after an interrupted run until explicitly resumed.
+
+The desktop **Pull Requests** workspace uses the authenticated [GitHub CLI](https://cli.github.com/) for the repository at the workspace root. It lists the current and open pull requests, checks, files, comments, reviews, and merge state; supported mutations include editing, review requests, comments, reviews, draft/ready transitions, close/reopen, merge, and auto-merge. Merge requests are pinned to the displayed head commit so a stale panel cannot merge a newer revision.
+
+**Monitor & Fix** polls an enabled pull request for failed checks or merge conflicts and starts at most one active governed Azem repair session for each observed failure fingerprint; an interrupted repair is eligible for retry after restart. Repair starts only when the workspace is clean and checked out to the pull request head branch; it never merges the pull request automatically. Missing `gh`, authentication, repository access, and network failures are reported in the Pull Requests workspace instead of disabling the rest of the desktop app.
+
 ### 2. Start it in a project
 
 Azem uses the directory from which it starts as the workspace.
@@ -416,11 +422,15 @@ For strict isolation, run Azem inside a container, virtual machine, or restricte
 ## Project Layout
 
 ```text
-cmd/azem/               Application entry point
+cmd/azem/               Terminal application entry point
+cmd/azem-gui/           Wails desktop application entry point
+frontend/               React desktop interface and Wails bindings
 internal/agent/         Tool governance, persistent runs, and team agents
 internal/app/           Application orchestration, providers, and subagents
 internal/auth/          OAuth, credential import, and credential storage
 internal/config/        Configuration, paths, roles, and personas
+internal/desktop/       Bounded Wails bridge and desktop lifecycle
+internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/mcp/           MCP connection and tool management
 internal/provider/      ChatGPT/Codex and Grok drivers
 internal/recovery/      Crash recovery and side-effect reconciliation

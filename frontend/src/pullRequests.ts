@@ -37,7 +37,7 @@ export async function refreshPullRequestDetail(number?: number): Promise<void> {
     if (request !== detailRequest || state.selectedPullRequestNumber !== selected) return;
     state.setPullRequestDetail(detail);
   } catch (cause) {
-    if (request !== detailRequest) return;
+    if (request !== detailRequest || useRuntimeStore.getState().selectedPullRequestNumber !== selected) return;
     useRuntimeStore.getState().setPullRequestError(cause instanceof Error ? cause.message : String(cause));
   }
 }
@@ -47,7 +47,9 @@ export async function runPullRequestMutation(request: PullRequestMutationRequest
   store.setPullRequestError("");
   store.setPullRequestMutating(true);
   try {
-    const detail = await mutatePullRequest(request);
+    const expectedRepository = store.pullRequestDashboard?.repository?.nameWithOwner;
+    if (!expectedRepository) throw new Error("Pull request repository is unavailable; refresh before continuing.");
+    const detail = await mutatePullRequest({ ...request, expectedRepository });
     const state = useRuntimeStore.getState();
     state.setPullRequestDetail(detail);
     await refreshPullRequestDashboard();

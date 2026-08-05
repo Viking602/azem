@@ -23,6 +23,7 @@ type ShellOptions struct {
 	MaxContextOutputBytes  int
 	MaxArtifactOutputBytes int
 	StopOnOutputLimit      bool
+	MaxWallClockDuration   time.Duration
 	MaxConcurrency         int
 	ArtifactSink           func(context.Context, ShellExecutionSnapshot, []byte) (ShellArtifactResult, error)
 }
@@ -32,7 +33,7 @@ type ShellArtifactResult struct {
 }
 
 func defaultShellOptions() ShellOptions {
-	return ShellOptions{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2}
+	return ShellOptions{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2, MaxWallClockDuration: 10 * time.Minute}
 }
 
 type ShellExecutionSnapshot struct {
@@ -67,6 +68,9 @@ func newShellRuntime(ctx context.Context, opts ShellOptions) *shellRuntime {
 	}
 	if opts.MaxConcurrency <= 0 {
 		opts.MaxConcurrency = defaults.MaxConcurrency
+	}
+	if opts.MaxWallClockDuration <= 0 {
+		opts.MaxWallClockDuration = defaults.MaxWallClockDuration
 	}
 	return &shellRuntime{ctx: ctx, sem: make(chan struct{}, opts.MaxConcurrency), active: map[string]ShellExecutionSnapshot{}, opts: opts}
 }
@@ -158,7 +162,7 @@ func (d *shellDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolShell,
-		Description: "Run a foreground command. timeout_seconds is the maximum interval without stdout/stderr output; active output keeps the command alive. Detached/background processes are not permitted.",
+		Description: "Run a foreground command. timeout_seconds is the maximum interval without stdout/stderr output; active output extends that interval, but every command has an independent 10-minute wall-clock limit. Detached/background processes are not permitted.",
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{
@@ -297,6 +301,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	}
 	startedAt := time.Now()
 	deadline := startedAt.Add(inactivityTimeout)
+	absoluteDeadline := startedAt.Add(d.runtime.opts.MaxWallClockDuration)
 	sum := sha256.Sum256([]byte(input.Command))
 	caller, _ := tool.CallerFromContext(ctx)
 	snap := ShellExecutionSnapshot{SessionID: caller.SessionID, RunID: caller.TeamRunID, AgentID: caller.AgentID, ToolCallID: call.ID, CommandHash: hex.EncodeToString(sum[:]), State: "running", PID: command.Process.Pid, PGID: supervisor.owner.PGID(), JobID: supervisor.owner.JobID(), StartedAt: startedAt, Deadline: deadline, ExitCode: -1}
@@ -317,6 +322,8 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 			}
 		}
 	}()
+	wallClockTimer := time.NewTimer(d.runtime.opts.MaxWallClockDuration)
+	defer wallClockTimer.Stop()
 	var err error
 	reason := ""
 	var terminationErr, updateSinkErr error
@@ -324,8 +331,9 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	if sink != nil {
 		startedData := map[string]string{
 			"cwd": d.root, "pid": fmt.Sprint(command.Process.Pid), "health": "running",
-			"timeout_mode": "output_inactivity", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
+			"timeout_mode": "output_inactivity_with_wall_clock_limit", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
 			"output": "", "output_bytes": "0", "deadline": deadline.UTC().Format(time.RFC3339Nano),
+			"wall_clock_deadline": absoluteDeadline.UTC().Format(time.RFC3339Nano),
 		}
 		if sinkErr := sink(tool.Update{Kind: "started", Data: startedData}); sinkErr != nil {
 			reason = "update_sink_failure"
@@ -358,6 +366,8 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 			current.Deadline = deadline
 			d.runtime.active[registryKey] = current
 			d.runtime.mu.Unlock()
+		case <-wallClockTimer.C:
+			reason = "wall_clock_timeout"
 		case <-limitHit:
 			if d.runtime.opts.StopOnOutputLimit {
 				reason = "output_limit"
@@ -377,8 +387,9 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 			if sink != nil {
 				data := map[string]string{
 					"pid": fmt.Sprint(command.Process.Pid), "health": "running",
-					"timeout_mode": "output_inactivity", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
+					"timeout_mode": "output_inactivity_with_wall_clock_limit", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
 					"output": liveOutput, "output_bytes": fmt.Sprint(outputBytes), "deadline": deadline.UTC().Format(time.RFC3339Nano),
+					"wall_clock_deadline": absoluteDeadline.UTC().Format(time.RFC3339Nano),
 				}
 				if !lastOutputAt.IsZero() {
 					data["last_output_at"] = lastOutputAt.UTC().Format(time.RFC3339Nano)

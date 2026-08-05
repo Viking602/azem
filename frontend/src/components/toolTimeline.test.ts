@@ -93,6 +93,20 @@ describe("tool timeline grouping", () => {
     }
   });
 
+  it("keeps queued and approval-bound tools outside settled groups", () => {
+    const entries = groupTimelineBlocks([
+      tool("read-1", "coding.read_file"),
+      tool("read-2", "coding.read_file"),
+      tool("write-1", "coding.write_file", "awaiting_approval"),
+      tool("shell-1", "coding.shell", "queued"),
+      tool("search-1", "coding.search"),
+      tool("search-2", "coding.search"),
+    ], "zh-CN");
+    expect(entries.map((entry) => entry.kind)).toEqual(["tool-group", "block", "block", "tool-group"]);
+    expect(entries[1]).toMatchObject({ kind: "block", block: { id: "write-1", state: "awaiting_approval" } });
+    expect(entries[2]).toMatchObject({ kind: "block", block: { id: "shell-1", state: "queued" } });
+  });
+
   it("keeps single tools expanded", () => {
     const entries = groupTimelineBlocks([tool("t1", "coding.search")], "en");
     expect(entries).toHaveLength(1);

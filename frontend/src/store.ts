@@ -68,6 +68,8 @@ export interface RuntimeData {
   recovery: Array<Record<string, unknown>>;
   runId: string;
   running: boolean;
+  globalRunId: string;
+  globalRunSessionId: string;
   runStartedAt: number;
   activity: string;
   approvalMode: string;
@@ -84,8 +86,9 @@ export interface RuntimeData {
   commandOpen: boolean;
   planMode: boolean;
   attachments: Attachment[];
-  // ponytail: queue is process-local; persist it with session blocks if crash recovery becomes necessary.
+  // Follow-up queues are process-local but session-scoped, matching Codex navigation behavior.
   queuedPrompts: QueuedPrompt[];
+  queuePauseReasons: Record<string, "interrupted">;
   theme: "system" | "light" | "dark";
 }
 
@@ -120,7 +123,12 @@ interface RuntimeActions {
   replaceAttachments: (attachments: Attachment[]) => void;
   clearAttachments: () => void;
   enqueuePrompt: (text: string, attachments: Attachment[]) => void;
-  removeQueuedPrompt: (id: string) => void;
+  removeQueuedPrompt: (sessionId: string, id: string) => void;
+  updateQueuedPrompt: (sessionId: string, id: string, text: string, attachments: Attachment[]) => void;
+  failQueuedPrompt: (sessionId: string, id: string, message: string) => void;
+  retryQueuedPrompt: (sessionId: string, id: string) => void;
+  reorderQueuedPrompt: (sessionId: string, id: string, beforeId: string) => void;
+  resumeQueuedPrompts: (sessionId: string) => void;
 }
 
 const initialData: RuntimeData = {
@@ -152,6 +160,8 @@ const initialData: RuntimeData = {
   runId: "",
   running: false,
   runStartedAt: 0,
+  globalRunId: "",
+  globalRunSessionId: "",
   activity: "",
   approvalMode: "prompt",
   workspaceDirty: false,
@@ -168,6 +178,7 @@ const initialData: RuntimeData = {
   planMode: false,
   attachments: [],
   queuedPrompts: [],
+  queuePauseReasons: {},
   theme: "system",
 };
 
@@ -198,6 +209,7 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
     selectedAgentId: selectedPullRequestNumber ? "" : state.selectedAgentId,
     agentBlocks: selectedPullRequestNumber ? [] : state.agentBlocks,
     inspectorOpen: selectedPullRequestNumber ? false : state.inspectorOpen,
+    pullRequestLoading: selectedPullRequestNumber ? state.pullRequestLoading : false,
   })),
   setPullRequestDetail: ({ pullRequest, monitor }) => set((state) => {
     const pullRequestMonitors = new Map(state.pullRequestMonitors);
@@ -274,11 +286,64 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   removeAttachment: (id) => set((state) => ({ attachments: state.attachments.filter((item) => item.id !== id) })),
   replaceAttachments: (attachments) => set({ attachments }),
   clearAttachments: () => set({ attachments: [] }),
-  enqueuePrompt: (text, attachments) => set((state) => ({
-    queuedPrompts: [...state.queuedPrompts, { id: crypto.randomUUID(), text, attachments: [...attachments] }],
+  enqueuePrompt: (text, attachments) => set((state) => {
+    const sessionId = state.currentSessionId || state.snapshot?.sessionId || "";
+    return {
+      queuedPrompts: [...state.queuedPrompts, {
+        id: crypto.randomUUID(), sessionId, text, attachments: [...attachments], state: "queued",
+      }],
+    };
+  }),
+  removeQueuedPrompt: (sessionId, id) => set((state) => {
+    const removed = state.queuedPrompts.find((item) => item.id === id && item.sessionId === sessionId);
+    if (!removed) return {};
+    const queuedPrompts = state.queuedPrompts.filter((item) => item.id !== id || item.sessionId !== sessionId);
+    if (queuedPrompts.some((item) => item.sessionId === sessionId)) return { queuedPrompts };
+    const queuePauseReasons = { ...state.queuePauseReasons };
+    delete queuePauseReasons[sessionId];
+    return { queuedPrompts, queuePauseReasons };
+  }),
+  updateQueuedPrompt: (sessionId, id, text, attachments) => set((state) => ({
+    queuedPrompts: state.queuedPrompts.map((item) => item.id === id && item.sessionId === sessionId
+      ? { ...item, text, attachments: [...attachments], state: "queued", error: undefined }
+      : item),
   })),
-  removeQueuedPrompt: (id) => set((state) => ({ queuedPrompts: state.queuedPrompts.filter((item) => item.id !== id) })),
+  failQueuedPrompt: (sessionId, id, message) => set((state) => ({
+    queuedPrompts: state.queuedPrompts.map((item) => item.id === id && item.sessionId === sessionId
+      ? { ...item, state: "failed", error: message }
+      : item),
+  })),
+  retryQueuedPrompt: (sessionId, id) => set((state) => ({
+    queuedPrompts: state.queuedPrompts.map((item) => item.id === id && item.sessionId === sessionId
+      ? { ...item, state: "queued", error: undefined }
+      : item),
+  })),
+  reorderQueuedPrompt: (sessionId, id, beforeId) => set((state) => {
+    const source = state.queuedPrompts.find((item) => item.id === id);
+    if (!source || source.sessionId !== sessionId) return {};
+    return { queuedPrompts: reorderSessionQueue(state.queuedPrompts, id, beforeId) };
+  }),
+  resumeQueuedPrompts: (sessionId) => set((state) => {
+    const queuePauseReasons = { ...state.queuePauseReasons };
+    delete queuePauseReasons[sessionId];
+    return { queuePauseReasons };
+  }),
 }));
+
+export function reorderSessionQueue(items: QueuedPrompt[], id: string, beforeId: string): QueuedPrompt[] {
+  if (id === beforeId) return items;
+  const source = items.find((item) => item.id === id);
+  const target = items.find((item) => item.id === beforeId);
+  if (!source || !target || source.sessionId !== target.sessionId) return items;
+  const scoped = items.filter((item) => item.sessionId === source.sessionId);
+  const from = scoped.findIndex((item) => item.id === id);
+  const to = scoped.findIndex((item) => item.id === beforeId);
+  if (from < 0 || to < 0) return items;
+  const [moved] = scoped.splice(from, 1);
+  scoped.splice(to, 0, moved!);
+  let index = 0;
+  return items.map((item) => item.sessionId === source.sessionId ? scoped[index++]! : item);
+}
 
 const SESSION_SCOPED_EVENTS: Record<string, true> = {
   run_started: true,
@@ -309,6 +374,26 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
   if (event.sequence && event.sequence <= state.lastSequence) return state;
   let next = { ...state, lastSequence: Math.max(state.lastSequence, event.sequence || 0) };
   const data = event.data ?? {};
+  // The backend permits only one main run process-wide. Track that lifecycle before
+  // filtering session-scoped events so a queue in another session waits instead of
+  // attempting a concurrent turn and losing its prompt.
+  if (!event.agentId && event.kind === "run_started" && event.sessionId) {
+    next.globalRunId = event.runId ?? "starting";
+    next.globalRunSessionId = event.sessionId;
+  }
+  if (!event.agentId && (event.kind === "run_finished" || event.kind === "run_cancelled" || event.kind === "run_failed")) {
+    const isGlobalTerminal = Boolean(next.globalRunId) && (
+      event.runId === next.globalRunId ||
+      (next.globalRunId === "starting" && event.sessionId === next.globalRunSessionId)
+    );
+    if (isGlobalTerminal) {
+      next.globalRunId = "";
+      next.globalRunSessionId = "";
+    }
+    if (event.kind === "run_cancelled" && event.sessionId && next.queuedPrompts.some((item) => item.sessionId === event.sessionId)) {
+      next.queuePauseReasons = { ...next.queuePauseReasons, [event.sessionId]: "interrupted" };
+    }
+  }
   if (event.sessionId && event.sessionId !== state.currentSessionId && SESSION_SCOPED_EVENTS[event.kind]) return next;
 
 
@@ -341,6 +426,8 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         );
         next.runId = data.activeRunID || data.lastRunID || "";
         next.running = data.active === "true";
+        next.globalRunId = data.globalActiveRunID || (next.running ? next.runId : "");
+        next.globalRunSessionId = data.globalActiveSessionID || (next.running ? event.sessionId : "");
         next.runStartedAt = next.running ? Date.now() : 0;
         next.activity = next.running ? "waiting_model" : "";
         next.error = "";
@@ -350,7 +437,6 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         next.agents = (event.agentSnapshots ?? []).map(normalizeAgentSnapshot);
         next.todo = event.todo ?? null;
         next.attachments = [];
-        next.queuedPrompts = [];
         next.contextProfile = null;
         const contextLimit = next.modelsByProvider[data.provider]?.find((item) => item.id === data.model)?.contextWindow ?? 0;
         next.contextUsage = parseContextUsage(data.usage, contextLimit);
@@ -535,14 +621,14 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
             if (stamped.kind === "thinking" || stamped.kind === "commentary") {
               return settleTimedProcessBlock(stamped, terminalState, completedAt);
             }
-            return { ...stamped, state: terminalState === "completed" && stamped.kind === "tool" ? "completed" : terminalState };
+            return { ...stamped, state: stamped.kind === "tool" ? (terminalState === "cancelled" ? "cancelled" : "failed") : terminalState };
           }
           return stamped;
         });
         if (next.selectedAgentId) {
           next.agentBlocks = next.agentBlocks.map((block) => {
-            if (!["streaming", "running", "started"].includes(block.state || "")) return block;
-            return { ...block, state: terminalState === "completed" && block.kind === "tool" ? "completed" : terminalState };
+            if (!isLiveBlock(block)) return block;
+            return { ...block, state: block.kind === "tool" ? (terminalState === "cancelled" ? "cancelled" : "failed") : terminalState };
           });
         }
         if (event.kind === "run_cancelled" && !next.blocks.some((block) => block.kind === "status" && block.runId === terminalRunId)) {
@@ -556,6 +642,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
           }];
         }
       }
+      // Cross-session cancellation pause state is projected before session filtering.
       next.runId = "";
       if (event.kind === "run_failed") {
         next.error = event.text ?? "Run failed";
@@ -591,6 +678,8 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
     currentTitle: session.title,
     blocks,
     running: mode === "running",
+    globalRunId: mode === "running" ? "run-demo" : "",
+    globalRunSessionId: mode === "running" ? snapshot.sessionId : "",
     runId: mode === "running" ? "run-demo" : "",
     runStartedAt: Date.now() - 402_000,
     activity: mode === "running" ? "tool" : "completed",
@@ -661,7 +750,7 @@ function demoAgents(): AgentState[] {
 }
 
 function isLiveBlock(block: Block) {
-  return ["streaming", "running", "started", "progress"].includes(block.state || "");
+  return ["queued", "awaiting_approval", "reviewing_approval", "streaming", "running", "started", "progress"].includes(block.state || "");
 }
 
 function settleTimedProcessBlock(block: Block, state = "completed", completedAt = Date.now()): Block {
@@ -757,11 +846,12 @@ function updateTool(blocks: Block[], event: RuntimeEvent): Block[] {
   if (event.kind === "tool_started") blocks = settleActiveProcessText(blocks, event);
   const text = event.text ?? "";
   const argumentsText = typeof data.arguments === "string" ? data.arguments : "";
+  const pendingState = ["queued", "awaiting_approval", "reviewing_approval"].includes(event.state || "")
+    ? event.state || ""
+    : "";
   const nextState = event.kind === "tool_finished"
     ? event.state || "completed"
-    : event.kind === "tool_started" || event.kind === "tool_update"
-      ? "running"
-      : event.state || "";
+    : pendingState || (event.kind === "tool_started" || event.kind === "tool_update" ? "running" : event.state || "");
 
   if (index < 0) {
     // Seed content from arguments so the timeline can preview path/command while running.

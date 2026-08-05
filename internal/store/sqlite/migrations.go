@@ -363,12 +363,12 @@ var migrations = []string{
 		expires_at INTEGER NOT NULL,
 		data BLOB NOT NULL
 	);
-	CREATE INDEX resource_claims_key_state_expiry
-		ON resource_claims(resource_key,state,expires_at,id);
+	CREATE INDEX resource_claims_owner
+		ON resource_claims(run_id,task_id,holder_id,created_at,id);
 	CREATE INDEX resource_claims_lease_state
 		ON resource_claims(lease_id,state,id);
-	CREATE INDEX resource_claims_owner
-		ON resource_claims(run_id,task_id,holder_id,created_at,id);`,
+	CREATE INDEX resource_claims_key_state_expiry
+		ON resource_claims(resource_key,state,expires_at,id);`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

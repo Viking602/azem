@@ -241,13 +241,17 @@ func (s *Service) PutArtifact(ctx context.Context, sessionID, runID, kind string
 	}
 	digest := sha256.Sum256(payload)
 	hash := fmt.Sprintf("%x", digest[:])
-	idDigest := sha256.Sum256([]byte(sessionID + "\x00" + kind + "\x00" + hash))
-	id := fmt.Sprintf("artifact_%x", idDigest[:16])
+	id := contextArtifactID(sessionID, kind, hash)
 	now := time.Now().UTC()
 	if err := dbgen.New(s.db).InsertContextArtifact(ctx, dbgen.InsertContextArtifactParams{ID: id, SessionID: sessionID, RunID: runID, Kind: kind, Sha256: hash, Payload: payload, Preview: preview, CreatedAt: now.UnixNano()}); err != nil {
 		return ContextArtifact{}, fmt.Errorf("put context artifact: %w", err)
 	}
 	return s.LoadArtifact(ctx, sessionID, id)
+}
+
+func contextArtifactID(sessionID, kind, hash string) string {
+	digest := sha256.Sum256([]byte(sessionID + "\x00" + kind + "\x00" + hash))
+	return fmt.Sprintf("artifact_%x", digest[:16])
 }
 
 func (s *Service) LoadArtifact(ctx context.Context, sessionID, id string) (ContextArtifact, error) {
@@ -408,13 +412,90 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
 			SELECT ?,goal,revision,phases,? FROM session_todos WHERE session_id=?`, []any{targetID, now, sourceID}},
 		{"recap", `INSERT INTO recaps(session_id,anchor,covered_boundary,revision,goal,summary,open_items,updated_at)
 			SELECT ?,anchor,covered_boundary,revision,goal,summary,open_items,? FROM recaps WHERE session_id=?`, []any{targetID, now, sourceID}},
+		{"tools", `INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at)
+			SELECT ?,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at
+			FROM session_tool_records WHERE session_id=? AND state<>'running'`, []any{targetID, sourceID}},
 	}
 	for _, copy := range copies {
 		if _, err := tx.ExecContext(ctx, copy.query, copy.args...); err != nil {
 			return fmt.Errorf("fork session %s: %w", copy.name, err)
 		}
 	}
+	artifactIDs, err := cloneForkArtifacts(ctx, tx, sourceID, targetID)
+	if err != nil {
+		return err
+	}
+	if err := remapForkArtifactReferences(ctx, tx, targetID, artifactIDs); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+type forkArtifact struct {
+	id, runID, kind, hash, preview string
+	payload                        []byte
+	createdAt                      int64
+}
+
+func cloneForkArtifacts(ctx context.Context, tx *sql.Tx, sourceID, targetID string) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,run_id,kind,sha256,payload,preview,created_at
+		FROM context_artifacts WHERE session_id=? ORDER BY created_at,id`, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("fork session artifacts: %w", err)
+	}
+	artifacts := []forkArtifact{}
+	for rows.Next() {
+		var artifact forkArtifact
+		if err := rows.Scan(&artifact.id, &artifact.runID, &artifact.kind, &artifact.hash, &artifact.payload, &artifact.preview, &artifact.createdAt); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("read fork session artifact: %w", err)
+		}
+		artifact.payload = append([]byte(nil), artifact.payload...)
+		artifacts = append(artifacts, artifact)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close fork session artifacts: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read fork session artifacts: %w", err)
+	}
+	ids := make(map[string]string, len(artifacts))
+	for _, artifact := range artifacts {
+		targetArtifactID := contextArtifactID(targetID, artifact.kind, artifact.hash)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,payload,preview,created_at)
+			VALUES(?,?,?,?,?,?,?,?)`, targetArtifactID, targetID, artifact.runID, artifact.kind, artifact.hash, artifact.payload, artifact.preview, artifact.createdAt); err != nil {
+			return nil, fmt.Errorf("clone fork session artifact %s: %w", artifact.id, err)
+		}
+		ids[artifact.id] = targetArtifactID
+	}
+	return ids, nil
+}
+
+func remapForkArtifactReferences(ctx context.Context, tx *sql.Tx, targetID string, ids map[string]string) error {
+	for sourceArtifactID, targetArtifactID := range ids {
+		updates := []struct {
+			name  string
+			query string
+			args  []any
+		}{
+			{"projection", `UPDATE session_projections
+				SET blocks=replace(CAST(blocks AS TEXT),?,?),model_history=replace(CAST(model_history AS TEXT),?,?)
+				WHERE session_id=?`, []any{sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, targetID}},
+			{"blocks", `UPDATE session_blocks SET data=replace(CAST(data AS TEXT),?,?) WHERE session_id=?`, []any{sourceArtifactID, targetArtifactID, targetID}},
+			{"todo", `UPDATE session_todos SET goal=replace(goal,?,?),phases=replace(CAST(phases AS TEXT),?,?) WHERE session_id=?`, []any{sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, targetID}},
+			{"recap", `UPDATE recaps SET goal=replace(goal,?,?),summary=replace(summary,?,?),open_items=replace(open_items,?,?) WHERE session_id=?`, []any{sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, targetID}},
+			{"tools", `UPDATE session_tool_records
+				SET arguments=replace(CAST(arguments AS TEXT),?,?),content=replace(content,?,?),
+					structured=replace(CAST(structured AS TEXT),?,?),artifact_id=CASE WHEN artifact_id=? THEN ? ELSE artifact_id END
+				WHERE session_id=?`, []any{sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, targetID}},
+		}
+		for _, update := range updates {
+			if _, err := tx.ExecContext(ctx, update.query, update.args...); err != nil {
+				return fmt.Errorf("remap fork session %s artifact: %w", update.name, err)
+			}
+		}
+	}
+	return nil
 }
 
 func validateSessionForkIDs(sourceID, targetID string) error {

@@ -849,7 +849,7 @@ func TestSessionMenuStateAndForkPersist(t *testing.T) {
 	}
 	defer store.Close(ctx)
 	service := NewService(store.DB())
-	prepareSessionMenuTest(t, ctx, service)
+	sourceArtifactID := prepareSessionMenuTest(t, ctx, service)
 
 	listed, err := service.List(ctx, 1)
 	if err != nil {
@@ -862,8 +862,68 @@ func TestSessionMenuStateAndForkPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if projection.Session.Title != "Renamed" || len(projection.Blocks) != 1 || projection.Blocks[0].Content != "keep this context" {
+	if projection.Session.Title != "Renamed" || len(projection.Blocks) != 1 || !strings.Contains(projection.Blocks[0].Content, "keep this context") {
 		t.Fatalf("forked projection=%#v", projection)
+	}
+	if len(projection.ToolRecords) != 2 {
+		t.Fatalf("forked terminal tool records=%#v", projection.ToolRecords)
+	}
+	var completed, interrupted ToolRecord
+	for _, record := range projection.ToolRecords {
+		switch record.ToolCallID {
+		case "completed":
+			completed = record
+		case "interrupted":
+			interrupted = record
+		}
+	}
+	if completed.State != ToolCompleted || completed.ArtifactID == "" || completed.ArtifactID == sourceArtifactID ||
+		!strings.Contains(completed.Content, completed.ArtifactID) || !bytes.Contains(completed.Arguments, []byte(completed.ArtifactID)) ||
+		!bytes.Contains(completed.Structured, []byte(completed.ArtifactID)) {
+		t.Fatalf("forked completed tool record=%#v", completed)
+	}
+	if interrupted.State != ToolInterrupted {
+		t.Fatalf("forked interrupted tool record=%#v", interrupted)
+	}
+	if strings.Contains(projection.Blocks[0].Content, sourceArtifactID) || !strings.Contains(projection.Blocks[0].Content, completed.ArtifactID) {
+		t.Fatalf("forked block artifact reference=%q", projection.Blocks[0].Content)
+	}
+	artifact, err := service.LoadArtifact(ctx, "forked", completed.ArtifactID)
+	if err != nil || string(artifact.Payload) != "forked artifact payload" {
+		t.Fatalf("forked artifact=%#v error=%v", artifact, err)
+	}
+	if _, err := service.LoadArtifact(ctx, "forked", sourceArtifactID); err == nil {
+		t.Fatal("source artifact ID remained accessible from fork")
+	}
+	history, err := service.SearchHistory(ctx, "forked", "fork artifact", 10, 1000, 4000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var historyArtifactCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM history_fts WHERE session_id='forked' AND source_type='artifact' AND source_id=?`,
+		"artifact:"+completed.ArtifactID).Scan(&historyArtifactCount); err != nil || historyArtifactCount != 1 {
+		t.Fatalf("forked artifact history row count=%d error=%v", historyArtifactCount, err)
+	}
+	foundArtifactHistory := false
+	for _, item := range history {
+		foundArtifactHistory = foundArtifactHistory || item.SourceID == "artifact:"+completed.ArtifactID
+		if strings.Contains(item.SourceID, sourceArtifactID) {
+			t.Fatalf("forked history retained source artifact=%#v", history)
+		}
+	}
+	if !foundArtifactHistory {
+		t.Fatalf("forked artifact history=%#v", history)
+	}
+	if got, err := service.PutArtifact(ctx, "forked", "dedup-run", artifact.Kind, artifact.Payload, "new preview"); err != nil || got.ID != artifact.ID {
+		t.Fatalf("forked artifact dedup=%#v error=%v", got, err)
+	}
+	var artifactCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM context_artifacts WHERE session_id='forked'`).Scan(&artifactCount); err != nil || artifactCount != 1 {
+		t.Fatalf("forked artifact count=%d error=%v", artifactCount, err)
+	}
+	sourceProjection, err := service.LoadProjection(ctx, "source")
+	if err != nil || len(sourceProjection.ToolRecords) != 3 || sourceProjection.Blocks[0].Content != "keep this context artifact:"+sourceArtifactID {
+		t.Fatalf("source projection changed=%#v error=%v", sourceProjection, err)
 	}
 }
 
@@ -894,12 +954,45 @@ func TestRenameIfTitleDoesNotOverwriteManualRename(t *testing.T) {
 	}
 }
 
-func prepareSessionMenuTest(t *testing.T, ctx context.Context, service *Service) {
+func prepareSessionMenuTest(t *testing.T, ctx context.Context, service *Service) string {
 	t.Helper()
 	if _, err := service.Ensure(ctx, Session{ID: "source", Title: "Original"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.AppendBlock(ctx, "source", Block{Kind: "user", Content: "keep this context"}); err != nil {
+	artifact, err := service.PutArtifact(ctx, "source", "run", "tool_result", []byte("forked artifact payload"), "fork artifact preview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.AppendBlock(ctx, "source", Block{Kind: "user", Content: "keep this context artifact:" + artifact.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "completed", Name: "coding.shell",
+		Arguments: []byte(`{"artifact":"` + artifact.ID + `"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.FinishToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "completed", State: ToolCompleted,
+		Content:    "full output: artifact:" + artifact.ID,
+		Structured: []byte(`{"artifactId":"` + artifact.ID + `"}`), ArtifactID: artifact.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "interrupted", Name: "coding.edit_hashline",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.FinishToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "interrupted", State: ToolInterrupted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "running", Name: "coding.read_file",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.Ensure(ctx, Session{ID: "newer", Title: "Newer"}); err != nil {
@@ -916,4 +1009,5 @@ func prepareSessionMenuTest(t *testing.T, ctx context.Context, service *Service)
 	if err := service.Fork(ctx, "source", "forked"); err != nil {
 		t.Fatal(err)
 	}
+	return artifact.ID
 }

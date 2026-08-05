@@ -299,3 +299,65 @@ func TestMigrationV16BackfillsKnownCacheWrites(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrationV18AddsControlPlaneStoresAndReopens(t *testing.T) {
+	if len(migrations) != schemaVersion {
+		t.Fatalf("migration count = %d, schema version = %d", len(migrations), schemaVersion)
+	}
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "control-plane.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 17; version++ {
+		if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
+			t.Fatalf("apply fixture migration %d: %v", version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version=17`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := provider.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 18 {
+		t.Fatalf("schema version = %d, want 18", version)
+	}
+	for _, name := range []string{
+		"agent_definition_snapshots",
+		"agent_definition_snapshots_created",
+		"admission_reservations",
+		"admission_reservations_agent_state",
+		"admission_reservations_expiry",
+		"resource_claims",
+		"resource_claims_owner",
+		"resource_claims_lease_state",
+		"resource_claims_key_state_expiry",
+	} {
+		var found string
+		if err := provider.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE name=?`, name).Scan(&found); err != nil {
+			t.Fatalf("missing migration 18 object %s: %v", name, err)
+		}
+	}
+	if err := provider.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen schema 18 database: %v", err)
+	}
+	if err := reopened.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

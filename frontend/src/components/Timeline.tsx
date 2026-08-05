@@ -1,5 +1,5 @@
 import {
-  Check, ChevronDown, ChevronRight, CircleStop, FileCode2, FilePenLine, ImagePlus,
+  Check, ChevronDown, ChevronRight, CircleStop, Clock3, FileCode2, FilePenLine, ImagePlus,
   LoaderCircle, ShieldCheck, X,
 } from "lucide-react";
 import { Fragment, useEffect, useRef, useState } from "react";
@@ -27,11 +27,8 @@ export function TimelineFeed({
 }) {
   // Side chat stays flat; main transcript folds completed process trails like Codex.
   if (compact) {
-    const entries = groupTimelineBlocks(blocks, language);
     return <div className="timeline-feed compact">
-      {entries.map((entry) => entry.kind === "tool-group"
-        ? <ToolGroup key={entry.id} blocks={entry.blocks} summary={entry.summary} language={language} />
-        : <TimelineBlock key={entry.block.id} block={entry.block} language={language} compact />)}
+      <ProcessEntries blocks={blocks} language={language} compact />
     </div>;
   }
 
@@ -106,18 +103,20 @@ function ProcessFold({ blocks, elapsedMs, language }: {
   </details>;
 }
 
-function ProcessEntries({ blocks, language, active = false }: {
+function ProcessEntries({ blocks, language, active = false, compact = false }: {
   blocks: Block[];
   language: Snapshot["language"];
   active?: boolean;
+  compact?: boolean;
 }) {
   const entries = groupTimelineBlocks(blocks, language);
   return <div className={`process-entries ${active ? "active" : ""}`} aria-live={active ? "polite" : undefined} aria-busy={active || undefined}>
     {entries.map((entry) => entry.kind === "tool-group"
       ? <ToolGroup key={entry.id} blocks={entry.blocks} summary={entry.summary} language={language} />
-      : <TimelineBlock key={entry.block.id} block={entry.block} language={language} />)}
+      : <TimelineBlock key={entry.block.id} block={entry.block} language={language} compact={compact} />)}
   </div>;
 }
+
 
 function ToolGroup({ blocks, summary, language }: { blocks: Block[]; summary: string; language: Snapshot["language"] }) {
   return <details className="tool-group work-entry">
@@ -173,6 +172,18 @@ export function TimelineBlock({ block, language, compact = false, nested = false
     if (fileChanges.length) {
       return <FileChangeBlock changes={fileChanges} language={language} nested={nested} />;
     }
+    const queued = block.state === "queued";
+    const awaitingApproval = block.state === "awaiting_approval" || block.state === "reviewing_approval";
+    const pending = queued || awaitingApproval;
+    const stateIcon = running
+      ? <LoaderCircle className="spin" size={12} />
+      : awaitingApproval
+        ? <ShieldCheck size={12} />
+        : queued
+          ? <Clock3 size={12} />
+          : block.state === "failed" || block.state === "cancelled"
+            ? <CircleStop size={12} />
+            : <Check size={12} />;
     const label = block.title ? toolDisplayName(block.title, language) : t("toolGeneric");
     // Prefer content; fall back to start-payload arguments so running tools still show path/command.
     const payload = block.content || block.data?.arguments || "";
@@ -191,14 +202,14 @@ export function TimelineBlock({ block, language, compact = false, nested = false
     >
       <summary>
         <span className="tool-leading work-entry-icon" aria-hidden="true">
-          <span className="tool-state">{running ? <LoaderCircle className="spin" size={12} /> : <Check size={12} />}</span>
+          <span className="tool-state">{stateIcon}</span>
           <span className="tool-chevron"><ChevronRight className="closed-chevron" size={12} /><ChevronDown className="open-chevron" size={12} /></span>
         </span>
         <span className="tool-summary-text">
           <strong className="work-entry-label">{label}</strong>
           {showPreview ? <em className="tool-preview">{presentation.preview}</em> : null}
         </span>
-        {(running || block.state === "failed") ? <span className="tool-status">{toolStatusLabel(block.state, language)}</span> : null}
+        {(running || pending || block.state === "failed") ? <span className="tool-status">{toolStatusLabel(block.state, language)}</span> : null}
       </summary>
       {hasDetail ? (
         <div className="tool-detail">
@@ -236,7 +247,10 @@ function ToolExecutionLog({ output, label }: { output: string; label: string }) 
 function toolStatusLabel(state: string | undefined, language: Snapshot["language"]) {
   const t = translator(language);
   if (state === "running" || state === "started" || state === "streaming" || state === "progress") return t("toolStatusRunning");
+  if (state === "queued") return t("queued");
+  if (state === "awaiting_approval" || state === "reviewing_approval") return t("needApproval");
   if (state === "failed") return t("toolStatusFailed");
+  if (state === "cancelled") return t("cancelled");
   return t("toolStatusDone");
 }
 

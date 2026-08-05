@@ -152,7 +152,7 @@ function MergeMenu({ pullRequest, disabled, confirm }: { pullRequest: PullReques
   return <details className="merge-menu" ref={details}>
     <summary className="merge-button" aria-disabled={!canMerge || disabled}><GitMerge size={16} />{pullRequest.autoMergeEnabled ? t("disableAutoMerge") : t("merge")}<ChevronDown size={14} /></summary>
     <div role="menu">
-      {pullRequest.autoMergeEnabled ? <button type="button" role="menuitem" onClick={() => { if (details.current) details.current.open = false; confirm({ title: t("disableAutoMerge"), description: pullRequest.title, request: { number: pullRequest.number, kind: "disable_auto_merge" } }); }}>{t("disableAutoMerge")}</button> : <>
+      {pullRequest.autoMergeEnabled ? <button type="button" role="menuitem" disabled={disabled} onClick={() => { if (details.current) details.current.open = false; confirm({ title: t("disableAutoMerge"), description: pullRequest.title, request: { number: pullRequest.number, kind: "disable_auto_merge" } }); }}>{t("disableAutoMerge")}</button> : <>
         <span>{t("merge")}</span>
         {pullRequest.allowedMergeMethods.map((method) => <button type="button" role="menuitem" disabled={!canMerge || disabled} key={`merge-${method}`} onClick={() => choose("merge", method)}>{mergeMethodLabel(method, language)}</button>)}
         <span>{t("enableAutoMerge")}</span>
@@ -184,7 +184,7 @@ function DescriptionSection({ pullRequest, edit }: { pullRequest: PullRequest; e
     <summary><span>{t("description")}</span><ChevronDown size={15} /></summary>
     <div className="pull-request-section-actions"><button className="icon-button" type="button" aria-label={t("editPullRequest")} onClick={edit}><Pencil size={14} /></button></div>
     <div className="pull-request-markdown">
-      {pullRequest.body ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} /> }}>{pullRequest.body}</ReactMarkdown> : <p>—</p>}
+      {pullRequest.body ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} />, img: InertMarkdownImage }}>{pullRequest.body}</ReactMarkdown> : <p>—</p>}
     </div>
   </details>;
 }
@@ -197,6 +197,11 @@ function SafeMarkdownAnchor({ baseURL, href, children, title }: MarkdownAnchorPr
     if (destination) void openExternalURL(destination);
   };
   return <a href={destination ?? undefined} title={title} aria-disabled={destination ? undefined : true} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{children}</a>;
+}
+
+function InertMarkdownImage({ alt, title }: ComponentProps<"img">) {
+  const label = alt?.trim() || title?.trim() || "Image";
+  return <span className="pull-request-markdown-image-omitted" role="img" aria-label={label}>[{label}]</span>;
 }
 
 function resolveExternalURL(href: string | undefined, baseURL: string): string | null {
@@ -263,7 +268,7 @@ function CommentsSection({ pullRequest, review }: { pullRequest: PullRequest; re
   };
   return <section className="pull-request-comments" aria-labelledby="pull-request-comments-heading">
     <header><h2 id="pull-request-comments-heading">{t("comments")} · {pullRequest.comments.length}</h2><button type="button" onClick={review}><ShieldCheck size={14} />{t("review")}</button></header>
-    <div className="pull-request-comment-list">{pullRequest.comments.length === 0 ? <div className="pull-request-section-empty"><MessageCircle size={16} />{t("noComments")}</div> : pullRequest.comments.map((comment) => <article key={comment.id || `${comment.author.login}-${comment.createdAt}`}><header><Actor actor={comment.author} /><time dateTime={comment.createdAt}>{dateLabel(comment.createdAt)}</time></header><div className="pull-request-markdown compact"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} /> }}>{comment.body}</ReactMarkdown></div></article>)}</div>
+    <div className="pull-request-comment-list">{pullRequest.comments.length === 0 ? <div className="pull-request-section-empty"><MessageCircle size={16} />{t("noComments")}</div> : pullRequest.comments.map((comment) => <article key={comment.id || `${comment.author.login}-${comment.createdAt}`}><header><Actor actor={comment.author} /><time dateTime={comment.createdAt}>{dateLabel(comment.createdAt)}</time></header><div className="pull-request-markdown compact"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} />, img: InertMarkdownImage }}>{comment.body}</ReactMarkdown></div></article>)}</div>
     {pullRequest.state === "OPEN" && <form className="pull-request-comment-composer" onSubmit={(event) => void submit(event)}><label className="sr-only" htmlFor="pull-request-comment">{t("commentPlaceholder")}</label><textarea id="pull-request-comment" value={body} onChange={(event) => setBody(event.target.value)} placeholder={t("commentPlaceholder")} /><button type="submit" aria-label={t("postComment")} title={t("postComment")} disabled={mutating || !body.trim()}><Send size={15} /></button></form>}
   </section>;
 }
@@ -310,7 +315,13 @@ function ReviewDialog({ pullRequest, close }: { pullRequest: PullRequest; close:
   const [body, setBody] = useState("");
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (await runPullRequestMutation({ number: pullRequest.number, kind: "review", reviewKind: kind, body })) close();
+    if (await runPullRequestMutation({
+      number: pullRequest.number,
+      kind: "review",
+      reviewKind: kind,
+      body,
+      expectedHeadOid: pullRequest.headRefOid,
+    })) close();
   };
   return <Modal title={t("review")} close={close}><form className="pull-request-form" onSubmit={(event) => void submit(event)}>
     <fieldset className="pull-request-review-kinds"><legend>{t("review")}</legend>{(["comment", "approve", "request_changes"] as const).map((value) => <label key={value}><input type="radio" name="review-kind" checked={kind === value} onChange={() => setKind(value)} /><span>{value === "approve" ? t("approvePR") : value === "request_changes" ? t("requestChanges") : t("reviewComment")}</span></label>)}</fieldset>

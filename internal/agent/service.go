@@ -442,8 +442,21 @@ func (s *Service) RequireRunReconciliation(ctx context.Context, runID, reason st
 	if _, err := s.runner.Recover(ctx, runID); err != nil {
 		return err
 	}
+	run, err := s.runner.Run(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status == api.RunStatusReconcileRequired {
+		s.untrackSingleRunner(runID, nil)
+		return nil
+	}
+	if run.Status == api.RunStatusBlocked || run.Status == api.RunStatusWaitingUserInput {
+		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusRunning}); err != nil {
+			return fmt.Errorf("prepare run %s for reconciliation: %w", runID, err)
+		}
+	}
 	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusReconcileRequired}); err != nil {
-		return fmt.Errorf("mark run %s reconciliation required: %w", runID, err)
+		return fmt.Errorf("mark run %s reconciliation required from %s: %w", runID, run.Status, err)
 	}
 	s.untrackSingleRunner(runID, nil)
 	return nil

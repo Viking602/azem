@@ -27,7 +27,7 @@ export function isFileChangeTool(name = "") {
 export function fileChangesForBlock(block: Block): FileChange[] {
   if (block.kind === "diff") return diffEventChanges(block);
   if (block.kind !== "tool" || !isFileChangeTool(block.title || block.data?.name || "")) return [];
-  if (["running", "started", "streaming", "progress", "failed"].includes(block.state || "")) return [];
+  if (block.state && block.state !== "completed") return [];
 
   const name = block.title || block.data?.name || "";
   if (name === "coding.write_file") return writeFileChanges(block.data?.arguments || "");

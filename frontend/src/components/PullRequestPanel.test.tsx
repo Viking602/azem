@@ -1,9 +1,9 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { openExternalURL } from "../bridge";
+import { getPullRequestDashboard, mutatePullRequest, openExternalURL } from "../bridge";
 import { useRuntimeStore } from "../store";
-import type { PullRequest, PullRequestActor, Snapshot } from "../types";
+import type { PullRequest, PullRequestActor, PullRequestDashboard, Snapshot } from "../types";
 import PullRequestPanel from "./PullRequestPanel";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -26,6 +26,7 @@ const basePullRequest: PullRequest = {
   draft: false,
   author,
   headRefName: "feature/links",
+  headRefOid: "abcdef1234567890",
   baseRefName: "main",
   additions: 1,
   deletions: 1,
@@ -53,8 +54,29 @@ const basePullRequest: PullRequest = {
 };
 
 async function renderPanel(pullRequest: PullRequest): Promise<{ container: HTMLDivElement; root: Root }> {
+  const dashboard: PullRequestDashboard = {
+    capability: { available: true },
+    repository: {
+      nameWithOwner: "example/azem",
+      url: "https://github.com/example/azem",
+      defaultBranch: "main",
+      viewerPermission: "WRITE",
+      viewerLogin: "reviewer",
+      allowedMergeMethods: ["merge"],
+    },
+    createdByViewer: [],
+    needsReview: [],
+    open: [],
+    refreshedAt: "2026-08-01T00:00:00Z",
+  };
+  vi.mocked(mutatePullRequest).mockResolvedValue({
+    pullRequest,
+    monitor: { number: pullRequest.number, enabled: false, status: "disabled" },
+  });
+  vi.mocked(getPullRequestDashboard).mockResolvedValue(dashboard);
   useRuntimeStore.setState({
     snapshot,
+    pullRequestDashboard: dashboard,
     selectedPullRequestNumber: pullRequest.number,
     pullRequestDetail: pullRequest,
     pullRequestMonitors: new Map(),
@@ -77,6 +99,7 @@ afterEach(() => {
   vi.clearAllMocks();
   useRuntimeStore.setState({
     snapshot: null,
+    pullRequestDashboard: null,
     selectedPullRequestNumber: null,
     pullRequestDetail: null,
     pullRequestMonitors: new Map(),
@@ -131,6 +154,52 @@ describe("PullRequestPanel Markdown links", () => {
       unsafeLinks.forEach((link) => expect(dispatchClick(link)).toBe(false));
     });
     expect(openExternalURL).not.toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("renders remote Markdown images inertly without network-capable elements", async () => {
+    const pullRequest: PullRequest = {
+      ...basePullRequest,
+      body: "![body tracker](http://127.0.0.1:8080/body)",
+      comments: [{
+        ...basePullRequest.comments[0]!,
+        body: "![comment tracker](https://attacker.example/track)",
+      }],
+    };
+    const { container, root } = await renderPanel(pullRequest);
+
+    expect(container.querySelectorAll(".pull-request-markdown img")).toHaveLength(0);
+    expect(container.querySelectorAll(".pull-request-markdown-image-omitted")).toHaveLength(2);
+    expect(container.innerHTML).not.toContain("127.0.0.1");
+    expect(container.innerHTML).not.toContain("attacker.example");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+});
+
+describe("PullRequestPanel review safety", () => {
+  it("binds a review to the displayed repository and head commit", async () => {
+    const { container, root } = await renderPanel(basePullRequest);
+    const reviewButton = container.querySelector<HTMLButtonElement>(".pull-request-comments > header button")!;
+    await act(async () => reviewButton.click());
+
+    const dialog = document.querySelector<HTMLDivElement>(".pull-request-dialog")!;
+    const approve = Array.from(dialog.querySelectorAll<HTMLLabelElement>(".pull-request-review-kinds label"))
+      .find((label) => label.textContent?.includes("Approve"))!;
+    await act(async () => approve.querySelector<HTMLInputElement>("input")!.click());
+    await act(async () => dialog.querySelector<HTMLFormElement>("form")!.requestSubmit());
+
+    expect(mutatePullRequest).toHaveBeenCalledWith({
+      number: 42,
+      kind: "review",
+      reviewKind: "approve",
+      body: "",
+      expectedHeadOid: "abcdef1234567890",
+      expectedRepository: "example/azem",
+    });
 
     await act(async () => root.unmount());
     container.remove();

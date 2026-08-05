@@ -2,6 +2,7 @@ package githubpr
 
 import (
 	"context"
+	"encoding/json"
 	"os/exec"
 	"slices"
 	"strings"
@@ -82,7 +83,7 @@ func TestMutationsKeepUserTextOnStdinAndGuardMergeHead(t *testing.T) {
 			return []byte(`{"nameWithOwner":"octo/demo","mergeCommitAllowed":true,"rebaseMergeAllowed":true,"squashMergeAllowed":true}`), nil
 		case command == "gh api user --jq .login":
 			return []byte("octocat\n"), nil
-		case len(args) >= 2 && name == "gh" && args[0] == "pr" && (args[1] == "edit" || args[1] == "merge"):
+		case len(args) >= 1 && name == "gh" && ((args[0] == "pr" && len(args) >= 2 && (args[1] == "edit" || args[1] == "merge")) || args[0] == "api"):
 			mutationArgs = append(mutationArgs, append([]string(nil), args...))
 			mutationStdin = append(mutationStdin, stdin)
 			return nil, nil
@@ -96,7 +97,9 @@ func TestMutationsKeepUserTextOnStdinAndGuardMergeHead(t *testing.T) {
 	client := NewClientWithRunner("/workspace", runner)
 
 	body := "body with `ticks`, $(commands), and ; separators"
-	if _, err := client.Mutate(context.Background(), MutationRequest{Number: 42, Kind: MutationEdit, Title: "title; touch /tmp/nope", Body: body}); err != nil {
+	if _, err := client.Mutate(context.Background(), MutationRequest{
+		Number: 42, Kind: MutationEdit, Title: "title; touch /tmp/nope", Body: body, ExpectedRepository: "octo/demo",
+	}); err != nil {
 		t.Fatalf("edit mutation error = %v", err)
 	}
 	wantEdit := []string{"pr", "edit", "42", "--repo", "octo/demo", "--title", "title; touch /tmp/nope", "--body-file", "-"}
@@ -104,7 +107,9 @@ func TestMutationsKeepUserTextOnStdinAndGuardMergeHead(t *testing.T) {
 		t.Fatalf("edit call args=%v stdin=%q", mutationArgs, mutationStdin)
 	}
 
-	if _, err := client.Mutate(context.Background(), MutationRequest{Number: 42, Kind: MutationMerge, MergeMethod: "squash", ExpectedHeadOID: "abcdef1234567890"}); err != nil {
+	if _, err := client.Mutate(context.Background(), MutationRequest{
+		Number: 42, Kind: MutationMerge, MergeMethod: "squash", ExpectedHeadOID: "abcdef1234567890", ExpectedRepository: "octo/demo",
+	}); err != nil {
 		t.Fatalf("merge mutation error = %v", err)
 	}
 	wantMerge := []string{"pr", "merge", "42", "--repo", "octo/demo", "--squash", "--match-head-commit", "abcdef1234567890"}
@@ -112,15 +117,85 @@ func TestMutationsKeepUserTextOnStdinAndGuardMergeHead(t *testing.T) {
 		t.Fatalf("merge args = %v, want %v", mutationArgs, wantMerge)
 	}
 
+	reviewBody := "Pin this review to the displayed revision."
+	if _, err := client.Mutate(context.Background(), MutationRequest{
+		Number: 42, Kind: MutationReview, ReviewKind: "request_changes", Body: reviewBody,
+		ExpectedHeadOID: "abcdef1234567890", ExpectedRepository: "octo/demo",
+	}); err != nil {
+		t.Fatalf("review mutation error = %v", err)
+	}
+	wantReview := []string{"api", "--method", "POST", "repos/octo/demo/pulls/42/reviews", "--input", "-"}
+	if len(mutationArgs) != 3 || !slices.Equal(mutationArgs[2], wantReview) {
+		t.Fatalf("review args = %v, want %v", mutationArgs, wantReview)
+	}
+	var reviewPayload map[string]string
+	if err := json.Unmarshal([]byte(mutationStdin[2]), &reviewPayload); err != nil {
+		t.Fatal(err)
+	}
+	if reviewPayload["commit_id"] != "abcdef1234567890" || reviewPayload["event"] != "REQUEST_CHANGES" || reviewPayload["body"] != reviewBody {
+		t.Fatalf("review payload = %#v", reviewPayload)
+	}
+
 	before := len(mutationArgs)
-	if _, err := client.Mutate(context.Background(), MutationRequest{Number: 42, Kind: MutationAddReviewer, Login: "octocat;rm"}); err == nil {
+	if _, err := client.Mutate(context.Background(), MutationRequest{
+		Number: 42, Kind: MutationAddReviewer, Login: "octocat;rm", ExpectedRepository: "octo/demo",
+	}); err == nil {
 		t.Fatal("unsafe reviewer login was accepted")
 	}
-	if _, err := client.Mutate(context.Background(), MutationRequest{Number: 42, Kind: MutationMerge, MergeMethod: "squash", ExpectedHeadOID: "not-an-oid"}); err == nil {
+	if _, err := client.Mutate(context.Background(), MutationRequest{
+		Number: 42, Kind: MutationMerge, MergeMethod: "squash", ExpectedHeadOID: "not-an-oid", ExpectedRepository: "octo/demo",
+	}); err == nil {
 		t.Fatal("invalid expected head OID was accepted")
+	}
+	if _, err := client.Mutate(context.Background(), MutationRequest{
+		Number: 42, Kind: MutationReview, ReviewKind: "approve",
+		ExpectedHeadOID: "bbbbbbbbbbbbbbbb", ExpectedRepository: "octo/demo",
+	}); err == nil || !strings.Contains(err.Error(), "head changed") {
+		t.Fatalf("stale review error = %v", err)
+	}
+	if _, err := client.Mutate(context.Background(), MutationRequest{
+		Number: 42, Kind: MutationClose, ExpectedRepository: "octo/other",
+	}); err == nil || !strings.Contains(err.Error(), "repository changed") {
+		t.Fatalf("repository mismatch error = %v", err)
 	}
 	if len(mutationArgs) != before {
 		t.Fatalf("invalid mutation reached runner: %v", mutationArgs[before:])
+	}
+}
+
+func TestDetailReResolvesRepositoryAfterWorkspaceRemoteChanges(t *testing.T) {
+	repository := "octo/one"
+	var detailRepositories []string
+	runner := runnerFunc(func(_ context.Context, _ string, _ string, name string, args ...string) ([]byte, error) {
+		command := name + " " + strings.Join(args, " ")
+		switch {
+		case strings.HasPrefix(command, "gh repo view "):
+			return []byte(`{"nameWithOwner":"` + repository + `","mergeCommitAllowed":true}`), nil
+		case command == "gh api user --jq .login":
+			return []byte("octocat\n"), nil
+		case strings.HasPrefix(command, "gh pr view "):
+			for index, argument := range args {
+				if argument == "--repo" && index+1 < len(args) {
+					detailRepositories = append(detailRepositories, args[index+1])
+				}
+			}
+			return []byte(`{"number":42,"title":"repository scoped","state":"OPEN","headRefName":"feature","headRefOid":"abcdef1234567890","baseRefName":"main","statusCheckRollup":[]}`), nil
+		default:
+			t.Fatalf("unexpected command %q", command)
+			return nil, nil
+		}
+	})
+	client := NewClientWithRunner("/workspace", runner)
+
+	if _, err := client.Detail(context.Background(), 42); err != nil {
+		t.Fatal(err)
+	}
+	repository = "octo/two"
+	if _, err := client.Detail(context.Background(), 42); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"octo/one", "octo/two"}; !slices.Equal(detailRepositories, want) {
+		t.Fatalf("detail repositories = %v, want %v", detailRepositories, want)
 	}
 }
 

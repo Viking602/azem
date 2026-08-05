@@ -89,6 +89,8 @@ var (
 	errResumeBudgetExhausted = errors.New("resume run budget exhausted")
 )
 
+const teamWorkspaceAnchorMetadata = "workspace_anchor"
+
 type singleRunManifest struct {
 	Version          int       `json:"version"`
 	Provider         string    `json:"provider"`
@@ -628,6 +630,13 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		return nil, hyagent.Engine{}, err
 	}
 	engine.Hooks = engine.Hooks.Prepend(editRecoveryHook{run: run})
+	if host != nil {
+		engine.Hooks = engine.Hooks.Prepend(activeGuidanceModelHook{
+			peek: func() activeGuidanceSnapshot {
+				return host.peekActiveGuidance(request.SessionID, run.RunID)
+			},
+		})
+	}
 	if host != nil {
 		metadata := host.hookMetadata(request.SessionID, run.RunID)
 		engine.OutputGuardrails = append(engine.OutputGuardrails, host.stopHookGuardrail(metadata, hooks.Stop, func(input hyagent.OutputGuardrailInput) string {
@@ -1387,6 +1396,40 @@ func manualCompactionTailStart(blocks []session.Block, keepRecent int) int {
 	return tailStart
 }
 
+// activeGuidanceModelHook projects pending guidance into every model request.
+// The engine's hook context is request-local, so guidance remains pending until
+// compaction adopts it into durable history or the terminal guardrail retries.
+type activeGuidanceModelHook struct {
+	peek func() activeGuidanceSnapshot
+}
+
+func (h activeGuidanceModelHook) TransformContext(_ context.Context, messages []message.Message) ([]message.Message, error) {
+	if h.peek == nil {
+		return messages, nil
+	}
+	guidance := guidanceMessages(h.peek().values)
+	if len(guidance) == 0 {
+		return messages, nil
+	}
+	return append(append([]message.Message(nil), messages...), guidance...), nil
+}
+
+func (activeGuidanceModelHook) BeforeModelCall(context.Context, *hyprovider.Request) error {
+	return nil
+}
+
+func (activeGuidanceModelHook) BeforeToolCall(context.Context, *tool.Call) error {
+	return nil
+}
+
+func (activeGuidanceModelHook) AfterToolCall(context.Context, *tool.Result) error {
+	return nil
+}
+
+func (activeGuidanceModelHook) OnEvent(context.Context, hyprovider.Event) error {
+	return nil
+}
+
 type activeGuidanceContext struct {
 	inner       hyagent.TargetContextManager
 	peek        func() activeGuidanceSnapshot
@@ -1417,10 +1460,12 @@ func (c activeGuidanceContext) CompactTo(ctx context.Context, history []message.
 	return compacted, err
 }
 
-func guidanceMessages(values []string) []message.Message {
-	cleaned := make([]string, 0, len(values))
+func guidanceMessages(values []activeGuidanceMessage) []message.Message {
+	cleaned := make([]activeGuidanceMessage, 0, len(values))
 	for _, value := range values {
-		if value = strings.TrimSpace(value); value != "" {
+		value.Text = strings.TrimSpace(value.Text)
+		value.Attachments = CloneAttachments(value.Attachments)
+		if value.Text != "" || len(value.Attachments) > 0 {
 			cleaned = append(cleaned, value)
 		}
 	}
@@ -1428,14 +1473,20 @@ func guidanceMessages(values []string) []message.Message {
 		return nil
 	}
 	if len(cleaned) == 1 {
-		return []message.Message{message.NewText(message.RoleUser, cleaned[0])}
+		return []message.Message{UserMessageWithAttachments(cleaned[0].Text, cleaned[0].Attachments)}
 	}
 	var combined strings.Builder
 	combined.WriteString("[User guidance received while the task was running]\n")
+	attachments := make([]session.Attachment, 0)
 	for index, value := range cleaned {
-		fmt.Fprintf(&combined, "%d. %s\n", index+1, value)
+		text := value.Text
+		if text == "" {
+			text = "[Attached image]"
+		}
+		fmt.Fprintf(&combined, "%d. %s\n", index+1, text)
+		attachments = append(attachments, value.Attachments...)
 	}
-	return []message.Message{message.NewText(message.RoleUser, strings.TrimSpace(combined.String()))}
+	return []message.Message{UserMessageWithAttachments(strings.TrimSpace(combined.String()), attachments)}
 }
 
 func modelContextTokenTarget(providerID, modelID string, contextWindow, toolTokens int) (int, error) {
@@ -1884,6 +1935,14 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 	run, err := r.coding.Runner().Run(context.Background(), runID)
 	if err != nil {
 		return err
+	}
+	currentWorkspace := canonicalWorkspaceAnchor(r.cfg.Workspace.Root)
+	storedWorkspace := strings.TrimSpace(run.Metadata[teamWorkspaceAnchorMetadata])
+	if storedWorkspace == "" {
+		return r.coding.RequireRunReconciliation(context.Background(), runID, "durable team run is missing its workspace binding")
+	}
+	if storedWorkspace != currentWorkspace {
+		return r.coding.RequireRunReconciliation(context.Background(), runID, "durable team run belongs to a different workspace")
 	}
 	request := TurnRequest{
 		SessionID:      firstNonempty(run.Metadata["session_id"], "default"),

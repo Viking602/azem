@@ -1,7 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
-import { mergeSessionTranscript, reduceEvents, type RuntimeData, useRuntimeStore } from "./store";
+import { mergeSessionTranscript, reduceEvents, reorderSessionQueue, type RuntimeData, useRuntimeStore } from "./store";
 import type { Snapshot } from "./types";
 import Inspector from "./components/Inspector";
 import ThreadSurface, { approvalPresentation, ContextMeter, contextOccupancy, formatDuration } from "./components/ThreadSurface";
@@ -11,6 +11,14 @@ import { toolDisplayName } from "./i18n";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => undefined });
+
+async function enterComposerText(textarea: HTMLTextAreaElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  await act(async () => {
+    setter?.call(textarea, value);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
 
 const snapshot: Snapshot = {
   workspace: "/tmp/azem", sessionId: "s1", provider: "chatgpt", model: "gpt-5.6-sol",
@@ -25,10 +33,10 @@ function state(): RuntimeData {
     pullRequestMonitors: new Map(), pullRequestLoading: false, pullRequestMutating: false, pullRequestError: "",
     modelRoutes: [], modelsByProvider: {}, contextProfile: null,
     contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recovery: [],
-    runId: "", running: false, runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
+    runId: "", running: false, globalRunId: "", globalRunSessionId: "", runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
     lastSequence: 0, error: "", view: "thread", inspectorTab: "environment", inspectorOpen: true,
-    settingsOpen: false, commandOpen: false, planMode: false, attachments: [], queuedPrompts: [], theme: "system",
+    settingsOpen: false, commandOpen: false, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system",
   };
 }
 
@@ -111,9 +119,33 @@ describe("runtime event projection", () => {
       { sequence: 6, kind: "run_finished", runId: "r1" },
     ]);
     expect(finished.blocks.find((block) => block.toolCallId === "read-1")).toMatchObject({ state: "completed" });
-    // Search never finished; run end must not leave it spinning forever.
-    expect(finished.blocks.find((block) => block.toolCallId === "search-1")).toMatchObject({ state: "completed" });
+    // Search never finished; run end must stop it without claiming execution succeeded.
+    expect(finished.blocks.find((block) => block.toolCallId === "search-1")).toMatchObject({ state: "failed" });
     expect(finished.running).toBe(false);
+  });
+
+  it("preserves queued and approval states until a tool actually runs", () => {
+    const queued = reduceEvents(state(), [
+      { sequence: 1, kind: "run_started", runId: "r1" },
+      { sequence: 2, kind: "tool_started", runId: "r1", toolCallId: "write-1", state: "queued", data: { name: "coding.write_file" } },
+      { sequence: 3, kind: "tool_started", runId: "r1", toolCallId: "read-1", state: "queued", data: { name: "coding.read_file" } },
+    ]);
+    expect(queued.blocks.map((block) => block.state)).toEqual(["queued", "queued"]);
+
+    const awaiting = reduceEvents(queued, [
+      { sequence: 4, kind: "tool_update", runId: "r1", toolCallId: "write-1", state: "awaiting_approval" },
+    ]);
+    expect(awaiting.blocks.map((block) => block.state)).toEqual(["awaiting_approval", "queued"]);
+
+    const running = reduceEvents(awaiting, [
+      { sequence: 5, kind: "tool_update", runId: "r1", toolCallId: "write-1", state: "running" },
+    ]);
+    expect(running.blocks.map((block) => block.state)).toEqual(["running", "queued"]);
+
+    const finished = reduceEvents(running, [
+      { sequence: 6, kind: "run_finished", runId: "r1" },
+    ]);
+    expect(finished.blocks.map((block) => block.state)).toEqual(["failed", "failed"]);
   });
 
   it("shows cumulative command output without resetting the open detail", async () => {
@@ -369,6 +401,23 @@ describe("runtime event projection", () => {
     expect(formatDuration(3_723_000)).toBe("1h02m03s");
   });
 
+  it("starts an image-only turn from the composer", async () => {
+    useRuntimeStore.setState({ ...state(), blocks: [] });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ThreadSurface)));
+    const image = { id: "image-only", name: "screen.png", mimeType: "image/png", path: "/tmp/screen.png", size: 42 };
+    await act(async () => useRuntimeStore.setState({ attachments: [image] }));
+    const send = container.querySelector<HTMLButtonElement>(".send-button")!;
+    expect(send.disabled).toBe(false);
+    await act(async () => send.click());
+    expect(useRuntimeStore.getState()).toMatchObject({ running: true, attachments: [] });
+    expect(useRuntimeStore.getState().blocks.at(-1)).toMatchObject({ kind: "user", content: "", attachments: [image] });
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("queues, edits, and removes follow-up messages without restarting the active timer", () => {
     useRuntimeStore.setState({ ...state(), running: true, runStartedAt: 123 });
     const image = { id: "image-1", name: "screen.png", mimeType: "image/png", path: "/tmp/screen.png", size: 42 };
@@ -377,8 +426,138 @@ describe("runtime event projection", () => {
     expect(queued).toMatchObject({ text: "下一轮", attachments: [image] });
     useRuntimeStore.getState().addOptimisticUser("当前引导", []);
     expect(useRuntimeStore.getState().runStartedAt).toBe(123);
-    useRuntimeStore.getState().removeQueuedPrompt(queued.id);
+    useRuntimeStore.getState().removeQueuedPrompt(queued.sessionId, queued.id);
     expect(useRuntimeStore.getState().queuedPrompts).toHaveLength(0);
+  });
+
+  it("keeps queues scoped to their session and reorders only that session", () => {
+    const first = { id: "a", sessionId: "s1", text: "first", attachments: [], state: "queued" as const };
+    const other = { id: "x", sessionId: "s2", text: "other", attachments: [], state: "queued" as const };
+    const second = { id: "b", sessionId: "s1", text: "second", attachments: [], state: "queued" as const };
+    expect(reorderSessionQueue([first, other, second], "b", "a").map((item) => item.id)).toEqual(["b", "x", "a"]);
+    const switched = reduceEvents({ ...state(), queuedPrompts: [first] }, [{
+      sequence: 1,
+      kind: "session_loaded",
+      sessionId: "s2",
+      state: "loaded",
+      data: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", blocks: "[]" },
+    }]);
+    expect(switched.queuedPrompts).toEqual([first]);
+  });
+
+  it("holds a prompt in the visible session while another session owns the global run", async () => {
+    useRuntimeStore.setState({
+      ...state(),
+      currentSessionId: "s2",
+      globalRunId: "run-a",
+      globalRunSessionId: "s1",
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ThreadSurface)));
+    await enterComposerText(container.querySelector<HTMLTextAreaElement>("#azem-composer")!, "wait for session A");
+    await act(async () => container.querySelector<HTMLButtonElement>(".send-button")!.click());
+    expect(useRuntimeStore.getState()).toMatchObject({
+      currentSessionId: "s2",
+      running: false,
+      queuedPrompts: [{ sessionId: "s2", text: "wait for session A", state: "queued" }],
+    });
+    expect(container.querySelector(".queued-prompt-content")?.textContent).toBe("wait for session A");
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("tracks a foreign main run through session-scoped event filtering", () => {
+    const running = reduceEvents({ ...state(), currentSessionId: "s2" }, [{
+      sequence: 1, kind: "run_started", sessionId: "s1", runId: "run-a",
+    }]);
+    expect(running).toMatchObject({
+      currentSessionId: "s2",
+      running: false,
+      globalRunId: "run-a",
+      globalRunSessionId: "s1",
+    });
+    const finished = reduceEvents(running, [{
+      sequence: 2, kind: "run_finished", sessionId: "s1", runId: "run-a",
+    }]);
+    expect(finished).toMatchObject({ running: false, globalRunId: "", globalRunSessionId: "" });
+  });
+
+  it("rejects queue mutations from a different session", () => {
+    const queued = { id: "a", sessionId: "s1", text: "first", attachments: [], state: "queued" as const };
+    useRuntimeStore.setState({ ...state(), currentSessionId: "s2", queuedPrompts: [queued] });
+    useRuntimeStore.getState().updateQueuedPrompt("s2", queued.id, "cross-session", []);
+    useRuntimeStore.getState().failQueuedPrompt("s2", queued.id, "cross-session");
+    useRuntimeStore.getState().retryQueuedPrompt("s2", queued.id);
+    useRuntimeStore.getState().removeQueuedPrompt("s2", queued.id);
+    expect(useRuntimeStore.getState().queuedPrompts).toEqual([queued]);
+  });
+
+  it("clears a queue editor when the visible session changes", async () => {
+    const queued = { id: "a", sessionId: "s1", text: "session A draft", attachments: [], state: "queued" as const };
+    useRuntimeStore.setState({
+      ...state(),
+      blocks: [{ id: "assistant-1", kind: "assistant", content: "running" }],
+      running: true,
+      runId: "run-a",
+      queuedPrompts: [queued],
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ThreadSurface)));
+    await act(async () => container.querySelector<HTMLButtonElement>(".queued-prompt-content")!.click());
+    expect(container.querySelector<HTMLTextAreaElement>("#azem-composer")!.value).toBe("session A draft");
+    await act(async () => useRuntimeStore.getState().applyEvents([{
+      sequence: 1,
+      kind: "session_loaded",
+      sessionId: "s2",
+      state: "loaded",
+      data: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", blocks: "[]" },
+    }]));
+    expect(container.querySelector<HTMLTextAreaElement>("#azem-composer")!.value).toBe("");
+    expect(useRuntimeStore.getState().queuedPrompts).toEqual([queued]);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("pauses queued follow-ups after interruption until Resume", async () => {
+    useRuntimeStore.setState({ ...state(), blocks: [{ id: "assistant-1", kind: "assistant", content: "处理中" }], running: true, runId: "r1", runStartedAt: Date.now() });
+    useRuntimeStore.getState().enqueuePrompt("中断后继续", []);
+    useRuntimeStore.getState().applyEvents([{ sequence: 1, kind: "run_cancelled", sessionId: "s1", runId: "r1" }]);
+    expect(useRuntimeStore.getState().queuePauseReasons.s1).toBe("interrupted");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ThreadSurface)));
+    await act(async () => Promise.resolve());
+    expect(useRuntimeStore.getState().queuedPrompts).toHaveLength(1);
+    expect(container.textContent).toContain("队列因你中断任务而暂停");
+    await act(async () => container.querySelector<HTMLButtonElement>(".queue-paused button")!.click());
+    await act(async () => Promise.resolve());
+    expect(useRuntimeStore.getState().queuedPrompts).toHaveLength(0);
+    expect(useRuntimeStore.getState().running).toBe(true);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("uses Cmd+Shift+Enter to invert Queue into Steer for one follow-up", async () => {
+    useRuntimeStore.setState({ ...state(), blocks: [{ id: "assistant-1", kind: "assistant", content: "处理中" }], running: true, runId: "r1", runStartedAt: Date.now() });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ThreadSurface)));
+    const textarea = container.querySelector<HTMLTextAreaElement>("#azem-composer")!;
+    await enterComposerText(textarea, "立即调整方向");
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true, cancelable: true, key: "Enter", code: "Enter", metaKey: true, shiftKey: true,
+    })));
+    await act(async () => Promise.resolve());
+    expect(useRuntimeStore.getState().queuedPrompts).toHaveLength(0);
+    expect(useRuntimeStore.getState().blocks.at(-1)).toMatchObject({ kind: "user", content: "立即调整方向" });
+    await act(async () => root.unmount());
+    container.remove();
   });
 
   it("starts the next queued message after the active run finishes", async () => {
@@ -603,6 +782,12 @@ describe("runtime event projection", () => {
     expect(container.textContent).not.toContain("+0");
     expect(container.textContent).not.toContain("−0");
     await act(async () => root.unmount());
+  });
+
+  it("clears pull request detail loading when its panel closes", () => {
+    useRuntimeStore.setState({ ...state(), selectedPullRequestNumber: 42, pullRequestLoading: true });
+    useRuntimeStore.getState().selectPullRequest(null);
+    expect(useRuntimeStore.getState()).toMatchObject({ selectedPullRequestNumber: null, pullRequestLoading: false });
   });
 
   it("renders the real environment panel without the old tabs or runtime placeholder", async () => {

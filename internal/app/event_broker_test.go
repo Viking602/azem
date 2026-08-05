@@ -36,6 +36,24 @@ func TestEventBrokerCoalescesDeltasBeforeLifecycleBarrier(t *testing.T) {
 	}
 }
 
+func TestEventBrokerKeepsTextPhasesSeparate(t *testing.T) {
+	broker := newEventBroker(time.Hour)
+	broker.Publish(Event{Kind: EventTextDelta, SessionID: "session", RunID: "run", Text: "working", TextPhase: "commentary"})
+	broker.Publish(Event{Kind: EventTextDelta, SessionID: "session", RunID: "run", Text: "answer", TextPhase: "final"})
+	broker.Publish(Event{Kind: EventRunFinished, SessionID: "session", RunID: "run"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	commentary, err := broker.Next(ctx)
+	if err != nil || commentary.Text != "working" || commentary.TextPhase != "commentary" {
+		t.Fatalf("commentary delta=%#v error=%v", commentary, err)
+	}
+	final, err := broker.Next(ctx)
+	if err != nil || final.Text != "answer" || final.TextPhase != "final" {
+		t.Fatalf("final delta=%#v error=%v", final, err)
+	}
+}
+
 func TestTerminalEventReleasesRunAdmissionBeforeDelivery(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
 	service.mu.Lock()
