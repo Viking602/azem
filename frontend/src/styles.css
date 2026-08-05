@@ -67,6 +67,11 @@ button, input, textarea { font: inherit; color: inherit; }
 button { border: 0; background: none; cursor: pointer; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible, .tool-log:focus-visible { outline: 2px solid color-mix(in srgb, var(--blue) 75%, white); outline-offset: 2px; }
 button:disabled { cursor: default; opacity: .45; }
+:where(button, summary, select, option, label, a[href], [role="button"], [role="tab"], [role="menuitem"], [role="option"]) {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
 pre, code, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
 ::selection { background: color-mix(in srgb, var(--accent) 24%, transparent); }
 * { scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent; scrollbar-width: thin; }

@@ -87,6 +87,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const preventNativeContextMenu = (event: MouseEvent) => event.preventDefault();
+    document.addEventListener("contextmenu", preventNativeContextMenu);
+    return () => document.removeEventListener("contextmenu", preventNativeContextMenu);
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       const primary = event.metaKey || event.ctrlKey;
