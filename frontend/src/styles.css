@@ -1938,32 +1938,8 @@ button.reasoning-summary:disabled { cursor: default; }
 .inspector-row { min-height: 34px; display: flex; align-items: center; gap: 8px; font-size: var(--text-sm); }
 .inspector-row > strong { flex: 0 0 auto; color: var(--ink); font-weight: 560; }
 .inspector-value, .inspector-muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); text-align: right; }
+.inspector-branch-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--text-sm); }
 .inspector-muted { color: var(--faint); }
-.inspector-field { display: grid; gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
-.inspector-field-label { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: var(--text-sm); font-weight: 560; }
-.inspector-branch-select { width: 100%; }
-.inspector-branch-select > summary {
-  width: 100%;
-  min-width: 0;
-  max-width: none;
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--paper);
-  color: var(--ink);
-  font-size: var(--text-sm);
-}
-.inspector-branch-select > summary:hover,
-.inspector-branch-select[open] > summary,
-.inspector-branch-select[data-open="true"] > summary {
-  border-color: var(--line-strong);
-  background: var(--paper-muted);
-}
-.inspector-branch-select .menu-select-value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: var(--text-sm);
-}
 .inspector-menu > summary { min-width: 0; max-width: 130px; height: 27px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: var(--text-xs); }
 .process-row, .source-row { min-height: 37px; display: flex; align-items: center; gap: 9px; }.process-row > span { min-width: 0; flex: 1; }.process-row strong, .process-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.process-row strong { font-size: var(--text-sm); }.process-row small { margin-top: 2px; color: var(--faint); font-size: var(--text-2xs); }.process-row em { color: var(--faint); font-size: var(--text-2xs); font-style: normal; }.process-row em[data-state="running"] { color: var(--green); }.source-row span { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); }
 .todo-section .inspector-section-header h2 { color: var(--ink); }

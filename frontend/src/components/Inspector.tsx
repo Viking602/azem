@@ -7,7 +7,6 @@ import { tFormat, translator } from "../i18n";
 import { subagentSummaryLabel } from "../subagents";
 import { useRuntimeStore } from "../store";
 import type { AgentState, Snapshot, TodoList, TodoStatus } from "../types";
-import MenuSelect from "./MenuSelect";
 import SubagentGlyph from "./SubagentGlyph";
 
 
@@ -26,11 +25,8 @@ export default function Inspector() {
   const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const t = translator(snapshot.language);
   const sources = Array.from(new Map(blocks.flatMap((block) => block.attachments ?? []).map((item) => [item.id || item.path, item])).values());
+  const currentBranch = branches.find((branch) => branch.current)?.name || "";
 
-  const action = async (kind: string, target = "", decision = "") => {
-    try { await execute({ kind, target, decision, sessionId: currentSessionId }); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-  };
 
   useEffect(() => {
     void execute({ kind: "list_background", sessionId: currentSessionId }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
@@ -51,18 +47,9 @@ export default function Inspector() {
             <InspectorRow icon={FolderGit2} label={t("local")}>
               <span className="inspector-value" title={snapshot.workspace}>{basename(snapshot.workspace)}</span>
             </InspectorRow>
-            <div className="inspector-field">
-              <div className="inspector-field-label"><GitBranch size={14} /><span>{t("branch")}</span></div>
-              <MenuSelect
-                className="inspector-branch-select"
-                fit="full"
-                placement="bottom"
-                value={branches.find((branch) => branch.current)?.name || ""}
-                options={branches.map((branch) => ({ value: branch.name, label: branch.name }))}
-                onChange={(value) => void action("switch_git_branch", value)}
-                ariaLabel={t("branch")}
-              />
-            </div>
+            <InspectorRow icon={GitBranch} label={t("branch")}>
+              <span className="inspector-value inspector-branch-value" title={currentBranch}>{currentBranch || t("noBranches")}</span>
+            </InspectorRow>
           </div>
         </section>
         {todo && todo.phases.length > 0 && <TodoPlan todo={todo} language={snapshot.language} />}

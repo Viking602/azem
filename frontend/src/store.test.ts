@@ -794,6 +794,7 @@ describe("runtime event projection", () => {
     const projected = reduceEvents({
       ...state(),
       blocks: [{ id: "user-1", kind: "user", content: "检查截图", attachments: [{ id: "image-1", name: "screen.png", mimeType: "image/png", path: "/tmp/screen.png", size: 42 }] }],
+      branches: [{ name: "codex/read-only-branch", current: true }],
     }, [{
       sequence: 1,
       kind: "background_state",
@@ -806,6 +807,8 @@ describe("runtime event projection", () => {
     expect(container.textContent).toContain("环境信息");
     expect(container.textContent).toContain("bun run dev");
     expect(container.textContent).toContain("screen.png");
+    expect(container.querySelector(".inspector-branch-value")?.textContent).toBe("codex/read-only-branch");
+    expect(container.querySelector(".inspector-branch-select")).toBeNull();
     expect(container.textContent).not.toContain("上下文检查器");
     expect(container.textContent).not.toContain("Runtime 正常");
     await act(async () => root.unmount());
