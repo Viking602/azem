@@ -24,6 +24,8 @@ const (
 
 type EventEmitter func(string, ...any) bool
 
+var readClipboardImage = azemapp.ReadClipboardImage
+
 type Snapshot struct {
 	Workspace           string                  `json:"workspace"`
 	SessionID           string                  `json:"sessionId"`
@@ -86,6 +88,7 @@ type Event struct {
 	ToolCallID       string                         `json:"toolCallId,omitempty"`
 	ApprovalID       string                         `json:"approvalId,omitempty"`
 	Text             string                         `json:"text,omitempty"`
+	TextPhase        string                         `json:"textPhase,omitempty"`
 	State            string                         `json:"state,omitempty"`
 	Data             map[string]string              `json:"data,omitempty"`
 	Agent            *azemapp.AgentStatePayload     `json:"agent,omitempty"`
@@ -179,6 +182,32 @@ func (b *Bridge) ImportAttachment(sessionID, name, mimeType, encoded string) (At
 		return Attachment{}, err
 	}
 	return attachmentFromSession(item), nil
+}
+
+func (b *Bridge) ImportClipboardImage(sessionID string) (*Attachment, error) {
+	data, mimeType, err := readClipboardImage()
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	extension := ".png"
+	switch mimeType {
+	case "image/jpeg", "image/jpg":
+		extension = ".jpg"
+	case "image/gif":
+		extension = ".gif"
+	case "image/webp":
+		extension = ".webp"
+	}
+	name := "pasted-image-" + time.Now().Format("20060102-150405") + extension
+	item, err := b.runtime.ImportImageBytes(sessionID, name, mimeType, data)
+	if err != nil {
+		return nil, err
+	}
+	attachment := attachmentFromSession(item)
+	return &attachment, nil
 }
 
 func (b *Bridge) Guide(sessionID, runID, text string) error {
@@ -316,7 +345,7 @@ func eventDTO(event azemapp.Event) Event {
 	return Event{
 		Kind: string(event.Kind), SessionID: event.SessionID, RunID: event.RunID,
 		AgentID: event.AgentID, ToolCallID: event.ToolCallID, ApprovalID: event.ApprovalID,
-		Text: event.Text, State: event.State, Data: event.Data,
+		Text: event.Text, TextPhase: event.TextPhase, State: event.State, Data: event.Data,
 		Agent: event.Agent, AgentBlocks: event.AgentBlocks, AgentCatalog: event.AgentCatalog,
 		AgentSnapshots: event.AgentSnapshots, SkillCatalog: event.SkillCatalog,
 		SkillDiagnostics: event.SkillDiagnostics, ContextProfile: event.ContextProfile,

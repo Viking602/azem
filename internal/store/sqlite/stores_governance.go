@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -377,6 +378,18 @@ func (u *unitOfWork) ListCapabilities(ctx context.Context, selector api.Capabili
 }
 
 func (u *unitOfWork) AppendUsage(ctx context.Context, value api.UsageRecord) error {
+	normalizeUsageRecord(&value)
+	existing, err := loadRecord[api.UsageRecord](ctx, u.tx, kindUsage, value.ID, "")
+	if err == nil {
+		normalizeUsageRecord(&existing)
+		if reflect.DeepEqual(existing, value) {
+			return nil
+		}
+		return fmt.Errorf("usage record %q: %w", value.ID, api.ErrIdempotencyConflict)
+	}
+	if !errors.Is(err, api.ErrNotFound) {
+		return err
+	}
 	return u.save(ctx, kindUsage, value.ID, "", value.RunID, value.TaskID, "", value.CreatedAt, "", "", value, false)
 }
 
@@ -387,7 +400,13 @@ func (u *unitOfWork) QueryUsage(ctx context.Context, selector api.UsageSelector)
 	}
 	filtered := values[:0]
 	for _, value := range values {
-		if selector.TaskID != "" && value.TaskID != selector.TaskID || selector.AgentID != "" && value.AgentID != selector.AgentID || selector.Provider != "" && value.Provider != selector.Provider || !within(value.CreatedAt, selector.Since, selector.Until) {
+		normalizeUsageRecord(&value)
+		if selector.TaskID != "" && value.TaskID != selector.TaskID ||
+			selector.AgentID != "" && value.AgentID != selector.AgentID ||
+			selector.Kind != "" && value.Kind != selector.Kind ||
+			selector.Provider != "" && value.Provider != selector.Provider ||
+			selector.ToolName != "" && value.ToolName != selector.ToolName ||
+			!within(value.CreatedAt, selector.Since, selector.Until) {
 			continue
 		}
 		filtered = append(filtered, value)
@@ -396,6 +415,7 @@ func (u *unitOfWork) QueryUsage(ctx context.Context, selector api.UsageSelector)
 }
 
 func (u *unitOfWork) SumCredits(ctx context.Context, selector api.UsageSelector) (int64, error) {
+	selector.Limit = 0
 	values, err := u.QueryUsage(ctx, selector)
 	if err != nil {
 		return 0, err
@@ -405,6 +425,12 @@ func (u *unitOfWork) SumCredits(ctx context.Context, selector api.UsageSelector)
 		total += value.Credits
 	}
 	return total, nil
+}
+
+func normalizeUsageRecord(value *api.UsageRecord) {
+	if value.Kind == "" {
+		value.Kind = api.UsageKindLegacyExecution
+	}
 }
 
 func (u *unitOfWork) AppendDeadLetter(ctx context.Context, value api.DeadLetterEntry) error {

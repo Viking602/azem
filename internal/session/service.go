@@ -31,16 +31,19 @@ type Session struct {
 }
 
 type Block struct {
-	Sequence         int64        `json:"-"`
-	Kind             string       `json:"kind"`
-	RunID            string       `json:"runId,omitempty"`
-	AgentID          string       `json:"agentId,omitempty"`
-	ParentToolCallID string       `json:"parentToolCallId,omitempty"`
-	Title            string       `json:"title,omitempty"`
-	Content          string       `json:"content,omitempty"`
-	State            string       `json:"state,omitempty"`
-	Collapsed        bool         `json:"collapsed,omitempty"`
-	Attachments      []Attachment `json:"attachments,omitempty"`
+	Sequence         int64             `json:"-"`
+	Kind             string            `json:"kind"`
+	RunID            string            `json:"runId,omitempty"`
+	AgentID          string            `json:"agentId,omitempty"`
+	ParentToolCallID string            `json:"parentToolCallId,omitempty"`
+	Title            string            `json:"title,omitempty"`
+	Content          string            `json:"content,omitempty"`
+	TextPhase        string            `json:"textPhase,omitempty"`
+	State            string            `json:"state,omitempty"`
+	Collapsed        bool              `json:"collapsed,omitempty"`
+	Attachments      []Attachment      `json:"attachments,omitempty"`
+	Data             map[string]string `json:"data,omitempty"`
+	Thinking         string            `json:"-"`
 }
 
 // ModelHistory is a replaceable provider-resume checkpoint, not the durable
@@ -311,18 +314,44 @@ func (s *Service) UpdatePreferences(ctx context.Context, id, providerID, modelID
 }
 
 func (s *Service) Rename(ctx context.Context, id, title string) error {
-	title = strings.TrimSpace(title)
-	if title == "" {
-		return fmt.Errorf("session title is required")
-	}
-	if len([]rune(title)) > 200 {
-		return fmt.Errorf("session title is too long")
+	title, err := normalizeSessionTitle(title)
+	if err != nil {
+		return err
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET title=? WHERE id=?`, title, id)
 	if err != nil {
 		return fmt.Errorf("rename session: %w", err)
 	}
 	return requireOneSession(result, id)
+}
+
+// RenameIfTitle updates a generated title only while the caller's observed
+// placeholder is still current, so a concurrent manual rename always wins.
+func (s *Service) RenameIfTitle(ctx context.Context, id, currentTitle, nextTitle string) (bool, error) {
+	nextTitle, err := normalizeSessionTitle(nextTitle)
+	if err != nil {
+		return false, err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET title=? WHERE id=? AND title=?`, nextTitle, id, currentTitle)
+	if err != nil {
+		return false, fmt.Errorf("conditionally rename session: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return changed == 1, nil
+}
+
+func normalizeSessionTitle(title string) (string, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "", fmt.Errorf("session title is required")
+	}
+	if len([]rune(title)) > 200 {
+		return "", fmt.Errorf("session title is too long")
+	}
+	return title, nil
 }
 
 func (s *Service) SetUIState(ctx context.Context, id, field string, enabled bool) error {
@@ -488,6 +517,20 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 	activeRunID, currentGeneration := checkpoint.LastRunID, checkpoint.CheckpointGeneration
 	if block.RunID != "" && activeRunID != "" && activeRunID != block.RunID {
 		return fmt.Errorf("complete turn: active run changed from %q to %q", block.RunID, activeRunID)
+	}
+	thinking := block.Thinking
+	block.Thinking = ""
+	if strings.TrimSpace(thinking) != "" {
+		thought := block
+		thought.Kind = "thinking"
+		thought.Title = "thinking"
+		thought.Content = thinking
+		if thought.State == "" {
+			thought.State = "completed"
+		}
+		if _, _, err := appendSessionBlock(ctx, tx, sessionID, thought); err != nil {
+			return err
+		}
 	}
 	if strings.TrimSpace(block.Content) != "" {
 		if _, _, err := appendSessionBlock(ctx, tx, sessionID, block); err != nil {

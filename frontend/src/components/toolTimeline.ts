@@ -1,5 +1,6 @@
 import { toolGroupLabel, translator, type Language, type ToolCategory } from "../i18n";
 import type { Block } from "../types";
+import { isFileChangeTool } from "./fileChanges";
 
 export type { ToolCategory };
 export const MIN_TOOL_GROUP_SIZE = 2;
@@ -176,11 +177,13 @@ export type TimelineEntry =
   | { kind: "tool-group"; id: string; blocks: Block[]; summary: string; running: boolean };
 
 export function isRunningTool(block: Block) {
-  return block.kind === "tool" && ["running", "started", "streaming"].includes(block.state || "");
+  return block.kind === "tool" && ["running", "started", "streaming", "progress"].includes(block.state || "");
 }
 
 export function isCollapsibleTool(block: Block) {
-  return block.kind === "tool" && !isRunningTool(block);
+  return block.kind === "tool"
+    && !isRunningTool(block)
+    && !isFileChangeTool(block.title || block.data?.name || "");
 }
 
 export function classifyToolCategory(title = ""): ToolCategory {
@@ -206,7 +209,7 @@ export function classifyToolCategory(title = ""): ToolCategory {
     raw.includes("shell") || raw.includes("test") || raw.includes("command")
     || raw.includes("运行") || raw.includes("命令")
   ) return "shell";
-  if (raw.includes("subagent") || raw.includes("spawn") || raw.includes("子代理") || raw.includes("agent")) return "agent";
+  if (raw.includes("subagent") || raw.includes("spawn") || raw.includes("子智能体") || raw.includes("agent")) return "agent";
   return "other";
 }
 
@@ -254,7 +257,7 @@ export function groupTimelineBlocks(blocks: Block[], language: Language): Timeli
 
 /** Kinds that form the collapsible process trail ("经过"), not final outcomes. */
 export function isProcessBlock(block: Block) {
-  return block.kind === "thinking" || block.kind === "tool";
+  return block.kind === "thinking" || block.kind === "commentary" || block.kind === "tool";
 }
 
 /** Agent / hook lifecycle noise — hide from the main transcript (Codex-style). */
@@ -303,7 +306,7 @@ export function segmentProcessTrail(
 }
 
 function isActiveProcessBlock(block: Block) {
-  return ["running", "started", "streaming"].includes(block.state || "");
+  return ["running", "started", "streaming", "progress"].includes(block.state || "");
 }
 
 function processElapsedMs(blocks: Block[]) {

@@ -26,6 +26,10 @@ coverage.*
 .env.*
 config.local.yaml
 
+# Local multi-module development
+/go.work
+/go.work.sum
+
 # Editor and operating-system files
 .idea/
 .vscode/

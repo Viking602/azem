@@ -19,10 +19,10 @@ type windowStateTracker struct {
 	path string
 	app  *application.App
 
-	mu     sync.Mutex
-	last   desktop.WindowGeometry
-	timer  *time.Timer
-	dirty  bool
+	mu    sync.Mutex
+	last  desktop.WindowGeometry
+	timer *time.Timer
+	dirty bool
 }
 
 func newWindowStateTracker(path string, app *application.App, initial desktop.WindowGeometry) *windowStateTracker {

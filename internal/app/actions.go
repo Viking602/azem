@@ -738,6 +738,7 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entries := []ModelRouteEntry{
+		{Scope: "title", Label: "Title", Route: s.cfg.Agents.Title},
 		{Scope: "plan", Label: "Plan", Route: s.cfg.Agents.Plan},
 		{Scope: "compaction", Label: "Compaction", Route: s.cfg.Agents.Compaction},
 	}
@@ -778,7 +779,7 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "plan" && entry.Scope != "compaction" && entry.Scope != "subagent" {
+	if entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "compaction" && entry.Scope != "subagent" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
 	if entry.Scope != "subagent" && entry.Role != "" {
@@ -821,7 +822,9 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		}
 	}
 	s.mu.Lock()
-	if entry.Scope == "plan" {
+	if entry.Scope == "title" {
+		s.cfg.Agents.Title = route
+	} else if entry.Scope == "plan" {
 		s.cfg.Agents.Plan = route
 	} else if entry.Scope == "compaction" {
 		s.cfg.Agents.Compaction = route

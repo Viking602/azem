@@ -270,6 +270,11 @@ agents:
   team:
     max_concurrency: 2
     max_ticks: 12
+  title:
+    # Lightweight model used for first-turn session titles.
+    provider: chatgpt
+    model: gpt-5.6-luna
+    reasoning: low
   plan:
     # Empty provider/model inherit the active model and reasoning effort.
     provider: ""

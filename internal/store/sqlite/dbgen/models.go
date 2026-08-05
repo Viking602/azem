@@ -16,6 +16,25 @@ type Account struct {
 	UpdatedAt     int64  `db:"updated_at"`
 }
 
+type AdmissionReservation struct {
+	ID        string `db:"id"`
+	AgentID   string `db:"agent_id"`
+	RunID     string `db:"run_id"`
+	State     string `db:"state"`
+	Version   int64  `db:"version"`
+	CreatedAt int64  `db:"created_at"`
+	UpdatedAt int64  `db:"updated_at"`
+	ExpiresAt int64  `db:"expires_at"`
+	Data      []byte `db:"data"`
+}
+
+type AgentDefinitionSnapshot struct {
+	DefinitionID string `db:"definition_id"`
+	Version      string `db:"version"`
+	CreatedAt    int64  `db:"created_at"`
+	Data         []byte `db:"data"`
+}
+
 type AuthCredential struct {
 	ProviderID string `db:"provider_id"`
 	AccountID  string `db:"account_id"`
@@ -133,6 +152,22 @@ type Record struct {
 	ToolName       string `db:"tool_name"`
 	IdempotencyKey string `db:"idempotency_key"`
 	Data           []byte `db:"data"`
+}
+
+type ResourceClaim struct {
+	ID          string `db:"id"`
+	ResourceKey string `db:"resource_key"`
+	RunID       string `db:"run_id"`
+	TaskID      string `db:"task_id"`
+	LeaseID     string `db:"lease_id"`
+	HolderID    string `db:"holder_id"`
+	Mode        string `db:"mode"`
+	State       string `db:"state"`
+	Version     int64  `db:"version"`
+	CreatedAt   int64  `db:"created_at"`
+	UpdatedAt   int64  `db:"updated_at"`
+	ExpiresAt   int64  `db:"expires_at"`
+	Data        []byte `db:"data"`
 }
 
 type Session struct {

@@ -1,10 +1,12 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it } from "vitest";
-import { reduceEvents, type RuntimeData, useRuntimeStore } from "./store";
+import { describe, expect, it, vi } from "vitest";
+import { mergeSessionTranscript, reduceEvents, type RuntimeData, useRuntimeStore } from "./store";
 import type { Snapshot } from "./types";
 import Inspector from "./components/Inspector";
 import ThreadSurface, { approvalPresentation, ContextMeter, contextOccupancy, formatDuration } from "./components/ThreadSurface";
+import { TimelineBlock } from "./components/Timeline";
+import SubagentsPage from "./components/SubagentsPage";
 import { toolDisplayName } from "./i18n";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -42,6 +44,31 @@ describe("runtime event projection", () => {
     expect(useRuntimeStore.getState().modelRoutes).toHaveLength(1);
   });
 
+  it("projects a first-turn session immediately and replaces its generated title", () => {
+    useRuntimeStore.setState(state());
+    useRuntimeStore.getState().addOptimisticUser("修复会话标题", []);
+    expect(useRuntimeStore.getState().sessions[0]).toMatchObject({ id: "s1", title: "新会话" });
+
+    useRuntimeStore.getState().applyEvents([{
+      sequence: 1, kind: "session_loaded", state: "list", data: { sessions: "[]" },
+    }]);
+    expect(useRuntimeStore.getState().sessions[0]).toMatchObject({ id: "s1", title: "新会话" });
+
+    useRuntimeStore.getState().applyEvents([{
+      sequence: 2,
+      kind: "session_loaded",
+      state: "list",
+      data: {
+        sessions: JSON.stringify([{
+          id: "s1", title: "修复会话标题", providerId: "chatgpt", modelId: "gpt-5.6-sol",
+          reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString(),
+        }]),
+      },
+    }]);
+    expect(useRuntimeStore.getState().sessions[0]?.title).toBe("修复会话标题");
+    expect(useRuntimeStore.getState().currentTitle).toBe("修复会话标题");
+  });
+
   it("isolates background automation events from the visible session", () => {
     const current: RuntimeData = { ...state(), running: true, runId: "visible-run", blocks: [{ id: "tool-1", kind: "tool", state: "running", content: "", title: "visible tool" }] };
     const projected = reduceEvents(current, [
@@ -67,21 +94,54 @@ describe("runtime event projection", () => {
         sequence: 3, kind: "tool_started", runId: "r1", toolCallId: "search-1", state: "running",
         data: { name: "coding.search", arguments: JSON.stringify({ query: "MenuSelect", path: "frontend/src" }) },
       },
+      {
+        sequence: 4, kind: "tool_update", runId: "r1", toolCallId: "read-1", state: "progress",
+        data: { output: "phase 1\n", output_bytes: "8" },
+      },
     ]);
     expect(started.blocks[0]).toMatchObject({
       kind: "tool", toolCallId: "read-1", state: "running", title: "coding.read_file",
     });
     expect(started.blocks[0]?.content).toContain("frontend/src/App.tsx");
     expect(started.blocks[1]?.content).toContain("MenuSelect");
+    expect(started.blocks[0]).toMatchObject({ state: "running", data: { output: "phase 1\n", output_bytes: "8" } });
 
     const finished = reduceEvents(started, [
-      { sequence: 4, kind: "tool_finished", runId: "r1", toolCallId: "read-1", state: "completed", text: "export default function App" },
-      { sequence: 5, kind: "run_finished", runId: "r1" },
+      { sequence: 5, kind: "tool_finished", runId: "r1", toolCallId: "read-1", state: "completed", text: "export default function App" },
+      { sequence: 6, kind: "run_finished", runId: "r1" },
     ]);
     expect(finished.blocks.find((block) => block.toolCallId === "read-1")).toMatchObject({ state: "completed" });
     // Search never finished; run end must not leave it spinning forever.
     expect(finished.blocks.find((block) => block.toolCallId === "search-1")).toMatchObject({ state: "completed" });
     expect(finished.running).toBe(false);
+  });
+
+  it("shows cumulative command output without resetting the open detail", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const block = {
+      id: "shell-1", kind: "tool" as const, title: "coding.shell", state: "running",
+      content: JSON.stringify({ command: "bun run dev", timeout_seconds: 30 }),
+      data: { output: "ready\nrequest 1\n", output_bytes: "16" },
+    };
+    await act(async () => root.render(createElement(TimelineBlock, { block, language: "zh-CN" })));
+    const details = container.querySelector("details")!;
+    details.open = true;
+    details.dispatchEvent(new Event("toggle"));
+    const log = container.querySelector<HTMLPreElement>(".tool-log")!;
+    expect(log.textContent).toBe("ready\nrequest 1\n");
+    expect(log.getAttribute("aria-live")).toBe("off");
+    expect(log.getAttribute("tabindex")).toBe("0");
+
+    await act(async () => root.render(createElement(TimelineBlock, {
+      block: { ...block, data: { output: "ready\nrequest 1\nrequest 2\n", output_bytes: "26" } },
+      language: "zh-CN",
+    })));
+    expect(details.open).toBe(true);
+    expect(container.querySelector(".tool-log")?.textContent).toContain("request 2");
+    await act(async () => root.unmount());
+    container.remove();
   });
 
   it("keeps growing subagent tool and elapsed counters across sparse agent_state updates", () => {
@@ -108,12 +168,16 @@ describe("runtime event projection", () => {
   it("streams subagent frames into the side chat instead of the main feed", () => {
     const base = { ...state(), selectedAgentId: "agent-1" };
     const projected = reduceEvents(base, [
-      { sequence: 1, kind: "thinking_delta", runId: "child-1", agentId: "agent-1", text: "先看 diff" },
-      { sequence: 2, kind: "tool_started", runId: "child-1", agentId: "agent-1", toolCallId: "c1", data: { name: "coding.git_diff" }, state: "running" },
-      { sequence: 3, kind: "tool_finished", runId: "child-1", agentId: "agent-1", toolCallId: "c1", text: "ok", state: "completed" },
-      { sequence: 4, kind: "text_delta", runId: "child-1", agentId: "agent-1", text: "结论" },
+      {
+        sequence: 1, kind: "agent_state", agentId: "agent-1", state: "running", text: "",
+        agent: { type: "explore", description: "检查变更", toolCalls: 0, turns: 0, tokensUsed: 0, elapsedMs: 0 },
+      },
+      { sequence: 2, kind: "thinking_delta", runId: "child-1", agentId: "agent-1", text: "先看 diff" },
+      { sequence: 3, kind: "tool_started", runId: "child-1", agentId: "agent-1", toolCallId: "c1", data: { name: "coding.git_diff" }, state: "running" },
+      { sequence: 4, kind: "tool_finished", runId: "child-1", agentId: "agent-1", toolCallId: "c1", text: "ok", state: "completed" },
+      { sequence: 5, kind: "text_delta", runId: "child-1", agentId: "agent-1", text: "结论" },
       // Unrelated main-run frame still goes to the main transcript.
-      { sequence: 5, kind: "thinking_delta", runId: "main-1", text: "主会话思考" },
+      { sequence: 6, kind: "thinking_delta", runId: "main-1", text: "主会话思考" },
     ]);
     expect(projected.blocks).toHaveLength(1);
     expect(projected.blocks[0]).toMatchObject({ kind: "thinking", content: "主会话思考" });
@@ -121,6 +185,13 @@ describe("runtime event projection", () => {
     expect(projected.agentBlocks[0]).toMatchObject({ kind: "thinking", title: "思考", content: "先看 diff" });
     expect(projected.agentBlocks[1]).toMatchObject({ kind: "tool", title: "coding.git_diff", state: "completed" });
     expect(projected.agentBlocks[2]).toMatchObject({ kind: "assistant", content: "结论" });
+    expect(projected.agents[0]).toMatchObject({ preview: "结论", previewKind: "assistant", previewRunId: "child-1" });
+
+    const finished = reduceEvents(projected, [{
+      sequence: 7, kind: "agent_state", agentId: "agent-1", state: "completed", text: "已检查全部变更",
+      agent: { type: "explore", description: "检查变更", summary: "已检查全部变更" },
+    }]);
+    expect(finished.agents[0]).toMatchObject({ state: "completed", preview: "已检查全部变更", previewKind: "assistant" });
   });
 
   it("ignores other agents' live frames while a different side chat is open", () => {
@@ -131,6 +202,15 @@ describe("runtime event projection", () => {
     expect(projected.blocks).toEqual([]);
   });
 
+  it("clears stale detail blocks only when switching subagents", () => {
+    const detail = [{ id: "answer-1", kind: "assistant" as const, content: "detail" }];
+    useRuntimeStore.setState({ ...state(), selectedAgentId: "agent-a", agentBlocks: detail });
+    useRuntimeStore.getState().selectAgent("agent-a");
+    expect(useRuntimeStore.getState().agentBlocks).toEqual(detail);
+    useRuntimeStore.getState().selectAgent("agent-b");
+    expect(useRuntimeStore.getState()).toMatchObject({ selectedAgentId: "agent-b", agentBlocks: [] });
+  });
+
   it("separates discrete thinking markdown segments instead of gluing **A****B**", () => {
     const projected = reduceEvents(state(), [
       { sequence: 1, kind: "thinking_delta", runId: "r1", text: "**Planning analysis**" },
@@ -138,6 +218,70 @@ describe("runtime event projection", () => {
       { sequence: 3, kind: "thinking_delta", runId: "r1", text: " mid-sentence" },
     ]);
     expect(projected.blocks[0]?.content).toBe("**Planning analysis**\n\n**Inspecting files** mid-sentence");
+  });
+
+  it("keeps reasoning steps in event order when tools run between model updates", () => {
+    const projected = reduceEvents(state(), [
+      { sequence: 1, kind: "thinking_delta", runId: "r1", text: "先读取文件。" },
+      { sequence: 2, kind: "tool_started", runId: "r1", toolCallId: "read-1", data: { name: "coding.read_file" } },
+      { sequence: 3, kind: "tool_finished", runId: "r1", toolCallId: "read-1", state: "completed", text: "done" },
+      { sequence: 4, kind: "thinking_delta", runId: "r1", text: "再检查结果。" },
+      { sequence: 5, kind: "text_delta", runId: "r1", text: "完成。" },
+    ]);
+    expect(projected.blocks.map((block) => block.kind)).toEqual(["thinking", "tool", "thinking", "assistant"]);
+    expect(projected.blocks.filter((block) => block.kind === "thinking").map((block) => block.content)).toEqual(["先读取文件。", "再检查结果。"]);
+    expect(projected.blocks.filter((block) => block.kind === "thinking").every((block) => block.state === "completed")).toBe(true);
+  });
+
+  it("keeps commentary in the process trail before tools and final answers", () => {
+    const projected = reduceEvents(state(), [
+      { sequence: 1, kind: "thinking_delta", runId: "r1", text: "分析协议。" },
+      { sequence: 2, kind: "text_delta", runId: "r1", text: "协议已确认，", textPhase: "commentary" },
+      { sequence: 3, kind: "text_delta", runId: "r1", text: "接下来读取文件。", textPhase: "commentary" },
+      { sequence: 4, kind: "tool_started", runId: "r1", toolCallId: "read-1", data: { name: "coding.read_file" } },
+      { sequence: 5, kind: "tool_finished", runId: "r1", toolCallId: "read-1", state: "completed", text: "done" },
+      { sequence: 6, kind: "text_delta", runId: "r1", text: "检查完成。", textPhase: "final_answer" },
+      { sequence: 7, kind: "run_finished", runId: "r1", state: "completed" },
+    ]);
+
+    expect(projected.blocks.map((block) => block.kind)).toEqual(["thinking", "commentary", "tool", "assistant"]);
+    expect(projected.blocks[1]).toMatchObject({
+      content: "协议已确认，接下来读取文件。",
+      state: "completed",
+      textPhase: "commentary",
+    });
+    expect(projected.blocks[3]).toMatchObject({
+      content: "检查完成。",
+      state: "completed",
+      textPhase: "final_answer",
+    });
+  });
+
+  it("timestamps a reasoning segment and settles it before tool work begins", () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const streaming = reduceEvents(state(), [
+        { sequence: 1, kind: "thinking_delta", runId: "r1", text: "检查实现" },
+      ]);
+      expect(streaming.blocks[0]).toMatchObject({
+        kind: "thinking",
+        state: "streaming",
+        data: { startedAt: "1000" },
+      });
+
+      clock.mockReturnValue(2_500);
+      const settled = reduceEvents(streaming, [
+        { sequence: 2, kind: "tool_started", runId: "r1", toolCallId: "read-1", data: { name: "coding.read_file" } },
+      ]);
+      expect(settled.blocks[0]).toMatchObject({
+        kind: "thinking",
+        state: "completed",
+        data: { startedAt: "1000", completedAt: "2500", elapsedMs: "1500" },
+      });
+      expect(settled.blocks[1]).toMatchObject({ kind: "tool", state: "running" });
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("coalesces streaming deltas and ignores replayed sequence numbers", () => {
@@ -160,6 +304,34 @@ describe("runtime event projection", () => {
     ]);
     expect(projected.running).toBe(false);
     expect(projected.blocks[0]).toMatchObject({ kind: "thinking", runId: "r1", state: "completed" });
+  });
+
+  it("adds a timed Codex-style separator when the user stops a run", () => {
+    const current: RuntimeData = {
+      ...state(),
+      running: true,
+      runId: "r1",
+      runStartedAt: Date.now() - 65_000,
+      blocks: [{ id: "thinking", kind: "thinking", runId: "r1", content: "处理中", state: "streaming" }],
+    };
+    const projected = reduceEvents(current, [{ sequence: 1, kind: "run_cancelled", runId: "r1" }]);
+    expect(projected.blocks.at(-1)).toMatchObject({ kind: "status", runId: "r1", title: "run_cancelled", state: "cancelled" });
+    expect(Number(projected.blocks.at(-1)?.data?.elapsedMs)).toBeGreaterThanOrEqual(65_000);
+  });
+
+  it("restores structured edit sections from durable tool records", () => {
+    const restored = mergeSessionTranscript(
+      [{ id: "user", kind: "user", runId: "r1", content: "edit" }],
+      [1],
+      [{
+        runId: "r1", toolCallId: "edit-1", name: "coding.edit_hashline", anchorSequence: 1, state: "completed",
+        arguments: { input: "patch" },
+        structured: { sections: [{ path: "src/app.ts", firstChangedLine: 3, diff: "-old\n+next" }] },
+      }],
+    );
+    expect(JSON.parse(restored[1]?.data?.structured || "{}")).toMatchObject({
+      sections: [{ path: "src/app.ts", firstChangedLine: 3, diff: "-old\n+next" }],
+    });
   });
 
   it("keeps approval beside the tool timeline and resolves it in place", () => {
@@ -322,6 +494,95 @@ describe("runtime event projection", () => {
       data: { factSnapshot: "true", usageSnapshot: JSON.stringify({ inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, currentTurnMainReported: true }) },
     }]);
     expect(projected.contextUsage).toEqual({ inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, reported: true });
+  });
+
+  it("restores, updates, and renders the current Todo plan", async () => {
+    const initialTodo = {
+      goal: "在桌面端展示任务进度", revision: 1,
+      phases: [{ id: "phase-1", title: "实现", items: [
+        { id: "item-1", content: "同步 Todo 状态", status: "completed" as const },
+        { id: "item-2", content: "添加 Inspector 展示", status: "in_progress" as const },
+        { id: "item-3", content: "运行验证", status: "pending" as const },
+      ] }],
+    };
+    const restored = reduceEvents(state(), [{
+      sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded", todo: initialTodo,
+      data: { blocks: "[]", provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single" },
+    }]);
+    expect(restored.todo).toEqual(initialTodo);
+
+    const updatedTodo = {
+      ...initialTodo, revision: 2,
+      phases: [{ ...initialTodo.phases[0]!, items: initialTodo.phases[0]!.items.map((item) => item.id === "item-2" ? { ...item, status: "completed" as const } : item) }],
+    };
+    const updated = reduceEvents(restored, [{ sequence: 2, kind: "todo_updated", sessionId: "s1", todo: updatedTodo }]);
+    expect(updated.todo?.revision).toBe(2);
+
+    useRuntimeStore.setState(updated);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(Inspector)));
+    expect(container.textContent).toContain("任务计划");
+    expect(container.textContent).toContain("在桌面端展示任务进度");
+    expect(container.textContent).toContain("添加 Inspector 展示");
+    expect(container.textContent).toContain("1 个待办");
+    expect(container.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("2");
+    expect(container.querySelector('[data-status="in_progress"]')).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it("summarizes subagents in the inspector and opens the expandable live roster", async () => {
+    let projected = state();
+    const states = ["running", "running", "queued", "completed", "completed", "failed"];
+    for (let index = 0; index < states.length; index += 1) {
+      projected = reduceEvents(projected, [{
+        sequence: index + 1,
+        kind: "agent_state",
+        agentId: `agent-${index + 1}`,
+        state: states[index],
+        text: states[index] === "completed" ? `完成任务 ${index + 1}` : "",
+        agent: {
+          type: index < 2 ? "explore" : "worker",
+          description: `任务 ${index + 1}`,
+          summary: states[index] === "completed" ? `完成任务 ${index + 1}` : "",
+          activity: states[index] === "running" ? `正在检查文件 ${index + 1}` : "",
+          elapsedMs: (index + 1) * 1000,
+        },
+      }]);
+    }
+    useRuntimeStore.setState(projected);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(Inspector)));
+    const summary = container.querySelector<HTMLButtonElement>(".subagent-summary-button")!;
+    expect(summary.textContent).toContain("2 个运行中 · 1 个排队中");
+    expect(container.querySelector(".agent-roster")).toBeNull();
+    await act(async () => summary.click());
+    expect(useRuntimeStore.getState().view).toBe("agents");
+
+    await act(async () => root.render(createElement(SubagentsPage)));
+    expect(container.querySelectorAll(".subagent-row")).toHaveLength(4);
+    expect(container.textContent).toContain("已启动 6 个子智能体");
+    const showMore = Array.from(container.querySelectorAll<HTMLButtonElement>(".subagents-show-more"))
+      .find((button) => button.textContent?.includes("再显示 2 个"))!;
+    await act(async () => showMore.click());
+    expect(container.querySelectorAll(".subagent-row")).toHaveLength(6);
+
+    const rows = container.querySelectorAll<HTMLButtonElement>(".subagent-row > button");
+    await act(async () => rows[0]!.click());
+    const firstSelected = useRuntimeStore.getState().selectedAgentId;
+    expect(firstSelected).not.toBe("");
+    await act(async () => useRuntimeStore.setState({ agentBlocks: [{ id: "stale", kind: "assistant", content: "旧详情" }] }));
+    await act(async () => rows[1]!.click());
+    expect(useRuntimeStore.getState().selectedAgentId).not.toBe(firstSelected);
+    expect(useRuntimeStore.getState().agentBlocks).toEqual([]);
+
+    await act(async () => container.querySelector<HTMLButtonElement>(".subagents-close")!.click());
+    expect(useRuntimeStore.getState()).toMatchObject({ view: "thread", selectedAgentId: "" });
+    await act(async () => root.unmount());
+    container.remove();
   });
 
   it("projects current workspace line changes from git status events", async () => {

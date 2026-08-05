@@ -88,6 +88,12 @@ func effectiveSubagentTools(roleTools []string, capability string) map[string]bo
 	return allowed
 }
 
+func subagentMayMutateWorkspace(profile effectiveSubagentProfile) bool {
+	tools := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
+	return tools["coding.edit_hashline"] || tools["coding.write_file"] ||
+		tools["coding.gofmt"] || tools["coding.shell"]
+}
+
 func subagentMayRunInBackground(profile effectiveSubagentProfile) bool {
 	if profile.RequestedIsolation != "worktree" {
 		return false

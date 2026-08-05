@@ -54,6 +54,7 @@ func TestMainInstructionsContract(t *testing.T) {
 		"## Execution workflow",
 		"## Delegation",
 		"## Verification",
+		"## Progress updates",
 		"## Completion and reporting",
 	}
 	var gotHeadings []string
@@ -65,8 +66,8 @@ func TestMainInstructionsContract(t *testing.T) {
 	if !reflect.DeepEqual(gotHeadings, wantHeadings) {
 		t.Fatalf("second-level headings = %q, want %q", gotHeadings, wantHeadings)
 	}
-	if size := len([]byte(mainInstructions)); size < 4096 || size > 12288 {
-		t.Fatalf("main instructions size = %d bytes, want 4096..12288", size)
+	if size := len([]byte(mainInstructions)); size < 4096 || size > 16384 {
+		t.Fatalf("main instructions size = %d bytes, want 4096..16384", size)
 	}
 	for _, name := range []string{
 		"coding.list_files", "coding.search", "coding.read_file", "coding.git_diff",
@@ -90,6 +91,84 @@ func TestMainInstructionsContract(t *testing.T) {
 	sum := sha256.Sum256([]byte(mainInstructions))
 	if want := hex.EncodeToString(sum[:]); mainInstructionFingerprint != want {
 		t.Fatalf("main instruction fingerprint = %q, want %q", mainInstructionFingerprint, want)
+	}
+}
+
+func TestMaterializeAgentDefinitionPersistsImmutableRevision(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	codingService, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = codingService.Close(ctx) })
+	spec := hyagent.Spec{
+		Instructions: "Persist this executable definition.",
+		Model:        "definition-test-model",
+		Tools:        []string{"definition.lookup"},
+		LoopPolicy:   hyagent.LoopPolicy{UnlimitedIterations: true, MaxWallClock: time.Minute},
+		ExtraBody:    map[string]any{"prompt_cache_key": "definition-test"},
+	}
+	governance := api.GovernancePolicy{Budget: api.Budget{
+		MaxTokens: 500, MaxToolCalls: 4, MaxRuntime: time.Minute,
+	}}
+	definition := agentDefinitionForSpec(
+		"azem-definition-test", "Azem Definition Test", "Definition integration test",
+		spec, governance, map[string]string{"role": "test"},
+	)
+	deps := hyagent.BuildDeps{
+		Providers: hyprovider.Single(&compactionTestDriver{}),
+		Tools: tool.NewBus(planModeTestDriver{definition: tool.Definition{
+			Name: "definition.lookup", EffectType: tool.EffectReadOnly,
+		}}),
+	}
+	for range 2 {
+		engine, err := materializeAgentDefinition(ctx, codingService, definition, spec, deps)
+		if err != nil {
+			t.Fatalf("materialize definition: %v", err)
+		}
+		if engine.Model != spec.Model || !engine.LoopPolicy.UnlimitedIterations ||
+			engine.ExtraBody["prompt_cache_key"] != "definition-test" {
+			t.Fatalf("materialized engine=%+v", engine)
+		}
+		definitions := engine.Tools.Definitions()
+		if len(definitions) != 1 || definitions[0].Name != spec.Tools[0] {
+			t.Fatalf("materialized tools=%#v, want %v", definitions, spec.Tools)
+		}
+	}
+	snapshots, err := codingService.Runner().ListAgentDefinitionSnapshots(ctx, api.AgentDefinitionSnapshotSelector{
+		DefinitionIDs: []string{definition.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].Definition.Version == "" ||
+		!reflect.DeepEqual(snapshots[0].Definition.Governance, governance) ||
+		!reflect.DeepEqual(snapshots[0].Definition.Tools, spec.Tools) ||
+		len(snapshots[0].Definition.Capabilities) != 0 {
+		t.Fatalf("definition snapshots=%#v", snapshots)
+	}
+	firstVersion := snapshots[0].Definition.Version
+	spec.LoopPolicy.MaxWallClock = 2 * time.Minute
+	definition = agentDefinitionForSpec(
+		definition.ID, definition.Name, definition.Description,
+		spec, governance, map[string]string{"role": "test"},
+	)
+	if _, err := materializeAgentDefinition(ctx, codingService, definition, spec, deps); err != nil {
+		t.Fatalf("materialize changed definition: %v", err)
+	}
+	snapshots, err = codingService.Runner().ListAgentDefinitionSnapshots(ctx, api.AgentDefinitionSnapshotSelector{
+		DefinitionIDs: []string{definition.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 2 || snapshots[0].Definition.Version == snapshots[1].Definition.Version ||
+		(snapshots[0].Definition.Version != firstVersion && snapshots[1].Definition.Version != firstVersion) {
+		t.Fatalf("changed definition snapshots=%#v", snapshots)
 	}
 }
 
@@ -870,10 +949,12 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	})
 	driver := &compactionTestDriver{streams: [][]hyprovider.Event{
 		{
+			{Kind: hyprovider.EventThinkingDelta, Thinking: "discarded partial reasoning"},
 			{Kind: hyprovider.EventTextDelta, Text: "uncommitted partial"},
 			{Kind: hyprovider.EventError, Err: &responses.APIError{Kind: responses.ErrorRateLimit, Code: "server_is_overloaded"}},
 		},
 		{
+			{Kind: hyprovider.EventThinkingDelta, Thinking: "**Recovered reasoning**"},
 			{Kind: hyprovider.EventTextDelta, Text: "recovered answer"},
 			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
 		},
@@ -895,12 +976,52 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.Blocks) != 2 || projection.Blocks[1].Kind != "assistant" ||
-		projection.Blocks[1].State != "completed" || projection.Blocks[1].Content != "recovered answer" {
+	if len(projection.Blocks) != 3 ||
+		projection.Blocks[1].Kind != "thinking" ||
+		projection.Blocks[1].State != "completed" ||
+		projection.Blocks[1].Content != "**Recovered reasoning**" ||
+		projection.Blocks[2].Kind != "assistant" ||
+		projection.Blocks[2].State != "completed" ||
+		projection.Blocks[2].Content != "recovered answer" {
 		t.Fatalf("recovered transcript blocks=%+v", projection.Blocks)
 	}
 	if err := message.ValidateCompleteTurns(projection.ModelHistory.Messages); err != nil {
 		t.Fatalf("recovered model history is incomplete: %v", err)
+	}
+}
+
+func TestTitleModelRouteIsIndependentFromPlanAndCompaction(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents.Plan = config.ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
+	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-summary", Reasoning: "low"}
+	runtime := &ProviderRuntime{cfg: cfg}
+	if initial := runtime.titleModelRouteSnapshot(); initial != (config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"}) {
+		t.Fatalf("default title route = %#v", initial)
+	}
+	title := config.ModelRouteConfig{Provider: "grok", Model: "grok-title", Reasoning: "low"}
+	runtime.UpdateModelRoute("title", "", title)
+	if got := runtime.titleModelRouteSnapshot(); got != title {
+		t.Fatalf("title route = %#v", got)
+	}
+	if runtime.cfg.Agents.Plan != cfg.Agents.Plan || runtime.cfg.Agents.Compaction != cfg.Agents.Compaction {
+		t.Fatalf("title route changed other routes: plan=%#v compaction=%#v", runtime.cfg.Agents.Plan, runtime.cfg.Agents.Compaction)
+	}
+}
+
+func TestNormalizeGeneratedSessionTitle(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want string
+	}{
+		{raw: "<title>Fix sidebar title updates</title>", want: "Fix sidebar title updates"},
+		{raw: "<title>修复会话标题。</title>", want: "修复会话标题"},
+		{raw: `"Generate concise titles!"`, want: "Generate concise titles"},
+		{raw: "<title/>", want: ""},
+		{raw: strings.Repeat("long ", 20), want: ""},
+	} {
+		if got := normalizeGeneratedSessionTitle(test.raw); got != test.want {
+			t.Fatalf("normalize %q = %q, want %q", test.raw, got, test.want)
+		}
 	}
 }
 
@@ -1043,6 +1164,31 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	durable, err := coding.Runner().Run(ctx, runID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	tasks, err := coding.Runner().ListTasks(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantClaim, err := workspaceWriteClaim(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workerClaimFound bool
+	for _, task := range tasks {
+		if task.ID == durable.RootTaskID {
+			if len(task.ResourceClaims) != 0 {
+				t.Fatalf("top-level root task claims=%#v", task.ResourceClaims)
+			}
+			continue
+		}
+		for _, taskClaim := range task.ResourceClaims {
+			if taskClaim == wantClaim {
+				workerClaimFound = true
+			}
+		}
+	}
+	if !workerClaimFound {
+		t.Fatalf("top-level worker claims=%#v, want %#v", tasks, wantClaim)
 	}
 	manifest, err := decodeSingleRunManifest(durable.Metadata["single_run_manifest"])
 	if err != nil || manifest.AccountID != "acct" {

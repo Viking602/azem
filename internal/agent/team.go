@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ type (
 		PrepareEngine  func(context.Context, hyagent.Engine, multiagent.Dispatch, multiagent.AgentClass) (hyagent.Engine, error)
 		DecorateEngine TeamEngineDecorator
 		RetryPolicy    api.RetryPolicy
+		ResourceClaims []api.ResourceClaimSpec
 	}
 )
 
@@ -157,7 +159,10 @@ func (s *Service) codingTeamRunner(prompt string, models TeamModels, providers p
 		byName[class.Name] = class
 		team.AddRole(class)
 	}
-	team.WithScheduler(CodingScheduler{Prompt: prompt, Classes: byName, RetryPolicy: hooks.RetryPolicy})
+	team.WithScheduler(CodingScheduler{
+		Prompt: prompt, Classes: byName, RetryPolicy: hooks.RetryPolicy,
+		ResourceClaims: slices.Clone(hooks.ResourceClaims),
+	})
 	return worker.TeamRunner{
 		Runner:     s.runner,
 		Team:       *team,

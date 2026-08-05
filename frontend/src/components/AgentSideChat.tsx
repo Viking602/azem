@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bot, LoaderCircle, MessageSquare, Square, X } from "lucide-react";
+import { Bot, LoaderCircle, Square, X } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
+import { isSubagentActive, subagentDisplayName, subagentStatusLabel } from "../subagents";
 import { useRuntimeStore } from "../store";
 import type { AgentState, Block, Snapshot } from "../types";
+import SubagentGlyph from "./SubagentGlyph";
 import { formatDuration } from "./ThreadSurface";
 import { TimelineFeed } from "./Timeline";
 
@@ -20,8 +22,9 @@ export default function AgentSideChat() {
   const language = snapshot.language;
   const t = translator(language);
   const agent = agents.find((item) => item.id === selectedAgentId) || null;
-  const running = agent?.state === "running" || agent?.state === "started";
-  const role = agent?.type || selectedAgentId || "agent";
+  const running = isSubagentActive(agent?.state);
+  const cancellable = agent?.state === "initializing" || agent?.state === "queued" || agent?.state === "running" || agent?.state === "started";
+  const role = agent ? subagentDisplayName(agent, agents, language) : selectedAgentId || t("subagents");
   const live = useLiveAgentStats(agent, agentBlocks, selectedAgentId, running);
 
   // Initial hydrate + light poll while running so the side chat stays live even if a frame was missed.
@@ -59,23 +62,37 @@ export default function AgentSideChat() {
   const switchAgent = (id: string) => {
     selectAgent(id);
   };
+  const navigateTabs = (event: React.KeyboardEvent<HTMLButtonElement>, id: string) => {
+    const current = agents.findIndex((item) => item.id === id);
+    let next = current;
+    if (event.key === "ArrowRight") next = (current + 1) % agents.length;
+    else if (event.key === "ArrowLeft") next = (current - 1 + agents.length) % agents.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = agents.length - 1;
+    else return;
+    event.preventDefault();
+    const nextId = agents[next]?.id;
+    if (!nextId) return;
+    switchAgent(nextId);
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`[data-agent-tab="${CSS.escape(nextId)}"]`)?.focus());
+  };
 
   return (
     <aside className="agent-side-chat" aria-label={t("sideChat")}>
       <header className="agent-side-chat-header">
         <div className="agent-side-chat-heading">
-          <MessageSquare size={15} />
+          {agent ? <SubagentGlyph agent={agent} size={20} /> : <Bot size={18} aria-hidden="true" />}
           <div className="agent-side-chat-title">
-            <strong title={role}>{t("sideChat")}</strong>
+            <strong title={role}>{role}</strong>
             <small>
-              <span className="agent-side-chat-role">{role}</span>
-              <em data-state={agent?.state || "idle"}>{agentStateLabel(agent?.state, language)}</em>
+              <span className="agent-side-chat-role">{t("subagents")}</span>
+              <em data-state={agent?.state || "idle"}>{subagentStatusLabel(agent?.state, language)}</em>
               {(running || live.elapsedMs > 0) ? <time>{formatDuration(live.elapsedMs)}</time> : null}
             </small>
           </div>
         </div>
         <div className="agent-side-chat-actions">
-          {running && (
+          {cancellable && (
             <button type="button" className="icon-button" title={t("toolStopSubagent")} aria-label={t("toolStopSubagent")} onClick={() => void cancel()}>
               <Square size={13} />
             </button>
@@ -94,12 +111,17 @@ export default function AgentSideChat() {
               type="button"
               role="tab"
               aria-selected={item.id === selectedAgentId}
+              tabIndex={item.id === selectedAgentId ? 0 : -1}
+              aria-controls="subagent-detail-panel"
               className={item.id === selectedAgentId ? "active" : ""}
+              data-agent-tab={item.id}
               onClick={() => switchAgent(item.id)}
-              title={item.summary || item.description || item.type}
+              onKeyDown={(event) => navigateTabs(event, item.id)}
+              title={subagentDisplayName(item, agents, language)}
+              aria-label={`${subagentDisplayName(item, agents, language)}，${subagentStatusLabel(item.state, language)}`}
             >
-              <span className="agent-tab-dot" data-state={item.state} />
-              <span>{item.type || item.id.slice(0, 8)}</span>
+              <SubagentGlyph agent={item} size={14} />
+              <span>{item.type || subagentDisplayName(item, agents, language)}</span>
             </button>
           ))}
         </div>
@@ -107,7 +129,7 @@ export default function AgentSideChat() {
 
       <AgentMetaBar agent={agent} language={language} toolCalls={live.toolCalls} tokensUsed={live.tokensUsed} />
 
-      <div className="agent-side-chat-scroll" ref={scrollRef}>
+      <div className="agent-side-chat-scroll" id="subagent-detail-panel" role="tabpanel" aria-label={role} ref={scrollRef}>
         {agentBlocks.length === 0 ? (
           <div className="agent-side-chat-empty">
             {running ? <LoaderCircle className="spin" size={20} /> : <Bot size={22} />}
@@ -190,15 +212,5 @@ function AgentMetaBar({ agent, language, toolCalls, tokensUsed }: {
       <div>{bits.map((bit) => <span key={bit}>{bit}</span>)}</div>
     </div>
   );
-}
-
-function agentStateLabel(state: string | undefined, language: Snapshot["language"]) {
-  const t = translator(language);
-  if (state === "running" || state === "started") return t("running");
-  if (state === "completed") return t("agentCompleted");
-  if (state === "failed") return t("agentFailed");
-  if (state === "cancelled" || state === "canceled") return t("agentCancelled");
-  if (state === "queued") return t("agentQueued");
-  return state || t("agentIdle");
 }
 

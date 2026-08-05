@@ -780,7 +780,7 @@ func (m AppModel) modelCatalogCount() int {
 func (m AppModel) settingsModelRoutes() []app.ModelRouteEntry {
 	routes := make([]app.ModelRouteEntry, 0, len(m.modelRoutes))
 	for _, entry := range m.modelRoutes {
-		if entry.Scope == "plan" || entry.Scope == "subagent" {
+		if entry.Scope == "title" || entry.Scope == "plan" || entry.Scope == "subagent" {
 			routes = append(routes, entry)
 		}
 	}
@@ -789,7 +789,9 @@ func (m AppModel) settingsModelRoutes() []app.ModelRouteEntry {
 
 func (m AppModel) modelRouteOption(entry app.ModelRouteEntry) overlayOption {
 	label := first(strings.TrimSpace(entry.Role), strings.TrimSpace(entry.Label), entry.Scope)
-	if entry.Scope == "plan" {
+	if entry.Scope == "title" {
+		label = m.tr("overlay.model_routes.session_title")
+	} else if entry.Scope == "plan" {
 		label = m.tr("overlay.model_routes.plan")
 	} else if entry.Scope == "compaction" {
 		label = m.tr("overlay.model_routes.compaction")
@@ -801,7 +803,7 @@ func (m AppModel) modelRouteOption(entry app.ModelRouteEntry) overlayOption {
 
 func (m AppModel) modelRouteValue(entry app.ModelRouteEntry) string {
 	detail := m.tr("overlay.model_routes.inherit_parent")
-	if entry.Scope == "plan" || entry.Scope == "compaction" {
+	if entry.Scope == "title" || entry.Scope == "plan" || entry.Scope == "compaction" {
 		detail = m.tr("overlay.model_routes.inherit_active")
 	}
 	configured := strings.Trim(strings.Join([]string{entry.Route.Provider, entry.Route.Model, entry.Route.Reasoning}, "/"), "/")
@@ -812,6 +814,9 @@ func (m AppModel) modelRouteValue(entry app.ModelRouteEntry) string {
 }
 
 func (m AppModel) settingsRouteDescription(entry app.ModelRouteEntry) string {
+	if entry.Scope == "title" {
+		return m.tr("overlay.settings.title_model_description")
+	}
 	if entry.Scope == "plan" {
 		return m.tr("overlay.settings.plan_model_description")
 	}

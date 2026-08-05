@@ -32,6 +32,7 @@ describe("SettingsDialog", () => {
       snapshot,
       approvalMode: snapshot.approvalMode,
       modelRoutes: [
+        { Scope: "title", Role: "", Label: "Title", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
         { Scope: "plan", Role: "", Label: "Plan", Route: {} },
         { Scope: "subagent", Role: "explore", Label: "Explore", Route: {} },
       ],
@@ -53,7 +54,10 @@ describe("SettingsDialog", () => {
     expect(execute).toHaveBeenCalledWith({ kind: "list_model_routes", sessionId: "session-1" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_agent_types", sessionId: "session-1" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_models", sessionId: "session-1" });
-    expect(container.querySelectorAll(".route-row")).toHaveLength(2);
+    expect(container.querySelectorAll(".route-row")).toHaveLength(3);
+    const titleRoute = Array.from(container.querySelectorAll<HTMLElement>(".route-row")).find((row) => row.textContent?.includes("会话标题"))!;
+    expect(titleRoute.textContent).toContain("根据首轮用户消息自动生成侧栏会话标题");
+    expect(titleRoute.textContent).toContain("5.6 Luna");
 
     vi.mocked(execute).mockClear();
     const explore = Array.from(container.querySelectorAll<HTMLElement>(".route-row")).find((row) => row.textContent?.includes("explore"))!;

@@ -108,6 +108,7 @@ type GrokConfig struct {
 type AgentsConfig struct {
 	Main       MainAgentConfig  `yaml:"main"`
 	Team       TeamConfig       `yaml:"team"`
+	Title      ModelRouteConfig `yaml:"title" json:"title"`
 	Plan       ModelRouteConfig `yaml:"plan" json:"plan"`
 	Compaction ModelRouteConfig `yaml:"compaction" json:"compaction"`
 	Context    ContextConfig    `yaml:"context"`
@@ -273,8 +274,9 @@ func Default() Config {
 			MaxDelay: "5m", MaxDelayDuration: 5 * time.Minute,
 		},
 		Agents: AgentsConfig{
-			Main: MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
-			Team: TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
+			Main:  MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
+			Team:  TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
+			Title: ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
 			Context: ContextConfig{
 				Enabled: true, SoftTriggerRatio: .68, HardTriggerRatio: .82, TargetRatio: .45, BackgroundPrepare: true, SafetyMarginRatio: .08,
 				ReserveOutputTokens: 16384, ReserveReasoningTokens: 8192, MinReclaimTokens: 16000,
@@ -422,6 +424,9 @@ func (c *Config) Validate() error {
 	c.Agents.Main.MaxWallClockDuration = mainWallClock
 	if c.Agents.Team.MaxConcurrency < 1 || c.Agents.Team.MaxTicks < 1 {
 		return fmt.Errorf("agents.team limits must be positive")
+	}
+	if err := validateModelRoute("agents.title", c.Agents.Title); err != nil {
+		return err
 	}
 	if err := validateModelRoute("agents.plan", c.Agents.Plan); err != nil {
 		return err

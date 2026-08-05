@@ -965,6 +965,50 @@ func TestEffectiveSubagentToolsIntersectsCapabilityAndRoleAllowlist(t *testing.T
 	}
 }
 
+func TestSubagentResourceClaimsSerializeSharedWorkspaceWriters(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name      string
+		mode      string
+		isolation string
+		tools     []string
+		wantClaim bool
+	}{
+		{name: "read only", mode: "read-only", tools: []string{"coding.read_file"}},
+		{name: "test only", mode: "execute", tools: []string{"coding.go_test"}},
+		{name: "shared shell", mode: "execute", tools: []string{"coding.shell"}, wantClaim: true},
+		{name: "isolated writer", mode: "all", isolation: "worktree", tools: []string{"coding.write_file"}},
+		{name: "write capability without write tool", mode: "read-write", tools: []string{"coding.read_file"}},
+		{name: "shared writer", mode: "read-write", tools: []string{"coding.edit_hashline"}, wantClaim: true},
+		{name: "shared full capability", mode: "all", tools: []string{"coding.gofmt"}, wantClaim: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			claims, err := subagentResourceClaims(effectiveSubagentProfile{
+				CapabilityMode: test.mode, Isolation: test.isolation, Tools: test.tools, CWD: "/fallback",
+			}, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !test.wantClaim {
+				if len(claims) != 0 {
+					t.Fatalf("claims=%#v, want none", claims)
+				}
+				return
+			}
+			identity, err := canonicalWorkspaceIdentity(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := api.ResourceClaimSpec{
+				Key: workspaceWriteClaimPrefix + identity, Mode: api.ResourceClaimExclusive,
+			}
+			if len(claims) != 1 || claims[0] != want {
+				t.Fatalf("claims=%#v, want %#v", claims, want)
+			}
+		})
+	}
+}
+
 func TestRenderSubagentInstructionsComposesPersonaRoleAndContracts(t *testing.T) {
 	permissions := map[string]string{
 		"read-only":  "Capability mode: read-only. You may inspect governed workspace evidence, but you cannot modify files or persistent state.",
@@ -1157,7 +1201,6 @@ func TestForegroundWaitStartsAfterQueuedTaskRuns(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("foreground wait did not observe running transition")
 	}
-
 }
 
 type metadataOnlyDriver struct{}

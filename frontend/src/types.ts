@@ -1,6 +1,7 @@
 export type View = "thread" | "projects" | "pullRequests" | "runs" | "agents" | "extensions" | "recovery";
 export type InspectorTab = "environment" | "changes" | "agents" | "context";
 export type DeliveryMode = "queue" | "guide";
+export type TextPhase = "commentary" | "final_answer";
 
 export interface Snapshot {
   workspace: string;
@@ -30,6 +31,28 @@ export interface QueuedPrompt {
   id: string;
   text: string;
   attachments: Attachment[];
+}
+
+export type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
+
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: TodoStatus;
+  subagentRunId?: string;
+}
+
+export interface TodoPhase {
+  id: string;
+  title: string;
+  items: TodoItem[];
+}
+
+export interface TodoList {
+  goal: string;
+  revision: number;
+  phases: TodoPhase[];
+  updatedAt?: string;
 }
 
 export interface TurnRequest {
@@ -70,7 +93,7 @@ export interface Session {
   updatedAt: string;
 }
 
-export type BlockKind = "user" | "thinking" | "assistant" | "tool" | "approval" | "diff" | "agent" | "hook" | "error";
+export type BlockKind = "user" | "thinking" | "commentary" | "assistant" | "tool" | "approval" | "diff" | "status" | "agent" | "hook" | "error";
 
 export interface Block {
   id: string;
@@ -81,11 +104,15 @@ export interface Block {
   approvalId?: string;
   title?: string;
   content?: string;
+  textPhase?: TextPhase;
   state?: string;
   collapsed?: boolean;
   data?: Record<string, string>;
   attachments?: Attachment[];
 }
+
+export type AgentPreviewKind = "" | "thinking" | "commentary" | "assistant";
+
 
 export interface AgentState {
   id: string;
@@ -105,6 +132,10 @@ export interface AgentState {
   elapsedMs: number;
   state: string;
   summary: string;
+  preview: string;
+  previewKind: AgentPreviewKind;
+  previewRunId: string;
+  elapsedObservedAt: number;
 }
 
 export interface BackgroundProcess {
@@ -349,6 +380,7 @@ export interface RuntimeEvent {
   toolCallId?: string;
   approvalId?: string;
   text?: string;
+  textPhase?: TextPhase;
   state?: string;
   data?: Record<string, string>;
   agent?: Record<string, unknown>;
@@ -357,7 +389,7 @@ export interface RuntimeEvent {
   agentSnapshots?: Array<Record<string, unknown>>;
   skillCatalog?: Array<Record<string, unknown>>;
   contextProfile?: ContextProfile;
-  todo?: unknown;
+  todo?: TodoList;
   recap?: unknown;
   modelRoutes?: ModelRoute[];
   background?: Array<Record<string, unknown>>;

@@ -71,11 +71,16 @@ func UpdateDefault(path, key, value string) error {
 }
 
 // UpdateModelRoute atomically updates a nested model route while preserving
-// unrelated YAML fields and comments. Supported scopes are "plan",
+// unrelated YAML fields and comments. Supported scopes are "title", "plan",
 // "compaction", and "subagent"; role is required only for the latter.
 func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	keys := []string{"agents"}
 	switch scope {
+	case "title":
+		if role != "" {
+			return fmt.Errorf("role is not valid for title route")
+		}
+		keys = append(keys, "title")
 	case "plan":
 		if role != "" {
 			return fmt.Errorf("role is not valid for plan route")
@@ -99,9 +104,14 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	}
 	return updateYAML(path, func(root *yaml.Node) {
 		mapping := ensureMappingPath(root, keys...)
+		persistInheritedTitle := scope == "title" && route == (ModelRouteConfig{})
 		for key, value := range map[string]string{"provider": route.Provider, "model": route.Model, "reasoning": route.Reasoning} {
 			if strings.TrimSpace(value) == "" {
-				deleteMappingValue(mapping, key)
+				if persistInheritedTitle {
+					setMappingScalar(mapping, key, "")
+				} else {
+					deleteMappingValue(mapping, key)
+				}
 			} else {
 				setMappingScalar(mapping, key, value)
 			}

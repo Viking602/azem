@@ -398,6 +398,50 @@ func TestCompleteTurnPersistsModelHistoryWithoutEmptyAssistantBlock(t *testing.T
 	}
 }
 
+func TestCompleteTurnPersistsReasoningBeforeAssistant(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "reasoning.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Reasoning"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "session", Block{
+		Kind: "user", RunID: "run", Content: "explain the change",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	history := ModelHistory{ProviderID: "chatgpt", ModelID: "model", Messages: []message.Message{
+		message.NewText(message.RoleUser, "explain the change"),
+		message.NewText(message.RoleAssistant, "done"),
+	}}
+	if err := service.CompleteTurn(ctx, "session", Block{
+		Kind: "assistant", RunID: "run", Content: "done", Thinking: "**Inspect**\n\nVerify the result.", State: "completed",
+		Data: map[string]string{"startedAt": "1000", "completedAt": "3500", "elapsedMs": "2500"},
+	}, history); err != nil {
+		t.Fatal(err)
+	}
+
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 3 {
+		t.Fatalf("reasoning transcript blocks=%+v", projection.Blocks)
+	}
+	thought, answer := projection.Blocks[1], projection.Blocks[2]
+	if thought.Kind != "thinking" || thought.RunID != "run" || thought.State != "completed" ||
+		thought.Content != "**Inspect**\n\nVerify the result." || thought.Data["elapsedMs"] != "2500" {
+		t.Fatalf("persisted reasoning=%+v", thought)
+	}
+	if answer.Kind != "assistant" || answer.Content != "done" {
+		t.Fatalf("persisted answer=%+v", answer)
+	}
+}
+
 func TestUpsertAgentBlockPreservesLifecyclePosition(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "agents.db"))
@@ -820,6 +864,33 @@ func TestSessionMenuStateAndForkPersist(t *testing.T) {
 	}
 	if projection.Session.Title != "Renamed" || len(projection.Blocks) != 1 || projection.Blocks[0].Content != "keep this context" {
 		t.Fatalf("forked projection=%#v", projection)
+	}
+}
+
+func TestRenameIfTitleDoesNotOverwriteManualRename(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "conditional-title.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "New session"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Rename(ctx, "session", "Manual title"); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := service.RenameIfTitle(ctx, "session", "New session", "Generated title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("generated title overwrote a manual rename")
+	}
+	saved, err := service.LoadSession(ctx, "session")
+	if err != nil || saved.Title != "Manual title" {
+		t.Fatalf("session title = %q, error=%v", saved.Title, err)
 	}
 }
 

@@ -2677,15 +2677,16 @@ func TestModelRoutingCommandRendersConfiguredAndInheritedRoutes(t *testing.T) {
 	}
 
 	model.applyEvent(app.Event{Kind: app.EventModelRoutes, Data: map[string]string{"subagent_max_concurrency": "2"}, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "title", Label: "Title"},
 		{Scope: "plan", Label: "Plan"},
 		{Scope: "compaction", Label: "Compaction"},
 		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("grok", "grok-4.5", "low")},
 	}})
-	if model.overlay != OverlayModelRoutes || len(model.overlayOptions()) != 3 {
+	if model.overlay != OverlayModelRoutes || len(model.overlayOptions()) != 4 {
 		t.Fatalf("model routes overlay = %q options=%#v", model.overlay, model.overlayOptions())
 	}
 	rendered := ansi.Strip(model.renderOverlay(100, 24))
-	for _, wanted := range []string{"MODEL ROUTING", "Plan model", "Compaction", "Inherit from active agent", "explore", "grok/grok-4.5/low"} {
+	for _, wanted := range []string{"MODEL ROUTING", "Session title", "Plan model", "Compaction", "Inherit from active agent", "explore", "grok/grok-4.5/low"} {
 		if !strings.Contains(rendered, wanted) {
 			t.Fatalf("model routes missing %q:\n%s", wanted, rendered)
 		}

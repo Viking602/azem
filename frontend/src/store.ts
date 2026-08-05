@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { translator } from "./i18n";
+import { isSubagentActive, isSubagentTerminal, projectSubagentPreview } from "./subagents";
 import type {
   AgentCatalogEntry,
   AgentState,
@@ -20,6 +21,7 @@ import type {
   Session,
   SkillEntry,
   Snapshot,
+  TodoList,
   View,
 } from "./types";
 
@@ -62,7 +64,7 @@ export interface RuntimeData {
   modelsByProvider: Record<string, ModelOption[]>;
   contextProfile: ContextProfile | null;
   contextUsage: ContextUsage;
-  todo: unknown;
+  todo: TodoList | null;
   recovery: Array<Record<string, unknown>>;
   runId: string;
   running: boolean;
@@ -182,7 +184,7 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   selectAgent: (selectedAgentId) => set((state) => ({
     selectedAgentId,
     selectedPullRequestNumber: selectedAgentId ? null : state.selectedPullRequestNumber,
-    agentBlocks: selectedAgentId ? state.agentBlocks : [],
+    agentBlocks: selectedAgentId && selectedAgentId === state.selectedAgentId ? state.agentBlocks : [],
     inspectorTab: selectedAgentId ? "agents" : state.inspectorTab,
     // Side chat is driven by selectedAgentId; keep env inspector closed while open.
     inspectorOpen: selectedAgentId ? false : state.inspectorOpen,
@@ -235,13 +237,32 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   setQueueMode: (queueMode) => set((state) => ({
     snapshot: state.snapshot ? { ...state.snapshot, queueMode } : state.snapshot,
   })),
-  addOptimisticUser: (content, attachments) => set((state) => ({
-    blocks: [...state.blocks, { id: `user-${Date.now()}`, kind: "user", content, state: "submitted", attachments: attachments ?? state.attachments }],
-    running: true,
-    runStartedAt: state.running ? state.runStartedAt : Date.now(),
-    activity: "waiting_model",
-    error: "",
-  })),
+  addOptimisticUser: (content, attachments) => set((state) => {
+    const sessionId = state.currentSessionId || state.snapshot?.sessionId || "";
+    const existing = state.sessions.find((item) => item.id === sessionId);
+    const optimisticSession = sessionId && state.snapshot
+      ? {
+          ...(existing ?? {
+            id: sessionId,
+            title: translator(state.snapshot.language === "en" ? "en" : "zh-CN")("newSession"),
+            providerId: state.snapshot.provider,
+            modelId: state.snapshot.model,
+            reasoning: state.snapshot.reasoning,
+            agentMode: state.snapshot.agentMode,
+          }),
+          updatedAt: new Date().toISOString(),
+        }
+      : null;
+    return {
+      blocks: [...state.blocks, { id: `user-${Date.now()}`, kind: "user", content, state: "submitted", attachments: attachments ?? state.attachments }],
+      sessions: optimisticSession ? [optimisticSession, ...state.sessions.filter((item) => item.id !== sessionId)] : state.sessions,
+      currentTitle: optimisticSession?.title ?? state.currentTitle,
+      running: true,
+      runStartedAt: state.running ? state.runStartedAt : Date.now(),
+      activity: "waiting_model",
+      error: "",
+    };
+  }),
   setRunId: (runId) => set({ runId }),
   failRun: (message) => set((state) => ({
     running: false,
@@ -297,7 +318,11 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       break;
     case "session_loaded":
       if (event.state === "list") {
-        next.sessions = parseArray(data.sessions).map(normalizeSession);
+        const loadedSessions = parseArray(data.sessions).map(normalizeSession);
+        const optimisticCurrent = next.running ? next.sessions.find((item) => item.id === next.currentSessionId) : undefined;
+        next.sessions = optimisticCurrent && !loadedSessions.some((item) => item.id === optimisticCurrent.id)
+          ? [optimisticCurrent, ...loadedSessions]
+          : loadedSessions;
         next.currentTitle = next.sessions.find((item) => item.id === next.currentSessionId)?.title ?? next.currentTitle;
       } else if (event.sessionId) {
         next.currentSessionId = event.sessionId;
@@ -323,6 +348,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         next.agentBlocks = [];
         next.currentTitle = next.sessions.find((item) => item.id === event.sessionId)?.title ?? next.currentTitle;
         next.agents = (event.agentSnapshots ?? []).map(normalizeAgentSnapshot);
+        next.todo = event.todo ?? null;
         next.attachments = [];
         next.queuedPrompts = [];
         next.contextProfile = null;
@@ -340,6 +366,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       const thinkingTitle = translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("thinking");
       // Subagent frames carry agentId — stream them into the side chat, not the main feed.
       if (event.agentId) {
+        next.agents = projectSubagentPreview(next.agents, event.agentId, event.runId ?? "", "thinking", event.text ?? "");
         if (event.agentId === next.selectedAgentId) {
           next.agentBlocks = appendDelta(next.agentBlocks, event, "thinking", thinkingTitle);
         }
@@ -349,16 +376,23 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       }
       break;
     }
-    case "text_delta":
+    case "text_delta": {
+      const commentary = event.textPhase === "commentary";
+      const kind = commentary ? "commentary" : "assistant";
+      const title = commentary
+        ? translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("progressUpdate")
+        : "Azem";
       if (event.agentId) {
+        next.agents = projectSubagentPreview(next.agents, event.agentId, event.runId ?? "", kind, event.text ?? "");
         if (event.agentId === next.selectedAgentId) {
-          next.agentBlocks = appendDelta(next.agentBlocks, event, "assistant", "Azem");
+          next.agentBlocks = appendDelta(next.agentBlocks, event, kind, title);
         }
       } else {
-        next.blocks = appendDelta(next.blocks, event, "assistant", "Azem");
-        next.activity = "responding";
+        next.blocks = appendDelta(next.blocks, event, kind, title);
+        next.activity = commentary ? "thinking" : "responding";
       }
       break;
+    }
     case "tool_started":
     case "tool_update":
     case "tool_finished":
@@ -488,15 +522,19 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "run_failed": {
       const terminalState = event.kind === "run_finished" ? "completed" : event.kind === "run_cancelled" ? "cancelled" : "failed";
       const terminalRunId = event.runId || next.runId;
-      const elapsedMs = next.runStartedAt ? Math.max(0, Date.now() - next.runStartedAt) : 0;
+      const completedAt = Date.now();
+      const elapsedMs = next.runStartedAt ? Math.max(0, completedAt - next.runStartedAt) : 0;
       next.running = false;
       next.activity = terminalState;
       if (terminalRunId) {
         next.blocks = next.blocks.map((block) => {
           if (block.runId !== terminalRunId) return block;
           const stamped = stampProcessElapsed(block, elapsedMs);
-          // Settle streaming text and tools still marked running when the run ends.
-          if (["streaming", "running", "started"].includes(stamped.state || "")) {
+          // Settle streaming text, reasoning, and tools still active when the run ends.
+          if (isLiveBlock(stamped)) {
+            if (stamped.kind === "thinking" || stamped.kind === "commentary") {
+              return settleTimedProcessBlock(stamped, terminalState, completedAt);
+            }
             return { ...stamped, state: terminalState === "completed" && stamped.kind === "tool" ? "completed" : terminalState };
           }
           return stamped;
@@ -506,6 +544,16 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
             if (!["streaming", "running", "started"].includes(block.state || "")) return block;
             return { ...block, state: terminalState === "completed" && block.kind === "tool" ? "completed" : terminalState };
           });
+        }
+        if (event.kind === "run_cancelled" && !next.blocks.some((block) => block.kind === "status" && block.runId === terminalRunId)) {
+          next.blocks = [...next.blocks, {
+            id: `status-cancelled-${terminalRunId}-${event.sequence || next.blocks.length}`,
+            kind: "status",
+            runId: terminalRunId,
+            title: "run_cancelled",
+            state: "cancelled",
+            data: { elapsedMs: String(elapsedMs) },
+          }];
         }
       }
       next.runId = "";
@@ -582,8 +630,9 @@ function demoBlocks(review: boolean): Block[] {
   const blocks: Block[] = [
     { id: "user-demo", kind: "user", runId: "demo-run", content: "参考 Synara UI 与 Codex App，重新设计 Azem GUI，并保留现有 Agent 治理和会话恢复能力。", state: "submitted" },
     { id: "thinking-demo", kind: "thinking", runId: "demo-run", title: "思考中", content: "先检查现有事件模型和 TUI Block 结构，再建立桌面端的信息架构、状态投影和视觉规范。", state: "completed", data: { elapsedMs: "154000" } },
+    { id: "commentary-demo", kind: "commentary", runId: "demo-run", title: "进度更新", content: "事件链已经确认，接下来核对桌面投影与会话恢复。", textPhase: "commentary", state: "completed" },
     { id: "tool-demo", kind: "tool", runId: "demo-run", title: "检查桌面事件投影", content: "internal/app/events.go · internal/app/event_broker.go · internal/session/service.go", state: "completed", data: { elapsedMs: "154000" } },
-    { id: "assistant-demo", kind: "assistant", runId: "demo-run", content: "界面采用两种密度状态：新会话时居中输入；开始执行后 Composer 固定到底部，并显示会话时间线与右侧 Inspector。", state: "completed" },
+    { id: "assistant-demo", kind: "assistant", runId: "demo-run", content: "界面采用两种密度状态：新会话时居中输入；开始执行后 Composer 固定到底部，并显示会话时间线与右侧 Inspector。", textPhase: "final_answer", state: "completed" },
   ];
   if (review) {
     blocks.push(
@@ -595,30 +644,93 @@ function demoBlocks(review: boolean): Block[] {
 }
 
 function demoAgents(): AgentState[] {
+  const elapsedObservedAt = Date.now();
+  const shared = {
+    model: "gpt-5.6-sol", background: true, capabilityMode: "read-only", isolation: "none",
+    cwd: "", activity: "thinking", warning: "", worktreePath: "", turns: 1, tokensUsed: 3200,
+    state: "running", previewKind: "thinking" as const, previewRunId: "demo-child", elapsedObservedAt,
+  };
   return [
-    { id: "planner", type: "Planner", description: "完成界面与事件协议", model: "gpt-5.6-sol", background: false, capabilityMode: "read-only", isolation: "none", cwd: "", activity: "completed", warning: "", worktreePath: "", toolCalls: 6, turns: 2, tokensUsed: 9400, elapsedMs: 105000, state: "completed", summary: "完成界面与事件协议" },
-    { id: "implementer", type: "Implementer", description: "正在生成桌面骨架", model: "gpt-5.6-sol", background: true, capabilityMode: "all", isolation: "worktree", cwd: "", activity: "editing", warning: "", worktreePath: "/tmp/azem-gui", toolCalls: 11, turns: 3, tokensUsed: 13800, elapsedMs: 267000, state: "running", summary: "正在生成桌面骨架" },
-    { id: "reviewer", type: "Reviewer", description: "等待变更完成", model: "gpt-5.6-sol", background: false, capabilityMode: "read-only", isolation: "none", cwd: "", activity: "waiting", warning: "", worktreePath: "", toolCalls: 0, turns: 0, tokensUsed: 0, elapsedMs: 0, state: "queued", summary: "等待变更完成" },
+    { ...shared, id: "recovery", type: "review", description: "Adversarial recovery", toolCalls: 5, elapsedMs: 38000, summary: "", preview: "我会检查中断与恢复路径，确认终态不会被新的稀疏事件覆盖。" },
+    { ...shared, id: "boundaries", type: "explore", description: "Adversarial boundaries", toolCalls: 4, elapsedMs: 33000, summary: "", preview: "先界定当前会话和工作区边界，再核对子智能体的可见范围。" },
+    { ...shared, id: "assumptions", type: "review", description: "Adversarial assumptions", toolCalls: 4, elapsedMs: 28000, summary: "", preview: "我会按只读审查处理：先确定真实边界，再检查能够复现的假设冲突。" },
+    { ...shared, id: "composition", type: "explore", description: "Adversarial composition", toolCalls: 3, elapsedMs: 23000, summary: "", preview: "我会先界定未提交差异的行为边界，再只读追踪组合失败面。" },
+    { ...shared, id: "cascade", type: "review", description: "Adversarial cascade", toolCalls: 3, elapsedMs: 17000, summary: "", preview: "先做只读审查：确认仓库结构和相关调用链，只报告能够复现的级联问题。" },
+    { ...shared, id: "abuse", type: "explore", description: "Adversarial abuse", toolCalls: 2, elapsedMs: 12000, summary: "", preview: "我会先按只读范围建立变更边界，再从对抗场景逐条核对失败面。" },
   ];
 }
 
-function appendDelta(blocks: Block[], event: RuntimeEvent, kind: "thinking" | "assistant", title: string): Block[] {
-  const id = `${kind}-${event.runId || event.agentId || "current"}`;
-  const index = blocks.findIndex((block) => block.id === id);
+function isLiveBlock(block: Block) {
+  return ["streaming", "running", "started", "progress"].includes(block.state || "");
+}
+
+function settleTimedProcessBlock(block: Block, state = "completed", completedAt = Date.now()): Block {
+  const startedAt = Number(block.data?.startedAt || 0);
+  const data: Record<string, string> = {
+    ...(block.data ?? {}),
+    completedAt: String(completedAt),
+  };
+  if (Number.isFinite(startedAt) && startedAt > 0) {
+    data.elapsedMs = String(Math.max(0, completedAt - startedAt));
+  }
+  return { ...block, state, data };
+}
+
+function settleActiveProcessText(
+  blocks: Block[],
+  event: RuntimeEvent,
+  includeCommentary = true,
+  state = "completed",
+) {
+  const completedAt = Date.now();
+  return blocks.map((block) => (block.kind === "thinking" || (includeCommentary && block.kind === "commentary"))
+    && block.runId === event.runId
+    && block.agentId === event.agentId
+    && isLiveBlock(block)
+    ? settleTimedProcessBlock(block, state, completedAt)
+    : block);
+}
+
+function appendDelta(
+  blocks: Block[],
+  event: RuntimeEvent,
+  kind: "thinking" | "commentary" | "assistant",
+  title: string,
+): Block[] {
+  if (kind === "commentary") blocks = settleActiveProcessText(blocks, event, false);
+  if (kind === "assistant") blocks = settleActiveProcessText(blocks, event);
+  const previousIndex = blocks.length - 1;
+  const previous = blocks[previousIndex];
+  const sameStream = previous?.kind === kind
+    && previous.runId === event.runId
+    && previous.agentId === event.agentId
+    && isLiveBlock(previous);
   const chunk = event.text ?? "";
-  if (index < 0) {
+  if (!sameStream) {
+    const stream = event.runId || event.agentId || "current";
     return [...blocks, {
-      id, kind, runId: event.runId, agentId: event.agentId, title,
-      content: chunk, state: "streaming",
+      id: `${kind}-${stream}-${event.sequence || blocks.length + 1}`,
+      kind,
+      runId: event.runId,
+      agentId: event.agentId,
+      title,
+      content: chunk,
+      textPhase: event.textPhase,
+      state: event.state || "streaming",
+      data: kind !== "assistant"
+        ? { ...(event.data ?? {}), startedAt: event.data?.startedAt || String(Date.now()) }
+        : event.data,
     }];
   }
-  return blocks.map((block, current) => current === index ? {
+  return blocks.map((block, current) => current === previousIndex ? {
     ...block,
     content: kind === "thinking"
       ? joinThinkingContent(block.content ?? "", chunk)
       : `${block.content ?? ""}${chunk}`,
+    textPhase: block.textPhase || event.textPhase,
     state: event.state || "streaming",
     title: block.title || title,
+    data: event.data ? { ...(block.data ?? {}), ...event.data } : block.data,
   } : block);
 }
 
@@ -642,10 +754,14 @@ function updateTool(blocks: Block[], event: RuntimeEvent): Block[] {
   const id = event.toolCallId || `tool-${event.sequence}`;
   const index = blocks.findIndex((block) => block.toolCallId === id || block.id === id);
   const data = event.data ?? {};
+  if (event.kind === "tool_started") blocks = settleActiveProcessText(blocks, event);
   const text = event.text ?? "";
   const argumentsText = typeof data.arguments === "string" ? data.arguments : "";
-  const nextState = event.state
-    || (event.kind === "tool_finished" ? "completed" : event.kind === "tool_started" ? "running" : "");
+  const nextState = event.kind === "tool_finished"
+    ? event.state || "completed"
+    : event.kind === "tool_started" || event.kind === "tool_update"
+      ? "running"
+      : event.state || "";
 
   if (index < 0) {
     // Seed content from arguments so the timeline can preview path/command while running.
@@ -702,12 +818,15 @@ function normalizeBlock(raw: Record<string, unknown>, index: number): Block {
   const data = raw.data && typeof raw.data === "object" && !Array.isArray(raw.data)
     ? Object.fromEntries(Object.entries(raw.data as Record<string, unknown>).map(([key, value]) => [key, String(value ?? "")]))
     : undefined;
+  const rawTextPhase = stringValue(raw, "textPhase", "TextPhase") || data?.phase || "";
+  const textPhase = rawTextPhase === "commentary" || rawTextPhase === "final_answer" ? rawTextPhase : undefined;
   return {
     id: String(raw.id ?? raw.Sequence ?? `block-${index}`),
     kind: String(raw.kind ?? raw.Kind ?? "assistant") as Block["kind"],
     runId: stringValue(raw, "runId", "RunID"), agentId: stringValue(raw, "agentId", "AgentID"),
     toolCallId: stringValue(raw, "toolCallId", "ToolCallID"), title: stringValue(raw, "title", "Title"),
-    content: stringValue(raw, "content", "Content"), state: stringValue(raw, "state", "State"),
+    content: stringValue(raw, "content", "Content"), textPhase,
+    state: stringValue(raw, "state", "State"),
     collapsed: Boolean(raw.collapsed ?? raw.Collapsed),
     data,
     attachments: (raw.attachments ?? raw.Attachments) as Attachment[] | undefined,
@@ -757,6 +876,10 @@ function normalizeToolRecord(raw: Record<string, unknown>, index: number) {
   const argumentText = typeof argumentsRaw === "string"
     ? argumentsRaw
     : argumentsRaw != null ? JSON.stringify(argumentsRaw) : "";
+  const structuredRaw = raw.structured ?? raw.Structured;
+  const structuredText = typeof structuredRaw === "string"
+    ? structuredRaw
+    : structuredRaw != null ? JSON.stringify(structuredRaw) : "";
   const content = stringValue(raw, "content", "Content");
   const startedAt = parseTimestamp(raw.startedAt ?? raw.StartedAt);
   const completedAt = parseTimestamp(raw.completedAt ?? raw.CompletedAt);
@@ -766,6 +889,7 @@ function normalizeToolRecord(raw: Record<string, unknown>, index: number) {
   if (elapsedMs > 0) data.elapsedMs = String(elapsedMs);
   if (startedAt > 0) data.startedAt = String(startedAt);
   if (completedAt > 0) data.completedAt = String(completedAt);
+  if (structuredText) data.structured = structuredText;
   return {
     anchorSequence: numberValue(raw.anchorSequence ?? raw.AnchorSequence, -1),
     startedAt: startedAt || index,
@@ -836,7 +960,7 @@ function normalizeAgent(id: string, raw: Record<string, unknown>, state = "", su
     warning: stringValue(raw, "warning", "Warning"), worktreePath: stringValue(raw, "worktreePath", "WorktreePath"),
     toolCalls: numberValue(raw.toolCalls ?? raw.ToolCalls), turns: numberValue(raw.turns ?? raw.Turns),
     tokensUsed: numberValue(raw.tokensUsed ?? raw.TokensUsed), elapsedMs: numberValue(raw.elapsedMs ?? raw.ElapsedMS),
-    state, summary,
+    state, summary, preview: "", previewKind: "", previewRunId: "", elapsedObservedAt: Date.now(),
   };
 }
 
@@ -909,10 +1033,26 @@ function projectContextUsage(current: ContextUsage, data: Record<string, string>
 function upsertAgent(agents: AgentState[], agent: AgentState): AgentState[] {
   const index = agents.findIndex((current) => current.id === agent.id);
   if (index < 0) return [...agents, agent];
+  const now = Date.now();
   return agents.map((current, currentIndex) => {
     if (currentIndex !== index) return current;
-    // Partial agent_state payloads (e.g. team lifecycle) often omit counters;
-    // never let a sparse update wipe live tool/elapsed stats.
+    const elapsedAdvanced = agent.elapsedMs > current.elapsedMs;
+    const becameTerminal = isSubagentActive(current.state) && isSubagentTerminal(agent.state);
+    const terminalSummary = isSubagentTerminal(agent.state)
+      && agent.summary
+      && !/^(?:completed|failed|cancelled|canceled|interrupted)$/i.test(agent.summary)
+      ? agent.summary
+      : "";
+    const elapsedMs = becameTerminal && !elapsedAdvanced
+      ? Math.max(current.elapsedMs, current.elapsedMs + Math.max(0, now - current.elapsedObservedAt))
+      : Math.max(current.elapsedMs, agent.elapsedMs);
+    const elapsedObservedAt = isSubagentTerminal(agent.state)
+      ? now
+      : elapsedAdvanced
+        ? agent.elapsedObservedAt
+        : current.elapsedObservedAt || agent.elapsedObservedAt;
+    // Partial agent_state payloads often omit counters and metadata; preserve
+    // the richer projection accumulated from live child frames.
     return {
       ...current,
       ...agent,
@@ -930,7 +1070,11 @@ function upsertAgent(agents: AgentState[], agent: AgentState): AgentState[] {
       toolCalls: Math.max(current.toolCalls, agent.toolCalls),
       turns: Math.max(current.turns, agent.turns),
       tokensUsed: Math.max(current.tokensUsed, agent.tokensUsed),
-      elapsedMs: Math.max(current.elapsedMs, agent.elapsedMs),
+      elapsedMs,
+      elapsedObservedAt,
+      preview: terminalSummary || current.preview || agent.preview,
+      previewKind: terminalSummary ? "assistant" : current.previewKind || agent.previewKind,
+      previewRunId: current.previewRunId || agent.previewRunId,
     };
   });
 }

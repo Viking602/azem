@@ -1,19 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect } from "react";
 import {
-  Bot, FileDiff, FileImage, FolderGit2, GitBranch, Plus, SquareTerminal, Wrench,
+  Check, ChevronRight, Circle, CircleDot, FileDiff, FileImage, FolderGit2, GitBranch, ListChecks, Minus, Plus, SquareTerminal, Wrench,
 } from "lucide-react";
 import { execute } from "../bridge";
-import { translator } from "../i18n";
+import { tFormat, translator } from "../i18n";
+import { subagentSummaryLabel } from "../subagents";
 import { useRuntimeStore } from "../store";
-import type { AgentState, Snapshot } from "../types";
+import type { AgentState, Snapshot, TodoList, TodoStatus } from "../types";
 import MenuSelect from "./MenuSelect";
+import SubagentGlyph from "./SubagentGlyph";
 
-const AGENT_ACCENTS = [
-  "#3478f6", "#ef4444", "#f59e0b", "#10b981", "#8b5cf6",
-  "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1",
-  "#14b8a6", "#a855f7", "#e11d48", "#0ea5e9", "#d946ef",
-];
-const AGENT_LIST_PREVIEW = 12;
 
 export default function Inspector() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
@@ -22,11 +18,12 @@ export default function Inspector() {
   const workspaceAdditions = useRuntimeStore((state) => state.workspaceAdditions);
   const workspaceDeletions = useRuntimeStore((state) => state.workspaceDeletions);
   const agents = useRuntimeStore((state) => state.agents);
+  const todo = useRuntimeStore((state) => state.todo);
   const backgroundProcesses = useRuntimeStore((state) => state.backgroundProcesses);
-  const selectedAgentId = useRuntimeStore((state) => state.selectedAgentId);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
-  const selectAgent = useRuntimeStore((state) => state.selectAgent);
   const setError = useRuntimeStore((state) => state.setError);
+  const setView = useRuntimeStore((state) => state.setView);
+  const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const t = translator(snapshot.language);
   const sources = Array.from(new Map(blocks.flatMap((block) => block.attachments ?? []).map((item) => [item.id || item.path, item])).values());
 
@@ -39,10 +36,6 @@ export default function Inspector() {
     void execute({ kind: "list_background", sessionId: currentSessionId }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   }, [currentSessionId, setError]);
 
-  const openAgent = (id: string) => {
-    selectAgent(id);
-    void action("inspect_agent", id);
-  };
 
   return (
     <aside className="context-inspector" aria-label={t("inspector")}>
@@ -72,8 +65,9 @@ export default function Inspector() {
             </div>
           </div>
         </section>
+        {todo && todo.phases.length > 0 && <TodoPlan todo={todo} language={snapshot.language} />}
         {backgroundProcesses.length > 0 && <section className="inspector-section"><header className="inspector-section-header"><h2>{t("backgroundProcesses")}</h2></header>{backgroundProcesses.map((process) => <div className="process-row" key={process.id}><SquareTerminal size={14} /><span><strong>{process.name || t("backgroundTerminal")}</strong><small title={process.command}>{process.command}</small></span><em data-state={process.state}>{process.state === "running" ? t("running") : process.state}</em></div>)}</section>}
-        {agents.length > 0 && <AgentList agents={agents} selectedAgentId={selectedAgentId} inspect={openAgent} language={snapshot.language} />}
+        {agents.length > 0 && <SubagentSummary agents={agents} language={snapshot.language} open={() => { setInspectorOpen(false); setView("agents"); }} />}
         <section className="inspector-section">
           <header className="inspector-section-header">
             <h2>{t("sources")}</h2>
@@ -88,118 +82,77 @@ export default function Inspector() {
   );
 }
 
-/** Codex-style dense Subagents roster: colored glyph + nickname, scales to dozens. */
-function AgentList({ agents, selectedAgentId, inspect, language }: {
-  agents: AgentState[];
-  selectedAgentId: string;
-  inspect: (id: string) => void;
-  language: Snapshot["language"];
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const labels = useMemo(() => agentRosterLabels(agents, language), [agents, language]);
-  const visible = expanded || agents.length <= AGENT_LIST_PREVIEW
-    ? agents
-    : agents.slice(0, AGENT_LIST_PREVIEW);
-  const hidden = Math.max(0, agents.length - visible.length);
-  const title = language === "zh-CN" ? "子代理" : "Subagents";
+function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["language"] }) {
+  const t = translator(language);
+  const items = todo.phases.flatMap((phase) => phase.items);
+  const completed = items.filter((item) => item.status === "completed" || item.status === "cancelled").length;
+  const open = items.length - completed;
+  const percentage = items.length > 0 ? Math.round((completed / items.length) * 100) : 0;
 
-  return <section className="inspector-section subagents-section">
+  return <section className="inspector-section todo-section" aria-label={t("todoTitle")}>
     <header className="inspector-section-header">
-      <h2>{title}</h2>
-      <small>{agents.length}</small>
+      <h2><ListChecks size={14} />{t("todoTitle")}</h2>
+      <small>{tFormat(language, "todoOpen", { count: open })}</small>
     </header>
-    <div className="agent-roster" role="list">
-      {visible.map((agent) => {
-        const label = labels.get(agent.id) || agent.type || agent.id;
-        const accent = agentAccent(agent.id);
-        const summary = agent.summary || agent.activity || agent.description || "";
-        const status = agentStateLabel(agent.state, language);
-        return <button
-          key={agent.id}
-          type="button"
-          role="listitem"
-          className={`agent-roster-row ${selectedAgentId === agent.id ? "active" : ""}`}
-          data-state={agent.state}
-          onClick={() => inspect(agent.id)}
-          title={[label, status, summary].filter(Boolean).join(" · ")}
-        >
-          <span className="agent-glyph" style={{ color: accent }} data-state={agent.state} aria-hidden="true">
-            <span className="agent-glyph-mark">{glyphFor(agent)}</span>
-          </span>
-          <span className="agent-roster-name">{label}</span>
-          {(agent.state === "running" || agent.state === "started") && <span className="agent-live-dot" aria-label={status} />}
-        </button>;
-      })}
+    {todo.goal && <p className="todo-goal"><span>{t("todoGoal")}</span>{todo.goal}</p>}
+    <div className="todo-progress-row">
+      <div className="todo-progress-track" role="progressbar" aria-label={tFormat(language, "todoProgress", { done: completed, total: items.length })} aria-valuemin={0} aria-valuemax={items.length} aria-valuenow={completed}>
+        <span style={{ width: `${percentage}%` }} />
+      </div>
+      <span>{completed}/{items.length}</span>
     </div>
-    {hidden > 0 && (
-      <button type="button" className="agent-show-more" onClick={() => setExpanded(true)}>
-        {language === "zh-CN" ? `显示另外 ${hidden} 个` : `Show ${hidden} more`}
-      </button>
-    )}
-    {expanded && agents.length > AGENT_LIST_PREVIEW && (
-      <button type="button" className="agent-show-more" onClick={() => setExpanded(false)}>
-        {language === "zh-CN" ? "收起" : "Show less"}
-      </button>
-    )}
+    <div className="todo-phases">
+      {todo.phases.map((phase) => <div className="todo-phase" key={phase.id || phase.title}>
+        {phase.title && <h3>{phase.title}</h3>}
+        <div className="todo-items">
+          {phase.items.map((item) => {
+            const Icon = todoStatusIcon(item.status);
+            return <div className="todo-item" data-status={item.status} key={item.id || item.content} title={todoStatusLabel(item.status, language)}>
+              <Icon size={14} aria-hidden="true" />
+              <span>{item.content}</span>
+            </div>;
+          })}
+        </div>
+      </div>)}
+    </div>
   </section>;
 }
 
-function agentRosterLabels(agents: AgentState[], language: Snapshot["language"]) {
-  const typeCounts = new Map<string, number>();
-  const typeIndex = new Map<string, number>();
-  for (const agent of agents) {
-    const key = (agent.type || "agent").toLowerCase();
-    typeCounts.set(key, (typeCounts.get(key) || 0) + 1);
-  }
-  const labels = new Map<string, string>();
-  for (const agent of agents) {
-    const key = (agent.type || "agent").toLowerCase();
-    const total = typeCounts.get(key) || 1;
-    const next = (typeIndex.get(key) || 0) + 1;
-    typeIndex.set(key, next);
-    const role = agent.type || "agent";
-    if (total <= 1) {
-      labels.set(agent.id, role);
-      continue;
-    }
-    // Codex-style ordinal nicknames: "Executor the 17th"
-    labels.set(agent.id, language === "zh-CN"
-      ? `${role} · ${next}`
-      : `${role} the ${ordinal(next)}`);
-  }
-  return labels;
+function todoStatusIcon(status: TodoStatus) {
+  if (status === "completed") return Check;
+  if (status === "cancelled") return Minus;
+  if (status === "in_progress") return CircleDot;
+  return Circle;
 }
 
-function ordinal(n: number) {
-  const v = n % 100;
-  if (v >= 11 && v <= 13) return `${n}th`;
-  switch (n % 10) {
-    case 1: return `${n}st`;
-    case 2: return `${n}nd`;
-    case 3: return `${n}rd`;
-    default: return `${n}th`;
-  }
-}
-
-function agentAccent(id: string) {
-  let hash = 0;
-  for (let i = 0; i < id.length; i += 1) hash = (hash * 33 + id.charCodeAt(i)) >>> 0;
-  return AGENT_ACCENTS[hash % AGENT_ACCENTS.length]!;
-}
-
-function glyphFor(agent: AgentState) {
-  const role = (agent.type || "A").trim();
-  return role.slice(0, 1).toUpperCase() || "A";
-}
-
-function agentStateLabel(state: string | undefined, language: Snapshot["language"]) {
+function todoStatusLabel(status: TodoStatus, language: Snapshot["language"]) {
   const t = translator(language);
-  if (state === "running" || state === "started") return t("running");
-  if (state === "completed") return t("agentCompleted");
-  if (state === "failed") return t("agentFailed");
-  if (state === "cancelled" || state === "canceled") return t("agentCancelled");
-  if (state === "queued") return t("agentQueued");
-  return state || t("agentIdle");
+  if (status === "completed") return t("completed");
+  if (status === "cancelled") return t("cancelled");
+  if (status === "in_progress") return t("todoInProgress");
+  return t("todoPending");
+}
+
+function SubagentSummary({ agents, language, open }: {
+  agents: AgentState[];
+  language: Snapshot["language"];
+  open: () => void;
+}) {
+  const t = translator(language);
+  const summary = subagentSummaryLabel(agents, language);
+  const visibleGlyphs = [...agents].reverse().slice(0, 4);
+  return (
+    <section className="inspector-section subagents-section">
+      <header className="inspector-section-header"><h2>{t("subagents")}</h2></header>
+      <button type="button" className="subagent-summary-button" onClick={open} aria-label={`${t("openSubagents")}，${summary}`}>
+        <span className="subagent-glyph-stack" aria-hidden="true">
+          {visibleGlyphs.map((agent) => <SubagentGlyph key={agent.id} agent={agent} size={20} />)}
+        </span>
+        <span className="subagent-summary-copy" aria-live="polite">{summary}</span>
+        <ChevronRight size={15} aria-hidden="true" />
+      </button>
+    </section>
+  );
 }
 
 function InspectorRow({ icon: Icon, label, children }: { icon: typeof Wrench; label: string; children: React.ReactNode }) {

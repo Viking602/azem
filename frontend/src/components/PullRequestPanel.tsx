@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle, Check, CheckCircle2, ChevronDown, ChevronRight, CircleDot, Clock3,
@@ -184,9 +184,30 @@ function DescriptionSection({ pullRequest, edit }: { pullRequest: PullRequest; e
     <summary><span>{t("description")}</span><ChevronDown size={15} /></summary>
     <div className="pull-request-section-actions"><button className="icon-button" type="button" aria-label={t("editPullRequest")} onClick={edit}><Pencil size={14} /></button></div>
     <div className="pull-request-markdown">
-      {pullRequest.body ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children }) => <a href={href} onClick={(event) => { event.preventDefault(); if (href) void openExternalURL(new URL(href, pullRequest.url).toString()); }}>{children}</a> }}>{pullRequest.body}</ReactMarkdown> : <p>—</p>}
+      {pullRequest.body ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} /> }}>{pullRequest.body}</ReactMarkdown> : <p>—</p>}
     </div>
   </details>;
+}
+
+type MarkdownAnchorProps = ComponentProps<"a"> & { baseURL: string };
+function SafeMarkdownAnchor({ baseURL, href, children, title }: MarkdownAnchorProps) {
+  const destination = resolveExternalURL(href, baseURL);
+  const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    if (destination) void openExternalURL(destination);
+  };
+  return <a href={destination ?? undefined} title={title} aria-disabled={destination ? undefined : true} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{children}</a>;
+}
+
+function resolveExternalURL(href: string | undefined, baseURL: string): string | null {
+  if (!href) return null;
+  try { decodeURI(href); } catch { return null; }
+  try {
+    const url = new URL(href, baseURL);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
 }
 
 function ChecksSection({ checks }: { checks: PullRequestCheck[] }) {
@@ -242,7 +263,7 @@ function CommentsSection({ pullRequest, review }: { pullRequest: PullRequest; re
   };
   return <section className="pull-request-comments" aria-labelledby="pull-request-comments-heading">
     <header><h2 id="pull-request-comments-heading">{t("comments")} · {pullRequest.comments.length}</h2><button type="button" onClick={review}><ShieldCheck size={14} />{t("review")}</button></header>
-    <div className="pull-request-comment-list">{pullRequest.comments.length === 0 ? <div className="pull-request-section-empty"><MessageCircle size={16} />{t("noComments")}</div> : pullRequest.comments.map((comment) => <article key={comment.id || `${comment.author.login}-${comment.createdAt}`}><header><Actor actor={comment.author} /><time dateTime={comment.createdAt}>{dateLabel(comment.createdAt)}</time></header><div className="pull-request-markdown compact"><ReactMarkdown remarkPlugins={[remarkGfm]}>{comment.body}</ReactMarkdown></div></article>)}</div>
+    <div className="pull-request-comment-list">{pullRequest.comments.length === 0 ? <div className="pull-request-section-empty"><MessageCircle size={16} />{t("noComments")}</div> : pullRequest.comments.map((comment) => <article key={comment.id || `${comment.author.login}-${comment.createdAt}`}><header><Actor actor={comment.author} /><time dateTime={comment.createdAt}>{dateLabel(comment.createdAt)}</time></header><div className="pull-request-markdown compact"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} /> }}>{comment.body}</ReactMarkdown></div></article>)}</div>
     {pullRequest.state === "OPEN" && <form className="pull-request-comment-composer" onSubmit={(event) => void submit(event)}><label className="sr-only" htmlFor="pull-request-comment">{t("commentPlaceholder")}</label><textarea id="pull-request-comment" value={body} onChange={(event) => setBody(event.target.value)} placeholder={t("commentPlaceholder")} /><button type="submit" aria-label={t("postComment")} title={t("postComment")} disabled={mutating || !body.trim()}><Send size={15} /></button></form>}
   </section>;
 }

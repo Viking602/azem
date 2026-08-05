@@ -29,12 +29,19 @@ func TestCodingSchedulerReplaysOneRevisionDeterministically(t *testing.T) {
 		byName[class.Name] = class
 	}
 	retryPolicy := api.RetryPolicy{MaxAttempts: 3}
-	scheduler := CodingScheduler{Prompt: "fix it", Classes: byName, RetryPolicy: retryPolicy}
+	claim := api.ResourceClaimSpec{Key: "workspace", Mode: api.ResourceClaimExclusive}
+	scheduler := CodingScheduler{
+		Prompt: "fix it", Classes: byName, RetryPolicy: retryPolicy,
+		ResourceClaims: []api.ResourceClaimSpec{claim},
+	}
 	state := multiagent.TeamState{RunID: "run-team"}
 
 	planner := nextDispatch(t, scheduler, state, PlannerClass)
 	if err := multiagent.ValidateDispatch(planner); err != nil {
 		t.Fatalf("planner dispatch invalid: %v", err)
+	}
+	if len(planner.Task.ResourceClaims) != 0 {
+		t.Fatalf("planner resource claims = %#v, want none", planner.Task.ResourceClaims)
 	}
 	if planner.Task.Budget == nil || planner.Task.Budget.MaxTokens != 0 || planner.Task.Budget.MaxToolCalls != 0 || planner.Task.Budget.MaxWallClock != 0 {
 		t.Fatalf("planner task budget = %#v, want unbounded", planner.Task.Budget)
@@ -54,22 +61,37 @@ func TestCodingSchedulerReplaysOneRevisionDeterministically(t *testing.T) {
 	})
 
 	implementer := nextDispatch(t, scheduler, state, ImplementerClass)
+	if !reflect.DeepEqual(implementer.Task.ResourceClaims, []api.ResourceClaimSpec{claim}) {
+		t.Fatalf("implementer resource claims = %#v", implementer.Task.ResourceClaims)
+	}
 	state = finishDispatch(state, implementer, map[string]any{"summary": "first", "evidence": []any{"test"}})
 	reviewer := nextDispatch(t, scheduler, state, ReviewerClass)
+	if !reflect.DeepEqual(reviewer.Task.ResourceClaims, []api.ResourceClaimSpec{claim}) {
+		t.Fatalf("reviewer resource claims = %#v", reviewer.Task.ResourceClaims)
+	}
 	state = finishDispatch(state, reviewer, map[string]any{"verdict": "revise", "findings": []any{"bug"}, "evidence": []any{"failure"}})
 
 	revision := nextDispatch(t, scheduler, state, ImplementerClass)
+	if !reflect.DeepEqual(revision.Task.ResourceClaims, []api.ResourceClaimSpec{claim}) {
+		t.Fatalf("revision resource claims = %#v", revision.Task.ResourceClaims)
+	}
 	if revision.Task.ID != "run-team-implementer-attempt-2" {
 		t.Fatalf("revision task id = %q", revision.Task.ID)
 	}
 	state = finishDispatch(state, revision, map[string]any{"summary": "fixed", "evidence": []any{"pass"}})
 	secondReview := nextDispatch(t, scheduler, state, ReviewerClass)
+	if !reflect.DeepEqual(secondReview.Task.ResourceClaims, []api.ResourceClaimSpec{claim}) {
+		t.Fatalf("second review resource claims = %#v", secondReview.Task.ResourceClaims)
+	}
 	if secondReview.Task.ID != "run-team-reviewer-attempt-2" {
 		t.Fatalf("review retry task id = %q", secondReview.Task.ID)
 	}
 	state = finishDispatch(state, secondReview, map[string]any{"verdict": "accept", "findings": []any{}, "evidence": []any{"pass"}})
 
 	reporter := nextDispatch(t, scheduler, state, ReporterClass)
+	if len(reporter.Task.ResourceClaims) != 0 {
+		t.Fatalf("reporter resource claims = %#v, want none", reporter.Task.ResourceClaims)
+	}
 	state = finishDispatch(state, reporter, map[string]any{"answer": "done"})
 	dispatches, err := scheduler.Next(context.Background(), state)
 	if err != nil || len(dispatches) != 0 {

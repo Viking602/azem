@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -31,11 +32,22 @@ func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reas
 
 func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, modelID, reasoning, transport string, factMetered bool) stream.Sink {
 	timeline := newDurableToolTimeline(s.sessions, s.cfg.Workspace.Root, sessionID, runID)
+	commentary := durableCommentaryCollector{
+		store: s.sessions, tools: timeline, sessionID: sessionID, runID: runID,
+	}
 	return stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
 		data := map[string]string{}
 		switch frame.Kind {
 		case stream.FrameText:
-			if !s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: frame.Text, Data: data}) {
+			if frame.TextPhase == hyprovider.TextPhaseCommentary {
+				commentary.append(frame.Text)
+			} else if err := commentary.flush(ctx); err != nil {
+				return err
+			}
+			if !s.emit(ctx, Event{
+				Kind: EventTextDelta, SessionID: sessionID, RunID: runID,
+				State: "streaming", Text: frame.Text, TextPhase: string(frame.TextPhase), Data: data,
+			}) {
 				return eventDeliveryError(ctx)
 			}
 		case stream.FrameThinking:
@@ -44,6 +56,9 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 			}
 		case stream.FrameToolCall:
 			if frame.ToolCall != nil {
+				if err := commentary.flush(ctx); err != nil {
+					return err
+				}
 				if err := timeline.start(ctx, *frame.ToolCall); err != nil {
 					return err
 				}
@@ -71,6 +86,13 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 				}
 			}
 		case stream.FrameDone:
+			if frame.StopReason == hyprovider.StopReasonToolUse {
+				if err := commentary.flush(ctx); err != nil {
+					return err
+				}
+			} else {
+				commentary.discard()
+			}
 			if factMetered {
 				return nil
 			}
@@ -91,6 +113,7 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 				}
 			}
 		case stream.FrameError:
+			commentary.discard()
 			if frame.Err != nil {
 				return frame.Err
 			}
@@ -120,6 +143,107 @@ func normalizeTurnRequest(request TurnRequest, defaults config.DefaultsConfig) T
 	return request
 }
 
+type durableCommentaryCollector struct {
+	store            *session.Service
+	tools            *durableToolTimeline
+	sessionID, runID string
+	content          strings.Builder
+	startedAt        time.Time
+}
+
+func (c *durableCommentaryCollector) append(chunk string) {
+	if chunk == "" {
+		return
+	}
+	if c.content.Len() == 0 {
+		c.startedAt = time.Now().UTC()
+	}
+	c.content.WriteString(chunk)
+}
+
+func (c *durableCommentaryCollector) flush(ctx context.Context) error {
+	content := c.content.String()
+	if strings.TrimSpace(content) == "" {
+		c.discard()
+		return nil
+	}
+	if c.store == nil {
+		c.discard()
+		return nil
+	}
+	completedAt := time.Now().UTC()
+	startedAt := c.startedAt
+	if startedAt.IsZero() {
+		startedAt = completedAt
+	}
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	sequence, err := c.store.AppendBlock(persistCtx, c.sessionID, session.Block{
+		Kind: "commentary", RunID: c.runID, Title: "progress", Content: content,
+		TextPhase: string(hyprovider.TextPhaseCommentary), State: "completed",
+		Data: map[string]string{
+			"startedAt":   fmt.Sprint(startedAt.UnixMilli()),
+			"completedAt": fmt.Sprint(completedAt.UnixMilli()),
+			"elapsedMs":   fmt.Sprint(completedAt.Sub(startedAt).Milliseconds()),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("persist commentary: %w", err)
+	}
+	c.tools.anchorAfter(sequence)
+	c.discard()
+	return nil
+}
+
+func (c *durableCommentaryCollector) discard() {
+	c.content.Reset()
+	c.startedAt = time.Time{}
+}
+
+type reasoningTraceCollector struct {
+	completed strings.Builder
+	attempt   strings.Builder
+	separate  bool
+}
+
+func (c *reasoningTraceCollector) append(chunk string) {
+	c.attempt.WriteString(chunk)
+}
+
+func (c *reasoningTraceCollector) commit(separateNext bool) {
+	chunk := c.attempt.String()
+	if strings.TrimSpace(chunk) != "" {
+		if c.separate && c.completed.Len() > 0 {
+			c.completed.WriteString("\n\n")
+		}
+		c.completed.WriteString(chunk)
+	}
+	c.attempt.Reset()
+	c.separate = separateNext && c.completed.Len() > 0
+}
+
+func (c *reasoningTraceCollector) discardAttempt() {
+	c.attempt.Reset()
+}
+
+func (c *reasoningTraceCollector) len() int {
+	return c.completed.Len() + c.attempt.Len()
+}
+
+func (c *reasoningTraceCollector) text() string {
+	if c.attempt.Len() == 0 {
+		return c.completed.String()
+	}
+	var combined strings.Builder
+	combined.Grow(c.completed.Len() + c.attempt.Len() + 2)
+	combined.WriteString(c.completed.String())
+	if c.separate && c.completed.Len() > 0 {
+		combined.WriteString("\n\n")
+	}
+	combined.WriteString(c.attempt.String())
+	return combined.String()
+}
+
 func (s *Service) providerTransport(providerID string) string {
 	if providerID != "grok" {
 		return "chatgpt-codex-responses"
@@ -138,26 +262,40 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		state = "resuming"
 	}
 	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: request.SessionID, RunID: run.RunID, State: state, Data: map[string]string{"preserveUsage": fmt.Sprint(request.resuming)}})
+	startedAt := time.Now().UTC()
 	var streamed strings.Builder
+	var reasoningTrace reasoningTraceCollector
+	var finalAnswer finalAnswerTrace
+	turnUsedTool := false
 	var result hyagent.Result
 	var executionOutcome hyworker.ExecutionOutcome
-	envelope, lease, runErr := s.coding.TransferRunExecution(run)
-	if runErr == nil {
-		uiSink := s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
-		sink := stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
-			if frame.Kind == stream.FrameText {
+	var runErr error
+	uiSink := s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
+	sink := stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
+		switch frame.Kind {
+		case stream.FrameText:
+			finalAnswer.append(frame.Text, frame.TextPhase)
+			if frame.TextPhase != hyprovider.TextPhaseCommentary {
 				streamed.WriteString(frame.Text)
 			}
-			return uiSink.Emit(ctx, frame)
-		})
-		workerCtx := agentservice.DelegatedApprovalContext(ctx)
-		executionOutcome, runErr = (hyworker.AgentWorker{
-			Runner: s.coding.Runner(), Engine: engine, AgentID: run.HolderID, Model: engine.Model, TTL: 10 * time.Minute,
-		}).ExecuteContinuing(workerCtx, hyworker.ExecuteEnvelopeRequest{
-			Envelope: envelope, Lease: lease, TTL: 10 * time.Minute, Sink: sink,
-		})
-		result = executionOutcome.Result
-	}
+		case stream.FrameThinking:
+			reasoningTrace.append(frame.Thinking)
+		case stream.FrameToolCall:
+			turnUsedTool = true
+		case stream.FrameDone:
+			finalAnswer.finishTurn()
+			reasoningTrace.commit(turnUsedTool)
+			turnUsedTool = false
+		case stream.FrameError:
+			reasoningTrace.discardAttempt()
+			turnUsedTool = false
+		}
+		return uiSink.Emit(ctx, frame)
+	})
+	workerCtx := agentservice.DelegatedApprovalContext(ctx)
+	executionOutcome, runErr = s.coding.ExecuteRun(workerCtx, run, engine, sink)
+	result = executionOutcome.Result
+	finalText := finalAnswer.resolve(result.Text)
 	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {
 		runErr = fmt.Errorf("%w (increase agents.main.max_tokens in config.yaml for unusually large tasks)", runErr)
 	}
@@ -195,7 +333,8 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	}
 	if runErr != nil && ctx.Err() == nil && s.sessions != nil {
 		failed := session.Block{
-			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: streamed.String(), State: "failed",
+			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: streamed.String(),
+			TextPhase: string(hyprovider.TextPhaseFinalAnswer), State: "failed",
 		}
 		if strings.TrimSpace(failed.Content) == "" {
 			failed.Kind = "error"
@@ -209,7 +348,8 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			runErr = fmt.Errorf("%v; persist failed turn: %w", runErr, err)
 		}
 	}
-	if runErr == nil && ctx.Err() == nil && s.sessions != nil && (strings.TrimSpace(result.Text) != "" || len(result.Messages) > 0) {
+	if runErr == nil && ctx.Err() == nil && s.sessions != nil &&
+		(strings.TrimSpace(finalText) != "" || strings.TrimSpace(result.Thinking) != "" || reasoningTrace.len() > 0 || len(result.Messages) > 0) {
 		_, instructionFingerprint := turnInstructions(request.PlanMode)
 		history := session.ModelHistory{
 			ProviderID: request.Provider, ModelID: engine.Model,
@@ -218,9 +358,20 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			WireVersion:            session.CurrentWireVersion,
 			Messages:               result.Messages,
 		}
+		thinking := reasoningTrace.text()
+		if strings.TrimSpace(thinking) == "" {
+			thinking = result.Thinking
+		}
+		completedAt := time.Now().UTC()
 		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := s.sessions.CompleteTurn(persistCtx, request.SessionID, session.Block{
-			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: result.Text, State: "completed",
+			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: finalText,
+			TextPhase: string(hyprovider.TextPhaseFinalAnswer), Thinking: thinking, State: "completed",
+			Data: map[string]string{
+				"startedAt":   fmt.Sprint(startedAt.UnixMilli()),
+				"completedAt": fmt.Sprint(completedAt.UnixMilli()),
+				"elapsedMs":   fmt.Sprint(completedAt.Sub(startedAt).Milliseconds()),
+			},
 		}, history); err != nil {
 			runErr = fmt.Errorf("persist completed turn: %w", err)
 		}
@@ -228,16 +379,6 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	}
 	if ctx.Err() != nil && s.cancellationIntent(run.RunID) == "shutdown" {
 		return
-	}
-	completionCtx, completionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	completionErr := s.coding.FinalizeReportedRun(completionCtx, run.RunID)
-	completionCancel()
-	if completionErr != nil {
-		if runErr == nil {
-			runErr = completionErr
-		} else {
-			runErr = fmt.Errorf("%v; durable completion: %w", runErr, completionErr)
-		}
 	}
 	if ctx.Err() != nil {
 		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "cancelled", ctx.Err())
@@ -250,7 +391,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		return
 	}
 	if err := s.persistRecap(ctx, recapGenerationRequest{
-		SessionID: request.SessionID, RunID: run.RunID, Goal: request.Prompt, Answer: result.Text, Todo: request.Todo,
+		SessionID: request.SessionID, RunID: run.RunID, Goal: request.Prompt, Answer: finalText, Todo: request.Todo,
 	}); err != nil {
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
 	}
@@ -265,6 +406,7 @@ type teamExecutionPolicy struct {
 	contextBudget         ContextBudget
 	attachmentRoot        string
 	images                []session.Attachment
+	resourceClaims        []api.ResourceClaimSpec
 	newSummarizerResolver func(string) func(context.Context) (func(context.Context, string) (string, error), int, error)
 }
 
@@ -284,6 +426,12 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 		return teamExecutionPolicy{}, err
 	}
 	policy := teamExecutionPolicy{contextBudget: budget, attachmentRoot: s.attachments.Root, images: CloneAttachments(request.Images)}
+	policy.resourceClaims, err = topLevelWorkspaceWriteClaims(
+		s.cfg.Workspace.AllowWrite, s.cfg.Workspace.ShellPolicy, s.cfg.Workspace.Root,
+	)
+	if err != nil {
+		return teamExecutionPolicy{}, err
+	}
 	compactionRoute, _ := s.providers.modelRouteSnapshot()
 	report := s.providers.compactionUsageReporter(s, request.SessionID, parentRunID)
 	policy.newSummarizerResolver = func(cacheKey string) func(context.Context) (func(context.Context, string) (string, error), int, error) {
@@ -564,7 +712,10 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 			MaxBackoff:  s.cfg.Retry.MaxDelayDuration,
 		}
 	}
-	return agentservice.TeamHooks{BeforeTask: beforeTask, PrepareEngine: prepare, DecorateEngine: decorate, RetryPolicy: retryPolicy}
+	return agentservice.TeamHooks{
+		BeforeTask: beforeTask, PrepareEngine: prepare, DecorateEngine: decorate,
+		RetryPolicy: retryPolicy, ResourceClaims: slices.Clone(policy.resourceClaims),
+	}
 }
 
 type teamHookContext struct {

@@ -156,7 +156,7 @@ func sessionDeepLinkHandler(bridge *desktop.Bridge, window *application.WebviewW
 			return
 		}
 		id := strings.TrimPrefix(value.Path, "/")
-		if !strings.HasPrefix(id, "session-") || strings.Contains(id, "/") {
+		if !validSessionID(id) {
 			return
 		}
 		targetWorkspace := value.Query().Get("workspace")
@@ -173,6 +173,39 @@ func sessionDeepLinkHandler(bridge *desktop.Bridge, window *application.WebviewW
 		window.Restore()
 		window.Focus()
 	}
+}
+
+func validSessionID(id string) bool {
+	if strings.HasPrefix(id, "session_") {
+		suffix := strings.TrimPrefix(id, "session_")
+		if len(suffix) != 24 {
+			return false
+		}
+		for _, character := range suffix {
+			if !((character >= '0' && character <= '9') ||
+				(character >= 'a' && character <= 'f') ||
+				(character >= 'A' && character <= 'F')) {
+				return false
+			}
+		}
+		return true
+	}
+	if !strings.HasPrefix(id, "session-") {
+		return false
+	}
+	suffix := strings.TrimPrefix(id, "session-")
+	if len(suffix) == 0 || len(suffix) > 128 {
+		return false
+	}
+	for _, character := range suffix {
+		if !((character >= '0' && character <= '9') ||
+			(character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			character == '-' || character == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func launchSessionWindow(configFile, sessionID, workspace string, forceWorkspace bool) error {

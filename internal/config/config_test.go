@@ -283,6 +283,7 @@ func TestPersistedBuiltInRoleRouteReloadsWithoutExplicitRoleDefinition(t *testin
 
 func TestModelRouteValidationAndPlanLoad(t *testing.T) {
 	cfg := Default()
+	cfg.Agents.Title = ModelRouteConfig{Provider: "chatgpt", Model: "gpt-title", Reasoning: "low"}
 	cfg.Agents.Plan = ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
 	cfg.Agents.Compaction = ModelRouteConfig{Provider: "chatgpt", Model: "gpt-test"}
 	if err := cfg.Validate(); err != nil {
@@ -302,12 +303,15 @@ func TestModelRouteValidationAndPlanLoad(t *testing.T) {
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  plan:\n    provider: grok\n    model: grok-plan\n    reasoning: high\n  compaction:\n    provider: chatgpt\n    model: gpt-test\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  title:\n    provider: grok\n    model: grok-title\n    reasoning: low\n  plan:\n    provider: grok\n    model: grok-plan\n    reasoning: high\n  compaction:\n    provider: chatgpt\n    model: gpt-test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := Load(path, root)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if loaded.Agents.Title != (ModelRouteConfig{Provider: "grok", Model: "grok-title", Reasoning: "low"}) {
+		t.Fatalf("title route = %#v", loaded.Agents.Title)
 	}
 	if loaded.Agents.Plan != (ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}) {
 		t.Fatalf("plan route = %#v", loaded.Agents.Plan)
@@ -340,6 +344,29 @@ func TestUpdatePlanModelRoutePersistsAndResets(t *testing.T) {
 	loaded, err = Load(path, root)
 	if err != nil || loaded.Agents.Plan != (ModelRouteConfig{}) {
 		t.Fatalf("reset plan route = %#v, error=%v", loaded.Agents.Plan, err)
+	}
+}
+
+func TestUpdateTitleModelRoutePersistsAndResetsToInherited(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "grok", Model: "grok-title", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "title", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Title != route {
+		t.Fatalf("title route = %#v, error=%v", loaded.Agents.Title, err)
+	}
+	if err := ResetModelRoute(path, "title", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Title != (ModelRouteConfig{}) {
+		t.Fatalf("reset title route = %#v, error=%v", loaded.Agents.Title, err)
 	}
 }
 

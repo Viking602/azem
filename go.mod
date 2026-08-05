@@ -57,7 +57,7 @@ require (
 )
 
 require (
-	github.com/Viking602/venat v0.13.0
+	github.com/Viking602/venat v0.13.1-0.20260805043312-9424a2b3bacb
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260703014108-f5a850f9c2b7 // indirect
 	github.com/charmbracelet/x/ansi v0.11.7

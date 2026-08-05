@@ -110,6 +110,12 @@ export default function App() {
           useRuntimeStore.getState().selectAgent("");
           return;
         }
+        if (useRuntimeStore.getState().view === "agents") {
+          event.preventDefault();
+          useRuntimeStore.getState().setView("thread");
+          requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".inspector-toggle")?.focus());
+          return;
+        }
         if (running) document.querySelector<HTMLButtonElement>("[data-cancel-run]")?.click();
       }
     };
@@ -124,7 +130,7 @@ export default function App() {
 
   const hasContext = blocks.length > 0 || running;
   const showPullRequest = Boolean(selectedPullRequestNumber);
-  const showSideChat = !showPullRequest && view === "thread" && Boolean(selectedAgentId);
+  const showSideChat = !showPullRequest && (view === "thread" || view === "agents") && Boolean(selectedAgentId);
   const showInspector = !showPullRequest && view === "thread" && hasContext && inspectorOpen && !showSideChat;
   const layoutMode = showPullRequest ? "pull-request" : showSideChat ? "agent" : showInspector ? "open" : "closed";
   const t = translator(snapshot.language);

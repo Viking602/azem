@@ -86,6 +86,7 @@ type Service struct {
 	background         *backgroundservice.Manager
 	historySearch      func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error)
 	recapGenerator     func(context.Context, recapGenerationRequest) (string, error)
+	titleGenerator     func(context.Context, titleGenerationRequest) (string, error)
 }
 
 func NewService(parent context.Context, cfg config.Config) *Service {
@@ -219,6 +220,7 @@ func (s *Service) AttachSkills(catalog *skills.Catalog) {
 func (s *Service) AttachProviderRuntime(runtime *ProviderRuntime) {
 	s.providers = runtime
 	if runtime != nil {
+		s.titleGenerator = runtime.GenerateTitle
 		s.recapGenerator = runtime.GenerateRecap
 		runtime.Attach(s, s.mcp, s.subagentStore)
 	}
@@ -530,11 +532,8 @@ func sessionProjectionData(projection session.Projection, blocks string) map[str
 	return data
 }
 
-func (s *Service) materializeTurnSession(ctx context.Context, request TurnRequest) error {
-	if s.sessions == nil {
-		return nil
-	}
-	title := strings.TrimSpace(strings.SplitN(request.Prompt, "\n", 2)[0])
+func initialSessionTitle(prompt string) string {
+	title := strings.TrimSpace(strings.SplitN(prompt, "\n", 2)[0])
 	if title == "" {
 		title = "New session"
 	}
@@ -542,15 +541,52 @@ func (s *Service) materializeTurnSession(ctx context.Context, request TurnReques
 	if len(runes) > 80 {
 		title = string(runes[:79]) + "…"
 	}
+	return title
+}
+
+func (s *Service) materializeTurnSession(ctx context.Context, request TurnRequest) error {
+	if s.sessions == nil {
+		return nil
+	}
 	_, err := s.sessions.Ensure(ctx, session.Session{
 		ID:         request.SessionID,
-		Title:      title,
+		Title:      initialSessionTitle(request.Prompt),
 		ProviderID: request.Provider,
 		ModelID:    request.Model,
 		Reasoning:  request.Reasoning,
 		AgentMode:  request.AgentMode,
 	})
 	return err
+}
+
+func (s *Service) startSessionTitleGeneration(request titleGenerationRequest, currentTitle string) {
+	if s.sessions == nil || s.titleGenerator == nil || currentTitle == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		return
+	}
+	generator := s.titleGenerator
+	s.wg.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		generationCtx, cancelGeneration := context.WithTimeout(s.ctx, 30*time.Second)
+		title, err := generator(generationCtx, request)
+		cancelGeneration()
+		if err != nil || title == "" {
+			return
+		}
+		persistCtx, cancelPersist := context.WithTimeout(s.ctx, 2*time.Second)
+		defer cancelPersist()
+		changed, err := s.sessions.RenameIfTitle(persistCtx, request.SessionID, currentTitle, title)
+		if err != nil || !changed {
+			return
+		}
+		_ = s.emitSessionList(persistCtx)
+	}()
 }
 
 func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
@@ -614,12 +650,19 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		s.clearRun("starting")
 		return "", err
 	}
+	autoTitleCurrent := ""
 	if s.sessions != nil {
 		projection, err := s.sessions.LoadProjection(s.ctx, request.SessionID)
 		if err != nil {
 			cancel()
 			s.clearRun("starting")
 			return "", err
+		}
+		if len(projection.Blocks) == 0 {
+			currentTitle := strings.TrimSpace(projection.Session.Title)
+			if currentTitle == "New session" || currentTitle == initialSessionTitle(request.Prompt) {
+				autoTitleCurrent = projection.Session.Title
+			}
 		}
 		request.History = append([]session.Block(nil), projection.Blocks...)
 		request.modelHistory = projection.ModelHistory
@@ -684,6 +727,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 				return "", fmt.Errorf("persist user turn: %w", err)
 			}
 		}
+		s.startSessionTitleGeneration(titleGenerationRequest{SessionID: request.SessionID, RunID: runID, Prompt: request.Prompt}, autoTitleCurrent)
 		handedOff = true
 		go s.runFakeTurn(runCtx, request.SessionID, runID, request.Prompt)
 		return runID, nil
@@ -721,6 +765,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 				return "", fmt.Errorf("persist user turn: %w", err)
 			}
 		}
+		s.startSessionTitleGeneration(titleGenerationRequest{SessionID: request.SessionID, RunID: runID, Prompt: request.Prompt}, autoTitleCurrent)
 		handedOff = true
 		go s.runProviderTeam(runCtx, request, runID, goal, resolution)
 		return runID, nil
@@ -743,6 +788,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	s.activeRun = durableRun.RunID
 	s.guidanceOpen = true
 	s.mu.Unlock()
+	s.startSessionTitleGeneration(titleGenerationRequest{SessionID: request.SessionID, RunID: durableRun.RunID, Prompt: request.Prompt}, autoTitleCurrent)
 	handedOff = true
 	go s.runProviderTurn(runCtx, request, durableRun, engine)
 	return durableRun.RunID, nil
@@ -877,7 +923,7 @@ func (s *Service) HasActiveChildren() bool {
 func (s *Service) CancelActiveWithChildren(children bool) bool {
 	s.mu.Lock()
 	cancel := s.activeEnd
-	sessionID, runID, providers := s.activeSession, s.activeRun, s.providers
+	sessionID, runID, providers, coding := s.activeSession, s.activeRun, s.providers, s.coding
 	if cancel != nil {
 		s.activeCancelIntent = "user"
 	}
@@ -887,6 +933,11 @@ func (s *Service) CancelActiveWithChildren(children bool) bool {
 	}
 	if children && providers != nil && sessionID != "" && runID != "" && runID != "starting" {
 		providers.CancelParentSubagents(sessionID, runID)
+	}
+	if coding != nil && runID != "" && runID != "starting" {
+		cancelCtx, cancelRun := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = coding.CancelTrackedRun(cancelCtx, runID)
+		cancelRun()
 	}
 	cancel()
 	return true

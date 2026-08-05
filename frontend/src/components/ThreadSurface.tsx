@@ -6,7 +6,7 @@ import {
   Pencil, Plug, Plus, RefreshCw, Search, Send, Settings, ShieldAlert, ShieldCheck, Sparkles, Trash2, Zap,
   PanelRightClose, PanelRightOpen, X,
 } from "lucide-react";
-import { cancelActive, execute, guide, importAttachment, openProject, selectProjectFolder, startTurn } from "../bridge";
+import { cancelActive, execute, guide, importAttachment, importClipboardImage, openProject, selectProjectFolder, startTurn } from "../bridge";
 import { reasoningHint, sortReasoningLevels, tFormat, translator } from "../i18n";
 import { useRuntimeStore, type ContextUsage } from "../store";
 import type { Attachment, Block, ContextProfile, DeliveryMode, QueuedPrompt, SkillEntry, Snapshot } from "../types";
@@ -40,6 +40,10 @@ type SlashContext = {
   contextPercent?: number;
   provider?: string;
 };
+
+export function shouldReadNativeClipboard(clipboardData: DataTransfer): boolean {
+  return pastedImages(clipboardData).length === 0 && !clipboardData.types.includes("text/plain");
+}
 
 const slashCommands: Array<{
   action: SlashAction;
@@ -84,8 +88,8 @@ const slashCommands: Array<{
   },
   // Team mode UI is intentionally unavailable until multi-agent is designed.
   {
-    action: "agents", aliases: ["subagents", "代理"], zh: "子代理", en: "Agents",
-    zhDetail: "查看当前子代理任务", enDetail: "Inspect current subagent tasks", icon: Bot,
+    action: "agents", aliases: ["subagents", "子智能体", "智能体", "代理"], zh: "子智能体", en: "Subagents",
+    zhDetail: "查看当前子智能体任务", enDetail: "Inspect current subagent tasks", icon: Bot,
   },
   {
     action: "approval", aliases: ["approval", "approve", "审批", "yolo"], zh: "审批模式", en: "Approval",
@@ -191,6 +195,7 @@ export default function ThreadSurface() {
   const running = useRuntimeStore((state) => state.running);
   const runId = useRuntimeStore((state) => state.runId);
   const runStartedAt = useRuntimeStore((state) => state.runStartedAt);
+  const activity = useRuntimeStore((state) => state.activity);
   const error = useRuntimeStore((state) => state.error);
   const planMode = useRuntimeStore((state) => state.planMode);
   const attachments = useRuntimeStore((state) => state.attachments);
@@ -266,14 +271,30 @@ export default function ThreadSurface() {
     }, setError);
   };
 
-  const attach = async (files: FileList | null) => {
+  const attach = async (files: Iterable<File> | null) => {
     if (!files) return;
-    for (const file of Array.from(files)) {
+    const timestamp = new Date();
+    for (const [index, file] of Array.from(files).entries()) {
+      if (!file.type.startsWith("image/")) continue;
       try {
-        useRuntimeStore.getState().addAttachment(await importAttachment(currentSessionId, file));
+        const image = file.name ? file : namedClipboardImage(file, timestamp, index);
+        useRuntimeStore.getState().addAttachment(await importAttachment(currentSessionId, image));
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
+    }
+  };
+
+  const attachClipboard = async (files: File[]) => {
+    if (files.length > 0) {
+      await attach(files);
+      return;
+    }
+    try {
+      const image = await importClipboardImage(currentSessionId);
+      if (image) useRuntimeStore.getState().addAttachment(image);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
 
@@ -293,7 +314,7 @@ export default function ThreadSurface() {
           <div className="azem-symbol" aria-hidden="true"><span /><span /></div>
           <h1>{t("promptTitle")}</h1>
           <Composer
-            prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach}
+            prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
             agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
             running={running}
             deliveryMode={deliveryMode} setDeliveryMode={setDeliveryMode}
@@ -307,7 +328,13 @@ export default function ThreadSurface() {
             setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 72);
           }}>
             <div className="transcript">
-              <TimelineFeed blocks={blocks} language={snapshot.language} activeRunId={runId} running={running} />
+              <TimelineFeed
+                blocks={blocks}
+                language={snapshot.language}
+                activeRunId={runId}
+                running={running}
+                waitingForModel={running && (activity === "waiting_model" || activity === "thinking")}
+              />
               {queuedPrompts.length > 0 && <QueuedPrompts items={queuedPrompts} running={running} onGuide={guideQueued} onDelete={removeQueuedPrompt} onEdit={editQueued} onCloseQueue={() => setDeliveryMode("guide")} />}
               {error && <div className="inline-error" role="alert">{error}</div>}
             </div>
@@ -315,7 +342,7 @@ export default function ThreadSurface() {
           {!following && <button className="jump-latest" aria-label={t("jumpLatest")} title={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
           <div className="composer-dock">
             <Composer
-              prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach}
+              prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
               agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
               running={running} cancel={cancel}
               deliveryMode={deliveryMode} setDeliveryMode={setDeliveryMode}
@@ -419,8 +446,9 @@ function HeaderActions({ empty }: { empty: boolean }) {
   return <div className="thread-actions"><button hidden={empty} className="icon-button inspector-toggle" data-open={String(inspectorOpen)} title={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}><PanelRightClose className="inspector-open-icon" size={15} /><PanelRightOpen className="inspector-closed-icon" size={15} /></button></div>;
 }
 
-function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, planMode, setPlanMode, running, cancel, deliveryMode, setDeliveryMode, showContextBar = false }: {
-  prompt: string; setPrompt: (value: string) => void; submit: () => void; attach: (files: FileList | null) => void;
+function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMode, setAgentMode, planMode, setPlanMode, running, cancel, deliveryMode, setDeliveryMode, showContextBar = false }: {
+  prompt: string; setPrompt: (value: string) => void; submit: () => void;
+  attach: (files: Iterable<File> | null) => void; attachClipboard: (files: File[]) => void;
   agentMode: string; setAgentMode: (value: string) => void; planMode: boolean; setPlanMode: (value: boolean) => void;
   running: boolean; cancel?: () => void;
   deliveryMode: DeliveryMode; setDeliveryMode: (value: DeliveryMode) => void;
@@ -540,7 +568,18 @@ function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, 
           </section>}
         </div>}
         {attachments.length > 0 && <div className="attachment-row">{attachments.map((item) => <span key={item.id}><ImagePlus size={13} />{item.name}<button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.id)}><X size={12} /></button></span>)}</div>}
-        <textarea id="azem-composer" value={prompt} onChange={(event) => setPrompt(event.target.value)} onFocus={() => setSlashDismissed(false)} onBlur={() => setSlashDismissed(true)}
+        <textarea id="azem-composer" value={prompt} onChange={(event) => setPrompt(event.target.value)} onPaste={(event) => {
+          const images = pastedImages(event.clipboardData);
+          if (images.length > 0) {
+            event.preventDefault();
+            const timestamp = new Date();
+            void attachClipboard(images.map((file, index) => file.name ? file : namedClipboardImage(file, timestamp, index)));
+            return;
+          }
+          if (!shouldReadNativeClipboard(event.clipboardData)) return;
+          event.preventDefault();
+          void attachClipboard([]);
+        }} onFocus={() => setSlashDismissed(false)} onBlur={() => setSlashDismissed(true)}
           aria-autocomplete="list" aria-expanded={slashOpen} aria-controls={slashOpen ? "slash-menu" : undefined} aria-activedescendant={slashOpen ? `slash-option-${slashCursor}` : undefined}
           placeholder={running ? deliveryMode === "queue" ? t("queuePlaceholder") : t("guidePlaceholder") : t("promptPlaceholder")} rows={2} onKeyDown={(event) => {
           if (slashOpen && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) {
@@ -592,6 +631,27 @@ function Composer({ prompt, setPrompt, submit, attach, agentMode, setAgentMode, 
       </div>
     </div>
   );
+}
+
+export function pastedImages(clipboardData: DataTransfer): File[] {
+  const files = Array.from(clipboardData.files);
+  const candidates = files.length > 0
+    ? files
+    : Array.from(clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+  return candidates.filter((file) => file.type.startsWith("image/"));
+}
+
+export function namedClipboardImage(file: File, timestamp: Date, index: number): File {
+  const extension = file.type === "image/jpeg" || file.type === "image/jpg" ? "jpg"
+    : file.type === "image/gif" ? "gif"
+      : file.type === "image/webp" ? "webp"
+        : "png";
+  const suffix = index === 0 ? "" : `-${index + 1}`;
+  const name = `pasted-image-${timestamp.toISOString().replace(/[:.]/g, "-")}${suffix}.${extension}`;
+  return new File([file], name, { type: file.type || `image/${extension}`, lastModified: file.lastModified });
 }
 
 function workspaceBasename(path: string) {

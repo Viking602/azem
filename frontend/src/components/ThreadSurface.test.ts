@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SkillEntry } from "../types";
-import { parseSkillPrompt, skillTitle, slashSuggestions } from "./ThreadSurface";
+import { namedClipboardImage, parseSkillPrompt, pastedImages, shouldReadNativeClipboard, skillTitle, slashSuggestions } from "./ThreadSurface";
 
 const skills: SkillEntry[] = [
   { name: "animation-systems", description: "Build polished motion", sourcePath: "~/.agents/skills/animation-systems", bundled: false, eager: false, disabled: false, resourceCount: 0 },
@@ -36,5 +36,38 @@ describe("composer slash commands", () => {
     expect(skillTitle("animation-systems")).toBe("Animation Systems");
     expect(parseSkillPrompt("/skill:verify 检查改动", "zh-CN")).toEqual({ name: "verify", instruction: "检查改动" });
     expect(parseSkillPrompt("/skill:verify", "zh-CN")?.instruction).toContain("verify");
+  });
+
+  it("extracts pasted images from clipboard files without treating text as an attachment", () => {
+    const image = new File([new Uint8Array([137, 80, 78, 71])], "screenshot.png", { type: "image/png" });
+    const text = new File(["notes"], "notes.txt", { type: "text/plain" });
+    const clipboard = { files: [image, text], items: [] } as unknown as DataTransfer;
+    expect(pastedImages(clipboard)).toEqual([image]);
+  });
+
+  it("falls back to clipboard items when the files collection is empty", () => {
+    const image = new File([new Uint8Array([255, 216, 255])], "clipboard.jpg", { type: "image/jpeg" });
+    const clipboard = {
+      files: [],
+      items: [
+        { kind: "string", getAsFile: () => null },
+        { kind: "file", getAsFile: () => image },
+      ],
+    } as unknown as DataTransfer;
+    expect(pastedImages(clipboard)).toEqual([image]);
+  });
+
+  it("gives unnamed clipboard blobs a stable image filename", () => {
+    const image = new File([new Uint8Array([137, 80, 78, 71])], "", { type: "image/png" });
+    const named = namedClipboardImage(image, new Date("2026-08-04T05:00:00.000Z"), 0);
+    expect(named.name).toBe("pasted-image-2026-08-04T05-00-00-000Z.png");
+    expect(named.type).toBe("image/png");
+  });
+
+  it("uses native clipboard fallback only when WebView exposes neither images nor text", () => {
+    const emptyClipboard = { files: [], items: [], types: [] } as unknown as DataTransfer;
+    const textClipboard = { files: [], items: [], types: ["text/plain"] } as unknown as DataTransfer;
+    expect(shouldReadNativeClipboard(emptyClipboard)).toBe(true);
+    expect(shouldReadNativeClipboard(textClipboard)).toBe(false);
   });
 });

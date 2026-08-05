@@ -169,10 +169,14 @@ function RouteRow({ route, description, modelsByProvider, action, language }: {
 function SettingRow({ label, description, children }: { label: string; description: string; children: React.ReactNode }) { return <div className="setting-row"><div><strong>{label}</strong><p>{description}</p></div><div>{children}</div></div>; }
 function routeTitle(route: ModelRoute, language: Language) {
   const t = translator(language);
-  return route.Scope === "plan" ? t("routePlan") : route.Scope === "compaction" ? t("routeCompaction") : route.Role || route.Label;
+  if (route.Scope === "title") return t("routeTitle");
+  if (route.Scope === "plan") return t("routePlan");
+  if (route.Scope === "compaction") return t("routeCompaction");
+  return route.Role || route.Label;
 }
 function routeDescription(route: ModelRoute, description: string, language: Language) {
   const t = translator(language);
+  if (route.Scope === "title") return t("routeTitleHint");
   if (route.Scope === "plan") return t("routePlanHint");
   if (route.Scope === "compaction") return t("routeCompactionHint");
   return description || tFormat(language, "routeSubagentHint", { role: route.Role || route.Label });

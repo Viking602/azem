@@ -179,6 +179,7 @@ type Event struct {
 	ToolCallID       string
 	ApprovalID       string
 	Text             string
+	TextPhase        string
 	State            string
 	Data             map[string]string
 	Agent            *AgentStatePayload

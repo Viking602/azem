@@ -4,6 +4,7 @@ import {
   classifyToolCategory,
   formatToolPresentation,
   groupTimelineBlocks,
+  isRunningTool,
   segmentProcessTrail,
   summarizeToolGroup,
 } from "./toolTimeline";
@@ -40,6 +41,12 @@ describe("process trail segmentation", () => {
     expect(segments).toHaveLength(2);
     expect(segments[0]).toMatchObject({ kind: "block" });
     expect(segments[1]).toMatchObject({ kind: "process", active: true });
+  });
+
+  it("treats progress heartbeats as an active command", () => {
+    expect(isRunningTool(tool("shell", "coding.shell", "progress"))).toBe(true);
+    const segments = segmentProcessTrail([tool("shell", "coding.shell", "progress")]);
+    expect(segments[0]).toMatchObject({ kind: "process", active: true });
   });
 });
 

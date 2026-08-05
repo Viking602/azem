@@ -1,13 +1,13 @@
 import {
-  AlertTriangle, Bot, Box, CheckCircle2, Clock3, FileClock, FolderGit2,
+  AlertTriangle, Bot, Box, CheckCircle2, FileClock, FolderGit2,
   RefreshCw, RotateCcw, ShieldAlert, Sparkles, Wrench,
 } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 import type { View } from "../types";
-import { formatDuration } from "./ThreadSurface";
 import PullRequestsPage from "./PullRequestsPage";
+import SubagentsPage from "./SubagentsPage";
 
 export default function Pages({ view }: { view: Exclude<View, "thread"> }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
@@ -20,7 +20,7 @@ export default function Pages({ view }: { view: Exclude<View, "thread"> }) {
   };
 
   if (view === "pullRequests") return <PullRequestsPage />;
-  if (view === "agents") return <AgentsPage action={action} />;
+  if (view === "agents") return <SubagentsPage />;
   if (view === "extensions") return <ExtensionsPage action={action} />;
   if (view === "recovery") return <RecoveryPage action={action} />;
   if (view === "projects") return <ProjectsPage open={() => setView("thread")} />;
@@ -31,15 +31,6 @@ function PageFrame({ eyebrow, title, description, action, children }: { eyebrow:
   return <section className="secondary-page"><header><div><span>{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>{action}</header><div className="page-content">{children}</div></section>;
 }
 
-function AgentsPage({ action }: { action: (kind: string, target?: string) => Promise<void> }) {
-  const agents = useRuntimeStore((state) => state.agents);
-  const catalog = useRuntimeStore((state) => state.agentCatalog);
-  return <PageFrame eyebrow="Runtime" title="Agents" description="查看当前会话内的子代理、隔离方式和真实执行进度。" action={<button className="subtle-button" onClick={() => action("list_agent_types")}><RefreshCw size={14} />刷新</button>}>
-    <div className="stat-grid"><Stat icon={Bot} label="运行中" value={agents.filter((agent) => agent.state === "running").length} /><Stat icon={CheckCircle2} label="已完成" value={agents.filter((agent) => agent.state === "completed").length} /><Stat icon={Clock3} label="累计耗时" value={formatDuration(agents.reduce((sum, agent) => sum + agent.elapsedMs, 0))} /></div>
-    <div className="data-grid">{agents.map((agent) => <article className="data-card" key={agent.id}><header><span className="agent-avatar">{(agent.type || "A")[0]}</span><div><h3>{agent.type || agent.id}</h3><p>{agent.summary || agent.description}</p></div><StateBadge state={agent.state} /></header><dl><div><dt>模型</dt><dd>{agent.model || "继承父代理"}</dd></div><div><dt>隔离</dt><dd>{agent.isolation || "none"}</dd></div><div><dt>工具调用</dt><dd>{agent.toolCalls}</dd></div><div><dt>Tokens</dt><dd>{agent.tokensUsed.toLocaleString()}</dd></div></dl><footer><span>{agent.capabilityMode || "read-only"}</span>{agent.state === "running" && <button className="danger-text" onClick={() => action("cancel_agent", agent.id)}>取消</button>}</footer></article>)}</div>
-    <h2 className="section-title">可用角色</h2><div className="catalog-list">{catalog.map((agent) => <div key={agent.name}><Bot size={15} /><span><strong>{agent.name}</strong><small>{agent.description}</small></span><em>{agent.model || "inherit"} · {agent.reasoning || "inherit"}</em></div>)}</div>
-  </PageFrame>;
-}
 
 function ExtensionsPage({ action }: { action: (kind: string) => Promise<void> }) {
   const skills = useRuntimeStore((state) => state.skills);

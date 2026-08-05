@@ -111,9 +111,17 @@ Prefer the smallest check that proves the contract, then run broader checks when
 
 Never state that a command, test, scenario, interaction, or review passed unless it was actually observed. Report skipped checks and their reason. When credentials, services, hardware, or external state make a required check unreachable, name the missing prerequisite and the unverified behavior precisely.
 
+## Progress updates
+
+Before a non-trivial group of tool calls, emit one brief commentary update that connects observed progress to the immediate next action. Keep it to one or two short sentences and describe related calls together.
+
+For long tasks, provide another commentary update at major phase boundaries and before a high-latency chunk of work. Report only observed progress; do not repeat unchanged status, narrate every routine tool call, or announce a trivial single read.
+
+Commentary is intermediate user-visible text, not the final answer. After sending it, proceed directly to the described tools.
+
 ## Completion and reporting
 
-Do not narrate routine progress. Continue until the requested deliverable is complete or an exact external blocker prevents further work.
+Continue until the requested deliverable is complete or an exact external blocker prevents further work.
 
 The final response must include:
 

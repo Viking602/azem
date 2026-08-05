@@ -84,6 +84,11 @@ export async function importAttachment(sessionId: string, file: File): Promise<A
   }
   return Call.ByName(`${bridgeName}.ImportAttachment`, sessionId, file.name, file.type, encoded) as Promise<Attachment>;
 }
+
+export async function importClipboardImage(sessionId: string): Promise<Attachment | null> {
+  if (!isDesktopRuntime()) return null;
+  return Call.ByName(`${bridgeName}.ImportClipboardImage`, sessionId) as Promise<Attachment | null>;
+}
 export async function getPullRequestDashboard(): Promise<PullRequestDashboard> {
   if (!isDesktopRuntime()) return demoDashboard();
   return Call.ByName(`${bridgeName}.PullRequestDashboard`) as Promise<PullRequestDashboard>;

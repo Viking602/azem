@@ -2,6 +2,9 @@ package desktop
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +47,43 @@ func TestDesktopAttachmentRoundTrip(t *testing.T) {
 	}
 	if got := attachmentFromSession(converted[0]); got != input[0] {
 		t.Fatalf("unexpected desktop attachment: %#v", got)
+	}
+}
+
+func TestImportClipboardImage(t *testing.T) {
+	previous := readClipboardImage
+	readClipboardImage = func() ([]byte, string, error) {
+		return []byte{
+			0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+			0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		}, "image/png", nil
+	}
+	t.Cleanup(func() { readClipboardImage = previous })
+
+	runtime := azemapp.NewService(context.Background(), config.Default())
+	runtime.AttachAttachments(filepath.Join(t.TempDir(), "attachments"))
+	bridge := &Bridge{runtime: runtime}
+
+	attachment, err := bridge.ImportClipboardImage("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attachment == nil || attachment.MIMEType != "image/png" || !strings.HasPrefix(attachment.Name, "pasted-image-") {
+		t.Fatalf("unexpected clipboard attachment: %#v", attachment)
+	}
+	if _, err := os.Stat(attachment.Path); err != nil {
+		t.Fatalf("clipboard attachment was not stored: %v", err)
+	}
+}
+
+func TestImportClipboardImageReturnsNilWhenClipboardHasNoImage(t *testing.T) {
+	previous := readClipboardImage
+	readClipboardImage = func() ([]byte, string, error) { return nil, "", nil }
+	t.Cleanup(func() { readClipboardImage = previous })
+
+	attachment, err := (&Bridge{}).ImportClipboardImage("session-1")
+	if err != nil || attachment != nil {
+		t.Fatalf("attachment = %#v, err = %v", attachment, err)
 	}
 }
 

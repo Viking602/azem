@@ -339,6 +339,62 @@ func TestPersistRecapGeneratesConciseSummaryAndEmitsUpdatedEvent(t *testing.T) {
 	}
 }
 
+func TestFirstTurnGeneratesTitleAndEmitsUpdatedSessionList(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	requests := make(chan titleGenerationRequest, 1)
+	service.titleGenerator = func(_ context.Context, request titleGenerationRequest) (string, error) {
+		requests <- request
+		return "Generate immediate session titles", nil
+	}
+
+	runID, err := service.StartConfiguredTurn(TurnRequest{
+		SessionID: "title-session", Prompt: "The sidebar title should update immediately",
+		Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := <-requests
+	if generated.SessionID != "title-session" || generated.RunID != runID || generated.Prompt != "The sidebar title should update immediately" {
+		t.Fatalf("title request = %#v", generated)
+	}
+
+	eventCtx, cancelEvents := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelEvents()
+	foundTitle := false
+	for !foundTitle {
+		event, err := service.NextEvent(eventCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind != EventSessionLoaded || event.State != "list" {
+			continue
+		}
+		var listed []session.Session
+		if err := json.Unmarshal([]byte(event.Data["sessions"]), &listed); err != nil {
+			t.Fatal(err)
+		}
+		foundTitle = len(listed) == 1 && listed[0].ID == "title-session" && listed[0].Title == "Generate immediate session titles"
+	}
+	saved, err := sessions.LoadSession(ctx, "title-session")
+	if err != nil || saved.Title != "Generate immediate session titles" {
+		t.Fatalf("generated title = %q, error=%v", saved.Title, err)
+	}
+	shutdownCtx, cancelShutdown := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelShutdown()
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPersistRecapGenerationFailureKeepsPreviousRecap(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
@@ -1147,12 +1203,15 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := []string{event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Role, event.ModelRoutes[3].Role, event.ModelRoutes[4].Role}; !reflect.DeepEqual(got, []string{"plan", "compaction", "alpha", "off", "zeta"}) {
+	if got := []string{
+		event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Scope,
+		event.ModelRoutes[3].Role, event.ModelRoutes[4].Role, event.ModelRoutes[5].Role,
+	}; !reflect.DeepEqual(got, []string{"title", "plan", "compaction", "alpha", "off", "zeta"}) {
 		t.Fatalf("route order = %v", got)
 	}
 	clone := event.Clone()
-	clone.ModelRoutes[0].Route.Model = "changed"
-	if event.ModelRoutes[0].Route.Model != "architect" {
+	clone.ModelRoutes[1].Route.Model = "changed"
+	if event.ModelRoutes[1].Route.Model != "architect" {
 		t.Fatal("event clone mutated source routes")
 	}
 	if event.Data["subagent_max_concurrency"] != "2" {
@@ -1451,8 +1510,8 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes := service.modelRouteEntries()
-	if routes[2].Route != (config.ModelRouteConfig{}) {
-		t.Fatalf("route not reset: %+v", routes[2])
+	if routes[3].Route != (config.ModelRouteConfig{}) {
+		t.Fatalf("route not reset: %+v", routes[3])
 	}
 	service.mu.Lock()
 	_, legacyExists := service.cfg.Agents.Subagents.Models["explore"]
@@ -1472,7 +1531,7 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetModelRoute, Route: invalid}); err == nil {
 		t.Fatal("incomplete route unexpectedly succeeded")
 	}
-	if got := service.modelRouteEntries()[2].Route; got != (config.ModelRouteConfig{}) {
+	if got := service.modelRouteEntries()[3].Route; got != (config.ModelRouteConfig{}) {
 		t.Fatalf("validation failure mutated route: %+v", got)
 	}
 }
