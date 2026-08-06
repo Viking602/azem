@@ -16,6 +16,10 @@ describe("Codex-style process timeline", () => {
         },
       },
       { id: "thinking-2", kind: "thinking", runId: "run-1", content: "再验证完成后的展示。", state: "completed" },
+      {
+        id: "diff", kind: "diff", runId: "run-1", title: "frontend/src/plain.ts", state: "completed",
+        content: "@@ -1 +1 @@\n-old\n+new",
+      },
       { id: "assistant", kind: "assistant", runId: "run-1", content: "已经完成。", state: "cancelled" },
       { id: "status", kind: "status", runId: "run-1", title: "run_cancelled", state: "cancelled", data: { elapsedMs: "65000" } },
     ];
@@ -26,6 +30,11 @@ describe("Codex-style process timeline", () => {
     await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
 
     expect(container.querySelectorAll(".reasoning-step")).toHaveLength(2);
+    expect(Array.from(container.querySelectorAll<HTMLButtonElement>(".reasoning-summary"))
+      .every((summary) => summary.getAttribute("aria-expanded") === "false")).toBe(true);
+    expect(container.querySelectorAll(".file-change-entry")).toHaveLength(2);
+    expect(Array.from(container.querySelectorAll<HTMLDetailsElement>(".file-change-entry"))
+      .every((details) => !details.open)).toBe(true);
     expect(container.querySelector(".file-change-entry")?.textContent).toContain("已编辑的文件");
     expect(container.querySelector(".file-change-entry > .code-diff-stack.process-rail-inset")).not.toBeNull();
     expect(container.querySelector(".code-diff tr.deleted")?.textContent).toContain("oldValue");
@@ -50,6 +59,10 @@ describe("Codex-style process timeline", () => {
         data: { arguments: JSON.stringify({ path: "src/new.go", content: "package main\n" }) },
       },
       { id: "shell-1", kind: "tool", runId: "run-pending", title: "coding.shell", state: "queued" },
+      {
+        id: "shell-running", kind: "tool", runId: "run-pending", title: "coding.shell", state: "running",
+        data: { arguments: JSON.stringify({ command: "bun run build" }), output: "building\n" },
+      },
       { id: "search-1", kind: "tool", runId: "run-pending", title: "coding.search", state: "completed" },
       { id: "search-2", kind: "tool", runId: "run-pending", title: "coding.search", state: "completed" },
     ];
@@ -62,11 +75,13 @@ describe("Codex-style process timeline", () => {
     })));
 
     expect(container.querySelectorAll(".tool-group")).toHaveLength(2);
-    expect(container.querySelectorAll(".process-entries > .tool-block")).toHaveLength(2);
+    expect(container.querySelectorAll(".process-entries > .tool-block")).toHaveLength(3);
     expect(container.textContent).toContain("需要审批");
     expect(container.textContent).toContain("排队中");
     expect(container.querySelector(".file-change-entry")).toBeNull();
-    expect(container.querySelector(".tool-block .spin")).toBeNull();
+    expect(container.querySelector(".tool-block .spin")).not.toBeNull();
+    expect(Array.from(container.querySelectorAll<HTMLDetailsElement>(".tool-block, .tool-group"))
+      .every((details) => !details.open)).toBe(true);
 
     await act(async () => root.unmount());
     container.remove();
@@ -84,18 +99,24 @@ describe("Codex-style process timeline", () => {
 
     const live: Block = {
       id: "thinking-live", kind: "thinking", runId: "run-live",
-      content: "**检查事件管线**\n\n确认流式内容逐段出现。", state: "streaming",
+      content: "**检查事件管线**\n\n确认 `stream` 和 [事件顺序](https://example.com)。", state: "streaming",
     };
     await act(async () => root.render(createElement(TimelineFeed, {
       blocks: [user, live], language: "zh-CN", activeRunId: "run-live", running: true, waitingForModel: true,
     })));
     expect(container.querySelector(".reasoning-placeholder")).toBeNull();
-    expect(container.querySelector(".reasoning-trace.streaming")?.textContent).toContain("确认流式内容逐段出现");
+    expect(container.querySelector(".reasoning-trace.streaming")?.textContent).toContain("确认 stream 和 事件顺序。");
     expect(container.querySelector(".reasoning-label-sweep")).not.toBeNull();
     expect(container.querySelector(".reasoning-spark.active")).not.toBeNull();
+    expect(container.querySelector<HTMLDivElement>(".reasoning-body")?.hidden).toBe(true);
+    expect(container.querySelector(".reasoning-step strong, .reasoning-step code, .reasoning-step a")).toBeNull();
+    expect(container.querySelector(".reasoning-body")?.textContent).toContain("确认 stream 和 事件顺序。");
     const summary = container.querySelector<HTMLButtonElement>(".reasoning-summary")!;
     expect(summary.textContent).toContain("思考中");
 
+    await act(async () => summary.click());
+    expect(summary.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector<HTMLDivElement>(".reasoning-body")?.hidden).toBe(false);
     await act(async () => summary.click());
     expect(summary.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector<HTMLDivElement>(".reasoning-body")?.hidden).toBe(true);
@@ -115,8 +136,28 @@ describe("Codex-style process timeline", () => {
     expect(container.querySelector(".reasoning-trace.completed")?.textContent).toContain("思考了 4s");
     expect(container.querySelector(".reasoning-label-sweep")).toBeNull();
     expect(container.querySelector(".reasoning-spark.active")).toBeNull();
+    expect(container.querySelector(".reasoning-summary")?.getAttribute("aria-expanded")).toBe("false");
 
     await act(async () => root.unmount());
     container.remove();
+  });
+  it("renders ANSI command output as styled text without escape glyphs", async () => {
+    const ansi = "\u001b[1m\u001b[30m\u001b[46m RUN \u001b[49m\u001b[39m\u001b[22m \u001b[36mv4.1.10\u001b[39m";
+    const block: Block = {
+      id: "shell-ansi", kind: "tool", runId: "run-ansi", title: "coding.shell", state: "completed",
+      content: `{"command":"bun run test"}\n${ansi}`,
+    };
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [block], language: "zh-CN" })));
+
+    const result = container.querySelector<HTMLElement>(".tool-result")!;
+    expect(result.textContent).toContain("RUN  v4.1.10");
+    expect(result.textContent).not.toContain("\u001b");
+    expect(container.querySelector(".tool-preview")?.textContent).not.toContain("\u001b");
+    expect(Array.from(result.querySelectorAll<HTMLElement>("span")).some((span) => Boolean(span.style.backgroundColor))).toBe(true);
+
+    await act(async () => root.unmount());
   });
 });

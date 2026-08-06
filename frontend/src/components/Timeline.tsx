@@ -12,6 +12,7 @@ import type { Block, Snapshot } from "../types";
 import {
   formatDuration, formatToolPresentation, groupTimelineBlocks, isRunningTool, segmentProcessTrail,
 } from "./toolTimeline";
+import AnsiText from "./AnsiText";
 import CodeDiff from "./CodeDiff";
 import { aggregateEditedFiles, fileChangesForBlock, type EditedFileSummary, type FileChange } from "./fileChanges";
 
@@ -218,14 +219,14 @@ export function TimelineBlock({ block, language, compact = false, nested = false
           </dl>}
           {running && liveOutput
             ? <ToolExecutionLog output={liveOutput} label={`${label} · ${t("fieldDetail")}`} />
-            : presentation.result ? <pre className="tool-result">{presentation.result}</pre> : null}
+            : presentation.result ? <pre className="tool-result"><AnsiText text={presentation.result} /></pre> : null}
         </div>
       ) : running ? (
         <div className="tool-detail tool-detail-empty">{t("toolExecuting")}</div>
       ) : null}
     </details>;
   }
-  if (block.kind === "diff") return <DiffBlock block={block} language={language} />;
+  if (block.kind === "diff") return <DiffBlock block={block} language={language} nested={nested} />;
   if (block.kind === "approval") return <ApprovalBlock block={block} />;
   if (block.kind === "status") return <RunStatusMarker block={block} language={language} />;
   if (block.kind === "error") {
@@ -241,7 +242,7 @@ function ToolExecutionLog({ output, label }: { output: string; label: string }) 
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
   }, [output]);
-  return <pre ref={ref} className="tool-result tool-log" tabIndex={0} aria-label={label} aria-live="off">{output}</pre>;
+  return <pre ref={ref} className="tool-result tool-log" tabIndex={0} aria-label={label} aria-live="off"><AnsiText text={output} /></pre>;
 }
 
 function toolStatusLabel(state: string | undefined, language: Snapshot["language"]) {
@@ -254,11 +255,26 @@ function toolStatusLabel(state: string | undefined, language: Snapshot["language
   return t("toolStatusDone");
 }
 
-/** Repair glued thinking segments (`**A****B**` → separate markdown paragraphs). */
-export function normalizeThinkingMarkdown(content: string) {
+function normalizeThinkingText(content: string) {
   return content
     .replace(/\*\*\*\*/g, "**\n\n**")
     .replace(/([^\n])\n\*\*/g, "$1\n\n**")
+    .trim();
+}
+
+function plainThinkingText(content: string) {
+  return content
+    .replace(/^```[^\n]*\n?/gmu, "")
+    .replace(/^```$/gmu, "")
+    .replace(/^#{1,6}[ \t]+/gmu, "")
+    .replace(/^>[ \t]?/gmu, "")
+    .replace(/^(\s*)(?:[-*+]|\d+[.)])[ \t]+/gmu, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/gu, "$1")
+    .replace(/`([^`\n]+)`/gu, "$1")
+    .replace(/\*\*([^*]+)\*\*/gu, "$1")
+    .replace(/__([^_]+)__/gu, "$1")
+    .replace(/~~([^~]+)~~/gu, "$1")
     .trim();
 }
 function isActiveReasoning(block: Block) {
@@ -269,9 +285,9 @@ function isActiveReasoning(block: Block) {
 function ReasoningTrace({ block, language }: { block: Block; language: Snapshot["language"] }) {
   const t = translator(language);
   const active = isActiveReasoning(block);
-  const [open, setOpen] = useState(true);
-  const normalized = normalizeThinkingMarkdown(block.content || "");
-  const steps = normalized.split(/\n{2,}/u).map((step) => step.trim()).filter(Boolean);
+  const [open, setOpen] = useState(false);
+  const normalized = normalizeThinkingText(block.content || "");
+  const steps = normalized.split(/\n{2,}/u).map(plainThinkingText).filter(Boolean);
   const elapsedMs = Number(block.data?.elapsedMs || 0);
   const label = active
     ? t("thinkingActive")
@@ -294,9 +310,7 @@ function ReasoningTrace({ block, language }: { block: Block; language: Snapshot[
       {steps.length ? <ChevronDown className="reasoning-chevron" size={13} aria-hidden="true" /> : null}
     </button>
     {steps.length ? <div className="reasoning-body" id={panelId} hidden={!open}>
-      {steps.map((step, index) => <div className="reasoning-step markdown" key={index}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{step}</ReactMarkdown>
-      </div>)}
+      {steps.map((step, index) => <p className="reasoning-step" key={index}>{step}</p>)}
     </div> : null}
   </section>;
 }
@@ -332,10 +346,9 @@ function FileChangeBlock({ changes, language, nested }: {
   nested: boolean;
 }) {
   const t = translator(language);
-  const [open, setOpen] = useState(!nested);
   const additions = changes.reduce((total, change) => total + change.additions, 0);
   const deletions = changes.reduce((total, change) => total + change.deletions, 0);
-  return <details className={`file-change-entry work-entry ${nested ? "nested" : ""}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  return <details className={`file-change-entry work-entry ${nested ? "nested" : ""}`}>
     <summary>
       <span className="work-entry-icon" aria-hidden="true"><FileCode2 size={13} /></span>
       <span className="work-entry-label">{t("editedFiles")}</span>
@@ -371,9 +384,9 @@ function EditedFilesSummary({ summary, language }: { summary: EditedFileSummary;
   </article>;
 }
 
-function DiffBlock({ block, language }: { block: Block; language: Snapshot["language"] }) {
+function DiffBlock({ block, language, nested }: { block: Block; language: Snapshot["language"]; nested: boolean }) {
   const changes = fileChangesForBlock(block);
-  return changes.length ? <CodeDiff changes={changes} language={language} /> : null;
+  return changes.length ? <FileChangeBlock changes={changes} language={language} nested={nested} /> : null;
 }
 
 function ApprovalBlock({ block }: { block: Block }) {

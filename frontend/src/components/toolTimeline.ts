@@ -1,5 +1,6 @@
 import { toolGroupLabel, translator, type Language, type ToolCategory } from "../i18n";
 import type { Block } from "../types";
+import { plainAnsiText } from "./AnsiText";
 import { isFileChangeTool } from "./fileChanges";
 
 export type { ToolCategory };
@@ -17,10 +18,11 @@ export function formatToolPresentation(content = "", language: Language = "zh-CN
   if (!trimmed) return { preview: "", fields: [] };
 
   const { args, result } = splitToolPayload(trimmed);
+  const plainResult = plainAnsiText(result);
   const fields = args ? humanizeToolArgs(args, language) : [];
   const preview = fields.map((field) => field.value).filter(Boolean).join(" · ")
-    || (result ? shorten(result.replace(/\s+/g, " ").trim(), 80) : "")
-    || shorten(stripJsonNoise(trimmed), 72);
+    || (plainResult ? shorten(plainResult.replace(/\s+/g, " ").trim(), 80) : "")
+    || shorten(stripJsonNoise(plainAnsiText(trimmed)), 72);
 
   return {
     preview,
