@@ -11,6 +11,7 @@ import { toolDisplayName } from "./i18n";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => undefined });
+Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: () => undefined });
 
 async function enterComposerText(textarea: HTMLTextAreaElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
@@ -28,7 +29,7 @@ const snapshot: Snapshot = {
 
 function state(): RuntimeData {
   return {
-    snapshot, sessions: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], backgroundProcesses: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
+    snapshot, sessions: [], projects: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], backgroundProcesses: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
     skills: [], branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
     pullRequestMonitors: new Map(), pullRequestLoading: false, pullRequestMutating: false, pullRequestError: "",
     modelRoutes: [], modelsByProvider: {}, contextProfile: null,
@@ -122,6 +123,20 @@ describe("runtime event projection", () => {
     // Search never finished; run end must stop it without claiming execution succeeded.
     expect(finished.blocks.find((block) => block.toolCallId === "search-1")).toMatchObject({ state: "failed" });
     expect(finished.running).toBe(false);
+  });
+
+  it("settles shell commands as soon as their finished update arrives", () => {
+    const started = reduceEvents(state(), [
+      { sequence: 1, kind: "tool_started", runId: "r1", toolCallId: "failed", state: "running", data: { name: "coding.shell" } },
+      { sequence: 2, kind: "tool_started", runId: "r1", toolCallId: "passed", state: "running", data: { name: "coding.shell" } },
+    ]);
+    const settled = reduceEvents(started, [
+      { sequence: 3, kind: "tool_update", runId: "r1", toolCallId: "failed", state: "finished", data: { status: "exited", exit_code: "1", output: "HTTP 401" } },
+      { sequence: 4, kind: "tool_update", runId: "r1", toolCallId: "passed", state: "finished", data: { status: "exited", exit_code: "0", output: "ok" } },
+    ]);
+
+    expect(settled.blocks.find((block) => block.toolCallId === "failed")).toMatchObject({ state: "failed" });
+    expect(settled.blocks.find((block) => block.toolCallId === "passed")).toMatchObject({ state: "completed" });
   });
 
   it("preserves queued and approval states until a tool actually runs", () => {
@@ -243,7 +258,27 @@ describe("runtime event projection", () => {
     expect(useRuntimeStore.getState()).toMatchObject({ selectedAgentId: "agent-b", agentBlocks: [] });
   });
 
-  it("separates discrete thinking markdown segments instead of gluing **A****B**", () => {
+  it("keeps the inspector preference across temporary pages and side panels", () => {
+    useRuntimeStore.setState(state());
+    useRuntimeStore.getState().setView("extensions");
+    useRuntimeStore.getState().selectAgent("agent-a");
+    useRuntimeStore.getState().selectAgent("");
+    useRuntimeStore.getState().selectPullRequest(42);
+    useRuntimeStore.getState().selectPullRequest(null);
+    useRuntimeStore.getState().setView("thread");
+    expect(useRuntimeStore.getState().inspectorOpen).toBe(true);
+
+    useRuntimeStore.getState().setInspectorOpen(false);
+    useRuntimeStore.getState().setView("extensions");
+    useRuntimeStore.getState().selectAgent("agent-a");
+    useRuntimeStore.getState().selectAgent("");
+    useRuntimeStore.getState().selectPullRequest(42);
+    useRuntimeStore.getState().selectPullRequest(null);
+    useRuntimeStore.getState().setView("thread");
+    expect(useRuntimeStore.getState().inspectorOpen).toBe(false);
+  });
+
+  it("separates discrete thinking blurbs instead of gluing **A****B**", () => {
     const projected = reduceEvents(state(), [
       { sequence: 1, kind: "thinking_delta", runId: "r1", text: "**Planning analysis**" },
       { sequence: 2, kind: "thinking_delta", runId: "r1", text: "**Inspecting files**" },
@@ -287,6 +322,36 @@ describe("runtime event projection", () => {
       state: "completed",
       textPhase: "final_answer",
     });
+  });
+
+  it("drops an uncommitted provider attempt before projecting its retry", () => {
+    const projected = reduceEvents(state(), [
+      { sequence: 1, kind: "run_started", runId: "r1" },
+      { sequence: 2, kind: "thinking_delta", runId: "r1", text: "第一次思考" },
+      { sequence: 3, kind: "text_delta", runId: "r1", text: "第一次答案", textPhase: "final_answer" },
+      { sequence: 4, kind: "provider_retry", runId: "r1", state: "restarted" },
+      { sequence: 5, kind: "thinking_delta", runId: "r1", text: "恢复后思考" },
+      { sequence: 6, kind: "text_delta", runId: "r1", text: "最终答案", textPhase: "final_answer" },
+      { sequence: 7, kind: "run_finished", runId: "r1", state: "completed" },
+    ]);
+
+    expect(projected.blocks.map((block) => [block.kind, block.content])).toEqual([
+      ["thinking", "恢复后思考"],
+      ["assistant", "最终答案"],
+    ]);
+
+    const subagent = reduceEvents({
+      ...state(),
+      selectedAgentId: "agent-1",
+      agentBlocks: [
+        { id: "old-thinking", kind: "thinking", runId: "child-1", content: "第一次思考" },
+        { id: "old-answer", kind: "assistant", runId: "child-1", content: "第一次答案" },
+      ],
+    }, [
+      { sequence: 1, kind: "provider_retry", runId: "child-1", agentId: "agent-1", state: "restarted" },
+      { sequence: 2, kind: "text_delta", runId: "child-1", agentId: "agent-1", text: "子智能体最终答案" },
+    ]);
+    expect(subagent.agentBlocks.map((block) => block.content)).toEqual(["子智能体最终答案"]);
   });
 
   it("timestamps a reasoning segment and settles it before tool work begins", () => {
@@ -418,6 +483,31 @@ describe("runtime event projection", () => {
     container.remove();
   });
 
+  it("shows a selected skill inside the composer and clears it after sending", async () => {
+    useRuntimeStore.setState({
+      ...state(),
+      blocks: [],
+      skills: [{ name: "aside-browser", description: "Control the browser", sourcePath: "~/.agents/skills/aside-browser", bundled: false, eager: false, disabled: false, resourceCount: 0 }],
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ThreadSurface)));
+    const textarea = container.querySelector<HTMLTextAreaElement>("#azem-composer")!;
+    await enterComposerText(textarea, "/aside");
+    await act(async () => container.querySelector<HTMLButtonElement>(".slash-skills button")!.click());
+
+    expect(container.querySelector(".composer-skill")?.textContent).toContain("aside-browser");
+    expect(textarea.value).toBe("");
+    await enterComposerText(textarea, "检查当前页面");
+    await act(async () => container.querySelector<HTMLButtonElement>(".send-button")!.click());
+    expect(useRuntimeStore.getState().blocks.at(-1)).toMatchObject({ kind: "user", content: "检查当前页面" });
+    expect(container.querySelector(".composer-skill")).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("queues, edits, and removes follow-up messages without restarting the active timer", () => {
     useRuntimeStore.setState({ ...state(), running: true, runStartedAt: 123 });
     const image = { id: "image-1", name: "screen.png", mimeType: "image/png", path: "/tmp/screen.png", size: 42 };
@@ -428,6 +518,33 @@ describe("runtime event projection", () => {
     expect(useRuntimeStore.getState().runStartedAt).toBe(123);
     useRuntimeStore.getState().removeQueuedPrompt(queued.sessionId, queued.id);
     expect(useRuntimeStore.getState().queuedPrompts).toHaveLength(0);
+  });
+
+  it("shows queued guidance as an attached row without a delivery dropdown", async () => {
+    useRuntimeStore.setState({
+      ...state(),
+      blocks: [{ id: "assistant-1", kind: "assistant", content: "处理中" }],
+      running: true,
+      runId: "r1",
+      runStartedAt: Date.now(),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ThreadSurface)));
+
+    expect(container.querySelector(".delivery-menu")).toBeNull();
+    await enterComposerText(container.querySelector<HTMLTextAreaElement>("#azem-composer")!, "下一轮再处理");
+    await act(async () => container.querySelector<HTMLButtonElement>(".send-button")!.click());
+
+    expect(useRuntimeStore.getState().queuedPrompts[0]?.text).toBe("下一轮再处理");
+    expect(container.querySelector(".queued-prompts + .composer-shell")).not.toBeNull();
+    expect(container.querySelector(".queued-guide")?.textContent).toContain("引导");
+    expect(container.querySelector(".queued-icon")).not.toBeNull();
+    expect(container.querySelector(".queue-menu")).not.toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 
   it("keeps queues scoped to their session and reorders only that session", () => {
@@ -740,6 +857,7 @@ describe("runtime event projection", () => {
     expect(container.querySelector(".agent-roster")).toBeNull();
     await act(async () => summary.click());
     expect(useRuntimeStore.getState().view).toBe("agents");
+    expect(useRuntimeStore.getState().inspectorOpen).toBe(true);
 
     await act(async () => root.render(createElement(SubagentsPage)));
     expect(container.querySelectorAll(".subagent-row")).toHaveLength(4);

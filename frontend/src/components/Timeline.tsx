@@ -160,9 +160,11 @@ export function TimelineBlock({ block, language, compact = false, nested = false
     </article>;
   }
   if (block.kind === "assistant") {
+    const active = ["streaming", "running", "started", "progress"].includes(block.state || "");
     // Prose body — primary transcript content (Synara ChatMarkdown tier).
-    return <article className={`assistant-block markdown timeline-prose ${compact ? "compact" : ""}`}>
+    return <article className={`assistant-block markdown timeline-prose ${active ? "streaming" : ""} ${compact ? "compact" : ""}`} aria-busy={active || undefined}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content || ""}</ReactMarkdown>
+      {active ? <span className="stream-cursor" aria-hidden="true" /> : null}
     </article>;
   }
   if (block.kind === "thinking") return <ReasoningTrace block={block} language={language} />;
@@ -305,7 +307,7 @@ function ReasoningTrace({ block, language }: { block: Block; language: Snapshot[
       onClick={() => setOpen((value) => !value)}
       disabled={!steps.length}
     >
-      <ReasoningSpark active={active} />
+      <ReasoningMark active={active} />
       <ReasoningLabel label={label} active={active} />
       {steps.length ? <ChevronDown className="reasoning-chevron" size={13} aria-hidden="true" /> : null}
     </button>
@@ -319,15 +321,15 @@ function ThinkingPlaceholder({ language }: { language: Snapshot["language"] }) {
   const label = translator(language)("thinkingActive");
   return <div className="reasoning-trace reasoning-placeholder streaming" role="status" aria-live="polite" aria-busy="true">
     <div className="reasoning-summary">
-      <ReasoningSpark active />
+      <ReasoningMark active />
       <ReasoningLabel label={label} active />
     </div>
   </div>;
 }
 
-function ReasoningSpark({ active }: { active: boolean }) {
-  return <span className={`reasoning-spark ${active ? "active" : ""}`} aria-hidden="true">
-    <i /><i /><i />
+function ReasoningMark({ active }: { active: boolean }) {
+  return <span className={`azem-thinking-mark ${active ? "active" : ""}`} aria-hidden="true">
+    <i /><i />
   </span>;
 }
 

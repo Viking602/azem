@@ -1,0 +1,6 @@
+# Repository architecture constraints enforced by `sentrux check .`.
+
+[constraints]
+max_cycles = 0
+max_coupling = "B"
+no_god_files = true

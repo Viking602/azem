@@ -693,6 +693,7 @@ func agentDefinitionForSpec(
 			Temperature: spec.Temperature, TopP: spec.TopP, MaxTokens: spec.MaxTokens,
 		},
 		Tools:      append([]string(nil), spec.Tools...),
+		ToolMode:   api.ToolModeParallel,
 		Governance: governance,
 		Status:     "active",
 		Metadata:   metadata,

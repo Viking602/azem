@@ -270,8 +270,18 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	var result hyagent.Result
 	var executionOutcome hyworker.ExecutionOutcome
 	var runErr error
+	restartingAttempt := false
 	uiSink := s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
 	sink := stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
+		if restartingAttempt && frame.Kind != stream.FrameError {
+			if !s.emit(ctx, Event{
+				Kind: EventProviderRetry, SessionID: request.SessionID, RunID: run.RunID,
+				State: "restarted", Data: map[string]string{"scope": "attempt"},
+			}) {
+				return eventDeliveryError(ctx)
+			}
+			restartingAttempt = false
+		}
 		switch frame.Kind {
 		case stream.FrameText:
 			finalAnswer.append(frame.Text, frame.TextPhase)
@@ -289,6 +299,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		case stream.FrameError:
 			reasoningTrace.discardAttempt()
 			turnUsedTool = false
+			restartingAttempt = true
 		}
 		return uiSink.Emit(ctx, frame)
 	})

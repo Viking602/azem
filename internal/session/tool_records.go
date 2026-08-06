@@ -235,17 +235,6 @@ func (s *Service) InterruptRunningToolRecordsForRun(ctx context.Context, runID s
 	return nil
 }
 
-func (s *Service) SetWorkspaceSession(ctx context.Context, anchor, sessionID string) error {
-	anchor, sessionID = strings.TrimSpace(anchor), strings.TrimSpace(sessionID)
-	if anchor == "" || sessionID == "" {
-		return fmt.Errorf("workspace anchor and session are required")
-	}
-	if err := dbgen.New(s.db).UpsertWorkspaceSession(ctx, dbgen.UpsertWorkspaceSessionParams{Anchor: anchor, SessionID: sessionID, UpdatedAt: time.Now().UTC().UnixNano()}); err != nil {
-		return fmt.Errorf("set workspace session: %w", err)
-	}
-	return nil
-}
-
 func (s *Service) WorkspaceSession(ctx context.Context, anchor string) (string, error) {
 	id, err := dbgen.New(s.db).GetWorkspaceSession(ctx, strings.TrimSpace(anchor))
 	if err != nil {

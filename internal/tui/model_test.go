@@ -1848,6 +1848,27 @@ func TestShellLifecycleUpdatesDoNotPolluteCommandSummary(t *testing.T) {
 	}
 }
 
+func TestShellFinishedUpdateSettlesCommandState(t *testing.T) {
+	for _, test := range []struct {
+		name, status, exitCode, reason, want string
+	}{
+		{name: "success", status: "exited", exitCode: "0", want: "completed"},
+		{name: "failure", status: "exited", exitCode: "1", want: "failed"},
+		{name: "stopped", status: "stopped", exitCode: "-1", reason: "timeout", want: "failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+			model.updateTool(app.Event{Kind: app.EventToolStarted, RunID: "run", ToolCallID: "shell", Data: map[string]string{"name": "coding.shell"}})
+			model.updateTool(app.Event{Kind: app.EventToolUpdate, RunID: "run", ToolCallID: "shell", State: "finished", Data: map[string]string{
+				"status": test.status, "exit_code": test.exitCode, "reason": test.reason,
+			}})
+			if got := model.transcript[0].State; got != test.want {
+				t.Fatalf("state=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestReadAndSkillToolResultsUseDisplaySummaries(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.updateTool(app.Event{

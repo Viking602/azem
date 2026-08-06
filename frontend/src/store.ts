@@ -17,6 +17,7 @@ import type {
   PullRequestDashboard,
   PullRequestDetailResponse,
   PullRequestMonitorState,
+  Project,
   RuntimeEvent,
   Session,
   SkillEntry,
@@ -43,6 +44,7 @@ export interface ContextUsage {
 export interface RuntimeData {
   snapshot: Snapshot | null;
   sessions: Session[];
+  projects: Project[];
   currentSessionId: string;
   currentTitle: string;
   blocks: Block[];
@@ -134,6 +136,7 @@ interface RuntimeActions {
 const initialData: RuntimeData = {
   snapshot: null,
   sessions: [],
+  projects: [],
   currentSessionId: "",
   currentTitle: "",
   blocks: [],
@@ -197,8 +200,6 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
     selectedPullRequestNumber: selectedAgentId ? null : state.selectedPullRequestNumber,
     agentBlocks: selectedAgentId && selectedAgentId === state.selectedAgentId ? state.agentBlocks : [],
     inspectorTab: selectedAgentId ? "agents" : state.inspectorTab,
-    // Side chat is driven by selectedAgentId; keep env inspector closed while open.
-    inspectorOpen: selectedAgentId ? false : state.inspectorOpen,
   })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen, commandOpen: false }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
@@ -208,7 +209,6 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
     pullRequestDetail: state.pullRequestDetail?.number === selectedPullRequestNumber ? state.pullRequestDetail : null,
     selectedAgentId: selectedPullRequestNumber ? "" : state.selectedAgentId,
     agentBlocks: selectedPullRequestNumber ? [] : state.agentBlocks,
-    inspectorOpen: selectedPullRequestNumber ? false : state.inspectorOpen,
     pullRequestLoading: selectedPullRequestNumber ? state.pullRequestLoading : false,
   })),
   setPullRequestDetail: ({ pullRequest, monitor }) => set((state) => {
@@ -256,6 +256,7 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
       ? {
           ...(existing ?? {
             id: sessionId,
+            workspace: state.snapshot.workspace,
             title: translator(state.snapshot.language === "en" ? "en" : "zh-CN")("newSession"),
             providerId: state.snapshot.provider,
             modelId: state.snapshot.model,
@@ -347,6 +348,7 @@ export function reorderSessionQueue(items: QueuedPrompt[], id: string, beforeId:
 
 const SESSION_SCOPED_EVENTS: Record<string, true> = {
   run_started: true,
+  provider_retry: true,
   thinking_delta: true,
   text_delta: true,
   tool_started: true,
@@ -404,10 +406,12 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "session_loaded":
       if (event.state === "list") {
         const loadedSessions = parseArray(data.sessions).map(normalizeSession);
+        const loadedProjects = parseArray(data.projects).map(normalizeProject);
         const optimisticCurrent = next.running ? next.sessions.find((item) => item.id === next.currentSessionId) : undefined;
         next.sessions = optimisticCurrent && !loadedSessions.some((item) => item.id === optimisticCurrent.id)
           ? [optimisticCurrent, ...loadedSessions]
           : loadedSessions;
+        next.projects = loadedProjects;
         next.currentTitle = next.sessions.find((item) => item.id === next.currentSessionId)?.title ?? next.currentTitle;
       } else if (event.sessionId) {
         next.currentSessionId = event.sessionId;
@@ -447,6 +451,19 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       next.runId = event.runId ?? next.runId;
       next.runStartedAt = Date.now();
       next.activity = "waiting_model";
+      break;
+    case "provider_retry":
+      if (event.state === "restarted") {
+        if (event.agentId) {
+          if (event.agentId === next.selectedAgentId) next.agentBlocks = discardUncommittedAttempt(next.agentBlocks, event.runId);
+          next.agents = next.agents.map((agent) => agent.id === event.agentId
+            ? { ...agent, preview: "", previewKind: "", previewRunId: "" }
+            : agent);
+        } else {
+          next.blocks = discardUncommittedAttempt(next.blocks, event.runId);
+        }
+        next.activity = "waiting_model";
+      }
       break;
     case "thinking_delta": {
       const thinkingTitle = translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("thinking");
@@ -666,7 +683,7 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
   };
   const mode = new URLSearchParams(location.search).get("demo") ?? "running";
   const session: Session = {
-    id: snapshot.sessionId, title: "分析 Azem GUI 设计方案", providerId: snapshot.provider,
+    id: snapshot.sessionId, workspace: snapshot.workspace, title: "分析 Azem GUI 设计方案", providerId: snapshot.provider,
     modelId: snapshot.model, reasoning: snapshot.reasoning, agentMode: snapshot.agentMode,
     updatedAt: new Date().toISOString(),
   };
@@ -765,6 +782,16 @@ function settleTimedProcessBlock(block: Block, state = "completed", completedAt 
   return { ...block, state, data };
 }
 
+function discardUncommittedAttempt(blocks: Block[], runId?: string): Block[] {
+  let boundary = blocks.length;
+  while (boundary > 0) {
+    const block = blocks[boundary - 1]!;
+    if (block.runId !== runId || !["thinking", "commentary", "assistant"].includes(block.kind)) break;
+    boundary--;
+  }
+  return boundary === blocks.length ? blocks : blocks.slice(0, boundary);
+}
+
 function settleActiveProcessText(
   blocks: Block[],
   event: RuntimeEvent,
@@ -824,9 +851,9 @@ function appendDelta(
 }
 
 /**
- * Models often emit discrete thinking blurbs as separate deltas, each wrapped in
- * **bold**. Naïve concatenation yields `**A****B**`; insert paragraph breaks so
- * markdown can render them as separate lines.
+ * Models often emit discrete thinking blurbs as separate deltas, each wrapped
+ * in ** markers. Naïve concatenation yields `**A****B**`; insert paragraph
+ * breaks so the timeline can present each blurb as a separate plain-text step.
  */
 function joinThinkingContent(existing: string, next: string) {
   if (!existing) return next;
@@ -849,9 +876,12 @@ function updateTool(blocks: Block[], event: RuntimeEvent): Block[] {
   const pendingState = ["queued", "awaiting_approval", "reviewing_approval"].includes(event.state || "")
     ? event.state || ""
     : "";
+  const finishedState = event.kind === "tool_update" && event.state === "finished"
+    ? (data.status === "stopped" || Boolean(data.reason) || (data.exit_code !== undefined && data.exit_code !== "0") ? "failed" : "completed")
+    : "";
   const nextState = event.kind === "tool_finished"
     ? event.state || "completed"
-    : pendingState || (event.kind === "tool_started" || event.kind === "tool_update" ? "running" : event.state || "");
+    : pendingState || finishedState || (event.kind === "tool_started" || event.kind === "tool_update" ? "running" : event.state || "");
 
   if (index < 0) {
     // Seed content from arguments so the timeline can preview path/command while running.
@@ -896,12 +926,16 @@ function updateTool(blocks: Block[], event: RuntimeEvent): Block[] {
 
 function normalizeSession(raw: Record<string, unknown>): Session {
   return {
-    id: stringValue(raw, "id", "ID"), title: stringValue(raw, "title", "Title") || "New session",
+    id: stringValue(raw, "id", "ID"), workspace: stringValue(raw, "workspace", "Workspace"), title: stringValue(raw, "title", "Title") || "New session",
     providerId: stringValue(raw, "providerId", "ProviderID"), modelId: stringValue(raw, "modelId", "ModelID"),
     reasoning: stringValue(raw, "reasoning", "Reasoning"), agentMode: stringValue(raw, "agentMode", "AgentMode"),
     pinned: Boolean(raw.pinned ?? raw.Pinned), archived: Boolean(raw.archived ?? raw.Archived), unread: Boolean(raw.unread ?? raw.Unread),
     updatedAt: stringValue(raw, "updatedAt", "UpdatedAt"),
   };
+}
+
+function normalizeProject(raw: Record<string, unknown>): Project {
+  return { workspace: stringValue(raw, "workspace", "Workspace"), updatedAt: stringValue(raw, "updatedAt", "UpdatedAt") };
 }
 
 function normalizeBlock(raw: Record<string, unknown>, index: number): Block {

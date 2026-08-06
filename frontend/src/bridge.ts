@@ -67,6 +67,11 @@ export async function openProject(path: string): Promise<void> {
   await Call.ByName(`${bridgeName}.OpenProject`, path);
 }
 
+export async function openProjectSession(path: string, sessionId: string): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await Call.ByName(`${bridgeName}.OpenProjectSession`, path, sessionId);
+}
+
 export async function cancelActive(includeChildren = false): Promise<boolean> {
   if (!isDesktopRuntime()) return true;
   return Call.ByName(`${bridgeName}.CancelActive`, includeChildren) as Promise<boolean>;

@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 18
+const schemaVersion = 19
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -369,6 +369,21 @@ var migrations = []string{
 		ON resource_claims(lease_id,state,id);
 	CREATE INDEX resource_claims_key_state_expiry
 		ON resource_claims(resource_key,state,expires_at,id);`,
+	`CREATE TABLE desktop_projects (
+		workspace TEXT PRIMARY KEY,
+		updated_at INTEGER NOT NULL
+	);
+	CREATE TABLE session_workspaces (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+		workspace TEXT NOT NULL REFERENCES desktop_projects(workspace) ON DELETE RESTRICT,
+		assigned_at INTEGER NOT NULL
+	);
+	CREATE INDEX session_workspaces_workspace ON session_workspaces(workspace,assigned_at DESC,session_id);
+	INSERT INTO desktop_projects(workspace,updated_at)
+		SELECT anchor,MAX(updated_at) FROM workspace_session_state WHERE TRIM(anchor)<>'' GROUP BY anchor;
+	INSERT INTO session_workspaces(session_id,workspace,assigned_at)
+		SELECT session_id,anchor,updated_at FROM workspace_session_state WHERE TRIM(anchor)<>''
+		ON CONFLICT(session_id) DO NOTHING;`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

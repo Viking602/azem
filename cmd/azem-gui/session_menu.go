@@ -80,7 +80,7 @@ func (c sessionMenuController) register(name string, pinned bool) {
 	c.add(menu, c.text("在新工作树中继续", "Continue in New Worktree"), c.continueInWorktree)
 	menu.AddSeparator()
 	c.add(menu, c.text("在新窗口中打开", "Open in New Window"), func(id string) {
-		c.report(launchSessionWindow(c.configFile, id, c.workspace, false))
+		c.report(launchSessionWindow(c.configFile, id, c.workspace, true))
 	})
 	c.app.ContextMenu.Add(name, menu)
 }

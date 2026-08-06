@@ -8,6 +8,8 @@
 	<string>Azem</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.viking602.azem</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon.icns</string>
 	<key>CFBundleName</key>
 	<string>Azem</string>
 	<key>CFBundlePackageType</key>

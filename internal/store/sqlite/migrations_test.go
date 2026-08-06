@@ -330,8 +330,8 @@ func TestMigrationV18AddsControlPlaneStoresAndReopens(t *testing.T) {
 	if err := provider.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 18 {
-		t.Fatalf("schema version = %d, want 18", version)
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 	}
 	for _, name := range []string{
 		"agent_definition_snapshots",
@@ -355,7 +355,56 @@ func TestMigrationV18AddsControlPlaneStoresAndReopens(t *testing.T) {
 
 	reopened, err := Open(ctx, path)
 	if err != nil {
-		t.Fatalf("reopen schema 18 database: %v", err)
+		t.Fatalf("reopen current database after migration 18: %v", err)
+	}
+	if err := reopened.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrationV19BackfillsDesktopProjectOwnershipAndReopens(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "projects.db")
+	workspace := t.TempDir()
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 18; version++ {
+		if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
+			t.Fatalf("apply fixture migration %d: %v", version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO sessions(id,title,created_at,updated_at) VALUES('legacy','Legacy',1,2);
+		INSERT INTO session_projections(session_id,last_run_id,updated_at) VALUES('legacy','run',2);
+		INSERT INTO workspace_session_state(anchor,session_id,updated_at) VALUES(?,?,3);
+		PRAGMA user_version=18`, workspace, "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotProject, gotOwner string
+	if err := provider.db.QueryRowContext(ctx, `SELECT workspace FROM desktop_projects`).Scan(&gotProject); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.db.QueryRowContext(ctx, `SELECT workspace FROM session_workspaces WHERE session_id='legacy'`).Scan(&gotOwner); err != nil {
+		t.Fatal(err)
+	}
+	if gotProject != workspace || gotOwner != workspace {
+		t.Fatalf("project=%q owner=%q want=%q", gotProject, gotOwner, workspace)
+	}
+	if err := provider.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen schema 19 database: %v", err)
 	}
 	if err := reopened.Close(ctx); err != nil {
 		t.Fatal(err)

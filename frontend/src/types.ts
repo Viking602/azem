@@ -85,6 +85,7 @@ export interface ActionRequest {
 
 export interface Session {
   id: string;
+  workspace: string;
   title: string;
   providerId: string;
   modelId: string;
@@ -93,6 +94,11 @@ export interface Session {
   pinned?: boolean;
   archived?: boolean;
   unread?: boolean;
+  updatedAt: string;
+}
+
+export interface Project {
+  workspace: string;
   updatedAt: string;
 }
 

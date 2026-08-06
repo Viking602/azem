@@ -5,7 +5,7 @@
     "": {
       "name": "azem-desktop",
       "dependencies": {
-        "@wailsio/runtime": "latest",
+        "@wailsio/runtime": "3.0.0-alpha2.119",
         "lucide-react": "^0.468.0",
         "react": "^19.2.0",
         "react-dom": "^19.2.0",

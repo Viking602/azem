@@ -115,7 +115,7 @@ type Bridge struct {
 	cfg          config.Config
 	workspace    string
 	sessionID    string
-	openProject  func(string) error
+	openProject  func(string, string) error
 	emit         EventEmitter
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -125,7 +125,7 @@ type Bridge struct {
 	prMonitor    *githubpr.Monitor
 }
 
-func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventEmitter, openProject func(string) error) *Bridge {
+func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventEmitter, openProject func(string, string) error) *Bridge {
 	ctx, cancel := context.WithCancel(parent)
 	bridge := &Bridge{
 		runtime: boot.Service, cfg: boot.Config, workspace: boot.Paths.Workspace,

@@ -1160,8 +1160,26 @@ func (s *Service) emitSessionList(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.emit(ctx, Event{Kind: EventSessionLoaded, State: "list", Data: map[string]string{"sessions": string(encoded)}})
+	projects, err := s.sessions.Projects(ctx)
+	if err != nil {
+		return err
+	}
+	encodedProjects, err := json.Marshal(projects)
+	if err != nil {
+		return err
+	}
+	s.emit(ctx, Event{Kind: EventSessionLoaded, State: "list", Data: map[string]string{"sessions": string(encoded), "projects": string(encodedProjects)}})
 	return nil
+}
+
+func (s *Service) RememberProject(ctx context.Context, workspace string) error {
+	if s.sessions == nil {
+		return fmt.Errorf("session store is unavailable")
+	}
+	if err := s.sessions.TouchProject(ctx, workspace); err != nil {
+		return err
+	}
+	return s.emitSessionList(ctx)
 }
 
 func (s *Service) login(ctx context.Context, provider string) error {

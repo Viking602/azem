@@ -54,6 +54,11 @@ type ContextArtifact struct {
 	CreatedAt int64  `db:"created_at"`
 }
 
+type DesktopProject struct {
+	Workspace string `db:"workspace"`
+	UpdatedAt int64  `db:"updated_at"`
+}
+
 type Event struct {
 	RunID      string `db:"run_id"`
 	Sequence   int64  `db:"sequence"`
@@ -224,6 +229,19 @@ type SessionToolRecord struct {
 	Observations   []byte `db:"observations"`
 	StartedAt      int64  `db:"started_at"`
 	CompletedAt    int64  `db:"completed_at"`
+}
+
+type SessionUiState struct {
+	SessionID string `db:"session_id"`
+	Pinned    int64  `db:"pinned"`
+	Archived  int64  `db:"archived"`
+	Unread    int64  `db:"unread"`
+}
+
+type SessionWorkspace struct {
+	SessionID  string `db:"session_id"`
+	Workspace  string `db:"workspace"`
+	AssignedAt int64  `db:"assigned_at"`
 }
 
 type SubagentRun struct {

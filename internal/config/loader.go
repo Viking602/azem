@@ -289,6 +289,16 @@ func setMappingScalar(mapping *yaml.Node, key, value string) {
 }
 
 func Load(path string, startupWorkspace string) (Config, error) {
+	return load(path, startupWorkspace, false)
+}
+
+// LoadAtWorkspace loads user settings while keeping the explicitly selected
+// desktop workspace authoritative over the optional CLI workspace.root field.
+func LoadAtWorkspace(path string, startupWorkspace string) (Config, error) {
+	return load(path, startupWorkspace, true)
+}
+
+func load(path string, startupWorkspace string, forceWorkspace bool) (Config, error) {
 	cfg := Default()
 	if path == "" {
 		paths, err := ResolvePaths(startupWorkspace)
@@ -359,7 +369,9 @@ func Load(path string, startupWorkspace string) (Config, error) {
 		}
 	}
 
-	if cfg.Workspace.Root == "" {
+	if forceWorkspace {
+		cfg.Workspace.Root = startupWorkspace
+	} else if cfg.Workspace.Root == "" {
 		cfg.Workspace.Root = startupWorkspace
 	} else if !filepath.IsAbs(cfg.Workspace.Root) {
 		cfg.Workspace.Root = filepath.Join(filepath.Dir(path), cfg.Workspace.Root)

@@ -52,8 +52,9 @@ function RecoveryPage({ action }: { action: (kind: string, target?: string, deci
 }
 
 function ProjectsPage({ open }: { open: () => void }) {
-  const sessions = useRuntimeStore((state) => state.sessions);
+  const allSessions = useRuntimeStore((state) => state.sessions);
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const sessions = allSessions.filter((session) => session.workspace === snapshot.workspace || !session.workspace);
   return <PageFrame eyebrow="Workspace" title={basename(snapshot.workspace)} description={snapshot.workspace}>
     <div className="project-overview"><FolderGit2 size={26} /><div><strong>{sessions.length} 个会话</strong><p>所有会话共享当前工作区的运行时、Skills 与恢复状态。</p></div></div>
     <div className="catalog-list">{sessions.map((session) => <button key={session.id} onClick={async () => { await execute({ kind: "resume_session", target: session.id }); open(); }}><FileClock size={15} /><span><strong>{session.title || "新会话"}</strong><small>{session.modelId} · {session.reasoning}</small></span><em>{dateLabel(session.updatedAt)}</em></button>)}</div>

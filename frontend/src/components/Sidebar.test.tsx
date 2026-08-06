@@ -1,13 +1,13 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { execute, openProject, selectProjectFolder } from "../bridge";
+import { execute, openProject, openProjectSession, selectProjectFolder } from "../bridge";
 import { useRuntimeStore } from "../store";
 import type { Session, Snapshot } from "../types";
 import Sidebar from "./Sidebar";
 
 vi.mock("../bridge", () => ({
-  createProject: vi.fn(), execute: vi.fn(), openProject: vi.fn(), selectProjectFolder: vi.fn(),
+  createProject: vi.fn(), execute: vi.fn(), openProject: vi.fn().mockResolvedValue(undefined), openProjectSession: vi.fn().mockResolvedValue(undefined), selectProjectFolder: vi.fn(),
   subscribeSessionMenu: vi.fn(() => () => undefined),
 }));
 
@@ -22,10 +22,10 @@ describe("Sidebar project sessions", () => {
 
   it("shows five sessions until expanded and starts a new session from the project row", async () => {
     const sessions: Session[] = Array.from({ length: 7 }, (_, index) => ({
-      id: `session-${index + 1}`, title: `会话 ${index + 1}`, providerId: "chatgpt",
+      id: `session-${index + 1}`, workspace: snapshot.workspace, title: `会话 ${index + 1}`, providerId: "chatgpt",
       modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString(),
     }));
-    useRuntimeStore.setState({ snapshot, sessions, currentSessionId: "session-1", view: "thread" });
+    useRuntimeStore.setState({ snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions, currentSessionId: "session-1", view: "thread" });
     const container = document.createElement("div");
     const root = createRoot(container);
 
@@ -37,6 +37,25 @@ describe("Sidebar project sessions", () => {
 
     await act(async () => container.querySelector<HTMLButtonElement>('.project-action[aria-label="新会话"]')!.click());
     expect(execute).toHaveBeenCalledWith({ kind: "new_session", target: "", sessionId: "session-1" });
+    await act(async () => root.unmount());
+  });
+
+  it("renders multiple durable projects and opens another project's session in its workspace", async () => {
+    const other = "/workspace/synara";
+    const sessions: Session[] = [{
+      id: "session-other", workspace: other, title: "Synara 会话", providerId: "chatgpt",
+      modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString(),
+    }];
+    useRuntimeStore.setState({ snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }, { workspace: other, updatedAt: "" }], sessions, currentSessionId: "session-1", view: "thread" });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(<Sidebar />));
+    expect(Array.from(container.querySelectorAll(".project-toggle span")).map((node) => node.textContent)).toEqual(["azem", "synara"]);
+    await act(async () => container.querySelectorAll<HTMLButtonElement>(".project-toggle")[1]!.click());
+    await act(async () => Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list button")).find((button) => button.textContent === "Synara 会话")!.click());
+
+    expect(openProjectSession).toHaveBeenCalledWith(other, "session-other");
     await act(async () => root.unmount());
   });
 

@@ -80,8 +80,8 @@ func run() error {
 	}
 	options.SingleInstance = sessionSingleInstance(newWindow, &mainWindow, &handleDeepLink)
 	desktopApp := application.New(options)
-	bridge = desktop.NewBridge(ctx, boot, desktopApp.Event.Emit, func(workspace string) error {
-		return launchSessionWindow(configFile, "", workspace, true)
+	bridge = desktop.NewBridge(ctx, boot, desktopApp.Event.Emit, func(workspace, sessionID string) error {
+		return launchSessionWindow(configFile, sessionID, workspace, true)
 	})
 	desktopApp.RegisterService(application.NewService(bridge))
 	geometry := loadMainWindowGeometry(desktopApp, boot.Paths.StateDir)
@@ -109,9 +109,9 @@ func run() error {
 
 func bootstrapDesktop(ctx context.Context, startupWorkspace, workspaceOverride, configFile string) (azemapp.BootstrapResult, error) {
 	if workspaceOverride != "" {
-		return azemapp.BootstrapAtWorkspace(ctx, workspaceOverride, configFile)
+		return azemapp.BootstrapDesktopAtWorkspace(ctx, workspaceOverride, configFile)
 	}
-	return azemapp.Bootstrap(ctx, startupWorkspace, configFile)
+	return azemapp.BootstrapDesktop(ctx, startupWorkspace, configFile)
 }
 
 func sessionSingleInstance(newWindow bool, mainWindow **application.WebviewWindow, handleDeepLink *func(string)) *application.SingleInstanceOptions {

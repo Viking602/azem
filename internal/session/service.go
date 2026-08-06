@@ -18,6 +18,7 @@ import (
 
 type Session struct {
 	ID         string
+	Workspace  string
 	Title      string
 	ProviderID string
 	ModelID    string
@@ -415,6 +416,8 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
 		{"tools", `INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at)
 			SELECT ?,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at
 			FROM session_tool_records WHERE session_id=? AND state<>'running'`, []any{targetID, sourceID}},
+		{"project", `INSERT INTO session_workspaces(session_id,workspace,assigned_at)
+			SELECT ?,workspace,? FROM session_workspaces WHERE session_id=?`, []any{targetID, now, sourceID}},
 	}
 	for _, copy := range copies {
 		if _, err := tx.ExecContext(ctx, copy.query, copy.args...); err != nil {
@@ -939,6 +942,13 @@ func (s *Service) List(ctx context.Context, limit int) ([]Session, error) {
 	for index := range values {
 		state := states[values[index].ID]
 		values[index].Pinned, values[index].Archived, values[index].Unread = state[0], state[1], state[2]
+	}
+	workspaces, err := s.sessionWorkspaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range values {
+		values[index].Workspace = workspaces[values[index].ID]
 	}
 	sort.SliceStable(values, func(left, right int) bool { return values[left].Pinned && !values[right].Pinned })
 	if limit > 0 && len(values) > limit {

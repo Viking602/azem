@@ -12,8 +12,59 @@ import type { RuntimeEvent } from "./types";
 // Secondary surfaces — split out of the main entry so the first paint stays lean.
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
 const Pages = lazy(() => import("./components/Pages"));
+const SubagentsDrawer = lazy(() => import("./components/SubagentsPage"));
 const SettingsDialog = lazy(() => import("./components/SettingsDialog"));
 const PullRequestPanel = lazy(() => import("./components/PullRequestPanel"));
+
+const STREAM_FRAME_INTERVAL_MS = 32;
+const STREAM_EVENT_KINDS = new Set(["text_delta", "thinking_delta"]);
+const TERMINAL_EVENT_KINDS = new Set(["run_finished", "run_failed", "run_cancelled"]);
+
+function textBudget(queue: RuntimeEvent[], reducedMotion: boolean) {
+  if (reducedMotion) return 2048;
+  let pending = 0;
+  let terminal = false;
+  for (const event of queue) {
+    if (STREAM_EVENT_KINDS.has(event.kind)) pending += event.text?.length ?? 0;
+    if (TERMINAL_EVENT_KINDS.has(event.kind)) terminal = true;
+    if (pending > 4096 && terminal) break;
+  }
+  if (terminal || pending > 4096) return 1024;
+  if (pending > 1024) return 192;
+  return 72;
+}
+
+function safeChunkEnd(text: string, limit: number) {
+  let end = Math.min(text.length, limit);
+  if (end < text.length && /[\uD800-\uDBFF]/u.test(text[end - 1] ?? "") && /[\uDC00-\uDFFF]/u.test(text[end] ?? "")) end--;
+  return end || Math.min(2, text.length);
+}
+
+export function takeRuntimeEventFrame(queue: RuntimeEvent[], reducedMotion = false) {
+  const events: RuntimeEvent[] = [];
+  let budget = textBudget(queue, reducedMotion);
+  while (queue.length && events.length < 32) {
+    const event = queue[0]!;
+    const text = event.text ?? "";
+    if (!STREAM_EVENT_KINDS.has(event.kind) || !text) {
+      events.push(event);
+      queue.shift();
+      continue;
+    }
+    if (budget <= 0) break;
+    if (text.length <= budget) {
+      events.push(event);
+      queue.shift();
+      budget -= text.length;
+      continue;
+    }
+    const end = safeChunkEnd(text, budget);
+    events.push({ ...event, sequence: 0, text: text.slice(0, end) });
+    queue[0] = { ...event, text: text.slice(end) };
+    break;
+  }
+  return events;
+}
 
 export default function App() {
   const hydrate = useRuntimeStore((state) => state.hydrate);
@@ -35,6 +86,7 @@ export default function App() {
   const [sidebarWidth, setSidebarWidth] = useState(238);
   const queue = useRef<RuntimeEvent[]>([]);
   const frame = useRef(0);
+  const lastFlush = useRef(-Infinity);
 
   useEffect(() => {
     let workspaceRefreshTimer = 0;
@@ -45,10 +97,16 @@ export default function App() {
         void refreshPullRequestDashboard();
       }, 120);
     };
-    const flush = () => {
+    const flush = (timestamp: number) => {
       frame.current = 0;
-      const events = queue.current.splice(0);
+      if (timestamp - lastFlush.current < STREAM_FRAME_INTERVAL_MS) {
+        frame.current = requestAnimationFrame(flush);
+        return;
+      }
+      const events = takeRuntimeEventFrame(queue.current, window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
       if (events.length) applyEvents(events);
+      lastFlush.current = timestamp;
+      if (queue.current.length) frame.current = requestAnimationFrame(flush);
     };
     const unsubscribe = subscribe((event) => {
       queue.current.push(event);
@@ -137,6 +195,7 @@ export default function App() {
   const hasContext = blocks.length > 0 || running;
   const showPullRequest = Boolean(selectedPullRequestNumber);
   const showSideChat = !showPullRequest && (view === "thread" || view === "agents") && Boolean(selectedAgentId);
+  const showAgentDrawer = view === "agents" && !selectedAgentId;
   const showInspector = !showPullRequest && view === "thread" && hasContext && inspectorOpen && !showSideChat;
   const layoutMode = showPullRequest ? "pull-request" : showSideChat ? "agent" : showInspector ? "open" : "closed";
   const t = translator(snapshot.language);
@@ -147,7 +206,7 @@ export default function App() {
         <Sidebar />
         <ResizeHandle value={sidebarWidth} setValue={setSidebarWidth} min={210} max={320} />
         <main className="workspace-main">
-          {view === "thread" ? (
+          {view === "thread" || view === "agents" ? (
             <ThreadSurface />
           ) : (
             <Suspense fallback={lazyFallback}>
@@ -155,6 +214,13 @@ export default function App() {
             </Suspense>
           )}
           {showInspector && <Inspector />}
+          {showAgentDrawer && <Suspense fallback={null}>
+            <div className="subagents-drawer-layer" onClick={(event) => {
+              if (event.target === event.currentTarget) useRuntimeStore.getState().setView("thread");
+            }}>
+              <SubagentsDrawer />
+            </div>
+          </Suspense>}
         </main>
         {showSideChat && <AgentSideChat />}
         {showPullRequest && <Suspense fallback={null}><PullRequestPanel /></Suspense>}

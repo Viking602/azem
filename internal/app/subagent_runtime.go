@@ -1056,7 +1056,25 @@ func (r *subagentRuntime) execute(id string) {
 	r.mu.Unlock()
 	r.emitState(running, "running")
 
-	sink := stream.SinkFunc(func(_ context.Context, frame stream.Frame) error {
+	restartingAttempt := false
+	sink := stream.SinkFunc(func(frameCtx context.Context, frame stream.Frame) error {
+		if restartingAttempt && frame.Kind != stream.FrameError {
+			r.mu.Lock()
+			if current := r.active[id]; current != nil && !current.terminalizing {
+				current.blocks = discardAgentAttemptBlocks(current.blocks, childRun.RunID)
+			}
+			r.mu.Unlock()
+			if parent.Host != nil && !parent.Host.emit(frameCtx, Event{
+				Kind: EventProviderRetry, SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id,
+				State: "restarted", Data: map[string]string{"scope": "attempt"},
+			}) {
+				return eventDeliveryError(frameCtx)
+			}
+			restartingAttempt = false
+		}
+		if frame.Kind == stream.FrameError {
+			restartingAttempt = true
+		}
 		frame.Source = "child:" + id
 		r.handleFrame(id, frame)
 		return nil
@@ -1145,6 +1163,18 @@ executionLoop:
 		state = agentservice.SubagentFailed
 	}
 	r.terminalize(id, terminalRequest{state: state, err: runErr, result: &result, stopHookRan: stopHookRan})
+}
+
+func discardAgentAttemptBlocks(blocks []AgentTranscriptBlock, runID string) []AgentTranscriptBlock {
+	boundary := len(blocks)
+	for boundary > 0 {
+		block := blocks[boundary-1]
+		if block.RunID != runID || (block.Kind != "thinking" && block.Kind != "commentary" && block.Kind != "assistant") {
+			break
+		}
+		boundary--
+	}
+	return blocks[:boundary]
 }
 
 func (r *subagentRuntime) persistActiveState(id, summary string) error {

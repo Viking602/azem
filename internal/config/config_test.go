@@ -436,6 +436,22 @@ func TestLoadResolvesRelativeWorkspaceFromConfigDirectory(t *testing.T) {
 	}
 }
 
+func TestLoadAtWorkspaceIgnoresConfiguredWorkspaceRoot(t *testing.T) {
+	root, selected := t.TempDir(), t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nworkspace:\n  root: .\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadAtWorkspace(path, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, _ = filepath.EvalSymlinks(selected)
+	if cfg.Workspace.Root != selected {
+		t.Fatalf("workspace = %q, want selected project %q", cfg.Workspace.Root, selected)
+	}
+}
+
 func TestLoadOverridesMainAgentBudgets(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")

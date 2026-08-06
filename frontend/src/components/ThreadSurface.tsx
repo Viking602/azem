@@ -4,13 +4,12 @@ import {
   ArrowDown, ArrowUp, Bot, Box, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot, CircleStop,
   CornerUpRight, Folder, GitBranch, GripVertical, Hand, HardDrive, ImagePlus, Lightbulb, ListX, Minimize2,
   MoreHorizontal, Pencil, Plug, Plus, RefreshCw, RotateCcw, Search, Send, Settings, ShieldAlert, ShieldCheck,
-  Sparkles, Trash2, Zap, PanelRightClose, PanelRightOpen, X,
+  Sparkles, Trash2, WandSparkles, Zap, PanelRightClose, PanelRightOpen, X,
 } from "lucide-react";
 import { cancelActive, execute, guide, importAttachment, importClipboardImage, openProject, selectProjectFolder, startTurn } from "../bridge";
 import { reasoningHint, sortReasoningLevels, tFormat, translator } from "../i18n";
 import { useRuntimeStore, type ContextUsage } from "../store";
 import type { Attachment, Block, ContextProfile, DeliveryMode, QueuedPrompt, SkillEntry, Snapshot } from "../types";
-import MenuSelect from "./MenuSelect";
 import ReasoningEffortSlider, { isHighCostReasoning } from "./ReasoningEffortSlider";
 import { TimelineFeed } from "./Timeline";
 import { formatDuration } from "./toolTimeline";
@@ -230,8 +229,8 @@ export default function ThreadSurface() {
   const runtimeBusy = running || Boolean(globalRunSessionId);
 
   useEffect(() => {
-    if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: "smooth" });
-  }, [blocks, following]);
+    if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: running ? "auto" : "smooth" });
+  }, [blocks, following, running]);
 
   useEffect(() => setDeliveryMode(snapshot.queueMode ?? "queue"), [currentSessionId, snapshot.queueMode]);
   useEffect(() => {
@@ -376,7 +375,12 @@ export default function ThreadSurface() {
       <ThreadHeader empty={empty} elapsed={elapsed} />
       {empty ? (
         <div className="empty-composer-wrap">
-          <div className="azem-symbol" aria-hidden="true"><span /><span /></div>
+          <svg className="azem-symbol" viewBox="0 0 44 44" aria-hidden="true" focusable="false">
+            <path className="azem-symbol-sun" d="M7 31.5C3.7 20.1 8.9 8.2 20 4.6c8.8-2.8 17.2 2.8 19.1 11.3" />
+            <circle className="azem-symbol-sun-dot" cx="39.1" cy="15.9" r="2.8" />
+            <path className="azem-symbol-road" d="M5.5 37.6c7.2-6.8 13.9-10.6 24.2-12.8" />
+            <path className="azem-symbol-road azem-symbol-road-accent" d="M12 40c7.3-6.7 14.2-10.6 24.5-12.8" />
+          </svg>
           <h1>{t("promptTitle")}</h1>
           <div className="composer-stack">
             {queue}
@@ -385,7 +389,7 @@ export default function ThreadSurface() {
               agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
               running={running}
               busy={runtimeBusy}
-              deliveryMode={deliveryMode} setDeliveryMode={changeDeliveryMode}
+              deliveryMode={deliveryMode}
               showContextBar
             />
           </div>
@@ -416,7 +420,7 @@ export default function ThreadSurface() {
                 agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
                 running={running} cancel={cancel}
                 busy={runtimeBusy}
-                deliveryMode={deliveryMode} setDeliveryMode={changeDeliveryMode}
+                deliveryMode={deliveryMode}
               />
             </div>
           </div>
@@ -527,12 +531,12 @@ function HeaderActions({ empty }: { empty: boolean }) {
   return <div className="thread-actions"><button hidden={empty} className="icon-button inspector-toggle" data-open={String(inspectorOpen)} title={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}><PanelRightClose className="inspector-open-icon" size={15} /><PanelRightOpen className="inspector-closed-icon" size={15} /></button></div>;
 }
 
-function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMode, setAgentMode, planMode, setPlanMode, running, busy, cancel, deliveryMode, setDeliveryMode, showContextBar = false }: {
+function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMode, setAgentMode, planMode, setPlanMode, running, busy, cancel, deliveryMode, showContextBar = false }: {
   prompt: string; setPrompt: (value: string) => void; submit: (modeOverride?: DeliveryMode) => void;
   attach: (files: Iterable<File> | null) => void; attachClipboard: (files: File[]) => void;
   agentMode: string; setAgentMode: (value: string) => void; planMode: boolean; setPlanMode: (value: boolean) => void;
   running: boolean; busy: boolean; cancel?: () => void;
-  deliveryMode: DeliveryMode; setDeliveryMode: (value: DeliveryMode) => void;
+  deliveryMode: DeliveryMode;
   /** Project / local / branch chips — empty welcome only; hide during active threads. */
   showContextBar?: boolean;
 }) {
@@ -562,6 +566,12 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
   };
   const selectedReasoningName = reasoningNames[snapshot.reasoning] ?? snapshot.reasoning;
   const contextPercent = contextOccupancy(contextUsage, contextProfile).percentage;
+  const skillInvocation = parseSkillPrompt(prompt, snapshot.language);
+  const selectedSkill = skillInvocation
+    ? skills.find((skill) => !skill.disabled && skill.name.toLowerCase() === skillInvocation.name.toLowerCase())
+    : undefined;
+  const skillPrefix = selectedSkill ? `/skill:${selectedSkill.name} ` : "";
+  const visiblePrompt = selectedSkill ? prompt.replace(/^\/skill:[^\s]+(?:\s+)?/, "") : prompt;
   const slashItems = slashSuggestions(prompt, skills, snapshot.language, {
     reasoningLabel: selectedReasoningName,
     approvalLabel: approvalLabels[approvalMode] ?? approvalMode,
@@ -648,8 +658,9 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
             })}
           </section>}
         </div>}
+        {selectedSkill && <div className="composer-skill"><WandSparkles size={17} aria-hidden="true" /><span>{selectedSkill.name}</span></div>}
         {attachments.length > 0 && <div className="attachment-row">{attachments.map((item) => <span key={item.id}><ImagePlus size={13} />{item.name}<button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.id)}><X size={12} /></button></span>)}</div>}
-        <textarea id="azem-composer" value={prompt} onChange={(event) => setPrompt(event.target.value)} onPaste={(event) => {
+        <textarea id="azem-composer" value={visiblePrompt} onChange={(event) => setPrompt(skillPrefix + event.target.value)} onPaste={(event) => {
           const images = pastedImages(event.clipboardData);
           if (images.length > 0) {
             event.preventDefault();
@@ -663,6 +674,11 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
         }} onFocus={() => setSlashDismissed(false)} onBlur={() => setSlashDismissed(true)}
           aria-autocomplete="list" aria-expanded={slashOpen} aria-controls={slashOpen ? "slash-menu" : undefined} aria-activedescendant={slashOpen ? `slash-option-${slashCursor}` : undefined}
           placeholder={busy ? running && deliveryMode === "guide" ? t("guidePlaceholder") : t("queuePlaceholder") : t("promptPlaceholder")} rows={2} onKeyDown={(event) => {
+          if (selectedSkill && event.key === "Backspace" && !visiblePrompt) {
+            event.preventDefault();
+            setPrompt("");
+            return;
+          }
           if (slashOpen && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) {
             event.preventDefault();
             if (event.key === "ArrowDown") setSlashCursor((slashCursor + 1) % slashItems.length);
@@ -704,7 +720,6 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
             {planMode ? <span>{t("planLabel")}</span> : null}
           </button>
           <span className="toolbar-spacer" />
-          {running && <MenuSelect className="composer-menu delivery-menu" placement="top" value={deliveryMode} options={[{ value: "queue", label: t("queue") }, { value: "guide", label: t("guide") }]} onChange={(value) => setDeliveryMode(value as DeliveryMode)} ariaLabel={t("deliveryMode")} />}
           <ContextMeter />
           <ModelControls
             running={running} models={modelChoices} selectedModel={modelKey(snapshot.provider, snapshot.model)} selectedModelName={selectedModelName}

@@ -5,6 +5,20 @@ import type { Block } from "../types";
 import { TimelineFeed } from "./Timeline";
 
 describe("Codex-style process timeline", () => {
+  it("marks only live assistant output as animated and busy", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const live: Block = { id: "live", kind: "assistant", content: "正在输出", state: "streaming" };
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [live], language: "zh-CN" })));
+    expect(container.querySelector(".assistant-block.streaming")?.getAttribute("aria-busy")).toBe("true");
+    expect(container.querySelector(".stream-cursor")).not.toBeNull();
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [{ ...live, state: "completed" }], language: "zh-CN" })));
+    expect(container.querySelector(".stream-cursor")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
   it("renders progressive reasoning, highlighted edit diffs, a completed file summary, and a stop separator", async () => {
     const blocks: Block[] = [
       { id: "user", kind: "user", runId: "run-1", content: "调整时间线", state: "submitted" },
@@ -107,7 +121,8 @@ describe("Codex-style process timeline", () => {
     expect(container.querySelector(".reasoning-placeholder")).toBeNull();
     expect(container.querySelector(".reasoning-trace.streaming")?.textContent).toContain("确认 stream 和 事件顺序。");
     expect(container.querySelector(".reasoning-label-sweep")).not.toBeNull();
-    expect(container.querySelector(".reasoning-spark.active")).not.toBeNull();
+    expect(container.querySelector(".azem-thinking-mark.active")?.childElementCount).toBe(2);
+    expect(container.querySelector(".reasoning-spark")).toBeNull();
     expect(container.querySelector<HTMLDivElement>(".reasoning-body")?.hidden).toBe(true);
     expect(container.querySelector(".reasoning-step strong, .reasoning-step code, .reasoning-step a")).toBeNull();
     expect(container.querySelector(".reasoning-body")?.textContent).toContain("确认 stream 和 事件顺序。");
@@ -135,7 +150,7 @@ describe("Codex-style process timeline", () => {
     })));
     expect(container.querySelector(".reasoning-trace.completed")?.textContent).toContain("思考了 4s");
     expect(container.querySelector(".reasoning-label-sweep")).toBeNull();
-    expect(container.querySelector(".reasoning-spark.active")).toBeNull();
+    expect(container.querySelector(".azem-thinking-mark.active")).toBeNull();
     expect(container.querySelector(".reasoning-summary")?.getAttribute("aria-expanded")).toBe("false");
 
     await act(async () => root.unmount());

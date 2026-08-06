@@ -17,6 +17,14 @@ func (b *Bridge) CreateProject(name string) (string, error) {
 }
 
 func (b *Bridge) OpenProject(path string) error {
+	return b.openProjectWindow(path, "")
+}
+
+func (b *Bridge) OpenProjectSession(path, sessionID string) error {
+	return b.openProjectWindow(path, strings.TrimSpace(sessionID))
+}
+
+func (b *Bridge) openProjectWindow(path, sessionID string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("project path is empty")
@@ -35,7 +43,12 @@ func (b *Bridge) OpenProject(path string) error {
 	if b.openProject == nil {
 		return fmt.Errorf("project window is unavailable")
 	}
-	return b.openProject(absolute)
+	if b.runtime != nil {
+		if err := b.runtime.RememberProject(b.ctx, absolute); err != nil {
+			return err
+		}
+	}
+	return b.openProject(absolute, sessionID)
 }
 
 func createProjectDirectory(root, name string) (string, error) {

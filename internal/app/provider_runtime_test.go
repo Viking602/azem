@@ -25,7 +25,6 @@ import (
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/message"
-	"github.com/Viking602/venat/multiagent"
 	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/stream"
 	"github.com/Viking602/venat/tool"
@@ -41,7 +40,6 @@ import (
 	"github.com/Viking602/azem/internal/provider/codex"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -91,6 +89,13 @@ func TestMainInstructionsContract(t *testing.T) {
 	sum := sha256.Sum256([]byte(mainInstructions))
 	if want := hex.EncodeToString(sum[:]); mainInstructionFingerprint != want {
 		t.Fatalf("main instruction fingerprint = %q, want %q", mainInstructionFingerprint, want)
+	}
+}
+
+func TestAgentDefinitionUsesParallelToolDispatch(t *testing.T) {
+	definition := agentDefinitionForSpec("test", "Test", "", hyagent.Spec{}, api.GovernancePolicy{}, nil)
+	if definition.ToolMode != api.ToolModeParallel {
+		t.Fatalf("tool mode = %q, want %q", definition.ToolMode, api.ToolModeParallel)
 	}
 }
 
@@ -963,6 +968,42 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	service.runProviderTurn(ctx, TurnRequest{
 		SessionID: "retry-session", Prompt: "recover this turn", Provider: "test", Model: "test",
 	}, run, hyagent.Engine{Provider: driver, Model: "test", ContextBuilder: turnContext{instructions: "test"}})
+	eventCtx, eventCancel := context.WithTimeout(ctx, time.Second)
+	defer eventCancel()
+	var emitted []Event
+	for {
+		event, nextErr := service.NextEvent(eventCtx)
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		emitted = append(emitted, event)
+		if event.Kind == EventRunFinished {
+			break
+		}
+	}
+	retryIndex, firstTextIndex, recoveredTextIndex := -1, -1, -1
+	for index, event := range emitted {
+		if event.Kind == EventProviderRetry && event.State == "restarted" {
+			retryIndex = index
+		}
+		if event.Kind == EventTextDelta && strings.Contains(event.Text, "uncommitted partial") {
+			firstTextIndex = index
+		}
+		if event.Kind == EventTextDelta && strings.Contains(event.Text, "recovered answer") {
+			recoveredTextIndex = index
+		}
+	}
+	if firstTextIndex < 0 || retryIndex <= firstTextIndex || recoveredTextIndex <= retryIndex {
+		t.Fatalf("retry event ordering first=%d retry=%d recovered=%d events=%+v", firstTextIndex, retryIndex, recoveredTextIndex, emitted)
+	}
+	childBlocks := discardAgentAttemptBlocks([]AgentTranscriptBlock{
+		{Kind: "tool", RunID: "child", Content: "keep"},
+		{Kind: "thinking", RunID: "child", Content: "discard"},
+		{Kind: "assistant", RunID: "child", Content: "discard"},
+	}, "child")
+	if len(childBlocks) != 1 || childBlocks[0].Kind != "tool" {
+		t.Fatalf("subagent retry retained uncommitted blocks: %+v", childBlocks)
+	}
 
 	if len(driver.requests) != 2 {
 		t.Fatalf("provider requests = %d, want initial request plus one session retry", len(driver.requests))
@@ -2750,114 +2791,6 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 	}
 }
 
-type skillRuntimeHarness struct {
-	service        *Service
-	calls          *atomic.Int32
-	workspace      string
-	catalog        *skills.Catalog
-	definitionPath string
-}
-
-func newSkillRuntimeHarness(t *testing.T, definition string, resources map[string]string, respond func(int, string, http.ResponseWriter)) skillRuntimeHarness {
-	t.Helper()
-	ctx := context.Background()
-	workspace := t.TempDir()
-	skillRoot := filepath.Join(t.TempDir(), "skills")
-	skillDir := filepath.Join(skillRoot, "demo")
-	if err := os.MkdirAll(skillDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(definition), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for name, content := range resources {
-		path := filepath.Join(skillDir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	var responseCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/models":
-			writer.Header().Set("Content-Type", "application/json")
-			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-skill","title":"GPT Skill","context_window":128000,"supported_reasoning_levels":["minimal"],"default_reasoning_level":"minimal","supports_tools":true}]}`))
-		case "/responses":
-			body, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Errorf("read provider request: %v", err)
-				writer.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			writer.Header().Set("Content-Type", "text/event-stream")
-			respond(int(responseCalls.Add(1)), string(body), writer)
-		default:
-			writer.WriteHeader(http.StatusNotFound)
-		}
-	}))
-
-	store, err := sqlitestore.Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentials, err := auth.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	authentication := auth.NewService(store.DB(), credentials, chatgpt.NewClient(), grok.NewClient())
-	importPath := filepath.Join(t.TempDir(), "codex.json")
-	if err := os.WriteFile(importPath, []byte(`{"tokens":{"access_token":"access","refresh_token":"refresh","account_id":"acct"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := authentication.ImportChatGPT(ctx, importPath); err != nil {
-		t.Fatal(err)
-	}
-	modelCatalog := catalog.NewService(store.DB(), authentication)
-	modelCatalog.Endpoints["chatgpt"] = server.URL + "/models"
-	modelCatalog.AdditionalEndpoints["chatgpt"] = nil
-	skillCatalog, err := skills.Load(skills.LoadOptions{Config: config.SkillsConfig{
-		Enabled:        true,
-		AdditionalDirs: []string{skillRoot},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	coding, err := agentservice.NewService(store, workspace, agentservice.WithSkills(skillCatalog))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Default()
-	cfg.Workspace.Root = workspace
-	providerRuntime, err := NewProviderRuntime(cfg, authentication, modelCatalog, coding, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	providerRuntime.ChatGPTEndpoint = server.URL + "/responses"
-	service := NewService(ctx, cfg)
-	service.AttachDurable(session.NewService(store.DB()), coding)
-	service.AttachAuth(authentication, modelCatalog)
-	service.AttachProviderRuntime(providerRuntime)
-	t.Cleanup(func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := service.Shutdown(shutdownCtx); err != nil {
-			t.Errorf("shutdown: %v", err)
-		}
-		server.Close()
-		if err := store.Close(shutdownCtx); err != nil {
-			t.Errorf("close store: %v", err)
-		}
-	})
-	return skillRuntimeHarness{
-		service: service, calls: &responseCalls, workspace: workspace,
-		catalog: skillCatalog, definitionPath: filepath.Join(skillDir, "SKILL.md"),
-	}
-}
-
 func writeProviderToolCall(writer http.ResponseWriter, responseID, callID, name, arguments string) {
 	_, _ = fmt.Fprintf(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":%q,\"call_id\":%q,\"name\":%q,\"arguments\":%q}}\n\n", responseID+"-item", callID, name, arguments)
 	_, _ = fmt.Fprintf(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":%q,\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14}}}\n\n", responseID)
@@ -3999,72 +3932,6 @@ func TestTurnContextBuildFallsBackWhenModelHistoryScopeDiffers(t *testing.T) {
 		if len(current.ProviderState) != 0 || current.Text == "stale answer" {
 			t.Fatalf("stale exact state leaked into fallback: %#v", current)
 		}
-	}
-}
-
-func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testing.T) {
-	service := NewService(context.Background(), config.Default())
-	recovery := &agentservice.EditRecovery{}
-	hooks := service.teamHooks(TurnRequest{SessionID: "session-1", Provider: "chatgpt", Model: "gpt-team"}, "team-parent", teamExecutionPolicy{}, recovery)
-	if hooks.RetryPolicy.MaxBackoff != service.cfg.Retry.MaxDelayDuration {
-		t.Fatalf("team retry max backoff = %v, want %v", hooks.RetryPolicy.MaxBackoff, service.cfg.Retry.MaxDelayDuration)
-	}
-	base := hyagent.Engine{ExtraBody: map[string]any{"parallel_tool_calls": false}}
-	prepare := func(runID, role string) hyagent.Engine {
-		t.Helper()
-		prepared, err := hooks.PrepareEngine(context.Background(), base, multiagent.Dispatch{
-			Task: api.Task{RunID: runID}, To: role,
-		}, multiagent.AgentClass{Name: role})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if prepared.ExtraBody["parallel_tool_calls"] != false {
-			t.Fatalf("existing provider option lost: %#v", prepared.ExtraBody)
-		}
-		return prepared
-	}
-	first := prepare("child-run-1", agentservice.ImplementerClass)
-	repeated := prepare("child-run-2", agentservice.ImplementerClass)
-	secondRole := prepare("child-run-2", agentservice.ReviewerClass)
-	if first.ExtraBody["prompt_cache_key"] != "session-1:team:chatgpt:gpt-team:implementer" ||
-		repeated.ExtraBody["prompt_cache_key"] != first.ExtraBody["prompt_cache_key"] ||
-		secondRole.ExtraBody["prompt_cache_key"] == first.ExtraBody["prompt_cache_key"] {
-		t.Fatalf("team cache keys first=%#v repeated=%#v secondRole=%#v", first.ExtraBody, repeated.ExtraBody, secondRole.ExtraBody)
-	}
-	if _, mutated := base.ExtraBody["prompt_cache_key"]; mutated {
-		t.Fatalf("base engine ExtraBody mutated: %#v", base.ExtraBody)
-	}
-	failedPatch, _ := json.Marshal(map[string]string{"input": "[internal/app/app.go#ABCD]\ninvalid"})
-	recovery.Observe(
-		tool.Call{ID: "failed-edit", Name: coding.ToolEditHashline, Arguments: failedPatch},
-		tool.Result{ToolCallID: "failed-edit", Name: coding.ToolEditHashline, IsError: true},
-		nil,
-	)
-	recoveryRequest := hyprovider.Request{Tools: []message.ToolDefinition{
-		{Name: coding.ToolEditHashline},
-		{Name: coding.ToolReadFile},
-	}}
-	if err := first.Hooks.BeforeModelCall(context.Background(), &recoveryRequest); err != nil {
-		t.Fatal(err)
-	}
-	if len(recoveryRequest.Tools) != 1 || recoveryRequest.Tools[0].Name != coding.ToolReadFile {
-		t.Fatalf("team edit recovery tools = %#v", recoveryRequest.Tools)
-	}
-	readArguments, _ := json.Marshal(map[string]string{"path": "internal/app/app.go"})
-	recovery.Observe(
-		tool.Call{ID: "recovery-read", Name: coding.ToolReadFile, Arguments: readArguments},
-		tool.Result{ToolCallID: "recovery-read", Name: coding.ToolReadFile},
-		nil,
-	)
-	restoredRequest := hyprovider.Request{Tools: []message.ToolDefinition{
-		{Name: coding.ToolEditHashline},
-		{Name: coding.ToolReadFile},
-	}}
-	if err := first.Hooks.BeforeModelCall(context.Background(), &restoredRequest); err != nil {
-		t.Fatal(err)
-	}
-	if len(restoredRequest.Tools) != 2 {
-		t.Fatalf("team tools were not restored after read: %#v", restoredRequest.Tools)
 	}
 }
 

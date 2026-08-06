@@ -27,6 +27,9 @@ CREATE TABLE subagent_runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, paren
 CREATE TABLE session_tool_records (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, anchor_sequence INTEGER NOT NULL DEFAULT -1, name TEXT NOT NULL, arguments BLOB NOT NULL DEFAULT '{}', state TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', structured BLOB NOT NULL DEFAULT 'null', artifact_id TEXT NOT NULL DEFAULT '', observations BLOB NOT NULL DEFAULT '[]', started_at INTEGER NOT NULL, completed_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session_id,run_id,tool_call_id));
 CREATE INDEX session_tool_records_session_started ON session_tool_records(session_id,started_at,run_id,tool_call_id);
 CREATE TABLE workspace_session_state (anchor TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, updated_at INTEGER NOT NULL);
+CREATE TABLE desktop_projects (workspace TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);
+CREATE TABLE session_workspaces (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, workspace TEXT NOT NULL REFERENCES desktop_projects(workspace) ON DELETE RESTRICT, assigned_at INTEGER NOT NULL);
+CREATE INDEX session_workspaces_workspace ON session_workspaces(workspace,assigned_at DESC,session_id);
 
 CREATE TABLE agent_definition_snapshots (definition_id TEXT NOT NULL, version TEXT NOT NULL, created_at INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(definition_id,version));
 CREATE INDEX agent_definition_snapshots_created ON agent_definition_snapshots(created_at,definition_id,version);

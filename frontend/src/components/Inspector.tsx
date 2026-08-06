@@ -22,7 +22,6 @@ export default function Inspector() {
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
   const setError = useRuntimeStore((state) => state.setError);
   const setView = useRuntimeStore((state) => state.setView);
-  const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const t = translator(snapshot.language);
   const sources = Array.from(new Map(blocks.flatMap((block) => block.attachments ?? []).map((item) => [item.id || item.path, item])).values());
   const currentBranch = branches.find((branch) => branch.current)?.name || "";
@@ -54,7 +53,7 @@ export default function Inspector() {
         </section>
         {todo && todo.phases.length > 0 && <TodoPlan todo={todo} language={snapshot.language} />}
         {backgroundProcesses.length > 0 && <section className="inspector-section"><header className="inspector-section-header"><h2>{t("backgroundProcesses")}</h2></header>{backgroundProcesses.map((process) => <div className="process-row" key={process.id}><SquareTerminal size={14} /><span><strong>{process.name || t("backgroundTerminal")}</strong><small title={process.command}>{process.command}</small></span><em data-state={process.state}>{process.state === "running" ? t("running") : process.state}</em></div>)}</section>}
-        {agents.length > 0 && <SubagentSummary agents={agents} language={snapshot.language} open={() => { setInspectorOpen(false); setView("agents"); }} />}
+        {agents.length > 0 && <SubagentSummary agents={agents} language={snapshot.language} open={() => setView("agents")} />}
         <section className="inspector-section">
           <header className="inspector-section-header">
             <h2>{t("sources")}</h2>
