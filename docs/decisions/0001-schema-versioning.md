@@ -6,7 +6,8 @@ Date: 2026-08-06
 ## Context
 
 Azem stores sessions, governed execution, recovery state, and desktop project
-ownership in one local SQLite database. Runtime migrations and SQLC require
+ownership in one local SQLite database. Schema 20 also stores semantic context
+snapshots, append-only semantic events, and context manifests. Runtime migrations and SQLC require
 separate schema representations. Older binaries cannot safely interpret state
 written by newer schemas.
 
@@ -21,6 +22,10 @@ written by newer schemas.
   future-version rejection.
 - Never implement rollback by lowering `user_version`, deleting tables, or
   rebuilding the user's database.
+- A migration may invalidate explicitly replaceable derived state, such as
+  pre-release Provider `ModelHistory`, only when authoritative transcript,
+  Todo, tool, Artifact, Memory, and recovery records remain intact and the
+  invalidation is covered by an upgrade test.
 
 ## Consequences
 

@@ -97,6 +97,7 @@ type Service struct {
 func NewService(parent context.Context, cfg config.Config) *Service {
 	ctx, cancel := context.WithCancel(parent)
 	cfg.Agents.Subagents = cloneSubagentConfig(cfg.Agents.Subagents)
+	cfg.Providers.LLMux = cloneLLMuxProviders(cfg.Providers.LLMux)
 	approvalMode := ApprovalMode(cfg.Defaults.ApprovalMode)
 	if approvalMode != ApprovalModePrompt && approvalMode != ApprovalModeAutoReview && approvalMode != ApprovalModeYolo {
 		approvalMode = ApprovalModePrompt

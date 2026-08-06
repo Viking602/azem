@@ -40,3 +40,8 @@ CREATE TABLE resource_claims (id TEXT PRIMARY KEY, resource_key TEXT NOT NULL, r
 CREATE INDEX resource_claims_owner ON resource_claims(run_id,task_id,holder_id,created_at,id);
 CREATE INDEX resource_claims_lease_state ON resource_claims(lease_id,state,id);
 CREATE INDEX resource_claims_key_state_expiry ON resource_claims(resource_key,state,expires_at,id);
+CREATE TABLE session_semantic_state (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, revision INTEGER NOT NULL DEFAULT 0, checkpoint_id TEXT NOT NULL DEFAULT '', cursor BLOB NOT NULL DEFAULT '{}', state BLOB NOT NULL DEFAULT '{}', source_digest TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL);
+CREATE TABLE session_semantic_state_events (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, revision INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, base_revision INTEGER NOT NULL, cursor BLOB NOT NULL, patch BLOB NOT NULL, source_digest TEXT NOT NULL, writer_run_id TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, PRIMARY KEY(session_id,revision), UNIQUE(session_id,base_revision,source_digest));
+CREATE TABLE context_manifests (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, run_id TEXT NOT NULL DEFAULT '', canonical_high_water INTEGER NOT NULL DEFAULT -1, semantic_revision INTEGER NOT NULL DEFAULT 0, policy_version INTEGER NOT NULL, manifest_hash TEXT NOT NULL, activated INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL, created_at INTEGER NOT NULL, UNIQUE(session_id,manifest_hash));
+CREATE INDEX context_manifests_session_created ON context_manifests(session_id,created_at DESC,id);
+CREATE UNIQUE INDEX context_manifests_one_active ON context_manifests(session_id) WHERE activated=1;

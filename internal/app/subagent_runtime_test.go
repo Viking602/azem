@@ -2251,7 +2251,7 @@ func TestSubagentCoordinatorTerminalizesProviderFailureAndPanic(t *testing.T) {
 }
 
 func TestSubagentTurnContextCompactsToModelTarget(t *testing.T) {
-	contextManager := subagentTurnContext{summarize: func(context.Context, string) (string, error) { return "subagent summary", nil }}
+	contextManager := subagentTurnContext{summarize: func(context.Context, string) (string, error) { return semanticStateForTest("subagent summary"), nil }}
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "stable rules"),
 		message.NewText(message.RoleUser, "old request"),

@@ -81,6 +81,8 @@ export interface ActionRequest {
   offset?: number;
   limit?: number;
   route?: ModelRoute;
+	provider?: ModelProvider;
+	secret?: string;
 }
 
 export interface Session {
@@ -368,6 +370,27 @@ export interface ModelRoute {
   Route: ModelRouteConfig;
 }
 
+export interface LLMuxModelConfig {
+	id: string;
+	name?: string;
+	contextWindow: number;
+	reasoningLevels?: string[];
+	defaultReasoning?: string;
+}
+
+export interface ModelProvider {
+	ID: string;
+	DisplayName: string;
+	Backend: string;
+	DefaultBaseURL: string;
+	BaseURL: string;
+	EnvKey: string;
+	Enabled: boolean;
+	CredentialConfigured: boolean;
+	CredentialSource: "stored" | "environment" | "none";
+	Models: LLMuxModelConfig[];
+}
+
 export interface ContextContribution {
   category: string;
   name: string;
@@ -380,6 +403,23 @@ export interface ContextProfile {
   contributions: ContextContribution[];
   reportedInputTokens?: number;
   reportedOutputTokens?: number;
+  manifestHash?: string;
+  semanticRevision?: number;
+  semanticCursor?: {
+    canonical_sequence: number;
+    todo_revision: number;
+    tool_completed_at_ns: number;
+    tool_run_id?: string;
+    tool_call_id?: string;
+    subagent_finished_at_ns: number;
+    subagent_id?: string;
+  };
+  canonicalHighWater?: number;
+  policyVersion?: number;
+  rebuildReason?: string;
+  writerLag?: number;
+  segments?: Array<{ kind: string; mandatory: boolean; token_estimate: number; content_hash: string; source_refs?: string[] }>;
+  exclusions?: Array<{ source_ref: string; reason: string }>;
 }
 
 export interface RuntimeEvent {
@@ -403,6 +443,7 @@ export interface RuntimeEvent {
   todo?: TodoList;
   recap?: unknown;
   modelRoutes?: ModelRoute[];
+	modelProviders?: ModelProvider[];
   background?: Array<Record<string, unknown>>;
   gitBranches?: Array<Record<string, unknown>>;
   workspaceDirty?: boolean;

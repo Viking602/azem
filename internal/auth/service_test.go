@@ -86,6 +86,30 @@ func TestFileStorePermissionsAndRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSetAPIKeyReplacesSingleProviderCredential(t *testing.T) {
+	ctx := context.Background()
+	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	store := NewSQLiteStore(provider.DB())
+	service := NewService(provider.DB(), store, nil, nil)
+	for _, secret := range []string{"first", "second"} {
+		account, err := service.SetAPIKey(ctx, "openrouter", secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if account.ID != "api-key" || account.Provider != "openrouter" || account.Status != "active" {
+			t.Fatalf("account=%+v", account)
+		}
+	}
+	credential, err := store.Get(ctx, "openrouter", "api-key")
+	if err != nil || credential.AccessToken != "second" {
+		t.Fatalf("credential=%+v err=%v", credential, err)
+	}
+}
+
 func TestLoginChatGPTCallbackPersistsLargeCredentialInSQLite(t *testing.T) {
 	ctx := context.Background()
 	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))

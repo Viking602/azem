@@ -4,7 +4,7 @@ Last verified: 2026-08-06
 
 Azem stores configuration and durable runtime state locally. SQLite is the
 authoritative store for sessions, projections, governed agent execution, usage,
-memory, desktop projects, and recovery metadata. Current schema version: **19**.
+memory, desktop projects, semantic context, and recovery metadata. Current schema version: **20**.
 
 ## Paths and permissions
 
@@ -91,6 +91,14 @@ different project. Pre-schema-19 sessions are adopted automatically only when
 there is exactly one valid project; otherwise they remain unassigned until
 opened from the correct workspace.
 
+Schema 20 replaces the pre-release compaction checkpoint format:
+
+- `session_semantic_state` stores the current host-validated semantic snapshot and writer cursor.
+- `session_semantic_state_events` stores append-only patches with revision CAS and idempotency keys.
+- `context_manifests` records the exact ordered context segments, exclusions, policy version, and active manifest hash.
+
+The migration deliberately invalidates replaceable `model_history` and prompt-cache identity so no legacy summary can enter the new kernel. It preserves canonical blocks, Todo, tool records, artifacts, Memory, Recap, project ownership, and every other authoritative store.
+
 ## Stored data groups
 
 | Group | Examples | Owner |
@@ -99,7 +107,7 @@ opened from the correct workspace.
 | Tool timeline | tool records, file evidence, action attempts, tool-call charges | `internal/session`, `internal/app`, Venat adapters |
 | Agent execution | runs, tasks, leases, approvals, resume tokens, team state | Venat through `internal/store/sqlite` |
 | Control plane | definition snapshots, admission reservations, resource claims | Venat through `stores_control_plane.go` |
-| Context | memories, recaps, history FTS, context artifacts | `internal/memory`, `internal/recap`, `internal/session` |
+| Context | semantic state/events, manifests, memories, recaps, history FTS, context artifacts | `internal/app`, `internal/memory`, `internal/recap`, `internal/session` |
 | Product state | authentication metadata, model catalog cache, usage | corresponding internal services |
 | Desktop navigation | project catalog, session-to-project ownership, last workspace session | `internal/session`, `internal/app`, `internal/desktop` |
 
@@ -156,6 +164,6 @@ go test ./internal/store/sqlite
 ```
 
 Required coverage includes previous-schema upgrade, schema 18 control-plane
-tables and indexes, schema 19 project ownership backfill, current-version
-reopen, retained data, automatic backup, and rejection of a future schema. Run
+tables and indexes, schema 19 project ownership backfill, schema 20 compaction-state
+invalidation with canonical data retention, current-version reopen, automatic backup, and rejection of a future schema. Run
 `GOWORK=off go test ./...` before release.

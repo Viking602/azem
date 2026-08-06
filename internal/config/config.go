@@ -84,8 +84,23 @@ type AuthConfig struct {
 }
 
 type ProvidersConfig struct {
-	ChatGPT ChatGPTConfig `yaml:"chatgpt"`
-	Grok    GrokConfig    `yaml:"grok"`
+	ChatGPT ChatGPTConfig                  `yaml:"chatgpt"`
+	Grok    GrokConfig                     `yaml:"grok"`
+	LLMux   map[string]LLMuxProviderConfig `yaml:"llmux,omitempty"`
+}
+
+type LLMuxProviderConfig struct {
+	Enabled bool               `yaml:"enabled" json:"enabled"`
+	BaseURL string             `yaml:"base_url,omitempty" json:"baseURL,omitempty"`
+	Models  []LLMuxModelConfig `yaml:"models,omitempty" json:"models,omitempty"`
+}
+
+type LLMuxModelConfig struct {
+	ID               string   `yaml:"id" json:"id"`
+	Name             string   `yaml:"name,omitempty" json:"name,omitempty"`
+	ContextWindow    int      `yaml:"context_window" json:"contextWindow"`
+	ReasoningLevels  []string `yaml:"reasoning_levels,omitempty" json:"reasoningLevels,omitempty"`
+	DefaultReasoning string   `yaml:"default_reasoning,omitempty" json:"defaultReasoning,omitempty"`
 }
 
 type ProviderConfig struct {
@@ -268,6 +283,7 @@ func Default() Config {
 		Providers: ProvidersConfig{
 			ChatGPT: ChatGPTConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}},
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
+			LLMux:   map[string]LLMuxProviderConfig{},
 		},
 		Retry: RetryConfig{
 			Enabled: true, MaxRetries: 5, BaseDelay: "500ms", BaseDelayDuration: 500 * time.Millisecond,
@@ -424,6 +440,9 @@ func (c *Config) Validate() error {
 	c.Agents.Main.MaxWallClockDuration = mainWallClock
 	if c.Agents.Team.MaxConcurrency < 1 || c.Agents.Team.MaxTicks < 1 {
 		return fmt.Errorf("agents.team limits must be positive")
+	}
+	if err := c.validateLLMuxProviders(); err != nil {
+		return err
 	}
 	if err := validateModelRoute("agents.title", c.Agents.Title); err != nil {
 		return err
@@ -692,8 +711,8 @@ func validateModelRoute(name string, route ModelRouteConfig) error {
 	if provider == "" || model == "" {
 		return fmt.Errorf("%s route must set both provider and model", name)
 	}
-	if provider != "chatgpt" && provider != "grok" {
-		return fmt.Errorf("%s provider must be chatgpt or grok", name)
+	if !mcpServerNamePattern.MatchString(provider) {
+		return fmt.Errorf("%s provider must match [a-z0-9_-]+", name)
 	}
 	return nil
 }
@@ -704,8 +723,8 @@ func validateInheritedModelRoute(name string, route ModelRouteConfig) error {
 	if provider != "" && model == "" {
 		return fmt.Errorf("%s route must set model when provider is set", name)
 	}
-	if provider != "" && provider != "chatgpt" && provider != "grok" {
-		return fmt.Errorf("%s provider must be chatgpt or grok", name)
+	if provider != "" && !mcpServerNamePattern.MatchString(provider) {
+		return fmt.Errorf("%s provider must match [a-z0-9_-]+", name)
 	}
 	return nil
 }

@@ -65,15 +65,17 @@ type Attachment struct {
 }
 
 type ActionRequest struct {
-	Kind      string                   `json:"kind"`
-	Target    string                   `json:"target"`
-	Decision  string                   `json:"decision"`
-	SessionID string                   `json:"sessionId"`
-	Name      string                   `json:"name"`
-	CWD       string                   `json:"cwd"`
-	Offset    int                      `json:"offset"`
-	Limit     int                      `json:"limit"`
-	Route     *azemapp.ModelRouteEntry `json:"route,omitempty"`
+	Kind      string                      `json:"kind"`
+	Target    string                      `json:"target"`
+	Decision  string                      `json:"decision"`
+	SessionID string                      `json:"sessionId"`
+	Name      string                      `json:"name"`
+	CWD       string                      `json:"cwd"`
+	Offset    int                         `json:"offset"`
+	Limit     int                         `json:"limit"`
+	Route     *azemapp.ModelRouteEntry    `json:"route,omitempty"`
+	Provider  *azemapp.ModelProviderEntry `json:"provider,omitempty"`
+	Secret    string                      `json:"secret,omitempty"`
 }
 type PullRequestDetail struct {
 	PullRequest githubpr.PullRequest  `json:"pullRequest"`
@@ -103,6 +105,7 @@ type Event struct {
 	Memories         any                            `json:"memories,omitempty"`
 	Recap            any                            `json:"recap,omitempty"`
 	ModelRoutes      []azemapp.ModelRouteEntry      `json:"modelRoutes,omitempty"`
+	ModelProviders   []azemapp.ModelProviderEntry   `json:"modelProviders,omitempty"`
 	Background       any                            `json:"background,omitempty"`
 	BackgroundLogs   any                            `json:"backgroundLogs,omitempty"`
 	GitBranches      []azemapp.GitBranchEntry       `json:"gitBranches,omitempty"`
@@ -236,6 +239,7 @@ func (b *Bridge) Execute(request ActionRequest) error {
 	return b.runtime.ExecuteAction(b.ctx, azemapp.Action{
 		Kind: kind, Target: request.Target, Decision: request.Decision,
 		SessionID: request.SessionID, Route: request.Route,
+		Provider: request.Provider, Secret: request.Secret,
 		Name: request.Name, CWD: request.CWD, Offset: request.Offset, Limit: request.Limit,
 	})
 }
@@ -322,6 +326,7 @@ func (b *Bridge) prime() {
 		{Kind: azemapp.ActionListAgentTypes, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListSkills, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListModels},
+		{Kind: azemapp.ActionListModelProviders},
 	}
 	for _, action := range actions {
 		if err := b.runtime.ExecuteAction(b.ctx, action); err != nil && !errors.Is(err, context.Canceled) {
@@ -360,7 +365,7 @@ func eventDTO(event azemapp.Event) Event {
 		AgentSnapshots: event.AgentSnapshots, SkillCatalog: event.SkillCatalog,
 		SkillDiagnostics: event.SkillDiagnostics, ContextProfile: event.ContextProfile,
 		Todo: event.Todo, Memories: event.Memories, Recap: event.Recap,
-		ModelRoutes: event.ModelRoutes, Background: event.Background,
+		ModelRoutes: event.ModelRoutes, ModelProviders: event.ModelProviders, Background: event.Background,
 		BackgroundLogs: event.BackgroundLogs, GitBranches: event.GitBranches,
 		WorkspaceDirty: event.WorkspaceDirty, At: event.At,
 	}
@@ -377,7 +382,8 @@ func allowedAction(kind azemapp.ActionKind) bool {
 		azemapp.ActionCancelAgent, azemapp.ActionRefreshMCP, azemapp.ActionReconnectMCP,
 		azemapp.ActionListSkills, azemapp.ActionReloadSkills,
 		azemapp.ActionListMemories, azemapp.ActionRemember, azemapp.ActionForgetMemory,
-		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
+		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionSetModelProvider,
+		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
 		azemapp.ActionResetModelRoute, azemapp.ActionSetSubagentConcurrency,
 		azemapp.ActionSetChatGPTFastMode, azemapp.ActionSetSessionPreferences, azemapp.ActionListBackground,
 		azemapp.ActionStartBackground, azemapp.ActionStopBackground, azemapp.ActionLogsBackground,

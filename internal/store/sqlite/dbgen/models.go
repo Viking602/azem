@@ -54,6 +54,19 @@ type ContextArtifact struct {
 	CreatedAt int64  `db:"created_at"`
 }
 
+type ContextManifest struct {
+	ID                 string `db:"id"`
+	SessionID          string `db:"session_id"`
+	RunID              string `db:"run_id"`
+	CanonicalHighWater int64  `db:"canonical_high_water"`
+	SemanticRevision   int64  `db:"semantic_revision"`
+	PolicyVersion      int64  `db:"policy_version"`
+	ManifestHash       string `db:"manifest_hash"`
+	Activated          int64  `db:"activated"`
+	Data               []byte `db:"data"`
+	CreatedAt          int64  `db:"created_at"`
+}
+
 type DesktopProject struct {
 	Workspace string `db:"workspace"`
 	UpdatedAt int64  `db:"updated_at"`
@@ -205,6 +218,28 @@ type SessionProjection struct {
 	CheckpointGeneration int64  `db:"checkpoint_generation"`
 	CacheEpoch           int64  `db:"cache_epoch"`
 	CacheIdentityHash    string `db:"cache_identity_hash"`
+}
+
+type SessionSemanticState struct {
+	SessionID    string `db:"session_id"`
+	Revision     int64  `db:"revision"`
+	CheckpointID string `db:"checkpoint_id"`
+	Cursor       []byte `db:"cursor"`
+	State        []byte `db:"state"`
+	SourceDigest string `db:"source_digest"`
+	UpdatedAt    int64  `db:"updated_at"`
+}
+
+type SessionSemanticStateEvent struct {
+	SessionID    string `db:"session_id"`
+	Revision     int64  `db:"revision"`
+	CheckpointID string `db:"checkpoint_id"`
+	BaseRevision int64  `db:"base_revision"`
+	Cursor       []byte `db:"cursor"`
+	Patch        []byte `db:"patch"`
+	SourceDigest string `db:"source_digest"`
+	WriterRunID  string `db:"writer_run_id"`
+	CreatedAt    int64  `db:"created_at"`
 }
 
 type SessionTodo struct {

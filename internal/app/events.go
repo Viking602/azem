@@ -32,6 +32,7 @@ const (
 	EventApprovalResolved  EventKind = "approval_resolved"
 	EventApprovalMode      EventKind = "approval_mode"
 	EventModelCatalog      EventKind = "model_catalog"
+	EventModelProviders    EventKind = "model_providers"
 	EventSkillCatalog      EventKind = "skill_catalog"
 	EventAuthState         EventKind = "auth_state"
 	EventMCPState          EventKind = "mcp_state"
@@ -55,6 +56,19 @@ type ModelRouteEntry struct {
 	Role  string
 	Label string
 	Route config.ModelRouteConfig
+}
+
+type ModelProviderEntry struct {
+	ID                   string
+	DisplayName          string
+	Backend              string
+	DefaultBaseURL       string
+	BaseURL              string
+	EnvKey               string
+	Enabled              bool
+	CredentialConfigured bool
+	CredentialSource     string
+	Models               []config.LLMuxModelConfig
 }
 
 type GitBranchEntry struct {
@@ -148,11 +162,20 @@ type ContextContribution struct {
 }
 
 type ContextProfile struct {
-	Source               string                `json:"source"`
-	Estimated            bool                  `json:"estimated"`
-	Contributions        []ContextContribution `json:"contributions"`
-	ReportedInputTokens  int                   `json:"reportedInputTokens,omitempty"`
-	ReportedOutputTokens int                   `json:"reportedOutputTokens,omitempty"`
+	Source               string                 `json:"source"`
+	Estimated            bool                   `json:"estimated"`
+	Contributions        []ContextContribution  `json:"contributions"`
+	ReportedInputTokens  int                    `json:"reportedInputTokens,omitempty"`
+	ReportedOutputTokens int                    `json:"reportedOutputTokens,omitempty"`
+	ManifestHash         string                 `json:"manifestHash,omitempty"`
+	SemanticRevision     int64                  `json:"semanticRevision,omitempty"`
+	SemanticCursor       session.WriterCursorV1 `json:"semanticCursor,omitempty"`
+	CanonicalHighWater   int64                  `json:"canonicalHighWater,omitempty"`
+	PolicyVersion        int                    `json:"policyVersion,omitempty"`
+	RebuildReason        string                 `json:"rebuildReason,omitempty"`
+	WriterLag            int64                  `json:"writerLag,omitempty"`
+	Segments             []ContextSegmentV1     `json:"segments,omitempty"`
+	Exclusions           []ContextExclusionV1   `json:"exclusions,omitempty"`
 }
 
 func (p ContextProfile) TotalTokens() int {
@@ -193,6 +216,7 @@ type Event struct {
 	Memories         []memory.Memory
 	Recap            *recap.Recap
 	ModelRoutes      []ModelRouteEntry
+	ModelProviders   []ModelProviderEntry
 	Background       []backgroundservice.Process
 	BackgroundLogs   *backgroundservice.LogSnapshot
 	GitBranches      []GitBranchEntry
@@ -245,6 +269,18 @@ func (e Event) Clone() Event {
 	}
 	if e.ModelRoutes != nil {
 		cloned.ModelRoutes = append([]ModelRouteEntry(nil), e.ModelRoutes...)
+	}
+	if e.ModelProviders != nil {
+		cloned.ModelProviders = append([]ModelProviderEntry(nil), e.ModelProviders...)
+		for i := range cloned.ModelProviders {
+			if e.ModelProviders[i].Models != nil {
+				cloned.ModelProviders[i].Models = make([]config.LLMuxModelConfig, len(e.ModelProviders[i].Models))
+				copy(cloned.ModelProviders[i].Models, e.ModelProviders[i].Models)
+			}
+			for j := range cloned.ModelProviders[i].Models {
+				cloned.ModelProviders[i].Models[j].ReasoningLevels = append([]string(nil), e.ModelProviders[i].Models[j].ReasoningLevels...)
+			}
+		}
 	}
 	if e.Background != nil {
 		cloned.Background = append([]backgroundservice.Process(nil), e.Background...)

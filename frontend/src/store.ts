@@ -12,6 +12,7 @@ import type {
   GitBranch,
   InspectorTab,
   ModelRoute,
+	ModelProvider,
   QueuedPrompt,
   PullRequest,
   PullRequestDashboard,
@@ -56,6 +57,7 @@ export interface RuntimeData {
   skills: SkillEntry[];
   branches: GitBranch[];
   modelRoutes: ModelRoute[];
+	modelProviders: ModelProvider[];
   pullRequestDashboard: PullRequestDashboard | null;
   selectedPullRequestNumber: number | null;
   pullRequestDetail: PullRequest | null;
@@ -148,6 +150,7 @@ const initialData: RuntimeData = {
   skills: [],
   branches: [],
   modelRoutes: [],
+	modelProviders: [],
   pullRequestDashboard: null,
   selectedPullRequestNumber: null,
   pullRequestDetail: null,
@@ -589,6 +592,9 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         chatgptFastMode: data.chatgpt_fast_mode === "true",
       };
       break;
+	case "model_providers":
+	  next.modelProviders = (event.modelProviders ?? []).map((provider) => ({ ...provider, Models: provider.Models ?? [] }));
+	  break;
     case "model_catalog": {
       const provider = data.provider || "unknown";
       next.modelsByProvider = { ...next.modelsByProvider, [provider]: parseArray(data.models).map(normalizeModel) };

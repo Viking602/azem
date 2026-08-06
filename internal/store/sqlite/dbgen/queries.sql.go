@@ -507,6 +507,15 @@ func (q *Queries) CreateSubagentRun(ctx context.Context, arg CreateSubagentRunPa
 	return err
 }
 
+const deactivateContextManifests = `-- name: DeactivateContextManifests :exec
+UPDATE context_manifests SET activated=0 WHERE session_id=? AND activated=1
+`
+
+func (q *Queries) DeactivateContextManifests(ctx context.Context, sessionID string) error {
+	_, err := q.db.ExecContext(ctx, deactivateContextManifests, sessionID)
+	return err
+}
+
 const deleteCatalog = `-- name: DeleteCatalog :exec
 DELETE FROM model_catalog WHERE provider_id=? AND account_id=?
 `
@@ -724,6 +733,37 @@ func (q *Queries) GetActionAttemptByIdempotency(ctx context.Context, arg GetActi
 	var data []byte
 	err := row.Scan(&data)
 	return data, err
+}
+
+const getActiveContextManifest = `-- name: GetActiveContextManifest :one
+SELECT id,run_id,canonical_high_water,semantic_revision,policy_version,manifest_hash,data,created_at FROM context_manifests WHERE session_id=? AND activated=1 LIMIT 1
+`
+
+type GetActiveContextManifestRow struct {
+	ID                 string `db:"id"`
+	RunID              string `db:"run_id"`
+	CanonicalHighWater int64  `db:"canonical_high_water"`
+	SemanticRevision   int64  `db:"semantic_revision"`
+	PolicyVersion      int64  `db:"policy_version"`
+	ManifestHash       string `db:"manifest_hash"`
+	Data               []byte `db:"data"`
+	CreatedAt          int64  `db:"created_at"`
+}
+
+func (q *Queries) GetActiveContextManifest(ctx context.Context, sessionID string) (GetActiveContextManifestRow, error) {
+	row := q.db.QueryRowContext(ctx, getActiveContextManifest, sessionID)
+	var i GetActiveContextManifestRow
+	err := row.Scan(
+		&i.ID,
+		&i.RunID,
+		&i.CanonicalHighWater,
+		&i.SemanticRevision,
+		&i.PolicyVersion,
+		&i.ManifestHash,
+		&i.Data,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const getAdmissionReservationData = `-- name: GetAdmissionReservationData :one
@@ -1073,6 +1113,33 @@ func (q *Queries) GetRunCheckpointState(ctx context.Context, sessionID string) (
 		&i.CheckpointGeneration,
 		&i.CacheEpoch,
 		&i.CacheIdentityHash,
+	)
+	return i, err
+}
+
+const getSemanticState = `-- name: GetSemanticState :one
+SELECT revision,checkpoint_id,cursor,state,source_digest,updated_at FROM session_semantic_state WHERE session_id=?
+`
+
+type GetSemanticStateRow struct {
+	Revision     int64  `db:"revision"`
+	CheckpointID string `db:"checkpoint_id"`
+	Cursor       []byte `db:"cursor"`
+	State        []byte `db:"state"`
+	SourceDigest string `db:"source_digest"`
+	UpdatedAt    int64  `db:"updated_at"`
+}
+
+func (q *Queries) GetSemanticState(ctx context.Context, sessionID string) (GetSemanticStateRow, error) {
+	row := q.db.QueryRowContext(ctx, getSemanticState, sessionID)
+	var i GetSemanticStateRow
+	err := row.Scan(
+		&i.Revision,
+		&i.CheckpointID,
+		&i.Cursor,
+		&i.State,
+		&i.SourceDigest,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -1558,6 +1625,62 @@ func (q *Queries) InsertResourceClaim(ctx context.Context, arg InsertResourceCla
 		arg.UpdatedAt,
 		arg.ExpiresAt,
 		arg.Data,
+	)
+}
+
+const insertSemanticState = `-- name: InsertSemanticState :execresult
+INSERT OR IGNORE INTO session_semantic_state(session_id,revision,checkpoint_id,cursor,state,source_digest,updated_at) VALUES(?,?,?,?,?,?,?)
+`
+
+type InsertSemanticStateParams struct {
+	SessionID    string `db:"session_id"`
+	Revision     int64  `db:"revision"`
+	CheckpointID string `db:"checkpoint_id"`
+	Cursor       []byte `db:"cursor"`
+	State        []byte `db:"state"`
+	SourceDigest string `db:"source_digest"`
+	UpdatedAt    int64  `db:"updated_at"`
+}
+
+func (q *Queries) InsertSemanticState(ctx context.Context, arg InsertSemanticStateParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertSemanticState,
+		arg.SessionID,
+		arg.Revision,
+		arg.CheckpointID,
+		arg.Cursor,
+		arg.State,
+		arg.SourceDigest,
+		arg.UpdatedAt,
+	)
+}
+
+const insertSemanticStateEvent = `-- name: InsertSemanticStateEvent :execresult
+INSERT OR IGNORE INTO session_semantic_state_events(session_id,revision,checkpoint_id,base_revision,cursor,patch,source_digest,writer_run_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)
+`
+
+type InsertSemanticStateEventParams struct {
+	SessionID    string `db:"session_id"`
+	Revision     int64  `db:"revision"`
+	CheckpointID string `db:"checkpoint_id"`
+	BaseRevision int64  `db:"base_revision"`
+	Cursor       []byte `db:"cursor"`
+	Patch        []byte `db:"patch"`
+	SourceDigest string `db:"source_digest"`
+	WriterRunID  string `db:"writer_run_id"`
+	CreatedAt    int64  `db:"created_at"`
+}
+
+func (q *Queries) InsertSemanticStateEvent(ctx context.Context, arg InsertSemanticStateEventParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertSemanticStateEvent,
+		arg.SessionID,
+		arg.Revision,
+		arg.CheckpointID,
+		arg.BaseRevision,
+		arg.Cursor,
+		arg.Patch,
+		arg.SourceDigest,
+		arg.WriterRunID,
+		arg.CreatedAt,
 	)
 }
 
@@ -2315,6 +2438,53 @@ func (q *Queries) ListResourceClaimData(ctx context.Context) ([][]byte, error) {
 	return items, nil
 }
 
+const listSemanticStateEvents = `-- name: ListSemanticStateEvents :many
+SELECT revision,checkpoint_id,base_revision,cursor,patch,source_digest,writer_run_id,created_at FROM session_semantic_state_events WHERE session_id=? ORDER BY revision
+`
+
+type ListSemanticStateEventsRow struct {
+	Revision     int64  `db:"revision"`
+	CheckpointID string `db:"checkpoint_id"`
+	BaseRevision int64  `db:"base_revision"`
+	Cursor       []byte `db:"cursor"`
+	Patch        []byte `db:"patch"`
+	SourceDigest string `db:"source_digest"`
+	WriterRunID  string `db:"writer_run_id"`
+	CreatedAt    int64  `db:"created_at"`
+}
+
+func (q *Queries) ListSemanticStateEvents(ctx context.Context, sessionID string) ([]ListSemanticStateEventsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listSemanticStateEvents, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSemanticStateEventsRow
+	for rows.Next() {
+		var i ListSemanticStateEventsRow
+		if err := rows.Scan(
+			&i.Revision,
+			&i.CheckpointID,
+			&i.BaseRevision,
+			&i.Cursor,
+			&i.Patch,
+			&i.SourceDigest,
+			&i.WriterRunID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSessionBlocks = `-- name: ListSessionBlocks :many
 SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence
 `
@@ -3060,6 +3230,34 @@ func (q *Queries) UpdateResourceClaimCAS(ctx context.Context, arg UpdateResource
 	)
 }
 
+const updateSemanticStateCAS = `-- name: UpdateSemanticStateCAS :execresult
+UPDATE session_semantic_state SET revision=?,checkpoint_id=?,cursor=?,state=?,source_digest=?,updated_at=? WHERE session_id=? AND revision=?
+`
+
+type UpdateSemanticStateCASParams struct {
+	Revision     int64  `db:"revision"`
+	CheckpointID string `db:"checkpoint_id"`
+	Cursor       []byte `db:"cursor"`
+	State        []byte `db:"state"`
+	SourceDigest string `db:"source_digest"`
+	UpdatedAt    int64  `db:"updated_at"`
+	SessionID    string `db:"session_id"`
+	Revision_2   int64  `db:"revision_2"`
+}
+
+func (q *Queries) UpdateSemanticStateCAS(ctx context.Context, arg UpdateSemanticStateCASParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, updateSemanticStateCAS,
+		arg.Revision,
+		arg.CheckpointID,
+		arg.Cursor,
+		arg.State,
+		arg.SourceDigest,
+		arg.UpdatedAt,
+		arg.SessionID,
+		arg.Revision_2,
+	)
+}
+
 const updateSessionBlockData = `-- name: UpdateSessionBlockData :exec
 UPDATE session_blocks SET data=? WHERE session_id=? AND sequence=?
 `
@@ -3177,6 +3375,40 @@ func (q *Queries) UpsertAccount(ctx context.Context, arg UpsertAccountParams) er
 		arg.Status,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+	)
+	return err
+}
+
+const upsertContextManifest = `-- name: UpsertContextManifest :exec
+INSERT INTO context_manifests(id,session_id,run_id,canonical_high_water,semantic_revision,policy_version,manifest_hash,activated,data,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(session_id,manifest_hash) DO UPDATE SET run_id=excluded.run_id,canonical_high_water=excluded.canonical_high_water,semantic_revision=excluded.semantic_revision,policy_version=excluded.policy_version,activated=excluded.activated,data=excluded.data
+`
+
+type UpsertContextManifestParams struct {
+	ID                 string `db:"id"`
+	SessionID          string `db:"session_id"`
+	RunID              string `db:"run_id"`
+	CanonicalHighWater int64  `db:"canonical_high_water"`
+	SemanticRevision   int64  `db:"semantic_revision"`
+	PolicyVersion      int64  `db:"policy_version"`
+	ManifestHash       string `db:"manifest_hash"`
+	Activated          int64  `db:"activated"`
+	Data               []byte `db:"data"`
+	CreatedAt          int64  `db:"created_at"`
+}
+
+func (q *Queries) UpsertContextManifest(ctx context.Context, arg UpsertContextManifestParams) error {
+	_, err := q.db.ExecContext(ctx, upsertContextManifest,
+		arg.ID,
+		arg.SessionID,
+		arg.RunID,
+		arg.CanonicalHighWater,
+		arg.SemanticRevision,
+		arg.PolicyVersion,
+		arg.ManifestHash,
+		arg.Activated,
+		arg.Data,
+		arg.CreatedAt,
 	)
 	return err
 }

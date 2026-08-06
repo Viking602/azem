@@ -156,6 +156,21 @@ func (s *Service) ImportGrok(ctx context.Context, path string) (Account, error) 
 	return account, nil
 }
 
+func (s *Service) SetAPIKey(ctx context.Context, provider, apiKey string) (Account, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	apiKey = strings.TrimSpace(apiKey)
+	if provider == "" || strings.ContainsAny(provider, " /\\") {
+		return Account{}, fmt.Errorf("API key provider is invalid")
+	}
+	if apiKey == "" || len(apiKey) > 32<<10 {
+		return Account{}, fmt.Errorf("API key must contain 1..32768 bytes")
+	}
+	return s.storeCredential(ctx, Credential{
+		Provider: provider, AccountID: "api-key", AccessToken: apiKey,
+		DisplayName: provider + " API key",
+	})
+}
+
 func (s *Service) Credential(ctx context.Context, provider string, accountID string) (Credential, error) {
 	credential, err := s.store.Get(ctx, provider, accountID)
 	if err != nil {

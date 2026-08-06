@@ -1,12 +1,12 @@
 import { useEffect } from "react";
 import {
-  Check, ChevronRight, Circle, CircleDot, FileDiff, FileImage, FolderGit2, GitBranch, ListChecks, Minus, Plus, SquareTerminal, Wrench,
+  Check, ChevronRight, Circle, CircleDot, DatabaseZap, FileDiff, FileImage, FolderGit2, GitBranch, ListChecks, Minus, Plus, SquareTerminal, Wrench,
 } from "lucide-react";
 import { execute } from "../bridge";
 import { tFormat, translator } from "../i18n";
 import { subagentSummaryLabel } from "../subagents";
 import { useRuntimeStore } from "../store";
-import type { AgentState, Snapshot, TodoList, TodoStatus } from "../types";
+import type { AgentState, ContextProfile, Snapshot, TodoList, TodoStatus } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
 
 
@@ -19,6 +19,7 @@ export default function Inspector() {
   const agents = useRuntimeStore((state) => state.agents);
   const todo = useRuntimeStore((state) => state.todo);
   const backgroundProcesses = useRuntimeStore((state) => state.backgroundProcesses);
+  const contextProfile = useRuntimeStore((state) => state.contextProfile);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
   const setError = useRuntimeStore((state) => state.setError);
   const setView = useRuntimeStore((state) => state.setView);
@@ -52,6 +53,7 @@ export default function Inspector() {
           </div>
         </section>
         {todo && todo.phases.length > 0 && <TodoPlan todo={todo} language={snapshot.language} />}
+        <ContextKernelIfAvailable profile={contextProfile} language={snapshot.language} />
         {backgroundProcesses.length > 0 && <section className="inspector-section"><header className="inspector-section-header"><h2>{t("backgroundProcesses")}</h2></header>{backgroundProcesses.map((process) => <div className="process-row" key={process.id}><SquareTerminal size={14} /><span><strong>{process.name || t("backgroundTerminal")}</strong><small title={process.command}>{process.command}</small></span><em data-state={process.state}>{process.state === "running" ? t("running") : process.state}</em></div>)}</section>}
         {agents.length > 0 && <SubagentSummary agents={agents} language={snapshot.language} open={() => setView("agents")} />}
         <section className="inspector-section">
@@ -66,6 +68,38 @@ export default function Inspector() {
       </div>
     </aside>
   );
+}
+
+function ContextKernelIfAvailable({ profile, language }: { profile?: ContextProfile | null; language: Snapshot["language"] }) {
+  if (!profile || (!profile.manifestHash && !profile.semanticRevision)) return null;
+  return <ContextKernel profile={profile} language={language} />;
+}
+
+function ContextKernel({ profile, language }: { profile: ContextProfile; language: Snapshot["language"] }) {
+  const t = translator(language);
+  const segments = profile.segments ?? [];
+  const segmentTokens = segments.reduce((total, segment) => total + Math.max(0, segment.token_estimate), 0);
+  const lag = Math.max(0, profile.writerLag ?? 0);
+  return <section className="inspector-section context-kernel-section" aria-label={t("contextKernel")}>
+    <header className="inspector-section-header"><h2><DatabaseZap size={14} />{t("contextKernel")}</h2><small>V{profile.policyVersion ?? 1}</small></header>
+    <div className="context-kernel-grid">
+      <span>{t("semanticRevision")}</span><strong>r{profile.semanticRevision ?? 0}</strong>
+      <span>{t("writerLag")}</span><strong data-state={lag > 0 ? "pending" : "current"}>{lag}</strong>
+      <span>{t("rebuildReason")}</span><strong>{profile.rebuildReason || "—"}</strong>
+      <span>{t("contextSegments")}</span><strong>{segments.length} · ~{formatCompactTokens(segmentTokens)}</strong>
+    </div>
+    {profile.manifestHash && <code className="context-manifest-hash" title={profile.manifestHash}>{profile.manifestHash.slice(0, 12)}</code>}
+    {segments.length > 0 && <div className="context-segment-list" aria-label={t("contextSegments")}>
+      {segments.map((segment, index) => <div key={`${segment.kind}-${segment.content_hash}-${index}`}>
+        <span>{segment.kind.replaceAll("_", " ")}</span><em>~{formatCompactTokens(segment.token_estimate)}</em>
+      </div>)}
+    </div>}
+  </section>;
+}
+
+function formatCompactTokens(tokens: number) {
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k`;
+  return String(tokens);
 }
 
 function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["language"] }) {

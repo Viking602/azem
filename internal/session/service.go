@@ -61,9 +61,12 @@ type ModelHistory struct {
 	SummaryHash            string            `json:"summaryHash,omitempty"`
 	StaticPrefixHash       string            `json:"staticPrefixHash,omitempty"`
 	WireVersion            int               `json:"wireVersion,omitempty"`
+	ContextManifestHash    string            `json:"contextManifestHash,omitempty"`
+	SemanticRevision       int64             `json:"semanticRevision,omitempty"`
+	PolicyVersion          int               `json:"policyVersion,omitempty"`
 }
 
-const CurrentWireVersion = 1
+const CurrentWireVersion = 2
 
 var ErrRunCheckpointStale = errors.New("session: run checkpoint source is stale")
 
@@ -107,6 +110,8 @@ type CompactionPlan struct {
 	ExpectedUpdatedAt time.Time
 	TailStart         int
 	ExpectedHighWater *int64
+	SemanticCommit    *SemanticCommit
+	Manifest          *ContextManifestRecord
 }
 
 // RunCheckpoint installs provider-resumable history for an active run without
@@ -118,6 +123,8 @@ type RunCheckpoint struct {
 	ModelHistory      ModelHistory
 	CacheIdentity     string
 	ExpectedHighWater *int64
+	SemanticCommit    *SemanticCommit
+	Manifest          *ContextManifestRecord
 }
 
 type Service struct {
@@ -242,6 +249,7 @@ func (s *Service) PutArtifact(ctx context.Context, sessionID, runID, kind string
 	}
 	digest := sha256.Sum256(payload)
 	hash := fmt.Sprintf("%x", digest[:])
+	preview = BuildArtifactPreviewV2(kind, payload, hash, preview)
 	id := contextArtifactID(sessionID, kind, hash)
 	now := time.Now().UTC()
 	if err := dbgen.New(s.db).InsertContextArtifact(ctx, dbgen.InsertContextArtifactParams{ID: id, SessionID: sessionID, RunID: runID, Kind: kind, Sha256: hash, Payload: payload, Preview: preview, CreatedAt: now.UnixNano()}); err != nil {
@@ -693,6 +701,9 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 		return fmt.Errorf("save run checkpoint: active run changed from %q to %q", checkpoint.RunID, lastRunID)
 	}
 	history := checkpoint.ModelHistory
+	if checkpoint.SemanticCommit != nil || checkpoint.Manifest != nil {
+		history.WireVersion = CurrentWireVersion
+	}
 	if hash := ModelCheckpointHash(history.Messages); hash != "" {
 		history.SummaryHash = hash
 		history.WireVersion = CurrentWireVersion
@@ -707,7 +718,19 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 	if checkpoint.ExpectedHighWater != nil && (boundary == nil || *boundary < *checkpoint.ExpectedHighWater) {
 		return fmt.Errorf("%w: canonical transcript changed while checkpoint was prepared", ErrRunCheckpointStale)
 	}
-	if currentIdentity == checkpoint.CacheIdentity {
+	now := time.Now().UTC().UnixNano()
+	semanticRevision, err := commitSemanticState(ctx, queries, sessionID, checkpoint.RunID, checkpoint.SemanticCommit, now)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrRunCheckpointStale, err)
+	}
+	if semanticRevision > 0 {
+		history.SemanticRevision = semanticRevision
+	}
+	if checkpoint.Manifest != nil {
+		history.ContextManifestHash = checkpoint.Manifest.ManifestHash
+		history.PolicyVersion = checkpoint.Manifest.PolicyVersion
+	}
+	if currentIdentity == checkpoint.CacheIdentity && checkpoint.SemanticCommit == nil && checkpoint.Manifest == nil {
 		var current ModelHistory
 		encoded, err := queries.GetProjectionHistory(ctx, sessionID)
 		if err != nil {
@@ -723,7 +746,6 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 	if err != nil {
 		return fmt.Errorf("encode run checkpoint: %w", err)
 	}
-	now := time.Now().UTC().UnixNano()
 	nextCacheEpoch := cacheEpoch
 	if currentIdentity != checkpoint.CacheIdentity {
 		nextCacheEpoch++
@@ -738,6 +760,9 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 	}
 	if changed != 1 {
 		return fmt.Errorf("save run checkpoint: projection changed while checkpoint was prepared")
+	}
+	if err := persistContextManifest(ctx, queries, sessionID, checkpoint.Manifest, semanticRevision, now); err != nil {
+		return err
 	}
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
@@ -829,11 +854,25 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 	plan.ModelHistory.CoveredThroughSequence = boundary
 	plan.ModelHistory.Generation = generation + 1
 	now := time.Now().UTC().UnixNano()
+	semanticRevision, err := commitSemanticState(ctx, queries, sessionID, "manual-compaction", plan.SemanticCommit, now)
+	if err != nil {
+		return Projection{}, fmt.Errorf("compact session: %w", err)
+	}
+	if semanticRevision > 0 {
+		plan.ModelHistory.SemanticRevision = semanticRevision
+	}
+	if plan.Manifest != nil {
+		plan.ModelHistory.ContextManifestHash = plan.Manifest.ManifestHash
+		plan.ModelHistory.PolicyVersion = plan.Manifest.PolicyVersion
+	}
 	encodedHistory, err := json.Marshal(plan.ModelHistory)
 	if err != nil {
 		return Projection{}, fmt.Errorf("encode compacted model history: %w", err)
 	}
 	if err := queries.SaveCompaction(ctx, dbgen.SaveCompactionParams{ModelHistory: encodedHistory, CheckpointGeneration: generation + 1, CacheEpoch: cacheEpoch + 1, UpdatedAt: now, SessionID: sessionID}); err != nil {
+		return Projection{}, err
+	}
+	if err := persistContextManifest(ctx, queries, sessionID, plan.Manifest, semanticRevision, now); err != nil {
 		return Projection{}, err
 	}
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 19
+const schemaVersion = 20
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -384,6 +384,48 @@ var migrations = []string{
 	INSERT INTO session_workspaces(session_id,workspace,assigned_at)
 		SELECT session_id,anchor,updated_at FROM workspace_session_state WHERE TRIM(anchor)<>''
 		ON CONFLICT(session_id) DO NOTHING;`,
+	`CREATE TABLE session_semantic_state (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+		revision INTEGER NOT NULL DEFAULT 0,
+		checkpoint_id TEXT NOT NULL DEFAULT '',
+		cursor BLOB NOT NULL DEFAULT '{}',
+		state BLOB NOT NULL DEFAULT '{}',
+		source_digest TEXT NOT NULL DEFAULT '',
+		updated_at INTEGER NOT NULL
+	);
+	CREATE TABLE session_semantic_state_events (
+		session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+		revision INTEGER NOT NULL,
+		checkpoint_id TEXT NOT NULL,
+		base_revision INTEGER NOT NULL,
+		cursor BLOB NOT NULL,
+		patch BLOB NOT NULL,
+		source_digest TEXT NOT NULL,
+		writer_run_id TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL,
+		PRIMARY KEY(session_id,revision),
+		UNIQUE(session_id,base_revision,source_digest)
+	);
+	CREATE TABLE context_manifests (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+		run_id TEXT NOT NULL DEFAULT '',
+		canonical_high_water INTEGER NOT NULL DEFAULT -1,
+		semantic_revision INTEGER NOT NULL DEFAULT 0,
+		policy_version INTEGER NOT NULL,
+		manifest_hash TEXT NOT NULL,
+		activated INTEGER NOT NULL DEFAULT 0,
+		data BLOB NOT NULL,
+		created_at INTEGER NOT NULL,
+		UNIQUE(session_id,manifest_hash)
+	);
+	CREATE INDEX context_manifests_session_created
+		ON context_manifests(session_id,created_at DESC,id);
+	CREATE UNIQUE INDEX context_manifests_one_active
+		ON context_manifests(session_id) WHERE activated=1;
+	UPDATE session_projections
+		SET model_history='{}', checkpoint_generation=checkpoint_generation+1,
+			cache_epoch=cache_epoch+1, cache_identity_hash='';`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -224,6 +225,34 @@ func TestUpdateModelRoutePreservesYAMLAndDeletesOnlyRouteScalars(t *testing.T) {
 	}
 }
 
+func TestUpdateLLMuxProviderPreservesYAMLAndReloadsModels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n# preserve this comment\ndefaults:\n  theme: dark\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := LLMuxProviderConfig{Enabled: true, BaseURL: "https://openrouter.ai/api/v1", Models: []LLMuxModelConfig{{
+		ID: "openai/gpt-5.4", Name: "GPT 5.4", ContextWindow: 400000,
+		ReasoningLevels: []string{"low", "high"}, DefaultReasoning: "high",
+	}}}
+	if err := UpdateLLMuxProvider(path, "openrouter", want); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "preserve this comment") || !strings.Contains(string(data), "theme: dark") || strings.Contains(string(data), "api_key") {
+		t.Fatalf("provider update corrupted or leaked a secret:\n%s", data)
+	}
+	loaded, err := Load(path, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Providers.LLMux["openrouter"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("llmux provider = %#v, want %#v", got, want)
+	}
+}
+
 func TestResetModelRouteRemovesLegacyOverrideAndPreservesOtherFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := "agents:\n  subagents:\n    models:\n      explore: legacy-model\n      review: keep-model\n    roles:\n      explore:\n        description: keep me\n        provider: grok\n        model: grok-4\n        reasoning: high\n"
@@ -293,7 +322,7 @@ func TestModelRouteValidationAndPlanLoad(t *testing.T) {
 		{Provider: "chatgpt"},
 		{Model: "gpt-test"},
 		{Reasoning: "high"},
-		{Provider: "other", Model: "model"},
+		{Provider: "invalid/provider", Model: "model"},
 	} {
 		cfg := Default()
 		cfg.Agents.Plan = route

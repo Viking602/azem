@@ -410,3 +410,68 @@ func TestMigrationV19BackfillsDesktopProjectOwnershipAndReopens(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMigrationV20InvalidatesOnlyReplaceableContextState(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "semantic-state.db")
+	prepareSchema19SemanticFixture(t, ctx, path)
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	assertSchema20SemanticMigration(t, ctx, provider)
+}
+
+func prepareSchema19SemanticFixture(t *testing.T, ctx context.Context, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 19; version++ {
+		if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
+			t.Fatalf("apply fixture migration %d: %v", version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO sessions(id,title,created_at,updated_at) VALUES('s','Session',1,1);
+		INSERT INTO session_projections(session_id,model_history,checkpoint_generation,cache_epoch,cache_identity_hash,updated_at)
+			VALUES('s','{"wireVersion":1}',4,5,'legacy-cache',1);
+		INSERT INTO session_blocks(session_id,sequence,kind,data) VALUES('s',0,'user','{"kind":"user","content":"canonical"}');
+		INSERT INTO session_todos(session_id,goal,revision,phases,updated_at) VALUES('s','ship',2,'[]',1);
+		INSERT INTO context_artifacts(id,session_id,kind,sha256,payload,preview,created_at)
+			VALUES('a','s','tool_result','digest',X'01','preview',1);
+		PRAGMA user_version=19`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertSchema20SemanticMigration(t *testing.T, ctx context.Context, provider *Provider) {
+	t.Helper()
+	var history, identity string
+	var generation, epoch, blocks, todos, artifacts int
+	if err := provider.db.QueryRowContext(ctx, `SELECT model_history,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id='s'`).Scan(&history, &generation, &epoch, &identity); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.db.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM session_blocks WHERE session_id='s'),
+		(SELECT count(*) FROM session_todos WHERE session_id='s'),
+		(SELECT count(*) FROM context_artifacts WHERE session_id='s')`).Scan(&blocks, &todos, &artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if history != "{}" || identity != "" || generation != 5 || epoch != 6 {
+		t.Fatalf("replaceable state history=%q identity=%q generation=%d epoch=%d", history, identity, generation, epoch)
+	}
+	if blocks != 1 || todos != 1 || artifacts != 1 {
+		t.Fatalf("canonical state blocks=%d todos=%d artifacts=%d", blocks, todos, artifacts)
+	}
+	for _, name := range []string{"session_semantic_state", "session_semantic_state_events", "context_manifests", "context_manifests_one_active"} {
+		var found string
+		if err := provider.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE name=?`, name).Scan(&found); err != nil {
+			t.Fatalf("missing migration 20 object %s: %v", name, err)
+		}
+	}
+}

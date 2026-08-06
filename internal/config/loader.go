@@ -174,6 +174,22 @@ func UpdateChatGPTFastMode(path string, enabled bool) error {
 	})
 }
 
+func UpdateLLMuxProvider(path, id string, provider LLMuxProviderConfig) error {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if err := validateLLMuxProvider(id, provider); err != nil {
+		return err
+	}
+	var encoded yaml.Node
+	if err := encoded.Encode(provider); err != nil {
+		return fmt.Errorf("encode llmux provider: %w", err)
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		providers := ensureMappingPath(root, "providers", "llmux")
+		deleteMappingValue(providers, id)
+		providers.Content = append(providers.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: id}, &encoded)
+	})
+}
+
 // UpdateSessionModelDefaults atomically writes the selected provider/model/reasoning
 // defaults so new sessions and app restarts restore the last UI selection.
 func UpdateSessionModelDefaults(path, provider, model, reasoning string) error {

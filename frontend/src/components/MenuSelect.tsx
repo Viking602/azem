@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
 
-export type MenuSelectOption = { value: string; label: string; disabled?: boolean };
+export type MenuSelectOption = { value: string; label: string; icon?: ReactNode; disabled?: boolean };
 
 type MenuCoords = {
   top?: number;
@@ -135,12 +135,12 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
         role="option"
         aria-selected={value === option.value}
         disabled={option.disabled}
-        className={`menu-select-option ${value === option.value ? "selected" : ""}`}
+        className={`menu-select-option ${option.icon ? "has-icon" : ""} ${value === option.value ? "selected" : ""}`}
         data-value={option.value}
         title={option.label}
         key={option.value}
         onClick={() => choose(option.value)}
-      ><Check size={13} /><span>{option.label}</span></button>)}
+      ><Check size={13} />{option.icon}<span>{option.label}</span></button>)}
     </div>,
     portalRoot(details.current),
   ) : null;
@@ -183,7 +183,7 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
             focusOption(event.key === "ArrowDown" ? "first" : "last");
           });
         }}
-      ><span className="menu-select-value">{selected?.label ?? value}</span><ChevronDown size={12} /></summary>
+      >{selected?.icon}<span className="menu-select-value">{selected?.label ?? value}</span><ChevronDown size={12} /></summary>
     </details>
     {menu}
   </>;

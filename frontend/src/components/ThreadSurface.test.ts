@@ -14,6 +14,7 @@ describe("composer slash commands", () => {
     expect(items.some((item) => item.value === "/new")).toBe(true);
     expect(items.some((item) => item.value === "/mcp")).toBe(true);
     expect(items.some((item) => item.value === "/compact" && item.detail.includes("74%"))).toBe(true);
+    expect(items.some((item) => item.value === "/rebuild")).toBe(true);
     expect(items.some((item) => item.value === "/fast")).toBe(true);
     expect(items.some((item) => item.value === "/skill:animation-systems")).toBe(true);
     expect(items.some((item) => item.value === "/skill:disabled-skill")).toBe(false);

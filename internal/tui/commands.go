@@ -109,6 +109,7 @@ var slashCommands = []SlashCommand{
 	{Name: "sessions", Usage: "/sessions"},
 	{Name: "resume", Usage: "/resume"},
 	{Name: "compact", Usage: "/compact"},
+	{Name: "rebuild", Usage: "/rebuild"},
 	{Name: "mcp", Usage: "/mcp [refresh|reconnect <server>]"},
 	{Name: "memory", Usage: "/memory [query]"},
 	{Name: "remember", Usage: "/remember <text>"},

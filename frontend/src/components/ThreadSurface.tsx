@@ -11,6 +11,7 @@ import { reasoningHint, sortReasoningLevels, tFormat, translator } from "../i18n
 import { useRuntimeStore, type ContextUsage } from "../store";
 import type { Attachment, Block, ContextProfile, DeliveryMode, QueuedPrompt, SkillEntry, Snapshot } from "../types";
 import ReasoningEffortSlider, { isHighCostReasoning } from "./ReasoningEffortSlider";
+import ProviderIcon from "./ProviderIcon";
 import { TimelineFeed } from "./Timeline";
 import { formatDuration } from "./toolTimeline";
 export { approvalPresentation } from "./Timeline";
@@ -46,6 +47,7 @@ export function shouldReadNativeClipboard(clipboardData: DataTransfer): boolean 
 
 const slashCommands: Array<{
   action: SlashAction;
+  value?: string;
   aliases: string[];
   zh: string;
   en: string;
@@ -65,6 +67,10 @@ const slashCommands: Array<{
     detail: (context, language) => context.contextPercent != null && context.contextPercent > 0
       ? (language === "zh-CN" ? `压缩此聊天的上下文（已使用 ${context.contextPercent}%）` : `Compact this chat context (${context.contextPercent}% used)`)
       : (language === "zh-CN" ? "压缩当前会话的上下文" : "Compact the current conversation context"),
+  },
+  {
+    action: "compact", value: "/rebuild", aliases: ["rebuild", "重建"], zh: "重建上下文", en: "Rebuild context",
+    zhDetail: "立即运行新的语义压缩内核", enDetail: "Run the semantic context kernel now", icon: RotateCcw,
   },
   {
     action: "settings", aliases: ["settings", "config", "设置"], zh: "设置", en: "Settings",
@@ -129,7 +135,7 @@ export function slashSuggestions(input: string, skills: SkillEntry[], language: 
     .filter((item) => (item.when ? item.when(context) : true))
     .filter((item) => [item.action, ...item.aliases, item.zh, item.en].some((candidate) => slashMatch(candidate, query)))
     .map((item) => ({
-      value: `/${item.action}`,
+      value: item.value ?? `/${item.action}`,
       label: language === "zh-CN" ? item.zh : item.en,
       detail: item.detail?.(context, language) ?? (language === "zh-CN" ? item.zhDetail : item.enDetail),
       kind: "command" as const,
@@ -722,7 +728,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
           <span className="toolbar-spacer" />
           <ContextMeter />
           <ModelControls
-            running={running} models={modelChoices} selectedModel={modelKey(snapshot.provider, snapshot.model)} selectedModelName={selectedModelName}
+            running={running} models={modelChoices} selectedModel={modelKey(snapshot.provider, snapshot.model)} selectedModelName={selectedModelName} selectedProvider={snapshot.provider}
             reasoningLevels={reasoningLevels} selectedReasoning={snapshot.reasoning} selectedReasoningName={selectedReasoningName}
             fast={snapshot.chatgptFastMode} reasoningNames={reasoningNames} onModelChange={changeModel} onReasoningChange={changeReasoning} onSpeedChange={changeSpeed}
             modelLabel={t("model")} reasoningLabel={t("reasoning")} speedLabel={t("speed")} standardSpeed={t("standardSpeed")} fastSpeed={t("fastSpeed")} fastHint={t("fastModeHint")}
@@ -1237,7 +1243,7 @@ function QueueMenu({ item, queueing, canMoveUp, canMoveDown, onEdit, onMoveUp, o
   </>;
 }
 
-type ModelControlOption = { value: string; label: string; hint?: string };
+type ModelControlOption = { value: string; label: string; provider?: string; hint?: string };
 type ModelControlGroup = {
   label: string;
   current: string;
@@ -1246,8 +1252,8 @@ type ModelControlGroup = {
   select: (value: string) => void;
 };
 
-function ModelControls({ running, models, selectedModel, selectedModelName, reasoningLevels, selectedReasoning, selectedReasoningName, fast, reasoningNames, onModelChange, onReasoningChange, onSpeedChange, modelLabel, reasoningLabel, speedLabel, standardSpeed, fastSpeed, fastHint, fasterLabel, smarterLabel, advancedLabel, backLabel, highCostHint, fastBoostTitle, fastBoostDetail, language }: {
-  running: boolean; models: ComposerModel[]; selectedModel: string; selectedModelName: string; reasoningLevels: string[]; selectedReasoning: string; selectedReasoningName: string;
+function ModelControls({ running, models, selectedModel, selectedModelName, selectedProvider, reasoningLevels, selectedReasoning, selectedReasoningName, fast, reasoningNames, onModelChange, onReasoningChange, onSpeedChange, modelLabel, reasoningLabel, speedLabel, standardSpeed, fastSpeed, fastHint, fasterLabel, smarterLabel, advancedLabel, backLabel, highCostHint, fastBoostTitle, fastBoostDetail, language }: {
+  running: boolean; models: ComposerModel[]; selectedModel: string; selectedModelName: string; selectedProvider: string; reasoningLevels: string[]; selectedReasoning: string; selectedReasoningName: string;
   fast: boolean; reasoningNames: Record<string, string>; onModelChange: (value: string) => void; onReasoningChange: (value: string) => void; onSpeedChange: (value: string) => void;
   modelLabel: string; reasoningLabel: string; speedLabel: string; standardSpeed: string; fastSpeed: string; fastHint: string;
   fasterLabel: string; smarterLabel: string; advancedLabel: string; backLabel: string; highCostHint: string;
@@ -1267,7 +1273,7 @@ function ModelControls({ running, models, selectedModel, selectedModelName, reas
 
   const levels = sortReasoningLevels(reasoningLevels);
   const groups: ModelControlGroup[] = [
-    { label: modelLabel, current: selectedModelName, selected: selectedModel, options: models.map((model) => ({ value: modelKey(model.provider, model.id), label: model.name })), select: onModelChange },
+    { label: modelLabel, current: selectedModelName, selected: selectedModel, options: models.map((model) => ({ value: modelKey(model.provider, model.id), label: model.name, provider: model.provider })), select: onModelChange },
     {
       label: reasoningLabel,
       current: selectedReasoningName,
@@ -1527,11 +1533,12 @@ function ModelControls({ running, models, selectedModel, selectedModelName, reas
           role="menuitemradio"
           aria-checked={active.selected === option.value}
           disabled={running}
-          className={active.selected === option.value ? "selected" : ""}
+          className={`${option.provider ? "has-provider-icon" : ""} ${active.selected === option.value ? "selected" : ""}`.trim()}
           key={option.value}
           title={option.hint ? `${option.label} — ${option.hint}` : option.label}
           onClick={() => choose(active.select, option.value)}
         >
+          {option.provider ? <ProviderIcon provider={option.provider} /> : null}
           <span className="model-control-option-copy">
             <span>{option.label}</span>
             {option.hint ? <small>{option.hint}</small> : null}
@@ -1576,6 +1583,7 @@ function ModelControls({ running, models, selectedModel, selectedModelName, reas
         data-fast={String(fast)}
         data-high={String(highEffort)}
       >
+        <ProviderIcon provider={selectedProvider} size={14} />
         {fast ? <Zap size={12} className="model-controls-fast-icon" aria-hidden="true" /> : null}
         <span>{selectedModelName}</span>
         <small data-high={String(highEffort)}>{selectedReasoningName}</small>

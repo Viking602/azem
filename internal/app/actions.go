@@ -64,6 +64,8 @@ const (
 	ActionForgetMemory           ActionKind = "forget_memory"
 	ActionShowRecap              ActionKind = "show_recap"
 	ActionListModels             ActionKind = "list_models"
+	ActionListModelProviders     ActionKind = "list_model_providers"
+	ActionSetModelProvider       ActionKind = "set_model_provider"
 	ActionListModelRoutes        ActionKind = "list_model_routes"
 	ActionSetModelRoute          ActionKind = "set_model_route"
 	ActionResetModelRoute        ActionKind = "reset_model_route"
@@ -85,6 +87,8 @@ type Action struct {
 	Decision  string
 	SessionID string
 	Route     *ModelRouteEntry
+	Provider  *ModelProviderEntry
+	Secret    string
 	Name      string
 	CWD       string
 	Offset    int
@@ -149,6 +153,10 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	case ActionListModels:
 		s.emitAuthCatalog(ctx)
 		return nil
+	case ActionListModelProviders:
+		return s.emitModelProviders(ctx, "listed")
+	case ActionSetModelProvider:
+		return s.updateModelProvider(ctx, action.Provider, action.Secret)
 	case ActionSetSubagentConcurrency:
 		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))
 		if err != nil || maxConcurrency < 1 {
@@ -738,6 +746,7 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entries := []ModelRouteEntry{
+		{Scope: "main", Label: "Main", Route: config.ModelRouteConfig{Provider: s.cfg.Defaults.Provider, Model: s.cfg.Defaults.Model, Reasoning: s.cfg.Defaults.Reasoning}},
 		{Scope: "title", Label: "Title", Route: s.cfg.Agents.Title},
 		{Scope: "plan", Label: "Plan", Route: s.cfg.Agents.Plan},
 		{Scope: "compaction", Label: "Compaction", Route: s.cfg.Agents.Compaction},
@@ -779,7 +788,7 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "compaction" && entry.Scope != "subagent" {
+	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "compaction" && entry.Scope != "subagent" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
 	if entry.Scope != "subagent" && entry.Role != "" {
@@ -794,6 +803,9 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	route := entry.Route
 	if reset {
+		if entry.Scope == "main" {
+			return fmt.Errorf("main model route cannot be reset")
+		}
 		route = config.ModelRouteConfig{}
 	} else {
 		if strings.TrimSpace(route.Provider) == "" || strings.TrimSpace(route.Model) == "" {
@@ -813,6 +825,9 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	if s.configPath != "" {
 		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			if entry.Scope == "main" {
+				return config.UpdateSessionModelDefaults(s.configPath, route.Provider, route.Model, route.Reasoning)
+			}
 			if reset {
 				return config.ResetModelRoute(s.configPath, entry.Scope, entry.Role)
 			}
@@ -822,7 +837,9 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		}
 	}
 	s.mu.Lock()
-	if entry.Scope == "title" {
+	if entry.Scope == "main" {
+		s.cfg.Defaults.Provider, s.cfg.Defaults.Model, s.cfg.Defaults.Reasoning = route.Provider, route.Model, route.Reasoning
+	} else if entry.Scope == "title" {
 		s.cfg.Agents.Title = route
 	} else if entry.Scope == "plan" {
 		s.cfg.Agents.Plan = route
