@@ -362,12 +362,18 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	if runErr == nil && ctx.Err() == nil && s.sessions != nil &&
 		(strings.TrimSpace(finalText) != "" || strings.TrimSpace(result.Thinking) != "" || reasoningTrace.len() > 0 || len(result.Messages) > 0) {
 		_, instructionFingerprint := turnInstructions(request.PlanMode)
+		_, manifest := extractContextCheckpoint(result.Messages)
 		history := session.ModelHistory{
 			ProviderID: request.Provider, ModelID: engine.Model,
 			InstructionFingerprint: instructionFingerprint,
 			StaticPrefixHash:       instructionFingerprint,
 			WireVersion:            session.CurrentWireVersion,
 			Messages:               result.Messages,
+		}
+		if manifest != nil {
+			history.ContextManifestHash = manifest.ManifestHash
+			history.SemanticRevision = manifest.SemanticRevision
+			history.PolicyVersion = manifest.PolicyVersion
 		}
 		thinking := reasoningTrace.text()
 		if strings.TrimSpace(thinking) == "" {
@@ -463,7 +469,7 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 				return nil
 			}
 			return report
-		}())
+		}(), s.cfg.Agents.Context.MaxSummaryTokens)
 	}
 	return policy, nil
 }

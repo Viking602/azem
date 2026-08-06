@@ -94,6 +94,9 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionListModels) {
 		t.Fatal("model catalog must be available to the desktop")
 	}
+	if !allowedAction(azemapp.ActionListModelProviders) || !allowedAction(azemapp.ActionSetModelProvider) {
+		t.Fatal("llmux model provider actions must be available to the desktop")
+	}
 	if !allowedAction(azemapp.ActionSetQueueMode) {
 		t.Fatal("queue mode must be configurable from the desktop")
 	}

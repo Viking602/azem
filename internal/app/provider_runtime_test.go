@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -261,7 +262,7 @@ func TestPhase3ArtifactToolRoundTripsBinaryPayloadAsBase64(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	arguments, _ := json.Marshal(map[string]string{"artifact_id": artifact.ID})
+	arguments, _ := json.Marshal(map[string]string{"artifact_id": artifact.ID, "mode": "full"})
 	result, err := (&contextArtifactDriver{sessionID: "s", store: sessions}).Execute(ctx, tool.Call{ID: "call", Name: contextReadArtifactTool, Arguments: arguments}, nil)
 	if err != nil || result.IsError {
 		t.Fatalf("artifact read=%+v err=%v", result, err)
@@ -269,6 +270,35 @@ func TestPhase3ArtifactToolRoundTripsBinaryPayloadAsBase64(t *testing.T) {
 	decoded, err := base64.StdEncoding.DecodeString(result.Content)
 	if err != nil || !bytes.Equal(decoded, payload) || !strings.Contains(string(result.Structured), `"encoding":"base64"`) {
 		t.Fatalf("binary artifact content=%q structured=%s err=%v", result.Content, result.Structured, err)
+	}
+}
+
+func TestArtifactV2ReadModesStayBounded(t *testing.T) {
+	payload := []byte("alpha\nwarning: first\nbeta\nerror: second\nomega\n")
+	artifact := session.ContextArtifact{Payload: payload, Preview: `{"version":2}`}
+	for _, test := range []struct {
+		name  string
+		input artifactReadInput
+		want  string
+	}{
+		{name: "preview", input: artifactReadInput{Mode: "preview"}, want: `{"version":2}`},
+		{name: "range", input: artifactReadInput{Mode: "range", Offset: 6}, want: "warning"},
+		{name: "lines", input: artifactReadInput{Mode: "line_range", StartLine: 2, EndLine: 3}, want: "warning: first\nbeta\n"},
+		{name: "tail", input: artifactReadInput{Mode: "tail"}, want: "omega"},
+		{name: "grep", input: artifactReadInput{Mode: "grep", Pattern: "warning|error"}, want: "2:warning: first\n4:error: second\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, _, _, err := selectArtifactContent(artifact, test.input, 64)
+			if err != nil || !strings.Contains(string(got), test.want) {
+				t.Fatalf("content=%q err=%v", got, err)
+			}
+			if len(got) > 64 {
+				t.Fatalf("unbounded result=%d", len(got))
+			}
+		})
+	}
+	if _, _, _, err := selectArtifactContent(session.ContextArtifact{Payload: make([]byte, artifactReadMaximumBytes+1)}, artifactReadInput{Mode: "full"}, artifactReadMaximumBytes); err == nil {
+		t.Fatal("oversized full read was accepted")
 	}
 }
 
@@ -472,10 +502,15 @@ func TestLegacyCompactResolvesSummarizerLazily(t *testing.T) {
 		activated = identity
 		return nil
 	}, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
-		return func(context.Context, string) (string, error) { return "resolved summary", nil }, 1000, nil
+		return func(context.Context, string) (string, error) { return semanticStateForTest("resolved summary"), nil }, 1000, nil
 	}}
 	result, err := manager.Compact(context.Background(), history)
-	if err != nil || len(result) >= len(history) || activated != activeCacheIdentity("static", compactionSummaryHash(result)) {
+	_, manifest := extractContextCheckpoint(result)
+	manifestHash := ""
+	if manifest != nil {
+		manifestHash = manifest.ManifestHash
+	}
+	if err != nil || len(result) >= len(history) || activated != activeCacheIdentity("static", manifestHash, compactionSummaryHash(result)) {
 		t.Fatalf("legacy compact messages=%d/%d identity=%q err=%v", len(result), len(history), activated, err)
 	}
 }
@@ -502,15 +537,23 @@ type compactionTestDriver struct {
 	streams  [][]hyprovider.Event
 }
 
+func semanticStateForTest(objective string) string {
+	encoded, _ := json.Marshal(SemanticStateV1{Version: 1, Objective: StateFactV1{
+		Text: objective, Status: "active", Authority: "agent", Confidence: "inferred",
+		Sources: []EvidenceRefV1{{Kind: "checkpoint", ID: "test:evidence"}},
+	}})
+	return string(encoded)
+}
+
 func TestPhase3BoundedCompactionUsesResolvedWindowAndPreservesTurns(t *testing.T) {
 	var inputs []string
 	resolveCalls := 0
 	var resolved sync.Once
-	manager := turnContext{structuredSummary: true, compactTargetTokens: 250, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
+	manager := turnContext{structuredSummary: true, compactTargetTokens: 500, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
 		resolved.Do(func() { resolveCalls++ })
 		return func(_ context.Context, input string) (string, error) {
 			inputs = append(inputs, input)
-			return `{"version":2,"objective":"continue","source_references":[]}`, nil
+			return semanticStateForTest("continue"), nil
 		}, 350, nil
 	}}
 	history := []message.Message{message.NewText(message.RoleSystem, "rules")}
@@ -522,7 +565,7 @@ func TestPhase3BoundedCompactionUsesResolvedWindowAndPreservesTurns(t *testing.T
 	if unchanged, err := manager.CompactTo(context.Background(), history, estimateContextTokens(history)); err != nil || resolveCalls != 0 || !reflect.DeepEqual(unchanged, history) {
 		t.Fatalf("subthreshold resolved or changed: calls=%d err=%v", resolveCalls, err)
 	}
-	got, err := manager.CompactTo(context.Background(), history, 500)
+	got, err := manager.CompactTo(context.Background(), history, 700)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,8 +577,8 @@ func TestPhase3BoundedCompactionUsesResolvedWindowAndPreservesTurns(t *testing.T
 			t.Fatalf("compactor input %d = %d bytes, budget=%d", i, len(input), contextTokenBytes(350))
 		}
 	}
-	if estimateContextTokens(got) > 250 {
-		t.Fatalf("compacted tokens=%d target=250", estimateContextTokens(got))
+	if estimateContextTokens(got) > 500 {
+		t.Fatalf("compacted tokens=%d target=500", estimateContextTokens(got))
 	}
 	before := len(inputs)
 	if _, err := manager.CompactTo(context.Background(), got, 500); err != nil || len(inputs) != before {
@@ -545,7 +588,7 @@ func TestPhase3BoundedCompactionUsesResolvedWindowAndPreservesTurns(t *testing.T
 
 func TestPhase3IrreducibleAtomicGroupReturnsExplicitError(t *testing.T) {
 	manager := turnContext{structuredSummary: true, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
-		return func(context.Context, string) (string, error) { return `{"version":2,"objective":"x"}`, nil }, 100, nil
+		return func(context.Context, string) (string, error) { return semanticStateForTest("x"), nil }, 100, nil
 	}}
 	_, err := manager.summarizeBounded(context.Background(), nil, []message.Message{
 		message.NewText(message.RoleUser, strings.Repeat("x", 500)), message.NewText(message.RoleAssistant, "answer"),
@@ -560,7 +603,7 @@ func TestPhase3CompactsCompletedToolGroupsWithinLatestUserTurn(t *testing.T) {
 	manager := turnContext{structuredSummary: true, compactTargetTokens: 430, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
 		return func(_ context.Context, input string) (string, error) {
 			inputs = append(inputs, input)
-			return `{"version":2,"objective":"continue"}`, nil
+			return semanticStateForTest("continue"), nil
 		}, 500, nil
 	}}
 	latest := message.NewText(message.RoleUser, "keep this latest user message exactly")
@@ -629,7 +672,7 @@ func TestPhase3SingleUserTurnLargerThanCompactorWindowChunksByToolGroup(t *testi
 	manager := turnContext{structuredSummary: true, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
 		return func(_ context.Context, input string) (string, error) {
 			inputs = append(inputs, input)
-			return `{"version":2,"objective":"continue"}`, nil
+			return semanticStateForTest("continue"), nil
 		}, 500, nil
 	}}
 	omitted := []message.Message{message.NewText(message.RoleUser, "one turn")}
@@ -661,13 +704,10 @@ func TestPhase3SummaryReductionPreservesPreviousChronology(t *testing.T) {
 	manager := turnContext{structuredSummary: true, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
 		return func(_ context.Context, input string) (string, error) {
 			inputs = append(inputs, input)
-			return `{"version":2,"objective":"reduced"}`, nil
+			return semanticStateForTest("reduced"), nil
 		}, 1000, nil
 	}}
-	previous := []string{
-		`{"version":2,"objective":"OLDEST"}`,
-		`{"version":2,"objective":"NEWEST"}`,
-	}
+	previous := []string{semanticStateForTest("OLDEST"), semanticStateForTest("NEWEST")}
 	if _, err := manager.summarizeBounded(context.Background(), previous, []message.Message{message.NewText(message.RoleUser, "current")}); err != nil {
 		t.Fatal(err)
 	}
@@ -682,14 +722,18 @@ func TestPhase3SummaryReductionPreservesPreviousChronology(t *testing.T) {
 func TestPhase3MapFailureLeavesHistoryCheckpointUnchanged(t *testing.T) {
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "rules"),
-		message.NewText(message.RoleUser, strings.Repeat("old", 200)),
+		message.NewText(message.RoleUser, strings.Repeat("old", 800)),
 		message.NewText(message.RoleAssistant, "answer"),
+		message.NewText(message.RoleUser, "follow-up one"),
+		message.NewText(message.RoleAssistant, "answer one"),
+		message.NewText(message.RoleUser, "follow-up two"),
+		message.NewText(message.RoleAssistant, "answer two"),
 		message.NewText(message.RoleUser, "latest"),
 	}
-	manager := turnContext{structuredSummary: true, compactTargetTokens: 20, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
+	manager := turnContext{structuredSummary: true, compactTargetTokens: 400, resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
 		return func(context.Context, string) (string, error) { return "", errors.New("map failed") }, 1000, nil
 	}}
-	got, err := manager.CompactTo(context.Background(), history, 50)
+	got, err := manager.CompactTo(context.Background(), history, 500)
 	if err == nil || !strings.Contains(err.Error(), "map failed") {
 		t.Fatalf("error=%v", err)
 	}
@@ -700,29 +744,50 @@ func TestPhase3MapFailureLeavesHistoryCheckpointUnchanged(t *testing.T) {
 
 func TestPhase3DurableProvenanceUsesSequence(t *testing.T) {
 	value, ok := blockMessage(session.Block{Sequence: 42, Kind: "user", Content: "source"})
-	if !ok || messageSourceReference(value, 0, 0) != "sequence:42" {
+	if !ok || !reflect.DeepEqual(messageStableReferences(value, ""), []string{"sequence:42"}) {
 		t.Fatalf("message=%#v", value)
 	}
 	failed, ok := blockMessage(session.Block{Sequence: 43, Kind: "assistant", State: "failed", Content: "partial output"})
 	if !ok || failed.Text != failedAssistantLabel+"partial output" {
 		t.Fatalf("failed assistant message=%#v", failed)
 	}
-	if _, err := normalizeSummaryV2(`{"version":2,"objective":"x","source_references":["message:0"]}`, nil); err == nil {
-		t.Fatal("accepted ambiguous per-chunk message provenance")
+	if _, err := normalizeSemanticStateV1("not-json", map[string]string{"sequence:42": "user"}); err == nil {
+		t.Fatal("accepted non-JSON semantic state")
 	}
-	normalized, err := normalizeSummaryV2(
-		`{"version":2,"objective":"x","covered":["transcript: invented prose"],"source_references":["transcript: invented prose"]}`,
-		[]string{"sequence:42"},
+	normalized, err := normalizeSemanticStateV1(
+		`{"version":1,"objective":{"text":"x","status":"active","authority":"user","confidence":"reported","sources":[{"kind":"sequence","id":"42"}]}}`,
+		map[string]string{"sequence:42": "user"},
 	)
 	if err != nil {
 		t.Fatalf("host provenance did not replace model references: %v", err)
 	}
-	var summary compactionSummaryV2
+	var summary SemanticStateV1
 	if err := json.Unmarshal([]byte(normalized), &summary); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(summary.Sources, []string{"sequence:42"}) || !reflect.DeepEqual(summary.Covered, []string{"sequence:42"}) {
-		t.Fatalf("normalized provenance=%+v", summary)
+	if !reflect.DeepEqual(summary.Objective.Sources, []EvidenceRefV1{{Kind: "sequence", ID: "42"}}) || summary.Objective.Authority != "user" {
+		t.Fatalf("normalized provenance=%+v", summary.Objective)
+	}
+}
+
+func TestSemanticPatchSkipsUnchangedFacts(t *testing.T) {
+	fact := StateFactV1{ID: "objective-1", Text: "ship", Status: "active", Authority: "user", Confidence: "reported", Sources: []EvidenceRefV1{{Kind: "sequence", ID: "1"}}}
+	state := SemanticStateV1{Version: 1, Objective: fact}
+	patch := semanticStatePatch(2, session.WriterCursorV1{CanonicalSequence: 3}, "digest", state, state)
+	if len(patch.Operations) != 0 {
+		t.Fatalf("unchanged facts produced operations: %+v", patch.Operations)
+	}
+}
+
+func TestLatestSubagentCursorUsesStableFinishOrder(t *testing.T) {
+	finished := time.Unix(100, 0).UTC()
+	gotTime, gotID := latestSubagentCursor([]agentservice.SubagentSnapshot{
+		{Run: agentservice.SubagentRun{ID: "agent-a", FinishedAt: finished}},
+		{Run: agentservice.SubagentRun{ID: "agent-b", FinishedAt: finished}},
+		{Run: agentservice.SubagentRun{ID: "running"}},
+	})
+	if gotTime != finished.UnixNano() || gotID != "agent-b" {
+		t.Fatalf("cursor=%d/%q", gotTime, gotID)
 	}
 }
 
@@ -1371,7 +1436,7 @@ func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	inner := turnContext{instructions: "rules", summarize: func(context.Context, string) (string, error) { return "guidance summary", nil }}
+	inner := turnContext{instructions: "rules", summarize: func(context.Context, string) (string, error) { return semanticStateForTest("guidance summary"), nil }}
 	manager := activeGuidanceContext{
 		inner: inner,
 		peek:  func() activeGuidanceSnapshot { return service.peekActiveGuidance("session-guided", "run-guided") },
@@ -1383,8 +1448,13 @@ func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
 		message.NewText(message.RoleSystem, "rules"),
 		message.NewText(message.RoleUser, strings.Repeat("old context ", 500)),
 		message.NewText(message.RoleAssistant, "old answer"),
+		message.NewText(message.RoleUser, "follow up one"),
+		message.NewText(message.RoleAssistant, "answer one"),
+		message.NewText(message.RoleUser, "follow up two"),
+		message.NewText(message.RoleAssistant, "answer two"),
+		message.NewText(message.RoleUser, "latest"),
 	}
-	prepared, err := manager.CompactTo(context.Background(), history, 100)
+	prepared, err := manager.CompactTo(context.Background(), history, 300)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1522,7 +1592,7 @@ func TestTeamRequestPreparerKeepsPlannerImagesAndHistoryStructured(t *testing.T)
 	preparer := teamRequestPreparer{context: teamHookContext{
 		history: []session.Block{{Kind: "assistant", Content: "prior answer"}},
 	}, images: []session.Attachment{image}, target: 100_000, compactor: &turnContext{summarize: func(context.Context, string) (string, error) {
-		return "summary", nil
+		return semanticStateForTest("summary"), nil
 	}}}
 	prepared, err := preparer.prepare(context.Background(), hyprovider.Request{
 		Messages: []message.Message{message.NewText(message.RoleUser, "current task")},
@@ -1587,7 +1657,7 @@ func TestTeamRequestPreparerUsesModelCompactionAtContextTarget(t *testing.T) {
 	summaryCalls := 0
 	preparer := teamRequestPreparer{target: 600, compactor: &turnContext{summarize: func(context.Context, string) (string, error) {
 		summaryCalls++
-		return "model-generated team summary", nil
+		return semanticStateForTest("model-generated team summary"), nil
 	}}}
 	prepared, err := preparer.prepare(context.Background(), hyprovider.Request{Messages: messages})
 	if err != nil {
@@ -1631,7 +1701,7 @@ func TestTurnContextRefreshesTodoReminderAfterMutation(t *testing.T) {
 	}
 	manager := turnContext{
 		loadTodo:  func(context.Context) (session.TodoList, error) { return latest, nil },
-		summarize: func(context.Context, string) (string, error) { return "todo summary", nil },
+		summarize: func(context.Context, string) (string, error) { return semanticStateForTest("todo summary"), nil },
 	}
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
@@ -1676,7 +1746,7 @@ func TestTurnContextCompactPreservesFullSystemPrefixAndFreshTodo(t *testing.T) {
 	}}}
 	manager := turnContext{
 		loadTodo:  func(context.Context) (session.TodoList, error) { return latest, nil },
-		summarize: func(context.Context, string) (string, error) { return "todo summary", nil },
+		summarize: func(context.Context, string) (string, error) { return semanticStateForTest("todo summary"), nil },
 	}
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
@@ -1716,7 +1786,7 @@ func TestTurnContextCompactToRestoresCurrentTodoAfterOmittingItsUpdate(t *testin
 	}}}
 	manager := turnContext{
 		loadTodo:  func(context.Context) (session.TodoList, error) { return latest, nil },
-		summarize: func(context.Context, string) (string, error) { return "todo summary", nil },
+		summarize: func(context.Context, string) (string, error) { return semanticStateForTest("todo summary"), nil },
 	}
 	old := strings.Repeat("old context ", 200)
 	history := []message.Message{
@@ -1731,14 +1801,14 @@ func TestTurnContextCompactToRestoresCurrentTodoAfterOmittingItsUpdate(t *testin
 	}
 	expected := []message.Message{
 		history[0], history[1],
-		message.NewText(message.RoleAssistant, compactionSummaryLabel+"todo summary"),
+		message.NewText(message.RoleAssistant, semanticStateSafetyLabel+semanticStateForTest("todo summary")),
 		history[7],
 		manager.todoReminderMessage(todoReminder(latest)),
 	}
 	expected[2].Kind = message.KindCompactionSummary
 	expected[2].Visibility = message.VisibilityPrivate
 	expected[2].CreatedAt = time.Time{}
-	target := estimateContextTokens(expected)
+	target := 1600
 	compacted, err := manager.CompactTo(context.Background(), history, target)
 	if err != nil {
 		t.Fatal(err)
@@ -1785,7 +1855,9 @@ func TestTurnContextCompactToFitsTargetAndPreservesLatestRequest(t *testing.T) {
 		message.NewText(message.RoleUser, "current request"),
 	}
 	const target = 500
-	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "current work summary", nil }}
+	manager := turnContext{summarize: func(context.Context, string) (string, error) {
+		return semanticStateForTest("current work summary"), nil
+	}}
 	compacted, err := manager.CompactTo(context.Background(), history, target)
 	if err != nil {
 		t.Fatal(err)
@@ -1796,8 +1868,8 @@ func TestTurnContextCompactToFitsTargetAndPreservesLatestRequest(t *testing.T) {
 	if compacted[0].Text != "system rules" || compacted[len(compacted)-1].Text != "current request" {
 		t.Fatalf("compacted history lost mandatory context: %#v", compacted)
 	}
-	if len(compacted) >= len(history) {
-		t.Fatalf("history was not compacted: %#v", compacted)
+	if reflect.DeepEqual(compacted, history) || !slices.ContainsFunc(compacted, func(current message.Message) bool { return current.Kind == message.KindCompactionSummary }) {
+		t.Fatalf("history did not switch to a semantic checkpoint: %#v", compacted)
 	}
 	again, err := manager.CompactTo(context.Background(), history, target)
 	if err != nil {
@@ -1809,7 +1881,7 @@ func TestTurnContextCompactToFitsTargetAndPreservesLatestRequest(t *testing.T) {
 }
 
 func TestTurnContextCompactToGeneratesRecursiveSummary(t *testing.T) {
-	old := message.NewText(message.RoleSystem, "Objective: preserve the old decision")
+	old := message.NewText(message.RoleAssistant, semanticStateSafetyLabel+semanticStateForTest("preserve the old decision"))
 	old.Kind = message.KindCompactionSummary
 	old.Visibility = message.VisibilityPrivate
 	history := []message.Message{
@@ -1818,36 +1890,42 @@ func TestTurnContextCompactToGeneratesRecursiveSummary(t *testing.T) {
 		message.NewText(message.RoleAssistant, strings.Repeat("older work ", 300)),
 		message.NewText(message.RoleUser, "newest request"),
 	}
-	var input string
+	var inputs []string
 	calls := 0
 	manager := turnContext{summarize: func(_ context.Context, transcript string) (string, error) {
 		calls++
-		input = transcript
-		return "Objective: newest request\nImportant Details: old decision retained\nWork State (Completed / Active / Blocked): Active\nNext Move: continue\nRelevant Files: provider_context.go", nil
+		inputs = append(inputs, transcript)
+		return semanticStateForTest("newest request; old decision retained; continue in provider_context.go"), nil
 	}}
 	compacted, err := manager.CompactTo(context.Background(), history, 300)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(input, "old decision") || !strings.Contains(input, "older request") {
-		t.Fatalf("recursive summary input omitted history: %q", input)
+	joinedInputs := strings.Join(inputs, "\n")
+	if !strings.Contains(joinedInputs, "old decision") {
+		t.Fatalf("recursive summary input omitted history: %q", joinedInputs)
+	}
+	if !slices.ContainsFunc(compacted, func(current message.Message) bool {
+		return current.Role == message.RoleUser && current.Text == "older request"
+	}) {
+		t.Fatalf("recent exact user evidence was lost: %#v", compacted)
 	}
 	summaries := 0
 	for _, current := range compacted {
 		if current.Kind == message.KindCompactionSummary {
 			summaries++
-			if current.Role != message.RoleAssistant || current.Visibility != message.VisibilityPrivate || !strings.Contains(current.Text, "Untrusted historical record") || !strings.Contains(current.Text, "newest request") {
+			if current.Role != message.RoleAssistant || current.Visibility != message.VisibilityPrivate || !strings.Contains(current.Text, "Host-validated semantic state") || !strings.Contains(current.Text, "newest request") {
 				t.Fatalf("generated summary = %#v", current)
 			}
 		}
 	}
-	if calls != 1 || summaries != 1 || compacted[len(compacted)-1].Text != "newest request" {
+	if calls < 1 || summaries != 1 || compacted[len(compacted)-1].Text != "newest request" {
 		t.Fatalf("compacted history = %#v", compacted)
 	}
 }
 
 func TestTurnContextRollsOversizedCompletedToolResultIntoSummary(t *testing.T) {
-	previous := message.NewText(message.RoleAssistant, compactionSummaryLabel+"## Objective\n- keep state")
+	previous := message.NewText(message.RoleAssistant, semanticStateSafetyLabel+semanticStateForTest("keep state"))
 	previous.Kind = message.KindCompactionSummary
 	previous.Visibility = message.VisibilityPrivate
 	history := []message.Message{
@@ -1859,7 +1937,7 @@ func TestTurnContextRollsOversizedCompletedToolResultIntoSummary(t *testing.T) {
 	calls := 0
 	manager := turnContext{summarize: func(context.Context, string) (string, error) {
 		calls++
-		return "unexpected", nil
+		return semanticStateForTest("rolled oversized tool evidence"), nil
 	}}
 	got, err := manager.CompactTo(context.Background(), history, 500)
 	if err != nil || reflect.DeepEqual(got, history) || calls == 0 {
@@ -1868,7 +1946,7 @@ func TestTurnContextRollsOversizedCompletedToolResultIntoSummary(t *testing.T) {
 	assertRollingToolCheckpoint(t, got, history[2])
 }
 
-func TestManualCompactionTailRetainsLatestUserBeforeAgentBlocks(t *testing.T) {
+func TestRecentUserSelectionIgnoresAgentBlocks(t *testing.T) {
 	blocks := []session.Block{
 		{Kind: "user", Content: "old"},
 		{Kind: "assistant", Content: "old answer"},
@@ -1879,8 +1957,14 @@ func TestManualCompactionTailRetainsLatestUserBeforeAgentBlocks(t *testing.T) {
 		{Kind: "agent", Content: "four"},
 		{Kind: "agent", Content: "five"},
 	}
-	if start := manualCompactionTailStart(blocks, 4); start != 2 {
-		t.Fatalf("tail start = %d, want latest user at 2", start)
+	var messages []message.Message
+	for _, block := range blocks {
+		if current, ok := blockMessage(block); ok {
+			messages = append(messages, current)
+		}
+	}
+	if indexes := recentUserIndexes(messages, 0, contextRecentUserTurns); !reflect.DeepEqual(indexes, []int{0, 2}) {
+		t.Fatalf("recent user indexes = %v", indexes)
 	}
 }
 
@@ -2036,7 +2120,7 @@ func TestManualCompactWaitsForConfiguredModelAndPersistsSummary(t *testing.T) {
 			responseBody = string(body)
 			responseCalls.Add(1)
 			writer.Header().Set("Content-Type", "text/event-stream")
-			writeProviderText(writer, "compact-response", "## Objective\n- preserve the task")
+			writeProviderText(writer, "compact-response", semanticStateForTest("preserve the task"))
 		default:
 			writer.WriteHeader(http.StatusNotFound)
 		}
@@ -2160,7 +2244,7 @@ func TestTurnContextCompactToHooksOnlyBracketRequiredCompaction(t *testing.T) {
 	manager := turnContext{
 		summarize: func(context.Context, string) (string, error) {
 			summaries++
-			return "summary", nil
+			return semanticStateForTest("summary"), nil
 		},
 		compactHooks: func(_ context.Context, _ []message.Message, compacted []message.Message, _ error) error {
 			if compacted == nil {
@@ -2179,7 +2263,7 @@ func TestTurnContextCompactToHooksOnlyBracketRequiredCompaction(t *testing.T) {
 	if summaries != 0 || pre != 0 || post != 0 {
 		t.Fatalf("subthreshold calls: summarize=%d pre=%d post=%d", summaries, pre, post)
 	}
-	if _, err := manager.CompactTo(context.Background(), history, 100); err != nil {
+	if _, err := manager.CompactTo(context.Background(), history, 300); err != nil {
 		t.Fatal(err)
 	}
 	if summaries != 1 || pre != 1 || post != 1 {
@@ -2201,8 +2285,11 @@ func TestPhase5BelowSoftDoesNotPrepareOrHook(t *testing.T) {
 	var calls, hooks atomic.Int32
 	manager := turnContext{
 		softTriggerTokens: estimateContextTokens(history) + 1, backgroundPrepare: true,
-		compactTargetTokens: 100, coordinator: &compactionCoordinator{},
-		summarize:    func(context.Context, string) (string, error) { calls.Add(1); return "summary", nil },
+		compactTargetTokens: 512, coordinator: &compactionCoordinator{},
+		summarize: func(context.Context, string) (string, error) {
+			calls.Add(1)
+			return semanticStateForTest("summary"), nil
+		},
 		compactHooks: func(context.Context, []message.Message, []message.Message, error) error { hooks.Add(1); return nil },
 	}
 	for range 100 {
@@ -2222,14 +2309,14 @@ func TestPhase5SoftPrepareReturnsImmediatelyAndStartsOnce(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
 	manager := turnContext{
-		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 512,
 		coordinator: &compactionCoordinator{}, summarize: func(ctx context.Context, _ string) (string, error) {
 			if calls.Add(1) == 1 {
 				close(started)
 			}
 			select {
 			case <-release:
-				return "summary", nil
+				return semanticStateForTest("summary"), nil
 			case <-ctx.Done():
 				return "", ctx.Err()
 			}
@@ -2265,12 +2352,12 @@ func TestPhase5HardTriggerUsesPreparedResultAndActivatesOnce(t *testing.T) {
 	release := make(chan struct{})
 	var calls, pre, post, activations atomic.Int32
 	manager := turnContext{
-		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 512,
 		coordinator: &compactionCoordinator{},
 		summarize: func(context.Context, string) (string, error) {
 			calls.Add(1)
 			<-release
-			return "prepared summary", nil
+			return semanticStateForTest("prepared summary"), nil
 		},
 		compactHooks: func(_ context.Context, _ []message.Message, compacted []message.Message, _ error) error {
 			if compacted == nil {
@@ -2296,7 +2383,7 @@ func TestPhase5HardTriggerUsesPreparedResultAndActivatesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if estimateContextTokens(got) > 100 || calls.Load() != backgroundCalls {
+	if estimateContextTokens(got) > 512 || calls.Load() != backgroundCalls {
 		t.Fatalf("prepared result tokens=%d calls=%d background=%d", estimateContextTokens(got), calls.Load(), backgroundCalls)
 	}
 	if pre.Load() != 1 || post.Load() != 1 || activations.Load() != 1 {
@@ -2315,9 +2402,9 @@ func TestPhase5CompletedSoftPreparationActivatesBeforeHardLimit(t *testing.T) {
 	tokens := estimateContextTokens(history)
 	var activations atomic.Int32
 	manager := turnContext{
-		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 512,
 		coordinator: &compactionCoordinator{},
-		summarize:   func(context.Context, string) (string, error) { return "prepared state", nil },
+		summarize:   func(context.Context, string) (string, error) { return semanticStateForTest("prepared state"), nil },
 		activateCompaction: func(context.Context, []message.Message, string) error {
 			activations.Add(1)
 			return nil
@@ -2341,11 +2428,11 @@ func TestPhase5PreparedResultAcceptsAppendOnlyTail(t *testing.T) {
 	tokensA := estimateContextTokens(historyA)
 	var calls, pre, post, activations atomic.Int32
 	manager := turnContext{
-		softTriggerTokens: tokensA - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		softTriggerTokens: tokensA - 1, backgroundPrepare: true, compactTargetTokens: 800,
 		coordinator: &compactionCoordinator{},
 		summarize: func(context.Context, string) (string, error) {
 			calls.Add(1)
-			return "source-specific summary", nil
+			return semanticStateForTest("source-specific summary"), nil
 		},
 		compactHooks: func(_ context.Context, _ []message.Message, compacted []message.Message, _ error) error {
 			if compacted == nil {
@@ -2385,9 +2472,12 @@ func TestPhase5SynchronousHardActivationOnce(t *testing.T) {
 	tokens := estimateContextTokens(history)
 	var calls, pre, post, activations atomic.Int32
 	manager := turnContext{
-		softTriggerTokens: tokens - 1, backgroundPrepare: false, compactTargetTokens: 100,
+		softTriggerTokens: tokens - 1, backgroundPrepare: false, compactTargetTokens: 512,
 		coordinator: &compactionCoordinator{},
-		summarize:   func(context.Context, string) (string, error) { calls.Add(1); return "synchronous summary", nil },
+		summarize: func(context.Context, string) (string, error) {
+			calls.Add(1)
+			return semanticStateForTest("synchronous summary"), nil
+		},
 		compactHooks: func(_ context.Context, _ []message.Message, compacted []message.Message, _ error) error {
 			if compacted == nil {
 				pre.Add(1)
@@ -2405,7 +2495,7 @@ func TestPhase5SynchronousHardActivationOnce(t *testing.T) {
 	if calls.Load() != 1 || pre.Load() != 1 || post.Load() != 1 || activations.Load() != 1 {
 		t.Fatalf("calls=%d pre=%d post=%d activations=%d", calls.Load(), pre.Load(), post.Load(), activations.Load())
 	}
-	if again, againErr := manager.CompactTo(context.Background(), got, 100); againErr != nil || !reflect.DeepEqual(again, got) {
+	if again, againErr := manager.CompactTo(context.Background(), got, 512); againErr != nil || !reflect.DeepEqual(again, got) {
 		t.Fatalf("already compacted result changed: err=%v", againErr)
 	}
 	if calls.Load() != 1 || pre.Load() != 1 || post.Load() != 1 || activations.Load() != 1 {
@@ -2420,7 +2510,7 @@ func TestPhase5CancelledOrFailedPreparationPreservesHistoryWithoutPostHook(t *te
 	var hooks atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
 	manager := turnContext{
-		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 100,
+		softTriggerTokens: tokens - 1, backgroundPrepare: true, compactTargetTokens: 512,
 		coordinator: &compactionCoordinator{},
 		summarize: func(ctx context.Context, _ string) (string, error) {
 			close(started)
@@ -2449,7 +2539,7 @@ func TestActiveGuidanceSurvivesGeneratedCompaction(t *testing.T) {
 	snapshot := activeGuidanceSnapshot{values: []activeGuidanceMessage{{Text: "first correction"}, {Text: "second correction"}}}
 	acknowledged := false
 	manager := activeGuidanceContext{
-		inner: turnContext{summarize: func(context.Context, string) (string, error) { return "Objective: retain guidance", nil }},
+		inner: turnContext{summarize: func(context.Context, string) (string, error) { return semanticStateForTest("retain guidance"), nil }},
 		peek:  func() activeGuidanceSnapshot { return snapshot },
 		acknowledge: func(got activeGuidanceSnapshot) {
 			acknowledged = reflect.DeepEqual(got, snapshot)
@@ -2459,8 +2549,13 @@ func TestActiveGuidanceSurvivesGeneratedCompaction(t *testing.T) {
 		message.NewText(message.RoleSystem, "rules"),
 		message.NewText(message.RoleUser, strings.Repeat("old ", 400)),
 		message.NewText(message.RoleAssistant, "done"),
+		message.NewText(message.RoleUser, "follow up one"),
+		message.NewText(message.RoleAssistant, "done one"),
+		message.NewText(message.RoleUser, "follow up two"),
+		message.NewText(message.RoleAssistant, "done two"),
+		message.NewText(message.RoleUser, "latest"),
 	}
-	got, err := manager.CompactTo(context.Background(), history, 100)
+	got, err := manager.CompactTo(context.Background(), history, 300)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2511,7 +2606,7 @@ func TestTurnContextCompactToSummarizesOversizedCompletedToolResult(t *testing.T
 		message.NewToolResult(message.ToolResult{ToolCallID: "read-1", Name: "read_file", Content: "prefix" + string([]byte{0xff}) + strings.Repeat("文件内容", 2_000)}),
 	}
 	const target = 1_000
-	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "summary", nil }}
+	manager := turnContext{summarize: func(context.Context, string) (string, error) { return semanticStateForTest("summary"), nil }}
 	compacted, err := manager.CompactTo(context.Background(), history, target)
 	if err != nil || reflect.DeepEqual(compacted, history) {
 		t.Fatalf("oversized tool result history=%#v error=%v", compacted, err)
@@ -2535,7 +2630,7 @@ func TestTurnContextCompactToSummarizesDuplicatedStructuredToolOutput(t *testing
 	}
 
 	const target = 2_000
-	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "summary", nil }}
+	manager := turnContext{summarize: func(context.Context, string) (string, error) { return semanticStateForTest("summary"), nil }}
 	compacted, err := manager.CompactTo(context.Background(), history, target)
 	if err != nil || reflect.DeepEqual(compacted, history) {
 		t.Fatalf("duplicated structured output history=%#v error=%v", compacted, err)
@@ -2613,8 +2708,8 @@ func TestTurnContextCompactToCanSummarizeLatestCompletedResultThatCannotFit(t *t
 		message.NewToolResult(message.ToolResult{ToolCallID: "latest", Name: "read", Content: strings.Repeat("z", 2_000)}),
 	)
 
-	const target = 64
-	manager := turnContext{summarize: func(context.Context, string) (string, error) { return "summary", nil }}
+	const target = 300
+	manager := turnContext{summarize: func(context.Context, string) (string, error) { return semanticStateForTest("summary"), nil }}
 	compacted, err := manager.CompactTo(context.Background(), history, target)
 	if err != nil || reflect.DeepEqual(compacted, history) {
 		t.Fatalf("mandatory oversized result history=%#v error=%v", compacted, err)
@@ -3684,6 +3779,35 @@ func TestAutoReviewRepeatedDenialsStillRequireUserDecision(t *testing.T) {
 	}
 	if harness.driver.executions.Load() != 0 {
 		t.Fatal("denial threshold executed tool")
+	}
+}
+
+func TestResolveLLMuxDriverUsesConfiguredModelAndStoredCredential(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	credentials, err := auth.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication := auth.NewService(store.DB(), credentials, nil, nil)
+	if _, err := authentication.SetAPIKey(ctx, "openai", "sk-test"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Providers.LLMux["openai"] = config.LLMuxProviderConfig{Enabled: true, Models: []config.LLMuxModelConfig{{
+		ID: "gpt-test", ContextWindow: 128000, ReasoningLevels: []string{"low", "high"}, DefaultReasoning: "high",
+	}}}
+	runtime := &ProviderRuntime{cfg: cfg, auth: authentication}
+	account, model, window, driver, err := runtime.resolveLLMuxDriverForAccount(ctx, "openai", "gpt-test", "low", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ID != "api-key" || model != "gpt-test" || window != 128000 || driver.Metadata().Name != "llmux:openai" {
+		t.Fatalf("resolution = account:%+v model:%q window:%d metadata:%+v", account, model, window, driver.Metadata())
 	}
 }
 

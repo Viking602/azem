@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -35,30 +36,13 @@ func (d *contextProfileProviderDriver) Stream(ctx context.Context, request hypro
 
 func contextProfileFromRequest(request hyprovider.Request) ContextProfile {
 	profile := ContextProfile{Source: "request", Estimated: true}
+	if manifest, _ := extractContextCheckpointMetadata(request.Messages); manifest != nil {
+		applyContextManifestProfile(&profile, *manifest)
+	}
 	systemIndex := 0
 	messageIndex := map[message.Role]int{}
 	for _, current := range request.Messages {
-		if skillKind := current.Metadata[skillContextMetadataKey]; skillKind != "" {
-			profile.Contributions = append(profile.Contributions, skillMessageContributions(current.Text, skillKind)...)
-			continue
-		}
-		if current.Role == message.RoleSystem {
-			systemIndex++
-			name := "azem.core_instructions"
-			if systemIndex > 1 {
-				name = fmt.Sprintf("system:%d", systemIndex)
-			}
-			profile.Contributions = appendTokenContribution(profile.Contributions, ContextCategoryCore, name, estimateContextTokens([]message.Message{current}))
-			continue
-		}
-		messageIndex[current.Role]++
-		name := fmt.Sprintf("message:%s:%d", current.Role, messageIndex[current.Role])
-		if current.ToolResult != nil {
-			name = "tool_result:" + current.ToolResult.Name
-		} else if current.Kind == message.KindCompactionSummary {
-			name = fmt.Sprintf("compaction:%d", messageIndex[current.Role])
-		}
-		profile.Contributions = appendTokenContribution(profile.Contributions, ContextCategoryConversation, name, estimateContextTokens([]message.Message{current}))
+		profile.Contributions = appendMessageProfileContribution(profile.Contributions, current, &systemIndex, messageIndex)
 	}
 	for _, definition := range request.Tools {
 		category := ContextCategoryBuiltinTools
@@ -68,6 +52,29 @@ func contextProfileFromRequest(request hyprovider.Request) ContextProfile {
 		profile.Contributions = appendTokenContribution(profile.Contributions, category, definition.Name, estimateToolTokens(definition))
 	}
 	return profile
+}
+
+func appendMessageProfileContribution(contributions []ContextContribution, current message.Message, systemIndex *int, messageIndex map[message.Role]int) []ContextContribution {
+	if skillKind := current.Metadata[skillContextMetadataKey]; skillKind != "" {
+		return append(contributions, skillMessageContributions(current.Text, skillKind)...)
+	}
+	category, name := ContextCategoryConversation, ""
+	if current.Role == message.RoleSystem {
+		*systemIndex++
+		category, name = ContextCategoryCore, "azem.core_instructions"
+		if *systemIndex > 1 {
+			name = fmt.Sprintf("system:%d", *systemIndex)
+		}
+	} else {
+		messageIndex[current.Role]++
+		name = fmt.Sprintf("message:%s:%d", current.Role, messageIndex[current.Role])
+		if current.ToolResult != nil {
+			name = "tool_result:" + current.ToolResult.Name
+		} else if current.Kind == message.KindCompactionSummary {
+			name = fmt.Sprintf("compaction:%d", messageIndex[current.Role])
+		}
+	}
+	return appendTokenContribution(contributions, category, name, estimateContextTokens([]message.Message{current}))
 }
 
 func (r *ProviderRuntime) EstimateContextProfile(ctx context.Context, sessionID string) (ContextProfile, error) {
@@ -129,9 +136,36 @@ func (r *ProviderRuntime) EstimateContextProfile(ctx context.Context, sessionID 
 		projection, loadErr := host.sessions.LoadProjection(ctx, sessionID)
 		if loadErr == nil {
 			profile.Contributions = append(profile.Contributions, conversationContributions(projectionContextMessages(projection))...)
+			if record, manifestErr := host.sessions.LoadActiveContextManifest(ctx, sessionID); manifestErr == nil {
+				var manifest ContextManifestV1
+				if json.Unmarshal(record.Data, &manifest) == nil {
+					applyContextManifestProfile(&profile, manifest)
+				}
+			}
+			if checkpoint, semanticErr := host.sessions.LoadSemanticCheckpoint(ctx, sessionID); semanticErr == nil {
+				profile.SemanticRevision = checkpoint.Revision
+				profile.SemanticCursor = checkpoint.Cursor
+				highWater := canonicalProjectionHighWater(projection.Blocks)
+				if highWater != nil {
+					profile.CanonicalHighWater = *highWater
+					profile.WriterLag = max(0, *highWater-checkpoint.Cursor.CanonicalSequence)
+				}
+			}
 		}
 	}
 	return profile, nil
+}
+
+func applyContextManifestProfile(profile *ContextProfile, manifest ContextManifestV1) {
+	profile.ManifestHash = manifest.ManifestHash
+	profile.SemanticRevision = manifest.SemanticRevision
+	profile.SemanticCursor = manifest.SemanticCursor
+	profile.CanonicalHighWater = manifest.CanonicalHighWater
+	profile.PolicyVersion = manifest.PolicyVersion
+	profile.RebuildReason = manifest.Reason
+	profile.WriterLag = max(0, manifest.CanonicalHighWater-manifest.SemanticCursor.CanonicalSequence)
+	profile.Segments = append([]ContextSegmentV1(nil), manifest.Segments...)
+	profile.Exclusions = append([]ContextExclusionV1(nil), manifest.Exclusions...)
 }
 
 func projectionContextMessages(projection session.Projection) []message.Message {

@@ -1247,14 +1247,14 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := []string{
-		event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Scope,
-		event.ModelRoutes[3].Role, event.ModelRoutes[4].Role, event.ModelRoutes[5].Role,
-	}; !reflect.DeepEqual(got, []string{"title", "plan", "compaction", "alpha", "off", "zeta"}) {
+		event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Scope, event.ModelRoutes[3].Scope,
+		event.ModelRoutes[4].Role, event.ModelRoutes[5].Role, event.ModelRoutes[6].Role,
+	}; !reflect.DeepEqual(got, []string{"main", "title", "plan", "compaction", "alpha", "off", "zeta"}) {
 		t.Fatalf("route order = %v", got)
 	}
 	clone := event.Clone()
-	clone.ModelRoutes[1].Route.Model = "changed"
-	if event.ModelRoutes[1].Route.Model != "architect" {
+	clone.ModelRoutes[2].Route.Model = "changed"
+	if event.ModelRoutes[2].Route.Model != "architect" {
 		t.Fatal("event clone mutated source routes")
 	}
 	if event.Data["subagent_max_concurrency"] != "2" {

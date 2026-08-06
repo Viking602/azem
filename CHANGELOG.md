@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Providers: integrate `github.com/Viking602/llmux` v0.2.0 as the generic
+  language-model transport for native and OpenAI-compatible providers while
+  retaining the existing ChatGPT and Grok subscription drivers.
+- Desktop: add searchable Model settings for provider enablement, API base URL,
+  protected API-key storage, arbitrary model IDs, context windows, and
+  reasoning levels. Configured models are immediately available to the default
+  session, title, plan, compaction, and subagent routes.
+- Desktop: widen Model settings, align provider credential fields, use the
+  available viewport for the provider directory, and show provider logos in
+  provider catalogs and every model-selection surface.
+
+- Context: replace the rolling summary implementation with one semantic
+  compaction kernel shared by automatic, manual `/compact`, explicit
+  `/rebuild`, Team, subagent, and resume paths. It preserves the latest three
+  user turns verbatim, validates stable provenance, keeps tool groups atomic,
+  and emits deterministic context manifests.
+- Context: Artifact V2 stores bounded head/tail/error/warning previews and the
+  read tool now supports bounded preview, byte range, line range, tail, grep,
+  and size-limited full modes.
+- Persistence: schema 20 adds semantic state, append-only semantic events, and
+  context manifests. The upgrade invalidates legacy replaceable ModelHistory
+  and cache identity while retaining canonical conversation and durable state.
+- Desktop: Inspector now shows semantic revision, writer lag, rebuild reason,
+  manifest hash, and segment token estimates.
 - Runtime: dispatch independent tool calls in parallel so foreground subagents
   and shell commands no longer queue behind unrelated calls; their existing
   runtime concurrency limits still apply.

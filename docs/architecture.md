@@ -14,7 +14,8 @@ second execution engine.
 flowchart LR
     TUI["Bubble Tea TUI"] --> APP["internal/app Service"]
     GUI["React desktop"] --> BRIDGE["Bounded Wails Bridge"] --> APP
-    APP --> PROVIDERS["ChatGPT / Grok drivers"]
+    APP --> PROVIDERS["ChatGPT / Grok subscription drivers"]
+    APP --> LLMUX["llmux provider adapter"]
     APP --> AGENT["Venat-backed agent runtime"]
     APP --> POLICY["Approvals / hooks / MCP / Skills"]
     APP --> SESSION["Session and timeline services"]
@@ -153,7 +154,9 @@ declared module version, not an adjacent checkout, defines behavior.
 ## Extension points
 
 - **Providers:** implement transport and stream normalization under
-  `internal/provider`, then register routing in `internal/app`.
+  `internal/provider`, then register routing in `internal/app`. Generic API-key
+  providers use `internal/provider/llmux`; the ChatGPT and Grok IDs remain
+  reserved for their subscription drivers.
 - **MCP:** configure stdio or Streamable HTTP servers through `internal/mcp`;
   keep secrets as environment or keyring references.
 - **Skills:** add user, project, configured, or bundled Skill directories;

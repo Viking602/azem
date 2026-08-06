@@ -152,6 +152,23 @@ WHERE id=sqlc.arg(id) AND version=sqlc.arg(expected_version);
 INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,payload,preview,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(session_id,kind,sha256) DO NOTHING;
 -- name: GetContextArtifact :one
 SELECT id,session_id,run_id,kind,sha256,payload,preview,created_at FROM context_artifacts WHERE id=? AND session_id=?;
+-- name: GetSemanticState :one
+SELECT revision,checkpoint_id,cursor,state,source_digest,updated_at FROM session_semantic_state WHERE session_id=?;
+-- name: InsertSemanticStateEvent :execresult
+INSERT OR IGNORE INTO session_semantic_state_events(session_id,revision,checkpoint_id,base_revision,cursor,patch,source_digest,writer_run_id,created_at) VALUES(?,?,?,?,?,?,?,?,?);
+-- name: InsertSemanticState :execresult
+INSERT OR IGNORE INTO session_semantic_state(session_id,revision,checkpoint_id,cursor,state,source_digest,updated_at) VALUES(?,?,?,?,?,?,?);
+-- name: UpdateSemanticStateCAS :execresult
+UPDATE session_semantic_state SET revision=?,checkpoint_id=?,cursor=?,state=?,source_digest=?,updated_at=? WHERE session_id=? AND revision=?;
+-- name: DeactivateContextManifests :exec
+UPDATE context_manifests SET activated=0 WHERE session_id=? AND activated=1;
+-- name: UpsertContextManifest :exec
+INSERT INTO context_manifests(id,session_id,run_id,canonical_high_water,semantic_revision,policy_version,manifest_hash,activated,data,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(session_id,manifest_hash) DO UPDATE SET run_id=excluded.run_id,canonical_high_water=excluded.canonical_high_water,semantic_revision=excluded.semantic_revision,policy_version=excluded.policy_version,activated=excluded.activated,data=excluded.data;
+-- name: GetActiveContextManifest :one
+SELECT id,run_id,canonical_high_water,semantic_revision,policy_version,manifest_hash,data,created_at FROM context_manifests WHERE session_id=? AND activated=1 LIMIT 1;
+-- name: ListSemanticStateEvents :many
+SELECT revision,checkpoint_id,base_revision,cursor,patch,source_digest,writer_run_id,created_at FROM session_semantic_state_events WHERE session_id=? ORDER BY revision;
 -- name: EnsureSession :exec
 INSERT INTO sessions(id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING;
 -- name: EnsureSessionProjection :exec

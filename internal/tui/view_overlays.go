@@ -922,7 +922,7 @@ func (m AppModel) overlayDescription() []string {
 	case OverlayHelp:
 		return []string{
 			m.tr("overlay.help.line1"), m.tr("overlay.help.line2"), m.tr("overlay.help.line3"), m.tr("overlay.help.line4"),
-			"/settings /login /logout /provider /models /skills /skill /new /sessions /resume /compact",
+			"/settings /login /logout /provider /models /skills /skill /new /sessions /resume /compact /rebuild",
 			"/plan /team /agents /mcp /status /context /reconcile /cancel /help /quit",
 		}
 	case OverlayStatus:

@@ -107,6 +107,7 @@ Azem streams progress in the terminal and asks for approval when the selected po
 
 - File discovery, reading, searching, patch editing, formatting, testing, and shell execution
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
+- llmux-backed OpenAI, Anthropic, Google, Mistral, Cohere, xAI, OpenRouter, DeepSeek, local inference, and other compatible providers with a searchable desktop model registry
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
 - Persistent conversations start in a fresh session on every launch; use `/resume` to reopen prior sessions with their context, tool history, and recap
@@ -129,6 +130,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 - **Compact tool activity** summarizes file reads, searches, tests, shell commands, edits, and failures. Large patch bodies and complete file contents stay out of routine status messages.
 - **Subagent visibility** applies the same summaries and file-diff presentation when inspecting child-agent activity.
 - **Context visibility** shows startup occupancy before the first model call, then calibrates the total from provider usage. The segmented meter and `/context` breakdown separate core instructions, Skills, built-in tools, MCP tools, conversation history, and provider framing.
+- **Semantic context rebuilding** keeps a provenance-backed task state, the three most recent user turns verbatim, current Todo state, and complete tool-call groups. `/compact` and `/rebuild` use the same kernel; the Inspector shows its manifest, semantic revision, writer lag, reason, and segments.
 
 ## How It Works
 
@@ -136,7 +138,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 flowchart LR
     U[Terminal UI] --> A[Application runtime]
     D[Wails desktop UI] --> A
-    A --> P[ChatGPT or Grok]
+    A --> P[ChatGPT / Grok subscriptions or llmux providers]
     A --> G[Approval and tool governance]
     G --> T[Files, tests, and shell]
     G --> M[MCP servers]
@@ -150,6 +152,9 @@ Each turn is routed through the application runtime, which selects a provider, a
 ### Provider stream resilience
 
 For ChatGPT, Azem retries transient stream-opening and transport failures up to five times when no response output has been emitted. This includes connection resets, temporary network errors, interrupted streams, and selected TLS transport failures. Cancellation, deadlines, invalid requests, and certificate validation errors are not retried. After any output has been emitted, Azem does not replay the request, avoiding duplicate partial responses or tool activity.
+
+llmux transports disable their internal retry loop and use the same Venat retry
+boundary, so Azem has one owner for retry timing and duplicate-output safety.
 
 ## Usage
 
@@ -206,6 +211,7 @@ Without `-config`, Azem reads `azem/config.yaml` from the operating system's use
 | `/sessions` | List saved sessions |
 | `/resume` | Resume a saved session |
 | `/compact` | Compact the current session context |
+| `/rebuild` | Immediately rebuild context with the semantic compaction kernel |
 | `/memory [query]` | Search workspace-native memory |
 | `/remember <text>` | Save explicit evidence to workspace memory |
 | `/forget <memory-id>` | Remove one workspace memory |
@@ -264,6 +270,17 @@ providers:
     catalog_ttl: 5m
     experimental_oauth: true
     transport: api
+  llmux:
+    openrouter:
+      enabled: true
+      # API keys are not written here. Configure one in Desktop Settings or set OPENROUTER_API_KEY.
+      base_url: "" # empty uses llmux's provider default
+      models:
+        - id: anthropic/claude-sonnet-4.5
+          name: Claude Sonnet 4.5
+          context_window: 200000
+          reasoning_levels: [low, medium, high]
+          default_reasoning: medium
 
 retry:
   enabled: true
@@ -307,7 +324,6 @@ agents:
     max_summary_tokens: 4096
     large_tool_result_tokens: 12000
     history_retrieval_tokens: 4096 # private, session-scoped SQLite FTS evidence budget
-    preserve_full_history: true
   subagents:
     enabled: true
     max_depth: 1
@@ -410,6 +426,10 @@ On Linux, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` override the 
 
 Credentials can be stored in SQLite, the system keyring, or a permission-restricted JSON file. SQLite and file storage rely on filesystem permissions and do not provide application-level encryption at rest. Use the system keyring when stronger local credential protection is required.
 
+Desktop **Settings → Model settings** stores llmux API keys through that same
+credential service. Keys are write-only from the UI: runtime events expose only
+whether a stored key or environment variable is available.
+
 ## Security Model
 
 Azem's approvals and persistent action boundaries help reduce accidental operations and duplicate side effects. They are governance controls, not an operating-system sandbox.
@@ -437,7 +457,7 @@ internal/config/        Configuration, paths, roles, and personas
 internal/desktop/       Bounded Wails bridge and desktop lifecycle
 internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/mcp/           MCP connection and tool management
-internal/provider/      ChatGPT/Codex and Grok drivers
+internal/provider/      ChatGPT/Codex, Grok, llmux drivers, and model catalogs
 internal/recovery/      Crash recovery and side-effect reconciliation
 internal/session/       Session persistence and compaction
 internal/skills/        Agent Skills discovery and activation

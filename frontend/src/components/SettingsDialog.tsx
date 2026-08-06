@@ -1,20 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, Bot, Gauge, Languages, Palette, RefreshCw, Search, Settings2, X,
+  ArrowLeft, Bot, Database, Gauge, Languages, Palette, RefreshCw, Search, Settings2, X,
 } from "lucide-react";
 import { execute } from "../bridge";
 import { reasoningLabel as i18nReasoningLabel, sortReasoningLevels, tFormat, translator, type Language } from "../i18n";
 import { useRuntimeStore, type ModelOption } from "../store";
 import type { DeliveryMode, ModelRoute, ModelRouteConfig } from "../types";
 import MenuSelect from "./MenuSelect";
+import ModelProviderSettings from "./ModelProviderSettings";
+import ProviderIcon from "./ProviderIcon";
 
-type SettingsSection = "models" | "subagents" | "governance" | "appearance" | "extensions";
+type SettingsSection = "catalog" | "models" | "subagents" | "governance" | "appearance" | "extensions";
 
 export default function SettingsDialog() {
   const dialog = useRef<HTMLDialogElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const modelRoutes = useRuntimeStore((state) => state.modelRoutes);
+	const modelProviders = useRuntimeStore((state) => state.modelProviders);
   const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
   const agentCatalog = useRuntimeStore((state) => state.agentCatalog);
   const skills = useRuntimeStore((state) => state.skills);
@@ -30,6 +33,7 @@ export default function SettingsDialog() {
   const t = translator(snapshot.language);
   const close = () => useRuntimeStore.getState().setSettingsOpen(false);
   const sections: Array<{ id: SettingsSection; label: string; description: string; icon: typeof Bot }> = [
+	{ id: "catalog", label: t("modelSettings"), description: t("settingsNavCatalog"), icon: Database },
     { id: "models", label: t("roleModels"), description: t("settingsNavModels"), icon: Bot },
     { id: "subagents", label: t("subagentRuntime"), description: t("settingsNavSubagents"), icon: Gauge },
     { id: "governance", label: t("settingsGovernance"), description: t("settingsNavGovernance"), icon: Settings2 },
@@ -39,6 +43,9 @@ export default function SettingsDialog() {
   const filteredSections = sections.filter((section) => `${section.label}${section.description}`.toLowerCase().includes(query.trim().toLowerCase()));
   const current = sections.find((section) => section.id === activeSection)!;
   const descriptions = useMemo(() => new Map(agentCatalog.map((agent) => [agent.name, agent.description])), [agentCatalog]);
+	const catalogPage: Partial<Record<SettingsSection, React.ReactNode>> = {
+		catalog: <ModelProviderSettings providers={modelProviders} sessionId={snapshot.sessionId} language={snapshot.language} setError={setError} />,
+	};
 
   useEffect(() => {
     const node = dialog.current;
@@ -57,6 +64,7 @@ export default function SettingsDialog() {
       execute({ kind: "list_model_routes", sessionId: snapshot.sessionId }),
       execute({ kind: "list_agent_types", sessionId: snapshot.sessionId }),
       execute({ kind: "list_models", sessionId: snapshot.sessionId }),
+	  execute({ kind: "list_model_providers", sessionId: snapshot.sessionId }),
     ]).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
     return () => {
       node.removeEventListener("cancel", onCancel);
@@ -91,6 +99,7 @@ export default function SettingsDialog() {
       <main className="settings-main">
         <header className="settings-page-header"><div><h1>{current.label}</h1><p>{current.description}</p></div><button className="icon-button" onClick={close} aria-label={t("closeSettings")}><X size={17} /></button></header>
         <div className="settings-content">
+		  {catalogPage[activeSection]}
           {activeSection === "models" && <SettingsPane title={t("settingsModels")} description={t("settingsModelsHint")} action={<button className="small-button" onClick={() => void action("list_model_routes")}><RefreshCw size={13} />{t("refresh")}</button>}>
             <div className="settings-card role-routes">
               {modelRoutes.length === 0 ? <div className="settings-empty"><span className="azem-mark" />{t("loadingRoles")}</div> : modelRoutes.map((route) => <RouteRow key={`${route.Scope}-${route.Role}`} route={route} description={descriptions.get(route.Role) || route.Label} modelsByProvider={modelsByProvider} action={action} language={snapshot.language} />)}
@@ -137,8 +146,8 @@ function RouteRow({ route, description, modelsByProvider, action, language }: {
   const reasoning = value.reasoning || modelInfo?.defaultReasoning || snapshot.reasoning;
   const inherited = !value.provider && !value.model && !value.reasoning;
   const title = routeTitle(route, language);
-  const providerOptions = unique([snapshot.provider, value.provider, ...Object.keys(modelsByProvider)]).map((id) => ({ value: id, label: providerLabel(id) }));
-  const modelOptions = unique([model, ...providerModels.map((item) => item.id)]).map((id) => ({ value: id, label: providerModels.find((item) => item.id === id)?.name || id }));
+  const providerOptions = unique([snapshot.provider, value.provider, ...Object.keys(modelsByProvider)]).map((id) => ({ value: id, label: providerLabel(id), icon: <ProviderIcon provider={id} /> }));
+  const modelOptions = unique([model, ...providerModels.map((item) => item.id)]).map((id) => ({ value: id, label: providerModels.find((item) => item.id === id)?.name || id, icon: <ProviderIcon provider={provider} /> }));
   const reasoningOptions = sortReasoningLevels([reasoning, ...(modelInfo?.reasoningLevels.length ? modelInfo.reasoningLevels : ["low", "medium", "high", "xhigh", "max"])]).map((level) => ({ value: level, label: i18nReasoningLabel(level, language) }));
   const setProvider = (next: string) => {
     const nextModel = modelsByProvider[next]?.[0];
@@ -161,7 +170,7 @@ function RouteRow({ route, description, modelsByProvider, action, language }: {
       <label><span>{t("provider")}</span><MenuSelect className="route-menu" value={provider} options={providerOptions} onChange={setProvider} ariaLabel={`${title} ${t("provider")}`} /></label>
       <label><span>{t("model")}</span><MenuSelect className="route-menu route-model-menu" value={model} options={modelOptions} onChange={setModel} ariaLabel={`${title} ${t("model")}`} /></label>
       <label><span>{t("reasoning")}</span><MenuSelect className="route-menu" value={reasoning} options={reasoningOptions} onChange={setReasoning} ariaLabel={`${title} ${t("reasoning")}`} /></label>
-      <div className="route-actions"><button className="small-button" disabled={!provider || !model} onClick={() => void save()}>{t("save")}</button><button className="text-button" disabled={inherited} onClick={reset}>{t("resetInherit")}</button></div>
+      <div className="route-actions"><button className="small-button" disabled={!provider || !model} onClick={() => void save()}>{t("save")}</button>{route.Scope !== "main" && <button className="text-button" disabled={inherited} onClick={reset}>{t("resetInherit")}</button>}</div>
     </div>
   </div>;
 }
@@ -169,6 +178,7 @@ function RouteRow({ route, description, modelsByProvider, action, language }: {
 function SettingRow({ label, description, children }: { label: string; description: string; children: React.ReactNode }) { return <div className="setting-row"><div><strong>{label}</strong><p>{description}</p></div><div>{children}</div></div>; }
 function routeTitle(route: ModelRoute, language: Language) {
   const t = translator(language);
+	if (route.Scope === "main") return t("routeMain");
   if (route.Scope === "title") return t("routeTitle");
   if (route.Scope === "plan") return t("routePlan");
   if (route.Scope === "compaction") return t("routeCompaction");
@@ -176,6 +186,7 @@ function routeTitle(route: ModelRoute, language: Language) {
 }
 function routeDescription(route: ModelRoute, description: string, language: Language) {
   const t = translator(language);
+	if (route.Scope === "main") return t("routeMainHint");
   if (route.Scope === "title") return t("routeTitleHint");
   if (route.Scope === "plan") return t("routePlanHint");
   if (route.Scope === "compaction") return t("routeCompactionHint");

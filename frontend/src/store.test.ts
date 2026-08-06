@@ -32,7 +32,7 @@ function state(): RuntimeData {
     snapshot, sessions: [], projects: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], backgroundProcesses: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
     skills: [], branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
     pullRequestMonitors: new Map(), pullRequestLoading: false, pullRequestMutating: false, pullRequestError: "",
-    modelRoutes: [], modelsByProvider: {}, contextProfile: null,
+    modelRoutes: [], modelProviders: [], modelsByProvider: {}, contextProfile: null,
     contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recovery: [],
     runId: "", running: false, globalRunId: "", globalRunSessionId: "", runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
@@ -42,6 +42,19 @@ function state(): RuntimeData {
 }
 
 describe("runtime event projection", () => {
+	it("projects llmux provider settings without exposing a secret field", () => {
+		const projected = reduceEvents(state(), [{
+			sequence: 1, kind: "model_providers", modelProviders: [{
+				ID: "openrouter", DisplayName: "OpenRouter", Backend: "openai_compat",
+				DefaultBaseURL: "https://openrouter.ai/api/v1", BaseURL: "", EnvKey: "OPENROUTER_API_KEY",
+				Enabled: true, CredentialConfigured: true, CredentialSource: "stored",
+				Models: [{ id: "openai/gpt-test", contextWindow: 128000 }],
+			}],
+		}]);
+		expect(projected.modelProviders[0]).toMatchObject({ ID: "openrouter", CredentialSource: "stored" });
+		expect(projected.modelProviders[0]).not.toHaveProperty("secret");
+	});
+
   it("keeps bootstrap events emitted before initialise returns", () => {
     useRuntimeStore.setState(state());
     useRuntimeStore.getState().hydrate({ ...snapshot, sequence: 6 });
@@ -899,6 +912,30 @@ describe("runtime event projection", () => {
     await act(async () => useRuntimeStore.setState(clean));
     expect(container.textContent).not.toContain("+0");
     expect(container.textContent).not.toContain("−0");
+    await act(async () => root.unmount());
+  });
+
+  it("renders semantic context kernel diagnostics", async () => {
+    useRuntimeStore.setState({
+      ...state(),
+      contextProfile: {
+        source: "request", estimated: true, contributions: [],
+        manifestHash: "abcdef0123456789", semanticRevision: 3,
+        semanticCursor: { canonical_sequence: 42, todo_revision: 1, tool_completed_at_ns: 0, subagent_finished_at_ns: 0 },
+        canonicalHighWater: 44, policyVersion: 1, rebuildReason: "automatic_hard", writerLag: 2,
+        segments: [{ kind: "semantic_state", mandatory: true, token_estimate: 240, content_hash: "segment-hash", source_refs: ["sequence:42"] }],
+        exclusions: [{ source_ref: "sequence:1", reason: "represented_by_semantic_state" }],
+      },
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(Inspector)));
+    expect(container.textContent).toContain("压缩内核");
+    expect(container.textContent).toContain("r3");
+    expect(container.textContent).toContain("automatic_hard");
+    expect(container.textContent).toContain("semantic state");
+    expect(container.querySelector(".context-manifest-hash")?.textContent).toBe("abcdef012345");
+    expect(container.querySelector('[data-state="pending"]')?.textContent).toBe("2");
     await act(async () => root.unmount());
   });
 

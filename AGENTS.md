@@ -58,10 +58,12 @@ Status values:
 
 | ID | Status | Issue and impact | Evidence | Required handling |
 |---|---|---|---|---|
-| DB-001 | Fixed, guarded | A user database reached schema 18 while source only supported 17, causing packaged startup to fail with `database schema 18 is newer than supported schema 17`. | `internal/store/sqlite/migrations.go`, `migrations_test.go`, real schema 18 reopen verification. | Keep `schemaVersion == len(migrations)`. Preserve migration 18 control-plane tables and indexes, v17-to-v18 upgrade/reopen coverage, and rejection of unknown future schemas. |
+| DB-001 | Fixed, guarded | A user database reached schema 18 while source only supported 17, causing packaged startup to fail with `database schema 18 is newer than supported schema 17`. | `internal/store/sqlite/migrations.go`, `migrations_test.go`, real schema 18 reopen verification. | Keep `schemaVersion == len(migrations)`. Preserve migration 18 control-plane stores, schema 19 project ownership, schema 20 semantic context stores, upgrade/reopen coverage, and rejection of unknown future schemas. |
 | DB-002 | Fixed, guarded | Runtime migrations and the SQLC schema are separate definitions that must remain synchronized. | `internal/store/sqlite/migrations.go`, `internal/store/sqlite/dbgen/schema.sql`, `docs/persistence.md`, `docs/decisions/0001-schema-versioning.md`. | Keep both definitions, the persistence guide, and the schema ADR synchronized. Every schema change tests upgrade, reopen, and data retention. |
 | PROJECT-001 | Fixed, guarded | The desktop process previously exposed one fallback workspace while session history was global, so direct app launches lost the real project name, branch, and PR context and rendered every session under the wrong project. | Schema 19 project/session ownership tables, desktop bootstrap restore test, session catalog test, multi-project Sidebar test. | Keep project catalog state in SQLite rather than `config.yaml`; preserve one immutable project owner per session; direct desktop launch restores the most recently opened valid project; cross-project sessions open with that project's workspace. |
 | STREAM-001 | Fixed, guarded | Commentary, reasoning, and final answers were previously merged, hiding progress around tool calls or duplicating final output. | Provider stream, app event, session timeline, and frontend reducer `TextPhase` tests. | Preserve `commentary` and `final_answer` end to end; reasoning must not impersonate commentary; final output renders once. |
+| PROVIDER-001 | Fixed, guarded | Azem previously hard-coded ChatGPT and Grok, so other model providers and arbitrary model IDs could not be configured or routed from the desktop. | `internal/provider/llmux`, generic runtime resolution tests, model-provider action/Bridge/store/settings tests. | Keep ChatGPT/Grok subscription IDs reserved; keep llmux API keys out of YAML and events; validate configured models; preserve one retry owner and typed stream mapping. |
+| CONTEXT-001 | Fixed, guarded | Rolling summaries mixed durable task state with short-lived transcript evidence and could drift across repeated compactions. | SemanticStateV1 validation, schema 20 state/events/manifests, unified planner tests, Artifact V2 tests, Inspector projection tests. | Keep one new kernel across automatic/manual/resume paths; preserve latest three user turns exactly, stable provenance, atomic tool groups, transactional cursor/manifest activation, and explicit mandatory-budget failure. Do not restore legacy fallback. |
 | RUNTIME-001 | Fixed, guarded | Venat upgrades changed Usage Store and durable control-plane contracts; old semantics ignored aggregate query limits. | `go.mod`, `internal/store/sqlite/stores_governance.go`, Venat contract tests. | Do not restore old Usage semantics. Verify the real module with `GOWORK=off`, and run upstream contract tests during framework upgrades. |
 | CONCURRENCY-001 | Fixed, guarded | Agent definitions omitted `toolMode`, so Venat defaulted whole tool batches to sequential execution. Foreground subagent spawns and shell calls appeared queued even when their runtime limits had free capacity. | `agentDefinitionForSpec`, `TestAgentDefinitionUsesParallelToolDispatch`, Venat parallel dispatch tests. | Keep main and subagent definitions in parallel tool mode. Preserve the separate shell and subagent concurrency limits and Venat's sequential skill-activation safeguard. |
 | TOOL-001 | Fixed, guarded | Queued tools were once rendered as running, making approval wait time appear as execution time and leaving later calls spinning. | `provider_execution.go`, `provider_approval.go`, `frontend/src/store.ts`, `Timeline.tsx`, lifecycle tests. | Preserve `queued -> awaiting_approval -> running -> completed/failed`; do not show unexecuted writes as file changes; converge every non-terminal tool when a run ends. |
@@ -70,10 +72,10 @@ Status values:
 | PR-002 | Documentation gap | PR operations depend on local `git`, GitHub CLI authentication, a resolvable GitHub remote, and repository permission. | `internal/githubpr/client.go`. | Document missing `gh`, logged-out, non-GitHub, permission, network, and rate-limit failures. Never represent unavailable capability as an empty list. |
 | PR-003 | Documentation gap | PR monitoring polls, persists state, deduplicates fingerprints, and starts repair sessions; its maintenance contract is not independently documented. | `internal/githubpr/monitor.go`: 60-second interval, five-minute maximum backoff, state version 3. | Document the state machine, persistence file, trigger, retry, deduplication, concurrency, restart, and stop behavior. |
 | PR-004 | Documentation gap | Merge, auto-merge, reviews, and other mutations have external side effects without a dedicated permission and safety guide. | `MutationRequest` in `internal/githubpr/types.go`. | `docs/security.md` must list each mutation, permissions, validation, head-OID protection, and audit evidence. |
-| DOC-001 | Documentation gap | Core architecture, persistence, and testing guides now exist, but PR, security, release, desktop, configuration, recovery, troubleshooting, accessibility, contribution, changelog, and ADR documentation remain. | `docs/architecture.md`, `docs/persistence.md`, `docs/testing.md`, documentation index below. | Complete the remaining index incrementally; keep README as the short user entry point. |
+| DOC-001 | Documentation gap | Core architecture, persistence, testing, configuration, provider streaming, and security guides now exist, but PR, release, desktop, recovery, troubleshooting, accessibility, contribution, changelog, and ADR documentation remain. | Existing `docs/*.md` files and documentation index below. | Complete the remaining index incrementally; keep README as the short user entry point. |
 | DOC-002 | Fixed, guarded | Project Layout previously omitted the Wails GUI, React frontend, desktop bridge, and GitHub PR package. | README Project Layout. | Update Project Layout whenever a top-level application or module boundary changes. |
 | DOC-003 | Fixed, guarded | Development documentation previously covered only Go tests and formatting. | `docs/testing.md`, README Development section, `Makefile`. | Keep Go, frontend, desktop, SQLite, architecture, and GUI smoke commands synchronized with the real build. |
-| SEC-001 | Unresolved | The README describes approvals as governance rather than an OS sandbox, but combined GitHub, OAuth/CLI credential, hook, MCP, and automated-repair risks lack a full threat model. | README Security Model. | Write `docs/security.md` with trust boundaries and deployment guidance. |
+| SEC-001 | Fixed, guarded | Combined GitHub, OAuth/API-key credential, hook, MCP, and automated-repair risks previously lacked a full threat model. | README Security Model and `docs/security.md`. | Keep the threat model synchronized with every new Bridge action, credential path, external mutation, hook, MCP, and automated-repair capability. |
 | OPS-001 | Unresolved | There is no complete database upgrade, backup, rollback, corruption recovery, or downgrade runbook. | Schema 17/18 incident; automatic `.bak` implementation. | Write `docs/release.md` and `docs/troubleshooting.md`; prohibit downgrade writes. |
 | TEST-001 | Fixed, guarded | Maintainers previously lacked a unified command matrix by change type. | `docs/testing.md`, verification matrix below. | Keep commands executable and require a real GUI launch for desktop behavior changes. |
 
@@ -95,6 +97,9 @@ evidence-backed internal record above remains the maintenance backlog.
 - Schema 19 contains `desktop_projects`, `session_workspaces`, and the
   `session_workspaces_workspace` index. Projects are application state, not a
   single `workspace.root` configuration value.
+- Schema 20 contains semantic state, append-only semantic events, and context
+  manifests. Its migration invalidates legacy replaceable ModelHistory/cache
+  identity but preserves canonical transcript and all other durable stores.
 
 ### Provider text phases
 
@@ -112,6 +117,17 @@ provider stream
 - `final_answer` is the user-visible terminal response and appears once.
 - Reasoning/thinking never impersonates commentary.
 - Persisting and reopening a session preserves phase and order.
+
+### llmux providers
+
+- `chatgpt` and `grok` remain reserved for their existing subscription drivers.
+- llmux profile IDs resolve only when enabled and when the selected model exists
+  in `providers.llmux.<id>.models`.
+- Stored API keys use `internal/auth`; YAML and runtime events never contain
+  them. Environment fallback uses the profile's declared variable.
+- llmux internal retries remain disabled so Venat is the single retry owner.
+- Image attachments retain the shared trusted-root, type, count, and size
+  validation before entering llmux.
 
 ### Venat integration
 
@@ -158,6 +174,7 @@ Security requirements:
 | `docs/architecture.md` | Complete | Shared runtime, package boundaries, event flow, key call paths, extension points. | Update for module or event-boundary changes. |
 | `docs/persistence.md` | Complete | Paths, schema, SQLC synchronization, backup, compatibility, durable stores, recovery. | Add schema ADR. |
 | `docs/testing.md` | Complete | Test levels, command selection, desktop smoke test, live-test conditions. | Update whenever commands or build targets change. |
+| `docs/context-rebuild-plan.md` | Complete | New semantic compaction kernel, persistence, provenance, Artifact V2, activation, and diagnostics. | Keep synchronized with context policy and schema changes. |
 | `CHANGELOG.md` | Current | User-visible compatibility and behavior changes. | Update for schema, configuration, dependency, or behavior changes. |
 | `docs/decisions/README.md` | Current | ADR index and status rules. | Add and supersede ADRs through the index. |
 | `docs/decisions/0001-schema-versioning.md` | Accepted | Schema compatibility, dual definitions, backup, and rollback rules. | Update only by superseding ADR. |
@@ -173,13 +190,13 @@ Security requirements:
 | P0 | `docs/architecture.md` | Complete | Shared runtime, package boundaries, event flow, Agent/Store/Provider relationships, key call paths, extension points. |
 | P0 | `docs/persistence.md` | Complete | SQLite paths, migration rules, SQLC sync, backups, compatibility, durable stores, recovery. |
 | P0 | `docs/pull-requests.md` | Pending | Prerequisites, capability detection, lists/details, mutations, monitor state machine, polling/backoff, fingerprints, repair sessions, errors. |
-| P0 | `docs/security.md` | Pending | Trust boundaries, approval modes, shell/filesystem/network, MCP, hooks, credentials, GitHub mutations, repair isolation. |
+| P0 | `docs/security.md` | Complete | Trust boundaries, approval modes, shell/filesystem/network, MCP, hooks, credentials, GitHub mutations, repair isolation. |
 | P0 | `docs/testing.md` | Complete | Test levels and commands for Go, frontend, desktop, SQLite, PR, real GUI smoke, and live-test conditions. |
 | P0 | `docs/release.md` | Pending | Versioning, dependency locks, `GOWORK=off`, complete tests, macOS packaging, schema upgrades, backup, rollback limits, release verification. |
 | P1 | `docs/agent-runtime.md` | Pending | Venat integration, Single/Team agents, scheduling, leases, admission, resources, resume, usage, budgets. |
-| P1 | `docs/provider-streaming.md` | Pending | Transports, retries, frames, `TextPhase`, tool calls, usage, terminal events, errors. |
+| P1 | `docs/provider-streaming.md` | Complete | Transports, retries, frames, `TextPhase`, tool calls, usage, terminal events, errors. |
 | P1 | `docs/desktop.md` | Pending | Wails startup, Bridge allowlist, event projection, React store, windows, deep links, build, smoke test. |
-| P1 | `docs/configuration.md` | Pending | Complete schema, defaults, environment, routes, roles, MCP, hooks, credentials, examples. |
+| P1 | `docs/configuration.md` | Complete | Complete schema, defaults, environment, routes, roles, MCP, hooks, credentials, examples. |
 | P1 | `docs/recovery.md` | Pending | Crash recovery, side-effect reconciliation, tool timeline, background work, Team resume, failures. |
 | P1 | `docs/troubleshooting.md` | Pending | Login, streams, SQLite, `gh`, PR monitor, Wails/WebView, Bun, CGO, logs. |
 | P2 | `docs/accessibility.md` | Pending | Keyboard, focus, ARIA, announcements, contrast, reduced motion, screen reader, WebView verification. |

@@ -969,7 +969,7 @@ func (r *subagentRuntime) execute(id string) {
 			structuredSummary: true, largeToolTokens: parent.ContextConfig.LargeToolResultTokens,
 			compactTargetTokens: contextBudget.Target, minReclaimTokens: parent.ContextConfig.MinReclaimTokens,
 			softTriggerTokens: contextBudget.SoftTrigger, backgroundPrepare: parent.ContextConfig.BackgroundPrepare, coordinator: &compactionCoordinator{},
-			resolveSummarizer: lazyCompactionResolver(compactionResolve, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, compactionReport),
+			resolveSummarizer: lazyCompactionResolver(compactionResolve, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, compactionReport, parent.ContextConfig.MaxSummaryTokens),
 		},
 	}
 	if parent.Host != nil && parent.Host.sessions != nil {

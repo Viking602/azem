@@ -3,6 +3,8 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -103,8 +105,8 @@ func TestPhase6SearchHistoryIsolationSafetyBudgetsAndProvenance(t *testing.T) {
 			t.Fatalf("fabricated or mutable source: %+v", item)
 		}
 		wantSources[item.SourceID] = true
-		if strings.Contains(item.Preview, "SECRET") {
-			t.Fatal("artifact payload leaked into search result")
+		if item.SourceType == "artifact" && (!strings.Contains(item.Preview, `"version":2`) || len(item.Preview) >= len(artifact.Payload)) {
+			t.Fatal("artifact search result is not a bounded v2 preview")
 		}
 	}
 	for source, found := range wantSources {
@@ -327,6 +329,123 @@ func TestSaveRunCheckpointPersistsHistoryWithoutCompletingTurn(t *testing.T) {
 	}
 	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err == nil || !strings.Contains(err.Error(), "active run changed") {
 		t.Fatalf("stale run checkpoint error=%v", err)
+	}
+}
+
+func TestRunCheckpointCommitsSemanticStateAndManifestAtomically(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "semantic-checkpoint.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Semantic"}); err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "ship it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := json.RawMessage(`{"version":1,"objective":{"text":"ship it"}}`)
+	digest := strings.Repeat("a", 64)
+	cursor := WriterCursorV1{CanonicalSequence: sequence}
+	patch, err := json.Marshal(map[string]any{
+		"version": 1, "base_revision": 0, "through": cursor, "source_digest": digest, "operations": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestHash := strings.Repeat("b", 64)
+	manifestData := json.RawMessage(fmt.Sprintf(`{"version":1,"id":"manifest-1","semantic_revision":1,"policy_version":1,"manifest_hash":"%s"}`, manifestHash))
+	highWater := sequence
+	checkpoint := RunCheckpoint{
+		RunID: "run", CacheIdentity: "cache-v2", ExpectedHighWater: &sequence,
+		ModelHistory: ModelHistory{Messages: []message.Message{message.NewText(message.RoleAssistant, "semantic state")}},
+		SemanticCommit: &SemanticCommit{
+			CheckpointID: "semantic-1", BaseRevision: 0, Cursor: cursor,
+			State: state, Patch: patch, SourceDigest: digest,
+		},
+		Manifest: &ContextManifestRecord{
+			ID: "manifest-1", RunID: "run", CanonicalHighWater: &highWater, SemanticRevision: 1,
+			PolicyVersion: 1, ManifestHash: manifestHash, Data: manifestData,
+		},
+	}
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	assertSemanticCheckpointPersisted(t, ctx, service, checkpoint, state, digest, sequence)
+	assertStaleSemanticCheckpointRejected(t, ctx, service, checkpoint, state, cursor, digest)
+}
+
+func assertSemanticCheckpointPersisted(t *testing.T, ctx context.Context, service *Service, checkpoint RunCheckpoint, state json.RawMessage, digest string, sequence int64) {
+	t.Helper()
+	assertSemanticState(t, ctx, service, state, digest, sequence)
+	assertSemanticEvent(t, ctx, service, digest)
+	assertSemanticManifest(t, ctx, service)
+	assertSemanticProjection(t, ctx, service, checkpoint)
+}
+
+func assertSemanticState(t *testing.T, ctx context.Context, service *Service, state json.RawMessage, digest string, sequence int64) {
+	t.Helper()
+	semantic, err := service.LoadSemanticCheckpoint(ctx, "session")
+	if err != nil || semantic.Revision != 1 || semantic.ID != "semantic-1" || semantic.Cursor.CanonicalSequence != sequence || !bytes.Equal(semantic.State, state) {
+		t.Fatalf("semantic checkpoint=%+v err=%v", semantic, err)
+	}
+}
+
+func assertSemanticEvent(t *testing.T, ctx context.Context, service *Service, digest string) {
+	t.Helper()
+	events, err := service.ListSemanticStateEvents(ctx, "session")
+	if err != nil || len(events) != 1 || events[0].SourceDigest != digest {
+		t.Fatalf("semantic events=%+v err=%v", events, err)
+	}
+}
+
+func assertSemanticManifest(t *testing.T, ctx context.Context, service *Service) {
+	t.Helper()
+	manifest, err := service.LoadActiveContextManifest(ctx, "session")
+	if err != nil || manifest.ID != "manifest-1" || manifest.SemanticRevision != 1 {
+		t.Fatalf("active manifest=%+v err=%v", manifest, err)
+	}
+}
+
+func assertSemanticProjection(t *testing.T, ctx context.Context, service *Service, checkpoint RunCheckpoint) {
+	t.Helper()
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil || projection.ModelHistory.WireVersion != CurrentWireVersion || projection.ModelHistory.ContextManifestHash != checkpoint.Manifest.ManifestHash || projection.ModelHistory.SemanticRevision != 1 {
+		t.Fatalf("model history=%+v err=%v", projection.ModelHistory, err)
+	}
+}
+
+func assertStaleSemanticCheckpointRejected(t *testing.T, ctx context.Context, service *Service, checkpoint RunCheckpoint, state json.RawMessage, cursor WriterCursorV1, digest string) {
+	t.Helper()
+	stale := checkpoint
+	stale.CacheIdentity = "cache-stale"
+	staleDigest := strings.Repeat("c", 64)
+	stalePatch, err := json.Marshal(map[string]any{
+		"version": 1, "base_revision": 0, "through": cursor, "source_digest": staleDigest, "operations": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.SemanticCommit = &SemanticCommit{CheckpointID: "semantic-stale", BaseRevision: 0, Cursor: cursor, State: state, Patch: stalePatch, SourceDigest: staleDigest}
+	if err := service.SaveRunCheckpoint(ctx, "session", stale); !errors.Is(err, ErrRunCheckpointStale) {
+		t.Fatalf("stale semantic commit error=%v", err)
+	}
+	unchanged, err := service.LoadSemanticCheckpoint(ctx, "session")
+	if err != nil || unchanged.Revision != 1 || unchanged.SourceDigest != digest {
+		t.Fatalf("stale commit mutated state=%+v err=%v", unchanged, err)
+	}
+}
+
+func TestWriterCursorRejectsBackwardTieBreakers(t *testing.T) {
+	current := WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-b", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-b"}
+	if cursorAtOrAfter(WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-a", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-b"}, current) {
+		t.Fatal("tool cursor accepted a lexicographically older tie")
+	}
+	if cursorAtOrAfter(WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-b", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-a"}, current) {
+		t.Fatal("subagent cursor accepted a lexicographically older tie")
 	}
 }
 

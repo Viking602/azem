@@ -25,6 +25,11 @@ type BuildOptions struct {
 	ToolCallItemID                 func(string) string
 }
 
+type ImageAttachment struct {
+	Data      []byte
+	MediaType string
+}
+
 const (
 	UsageReporterExtraKey          = "azem_usage_reporter"
 	AttachmentRootExtraKey         = "azem_attachment_root"
@@ -334,43 +339,75 @@ func decodeWireAttachments(meta map[string]string) ([]wireAttachment, error) {
 }
 
 func wireInputImage(att wireAttachment, attachmentRoot string) (map[string]any, error) {
+	image, err := loadImageAttachment(att, attachmentRoot)
+	if err != nil {
+		return nil, err
+	}
+	url := "data:" + image.MediaType + ";base64," + base64.StdEncoding.EncodeToString(image.Data)
+	return map[string]any{
+		"type":      "input_image",
+		"image_url": url,
+		"detail":    "auto",
+	}, nil
+}
+
+func LoadImageAttachments(metadata map[string]string, attachmentRoot string) ([]ImageAttachment, error) {
+	attachments, err := decodeWireAttachments(metadata)
+	if err != nil {
+		return nil, err
+	}
+	if len(attachments) > maxWireImages {
+		return nil, fmt.Errorf("responses request has %d images; maximum is %d", len(attachments), maxWireImages)
+	}
+	images := make([]ImageAttachment, 0, len(attachments))
+	for _, attachment := range attachments {
+		image, err := loadImageAttachment(attachment, attachmentRoot)
+		if err != nil {
+			return nil, err
+		}
+		images = append(images, image)
+	}
+	return images, nil
+}
+
+func loadImageAttachment(att wireAttachment, attachmentRoot string) (ImageAttachment, error) {
 	path := strings.TrimSpace(att.Path)
 	if path == "" {
-		return nil, fmt.Errorf("image attachment %q is missing a path", att.Name)
+		return ImageAttachment{}, fmt.Errorf("image attachment %q is missing a path", att.Name)
 	}
 	if attachmentRoot == "" {
-		return nil, fmt.Errorf("image attachment %q has no trusted attachment root", att.Name)
+		return ImageAttachment{}, fmt.Errorf("image attachment %q has no trusted attachment root", att.Name)
 	}
 	root, err := filepath.EvalSymlinks(attachmentRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolve attachment root: %w", err)
+		return ImageAttachment{}, fmt.Errorf("resolve attachment root: %w", err)
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve image %q: %w", firstNonEmpty(att.Name, path), err)
+		return ImageAttachment{}, fmt.Errorf("resolve image %q: %w", firstNonEmpty(att.Name, path), err)
 	}
 	relative, err := filepath.Rel(root, resolved)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return nil, fmt.Errorf("image attachment %q is outside the trusted attachment root", firstNonEmpty(att.Name, path))
+		return ImageAttachment{}, fmt.Errorf("image attachment %q is outside the trusted attachment root", firstNonEmpty(att.Name, path))
 	}
 	file, err := os.Open(resolved)
 	if err != nil {
-		return nil, fmt.Errorf("read image %q: %w", firstNonEmpty(att.Name, path), err)
+		return ImageAttachment{}, fmt.Errorf("read image %q: %w", firstNonEmpty(att.Name, path), err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxWireImageBytes {
-		return nil, fmt.Errorf("image %q is not a regular file within the %d MiB limit", firstNonEmpty(att.Name, path), maxWireImageBytes>>20)
+		return ImageAttachment{}, fmt.Errorf("image %q is not a regular file within the %d MiB limit", firstNonEmpty(att.Name, path), maxWireImageBytes>>20)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxWireImageBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read image %q: %w", firstNonEmpty(att.Name, path), err)
+		return ImageAttachment{}, fmt.Errorf("read image %q: %w", firstNonEmpty(att.Name, path), err)
 	}
 	if len(data) == 0 {
-		return nil, fmt.Errorf("image %q is empty", firstNonEmpty(att.Name, path))
+		return ImageAttachment{}, fmt.Errorf("image %q is empty", firstNonEmpty(att.Name, path))
 	}
 	if len(data) > maxWireImageBytes {
-		return nil, fmt.Errorf("image %q exceeds the %d MiB limit", firstNonEmpty(att.Name, path), maxWireImageBytes>>20)
+		return ImageAttachment{}, fmt.Errorf("image %q exceeds the %d MiB limit", firstNonEmpty(att.Name, path), maxWireImageBytes>>20)
 	}
 	mimeType := strings.ToLower(strings.TrimSpace(strings.SplitN(http.DetectContentType(data[:min(len(data), 512)]), ";", 2)[0]))
 	if mimeType == "image/jpg" {
@@ -379,14 +416,9 @@ func wireInputImage(att wireAttachment, attachmentRoot string) (map[string]any, 
 	switch mimeType {
 	case "image/png", "image/jpeg", "image/gif", "image/webp":
 	default:
-		return nil, fmt.Errorf("image %q has unsupported detected type %q", firstNonEmpty(att.Name, path), mimeType)
+		return ImageAttachment{}, fmt.Errorf("image %q has unsupported detected type %q", firstNonEmpty(att.Name, path), mimeType)
 	}
-	url := "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
-	return map[string]any{
-		"type":      "input_image",
-		"image_url": url,
-		"detail":    "auto",
-	}, nil
+	return ImageAttachment{Data: data, MediaType: mimeType}, nil
 }
 
 func firstNonEmpty(values ...string) string {

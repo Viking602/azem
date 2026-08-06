@@ -2177,7 +2177,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		return m.beginAction(Action{Kind: ActionListSessions})
-	case "compact":
+	case "compact", "rebuild":
 		return m.beginAction(Action{Kind: ActionCompact, Target: m.sessionID})
 	case "memory":
 		return m.beginAction(Action{Kind: ActionListMemories, Target: strings.Join(command.Args, " ")})
