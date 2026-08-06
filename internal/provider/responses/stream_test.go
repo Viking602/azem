@@ -80,6 +80,42 @@ func TestStreamAssemblesCrossChunkToolCallAndUsage(t *testing.T) {
 	}
 }
 
+func TestStreamPreservesCommentaryAndFinalAnswerPhases(t *testing.T) {
+	frames := strings.Join([]string{
+		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"commentary","role":"assistant","phase":"commentary","content":[]}}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"delta":"checking"}`,
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"answer","role":"assistant","phase":"final_answer","content":[]}}`,
+		`data: {"type":"response.output_text.delta","output_index":1,"delta":"done"}`,
+		`data: {"type":"response.completed","response":{"id":"response-1","status":"completed"}}`,
+	}, "\n\n") + "\n\n"
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := NewStream(ctx, cancel, &chunkBody{chunks: [][]byte{[]byte(frames)}})
+
+	commentary, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commentary.Kind != hyprovider.EventTextDelta || commentary.Text != "checking" || commentary.TextPhase != hyprovider.TextPhaseCommentary {
+		t.Fatalf("commentary=%#v", commentary)
+	}
+
+	answer, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer.Kind != hyprovider.EventTextDelta || answer.Text != "done" || answer.TextPhase != hyprovider.TextPhaseFinalAnswer {
+		t.Fatalf("answer=%#v", answer)
+	}
+
+	done, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Kind != hyprovider.EventDone {
+		t.Fatalf("done=%#v", done)
+	}
+}
+
 func TestStreamCacheReportedDistinguishesMissingFromExplicitZero(t *testing.T) {
 	for _, tc := range []struct {
 		name, details string

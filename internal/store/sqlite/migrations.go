@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 16
+const schemaVersion = 19
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -317,6 +317,73 @@ var migrations = []string{
 	);`,
 	`ALTER TABLE provider_requests ADD COLUMN cache_write_reported INTEGER NOT NULL DEFAULT 0;
 	UPDATE provider_requests SET cache_write_reported=1 WHERE cache_write_tokens<>0;`,
+	`CREATE TABLE session_ui_state (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+		pinned INTEGER NOT NULL DEFAULT 0,
+		archived INTEGER NOT NULL DEFAULT 0,
+		unread INTEGER NOT NULL DEFAULT 0
+	);`,
+	`CREATE TABLE agent_definition_snapshots (
+		definition_id TEXT NOT NULL,
+		version TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		data BLOB NOT NULL,
+		PRIMARY KEY(definition_id,version)
+	);
+	CREATE INDEX agent_definition_snapshots_created
+		ON agent_definition_snapshots(created_at,definition_id,version);
+	CREATE TABLE admission_reservations (
+		id TEXT PRIMARY KEY,
+		agent_id TEXT NOT NULL,
+		run_id TEXT NOT NULL,
+		state TEXT NOT NULL,
+		version INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		data BLOB NOT NULL,
+		UNIQUE(agent_id,run_id)
+	);
+	CREATE INDEX admission_reservations_agent_state
+		ON admission_reservations(agent_id,state,created_at,id);
+	CREATE INDEX admission_reservations_expiry
+		ON admission_reservations(state,expires_at,id);
+	CREATE TABLE resource_claims (
+		id TEXT PRIMARY KEY,
+		resource_key TEXT NOT NULL,
+		run_id TEXT NOT NULL,
+		task_id TEXT NOT NULL,
+		lease_id TEXT NOT NULL,
+		holder_id TEXT NOT NULL,
+		mode TEXT NOT NULL,
+		state TEXT NOT NULL,
+		version INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		data BLOB NOT NULL
+	);
+	CREATE INDEX resource_claims_owner
+		ON resource_claims(run_id,task_id,holder_id,created_at,id);
+	CREATE INDEX resource_claims_lease_state
+		ON resource_claims(lease_id,state,id);
+	CREATE INDEX resource_claims_key_state_expiry
+		ON resource_claims(resource_key,state,expires_at,id);`,
+	`CREATE TABLE desktop_projects (
+		workspace TEXT PRIMARY KEY,
+		updated_at INTEGER NOT NULL
+	);
+	CREATE TABLE session_workspaces (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+		workspace TEXT NOT NULL REFERENCES desktop_projects(workspace) ON DELETE RESTRICT,
+		assigned_at INTEGER NOT NULL
+	);
+	CREATE INDEX session_workspaces_workspace ON session_workspaces(workspace,assigned_at DESC,session_id);
+	INSERT INTO desktop_projects(workspace,updated_at)
+		SELECT anchor,MAX(updated_at) FROM workspace_session_state WHERE TRIM(anchor)<>'' GROUP BY anchor;
+	INSERT INTO session_workspaces(session_id,workspace,assigned_at)
+		SELECT session_id,anchor,updated_at FROM workspace_session_state WHERE TRIM(anchor)<>''
+		ON CONFLICT(session_id) DO NOTHING;`,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {

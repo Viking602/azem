@@ -122,6 +122,27 @@ func TestUIPreferencesPersistAndRestore(t *testing.T) {
 	}
 }
 
+func TestQueueModePreferencePersistsAndRestores(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	service := NewService(context.Background(), config.Default())
+	service.SetConfigPath(configPath)
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetQueueMode, Target: "guide"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetQueueMode, Target: "later"}); err == nil {
+		t.Fatal("invalid queue mode accepted")
+	}
+	persisted, err := config.Load(configPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewService(context.Background(), persisted)
+	if restarted.cfg.Defaults.QueueMode != "guide" {
+		t.Fatalf("restored queue mode = %q", restarted.cfg.Defaults.QueueMode)
+	}
+}
+
 func TestHistoricalEvidenceIsBoundedStructuredDataAndExcludedFromTeamPrompt(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
@@ -315,6 +336,62 @@ func TestPersistRecapGeneratesConciseSummaryAndEmitsUpdatedEvent(t *testing.T) {
 		event.Recap.Summary == fullAnswer || event.Recap.Revision != 1 ||
 		event.Recap.Goal != "Ship recap" || event.Recap.OpenItems != "in_progress: Run focused tests\npending: Open PR" {
 		t.Fatalf("recap update event = %#v", event)
+	}
+}
+
+func TestFirstTurnGeneratesTitleAndEmitsUpdatedSessionList(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	requests := make(chan titleGenerationRequest, 1)
+	service.titleGenerator = func(_ context.Context, request titleGenerationRequest) (string, error) {
+		requests <- request
+		return "Generate immediate session titles", nil
+	}
+
+	runID, err := service.StartConfiguredTurn(TurnRequest{
+		SessionID: "title-session", Prompt: "The sidebar title should update immediately",
+		Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := <-requests
+	if generated.SessionID != "title-session" || generated.RunID != runID || generated.Prompt != "The sidebar title should update immediately" {
+		t.Fatalf("title request = %#v", generated)
+	}
+
+	eventCtx, cancelEvents := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelEvents()
+	foundTitle := false
+	for !foundTitle {
+		event, err := service.NextEvent(eventCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind != EventSessionLoaded || event.State != "list" {
+			continue
+		}
+		var listed []session.Session
+		if err := json.Unmarshal([]byte(event.Data["sessions"]), &listed); err != nil {
+			t.Fatal(err)
+		}
+		foundTitle = len(listed) == 1 && listed[0].ID == "title-session" && listed[0].Title == "Generate immediate session titles"
+	}
+	saved, err := sessions.LoadSession(ctx, "title-session")
+	if err != nil || saved.Title != "Generate immediate session titles" {
+		t.Fatalf("generated title = %q, error=%v", saved.Title, err)
+	}
+	shutdownCtx, cancelShutdown := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelShutdown()
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -533,6 +610,49 @@ func TestNewSessionStaysEphemeralUntilFirstTurn(t *testing.T) {
 	}
 	if resumed.Kind != EventSessionLoaded || resumed.State != "loaded" || resumed.SessionID != event.SessionID || resumed.Data["blocks"] == "[]" {
 		t.Fatalf("resume event = %+v", resumed)
+	}
+}
+
+func TestResumeSessionProjectsGlobalActiveRunOwner(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB())
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		if err := store.Close(shutdownCtx); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	for _, id := range []string{"session-a", "session-b"} {
+		if _, err := sessions.Ensure(ctx, session.Session{ID: id, Title: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service.mu.Lock()
+	service.activeRun = "run-a"
+	service.activeSession = "session-a"
+	service.mu.Unlock()
+	if err := service.emitSession(ctx, "session-b"); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventSessionLoaded || event.SessionID != "session-b" ||
+		event.Data["active"] != "false" ||
+		event.Data["globalActiveRunID"] != "run-a" ||
+		event.Data["globalActiveSessionID"] != "session-a" {
+		t.Fatalf("foreign active-run projection = %+v", event)
 	}
 }
 
@@ -1126,12 +1246,15 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := []string{event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Role, event.ModelRoutes[3].Role, event.ModelRoutes[4].Role}; !reflect.DeepEqual(got, []string{"plan", "compaction", "alpha", "off", "zeta"}) {
+	if got := []string{
+		event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Scope,
+		event.ModelRoutes[3].Role, event.ModelRoutes[4].Role, event.ModelRoutes[5].Role,
+	}; !reflect.DeepEqual(got, []string{"title", "plan", "compaction", "alpha", "off", "zeta"}) {
 		t.Fatalf("route order = %v", got)
 	}
 	clone := event.Clone()
-	clone.ModelRoutes[0].Route.Model = "changed"
-	if event.ModelRoutes[0].Route.Model != "architect" {
+	clone.ModelRoutes[1].Route.Model = "changed"
+	if event.ModelRoutes[1].Route.Model != "architect" {
 		t.Fatal("event clone mutated source routes")
 	}
 	if event.Data["subagent_max_concurrency"] != "2" {
@@ -1207,6 +1330,62 @@ func TestChatGPTFastModeActionPersistsAndUpdatesRuntime(t *testing.T) {
 	}
 }
 
+func TestSessionPreferencesActionPersistsDefaultsAndSession(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	store, err := sqlitestore.Open(ctx, filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close(ctx) })
+	sessions := session.NewService(store.DB())
+	service := NewService(ctx, config.Default())
+	service.SetConfigPath(path)
+	service.AttachDurable(sessions, nil)
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "session-prefs", Title: "Prefs", ProviderID: "chatgpt", ModelID: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(ctx, Action{
+		Kind: ActionSetSessionPreferences, SessionID: "session-prefs",
+		Route: &ModelRouteEntry{Route: config.ModelRouteConfig{Provider: "grok", Model: "grok-4.20", Reasoning: "medium"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if service.cfg.Defaults.Provider != "grok" || service.cfg.Defaults.Model != "grok-4.20" || service.cfg.Defaults.Reasoning != "medium" {
+		t.Fatalf("in-memory defaults = %#v", service.cfg.Defaults)
+	}
+	loaded, err := config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Defaults.Provider != "grok" || loaded.Defaults.Model != "grok-4.20" || loaded.Defaults.Reasoning != "medium" {
+		t.Fatalf("persisted defaults = %#v", loaded.Defaults)
+	}
+	row, err := sessions.LoadSession(ctx, "session-prefs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ProviderID != "grok" || row.ModelID != "grok-4.20" || row.Reasoning != "medium" || row.AgentMode != "single" {
+		t.Fatalf("session preferences = %#v", row)
+	}
+	// Blank sessions (not yet in the store) should still update defaults without error.
+	if err := service.ExecuteAction(ctx, Action{
+		Kind: ActionSetSessionPreferences, SessionID: "ephemeral-blank",
+		Route: &ModelRouteEntry{Route: config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if service.cfg.Defaults.Model != "gpt-5.6-luna" || service.cfg.Defaults.Reasoning != "low" {
+		t.Fatalf("blank-session defaults = %#v", service.cfg.Defaults)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSessionPreferences}); err == nil {
+		t.Fatal("missing route was accepted")
+	}
+}
+
 func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -1246,6 +1425,9 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	if listed.Kind != EventGitBranches || listed.State != "listed" || listed.Text != "main" || listed.WorkspaceDirty {
 		t.Fatalf("listed branch event = %#v", listed)
 	}
+	if listed.Data["additions"] != "0" || listed.Data["deletions"] != "0" || listed.Data["changed_files"] != "0" {
+		t.Fatalf("clean workspace line changes = %#v", listed.Data)
+	}
 	if got := []GitBranchEntry{{Name: "feature"}, {Name: "main", Current: true}}; !reflect.DeepEqual(listed.GitBranches, got) {
 		t.Fatalf("branches = %#v, want %#v", listed.GitBranches, got)
 	}
@@ -1258,6 +1440,9 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	if err := os.WriteFile(tracked, []byte("dirty\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "untracked.txt"), []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	err = service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "feature"})
 	if !errors.Is(err, ErrDirtyWorkspace) {
 		t.Fatalf("dirty switch error = %v", err)
@@ -1268,6 +1453,9 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	}
 	if blocked.Kind != EventGitBranches || blocked.State != "dirty_confirmation_required" || !blocked.WorkspaceDirty || blocked.Text != "main" {
 		t.Fatalf("dirty branch event = %#v", blocked)
+	}
+	if blocked.Data["additions"] != "3" || blocked.Data["deletions"] != "1" || blocked.Data["changed_files"] != "2" {
+		t.Fatalf("dirty workspace line changes = %#v", blocked.Data)
 	}
 
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSwitchGitBranch, Target: "feature", Decision: "confirm_dirty"}); err != nil {
@@ -1303,6 +1491,51 @@ func TestGitBranchActionsListGuardAndSwitch(t *testing.T) {
 	}
 }
 
+func TestCreateGitBranchAction(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	for _, arguments := range [][]string{
+		{"init", "--initial-branch=main"},
+		{"config", "user.email", "azem@example.test"},
+		{"config", "user.name", "Azem Test"},
+	} {
+		if _, err := gitOutput(ctx, root, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{
+		{"add", "tracked.txt"},
+		{"commit", "-m", "base"},
+	} {
+		if _, err := gitOutput(ctx, root, arguments...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Default()
+	cfg.Workspace.Root = root
+	service := NewService(ctx, cfg)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionCreateGitBranch, Target: "codex/gui-desktop-experience"}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Kind != EventGitBranches || created.State != "created" || created.Text != "codex/gui-desktop-experience" {
+		t.Fatalf("created branch event = %#v", created)
+	}
+	current, err := gitOutput(ctx, root, "branch", "--show-current")
+	if err != nil || strings.TrimSpace(string(current)) != "codex/gui-desktop-experience" {
+		t.Fatalf("current branch = %q, error=%v", current, err)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionCreateGitBranch, Target: "bad branch name"}); err == nil {
+		t.Fatal("invalid branch name was accepted")
+	}
+}
+
 func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 	cfg := config.Default()
 	cfg.Agents.Subagents.Roles = map[string]config.SubagentRoleConfig{
@@ -1320,8 +1553,8 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes := service.modelRouteEntries()
-	if routes[2].Route != (config.ModelRouteConfig{}) {
-		t.Fatalf("route not reset: %+v", routes[2])
+	if routes[3].Route != (config.ModelRouteConfig{}) {
+		t.Fatalf("route not reset: %+v", routes[3])
 	}
 	service.mu.Lock()
 	_, legacyExists := service.cfg.Agents.Subagents.Models["explore"]
@@ -1341,7 +1574,7 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetModelRoute, Route: invalid}); err == nil {
 		t.Fatal("incomplete route unexpectedly succeeded")
 	}
-	if got := service.modelRouteEntries()[2].Route; got != (config.ModelRouteConfig{}) {
+	if got := service.modelRouteEntries()[3].Route; got != (config.ModelRouteConfig{}) {
 		t.Fatalf("validation failure mutated route: %+v", got)
 	}
 }

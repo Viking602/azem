@@ -205,6 +205,51 @@ func sanitizePathComponent(value string) string {
 	return replacer.Replace(value)
 }
 
+// ValidateSessionAttachments accepts only files imported into the submitted
+// session's durable attachment directory. Renderer-supplied paths are otherwise
+// able to cross session boundaries or reference unrelated local files.
+func (s AttachmentStore) ValidateSessionAttachments(sessionID string, atts []session.Attachment) error {
+	if err := ValidateTurnAttachments(atts); err != nil {
+		return err
+	}
+	if len(atts) == 0 {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return fmt.Errorf("session id is required")
+	}
+	if strings.TrimSpace(s.Root) == "" {
+		return fmt.Errorf("attachment store is unavailable")
+	}
+	sessionRoot, err := filepath.Abs(filepath.Join(s.Root, sanitizePathComponent(sessionID)))
+	if err != nil {
+		return fmt.Errorf("resolve session attachment directory: %w", err)
+	}
+	sessionRoot, err = filepath.EvalSymlinks(sessionRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("attachment %q does not belong to session %q", atts[0].Name, sessionID)
+		}
+		return fmt.Errorf("resolve session attachment directory: %w", err)
+	}
+	for _, att := range atts {
+		path, resolveErr := filepath.Abs(filepath.Clean(att.Path))
+		if resolveErr != nil {
+			return fmt.Errorf("resolve attachment %q: %w", att.Name, resolveErr)
+		}
+		path, resolveErr = filepath.EvalSymlinks(path)
+		if resolveErr != nil {
+			return fmt.Errorf("resolve attachment %q: %w", att.Name, resolveErr)
+		}
+		relative, relativeErr := filepath.Rel(sessionRoot, path)
+		if relativeErr != nil || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("attachment %q does not belong to session %q", att.Name, sessionID)
+		}
+	}
+	return nil
+}
+
 func ValidateTurnAttachments(atts []session.Attachment) error {
 	if len(atts) == 0 {
 		return nil

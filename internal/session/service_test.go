@@ -398,6 +398,50 @@ func TestCompleteTurnPersistsModelHistoryWithoutEmptyAssistantBlock(t *testing.T
 	}
 }
 
+func TestCompleteTurnPersistsReasoningBeforeAssistant(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "reasoning.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Reasoning"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "session", Block{
+		Kind: "user", RunID: "run", Content: "explain the change",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	history := ModelHistory{ProviderID: "chatgpt", ModelID: "model", Messages: []message.Message{
+		message.NewText(message.RoleUser, "explain the change"),
+		message.NewText(message.RoleAssistant, "done"),
+	}}
+	if err := service.CompleteTurn(ctx, "session", Block{
+		Kind: "assistant", RunID: "run", Content: "done", Thinking: "**Inspect**\n\nVerify the result.", State: "completed",
+		Data: map[string]string{"startedAt": "1000", "completedAt": "3500", "elapsedMs": "2500"},
+	}, history); err != nil {
+		t.Fatal(err)
+	}
+
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 3 {
+		t.Fatalf("reasoning transcript blocks=%+v", projection.Blocks)
+	}
+	thought, answer := projection.Blocks[1], projection.Blocks[2]
+	if thought.Kind != "thinking" || thought.RunID != "run" || thought.State != "completed" ||
+		thought.Content != "**Inspect**\n\nVerify the result." || thought.Data["elapsedMs"] != "2500" {
+		t.Fatalf("persisted reasoning=%+v", thought)
+	}
+	if answer.Kind != "assistant" || answer.Content != "done" {
+		t.Fatalf("persisted answer=%+v", answer)
+	}
+}
+
 func TestUpsertAgentBlockPreservesLifecyclePosition(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "agents.db"))
@@ -795,4 +839,175 @@ func TestToolTimelineAndWorkspaceSessionSurviveReopen(t *testing.T) {
 	if sessionID != "session" {
 		t.Fatalf("workspace session=%q", sessionID)
 	}
+}
+
+func TestSessionMenuStateAndForkPersist(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "session-menu.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	sourceArtifactID := prepareSessionMenuTest(t, ctx, service)
+
+	listed, err := service.List(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != "source" || listed[0].Title != "Renamed" || !listed[0].Pinned || !listed[0].Archived || !listed[0].Unread {
+		t.Fatalf("session menu state=%#v", listed)
+	}
+	projection, err := service.LoadProjection(ctx, "forked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Session.Title != "Renamed" || len(projection.Blocks) != 1 || !strings.Contains(projection.Blocks[0].Content, "keep this context") {
+		t.Fatalf("forked projection=%#v", projection)
+	}
+	if len(projection.ToolRecords) != 2 {
+		t.Fatalf("forked terminal tool records=%#v", projection.ToolRecords)
+	}
+	var completed, interrupted ToolRecord
+	for _, record := range projection.ToolRecords {
+		switch record.ToolCallID {
+		case "completed":
+			completed = record
+		case "interrupted":
+			interrupted = record
+		}
+	}
+	if completed.State != ToolCompleted || completed.ArtifactID == "" || completed.ArtifactID == sourceArtifactID ||
+		!strings.Contains(completed.Content, completed.ArtifactID) || !bytes.Contains(completed.Arguments, []byte(completed.ArtifactID)) ||
+		!bytes.Contains(completed.Structured, []byte(completed.ArtifactID)) {
+		t.Fatalf("forked completed tool record=%#v", completed)
+	}
+	if interrupted.State != ToolInterrupted {
+		t.Fatalf("forked interrupted tool record=%#v", interrupted)
+	}
+	if strings.Contains(projection.Blocks[0].Content, sourceArtifactID) || !strings.Contains(projection.Blocks[0].Content, completed.ArtifactID) {
+		t.Fatalf("forked block artifact reference=%q", projection.Blocks[0].Content)
+	}
+	artifact, err := service.LoadArtifact(ctx, "forked", completed.ArtifactID)
+	if err != nil || string(artifact.Payload) != "forked artifact payload" {
+		t.Fatalf("forked artifact=%#v error=%v", artifact, err)
+	}
+	if _, err := service.LoadArtifact(ctx, "forked", sourceArtifactID); err == nil {
+		t.Fatal("source artifact ID remained accessible from fork")
+	}
+	history, err := service.SearchHistory(ctx, "forked", "fork artifact", 10, 1000, 4000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var historyArtifactCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM history_fts WHERE session_id='forked' AND source_type='artifact' AND source_id=?`,
+		"artifact:"+completed.ArtifactID).Scan(&historyArtifactCount); err != nil || historyArtifactCount != 1 {
+		t.Fatalf("forked artifact history row count=%d error=%v", historyArtifactCount, err)
+	}
+	foundArtifactHistory := false
+	for _, item := range history {
+		foundArtifactHistory = foundArtifactHistory || item.SourceID == "artifact:"+completed.ArtifactID
+		if strings.Contains(item.SourceID, sourceArtifactID) {
+			t.Fatalf("forked history retained source artifact=%#v", history)
+		}
+	}
+	if !foundArtifactHistory {
+		t.Fatalf("forked artifact history=%#v", history)
+	}
+	if got, err := service.PutArtifact(ctx, "forked", "dedup-run", artifact.Kind, artifact.Payload, "new preview"); err != nil || got.ID != artifact.ID {
+		t.Fatalf("forked artifact dedup=%#v error=%v", got, err)
+	}
+	var artifactCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM context_artifacts WHERE session_id='forked'`).Scan(&artifactCount); err != nil || artifactCount != 1 {
+		t.Fatalf("forked artifact count=%d error=%v", artifactCount, err)
+	}
+	sourceProjection, err := service.LoadProjection(ctx, "source")
+	if err != nil || len(sourceProjection.ToolRecords) != 3 || sourceProjection.Blocks[0].Content != "keep this context artifact:"+sourceArtifactID {
+		t.Fatalf("source projection changed=%#v error=%v", sourceProjection, err)
+	}
+}
+
+func TestRenameIfTitleDoesNotOverwriteManualRename(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "conditional-title.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "New session"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Rename(ctx, "session", "Manual title"); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := service.RenameIfTitle(ctx, "session", "New session", "Generated title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("generated title overwrote a manual rename")
+	}
+	saved, err := service.LoadSession(ctx, "session")
+	if err != nil || saved.Title != "Manual title" {
+		t.Fatalf("session title = %q, error=%v", saved.Title, err)
+	}
+}
+
+func prepareSessionMenuTest(t *testing.T, ctx context.Context, service *Service) string {
+	t.Helper()
+	if _, err := service.Ensure(ctx, Session{ID: "source", Title: "Original"}); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := service.PutArtifact(ctx, "source", "run", "tool_result", []byte("forked artifact payload"), "fork artifact preview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.AppendBlock(ctx, "source", Block{Kind: "user", Content: "keep this context artifact:" + artifact.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "completed", Name: "coding.shell",
+		Arguments: []byte(`{"artifact":"` + artifact.ID + `"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.FinishToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "completed", State: ToolCompleted,
+		Content:    "full output: artifact:" + artifact.ID,
+		Structured: []byte(`{"artifactId":"` + artifact.ID + `"}`), ArtifactID: artifact.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "interrupted", Name: "coding.edit_hashline",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.FinishToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "interrupted", State: ToolInterrupted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "running", Name: "coding.read_file",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Ensure(ctx, Session{ID: "newer", Title: "Newer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Rename(ctx, "source", " Renamed "); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"pinned", "archived", "unread"} {
+		if err := service.SetUIState(ctx, "source", field, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.Fork(ctx, "source", "forked"); err != nil {
+		t.Fatal(err)
+	}
+	return artifact.ID
 }

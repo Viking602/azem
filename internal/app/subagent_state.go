@@ -291,10 +291,11 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	switch frame.Kind {
 	case stream.FrameThinking:
 		active.activity = compactActivity(frame.Thinking)
-		appendAgentDelta(&active.blocks, "thinking", childRunID, "Thinking", frame.Thinking)
+		// Title is a stable kind key; the GUI localizes "thinking" → 思考 / Thinking.
+		appendAgentDelta(&active.blocks, "thinking", childRunID, "thinking", frame.Thinking)
 	case stream.FrameText:
 		active.activity = compactActivity(frame.Text)
-		appendAgentDelta(&active.blocks, "assistant", childRunID, "Assistant", frame.Text)
+		appendAgentDelta(&active.blocks, "assistant", childRunID, "assistant", frame.Text)
 	case stream.FrameToolCall:
 		if frame.ToolCall != nil {
 			active.ToolStarted = true
@@ -319,6 +320,10 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	}
 	r.mu.Unlock()
 	r.persistActivity(id)
+	// Push live roster stats (tool count + elapsed) on tool boundaries and turn ends.
+	if frame.Kind == stream.FrameToolCall || frame.Kind == stream.FrameToolResult || frame.Kind == stream.FrameDone {
+		r.emitLiveState(id, frame.Kind == stream.FrameToolCall || frame.Kind == stream.FrameDone)
+	}
 
 	event := Event{
 		SessionID: sessionID, RunID: childRunID, AgentID: id, State: "running",
@@ -377,6 +382,27 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		}
 		parent.emit(parent.ctx, event)
 	}
+}
+
+// emitLiveState pushes agent_state so the GUI can tick toolCalls / elapsed while streaming.
+// force=true always emits (tool start / turn done); otherwise throttle to avoid event floods.
+func (r *subagentRuntime) emitLiveState(id string, force bool) {
+	r.mu.Lock()
+	active := r.active[id]
+	if active == nil || active.terminalizing {
+		r.mu.Unlock()
+		return
+	}
+	if !force && time.Since(active.lastStateEmit) < 750*time.Millisecond && active.lastEmittedTools == active.run.ToolCalls {
+		r.mu.Unlock()
+		return
+	}
+	active.lastStateEmit = time.Now()
+	active.lastEmittedTools = active.run.ToolCalls
+	run := cloneSubagentRun(active.run)
+	activity := active.activity
+	r.mu.Unlock()
+	r.emitState(run, activity)
 }
 
 func childFrameData(source, parentToolCallID string, values map[string]string) map[string]string {

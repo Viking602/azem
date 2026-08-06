@@ -34,6 +34,11 @@ var (
 	ErrDirtyWorkspace   = errors.New("workspace has uncommitted changes")
 )
 
+type activeGuidanceMessage struct {
+	Text        string
+	Attachments []session.Attachment
+}
+
 type Service struct {
 	cfg                config.Config
 	configPath         string
@@ -43,7 +48,7 @@ type Service struct {
 	mu                 sync.Mutex
 	activeRun          string
 	activeSession      string
-	activeGuidance     []string
+	activeGuidance     []activeGuidanceMessage
 	guidanceGeneration uint64
 	guidanceOpen       bool
 	currentSession     string
@@ -86,6 +91,7 @@ type Service struct {
 	background         *backgroundservice.Manager
 	historySearch      func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error)
 	recapGenerator     func(context.Context, recapGenerationRequest) (string, error)
+	titleGenerator     func(context.Context, titleGenerationRequest) (string, error)
 }
 
 func NewService(parent context.Context, cfg config.Config) *Service {
@@ -219,6 +225,7 @@ func (s *Service) AttachSkills(catalog *skills.Catalog) {
 func (s *Service) AttachProviderRuntime(runtime *ProviderRuntime) {
 	s.providers = runtime
 	if runtime != nil {
+		s.titleGenerator = runtime.GenerateTitle
 		s.recapGenerator = runtime.GenerateRecap
 		runtime.Attach(s, s.mcp, s.subagentStore)
 	}
@@ -312,6 +319,21 @@ func (s *Service) NextEvent(ctx context.Context) (Event, error) {
 
 func (s *Service) StartTurn(prompt string) (string, error) {
 	return s.StartConfiguredTurn(TurnRequest{Prompt: prompt})
+}
+
+// StartAutomatedTurn creates a dedicated durable session for a user-enabled
+// automation such as pull request repair. It uses the configured defaults and
+// still observes the normal approval policy.
+func (s *Service) StartAutomatedTurn(prompt string) (string, string, error) {
+	sessionID, err := randomID("session")
+	if err != nil {
+		return "", "", err
+	}
+	runID, err := s.StartConfiguredTurn(TurnRequest{SessionID: sessionID, Prompt: prompt})
+	if err != nil {
+		return "", "", err
+	}
+	return sessionID, runID, nil
 }
 
 type historicalEvidence struct {
@@ -515,11 +537,8 @@ func sessionProjectionData(projection session.Projection, blocks string) map[str
 	return data
 }
 
-func (s *Service) materializeTurnSession(ctx context.Context, request TurnRequest) error {
-	if s.sessions == nil {
-		return nil
-	}
-	title := strings.TrimSpace(strings.SplitN(request.Prompt, "\n", 2)[0])
+func initialSessionTitle(prompt string) string {
+	title := strings.TrimSpace(strings.SplitN(prompt, "\n", 2)[0])
 	if title == "" {
 		title = "New session"
 	}
@@ -527,9 +546,16 @@ func (s *Service) materializeTurnSession(ctx context.Context, request TurnReques
 	if len(runes) > 80 {
 		title = string(runes[:79]) + "…"
 	}
+	return title
+}
+
+func (s *Service) materializeTurnSession(ctx context.Context, request TurnRequest) error {
+	if s.sessions == nil {
+		return nil
+	}
 	_, err := s.sessions.Ensure(ctx, session.Session{
 		ID:         request.SessionID,
-		Title:      title,
+		Title:      initialSessionTitle(request.Prompt),
 		ProviderID: request.Provider,
 		ModelID:    request.Model,
 		Reasoning:  request.Reasoning,
@@ -538,12 +564,42 @@ func (s *Service) materializeTurnSession(ctx context.Context, request TurnReques
 	return err
 }
 
+func (s *Service) startSessionTitleGeneration(request titleGenerationRequest, currentTitle string) {
+	if s.sessions == nil || s.titleGenerator == nil || currentTitle == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.shuttingDown {
+		s.mu.Unlock()
+		return
+	}
+	generator := s.titleGenerator
+	s.wg.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		generationCtx, cancelGeneration := context.WithTimeout(s.ctx, 30*time.Second)
+		title, err := generator(generationCtx, request)
+		cancelGeneration()
+		if err != nil || title == "" {
+			return
+		}
+		persistCtx, cancelPersist := context.WithTimeout(s.ctx, 2*time.Second)
+		defer cancelPersist()
+		changed, err := s.sessions.RenameIfTitle(persistCtx, request.SessionID, currentTitle, title)
+		if err != nil || !changed {
+			return
+		}
+		_ = s.emitSessionList(persistCtx)
+	}()
+}
+
 func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	request = normalizeTurnRequest(request, s.cfg.Defaults)
 	if request.Prompt == "" && len(request.Images) == 0 {
 		return "", fmt.Errorf("prompt is empty")
 	}
-	if err := ValidateTurnAttachments(request.Images); err != nil {
+	if err := s.attachments.ValidateSessionAttachments(request.SessionID, request.Images); err != nil {
 		return "", err
 	}
 	if request.PlanMode && request.AgentMode != "single" {
@@ -599,12 +655,19 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		s.clearRun("starting")
 		return "", err
 	}
+	autoTitleCurrent := ""
 	if s.sessions != nil {
 		projection, err := s.sessions.LoadProjection(s.ctx, request.SessionID)
 		if err != nil {
 			cancel()
 			s.clearRun("starting")
 			return "", err
+		}
+		if len(projection.Blocks) == 0 {
+			currentTitle := strings.TrimSpace(projection.Session.Title)
+			if currentTitle == "New session" || currentTitle == initialSessionTitle(request.Prompt) {
+				autoTitleCurrent = projection.Session.Title
+			}
 		}
 		request.History = append([]session.Block(nil), projection.Blocks...)
 		request.modelHistory = projection.ModelHistory
@@ -669,6 +732,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 				return "", fmt.Errorf("persist user turn: %w", err)
 			}
 		}
+		s.startSessionTitleGeneration(titleGenerationRequest{SessionID: request.SessionID, RunID: runID, Prompt: request.Prompt}, autoTitleCurrent)
 		handedOff = true
 		go s.runFakeTurn(runCtx, request.SessionID, runID, request.Prompt)
 		return runID, nil
@@ -706,6 +770,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 				return "", fmt.Errorf("persist user turn: %w", err)
 			}
 		}
+		s.startSessionTitleGeneration(titleGenerationRequest{SessionID: request.SessionID, RunID: runID, Prompt: request.Prompt}, autoTitleCurrent)
 		handedOff = true
 		go s.runProviderTeam(runCtx, request, runID, goal, resolution)
 		return runID, nil
@@ -728,6 +793,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	s.activeRun = durableRun.RunID
 	s.guidanceOpen = true
 	s.mu.Unlock()
+	s.startSessionTitleGeneration(titleGenerationRequest{SessionID: request.SessionID, RunID: durableRun.RunID, Prompt: request.Prompt}, autoTitleCurrent)
 	handedOff = true
 	go s.runProviderTurn(runCtx, request, durableRun, engine)
 	return durableRun.RunID, nil
@@ -747,12 +813,22 @@ func (s *Service) persistSessionPreferences(ctx context.Context, request TurnReq
 	return s.sessions.UpdatePreferences(ctx, request.SessionID, request.Provider, request.Model, request.Reasoning, request.AgentMode)
 }
 
-// GuideActiveTurn queues a user message for the next model boundary of the
-// matching active single-agent run without cancelling or replaying completed tools.
+// GuideActiveTurn queues a text-only user message for the next model boundary
+// of the matching active single-agent run.
 func (s *Service) GuideActiveTurn(sessionID, runID, text string) error {
+	return s.GuideActiveTurnWithAttachments(sessionID, runID, text, nil)
+}
+
+// GuideActiveTurnWithAttachments steers the matching active run without
+// cancelling it or replaying completed tools.
+func (s *Service) GuideActiveTurnWithAttachments(sessionID, runID, text string, attachments []session.Attachment) error {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	attachments = CloneAttachments(attachments)
+	if text == "" && len(attachments) == 0 {
 		return fmt.Errorf("guidance message is empty")
+	}
+	if err := s.attachments.ValidateSessionAttachments(sessionID, attachments); err != nil {
+		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -768,28 +844,29 @@ func (s *Service) GuideActiveTurn(sessionID, runID, text string) error {
 	if s.sessions != nil {
 		if _, err := s.sessions.AppendBlock(s.ctx, sessionID, session.Block{
 			Kind: "user", RunID: s.activeRun, Title: "Guidance", Content: text, State: "guidance",
+			Attachments: CloneAttachments(attachments),
 		}); err != nil {
 			return fmt.Errorf("persist guidance message: %w", err)
 		}
 	}
-	s.activeGuidance = append(s.activeGuidance, text)
+	s.activeGuidance = append(s.activeGuidance, activeGuidanceMessage{Text: text, Attachments: attachments})
 	return nil
 }
 
-func (s *Service) drainActiveGuidance(sessionID, runID string) []string {
+func (s *Service) drainActiveGuidance(sessionID, runID string) []activeGuidanceMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID || len(s.activeGuidance) == 0 {
 		return nil
 	}
-	messages := append([]string(nil), s.activeGuidance...)
+	messages := cloneActiveGuidance(s.activeGuidance)
 	s.activeGuidance = nil
 	s.guidanceGeneration++
 	return messages
 }
 
 type activeGuidanceSnapshot struct {
-	values     []string
+	values     []activeGuidanceMessage
 	generation uint64
 }
 
@@ -800,7 +877,7 @@ func (s *Service) peekActiveGuidance(sessionID, runID string) activeGuidanceSnap
 		return activeGuidanceSnapshot{}
 	}
 	return activeGuidanceSnapshot{
-		values: append([]string(nil), s.activeGuidance...), generation: s.guidanceGeneration,
+		values: cloneActiveGuidance(s.activeGuidance), generation: s.guidanceGeneration,
 	}
 }
 
@@ -810,24 +887,32 @@ func (s *Service) acknowledgeActiveGuidance(sessionID, runID string, snapshot ac
 	if snapshot.generation != s.guidanceGeneration || s.activeSession != sessionID || s.activeRun != runID || len(snapshot.values) > len(s.activeGuidance) {
 		return
 	}
-	s.activeGuidance = append([]string(nil), s.activeGuidance[len(snapshot.values):]...)
+	s.activeGuidance = cloneActiveGuidance(s.activeGuidance[len(snapshot.values):])
 	s.guidanceGeneration++
 }
 
-func (s *Service) finishActiveGuidance(sessionID, runID string) []string {
+func (s *Service) finishActiveGuidance(sessionID, runID string) []activeGuidanceMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID {
 		return nil
 	}
 	if len(s.activeGuidance) > 0 {
-		messages := append([]string(nil), s.activeGuidance...)
+		messages := cloneActiveGuidance(s.activeGuidance)
 		s.activeGuidance = nil
 		s.guidanceGeneration++
 		return messages
 	}
 	s.guidanceOpen = false
 	return nil
+}
+
+func cloneActiveGuidance(values []activeGuidanceMessage) []activeGuidanceMessage {
+	cloned := make([]activeGuidanceMessage, len(values))
+	for index, value := range values {
+		cloned[index] = activeGuidanceMessage{Text: value.Text, Attachments: CloneAttachments(value.Attachments)}
+	}
+	return cloned
 }
 
 func (s *Service) CancelActive() bool {
@@ -862,7 +947,7 @@ func (s *Service) HasActiveChildren() bool {
 func (s *Service) CancelActiveWithChildren(children bool) bool {
 	s.mu.Lock()
 	cancel := s.activeEnd
-	sessionID, runID, providers := s.activeSession, s.activeRun, s.providers
+	sessionID, runID, providers, coding := s.activeSession, s.activeRun, s.providers, s.coding
 	if cancel != nil {
 		s.activeCancelIntent = "user"
 	}
@@ -872,6 +957,11 @@ func (s *Service) CancelActiveWithChildren(children bool) bool {
 	}
 	if children && providers != nil && sessionID != "" && runID != "" && runID != "starting" {
 		providers.CancelParentSubagents(sessionID, runID)
+	}
+	if coding != nil && runID != "" && runID != "starting" {
+		cancelCtx, cancelRun := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = coding.CancelTrackedRun(cancelCtx, runID)
+		cancelRun()
 	}
 	cancel()
 	return true

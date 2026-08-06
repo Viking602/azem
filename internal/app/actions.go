@@ -41,10 +41,15 @@ const (
 	ActionNewSession             ActionKind = "new_session"
 	ActionListSessions           ActionKind = "list_sessions"
 	ActionResumeSession          ActionKind = "resume_session"
+	ActionRenameSession          ActionKind = "rename_session"
+	ActionPinSession             ActionKind = "pin_session"
+	ActionArchiveSession         ActionKind = "archive_session"
+	ActionMarkSessionUnread      ActionKind = "mark_session_unread"
 	ActionCompact                ActionKind = "compact"
 	ActionResolveApproval        ActionKind = "resolve_approval"
 	ActionSetApprovalMode        ActionKind = "set_approval_mode"
 	ActionSetLanguage            ActionKind = "set_language"
+	ActionSetQueueMode           ActionKind = "set_queue_mode"
 	ActionReconcileAttempt       ActionKind = "reconcile_attempt"
 	ActionInspectAgent           ActionKind = "inspect_agent"
 	ActionListAgentTypes         ActionKind = "list_agent_types"
@@ -58,17 +63,20 @@ const (
 	ActionRemember               ActionKind = "remember"
 	ActionForgetMemory           ActionKind = "forget_memory"
 	ActionShowRecap              ActionKind = "show_recap"
+	ActionListModels             ActionKind = "list_models"
 	ActionListModelRoutes        ActionKind = "list_model_routes"
 	ActionSetModelRoute          ActionKind = "set_model_route"
 	ActionResetModelRoute        ActionKind = "reset_model_route"
 	ActionSetSubagentConcurrency ActionKind = "set_subagent_concurrency"
 	ActionSetChatGPTFastMode     ActionKind = "set_chatgpt_fast_mode"
+	ActionSetSessionPreferences  ActionKind = "set_session_preferences"
 	ActionListBackground         ActionKind = "list_background"
 	ActionStartBackground        ActionKind = "start_background"
 	ActionStopBackground         ActionKind = "stop_background"
 	ActionLogsBackground         ActionKind = "logs_background"
 	ActionListGitBranches        ActionKind = "list_git_branches"
 	ActionSwitchGitBranch        ActionKind = "switch_git_branch"
+	ActionCreateGitBranch        ActionKind = "create_git_branch"
 )
 
 type Action struct {
@@ -101,6 +109,8 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		return s.emitGitBranches(ctx, "listed")
 	case ActionSwitchGitBranch:
 		return s.switchGitBranch(ctx, action.Target, action.Decision == "confirm_dirty")
+	case ActionCreateGitBranch:
+		return s.createGitBranch(ctx, action.Target)
 	case ActionListBackground:
 		return s.emitBackgroundSnapshot(ctx, "listed")
 	case ActionStartBackground:
@@ -136,6 +146,9 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	case ActionListModelRoutes:
 		s.emit(ctx, s.modelRoutesEvent("listed"))
 		return nil
+	case ActionListModels:
+		s.emitAuthCatalog(ctx)
+		return nil
 	case ActionSetSubagentConcurrency:
 		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))
 		if err != nil || maxConcurrency < 1 {
@@ -148,6 +161,8 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 			return fmt.Errorf("ChatGPT fast mode must be true or false")
 		}
 		return s.updateChatGPTFastMode(ctx, enabled)
+	case ActionSetSessionPreferences:
+		return s.updateSessionPreferences(ctx, action)
 	case ActionSetModelRoute:
 		return s.updateModelRoute(ctx, action.Route, false)
 	case ActionResetModelRoute:
@@ -226,6 +241,26 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		}
 		s.mu.Lock()
 		s.cfg.Defaults.Language = action.Target
+		s.mu.Unlock()
+		return nil
+	case ActionSetQueueMode:
+		if action.Target != "queue" && action.Target != "guide" {
+			return fmt.Errorf("invalid queue mode %q", action.Target)
+		}
+		if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(s.currentSession, ""), func(e *hooks.Envelope) {
+			e.Source, e.FilePath = "user_settings", s.configPath
+		}); err != nil {
+			return err
+		}
+		if s.configPath != "" {
+			if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+				return config.UpdateDefault(s.configPath, "queue_mode", action.Target)
+			}); err != nil {
+				return err
+			}
+		}
+		s.mu.Lock()
+		s.cfg.Defaults.QueueMode = action.Target
 		s.mu.Unlock()
 		return nil
 	case ActionResolveApproval:
@@ -313,8 +348,38 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 	case ActionNewSession:
 		return s.createSession(ctx, action.Target)
 	case ActionResumeSession:
-		return s.emitSession(ctx, action.Target)
+		if err := s.sessions.SetUIState(ctx, action.Target, "unread", false); err != nil {
+			return err
+		}
+		if err := s.emitSession(ctx, action.Target); err != nil {
+			return err
+		}
+		return s.emitSessionList(ctx)
 	case ActionListSessions:
+		return s.emitSessionList(ctx)
+	case ActionRenameSession:
+		if err := s.sessions.Rename(ctx, action.Target, action.Name); err != nil {
+			return err
+		}
+		return s.emitSessionList(ctx)
+	case ActionPinSession:
+		enabled, err := strconv.ParseBool(action.Decision)
+		if err != nil {
+			return fmt.Errorf("pin state must be true or false")
+		}
+		if err := s.sessions.SetUIState(ctx, action.Target, "pinned", enabled); err != nil {
+			return err
+		}
+		return s.emitSessionList(ctx)
+	case ActionArchiveSession:
+		if err := s.sessions.SetUIState(ctx, action.Target, "archived", true); err != nil {
+			return err
+		}
+		return s.emitSessionList(ctx)
+	case ActionMarkSessionUnread:
+		if err := s.sessions.SetUIState(ctx, action.Target, "unread", true); err != nil {
+			return err
+		}
 		return s.emitSessionList(ctx)
 	case ActionCompact:
 		if s.sessions == nil {
@@ -444,11 +509,21 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 }
 
 func (s *Service) emitGitBranches(ctx context.Context, state string) error {
-	branches, current, dirty, err := s.gitBranchSnapshot(ctx)
+	branches, current, dirty, changedFiles, err := s.gitBranchSnapshot(ctx)
 	if err != nil {
 		return err
 	}
-	s.emitGitBranchSnapshot(ctx, state, branches, current, dirty)
+	additions, deletions := 0, 0
+	if dirty {
+		s.mu.Lock()
+		root := s.cfg.Workspace.Root
+		s.mu.Unlock()
+		additions, deletions, err = gitWorkspaceLineChanges(ctx, root)
+		if err != nil {
+			return err
+		}
+	}
+	s.emitGitBranchSnapshot(ctx, state, branches, current, dirty, additions, deletions, changedFiles)
 	return nil
 }
 
@@ -478,9 +553,16 @@ func (s *Service) switchGitBranch(ctx context.Context, target string, confirmDir
 		}
 		s.mu.Unlock()
 	}()
-	branches, current, dirty, err := gitBranchSnapshot(ctx, root)
+	branches, current, dirty, changedFiles, err := gitBranchSnapshot(ctx, root)
 	if err != nil {
 		return err
+	}
+	additions, deletions := 0, 0
+	if dirty {
+		additions, deletions, err = gitWorkspaceLineChanges(ctx, root)
+		if err != nil {
+			return err
+		}
 	}
 	found := false
 	for _, branch := range branches {
@@ -493,11 +575,11 @@ func (s *Service) switchGitBranch(ctx context.Context, target string, confirmDir
 		return fmt.Errorf("unknown local git branch %q", target)
 	}
 	if target == current {
-		s.emitGitBranchSnapshot(ctx, "switched", branches, current, dirty)
+		s.emitGitBranchSnapshot(ctx, "switched", branches, current, dirty, additions, deletions, changedFiles)
 		return nil
 	}
 	if dirty && !confirmDirty {
-		s.emitGitBranchSnapshot(ctx, "dirty_confirmation_required", branches, current, true)
+		s.emitGitBranchSnapshot(ctx, "dirty_confirmation_required", branches, current, true, additions, deletions, changedFiles)
 		return ErrDirtyWorkspace
 	}
 	if _, err := gitOutputLimited(ctx, root, 64*1024, "switch", "--no-guess", "--", target); err != nil {
@@ -506,33 +588,83 @@ func (s *Service) switchGitBranch(ctx context.Context, target string, confirmDir
 	return s.emitGitBranches(ctx, "switched")
 }
 
-func (s *Service) gitBranchSnapshot(ctx context.Context) ([]GitBranchEntry, string, bool, error) {
+func (s *Service) createGitBranch(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("git branch is required")
+	}
+	const branchCreateReservation = "maintenance:create-git-branch"
+	s.mu.Lock()
+	root := s.cfg.Workspace.Root
+	allowWrite := s.cfg.Workspace.AllowWrite
+	if s.activeRun != "" {
+		s.mu.Unlock()
+		return ErrRunActive
+	}
+	if !allowWrite {
+		s.mu.Unlock()
+		return fmt.Errorf("git branch creation is disabled by workspace.allow_write")
+	}
+	s.activeRun = branchCreateReservation
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.activeRun == branchCreateReservation {
+			s.activeRun = ""
+		}
+		s.mu.Unlock()
+	}()
+	if _, err := gitOutputLimited(ctx, root, 1024, "check-ref-format", "--branch", name); err != nil {
+		return fmt.Errorf("invalid git branch name %q", name)
+	}
+	branches, current, _, _, err := gitBranchSnapshot(ctx, root)
+	if err != nil {
+		return err
+	}
+	for _, branch := range branches {
+		if branch.Name == name {
+			if name == current {
+				return s.emitGitBranches(ctx, "switched")
+			}
+			if _, err := gitOutputLimited(ctx, root, 64*1024, "switch", "--no-guess", "--", name); err != nil {
+				return fmt.Errorf("switch git branch to %q: %w", name, err)
+			}
+			return s.emitGitBranches(ctx, "switched")
+		}
+	}
+	if _, err := gitOutputLimited(ctx, root, 64*1024, "switch", "-c", name); err != nil {
+		return fmt.Errorf("create git branch %q: %w", name, err)
+	}
+	return s.emitGitBranches(ctx, "created")
+}
+
+func (s *Service) gitBranchSnapshot(ctx context.Context) ([]GitBranchEntry, string, bool, int, error) {
 	s.mu.Lock()
 	root := s.cfg.Workspace.Root
 	s.mu.Unlock()
 	return gitBranchSnapshot(ctx, root)
 }
 
-func gitBranchSnapshot(ctx context.Context, root string) ([]GitBranchEntry, string, bool, error) {
+func gitBranchSnapshot(ctx context.Context, root string) ([]GitBranchEntry, string, bool, int, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
-		return nil, "", false, fmt.Errorf("workspace root is empty")
+		return nil, "", false, 0, fmt.Errorf("workspace root is empty")
 	}
 	inside, err := gitOutputLimited(ctx, root, 1024, "rev-parse", "--is-inside-work-tree")
 	if err != nil || strings.TrimSpace(string(inside)) != "true" {
 		if err != nil {
-			return nil, "", false, fmt.Errorf("inspect git workspace: %w", err)
+			return nil, "", false, 0, fmt.Errorf("inspect git workspace: %w", err)
 		}
-		return nil, "", false, fmt.Errorf("workspace %q is not a git work tree", root)
+		return nil, "", false, 0, fmt.Errorf("workspace %q is not a git work tree", root)
 	}
 	currentOutput, err := gitOutputLimited(ctx, root, 64*1024, "branch", "--show-current")
 	if err != nil {
-		return nil, "", false, fmt.Errorf("read current git branch: %w", err)
+		return nil, "", false, 0, fmt.Errorf("read current git branch: %w", err)
 	}
 	current := strings.TrimSpace(string(currentOutput))
 	branchOutput, err := gitOutputLimited(ctx, root, 1024*1024, "for-each-ref", "--format=%(refname:short)", "refs/heads")
 	if err != nil {
-		return nil, "", false, fmt.Errorf("list git branches: %w", err)
+		return nil, "", false, 0, fmt.Errorf("list git branches: %w", err)
 	}
 	lines := strings.Split(string(branchOutput), "\n")
 	branches := make([]GitBranchEntry, 0, len(lines))
@@ -552,15 +684,53 @@ func gitBranchSnapshot(ctx context.Context, root string) ([]GitBranchEntry, stri
 	sort.Slice(branches, func(left, right int) bool { return branches[left].Name < branches[right].Name })
 	status, err := gitOutputLimited(ctx, root, 1024*1024, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
-		return nil, "", false, fmt.Errorf("read git workspace status: %w", err)
+		return nil, "", false, 0, fmt.Errorf("read git workspace status: %w", err)
 	}
-	return branches, current, len(status) > 0, nil
+	changedFiles := countPorcelainStatusEntries(status)
+	return branches, current, changedFiles > 0, changedFiles, nil
 }
 
-func (s *Service) emitGitBranchSnapshot(ctx context.Context, state string, branches []GitBranchEntry, current string, dirty bool) {
+func countPorcelainStatusEntries(status []byte) int {
+	if len(status) == 0 {
+		return 0
+	}
+	count := 0
+	for i := 0; i < len(status); {
+		if status[i] == 0 {
+			i++
+			continue
+		}
+		start := i
+		for i < len(status) && status[i] != 0 {
+			i++
+		}
+		entry := status[start:i]
+		count++
+		if i < len(status) {
+			i++ // skip NUL
+		}
+		// Rename/copy records include a second path after the first NUL.
+		if len(entry) >= 1 && (entry[0] == 'R' || entry[0] == 'C') {
+			for i < len(status) && status[i] != 0 {
+				i++
+			}
+			if i < len(status) {
+				i++
+			}
+		}
+	}
+	return count
+}
+
+func (s *Service) emitGitBranchSnapshot(ctx context.Context, state string, branches []GitBranchEntry, current string, dirty bool, additions, deletions, changedFiles int) {
 	s.emit(ctx, Event{
 		Kind: EventGitBranches, State: state, Text: current,
 		GitBranches: branches, WorkspaceDirty: dirty,
+		Data: map[string]string{
+			"additions":     strconv.Itoa(additions),
+			"deletions":     strconv.Itoa(deletions),
+			"changed_files": strconv.Itoa(changedFiles),
+		},
 	})
 }
 
@@ -568,6 +738,7 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entries := []ModelRouteEntry{
+		{Scope: "title", Label: "Title", Route: s.cfg.Agents.Title},
 		{Scope: "plan", Label: "Plan", Route: s.cfg.Agents.Plan},
 		{Scope: "compaction", Label: "Compaction", Route: s.cfg.Agents.Compaction},
 	}
@@ -608,7 +779,7 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "plan" && entry.Scope != "compaction" && entry.Scope != "subagent" {
+	if entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "compaction" && entry.Scope != "subagent" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
 	if entry.Scope != "subagent" && entry.Role != "" {
@@ -651,7 +822,9 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		}
 	}
 	s.mu.Lock()
-	if entry.Scope == "plan" {
+	if entry.Scope == "title" {
+		s.cfg.Agents.Title = route
+	} else if entry.Scope == "plan" {
 		s.cfg.Agents.Plan = route
 	} else if entry.Scope == "compaction" {
 		s.cfg.Agents.Compaction = route
@@ -727,6 +900,54 @@ func (s *Service) updateChatGPTFastMode(ctx context.Context, enabled bool) error
 		s.providers.UpdateChatGPTFastMode(enabled)
 	}
 	s.emit(ctx, s.modelRoutesEvent("updated"))
+	return nil
+}
+
+func (s *Service) updateSessionPreferences(ctx context.Context, action Action) error {
+	if action.Route == nil {
+		return fmt.Errorf("session preferences require provider, model, and reasoning")
+	}
+	provider := strings.TrimSpace(action.Route.Route.Provider)
+	model := strings.TrimSpace(action.Route.Route.Model)
+	reasoning := strings.TrimSpace(action.Route.Route.Reasoning)
+	if provider == "" || model == "" {
+		return fmt.Errorf("session preferences require provider and model")
+	}
+
+	s.mu.Lock()
+	currentSession := firstNonempty(action.SessionID, s.currentSession)
+	agentMode := s.cfg.Defaults.AgentMode
+	s.mu.Unlock()
+
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateSessionModelDefaults(s.configPath, provider, model, reasoning)
+		}); err != nil {
+			return err
+		}
+	}
+
+	s.mu.Lock()
+	s.cfg.Defaults.Provider = provider
+	s.cfg.Defaults.Model = model
+	s.cfg.Defaults.Reasoning = reasoning
+	s.mu.Unlock()
+
+	// Durable sessions keep their own selection; blank/new sessions only exist in
+	// memory until the first turn, so defaults cover restart for those.
+	if s.sessions != nil && currentSession != "" {
+		if existing, err := s.sessions.LoadSession(ctx, currentSession); err == nil {
+			agentMode = firstNonempty(existing.AgentMode, agentMode)
+			if err := s.sessions.UpdatePreferences(ctx, currentSession, provider, model, reasoning, agentMode); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -832,6 +1053,28 @@ func (s *Service) createSession(ctx context.Context, title string) error {
 	return nil
 }
 
+func (s *Service) ForkSession(ctx context.Context, sourceID string, activate bool) (string, error) {
+	if s.sessions == nil {
+		return "", fmt.Errorf("session store is unavailable")
+	}
+	id, err := randomID("session")
+	if err != nil {
+		return "", err
+	}
+	if err := s.sessions.Fork(ctx, sourceID, id); err != nil {
+		return "", err
+	}
+	if activate {
+		if err := s.emitSession(ctx, id); err != nil {
+			return "", err
+		}
+	}
+	if err := s.emitSessionList(ctx); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 func (s *Service) emitSession(ctx context.Context, id string) error {
 	if s.sessions == nil {
 		return fmt.Errorf("session store is unavailable")
@@ -859,9 +1102,23 @@ func (s *Service) emitSession(ctx context.Context, id string) error {
 		return err
 	}
 	s.rememberSessionUsage(id, projection.Usage)
+	data := sessionProjectionData(projection, string(blocks))
+	s.mu.Lock()
+	active := s.activeRun != "" && s.activeSession == id
+	activeRunID := s.activeRun
+	activeSessionID := s.activeSession
+	s.mu.Unlock()
+	data["active"] = strconv.FormatBool(active)
+	if active {
+		data["activeRunID"] = activeRunID
+	}
+	if activeRunID != "" && activeSessionID != "" {
+		data["globalActiveRunID"] = activeRunID
+		data["globalActiveSessionID"] = activeSessionID
+	}
 	s.emit(ctx, Event{
 		Kind: EventSessionLoaded, SessionID: id, State: "loaded",
-		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,
+		Data: data, AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,
 	})
 	if err := s.switchSessionHooks(ctx, id, "resume", projection.Session.ModelID); err != nil {
 		return err
@@ -903,8 +1160,26 @@ func (s *Service) emitSessionList(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.emit(ctx, Event{Kind: EventSessionLoaded, State: "list", Data: map[string]string{"sessions": string(encoded)}})
+	projects, err := s.sessions.Projects(ctx)
+	if err != nil {
+		return err
+	}
+	encodedProjects, err := json.Marshal(projects)
+	if err != nil {
+		return err
+	}
+	s.emit(ctx, Event{Kind: EventSessionLoaded, State: "list", Data: map[string]string{"sessions": string(encoded), "projects": string(encodedProjects)}})
 	return nil
+}
+
+func (s *Service) RememberProject(ctx context.Context, workspace string) error {
+	if s.sessions == nil {
+		return fmt.Errorf("session store is unavailable")
+	}
+	if err := s.sessions.TouchProject(ctx, workspace); err != nil {
+		return err
+	}
+	return s.emitSessionList(ctx)
 }
 
 func (s *Service) login(ctx context.Context, provider string) error {

@@ -7,13 +7,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/coding"
+	hyprovider "github.com/Viking602/venat/provider"
+	"github.com/Viking602/venat/provider/scripted"
 	"github.com/Viking602/venat/tool"
+	hyworker "github.com/Viking602/venat/worker"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
@@ -375,8 +381,9 @@ func TestConcurrentRunsKeepTasksLeasesAndApprovalsIsolated(t *testing.T) {
 		}
 		runs = append(runs, outcome.run)
 	}
-	if runs[0].RunID == runs[1].RunID || runs[0].TaskID == runs[1].TaskID || runs[0].LeaseID == runs[1].LeaseID {
-		t.Fatalf("run identities overlap: %#v %#v", runs[0], runs[1])
+	if runs[0].RunID == runs[1].RunID || runs[0].TaskID == runs[1].TaskID ||
+		runs[0].LeaseID != "" || runs[1].LeaseID != "" {
+		t.Fatalf("run identities or eager leases overlap: %#v %#v", runs[0], runs[1])
 	}
 
 	calls := make([]tool.Call, 2)
@@ -623,7 +630,7 @@ func TestResumeRunReacquiresRecoveredTaskWithoutChangingRunID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resumed.RunID != run.RunID || resumed.TaskID != run.TaskID || resumed.LeaseID == run.LeaseID {
+	if resumed.RunID != run.RunID || resumed.TaskID != run.TaskID || resumed.EnvelopeID == "" || resumed.LeaseID != "" {
 		t.Fatalf("resumed run=%+v original=%+v", resumed, run)
 	}
 	if err := recovered.CompleteRun(ctx, resumed, "done after recovery", nil); err != nil {
@@ -696,7 +703,7 @@ func TestCompleteRunPersistsTerminalState(t *testing.T) {
 	}
 }
 
-func TestFinalizeReportedRunRepairsPostReportCrashWindow(t *testing.T) {
+func TestExecuteRunUsesCoordinatorLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
@@ -707,111 +714,180 @@ func TestFinalizeReportedRunRepairsPostReportCrashWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer service.Close(ctx)
-	run, err := service.StartRun(ctx, "finalize reported")
+	claim := api.ResourceClaimSpec{Key: "workspace:test", Mode: api.ResourceClaimExclusive}
+	run, err := service.StartRunWithMetadata(ctx, "execute through coordinator", nil, RunExecutionPolicy{
+		ResourceClaims: []api.ResourceClaimSpec{claim},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := run.stopRunLeaseHeartbeat(); err != nil {
+	if run.LeaseID != "" {
+		t.Fatalf("StartRun eagerly acquired lease %q", run.LeaseID)
+	}
+	task, err := service.Runner().Task(ctx, run.RunID, run.TaskID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.runner.HeartbeatTaskExecution(ctx, api.HeartbeatTaskExecutionCommand{LeaseID: run.LeaseID, HolderID: run.HolderID, TTL: service.runLeaseTTL}); err != nil {
-		t.Fatal(err)
+	if !reflect.DeepEqual(task.ResourceClaims, []api.ResourceClaimSpec{claim}) {
+		t.Fatalf("task resource claims=%#v", task.ResourceClaims)
 	}
-	if err := service.runner.SubmitTypedReport(ctx, api.SubmitTypedReportCommand{
-		RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID, HolderType: api.HolderAgent,
-		HolderID: run.HolderID, TaskVersion: run.TaskVersion,
-		Report: api.TypedReport{Status: api.ReportStatusSuccess, Summary: "already committed"},
-	}); err != nil {
-		t.Fatal(err)
+	engine := hyagent.Engine{
+		Provider: scripted.New([]hyprovider.Event{
+			{Kind: hyprovider.EventTextDelta, Text: "done"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		}),
+		Model: "test-model",
 	}
-	if err := service.FinalizeReportedRun(ctx, run.RunID); err != nil {
-		t.Fatal(err)
+	outcome, err := service.ExecuteRun(ctx, run, engine, nil)
+	if err != nil {
+		t.Fatalf("ExecuteRun: %v", err)
+	}
+	if outcome.State != hyworker.ExecutionCompleted || run.LeaseID == "" {
+		t.Fatalf("outcome=%+v run=%+v", outcome, run)
 	}
 	projection, err := service.Recover(ctx, run.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if projection.Run.Status != api.RunStatusCompleted {
-		t.Fatalf("repaired run status=%s", projection.Run.Status)
+		t.Fatalf("run status=%s", projection.Run.Status)
 	}
-	cancelled, err := service.StartRun(ctx, "finalize cancelled report")
+	if active := service.runner.ActiveLeaseCountContext(ctx, run.RunID, run.TaskID); active != 0 {
+		t.Fatalf("active lease count=%d, want 0", active)
+	}
+	claims, err := service.Runner().ListResourceClaims(ctx, api.ResourceClaimSelector{RunIDs: []string{run.RunID}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cancelled.stopRunLeaseHeartbeat(); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.runner.HeartbeatTaskExecution(ctx, api.HeartbeatTaskExecutionCommand{LeaseID: cancelled.LeaseID, HolderID: cancelled.HolderID, TTL: service.runLeaseTTL}); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.runner.SubmitTypedReport(ctx, api.SubmitTypedReportCommand{
-		RunID: cancelled.RunID, TaskID: cancelled.TaskID, LeaseID: cancelled.LeaseID, HolderType: api.HolderAgent,
-		HolderID: cancelled.HolderID, TaskVersion: cancelled.TaskVersion,
-		Report: api.TypedReport{Status: api.ReportStatusFailed, Summary: "cancelled", Kind: "cancelled"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.FinalizeReportedRun(ctx, cancelled.RunID); err != nil {
-		t.Fatal(err)
-	}
-	cancelledProjection, err := service.Recover(ctx, cancelled.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cancelledProjection.Run.Status != api.RunStatusCancelled {
-		t.Fatalf("repaired cancelled run status=%s", cancelledProjection.Run.Status)
+	if len(claims) != 1 || claims[0].State != api.ResourceClaimReleased {
+		t.Fatalf("resource claims=%#v", claims)
 	}
 }
 
-func TestRunLeaseHeartbeatKeepsLongRunReportable(t *testing.T) {
+func TestExecuteRunResourceClaimConflictCanRetryAfterOwnerCancels(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "claims.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(context.Background())
+	policy := RunExecutionPolicy{ResourceClaims: []api.ResourceClaimSpec{{
+		Key: "workspace:shared", Mode: api.ResourceClaimExclusive,
+	}}}
+	owner, err := service.StartRunWithMetadata(ctx, "hold workspace", nil, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter, err := service.StartRunWithMetadata(ctx, "wait for workspace", nil, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocking := &claimBlockingDriver{started: make(chan struct{})}
+	ownerDone := make(chan error, 1)
+	go func() {
+		_, executeErr := service.ExecuteRun(ctx, owner, hyagent.Engine{
+			Provider: blocking, Model: "blocking",
+		}, nil)
+		ownerDone <- executeErr
+	}()
+	select {
+	case <-blocking.started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	_, err = service.ExecuteRun(ctx, waiter, hyagent.Engine{
+		Provider: scripted.New([]hyprovider.Event{
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		}),
+		Model: "waiter",
+	}, nil)
+	var unavailable *hyworker.TaskExecutionUnavailableError
+	if !errors.As(err, &unavailable) ||
+		unavailable.ResourceClaims.Reason != api.ResourceClaimDeniedConflict {
+		t.Fatalf("waiter execution error=%v", err)
+	}
+	if cancelErr := service.CancelRun(ctx, owner, errors.New("release workspace")); cancelErr != nil {
+		t.Fatalf("cancel owner: %v", cancelErr)
+	}
+	select {
+	case <-ownerDone:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	outcome, err := service.ExecuteRun(ctx, waiter, hyagent.Engine{
+		Provider: scripted.New([]hyprovider.Event{
+			{Kind: hyprovider.EventTextDelta, Text: "acquired"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		}),
+		Model: "waiter",
+	}, nil)
+	if err != nil || outcome.State != hyworker.ExecutionCompleted || outcome.Result.Text != "acquired" {
+		t.Fatalf("retried waiter outcome=%+v error=%v", outcome, err)
+	}
+}
+
+type claimBlockingDriver struct {
+	once    sync.Once
+	started chan struct{}
+}
+
+func (d *claimBlockingDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "blocking", Models: []string{"blocking"}}
+}
+
+func (d *claimBlockingDriver) Stream(ctx context.Context, _ hyprovider.Request) (hyprovider.Stream, error) {
+	d.once.Do(func() { close(d.started) })
+	return &claimBlockingStream{ctx: ctx}, nil
+}
+
+type claimBlockingStream struct {
+	ctx context.Context
+}
+
+func (s *claimBlockingStream) Recv() (hyprovider.Event, error) {
+	<-s.ctx.Done()
+	return hyprovider.Event{}, s.ctx.Err()
+}
+
+func (*claimBlockingStream) Close() error { return nil }
+
+func TestCompleteRunReportsSetupResultWithoutEagerLease(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	const leaseTTL = 120 * time.Millisecond
 	service, err := NewService(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	service.runLeaseTTL = leaseTTL
-	service.runHeartbeatInterval = 20 * time.Millisecond
+	service.runLeaseTTL = 120 * time.Millisecond
 	defer service.Close(ctx)
-	run, err := service.StartRun(ctx, "long running task")
+	run, err := service.StartRun(ctx, "setup-only task")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var initialExpiry int64
-	if err := store.DB().QueryRowContext(ctx, `SELECT expires_at FROM leases WHERE id=?`, run.LeaseID).Scan(&initialExpiry); err != nil {
+	var leases int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM leases WHERE run_id=?`, run.RunID).Scan(&leases); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		var version int
-		var extendedExpiry int64
-		if err := store.DB().QueryRowContext(ctx, `SELECT version,expires_at FROM leases WHERE id=?`, run.LeaseID).Scan(&version, &extendedExpiry); err != nil {
-			t.Fatal(err)
-		}
-		if version > 1 && extendedExpiry > initialExpiry {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("run lease was not renewed before its initial expiry")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if wait := time.Until(time.Unix(0, initialExpiry).Add(20 * time.Millisecond)); wait > 0 {
-		time.Sleep(wait)
+	if leases != 0 || run.LeaseID != "" {
+		t.Fatalf("eager leases=%d run=%+v", leases, run)
 	}
 	if err := service.CompleteRun(ctx, run, "done", nil); err != nil {
-		t.Fatalf("complete run after initial lease expiry: %v", err)
+		t.Fatal(err)
 	}
 	projection, err := service.Recover(ctx, run.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if projection.Run.Status != api.RunStatusCompleted {
-		t.Fatalf("run status = %q, want completed", projection.Run.Status)
+		t.Fatalf("run status=%s", projection.Run.Status)
 	}
 }
 
@@ -826,7 +902,6 @@ func TestCompleteRunPersistsProviderFailureAfterLeaseRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.runLeaseTTL = time.Second
-	service.runHeartbeatInterval = 50 * time.Millisecond
 	defer service.Close(ctx)
 	run, err := service.StartRun(ctx, "provider failure")
 	if err != nil {

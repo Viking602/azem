@@ -167,10 +167,22 @@ func TestMCPDefaultDriverRequiresRunnerApprovalBeforeRemoteCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lease, acquired, err := service.Runner().AcquireTaskExecution(ctx, api.AcquireTaskExecutionCommand{
+		RunID: run.RunID, TaskID: run.TaskID, EnvelopeID: run.EnvelopeID,
+		HolderType: api.HolderAgent, HolderID: run.HolderID, TTL: time.Minute,
+	})
+	if err != nil || !acquired {
+		t.Fatalf("acquire governed MCP lease: acquired=%t error=%v", acquired, err)
+	}
+	defer func() {
+		_ = service.Runner().ReleaseTaskExecution(context.Background(), api.ReleaseTaskExecutionCommand{
+			LeaseID: lease.ID, HolderID: run.HolderID,
+		})
+	}()
 	driver := manager.Snapshot()[0]
 	governed := worker.GovernedToolBus{
 		Runner: service.Runner(), Bus: tool.NewBus(driver), RunID: run.RunID, TaskID: run.TaskID,
-		LeaseID: run.LeaseID, HolderType: api.HolderAgent, HolderID: run.HolderID, TaskVersion: run.TaskVersion,
+		LeaseID: lease.ID, HolderType: api.HolderAgent, HolderID: run.HolderID, TaskVersion: lease.TaskVersion,
 	}
 	_, err = governed.Execute(ctx, tool.Call{ID: "deploy-call", Name: driver.Definition().Name}, nil)
 	if !errors.Is(err, venat.ErrPolicyDenied) {

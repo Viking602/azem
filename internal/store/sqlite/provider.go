@@ -107,11 +107,14 @@ func (p *Provider) Begin(ctx context.Context) (api.UnitOfWork, error) {
 
 func (p *Provider) Capabilities(context.Context) (api.StoreCapabilities, error) {
 	return api.StoreCapabilities{
-		SupportsTransactions:        true,
-		SupportsBlackboardSubscribe: false,
-		SupportsListPending:         true,
-		SupportsConcurrentWriters:   true,
-		SupportsDeadLetterRequeue:   false,
+		SupportsTransactions:          true,
+		SupportsBlackboardSubscribe:   false,
+		SupportsListPending:           true,
+		SupportsConcurrentWriters:     true,
+		SupportsDeadLetterRequeue:     false,
+		SupportsDefinitionSnapshots:   true,
+		SupportsAdmissionReservations: true,
+		SupportsResourceClaims:        true,
 	}, nil
 }
 

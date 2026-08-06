@@ -99,6 +99,8 @@ type durableToolTimeline struct {
 	sessionID, runID string
 	mu               sync.Mutex
 	calls            map[string]message.ToolCall
+	anchorSequence   int64
+	hasAnchor        bool
 }
 
 func newDurableToolTimeline(store *session.Service, workspace, sessionID, runID string) *durableToolTimeline {
@@ -111,14 +113,30 @@ func (t *durableToolTimeline) start(ctx context.Context, call message.ToolCall) 
 	}
 	t.mu.Lock()
 	t.calls[call.ID] = call
+	anchor, hasAnchor := t.anchorSequence, t.hasAnchor
 	t.mu.Unlock()
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	_, err := t.store.StartToolRecord(persistCtx, t.sessionID, session.ToolRecord{
+	record := session.ToolRecord{
 		RunID: t.runID, ToolCallID: call.ID, Name: call.Name,
 		Arguments: append(json.RawMessage(nil), call.Arguments...), StartedAt: time.Now().UTC(),
-	})
+	}
+	if hasAnchor {
+		_, err := t.store.StartToolRecordAt(persistCtx, t.sessionID, record, anchor)
+		return err
+	}
+	_, err := t.store.StartToolRecord(persistCtx, t.sessionID, record)
 	return err
+}
+
+func (t *durableToolTimeline) anchorAfter(sequence int64) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.anchorSequence = sequence
+	t.hasAnchor = true
 }
 
 func (t *durableToolTimeline) finish(ctx context.Context, result message.ToolResult) error {

@@ -1,7 +1,13 @@
 # Build outputs
 /azem
+/azem-gui
 /bin/
 /dist/
+/frontend/node_modules/
+/frontend/dist/*
+!/frontend/dist/.keep
+/frontend/*.tsbuildinfo
+/.playwright-cli/
 
 # Test and coverage artifacts
 *.test
@@ -19,6 +25,10 @@ coverage.*
 .env
 .env.*
 config.local.yaml
+
+# Local multi-module development
+/go.work
+/go.work.sum
 
 # Editor and operating-system files
 .idea/

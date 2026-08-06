@@ -69,9 +69,11 @@ type ServerSnapshot struct {
 	LastError   string
 }
 
-type SecretResolver func(context.Context, string) (string, error)
-type DialFunc func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error)
-type SleepFunc func(context.Context, time.Duration) error
+type (
+	SecretResolver func(context.Context, string) (string, error)
+	DialFunc       func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error)
+	SleepFunc      func(context.Context, time.Duration) error
+)
 
 type Options struct {
 	Dial        DialFunc
@@ -215,6 +217,22 @@ func (m *Manager) Reconnect(ctx context.Context, name string) error {
 }
 
 func (m *Manager) Refresh(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		if m.isClosed() {
+			return ErrManagerClosed
+		}
+		var refreshErr error
+		for _, snapshot := range m.Servers() {
+			if snapshot.State != StateReady {
+				continue
+			}
+			if err := m.Refresh(ctx, snapshot.Name); err != nil {
+				refreshErr = errors.Join(refreshErr, fmt.Errorf("mcp %s: %w", snapshot.Name, err))
+			}
+		}
+		return refreshErr
+	}
 	m.mu.RLock()
 	if m.closed {
 		m.mu.RUnlock()

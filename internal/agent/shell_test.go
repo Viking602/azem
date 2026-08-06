@@ -115,6 +115,97 @@ func TestSilentShellCommandEmitsProgressWithoutRepeatedMessages(t *testing.T) {
 	}
 }
 
+func TestShellOutputActivityExtendsTimeoutAndStreamsLogs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell timing and process probes")
+	}
+	driver := newShellDriver(t.TempDir(), "allow", "deny")
+	arguments, _ := json.Marshal(shellInput{
+		Command:        `i=0; while [ "$i" -lt 7 ]; do i=$((i+1)); printf 'tick-%s\n' "$i"; sleep 0.2; done`,
+		TimeoutSeconds: 1,
+	})
+	startedAlive := false
+	sawProgressLog := false
+	started := time.Now()
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "streaming", Name: ToolShell, Arguments: arguments}, func(update tool.Update) error {
+		if update.Kind == "started" {
+			pid, parseErr := strconv.Atoi(update.Data["pid"])
+			startedAlive = parseErr == nil && shellProcessExists(pid)
+		}
+		if update.Kind == "progress" && strings.Contains(update.Data["output"], "tick-") {
+			sawProgressLog = true
+		}
+		return nil
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("streaming shell result=%+v error=%v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed <= time.Second {
+		t.Fatalf("streaming shell completed after %s, timeout was not extended by output", elapsed)
+	}
+	if !startedAlive {
+		t.Fatal("started update was emitted before the process was alive")
+	}
+	if !sawProgressLog {
+		t.Fatal("progress updates did not include cumulative command output")
+	}
+	if !strings.Contains(result.Content, "tick-7") {
+		t.Fatalf("final output=%q", result.Content)
+	}
+}
+
+func TestShellWallClockLimitCannotBeExtendedByOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell command")
+	}
+	shellRuntime := newShellRuntime(context.Background(), ShellOptions{MaxWallClockDuration: 350 * time.Millisecond})
+	driver := newRuntimeShellDriver(t.TempDir(), "allow", "deny", shellRuntime)
+	arguments, _ := json.Marshal(shellInput{
+		Command:        `i=0; while [ "$i" -lt 40 ]; do i=$((i+1)); printf 'tick\n'; sleep 0.05; done`,
+		TimeoutSeconds: 1,
+	})
+
+	started := time.Now()
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "wall-clock", Name: ToolShell, Arguments: arguments}, nil)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(result.Content, "command stopped: wall_clock_timeout") {
+		t.Fatalf("wall-clock shell result=%+v", result)
+	}
+	if elapsed < 250*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("wall-clock shell returned after %s", elapsed)
+	}
+}
+
+func TestShellTerminatesAfterOutputInactivityTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell command")
+	}
+	driver := newShellDriver(t.TempDir(), "allow", "deny")
+	arguments, _ := json.Marshal(shellInput{Command: "sleep 10", TimeoutSeconds: 1})
+	started := time.Now()
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "inactive", Name: ToolShell, Arguments: arguments}, nil)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(result.Content, "command stopped: timeout") {
+		t.Fatalf("inactive shell result=%+v", result)
+	}
+	if elapsed < 900*time.Millisecond || elapsed > 3*time.Second {
+		t.Fatalf("inactive shell returned after %s, want prompt termination near the one-second timeout", elapsed)
+	}
+	var output shellOutput
+	if err := json.Unmarshal(result.Structured, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Status != "stopped" || output.Reason != "timeout" {
+		t.Fatalf("structured inactive shell output=%+v", output)
+	}
+}
+
 func TestShellReapsResidualGroupAfterNormalShellExit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses POSIX process groups")

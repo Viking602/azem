@@ -25,7 +25,6 @@ import (
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/message"
-	"github.com/Viking602/venat/multiagent"
 	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/stream"
 	"github.com/Viking602/venat/tool"
@@ -41,7 +40,6 @@ import (
 	"github.com/Viking602/azem/internal/provider/codex"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -54,6 +52,7 @@ func TestMainInstructionsContract(t *testing.T) {
 		"## Execution workflow",
 		"## Delegation",
 		"## Verification",
+		"## Progress updates",
 		"## Completion and reporting",
 	}
 	var gotHeadings []string
@@ -65,8 +64,8 @@ func TestMainInstructionsContract(t *testing.T) {
 	if !reflect.DeepEqual(gotHeadings, wantHeadings) {
 		t.Fatalf("second-level headings = %q, want %q", gotHeadings, wantHeadings)
 	}
-	if size := len([]byte(mainInstructions)); size < 4096 || size > 12288 {
-		t.Fatalf("main instructions size = %d bytes, want 4096..12288", size)
+	if size := len([]byte(mainInstructions)); size < 4096 || size > 16384 {
+		t.Fatalf("main instructions size = %d bytes, want 4096..16384", size)
 	}
 	for _, name := range []string{
 		"coding.list_files", "coding.search", "coding.read_file", "coding.git_diff",
@@ -90,6 +89,91 @@ func TestMainInstructionsContract(t *testing.T) {
 	sum := sha256.Sum256([]byte(mainInstructions))
 	if want := hex.EncodeToString(sum[:]); mainInstructionFingerprint != want {
 		t.Fatalf("main instruction fingerprint = %q, want %q", mainInstructionFingerprint, want)
+	}
+}
+
+func TestAgentDefinitionUsesParallelToolDispatch(t *testing.T) {
+	definition := agentDefinitionForSpec("test", "Test", "", hyagent.Spec{}, api.GovernancePolicy{}, nil)
+	if definition.ToolMode != api.ToolModeParallel {
+		t.Fatalf("tool mode = %q, want %q", definition.ToolMode, api.ToolModeParallel)
+	}
+}
+
+func TestMaterializeAgentDefinitionPersistsImmutableRevision(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	codingService, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = codingService.Close(ctx) })
+	spec := hyagent.Spec{
+		Instructions: "Persist this executable definition.",
+		Model:        "definition-test-model",
+		Tools:        []string{"definition.lookup"},
+		LoopPolicy:   hyagent.LoopPolicy{UnlimitedIterations: true, MaxWallClock: time.Minute},
+		ExtraBody:    map[string]any{"prompt_cache_key": "definition-test"},
+	}
+	governance := api.GovernancePolicy{Budget: api.Budget{
+		MaxTokens: 500, MaxToolCalls: 4, MaxRuntime: time.Minute,
+	}}
+	definition := agentDefinitionForSpec(
+		"azem-definition-test", "Azem Definition Test", "Definition integration test",
+		spec, governance, map[string]string{"role": "test"},
+	)
+	deps := hyagent.BuildDeps{
+		Providers: hyprovider.Single(&compactionTestDriver{}),
+		Tools: tool.NewBus(planModeTestDriver{definition: tool.Definition{
+			Name: "definition.lookup", EffectType: tool.EffectReadOnly,
+		}}),
+	}
+	for range 2 {
+		engine, err := materializeAgentDefinition(ctx, codingService, definition, spec, deps)
+		if err != nil {
+			t.Fatalf("materialize definition: %v", err)
+		}
+		if engine.Model != spec.Model || !engine.LoopPolicy.UnlimitedIterations ||
+			engine.ExtraBody["prompt_cache_key"] != "definition-test" {
+			t.Fatalf("materialized engine=%+v", engine)
+		}
+		definitions := engine.Tools.Definitions()
+		if len(definitions) != 1 || definitions[0].Name != spec.Tools[0] {
+			t.Fatalf("materialized tools=%#v, want %v", definitions, spec.Tools)
+		}
+	}
+	snapshots, err := codingService.Runner().ListAgentDefinitionSnapshots(ctx, api.AgentDefinitionSnapshotSelector{
+		DefinitionIDs: []string{definition.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || snapshots[0].Definition.Version == "" ||
+		!reflect.DeepEqual(snapshots[0].Definition.Governance, governance) ||
+		!reflect.DeepEqual(snapshots[0].Definition.Tools, spec.Tools) ||
+		len(snapshots[0].Definition.Capabilities) != 0 {
+		t.Fatalf("definition snapshots=%#v", snapshots)
+	}
+	firstVersion := snapshots[0].Definition.Version
+	spec.LoopPolicy.MaxWallClock = 2 * time.Minute
+	definition = agentDefinitionForSpec(
+		definition.ID, definition.Name, definition.Description,
+		spec, governance, map[string]string{"role": "test"},
+	)
+	if _, err := materializeAgentDefinition(ctx, codingService, definition, spec, deps); err != nil {
+		t.Fatalf("materialize changed definition: %v", err)
+	}
+	snapshots, err = codingService.Runner().ListAgentDefinitionSnapshots(ctx, api.AgentDefinitionSnapshotSelector{
+		DefinitionIDs: []string{definition.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 2 || snapshots[0].Definition.Version == snapshots[1].Definition.Version ||
+		(snapshots[0].Definition.Version != firstVersion && snapshots[1].Definition.Version != firstVersion) {
+		t.Fatalf("changed definition snapshots=%#v", snapshots)
 	}
 }
 
@@ -870,10 +954,12 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	})
 	driver := &compactionTestDriver{streams: [][]hyprovider.Event{
 		{
+			{Kind: hyprovider.EventThinkingDelta, Thinking: "discarded partial reasoning"},
 			{Kind: hyprovider.EventTextDelta, Text: "uncommitted partial"},
 			{Kind: hyprovider.EventError, Err: &responses.APIError{Kind: responses.ErrorRateLimit, Code: "server_is_overloaded"}},
 		},
 		{
+			{Kind: hyprovider.EventThinkingDelta, Thinking: "**Recovered reasoning**"},
 			{Kind: hyprovider.EventTextDelta, Text: "recovered answer"},
 			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
 		},
@@ -882,6 +968,42 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	service.runProviderTurn(ctx, TurnRequest{
 		SessionID: "retry-session", Prompt: "recover this turn", Provider: "test", Model: "test",
 	}, run, hyagent.Engine{Provider: driver, Model: "test", ContextBuilder: turnContext{instructions: "test"}})
+	eventCtx, eventCancel := context.WithTimeout(ctx, time.Second)
+	defer eventCancel()
+	var emitted []Event
+	for {
+		event, nextErr := service.NextEvent(eventCtx)
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		emitted = append(emitted, event)
+		if event.Kind == EventRunFinished {
+			break
+		}
+	}
+	retryIndex, firstTextIndex, recoveredTextIndex := -1, -1, -1
+	for index, event := range emitted {
+		if event.Kind == EventProviderRetry && event.State == "restarted" {
+			retryIndex = index
+		}
+		if event.Kind == EventTextDelta && strings.Contains(event.Text, "uncommitted partial") {
+			firstTextIndex = index
+		}
+		if event.Kind == EventTextDelta && strings.Contains(event.Text, "recovered answer") {
+			recoveredTextIndex = index
+		}
+	}
+	if firstTextIndex < 0 || retryIndex <= firstTextIndex || recoveredTextIndex <= retryIndex {
+		t.Fatalf("retry event ordering first=%d retry=%d recovered=%d events=%+v", firstTextIndex, retryIndex, recoveredTextIndex, emitted)
+	}
+	childBlocks := discardAgentAttemptBlocks([]AgentTranscriptBlock{
+		{Kind: "tool", RunID: "child", Content: "keep"},
+		{Kind: "thinking", RunID: "child", Content: "discard"},
+		{Kind: "assistant", RunID: "child", Content: "discard"},
+	}, "child")
+	if len(childBlocks) != 1 || childBlocks[0].Kind != "tool" {
+		t.Fatalf("subagent retry retained uncommitted blocks: %+v", childBlocks)
+	}
 
 	if len(driver.requests) != 2 {
 		t.Fatalf("provider requests = %d, want initial request plus one session retry", len(driver.requests))
@@ -895,12 +1017,52 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.Blocks) != 2 || projection.Blocks[1].Kind != "assistant" ||
-		projection.Blocks[1].State != "completed" || projection.Blocks[1].Content != "recovered answer" {
+	if len(projection.Blocks) != 3 ||
+		projection.Blocks[1].Kind != "thinking" ||
+		projection.Blocks[1].State != "completed" ||
+		projection.Blocks[1].Content != "**Recovered reasoning**" ||
+		projection.Blocks[2].Kind != "assistant" ||
+		projection.Blocks[2].State != "completed" ||
+		projection.Blocks[2].Content != "recovered answer" {
 		t.Fatalf("recovered transcript blocks=%+v", projection.Blocks)
 	}
 	if err := message.ValidateCompleteTurns(projection.ModelHistory.Messages); err != nil {
 		t.Fatalf("recovered model history is incomplete: %v", err)
+	}
+}
+
+func TestTitleModelRouteIsIndependentFromPlanAndCompaction(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents.Plan = config.ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
+	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-summary", Reasoning: "low"}
+	runtime := &ProviderRuntime{cfg: cfg}
+	if initial := runtime.titleModelRouteSnapshot(); initial != (config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"}) {
+		t.Fatalf("default title route = %#v", initial)
+	}
+	title := config.ModelRouteConfig{Provider: "grok", Model: "grok-title", Reasoning: "low"}
+	runtime.UpdateModelRoute("title", "", title)
+	if got := runtime.titleModelRouteSnapshot(); got != title {
+		t.Fatalf("title route = %#v", got)
+	}
+	if runtime.cfg.Agents.Plan != cfg.Agents.Plan || runtime.cfg.Agents.Compaction != cfg.Agents.Compaction {
+		t.Fatalf("title route changed other routes: plan=%#v compaction=%#v", runtime.cfg.Agents.Plan, runtime.cfg.Agents.Compaction)
+	}
+}
+
+func TestNormalizeGeneratedSessionTitle(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want string
+	}{
+		{raw: "<title>Fix sidebar title updates</title>", want: "Fix sidebar title updates"},
+		{raw: "<title>修复会话标题。</title>", want: "修复会话标题"},
+		{raw: `"Generate concise titles!"`, want: "Generate concise titles"},
+		{raw: "<title/>", want: ""},
+		{raw: strings.Repeat("long ", 20), want: ""},
+	} {
+		if got := normalizeGeneratedSessionTitle(test.raw); got != test.want {
+			t.Fatalf("normalize %q = %q, want %q", test.raw, got, test.want)
+		}
 	}
 }
 
@@ -970,15 +1132,17 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 		switch request.URL.Path {
 		case "/models":
 			writer.Header().Set("Content-Type", "application/json")
-			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-test","title":"GPT Test","context_window":128000,"supported_reasoning_levels":["minimal","high"],"default_reasoning_level":"high","supports_tools":true}]}`))
+			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-test","title":"GPT Test","context_window":128000,"supported_reasoning_levels":["minimal","high"],"default_reasoning_level":"high","supports_tools":true,"service_tiers":[{"id":"priority","name":"Fast"}]}]}`))
 		case "/responses":
 			var payload struct {
-				Reasoning map[string]any `json:"reasoning"`
+				Model       string         `json:"model"`
+				Reasoning   map[string]any `json:"reasoning"`
+				ServiceTier string         `json:"service_tier"`
 			}
 			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 				t.Errorf("decode provider request: %v", err)
-			} else if payload.Reasoning["effort"] != "minimal" {
-				t.Errorf("reasoning effort = %v, want minimal", payload.Reasoning)
+			} else if payload.Model != "gpt-test" || payload.Reasoning["effort"] != "minimal" || payload.ServiceTier != "priority" {
+				t.Errorf("provider selection = model:%q reasoning:%v service_tier:%q", payload.Model, payload.Reasoning, payload.ServiceTier)
 			}
 			writer.Header().Set("Content-Type", "text/event-stream")
 			if responseCalls.Add(1) == 1 {
@@ -1019,6 +1183,7 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	}
 	cfg := config.Default()
 	cfg.Workspace.Root = workspace
+	cfg.Providers.ChatGPT.FastMode = true
 	providerRuntime, err := NewProviderRuntime(cfg, authentication, modelCatalog, coding, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1041,6 +1206,31 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	tasks, err := coding.Runner().ListTasks(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantClaim, err := workspaceWriteClaim(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workerClaimFound bool
+	for _, task := range tasks {
+		if task.ID == durable.RootTaskID {
+			if len(task.ResourceClaims) != 0 {
+				t.Fatalf("top-level root task claims=%#v", task.ResourceClaims)
+			}
+			continue
+		}
+		for _, taskClaim := range task.ResourceClaims {
+			if taskClaim == wantClaim {
+				workerClaimFound = true
+			}
+		}
+	}
+	if !workerClaimFound {
+		t.Fatalf("top-level worker claims=%#v, want %#v", tasks, wantClaim)
+	}
 	manifest, err := decodeSingleRunManifest(durable.Metadata["single_run_manifest"])
 	if err != nil || manifest.AccountID != "acct" {
 		t.Fatalf("durable account binding=%q error=%v", manifest.AccountID, err)
@@ -1050,6 +1240,7 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	var contextUsage [][3]string
 	var cacheWrites []string
 	estimatedUsage := 0
+	var toolLifecycle []string
 	deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	for {
@@ -1074,6 +1265,11 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 			} else if event.State == "estimated" {
 				estimatedUsage++
 			}
+		case EventToolStarted, EventToolUpdate:
+			if event.ToolCallID == "write-1" &&
+				(event.State == "queued" || event.State == "awaiting_approval" || event.State == "running") {
+				toolLifecycle = append(toolLifecycle, event.State)
+			}
 		case EventApprovalRequested:
 			if event.ToolCallID != "write-1" || event.Data["tool"] != "coding.write_file" {
 				t.Fatalf("approval event = %+v", event)
@@ -1092,6 +1288,9 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 finished:
 	if !approved || output.String() != "Created and verified." || responseCalls.Load() != 2 {
 		t.Fatalf("turn = approved:%v output:%q response calls:%d", approved, output.String(), responseCalls.Load())
+	}
+	if want := []string{"queued", "awaiting_approval", "running"}; !reflect.DeepEqual(toolLifecycle, want) {
+		t.Fatalf("tool lifecycle = %v, want %v", toolLifecycle, want)
 	}
 	if want := [][3]string{{"10", "6", "4"}, {"20", "15", "6"}}; !reflect.DeepEqual(contextUsage, want) {
 		t.Fatalf("context usage events = %v, want %v", contextUsage, want)
@@ -1200,13 +1399,13 @@ func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
 	if err := service.GuideActiveTurn("session-guided", "run-guided", "terminal correction"); err != nil {
 		t.Fatal(err)
 	}
-	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0] != "terminal correction" {
+	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0].Text != "terminal correction" {
 		t.Fatalf("terminal guidance = %#v", pending)
 	}
 	if err := service.GuideActiveTurn("session-guided", "run-guided", "accepted after retry"); err != nil {
 		t.Fatalf("guidance closed while terminal retry was required: %v", err)
 	}
-	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0] != "accepted after retry" {
+	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0].Text != "accepted after retry" {
 		t.Fatalf("guidance after terminal retry = %#v", pending)
 	}
 	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 0 {
@@ -1217,6 +1416,60 @@ func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
 	}
 	if err := service.GuideActiveTurn("session-guided", "stale-run", "wrong run"); err == nil {
 		t.Fatal("stale run accepted guidance")
+	}
+}
+
+func TestActiveGuidanceKeepsImageAttachments(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachAttachments(filepath.Join(t.TempDir(), "attachments"))
+	image, err := service.ImportImageBytes("session-guided", "guidance.png", "image/png", minimalPNG())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	service.activeRun = "run-guided"
+	service.activeSession = "session-guided"
+	service.guidanceOpen = true
+	service.mu.Unlock()
+	if err := service.GuideActiveTurnWithAttachments("session-guided", "run-guided", "inspect this update", []session.Attachment{image}); err != nil {
+		t.Fatal(err)
+	}
+	pending := service.finishActiveGuidance("session-guided", "run-guided")
+	messages := guidanceMessages(pending)
+	if len(messages) != 1 || messages[0].Text != "inspect this update" {
+		t.Fatalf("guidance messages = %#v", messages)
+	}
+	attachments := AttachmentsFromMessage(messages[0])
+	if len(attachments) != 1 || attachments[0] != image {
+		t.Fatalf("guidance attachments = %#v", attachments)
+	}
+}
+
+func TestActiveGuidanceAppearsAtEveryPendingModelBoundary(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.mu.Lock()
+	service.activeRun = "run-guided"
+	service.activeSession = "session-guided"
+	service.guidanceOpen = true
+	service.activeGuidance = []activeGuidanceMessage{{Text: "change direction"}}
+	service.mu.Unlock()
+	hook := activeGuidanceModelHook{
+		peek: func() activeGuidanceSnapshot {
+			return service.peekActiveGuidance("session-guided", "run-guided")
+		},
+	}
+	history := []message.Message{message.NewText(message.RoleUser, "original task")}
+	for boundary := range 2 {
+		got, err := hook.TransformContext(context.Background(), history)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || got[1].Role != message.RoleUser || got[1].Text != "change direction" {
+			t.Fatalf("boundary %d messages = %#v", boundary, got)
+		}
+		if len(history) != 1 {
+			t.Fatalf("hook mutated engine history: %#v", history)
+		}
 	}
 }
 
@@ -2193,7 +2446,7 @@ func TestPhase5CancelledOrFailedPreparationPreservesHistoryWithoutPostHook(t *te
 }
 
 func TestActiveGuidanceSurvivesGeneratedCompaction(t *testing.T) {
-	snapshot := activeGuidanceSnapshot{values: []string{"first correction", "second correction"}}
+	snapshot := activeGuidanceSnapshot{values: []activeGuidanceMessage{{Text: "first correction"}, {Text: "second correction"}}}
 	acknowledged := false
 	manager := activeGuidanceContext{
 		inner: turnContext{summarize: func(context.Context, string) (string, error) { return "Objective: retain guidance", nil }},
@@ -2245,7 +2498,7 @@ func TestActiveGuidanceRemainsQueuedWhenCompactionFails(t *testing.T) {
 		t.Fatal("expected compaction failure")
 	}
 	remaining := service.drainActiveGuidance("session-guided", "run-guided")
-	if len(remaining) != 1 || remaining[0] != "do not lose this" {
+	if len(remaining) != 1 || remaining[0].Text != "do not lose this" {
 		t.Fatalf("guidance after failed compaction = %#v", remaining)
 	}
 }
@@ -2492,9 +2745,9 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 	}
 
 	first := await(tool.Call{ID: "write-1", Name: definition.Name})
-	requested, err := service.NextEvent(ctx)
-	if err != nil || requested.Kind != EventApprovalRequested || requested.ToolCallID != "write-1" {
-		t.Fatalf("initial prompt = event:%+v err:%v", requested, err)
+	requested := nextApprovalEvent(t, service, EventApprovalRequested)
+	if requested.ToolCallID != "write-1" {
+		t.Fatalf("initial prompt = event:%+v", requested)
 	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetApprovalMode, Target: string(ApprovalModeYolo)}); err != nil {
 		t.Fatal(err)
@@ -2502,9 +2755,9 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 	if result := <-first; result.err != nil || result.mode != agentservice.ApprovalOnce {
 		t.Fatalf("drained approval = mode:%q err:%v", result.mode, result.err)
 	}
-	resolved, err := service.NextEvent(ctx)
-	if err != nil || resolved.Kind != EventApprovalResolved || resolved.ApprovalID != requested.ApprovalID {
-		t.Fatalf("drained event = event:%+v err:%v", resolved, err)
+	resolved := nextApprovalEvent(t, service, EventApprovalResolved)
+	if resolved.ApprovalID != requested.ApprovalID {
+		t.Fatalf("drained event = event:%+v", resolved)
 	}
 	modeEvent, err := service.NextEvent(ctx)
 	if err != nil || modeEvent.Kind != EventApprovalMode || modeEvent.State != "yolo" {
@@ -2523,9 +2776,9 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 		t.Fatalf("prompt mode event=%+v error=%v", modeEvent, err)
 	}
 	third := await(tool.Call{ID: "write-3", Name: definition.Name})
-	requested, err = service.NextEvent(ctx)
-	if err != nil || requested.Kind != EventApprovalRequested || requested.ToolCallID != "write-3" {
-		t.Fatalf("restored prompt = event:%+v err:%v", requested, err)
+	requested = nextApprovalEvent(t, service, EventApprovalRequested)
+	if requested.ToolCallID != "write-3" {
+		t.Fatalf("restored prompt = event:%+v", requested)
 	}
 	if _, err := service.resolveLiveApproval(ctx, requested.ApprovalID, "once", "user"); err != nil {
 		t.Fatal(err)
@@ -2535,114 +2788,6 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetApprovalMode, Target: "unsafe"}); err == nil {
 		t.Fatal("invalid approval mode was accepted")
-	}
-}
-
-type skillRuntimeHarness struct {
-	service        *Service
-	calls          *atomic.Int32
-	workspace      string
-	catalog        *skills.Catalog
-	definitionPath string
-}
-
-func newSkillRuntimeHarness(t *testing.T, definition string, resources map[string]string, respond func(int, string, http.ResponseWriter)) skillRuntimeHarness {
-	t.Helper()
-	ctx := context.Background()
-	workspace := t.TempDir()
-	skillRoot := filepath.Join(t.TempDir(), "skills")
-	skillDir := filepath.Join(skillRoot, "demo")
-	if err := os.MkdirAll(skillDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(definition), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for name, content := range resources {
-		path := filepath.Join(skillDir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	var responseCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/models":
-			writer.Header().Set("Content-Type", "application/json")
-			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-skill","title":"GPT Skill","context_window":128000,"supported_reasoning_levels":["minimal"],"default_reasoning_level":"minimal","supports_tools":true}]}`))
-		case "/responses":
-			body, err := io.ReadAll(request.Body)
-			if err != nil {
-				t.Errorf("read provider request: %v", err)
-				writer.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			writer.Header().Set("Content-Type", "text/event-stream")
-			respond(int(responseCalls.Add(1)), string(body), writer)
-		default:
-			writer.WriteHeader(http.StatusNotFound)
-		}
-	}))
-
-	store, err := sqlitestore.Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentials, err := auth.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	authentication := auth.NewService(store.DB(), credentials, chatgpt.NewClient(), grok.NewClient())
-	importPath := filepath.Join(t.TempDir(), "codex.json")
-	if err := os.WriteFile(importPath, []byte(`{"tokens":{"access_token":"access","refresh_token":"refresh","account_id":"acct"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := authentication.ImportChatGPT(ctx, importPath); err != nil {
-		t.Fatal(err)
-	}
-	modelCatalog := catalog.NewService(store.DB(), authentication)
-	modelCatalog.Endpoints["chatgpt"] = server.URL + "/models"
-	modelCatalog.AdditionalEndpoints["chatgpt"] = nil
-	skillCatalog, err := skills.Load(skills.LoadOptions{Config: config.SkillsConfig{
-		Enabled:        true,
-		AdditionalDirs: []string{skillRoot},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	coding, err := agentservice.NewService(store, workspace, agentservice.WithSkills(skillCatalog))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Default()
-	cfg.Workspace.Root = workspace
-	providerRuntime, err := NewProviderRuntime(cfg, authentication, modelCatalog, coding, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	providerRuntime.ChatGPTEndpoint = server.URL + "/responses"
-	service := NewService(ctx, cfg)
-	service.AttachDurable(session.NewService(store.DB()), coding)
-	service.AttachAuth(authentication, modelCatalog)
-	service.AttachProviderRuntime(providerRuntime)
-	t.Cleanup(func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if err := service.Shutdown(shutdownCtx); err != nil {
-			t.Errorf("shutdown: %v", err)
-		}
-		server.Close()
-		if err := store.Close(shutdownCtx); err != nil {
-			t.Errorf("close store: %v", err)
-		}
-	})
-	return skillRuntimeHarness{
-		service: service, calls: &responseCalls, workspace: workspace,
-		catalog: skillCatalog, definitionPath: filepath.Join(skillDir, "SKILL.md"),
 	}
 }
 
@@ -3787,72 +3932,6 @@ func TestTurnContextBuildFallsBackWhenModelHistoryScopeDiffers(t *testing.T) {
 		if len(current.ProviderState) != 0 || current.Text == "stale answer" {
 			t.Fatalf("stale exact state leaked into fallback: %#v", current)
 		}
-	}
-}
-
-func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testing.T) {
-	service := NewService(context.Background(), config.Default())
-	recovery := &agentservice.EditRecovery{}
-	hooks := service.teamHooks(TurnRequest{SessionID: "session-1", Provider: "chatgpt", Model: "gpt-team"}, "team-parent", teamExecutionPolicy{}, recovery)
-	if hooks.RetryPolicy.MaxBackoff != service.cfg.Retry.MaxDelayDuration {
-		t.Fatalf("team retry max backoff = %v, want %v", hooks.RetryPolicy.MaxBackoff, service.cfg.Retry.MaxDelayDuration)
-	}
-	base := hyagent.Engine{ExtraBody: map[string]any{"parallel_tool_calls": false}}
-	prepare := func(runID, role string) hyagent.Engine {
-		t.Helper()
-		prepared, err := hooks.PrepareEngine(context.Background(), base, multiagent.Dispatch{
-			Task: api.Task{RunID: runID}, To: role,
-		}, multiagent.AgentClass{Name: role})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if prepared.ExtraBody["parallel_tool_calls"] != false {
-			t.Fatalf("existing provider option lost: %#v", prepared.ExtraBody)
-		}
-		return prepared
-	}
-	first := prepare("child-run-1", agentservice.ImplementerClass)
-	repeated := prepare("child-run-2", agentservice.ImplementerClass)
-	secondRole := prepare("child-run-2", agentservice.ReviewerClass)
-	if first.ExtraBody["prompt_cache_key"] != "session-1:team:chatgpt:gpt-team:implementer" ||
-		repeated.ExtraBody["prompt_cache_key"] != first.ExtraBody["prompt_cache_key"] ||
-		secondRole.ExtraBody["prompt_cache_key"] == first.ExtraBody["prompt_cache_key"] {
-		t.Fatalf("team cache keys first=%#v repeated=%#v secondRole=%#v", first.ExtraBody, repeated.ExtraBody, secondRole.ExtraBody)
-	}
-	if _, mutated := base.ExtraBody["prompt_cache_key"]; mutated {
-		t.Fatalf("base engine ExtraBody mutated: %#v", base.ExtraBody)
-	}
-	failedPatch, _ := json.Marshal(map[string]string{"input": "[internal/app/app.go#ABCD]\ninvalid"})
-	recovery.Observe(
-		tool.Call{ID: "failed-edit", Name: coding.ToolEditHashline, Arguments: failedPatch},
-		tool.Result{ToolCallID: "failed-edit", Name: coding.ToolEditHashline, IsError: true},
-		nil,
-	)
-	recoveryRequest := hyprovider.Request{Tools: []message.ToolDefinition{
-		{Name: coding.ToolEditHashline},
-		{Name: coding.ToolReadFile},
-	}}
-	if err := first.Hooks.BeforeModelCall(context.Background(), &recoveryRequest); err != nil {
-		t.Fatal(err)
-	}
-	if len(recoveryRequest.Tools) != 1 || recoveryRequest.Tools[0].Name != coding.ToolReadFile {
-		t.Fatalf("team edit recovery tools = %#v", recoveryRequest.Tools)
-	}
-	readArguments, _ := json.Marshal(map[string]string{"path": "internal/app/app.go"})
-	recovery.Observe(
-		tool.Call{ID: "recovery-read", Name: coding.ToolReadFile, Arguments: readArguments},
-		tool.Result{ToolCallID: "recovery-read", Name: coding.ToolReadFile},
-		nil,
-	)
-	restoredRequest := hyprovider.Request{Tools: []message.ToolDefinition{
-		{Name: coding.ToolEditHashline},
-		{Name: coding.ToolReadFile},
-	}}
-	if err := first.Hooks.BeforeModelCall(context.Background(), &restoredRequest); err != nil {
-		t.Fatal(err)
-	}
-	if len(restoredRequest.Tools) != 2 {
-		t.Fatalf("team tools were not restored after read: %#v", restoredRequest.Tools)
 	}
 }
 

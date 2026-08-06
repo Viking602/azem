@@ -1848,6 +1848,27 @@ func TestShellLifecycleUpdatesDoNotPolluteCommandSummary(t *testing.T) {
 	}
 }
 
+func TestShellFinishedUpdateSettlesCommandState(t *testing.T) {
+	for _, test := range []struct {
+		name, status, exitCode, reason, want string
+	}{
+		{name: "success", status: "exited", exitCode: "0", want: "completed"},
+		{name: "failure", status: "exited", exitCode: "1", want: "failed"},
+		{name: "stopped", status: "stopped", exitCode: "-1", reason: "timeout", want: "failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+			model.updateTool(app.Event{Kind: app.EventToolStarted, RunID: "run", ToolCallID: "shell", Data: map[string]string{"name": "coding.shell"}})
+			model.updateTool(app.Event{Kind: app.EventToolUpdate, RunID: "run", ToolCallID: "shell", State: "finished", Data: map[string]string{
+				"status": test.status, "exit_code": test.exitCode, "reason": test.reason,
+			}})
+			if got := model.transcript[0].State; got != test.want {
+				t.Fatalf("state=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestReadAndSkillToolResultsUseDisplaySummaries(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.updateTool(app.Event{
@@ -2677,15 +2698,16 @@ func TestModelRoutingCommandRendersConfiguredAndInheritedRoutes(t *testing.T) {
 	}
 
 	model.applyEvent(app.Event{Kind: app.EventModelRoutes, Data: map[string]string{"subagent_max_concurrency": "2"}, ModelRoutes: []app.ModelRouteEntry{
+		{Scope: "title", Label: "Title"},
 		{Scope: "plan", Label: "Plan"},
 		{Scope: "compaction", Label: "Compaction"},
 		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("grok", "grok-4.5", "low")},
 	}})
-	if model.overlay != OverlayModelRoutes || len(model.overlayOptions()) != 3 {
+	if model.overlay != OverlayModelRoutes || len(model.overlayOptions()) != 4 {
 		t.Fatalf("model routes overlay = %q options=%#v", model.overlay, model.overlayOptions())
 	}
 	rendered := ansi.Strip(model.renderOverlay(100, 24))
-	for _, wanted := range []string{"MODEL ROUTING", "Plan model", "Compaction", "Inherit from active agent", "explore", "grok/grok-4.5/low"} {
+	for _, wanted := range []string{"MODEL ROUTING", "Session title", "Plan model", "Compaction", "Inherit from active agent", "explore", "grok/grok-4.5/low"} {
 		if !strings.Contains(rendered, wanted) {
 			t.Fatalf("model routes missing %q:\n%s", wanted, rendered)
 		}

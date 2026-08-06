@@ -23,6 +23,7 @@ type ShellOptions struct {
 	MaxContextOutputBytes  int
 	MaxArtifactOutputBytes int
 	StopOnOutputLimit      bool
+	MaxWallClockDuration   time.Duration
 	MaxConcurrency         int
 	ArtifactSink           func(context.Context, ShellExecutionSnapshot, []byte) (ShellArtifactResult, error)
 }
@@ -32,7 +33,7 @@ type ShellArtifactResult struct {
 }
 
 func defaultShellOptions() ShellOptions {
-	return ShellOptions{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2}
+	return ShellOptions{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2, MaxWallClockDuration: 10 * time.Minute}
 }
 
 type ShellExecutionSnapshot struct {
@@ -67,6 +68,9 @@ func newShellRuntime(ctx context.Context, opts ShellOptions) *shellRuntime {
 	}
 	if opts.MaxConcurrency <= 0 {
 		opts.MaxConcurrency = defaults.MaxConcurrency
+	}
+	if opts.MaxWallClockDuration <= 0 {
+		opts.MaxWallClockDuration = defaults.MaxWallClockDuration
 	}
 	return &shellRuntime{ctx: ctx, sem: make(chan struct{}, opts.MaxConcurrency), active: map[string]ShellExecutionSnapshot{}, opts: opts}
 }
@@ -114,6 +118,7 @@ func newShellSupervisor(command *exec.Cmd) (*shellSupervisor, error) {
 	}
 	return &shellSupervisor{command: command, owner: owner}, nil
 }
+
 func (s *shellSupervisor) Start() error {
 	if err := s.command.Start(); err != nil {
 		return err
@@ -148,13 +153,33 @@ func newShellDriver(root, approval, allowNetwork string) tool.Driver {
 	ctx := context.Background()
 	return &shellDriver{root: root, approval: approval, allowNetwork: allowNetwork, runtime: newShellRuntime(ctx, defaultShellOptions())}
 }
+
 func newRuntimeShellDriver(root, approval, allowNetwork string, runtime *shellRuntime) tool.Driver {
 	return &shellDriver{root, approval, allowNetwork, runtime}
 }
 
 func (d *shellDriver) Definition() tool.Definition {
 	additional := false
-	return tool.Definition{Name: ToolShell, Description: "Run a foreground command. Detached/background processes are not permitted.", InputSchema: tool.Schema{Type: "object", Properties: map[string]tool.Schema{"command": {Type: "string"}, "timeout_seconds": {Type: "integer"}, "network": {Type: "boolean"}}, Required: []string{"command"}, AdditionalProperties: &additional}, EffectType: tool.EffectExternalSideEffect, RequiresApproval: d.approval != "allow", RequiresActionTask: true, RiskLevel: "high", Timeout: 10 * time.Minute, PolicyTags: []string{"coding", "shell", "workspace"}, Metadata: map[string]string{"approval": d.approval, "network": d.allowNetwork}}
+	return tool.Definition{
+		Name:        ToolShell,
+		Description: "Run a foreground command. timeout_seconds is the maximum interval without stdout/stderr output; active output extends that interval, but every command has an independent 10-minute wall-clock limit. Detached/background processes are not permitted.",
+		InputSchema: tool.Schema{
+			Type: "object",
+			Properties: map[string]tool.Schema{
+				"command":         {Type: "string"},
+				"timeout_seconds": {Type: "integer"},
+				"network":         {Type: "boolean"},
+			},
+			Required:             []string{"command"},
+			AdditionalProperties: &additional,
+		},
+		EffectType:         tool.EffectExternalSideEffect,
+		RequiresApproval:   d.approval != "allow",
+		RequiresActionTask: true,
+		RiskLevel:          "high",
+		PolicyTags:         []string{"coding", "shell", "workspace"},
+		Metadata:           map[string]string{"approval": d.approval, "network": d.allowNetwork},
+	}
 }
 
 // rejectDetached is defense in depth. Process-group/job ownership is the actual boundary.
@@ -217,11 +242,6 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	if input.Network && d.allowNetwork == "deny" {
 		return shellError(call, "network access is disabled by workspace.allow_network"), nil
 	}
-	if sink != nil {
-		if err := sink(tool.Update{Kind: "started", Message: input.Command, Data: map[string]string{"cwd": d.root}}); err != nil {
-			return shellError(call, "update sink failed before start: "+err.Error()), nil
-		}
-	}
 	select {
 	case d.runtime.sem <- struct{}{}:
 		defer func() { <-d.runtime.sem }()
@@ -237,15 +257,13 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 		return shellError(call, "service shutting down"), nil
 	}
 	defer d.runtime.wg.Done()
-	timeout := 2 * time.Minute
+	inactivityTimeout := 2 * time.Minute
 	if input.TimeoutSeconds != 0 {
 		if input.TimeoutSeconds < 1 || input.TimeoutSeconds > 600 {
 			return shellError(call, "timeout_seconds must be between 1 and 600"), nil
 		}
-		timeout = time.Duration(input.TimeoutSeconds) * time.Second
+		inactivityTimeout = time.Duration(input.TimeoutSeconds) * time.Second
 	}
-	commandCtx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	var command *exec.Cmd
 	if runtime.GOOS == "windows" {
 		command = exec.Command("cmd.exe", "/d", "/s", "/c", input.Command)
@@ -281,10 +299,12 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 		ownerClosed = true
 		return shellError(call, "start: "+errors.Join(err, closeErr).Error()), nil
 	}
-	deadline, _ := commandCtx.Deadline()
+	startedAt := time.Now()
+	deadline := startedAt.Add(inactivityTimeout)
+	absoluteDeadline := startedAt.Add(d.runtime.opts.MaxWallClockDuration)
 	sum := sha256.Sum256([]byte(input.Command))
 	caller, _ := tool.CallerFromContext(ctx)
-	snap := ShellExecutionSnapshot{SessionID: caller.SessionID, RunID: caller.TeamRunID, AgentID: caller.AgentID, ToolCallID: call.ID, CommandHash: hex.EncodeToString(sum[:]), State: "running", PID: command.Process.Pid, PGID: supervisor.owner.PGID(), JobID: supervisor.owner.JobID(), StartedAt: time.Now(), Deadline: deadline, ExitCode: -1}
+	snap := ShellExecutionSnapshot{SessionID: caller.SessionID, RunID: caller.TeamRunID, AgentID: caller.AgentID, ToolCallID: call.ID, CommandHash: hex.EncodeToString(sum[:]), State: "running", PID: command.Process.Pid, PGID: supervisor.owner.PGID(), JobID: supervisor.owner.JobID(), StartedAt: startedAt, Deadline: deadline, ExitCode: -1}
 	registryKey := fmt.Sprintf("%s/%d", call.ID, command.Process.Pid)
 	d.runtime.mu.Lock()
 	d.runtime.active[registryKey] = snap
@@ -293,11 +313,33 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	go func() { done <- supervisor.Wait() }()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	idleTimer := time.NewTimer(inactivityTimeout)
+	defer func() {
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+	}()
+	wallClockTimer := time.NewTimer(d.runtime.opts.MaxWallClockDuration)
+	defer wallClockTimer.Stop()
 	var err error
 	reason := ""
-	var terminationErr error
+	var terminationErr, updateSinkErr error
 	finished := false
-	lastReportedOutputBytes := 0
+	if sink != nil {
+		startedData := map[string]string{
+			"cwd": d.root, "pid": fmt.Sprint(command.Process.Pid), "health": "running",
+			"timeout_mode": "output_inactivity_with_wall_clock_limit", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
+			"output": "", "output_bytes": "0", "deadline": deadline.UTC().Format(time.RFC3339Nano),
+			"wall_clock_deadline": absoluteDeadline.UTC().Format(time.RFC3339Nano),
+		}
+		if sinkErr := sink(tool.Update{Kind: "started", Data: startedData}); sinkErr != nil {
+			reason = "update_sink_failure"
+			updateSinkErr = fmt.Errorf("started update sink failed: %w", sinkErr)
+		}
+	}
 	for !finished && reason == "" {
 		select {
 		case err = <-done:
@@ -306,35 +348,64 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 			reason = "application_shutdown"
 		case <-ctx.Done():
 			reason = "context_cancelled"
-		case <-commandCtx.Done():
-			reason = "timeout"
+		case probedAt := <-idleTimer.C:
+			lastOutputAt := output.LastWrite()
+			activityAt := lastOutputAt
+			if activityAt.IsZero() {
+				activityAt = startedAt
+			}
+			remaining := inactivityTimeout - probedAt.Sub(activityAt)
+			if remaining <= 0 {
+				reason = "timeout"
+				break
+			}
+			deadline = activityAt.Add(inactivityTimeout)
+			idleTimer.Reset(remaining)
+			d.runtime.mu.Lock()
+			current := d.runtime.active[registryKey]
+			current.Deadline = deadline
+			d.runtime.active[registryKey] = current
+			d.runtime.mu.Unlock()
+		case <-wallClockTimer.C:
+			reason = "wall_clock_timeout"
 		case <-limitHit:
 			if d.runtime.opts.StopOnOutputLimit {
 				reason = "output_limit"
 			}
 		case <-ticker.C:
-			outputBytes := output.Total()
+			liveOutput, outputBytes, lastOutputAt := output.Progress()
+			activityAt := lastOutputAt
+			if activityAt.IsZero() {
+				activityAt = startedAt
+			}
+			deadline = activityAt.Add(inactivityTimeout)
 			d.runtime.mu.Lock()
 			current := d.runtime.active[registryKey]
-			current.OutputBytes = outputBytes
+			current.OutputBytes, current.Output, current.Deadline = outputBytes, liveOutput, deadline
 			d.runtime.active[registryKey] = current
 			d.runtime.mu.Unlock()
 			if sink != nil {
-				message := ""
-				if outputBytes != lastReportedOutputBytes {
-					message = fmt.Sprintf("%d output bytes", outputBytes)
+				data := map[string]string{
+					"pid": fmt.Sprint(command.Process.Pid), "health": "running",
+					"timeout_mode": "output_inactivity_with_wall_clock_limit", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
+					"output": liveOutput, "output_bytes": fmt.Sprint(outputBytes), "deadline": deadline.UTC().Format(time.RFC3339Nano),
+					"wall_clock_deadline": absoluteDeadline.UTC().Format(time.RFC3339Nano),
 				}
-				if sinkErr := sink(tool.Update{Kind: "progress", Message: message, Data: map[string]string{"output_bytes": fmt.Sprint(outputBytes)}}); sinkErr != nil {
+				if !lastOutputAt.IsZero() {
+					data["last_output_at"] = lastOutputAt.UTC().Format(time.RFC3339Nano)
+				}
+				if sinkErr := sink(tool.Update{Kind: "progress", Data: data}); sinkErr != nil {
 					reason = "update_sink_failure"
+					updateSinkErr = fmt.Errorf("progress update sink failed: %w", sinkErr)
 				}
-				lastReportedOutputBytes = outputBytes
 			}
 		}
 	}
 	if reason != "" {
+		liveOutput, outputBytes, _ := output.Progress()
 		d.runtime.mu.Lock()
 		current := d.runtime.active[registryKey]
-		current.State, current.Reason, current.OutputBytes = "stopping", reason, output.Total()
+		current.State, current.Reason, current.OutputBytes, current.Output = "stopping", reason, outputBytes, liveOutput
 		d.runtime.active[registryKey] = current
 		d.runtime.mu.Unlock()
 		terminationErr = supervisor.Terminate()
@@ -371,7 +442,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 		status = "stopped"
 	}
 	value := shellOutput{ExitCode: exitCode, Output: contextOut, Truncated: truncated, Status: status, Reason: reason, OutputBytes: total}
-	snap.State, snap.Reason, snap.ExitCode, snap.OutputBytes, snap.Output = status, reason, exitCode, total, contextOut
+	snap.State, snap.Reason, snap.ExitCode, snap.OutputBytes, snap.Output, snap.Deadline = status, reason, exitCode, total, contextOut, deadline
 	if d.runtime.opts.ArtifactSink != nil && truncated {
 		artifactResult, sinkErr := d.runtime.opts.ArtifactSink(ctx, snap, []byte(artifact))
 		if sinkErr != nil {
@@ -397,8 +468,16 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 		content = strings.TrimSpace(content + "\ncommand stopped: " + reason)
 	}
 	result := tool.Result{ToolCallID: call.ID, Name: call.Name, Content: content, Structured: structured, IsError: err != nil || reason != ""}
+	if updateSinkErr != nil {
+		result.IsError = true
+		result.Content = strings.TrimSpace(result.Content + "\n" + updateSinkErr.Error())
+	}
 	if sink != nil {
-		if sinkErr := sink(tool.Update{Kind: "finished", Message: fmt.Sprintf("exit %d (%s)", exitCode, status)}); sinkErr != nil {
+		finishedData := map[string]string{
+			"pid": fmt.Sprint(command.Process.Pid), "health": status, "status": status,
+			"exit_code": fmt.Sprint(exitCode), "reason": reason, "output": contextOut, "output_bytes": fmt.Sprint(total),
+		}
+		if sinkErr := sink(tool.Update{Kind: "finished", Data: finishedData}); sinkErr != nil {
 			result.IsError = true
 			result.Content = strings.TrimSpace(result.Content + "\nfinished update sink failed: " + sinkErr.Error())
 		}
@@ -414,6 +493,7 @@ type boundedShellBuffer struct {
 	mu                                 sync.Mutex
 	context, artifact                  bytes.Buffer
 	contextLimit, artifactLimit, total int
+	lastWrite                          time.Time
 	truncated, notified                bool
 	onLimit                            func()
 }
@@ -423,6 +503,9 @@ func (b *boundedShellBuffer) Write(value []byte) (int, error) {
 	defer b.mu.Unlock()
 	n := len(value)
 	b.total += n
+	if n > 0 {
+		b.lastWrite = time.Now()
+	}
 	if room := b.artifactLimit - b.artifact.Len(); room > 0 {
 		part := value
 		if len(part) > room {
@@ -446,7 +529,19 @@ func (b *boundedShellBuffer) Write(value []byte) (int, error) {
 	}
 	return n, nil
 }
-func (b *boundedShellBuffer) Total() int { b.mu.Lock(); defer b.mu.Unlock(); return b.total }
+
+func (b *boundedShellBuffer) LastWrite() time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastWrite
+}
+
+func (b *boundedShellBuffer) Progress() (string, int, time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.context.String(), b.total, b.lastWrite
+}
+
 func (b *boundedShellBuffer) Values() (string, string, int, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

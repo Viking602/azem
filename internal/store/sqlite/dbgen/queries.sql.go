@@ -726,6 +726,49 @@ func (q *Queries) GetActionAttemptByIdempotency(ctx context.Context, arg GetActi
 	return data, err
 }
 
+const getAdmissionReservationData = `-- name: GetAdmissionReservationData :one
+SELECT data FROM admission_reservations WHERE id=?
+`
+
+func (q *Queries) GetAdmissionReservationData(ctx context.Context, id string) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getAdmissionReservationData, id)
+	var data []byte
+	err := row.Scan(&data)
+	return data, err
+}
+
+const getAdmissionReservationDataForRun = `-- name: GetAdmissionReservationDataForRun :one
+SELECT data FROM admission_reservations WHERE agent_id=? AND run_id=?
+`
+
+type GetAdmissionReservationDataForRunParams struct {
+	AgentID string `db:"agent_id"`
+	RunID   string `db:"run_id"`
+}
+
+func (q *Queries) GetAdmissionReservationDataForRun(ctx context.Context, arg GetAdmissionReservationDataForRunParams) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getAdmissionReservationDataForRun, arg.AgentID, arg.RunID)
+	var data []byte
+	err := row.Scan(&data)
+	return data, err
+}
+
+const getAgentDefinitionSnapshotData = `-- name: GetAgentDefinitionSnapshotData :one
+SELECT data FROM agent_definition_snapshots WHERE definition_id=? AND version=?
+`
+
+type GetAgentDefinitionSnapshotDataParams struct {
+	DefinitionID string `db:"definition_id"`
+	Version      string `db:"version"`
+}
+
+func (q *Queries) GetAgentDefinitionSnapshotData(ctx context.Context, arg GetAgentDefinitionSnapshotDataParams) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getAgentDefinitionSnapshotData, arg.DefinitionID, arg.Version)
+	var data []byte
+	err := row.Scan(&data)
+	return data, err
+}
+
 const getCacheEpoch = `-- name: GetCacheEpoch :one
 SELECT cache_epoch FROM session_projections WHERE session_id=?
 `
@@ -1000,6 +1043,17 @@ func (q *Queries) GetRecordData(ctx context.Context, arg GetRecordDataParams) ([
 	return data, err
 }
 
+const getResourceClaimData = `-- name: GetResourceClaimData :one
+SELECT data FROM resource_claims WHERE id=?
+`
+
+func (q *Queries) GetResourceClaimData(ctx context.Context, id string) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, getResourceClaimData, id)
+	var data []byte
+	err := row.Scan(&data)
+	return data, err
+}
+
 const getRunCheckpointState = `-- name: GetRunCheckpointState :one
 SELECT last_run_id,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?
 `
@@ -1249,6 +1303,56 @@ func (q *Queries) InitializeCacheIdentity(ctx context.Context, arg InitializeCac
 	return err
 }
 
+const insertAdmissionReservation = `-- name: InsertAdmissionReservation :execresult
+INSERT OR IGNORE INTO admission_reservations(id,agent_id,run_id,state,version,created_at,updated_at,expires_at,data) VALUES(?,?,?,?,?,?,?,?,?)
+`
+
+type InsertAdmissionReservationParams struct {
+	ID        string `db:"id"`
+	AgentID   string `db:"agent_id"`
+	RunID     string `db:"run_id"`
+	State     string `db:"state"`
+	Version   int64  `db:"version"`
+	CreatedAt int64  `db:"created_at"`
+	UpdatedAt int64  `db:"updated_at"`
+	ExpiresAt int64  `db:"expires_at"`
+	Data      []byte `db:"data"`
+}
+
+func (q *Queries) InsertAdmissionReservation(ctx context.Context, arg InsertAdmissionReservationParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertAdmissionReservation,
+		arg.ID,
+		arg.AgentID,
+		arg.RunID,
+		arg.State,
+		arg.Version,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.ExpiresAt,
+		arg.Data,
+	)
+}
+
+const insertAgentDefinitionSnapshot = `-- name: InsertAgentDefinitionSnapshot :execresult
+INSERT OR IGNORE INTO agent_definition_snapshots(definition_id,version,created_at,data) VALUES(?,?,?,?)
+`
+
+type InsertAgentDefinitionSnapshotParams struct {
+	DefinitionID string `db:"definition_id"`
+	Version      string `db:"version"`
+	CreatedAt    int64  `db:"created_at"`
+	Data         []byte `db:"data"`
+}
+
+func (q *Queries) InsertAgentDefinitionSnapshot(ctx context.Context, arg InsertAgentDefinitionSnapshotParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertAgentDefinitionSnapshot,
+		arg.DefinitionID,
+		arg.Version,
+		arg.CreatedAt,
+		arg.Data,
+	)
+}
+
 const insertCatalogModel = `-- name: InsertCatalogModel :exec
 INSERT INTO model_catalog(provider_id,account_id,model_id,etag,fetched_at,expires_at,data) VALUES(?,?,?,?,?,?,?)
 `
@@ -1417,6 +1521,44 @@ func (q *Queries) InsertRecord(ctx context.Context, arg InsertRecordParams) erro
 		arg.Data,
 	)
 	return err
+}
+
+const insertResourceClaim = `-- name: InsertResourceClaim :execresult
+INSERT OR IGNORE INTO resource_claims(id,resource_key,run_id,task_id,lease_id,holder_id,mode,state,version,created_at,updated_at,expires_at,data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+`
+
+type InsertResourceClaimParams struct {
+	ID          string `db:"id"`
+	ResourceKey string `db:"resource_key"`
+	RunID       string `db:"run_id"`
+	TaskID      string `db:"task_id"`
+	LeaseID     string `db:"lease_id"`
+	HolderID    string `db:"holder_id"`
+	Mode        string `db:"mode"`
+	State       string `db:"state"`
+	Version     int64  `db:"version"`
+	CreatedAt   int64  `db:"created_at"`
+	UpdatedAt   int64  `db:"updated_at"`
+	ExpiresAt   int64  `db:"expires_at"`
+	Data        []byte `db:"data"`
+}
+
+func (q *Queries) InsertResourceClaim(ctx context.Context, arg InsertResourceClaimParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertResourceClaim,
+		arg.ID,
+		arg.ResourceKey,
+		arg.RunID,
+		arg.TaskID,
+		arg.LeaseID,
+		arg.HolderID,
+		arg.Mode,
+		arg.State,
+		arg.Version,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.ExpiresAt,
+		arg.Data,
+	)
 }
 
 const insertSessionBlock = `-- name: InsertSessionBlock :exec
@@ -1688,6 +1830,119 @@ func (q *Queries) ListActiveLeases(ctx context.Context, status string) ([]ListAc
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActiveResourceClaimDataByKey = `-- name: ListActiveResourceClaimDataByKey :many
+SELECT data FROM resource_claims WHERE resource_key=? AND state='active' AND expires_at>? ORDER BY created_at,id
+`
+
+type ListActiveResourceClaimDataByKeyParams struct {
+	ResourceKey string `db:"resource_key"`
+	ExpiresAt   int64  `db:"expires_at"`
+}
+
+func (q *Queries) ListActiveResourceClaimDataByKey(ctx context.Context, arg ListActiveResourceClaimDataByKeyParams) ([][]byte, error) {
+	rows, err := q.db.QueryContext(ctx, listActiveResourceClaimDataByKey, arg.ResourceKey, arg.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items [][]byte
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		items = append(items, data)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAdmissionReservationData = `-- name: ListAdmissionReservationData :many
+SELECT data FROM admission_reservations ORDER BY created_at,id
+`
+
+func (q *Queries) ListAdmissionReservationData(ctx context.Context) ([][]byte, error) {
+	rows, err := q.db.QueryContext(ctx, listAdmissionReservationData)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items [][]byte
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		items = append(items, data)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAdmissionReservationDataByAgent = `-- name: ListAdmissionReservationDataByAgent :many
+SELECT data FROM admission_reservations WHERE agent_id=? ORDER BY created_at,id
+`
+
+func (q *Queries) ListAdmissionReservationDataByAgent(ctx context.Context, agentID string) ([][]byte, error) {
+	rows, err := q.db.QueryContext(ctx, listAdmissionReservationDataByAgent, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items [][]byte
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		items = append(items, data)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAgentDefinitionSnapshotData = `-- name: ListAgentDefinitionSnapshotData :many
+SELECT data FROM agent_definition_snapshots ORDER BY created_at,definition_id,version
+`
+
+func (q *Queries) ListAgentDefinitionSnapshotData(ctx context.Context) ([][]byte, error) {
+	rows, err := q.db.QueryContext(ctx, listAgentDefinitionSnapshotData)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items [][]byte
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		items = append(items, data)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -2012,6 +2267,33 @@ type ListRecordDataByRunParams struct {
 
 func (q *Queries) ListRecordDataByRun(ctx context.Context, arg ListRecordDataByRunParams) ([][]byte, error) {
 	rows, err := q.db.QueryContext(ctx, listRecordDataByRun, arg.Kind, arg.RunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items [][]byte
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		items = append(items, data)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listResourceClaimData = `-- name: ListResourceClaimData :many
+SELECT data FROM resource_claims ORDER BY created_at,id
+`
+
+func (q *Queries) ListResourceClaimData(ctx context.Context) ([][]byte, error) {
+	rows, err := q.db.QueryContext(ctx, listResourceClaimData)
 	if err != nil {
 		return nil, err
 	}
@@ -2664,6 +2946,34 @@ func (q *Queries) UpdateAccountStatus(ctx context.Context, arg UpdateAccountStat
 	)
 }
 
+const updateAdmissionReservationCAS = `-- name: UpdateAdmissionReservationCAS :execresult
+UPDATE admission_reservations
+SET state=?1,version=?2,updated_at=?3,expires_at=?4,data=?5
+WHERE id=?6 AND version=?7
+`
+
+type UpdateAdmissionReservationCASParams struct {
+	NextState       string `db:"next_state"`
+	NextVersion     int64  `db:"next_version"`
+	UpdatedAt       int64  `db:"updated_at"`
+	ExpiresAt       int64  `db:"expires_at"`
+	Data            []byte `db:"data"`
+	ID              string `db:"id"`
+	ExpectedVersion int64  `db:"expected_version"`
+}
+
+func (q *Queries) UpdateAdmissionReservationCAS(ctx context.Context, arg UpdateAdmissionReservationCASParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, updateAdmissionReservationCAS,
+		arg.NextState,
+		arg.NextVersion,
+		arg.UpdatedAt,
+		arg.ExpiresAt,
+		arg.Data,
+		arg.ID,
+		arg.ExpectedVersion,
+	)
+}
+
 const updateAgentBlock = `-- name: UpdateAgentBlock :execresult
 UPDATE session_blocks SET run_id=?,data=? WHERE session_id=? AND kind='agent' AND agent_id=?
 `
@@ -2720,6 +3030,34 @@ func (q *Queries) UpdateProjectionRunAfterAssistantMutation(ctx context.Context,
 		arg.SessionID,
 	)
 	return err
+}
+
+const updateResourceClaimCAS = `-- name: UpdateResourceClaimCAS :execresult
+UPDATE resource_claims
+SET state=?1,version=?2,updated_at=?3,expires_at=?4,data=?5
+WHERE id=?6 AND version=?7
+`
+
+type UpdateResourceClaimCASParams struct {
+	NextState       string `db:"next_state"`
+	NextVersion     int64  `db:"next_version"`
+	UpdatedAt       int64  `db:"updated_at"`
+	ExpiresAt       int64  `db:"expires_at"`
+	Data            []byte `db:"data"`
+	ID              string `db:"id"`
+	ExpectedVersion int64  `db:"expected_version"`
+}
+
+func (q *Queries) UpdateResourceClaimCAS(ctx context.Context, arg UpdateResourceClaimCASParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, updateResourceClaimCAS,
+		arg.NextState,
+		arg.NextVersion,
+		arg.UpdatedAt,
+		arg.ExpiresAt,
+		arg.Data,
+		arg.ID,
+		arg.ExpectedVersion,
+	)
 }
 
 const updateSessionBlockData = `-- name: UpdateSessionBlockData :exec

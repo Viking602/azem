@@ -695,8 +695,17 @@ func (m *AppModel) updateTool(event app.Event) {
 		if toolStateTerminal(block.State) {
 			return
 		}
-		if block.Title == "coding.shell" && (event.State == "started" || event.State == "progress" || event.State == "finished") {
-			return
+		if block.Title == "coding.shell" {
+			switch event.State {
+			case "started", "progress":
+				return
+			case "finished":
+				block.State = "completed"
+				if event.Data["status"] == "stopped" || event.Data["reason"] != "" || (event.Data["exit_code"] != "" && event.Data["exit_code"] != "0") {
+					block.State = "failed"
+				}
+				return
+			}
 		}
 		appendBlockContent(block, event.Text)
 	case app.EventToolFinished:

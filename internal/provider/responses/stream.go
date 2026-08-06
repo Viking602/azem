@@ -26,6 +26,7 @@ type Stream struct {
 	reader      *frameReader
 	builders    map[string]*toolBuilder
 	emitted     map[string]bool
+	textPhases  map[int]hyprovider.TextPhase
 	completed   bool
 	terminal    bool
 	toolUse     bool
@@ -58,11 +59,12 @@ type streamEvent struct {
 }
 
 type streamItem struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id"`
-	CallID    string          `json:"call_id"`
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
+	Type      string               `json:"type"`
+	ID        string               `json:"id"`
+	CallID    string               `json:"call_id"`
+	Name      string               `json:"name"`
+	Phase     hyprovider.TextPhase `json:"phase"`
+	Arguments json.RawMessage      `json:"arguments"`
 }
 
 type completedResponse struct {
@@ -91,7 +93,11 @@ func NewStream(ctx context.Context, cancel context.CancelFunc, body io.ReadClose
 	if len(reporters) > 0 {
 		reporter = reporters[0]
 	}
-	return &Stream{ctx: ctx, cancel: cancel, body: body, reader: newFrameReader(body), builders: make(map[string]*toolBuilder), emitted: make(map[string]bool), reportUsage: reporter}
+	return &Stream{
+		ctx: ctx, cancel: cancel, body: body, reader: newFrameReader(body),
+		builders: make(map[string]*toolBuilder), emitted: make(map[string]bool),
+		textPhases: make(map[int]hyprovider.TextPhase), reportUsage: reporter,
+	}
 }
 
 func (s *Stream) Recv() (hyprovider.Event, error) {
@@ -165,7 +171,9 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 	case "response.output_text.delta":
 		s.textOutput = true
 		if event.Delta != "" {
-			return hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: event.Delta}, true, false
+			return hyprovider.Event{
+				Kind: hyprovider.EventTextDelta, Text: event.Delta, TextPhase: s.textPhase(event.OutputIndex),
+			}, true, false
 		}
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		if event.Delta != "" {
@@ -173,8 +181,11 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 		}
 	case "response.output_item.added":
 		var item streamItem
-		if json.Unmarshal(event.Item, &item) == nil && isToolItem(item.Type) {
-			s.updateBuilder(item, event.OutputIndex, false)
+		if json.Unmarshal(event.Item, &item) == nil {
+			s.recordTextPhase(event.OutputIndex, item.Phase)
+			if isToolItem(item.Type) {
+				s.updateBuilder(item, event.OutputIndex, false)
+			}
 		}
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		builder := s.builder(event.ItemID, event.CallID, event.OutputIndex)
@@ -198,12 +209,15 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 		return s.finishTool(builder)
 	case "response.output_item.done":
 		var item streamItem
-		if err := json.Unmarshal(event.Item, &item); err == nil && isToolItem(item.Type) {
-			builder, err := s.updateBuilder(item, event.OutputIndex, true)
-			if err != nil {
-				return s.errorEvent(err), true, true
+		if err := json.Unmarshal(event.Item, &item); err == nil {
+			s.recordTextPhase(event.OutputIndex, item.Phase)
+			if isToolItem(item.Type) {
+				builder, err := s.updateBuilder(item, event.OutputIndex, true)
+				if err != nil {
+					return s.errorEvent(err), true, true
+				}
+				return s.finishTool(builder)
 			}
-			return s.finishTool(builder)
 		}
 	case "response.completed":
 		var response completedResponse
@@ -299,6 +313,29 @@ func (s *Stream) providerStateComplete(state json.RawMessage) bool {
 		}
 	}
 	return len(items) > 0
+}
+
+func (s *Stream) recordTextPhase(index *int, phase hyprovider.TextPhase) {
+	if index == nil {
+		return
+	}
+	s.textPhases[*index] = normalizeTextPhase(phase)
+}
+
+func (s *Stream) textPhase(index *int) hyprovider.TextPhase {
+	if index == nil {
+		return ""
+	}
+	return s.textPhases[*index]
+}
+
+func normalizeTextPhase(phase hyprovider.TextPhase) hyprovider.TextPhase {
+	switch phase {
+	case hyprovider.TextPhaseCommentary, hyprovider.TextPhaseFinalAnswer:
+		return phase
+	default:
+		return ""
+	}
 }
 
 func (s *Stream) hasIncompleteTool() bool {

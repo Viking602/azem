@@ -4,13 +4,49 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X 'main.version=$(VERSION)' -X 'main.gitCommit=$(GIT_COMMIT)' -X 'main.buildTime=$(BUILD_TIME)'
 
-.PHONY: build test sqlc
+.PHONY: build gui frontend test test-gui sqlc architecture-check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/azem
 
+frontend:
+	cd frontend && bun install --frozen-lockfile && bun run build
+
+# Match LSMinimumSystemVersion in Info.plist; keeps CGO objects and the Go
+# linker on the same deployment target (avoids "built for newer macOS than linked").
+MACOSX_DEPLOYMENT_TARGET ?= 12.0
+DARWIN_CGO_ENV := MACOSX_DEPLOYMENT_TARGET=$(MACOSX_DEPLOYMENT_TARGET) \
+	CGO_CFLAGS="-mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)" \
+	CGO_LDFLAGS="-mmacosx-version-min=$(MACOSX_DEPLOYMENT_TARGET)"
+
+gui: frontend
+ifeq ($(shell uname -s),Darwin)
+	mkdir -p dist/Azem.app/Contents/MacOS dist/Azem.app/Contents/Resources
+	cp cmd/azem-gui/Info.plist dist/Azem.app/Contents/Info.plist
+	cp cmd/azem-gui/AppIcon.icns dist/Azem.app/Contents/Resources/AppIcon.icns
+	$(DARWIN_CGO_ENV) go build -ldflags "$(LDFLAGS)" -o azem-gui ./cmd/azem-gui
+	cp azem-gui dist/Azem.app/Contents/MacOS/Azem
+	codesign --force --sign - --timestamp=none dist/Azem.app/Contents/MacOS/Azem
+	codesign --force --sign - --timestamp=none dist/Azem.app
+	codesign --verify --deep --strict --verbose=2 dist/Azem.app
+else
+	go build -ldflags "$(LDFLAGS)" -o azem-gui ./cmd/azem-gui
+endif
+
 test:
 	go test ./...
 
+test-gui:
+	cd frontend && bun run typecheck && bun run test && bun run build
+
+ifeq ($(shell uname -s),Darwin)
+	$(DARWIN_CGO_ENV) go test ./internal/desktop ./cmd/azem-gui
+else
+	go test ./internal/desktop ./cmd/azem-gui
+endif
+
 sqlc:
 	go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate
+
+architecture-check:
+	sentrux check .

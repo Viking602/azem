@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,8 +59,24 @@ type bootstrapAssembly struct {
 }
 
 func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
+	return bootstrap(ctx, startupWorkspace, configFile, false, false)
+}
+
+func BootstrapAtWorkspace(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
+	return bootstrap(ctx, startupWorkspace, configFile, true, false)
+}
+
+func BootstrapDesktop(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
+	return bootstrap(ctx, startupWorkspace, configFile, false, true)
+}
+
+func BootstrapDesktopAtWorkspace(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
+	return bootstrap(ctx, startupWorkspace, configFile, true, true)
+}
+
+func bootstrap(ctx context.Context, startupWorkspace, configFile string, forceWorkspace, desktopMode bool) (BootstrapResult, error) {
 	assembly := bootstrapAssembly{ctx: ctx}
-	result, err := assembly.build(startupWorkspace, configFile)
+	result, err := assembly.build(startupWorkspace, configFile, forceWorkspace, desktopMode)
 	if err != nil {
 		assembly.close()
 		return BootstrapResult{}, err
@@ -66,11 +84,11 @@ func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) 
 	return result, nil
 }
 
-func (b *bootstrapAssembly) build(startupWorkspace, configFile string) (BootstrapResult, error) {
-	if err := b.loadConfiguration(startupWorkspace, configFile); err != nil {
+func (b *bootstrapAssembly) build(startupWorkspace, configFile string, forceWorkspace, desktopMode bool) (BootstrapResult, error) {
+	if err := b.loadConfiguration(startupWorkspace, configFile, forceWorkspace, desktopMode); err != nil {
 		return BootstrapResult{}, err
 	}
-	if err := b.buildCore(); err != nil {
+	if err := b.buildCore(forceWorkspace, desktopMode); err != nil {
 		return BootstrapResult{}, err
 	}
 	if err := b.wireService(); err != nil {
@@ -82,7 +100,7 @@ func (b *bootstrapAssembly) build(startupWorkspace, configFile string) (Bootstra
 	return BootstrapResult{Config: b.cfg, Paths: b.paths, SessionID: b.startupSessionID, Service: b.service}, nil
 }
 
-func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile string) error {
+func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile string, forceWorkspace, desktopMode bool) error {
 	paths, err := config.ResolvePaths(startupWorkspace)
 	if err != nil {
 		return err
@@ -91,7 +109,16 @@ func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile strin
 		paths.ConfigFile = configFile
 		paths.ConfigDir = directoryOf(configFile)
 	}
-	cfg, err := config.Load(paths.ConfigFile, paths.Workspace)
+	if desktopMode && !forceWorkspace {
+		if err := b.restoreDesktopWorkspace(&paths); err != nil {
+			return err
+		}
+	}
+	loadConfig := config.Load
+	if forceWorkspace || desktopMode {
+		loadConfig = config.LoadAtWorkspace
+	}
+	cfg, err := loadConfig(paths.ConfigFile, paths.Workspace)
 	if err != nil {
 		return err
 	}
@@ -111,11 +138,39 @@ func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile strin
 	return nil
 }
 
-func (b *bootstrapAssembly) buildCore() error {
+func (b *bootstrapAssembly) restoreDesktopWorkspace(paths *config.Paths) error {
 	var err error
-	b.store, err = sqlitestore.Open(b.ctx, b.paths.Database)
+	b.store, err = sqlitestore.Open(b.ctx, paths.Database)
 	if err != nil {
 		return err
+	}
+	b.sessions = session.NewService(b.store.DB())
+	if workspace, restoreErr := b.sessions.LastProject(b.ctx); restoreErr == nil {
+		paths.Workspace = workspace
+		return nil
+	} else if !errors.Is(restoreErr, sql.ErrNoRows) {
+		return fmt.Errorf("restore desktop project: %w", restoreErr)
+	}
+	if filepath.Dir(filepath.Clean(paths.Workspace)) != filepath.Clean(paths.Workspace) {
+		return nil
+	}
+	paths.Workspace, err = os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve desktop fallback workspace: %w", err)
+	}
+	return nil
+}
+
+func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
+	var err error
+	if b.store == nil {
+		b.store, err = sqlitestore.Open(b.ctx, b.paths.Database)
+		if err != nil {
+			return err
+		}
+	}
+	if b.sessions == nil {
+		b.sessions = session.NewService(b.store.DB())
 	}
 	b.skillCatalog, err = skills.Load(skills.LoadOptions{
 		HomeDir:      b.homeDir,
@@ -126,7 +181,15 @@ func (b *bootstrapAssembly) buildCore() error {
 	if err != nil {
 		return fmt.Errorf("load skills: %w", err)
 	}
-	b.sessions = session.NewService(b.store.DB())
+	if desktopMode {
+		if err := b.sessions.TouchProject(b.ctx, b.paths.Workspace); err != nil {
+			if forceWorkspace || filepath.Dir(filepath.Clean(b.paths.Workspace)) != filepath.Clean(b.paths.Workspace) {
+				return err
+			}
+		} else if err := b.sessions.AdoptUnassignedSessions(b.ctx); err != nil {
+			return err
+		}
+	}
 	b.startupSessionID, err = randomID("session")
 	if err != nil {
 		return fmt.Errorf("create startup session id: %w", err)

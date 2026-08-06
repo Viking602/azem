@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 	"github.com/Viking602/venat/api"
+	"github.com/google/uuid"
 )
 
 func (u *unitOfWork) LoadTraceSpan(ctx context.Context, id string) (api.TraceSpan, error) {
@@ -376,7 +378,35 @@ func (u *unitOfWork) ListCapabilities(ctx context.Context, selector api.Capabili
 	return limit(filtered, selector.Limit), nil
 }
 
+func normalizeUsageRecord(value api.UsageRecord) api.UsageRecord {
+	if value.Kind == "" {
+		value.Kind = api.UsageKindLegacyExecution
+	}
+	return value
+}
+
 func (u *unitOfWork) AppendUsage(ctx context.Context, value api.UsageRecord) error {
+	if value.ID == "" {
+		value.ID = uuid.NewString()
+	}
+	value = normalizeUsageRecord(value)
+	existing, err := loadRecord[api.UsageRecord](ctx, u.tx, kindUsage, value.ID, "")
+	if err == nil {
+		existing = normalizeUsageRecord(existing)
+		if value.CreatedAt.IsZero() {
+			value.CreatedAt = existing.CreatedAt
+		}
+		if reflect.DeepEqual(existing, value) {
+			return nil
+		}
+		return fmt.Errorf("append usage %q: %w", value.ID, api.ErrIdempotencyConflict)
+	}
+	if !errors.Is(err, api.ErrNotFound) {
+		return err
+	}
+	if value.CreatedAt.IsZero() {
+		value.CreatedAt = time.Now().UTC()
+	}
 	return u.save(ctx, kindUsage, value.ID, "", value.RunID, value.TaskID, "", value.CreatedAt, "", "", value, false)
 }
 
@@ -387,7 +417,13 @@ func (u *unitOfWork) QueryUsage(ctx context.Context, selector api.UsageSelector)
 	}
 	filtered := values[:0]
 	for _, value := range values {
-		if selector.TaskID != "" && value.TaskID != selector.TaskID || selector.AgentID != "" && value.AgentID != selector.AgentID || selector.Provider != "" && value.Provider != selector.Provider || !within(value.CreatedAt, selector.Since, selector.Until) {
+		value = normalizeUsageRecord(value)
+		if selector.TaskID != "" && value.TaskID != selector.TaskID ||
+			selector.AgentID != "" && value.AgentID != selector.AgentID ||
+			selector.Kind != "" && value.Kind != selector.Kind ||
+			selector.Provider != "" && value.Provider != selector.Provider ||
+			selector.ToolName != "" && value.ToolName != selector.ToolName ||
+			!within(value.CreatedAt, selector.Since, selector.Until) {
 			continue
 		}
 		filtered = append(filtered, value)
@@ -396,6 +432,7 @@ func (u *unitOfWork) QueryUsage(ctx context.Context, selector api.UsageSelector)
 }
 
 func (u *unitOfWork) SumCredits(ctx context.Context, selector api.UsageSelector) (int64, error) {
+	selector.Limit = 0
 	values, err := u.QueryUsage(ctx, selector)
 	if err != nil {
 		return 0, err

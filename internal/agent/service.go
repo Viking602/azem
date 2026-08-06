@@ -6,8 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -16,21 +16,24 @@ import (
 
 	"github.com/Viking602/azem/internal/skills"
 	"github.com/Viking602/venat"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/stream"
 	"github.com/Viking602/venat/tool"
+	hyworker "github.com/Viking602/venat/worker"
 )
 
 const mainAgentID = "azem-main"
 
-const (
-	defaultRunLeaseTTL               = 10 * time.Minute
-	defaultRunLeaseHeartbeatInterval = 30 * time.Second
-)
+const defaultRunLeaseTTL = 10 * time.Minute
 
 const (
-	approvalMetadataOperationID = "azem.operation_id"
-	approvalMetadataScope       = "azem.scope_fingerprint"
+	approvalMetadataOperationID   = "azem.operation_id"
+	approvalMetadataScope         = "azem.scope_fingerprint"
+	singleRunMetadataAgentID      = "azem.single_agent_id"
+	singleRunMetadataAgentVersion = "azem.single_agent_version"
+	singleRunMetadataGovernance   = "azem.single_governance"
 )
 
 type recoveredApprovalDecision struct {
@@ -39,28 +42,27 @@ type recoveredApprovalDecision struct {
 }
 
 type Service struct {
-	runner               *venat.Runner
-	store                api.StoreProvider
-	workspace            coding.Workspace
-	tools                *tool.Bus
-	policy               *ApprovalPolicy
-	allowWrite           bool
-	shellPolicy          string
-	allowNetwork         string
-	shellRuntime         *shellRuntime
-	teamMaxConcurrency   int
-	teamMaxTicks         int
-	skills               *skills.Catalog
-	runLeaseTTL          time.Duration
-	runHeartbeatInterval time.Duration
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	wg                   sync.WaitGroup
-	approvalMu           sync.Mutex
-	recoveredApprovals   map[string]map[string]recoveredApprovalDecision
+	runner             *venat.Runner
+	store              api.StoreProvider
+	workspace          coding.Workspace
+	tools              *tool.Bus
+	policy             *ApprovalPolicy
+	allowWrite         bool
+	shellPolicy        string
+	allowNetwork       string
+	shellRuntime       *shellRuntime
+	teamMaxConcurrency int
+	teamMaxTicks       int
+	skills             *skills.Catalog
+	runLeaseTTL        time.Duration
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	singleRunMu        sync.Mutex
+	singleRuns         map[string]*hyworker.SingleRunner
+	approvalMu         sync.Mutex
+	recoveredApprovals map[string]map[string]recoveredApprovalDecision
 }
-
-var ErrTerminalReportMissing = errors.New("terminal worker report is missing")
 
 const hashlineEditToolDescription = `Apply a hashline patch to existing files. This is not unified diff. Copy the exact ¶PATH#TAG header and N:TEXT line numbers from the latest coding.read_file result. Grammar:
 ¶PATH#TAG
@@ -172,26 +174,25 @@ func (recovery *EditRecovery) Observe(call tool.Call, result tool.Result, execut
 }
 
 type RunExecutionPolicy struct {
-	Budget      *api.TaskBudget
-	RetryPolicy api.RetryPolicy
+	AgentID        string
+	AgentVersion   string
+	Governance     api.GovernancePolicy
+	Budget         *api.TaskBudget
+	RetryPolicy    api.RetryPolicy
+	ResourceClaims []api.ResourceClaimSpec
 }
 
 type Run struct {
-	RunID           string
-	Goal            string
-	TaskID          string
-	EnvelopeID      string
-	LeaseID         string
-	TaskVersion     int
-	HolderID        string
-	pending         map[string]PendingApproval
-	approvedOnce    map[string]string
-	editRecovery    EditRecovery
-	leaseCancel     context.CancelFunc
-	leaseParentStop func() bool
-	leaseDone       <-chan error
-	leaseStopOnce   sync.Once
-	leaseErr        error
+	RunID        string
+	Goal         string
+	TaskID       string
+	EnvelopeID   string
+	LeaseID      string
+	TaskVersion  int
+	HolderID     string
+	pending      map[string]PendingApproval
+	approvedOnce map[string]string
+	editRecovery EditRecovery
 }
 
 type PendingApproval struct {
@@ -284,8 +285,9 @@ func NewService(store api.StoreProvider, workspaceRoot string, options ...Servic
 		runner: runner, store: store, workspace: workspace, policy: policy,
 		allowWrite: settings.allowWrite, shellPolicy: settings.shellPolicy, allowNetwork: settings.network,
 		teamMaxConcurrency: settings.teamMaxConcurrency, teamMaxTicks: settings.teamMaxTicks,
-		skills: settings.skills, runLeaseTTL: defaultRunLeaseTTL, runHeartbeatInterval: defaultRunLeaseHeartbeatInterval,
+		skills: settings.skills, runLeaseTTL: defaultRunLeaseTTL,
 		ctx: serviceCtx, cancel: serviceCancel,
+		singleRuns:         make(map[string]*hyworker.SingleRunner),
 		recoveredApprovals: make(map[string]map[string]recoveredApprovalDecision),
 	}
 	service.shellRuntime = newShellRuntime(serviceCtx, settings.shellOptions)
@@ -329,21 +331,6 @@ func (s *Service) StartRunWithMetadata(ctx context.Context, request string, meta
 	if err != nil {
 		return nil, err
 	}
-	run, root, err := s.runner.StartRun(ctx, api.StartRunCommand{RunID: runID, RootTaskID: rootID, Request: request, Metadata: metadata})
-	if err != nil {
-		return nil, err
-	}
-	for _, status := range []api.RunStatus{
-		api.RunStatusPlanning,
-		api.RunStatusValidating,
-		api.RunStatusRouting,
-		api.RunStatusDispatching,
-		api.RunStatusRunning,
-	} {
-		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: run.ID, To: status}); err != nil {
-			return nil, fmt.Errorf("start coding run %s: %w", status, err)
-		}
-	}
 	taskID, err := newID("task")
 	if err != nil {
 		return nil, err
@@ -352,102 +339,100 @@ func (s *Service) StartRunWithMetadata(ctx context.Context, request string, meta
 	if len(policies) > 0 {
 		executionPolicy = policies[0]
 	}
-	task, err := s.runner.CreateTask(ctx, api.CreateTaskCommand{
-		RunID: run.ID, TaskID: taskID, ParentTaskID: root.ID, Type: api.TaskTypeWorker,
-		Goal: request, OwnerAgentID: mainAgentID, AssignedAgentID: mainAgentID, AllowsAction: true,
+	agentID := strings.TrimSpace(executionPolicy.AgentID)
+	if agentID == "" {
+		agentID = mainAgentID
+	}
+	agentVersion := strings.TrimSpace(executionPolicy.AgentVersion)
+	if agentVersion == "" {
+		agentVersion = "runtime"
+	}
+	governance, err := json.Marshal(executionPolicy.Governance)
+	if err != nil {
+		return nil, fmt.Errorf("encode coding run governance: %w", err)
+	}
+	durableMetadata := maps.Clone(metadata)
+	if durableMetadata == nil {
+		durableMetadata = make(map[string]string, 3)
+	}
+	durableMetadata[singleRunMetadataAgentID] = agentID
+	durableMetadata[singleRunMetadataAgentVersion] = agentVersion
+	durableMetadata[singleRunMetadataGovernance] = string(governance)
+	if agentID != mainAgentID {
+		s.runner.RegisterAgent(api.AgentProfile{ID: agentID, Role: agentID})
+	}
+	coordinator := s.newSingleRunner(agentID, agentVersion, executionPolicy.Governance)
+	state, err := coordinator.Start(ctx, hyworker.StartSingleRunRequest{
+		RunID: runID, RootTaskID: rootID, TaskID: taskID,
+		Request: request, Metadata: durableMetadata, Goal: request, AllowsAction: true,
 		Budget: executionPolicy.Budget, RetryPolicy: executionPolicy.RetryPolicy,
+		ResourceClaims: append([]api.ResourceClaimSpec(nil), executionPolicy.ResourceClaims...),
 	})
 	if err != nil {
 		return nil, err
 	}
-	envelope, err := s.dispatchTask(ctx, api.DispatchTaskCommand{RunID: run.ID, TaskID: task.ID, TargetAgentID: mainAgentID})
-	if err != nil {
-		return nil, err
-	}
-	lease, acquired, err := s.runner.AcquireTaskExecution(ctx, api.AcquireTaskExecutionCommand{
-		RunID: run.ID, TaskID: task.ID, EnvelopeID: envelope.ID, HolderType: api.HolderAgent, HolderID: mainAgentID, TTL: s.runLeaseTTL,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !acquired {
-		return nil, fmt.Errorf("acquire coding task lease: no lease granted")
-	}
-	tracked := &Run{
-		RunID: run.ID, Goal: request, TaskID: task.ID, EnvelopeID: envelope.ID, LeaseID: lease.ID, TaskVersion: lease.TaskVersion, HolderID: mainAgentID,
-		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string),
-	}
-	s.startRunLeaseHeartbeat(ctx, tracked)
-	return tracked, nil
+	s.trackSingleRunner(runID, coordinator)
+	return trackedRun(state), nil
 }
 
-// ResumeRun reacquires the worker task that durable recovery redispatched for
-// an interrupted single-agent run. It preserves the original run and task IDs
-// so action-attempt idempotency remains scoped to the same execution.
+// ResumeRun delegates recovery, redispatch, and resumability checks to Venat's
+// durable single-run coordinator. A lease is acquired only when ExecuteRun
+// starts, after the host has rebuilt the immutable execution profile.
 func (s *Service) ResumeRun(ctx context.Context, runID string) (*Run, error) {
-	durable, err := s.runner.Run(ctx, runID)
+	coordinator, err := s.singleRunner(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := s.runner.ListTasks(ctx, runID)
+	state, err := coordinator.Resume(ctx, runID)
 	if err != nil {
 		return nil, err
 	}
-	var task api.Task
-	for _, candidate := range tasks {
-		if candidate.Type == api.TaskTypeWorker && candidate.AssignedAgentID == mainAgentID && candidate.Status == api.TaskStatusDispatched {
-			task = candidate
-			break
-		}
-	}
-	if task.ID == "" {
-		return nil, fmt.Errorf("resume coding run %s: no redispatched main task", runID)
-	}
-	envelopes, err := s.runner.ListEnvelopes(ctx, runID)
-	if err != nil {
-		return nil, err
-	}
-	var envelope api.TaskEnvelope
-	for _, candidate := range envelopes {
-		if candidate.TaskID == task.ID && candidate.Status == "pending" {
-			envelope = candidate
-			break
-		}
-	}
-	if envelope.ID == "" {
-		return nil, fmt.Errorf("resume coding run %s: redispatched envelope is missing", runID)
-	}
-	lease, acquired, err := s.runner.AcquireTaskExecution(ctx, api.AcquireTaskExecutionCommand{
-		RunID: runID, TaskID: task.ID, EnvelopeID: envelope.ID,
-		HolderType: api.HolderAgent, HolderID: mainAgentID, TTL: s.runLeaseTTL,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !acquired {
-		return nil, fmt.Errorf("resume coding run %s: no lease granted", runID)
-	}
-	tracked := &Run{
-		RunID: runID, Goal: task.Goal, TaskID: task.ID, EnvelopeID: envelope.ID, LeaseID: lease.ID, TaskVersion: lease.TaskVersion, HolderID: mainAgentID,
-		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string),
-	}
-	if tracked.Goal == "" {
-		tracked.Goal = durable.Request
-	}
-	s.startRunLeaseHeartbeat(ctx, tracked)
-	return tracked, nil
+	s.trackSingleRunner(runID, coordinator)
+	return trackedRun(state), nil
 }
 
-// ReleaseRun relinquishes a recovered lease when the host cannot safely
-// rebuild the immutable execution profile. The durable run remains
-// non-terminal and can be resumed after the incompatibility is resolved.
+// ExecuteRun binds a rebuilt transient engine to the durable single-run
+// coordinator. The lease observer publishes lease-scoped authorization to the
+// governed Azem tools before the agent can call them.
+func (s *Service) ExecuteRun(ctx context.Context, run *Run, engine hyagent.Engine, sink stream.Sink) (hyworker.ExecutionOutcome, error) {
+	if run == nil {
+		return hyworker.ExecutionOutcome{}, fmt.Errorf("run is nil")
+	}
+	coordinator, err := s.singleRunner(ctx, run.RunID)
+	if err != nil {
+		return hyworker.ExecutionOutcome{}, err
+	}
+	result, executeErr := coordinator.Execute(ctx, hyworker.ExecuteSingleRunRequest{
+		RunID: run.RunID, Sink: sink, TTL: s.runLeaseTTL, Engine: &engine,
+		OnLeaseAcquired: func(lease api.TaskExecutionLease) error {
+			run.EnvelopeID = lease.EnvelopeID
+			run.LeaseID = lease.ID
+			run.TaskVersion = lease.TaskVersion
+			run.HolderID = lease.HolderID
+			return nil
+		},
+	})
+	if result.Execution.State != hyworker.ExecutionSuspended {
+		s.untrackSingleRunner(run.RunID, coordinator)
+	}
+	return result.Execution, executeErr
+}
+
+// ReleaseRun durably suspends a rebuilt run that cannot safely execute. The
+// run remains resumable after its immutable profile mismatch is resolved.
 func (s *Service) ReleaseRun(ctx context.Context, run *Run) error {
 	if run == nil {
 		return nil
 	}
-	heartbeatErr := run.stopRunLeaseHeartbeat()
-	releaseErr := s.runner.ReleaseTaskExecution(ctx, api.ReleaseTaskExecutionCommand{LeaseID: run.LeaseID, HolderID: run.HolderID})
-	return errors.Join(heartbeatErr, releaseErr)
+	coordinator, err := s.singleRunner(ctx, run.RunID)
+	if err != nil {
+		return err
+	}
+	err = coordinator.Suspend(ctx, run.RunID)
+	if err == nil {
+		s.untrackSingleRunner(run.RunID, coordinator)
+	}
+	return err
 }
 
 func (s *Service) RequireRunReconciliation(ctx context.Context, runID, reason string) error {
@@ -457,93 +442,102 @@ func (s *Service) RequireRunReconciliation(ctx context.Context, runID, reason st
 	if _, err := s.runner.Recover(ctx, runID); err != nil {
 		return err
 	}
-	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusReconcileRequired}); err != nil {
-		return fmt.Errorf("mark run %s reconciliation required: %w", runID, err)
+	run, err := s.runner.Run(ctx, runID)
+	if err != nil {
+		return err
 	}
+	if run.Status == api.RunStatusReconcileRequired {
+		s.untrackSingleRunner(runID, nil)
+		return nil
+	}
+	if run.Status == api.RunStatusBlocked || run.Status == api.RunStatusWaitingUserInput {
+		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusRunning}); err != nil {
+			return fmt.Errorf("prepare run %s for reconciliation: %w", runID, err)
+		}
+	}
+	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusReconcileRequired}); err != nil {
+		return fmt.Errorf("mark run %s reconciliation required from %s: %w", runID, run.Status, err)
+	}
+	s.untrackSingleRunner(runID, nil)
 	return nil
 }
 
-func (s *Service) startRunLeaseHeartbeat(parent context.Context, run *Run) {
-	heartbeatCtx, cancel := context.WithCancel(s.ctx)
-	done := make(chan error, 1)
-	run.leaseCancel = cancel
-	run.leaseParentStop = context.AfterFunc(parent, cancel)
-	run.leaseDone = done
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		ticker := time.NewTicker(s.runHeartbeatInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-heartbeatCtx.Done():
-				done <- nil
-				return
-			case <-ticker.C:
-			}
-			timeout := min(s.runHeartbeatInterval, 5*time.Second)
-			beatCtx, beatCancel := context.WithTimeout(heartbeatCtx, timeout)
-			err := s.runner.HeartbeatTaskExecution(beatCtx, api.HeartbeatTaskExecutionCommand{
-				LeaseID: run.LeaseID, HolderID: run.HolderID, TTL: s.runLeaseTTL,
-			})
-			beatCancel()
-			if err == nil {
-				continue
-			}
-			if heartbeatCtx.Err() != nil {
-				done <- nil
-				return
-			}
-			if errors.Is(err, api.ErrLeaseNotActive) || errors.Is(err, api.ErrLeaseHolderMismatch) {
-				done <- fmt.Errorf("maintain run lease: %w", err)
-				return
-			}
-		}
-	}()
-}
-
-func (run *Run) stopRunLeaseHeartbeat() error {
-	run.leaseStopOnce.Do(func() {
-		if run.leaseParentStop != nil {
-			run.leaseParentStop()
-		}
-		if run.leaseCancel != nil {
-			run.leaseCancel()
-		}
-		if run.leaseDone != nil {
-			run.leaseErr = <-run.leaseDone
-		}
-	})
-	return run.leaseErr
-}
-
-func (s *Service) TransferRunExecution(run *Run) (api.TaskEnvelope, api.TaskExecutionLease, error) {
-	if run == nil {
-		return api.TaskEnvelope{}, api.TaskExecutionLease{}, fmt.Errorf("run is nil")
+func (s *Service) newSingleRunner(agentID, agentVersion string, governance api.GovernancePolicy) *hyworker.SingleRunner {
+	return &hyworker.SingleRunner{
+		Runner: s.runner,
+		Worker: hyworker.AgentWorker{
+			Runner: s.runner, AgentID: agentID, TTL: s.runLeaseTTL,
+		},
+		Admission:    hyworker.StandardAdmissionController{Runner: s.runner},
+		AgentVersion: agentVersion,
+		Governance:   governance,
 	}
-	if err := run.stopRunLeaseHeartbeat(); err != nil {
-		return api.TaskEnvelope{}, api.TaskExecutionLease{}, err
-	}
-	return api.TaskEnvelope{
-			ID: run.EnvelopeID, RunID: run.RunID, TaskID: run.TaskID, Status: "pending", TaskVersion: run.TaskVersion,
-		}, api.TaskExecutionLease{
-			ID: run.LeaseID, RunID: run.RunID, TaskID: run.TaskID, EnvelopeID: run.EnvelopeID,
-			HolderType: api.HolderAgent, HolderID: run.HolderID, TaskVersion: run.TaskVersion, Status: api.LeaseStatusActive,
-		}, nil
 }
 
-func (s *Service) dispatchTask(ctx context.Context, command api.DispatchTaskCommand) (api.TaskEnvelope, error) {
-	for {
-		envelope, err := s.runner.DispatchTask(ctx, command)
-		if err == nil {
-			return envelope, nil
+func (s *Service) singleRunner(ctx context.Context, runID string) (*hyworker.SingleRunner, error) {
+	s.singleRunMu.Lock()
+	coordinator := s.singleRuns[runID]
+	s.singleRunMu.Unlock()
+	if coordinator != nil {
+		return coordinator, nil
+	}
+	run, err := s.runner.Run(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	agentID := strings.TrimSpace(run.Metadata[singleRunMetadataAgentID])
+	if agentID == "" {
+		agentID = mainAgentID
+	}
+	agentVersion := strings.TrimSpace(run.Metadata[singleRunMetadataAgentVersion])
+	if agentVersion == "" {
+		agentVersion = "legacy"
+	}
+	var governance api.GovernancePolicy
+	if encoded := strings.TrimSpace(run.Metadata[singleRunMetadataGovernance]); encoded != "" {
+		if err := json.Unmarshal([]byte(encoded), &governance); err != nil {
+			return nil, fmt.Errorf("decode coding run governance: %w", err)
 		}
-		if !errors.Is(err, api.ErrIdempotencyConflict) {
-			return api.TaskEnvelope{}, err
-		}
-		if err := ctx.Err(); err != nil {
-			return api.TaskEnvelope{}, err
-		}
+	}
+	coordinator = s.newSingleRunner(agentID, agentVersion, governance)
+	s.singleRunMu.Lock()
+	if existing := s.singleRuns[runID]; existing != nil {
+		s.singleRunMu.Unlock()
+		return existing, nil
+	}
+	s.singleRuns[runID] = coordinator
+	s.singleRunMu.Unlock()
+	return coordinator, nil
+}
+
+func (s *Service) trackSingleRunner(runID string, coordinator *hyworker.SingleRunner) {
+	s.singleRunMu.Lock()
+	s.singleRuns[runID] = coordinator
+	s.singleRunMu.Unlock()
+}
+
+func (s *Service) untrackSingleRunner(runID string, expected *hyworker.SingleRunner) {
+	s.singleRunMu.Lock()
+	if expected == nil || s.singleRuns[runID] == expected {
+		delete(s.singleRuns, runID)
+	}
+	s.singleRunMu.Unlock()
+}
+
+func trackedRun(state hyworker.SingleRun) *Run {
+	goal := state.Task.Goal
+	if goal == "" {
+		goal = state.Run.Request
+	}
+	taskVersion := state.Envelope.TaskVersion
+	if taskVersion == 0 {
+		taskVersion = state.Task.Version
+	}
+	return &Run{
+		RunID: state.Run.ID, Goal: goal, TaskID: state.Task.ID,
+		EnvelopeID: state.Envelope.ID, TaskVersion: taskVersion,
+		HolderID: state.Task.AssignedAgentID,
+		pending:  make(map[string]PendingApproval), approvedOnce: make(map[string]string),
 	}
 }
 
@@ -809,140 +803,58 @@ func (s *Service) CompleteRun(ctx context.Context, run *Run, summary string, fai
 	if run == nil {
 		return fmt.Errorf("run is nil")
 	}
-	if err := run.stopRunLeaseHeartbeat(); err != nil {
+	coordinator, err := s.singleRunner(ctx, run.RunID)
+	if err != nil {
 		return err
 	}
-	if err := s.runner.HeartbeatTaskExecution(ctx, api.HeartbeatTaskExecutionCommand{
-		LeaseID: run.LeaseID, HolderID: run.HolderID, TTL: s.runLeaseTTL,
-	}); err != nil {
-		return fmt.Errorf("refresh run lease before report: %w", err)
-	}
-	status := api.ReportStatusSuccess
-	target := api.RunStatusCompleted
-	kind := ""
+	report := api.TypedReport{Status: api.ReportStatusSuccess, Summary: summary}
 	if failure != nil {
-		status = api.ReportStatusFailed
-		target = api.RunStatusFailed
-		kind = "agent_error"
-		if summary == "" {
-			summary = failure.Error()
+		report.Status = api.ReportStatusFailed
+		report.Kind = "agent_error"
+		if report.Summary == "" {
+			report.Summary = failure.Error()
 		}
 	}
-	if err := s.runner.SubmitTypedReport(ctx, api.SubmitTypedReportCommand{
-		RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID, HolderType: api.HolderAgent,
-		HolderID: run.HolderID, TaskVersion: run.TaskVersion,
-		Report: api.TypedReport{Status: status, Summary: summary, Kind: kind},
-	}); err != nil {
-		return fmt.Errorf("submit run report: %w", err)
+	if _, err := coordinator.Report(ctx, run.RunID, report); err != nil {
+		return err
 	}
-	return s.finalizeReportedRunTo(ctx, run.RunID, target)
-}
-
-// finalizeReportedRunTo advances a report authored directly by Azem when
-// execution never reached Venat's worker.
-func (s *Service) finalizeReportedRunTo(ctx context.Context, runID string, target api.RunStatus) error {
-	projection, err := s.runner.Recover(ctx, runID)
-	if err != nil {
-		return fmt.Errorf("project reported run: %w", err)
-	}
-	if projection.Run.Status == target {
-		return nil
-	}
-	if target == api.RunStatusCompleted {
-		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusComposingResponse}); err != nil {
-			return fmt.Errorf("compose run response from %s: %w", projection.Run.Status, err)
-		}
-	}
-	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: target}); err != nil {
-		return fmt.Errorf("finish run: %w", err)
-	}
+	s.untrackSingleRunner(run.RunID, coordinator)
 	return nil
 }
 
-// CancelRun records an explicit user cancellation as terminal. Application
-// shutdown uses ReleaseRun instead so an interrupted run remains resumable.
+// CancelRun records an explicit terminal cancellation through the same
+// coordinator that owns execution. Application shutdown cancels the ExecuteRun
+// context instead, which produces a resumable suspension.
 func (s *Service) CancelRun(ctx context.Context, run *Run, cause error) error {
 	if run == nil {
 		return fmt.Errorf("run is nil")
 	}
-	if err := run.stopRunLeaseHeartbeat(); err != nil {
+	_ = cause
+	coordinator, err := s.singleRunner(ctx, run.RunID)
+	if err != nil {
 		return err
 	}
-	if err := s.runner.HeartbeatTaskExecution(ctx, api.HeartbeatTaskExecutionCommand{
-		LeaseID: run.LeaseID, HolderID: run.HolderID, TTL: s.runLeaseTTL,
-	}); err != nil {
-		return fmt.Errorf("refresh run lease before cancellation: %w", err)
+	if err := coordinator.Cancel(ctx, run.RunID); err != nil {
+		return err
 	}
-	reason := "cancelled by user"
-	if cause != nil {
-		reason = cause.Error()
-	}
-	if err := s.runner.SubmitTypedReport(ctx, api.SubmitTypedReportCommand{
-		RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.LeaseID, HolderType: api.HolderAgent,
-		HolderID: run.HolderID, TaskVersion: run.TaskVersion,
-		Report: api.TypedReport{Status: api.ReportStatusFailed, Summary: reason, Kind: "cancelled"},
-	}); err != nil {
-		return fmt.Errorf("submit cancelled run report: %w", err)
-	}
-	projection, err := s.runner.Recover(ctx, run.RunID)
-	if err != nil {
-		return fmt.Errorf("project cancelled run: %w", err)
-	}
-	if projection.Run.Status == api.RunStatusCancelled {
-		return nil
-	}
-	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: run.RunID, To: api.RunStatusCancelled}); err != nil {
-		return fmt.Errorf("cancel run: %w", err)
-	}
+	s.untrackSingleRunner(run.RunID, coordinator)
 	return nil
 }
 
-// FinalizeReportedRun completes the run-level state transition after a crash
-// that occurred after the worker report committed and released its lease.
-func (s *Service) FinalizeReportedRun(ctx context.Context, runID string) error {
-	projection, err := s.runner.Recover(ctx, runID)
-	if err != nil {
-		return err
+// CancelTrackedRun cancels a locally coordinated single run. false means the
+// ID belongs to a different runtime path, such as TeamRunner.
+func (s *Service) CancelTrackedRun(ctx context.Context, runID string) (bool, error) {
+	s.singleRunMu.Lock()
+	coordinator := s.singleRuns[runID]
+	s.singleRunMu.Unlock()
+	if coordinator == nil {
+		return false, nil
 	}
-	if projection.Run.Status == api.RunStatusCompleted || projection.Run.Status == api.RunStatusFailed ||
-		projection.Run.Status == api.RunStatusBlocked || projection.Run.Status == api.RunStatusCancelled {
-		return nil
+	err := coordinator.Cancel(ctx, runID)
+	if err == nil {
+		s.untrackSingleRunner(runID, coordinator)
 	}
-	target := api.RunStatus("")
-	for _, task := range projection.Tasks {
-		if task.Type != api.TaskTypeWorker || task.Result == nil {
-			continue
-		}
-		switch task.Status {
-		case api.TaskStatusCompleted:
-			if task.Result.Status == api.ReportStatusSuccess {
-				target = api.RunStatusCompleted
-			}
-		case api.TaskStatusFailed:
-			if task.Result.Kind == "cancelled" {
-				target = api.RunStatusCancelled
-			} else {
-				target = api.RunStatusFailed
-			}
-		case api.TaskStatusBlocked:
-			target = api.RunStatusBlocked
-		case api.TaskStatusCancelled:
-			target = api.RunStatusCancelled
-		}
-		break
-	}
-	if target == "" {
-		return fmt.Errorf("finalize reported run %s: %w", runID, ErrTerminalReportMissing)
-	}
-	if target == api.RunStatusCompleted && projection.Run.Status != api.RunStatusComposingResponse {
-		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusComposingResponse}); err != nil {
-			return fmt.Errorf("finalize reported run %s composing response: %w", runID, err)
-		}
-	}
-	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: target}); err != nil {
-		return fmt.Errorf("finalize reported run %s: %w", runID, err)
-	}
-	return nil
+	return true, err
 }
 
 func (s *Service) Recover(ctx context.Context, runID string) (api.Projection, error) {

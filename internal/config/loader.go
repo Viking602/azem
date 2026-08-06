@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -16,7 +17,7 @@ import (
 // UpdateDefault atomically updates one persisted UI default while preserving
 // unrelated YAML fields and comments in the user's configuration file.
 func UpdateDefault(path, key, value string) error {
-	if key != "language" && key != "approval_mode" {
+	if !slices.Contains([]string{"language", "approval_mode", "queue_mode", "provider", "model", "reasoning"}, key) {
 		return fmt.Errorf("unsupported default %q", key)
 	}
 	var document yaml.Node
@@ -70,11 +71,16 @@ func UpdateDefault(path, key, value string) error {
 }
 
 // UpdateModelRoute atomically updates a nested model route while preserving
-// unrelated YAML fields and comments. Supported scopes are "plan",
+// unrelated YAML fields and comments. Supported scopes are "title", "plan",
 // "compaction", and "subagent"; role is required only for the latter.
 func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	keys := []string{"agents"}
 	switch scope {
+	case "title":
+		if role != "" {
+			return fmt.Errorf("role is not valid for title route")
+		}
+		keys = append(keys, "title")
 	case "plan":
 		if role != "" {
 			return fmt.Errorf("role is not valid for plan route")
@@ -98,9 +104,14 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	}
 	return updateYAML(path, func(root *yaml.Node) {
 		mapping := ensureMappingPath(root, keys...)
+		persistInheritedTitle := scope == "title" && route == (ModelRouteConfig{})
 		for key, value := range map[string]string{"provider": route.Provider, "model": route.Model, "reasoning": route.Reasoning} {
 			if strings.TrimSpace(value) == "" {
-				deleteMappingValue(mapping, key)
+				if persistInheritedTitle {
+					setMappingScalar(mapping, key, "")
+				} else {
+					deleteMappingValue(mapping, key)
+				}
 			} else {
 				setMappingScalar(mapping, key, value)
 			}
@@ -160,6 +171,22 @@ func UpdateChatGPTFastMode(path string, enabled bool) error {
 		chatGPT := ensureMappingPath(root, "providers", "chatgpt")
 		setMappingScalar(chatGPT, "fast_mode", strconv.FormatBool(enabled))
 		mappingValue(chatGPT, "fast_mode").Tag = "!!bool"
+	})
+}
+
+// UpdateSessionModelDefaults atomically writes the selected provider/model/reasoning
+// defaults so new sessions and app restarts restore the last UI selection.
+func UpdateSessionModelDefaults(path, provider, model, reasoning string) error {
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return fmt.Errorf("provider and model are required")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		defaults := ensureMappingPath(root, "defaults")
+		setMappingScalar(defaults, "provider", provider)
+		setMappingScalar(defaults, "model", model)
+		setMappingScalar(defaults, "reasoning", strings.TrimSpace(reasoning))
 	})
 }
 
@@ -262,6 +289,16 @@ func setMappingScalar(mapping *yaml.Node, key, value string) {
 }
 
 func Load(path string, startupWorkspace string) (Config, error) {
+	return load(path, startupWorkspace, false)
+}
+
+// LoadAtWorkspace loads user settings while keeping the explicitly selected
+// desktop workspace authoritative over the optional CLI workspace.root field.
+func LoadAtWorkspace(path string, startupWorkspace string) (Config, error) {
+	return load(path, startupWorkspace, true)
+}
+
+func load(path string, startupWorkspace string, forceWorkspace bool) (Config, error) {
 	cfg := Default()
 	if path == "" {
 		paths, err := ResolvePaths(startupWorkspace)
@@ -332,7 +369,9 @@ func Load(path string, startupWorkspace string) (Config, error) {
 		}
 	}
 
-	if cfg.Workspace.Root == "" {
+	if forceWorkspace {
+		cfg.Workspace.Root = startupWorkspace
+	} else if cfg.Workspace.Root == "" {
 		cfg.Workspace.Root = startupWorkspace
 	} else if !filepath.IsAbs(cfg.Workspace.Root) {
 		cfg.Workspace.Root = filepath.Join(filepath.Dir(path), cfg.Workspace.Root)

@@ -35,6 +35,117 @@ const (
 
 const processRestartInterruption = "interrupted by process restart"
 
+func durableSubagentAgentID(agentType string) string {
+	agentType = strings.TrimSpace(agentType)
+	if agentType == "" {
+		agentType = "worker"
+	}
+	return "azem-subagent-" + agentType
+}
+
+func subagentResourceClaims(profile effectiveSubagentProfile, workspaceRoot string) ([]api.ResourceClaimSpec, error) {
+	if profile.Isolation == "worktree" || !subagentMayMutateWorkspace(profile) {
+		return nil, nil
+	}
+	claim, err := workspaceWriteClaim(workspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	return []api.ResourceClaimSpec{claim}, nil
+}
+
+func (r *subagentRuntime) childWorkspaceClaims(ctx context.Context, parent subagentParentRuntime, profile effectiveSubagentProfile) ([]api.ResourceClaimSpec, error) {
+	claims, err := subagentResourceClaims(profile, parent.WorkspaceRoot)
+	if err != nil || len(claims) == 0 {
+		return claims, err
+	}
+	claim := claims[0]
+	parentHasClaim, err := parentTaskHasWorkspaceClaim(ctx, parent, claim.Key)
+	if err != nil {
+		return nil, err
+	}
+	if !parentHasClaim {
+		return claims, nil
+	}
+	for {
+		active, err := parentWorkspaceClaimActive(ctx, parent, claim.Key)
+		if err != nil {
+			return nil, err
+		}
+		if active {
+			return nil, nil
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func parentTaskHasWorkspaceClaim(ctx context.Context, parent subagentParentRuntime, key string) (bool, error) {
+	tasks, err := parent.Coding.Runner().ListTasks(ctx, parent.ParentRunID)
+	if err != nil {
+		return false, fmt.Errorf("list parent tasks for workspace claim: %w", err)
+	}
+	for _, task := range tasks {
+		for _, claim := range task.ResourceClaims {
+			if claim.Key == key && claim.Mode == api.ResourceClaimExclusive {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func parentWorkspaceClaimActive(ctx context.Context, parent subagentParentRuntime, key string) (bool, error) {
+	claims, err := parent.Coding.Runner().ListResourceClaims(ctx, api.ResourceClaimSelector{
+		RunIDs: []string{parent.ParentRunID}, Keys: []string{key}, States: []api.ResourceClaimState{api.ResourceClaimActive},
+	})
+	if err != nil {
+		return false, fmt.Errorf("list parent workspace claims: %w", err)
+	}
+	for _, claim := range claims {
+		if claim.Key == key && claim.Mode == api.ResourceClaimExclusive && claim.RunID == parent.ParentRunID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func clearRecoveredSharedWorkspaceClaim(ctx context.Context, parent subagentParentRuntime, runID, key string) error {
+	tasks, err := parent.Coding.Runner().ListTasks(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("list recovered child tasks for workspace claim: %w", err)
+	}
+	for _, task := range tasks {
+		hasClaim := false
+		for _, claim := range task.ResourceClaims {
+			if claim.Key == key && claim.Mode == api.ResourceClaimExclusive {
+				hasClaim = true
+				break
+			}
+		}
+		if !hasClaim {
+			continue
+		}
+		filtered := make([]api.ResourceClaimSpec, 0, len(task.ResourceClaims))
+		for _, claim := range task.ResourceClaims {
+			if claim.Key != key {
+				filtered = append(filtered, claim)
+			}
+		}
+		task.ResourceClaims = filtered
+		if err := parent.Coding.Runner().SaveTask(ctx, task); err != nil {
+			return fmt.Errorf("save recovered child task without inherited workspace claim: %w", err)
+		}
+		return nil
+	}
+	return nil
+}
+
 type subagentParentRuntime struct {
 	SessionID               string
 	ParentRunID             string
@@ -94,6 +205,8 @@ type activeSubagent struct {
 	toolNames           map[string]struct{}
 	lastActivityPersist time.Time
 	persistedActivity   string
+	lastStateEmit       time.Time
+	lastEmittedTools    int
 }
 
 type subagentRuntime struct {
@@ -685,10 +798,41 @@ func (r *subagentRuntime) execute(id string) {
 	} else {
 		profile.AccountID = parent.AccountID
 	}
-	executionPolicy := agentservice.RunExecutionPolicy{Budget: &api.TaskBudget{
-		MaxTokens: int64(r.cfg.Budget.MaxTokens), MaxWallClock: r.cfg.Budget.MaxWallClockDuration,
-		MaxToolCalls: r.cfg.Budget.MaxToolCalls, MaxSteps: r.cfg.Budget.MaxTurns,
-	}}
+	executionPolicy := agentservice.RunExecutionPolicy{
+		AgentID:      durableSubagentAgentID(profile.Type),
+		AgentVersion: "runtime",
+		Governance: api.GovernancePolicy{Budget: api.Budget{
+			MaxTokens: int64(r.cfg.Budget.MaxTokens), MaxRuntime: r.cfg.Budget.MaxWallClockDuration,
+			MaxToolCalls: r.cfg.Budget.MaxToolCalls,
+		}},
+		Budget: &api.TaskBudget{
+			MaxTokens: int64(r.cfg.Budget.MaxTokens), MaxWallClock: r.cfg.Budget.MaxWallClockDuration,
+			MaxToolCalls: r.cfg.Budget.MaxToolCalls, MaxSteps: r.cfg.Budget.MaxTurns,
+		},
+	}
+	executionPolicy.ResourceClaims, err = r.childWorkspaceClaims(ctx, parent, profile)
+	if err != nil {
+		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("resolve workspace claim: %w", err)})
+		return
+	}
+	if durableRunID != "" && profile.Isolation != "worktree" && subagentMayMutateWorkspace(profile) {
+		claim, claimErr := workspaceWriteClaim(parent.WorkspaceRoot)
+		if claimErr != nil {
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: claimErr})
+			return
+		}
+		parentHasClaim, claimErr := parentTaskHasWorkspaceClaim(ctx, parent, claim.Key)
+		if claimErr != nil {
+			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: claimErr})
+			return
+		}
+		if parentHasClaim {
+			if claimErr := clearRecoveredSharedWorkspaceClaim(ctx, parent, durableRunID, claim.Key); claimErr != nil {
+				r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: claimErr})
+				return
+			}
+		}
+	}
 	if parent.Host != nil && parent.Host.cfg.Retry.Enabled {
 		executionPolicy.RetryPolicy = api.RetryPolicy{
 			MaxAttempts: parent.Host.cfg.Retry.MaxRetries + 1,
@@ -836,7 +980,16 @@ func (r *subagentRuntime) execute(id string) {
 	if parent.Host != nil {
 		contextManager.inner.compactHooks = parent.Host.autoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
 	}
-	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
+	definitionID := childRun.HolderID
+	if definitionID == "azem-main" {
+		definitionID = durableSubagentAgentID(profile.Type)
+	}
+	definition := agentDefinitionForSpec(
+		definitionID, "Azem "+profile.Type, "Durable "+profile.Type+" subagent",
+		spec, executionPolicy.Governance,
+		map[string]string{"role": profile.Type, "provider": profile.Provider},
+	)
+	engine, err := materializeAgentDefinition(ctx, parent.Coding, definition, spec, hyagent.BuildDeps{
 		Skills:    skillSnapshot.Registry,
 		Providers: hyprovider.Single(childDriver), Tools: tool.NewBus(governed...), ContextManager: contextManager,
 	})
@@ -903,77 +1056,105 @@ func (r *subagentRuntime) execute(id string) {
 	r.mu.Unlock()
 	r.emitState(running, "running")
 
-	envelope, lease, runErr := parent.Coding.TransferRunExecution(childRun)
-	sink := stream.SinkFunc(func(_ context.Context, frame stream.Frame) error {
+	restartingAttempt := false
+	sink := stream.SinkFunc(func(frameCtx context.Context, frame stream.Frame) error {
+		if restartingAttempt && frame.Kind != stream.FrameError {
+			r.mu.Lock()
+			if current := r.active[id]; current != nil && !current.terminalizing {
+				current.blocks = discardAgentAttemptBlocks(current.blocks, childRun.RunID)
+			}
+			r.mu.Unlock()
+			if parent.Host != nil && !parent.Host.emit(frameCtx, Event{
+				Kind: EventProviderRetry, SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id,
+				State: "restarted", Data: map[string]string{"scope": "attempt"},
+			}) {
+				return eventDeliveryError(frameCtx)
+			}
+			restartingAttempt = false
+		}
+		if frame.Kind == stream.FrameError {
+			restartingAttempt = true
+		}
 		frame.Source = "child:" + id
 		r.handleFrame(id, frame)
 		return nil
 	})
 	var result hyagent.Result
 	workerStarted := false
-	if runErr == nil {
-		workerStarted = true
-		for {
-			outcome, executeErr := (hyworker.AgentWorker{
-				Runner: parent.Coding.Runner(), Engine: engine, AgentID: childRun.HolderID, Model: engine.Model, TTL: 10 * time.Minute,
-			}).ExecuteContinuing(agentservice.DelegatedApprovalContext(ctx), hyworker.ExecuteEnvelopeRequest{
-				Envelope: envelope, Lease: lease, TTL: 10 * time.Minute, Sink: sink,
-			})
-			result, runErr = outcome.Result, executeErr
-			if outcome.State != hyworker.ExecutionSuspended {
-				break
-			}
-			summary := "waiting for durable resume"
-			if outcome.Suspension != nil {
-				summary = "waiting for " + string(outcome.Suspension.Kind)
+	var runErr error
+executionLoop:
+	for {
+		outcome, executeErr := parent.Coding.ExecuteRun(agentservice.DelegatedApprovalContext(ctx), childRun, engine, sink)
+		if outcome.State != "" {
+			workerStarted = true
+		}
+		result, runErr = outcome.Result, executeErr
+		var unavailable *hyworker.TaskExecutionUnavailableError
+		if errors.As(executeErr, &unavailable) {
+			summary := "waiting for durable execution lease"
+			if unavailable.ResourceClaims.Reason == api.ResourceClaimDeniedConflict {
+				summary = "waiting for shared workspace"
 			}
 			if err := r.persistActiveState(id, summary); err != nil {
 				runErr = errors.Join(runErr, err)
 				break
 			}
+			timer := time.NewTimer(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				runErr = ctx.Err()
+				break executionLoop
+			case <-timer.C:
+				continue
+			}
+		}
+		if outcome.State != hyworker.ExecutionSuspended {
+			break
+		}
+		summary := "waiting for durable resume"
+		if outcome.Suspension != nil {
+			summary = "waiting for " + string(outcome.Suspension.Kind)
+		}
+		if err := r.persistActiveState(id, summary); err != nil {
+			runErr = errors.Join(runErr, err)
+			break
+		}
+		if ctx.Err() != nil {
+			runErr = ctx.Err()
+			break
+		}
+		resumed, resumeErr := waitForSubagentResume(ctx, parent.Coding, childRun.RunID)
+		if resumeErr != nil {
 			if ctx.Err() != nil {
 				runErr = ctx.Err()
-				break
+			} else {
+				runErr = errors.Join(runErr, resumeErr)
 			}
-			resumed, resumeErr := waitForSubagentResume(ctx, parent.Coding, childRun.RunID)
-			if resumeErr != nil {
-				if ctx.Err() != nil {
-					runErr = ctx.Err()
-				} else {
-					runErr = errors.Join(runErr, resumeErr)
-				}
-				break
-			}
-			envelope, lease, runErr = parent.Coding.TransferRunExecution(resumed)
-			if runErr != nil {
-				break
-			}
-			copyRunExecution(childRun, resumed)
-			if err := r.persistActiveState(id, "running"); err != nil {
-				runErr = err
-				break
-			}
+			break
+		}
+		copyRunExecution(childRun, resumed)
+		if err := r.persistActiveState(id, "running"); err != nil {
+			runErr = err
+			break
 		}
 	}
 	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {
 		runErr = fmt.Errorf("%w (increase agents.subagents.budget.max_tokens, or set it to 0 for unbounded, in config.yaml)", runErr)
 	}
 	stopHookRan := runErr == nil && ctx.Err() == nil && parent.Host != nil
-	completionCtx, completionCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	var completeErr error
-	if workerStarted {
-		completeErr = parent.Coding.FinalizeReportedRun(completionCtx, childRun.RunID)
-	} else {
-		completeErr = parent.Coding.CompleteRun(completionCtx, childRun, result.Text, runErr)
-	}
-	if completeErr != nil {
-		if runErr == nil {
-			runErr = completeErr
-		} else {
-			runErr = fmt.Errorf("%v; durable completion: %w", runErr, completeErr)
+	if !workerStarted {
+		completionCtx, completionCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		completeErr := parent.Coding.CompleteRun(completionCtx, childRun, result.Text, runErr)
+		completionCancel()
+		if completeErr != nil {
+			if runErr == nil {
+				runErr = completeErr
+			} else {
+				runErr = fmt.Errorf("%v; durable completion: %w", runErr, completeErr)
+			}
 		}
 	}
-	completionCancel()
 	state := agentservice.SubagentCompleted
 	if ctx.Err() != nil {
 		state = agentservice.SubagentCancelled
@@ -982,6 +1163,18 @@ func (r *subagentRuntime) execute(id string) {
 		state = agentservice.SubagentFailed
 	}
 	r.terminalize(id, terminalRequest{state: state, err: runErr, result: &result, stopHookRan: stopHookRan})
+}
+
+func discardAgentAttemptBlocks(blocks []AgentTranscriptBlock, runID string) []AgentTranscriptBlock {
+	boundary := len(blocks)
+	for boundary > 0 {
+		block := blocks[boundary-1]
+		if block.RunID != runID || (block.Kind != "thinking" && block.Kind != "commentary" && block.Kind != "assistant") {
+			break
+		}
+		boundary--
+	}
+	return blocks[:boundary]
 }
 
 func (r *subagentRuntime) persistActiveState(id, summary string) error {
@@ -1028,13 +1221,13 @@ func waitForSubagentResume(ctx context.Context, coding *agentservice.Service, ru
 			return nil, err
 		}
 		switch durable.Status {
-		case api.RunStatusRunning, api.RunStatusCreated:
+		case api.RunStatusRunning, api.RunStatusCreated, api.RunStatusBlocked:
 			resumed, resumeErr := coding.ResumeRun(ctx, runID)
 			if resumeErr != nil {
 				return nil, resumeErr
 			}
 			return resumed, nil
-		case api.RunStatusCompleted, api.RunStatusFailed, api.RunStatusBlocked, api.RunStatusCancelled:
+		case api.RunStatusCompleted, api.RunStatusFailed, api.RunStatusCancelled:
 			return nil, fmt.Errorf("subagent durable run %q became terminal with status %q", runID, durable.Status)
 		}
 		timer := time.NewTimer(pollInterval)

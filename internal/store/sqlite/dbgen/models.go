@@ -16,6 +16,25 @@ type Account struct {
 	UpdatedAt     int64  `db:"updated_at"`
 }
 
+type AdmissionReservation struct {
+	ID        string `db:"id"`
+	AgentID   string `db:"agent_id"`
+	RunID     string `db:"run_id"`
+	State     string `db:"state"`
+	Version   int64  `db:"version"`
+	CreatedAt int64  `db:"created_at"`
+	UpdatedAt int64  `db:"updated_at"`
+	ExpiresAt int64  `db:"expires_at"`
+	Data      []byte `db:"data"`
+}
+
+type AgentDefinitionSnapshot struct {
+	DefinitionID string `db:"definition_id"`
+	Version      string `db:"version"`
+	CreatedAt    int64  `db:"created_at"`
+	Data         []byte `db:"data"`
+}
+
 type AuthCredential struct {
 	ProviderID string `db:"provider_id"`
 	AccountID  string `db:"account_id"`
@@ -33,6 +52,11 @@ type ContextArtifact struct {
 	Payload   []byte `db:"payload"`
 	Preview   string `db:"preview"`
 	CreatedAt int64  `db:"created_at"`
+}
+
+type DesktopProject struct {
+	Workspace string `db:"workspace"`
+	UpdatedAt int64  `db:"updated_at"`
 }
 
 type Event struct {
@@ -135,6 +159,22 @@ type Record struct {
 	Data           []byte `db:"data"`
 }
 
+type ResourceClaim struct {
+	ID          string `db:"id"`
+	ResourceKey string `db:"resource_key"`
+	RunID       string `db:"run_id"`
+	TaskID      string `db:"task_id"`
+	LeaseID     string `db:"lease_id"`
+	HolderID    string `db:"holder_id"`
+	Mode        string `db:"mode"`
+	State       string `db:"state"`
+	Version     int64  `db:"version"`
+	CreatedAt   int64  `db:"created_at"`
+	UpdatedAt   int64  `db:"updated_at"`
+	ExpiresAt   int64  `db:"expires_at"`
+	Data        []byte `db:"data"`
+}
+
 type Session struct {
 	ID         string `db:"id"`
 	Title      string `db:"title"`
@@ -189,6 +229,19 @@ type SessionToolRecord struct {
 	Observations   []byte `db:"observations"`
 	StartedAt      int64  `db:"started_at"`
 	CompletedAt    int64  `db:"completed_at"`
+}
+
+type SessionUiState struct {
+	SessionID string `db:"session_id"`
+	Pinned    int64  `db:"pinned"`
+	Archived  int64  `db:"archived"`
+	Unread    int64  `db:"unread"`
+}
+
+type SessionWorkspace struct {
+	SessionID  string `db:"session_id"`
+	Workspace  string `db:"workspace"`
+	AssignedAt int64  `db:"assigned_at"`
 }
 
 type SubagentRun struct {

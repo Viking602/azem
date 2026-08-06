@@ -58,12 +58,14 @@ const (
 	ActionResetModelRoute        = app.ActionResetModelRoute
 	ActionSetSubagentConcurrency = app.ActionSetSubagentConcurrency
 	ActionSetChatGPTFastMode     = app.ActionSetChatGPTFastMode
+	ActionSetSessionPreferences  = app.ActionSetSessionPreferences
 	ActionListBackground         = app.ActionListBackground
 	ActionStartBackground        = app.ActionStartBackground
 	ActionStopBackground         = app.ActionStopBackground
 	ActionLogsBackground         = app.ActionLogsBackground
 	ActionListGitBranches        = app.ActionListGitBranches
 	ActionSwitchGitBranch        = app.ActionSwitchGitBranch
+	ActionCreateGitBranch        = app.ActionCreateGitBranch
 )
 
 type (

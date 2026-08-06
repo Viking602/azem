@@ -113,6 +113,41 @@ SELECT data FROM records WHERE kind=? AND key1=? AND status=?;
 -- name: ResolveReconcileAttemptCAS :execresult
 UPDATE records SET status=?,data=? WHERE kind=? AND key1=? AND status=?;
 
+-- name: InsertAgentDefinitionSnapshot :execresult
+INSERT OR IGNORE INTO agent_definition_snapshots(definition_id,version,created_at,data) VALUES(?,?,?,?);
+-- name: GetAgentDefinitionSnapshotData :one
+SELECT data FROM agent_definition_snapshots WHERE definition_id=? AND version=?;
+-- name: ListAgentDefinitionSnapshotData :many
+SELECT data FROM agent_definition_snapshots ORDER BY created_at,definition_id,version;
+
+-- name: InsertAdmissionReservation :execresult
+INSERT OR IGNORE INTO admission_reservations(id,agent_id,run_id,state,version,created_at,updated_at,expires_at,data) VALUES(?,?,?,?,?,?,?,?,?);
+-- name: GetAdmissionReservationData :one
+SELECT data FROM admission_reservations WHERE id=?;
+-- name: GetAdmissionReservationDataForRun :one
+SELECT data FROM admission_reservations WHERE agent_id=? AND run_id=?;
+-- name: ListAdmissionReservationData :many
+SELECT data FROM admission_reservations ORDER BY created_at,id;
+-- name: ListAdmissionReservationDataByAgent :many
+SELECT data FROM admission_reservations WHERE agent_id=? ORDER BY created_at,id;
+-- name: UpdateAdmissionReservationCAS :execresult
+UPDATE admission_reservations
+SET state=sqlc.arg(next_state),version=sqlc.arg(next_version),updated_at=sqlc.arg(updated_at),expires_at=sqlc.arg(expires_at),data=sqlc.arg(data)
+WHERE id=sqlc.arg(id) AND version=sqlc.arg(expected_version);
+
+-- name: InsertResourceClaim :execresult
+INSERT OR IGNORE INTO resource_claims(id,resource_key,run_id,task_id,lease_id,holder_id,mode,state,version,created_at,updated_at,expires_at,data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);
+-- name: GetResourceClaimData :one
+SELECT data FROM resource_claims WHERE id=?;
+-- name: ListResourceClaimData :many
+SELECT data FROM resource_claims ORDER BY created_at,id;
+-- name: ListActiveResourceClaimDataByKey :many
+SELECT data FROM resource_claims WHERE resource_key=? AND state='active' AND expires_at>? ORDER BY created_at,id;
+-- name: UpdateResourceClaimCAS :execresult
+UPDATE resource_claims
+SET state=sqlc.arg(next_state),version=sqlc.arg(next_version),updated_at=sqlc.arg(updated_at),expires_at=sqlc.arg(expires_at),data=sqlc.arg(data)
+WHERE id=sqlc.arg(id) AND version=sqlc.arg(expected_version);
+
 -- name: InsertContextArtifact :exec
 INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,payload,preview,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(session_id,kind,sha256) DO NOTHING;
 -- name: GetContextArtifact :one

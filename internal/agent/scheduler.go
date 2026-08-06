@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/multiagent"
 )
 
@@ -23,9 +25,10 @@ const (
 // Prompt is immutable run input; every scheduling decision and retry count is
 // otherwise derived from the supplied TeamState snapshot.
 type CodingScheduler struct {
-	Prompt      string
-	Classes     map[string]multiagent.AgentClass
-	RetryPolicy api.RetryPolicy
+	Prompt         string
+	Classes        map[string]multiagent.AgentClass
+	RetryPolicy    api.RetryPolicy
+	ResourceClaims []api.ResourceClaimSpec
 }
 
 func (s CodingScheduler) Next(ctx context.Context, state multiagent.TeamState) ([]multiagent.Dispatch, error) {
@@ -120,6 +123,9 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 			Validate: len(class.OutputSchema) > 0,
 		},
 	}
+	if codingClassMayMutateWorkspace(class) {
+		dispatch.Task.ResourceClaims = slices.Clone(s.ResourceClaims)
+	}
 	if from != nil {
 		dispatch.Handoff = &multiagent.Handoff{
 			RunID:                state.RunID,
@@ -131,6 +137,16 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 		}
 	}
 	return []multiagent.Dispatch{dispatch}, nil
+}
+
+func codingClassMayMutateWorkspace(class multiagent.AgentClass) bool {
+	for _, name := range class.Tools {
+		switch name {
+		case coding.ToolEditHashline, coding.ToolWriteFile, coding.ToolGofmt, ToolShell:
+			return true
+		}
+	}
+	return false
 }
 
 func codingTaskGoal(className string) string {

@@ -225,7 +225,8 @@ func sameEventStream(left, right Event) bool {
 		left.SessionID == right.SessionID &&
 		left.RunID == right.RunID &&
 		left.AgentID == right.AgentID &&
-		left.ToolCallID == right.ToolCallID
+		left.ToolCallID == right.ToolCallID &&
+		left.TextPhase == right.TextPhase
 }
 
 func mergeCoalescibleEvent(target *queuedEvent, next Event) {

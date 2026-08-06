@@ -81,6 +81,9 @@ func TestLanguageDefaultAndValidation(t *testing.T) {
 	if cfg.Defaults.ApprovalMode != "prompt" {
 		t.Fatalf("approval mode = %q", cfg.Defaults.ApprovalMode)
 	}
+	if cfg.Defaults.QueueMode != "queue" {
+		t.Fatalf("queue mode = %q", cfg.Defaults.QueueMode)
+	}
 	cfg.Defaults.Language = "zh-CN"
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -93,6 +96,11 @@ func TestLanguageDefaultAndValidation(t *testing.T) {
 	cfg.Defaults.ApprovalMode = "unsafe"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("unsupported approval mode accepted")
+	}
+	cfg = Default()
+	cfg.Defaults.QueueMode = "later"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unsupported queue mode accepted")
 	}
 }
 
@@ -109,6 +117,9 @@ func TestUpdateDefaultPersistsSelectionsAndPreservesConfig(t *testing.T) {
 	if err := UpdateDefault(path, "approval_mode", "yolo"); err != nil {
 		t.Fatal(err)
 	}
+	if err := UpdateDefault(path, "queue_mode", "guide"); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -120,8 +131,37 @@ func TestUpdateDefaultPersistsSelectionsAndPreservesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Defaults.Language != "zh-CN" || cfg.Defaults.ApprovalMode != "yolo" || cfg.Defaults.Provider != "grok" || !cfg.Workspace.AllowWrite {
+	if cfg.Defaults.Language != "zh-CN" || cfg.Defaults.ApprovalMode != "yolo" || cfg.Defaults.QueueMode != "guide" || cfg.Defaults.Provider != "grok" || !cfg.Workspace.AllowWrite {
 		t.Fatalf("persisted config = %#v", cfg)
+	}
+}
+
+func TestUpdateSessionModelDefaultsPersistsProviderModelReasoning(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# keep defaults comment\nversion: 1\ndefaults:\n  provider: grok\n  model: grok-4.20\n  reasoning: high\nworkspace:\n  allow_write: true\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSessionModelDefaults(path, "chatgpt", "gpt-5.6-luna", "xhigh"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# keep defaults comment") {
+		t.Fatalf("config comment was lost:\n%s", data)
+	}
+	cfg, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Defaults.Provider != "chatgpt" || cfg.Defaults.Model != "gpt-5.6-luna" || cfg.Defaults.Reasoning != "xhigh" {
+		t.Fatalf("session model defaults = %#v", cfg.Defaults)
+	}
+	if err := UpdateSessionModelDefaults(path, "", "model", "high"); err == nil {
+		t.Fatal("empty provider was accepted")
 	}
 }
 
@@ -243,6 +283,7 @@ func TestPersistedBuiltInRoleRouteReloadsWithoutExplicitRoleDefinition(t *testin
 
 func TestModelRouteValidationAndPlanLoad(t *testing.T) {
 	cfg := Default()
+	cfg.Agents.Title = ModelRouteConfig{Provider: "chatgpt", Model: "gpt-title", Reasoning: "low"}
 	cfg.Agents.Plan = ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
 	cfg.Agents.Compaction = ModelRouteConfig{Provider: "chatgpt", Model: "gpt-test"}
 	if err := cfg.Validate(); err != nil {
@@ -262,12 +303,15 @@ func TestModelRouteValidationAndPlanLoad(t *testing.T) {
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  plan:\n    provider: grok\n    model: grok-plan\n    reasoning: high\n  compaction:\n    provider: chatgpt\n    model: gpt-test\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  title:\n    provider: grok\n    model: grok-title\n    reasoning: low\n  plan:\n    provider: grok\n    model: grok-plan\n    reasoning: high\n  compaction:\n    provider: chatgpt\n    model: gpt-test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := Load(path, root)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if loaded.Agents.Title != (ModelRouteConfig{Provider: "grok", Model: "grok-title", Reasoning: "low"}) {
+		t.Fatalf("title route = %#v", loaded.Agents.Title)
 	}
 	if loaded.Agents.Plan != (ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}) {
 		t.Fatalf("plan route = %#v", loaded.Agents.Plan)
@@ -300,6 +344,29 @@ func TestUpdatePlanModelRoutePersistsAndResets(t *testing.T) {
 	loaded, err = Load(path, root)
 	if err != nil || loaded.Agents.Plan != (ModelRouteConfig{}) {
 		t.Fatalf("reset plan route = %#v, error=%v", loaded.Agents.Plan, err)
+	}
+}
+
+func TestUpdateTitleModelRoutePersistsAndResetsToInherited(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "grok", Model: "grok-title", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "title", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Title != route {
+		t.Fatalf("title route = %#v, error=%v", loaded.Agents.Title, err)
+	}
+	if err := ResetModelRoute(path, "title", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Title != (ModelRouteConfig{}) {
+		t.Fatalf("reset title route = %#v, error=%v", loaded.Agents.Title, err)
 	}
 }
 
@@ -369,6 +436,22 @@ func TestLoadResolvesRelativeWorkspaceFromConfigDirectory(t *testing.T) {
 	}
 }
 
+func TestLoadAtWorkspaceIgnoresConfiguredWorkspaceRoot(t *testing.T) {
+	root, selected := t.TempDir(), t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nworkspace:\n  root: .\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadAtWorkspace(path, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, _ = filepath.EvalSymlinks(selected)
+	if cfg.Workspace.Root != selected {
+		t.Fatalf("workspace = %q, want selected project %q", cfg.Workspace.Root, selected)
+	}
+}
+
 func TestLoadOverridesMainAgentBudgets(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -404,6 +487,9 @@ func TestLoadSparseConfigKeepsCodingBudgetsUnbounded(t *testing.T) {
 	}
 	if cfg.Agents.Main.MaxTokens != 0 || cfg.Agents.Main.MaxToolCalls != 0 || cfg.Agents.Main.MaxWallClockDuration != 0 {
 		t.Fatalf("sparse config main budget = %#v, want unbounded", cfg.Agents.Main)
+	}
+	if cfg.Defaults.QueueMode != "queue" {
+		t.Fatalf("sparse config queue mode = %q, want queue", cfg.Defaults.QueueMode)
 	}
 	budget := cfg.Agents.Subagents.Budget
 	if budget.MaxTokens != 0 || budget.MaxToolCalls != 0 || budget.MaxTurns != 0 || budget.MaxWallClockDuration != 0 {

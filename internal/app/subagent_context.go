@@ -88,6 +88,12 @@ func effectiveSubagentTools(roleTools []string, capability string) map[string]bo
 	return allowed
 }
 
+func subagentMayMutateWorkspace(profile effectiveSubagentProfile) bool {
+	tools := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
+	return tools["coding.edit_hashline"] || tools["coding.write_file"] ||
+		tools["coding.gofmt"] || tools["coding.shell"]
+}
+
 func subagentMayRunInBackground(profile effectiveSubagentProfile) bool {
 	if profile.RequestedIsolation != "worktree" {
 		return false
@@ -214,11 +220,32 @@ func appendAgentDelta(blocks *[]AgentTranscriptBlock, kind, runID, title, conten
 	if len(*blocks) > 0 {
 		last := &(*blocks)[len(*blocks)-1]
 		if last.Kind == kind && last.RunID == runID {
-			last.Content += content
+			if kind == "thinking" {
+				last.Content = joinThinkingContent(last.Content, content)
+			} else {
+				last.Content += content
+			}
 			return
 		}
 	}
 	*blocks = append(*blocks, AgentTranscriptBlock{ID: fmt.Sprintf("live-%s-%d", kind, len(*blocks)), Kind: kind, RunID: runID, Title: title, Content: content, State: "streaming"})
+}
+
+// joinThinkingContent keeps discrete model "thought titles" from gluing into
+// unreadable **A****B** blobs when each arrives as its own delta.
+func joinThinkingContent(existing, next string) string {
+	if existing == "" {
+		return next
+	}
+	if next == "" {
+		return existing
+	}
+	left := strings.TrimRight(existing, " \t")
+	right := strings.TrimLeft(next, " \t")
+	if strings.HasSuffix(left, "**") && strings.HasPrefix(right, "**") {
+		return left + "\n\n" + right
+	}
+	return existing + next
 }
 
 func finishAgentToolBlock(blocks []AgentTranscriptBlock, callID, content string, failed bool) {

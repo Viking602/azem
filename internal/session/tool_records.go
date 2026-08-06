@@ -47,6 +47,19 @@ type ToolRecord struct {
 }
 
 func (s *Service) StartToolRecord(ctx context.Context, sessionID string, record ToolRecord) (ToolRecord, error) {
+	return s.startToolRecord(ctx, sessionID, record, nil)
+}
+
+// StartToolRecordAt anchors a tool after an explicit durable transcript block.
+// Commentary uses this path so restored process trails preserve commentary → tool order.
+func (s *Service) StartToolRecordAt(ctx context.Context, sessionID string, record ToolRecord, anchorSequence int64) (ToolRecord, error) {
+	if anchorSequence < -1 {
+		return ToolRecord{}, fmt.Errorf("start tool record: invalid anchor sequence %d", anchorSequence)
+	}
+	return s.startToolRecord(ctx, sessionID, record, &anchorSequence)
+}
+
+func (s *Service) startToolRecord(ctx context.Context, sessionID string, record ToolRecord, anchorOverride *int64) (ToolRecord, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	record.SessionID = sessionID
 	if sessionID == "" || strings.TrimSpace(record.RunID) == "" || strings.TrimSpace(record.ToolCallID) == "" || strings.TrimSpace(record.Name) == "" {
@@ -63,11 +76,17 @@ func (s *Service) StartToolRecord(ctx context.Context, sessionID string, record 
 	if len(record.Structured) == 0 {
 		record.Structured = json.RawMessage(`null`)
 	}
-	anchor, err := dbgen.New(s.db).CanonicalHighWater(ctx, sessionID)
-	if errors.Is(err, sql.ErrNoRows) {
-		anchor = -1
-	} else if err != nil {
-		return ToolRecord{}, fmt.Errorf("start tool record high-water: %w", err)
+	anchor := int64(-1)
+	if anchorOverride != nil {
+		anchor = *anchorOverride
+	} else {
+		var err error
+		anchor, err = dbgen.New(s.db).CanonicalHighWater(ctx, sessionID)
+		if errors.Is(err, sql.ErrNoRows) {
+			anchor = -1
+		} else if err != nil {
+			return ToolRecord{}, fmt.Errorf("start tool record high-water: %w", err)
+		}
 	}
 	record.AnchorSequence = anchor
 	observations, err := json.Marshal(record.Observations)
@@ -212,17 +231,6 @@ func (s *Service) InterruptRunningToolRecordsForRun(ctx context.Context, runID s
 		CompletedAt: at.UnixNano(), RunID: runID,
 	}); err != nil {
 		return fmt.Errorf("interrupt running tool records for run %s: %w", runID, err)
-	}
-	return nil
-}
-
-func (s *Service) SetWorkspaceSession(ctx context.Context, anchor, sessionID string) error {
-	anchor, sessionID = strings.TrimSpace(anchor), strings.TrimSpace(sessionID)
-	if anchor == "" || sessionID == "" {
-		return fmt.Errorf("workspace anchor and session are required")
-	}
-	if err := dbgen.New(s.db).UpsertWorkspaceSession(ctx, dbgen.UpsertWorkspaceSessionParams{Anchor: anchor, SessionID: sessionID, UpdatedAt: time.Now().UTC().UnixNano()}); err != nil {
-		return fmt.Errorf("set workspace session: %w", err)
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ CREATE UNIQUE INDEX leases_active_slot ON leases(run_id,task_id) WHERE status='a
 CREATE TABLE tool_call_charges (run_id TEXT NOT NULL, task_id TEXT NOT NULL, call_id TEXT NOT NULL, tool_name TEXT NOT NULL, input_hash TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(run_id,task_id,call_id));
 CREATE INDEX tool_call_charges_run_task ON tool_call_charges(run_id,task_id);
 CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', provider_id TEXT NOT NULL DEFAULT '', model_id TEXT NOT NULL DEFAULT '', reasoning TEXT NOT NULL DEFAULT '', agent_mode TEXT NOT NULL DEFAULT 'single', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE session_ui_state (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0, unread INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE session_projections (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, last_run_id TEXT NOT NULL DEFAULT '', blocks BLOB NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL, model_history BLOB NOT NULL DEFAULT '{}', usage BLOB NOT NULL DEFAULT '{}', checkpoint_generation INTEGER NOT NULL DEFAULT 0, cache_epoch INTEGER NOT NULL DEFAULT 0, cache_identity_hash TEXT NOT NULL DEFAULT '');
 CREATE TABLE accounts (id TEXT NOT NULL, provider_id TEXT NOT NULL, email TEXT NOT NULL DEFAULT '', display_name TEXT NOT NULL DEFAULT '', plan TEXT NOT NULL DEFAULT '', credential_ref TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(provider_id,id));
 CREATE TABLE auth_credentials (provider_id TEXT NOT NULL, account_id TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(provider_id,account_id));
@@ -26,3 +27,16 @@ CREATE TABLE subagent_runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, paren
 CREATE TABLE session_tool_records (session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, anchor_sequence INTEGER NOT NULL DEFAULT -1, name TEXT NOT NULL, arguments BLOB NOT NULL DEFAULT '{}', state TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', structured BLOB NOT NULL DEFAULT 'null', artifact_id TEXT NOT NULL DEFAULT '', observations BLOB NOT NULL DEFAULT '[]', started_at INTEGER NOT NULL, completed_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session_id,run_id,tool_call_id));
 CREATE INDEX session_tool_records_session_started ON session_tool_records(session_id,started_at,run_id,tool_call_id);
 CREATE TABLE workspace_session_state (anchor TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, updated_at INTEGER NOT NULL);
+CREATE TABLE desktop_projects (workspace TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);
+CREATE TABLE session_workspaces (session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, workspace TEXT NOT NULL REFERENCES desktop_projects(workspace) ON DELETE RESTRICT, assigned_at INTEGER NOT NULL);
+CREATE INDEX session_workspaces_workspace ON session_workspaces(workspace,assigned_at DESC,session_id);
+
+CREATE TABLE agent_definition_snapshots (definition_id TEXT NOT NULL, version TEXT NOT NULL, created_at INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(definition_id,version));
+CREATE INDEX agent_definition_snapshots_created ON agent_definition_snapshots(created_at,definition_id,version);
+CREATE TABLE admission_reservations (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, run_id TEXT NOT NULL, state TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, data BLOB NOT NULL, UNIQUE(agent_id,run_id));
+CREATE INDEX admission_reservations_agent_state ON admission_reservations(agent_id,state,created_at,id);
+CREATE INDEX admission_reservations_expiry ON admission_reservations(state,expires_at,id);
+CREATE TABLE resource_claims (id TEXT PRIMARY KEY, resource_key TEXT NOT NULL, run_id TEXT NOT NULL, task_id TEXT NOT NULL, lease_id TEXT NOT NULL, holder_id TEXT NOT NULL, mode TEXT NOT NULL, state TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, data BLOB NOT NULL);
+CREATE INDEX resource_claims_owner ON resource_claims(run_id,task_id,holder_id,created_at,id);
+CREATE INDEX resource_claims_lease_state ON resource_claims(lease_id,state,id);
+CREATE INDEX resource_claims_key_state_expiry ON resource_claims(resource_key,state,expires_at,id);

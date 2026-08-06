@@ -2,7 +2,7 @@
 
 # Azem
 
-**A local-first AI coding agent for your terminal.**
+**A local-first AI coding agent for your terminal and desktop.**
 
 Governed tools, durable sessions, side-effect recovery, MCP integrations, Agent Skills, and multi-agent workflows - all from a keyboard-driven TUI.
 
@@ -20,7 +20,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 
 | Capability | What it provides |
 |---|---|
-| **Terminal-native workflow** | A fast Bubble Tea interface with streaming output, dedicated approval cards, concise tool summaries, colorized inline diffs, and token usage |
+| **Terminal and desktop workflows** | A fast Bubble Tea TUI plus a Wails desktop workspace with frame-paced streaming output, inline approvals and diffs, Agent inspection, recovery, and role-model settings |
 | **Governed execution** | Prompt, Auto Review, and YOLO approval modes for file, shell, and external actions |
 | **Durable state** | SQLite-backed sessions, runs, approvals, leases, side-effect reconciliation, and Team resume |
 | **Multiple providers** | ChatGPT through Codex-compatible OAuth and Grok through API or CLI-proxy transport |
@@ -43,9 +43,26 @@ cd azem
 make build
 ```
 
+To build the Wails desktop app, install [Bun](https://bun.sh/) and run:
+
+```bash
+make gui
+open dist/Azem.app
+```
+
+The desktop app and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. The React UI receives a bounded event projection; it does not expose arbitrary shell or filesystem bindings.
+
+Desktop text output is presented in frame-paced chunks with a restrained activity cursor. Rendering is capped independently from the display refresh rate, large backlogs catch up automatically, and reduced-motion preferences disable the animation without disabling bounded rendering.
+
+While a desktop turn is running, the composer supports Codex-style **Queue** and **Steer** delivery. Queue holds ordered, editable follow-ups for the next turn; Steer injects text or image guidance at the next model boundary without cancelling completed tool work. `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` elsewhere uses the opposite mode for one message. Queues are session-scoped, stay in order, and pause after an interrupted run until explicitly resumed.
+
+The desktop **Pull Requests** workspace uses the authenticated [GitHub CLI](https://cli.github.com/) for the repository at the workspace root. It lists the current and open pull requests, checks, files, comments, reviews, and merge state; supported mutations include editing, review requests, comments, reviews, draft/ready transitions, close/reopen, merge, and auto-merge. Merge requests are pinned to the displayed head commit so a stale panel cannot merge a newer revision.
+
+**Monitor & Fix** polls an enabled pull request for failed checks or merge conflicts and starts at most one active governed Azem repair session for each observed failure fingerprint; an interrupted repair is eligible for retry after restart. Repair starts only when the workspace is clean and checked out to the pull request head branch; it never merges the pull request automatically. Missing `gh`, authentication, repository access, and network failures are reported in the Pull Requests workspace instead of disabling the rest of the desktop app.
+
 ### 2. Start it in a project
 
-Azem uses the directory from which it starts as the workspace.
+The desktop app keeps a durable catalog of projects and restores the most recently opened project. `--workspace` selects one project for that window without rewriting the user configuration.
 
 ```bash
 cd /path/to/your/project
@@ -100,6 +117,7 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Agent Skills discovery from user, project, configured, and bundled directories
 - Planner, Implementer, Reviewer, and Reporter team workflow
 - Background subagents with role, persona, model, budget, resume, and cancellation controls
+- Independent tool calls dispatch in parallel while shell and subagent runtimes enforce their configured concurrency limits
 - Optional detached Git worktrees for isolated subagent changes
 
 ## Terminal Workflow
@@ -117,6 +135,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 ```mermaid
 flowchart LR
     U[Terminal UI] --> A[Application runtime]
+    D[Wails desktop UI] --> A
     A --> P[ChatGPT or Grok]
     A --> G[Approval and tool governance]
     G --> T[Files, tests, and shell]
@@ -126,7 +145,7 @@ flowchart LR
     A --> K[Agent Skills]
 ```
 
-Each turn is routed through the application runtime, which selects a provider, assembles the available tools, applies approval policy, persists execution state, and streams events back to the TUI. Structured tool results are projected into readable summaries and file diffs. After a restart, Azem restores durable run projections and surfaces side effects that require reconciliation. Team runs can resume from their checkpoint; Single-Agent model loops do not yet resume automatically and require a continuation turn.
+Each turn is routed through the application runtime, which selects a provider, assembles the available tools, applies approval policy, persists execution state, and streams events back to the TUI. Structured tool results are projected into readable summaries and file diffs. After a restart, Azem restores durable run projections and surfaces side effects that require reconciliation. Team runs and eligible Single-Agent runs resume automatically; runs requiring side-effect reconciliation remain paused for an explicit decision.
 
 ### Provider stream resilience
 
@@ -217,6 +236,7 @@ defaults:
   model: gpt-5.6-sol
   reasoning: high
   agent_mode: single       # single | team
+  queue_mode: queue        # queue | guide
 
 workspace:
   root: .
@@ -259,6 +279,11 @@ agents:
   team:
     max_concurrency: 2
     max_ticks: 12
+  title:
+    # Lightweight model used for first-turn session titles.
+    provider: chatgpt
+    model: gpt-5.6-luna
+    reasoning: low
   plan:
     # Empty provider/model inherit the active model and reasoning effort.
     provider: ""
@@ -389,7 +414,9 @@ Credentials can be stored in SQLite, the system keyring, or a permission-restric
 
 Azem's approvals and persistent action boundaries help reduce accidental operations and duplicate side effects. They are governance controls, not an operating-system sandbox.
 
-- `workspace.root` sets the shell's initial working directory; shell commands can still access paths outside it.
+- In the TUI, `workspace.root` sets the initial shell directory. Desktop windows
+  use the selected project from the SQLite catalog instead. Neither mode is an
+  OS sandbox: shell commands can still access paths outside the project.
 - `allow_write: false` removes built-in write tools but cannot stop an approved shell command from writing files.
 - `allow_network` relies on tools declaring network use and does not enforce OS-level network isolation.
 - `shell_policy: allow` and YOLO mode remove important confirmation points.
@@ -400,11 +427,15 @@ For strict isolation, run Azem inside a container, virtual machine, or restricte
 ## Project Layout
 
 ```text
-cmd/azem/               Application entry point
+cmd/azem/               Terminal application entry point
+cmd/azem-gui/           Wails desktop application entry point
+frontend/               React desktop interface and Wails bindings
 internal/agent/         Tool governance, persistent runs, and team agents
 internal/app/           Application orchestration, providers, and subagents
 internal/auth/          OAuth, credential import, and credential storage
 internal/config/        Configuration, paths, roles, and personas
+internal/desktop/       Bounded Wails bridge and desktop lifecycle
+internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/mcp/           MCP connection and tool management
 internal/provider/      ChatGPT/Codex and Grok drivers
 internal/recovery/      Crash recovery and side-effect reconciliation
@@ -412,17 +443,38 @@ internal/session/       Session persistence and compaction
 internal/skills/        Agent Skills discovery and activation
 internal/store/sqlite/  SQLite schema and storage implementation
 internal/tui/           Bubble Tea terminal interface
+docs/                   Maintainer architecture, persistence, and testing guides
+.sentrux/               Executable architecture constraints
 ```
+
+Maintainer documentation:
+
+- [Architecture](docs/architecture.md)
+- [Persistence and recovery](docs/persistence.md)
+- [Testing and desktop smoke checks](docs/testing.md)
 
 ## Development
 
-Run the full test suite:
+Run the complete Go suite against declared module dependencies:
 
 ```bash
-go test ./...
+GOWORK=off go test ./...
 ```
 
-Format changed Go files before committing:
+Run frontend and desktop checks:
+
+```bash
+make test-gui
+```
+
+Run the architecture policy gate:
+
+```bash
+make architecture-check
+```
+
+Format changed Go files before committing. See [Testing](docs/testing.md) for
+the change-specific verification matrix and real GUI smoke procedure.
 
 ```bash
 gofmt -w path/to/file.go
