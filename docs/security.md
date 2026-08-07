@@ -42,7 +42,15 @@ by the Azem process and any child process allowed to receive the environment.
 Provider and model selectors request public SVG logos from
 `https://models.dev/logos/{provider}.svg`. Requests contain only the provider
 identifier; credentials, model IDs, workspace data, and conversation content
-are never included.
+are never included. llmux IDs are normalized to the models.dev hyphen form;
+providers whose public catalog key differs by more than punctuation use an
+explicit models.dev alias, and missing assets fall back to a local generic icon.
+
+Model discovery sends the API key only to the validated HTTPS provider base URL
+(plain HTTP remains limited to loopback). Redirects are not followed. The
+separate public request to `https://models.dev/api.json` carries no provider
+credential and is used only to enrich model capabilities and resolve the
+models.dev provider logo ID.
 
 ## MCP, Skills, and hooks
 

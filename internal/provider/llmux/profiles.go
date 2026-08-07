@@ -2,6 +2,7 @@ package llmuxdriver
 
 import (
 	"sort"
+	"strings"
 
 	llmuxcatalog "github.com/Viking602/llmux/provider/catalog"
 	"github.com/Viking602/llmux/provider/openai/compat"
@@ -14,6 +15,8 @@ type Profile struct {
 	BaseURL       string
 	EnvKey        string
 	AllowEmptyKey bool
+	APIKeyHeader  string
+	APIKeyPrefix  string
 }
 
 var nativeProfiles = []Profile{
@@ -40,9 +43,18 @@ func Profiles() []Profile {
 		if provider, ok := llmuxcatalog.Lookup(current.ID); ok {
 			backend = string(provider.Backend)
 		}
+		baseURL := current.BaseURL
+		if override := map[string]string{
+			"freemodel": "https://cc.freemodel.dev/v1",
+			"opencode":  "https://opencode.ai/zen/v1",
+			"xpersona":  "https://www.xpersona.co/v1",
+		}[current.ID]; baseURL == "" {
+			baseURL = override
+		}
 		profiles = append(profiles, Profile{
 			ID: current.ID, DisplayName: current.DisplayName, Backend: backend,
-			BaseURL: current.BaseURL, EnvKey: current.EnvKey, AllowEmptyKey: current.AllowEmptyAPIKey,
+			BaseURL: baseURL, EnvKey: current.EnvKey, AllowEmptyKey: current.AllowEmptyAPIKey,
+			APIKeyHeader: current.APIKeyHeader, APIKeyPrefix: current.APIKeyPrefix,
 		})
 	}
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].ID < profiles[j].ID })
@@ -50,10 +62,19 @@ func Profiles() []Profile {
 }
 
 func LookupProfile(id string) (Profile, bool) {
+	id = CanonicalProviderID(id)
 	for _, profile := range Profiles() {
 		if profile.ID == id {
 			return profile, true
 		}
 	}
 	return Profile{}, false
+}
+
+func CanonicalProviderID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if profile, ok := compat.Lookup(id); ok {
+		return profile.ID
+	}
+	return strings.ReplaceAll(id, "_", "-")
 }

@@ -5,14 +5,14 @@ import type { Block } from "../types";
 import { TimelineFeed } from "./Timeline";
 
 describe("Codex-style process timeline", () => {
-  it("marks only live assistant output as animated and busy", async () => {
+  it("marks live assistant output as busy without rendering a cursor inside Markdown", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     const live: Block = { id: "live", kind: "assistant", content: "正在输出", state: "streaming" };
 
     await act(async () => root.render(createElement(TimelineFeed, { blocks: [live], language: "zh-CN" })));
     expect(container.querySelector(".assistant-block.streaming")?.getAttribute("aria-busy")).toBe("true");
-    expect(container.querySelector(".stream-cursor")).not.toBeNull();
+    expect(container.querySelector(".stream-cursor")).toBeNull();
 
     await act(async () => root.render(createElement(TimelineFeed, { blocks: [{ ...live, state: "completed" }], language: "zh-CN" })));
     expect(container.querySelector(".stream-cursor")).toBeNull();

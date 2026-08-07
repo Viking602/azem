@@ -30,9 +30,29 @@ import type {
 export interface ModelOption {
   id: string;
   name: string;
+	aliases?: string[];
   reasoningLevels: string[];
   defaultReasoning?: string;
   contextWindow?: number;
+	capabilities?: string[];
+	inputModalities?: string[];
+	outputModalities?: string[];
+}
+
+function modelIDKey(id: string) {
+	return id.trim().toLocaleLowerCase().replace(/^models\//, "").replace(/^~/, "").replaceAll("_", "-").split("/").at(-1) ?? "";
+}
+
+export function findModelOption(models: ModelOption[], id: string) {
+	const key = modelIDKey(id);
+	return models.find((model) => [model.id, ...(model.aliases ?? [])].some((candidate) => modelIDKey(candidate) === key));
+}
+
+export type UIFont = string;
+
+export function normalizeUIFont(uiFont: string): UIFont {
+  const font = uiFont.trim();
+  return font === "system" || (font.length > 0 && font.length <= 128 && !/["\\;\u0000-\u001f]/.test(font)) ? font : "system";
 }
 
 export interface ContextUsage {
@@ -94,6 +114,8 @@ export interface RuntimeData {
   queuedPrompts: QueuedPrompt[];
   queuePauseReasons: Record<string, "interrupted">;
   theme: "system" | "light" | "dark";
+  uiFont: UIFont;
+  uiFontSize: number;
 }
 
 interface RuntimeActions {
@@ -114,6 +136,8 @@ interface RuntimeActions {
   updatePullRequestMonitor: (monitor: PullRequestMonitorState) => void;
   setPlanMode: (enabled: boolean) => void;
   setTheme: (theme: RuntimeData["theme"]) => void;
+  setUIFont: (uiFont: UIFont) => void;
+  setUIFontSize: (uiFontSize: number) => void;
   setLanguage: (language: "en" | "zh-CN") => void;
   setSessionModel: (provider: string, model: string, reasoning: string) => void;
   setChatGPTFastMode: (enabled: boolean) => void;
@@ -186,6 +210,8 @@ const initialData: RuntimeData = {
   queuedPrompts: [],
   queuePauseReasons: {},
   theme: "system",
+  uiFont: "system",
+  uiFontSize: 14,
 };
 
 export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
@@ -235,12 +261,14 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   }),
   setPlanMode: (planMode) => set({ planMode }),
   setTheme: (theme) => set({ theme }),
+  setUIFont: (uiFont) => set({ uiFont: normalizeUIFont(uiFont) }),
+  setUIFontSize: (uiFontSize) => set({ uiFontSize: Math.min(20, Math.max(11, Math.round(uiFontSize))) }),
   setLanguage: (language) => set((state) => ({
     snapshot: state.snapshot ? { ...state.snapshot, language } : state.snapshot,
   })),
   setSessionModel: (provider, model, reasoning) => set((state) => {
     const modelChanged = state.snapshot?.provider !== provider || state.snapshot?.model !== model;
-    const contextLimit = state.modelsByProvider[provider]?.find((item) => item.id === model)?.contextWindow ?? 0;
+    const contextLimit = findModelOption(state.modelsByProvider[provider] ?? [], model)?.contextWindow ?? 0;
     return {
       snapshot: state.snapshot ? { ...state.snapshot, provider, model, reasoning } : state.snapshot,
       contextUsage: modelChanged ? emptyContextUsage(contextLimit) : state.contextUsage,
@@ -445,8 +473,11 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         next.todo = event.todo ?? null;
         next.attachments = [];
         next.contextProfile = null;
-        const contextLimit = next.modelsByProvider[data.provider]?.find((item) => item.id === data.model)?.contextWindow ?? 0;
+		const contextLimit = findModelOption(next.modelsByProvider[data.provider] ?? [], data.model)?.contextWindow ?? 0;
         next.contextUsage = parseContextUsage(data.usage, contextLimit);
+        if ((data.provider === "chatgpt" || data.provider === "grok") && contextLimit > 0) {
+          next.contextUsage.contextLimit = contextLimit;
+        }
       }
       break;
     case "run_started":
@@ -594,13 +625,20 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       break;
 	case "model_providers":
 	  next.modelProviders = (event.modelProviders ?? []).map((provider) => ({ ...provider, Models: provider.Models ?? [] }));
+	  for (const provider of next.modelProviders) {
+		if (provider.Enabled && provider.Models.length > 0) next.modelsByProvider = {
+		  ...next.modelsByProvider,
+		  [provider.ID]: provider.Models.map((model) => normalizeModel(model as unknown as Record<string, unknown>)),
+		};
+	  }
 	  break;
     case "model_catalog": {
       const provider = data.provider || "unknown";
       next.modelsByProvider = { ...next.modelsByProvider, [provider]: parseArray(data.models).map(normalizeModel) };
-      if (next.snapshot?.provider === provider && next.contextUsage.contextLimit === 0) {
-        const contextLimit = next.modelsByProvider[provider]?.find((item) => item.id === next.snapshot?.model)?.contextWindow ?? 0;
-        if (contextLimit > 0) next.contextUsage = { ...next.contextUsage, contextLimit };
+      if (next.snapshot?.provider === provider) {
+        const contextLimit = findModelOption(next.modelsByProvider[provider] ?? [], next.snapshot?.model ?? "")?.contextWindow ?? 0;
+        const subscription = provider === "chatgpt" || provider === "grok";
+        if (contextLimit > 0 && (subscription || next.contextUsage.contextLimit === 0)) next.contextUsage = { ...next.contextUsage, contextLimit };
       }
       break;
     }
@@ -669,7 +707,16 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       next.runId = "";
       if (event.kind === "run_failed") {
         next.error = event.text ?? "Run failed";
-        next.blocks = [...next.blocks, { id: `error-${event.sequence}`, kind: "error", title: translator(next.snapshot?.language === "en" ? "en" : "zh-CN")("runFailed"), content: event.text, state: "failed" }];
+        const language = next.snapshot?.language === "en" ? "en" : "zh-CN";
+        const failedText = event.text ?? "";
+        const truncated = /token limit|output reached|max_turns|max_output|truncated/i.test(failedText);
+        next.blocks = [...next.blocks, {
+          id: `error-${event.sequence}`,
+          kind: "error",
+          title: translator(language)(truncated ? "outputTruncated" : "runFailed"),
+          content: event.text,
+          state: "failed",
+        }];
       }
       break;
     }
@@ -839,9 +886,7 @@ function appendDelta(
       content: chunk,
       textPhase: event.textPhase,
       state: event.state || "streaming",
-      data: kind !== "assistant"
-        ? { ...(event.data ?? {}), startedAt: event.data?.startedAt || String(Date.now()) }
-        : event.data,
+      data: { ...(event.data ?? {}), startedAt: event.data?.startedAt || String(Date.now()) },
     }];
   }
   return blocks.map((block, current) => current === previousIndex ? {
@@ -876,7 +921,16 @@ function updateTool(blocks: Block[], event: RuntimeEvent): Block[] {
   const id = event.toolCallId || `tool-${event.sequence}`;
   const index = blocks.findIndex((block) => block.toolCallId === id || block.id === id);
   const data = event.data ?? {};
-  if (event.kind === "tool_started") blocks = settleActiveProcessText(blocks, event);
+  if (event.kind === "tool_started") {
+    blocks = settleActiveProcessText(blocks, event);
+    const completedAt = Date.now();
+    blocks = blocks.map((block): Block => block.kind === "assistant"
+      && block.runId === event.runId
+      && block.agentId === event.agentId
+      && isLiveBlock(block)
+      ? { ...settleTimedProcessBlock(block, "completed", completedAt), kind: "commentary", title: "progress", textPhase: "commentary" }
+      : block);
+  }
   const text = event.text ?? "";
   const argumentsText = typeof data.arguments === "string" ? data.arguments : "";
   const pendingState = ["queued", "awaiting_approval", "reviewing_approval"].includes(event.state || "")
@@ -1118,13 +1172,35 @@ function normalizeBranch(raw: Record<string, unknown>): GitBranch {
 
 function normalizeModel(raw: Record<string, unknown>): ModelOption {
   const id = stringValue(raw, "id", "ID");
+	const name = stringValue(raw, "name", "Name");
   const contextWindow = numberValue(raw.contextWindow ?? raw.ContextWindow);
+	const capabilities = new Set(((raw.capabilities ?? raw.Capabilities ?? []) as unknown[]).map(String));
+	if (raw.supportsTools ?? raw.SupportsTools) capabilities.add("tools");
+	if (raw.supportsParallel ?? raw.SupportsParallel) capabilities.add("parallel-tools");
+	if (raw.supportsReasoning ?? raw.SupportsReasoning) capabilities.add("reasoning");
+	if (raw.supportsStructured ?? raw.SupportsStructured) capabilities.add("structured-output");
+	const inputModalities = ((raw.inputModalities ?? raw.InputModalities ?? []) as unknown[]).map(String);
+	const outputModalities = ((raw.outputModalities ?? raw.OutputModalities ?? []) as unknown[]).map(String);
   return {
-    id, name: [stringValue(raw, "name", "Name"), id].filter(Boolean)[0]!,
+	  id, name: modelDisplayName(id, name), aliases: ((raw.aliases ?? raw.Aliases ?? []) as unknown[]).map(String),
     reasoningLevels: ((raw.reasoningLevels ?? raw.ReasoningLevels ?? []) as unknown[]).map(String),
     defaultReasoning: stringValue(raw, "defaultReasoning", "DefaultReasoning"),
     ...(contextWindow > 0 ? { contextWindow } : {}),
+	  ...(capabilities.size > 0 ? { capabilities: [...capabilities] } : {}),
+	  ...(inputModalities.length > 0 ? { inputModalities } : {}),
+	  ...(outputModalities.length > 0 ? { outputModalities } : {}),
   };
+}
+
+export function modelDisplayName(id: string, name = "") {
+	if (name.trim() && name.trim().toLocaleLowerCase() !== id.trim().toLocaleLowerCase()) return name.trim();
+	const raw = id.replace(/^~/, "").split("/").at(-1) || id;
+	const acronyms: Record<string, string> = { ai: "AI", api: "API", glm: "GLM", gpt: "GPT", oss: "OSS", vl: "VL", r1: "R1" };
+	return raw.split(/[-_]+/).filter(Boolean).map((part) => acronyms[part.toLowerCase()] ?? (/^\d/.test(part) ? part : part.charAt(0).toUpperCase() + part.slice(1))).join(" ");
+}
+
+export function providerDisplayName(id: string, providers: ModelProvider[]) {
+	return providers.find((provider) => provider.ID === id)?.DisplayName ?? (id === "chatgpt" ? "ChatGPT" : id === "grok" ? "Grok" : id);
 }
 
 function emptyContextUsage(contextLimit = 0): ContextUsage {

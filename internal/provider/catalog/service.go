@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"resty.dev/v3"
@@ -28,17 +30,31 @@ type Model struct {
 	Name                 string         `json:"name,omitempty"`
 	Description          string         `json:"description,omitempty"`
 	ContextWindow        int            `json:"contextWindow,omitempty"`
+	MaxOutputTokens      int            `json:"maxOutputTokens,omitempty"`
 	ReasoningLevels      []string       `json:"reasoningLevels,omitempty"`
 	DefaultReasoning     string         `json:"defaultReasoning,omitempty"`
 	SupportsTools        bool           `json:"supportsTools"`
 	SupportsParallel     bool           `json:"supportsParallel"`
 	SupportsReasoning    bool           `json:"supportsReasoning"`
+	SupportsStructured   bool           `json:"supportsStructured"`
 	Aliases              []string       `json:"aliases,omitempty"`
 	InputModalities      []string       `json:"inputModalities,omitempty"`
 	OutputModalities     []string       `json:"outputModalities,omitempty"`
 	Pricing              map[string]any `json:"pricing,omitempty"`
 	ServiceTiers         []ServiceTier  `json:"serviceTiers,omitempty"`
 	AdditionalSpeedTiers []string       `json:"additionalSpeedTiers,omitempty"`
+}
+
+func (m Model) MatchesID(id string) bool {
+	if m.ID == id {
+		return true
+	}
+	for _, alias := range m.Aliases {
+		if alias == id {
+			return true
+		}
+	}
+	return false
 }
 
 type ServiceTier struct {
@@ -79,6 +95,12 @@ type Service struct {
 	TTL                 map[string]time.Duration
 	Endpoints           map[string]string
 	AdditionalEndpoints map[string][]string
+	ModelsDevURL        string
+	ModelsDevTTL        time.Duration
+	ModelsDevClient     *http.Client
+	modelsDevMu         sync.Mutex
+	modelsDevCatalog    ModelsDevCatalog
+	modelsDevFetchedAt  time.Time
 }
 
 func NewService(db *sql.DB, authentication *auth.Service) *Service {
@@ -87,7 +109,53 @@ func NewService(db *sql.DB, authentication *auth.Service) *Service {
 		TTL:                 map[string]time.Duration{"chatgpt": 5 * time.Minute, "grok": 5 * time.Minute},
 		Endpoints:           map[string]string{"chatgpt": DefaultChatGPTCatalogURL, "grok": DefaultGrokCatalogURL},
 		AdditionalEndpoints: map[string][]string{"grok": {DefaultGrokLanguageModelsURL}},
+		ModelsDevURL:        DefaultModelsDevURL,
+		ModelsDevTTL:        15 * time.Minute,
 	}
+}
+
+func (s *Service) EnrichWithModelsDev(ctx context.Context, result Result) Result {
+	metadata, err := s.modelsDev(ctx)
+	if err != nil {
+		result.Warning = joinWarnings(result.Warning, "models.dev metadata unavailable: "+err.Error())
+		return result
+	}
+	_, matched := metadata.Enrich(ModelsDevProviderHint{ID: result.Provider}, result.Models)
+	if unmatched := len(result.Models) - matched; unmatched > 0 {
+		result.Warning = joinWarnings(result.Warning, fmt.Sprintf("models.dev metadata did not match %d model(s)", unmatched))
+	}
+	return result
+}
+
+func (s *Service) modelsDev(ctx context.Context) (ModelsDevCatalog, error) {
+	s.modelsDevMu.Lock()
+	defer s.modelsDevMu.Unlock()
+	ttl := s.ModelsDevTTL
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+	if len(s.modelsDevCatalog.providers) > 0 && time.Since(s.modelsDevFetchedAt) < ttl {
+		return s.modelsDevCatalog, nil
+	}
+	fresh, err := FetchModelsDev(ctx, s.ModelsDevClient, s.ModelsDevURL)
+	if err != nil {
+		if len(s.modelsDevCatalog.providers) > 0 {
+			return s.modelsDevCatalog, nil
+		}
+		return ModelsDevCatalog{}, err
+	}
+	s.modelsDevCatalog, s.modelsDevFetchedAt = fresh, time.Now()
+	return fresh, nil
+}
+
+func joinWarnings(current, addition string) string {
+	if current == "" {
+		return addition
+	}
+	if addition == "" {
+		return current
+	}
+	return current + "; " + addition
 }
 
 func (s *Service) List(ctx context.Context, provider string, accountID string, force bool) (Result, error) {
@@ -116,7 +184,7 @@ func (s *Service) ValidateSelection(ctx context.Context, provider string, accoun
 		return err
 	}
 	for _, model := range result.Models {
-		if model.ID == modelID {
+		if model.MatchesID(modelID) {
 			return nil
 		}
 	}
@@ -303,9 +371,16 @@ func decode(provider string, data []byte) ([]Model, bool, string, error) {
 			if id == "" {
 				continue
 			}
+			aliases := make([]string, 0, 1)
+			if item.ID != "" && item.ID != id {
+				aliases = append(aliases, item.ID)
+			}
+			if item.Slug != "" && item.Slug != id {
+				aliases = append(aliases, item.Slug)
+			}
 			model := Model{
 				ID: id, Name: first(item.Name, item.DisplayName, item.Title, id),
-				Description: item.Description, ContextWindow: item.ContextWindow,
+				Aliases: aliases, Description: item.Description, ContextWindow: item.ContextWindow,
 				ReasoningLevels: []string(item.ReasoningLevels), DefaultReasoning: item.DefaultReasoning,
 				SupportsReasoning: len(item.ReasoningLevels) > 0 || item.DefaultReasoning != "",
 				InputModalities:   item.InputModalities, ServiceTiers: item.ServiceTiers,

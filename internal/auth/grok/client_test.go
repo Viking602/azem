@@ -74,6 +74,12 @@ func TestDeviceDenialAndEndpointGuard(t *testing.T) {
 	if _, err := client.Discover(context.Background()); err == nil {
 		t.Fatal("insecure discovery endpoint accepted")
 	}
+	if err := client.ValidateResourceURL("https://cli-chat-proxy.grok.com/v1/billing?format=credits"); err != nil {
+		t.Fatalf("official Grok CLI proxy rejected: %v", err)
+	}
+	if err := client.ValidateResourceURL("https://cli-chat-proxy.grok.com.attacker.example/v1/billing"); err == nil {
+		t.Fatal("lookalike Grok CLI proxy accepted")
+	}
 }
 
 func TestSlowDownAndExpiredDeviceCodes(t *testing.T) {

@@ -178,9 +178,15 @@ func (s *meteredProviderStream) Recv() (hyprovider.Event, error) {
 		return e, err
 	}
 	if e.Kind == hyprovider.EventDone {
+		// length / max_turns means the provider hit an output or iteration
+		// ceiling. Persist that distinctly so metering and UI do not treat a
+		// truncated stream as a normal completed request.
 		status := "completed"
-		if e.StopReason == hyprovider.StopReasonAborted || e.StopReason == hyprovider.StopReasonError {
+		switch e.StopReason {
+		case hyprovider.StopReasonAborted, hyprovider.StopReasonError:
 			status = "unknown"
+		case hyprovider.StopReasonMaxTurns:
+			status = "length"
 		}
 		if err := s.state.finish(status, e.Usage); err != nil {
 			return hyprovider.Event{}, fmt.Errorf("persist provider request fact: %w", err)

@@ -33,6 +33,25 @@ func TestStreamingHTTPClientHasNoTotalBodyTimeout(t *testing.T) {
 	}
 }
 
+func TestDecodeSubscriptionQuotas(t *testing.T) {
+	chatgpt, err := decodeChatGPTQuota([]byte(`{
+		"plan_type":"pro",
+		"rate_limit":{"primary_window":{"used_percent":61.5,"limit_window_seconds":604800,"reset_at":1786500000}},
+		"credits":{"unlimited":false,"balance":"12.50"}
+	}`))
+	if err != nil || chatgpt.Plan != "pro" || chatgpt.UsedPercent != 61.5 || chatgpt.ResetsAt != 1786500000 || chatgpt.Balance != "12.50" {
+		t.Fatalf("ChatGPT quota=%+v error=%v", chatgpt, err)
+	}
+
+	grok, err := decodeGrokQuota([]byte(`{
+		"subscription_tier":"SuperGrok Heavy",
+		"config":{"creditUsagePercent":42.5,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-03T00:00:00Z","end":"2026-08-10T00:00:00Z"},"prepaidBalance":{"val":725}}
+	}`))
+	if err != nil || grok.Plan != "SuperGrok Heavy" || grok.UsedPercent != 42.5 || grok.ResetsAt == 0 || grok.Balance != "7.25" {
+		t.Fatalf("Grok quota=%+v error=%v", grok, err)
+	}
+}
+
 func TestHasAnyAccount(t *testing.T) {
 	ctx := context.Background()
 	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))

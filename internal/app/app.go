@@ -199,6 +199,7 @@ func (s *Service) handleAuthStatusChange(ctx context.Context, change authservice
 	}
 	s.emit(s.ctx, Event{Kind: EventAuthState, State: change.Status, Text: change.AccountID, Data: data})
 	s.emitApprovalMode(s.ctx)
+	_ = s.emitModelProviders(s.ctx, "auth_updated")
 }
 
 func (s *Service) emitApprovalMode(ctx context.Context) {

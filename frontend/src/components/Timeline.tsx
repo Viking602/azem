@@ -164,7 +164,6 @@ export function TimelineBlock({ block, language, compact = false, nested = false
     // Prose body — primary transcript content (Synara ChatMarkdown tier).
     return <article className={`assistant-block markdown timeline-prose ${active ? "streaming" : ""} ${compact ? "compact" : ""}`} aria-busy={active || undefined}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content || ""}</ReactMarkdown>
-      {active ? <span className="stream-cursor" aria-hidden="true" /> : null}
     </article>;
   }
   if (block.kind === "thinking") return <ReasoningTrace block={block} language={language} />;

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   CODEX_BURST_COUNT,
   effortIntensity,
-  effortParticles,
   fillWidthStyle,
   indexFromClientX,
   isHighCostReasoning,
@@ -41,22 +40,13 @@ describe("ReasoningEffortSlider helpers", () => {
     expect(isHighCostReasoning("low")).toBe(false);
   });
 
-  it("maps fill ratio to intensity bands for color and particles", () => {
+  it("maps fill ratio to intensity bands for color", () => {
     expect(effortIntensity(0)).toBe("low");
     expect(effortIntensity(0.25)).toBe("low");
     expect(effortIntensity(0.4)).toBe("mid");
     expect(effortIntensity(0.74)).toBe("mid");
     expect(effortIntensity(0.75)).toBe("high");
     expect(effortIntensity(1)).toBe("high");
-  });
-
-  it("builds a stable particle layout for the animated fill", () => {
-    const a = effortParticles(6);
-    const b = effortParticles(6);
-    expect(a).toHaveLength(6);
-    expect(a).toEqual(b);
-    expect(a[0]?.size).toBeGreaterThan(0);
-    expect(a[0]?.duration).toBeGreaterThan(0);
   });
 
   it("insets stop positions so end ticks stay inside the pill", () => {

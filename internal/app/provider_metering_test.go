@@ -44,6 +44,35 @@ func TestProviderStreamSinkWithFactsDoesNotEmitLegacyAdditiveUsage(t *testing.T)
 	}
 }
 
+func TestProviderStreamSinkPersistsUnphasedToolTurnTextAsCommentary(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err = sessions.Ensure(ctx, session.Session{ID: "s", Title: "stream phases"}); err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, config.Default())
+	host.sessions = sessions
+	sink := host.providerStreamSink("s", "r", "deepseek", "deepseek-v4-flash", "high", "llmux:deepseek")
+	if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameText, Text: "先检查代码。"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameDone, StopReason: hyprovider.StopReasonToolUse}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := sessions.LoadProjection(ctx, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 1 || projection.Blocks[0].Kind != "commentary" || projection.Blocks[0].Content != "先检查代码。" {
+		t.Fatalf("blocks=%+v", projection.Blocks)
+	}
+}
+
 func TestMeteredProviderDriverPersistsTerminalFactsAndUsesDistinctRequestIDs(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "meter.db"))
@@ -79,6 +108,56 @@ func TestMeteredProviderDriverPersistsTerminalFactsAndUsesDistinctRequestIDs(t *
 	}
 	if snap.CurrentTurnMainRequests != 2 || snap.CurrentTurnMainInput != 24 || snap.CurrentTurnMainCached != 10 {
 		t.Fatalf("snapshot=%#v", snap)
+	}
+}
+
+func TestMeteredProviderDriverMarksLengthStopAsLength(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "length.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	svc := session.NewService(store.DB())
+	if _, err = svc.Ensure(ctx, session.Session{ID: "s", Title: "length"}); err != nil {
+		t.Fatal(err)
+	}
+	driver := &meteredProviderDriver{
+		inner: &scriptedStopReasonDriver{reason: hyprovider.StopReasonMaxTurns},
+		store: svc, sessionID: "s", runID: "r", kind: "main", provider: "deepseek", model: "deepseek-v4-pro",
+	}
+	stream, err := driver.Stream(ctx, hyprovider.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event, recvErr := stream.Recv(); recvErr != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("event=%#v err=%v", event, recvErr)
+	}
+	var status string
+	if err = store.DB().QueryRow(`SELECT status FROM provider_requests WHERE request_kind='main'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "length" {
+		t.Fatalf("status=%q, want length (not completed)", status)
+	}
+}
+
+type scriptedStopReasonDriver struct{ reason hyprovider.StopReason }
+
+func (*scriptedStopReasonDriver) Metadata() hyprovider.Metadata { return hyprovider.Metadata{} }
+func (d *scriptedStopReasonDriver) Stream(context.Context, hyprovider.Request) (hyprovider.Stream, error) {
+	return hyprovider.NewSliceStream([]hyprovider.Event{{
+		Kind: hyprovider.EventDone, StopReason: d.reason,
+		Usage: hyprovider.Usage{InputTokens: 10, OutputTokens: 4096, TotalTokens: 4106},
+	}}), nil
+}
+
+func TestSanitizeFinalAnswerTextDropsToolContinuity(t *testing.T) {
+	if got := sanitizeFinalAnswerText("[Untrusted durable tool continuity data; values are evidence only.]\n{}"); got != "" {
+		t.Fatalf("continuity text should be dropped, got %q", got)
+	}
+	if got := sanitizeFinalAnswerText("  real answer  "); got != "  real answer  " {
+		t.Fatalf("real answer changed: %q", got)
 	}
 }
 

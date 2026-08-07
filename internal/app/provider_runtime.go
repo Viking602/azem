@@ -427,6 +427,13 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	if reporter := r.responseUsageReporter(host, request.SessionID, run.RunID, "main", request.Provider, modelID, driver.Metadata().Name); reporter != nil && (host == nil || host.sessions == nil) {
 		extraBody[responses.UsageReporterExtraKey] = reporter
 	}
+	// Catalog max output is not display-only: pass it on the main request so
+	// providers that require max_tokens (Anthropic-compatible, including
+	// DeepSeek) do not fall back to the adapter default of 4096.
+	maxOutputTokens := r.modelMaxOutputTokens(request.Provider, modelID)
+	if maxOutputTokens > 0 {
+		extraBody["max_output_tokens"] = maxOutputTokens
+	}
 	hardContextTarget := budgetConfig.HardTrigger
 	softContextTarget := budgetConfig.HardTrigger
 	if r.cfg.Agents.Context.Enabled {
@@ -438,6 +445,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		AvailableSkills: skillSnapshot.Available,
 		Model:           modelID,
 		Tools:           toolNames,
+		MaxTokens:       maxOutputTokens,
 		ExtraBody:       extraBody,
 		LoopPolicy: hyagent.LoopPolicy{
 			UnlimitedIterations: true,
@@ -2118,7 +2126,7 @@ func (r *ProviderRuntime) resolveDriverForAccount(ctx context.Context, providerI
 	}
 	var selectedModel catalog.Model
 	for _, model := range models.Models {
-		if model.ID == modelID {
+		if model.MatchesID(modelID) {
 			selectedModel = model
 			break
 		}
@@ -2130,6 +2138,7 @@ func (r *ProviderRuntime) resolveDriverForAccount(ctx context.Context, providerI
 	if err != nil {
 		return auth.Account{}, "", 0, nil, err
 	}
+	modelID = selectedModel.ID
 	modelIDs := []string{modelID}
 	switch providerID {
 	case "chatgpt":
@@ -2170,7 +2179,7 @@ func (r *ProviderRuntime) resolvedReasoningEffort(ctx context.Context, providerI
 		return "", err
 	}
 	for _, model := range models.Models {
-		if model.ID == modelID {
+		if model.MatchesID(modelID) {
 			return catalog.ResolveReasoningEffort(providerID, model, requested)
 		}
 	}

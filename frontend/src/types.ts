@@ -373,9 +373,15 @@ export interface ModelRoute {
 export interface LLMuxModelConfig {
 	id: string;
 	name?: string;
+	aliases?: string[];
+	description?: string;
 	contextWindow: number;
+	maxOutputTokens?: number;
 	reasoningLevels?: string[];
 	defaultReasoning?: string;
+	capabilities?: string[];
+	inputModalities?: string[];
+	outputModalities?: string[];
 }
 
 export interface ModelProvider {
@@ -387,7 +393,20 @@ export interface ModelProvider {
 	EnvKey: string;
 	Enabled: boolean;
 	CredentialConfigured: boolean;
-	CredentialSource: "stored" | "environment" | "none";
+	CredentialSource: "stored" | "environment" | "pending" | "none";
+	Subscription?: boolean;
+	AccountID?: string;
+	AccountLabel?: string;
+	AccountPlan?: string;
+	QuotaAvailable?: boolean;
+	QuotaUsedPercent?: number;
+	QuotaResetsAt?: number;
+	QuotaBalance?: string;
+	QuotaUnlimited?: boolean;
+	QuotaWarning?: string;
+	ModelsDevID?: string;
+	ModelsSource?: string;
+	ModelsWarning?: string;
 	Models: LLMuxModelConfig[];
 }
 

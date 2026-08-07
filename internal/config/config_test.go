@@ -253,6 +253,24 @@ func TestUpdateLLMuxProviderPreservesYAMLAndReloadsModels(t *testing.T) {
 	}
 }
 
+func TestUpdateLLMuxProviderMigratesLegacyUnderscoreID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := "providers:\n  llmux:\n    alibaba_coding_plan:\n      enabled: false\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateLLMuxProvider(path, "alibaba_coding_plan", LLMuxProviderConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "alibaba_coding_plan") || !strings.Contains(string(data), "alibaba-coding-plan") {
+		t.Fatalf("legacy provider ID was not migrated:\n%s", data)
+	}
+}
+
 func TestResetModelRouteRemovesLegacyOverrideAndPreservesOtherFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := "agents:\n  subagents:\n    models:\n      explore: legacy-model\n      review: keep-model\n    roles:\n      explore:\n        description: keep me\n        provider: grok\n        model: grok-4\n        reasoning: high\n"

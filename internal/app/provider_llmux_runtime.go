@@ -43,7 +43,7 @@ func (r *ProviderRuntime) resolveLLMuxDriverForAccount(ctx context.Context, prov
 	}
 	driver, err := llmuxdriver.New(llmuxdriver.Config{
 		ProviderID: providerID, APIKey: apiKey, BaseURL: baseURL,
-		Models: []string{selected.ID}, ReasoningEffort: reasoning,
+		Models: []string{selected.ID}, ReasoningEffort: reasoning, MaxOutputTokens: selected.MaxOutputTokens,
 	})
 	return account, selected.ID, selected.ContextWindow, driver, err
 }
@@ -97,9 +97,33 @@ func configuredModel(providerID string, models []config.LLMuxModelConfig, modelI
 		modelID = models[0].ID
 	}
 	for _, model := range configuredCatalogModels(models) {
-		if model.ID == modelID {
+		if model.MatchesID(modelID) {
 			return model, nil
 		}
 	}
 	return catalog.Model{}, fmt.Errorf("model %q is not configured for %s", modelID, providerID)
+}
+
+// modelMaxOutputTokens returns the configured catalog max output for llmux
+// models. Subscription providers (chatgpt/grok) intentionally return 0 because
+// their transports omit or reject max_output_tokens on the main path.
+func (r *ProviderRuntime) modelMaxOutputTokens(providerID, modelID string) int {
+	providerID = strings.ToLower(strings.TrimSpace(providerID))
+	if providerID == "" || providerID == "chatgpt" || providerID == "grok" {
+		return 0
+	}
+	r.mu.RLock()
+	provider, ok := r.cfg.Providers.LLMux[providerID]
+	r.mu.RUnlock()
+	if !ok {
+		return 0
+	}
+	model, err := configuredModel(providerID, provider.Models, modelID)
+	if err != nil {
+		return 0
+	}
+	if model.MaxOutputTokens <= 0 {
+		return 0
+	}
+	return model.MaxOutputTokens
 }

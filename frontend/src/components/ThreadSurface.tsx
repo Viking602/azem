@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
+import { motion, useAnimate } from "motion/react";
 import {
-  ArrowDown, ArrowUp, Bot, Box, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot, CircleStop,
+  ArrowDown, ArrowUp, Bot, Box, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleDot, CircleStop,
   CornerUpRight, Folder, GitBranch, GripVertical, Hand, HardDrive, ImagePlus, Lightbulb, ListX, Minimize2,
-  MoreHorizontal, Pencil, Plug, Plus, RefreshCw, RotateCcw, Search, Send, Settings, ShieldAlert, ShieldCheck,
+  MoreHorizontal, Pencil, Plug, Plus, RefreshCw, RotateCcw, Search, Settings, ShieldAlert, ShieldCheck,
   Sparkles, Trash2, WandSparkles, Zap, PanelRightClose, PanelRightOpen, X,
 } from "lucide-react";
 import { cancelActive, execute, guide, importAttachment, importClipboardImage, openProject, selectProjectFolder, startTurn } from "../bridge";
 import { reasoningHint, sortReasoningLevels, tFormat, translator } from "../i18n";
-import { useRuntimeStore, type ContextUsage } from "../store";
+import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ContextUsage } from "../store";
 import type { Attachment, Block, ContextProfile, DeliveryMode, QueuedPrompt, SkillEntry, Snapshot } from "../types";
 import ReasoningEffortSlider, { isHighCostReasoning } from "./ReasoningEffortSlider";
 import ProviderIcon from "./ProviderIcon";
@@ -40,6 +41,10 @@ type SlashContext = {
   contextPercent?: number;
   provider?: string;
 };
+
+export function supportsFastMode(provider: string): boolean {
+  return provider === "chatgpt";
+}
 
 export function shouldReadNativeClipboard(clipboardData: DataTransfer): boolean {
   return pastedImages(clipboardData).length === 0 && !clipboardData.types.includes("text/plain");
@@ -106,7 +111,7 @@ const slashCommands: Array<{
   {
     action: "fast", aliases: ["fast", "speed", "快速"], zh: "快速", en: "Fast",
     zhDetail: "切换 ChatGPT 标准与快速速度", enDetail: "Toggle standard and fast ChatGPT speed", icon: Zap,
-    when: (context) => context.provider === "chatgpt",
+    when: (context) => supportsFastMode(context.provider ?? ""),
     detail: (context, language) => language === "zh-CN"
       ? (context.fast ? "当前快速模式 · 点击切回标准" : "1.5x 速度，用量更高")
       : (context.fast ? "Fast mode on · click for standard" : "1.5x speed, increased usage"),
@@ -235,7 +240,7 @@ export default function ThreadSurface() {
   const runtimeBusy = running || Boolean(globalRunSessionId);
 
   useEffect(() => {
-    if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: running ? "auto" : "smooth" });
+    if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: running ? "instant" : "smooth" });
   }, [blocks, following, running]);
 
   useEffect(() => setDeliveryMode(snapshot.queueMode ?? "queue"), [currentSessionId, snapshot.queueMode]);
@@ -562,7 +567,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
   const [slashCursor, setSlashCursor] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const t = translator(snapshot.language);
-  const { modelChoices, reasoningLevels, selectedModelName, changeModel, changeReasoning, changeSpeed } = useComposerModels(snapshot);
+  const { modelChoices, reasoningLevels, selectedModel, selectedModelName, changeModel, changeReasoning, changeSpeed } = useComposerModels(snapshot);
   const reasoningNames: Record<string, string> = {
     minimal: t("reasoningMinimal"), low: t("reasoningLow"), medium: t("reasoningMedium"),
     high: t("reasoningHigh"), xhigh: t("reasoningXHigh"), max: t("reasoningMax"), ultra: t("reasoningUltra"),
@@ -728,14 +733,14 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
           <span className="toolbar-spacer" />
           <ContextMeter />
           <ModelControls
-            running={running} models={modelChoices} selectedModel={modelKey(snapshot.provider, snapshot.model)} selectedModelName={selectedModelName} selectedProvider={snapshot.provider}
+            running={running} models={modelChoices} selectedModel={selectedModel} selectedModelName={selectedModelName} selectedProvider={snapshot.provider}
             reasoningLevels={reasoningLevels} selectedReasoning={snapshot.reasoning} selectedReasoningName={selectedReasoningName}
             fast={snapshot.chatgptFastMode} reasoningNames={reasoningNames} onModelChange={changeModel} onReasoningChange={changeReasoning} onSpeedChange={changeSpeed}
             modelLabel={t("model")} reasoningLabel={t("reasoning")} speedLabel={t("speed")} standardSpeed={t("standardSpeed")} fastSpeed={t("fastSpeed")} fastHint={t("fastModeHint")}
             fasterLabel={t("reasoningFaster")} smarterLabel={t("reasoningSmarter")} advancedLabel={t("reasoningAdvanced")} backLabel={t("reasoningBack")}
             highCostHint={t("reasoningMaxHint")} fastBoostTitle={t("fastBoostTitle")} fastBoostDetail={t("fastBoostDetail")} language={snapshot.language}
           />
-          {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={() => submitOrChooseSlash()} disabled={!prompt.trim() && attachments.length === 0} title={busy ? running && deliveryMode === "guide" ? t("guide") : t("queue") : t("send")}><Send size={15} /></button>}
+          {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={() => submitOrChooseSlash()} disabled={!prompt.trim() && attachments.length === 0} title={busy ? running && deliveryMode === "guide" ? t("guide") : t("queue") : t("send")}><ArrowUp size={17} strokeWidth={2.25} /></button>}
         </div>
       </div>
     </div>
@@ -1243,7 +1248,26 @@ function QueueMenu({ item, queueing, canMoveUp, canMoveDown, onEdit, onMoveUp, o
   </>;
 }
 
-type ModelControlOption = { value: string; label: string; provider?: string; hint?: string };
+type ModelControlOption = { value: string; label: string; provider?: string; hint?: string; searchText?: string };
+type ModelControlView = "effort" | "advanced";
+type ModelControlViewAction = "open" | "close" | "advanced" | "back";
+
+export function nextModelControlView(current: ModelControlView, action: ModelControlViewAction): ModelControlView {
+  return action === "advanced" ? "advanced" : action === "back" ? "effort" : current;
+}
+
+export function filterModelControlOptions(options: ModelControlOption[], query: string, provider: string) {
+  const needle = query.trim().toLocaleLowerCase();
+  return options.filter((option) =>
+    (!provider || option.provider === provider)
+    && (!needle || `${option.label} ${option.searchText ?? ""}`.toLocaleLowerCase().includes(needle))
+  );
+}
+
+export function modelControlWidth(expanded: boolean, viewportWidth: number, contentWidth = 190) {
+  return Math.min(expanded ? 248 : Math.min(300, Math.max(0, contentWidth)), viewportWidth * .52);
+}
+
 type ModelControlGroup = {
   label: string;
   current: string;
@@ -1260,20 +1284,32 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
   fastBoostTitle: string; fastBoostDetail: string;
   language: Snapshot["language"];
 }) {
-  const root = useRef<HTMLDetailsElement>(null);
+  const modelProviders = useRuntimeStore((state) => state.modelProviders);
+  const [root, animate] = useAnimate<HTMLDetailsElement>();
   const summary = useRef<HTMLElement>(null);
   const menu = useRef<HTMLDivElement>(null);
+  const advancedPage = useRef<HTMLDivElement>(null);
+  const effortPage = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const hoverReady = useRef(false);
+  const widthAnimation = useRef(0);
+  const closedWidth = useRef(190);
   const [open, setOpen] = useState(false);
   // Plan A: effort slider is the default surface; advanced keeps the classic menus.
-  const [view, setView] = useState<"effort" | "advanced">("effort");
+  const [view, setView] = useState<ModelControlView>("effort");
+  const [viewTransitioning, setViewTransitioning] = useState(false);
+  const [pageHeights, setPageHeights] = useState({ advanced: 0, effort: 0 });
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
+  const [modelQuery, setModelQuery] = useState("");
+  const [modelProvider, setModelProvider] = useState("");
   const [menuBox, setMenuBox] = useState<{ top?: number; bottom?: number; left: number; width: number } | null>(null);
   const [subBox, setSubBox] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
 
+  const fastAvailable = supportsFastMode(selectedProvider);
+  const fastActive = fastAvailable && fast;
   const levels = sortReasoningLevels(reasoningLevels);
   const groups: ModelControlGroup[] = [
-    { label: modelLabel, current: selectedModelName, selected: selectedModel, options: models.map((model) => ({ value: modelKey(model.provider, model.id), label: model.name, provider: model.provider })), select: onModelChange },
+    { label: modelLabel, current: selectedModelName, selected: selectedModel, options: models.map((model) => ({ value: modelKey(model.provider, model.id), label: model.name, provider: model.provider, searchText: [model.id, ...(model.aliases ?? [])].join(" ") })), select: onModelChange },
     {
       label: reasoningLabel,
       current: selectedReasoningName,
@@ -1285,8 +1321,49 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
       })),
       select: onReasoningChange,
     },
-    { label: speedLabel, current: fast ? fastSpeed : standardSpeed, selected: fast ? "fast" : "standard", options: [{ value: "standard", label: standardSpeed }, { value: "fast", label: fastSpeed }], select: onSpeedChange },
+    ...(fastAvailable ? [{ label: speedLabel, current: fastActive ? fastSpeed : standardSpeed, selected: fastActive ? "fast" : "standard", options: [{ value: "standard", label: standardSpeed }, { value: "fast", label: fastSpeed }], select: onSpeedChange }] : []),
   ];
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
+
+  useLayoutEffect(() => {
+    if (!open || !menuBox || !advancedPage.current || !effortPage.current) return;
+    const measure = () => {
+      const next = { advanced: advancedPage.current!.scrollHeight, effort: effortPage.current!.scrollHeight };
+      setPageHeights((current) => current.advanced === next.advanced && current.effort === next.effort ? current : next);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(advancedPage.current);
+    observer.observe(effortPage.current);
+    return () => observer.disconnect();
+  }, [open, menuBox?.width, groups.length, levels.length]);
+
+  const measureClosedWidth = useCallback(() => {
+    const element = summary.current;
+    const control = root.current;
+    if (!element || !control) return;
+    const parts = Array.from(element.children).filter((child) => !child.classList.contains("model-controls-chevron"));
+    const contentWidth = parts.reduce((total, child) => {
+      const range = document.createRange();
+      range.selectNodeContents(child);
+      const textWidth = typeof range.getBoundingClientRect === "function" ? range.getBoundingClientRect().width : 0;
+      return total + (textWidth || child.getBoundingClientRect().width);
+    }, 0);
+    if (contentWidth <= 0) return;
+    const style = window.getComputedStyle(element);
+    const gap = Number.parseFloat(style.columnGap || style.gap) || 0;
+    const padding = (Number.parseFloat(window.getComputedStyle(control).getPropertyValue("--model-control-closed-padding")) || 0) * 2;
+    const width = modelControlWidth(false, window.innerWidth, Math.ceil(contentWidth + gap * Math.max(0, parts.length - 1) + padding));
+    closedWidth.current = width;
+    control.style.setProperty("--model-control-closed-width", `${width}px`);
+  }, []);
+
+  useLayoutEffect(measureClosedWidth);
+  useEffect(() => {
+    window.addEventListener("resize", measureClosedWidth);
+    return () => window.removeEventListener("resize", measureClosedWidth);
+  }, [measureClosedWidth]);
 
   const placeMenu = useCallback(() => {
     const el = summary.current;
@@ -1296,8 +1373,7 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
     }
     const rect = el.getBoundingClientRect();
     // Reverse-engineered from Codex model-picker menu: compact chip, not a wide sheet.
-    const preferred = view === "effort" ? 248 : Math.max(280, rect.width + 40);
-    const width = Math.min(preferred, Math.min(320, window.innerWidth - 16));
+    const width = modelControlWidth(true, window.innerWidth);
     const spaceAbove = rect.top - 8;
     const spaceBelow = window.innerHeight - rect.bottom - 8;
     const openUp = spaceAbove >= 160 || spaceAbove > spaceBelow;
@@ -1306,6 +1382,28 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
       ? { bottom: window.innerHeight - rect.top + 8, left, width }
       : { top: rect.bottom + 8, left, width });
   }, [view]);
+
+  const animateControlWidth = useCallback((element: HTMLDetailsElement, expanded: boolean) => {
+    const collapsedWidth = closedWidth.current;
+    const openWidth = modelControlWidth(true, window.innerWidth);
+    const runningAnimation = element.getAnimations().some((item) => item.playState === "running");
+    const from = runningAnimation ? element.getBoundingClientRect().width : expanded ? collapsedWidth : openWidth;
+    const to = expanded ? openWidth : collapsedWidth;
+    const sequence = ++widthAnimation.current;
+    if (typeof element.animate !== "function" || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      element.style.removeProperty("width");
+      if (expanded) requestAnimationFrame(placeMenu);
+      return;
+    }
+    void animate(element, { width: [`${from}px`, `${to}px`] }, {
+      duration: .24,
+      ease: [.23, 1, .32, 1],
+    }).then(() => {
+      if (sequence !== widthAnimation.current) return;
+      element.style.removeProperty("width");
+      if (expanded) placeMenu();
+    });
+  }, [animate, placeMenu]);
 
   const placeSubmenu = useCallback((label: string) => {
     const row = rowRefs.current[label];
@@ -1316,10 +1414,11 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
     }
     const rowRect = row.getBoundingClientRect();
     const menuRect = panel.getBoundingClientRect();
-    const group = groups.find((item) => item.label === label);
+    const group = groupsRef.current.find((item) => item.label === label);
     const options = group?.options ?? [];
     const longest = options.reduce((max, option) => Math.max(max, option.label.length + (option.hint?.length ? 4 : 0)), 0) || 12;
-    const width = Math.min(Math.max(180, longest * 9 + 56), Math.min(320, window.innerWidth - 16));
+    const modelMenu = label === modelLabel;
+    const width = Math.min(Math.max(modelMenu ? 280 : 180, longest * 9 + 56), Math.min(320, window.innerWidth - 16));
     const spaceLeft = menuRect.left - 8;
     const spaceRight = window.innerWidth - menuRect.right - 8;
     const openRight = spaceRight >= width || spaceRight >= spaceLeft;
@@ -1329,7 +1428,7 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
     const titleH = 28;
     const pad = 12;
     const rowH = options.reduce((sum, option) => sum + (option.hint ? 48 : 36), 0);
-    const contentHeight = titleH + pad + rowH;
+    const contentHeight = titleH + pad + rowH + (modelMenu ? 76 : 0);
     const maxHeight = Math.min(Math.max(contentHeight, 80), window.innerHeight - 16);
     let top = rowRect.top - 8;
     if (top + Math.min(contentHeight, maxHeight) > window.innerHeight - 8) {
@@ -1337,12 +1436,15 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
     }
     top = Math.max(8, top);
     setSubBox({ top, left, width, maxHeight });
-  }, [groups]);
+  }, [modelLabel]);
 
   const resetClosed = useCallback(() => {
     setOpen(false);
-    setView("effort");
+    setViewTransitioning(false);
+    setView((current) => nextModelControlView(current, "close"));
     setActiveGroup(null);
+    setModelQuery("");
+    setModelProvider("");
     setMenuBox(null);
     setSubBox(null);
   }, []);
@@ -1381,7 +1483,22 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
     }
     const frame = requestAnimationFrame(() => placeSubmenu(activeGroup));
     return () => cancelAnimationFrame(frame);
-  }, [open, view, activeGroup, placeSubmenu]);
+  }, [open, view, activeGroup, groups.find((group) => group.label === activeGroup)?.options.length, placeSubmenu]);
+
+  const transitionModelControlView = useCallback((action: "advanced" | "back") => {
+    const next = nextModelControlView(view, action);
+    if (next === view) return;
+    hoverReady.current = false;
+    setViewTransitioning(true);
+    setActiveGroup(null);
+    setSubBox(null);
+    if (action === "back") {
+      setModelQuery("");
+      setModelProvider("");
+    }
+    setView(next);
+    requestAnimationFrame(placeMenu);
+  }, [placeMenu, view]);
 
   const closeAll = () => {
     if (root.current) root.current.open = false;
@@ -1393,6 +1510,8 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
     // Keep the advanced panel open when changing model so the user can also adjust effort.
     if (view === "advanced") {
       setActiveGroup(null);
+      setModelQuery("");
+      setModelProvider("");
       setSubBox(null);
       return;
     }
@@ -1400,12 +1519,19 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
   };
 
   const active = groups.find((group) => group.label === activeGroup) ?? null;
+  const modelGroupActive = active?.label === modelLabel;
+  const providerOptions = [...new Set(groups[0]!.options.flatMap((option) => option.provider ? [option.provider] : []))];
+  const activeOptions = modelGroupActive && active ? filterModelControlOptions(active.options, modelQuery, modelProvider) : active?.options ?? [];
   const highEffort = isHighCostReasoning(selectedReasoning);
+  const activePageHeight = pageHeights[view] || "auto";
 
   const menuPortal = open && menuBox ? createPortal(
-    <div
+    <motion.div
       ref={menu}
-      className={`model-control-menu model-control-menu-portal model-control-menu-${view}`}
+      className="model-control-menu model-control-menu-portal"
+      data-view={view}
+      data-transitioning={String(viewTransitioning)}
+      onPointerMove={() => { if (view === "advanced") hoverReady.current = true; }}
       style={{
         position: "fixed",
         top: menuBox.top,
@@ -1415,78 +1541,28 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
         zIndex: 210,
       }}
     >
-      {view === "effort" ? (
-        <div className="effort-panel">
-          <div className="effort-panel-toolbar">
-            <button
-              type="button"
-              className="effort-panel-advanced"
-              disabled={running}
-              onClick={() => {
-                setView("advanced");
-                setActiveGroup(null);
-                setSubBox(null);
-                requestAnimationFrame(placeMenu);
-              }}
-            >
-              <span>{advancedLabel}</span>
-              <ChevronRight size={12} />
-            </button>
-            <div className={`effort-panel-speed-wrap ${fast ? "active" : ""}`}>
-              <button
-                type="button"
-                className={`effort-panel-speed ${fast ? "active" : ""}`}
-                disabled={running}
-                title={fast ? `${fastBoostTitle} · ${fastBoostDetail}` : `${standardSpeed} · ${fastHint}`}
-                aria-label={speedLabel}
-                aria-pressed={fast}
-                onClick={() => onSpeedChange(fast ? "standard" : "fast")}
-              >
-                <Zap size={16} />
-              </button>
-              <div className="effort-speed-tip" role="tooltip">
-                <strong>{fastBoostTitle}</strong>
-                <span>{fastBoostDetail}</span>
-              </div>
-            </div>
-          </div>
-          {levels.length > 1 ? (
-            <ReasoningEffortSlider
-              levels={levels}
-              value={selectedReasoning}
-              onChange={onReasoningChange}
-              labels={reasoningNames}
-              fasterLabel={fasterLabel}
-              smarterLabel={smarterLabel}
-              highCostHint={highCostHint}
-              fast={fast}
-              disabled={running}
-              ariaLabel={reasoningLabel}
-            />
-          ) : (
-            <p className="effort-panel-single">{selectedReasoningName || reasoningLabel}</p>
-          )}
-        </div>
-      ) : (
-        <>
-          <button
-            type="button"
-            className="model-control-back"
-            onClick={() => {
-              setView("effort");
-              setActiveGroup(null);
-              setSubBox(null);
-            }}
-          >
-            <ChevronLeft size={13} />
-            <span>{backLabel}</span>
-            <small>{reasoningLabel}</small>
-          </button>
+      <motion.div
+        className="model-control-page-stack"
+        initial={false}
+        animate={{ height: activePageHeight }}
+        transition={{ duration: .26, ease: [.23, 1, .32, 1] }}
+      >
+        <motion.div
+          ref={advancedPage}
+          className="model-control-page model-control-page-advanced"
+          data-active={String(view === "advanced")}
+          aria-hidden={view !== "advanced"}
+          inert={view !== "advanced"}
+          initial={false}
+          animate={{ y: view === "advanced" ? 0 : -pageHeights.advanced }}
+          transition={{ duration: .26, ease: [.23, 1, .32, 1] }}
+          onAnimationComplete={() => setViewTransitioning(false)}
+        >
           {groups.map((group) => (
             <div
               className={`model-control-item ${activeGroup === group.label ? "open" : ""}`}
               key={group.label}
-              onMouseEnter={() => !running && setActiveGroup(group.label)}
+              onMouseEnter={() => !running && hoverReady.current && setActiveGroup(group.label)}
               onFocus={() => !running && setActiveGroup(group.label)}
             >
               <button
@@ -1504,10 +1580,82 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
               </button>
             </div>
           ))}
-          <p>{fastHint}</p>
-        </>
-      )}
-    </div>,
+          <div className="model-control-advanced-footer">
+            <button
+              type="button"
+              className="model-control-back"
+              aria-label={backLabel}
+              title={backLabel}
+              onClick={() => {
+                transitionModelControlView("back");
+              }}
+            >
+              <span>{advancedLabel}</span>
+              <ChevronUp size={13} />
+            </button>
+          </div>
+        </motion.div>
+        <motion.div
+          ref={effortPage}
+          className="model-control-page model-control-page-effort"
+          data-active={String(view === "effort")}
+          aria-hidden={view !== "effort"}
+          inert={view !== "effort"}
+          initial={false}
+          animate={{ y: view === "effort" ? 0 : pageHeights.advanced }}
+          transition={{ duration: .26, ease: [.23, 1, .32, 1] }}
+        >
+          <div className="effort-panel">
+            <div className="effort-panel-toolbar">
+              <button
+                type="button"
+                className="effort-panel-advanced"
+                disabled={running}
+                onClick={() => {
+                  transitionModelControlView("advanced");
+                }}
+              >
+                <span>{advancedLabel}</span>
+                <ChevronRight size={12} />
+              </button>
+              {fastAvailable ? <div className={`effort-panel-speed-wrap ${fastActive ? "active" : ""}`}>
+                <button
+                  type="button"
+                  className={`effort-panel-speed ${fastActive ? "active" : ""}`}
+                  disabled={running}
+                  title={fastActive ? `${fastBoostTitle} · ${fastBoostDetail}` : `${standardSpeed} · ${fastHint}`}
+                  aria-label={speedLabel}
+                  aria-pressed={fastActive}
+                  onClick={() => onSpeedChange(fastActive ? "standard" : "fast")}
+                >
+                  <Zap size={16} />
+                </button>
+                <div className="effort-speed-tip" role="tooltip">
+                  <strong>{fastBoostTitle}</strong>
+                  <span>{fastBoostDetail}</span>
+                </div>
+              </div> : null}
+            </div>
+            {levels.length > 1 ? (
+              <ReasoningEffortSlider
+                levels={levels}
+                value={selectedReasoning}
+                onChange={onReasoningChange}
+                labels={reasoningNames}
+                fasterLabel={fasterLabel}
+                smarterLabel={smarterLabel}
+                highCostHint={highCostHint}
+                fast={fastActive}
+                disabled={running}
+                ariaLabel={reasoningLabel}
+              />
+            ) : (
+              <p className="effort-panel-single">{selectedReasoningName || reasoningLabel}</p>
+            )}
+          </div>
+        </motion.div>
+      </motion.div>
+    </motion.div>,
     document.body,
   ) : null;
 
@@ -1527,7 +1675,29 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
       onMouseEnter={() => setActiveGroup(active.label)}
     >
       <header className="model-control-submenu-title">{active.label}</header>
-      {active.options.map((option) => (
+      {modelGroupActive ? <div className="model-control-model-tools">
+        <label className="model-control-model-search">
+          <Search size={14} />
+          <input
+            autoFocus
+            type="search"
+            value={modelQuery}
+            onChange={(event) => setModelQuery(event.target.value)}
+            placeholder={language === "zh-CN" ? "搜索模型…" : "Search models…"}
+            aria-label={language === "zh-CN" ? "搜索模型" : "Search models"}
+          />
+        </label>
+        <div className="model-control-provider-filters" role="group" aria-label={language === "zh-CN" ? "按供应商筛选" : "Filter by provider"}>
+          <button type="button" className={!modelProvider ? "selected" : ""} aria-pressed={!modelProvider} onClick={() => setModelProvider("")}>
+            {language === "zh-CN" ? "全部" : "All"}
+          </button>
+          {providerOptions.map((provider) => <button type="button" className={modelProvider === provider ? "selected" : ""} aria-pressed={modelProvider === provider} key={provider} onClick={() => setModelProvider(provider)}>
+            <ProviderIcon provider={provider} size={12} />
+            <span>{providerDisplayName(provider, modelProviders)}</span>
+          </button>)}
+        </div>
+      </div> : null}
+      {activeOptions.map((option) => (
         <button
           type="button"
           role="menuitemradio"
@@ -1535,7 +1705,7 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
           disabled={running}
           className={`${option.provider ? "has-provider-icon" : ""} ${active.selected === option.value ? "selected" : ""}`.trim()}
           key={option.value}
-          title={option.hint ? `${option.label} — ${option.hint}` : option.label}
+          title={option.hint ? `${option.label} — ${option.hint}` : undefined}
           onClick={() => choose(active.select, option.value)}
         >
           {option.provider ? <ProviderIcon provider={option.provider} /> : null}
@@ -1546,6 +1716,7 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
           <Check size={13} />
         </button>
       ))}
+      {activeOptions.length === 0 ? <p className="model-control-empty">{language === "zh-CN" ? "没有匹配的模型" : "No matching models"}</p> : null}
     </div>,
     document.body,
   ) : null;
@@ -1563,9 +1734,10 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
           return;
         }
         const next = event.currentTarget.open;
+        animateControlWidth(event.currentTarget, next);
         setOpen(next);
         if (next) {
-          setView("effort");
+          setView((current) => nextModelControlView(current, "open"));
           setActiveGroup(null);
           requestAnimationFrame(placeMenu);
         } else {
@@ -1577,14 +1749,14 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
         ref={summary as React.RefObject<HTMLElement>}
         aria-disabled={running}
         aria-expanded={open}
-        title={fast
+        title={fastActive
           ? `${fastBoostTitle} · ${selectedModelName} · ${selectedReasoningName}`
           : `${selectedModelName} · ${selectedReasoningName}`}
-        data-fast={String(fast)}
+        data-fast={String(fastActive)}
         data-high={String(highEffort)}
       >
         <ProviderIcon provider={selectedProvider} size={14} />
-        {fast ? <Zap size={12} className="model-controls-fast-icon" aria-hidden="true" /> : null}
+        {fastActive ? <Zap size={12} className="model-controls-fast-icon" aria-hidden="true" /> : null}
         <span>{selectedModelName}</span>
         <small data-high={String(highEffort)}>{selectedReasoningName}</small>
         <ChevronDown size={12} className="model-controls-chevron" />
@@ -1655,7 +1827,7 @@ function useElapsed(start: number, running: boolean) {
   return formatDuration(start ? Math.max(0, now - start) : 0);
 }
 
-type ComposerModel = { provider: string; id: string; name: string; reasoningLevels: string[]; defaultReasoning?: string };
+type ComposerModel = { provider: string; id: string; name: string; aliases?: string[]; reasoningLevels: string[]; defaultReasoning?: string };
 
 function useComposerModels(snapshot: Snapshot) {
   const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
@@ -1663,14 +1835,16 @@ function useComposerModels(snapshot: Snapshot) {
   const setSessionModel = useRuntimeStore((state) => state.setSessionModel);
   const setChatGPTFastMode = useRuntimeStore((state) => state.setChatGPTFastMode);
   const setError = useRuntimeStore((state) => state.setError);
-  const fallbackModel: ComposerModel = { provider: snapshot.provider, id: snapshot.model, name: snapshot.model, reasoningLevels: [snapshot.reasoning].filter(Boolean) };
-  const catalogModels = Object.entries(modelsByProvider).flatMap(([provider, models]) => models.map((model) => ({ ...model, provider })));
-  const modelChoices = [...new Map([fallbackModel, ...catalogModels].map((model) => [modelKey(model.provider, model.id), model])).values()];
   const providerModels = modelsByProvider[snapshot.provider] ?? [];
-  const catalogLevels = providerModels.find((model) => model.id === snapshot.model)?.reasoningLevels ?? ["low", "medium", "high", "xhigh", "max"];
+  const catalogModel = findModelOption(providerModels, snapshot.model);
+  const fallbackModel: ComposerModel = { provider: snapshot.provider, id: snapshot.model, name: modelDisplayName(snapshot.model), aliases: [], reasoningLevels: [snapshot.reasoning].filter(Boolean) };
+  const catalogModels = Object.entries(modelsByProvider).flatMap(([provider, models]) => models.map((model) => ({ ...model, provider })));
+  const modelChoices = [...new Map([...(catalogModel ? [] : [fallbackModel]), ...catalogModels].map((model) => [modelKey(model.provider, model.id), model])).values()];
+  const catalogLevels = catalogModel?.reasoningLevels ?? [];
   // Keep Codex order (轻度→最高); never pin the current value to the top of the list.
-  const reasoningLevels = sortReasoningLevels([snapshot.reasoning, ...catalogLevels]);
-  const selectedModelName = modelChoices.find((model) => modelKey(model.provider, model.id) === modelKey(snapshot.provider, snapshot.model))?.name ?? snapshot.model;
+  const reasoningLevels = sortReasoningLevels(catalogLevels.length > 0 ? catalogLevels : [snapshot.reasoning].filter(Boolean));
+  const selectedModel = modelKey(snapshot.provider, catalogModel?.id ?? snapshot.model);
+  const selectedModelName = catalogModel?.name ?? modelDisplayName(snapshot.model);
   const persistSessionPreferences = (provider: string, model: string, reasoning: string, previous: { provider: string; model: string; reasoning: string }) => {
     execute({
       kind: "set_session_preferences",
@@ -1702,7 +1876,7 @@ function useComposerModels(snapshot: Snapshot) {
       setError(cause instanceof Error ? cause.message : String(cause));
     });
   };
-  return { modelChoices, reasoningLevels, selectedModelName, changeModel, changeReasoning, changeSpeed };
+  return { modelChoices, reasoningLevels, selectedModel, selectedModelName, changeModel, changeReasoning, changeSpeed };
 }
 
 function modelKey(provider: string, model: string) { return `${provider}/${model}`; }

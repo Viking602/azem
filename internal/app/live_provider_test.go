@@ -69,6 +69,28 @@ func TestLiveSubscriptionReadTurns(t *testing.T) {
 	}
 }
 
+func TestLiveSubscriptionQuota(t *testing.T) {
+	if os.Getenv("AZEM_LIVE_ACCEPTANCE") != "1" {
+		t.Skip("set AZEM_LIVE_ACCEPTANCE=1 to use local subscription credentials")
+	}
+	ctx, boot, _ := liveBootstrap(t)
+	accounts, err := boot.Service.Authentication().Accounts(ctx, "chatgpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) == 0 {
+		t.Fatal("no imported ChatGPT subscription account")
+	}
+	quota, err := boot.Service.Authentication().SubscriptionQuota(ctx, "chatgpt", accounts[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quota.Plan == "" || quota.ResetsAt == 0 {
+		t.Fatalf("incomplete ChatGPT quota: %+v", quota)
+	}
+	t.Logf("ChatGPT plan=%s weekly_used=%.1f%%", quota.Plan, quota.UsedPercent)
+}
+
 func TestLiveChatGPTFastMode(t *testing.T) {
 	if os.Getenv("AZEM_LIVE_ACCEPTANCE") != "1" {
 		t.Skip("set AZEM_LIVE_ACCEPTANCE=1 to use local subscription credentials")

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 /** Continuous 0–1 ratio from a pointer X on the track (inset usable range). */
 export function ratioFromClientX(clientX: number, track: DOMRect, insetPx: number): number {
@@ -30,21 +30,6 @@ export function effortIntensity(ratio: number): EffortIntensity {
   if (ratio >= 0.75) return "high";
   if (ratio >= 0.4) return "mid";
   return "low";
-}
-
-/** Deterministic sparkle layout so remounts don't jump. */
-export function effortParticles(count: number): Array<{ id: number; top: string; size: number; delay: number; duration: number; drift: number }> {
-  return Array.from({ length: count }, (_, id) => {
-    const seed = (id * 17 + 11) % 100;
-    return {
-      id,
-      top: `${18 + (seed % 64)}%`,
-      size: 2 + (seed % 4) * 0.55,
-      delay: (seed % 20) * 0.12,
-      duration: 1.8 + (seed % 12) * 0.12,
-      drift: ((seed % 7) - 3) * 1.4,
-    };
-  });
 }
 
 /** Half of the 28px Codex thumb — usable stop range is inset so dots stay inside the pill. */
@@ -135,8 +120,6 @@ export default function ReasoningEffortSlider({
   // Only while dragging: mid/low → 更高效/更智能; high/ultra → 更快消耗使用额度.
   // Idle → no overlay (高级 / ⚡ only).
   const labelsMode = !dragging ? "none" : showHint ? "hint" : "ends";
-  const particleCount = intensity === "high" ? 12 : intensity === "mid" ? 8 : 0;
-  const particles = useMemo(() => effortParticles(particleCount), [particleCount]);
 
   // Codex enteredMax only: fire when crossing into max, never on mount-at-max.
   useEffect(() => {
@@ -232,7 +215,6 @@ export default function ReasoningEffortSlider({
       className="effort-slider"
       data-disabled={String(disabled)}
       data-high={String(high)}
-      data-fast={String(fast)}
       data-intensity={intensity}
       data-dragging={String(dragging)}
       data-max={String(atMax)}
@@ -281,29 +263,9 @@ export default function ReasoningEffortSlider({
           <div
             className="effort-slider-fill"
             data-intensity={intensity}
-            data-fast={String(fast)}
             data-end={String(atMax)}
             style={fillStyle}
-          >
-            {particles.length > 0 ? (
-              <span className="effort-slider-particles">
-                {particles.map((particle) => (
-                  <span
-                    key={particle.id}
-                    className="effort-slider-particle"
-                    style={{
-                      top: particle.top,
-                      width: particle.size,
-                      height: particle.size,
-                      ["--effort-delay" as string]: `${particle.delay}s`,
-                      ["--effort-duration" as string]: `${particle.duration}s`,
-                      ["--effort-drift" as string]: `${particle.drift}px`,
-                    }}
-                  />
-                ))}
-              </span>
-            ) : null}
-          </div>
+          />
         </div>
         <div className="effort-slider-ticks" aria-hidden="true">
           {sorted.map((level, i) => (

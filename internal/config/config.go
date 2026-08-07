@@ -98,9 +98,15 @@ type LLMuxProviderConfig struct {
 type LLMuxModelConfig struct {
 	ID               string   `yaml:"id" json:"id"`
 	Name             string   `yaml:"name,omitempty" json:"name,omitempty"`
-	ContextWindow    int      `yaml:"context_window" json:"contextWindow"`
+	Aliases          []string `yaml:"aliases,omitempty" json:"aliases,omitempty"`
+	Description      string   `yaml:"description,omitempty" json:"description,omitempty"`
+	ContextWindow    int      `yaml:"context_window,omitempty" json:"contextWindow"`
+	MaxOutputTokens  int      `yaml:"max_output_tokens,omitempty" json:"maxOutputTokens,omitempty"`
 	ReasoningLevels  []string `yaml:"reasoning_levels,omitempty" json:"reasoningLevels,omitempty"`
 	DefaultReasoning string   `yaml:"default_reasoning,omitempty" json:"defaultReasoning,omitempty"`
+	Capabilities     []string `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
+	InputModalities  []string `yaml:"input_modalities,omitempty" json:"inputModalities,omitempty"`
+	OutputModalities []string `yaml:"output_modalities,omitempty" json:"outputModalities,omitempty"`
 }
 
 type ProviderConfig struct {

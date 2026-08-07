@@ -3,6 +3,7 @@ package llmuxdriver
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -25,6 +26,8 @@ type Config struct {
 	BaseURL         string
 	Models          []string
 	ReasoningEffort string
+	MaxOutputTokens int
+	Client          *http.Client
 }
 
 type Driver struct {
@@ -63,35 +66,41 @@ func New(config Config) (*Driver, error) {
 func newProvider(config Config) (sdk.Provider, error) {
 	retry := sdk.RetryPolicy{MaxAttempts: 1}
 	if _, ok := compat.Lookup(config.ProviderID); ok {
-		return compat.New(config.ProviderID, compat.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Retry: retry})
+		return compat.New(config.ProviderID, compat.Config{
+			APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry,
+			DefaultMaxOutputTokens: config.MaxOutputTokens,
+		})
 	}
 	switch config.ProviderID {
 	case "openai":
-		return openai.New(openai.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Retry: retry})
+		return openai.New(openai.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry})
 	case "anthropic":
-		return anthropic.New(anthropic.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Retry: retry})
+		return anthropic.New(anthropic.Config{
+			APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry,
+			DefaultMaxOutputTokens: config.MaxOutputTokens,
+		})
 	case "google":
-		return google.New(google.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Retry: retry})
+		return google.New(google.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry})
 	case "mistral":
-		return mistral.New(mistral.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Retry: retry})
+		return mistral.New(mistral.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry})
 	case "cohere":
-		return cohere.New(cohere.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Retry: retry})
+		return cohere.New(cohere.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry})
 	case "xai":
-		return sdkxai.New(sdkxai.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Retry: retry})
+		return sdkxai.New(sdkxai.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry})
 	default:
 		return nil, fmt.Errorf("llmux provider %q is not a supported language provider", config.ProviderID)
 	}
 }
 
 func (d *Driver) Metadata() hyprovider.Metadata {
-	return hyprovider.Metadata{Name: "llmux:" + d.providerID, Models: append([]string(nil), d.models...), Version: "0.2"}
+	return hyprovider.Metadata{Name: "llmux:" + d.providerID, Models: append([]string(nil), d.models...), Version: "0.2.3"}
 }
 
 func (d *Driver) SetRetryObserver(observer hyprovider.RetryObserver) { d.retryObserver = observer }
 func (d *Driver) SetMaxRetryDelay(delay time.Duration)               { d.maxRetryDelay = delay }
 
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
-	converted, err := convertRequest(request, d.reasoningEffort, d.providerID)
+	converted, names, err := convertRequest(request, d.reasoningEffort, d.providerID)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +117,7 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 		if err != nil {
 			return nil, mapError(err)
 		}
-		return &streamAdapter{inner: stream, reporter: reporter}, nil
+		return &streamAdapter{inner: stream, reporter: reporter, names: names}, nil
 	}
 	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
 		Delay: d.retryDelay, MaxDelay: d.maxRetryDelay, Observer: d.retryObserver,

@@ -115,6 +115,9 @@ provider stream -> app event -> session/desktop projection -> frontend store -> 
 `commentary` surrounds work and tool calls, `reasoning` remains a distinct
 thinking projection, and `final_answer` terminates the user-visible response.
 Persistence and session reopen must retain phase and order.
+For providers without a native text phase, streamed text stays provisional
+until a tool call classifies it as commentary or a natural stop confirms it as
+the final answer.
 
 The desktop bridge may deliver coalesced text bursts. React keeps those events
 ordered, presents text in adaptive chunks at no more than about 30 updates per

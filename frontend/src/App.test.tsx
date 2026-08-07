@@ -1,12 +1,18 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import App, { takeRuntimeEventFrame } from "./App";
+import { execute } from "./bridge";
 import { useRuntimeStore } from "./store";
 import type { RuntimeEvent, Snapshot } from "./types";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => undefined });
+
+vi.mock("./bridge", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./bridge")>();
+  return { ...original, execute: vi.fn(original.execute) };
+});
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
@@ -14,11 +20,27 @@ let root: Root | null = null;
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   container?.remove();
+  localStorage.clear();
+  document.documentElement.style.removeProperty("--ui-font-family");
+  document.documentElement.style.removeProperty("--ui-font-size");
   root = null;
   container = null;
+  vi.mocked(execute).mockClear();
 });
 
 describe("application interactions", () => {
+  it("refreshes session and model catalogs after initialisation", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+
+    expect(execute).toHaveBeenCalledWith({ kind: "list_sessions" });
+    expect(execute).toHaveBeenCalledWith({ kind: "list_models", sessionId: "session-demo" });
+    expect(execute).toHaveBeenCalledWith({ kind: "list_model_providers", sessionId: "session-demo" });
+  });
+
   it("paces streaming text without breaking Unicode or event order", () => {
     const text = `${"a".repeat(1023)}😀${"b".repeat(1100)}`;
     const queue: RuntimeEvent[] = [
@@ -51,6 +73,22 @@ describe("application interactions", () => {
     document.body.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("restores and applies the saved global interface typography", async () => {
+    localStorage.setItem("azem:ui-font", "Songti SC");
+    localStorage.setItem("azem:ui-font-size", "17");
+    useRuntimeStore.setState({ uiFont: "system", uiFontSize: 14 });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+
+    expect(useRuntimeStore.getState().uiFont).toBe("Songti SC");
+    expect(useRuntimeStore.getState().uiFontSize).toBe(17);
+    expect(document.documentElement.style.getPropertyValue("--ui-font-family")).toContain('"Songti SC"');
+    expect(document.documentElement.style.getPropertyValue("--ui-font-size")).toBe("17px");
   });
 
   it("keeps the thread mounted while subagents open in a drawer", async () => {

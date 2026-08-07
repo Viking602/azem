@@ -6,24 +6,32 @@ import (
 	"strings"
 
 	sdk "github.com/Viking602/llmux"
+	"github.com/Viking602/llmux/provider/openai/compat"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/provider/responses"
 )
 
-func convertRequest(request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, error) {
-	messages, instructions, err := convertMessages(request.Messages, stringExtra(request.ExtraBody, responses.AttachmentRootExtraKey))
+func convertRequest(request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, *toolNames, error) {
+	names := newToolNames(request.Tools)
+	anthropicProtocol := providerID == "anthropic"
+	developerMessages := providerID == "openai" || providerID == "xai"
+	if profile, ok := compat.Lookup(providerID); ok {
+		anthropicProtocol = profile.Protocol == compat.ProtocolAnthropic
+		developerMessages = profile.Protocol == compat.ProtocolResponses
+	}
+	messages, instructions, err := convertMessages(request.Messages, stringExtra(request.ExtraBody, responses.AttachmentRootExtraKey), names, anthropicProtocol, developerMessages)
 	if err != nil {
-		return sdk.Request{}, err
+		return sdk.Request{}, nil, err
 	}
 	tools := make([]sdk.ToolDefinition, 0, len(request.Tools))
 	for _, definition := range request.Tools {
 		schema, err := json.Marshal(definition.InputSchema)
 		if err != nil {
-			return sdk.Request{}, fmt.Errorf("encode tool %q schema: %w", definition.Name, err)
+			return sdk.Request{}, nil, fmt.Errorf("encode tool %q schema: %w", definition.Name, err)
 		}
-		tools = append(tools, sdk.ToolDefinition{Name: definition.Name, Description: definition.Description, InputSchema: schema})
+		tools = append(tools, sdk.ToolDefinition{Name: names.Wire(definition.Name), Description: definition.Description, InputSchema: schema})
 	}
 	zeroRetries, parallel := 0, true
 	if value, ok := boolExtra(request.ExtraBody, "parallel_tool_calls"); ok {
@@ -35,6 +43,11 @@ func convertRequest(request hyprovider.Request, defaultReasoningEffort, provider
 	}
 	if maxOutput := intExtra(request.ExtraBody, "max_output_tokens"); maxOutput > 0 {
 		options.MaxOutputTokens = &maxOutput
+	} else if request.MaxTokens > 0 {
+		// Venat ModelMaxTokens lands on Request.MaxTokens; honor it when the
+		// host did not also put max_output_tokens in ExtraBody.
+		maxOutput := request.MaxTokens
+		options.MaxOutputTokens = &maxOutput
 	}
 	effort := firstNonempty(request.Metadata["reasoning_effort"], stringExtra(request.ExtraBody, "reasoning_effort"), defaultReasoningEffort)
 	if effort != "" {
@@ -45,7 +58,7 @@ func convertRequest(request hyprovider.Request, defaultReasoningEffort, provider
 		if request.ResponseFormat.Schema != nil {
 			format.Schema, err = json.Marshal(request.ResponseFormat.Schema)
 			if err != nil {
-				return sdk.Request{}, fmt.Errorf("encode response schema: %w", err)
+				return sdk.Request{}, nil, fmt.Errorf("encode response schema: %w", err)
 			}
 		}
 		options.ResponseFormat = format
@@ -53,10 +66,10 @@ func convertRequest(request hyprovider.Request, defaultReasoningEffort, provider
 	if providerID == "xai" {
 		options.ProviderOptions = map[string]json.RawMessage{"xai": json.RawMessage(`{"include":["reasoning.encrypted_content"]}`)}
 	}
-	return sdk.Request{Messages: messages, Instructions: instructions, Metadata: sanitizedMetadata(request.Metadata), Options: options}, nil
+	return sdk.Request{Messages: messages, Instructions: instructions, Metadata: sanitizedMetadata(request.Metadata), Options: options}, names, nil
 }
 
-func convertMessages(input []message.Message, attachmentRoot string) ([]sdk.Message, string, error) {
+func convertMessages(input []message.Message, attachmentRoot string, names *toolNames, anthropicProtocol, developerMessages bool) ([]sdk.Message, string, error) {
 	messages := make([]sdk.Message, 0, len(input))
 	instructions := make([]string, 0, 2)
 	for _, current := range input {
@@ -66,7 +79,11 @@ func convertMessages(input []message.Message, attachmentRoot string) ([]sdk.Mess
 				continue
 			}
 			if current.Visibility == message.VisibilityPrivate {
-				messages = append(messages, sdk.TextMessage(sdk.RoleDeveloper, current.Text))
+				if developerMessages {
+					messages = append(messages, sdk.TextMessage(sdk.RoleDeveloper, current.Text))
+				} else {
+					instructions = append(instructions, current.Text)
+				}
 			} else {
 				instructions = append(instructions, current.Text)
 			}
@@ -79,7 +96,7 @@ func convertMessages(input []message.Message, attachmentRoot string) ([]sdk.Mess
 				messages = append(messages, sdk.Message{Role: sdk.RoleUser, Content: parts})
 			}
 		case message.RoleAssistant:
-			converted, err := assistantMessage(current)
+			converted, err := assistantMessage(current, names)
 			if err != nil {
 				return nil, "", err
 			}
@@ -89,12 +106,17 @@ func convertMessages(input []message.Message, attachmentRoot string) ([]sdk.Mess
 				return nil, "", fmt.Errorf("tool message %q has no result", current.ID)
 			}
 			result := current.ToolResult
-			messages = append(messages, sdk.Message{Role: sdk.RoleTool, Content: []sdk.ContentPart{{
+			part := sdk.ContentPart{
 				Kind: sdk.ContentToolResult, ToolResult: &sdk.ToolResult{
-					ToolCallID: result.ToolCallID, Name: result.Name, Content: result.Content,
+					ToolCallID: result.ToolCallID, Name: names.Wire(result.Name), Content: result.Content,
 					Structured: append(json.RawMessage(nil), result.Structured...), IsError: result.IsError,
 				},
-			}}})
+			}
+			if anthropicProtocol && len(messages) > 0 && messages[len(messages)-1].Role == sdk.RoleTool {
+				messages[len(messages)-1].Content = append(messages[len(messages)-1].Content, part)
+			} else {
+				messages = append(messages, sdk.Message{Role: sdk.RoleTool, Content: []sdk.ContentPart{part}})
+			}
 		default:
 			return nil, "", fmt.Errorf("unsupported message role %q", current.Role)
 		}
@@ -117,7 +139,7 @@ func userContentParts(current message.Message, attachmentRoot string) ([]sdk.Con
 	return parts, nil
 }
 
-func assistantMessage(current message.Message) (sdk.Message, error) {
+func assistantMessage(current message.Message, names *toolNames) (sdk.Message, error) {
 	if len(current.ProviderState) > 0 {
 		return sdk.Message{Role: sdk.RoleAssistant, ProviderState: append(json.RawMessage(nil), current.ProviderState...)}, nil
 	}
@@ -133,7 +155,7 @@ func assistantMessage(current message.Message) (sdk.Message, error) {
 		if !json.Valid(arguments) {
 			return sdk.Message{}, fmt.Errorf("assistant tool call %q has invalid JSON arguments", call.ID)
 		}
-		parts = append(parts, sdk.ContentPart{Kind: sdk.ContentToolCall, ToolCall: &sdk.ToolCall{ID: call.ID, Name: call.Name, Arguments: arguments}})
+		parts = append(parts, sdk.ContentPart{Kind: sdk.ContentToolCall, ToolCall: &sdk.ToolCall{ID: call.ID, Name: names.Wire(call.Name), Arguments: arguments}})
 	}
 	return sdk.Message{Role: sdk.RoleAssistant, Content: parts}, nil
 }

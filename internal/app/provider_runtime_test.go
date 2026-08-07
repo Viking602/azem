@@ -1114,6 +1114,20 @@ func TestTitleModelRouteIsIndependentFromPlanAndCompaction(t *testing.T) {
 	}
 }
 
+func TestModelMaxOutputTokensUsesConfiguredCatalogLimit(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers.LLMux["deepseek"] = config.LLMuxProviderConfig{Enabled: true, Models: []config.LLMuxModelConfig{{
+		ID: "deepseek-v4-flash", Aliases: []string{"deepseek-v4"}, MaxOutputTokens: 384000,
+	}}}
+	runtime := &ProviderRuntime{cfg: cfg}
+	if got := runtime.modelMaxOutputTokens("deepseek", "deepseek-v4"); got != 384000 {
+		t.Fatalf("max output tokens = %d, want 384000", got)
+	}
+	if got := runtime.modelMaxOutputTokens("chatgpt", "gpt-5.6-sol"); got != 0 {
+		t.Fatalf("subscription max output tokens = %d, want 0", got)
+	}
+}
+
 func TestNormalizeGeneratedSessionTitle(t *testing.T) {
 	for _, test := range []struct {
 		raw  string

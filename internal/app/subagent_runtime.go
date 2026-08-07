@@ -903,20 +903,29 @@ func (r *subagentRuntime) execute(id string) {
 			return
 		}
 	}
+	extraBody := map[string]any{"prompt_cache_key": childRun.RunID}
+	enableExplicitPromptCache(extraBody, profile.Provider, childModel)
+	if parent.Host != nil && strings.TrimSpace(parent.Host.attachments.Root) != "" {
+		extraBody[responses.AttachmentRootExtraKey] = parent.Host.attachments.Root
+	}
+	maxOutputTokens := 0
+	if parent.Host != nil && parent.Host.providers != nil {
+		maxOutputTokens = parent.Host.providers.modelMaxOutputTokens(profile.Provider, childModel)
+		if maxOutputTokens > 0 {
+			extraBody["max_output_tokens"] = maxOutputTokens
+		}
+	}
 	spec := hyagent.Spec{
 		Skills: skillSnapshot.Eager, AvailableSkills: skillSnapshot.Available,
 		Instructions: instructions, Model: childModel, Tools: toolNames,
+		MaxTokens: maxOutputTokens,
 		LoopPolicy: hyagent.LoopPolicy{
 			MaxIterations:       r.cfg.Budget.MaxTurns,
 			UnlimitedIterations: r.cfg.Budget.MaxTurns == 0,
 			MaxWallClock:        r.cfg.Budget.MaxWallClockDuration,
 			ContextTokenTarget:  contextTarget,
 		},
-		ExtraBody: map[string]any{"prompt_cache_key": childRun.RunID},
-	}
-	enableExplicitPromptCache(spec.ExtraBody, profile.Provider, childModel)
-	if parent.Host != nil && strings.TrimSpace(parent.Host.attachments.Root) != "" {
-		spec.ExtraBody[responses.AttachmentRootExtraKey] = parent.Host.attachments.Root
+		ExtraBody: extraBody,
 	}
 	if parent.Host != nil && parent.Host.providers != nil {
 		if parent.Host.sessions != nil {
@@ -1266,12 +1275,20 @@ func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
 	run.State = request.state
 	run.FinishedAt = time.Now().UTC()
 	if request.result != nil {
-		run.Output = strings.TrimSpace(request.result.Text)
+		run.Output = sanitizeFinalAnswerText(request.result.Text)
 		if run.Output == "" && len(request.result.Structured) > 0 {
 			var compact bytes.Buffer
 			if json.Compact(&compact, request.result.Structured) == nil {
 				run.Output = compact.String()
 			}
+		}
+		// Output-token length and iteration ceilings both surface as max_turns.
+		// A completed empty answer after that ceiling is a truncation failure,
+		// not a successful no-op completion.
+		if request.err == nil && request.result.StopReason == hyprovider.StopReasonMaxTurns &&
+			run.State == agentservice.SubagentCompleted {
+			request.err = errOutputTruncated
+			run.State = agentservice.SubagentFailed
 		}
 		transcript, transcriptErr := json.Marshal(request.result.Messages)
 		if transcriptErr != nil && request.err == nil {
