@@ -175,7 +175,7 @@ func UpdateChatGPTFastMode(path string, enabled bool) error {
 }
 
 func UpdateLLMuxProvider(path, id string, provider LLMuxProviderConfig) error {
-	id = strings.ToLower(strings.TrimSpace(id))
+	id = canonicalLLMuxProviderID(id)
 	if err := validateLLMuxProvider(id, provider); err != nil {
 		return err
 	}
@@ -186,6 +186,7 @@ func UpdateLLMuxProvider(path, id string, provider LLMuxProviderConfig) error {
 	return updateYAML(path, func(root *yaml.Node) {
 		providers := ensureMappingPath(root, "providers", "llmux")
 		deleteMappingValue(providers, id)
+		deleteMappingValue(providers, strings.ReplaceAll(id, "-", "_"))
 		providers.Content = append(providers.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: id}, &encoded)
 	})
 }

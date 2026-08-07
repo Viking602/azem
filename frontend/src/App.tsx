@@ -5,7 +5,7 @@ import Inspector from "./components/Inspector";
 import Sidebar from "./components/Sidebar";
 import ThreadSurface from "./components/ThreadSurface";
 import { translator } from "./i18n";
-import { useRuntimeStore } from "./store";
+import { normalizeUIFont, useRuntimeStore } from "./store";
 import { refreshPullRequestDashboard } from "./pullRequests";
 import type { RuntimeEvent } from "./types";
 
@@ -19,6 +19,12 @@ const PullRequestPanel = lazy(() => import("./components/PullRequestPanel"));
 const STREAM_FRAME_INTERVAL_MS = 32;
 const STREAM_EVENT_KINDS = new Set(["text_delta", "thinking_delta"]);
 const TERMINAL_EVENT_KINDS = new Set(["run_finished", "run_failed", "run_cancelled"]);
+const SYSTEM_FONT_STACK = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif';
+
+function interfaceFontStack(font: string) {
+  if (font === "system") return SYSTEM_FONT_STACK;
+  return `"${normalizeUIFont(font)}", ${SYSTEM_FONT_STACK}`;
+}
 
 function textBudget(queue: RuntimeEvent[], reducedMotion: boolean) {
   if (reducedMotion) return 2048;
@@ -83,6 +89,9 @@ export default function App() {
   const commandOpen = useRuntimeStore((state) => state.commandOpen);
   const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
   const theme = useRuntimeStore((state) => state.theme);
+  const uiFont = useRuntimeStore((state) => state.uiFont);
+  const uiFontSize = useRuntimeStore((state) => state.uiFontSize);
+  const [appearanceReady, setAppearanceReady] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(238);
   const queue = useRef<RuntimeEvent[]>([]);
   const frame = useRef(0);
@@ -120,6 +129,11 @@ export default function App() {
     initialise()
       .then(async (value) => {
         hydrate(value, !isDesktopRuntime());
+        void Promise.all([
+          execute({ kind: "list_sessions" }),
+          execute({ kind: "list_models", sessionId: value.sessionId }),
+          execute({ kind: "list_model_providers", sessionId: value.sessionId }),
+        ]).catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
         void refreshPullRequestDashboard();
         const sessionId = new URLSearchParams(location.search).get("session");
         if (sessionId && isDesktopRuntime()) await execute({ kind: "resume_session", target: sessionId, sessionId });
@@ -135,14 +149,24 @@ export default function App() {
   }, [applyEvents, hydrate, setError]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem("azem:theme", theme);
-  }, [theme]);
-
-  useEffect(() => {
     const saved = localStorage.getItem("azem:theme");
     if (saved === "light" || saved === "dark" || saved === "system") useRuntimeStore.getState().setTheme(saved);
+    const savedFont = localStorage.getItem("azem:ui-font");
+    if (savedFont) useRuntimeStore.getState().setUIFont(savedFont);
+    const savedFontSize = Number(localStorage.getItem("azem:ui-font-size"));
+    if (Number.isFinite(savedFontSize) && savedFontSize >= 11 && savedFontSize <= 20) useRuntimeStore.getState().setUIFontSize(savedFontSize);
+    setAppearanceReady(true);
   }, []);
+
+  useEffect(() => {
+    if (!appearanceReady) return;
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.setProperty("--ui-font-family", interfaceFontStack(uiFont));
+    document.documentElement.style.setProperty("--ui-font-size", `${uiFontSize}px`);
+    localStorage.setItem("azem:theme", theme);
+    localStorage.setItem("azem:ui-font", uiFont);
+    localStorage.setItem("azem:ui-font-size", String(uiFontSize));
+  }, [appearanceReady, theme, uiFont, uiFontSize]);
 
   useEffect(() => {
     const preventNativeContextMenu = (event: MouseEvent) => event.preventDefault();

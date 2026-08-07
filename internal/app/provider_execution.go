@@ -26,8 +26,28 @@ import (
 	hyworker "github.com/Viking602/venat/worker"
 )
 
+// errOutputTruncated is returned when a model stop reason is max_turns / length
+// (output token ceiling or iteration ceiling) so the host does not treat the
+// truncated turn as a normal completed answer.
+var errOutputTruncated = errors.New("model output reached the token limit before finishing")
+
 func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reasoning, transport string) stream.Sink {
 	return s.providerStreamSinkWithFacts(sessionID, runID, providerID, modelID, reasoning, transport, false)
+}
+
+// sanitizeFinalAnswerText drops internal host context that Venat may pick up as
+// the "last non-empty assistant message" when a truncated turn left no real
+// final answer (for example durable tool-continuity evidence).
+func sanitizeFinalAnswerText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "[Untrusted durable tool continuity data") ||
+		strings.HasPrefix(trimmed, "[Durable tool continuity policy]") {
+		return ""
+	}
+	return text
 }
 
 func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, modelID, reasoning, transport string, factMetered bool) stream.Sink {
@@ -39,7 +59,7 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 		data := map[string]string{}
 		switch frame.Kind {
 		case stream.FrameText:
-			if frame.TextPhase == hyprovider.TextPhaseCommentary {
+			if frame.TextPhase == hyprovider.TextPhaseCommentary || frame.TextPhase == "" {
 				commentary.append(frame.Text)
 			} else if err := commentary.flush(ctx); err != nil {
 				return err
@@ -306,12 +326,24 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	workerCtx := agentservice.DelegatedApprovalContext(ctx)
 	executionOutcome, runErr = s.coding.ExecuteRun(workerCtx, run, engine, sink)
 	result = executionOutcome.Result
-	finalText := finalAnswer.resolve(result.Text)
+	finalText := sanitizeFinalAnswerText(finalAnswer.resolve(result.Text))
 	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {
 		runErr = fmt.Errorf("%w (increase agents.main.max_tokens in config.yaml for unusually large tasks)", runErr)
 	}
 	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tool calls") {
 		runErr = fmt.Errorf("%w (increase agents.main.max_tool_calls, or set it to 0 for unbounded, in config.yaml)", runErr)
+	}
+	// Provider stop reason max_turns is overloaded for both iteration ceilings
+	// and output-token length limits (FinishLength / max_output_tokens). Either
+	// way the run did not complete a natural final answer and must not be
+	// reported as a successful completion — especially when Venat falls back
+	// to an internal tool-continuity assistant message as result.Text.
+	if runErr == nil && result.StopReason == hyprovider.StopReasonMaxTurns {
+		if strings.TrimSpace(finalText) == "" {
+			runErr = errOutputTruncated
+		} else {
+			runErr = fmt.Errorf("%w: partial answer retained", errOutputTruncated)
+		}
 	}
 	if s.sessions != nil {
 		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -343,14 +375,22 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		return
 	}
 	if runErr != nil && ctx.Err() == nil && s.sessions != nil {
+		content := strings.TrimSpace(streamed.String())
+		if content == "" {
+			content = strings.TrimSpace(finalText)
+		}
 		failed := session.Block{
-			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: streamed.String(),
+			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: content,
 			TextPhase: string(hyprovider.TextPhaseFinalAnswer), State: "failed",
 		}
 		if strings.TrimSpace(failed.Content) == "" {
 			failed.Kind = "error"
 			failed.Title = "Provider"
 			failed.Content = runErr.Error()
+		} else if errors.Is(runErr, errOutputTruncated) {
+			// Keep any partial streamed answer but make the truncation reason
+			// visible on the failed terminal block.
+			failed.Content = strings.TrimSpace(failed.Content + "\n\n" + runErr.Error())
 		}
 		persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, err := s.sessions.AppendBlock(persistCtx, request.SessionID, failed)

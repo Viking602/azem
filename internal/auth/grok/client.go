@@ -451,7 +451,7 @@ func (c *Client) validateEndpoint(raw string) error {
 		return fmt.Errorf("Grok OAuth endpoint must use HTTPS")
 	}
 	host := strings.ToLower(endpoint.Hostname())
-	if host != "x.ai" && !strings.HasSuffix(host, ".x.ai") {
+	if host != "x.ai" && !strings.HasSuffix(host, ".x.ai") && host != "cli-chat-proxy.grok.com" {
 		return fmt.Errorf("refusing to send Grok bearer flow to %q", host)
 	}
 	return nil

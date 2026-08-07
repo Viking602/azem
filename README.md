@@ -52,7 +52,14 @@ open dist/Azem.app
 
 The desktop app and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. The React UI receives a bounded event projection; it does not expose arbitrary shell or filesystem bindings.
 
-Desktop text output is presented in frame-paced chunks with a restrained activity cursor. Rendering is capped independently from the display refresh rate, large backlogs catch up automatically, and reduced-motion preferences disable the animation without disabling bounded rendering.
+Desktop text output is presented in frame-paced chunks. Rendering is capped independently from the display refresh rate, large backlogs catch up automatically, and reduced-motion preferences disable animation without disabling bounded rendering.
+
+Desktop **Settings → Appearance** provides persistent global interface font,
+11–20 px font-size, language, and theme controls. The searchable font picker
+reads families installed on the host operating system and uses localized family
+names when the font supplies them. macOS uses AppKit, Linux uses fontconfig,
+and Windows uses the installed Windows font collection; typography changes
+preview immediately without modifying project or runtime configuration.
 
 While a desktop turn is running, the composer supports Codex-style **Queue** and **Steer** delivery. Queue holds ordered, editable follow-ups for the next turn; Steer injects text or image guidance at the next model boundary without cancelling completed tool work. `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` elsewhere uses the opposite mode for one message. Queues are session-scoped, stay in order, and pause after an interrupted run until explicitly resumed.
 
@@ -107,7 +114,7 @@ Azem streams progress in the terminal and asks for approval when the selected po
 
 - File discovery, reading, searching, patch editing, formatting, testing, and shell execution
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
-- llmux-backed OpenAI, Anthropic, Google, Mistral, Cohere, xAI, OpenRouter, DeepSeek, local inference, and other compatible providers with a searchable desktop model registry
+- OpenAI/ChatGPT and Grok subscription login with live model catalogs, remaining weekly quota, reset time, and credit balance, plus llmux-backed OpenAI, Anthropic, Google, Mistral, Cohere, xAI, OpenRouter, DeepSeek, local inference, and other compatible providers in one searchable, progressively loaded desktop registry; enabled API providers can fetch their live model list and merge models.dev capabilities, while providers flagged for Anthropic Messages use that protocol instead of OpenAI Chat Completions
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
 - Persistent conversations start in a fresh session on every launch; use `/resume` to reopen prior sessions with their context, tool history, and recap
@@ -279,8 +286,12 @@ providers:
         - id: anthropic/claude-sonnet-4.5
           name: Claude Sonnet 4.5
           context_window: 200000
+          max_output_tokens: 64000 # positive per-request ceiling; 0 means unknown/unset, not unlimited
           reasoning_levels: [low, medium, high]
           default_reasoning: medium
+          capabilities: [tools, reasoning]
+          input_modalities: [text, image, attachment]
+          output_modalities: [text]
 
 retry:
   enabled: true
@@ -428,7 +439,12 @@ Credentials can be stored in SQLite, the system keyring, or a permission-restric
 
 Desktop **Settings → Model settings** stores llmux API keys through that same
 credential service. Keys are write-only from the UI: runtime events expose only
-whether a stored key or environment variable is available.
+whether a stored key or environment variable is available. Once enabled, a
+provider can fetch its authenticated model list and display the exact
+models.dev context limits, modalities, capabilities, and reasoning levels
+before saving the catalog. Subscription and llmux catalogs resolve provider
+slugs and aliases through models.dev, so every model picker shows the friendly
+models.dev name while requests still use the provider's actual model ID.
 
 ## Security Model
 

@@ -68,6 +68,19 @@ type ModelProviderEntry struct {
 	Enabled              bool
 	CredentialConfigured bool
 	CredentialSource     string
+	Subscription         bool
+	AccountID            string
+	AccountLabel         string
+	AccountPlan          string
+	QuotaAvailable       bool
+	QuotaUsedPercent     float64
+	QuotaResetsAt        int64
+	QuotaBalance         string
+	QuotaUnlimited       bool
+	QuotaWarning         string
+	ModelsDevID          string
+	ModelsSource         string
+	ModelsWarning        string
 	Models               []config.LLMuxModelConfig
 }
 
@@ -279,6 +292,9 @@ func (e Event) Clone() Event {
 			}
 			for j := range cloned.ModelProviders[i].Models {
 				cloned.ModelProviders[i].Models[j].ReasoningLevels = append([]string(nil), e.ModelProviders[i].Models[j].ReasoningLevels...)
+				cloned.ModelProviders[i].Models[j].Capabilities = append([]string(nil), e.ModelProviders[i].Models[j].Capabilities...)
+				cloned.ModelProviders[i].Models[j].InputModalities = append([]string(nil), e.ModelProviders[i].Models[j].InputModalities...)
+				cloned.ModelProviders[i].Models[j].OutputModalities = append([]string(nil), e.ModelProviders[i].Models[j].OutputModalities...)
 			}
 		}
 	}

@@ -65,6 +65,7 @@ const (
 	ActionShowRecap              ActionKind = "show_recap"
 	ActionListModels             ActionKind = "list_models"
 	ActionListModelProviders     ActionKind = "list_model_providers"
+	ActionDiscoverProviderModels ActionKind = "discover_provider_models"
 	ActionSetModelProvider       ActionKind = "set_model_provider"
 	ActionListModelRoutes        ActionKind = "list_model_routes"
 	ActionSetModelRoute          ActionKind = "set_model_route"
@@ -155,6 +156,8 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		return nil
 	case ActionListModelProviders:
 		return s.emitModelProviders(ctx, "listed")
+	case ActionDiscoverProviderModels:
+		return s.discoverModelProvider(ctx, action.Provider, action.Secret)
 	case ActionSetModelProvider:
 		return s.updateModelProvider(ctx, action.Provider, action.Secret)
 	case ActionSetSubagentConcurrency:
@@ -352,7 +355,7 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		if err := s.authentication.Logout(ctx, provider, accountID); err != nil {
 			return err
 		}
-		return nil
+		return s.emitModelProviders(ctx, "auth_updated")
 	case ActionNewSession:
 		return s.createSession(ctx, action.Target)
 	case ActionResumeSession:
@@ -1252,13 +1255,14 @@ func (s *Service) login(ctx context.Context, provider string) error {
 	if err != nil {
 		return fmt.Errorf("load %s model catalog: %w", account.Provider, err)
 	}
+	models = s.catalog.EnrichWithModelsDev(ctx, models)
 
 	encoded, err := json.Marshal(models.Models)
 	if err != nil {
 		return err
 	}
 	s.emit(ctx, Event{Kind: EventModelCatalog, State: "fresh", Data: map[string]string{"provider": account.Provider, "accountID": account.ID, "models": string(encoded)}})
-	return nil
+	return s.emitModelProviders(ctx, "auth_updated")
 }
 
 func (s *Service) emitAuthCatalog(ctx context.Context) {
@@ -1281,6 +1285,7 @@ func (s *Service) emitAuthCatalog(ctx context.Context) {
 			if err != nil {
 				continue
 			}
+			models = s.catalog.EnrichWithModelsDev(ctx, models)
 			encoded, err := json.Marshal(models.Models)
 			if err != nil {
 				continue

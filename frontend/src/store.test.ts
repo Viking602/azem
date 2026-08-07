@@ -1,7 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
-import { mergeSessionTranscript, reduceEvents, reorderSessionQueue, type RuntimeData, useRuntimeStore } from "./store";
+import { findModelOption, mergeSessionTranscript, modelDisplayName, providerDisplayName, reduceEvents, reorderSessionQueue, type RuntimeData, useRuntimeStore } from "./store";
 import type { Snapshot } from "./types";
 import Inspector from "./components/Inspector";
 import ThreadSurface, { approvalPresentation, ContextMeter, contextOccupancy, formatDuration } from "./components/ThreadSurface";
@@ -37,11 +37,24 @@ function state(): RuntimeData {
     runId: "", running: false, globalRunId: "", globalRunSessionId: "", runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
     lastSequence: 0, error: "", view: "thread", inspectorTab: "environment", inspectorOpen: true,
-    settingsOpen: false, commandOpen: false, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system",
+    settingsOpen: false, commandOpen: false, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system", uiFont: "system", uiFontSize: 14,
   };
 }
 
 describe("runtime event projection", () => {
+	it("projects configured provider reasoning levels and resolves model aliases", () => {
+		const projected = reduceEvents(state(), [{
+			sequence: 1, kind: "model_providers", modelProviders: [{
+				ID: "deepseek", DisplayName: "DeepSeek", Backend: "anthropic",
+				DefaultBaseURL: "https://api.deepseek.com/anthropic", BaseURL: "", EnvKey: "DEEPSEEK_API_KEY",
+				Enabled: true, CredentialConfigured: true, CredentialSource: "stored",
+				Models: [{ id: "deepseek-v4-flash", aliases: ["deepseek/deepseek-v4-flash"], contextWindow: 1_000_000, reasoningLevels: ["low", "high", "max"], defaultReasoning: "max" }],
+			}],
+		}]);
+		const models = projected.modelsByProvider.deepseek ?? [];
+		expect(findModelOption(models, "deepseek/deepseek-v4-flash")?.reasoningLevels).toEqual(["low", "high", "max"]);
+	});
+
 	it("projects llmux provider settings without exposing a secret field", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "model_providers", modelProviders: [{
@@ -394,6 +407,23 @@ describe("runtime event projection", () => {
     }
   });
 
+  it("moves tool-turn prose into the process trail and keeps the natural stop as the final answer", () => {
+    const projected = reduceEvents(state(), [
+      { sequence: 1, kind: "run_started", runId: "r1" },
+      { sequence: 2, kind: "text_delta", runId: "r1", text: "先检查代码。", state: "streaming" },
+      { sequence: 3, kind: "tool_started", runId: "r1", toolCallId: "read-1", data: { name: "coding.read_file" } },
+      { sequence: 4, kind: "tool_finished", runId: "r1", toolCallId: "read-1", state: "completed" },
+      { sequence: 5, kind: "text_delta", runId: "r1", text: "这是最终回答。", state: "streaming" },
+      { sequence: 6, kind: "run_finished", runId: "r1" },
+    ]);
+
+    expect(projected.blocks.map(({ kind, state: blockState, content }) => ({ kind, state: blockState, content }))).toEqual([
+      { kind: "commentary", state: "completed", content: "先检查代码。" },
+      { kind: "tool", state: "completed", content: "" },
+      { kind: "assistant", state: "completed", content: "这是最终回答。" },
+    ]);
+  });
+
   it("coalesces streaming deltas and ignores replayed sequence numbers", () => {
     const projected = reduceEvents(state(), [
       { sequence: 1, kind: "run_started", runId: "r1" },
@@ -547,7 +577,10 @@ describe("runtime event projection", () => {
     await act(async () => root.render(createElement(ThreadSurface)));
 
     expect(container.querySelector(".delivery-menu")).toBeNull();
+    expect(container.querySelector(".cancel-button")).not.toBeNull();
     await enterComposerText(container.querySelector<HTMLTextAreaElement>("#azem-composer")!, "下一轮再处理");
+    expect(container.querySelector(".cancel-button")).toBeNull();
+    expect(container.querySelector(".send-button")).not.toBeNull();
     await act(async () => container.querySelector<HTMLButtonElement>(".send-button")!.click());
 
     expect(useRuntimeStore.getState().queuedPrompts[0]?.text).toBe("下一轮再处理");
@@ -766,13 +799,34 @@ describe("runtime event projection", () => {
     const projected = reduceEvents(state(), [{
       sequence: 1,
       kind: "model_catalog",
-      data: { provider: "chatgpt", models: JSON.stringify([{ id: "gpt-5.6-sol", name: "5.6 Sol", contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high" }, { id: "gpt-5.6-terra", name: "5.6 Terra", reasoningLevels: ["low", "medium"] }]) },
+      data: { provider: "chatgpt", models: JSON.stringify([{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", aliases: ["gpt-latest"], contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high", supportsTools: true, supportsReasoning: true, supportsStructured: true, inputModalities: ["text"], outputModalities: ["text"] }, { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", reasoningLevels: ["low", "medium"] }]) },
     }]);
     expect(projected.modelsByProvider.chatgpt).toEqual([
-      { id: "gpt-5.6-sol", name: "5.6 Sol", contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high" },
-      { id: "gpt-5.6-terra", name: "5.6 Terra", reasoningLevels: ["low", "medium"], defaultReasoning: "" },
+	  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", aliases: ["gpt-latest"], contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high", capabilities: ["tools", "reasoning", "structured-output"], inputModalities: ["text"], outputModalities: ["text"] },
+	  { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", aliases: [], reasoningLevels: ["low", "medium"], defaultReasoning: "" },
     ]);
     expect(projected.contextUsage.contextLimit).toBe(272_000);
+	expect(modelDisplayName("openai/gpt-5.6-sol", "openai/gpt-5.6-sol")).toBe("GPT 5.6 Sol");
+	expect(providerDisplayName("deepseek", [{ ...state().modelProviders[0]!, ID: "deepseek", DisplayName: "DeepSeek" }])).toBe("DeepSeek");
+  });
+
+  it("uses the subscription catalog context limit regardless of startup event order", () => {
+    const catalogEvent = {
+      sequence: 1,
+      kind: "model_catalog" as const,
+      data: { provider: "chatgpt", models: JSON.stringify([{ id: "gpt-5.6-sol", contextWindow: 272_000 }]) },
+    };
+    const loadedEvent = {
+      sequence: 2,
+      kind: "session_loaded" as const,
+      sessionId: "s1",
+      state: "loaded",
+      data: { blocks: "[]", provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", usage: JSON.stringify({ inputTokens: 8_400, contextLimit: 1_050_000 }) },
+    };
+    const catalogLast = reduceEvents(state(), [{ ...loadedEvent, sequence: 1 }, { ...catalogEvent, sequence: 2 }]);
+    const sessionLast = reduceEvents(state(), [catalogEvent, loadedEvent]);
+    expect(catalogLast.contextUsage.contextLimit).toBe(272_000);
+    expect(sessionLast.contextUsage.contextLimit).toBe(272_000);
   });
 
   it("restores and renders the current conversation context occupancy", async () => {

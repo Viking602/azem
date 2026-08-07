@@ -18,6 +18,7 @@ import (
 type streamAdapter struct {
 	inner     sdk.Stream
 	reporter  responses.UsageReporter
+	names     *toolNames
 	requestID string
 	toolUse   bool
 }
@@ -36,7 +37,7 @@ func (s *streamAdapter) Recv() (hyprovider.Event, error) {
 			s.requestID = part.Response.ID
 		case sdk.PartTextDelta:
 			if part.Delta != "" {
-				return hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: part.Delta, TextPhase: hyprovider.TextPhaseFinalAnswer}, nil
+				return hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: part.Delta}, nil
 			}
 		case sdk.PartReasoningDelta:
 			if part.Delta != "" {
@@ -48,7 +49,7 @@ func (s *streamAdapter) Recv() (hyprovider.Event, error) {
 			}
 			s.toolUse = true
 			return hyprovider.Event{Kind: hyprovider.EventToolCall, ToolCall: &message.ToolCall{
-				ID: part.ToolCall.ID, Name: part.ToolCall.Name, Arguments: append(json.RawMessage(nil), part.ToolCall.Arguments...),
+				ID: part.ToolCall.ID, Name: s.names.Local(part.ToolCall.Name), Arguments: append(json.RawMessage(nil), part.ToolCall.Arguments...),
 			}}, nil
 		case sdk.PartFinish:
 			return s.finish(part), nil

@@ -44,6 +44,18 @@ export async function execute(request: ActionRequest): Promise<void> {
   await Call.ByName(`${bridgeName}.Execute`, request);
 }
 
+export interface SystemFont {
+  family: string;
+  label: string;
+}
+
+export async function listSystemFonts(language: "en" | "zh-CN"): Promise<SystemFont[]> {
+  if (!isDesktopRuntime()) return language === "zh-CN"
+    ? [{ family: "PingFang SC", label: "苹方-简" }, { family: "Songti SC", label: "宋体-简" }, { family: "Menlo", label: "Menlo" }]
+    : [{ family: "Menlo", label: "Menlo" }, { family: "PingFang SC", label: "PingFang SC" }, { family: "Songti SC", label: "Songti SC" }];
+  return Call.ByName(`${bridgeName}.SystemFonts`, language) as Promise<SystemFont[]>;
+}
+
 export async function selectProjectFolder(title: string, buttonText: string): Promise<string> {
   if (!isDesktopRuntime()) return "";
   return Dialogs.OpenFile({

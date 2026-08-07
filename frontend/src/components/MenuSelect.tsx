@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Search } from "lucide-react";
 
-export type MenuSelectOption = { value: string; label: string; icon?: ReactNode; disabled?: boolean };
+export type MenuSelectOption = { value: string; label: string; keywords?: string[]; icon?: ReactNode; disabled?: boolean };
 
 type MenuCoords = {
   top?: number;
@@ -19,7 +19,7 @@ function portalRoot(anchor: HTMLElement | null): HTMLElement {
   return document.body;
 }
 
-export default function MenuSelect({ value, options, onChange, ariaLabel, className = "", disabled = false, placement = "bottom", fit = "default" }: {
+export default function MenuSelect({ value, options, onChange, ariaLabel, className = "", disabled = false, placement = "bottom", fit = "default", searchable = false, searchPlaceholder = "Search…", emptyLabel = "No matches" }: {
   value: string;
   options: MenuSelectOption[];
   onChange: (value: string) => void;
@@ -29,12 +29,21 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
   placement?: "top" | "bottom";
   /** full: show complete option labels in a wider floating menu */
   fit?: "default" | "full";
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  emptyLabel?: string;
 }) {
   const details = useRef<HTMLDetailsElement>(null);
   const optionsRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState<MenuCoords | null>(null);
+  const [query, setQuery] = useState("");
   const selected = options.find((option) => option.value === value);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleOptions = normalizedQuery
+    ? options.filter((option) => `${option.label} ${option.value} ${(option.keywords ?? []).join(" ")}`.toLocaleLowerCase().includes(normalizedQuery))
+    : options;
 
   const updatePosition = useCallback(() => {
     const root = details.current;
@@ -69,6 +78,7 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
       if (details.current) details.current.open = false;
       setOpen(false);
       setCoords(null);
+      setQuery("");
     };
     document.addEventListener("pointerdown", close, true);
     return () => document.removeEventListener("pointerdown", close, true);
@@ -87,6 +97,10 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
     };
   }, [open, updatePosition, options.length]);
 
+  useEffect(() => {
+    if (open && coords && searchable) requestAnimationFrame(() => searchRef.current?.focus());
+  }, [coords, open, searchable]);
+
   const focusOption = (edge: "selected" | "first" | "last") => requestAnimationFrame(() => {
     const items = Array.from(optionsRef.current?.querySelectorAll<HTMLButtonElement>(".menu-select-option:not(:disabled)") ?? []);
     const target = edge === "first" ? items[0] : edge === "last" ? items.at(-1) : items.find((item) => item.dataset.value === value) ?? items[0];
@@ -97,6 +111,7 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
     details.current.open = false;
     setOpen(false);
     setCoords(null);
+    setQuery("");
     details.current.querySelector<HTMLElement>("summary")?.focus();
   };
   const choose = (next: string) => { onChange(next); close(); };
@@ -112,8 +127,6 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
       ref={optionsRef}
       className="menu-select-options menu-select-options-portal"
       data-fit={fit}
-      role="listbox"
-      aria-label={ariaLabel}
       style={{
         position: "fixed",
         top: coords.top,
@@ -124,23 +137,33 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
         zIndex: 200,
       }}
       onKeyDown={(event) => {
+        if (event.target instanceof HTMLInputElement) {
+          if (event.key === "ArrowDown") { event.preventDefault(); focusOption("first"); }
+          else if (event.key === "Escape") { event.preventDefault(); close(); }
+          else if (event.key === "Tab") close();
+          return;
+        }
         if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); move(event, event.key === "ArrowDown" ? 1 : -1); }
         else if (event.key === "Home" || event.key === "End") { event.preventDefault(); focusOption(event.key === "Home" ? "first" : "last"); }
         else if (event.key === "Escape") { event.preventDefault(); close(); }
         else if (event.key === "Tab") close();
       }}
     >
-      {options.map((option) => <button
-        type="button"
-        role="option"
-        aria-selected={value === option.value}
-        disabled={option.disabled}
-        className={`menu-select-option ${option.icon ? "has-icon" : ""} ${value === option.value ? "selected" : ""}`}
-        data-value={option.value}
-        title={option.label}
-        key={option.value}
-        onClick={() => choose(option.value)}
-      ><Check size={13} />{option.icon}<span>{option.label}</span></button>)}
+      {searchable && <label className="menu-select-search"><Search size={13} /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={searchPlaceholder} aria-label={searchPlaceholder} /></label>}
+      <div className="menu-select-list" role="listbox" aria-label={ariaLabel}>
+        {visibleOptions.map((option) => <button
+          type="button"
+          role="option"
+          aria-selected={value === option.value}
+          disabled={option.disabled}
+          className={`menu-select-option ${option.icon ? "has-icon" : ""} ${value === option.value ? "selected" : ""}`}
+          data-value={option.value}
+          title={option.label}
+          key={option.value}
+          onClick={() => choose(option.value)}
+        ><Check size={13} />{option.icon}<span>{option.label}</span></button>)}
+        {visibleOptions.length === 0 && <div className="menu-select-empty" role="status">{emptyLabel}</div>}
+      </div>
     </div>,
     portalRoot(details.current),
   ) : null;
@@ -163,7 +186,7 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
         const next = event.currentTarget.open;
         setOpen(next);
         if (next) requestAnimationFrame(updatePosition);
-        else setCoords(null);
+        else { setCoords(null); setQuery(""); }
       }}
     >
       <summary

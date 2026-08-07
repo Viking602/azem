@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
+// @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
+import { readFileSync } from "node:fs";
 import type { SkillEntry } from "../types";
-import { namedClipboardImage, parseSkillPrompt, pastedImages, shouldReadNativeClipboard, skillTitle, slashSuggestions } from "./ThreadSurface";
+import { filterModelControlOptions, modelControlWidth, namedClipboardImage, nextModelControlView, parseSkillPrompt, pastedImages, shouldReadNativeClipboard, skillTitle, slashSuggestions, supportsFastMode } from "./ThreadSurface";
+
+const styles = readFileSync("src/styles.css", "utf8");
+const threadSurface = readFileSync("src/components/ThreadSurface.tsx", "utf8");
 
 const skills: SkillEntry[] = [
   { name: "animation-systems", description: "Build polished motion", sourcePath: "~/.agents/skills/animation-systems", bundled: false, eager: false, disabled: false, resourceCount: 0 },
@@ -9,6 +14,62 @@ const skills: SkillEntry[] = [
 ];
 
 describe("composer slash commands", () => {
+	it("does not restart smooth scrolling for every streaming frame", () => {
+		expect(threadSurface).toContain('behavior: running ? "instant" : "smooth"');
+	});
+
+	it("keeps the model chip compact, expands to the effort panel width, and respects narrow viewports", () => {
+		expect([modelControlWidth(false, 1200), modelControlWidth(true, 1200)]).toEqual([190, 248]);
+		expect(modelControlWidth(false, 1200, 84)).toBe(84);
+		expect(modelControlWidth(false, 1200, 236)).toBe(236);
+		expect(modelControlWidth(false, 1200, 420)).toBe(300);
+		expect(modelControlWidth(false, 400, 236)).toBe(208);
+		expect(modelControlWidth(true, 400)).toBe(208);
+		expect(styles).toMatch(/\.model-controls\s*\{[^}]*flex:\s*0 0 auto;/s);
+		expect(styles).toMatch(/\.model-controls\s*\{[^}]*--model-control-closed-padding:\s*8px;/s);
+		expect(threadSurface).toContain('getPropertyValue("--model-control-closed-padding")');
+		expect(styles).toMatch(/\.model-controls > summary\s*\{[^}]*background:\s*transparent;/s);
+		expect(styles).toMatch(/\.model-controls > summary:hover\s*\{[^}]*background:\s*var\(--paper-muted\);/s);
+		expect(styles).toMatch(/\.model-control-back\s*\{[^}]*width:\s*fit-content;[^}]*min-height:\s*32px;/s);
+		expect(styles).not.toMatch(/\.model-control-back:hover[^}]*background:/s);
+	});
+
+	it("only exposes fast mode for the ChatGPT subscription provider", () => {
+		expect(supportsFastMode("chatgpt")).toBe(true);
+		expect(["openai", "grok", "deepseek"].some(supportsFastMode)).toBe(false);
+	});
+
+	it("searches model names, IDs, and aliases, then filters by provider", () => {
+		const options = [
+			{ value: "chatgpt:gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "chatgpt", searchText: "gpt-5.6-sol codex-latest" },
+			{ value: "grok:grok-4", label: "Grok 4", provider: "grok", searchText: "grok-4" },
+		];
+		expect(filterModelControlOptions(options, "latest", "")).toEqual([options[0]]);
+		expect(filterModelControlOptions(options, "", "grok")).toEqual([options[1]]);
+		expect(filterModelControlOptions(options, "sol", "grok")).toEqual([]);
+	});
+
+	it("keeps advanced model controls selected across close and reopen until Back", () => {
+		let view = nextModelControlView("effort", "advanced");
+		view = nextModelControlView(view, "close");
+		view = nextModelControlView(view, "open");
+		expect(view).toBe("advanced");
+		expect(nextModelControlView(view, "back")).toBe("effort");
+		expect(threadSurface).toContain("const transitionModelControlView = useCallback");
+		expect(threadSurface).toContain('transitionModelControlView("advanced")');
+		expect(threadSurface).toContain('transitionModelControlView("back")');
+		expect(threadSurface).toContain('className="model-control-page-stack"');
+		expect(threadSurface).toContain('className="model-control-page model-control-page-advanced"');
+		expect(threadSurface).toContain('className="model-control-page model-control-page-effort"');
+		expect(threadSurface).toContain('animate={{ height: activePageHeight }}');
+		expect(threadSurface).toContain('view === "advanced" ? 0 : -pageHeights.advanced');
+		expect(threadSurface).toContain('data-transitioning={String(viewTransitioning)}');
+		expect(threadSurface).toContain("hoverReady.current && setActiveGroup(group.label)");
+		expect(styles).toMatch(/\.model-control-page-stack\s*\{[^}]*display:\s*grid;/s);
+		expect(styles).toMatch(/\.model-control-page-effort\s*\{[^}]*align-content:\s*start;/s);
+		expect(styles).toMatch(/\.model-control-menu-portal\[data-transitioning="true"\]\s*\{[^}]*overflow:\s*hidden;/s);
+	});
+
   it("lists settings commands and filters enabled skills", () => {
     const items = slashSuggestions("/", skills, "zh-CN", { provider: "chatgpt", contextPercent: 74 });
     expect(items.some((item) => item.value === "/new")).toBe(true);
