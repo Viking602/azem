@@ -19,11 +19,14 @@ import {
 import AnsiText from "./AnsiText";
 import CodeDiff from "./CodeDiff";
 import SubagentGlyph from "./SubagentGlyph";
-import { aggregateEditedFiles, fileChangesForBlock, type EditedFileSummary, type FileChange } from "./fileChanges";
+import {
+  aggregateEditedFiles, fileChangesForBlock, pendingFileChangeSummaryForBlock,
+  type EditedFileSummary, type FileChange,
+} from "./fileChanges";
 
 function TimelineFeedView({
   blocks, language, compact = false, activeRunId = "", running = false, waitingForModel = false,
-  foldActiveProcess = false,
+  foldActiveProcess = false, collapseCompletedProcess = false,
 }: {
   blocks: Block[];
   language: Snapshot["language"];
@@ -32,6 +35,7 @@ function TimelineFeedView({
   running?: boolean;
   waitingForModel?: boolean;
   foldActiveProcess?: boolean;
+  collapseCompletedProcess?: boolean;
 }) {
   const activeDelegation = useRuntimeStore((state) => Boolean(activeRunId) && state.agents.some((agent) =>
     isSubagentActive(agent.state) && agent.parentRunId === activeRunId));
@@ -100,6 +104,7 @@ function TimelineFeedView({
                 language={language}
                 featured={index === latestProcessIndex}
                 active
+                collapseCompleted={collapseCompletedProcess}
               />
             : <ProcessEntries blocks={segment.blocks} language={language} active />
           : <ProcessFold
@@ -107,6 +112,7 @@ function TimelineFeedView({
               elapsedMs={segment.elapsedMs}
               language={language}
               featured={index === latestProcessIndex}
+              collapseCompleted={collapseCompletedProcess}
             />;
       const summary = changesByRun.get(runId);
       const showSummary = summary
@@ -132,27 +138,37 @@ function sameTimelineFeed(previous: TimelineFeedProps, next: TimelineFeedProps) 
     && previous.activeRunId === next.activeRunId
     && previous.running === next.running
     && previous.waitingForModel === next.waitingForModel
-    && previous.foldActiveProcess === next.foldActiveProcess;
+    && previous.foldActiveProcess === next.foldActiveProcess
+    && previous.collapseCompletedProcess === next.collapseCompletedProcess;
 }
 
 // Model/effort changes update the composer store, not the transcript. Keep the
 // potentially large timeline out of those render paths.
 export const TimelineFeed = memo(TimelineFeedView, sameTimelineFeed);
 
-function ProcessFold({ blocks, elapsedMs, language, featured, active = false }: {
+function ProcessFold({ blocks, elapsedMs, language, featured, active = false, collapseCompleted = false }: {
   blocks: Block[];
   elapsedMs: number;
   language: Snapshot["language"];
   featured: boolean;
   active?: boolean;
+  collapseCompleted?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(featured);
-  const previousFeatured = useRef(featured);
+  const [expanded, setExpanded] = useState(active || (featured && !collapseCompleted));
+  const previousState = useRef({ featured, active });
   useEffect(() => {
-    if (previousFeatured.current === featured) return;
-    previousFeatured.current = featured;
-    setExpanded(featured);
-  }, [featured]);
+    const previous = previousState.current;
+    previousState.current = { featured, active };
+    if (previous.active && !active && collapseCompleted) {
+      setExpanded(false);
+      return;
+    }
+    if (!previous.active && active) {
+      setExpanded(true);
+      return;
+    }
+    if (previous.featured !== featured && !collapseCompleted) setExpanded(featured);
+  }, [active, collapseCompleted, featured]);
   const label = translator(language)(active ? "processing" : "processed");
   const liveElapsedMs = useLiveElapsed(elapsedMs, active);
   const duration = liveElapsedMs > 0 ? formatDuration(liveElapsedMs) : "";
@@ -459,7 +475,9 @@ function ToolGroup({ blocks, summary, language }: { blocks: Block[]; summary: st
 
 function ToolStepList({ blocks, language }: { blocks: Block[]; language: Snapshot["language"] }) {
   return <div className="timeline-step-list" role="list">
-    {blocks.map((block) => <ToolStep key={block.id} block={block} language={language} />)}
+    {blocks.map((block) => fileChangesForBlock(block).length || pendingFileChangeSummaryForBlock(block)
+      ? <ToolTimelineBlock key={block.id} block={block} language={language} />
+      : <ToolStep key={block.id} block={block} language={language} />)}
   </div>;
 }
 
@@ -582,6 +600,10 @@ function ToolTimelineBlock({ block, language, compact = false, nested = false }:
   const fileChanges = fileChangesForBlock(block);
   if (fileChanges.length) {
     return <FileChangeBlock changes={fileChanges} language={language} nested={nested} />;
+  }
+  const pendingSummary = pendingFileChangeSummaryForBlock(block);
+  if (pendingSummary) {
+    return <FileChangeBlock changes={[]} summary={pendingSummary} language={language} nested={nested} running />;
   }
   return <ToolDisclosure block={block} language={language} compact={compact} nested={nested} />;
 }
@@ -1003,22 +1025,30 @@ function ReasoningLabel({ label, active }: { label: string; active: boolean }) {
   </span>;
 }
 
-function FileChangeBlock({ changes, language, nested }: {
+function FileChangeBlock({ changes, summary, language, nested, running = false }: {
   changes: FileChange[];
+  summary?: EditedFileSummary;
   language: Snapshot["language"];
   nested: boolean;
+  running?: boolean;
 }) {
   const t = translator(language);
-  const additions = changes.reduce((total, change) => total + change.additions, 0);
-  const deletions = changes.reduce((total, change) => total + change.deletions, 0);
-  return <details className={`file-change-entry work-entry ${nested ? "nested" : ""}`}>
+  const additions = summary?.additions ?? changes.reduce((total, change) => total + change.additions, 0);
+  const deletions = summary?.deletions ?? changes.reduce((total, change) => total + change.deletions, 0);
+  return <details
+    className={`file-change-entry work-entry ${nested ? "nested" : ""}`}
+    data-state={running ? "running" : "completed"}
+    aria-busy={running || undefined}
+  >
     <summary>
       <span className="work-entry-icon" aria-hidden="true"><FileCode2 size={13} /></span>
-      <span className="work-entry-label">{t("editedFiles")}</span>
+      <span className="work-entry-label">{t(running ? "editingFiles" : "editedFiles")}</span>
       <span className="file-change-chevron" aria-hidden="true"><ChevronDown size={13} /></span>
       <span className="file-change-totals"><span className="plus">+{additions}</span><span className="minus">−{deletions}</span></span>
     </summary>
-    <CodeDiff changes={changes} language={language} insetFromProcessRail />
+    {running
+      ? <div className="tool-detail-empty">{t("toolExecuting")}</div>
+      : <CodeDiff changes={changes} language={language} insetFromProcessRail />}
   </details>;
 }
 

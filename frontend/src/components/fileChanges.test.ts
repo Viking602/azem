@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Block } from "../types";
-import { aggregateEditedFiles, fileChangesForBlock } from "./fileChanges";
+import { aggregateEditedFiles, fileChangesForBlock, pendingFileChangeSummaryForBlock } from "./fileChanges";
 
 describe("file change extraction", () => {
   it("reads structured hashline edits and write-file arguments without raw patch parsing", () => {
@@ -45,6 +45,37 @@ describe("file change extraction", () => {
       };
       expect(fileChangesForBlock(block)).toEqual([]);
     }
+  });
+
+  it("summarizes an active hashline edit without marking queued or ambiguous edits as changed", () => {
+    const running: Block = {
+      id: "running-edit", kind: "tool", title: "coding.edit_hashline", state: "running",
+      data: { arguments: JSON.stringify({ input: [
+        "¶src/app.ts#ABCD",
+        "replace 4:",
+        "+const next = 2;",
+        "insert after 8:",
+        "+line one",
+        "+line two",
+        "",
+        "¶src/theme.ts#1234",
+        "delete 2..3",
+      ].join("\n") }) },
+    };
+
+    expect(pendingFileChangeSummaryForBlock(running)).toEqual({
+      files: [
+        { path: "src/app.ts", additions: 3, deletions: 1 },
+        { path: "src/theme.ts", additions: 0, deletions: 2 },
+      ],
+      additions: 3,
+      deletions: 3,
+    });
+    expect(pendingFileChangeSummaryForBlock({ ...running, state: "queued" })).toBeNull();
+    expect(pendingFileChangeSummaryForBlock({
+      ...running,
+      data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\nreplace block 4:\n+func next() {}" }) },
+    })).toBeNull();
   });
 
   it("falls back to the compact edit result stored in durable tool output", () => {

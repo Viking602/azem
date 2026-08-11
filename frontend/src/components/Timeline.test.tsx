@@ -156,6 +156,39 @@ describe("Codex-style process timeline", () => {
     }
   });
 
+  it("collapses a Subagent process when it settles and keeps the completed trail toggleable", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const progress: Block = {
+      id: "child-progress", kind: "commentary", runId: "child", state: "completed",
+      content: "**核对边界**\n只保留已验证证据",
+    };
+    const tool: Block = {
+      id: "child-tool", kind: "tool", runId: "child", title: "coding.search", state: "running",
+    };
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [progress, tool], language: "zh-CN", activeRunId: "child", running: true,
+      foldActiveProcess: true, collapseCompletedProcess: true,
+    })));
+    const process = container.querySelector<HTMLDetailsElement>(".process-fold");
+    expect(process?.open).toBe(true);
+    expect(process?.querySelector(".process-fold-label")?.textContent).toBe("处理中");
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [progress, { ...tool, state: "completed" }], language: "zh-CN",
+      foldActiveProcess: true, collapseCompletedProcess: true,
+    })));
+    expect(container.querySelector<HTMLDetailsElement>(".process-fold")).toBe(process);
+    expect(process?.open).toBe(false);
+    expect(process?.querySelector(".process-fold-label")?.textContent).toBe("已处理");
+
+    await act(async () => process?.querySelector<HTMLElement>("summary")?.click());
+    expect(process?.open).toBe(true);
+    expect(process?.textContent).toContain("核对边界");
+    await act(async () => root.unmount());
+  });
+
   it("restores a running progress timer from durable timestamps after switching sessions", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-10T04:31:35Z"));
@@ -469,6 +502,57 @@ describe("Codex-style process timeline", () => {
     expect(container.querySelector(".edited-files-summary")?.textContent).toContain("frontend/src/ThreadSurface.tsx");
     expect(container.querySelector(".run-status-marker:not(.section-marker)")?.textContent).toBe("你在 1m05s 后停止了");
     expect(container.querySelector<HTMLButtonElement>('.code-diff button[aria-label="复制差异"]')).not.toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("keeps a running hashline edit in the file-change presentation as it completes", async () => {
+    const runningEdit: Block = {
+      id: "edit-live", kind: "tool", runId: "run-live-edit", title: "coding.edit_hashline", state: "running",
+      data: { arguments: JSON.stringify({ input: [
+        "¶src/app.ts#ABCD",
+        "replace 4:",
+        "+const next = 2;",
+        "insert after 8:",
+        "+line one",
+        "+line two",
+        "",
+        "¶src/theme.ts#1234",
+        "delete 2..3",
+      ].join("\n") }) },
+    };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [runningEdit], language: "zh-CN", activeRunId: "run-live-edit", running: true,
+    })));
+
+    const runningEntry = container.querySelector<HTMLDetailsElement>('.file-change-entry[data-state="running"]');
+    expect(runningEntry?.getAttribute("aria-busy")).toBe("true");
+    expect(runningEntry?.textContent).toContain("正在编辑文件");
+    expect(runningEntry?.textContent).toContain("+3");
+    expect(runningEntry?.textContent).toContain("−3");
+    expect(container.querySelector(".tool-block")).toBeNull();
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [{
+        ...runningEdit,
+        state: "completed",
+        data: { structured: JSON.stringify({ sections: [
+          { path: "src/app.ts", firstChangedLine: 4, diff: "-const current = 1;\n+const next = 2;\n+line one\n+line two" },
+          { path: "src/theme.ts", firstChangedLine: 2, diff: "-old one\n-old two" },
+        ] }) },
+      }],
+      language: "zh-CN", activeRunId: "run-live-edit", running: true,
+    })));
+
+    const completedEntry = container.querySelector<HTMLDetailsElement>('.file-change-entry[data-state="completed"]');
+    expect(completedEntry).toBe(runningEntry);
+    expect(completedEntry?.getAttribute("aria-busy")).toBeNull();
+    expect(completedEntry?.textContent).toContain("已编辑的文件");
 
     await act(async () => root.unmount());
     container.remove();

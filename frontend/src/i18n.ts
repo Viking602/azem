@@ -82,7 +82,7 @@ const messages = {
     // Timeline / process
     thinking: "思考", thinkingActive: "思考中", executing: "执行中", thought: "思考过程", thoughtFor: "思考了 {duration}", progressUpdate: "进度更新", processed: "已处理", processedFor: "已处理 {duration}", processing: "处理中", finalAnswer: "最终回答",
     stoppedAfter: "你在 {duration} 后停止了", stopped: "你停止了运行",
-    editedFiles: "已编辑的文件", editedFileCount: "已编辑 {count} 个文件", editedOneFile: "已编辑 1 个文件",
+    editingFiles: "正在编辑文件", editedFiles: "已编辑的文件", editedFileCount: "已编辑 {count} 个文件", editedOneFile: "已编辑 1 个文件",
     editedFileDiff: "文件编辑差异", copyDiff: "复制差异", toolExecuting: "正在执行…",
     toolStatusRunning: "运行中", toolStatusFailed: "失败", toolStatusDone: "完成",
     jumpLatest: "返回最新",
@@ -286,7 +286,7 @@ const messages = {
     toolGitDiff: "View Git Diff", toolActivateSkill: "Load Skill", toolReadSkillResource: "Read Skill Resource", toolSpawn: "Start Subagent", toolGetSubagentOutput: "Get Subagent Output", toolStopSubagent: "Stop Subagent",
     thinking: "Thinking", thinkingActive: "Thinking", executing: "Executing", thought: "Thought", thoughtFor: "Thought for {duration}", progressUpdate: "Progress update", processed: "Worked", processedFor: "Worked for {duration}", processing: "Working", finalAnswer: "Final answer",
     stoppedAfter: "You stopped after {duration}", stopped: "You stopped the run",
-    editedFiles: "Edited files", editedFileCount: "Edited {count} files", editedOneFile: "Edited 1 file",
+    editingFiles: "Editing files", editedFiles: "Edited files", editedFileCount: "Edited {count} files", editedOneFile: "Edited 1 file",
     editedFileDiff: "File edit diff", copyDiff: "Copy diff", toolExecuting: "Running…",
     toolStatusRunning: "Running", toolStatusFailed: "Failed", toolStatusDone: "Done",
     jumpLatest: "Jump to latest",

@@ -293,4 +293,60 @@ describe("application interactions", () => {
     }));
     expect(container?.querySelector(".agent-side-chat .process-fold-label")?.textContent).toBe("处理中");
   });
+
+  it("renders a completed subagent transcript like the main conversation and folds only its process trail", async () => {
+    const snapshot: Snapshot = {
+      workspace: "/tmp/azem", sessionId: "s1", provider: "chatgpt", model: "gpt-5.6-sol",
+      reasoning: "high", agentMode: "single", language: "zh-CN", approvalMode: "prompt",
+      queueMode: "queue", subagentConcurrency: 2, chatgptFastMode: false, sequence: 0,
+    };
+    const agent = {
+      id: "agent-finished", type: "review", description: "审查安全边界", model: "gpt-5.6-sol",
+      background: true, capabilityMode: "read-only", isolation: "none", cwd: "/tmp/azem",
+      activity: "", warning: "", worktreePath: "", toolCalls: 1, turns: 1, tokensUsed: 860,
+      elapsedMs: 4_200, state: "completed", summary: "审查完成", preview: "审查完成",
+      previewKind: "assistant", previewRunId: "child-finished", elapsedObservedAt: Date.now(),
+    } as const;
+    const agentBlocks = [
+      { id: "child-user", kind: "user", runId: "child-finished", content: "只报告已经验证的安全 finding。", state: "completed" },
+      { id: "child-progress", kind: "commentary", runId: "child-finished", content: "**核对安全边界**\n检查审批与外部副作用", state: "completed" },
+      { id: "child-tool", kind: "tool", runId: "child-finished", title: "coding.search", content: "ok", state: "completed" },
+      { id: "child-answer", kind: "assistant", runId: "child-finished", content: "## Verdict\n\n未发现达到门槛的 finding。", state: "completed" },
+    ] as const;
+
+    useRuntimeStore.setState({ snapshot });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+    await act(async () => useRuntimeStore.setState({
+      snapshot,
+      view: "thread",
+      currentSessionId: "s1",
+      blocks: [{ id: "main-answer", kind: "assistant", content: "主会话" }],
+      selectedAgentId: agent.id,
+      agents: [agent],
+      agentBlocks: [...agentBlocks],
+    }));
+
+    await vi.waitFor(() => expect(container?.querySelector(".agent-side-chat")).not.toBeNull());
+    const transcript = container!.querySelector(".agent-side-chat-transcript");
+    const process = transcript?.querySelector<HTMLDetailsElement>('.process-fold[data-state="completed"]');
+    const user = transcript?.querySelector(".user-block");
+    const answer = transcript?.querySelector(".assistant-block");
+
+    expect(transcript?.classList.contains("transcript")).toBe(true);
+    expect(container?.querySelector(".agent-side-chat-feed-title")).toBeNull();
+    expect(container?.querySelector(".agent-side-chat-brief")).toBeNull();
+    expect(container?.querySelector(".agent-side-chat-meta")).toBeNull();
+    expect(user?.closest(".process-fold")).toBeNull();
+    expect(answer?.closest(".process-fold")).toBeNull();
+    expect(process?.open).toBe(false);
+    expect(process?.querySelector(".process-fold-label")?.textContent).toBe("已处理");
+
+    await act(async () => process?.querySelector<HTMLElement>("summary")?.click());
+    expect(process?.open).toBe(true);
+    expect(process?.textContent).toContain("核对安全边界");
+  });
 });

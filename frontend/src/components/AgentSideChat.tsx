@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bot, LoaderCircle, Square, X } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
 import { isSubagentActive, subagentDisplayName, subagentStatusLabel } from "../subagents";
 import { useRuntimeStore } from "../store";
-import type { AgentState, Block, Snapshot } from "../types";
+import type { AgentState } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
 import { formatDuration } from "./ThreadSurface";
 import { TimelineFeed } from "./Timeline";
@@ -28,7 +28,7 @@ export default function AgentSideChat() {
   const cancellable = agent?.state === "initializing" || agent?.state === "queued" || agent?.state === "running" || agent?.state === "started";
   const role = agent ? subagentDisplayName(agent, agents, language) : selectedAgentId || t("subagents");
   const activeRunId = agentBlocks.reduce((latest, block) => block.runId || latest, "") || agent?.previewRunId || "";
-  const live = useLiveAgentStats(agent, agentBlocks, selectedAgentId, running);
+  const liveElapsedMs = useLiveAgentElapsed(agent, selectedAgentId, running);
 
   // Hydrate once. Live agent events are the source of truth; polling the full
   // transcript repeatedly made large subagent chats deserialize and rerender
@@ -87,11 +87,10 @@ export default function AgentSideChat() {
         <div className="agent-side-chat-heading">
           {agent ? <SubagentGlyph agent={agent} size={34} /> : <Bot size={24} aria-hidden="true" />}
           <div className="agent-side-chat-title">
-            <span>{t("subagentConversation")}</span>
             <h2 id="subagent-detail-title" ref={titleRef} tabIndex={-1} title={role}>{role}</h2>
             <small>
               <em data-state={agent?.state || "idle"}>{subagentStatusLabel(agent?.state, language)}</em>
-              {(running || live.elapsedMs > 0) ? <time>{formatDuration(live.elapsedMs)}</time> : null}
+              {(running || liveElapsedMs > 0) ? <time>{formatDuration(liveElapsedMs)}</time> : null}
             </small>
           </div>
         </div>
@@ -135,9 +134,6 @@ export default function AgentSideChat() {
         </div>
       )}
 
-      {agent?.description && <div className="agent-side-chat-brief"><span>{t("subagentCurrentTask")}</span><p>{agent.description}</p></div>}
-      <AgentMetaBar agent={agent} language={language} toolCalls={live.toolCalls} tokensUsed={live.tokensUsed} />
-
       <div
         className="agent-side-chat-scroll"
         id="subagent-detail-panel"
@@ -149,20 +145,20 @@ export default function AgentSideChat() {
           followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
         }}
       >
-        <div className="agent-side-chat-feed-title"><strong>{t("subagentActivity")}</strong><span data-state={agent?.state || "idle"}>{subagentStatusLabel(agent?.state, language)}</span></div>
         {agentBlocks.length === 0 ? (
           <div className="agent-side-chat-empty">
             {running ? <LoaderCircle className="spin" size={20} /> : <Bot size={22} />}
-            <p>{running ? t("syncingAgentTimeline") : t("emptySideChat")}</p>
+            <p>{agent?.description || (running ? t("syncingAgentTimeline") : t("emptySideChat"))}</p>
           </div>
         ) : (
-          <div className="agent-side-chat-transcript">
+          <div className="agent-side-chat-transcript transcript">
             <TimelineFeed
               blocks={agentBlocks}
               language={language}
               activeRunId={activeRunId}
               running={running}
               foldActiveProcess
+              collapseCompletedProcess
             />
           </div>
         )}
@@ -172,19 +168,11 @@ export default function AgentSideChat() {
 }
 
 /** Derive live tool/elapsed stats even when agent_state events lag behind the stream. */
-function useLiveAgentStats(
+function useLiveAgentElapsed(
   agent: AgentState | null,
-  agentBlocks: Block[],
   agentId: string,
   running: boolean,
 ) {
-  const timelineTools = useMemo(
-    () => agentBlocks.filter((block) => block.kind === "tool").length,
-    [agentBlocks],
-  );
-  const toolCalls = Math.max(agent?.toolCalls ?? 0, timelineTools);
-  const tokensUsed = agent?.tokensUsed ?? 0;
-
   const [now, setNow] = useState(() => Date.now());
   const startedAt = useRef(0);
   const trackedId = useRef("");
@@ -212,29 +200,5 @@ function useLiveAgentStats(
     ? Math.max(0, now - startedAt.current)
     : Math.max(0, agent?.elapsedMs ?? 0);
 
-  return { toolCalls, tokensUsed, elapsedMs };
-}
-
-function AgentMetaBar({ agent, language, toolCalls, tokensUsed }: {
-  agent: AgentState | null;
-  language: Snapshot["language"];
-  toolCalls: number;
-  tokensUsed: number;
-}) {
-  if (!agent) return null;
-  const t = translator(language);
-  // Meta row only: model / isolation / tools / tokens — not the long Findings summary.
-  const bits = [
-    agent.model || t("inheritModel"),
-    agent.isolation && agent.isolation !== "none" ? agent.isolation : "",
-    agent.capabilityMode,
-    `${toolCalls} ${t("toolsLabel")}`,
-    tokensUsed > 0 ? `${tokensUsed.toLocaleString()} tok` : "",
-  ].filter(Boolean);
-  if (bits.length === 0) return null;
-  return (
-    <div className="agent-side-chat-meta">
-      <div>{bits.map((bit) => <span key={bit}>{bit}</span>)}</div>
-    </div>
-  );
+  return elapsedMs;
 }

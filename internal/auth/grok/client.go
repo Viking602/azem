@@ -19,9 +19,12 @@ import (
 )
 
 const (
-	DefaultClientID     = "b1a00492-073a-47ea-816f-4c329264a828"
-	DefaultScope        = "openid profile email offline_access grok-cli:access api:access"
-	CompatibilityNotice = "Grok sign-in uses the Grok CLI public-client compatibility surface and is experimental."
+	DefaultClientID      = "b1a00492-073a-47ea-816f-4c329264a828"
+	DefaultClientVersion = "0.2.121"
+	DefaultScope         = "openid profile email offline_access grok-cli:access api:access"
+	CompatibilityNotice  = "Grok sign-in uses the Grok CLI public-client compatibility surface and is experimental."
+	deviceClientSurface  = "ui"
+	deviceReferrer       = "grok-build"
 )
 
 var (
@@ -109,8 +112,8 @@ func (c *Client) Discover(ctx context.Context) (Discovery, error) {
 }
 
 func (c *Client) BeginDevice(ctx context.Context, discovery Discovery) (DeviceAuthorization, error) {
-	body := url.Values{"client_id": {c.ClientID}, "scope": {c.Scope}}
-	response, err := c.postForm(ctx, discovery.DeviceAuthorizationEndpoint, body)
+	body := url.Values{"client_id": {c.ClientID}, "scope": {c.Scope}, "referrer": {deviceReferrer}}
+	response, err := c.postDeviceForm(ctx, discovery.DeviceAuthorizationEndpoint, body)
 	if err != nil {
 		return DeviceAuthorization{}, err
 	}
@@ -156,7 +159,7 @@ func (c *Client) PollDevice(ctx context.Context, discovery Discovery, device Dev
 		if err := c.wait(ctx, interval); err != nil {
 			return Tokens{}, err
 		}
-		response, err := c.postForm(ctx, discovery.TokenEndpoint, url.Values{
+		response, err := c.postDeviceForm(ctx, discovery.TokenEndpoint, url.Values{
 			"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "client_id": {c.ClientID}, "device_code": {device.DeviceCode},
 		})
 		if err != nil {
@@ -424,6 +427,19 @@ func decodeTokens(data []byte) (Tokens, error) {
 		result.ExpiresAt = time.Now().UTC().Add(time.Duration(payload.ExpiresIn) * time.Second)
 	}
 	return result, nil
+}
+
+func (c *Client) postDeviceForm(ctx context.Context, endpoint string, values url.Values) (*resty.Response, error) {
+	if err := c.validateEndpoint(endpoint); err != nil {
+		return nil, err
+	}
+	return c.httpClient().R().
+		SetContext(ctx).
+		SetResponseBodyLimit(1<<20).
+		SetHeader("x-grok-client-version", DefaultClientVersion).
+		SetHeader("x-grok-client-surface", deviceClientSurface).
+		SetFormDataFromValues(values).
+		Post(endpoint)
 }
 
 func (c *Client) postForm(ctx context.Context, endpoint string, values url.Values) (*resty.Response, error) {

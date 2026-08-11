@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Desktop Subagents: render the detail drawer with the same reading width,
+  message typography, and hierarchy as the main conversation. User instructions
+  and final answers stay in the transcript while only process work uses the
+  toggleable `处理中` / `已处理` disclosure; completed work starts folded.
+- Desktop file edits: render active `coding.edit_hashline` and
+  `coding.write_file` calls with the same file-change row used after
+  completion, including exact planned line totals when they can be derived
+  safely. The row now transitions in place from “Editing files” to the real
+  completed diff instead of exposing raw edit arguments during execution.
+
+- MCP runtime: treat JSON-RPC `-32005` transport rejections as recoverable tool
+  errors instead of terminating the entire agent run. The model can now report
+  or retry the failed tool call while the reusable connection remains ready;
+  Azem does not automatically replay potentially side-effecting MCP calls.
+
+- Grok authentication: align device-code creation and polling with the current
+  Grok Build compatibility contract by sending the required referrer, client
+  version, and interactive-surface metadata. This prevents valid browser
+  authorization attempts from being rejected as `HTTP 400: invalid_grant`.
+
 - macOS project windows: keep project and session runtimes isolated so active
   work survives cross-project navigation, but launch secondary windows with an
   accessory activation policy. Opening another project no longer creates an

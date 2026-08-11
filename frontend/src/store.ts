@@ -868,6 +868,7 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
     { ...session, id: "session-llmux-release", workspace: "/Users/viking/GolandProjects/llmux", title: "发布 v0.2.4", updatedAt: "2026-08-08T02:00:00Z" },
   ];
   const blocks: Block[] = mode === "empty" ? [] : demoBlocks(mode === "review");
+  const subagentDemo = mode === "subagent" ? demoSubagentConversation() : null;
   return {
     snapshot,
     projects: [
@@ -888,7 +889,9 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
     approvalMode: snapshot.approvalMode,
     pullRequestMonitors: new Map((snapshot.pullRequestMonitors ?? []).map((monitor) => [monitor.number, monitor])),
     branches: [{ name: "main", current: true }, { name: "feat/usage-store", current: false }],
-    agents: mode === "review" ? demoReviewAgents() : [],
+    agents: mode === "review" ? demoReviewAgents() : subagentDemo ? [subagentDemo.agent] : [],
+    selectedAgentId: subagentDemo?.agent.id ?? "",
+    agentBlocks: subagentDemo?.blocks ?? [],
     skills: [
       { name: "frontend-design", description: "生产级界面设计与实现", sourcePath: "~/.agents/skills/frontend-design", bundled: false, eager: true, disabled: false, modelVisible: true, resourceCount: 4 },
       { name: "waza-ui", description: "产品界面与交互质量检查", sourcePath: "~/.codex/plugins/waza/ui", bundled: false, eager: false, disabled: false, modelVisible: true, resourceCount: 7 },
@@ -1012,7 +1015,13 @@ function demoBlocks(review: boolean): Block[] {
     { id: "progress-baseline", kind: "commentary", runId: "demo-run", title: "progress", content: "**提取视觉与动效基线**\n暖白纸面 · 8 个流式尾部节点 · reduced motion", textPhase: "commentary", state: "completed", data: { startedAt: "2300", completedAt: "2400" } },
     { id: "tool-baseline", kind: "tool", runId: "demo-run", title: "coding.search", content: "{\"query\":\"reduced-motion\",\"path\":\"frontend/src\"}", state: "completed", data: { startedAt: "2400", completedAt: "3100", elapsedMs: "700" } },
     { id: "progress-prototype", kind: "commentary", runId: "demo-run", title: "progress", content: "**构建高保真交互原型**\n页面、工具与文本共享一套节奏", textPhase: "commentary", state: "completed", data: { startedAt: "3200", completedAt: "3300" } },
-    { id: "tool-prototype", kind: "tool", runId: "demo-run", title: "coding.edit_hashline", content: "{\"path\":\"frontend/src/prototype.css\"}", state: "running", data: { startedAt: "3300", elapsedMs: "4800" } },
+    {
+      id: "tool-prototype", kind: "tool", runId: "demo-run", title: "coding.edit_hashline", state: "running",
+      data: {
+        startedAt: "3300", elapsedMs: "4800",
+        arguments: JSON.stringify({ input: "¶frontend/src/prototype.css#ABCD\nreplace 278:\n+.timeline-step { min-height: 31px; }\ninsert after 560:\n+.timeline-step[data-state=running] { color: var(--ink); }" }),
+      },
+    },
     { id: "commentary-demo", kind: "commentary", runId: "demo-run", title: "进度更新", content: "我会保留 Azem 现有的暖色工作台语气，把动效集中在状态发生变化的瞬间：页面切换建立空间关系，工具状态沿轨迹推进，流式文字只让新到达的尾部逐渐显现。", textPhase: "commentary", state: "streaming" },
     { id: "status-demo", kind: "status", runId: "demo-run", title: "渲染交互原型", content: "designs/azem-ui-motion-concept\n4 个文件 · 浏览器验证 · 示例图导出", state: "running", data: { variant: "artifact", progress: "38" } },
     { id: "conclusion-demo", kind: "status", runId: "demo-run", title: "方案结论", content: "", state: "ready", data: { variant: "section" } },
@@ -1074,6 +1083,39 @@ function demoAgents(): AgentState[] {
     { ...shared, id: "cascade", type: "review", description: "Adversarial cascade", toolCalls: 3, elapsedMs: 17000, summary: "", preview: "先做只读审查：确认仓库结构和相关调用链，只报告能够复现的级联问题。" },
     { ...shared, id: "abuse", type: "explore", description: "Adversarial abuse", toolCalls: 2, elapsedMs: 12000, summary: "", preview: "我会先按只读范围建立变更边界，再从对抗场景逐条核对失败面。" },
   ];
+}
+
+function demoSubagentConversation(): { agent: AgentState; blocks: Block[] } {
+  const runId = "demo-security-review";
+  return {
+    agent: {
+      id: "security-review", type: "review", description: "审查安全边界", model: "gpt-5.6-sol",
+      background: true, capabilityMode: "read-only", isolation: "none", cwd: ".",
+      activity: "", warning: "", worktreePath: "", toolCalls: 2, turns: 1, tokensUsed: 2_840,
+      elapsedMs: 14_200, state: "completed", summary: "安全审查完成", preview: "未发现达到报告门槛的 finding。",
+      previewKind: "assistant", previewRunId: runId, elapsedObservedAt: Date.now(),
+    },
+    blocks: [
+      {
+        id: "security-user", kind: "user", runId, state: "completed",
+        content: "立即停止继续调查，不再调用任何工具。仅基于已经读取并验证的证据输出最终安全 findings；每条保留精确 file:line、触发、guard 分析、severity/confidence。",
+      },
+      {
+        id: "security-progress", kind: "commentary", runId, state: "completed",
+        content: "**整理已验证证据**\n归并已检查的边界与剩余缺口",
+        data: { startedAt: "1000", completedAt: "3200", elapsedMs: "2200" },
+      },
+      {
+        id: "security-search", kind: "tool", runId, title: "coding.search", state: "completed",
+        content: "未发现可复现的高风险调用链。",
+        data: { startedAt: "3200", completedAt: "8100", elapsedMs: "4900" },
+      },
+      {
+        id: "security-answer", kind: "assistant", runId, textPhase: "final_answer", state: "completed",
+        content: "## Verdict\n\nREVISE\n\n## Findings\n\n无法达到报告门槛的安全 finding。\n\n## Evidence reviewed\n\n- 已覆盖范围：审批、外部副作用与桌面 Bridge。\n- 未发现可给出精确 `file:line`、攻击调用链和触发条件的已验证证据。\n\n## Residual gaps\n\n完整安全审阅被停止指令阻断，未覆盖的边界不能据此确认为发布硬阻塞。",
+      },
+    ],
+  };
 }
 
 function isLiveBlock(block: Block) {

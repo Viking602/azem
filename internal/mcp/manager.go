@@ -40,6 +40,8 @@ var ErrManagerClosed = errors.New("mcp manager is closed")
 // structured data into an apparently successful result.
 const maxMCPModelOutputBytes = 256 << 10
 
+const mcpTransportRejectedCode = -32005
+
 type Event struct {
 	Server string
 	State  State
@@ -683,11 +685,20 @@ func (d *remoteDriver) Execute(ctx context.Context, call tool.Call, sink tool.Up
 	remoteCall.Name = d.original
 	result, err := d.inner.Execute(callCtx, remoteCall, sink)
 	result.Name = d.definition.Name
-	if err != nil {
-		d.manager.degrade(d.server, err)
-		return result, err
+	if err == nil {
+		return boundMCPModelOutput(result), nil
 	}
-	return boundMCPModelOutput(result), nil
+	var rpcErr *mcpclient.RPCError
+	if errors.As(err, &rpcErr) && rpcErr.Code == mcpTransportRejectedCode {
+		return boundMCPModelOutput(tool.Result{
+			ToolCallID: call.ID,
+			Name:       d.definition.Name,
+			Content:    err.Error() + ". The MCP transport did not accept this request. The call was not replayed automatically.",
+			IsError:    true,
+		}), nil
+	}
+	d.manager.degrade(d.server, err)
+	return result, err
 }
 
 func boundMCPModelOutput(result tool.Result) tool.Result {

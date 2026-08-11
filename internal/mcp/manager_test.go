@@ -15,6 +15,7 @@ import (
 
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
+	mcpclient "github.com/Viking602/venat/transport/mcp/client"
 	"github.com/Viking602/venat/transport/mcpcontract"
 
 	"github.com/Viking602/azem/internal/config"
@@ -441,7 +442,7 @@ func TestManagerRetriesConnectionWithBoundedBackoff(t *testing.T) {
 
 func TestRemoteToolFailureDegradesWithoutReplay(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{tools: []message.ToolDefinition{{Name: "fail", InputSchema: message.JSONSchema{Type: "object"}}}, callErr: errors.New("remote failed")}
+	client := &fakeClient{tools: []message.ToolDefinition{{Name: "fail", InputSchema: message.JSONSchema{Type: "object"}}}, callErr: &mcpclient.RPCError{Code: -32004, Message: "server is closing"}}
 	manager := managerWithClient(client)
 	if err := manager.Start(ctx); err != nil {
 		t.Fatal(err)
@@ -455,6 +456,29 @@ func TestRemoteToolFailureDegradesWithoutReplay(t *testing.T) {
 	}
 	if manager.Servers()[0].State != StateDegraded || len(manager.Snapshot()) != 0 {
 		t.Fatalf("servers=%#v snapshot=%v", manager.Servers(), manager.Snapshot())
+	}
+}
+
+func TestRemoteToolTransportRejectionReturnsToolErrorWithoutFailingRun(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{
+		tools:   []message.ToolDefinition{{Name: "search", InputSchema: message.JSONSchema{Type: "object"}}},
+		callErr: &mcpclient.RPCError{Code: -32005, Message: "rejected by transport"},
+	}
+	manager := managerWithClient(client)
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	driver := manager.Snapshot()[0]
+	result, err := driver.Execute(ctx, tool.Call{ID: "call", Name: driver.Definition().Name}, nil)
+	if err != nil {
+		t.Fatalf("transport rejection escaped as a run-level error: %v", err)
+	}
+	if !result.IsError || result.ToolCallID != "call" || result.Name != driver.Definition().Name || !strings.Contains(result.Content, "rejected by transport") {
+		t.Fatalf("transport rejection result = %#v", result)
+	}
+	if manager.Servers()[0].State != StateReady || len(manager.Snapshot()) != 1 {
+		t.Fatalf("transport rejection broke a reusable connection: servers=%#v snapshot=%v", manager.Servers(), manager.Snapshot())
 	}
 }
 
