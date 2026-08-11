@@ -40,20 +40,21 @@ func TestModelProviderCatalogMergesConfigAndCredentialState(t *testing.T) {
 	if event.Kind != EventModelProviders {
 		t.Fatalf("event kind = %q", event.Kind)
 	}
-	foundSubscription, foundOpenCode := false, false
+	found := map[string]bool{"subscription": false, "opencode": false, "openrouter": false}
 	for _, provider := range event.ModelProviders {
 		if provider.Models == nil {
 			t.Fatalf("provider %q emitted nil models", provider.ID)
 		}
 		if provider.ID == "chatgpt" {
-			foundSubscription = provider.Subscription && provider.Backend == "subscription" && provider.ModelsDevID == "openai"
+			found["subscription"] = provider.Subscription && provider.Backend == "subscription" && provider.ModelsDevID == "openai"
 		}
-		if provider.ID == "opencode" {
-			foundOpenCode = provider.DefaultBaseURL == "https://opencode.ai/zen/v1" && provider.BaseURL == provider.DefaultBaseURL
+		if provider.ID == "opencode-zen" {
+			found["opencode"] = provider.DefaultBaseURL == "https://opencode.ai/zen/v1" && provider.BaseURL == provider.DefaultBaseURL
 		}
 		if provider.ID != "openrouter" {
 			continue
 		}
+		found["openrouter"] = true
 		if !provider.Enabled || !provider.CredentialConfigured || provider.CredentialSource != "stored" || provider.Models[0].ID != "openai/gpt-test" {
 			t.Fatalf("provider = %+v", provider)
 		}
@@ -66,12 +67,12 @@ func TestModelProviderCatalogMergesConfigAndCredentialState(t *testing.T) {
 		if provider.Models[0].ID != "openai/gpt-test" {
 			t.Fatal("event clone mutated source provider models")
 		}
-		if !foundSubscription || !foundOpenCode {
-			t.Fatalf("subscription=%v opencode=%v", foundSubscription, foundOpenCode)
-		}
-		return
 	}
-	t.Fatal("openrouter profile was not emitted")
+	for name, ok := range found {
+		if !ok {
+			t.Fatalf("provider %s was not emitted correctly", name)
+		}
+	}
 }
 
 func TestConfiguredModelResolvesAliasToProviderModelID(t *testing.T) {
@@ -81,6 +82,36 @@ func TestConfiguredModelResolvesAliasToProviderModelID(t *testing.T) {
 	}
 	if model.ID != "openai/gpt-5.6-sol" || model.Name != "GPT-5.6 Sol" {
 		t.Fatalf("model=%+v", model)
+	}
+}
+
+func TestConfiguredModelRejectsDisabledModel(t *testing.T) {
+	_, err := configuredModel("openrouter", []config.LLMuxModelConfig{{ID: "openai/gpt-test", Disabled: true}}, "openai/gpt-test")
+	if err == nil {
+		t.Fatal("disabled model was accepted")
+	}
+}
+
+func TestSetModelEnabledUpdatesConfiguredProvider(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	credentials, err := authservice.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Providers.LLMux["openrouter"] = config.LLMuxProviderConfig{Enabled: true, Models: []config.LLMuxModelConfig{{ID: "openai/gpt-test"}}}
+	service := NewService(ctx, cfg)
+	service.AttachAuth(authservice.NewService(store.DB(), credentials, nil, nil), nil)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetModelEnabled, Target: "openrouter", Name: "openai/gpt-test", Decision: "false"}); err != nil {
+		t.Fatal(err)
+	}
+	if !service.cfg.Providers.LLMux["openrouter"].Models[0].Disabled {
+		t.Fatal("disabled state was not applied to the configured provider")
 	}
 }
 

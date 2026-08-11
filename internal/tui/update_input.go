@@ -185,6 +185,11 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcriptTop = min(currentMaxOffset, max(0, m.transcriptTop+currentMaxOffset-previousMaxOffset))
 		}
 		commands := []tea.Cmd{waitForAppEvent(m.runtime)}
+		if msg.Event.Kind == app.EventProjectionResync && msg.Event.SessionID != "" {
+			commands = append(commands, executeAction(context.Background(), m.runtime, Action{
+				Kind: ActionRefreshSession, Target: msg.Event.SessionID, SessionID: msg.Event.SessionID,
+			}))
+		}
 		if (m.isRunning() || m.hasRunningHooks() || m.hasRunningAgents()) && !m.animationActive {
 			m.animationActive = true
 			commands = append(commands, nextRunFeedbackFrame(m.reducedMotion))
@@ -337,6 +342,18 @@ func (m AppModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.overlay != OverlayNone {
 		return m.updateOverlayKeyMsg(msg)
+	}
+	if m.planningOther {
+		switch key {
+		case "esc":
+			m.planningOther = false
+			m.composer.Reset()
+			m.composer.Placeholder = m.tr("composer.placeholder")
+			m.openOverlay(OverlayUserInput)
+			return m, nil
+		case "enter":
+			return m.submit()
+		}
 	}
 	if m.focus == focusTodo {
 		return m.updateTodoKey(key)
@@ -908,6 +925,17 @@ func (m AppModel) updateTranscriptKey(key string) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.moveTranscriptCursor(1)
 	case "enter", " ":
+		if m.transcriptCursor >= 0 && m.transcriptCursor < len(m.transcript) {
+			block := m.transcript[m.transcriptCursor]
+			if block.Kind == BlockPlan && block.State == "proposed" && m.planReview != nil && m.planReview.ID == block.PlanID {
+				m.openOverlay(OverlayPlan)
+				return m, nil
+			}
+			if block.Kind == BlockQuestion && block.State == "pending" && m.planningInput != nil && m.planningInput.ID == block.UserInputID {
+				m.openOverlay(OverlayUserInput)
+				return m, nil
+			}
+		}
 		m.toggleTranscriptBlock(m.transcriptCursor)
 	case "d":
 		if m.transcriptCursor >= 0 && m.transcriptCursor < len(m.transcript) && blockRendersDiff(m.transcript[m.transcriptCursor]) {
@@ -1404,6 +1432,20 @@ func (m AppModel) overlayOptionCount() int {
 		return 2
 	case OverlayApproval:
 		return 3
+	case OverlayUserInput:
+		if m.planningInput == nil {
+			return 0
+		}
+		question, ok := m.planningInput.current()
+		if !ok {
+			return 0
+		}
+		return len(question.Options) + 2
+	case OverlayPlan:
+		if m.planReview != nil && m.planReview.State == "proposed" {
+			return 3
+		}
+		return 0
 	case OverlayCancel:
 		return 2
 	case OverlayAgents:
@@ -1554,6 +1596,60 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 		decisions := []string{"once", "session", "deny"}
 		if m.overlayCursor < len(decisions) {
 			return m.beginAction(Action{Kind: ActionResolveApproval, Target: m.approvalID(), Decision: decisions[m.overlayCursor]})
+		}
+	case OverlayUserInput:
+		if m.planningInput == nil {
+			return m, m.closeOverlay()
+		}
+		question, ok := m.planningInput.current()
+		if !ok {
+			return m, m.closeOverlay()
+		}
+		switch {
+		case m.overlayCursor < len(question.Options):
+			m.planningInput.toggle(question.Options[m.overlayCursor].Label)
+			return m, nil
+		case m.overlayCursor == len(question.Options):
+			if !m.planningInput.canConfirm() {
+				m.errorBanner = m.tr("overlay.planning_question.select_required")
+				return m, nil
+			}
+			if m.planningInput.advance() {
+				return m.beginAction(Action{Kind: ActionResolveUserInput, Target: m.planningInput.ID, Payload: m.planningInput.payload()})
+			}
+			m.overlayCursor = 0
+			return m, nil
+		default:
+			m.planningOther = true
+			m.overlay = OverlayNone
+			m.composer.Reset()
+			m.composer.Placeholder = m.tr("overlay.planning_question.other_placeholder")
+			m.focus = focusComposer
+			return m, m.composer.Focus()
+		}
+	case OverlayPlan:
+		if m.planReview == nil || m.planReview.State != "proposed" {
+			return m, m.closeOverlay()
+		}
+		switch m.overlayCursor {
+		case 0:
+			m.planMode = true
+			m.overlay = OverlayNone
+			m.composer.Reset()
+			m.focus = focusComposer
+			return m, m.composer.Focus()
+		case 1:
+			m.planMode = true
+			m.overlay = OverlayNone
+			m.composer.SetValue(m.tr("overlay.plan.revise_prefix"))
+			m.focus = focusComposer
+			return m, m.composer.Focus()
+		case 2:
+			if m.isRunning() {
+				m.errorBanner = m.tr("overlay.plan.wait_for_finish")
+				return m, nil
+			}
+			return m.beginAction(Action{Kind: ActionResolvePlan, Target: m.planReview.ID, Decision: "execute"})
 		}
 	case OverlayCancel:
 		if m.overlayCursor < 0 || m.overlayCursor > 1 {
@@ -1915,6 +2011,17 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 	input := strings.TrimSpace(m.composer.Value())
 	images := append([]session.Attachment(nil), m.pendingImages...)
 	if input == "" && len(images) == 0 {
+		return m, nil
+	}
+	if m.planningOther && m.planningInput != nil {
+		m.planningInput.setOther(input)
+		m.planningOther = false
+		m.composer.Reset()
+		m.composer.Placeholder = m.tr("composer.placeholder")
+		if m.planningInput.advance() {
+			return m.beginAction(Action{Kind: ActionResolveUserInput, Target: m.planningInput.ID, Payload: m.planningInput.payload()})
+		}
+		m.openOverlay(OverlayUserInput)
 		return m, nil
 	}
 	if name, args, ok := parseSkillInvocation(input); ok {

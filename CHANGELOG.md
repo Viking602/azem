@@ -2,12 +2,192 @@
 
 ## Unreleased
 
-- Providers: integrate `github.com/Viking602/llmux` v0.2.3 as the generic
+- macOS project windows: keep project and session runtimes isolated so active
+  work survives cross-project navigation, but launch secondary windows with an
+  accessory activation policy. Opening another project no longer creates an
+  extra Azem icon in the Dock or Cmd-Tab application list.
+
+- Desktop MCP management: replace the blank plugin-derived Extensions view
+  with a real capability hub backed by live MCP snapshots. Settings now shows
+  configured local and remote services even when no plugin is installed, with
+  connection state, imported tool count, approval policy, refresh/reconnect,
+  and persistent enable switches. A validated add drawer creates stdio or
+  Streamable HTTP servers using secret references only; writes are atomic and
+  enabled connections start asynchronously without freezing Settings.
+
+- Desktop Skills: add a searchable Skill loading manager to both Extensions
+  surfaces. Any discovered Skill can be stopped or restored without editing
+  YAML. Stopped Skills remain visible for later restoration but are removed
+  from the runtime registry, model context, eager activation, and composer
+  slash suggestions; the selection is persisted atomically in
+  `skills.disabled`.
+
+- macOS networking: make Finder-launched Azem use the active SystemConfiguration
+  HTTP, HTTPS, and SOCKS proxy just like Codex/Electron. The shared resolver
+  covers subscription authentication and streaming, llmux providers, model
+  discovery, remote MCP, and default HTTP clients; it refreshes native settings,
+  respects bypass rules, and keeps scheme-specific environment proxies as
+  explicit overrides instead of silently connecting ChatGPT directly.
+
+- Subagents: prevent long reviews from failing after context compaction when a
+  valid semantic checkpoint is slightly larger than the former 16 KiB ceiling.
+  The writer now has an 8,192-token default budget and two bounded repair
+  attempts with headroom. Private semantic checkpoints remain durable but no
+  longer appear in the side chat or get re-seeded into resumed subagents.
+
+- Runtime isolation: keep live conversations running when another session or
+  project window is opened. Every Azem process now holds a shared SQLite
+  recovery fence for its lifetime; only the first exclusive owner performs
+  crash recovery, so a new window cannot expire another process's leases or
+  turn its active task into `reconcile_required`. Conversation navigation no
+  longer emits `SessionEnd`. Skill-resource reads complete before foreground
+  Subagents are spawned in their own parallel batch, preventing the old Venat
+  safeguard from serializing each ten-minute foreground wait.
+
+- Desktop progress timeline: make the model's own commentary the primary work
+  step. A strict short-title/detail contract now renders the current action,
+  target, elapsed time, completed check, and active ring in one rail, while the
+  tool calls announced by that update stay available inside the step instead
+  of replacing its title. Existing unformatted commentary keeps its prose
+  presentation.
+
+- Desktop packaging: version the `wails://` document URL with the build
+  timestamp so a newly installed build cannot reopen a cached HTML entry point
+  and mix the previous settings UI with the current hashed asset graph.
+
+- Desktop streaming: restore the live text reveal without delaying Markdown.
+  The current Markdown tree is rendered immediately while the latest eight
+  provider deltas fade in through a short blur; previous text and block geometry
+  stay mounted, and full-text replay remains development-only. Unphased
+  Anthropic/llmux text still stays visually distinct until its tool or terminal
+  boundary resolves the final text phase.
+
+- Desktop conversations: restore the approved session-switch motion on the
+  content stage. The title bar and sidebar stay fixed while the selected
+  conversation is replaced immediately and the next one rises seven pixels
+  through a subtle two-pixel blur; reduced-motion users receive an immediate
+  swap. A main run that succeeds or fails after the user switches to another
+  conversation now leaves a persisted blue unread dot on its session row;
+  opening that conversation clears the notification.
+
+- Desktop live context: preserve provider-reported cache input, cache-hit, and
+  cache-write totals in the React projection. The Inspector now separates an
+  unsupported cache metric from a real zero-percent hit rate, labels cached
+  input as **Cache hits**, displays the cache-reporting input denominator as
+  **Total cache**, and presents the current context as an expandable category
+  and item breakdown covering core instructions, conversation messages,
+  Skills, built-in tools, MCP tools, and current output.
+
+- Desktop navigation: implement the approved Codex/Zed-inspired application
+  shell across the real React/Wails routes. The compact title bar preserves
+  project and branch context; the sidebar groups conversations and Pull Request
+  state by project; the new Workspace overview links to real file, change, PR,
+  and session data; and child pages expose an explicit route back to Workspace.
+  Settings now open on the complete searchable model catalog and retain model
+  routes, Subagents, Governance and approvals, Appearance, and Extensions in a
+  consistent full-window layout. Each project can start an explicitly scoped
+  conversation, the Workspace header can open the system terminal at the active
+  repository, and Subagent settings update and persist the live subagent, shell,
+  and admission-timeout limits. The empty conversation page now keeps the
+  reference composer hierarchy intact, including the dedicated Fast control
+  beside the searchable model and reasoning selector. Fast uses one blue,
+  borderless glyph; the duplicate glyph beside the model name is removed.
+
+- Desktop settings: anchor searchable menus to their triggering control inside
+  the modal coordinate space. Font, model, route, and timeout menus now stay
+  aligned with their field and automatically choose the available side instead
+  of drifting toward the lower-right corner of the window.
+
+- Desktop composer: keep the branch picker within the visible window. The menu
+  now measures the space above and below its trigger, selects the roomier side,
+  and limits its scrollable height whenever the window or visual viewport
+  changes.
+
+- Approvals: make configurable Anthropic-compatible reviewers reliable when
+  their protocol ignores native response-schema settings. The Guardian prompt
+  now includes an explicit JSON-only contract, and the fail-closed parser
+  accepts a raw decision or one whole-response JSON fence while continuing to
+  reject prose, extra fields, invalid enums, nested fences, and tool calls.
+
+- Providers: add an independent image-assistance model route. Image-capable
+  main models keep their native attachment path; known text-only main models
+  send validated current-turn images to the configured helper and receive a
+  bounded, private, explicitly untrusted textual description instead. The
+  route works for single-agent and Team turns, filters known text-only helpers
+  in Settings, records helper usage, and fails explicitly when no usable helper
+  is configured.
+
+- Desktop workspace browser: keep Git-ignored build outputs out of the source
+  tree, use a compact title bar that remains visible below native window chrome,
+  and restore a true monospace, syntax-colored text preview.
+
+- Planning: add a durable interactive planning workflow shared by the desktop
+  and terminal applications. The planner can ask bounded selectable questions,
+  publish versioned proposals, accept follow-up questions and revision requests,
+  and starts implementation only after an explicit Execute Plan action. The
+  approved proposal is attached to a new ordinary turn as trusted private
+  context, with unresolved questions and proposals restored after restart.
+  Non-trivial proposals now include dependency-aware execution graphs, and the
+  approved turn schedules independent, exclusively owned tasks in parallel via
+  suitable subagents while the parent retains integration and final verification.
+
+- Desktop: make the Environment “Changes” summary open a dedicated workspace
+  review page. The page groups uncommitted files into a searchable directory
+  tree, automatically folds large file sets, fetches unified patches only when
+  a file is expanded, folds unchanged hunk ranges, and reports binary and
+  truncated diffs explicitly.
+
+- Desktop: add a Codex-style read-only workspace browser with lazy directory
+  loading and bundled vscode-icons file glyphs shared with change review,
+  bounded file tabs, virtualized large-text
+  rendering, raster-image previews, and explicit binary/truncation states.
+  Workspace path resolution rejects traversal and symlink escapes before any
+  file reaches the WebView.
+
+- Extensions: import enabled plugins from the shared Codex plugin directory.
+  Azem validates `.codex-plugin/plugin.json`, attaches plugin Skills and
+  eligible MCP servers to the existing runtime, exposes capability and degraded
+  states in the desktop Extensions page, keeps plugin Hooks opt-in, and marks
+  App/OAuth connections as requiring separate authorization.
+
+- Models: use one card layout for subscription and llmux catalogs and add a
+  persistent one-click model availability toggle. Disabled models remain in
+  Settings for re-enabling, but are hidden from session and role selectors and
+  rejected by subscription and llmux runtimes. Catalog usage labels now come
+  only from an exact provider/model route binding; model names containing
+  `codex` or `spark` no longer invent Subagent or Title assignments.
+
+- Windows: run foreground and background tools through PowerShell (PowerShell
+  7 preferred, built-in Windows PowerShell fallback), accept PowerShell's call
+  operator, stop background process trees, support system PowerShell hooks,
+  store application data under `%AppData%`, and add an amd64/arm64 desktop
+  build target and smoke-test matrix.
+
+- Approvals: make “Approve for me” a normal configurable model route. Role
+  settings can select any enabled ChatGPT, Grok, or llmux model; unavailable or
+  invalid reviewers continue to fail closed without executing the action.
+
+- Runtime: decouple provider execution from UI event backpressure. Replaceable
+  text, reasoning, and tool-progress projections now coalesce across
+  interleaved streams and fall back to durable session resync at the queue
+  high-water mark; approvals and lifecycle events remain lossless, large tool
+  results are bounded before agent checkpoints and use bounded, lazily rendered
+  UI previews, and live text avoids full Markdown parsing until completion.
+  Subagent detail hydration is event-driven instead of retransmitting the full
+  transcript every 1.5 seconds, so large child runs no longer stall the WebView
+  or make composer model controls drop frames.
+
+- Providers: integrate `github.com/Viking602/llmux` v0.2.4 as the generic
   language-model transport for native and OpenAI-compatible providers while
   retaining the existing ChatGPT and Grok subscription drivers. Main and
   subagent requests now apply each configured model's output-token limit, so
   Anthropic-compatible providers no longer silently fall back to 4,096 tokens;
   a provider `length` stop is reported as truncation instead of success.
+  OpenCode Go and Zen use their corrected endpoints, and legacy `opencode`
+  configuration resolves to `opencode-zen`. When a text-only model follows a
+  vision-capable model in the same session, historical images become an
+  explicit text omission marker and current-turn images are rejected locally,
+  rather than sending an unsupported `image_url` part upstream.
 - Desktop: add searchable Model settings for provider enablement, API base URL,
   protected API-key storage, arbitrary model IDs, context windows, and
   reasoning levels. Configured models are immediately available to the default

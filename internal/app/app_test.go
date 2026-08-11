@@ -4,16 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/api"
+	hyprovider "github.com/Viking602/venat/provider"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
@@ -498,6 +502,101 @@ func TestFakeTurnCancellation(t *testing.T) {
 	}
 }
 
+func TestCancelActiveReturnsBeforeUncooperativeExecutionFinishes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(context.Background())
+	coding, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(context.Background())
+	run, err := coding.StartRunWithMetadata(ctx, "block until released", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	driver := &uncooperativeCancelDriver{started: make(chan struct{}), release: make(chan struct{})}
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	executeDone := make(chan error, 1)
+	go func() {
+		_, executeErr := coding.ExecuteRun(runCtx, run, hyagent.Engine{Provider: driver, Model: "blocking"}, nil)
+		executeDone <- executeErr
+	}()
+	select {
+	case <-driver.started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	service := NewService(context.Background(), config.Default())
+	service.AttachDurable(nil, coding)
+	service.mu.Lock()
+	service.activeRun = run.RunID
+	service.activeSession = "session-cancel"
+	service.activeEnd = cancelRun
+	service.mu.Unlock()
+	cancelReturned := make(chan bool, 1)
+	go func() { cancelReturned <- service.CancelActive() }()
+
+	select {
+	case ok := <-cancelReturned:
+		if !ok {
+			t.Fatal("CancelActive returned false")
+		}
+	case <-time.After(250 * time.Millisecond):
+		close(driver.release)
+		t.Fatal("CancelActive blocked on durable coordinator cleanup")
+	}
+
+	close(driver.release)
+	select {
+	case <-runCtx.Done():
+	case <-ctx.Done():
+		t.Fatal("application-owned run context was not cancelled after durable cleanup")
+	}
+	select {
+	case <-executeDone:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	projection, err := coding.Recover(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Run.Status != api.RunStatusCancelled {
+		t.Fatalf("durable run status = %s, want cancelled", projection.Run.Status)
+	}
+}
+
+type uncooperativeCancelDriver struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (d *uncooperativeCancelDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "blocking", Models: []string{"blocking"}}
+}
+
+func (d *uncooperativeCancelDriver) Stream(context.Context, hyprovider.Request) (hyprovider.Stream, error) {
+	d.once.Do(func() { close(d.started) })
+	return &uncooperativeCancelStream{release: d.release}, nil
+}
+
+type uncooperativeCancelStream struct{ release <-chan struct{} }
+
+func (s *uncooperativeCancelStream) Recv() (hyprovider.Event, error) {
+	<-s.release
+	return hyprovider.Event{}, context.Canceled
+}
+
+func (*uncooperativeCancelStream) Close() error { return nil }
+
 func TestShutdownStopsAdmissionCancelsWorkersAndIsIdempotent(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace.Root = t.TempDir()
@@ -601,6 +700,16 @@ func TestNewSessionStaysEphemeralUntilFirstTurn(t *testing.T) {
 	if len(listed) != 1 || listed[0].ID != event.SessionID {
 		t.Fatalf("materialized session list = %+v", listed)
 	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionRefreshSession, Target: event.SessionID}); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.Kind != EventSessionLoaded || refreshed.State != "refreshed" || refreshed.SessionID != event.SessionID || refreshed.Data["blocks"] == "[]" {
+		t.Fatalf("refresh event = %+v", refreshed)
+	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionResumeSession, Target: event.SessionID}); err != nil {
 		t.Fatal(err)
 	}
@@ -653,6 +762,43 @@ func TestResumeSessionProjectsGlobalActiveRunOwner(t *testing.T) {
 		event.Data["globalActiveRunID"] != "run-a" ||
 		event.Data["globalActiveSessionID"] != "session-a" {
 		t.Fatalf("foreign active-run projection = %+v", event)
+	}
+}
+
+func TestMarkSessionUnreadPersistsUntilResume(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	requireAppTestNoError(t, err)
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	_, err = sessions.Ensure(ctx, session.Session{ID: "background-session", Title: "Background task"})
+	requireAppTestNoError(t, err)
+	_, err = sessions.AppendBlock(ctx, "background-session", session.Block{Kind: "user", Content: "Run in background"})
+	requireAppTestNoError(t, err)
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	requireAppTestNoError(t, service.ExecuteAction(ctx, Action{Kind: ActionMarkSessionUnread, Target: "background-session"}))
+	requireSessionUnread(t, ctx, sessions, true, "marked")
+	requireAppTestNoError(t, service.ExecuteAction(ctx, Action{Kind: ActionResumeSession, Target: "background-session"}))
+	requireSessionUnread(t, ctx, sessions, false, "resumed")
+	// A terminal event can race with the user's resume request. A late frontend
+	// persistence action must not put the blue dot back on the visible session.
+	requireAppTestNoError(t, service.ExecuteAction(ctx, Action{Kind: ActionMarkSessionUnread, Target: "background-session"}))
+	requireSessionUnread(t, ctx, sessions, false, "late mark after resume")
+}
+
+func requireAppTestNoError(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requireSessionUnread(t *testing.T, ctx context.Context, sessions *session.Service, want bool, state string) {
+	t.Helper()
+	listed, err := sessions.List(ctx, 10)
+	if err != nil || len(listed) != 1 || listed[0].Unread != want {
+		t.Fatalf("%s sessions = %+v, error = %v", state, listed, err)
 	}
 }
 
@@ -1119,6 +1265,30 @@ func TestBootstrapEmitsSkillSnapshot(t *testing.T) {
 	}
 }
 
+func TestBootstrapEmitsPluginSnapshot(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "demo@market", DisplayName: "Demo", Enabled: true, SkillCount: 1}}, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	service.Bootstrap()
+	bootstrap, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugins, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrap.Kind != EventBootstrapDone || plugins.Kind != EventPluginCatalog || len(plugins.PluginCatalog) != 1 || plugins.PluginCatalog[0].ID != "demo@market" {
+		t.Fatalf("bootstrap=%+v plugin snapshot=%+v", bootstrap, plugins)
+	}
+}
+
 func TestSkillCatalogActionsAndAtomicReload(t *testing.T) {
 	root := t.TempDir()
 	skillRoot := filepath.Join(root, "skills")
@@ -1219,6 +1389,83 @@ func TestSkillCatalogActionsAndAtomicReload(t *testing.T) {
 	}
 }
 
+func TestSetSkillEnabledPersistsAndUpdatesRuntimeCatalog(t *testing.T) {
+	root := t.TempDir()
+	skillRoot := filepath.Join(root, "skills")
+	writeSkill := filepath.Join(skillRoot, "demo")
+	if err := os.MkdirAll(writeSkill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(writeSkill, "SKILL.md"), []byte("---\nname: demo\ndescription: Demo skill\n---\nDEMO_BODY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Skills.AdditionalDirs = []string{skillRoot}
+	cfg.Skills.Eager = []string{"demo"}
+	catalog, err := skills.Load(skills.LoadOptions{Config: cfg.Skills})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	contents := fmt.Sprintf("version: 1\nskills:\n  enabled: true\n  additional_dirs: [%q]\n  eager: [demo]\nworkspace:\n  allow_write: true\n", skillRoot)
+	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), cfg)
+	service.SetConfigPath(configPath)
+	service.AttachSkills(catalog)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetSkillEnabled, Target: "demo", Decision: "false", SessionID: "session-1"}); err != nil {
+		t.Fatal(err)
+	}
+	disabledEvent, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabledEntry, ok := skillEventEntry(disabledEvent.SkillCatalog, "demo")
+	if disabledEvent.State != "availability_updated" || !ok || !disabledEntry.Disabled || disabledEntry.Eager {
+		t.Fatalf("disabled event = %+v", disabledEvent)
+	}
+	if _, ok := catalog.Snapshot().Registry.Get("demo"); ok {
+		t.Fatal("disabled skill remained available to the runtime")
+	}
+	persisted, err := config.Load(configPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(persisted.Skills.Disabled, []string{"demo"}) || len(persisted.Skills.Eager) != 0 || !persisted.Workspace.AllowWrite {
+		t.Fatalf("persisted disabled selection = %#v", persisted.Skills)
+	}
+
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetSkillEnabled, Target: "demo", Decision: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	enabledEvent, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabledEntry, ok := skillEventEntry(enabledEvent.SkillCatalog, "demo")
+	if !ok || enabledEntry.Disabled || enabledEntry.Eager {
+		t.Fatalf("re-enabled entry = %+v", enabledEntry)
+	}
+	if _, ok := catalog.Snapshot().Registry.Get("demo"); !ok {
+		t.Fatal("re-enabled skill was not registered")
+	}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetSkillEnabled, Target: "missing", Decision: "false"}); err == nil {
+		t.Fatal("unknown skill was accepted")
+	}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetSkillEnabled, Target: "demo", Decision: "disabled"}); err == nil {
+		t.Fatal("invalid enabled decision was accepted")
+	}
+}
+
 func skillEventEntry(entries []SkillCatalogEntry, name string) (SkillCatalogEntry, bool) {
 	for _, entry := range entries {
 		if entry.Name == name {
@@ -1247,9 +1494,9 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := []string{
-		event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Scope, event.ModelRoutes[3].Scope,
-		event.ModelRoutes[4].Role, event.ModelRoutes[5].Role, event.ModelRoutes[6].Role,
-	}; !reflect.DeepEqual(got, []string{"main", "title", "plan", "compaction", "alpha", "off", "zeta"}) {
+		event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Scope, event.ModelRoutes[3].Scope, event.ModelRoutes[4].Scope,
+		event.ModelRoutes[5].Scope, event.ModelRoutes[6].Role, event.ModelRoutes[7].Role, event.ModelRoutes[8].Role,
+	}; !reflect.DeepEqual(got, []string{"main", "title", "plan", "approval", "vision", "compaction", "alpha", "off", "zeta"}) {
 		t.Fatalf("route order = %v", got)
 	}
 	clone := event.Clone()
@@ -1298,6 +1545,56 @@ func TestSubagentConcurrencyActionPersistsAndEmits(t *testing.T) {
 	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentConcurrency, Target: "0"}); err == nil {
 		t.Fatal("zero concurrency was accepted")
+	}
+}
+
+func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	cfg := config.Default()
+	service := NewService(ctx, cfg)
+	service.SetConfigPath(path)
+	subagents := &subagentRuntime{cfg: cfg.Agents.Subagents}
+	service.providers = &ProviderRuntime{cfg: cfg, subagents: subagents}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellConcurrency, Target: "4"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["shell_max_concurrency"] != "4" {
+		t.Fatalf("shell concurrency event = %#v", event.Data)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "30"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["subagent_await_seconds"] != "30" {
+		t.Fatalf("await timeout event = %#v", event.Data)
+	}
+	loaded, err := config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workspace.Shell.MaxConcurrency != 4 || loaded.Agents.Subagents.AwaitDuration != 30*time.Second {
+		t.Fatalf("persisted limits = shell:%d await:%s", loaded.Workspace.Shell.MaxConcurrency, loaded.Agents.Subagents.AwaitDuration)
+	}
+	subagents.mu.Lock()
+	liveAwait := subagents.cfg.AwaitDuration
+	subagents.mu.Unlock()
+	if liveAwait != 30*time.Second {
+		t.Fatalf("live await timeout = %s", liveAwait)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellConcurrency, Target: "0"}); err == nil {
+		t.Fatal("zero shell concurrency was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "4"}); err == nil {
+		t.Fatal("too-short await timeout was accepted")
 	}
 }
 
@@ -1553,8 +1850,9 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	routes := service.modelRouteEntries()
-	if routes[3].Route != (config.ModelRouteConfig{}) {
-		t.Fatalf("route not reset: %+v", routes[3])
+	explore := slices.IndexFunc(routes, func(route ModelRouteEntry) bool { return route.Scope == "subagent" && route.Role == "explore" })
+	if explore < 0 || routes[explore].Route != (config.ModelRouteConfig{}) {
+		t.Fatalf("route not reset: %+v", routes)
 	}
 	service.mu.Lock()
 	_, legacyExists := service.cfg.Agents.Subagents.Models["explore"]
@@ -1574,7 +1872,7 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetModelRoute, Route: invalid}); err == nil {
 		t.Fatal("incomplete route unexpectedly succeeded")
 	}
-	if got := service.modelRouteEntries()[3].Route; got != (config.ModelRouteConfig{}) {
+	if got := service.modelRouteEntries()[explore].Route; got != (config.ModelRouteConfig{}) {
 		t.Fatalf("validation failure mutated route: %+v", got)
 	}
 }

@@ -306,13 +306,19 @@ func (s *Service) endSessionHooks(ctx context.Context, sessionID, reason string)
 }
 
 func (s *Service) switchSessionHooks(ctx context.Context, sessionID, source, model string) error {
-	s.mu.Lock()
-	previous := s.currentSession
-	s.mu.Unlock()
-	if previous != "" && previous != sessionID {
-		s.endSessionHooks(ctx, previous, "other")
-	}
 	return s.startSessionHooks(ctx, sessionID, "", source, model)
+}
+
+func (s *Service) endAllSessionHooks(ctx context.Context, reason string) {
+	s.mu.Lock()
+	sessionIDs := make([]string, 0, len(s.hookSessions))
+	for sessionID := range s.hookSessions {
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	s.mu.Unlock()
+	for _, sessionID := range sessionIDs {
+		s.endSessionHooks(ctx, sessionID, reason)
+	}
 }
 
 func compactDescription(before, after int) string {

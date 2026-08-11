@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -63,7 +64,7 @@ func (m AppModel) genericOverlayFrame(width, height int) overlayFrameLayout {
 	maxBoxWidth := 82
 	switch m.overlay {
 	case OverlayAgentTypes, OverlayPersonas, OverlaySkills, OverlayMemory, OverlayRecap,
-		OverlayModelRoutes, OverlaySettings, OverlayStatus, OverlayContext, OverlayBackground:
+		OverlayModelRoutes, OverlaySettings, OverlayStatus, OverlayContext, OverlayBackground, OverlayUserInput, OverlayPlan:
 		maxBoxWidth = 110
 	}
 	boxWidth := min(maxBoxWidth, max(3, width-2))
@@ -856,6 +857,17 @@ func (m AppModel) overlayHeading() (string, string) {
 		return m.tr("overlay.branch_confirm.title"), m.tr("overlay.branch_confirm.subtitle")
 	case OverlayApproval:
 		return m.tr("overlay.approval.title"), m.tr("overlay.approval.subtitle")
+	case OverlayUserInput:
+		if m.planningInput != nil {
+			question, _ := m.planningInput.current()
+			return m.tr("overlay.planning_question.title"), question.Header
+		}
+		return m.tr("overlay.planning_question.title"), ""
+	case OverlayPlan:
+		if m.planReview != nil {
+			return m.tr("overlay.plan.title", map[string]string{"version": m.planReview.Version}), m.planReview.Title
+		}
+		return m.tr("overlay.plan.title", map[string]string{"version": ""}), ""
 	case OverlayCancel:
 		return m.tr("overlay.cancel.title"), m.tr("overlay.cancel.subtitle")
 	case OverlayDiff:
@@ -986,6 +998,20 @@ func (m AppModel) overlayDescription() []string {
 			m.tr("overlay.approval.risk", map[string]string{"risk": first(m.approval.Risk, "unspecified"), "effect": first(m.approval.Effect, "unspecified")}),
 			first(m.approval.Action, m.approval.Diff),
 		}
+	case OverlayUserInput:
+		if m.planningInput == nil {
+			return []string{m.tr("overlay.planning_question.unavailable")}
+		}
+		question, ok := m.planningInput.current()
+		if !ok {
+			return []string{m.tr("overlay.planning_question.unavailable")}
+		}
+		return []string{question.Question}
+	case OverlayPlan:
+		if m.planReview == nil {
+			return []string{m.tr("overlay.plan.unavailable")}
+		}
+		return strings.Split(m.planReview.Body, "\n")
 	case OverlayCancel:
 		return []string{m.tr("overlay.cancel.description")}
 	case OverlayDiff:
@@ -1258,6 +1284,41 @@ func (m AppModel) overlayOptions() []overlayOption {
 			{Label: m.tr("overlay.approval.session"), Detail: m.tr("overlay.approval.session_detail"), State: "shift+a"},
 			{Label: m.tr("overlay.approval.deny"), Detail: m.tr("overlay.approval.deny_detail"), State: "d"},
 		}
+	case OverlayUserInput:
+		if m.planningInput == nil {
+			return nil
+		}
+		question, ok := m.planningInput.current()
+		if !ok {
+			return nil
+		}
+		answer := m.planningInput.Answers[question.ID]
+		options := make([]overlayOption, 0, len(question.Options)+2)
+		for _, option := range question.Options {
+			state := ""
+			if slices.Contains(answer.Selected, option.Label) {
+				state = "selected"
+			}
+			detail := option.Description
+			if option.Recommended {
+				detail = m.tr("overlay.planning_question.recommended") + " · " + detail
+			}
+			options = append(options, overlayOption{Label: option.Label, Detail: detail, State: state})
+		}
+		options = append(options,
+			overlayOption{Label: m.tr("overlay.planning_question.confirm"), Detail: m.tr("overlay.planning_question.confirm_detail"), State: "enter"},
+			overlayOption{Label: m.tr("overlay.planning_question.other"), Detail: m.tr("overlay.planning_question.other_detail")},
+		)
+		return options
+	case OverlayPlan:
+		if m.planReview == nil || m.planReview.State != "proposed" {
+			return nil
+		}
+		return []overlayOption{
+			{Label: m.tr("overlay.plan.ask"), Detail: m.tr("overlay.plan.ask_detail")},
+			{Label: m.tr("overlay.plan.revise"), Detail: m.tr("overlay.plan.revise_detail")},
+			{Label: m.tr("overlay.plan.execute"), Detail: m.tr("overlay.plan.execute_detail"), State: "enter"},
+		}
 	case OverlayCancel:
 		return []overlayOption{
 			{Label: m.tr("overlay.cancel.parent"), Detail: m.tr("overlay.cancel.parent_detail")},
@@ -1365,6 +1426,8 @@ func (m AppModel) overlayFooter() string {
 		return m.tr("overlay.branch_confirm.footer")
 	case OverlayApproval:
 		return m.tr("overlay.footer.approval")
+	case OverlayUserInput, OverlayPlan:
+		return m.tr("overlay.footer.select")
 	case OverlayCancel:
 		return m.tr("overlay.footer.cancel")
 	case OverlayAgents:
@@ -1410,6 +1473,8 @@ func (m AppModel) overlayFooterForWidth(width int) string {
 		return m.tr("overlay.model_routes.footer_short")
 	case OverlayApproval:
 		return m.tr("overlay.footer.approval_short")
+	case OverlayUserInput, OverlayPlan:
+		return m.tr("overlay.footer.short")
 	case OverlayCancel:
 		return m.tr("overlay.footer.cancel_short")
 	case OverlayAgents:

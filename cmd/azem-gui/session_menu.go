@@ -126,10 +126,23 @@ func (c sessionMenuController) continueInWorktree(id string) {
 }
 
 func sessionWindowURL(sessionID string) string {
-	if strings.TrimSpace(sessionID) == "" {
-		return "/"
+	return sessionWindowURLWithVersion(sessionID, buildTime)
+}
+
+func sessionWindowURLWithVersion(sessionID, assetVersion string) string {
+	query := url.Values{}
+	if value := strings.TrimSpace(sessionID); value != "" {
+		query.Set("session", value)
 	}
-	return "/?session=" + url.QueryEscape(sessionID)
+	if value := strings.TrimSpace(assetVersion); value != "" && value != "unknown" {
+		// WKWebView may retain the previous wails:// document between launches.
+		// A build-scoped document URL forces it to load the new hashed asset graph.
+		query.Set("assets", value)
+	}
+	if encoded := query.Encode(); encoded != "" {
+		return "/?" + encoded
+	}
+	return "/"
 }
 
 func sessionDeepLink(sessionID, workspace string) string {

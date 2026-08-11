@@ -66,12 +66,14 @@ type catalogState struct {
 }
 
 type Catalog struct {
-	mu      sync.RWMutex
-	options LoadOptions
-	state   catalogState
+	mu       sync.RWMutex
+	updateMu sync.Mutex
+	options  LoadOptions
+	state    catalogState
 }
 
 func Load(options LoadOptions) (*Catalog, error) {
+	options = cloneLoadOptions(options)
 	state, err := buildCatalog(options)
 	if err != nil {
 		return nil, err
@@ -83,11 +85,46 @@ func (c *Catalog) Reload() error {
 	if c == nil {
 		return errors.New("skills catalog is nil")
 	}
-	state, err := buildCatalog(c.options)
+	c.updateMu.Lock()
+	defer c.updateMu.Unlock()
+	c.mu.RLock()
+	options := cloneLoadOptions(c.options)
+	c.mu.RUnlock()
+	state, err := buildCatalog(options)
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
+	c.options = options
+	c.state = state
+	c.mu.Unlock()
+	return nil
+}
+
+// UpdateConfig rebuilds the catalog before persisting the new selection. The
+// in-memory snapshot is swapped only after persistence succeeds, so callers
+// never observe a disabled state that was not durably saved.
+func (c *Catalog) UpdateConfig(cfg config.SkillsConfig, persist func() error) error {
+	if c == nil {
+		return errors.New("skills catalog is nil")
+	}
+	c.updateMu.Lock()
+	defer c.updateMu.Unlock()
+	c.mu.RLock()
+	options := cloneLoadOptions(c.options)
+	c.mu.RUnlock()
+	options.Config = cloneSkillsConfig(cfg)
+	state, err := buildCatalog(options)
+	if err != nil {
+		return err
+	}
+	if persist != nil {
+		if err := persist(); err != nil {
+			return err
+		}
+	}
+	c.mu.Lock()
+	c.options = options
 	c.state = state
 	c.mu.Unlock()
 	return nil
@@ -338,4 +375,16 @@ func truncateRunes(value string, limit int) string {
 	}
 	runes := []rune(value)
 	return string(runes[:limit])
+}
+
+func cloneLoadOptions(options LoadOptions) LoadOptions {
+	options.Config = cloneSkillsConfig(options.Config)
+	return options
+}
+
+func cloneSkillsConfig(cfg config.SkillsConfig) config.SkillsConfig {
+	cfg.AdditionalDirs = append([]string(nil), cfg.AdditionalDirs...)
+	cfg.Eager = append([]string(nil), cfg.Eager...)
+	cfg.Disabled = append([]string(nil), cfg.Disabled...)
+	return cfg
 }

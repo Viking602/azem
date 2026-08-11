@@ -1,12 +1,11 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
-import { findModelOption, mergeSessionTranscript, modelDisplayName, providerDisplayName, reduceEvents, reorderSessionQueue, type RuntimeData, useRuntimeStore } from "./store";
-import type { Snapshot } from "./types";
+import { findModelOption, mergeSessionTranscript, modelDisplayName, providerDisplayName, reduceEvents, reorderSessionQueue, shouldMarkSessionUnread, type RuntimeData, useRuntimeStore } from "./store";
+import type { Session, Snapshot } from "./types";
 import Inspector from "./components/Inspector";
 import ThreadSurface, { approvalPresentation, ContextMeter, contextOccupancy, formatDuration } from "./components/ThreadSurface";
 import { TimelineBlock } from "./components/Timeline";
-import SubagentsPage from "./components/SubagentsPage";
 import { toolDisplayName } from "./i18n";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -30,7 +29,7 @@ const snapshot: Snapshot = {
 function state(): RuntimeData {
   return {
     snapshot, sessions: [], projects: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], backgroundProcesses: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
-    skills: [], branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
+    skills: [], mcpServers: [], plugins: [], branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
     pullRequestMonitors: new Map(), pullRequestLoading: false, pullRequestMutating: false, pullRequestError: "",
     modelRoutes: [], modelProviders: [], modelsByProvider: {}, contextProfile: null,
     contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recovery: [],
@@ -42,6 +41,78 @@ function state(): RuntimeData {
 }
 
 describe("runtime event projection", () => {
+  it("projects interactive planning questions and versioned plan review state", () => {
+    const questions = JSON.stringify([{
+      id: "scope", header: "范围", question: "选择范围",
+      options: [{ label: "最小", description: "仅目标路径" }, { label: "完整", description: "包含配套验证" }],
+    }]);
+    const requested = reduceEvents(state(), [{
+      sequence: 1, kind: "user_input_requested", sessionId: "s1", runId: "run-plan",
+      userInputId: "ask-1", state: "pending", data: { questions },
+    }]);
+    expect(requested.blocks[0]).toMatchObject({ kind: "question", userInputId: "ask-1", state: "pending" });
+    expect(requested.activity).toBe("input");
+
+    const answered = reduceEvents(requested, [{
+      sequence: 2, kind: "user_input_resolved", sessionId: "s1", userInputId: "ask-1",
+      state: "answered", data: { answers: "[]" },
+    }]);
+    expect(answered.blocks[0]).toMatchObject({ state: "answered", data: { answers: "[]" } });
+
+    const first = reduceEvents(answered, [{
+      sequence: 3, kind: "plan_proposed", sessionId: "s1", runId: "run-plan", planId: "plan-1",
+      state: "proposed", text: "First body", data: { title: "First", version: "1" },
+    }]);
+    const revised = reduceEvents(first, [{
+      sequence: 4, kind: "plan_proposed", sessionId: "s1", runId: "run-plan-2", planId: "plan-2",
+      state: "proposed", text: "Revised body", data: { title: "Revised", version: "2" },
+    }]);
+    expect(revised.planMode).toBe(true);
+    expect(revised.blocks.filter((block) => block.kind === "plan").map((block) => block.state)).toEqual(["superseded", "proposed"]);
+
+    const executing = reduceEvents(revised, [{
+      sequence: 5, kind: "plan_resolved", sessionId: "s1", planId: "plan-2", state: "executing",
+    }]);
+    expect(executing.planMode).toBe(false);
+    expect(executing.blocks.find((block) => block.planId === "plan-2")?.state).toBe("approved");
+  });
+
+  it("restores plan mode from the latest durable proposal", () => {
+    const restored = reduceEvents(state(), [{
+      sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded",
+      data: {
+        provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single",
+        blocks: JSON.stringify([{ ID: "p1", Kind: "plan", State: "proposed", Title: "Plan", Content: "Body", Data: { planId: "artifact-1", version: "1" } }]),
+        blockSequences: "[1]", toolRecords: "[]",
+      },
+    }]);
+    expect(restored.planMode).toBe(true);
+    expect(restored.blocks[0]).toMatchObject({ kind: "plan", planId: "artifact-1", state: "proposed" });
+  });
+
+	it("projects the plugin catalog and capability counts", () => {
+		const projected = reduceEvents(state(), [{
+			sequence: 1, kind: "plugin_catalog", pluginCatalog: [{
+				ID: "demo@market", Name: "demo", DisplayName: "Demo", Version: "1.0.0", Marketplace: "market",
+				Enabled: true, SkillCount: 2, MCPServerCount: 2, IntegratedMCPCount: 1,
+				HookCount: 1, HooksTrusted: false, HasApp: true, Capabilities: ["Read"], Status: "degraded",
+			}],
+		}]);
+		expect(projected.plugins[0]).toMatchObject({ id: "demo@market", displayName: "Demo", skillCount: 2, integratedMCPCount: 1, hasApp: true });
+	});
+
+	it("projects MCP snapshots and live connection transitions", () => {
+		const projected = reduceEvents(state(), [{
+			sequence: 1, kind: "mcp_state", state: "snapshot", data: { servers: JSON.stringify([{
+				name: "grep", enabled: true, state: "ready", transport: "streamable_http", target: "https://mcp.grep.app",
+				approval: "never", maxConcurrency: 2, toolCount: 1, tools: [{ name: "searchGitHub", effect: "read_only" }], error: "",
+			}]) },
+		}, {
+			sequence: 2, kind: "mcp_state", state: "degraded", text: "offline", data: { server: "grep", state: "degraded", error: "offline" },
+		}]);
+		expect(projected.mcpServers[0]).toMatchObject({ name: "grep", state: "degraded", toolCount: 1, error: "offline" });
+	});
+
 	it("projects configured provider reasoning levels and resolves model aliases", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "model_providers", modelProviders: [{
@@ -79,15 +150,29 @@ describe("runtime event projection", () => {
     expect(useRuntimeStore.getState().modelRoutes).toHaveLength(1);
   });
 
+  it("shows the snapshot branch before the full git branch event arrives", () => {
+    useRuntimeStore.setState(state());
+    useRuntimeStore.getState().hydrate({ ...snapshot, currentBranch: "main" });
+    expect(useRuntimeStore.getState().branches).toEqual([{ name: "main", current: true }]);
+
+    useRuntimeStore.getState().applyEvents([{
+      sequence: 1,
+      kind: "git_branches",
+      gitBranches: [{ name: "feature", current: true }, { name: "main", current: false }],
+    }]);
+    useRuntimeStore.getState().hydrate({ ...snapshot, currentBranch: "main" });
+    expect(useRuntimeStore.getState().branches).toEqual([{ name: "feature", current: true }, { name: "main", current: false }]);
+  });
+
   it("projects a first-turn session immediately and replaces its generated title", () => {
     useRuntimeStore.setState(state());
     useRuntimeStore.getState().addOptimisticUser("修复会话标题", []);
-    expect(useRuntimeStore.getState().sessions[0]).toMatchObject({ id: "s1", title: "新会话" });
+    expect(useRuntimeStore.getState().sessions[0]).toMatchObject({ id: "s1", title: "新对话" });
 
     useRuntimeStore.getState().applyEvents([{
       sequence: 1, kind: "session_loaded", state: "list", data: { sessions: "[]" },
     }]);
-    expect(useRuntimeStore.getState().sessions[0]).toMatchObject({ id: "s1", title: "新会话" });
+    expect(useRuntimeStore.getState().sessions[0]).toMatchObject({ id: "s1", title: "新对话" });
 
     useRuntimeStore.getState().applyEvents([{
       sequence: 2,
@@ -165,6 +250,15 @@ describe("runtime event projection", () => {
     expect(settled.blocks.find((block) => block.toolCallId === "passed")).toMatchObject({ state: "completed" });
   });
 
+	it("projects a run failure once inside the timeline", () => {
+		const failed = reduceEvents({ ...state(), running: true, runId: "r1" }, [{
+			sequence: 1, kind: "run_failed", sessionId: "s1", runId: "r1", text: "provider unavailable",
+		}]);
+		expect(failed.error).toBe("");
+		expect(failed.blocks.filter((block) => block.kind === "error")).toHaveLength(1);
+		expect(failed.blocks.at(-1)?.content).toBe("provider unavailable");
+	});
+
   it("preserves queued and approval states until a tool actually runs", () => {
     const queued = reduceEvents(state(), [
       { sequence: 1, kind: "run_started", runId: "r1" },
@@ -200,8 +294,10 @@ describe("runtime event projection", () => {
     };
     await act(async () => root.render(createElement(TimelineBlock, { block, language: "zh-CN" })));
     const details = container.querySelector("details")!;
-    details.open = true;
-    details.dispatchEvent(new Event("toggle"));
+    await act(async () => {
+      details.open = true;
+      details.dispatchEvent(new Event("toggle"));
+    });
     const log = container.querySelector<HTMLPreElement>(".tool-log")!;
     expect(log.textContent).toBe("ready\nrequest 1\n");
     expect(log.getAttribute("aria-live")).toBe("off");
@@ -221,7 +317,7 @@ describe("runtime event projection", () => {
     const projected = reduceEvents(state(), [
       {
         sequence: 1, kind: "agent_state", agentId: "a1", state: "running", text: "",
-        agent: { type: "explore", model: "gpt-5.6-luna", capabilityMode: "read-only", toolCalls: 2, turns: 1, tokensUsed: 100, elapsedMs: 5000, activity: "coding.read_file" },
+        agent: { type: "explore", parentRunId: "parent-run", parentToolCallId: "spawn-call", model: "gpt-5.6-luna", capabilityMode: "read-only", toolCalls: 2, turns: 1, tokensUsed: 100, elapsedMs: 5000, activity: "coding.read_file" },
       },
       // Sparse lifecycle event without counters must not reset stats to zero.
       {
@@ -234,7 +330,8 @@ describe("runtime event projection", () => {
       },
     ]);
     expect(projected.agents[0]).toMatchObject({
-      id: "a1", state: "running", toolCalls: 5, elapsedMs: 12000, activity: "coding.git_diff", model: "gpt-5.6-luna",
+      id: "a1", state: "running", parentRunId: "parent-run", parentToolCallId: "spawn-call",
+      toolCalls: 5, elapsedMs: 12000, activity: "coding.git_diff", model: "gpt-5.6-luna",
     });
   });
 
@@ -320,6 +417,7 @@ describe("runtime event projection", () => {
       { sequence: 3, kind: "tool_finished", runId: "r1", toolCallId: "read-1", state: "completed", text: "done" },
       { sequence: 4, kind: "thinking_delta", runId: "r1", text: "再检查结果。" },
       { sequence: 5, kind: "text_delta", runId: "r1", text: "完成。" },
+      { sequence: 6, kind: "run_finished", runId: "r1" },
     ]);
     expect(projected.blocks.map((block) => block.kind)).toEqual(["thinking", "tool", "thinking", "assistant"]);
     expect(projected.blocks.filter((block) => block.kind === "thinking").map((block) => block.content)).toEqual(["先读取文件。", "再检查结果。"]);
@@ -408,9 +506,17 @@ describe("runtime event projection", () => {
   });
 
   it("moves tool-turn prose into the process trail and keeps the natural stop as the final answer", () => {
-    const projected = reduceEvents(state(), [
+    const streaming = reduceEvents(state(), [
       { sequence: 1, kind: "run_started", runId: "r1" },
       { sequence: 2, kind: "text_delta", runId: "r1", text: "先检查代码。", state: "streaming" },
+    ]);
+    expect(streaming.blocks[0]).toMatchObject({
+      kind: "assistant",
+      state: "streaming",
+      content: "先检查代码。",
+    });
+
+    const projected = reduceEvents(streaming, [
       { sequence: 3, kind: "tool_started", runId: "r1", toolCallId: "read-1", data: { name: "coding.read_file" } },
       { sequence: 4, kind: "tool_finished", runId: "r1", toolCallId: "read-1", state: "completed" },
       { sequence: 5, kind: "text_delta", runId: "r1", text: "这是最终回答。", state: "streaming" },
@@ -422,6 +528,28 @@ describe("runtime event projection", () => {
       { kind: "tool", state: "completed", content: "" },
       { kind: "assistant", state: "completed", content: "这是最终回答。" },
     ]);
+  });
+
+  it("keeps an unphased natural-stop stream in one final-answer block", () => {
+    const first = reduceEvents(state(), [
+      { sequence: 1, kind: "run_started", runId: "r1" },
+      { sequence: 2, kind: "text_delta", runId: "r1", text: "最终", state: "streaming" },
+    ]);
+    expect(first.blocks).toHaveLength(1);
+    expect(first.blocks[0]).toMatchObject({ kind: "assistant", state: "streaming", content: "最终" });
+    const blockId = first.blocks[0]!.id;
+
+    const completed = reduceEvents(first, [
+      { sequence: 3, kind: "text_delta", runId: "r1", text: "正文", state: "streaming" },
+      { sequence: 4, kind: "run_finished", runId: "r1" },
+    ]);
+    expect(completed.blocks).toHaveLength(1);
+    expect(completed.blocks[0]).toMatchObject({
+      id: blockId,
+      kind: "assistant",
+      state: "completed",
+      content: "最终正文",
+    });
   });
 
   it("coalesces streaming deltas and ignores replayed sequence numbers", () => {
@@ -530,7 +658,7 @@ describe("runtime event projection", () => {
     useRuntimeStore.setState({
       ...state(),
       blocks: [],
-      skills: [{ name: "aside-browser", description: "Control the browser", sourcePath: "~/.agents/skills/aside-browser", bundled: false, eager: false, disabled: false, resourceCount: 0 }],
+      skills: [{ name: "aside-browser", description: "Control the browser", sourcePath: "~/.agents/skills/aside-browser", bundled: false, eager: false, disabled: false, modelVisible: true, resourceCount: 0 }],
     });
     const container = document.createElement("div");
     document.body.append(container);
@@ -632,7 +760,11 @@ describe("runtime event projection", () => {
   });
 
   it("tracks a foreign main run through session-scoped event filtering", () => {
-    const running = reduceEvents({ ...state(), currentSessionId: "s2" }, [{
+    const foreignSession: Session = {
+      id: "s1", workspace: snapshot.workspace, title: "后台任务", providerId: "chatgpt",
+      modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString(),
+    };
+    const running = reduceEvents({ ...state(), currentSessionId: "s2", sessions: [foreignSession] }, [{
       sequence: 1, kind: "run_started", sessionId: "s1", runId: "run-a",
     }]);
     expect(running).toMatchObject({
@@ -645,6 +777,21 @@ describe("runtime event projection", () => {
       sequence: 2, kind: "run_finished", sessionId: "s1", runId: "run-a",
     }]);
     expect(finished).toMatchObject({ running: false, globalRunId: "", globalRunSessionId: "" });
+    expect(finished.sessions[0]?.unread).toBe(true);
+    expect(shouldMarkSessionUnread(running, { sequence: 0, kind: "run_finished", sessionId: "s1", runId: "run-a" })).toBe(true);
+
+    const opened = reduceEvents(finished, [{
+      sequence: 3, kind: "session_loaded", sessionId: "s1", state: "loaded",
+      data: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", blocks: "[]" },
+    }]);
+    expect(opened.sessions[0]?.unread).toBe(false);
+  });
+
+  it("does not mark cancellations, subagents, or the visible session unread", () => {
+    const running = { ...state(), currentSessionId: "s2", globalRunId: "run-a", globalRunSessionId: "s1" };
+    expect(shouldMarkSessionUnread(running, { sequence: 0, kind: "run_cancelled", sessionId: "s1", runId: "run-a" })).toBe(false);
+    expect(shouldMarkSessionUnread(running, { sequence: 0, kind: "run_finished", sessionId: "s1", runId: "run-a", agentId: "agent-1" })).toBe(false);
+    expect(shouldMarkSessionUnread({ ...running, currentSessionId: "s1" }, { sequence: 0, kind: "run_finished", sessionId: "s1", runId: "run-a" })).toBe(false);
   });
 
   it("rejects queue mutations from a different session", () => {
@@ -799,11 +946,11 @@ describe("runtime event projection", () => {
     const projected = reduceEvents(state(), [{
       sequence: 1,
       kind: "model_catalog",
-      data: { provider: "chatgpt", models: JSON.stringify([{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", aliases: ["gpt-latest"], contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high", supportsTools: true, supportsReasoning: true, supportsStructured: true, inputModalities: ["text"], outputModalities: ["text"] }, { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", reasoningLevels: ["low", "medium"] }]) },
+      data: { provider: "chatgpt", models: JSON.stringify([{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", aliases: ["gpt-latest"], contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high", supportsTools: true, supportsReasoning: true, supportsStructured: true, serviceTiers: [{ id: "priority" }], inputModalities: ["text"], outputModalities: ["text"] }, { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", reasoningLevels: ["low", "medium"], disabled: true }]) },
     }]);
     expect(projected.modelsByProvider.chatgpt).toEqual([
-	  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", aliases: ["gpt-latest"], contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high", capabilities: ["tools", "reasoning", "structured-output"], inputModalities: ["text"], outputModalities: ["text"] },
-	  { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", aliases: [], reasoningLevels: ["low", "medium"], defaultReasoning: "" },
+	  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", aliases: ["gpt-latest"], contextWindow: 272_000, reasoningLevels: ["medium", "high"], defaultReasoning: "high", capabilities: ["tools", "reasoning", "structured-output", "fast"], inputModalities: ["text"], outputModalities: ["text"] },
+	  { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", aliases: [], reasoningLevels: ["low", "medium"], defaultReasoning: "", disabled: true },
     ]);
     expect(projected.contextUsage.contextLimit).toBe(272_000);
 	expect(modelDisplayName("openai/gpt-5.6-sol", "openai/gpt-5.6-sol")).toBe("GPT 5.6 Sol");
@@ -854,9 +1001,35 @@ describe("runtime event projection", () => {
   it("updates context occupancy from provider fact snapshots", () => {
     const projected = reduceEvents(state(), [{
       sequence: 1, kind: "context_usage", sessionId: "s1", state: "reported",
-      data: { factSnapshot: "true", usageSnapshot: JSON.stringify({ inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, currentTurnMainReported: true }) },
+      data: { factSnapshot: "true", usageSnapshot: JSON.stringify({
+        inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, currentTurnMainReported: true,
+        cacheInputTokens: 120_000, cachedInputTokens: 72_000, cacheWriteTokens: 9_000,
+        cacheReported: true, cacheWriteReported: true,
+      }) },
     }]);
-    expect(projected.contextUsage).toEqual({ inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, reported: true });
+    expect(projected.contextUsage).toEqual({
+      inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, reported: true,
+      cacheInputTokens: 120_000, cachedInputTokens: 72_000, cacheWriteTokens: 9_000,
+      cacheReported: true, cacheWriteReported: true,
+    });
+  });
+
+  it("accumulates cache totals without replacing main-context occupancy for aggregate requests", () => {
+    const projected = reduceEvents(state(), [
+      {
+        sequence: 1, kind: "context_usage", sessionId: "s1", state: "reported",
+        data: { requestKind: "main", inputTokens: "100", outputTokens: "9", cachedInputTokens: "40", cacheWriteTokens: "6", cacheStatus: "reported", cacheWriteStatus: "reported" },
+      },
+      {
+        sequence: 2, kind: "context_usage", sessionId: "s1", state: "reported",
+        data: { requestKind: "team", aggregateOnly: "true", inputTokens: "60", outputTokens: "3", cachedInputTokens: "30", cacheWriteTokens: "4", cacheStatus: "reported", cacheWriteStatus: "reported" },
+      },
+    ]);
+    expect(projected.contextUsage).toEqual({
+      inputTokens: 100, outputTokens: 9, contextLimit: 0, reported: true,
+      cacheInputTokens: 160, cachedInputTokens: 70, cacheWriteTokens: 10,
+      cacheReported: true, cacheWriteReported: true,
+    });
   });
 
   it("restores, updates, and renders the current Todo plan", async () => {
@@ -885,16 +1058,16 @@ describe("runtime event projection", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     await act(async () => root.render(createElement(Inspector)));
-    expect(container.textContent).toContain("任务计划");
+    expect(container.textContent).toContain("执行计划");
     expect(container.textContent).toContain("在桌面端展示任务进度");
     expect(container.textContent).toContain("添加 Inspector 展示");
-    expect(container.textContent).toContain("1 个待办");
+    expect(container.textContent).toContain("2 / 3");
     expect(container.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("2");
     expect(container.querySelector('[data-status="in_progress"]')).toBeNull();
     await act(async () => root.unmount());
   });
 
-  it("summarizes subagents in the inspector and opens the expandable live roster", async () => {
+  it("keeps the inspector subagent roster folded and opens a selected detail directly", async () => {
     let projected = state();
     const states = ["running", "running", "queued", "completed", "completed", "failed"];
     for (let index = 0; index < states.length; index += 1) {
@@ -920,21 +1093,22 @@ describe("runtime event projection", () => {
 
     await act(async () => root.render(createElement(Inspector)));
     const summary = container.querySelector<HTMLButtonElement>(".subagent-summary-button")!;
+    const inspectorList = container.querySelector<HTMLDivElement>(".inspector-subagent-list")!;
     expect(summary.textContent).toContain("2 个运行中 · 1 个排队中");
+    expect(summary.getAttribute("aria-expanded")).toBe("false");
+    expect(inspectorList.hidden).toBe(true);
     expect(container.querySelector(".agent-roster")).toBeNull();
+
     await act(async () => summary.click());
-    expect(useRuntimeStore.getState().view).toBe("agents");
+    expect(summary.getAttribute("aria-expanded")).toBe("true");
+    expect(inspectorList.hidden).toBe(false);
+    expect(container.querySelectorAll(".inspector-subagent-row")).toHaveLength(6);
+    expect(container.textContent).toContain("任务 6");
+    expect(container.textContent).toContain("失败");
+    expect(useRuntimeStore.getState().view).toBe("thread");
     expect(useRuntimeStore.getState().inspectorOpen).toBe(true);
 
-    await act(async () => root.render(createElement(SubagentsPage)));
-    expect(container.querySelectorAll(".subagent-row")).toHaveLength(4);
-    expect(container.textContent).toContain("已启动 6 个子智能体");
-    const showMore = Array.from(container.querySelectorAll<HTMLButtonElement>(".subagents-show-more"))
-      .find((button) => button.textContent?.includes("再显示 2 个"))!;
-    await act(async () => showMore.click());
-    expect(container.querySelectorAll(".subagent-row")).toHaveLength(6);
-
-    const rows = container.querySelectorAll<HTMLButtonElement>(".subagent-row > button");
+    const rows = container.querySelectorAll<HTMLButtonElement>(".inspector-subagent-row");
     await act(async () => rows[0]!.click());
     const firstSelected = useRuntimeStore.getState().selectedAgentId;
     expect(firstSelected).not.toBe("");
@@ -943,10 +1117,14 @@ describe("runtime event projection", () => {
     expect(useRuntimeStore.getState().selectedAgentId).not.toBe(firstSelected);
     expect(useRuntimeStore.getState().agentBlocks).toEqual([]);
 
-    await act(async () => container.querySelector<HTMLButtonElement>(".subagents-close")!.click());
-    expect(useRuntimeStore.getState()).toMatchObject({ view: "thread", selectedAgentId: "" });
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  it("localizes built-in skill runtime tools", () => {
+    expect(toolDisplayName("hydaelyn_activate_skill", "zh-CN")).toBe("加载技能");
+    expect(toolDisplayName("hydaelyn_read_skill_resource", "zh-CN")).toBe("读取技能资源");
+    expect(toolDisplayName("hydaelyn_read_skill_resource", "en")).toBe("Read Skill Resource");
   });
 
   it("projects current workspace line changes from git status events", async () => {
@@ -984,7 +1162,7 @@ describe("runtime event projection", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     await act(async () => root.render(createElement(Inspector)));
-    expect(container.textContent).toContain("压缩内核");
+    expect(container.textContent).toContain("上下文内核");
     expect(container.textContent).toContain("r3");
     expect(container.textContent).toContain("automatic_hard");
     expect(container.textContent).toContain("semantic state");
@@ -999,7 +1177,7 @@ describe("runtime event projection", () => {
     expect(useRuntimeStore.getState()).toMatchObject({ selectedPullRequestNumber: null, pullRequestLoading: false });
   });
 
-  it("renders the real environment panel without the old tabs or runtime placeholder", async () => {
+  it("keeps runtime processes, sources, and branch details in the live context panel", async () => {
     const projected = reduceEvents({
       ...state(),
       blocks: [{ id: "user-1", kind: "user", content: "检查截图", attachments: [{ id: "image-1", name: "screen.png", mimeType: "image/png", path: "/tmp/screen.png", size: 42 }] }],

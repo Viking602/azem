@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -347,6 +348,13 @@ func (r *subagentRuntime) updateMaxConcurrency(maxConcurrency int) {
 	r.mu.Unlock()
 }
 
+func (r *subagentRuntime) updateAwaitTimeout(timeout time.Duration) {
+	r.mu.Lock()
+	r.cfg.AwaitTimeout = timeout.String()
+	r.cfg.AwaitDuration = timeout
+	r.mu.Unlock()
+}
+
 func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, parent subagentParentRuntime) (agentservice.SubagentRun, error) {
 	return r.spawn(input, parent, nil)
 }
@@ -636,6 +644,7 @@ func sanitizedResumeSeed(encoded json.RawMessage) ([]message.Message, error) {
 	if err := json.Unmarshal(encoded, &transcript); err != nil {
 		return nil, fmt.Errorf("decode transcript: %w", err)
 	}
+	transcript = slices.DeleteFunc(transcript, internalSubagentTranscriptMessage)
 	seed := make([]message.Message, 0, len(transcript))
 	for _, item := range transcript {
 		if item.Role != message.RoleUser && item.Role != message.RoleAssistant {

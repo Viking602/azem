@@ -154,6 +154,9 @@ func (r *subagentRuntime) Detail(ctx context.Context, sessionID, id string) ([]A
 	if active := r.active[id]; active != nil && active.run.SessionID == sessionID {
 		blocks := append([]AgentTranscriptBlock(nil), active.blocks...)
 		r.mu.Unlock()
+		for index := range blocks {
+			blocks[index] = boundedAgentTranscriptBlock(blocks[index])
+		}
 		return blocks, nil
 	}
 	r.mu.Unlock()
@@ -295,9 +298,11 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		appendAgentDelta(&active.blocks, "thinking", childRunID, "thinking", frame.Thinking)
 	case stream.FrameText:
 		active.activity = compactActivity(frame.Text)
-		appendAgentDelta(&active.blocks, "assistant", childRunID, "assistant", frame.Text)
+		kind := subagentTextKind(frame.TextPhase, false)
+		appendAgentDelta(&active.blocks, kind, childRunID, kind, frame.Text)
 	case stream.FrameToolCall:
 		if frame.ToolCall != nil {
+			settleSubagentProcessText(active.blocks, childRunID)
 			active.ToolStarted = true
 			active.run.ToolCalls++
 			active.toolNames[frame.ToolCall.Name] = struct{}{}
@@ -336,6 +341,7 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	case stream.FrameText:
 		event.Kind = EventTextDelta
 		event.Text = frame.Text
+		event.TextPhase = string(frame.TextPhase)
 	case stream.FrameToolCall:
 		if frame.ToolCall == nil {
 			return

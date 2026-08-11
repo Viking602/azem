@@ -1,6 +1,6 @@
 # Azem Agent Guide
 
-Last verified: 2026-08-06
+Last verified: 2026-08-11
 
 ## Scope
 
@@ -64,10 +64,22 @@ Status values:
 | STREAM-001 | Fixed, guarded | Commentary, reasoning, and final answers were previously merged, hiding progress around tool calls or duplicating final output. | Provider stream, app event, session timeline, and frontend reducer `TextPhase` tests. | Preserve `commentary` and `final_answer` end to end; reasoning must not impersonate commentary; final output renders once. |
 | PROVIDER-001 | Fixed, guarded | Azem previously hard-coded ChatGPT and Grok, so other model providers and arbitrary model IDs could not be configured or routed from the desktop. | `internal/provider/llmux`, generic runtime resolution tests, model-provider action/Bridge/store/settings tests. | Keep ChatGPT/Grok subscription IDs reserved; keep llmux API keys out of YAML and events; validate configured models; preserve one retry owner and typed stream mapping. |
 | CONTEXT-001 | Fixed, guarded | Rolling summaries mixed durable task state with short-lived transcript evidence and could drift across repeated compactions. | SemanticStateV1 validation, schema 20 state/events/manifests, unified planner tests, Artifact V2 tests, Inspector projection tests. | Keep one new kernel across automatic/manual/resume paths; preserve latest three user turns exactly, stable provenance, atomic tool groups, transactional cursor/manifest activation, and explicit mandatory-budget failure. Do not restore legacy fallback. |
+| CONTEXT-002 | Fixed, guarded | Long subagent reviews could spend millions of cumulative input tokens and then fail when a valid semantic checkpoint exceeded the 16 KiB writer ceiling; persisted private checkpoints were also projected as visible assistant prose and re-seeded on resume. | Failed `subagent_runs` records with `summary output requires ... configured limit allows 16384`, compaction retry/limit tests, and subagent projection/resume tests. | Keep the default semantic writer ceiling at 8,192 tokens, retain bounded two-stage repair with headroom, and never project or resume-seed private/compaction messages. Mandatory state that still cannot fit must fail explicitly. |
 | RUNTIME-001 | Fixed, guarded | Venat upgrades changed Usage Store and durable control-plane contracts; old semantics ignored aggregate query limits. | `go.mod`, `internal/store/sqlite/stores_governance.go`, Venat contract tests. | Do not restore old Usage semantics. Verify the real module with `GOWORK=off`, and run upstream contract tests during framework upgrades. |
+| RUNTIME-002 | Fixed, guarded | Opening another project window previously ran global crash recovery against the shared SQLite database, expired leases owned by a still-live Azem process, and made the original run fail with `stale task version` or become `reconcile_required`. | `internal/store/sqlite/recovery_fence*`, recovery-fence tests, durable run/tool/subagent evidence from `run_ee2cd85db941608e69b4de4b`. | Every process holds the shared runtime fence for its complete lifetime. Only a process that first acquires the exclusive fence may prepare crash recovery, and session navigation must not emit `SessionEnd`. |
 | CONCURRENCY-001 | Fixed, guarded | Agent definitions omitted `toolMode`, so Venat defaulted whole tool batches to sequential execution. Foreground subagent spawns and shell calls appeared queued even when their runtime limits had free capacity. | `agentDefinitionForSpec`, `TestAgentDefinitionUsesParallelToolDispatch`, Venat parallel dispatch tests. | Keep main and subagent definitions in parallel tool mode. Preserve the separate shell and subagent concurrency limits and Venat's sequential skill-activation safeguard. |
 | TOOL-001 | Fixed, guarded | Queued tools were once rendered as running, making approval wait time appear as execution time and leaving later calls spinning. | `provider_execution.go`, `provider_approval.go`, `frontend/src/store.ts`, `Timeline.tsx`, lifecycle tests. | Preserve `queued -> awaiting_approval -> running -> completed/failed`; do not show unexecuted writes as file changes; converge every non-terminal tool when a run ends. |
+| TOOL-002 | Fixed, guarded | The desktop stop action synchronously waited for Venat to finish cancelling the active durable run before returning through the Bridge. A slow MCP/tool cleanup therefore left the stop button and run visibly stuck. | `CancelActiveWithChildren`, `TestCancelActiveReturnsBeforeUncooperativeExecutionFinishes`, and real desktop stop verification. | Deliver the cancellation request to the durable coordinator asynchronously so the Bridge returns immediately; keep the coordinator as the owner of the terminal cancellation cause, then cancel the app-owned run context after durable cleanup converges. |
+| APPROVAL-001 | Fixed, guarded | Configurable Anthropic-compatible approval models can ignore native response-schema options and return the decision as a Markdown JSON fence, which previously caused `Automatic review failed (parse)` and prevented an authorized action from running. | `internal/provider/codex/guardian_policy.go`, `reviewer.go`, provider reviewer and app automatic-approval tests. | Keep the explicit JSON-only output contract and strict fail-closed validation. Accept only raw JSON or one whole-response JSON fence; never extract a decision from surrounding prose or execute after an invalid review. |
+| TODO-001 | Fixed, guarded | Parallel Todo mutations shared one stale revision; a later `start` could win first, demote the actual current item to pending, and make its `done` fail. Completed work then appeared to update only at the end or was never persisted. | `todo_tool.go`, `TestTodoStartCannotReplaceCurrentItem`, `TestTodoConcurrentMutationsCannotSkipCurrentItem`, executable main prompt contract. | Keep global tool dispatch parallel, but issue exactly one Todo mutation after each completed item and await its snapshot. `start` must never replace another current item; `done` remains the only normal transition that completes and advances work. |
 | UI-001 | Fixed, guarded | Todo, Subagents, active-thinking motion, and process groups once existed only on an integration branch and disappeared from the GUI branch. | Commit `c2e4030`, frontend components/styles, frontend regression tests. | Move these projections and views as one unit. Do not restore the old `AgentList` or port styling without the store/event projection. |
+| EXT-001 | Fixed, guarded | The Extensions surface previously exposed only raw Skills, so installed Codex plugins could not contribute their declared Skills or MCP servers and pending trust/auth requirements were invisible. | `internal/plugins`, desktop `plugin_catalog` projection, Extensions UI, plugin compatibility tests. | Preserve manifest root/path validation, Codex installed/enabled state, existing Skill/MCP/hook boundaries, default-denied plugin Hooks, and explicit OAuth/App degraded states. |
+| EXT-002 | Fixed, guarded | The desktop Extensions surface derived MCP totals only from plugin metadata and never projected the live MCP manager, so configured servers disappeared and the page looked empty when no plugin was installed. | `internal/app/mcp_settings.go`, `mcp_state` frontend projection, `ExtensionsSettings` tests, and real `Azem.app` enable/disable verification. | Keep MCP independent from plugin discovery. Preserve typed add/enable/reconnect actions, atomic configuration writes, secret-free snapshots, asynchronous connection startup, explicit empty states, and live manager tool removal when disabled. |
+| UI-002 | Fixed, guarded | A slow desktop renderer could exceed the runtime event high-water mark and terminate an otherwise healthy provider run with `UI event backlog exceeded the safe limit`. | `internal/app/event_broker.go`, `event_broker_test.go`, desktop/TUI refresh actions, frontend streaming tests. | UI projection pressure must never become a provider error. Keep replaceable deltas coalesced by stream, lifecycle and approval events lossless, durable projection resync after compaction, bounded tool previews, and lightweight live rendering. |
+| UI-003 | Fixed, guarded | Switching live assistant output to immediate Markdown removed the per-delta text reveal because existing paragraph nodes no longer remounted; the old plain-text reveal could not be restored without delaying Markdown syntax. | `StreamingMarkdown`, `StreamingText`, and Timeline live Markdown/reveal tests. | Parse Markdown on every coalesced frame, animate only the bounded latest provider ranges, keep existing block nodes mounted, and honor both system and explicit reduced-motion settings. |
+| UI-004 | Fixed, guarded | A conversation could finish after the user switched away without leaving any visible notification, so the completed result was easy to miss. | Cross-session terminal reducer tests, Sidebar unread-dot test, and `TestMarkSessionUnreadPersistsUntilResume`. | Only a tracked foreign main run that succeeds or fails marks its session unread. Persist the blue dot through `session_ui_state`, clear it on resume, and exclude cancellation and subagent terminal events. |
+| UI-005 | Fixed, guarded | Opening another project intentionally started an isolated desktop runtime with `--new-window`, but that flag also disabled Wails single-instance handling and every child used the regular macOS activation policy, producing one extra Azem Dock application per project. | `desktopMacOptions`, `TestIndependentWindowDoesNotRegisterAnotherMacApplication`, process argv verification, and real packaged multi-project launch. | Keep the primary process regular and every isolated project/session window accessory on macOS. Preserve isolated runtimes so background work survives project navigation, while secondary windows must not register another Dock or Cmd-Tab application entry. |
+| NETWORK-001 | Fixed, guarded | Finder-launched Azem ignored the active macOS system proxy because Go's default HTTP transport reads proxy environment variables but not SystemConfiguration. ChatGPT requests connected directly and failed with `EOF` or TLS handshake timeouts while Codex/Electron succeeded through the local proxy. | `internal/netproxy`, auth/provider transport tests, live ChatGPT proxy test resolving `127.0.0.1:6152`. | Keep desktop bootstrap and every Azem-owned HTTP transport on the shared resolver. Preserve scheme-specific environment overrides, native proxy refresh, bypass rules, streaming zero-timeout semantics, and the opt-in live endpoint test. |
 | PR-001 | Fixed, guarded | GitHub PR capability needs a visible entry point and explicit prerequisites. | README Pull Requests section, `internal/githubpr/`, desktop PR pages. | Keep README synchronized with mutations, head-OID protection, Monitor & Fix triggers, and unavailable states. |
 | PR-002 | Documentation gap | PR operations depend on local `git`, GitHub CLI authentication, a resolvable GitHub remote, and repository permission. | `internal/githubpr/client.go`. | Document missing `gh`, logged-out, non-GitHub, permission, network, and rate-limit failures. Never represent unavailable capability as an empty list. |
 | PR-003 | Documentation gap | PR monitoring polls, persists state, deduplicates fingerprints, and starts repair sessions; its maintenance contract is not independently documented. | `internal/githubpr/monitor.go`: 60-second interval, five-minute maximum backoff, state version 3. | Document the state machine, persistence file, trigger, retry, deduplication, concurrency, restart, and stop behavior. |
@@ -92,6 +104,9 @@ evidence-backed internal record above remains the maintenance backlog.
 - Never delete or rebuild a user database to solve a version conflict.
 - Test previous-version upgrade, current-version reopen, retained data, and
   safe rejection of a future schema.
+- Hold the shared runtime recovery fence until the process has stopped its
+  agents and closed persistence. A second desktop window must never recover or
+  quarantine work owned by another live process.
 - Schema 18 contains `agent_definition_snapshots`, `admission_reservations`,
   `resource_claims`, and every index defined by migration 18.
 - Schema 19 contains `desktop_projects`, `session_workspaces`, and the
@@ -117,17 +132,28 @@ provider stream
 - `final_answer` is the user-visible terminal response and appears once.
 - Reasoning/thinking never impersonates commentary.
 - Persisting and reopening a session preserves phase and order.
+- UI projection compaction never fails the provider run. Consumers reload the
+  durable session projection after replaceable deltas are discarded, including
+  one final reload after the terminal event.
 
 ### llmux providers
 
 - `chatgpt` and `grok` remain reserved for their existing subscription drivers.
 - llmux profile IDs resolve only when enabled and when the selected model exists
-  in `providers.llmux.<id>.models`.
+  and is not disabled in `providers.llmux.<id>.models`. Subscription
+  `disabled_models` follows the same runtime and model-picker rule; Settings
+  keeps disabled models visible so they can be re-enabled.
 - Stored API keys use `internal/auth`; YAML and runtime events never contain
   them. Environment fallback uses the profile's declared variable.
 - llmux internal retries remain disabled so Venat is the single retry owner.
 - Image attachments retain the shared trusted-root, type, count, and size
   validation before entering llmux.
+- Image-capable main models receive validated attachments directly. A main
+  model whose catalog explicitly excludes images must use the independently
+  configured `agents.vision` route; its bounded output enters the main context
+  as private, untrusted user evidence and the text-only main request contains
+  no image parts. Unknown modality metadata keeps the native compatibility
+  path, and a missing or unusable helper fails explicitly.
 
 ### Venat integration
 
@@ -146,6 +172,23 @@ provider stream
   configured concurrency limits.
 - Skill activation batches remain sequential because later calls can depend on
   tools registered by the activation call.
+- With Venat versions that serialize skill-resource batches, finish
+  `hydaelyn_read_skill_resource` calls before launching foreground Subagents;
+  launch independent Subagents together in the following parallel batch.
+
+### Codex-compatible plugins
+
+- `.codex-plugin/plugin.json` is the required plugin entry point; every
+  referenced path begins with `./` and remains inside the plugin root.
+- Import only plugins reported installed and enabled by the current Codex
+  plugin catalog.
+- Plugin Skills and MCP servers reuse the existing runtimes; do not create a
+  second execution or approval path.
+- Installing or enabling a plugin does not trust its Hooks. Keep
+  `plugins.trust_hooks` false by default and provide `PLUGIN_ROOT`,
+  `CLAUDE_PLUGIN_ROOT`, and `PLUGIN_DATA` only after explicit trust.
+- OAuth-only MCP and `.app.json` connections remain visibly unavailable until
+  a separately authenticated connection exists.
 
 ### GitHub pull requests
 
@@ -174,7 +217,9 @@ Security requirements:
 | `docs/architecture.md` | Complete | Shared runtime, package boundaries, event flow, key call paths, extension points. | Update for module or event-boundary changes. |
 | `docs/persistence.md` | Complete | Paths, schema, SQLC synchronization, backup, compatibility, durable stores, recovery. | Add schema ADR. |
 | `docs/testing.md` | Complete | Test levels, command selection, desktop smoke test, live-test conditions. | Update whenever commands or build targets change. |
+| `docs/desktop.md` | Complete | Wails startup, Bridge boundary, frontend ownership, workspace browser limits, build and smoke checks. | Update for new Bridge methods, windows, navigation, or WebView behavior. |
 | `docs/context-rebuild-plan.md` | Complete | New semantic compaction kernel, persistence, provenance, Artifact V2, activation, and diagnostics. | Keep synchronized with context policy and schema changes. |
+| `docs/plugins.md` | Complete | Shared Codex plugin standard, compatibility matrix, discovery, trust, and runtime projection. | Update when the upstream manifest or supported capability boundary changes. |
 | `CHANGELOG.md` | Current | User-visible compatibility and behavior changes. | Update for schema, configuration, dependency, or behavior changes. |
 | `docs/decisions/README.md` | Current | ADR index and status rules. | Add and supersede ADRs through the index. |
 | `docs/decisions/0001-schema-versioning.md` | Accepted | Schema compatibility, dual definitions, backup, and rollback rules. | Update only by superseding ADR. |
@@ -195,7 +240,7 @@ Security requirements:
 | P0 | `docs/release.md` | Pending | Versioning, dependency locks, `GOWORK=off`, complete tests, macOS packaging, schema upgrades, backup, rollback limits, release verification. |
 | P1 | `docs/agent-runtime.md` | Pending | Venat integration, Single/Team agents, scheduling, leases, admission, resources, resume, usage, budgets. |
 | P1 | `docs/provider-streaming.md` | Complete | Transports, retries, frames, `TextPhase`, tool calls, usage, terminal events, errors. |
-| P1 | `docs/desktop.md` | Pending | Wails startup, Bridge allowlist, event projection, React store, windows, deep links, build, smoke test. |
+| P1 | `docs/desktop.md` | Complete | Wails startup, Bridge allowlist, event projection, React store, workspace browser, build, smoke test. |
 | P1 | `docs/configuration.md` | Complete | Complete schema, defaults, environment, routes, roles, MCP, hooks, credentials, examples. |
 | P1 | `docs/recovery.md` | Pending | Crash recovery, side-effect reconciliation, tool timeline, background work, Team resume, failures. |
 | P1 | `docs/troubleshooting.md` | Pending | Login, streams, SQLite, `gh`, PR monitor, Wails/WebView, Bun, CGO, logs. |

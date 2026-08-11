@@ -11,6 +11,7 @@ import type {
   DeliveryMode,
   GitBranch,
   InspectorTab,
+  MCPServerEntry,
   ModelRoute,
 	ModelProvider,
   QueuedPrompt,
@@ -18,6 +19,7 @@ import type {
   PullRequestDashboard,
   PullRequestDetailResponse,
   PullRequestMonitorState,
+  PluginEntry,
   Project,
   RuntimeEvent,
   Session,
@@ -30,6 +32,7 @@ import type {
 export interface ModelOption {
   id: string;
   name: string;
+	disabled?: boolean;
 	aliases?: string[];
   reasoningLevels: string[];
   defaultReasoning?: string;
@@ -60,6 +63,11 @@ export interface ContextUsage {
   outputTokens: number;
   contextLimit: number;
   reported: boolean;
+  cacheInputTokens?: number;
+  cachedInputTokens?: number;
+  cacheWriteTokens?: number;
+  cacheReported?: boolean;
+  cacheWriteReported?: boolean;
 }
 
 export interface RuntimeData {
@@ -75,6 +83,8 @@ export interface RuntimeData {
   agentBlocks: Block[];
   agentCatalog: AgentCatalogEntry[];
   skills: SkillEntry[];
+  mcpServers: MCPServerEntry[];
+  plugins: PluginEntry[];
   branches: GitBranch[];
   modelRoutes: ModelRoute[];
 	modelProviders: ModelProvider[];
@@ -122,6 +132,7 @@ interface RuntimeActions {
   hydrate: (snapshot: Snapshot, demo?: boolean) => void;
   applyEvents: (events: RuntimeEvent[]) => void;
   setView: (view: View) => void;
+  startLocalDraft: () => void;
   setInspectorTab: (tab: InspectorTab) => void;
   setInspectorOpen: (open: boolean) => void;
   selectAgent: (agentId: string) => void;
@@ -172,6 +183,8 @@ const initialData: RuntimeData = {
   agentBlocks: [],
   agentCatalog: [],
   skills: [],
+  mcpServers: [],
+  plugins: [],
   branches: [],
   modelRoutes: [],
 	modelProviders: [],
@@ -216,12 +229,32 @@ const initialData: RuntimeData = {
 
 export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   ...initialData,
-  hydrate: (snapshot, demo = false) => set((state) => ({
-    ...state,
-    ...hydrateData(snapshot, demo),
-  })),
+  hydrate: (snapshot, demo = false) => set((state) => {
+    const hydrated = hydrateData(snapshot, demo);
+    if (!demo && state.branches.length === 0 && snapshot.currentBranch) {
+      hydrated.branches = [{ name: snapshot.currentBranch, current: true }];
+    }
+    return { ...state, ...hydrated };
+  }),
   applyEvents: (events) => set((state) => reduceEvents(state, events)),
   setView: (view) => set({ view, commandOpen: false }),
+  startLocalDraft: () => set({
+    currentSessionId: "",
+    currentTitle: "",
+    blocks: [],
+    running: false,
+    globalRunId: "",
+    globalRunSessionId: "",
+    runId: "",
+    runStartedAt: 0,
+    activity: "",
+    error: "",
+    selectedAgentId: "",
+    agentBlocks: [],
+    selectedPullRequestNumber: null,
+    pullRequestDetail: null,
+    view: "thread",
+  }),
   setInspectorTab: (inspectorTab) => set({ inspectorTab, inspectorOpen: true }),
   setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
   selectAgent: (selectedAgentId) => set((state) => ({
@@ -388,6 +421,10 @@ const SESSION_SCOPED_EVENTS: Record<string, true> = {
   diff_ready: true,
   approval_requested: true,
   approval_resolved: true,
+  user_input_requested: true,
+  user_input_resolved: true,
+  plan_proposed: true,
+  plan_resolved: true,
   agent_state: true,
   context_profile: true,
   context_usage: true,
@@ -396,6 +433,7 @@ const SESSION_SCOPED_EVENTS: Record<string, true> = {
   run_cancelled: true,
   run_failed: true,
 };
+const UNREAD_SESSION_TERMINALS = new Set(["run_finished", "run_failed"]);
 
 export function reduceEvents<T extends RuntimeData>(state: T, events: RuntimeEvent[]): T {
   let next = { ...state, blocks: [...state.blocks], sessions: [...state.sessions], agents: [...state.agents] };
@@ -403,8 +441,16 @@ export function reduceEvents<T extends RuntimeData>(state: T, events: RuntimeEve
   return next;
 }
 
+export const shouldMarkSessionUnread = (
+  state: Pick<RuntimeData, "currentSessionId" | "globalRunId" | "globalRunSessionId">,
+  event: RuntimeEvent,
+) => [!event.agentId, Boolean(event.sessionId), event.sessionId !== state.currentSessionId,
+  UNREAD_SESSION_TERMINALS.has(event.kind), Boolean(state.globalRunId), event.sessionId === state.globalRunSessionId,
+  ["starting", event.runId ?? state.globalRunId].includes(state.globalRunId)].every(Boolean);
+
 function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
   if (event.sequence && event.sequence <= state.lastSequence) return state;
+  const markSessionUnread = shouldMarkSessionUnread(state, event);
   let next = { ...state, lastSequence: Math.max(state.lastSequence, event.sequence || 0) };
   const data = event.data ?? {};
   // The backend permits only one main run process-wide. Track that lifecycle before
@@ -427,6 +473,9 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       next.queuePauseReasons = { ...next.queuePauseReasons, [event.sessionId]: "interrupted" };
     }
   }
+  if (markSessionUnread) {
+    next.sessions = next.sessions.map((session) => session.id === event.sessionId ? { ...session, unread: true } : session);
+  }
   if (event.sessionId && event.sessionId !== state.currentSessionId && SESSION_SCOPED_EVENTS[event.kind]) return next;
 
 
@@ -446,6 +495,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         next.currentTitle = next.sessions.find((item) => item.id === next.currentSessionId)?.title ?? next.currentTitle;
       } else if (event.sessionId) {
         next.currentSessionId = event.sessionId;
+        next.sessions = next.sessions.map((session) => session.id === event.sessionId ? { ...session, unread: false } : session);
         next.snapshot = {
           ...next.snapshot!,
           provider: data.provider,
@@ -459,6 +509,8 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
           parseJSONValue(data.blockSequences),
           parseJSONValue(data.toolRecords),
         );
+        const latestPlan = [...next.blocks].reverse().find((block) => block.kind === "plan");
+        next.planMode = latestPlan?.state === "proposed";
         next.runId = data.activeRunID || data.lastRunID || "";
         next.running = data.active === "true";
         next.globalRunId = data.globalActiveRunID || (next.running ? next.runId : "");
@@ -514,6 +566,10 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       break;
     }
     case "text_delta": {
+      // Unphased provider text is the visible answer unless a later tool
+      // boundary proves it was commentary. Keeping the natural-stop stream in
+      // one assistant block prevents the final body from jumping out of the
+      // process rail when the run finishes.
       const commentary = event.textPhase === "commentary";
       const kind = commentary ? "commentary" : "assistant";
       const title = commentary
@@ -590,6 +646,49 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       else next.blocks = next.blocks.map((block) => block.approvalId === event.approvalId ? { ...block, state: event.state || data.decision || "resolved" } : block);
       next.activity = "waiting_model";
       break;
+    case "user_input_requested":
+      next.blocks = [...next.blocks, {
+        id: event.userInputId || `question-${event.sequence}`,
+        kind: "question",
+        runId: event.runId,
+        toolCallId: event.toolCallId,
+        userInputId: event.userInputId,
+        title: data.title || (next.snapshot?.language === "en" ? "Need your input" : "需要你的选择"),
+        state: event.state || "pending",
+        data,
+      }];
+      next.activity = "input";
+      break;
+    case "user_input_resolved":
+      next.blocks = next.blocks.map((block) => block.userInputId === event.userInputId
+        ? { ...block, state: event.state || "answered", data: { ...(block.data ?? {}), ...data } }
+        : block);
+      next.activity = "waiting_model";
+      break;
+    case "plan_proposed":
+      next.blocks = next.blocks.map((block) => block.kind === "plan" && block.state === "proposed"
+        ? { ...block, state: "superseded" }
+        : block);
+      next.blocks = [...next.blocks, {
+        id: event.planId || `plan-${event.sequence}`,
+        kind: "plan",
+        runId: event.runId,
+        toolCallId: event.toolCallId,
+        planId: event.planId,
+        title: data.title || (next.snapshot?.language === "en" ? "Implementation plan" : "实施计划"),
+        content: event.text || "",
+        state: event.state || "proposed",
+        data,
+      }];
+      next.planMode = true;
+      next.activity = "review";
+      break;
+    case "plan_resolved":
+      next.blocks = next.blocks.map((block) => block.planId === event.planId
+        ? { ...block, state: event.state === "executing" ? "approved" : (event.state || "approved") }
+        : block);
+      next.planMode = false;
+      break;
     case "agent_state":
       if (event.agent) next.agents = upsertAgent(next.agents, normalizeAgent(event.agentId ?? "", event.agent, event.state, event.text));
       break;
@@ -606,6 +705,25 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "skill_catalog":
       next.skills = (event.skillCatalog ?? []).map(normalizeSkill);
       break;
+    case "plugin_catalog":
+      next.plugins = (event.pluginCatalog ?? []).map(normalizePlugin);
+      break;
+    case "mcp_state": {
+      if (event.state === "snapshot") {
+        next.mcpServers = parseMCPServers(data.servers);
+        break;
+      }
+      const name = data.server?.trim();
+      if (!name) break;
+      const index = next.mcpServers.findIndex((server) => server.name === name);
+      if (index < 0) break;
+      next.mcpServers = next.mcpServers.map((server, serverIndex) => serverIndex === index ? {
+        ...server,
+        state: data.state || event.state || server.state,
+        error: data.error || event.text || "",
+      } : server);
+      break;
+    }
     case "context_profile":
       next.contextProfile = event.contextProfile ?? null;
       break;
@@ -620,6 +738,8 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       if (next.snapshot) next.snapshot = {
         ...next.snapshot,
         subagentConcurrency: numberValue(data.subagent_max_concurrency, next.snapshot.subagentConcurrency),
+        shellConcurrency: numberValue(data.shell_max_concurrency, next.snapshot.shellConcurrency ?? 2),
+        subagentAwaitSeconds: numberValue(data.subagent_await_seconds, next.snapshot.subagentAwaitSeconds ?? 600),
         chatgptFastMode: data.chatgpt_fast_mode === "true",
       };
       break;
@@ -706,7 +826,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       // Cross-session cancellation pause state is projected before session filtering.
       next.runId = "";
       if (event.kind === "run_failed") {
-        next.error = event.text ?? "Run failed";
+        next.error = "";
         const language = next.snapshot?.language === "en" ? "en" : "zh-CN";
         const failedText = event.text ?? "";
         const truncated = /token limit|output reached|max_turns|max_output|truncated/i.test(failedText);
@@ -736,14 +856,26 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
   };
   const mode = new URLSearchParams(location.search).get("demo") ?? "running";
   const session: Session = {
-    id: snapshot.sessionId, workspace: snapshot.workspace, title: "分析 Azem GUI 设计方案", providerId: snapshot.provider,
+    id: snapshot.sessionId, workspace: snapshot.workspace, title: "优化 Azem 的 UI 动效", providerId: snapshot.provider,
     modelId: snapshot.model, reasoning: snapshot.reasoning, agentMode: snapshot.agentMode,
     updatedAt: new Date().toISOString(),
   };
+  const sessions: Session[] = [
+    session,
+    { ...session, id: "session-codex-plugins", title: "Codex 插件兼容设计", updatedAt: "2026-08-08T10:20:00Z" },
+    { ...session, id: "session-semantic-context", title: "语义上下文重建", updatedAt: "2026-08-07T08:00:00Z" },
+    { ...session, id: "session-llmux-limits", workspace: "/Users/viking/GolandProjects/llmux", title: "Normalize usage limits", updatedAt: "2026-08-09T08:00:00Z", unread: true },
+    { ...session, id: "session-llmux-release", workspace: "/Users/viking/GolandProjects/llmux", title: "发布 v0.2.4", updatedAt: "2026-08-08T02:00:00Z" },
+  ];
   const blocks: Block[] = mode === "empty" ? [] : demoBlocks(mode === "review");
   return {
     snapshot,
-    sessions: [session],
+    projects: [
+      { workspace: "/Users/viking/GolandProjects/azem", updatedAt: "2026-08-09T09:00:00Z" },
+      { workspace: "/Users/viking/GolandProjects/llmux", updatedAt: "2026-08-09T08:00:00Z" },
+      { workspace: "/Users/viking/GolandProjects/venat", updatedAt: "2026-08-08T09:00:00Z" },
+    ],
+    sessions,
     currentSessionId: snapshot.sessionId,
     currentTitle: session.title,
     blocks,
@@ -755,43 +887,136 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
     activity: mode === "running" ? "tool" : "completed",
     approvalMode: snapshot.approvalMode,
     pullRequestMonitors: new Map((snapshot.pullRequestMonitors ?? []).map((monitor) => [monitor.number, monitor])),
-    branches: [{ name: "codex/gui-desktop-experience", current: true }, { name: "main", current: false }],
-    agents: demoAgents(),
-    skills: [{ name: "frontend-design", description: "Production UI design guidance", sourcePath: "~/.agents/skills/frontend-design", bundled: false, eager: true, disabled: false, resourceCount: 4 }],
+    branches: [{ name: "main", current: true }, { name: "feat/usage-store", current: false }],
+    agents: mode === "review" ? demoReviewAgents() : [],
+    skills: [
+      { name: "frontend-design", description: "生产级界面设计与实现", sourcePath: "~/.agents/skills/frontend-design", bundled: false, eager: true, disabled: false, modelVisible: true, resourceCount: 4 },
+      { name: "waza-ui", description: "产品界面与交互质量检查", sourcePath: "~/.codex/plugins/waza/ui", bundled: false, eager: false, disabled: false, modelVisible: true, resourceCount: 7 },
+      { name: "github", description: "Pull Request、Issue 与检查状态", sourcePath: "~/.codex/plugins/github", bundled: false, eager: false, disabled: false, modelVisible: true, resourceCount: 3 },
+    ],
+    mcpServers: [
+      { name: "grep", enabled: true, state: "ready", transport: "streamable_http", target: "https://mcp.grep.app", url: "https://mcp.grep.app", args: [], inheritEnv: false, approval: "never", maxConcurrency: 2, toolCount: 1, tools: [{ name: "searchGitHub", description: "Search public GitHub code", effect: "read_only", requiresApproval: false }], error: "" },
+      { name: "local-docs", enabled: false, state: "disabled", transport: "stdio", target: "npx -y @modelcontextprotocol/server-filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem"], inheritEnv: true, approval: "always", maxConcurrency: 1, toolCount: 0, tools: [], error: "" },
+    ],
+    plugins: [
+      { id: "waza@demo", name: "waza", displayName: "Waza", version: "3.33.0", marketplace: "openai", description: "工程健康、研究、UI 与写作工作流", developerName: "OpenAI", category: "Developer Tools", brandColor: "#3278ef", logoPath: "", enabled: true, skillCount: 6, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "ready", warning: "" },
+      { id: "github@demo", name: "github", displayName: "GitHub", version: "0.1.9", marketplace: "openai", description: "仓库、PR、Issue、Review 与 CI", developerName: "GitHub", category: "Developer Tools", brandColor: "#181717", logoPath: "", enabled: true, skillCount: 2, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: true, capabilities: ["Skills", "MCP"], status: "degraded", warning: "OAuth 等待授权" },
+      { id: "kami@demo", name: "kami", displayName: "Kami", version: "1.12.0", marketplace: "kami", description: "文档与产品页面排版", developerName: "Kami", category: "Productivity", brandColor: "#6d5efc", logoPath: "", enabled: true, skillCount: 1, mcpServerCount: 0, integratedMCPCount: 0, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills"], status: "ready", warning: "" },
+      { id: "custom@demo", name: "custom", displayName: "Custom Toolkit", version: "0.8.0", marketplace: "local", description: "包含未信任的生命周期 Hooks", developerName: "Azem", category: "Local", brandColor: "#ff6a3d", logoPath: "", enabled: true, skillCount: 3, mcpServerCount: 0, integratedMCPCount: 0, hookCount: 2, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "Hooks"], status: "degraded", warning: "Hooks 等待显式信任" },
+      { id: "disabled@demo", name: "disabled", displayName: "实验扩展", version: "0.1.0", marketplace: "local", description: "未启用的实验能力", developerName: "Azem", category: "Experimental", brandColor: "#8b8b84", logoPath: "", enabled: false, skillCount: 1, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "disabled", warning: "" },
+    ],
     modelRoutes: [
-      { Scope: "plan", Role: "", Label: "Plan", Route: {} },
-      { Scope: "compaction", Role: "", Label: "Compaction", Route: {} },
-      { Scope: "subagent", Role: "explore", Label: "Explore", Route: {} },
-      { Scope: "subagent", Role: "worker", Label: "Worker", Route: {} },
-      { Scope: "subagent", Role: "review", Label: "Review", Route: {} },
-      { Scope: "subagent", Role: "verify", Label: "Verify", Route: {} },
+      { Scope: "main", Role: "", Label: "主会话", Route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
+      { Scope: "plan", Role: "", Label: "规划", Route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
+      { Scope: "approval", Role: "", Label: "审批", Route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
+      { Scope: "vision", Role: "", Label: "视觉", Route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
+      { Scope: "compaction", Role: "", Label: "上下文压缩", Route: { provider: "chatgpt", model: "gpt-5.3-spark", reasoning: "low" } },
+      { Scope: "subagent", Role: "research", Label: "Research", Route: { provider: "chatgpt", model: "gpt-5.3-spark", reasoning: "medium" } },
+      { Scope: "subagent", Role: "review", Label: "Review", Route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
     ],
     modelsByProvider: {
       chatgpt: [
-        { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high" },
-        { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "medium" },
+        { id: "gpt-5.6", name: "GPT-5.6", aliases: ["gpt-5.6-sol"], reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.5-codex", name: "GPT-5.5 Codex", reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "code"] },
+        { id: "gpt-5.3-spark", name: "GPT-5.3 Spark", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "medium", capabilities: ["tools", "fast"] },
       ],
-      grok: [{ id: "grok-4.20", name: "Grok 4.20", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high" }],
+      grok: [
+        { id: "grok-4.20", name: "Grok 4.20", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "grok-code-fast", name: "Grok Code Fast", reasoningLevels: ["low", "medium"], defaultReasoning: "medium", capabilities: ["tools", "code", "fast"] },
+      ],
+      openrouter: [
+        { id: "claude-sonnet-4.5", name: "Claude Sonnet 4.5", reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+      ],
     },
+    modelProviders: demoModelProviders(),
+    workspaceDirty: true,
+    workspaceChangedFiles: 4,
+    workspaceAdditions: 186,
+    workspaceDeletions: 32,
     contextProfile: {
       source: "estimated", estimated: true,
+      semanticRevision: 12,
+      writerLag: 0,
+      segments: Array.from({ length: 8 }, (_, index) => ({
+        kind: index < 3 ? "canonical_turn" : "semantic_state",
+        mandatory: index < 3,
+        token_estimate: index < 3 ? 4200 : 2100,
+        content_hash: `demo-segment-${index + 1}`,
+      })),
       contributions: [
         { category: "core", name: "Instructions", tokens: 7340 },
         { category: "conversation", name: "Thread", tokens: 5250 },
         { category: "builtin_tools", name: "Tools", tokens: 2280 },
       ],
     },
-    contextUsage: { inputTokens: 68_000, outputTokens: 4_000, contextLimit: 272_000, reported: true },
+    contextUsage: {
+      inputTokens: 58_000, outputTokens: 4_000, contextLimit: 164_000, reported: true,
+      cacheInputTokens: 96_000, cachedInputTokens: 62_000, cacheWriteTokens: 9_400,
+      cacheReported: true, cacheWriteReported: true,
+    },
+    todo: {
+      goal: "完成 Azem 交互原型并验证动效边界",
+      revision: 12,
+      phases: [{
+        id: "demo-plan",
+        title: "执行计划",
+        items: [
+          { id: "demo-analyse", content: "分析当前界面与事件链", status: "completed" },
+          { id: "demo-tokens", content: "建立视觉与动效 token", status: "completed" },
+          { id: "demo-build", content: "制作完整交互页面", status: "in_progress" },
+          { id: "demo-verify", content: "验证性能与减弱动效", status: "pending" },
+        ],
+      }],
+    },
   };
+}
+
+function demoReviewAgents(): AgentState[] {
+  const observedAt = Date.now();
+  return [
+    ["review-backend", "审查 Go 后端改动", "正在检查调度与持久化边界"],
+    ["review-frontend", "审查前端改动", "正在核对事件投影与交互状态"],
+    ["review-security", "审查安全边界", "正在检查审批与外部副作用"],
+    ["review-architecture", "审查架构与文档一致性", "正在比对架构约束与维护文档"],
+  ].map(([id, description, activity], index) => ({
+    id,
+    type: "review",
+    description,
+    model: "gpt-5.5-codex",
+    background: false,
+    capabilityMode: "read-only",
+    isolation: "none",
+    cwd: ".",
+    activity,
+    warning: "",
+    worktreePath: "",
+    toolCalls: index + 1,
+    turns: 1,
+    tokensUsed: 800 + index * 170,
+    elapsedMs: 12_000 + index * 3_000,
+    state: "running",
+    summary: "",
+    preview: activity,
+    previewKind: "commentary",
+    previewRunId: `run-${id}`,
+    elapsedObservedAt: observedAt,
+  }));
 }
 
 function demoBlocks(review: boolean): Block[] {
   const blocks: Block[] = [
-    { id: "user-demo", kind: "user", runId: "demo-run", content: "参考 Synara UI 与 Codex App，重新设计 Azem GUI，并保留现有 Agent 治理和会话恢复能力。", state: "submitted" },
-    { id: "thinking-demo", kind: "thinking", runId: "demo-run", title: "思考中", content: "先检查现有事件模型和 TUI Block 结构，再建立桌面端的信息架构、状态投影和视觉规范。", state: "completed", data: { elapsedMs: "154000" } },
-    { id: "commentary-demo", kind: "commentary", runId: "demo-run", title: "进度更新", content: "事件链已经确认，接下来核对桌面投影与会话恢复。", textPhase: "commentary", state: "completed" },
-    { id: "tool-demo", kind: "tool", runId: "demo-run", title: "检查桌面事件投影", content: "internal/app/events.go · internal/app/event_broker.go · internal/session/service.go", state: "completed", data: { elapsedMs: "154000" } },
-    { id: "assistant-demo", kind: "assistant", runId: "demo-run", content: "界面采用两种密度状态：新会话时居中输入；开始执行后 Composer 固定到底部，并显示会话时间线与右侧 Inspector。", textPhase: "final_answer", state: "completed" },
+    { id: "user-demo", kind: "user", runId: "demo-run", content: "给我一个具体优化这个项目 UI 的方案，页面切换和文字流式输出的动效都要有。", state: "submitted" },
+    { id: "progress-structure", kind: "commentary", runId: "demo-run", title: "progress", content: "**读取当前前端结构**\nApp、Sidebar、Timeline 与 Inspector", textPhase: "commentary", state: "completed", data: { startedAt: "1000", completedAt: "1100" } },
+    { id: "tool-structure", kind: "tool", runId: "demo-run", title: "coding.read_file", content: "{\"path\":\"frontend/src/components/Timeline.tsx\"}", state: "completed", data: { startedAt: "1100", completedAt: "2200", elapsedMs: "1100" } },
+    { id: "progress-baseline", kind: "commentary", runId: "demo-run", title: "progress", content: "**提取视觉与动效基线**\n暖白纸面 · 8 个流式尾部节点 · reduced motion", textPhase: "commentary", state: "completed", data: { startedAt: "2300", completedAt: "2400" } },
+    { id: "tool-baseline", kind: "tool", runId: "demo-run", title: "coding.search", content: "{\"query\":\"reduced-motion\",\"path\":\"frontend/src\"}", state: "completed", data: { startedAt: "2400", completedAt: "3100", elapsedMs: "700" } },
+    { id: "progress-prototype", kind: "commentary", runId: "demo-run", title: "progress", content: "**构建高保真交互原型**\n页面、工具与文本共享一套节奏", textPhase: "commentary", state: "completed", data: { startedAt: "3200", completedAt: "3300" } },
+    { id: "tool-prototype", kind: "tool", runId: "demo-run", title: "coding.edit_hashline", content: "{\"path\":\"frontend/src/prototype.css\"}", state: "running", data: { startedAt: "3300", elapsedMs: "4800" } },
+    { id: "commentary-demo", kind: "commentary", runId: "demo-run", title: "进度更新", content: "我会保留 Azem 现有的暖色工作台语气，把动效集中在状态发生变化的瞬间：页面切换建立空间关系，工具状态沿轨迹推进，流式文字只让新到达的尾部逐渐显现。", textPhase: "commentary", state: "streaming" },
+    { id: "status-demo", kind: "status", runId: "demo-run", title: "渲染交互原型", content: "designs/azem-ui-motion-concept\n4 个文件 · 浏览器验证 · 示例图导出", state: "running", data: { variant: "artifact", progress: "38" } },
+    { id: "conclusion-demo", kind: "status", runId: "demo-run", title: "方案结论", content: "", state: "ready", data: { variant: "section" } },
+    { id: "assistant-demo", kind: "assistant", runId: "demo-run", title: "方案结论", content: "建议把 Azem 的视觉方向定义为“静谧机械感”。保留暖白纸面和橙色品牌点，把导航、检查器和运行状态组织成连续的空间层。\n\n页面切换使用 320ms 的轻微景深过渡；工具状态使用 180–240ms 的轨迹推进；流式文字让每个新字符从模糊、透明和轻微下移中逐字浮现，旧文本立即稳定，避免整段闪动。", textPhase: "final_answer", state: "streaming" },
   ];
   if (review) {
     blocks.push(
@@ -800,6 +1025,38 @@ function demoBlocks(review: boolean): Block[] {
     );
   }
   return blocks;
+}
+
+function demoModelProviders(): ModelProvider[] {
+  return [
+    {
+      ID: "chatgpt", DisplayName: "ChatGPT", Backend: "subscription", DefaultBaseURL: "", BaseURL: "", EnvKey: "", Enabled: true,
+      CredentialConfigured: true, CredentialSource: "stored", Subscription: true, AccountLabel: "viking@example.com", AccountPlan: "Pro 20x",
+      QuotaAvailable: true, QuotaUsedPercent: 61.5, QuotaResetsAt: 1786492800, QuotaBalance: "US$12.50", ModelsDevID: "openai", ModelsSource: "subscription",
+      Models: [
+        { id: "gpt-5.6", name: "GPT-5.6", contextWindow: 272000, reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "fast"], inputModalities: ["text", "image"], outputModalities: ["text"] },
+        { id: "gpt-5.5-codex", name: "GPT-5.5 Codex", contextWindow: 272000, reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high", capabilities: ["reasoning", "tools"], inputModalities: ["text"], outputModalities: ["text"] },
+        { id: "gpt-5.3-spark", name: "GPT-5.3 Spark", contextWindow: 128000, reasoningLevels: ["low", "medium", "high"], defaultReasoning: "medium", capabilities: ["tools", "fast"], inputModalities: ["text"], outputModalities: ["text"] },
+      ],
+    },
+    {
+      ID: "grok", DisplayName: "Grok", Backend: "subscription", DefaultBaseURL: "", BaseURL: "", EnvKey: "", Enabled: true,
+      CredentialConfigured: true, CredentialSource: "stored", Subscription: true, AccountLabel: "viking@example.com", AccountPlan: "Plus",
+      QuotaAvailable: true, QuotaUsedPercent: 28, QuotaBalance: "无限额度", QuotaUnlimited: true, ModelsDevID: "xai", ModelsSource: "subscription",
+      Models: [
+        { id: "grok-4.20", name: "Grok 4.20", contextWindow: 256000, reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools"], inputModalities: ["text", "image"], outputModalities: ["text"] },
+        { id: "grok-code-fast", name: "Grok Code Fast", contextWindow: 128000, reasoningLevels: ["low", "medium"], defaultReasoning: "medium", capabilities: ["tools"], inputModalities: ["text"], outputModalities: ["text"] },
+      ],
+    },
+    {
+      ID: "openrouter", DisplayName: "OpenRouter", Backend: "openai_compat", DefaultBaseURL: "https://openrouter.ai/api/v1", BaseURL: "https://openrouter.ai/api/v1", EnvKey: "OPENROUTER_API_KEY", Enabled: true,
+      CredentialConfigured: true, CredentialSource: "stored", ModelsDevID: "openrouter", ModelsSource: "provider_api+models.dev", Models: [
+        { id: "claude-sonnet-4.5", name: "Claude Sonnet 4.5", contextWindow: 200000, reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high", capabilities: ["reasoning", "tools"], inputModalities: ["text", "image"], outputModalities: ["text"] },
+        { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", contextWindow: 1000000, reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools"], inputModalities: ["text", "image"], outputModalities: ["text"] },
+        { id: "deepseek-v3.2", name: "DeepSeek V3.2", contextWindow: 128000, reasoningLevels: ["low", "medium", "high"], defaultReasoning: "medium", capabilities: ["tools"], inputModalities: ["text"], outputModalities: ["text"] },
+      ],
+    },
+  ];
 }
 
 function demoAgents(): AgentState[] {
@@ -999,9 +1256,15 @@ function normalizeProject(raw: Record<string, unknown>): Project {
 }
 
 function normalizeBlock(raw: Record<string, unknown>, index: number): Block {
-  const data = raw.data && typeof raw.data === "object" && !Array.isArray(raw.data)
-    ? Object.fromEntries(Object.entries(raw.data as Record<string, unknown>).map(([key, value]) => [key, String(value ?? "")]))
+  const rawData = raw.data ?? raw.Data;
+  const normalizedData = rawData && typeof rawData === "object" && !Array.isArray(rawData)
+    ? Object.fromEntries(Object.entries(rawData as Record<string, unknown>).map(([key, value]) => [key, String(value ?? "")]))
     : undefined;
+  const contentBytes = Number(raw.contentBytes ?? raw.ContentBytes ?? 0);
+  const contentTruncated = Boolean(raw.contentTruncated ?? raw.ContentTruncated);
+  const data = contentBytes > 0 || contentTruncated
+    ? { ...(normalizedData ?? {}), contentBytes: String(contentBytes), contentTruncated: String(contentTruncated) }
+    : normalizedData;
   const rawTextPhase = stringValue(raw, "textPhase", "TextPhase") || data?.phase || "";
   const textPhase = rawTextPhase === "commentary" || rawTextPhase === "final_answer" ? rawTextPhase : undefined;
   return {
@@ -1009,6 +1272,9 @@ function normalizeBlock(raw: Record<string, unknown>, index: number): Block {
     kind: String(raw.kind ?? raw.Kind ?? "assistant") as Block["kind"],
     runId: stringValue(raw, "runId", "RunID"), agentId: stringValue(raw, "agentId", "AgentID"),
     toolCallId: stringValue(raw, "toolCallId", "ToolCallID"), title: stringValue(raw, "title", "Title"),
+    approvalId: stringValue(raw, "approvalId", "ApprovalID") || data?.approvalId,
+    userInputId: stringValue(raw, "userInputId", "UserInputID") || data?.userInputId,
+    planId: stringValue(raw, "planId", "PlanID") || data?.planId,
     content: stringValue(raw, "content", "Content"), textPhase,
     state: stringValue(raw, "state", "State"),
     collapsed: Boolean(raw.collapsed ?? raw.Collapsed),
@@ -1138,6 +1404,7 @@ function normalizeBackgroundProcess(raw: Record<string, unknown>): BackgroundPro
 function normalizeAgent(id: string, raw: Record<string, unknown>, state = "", summary = ""): AgentState {
   return {
     id, type: stringValue(raw, "type", "Type"), description: stringValue(raw, "description", "Description"),
+    parentRunId: stringValue(raw, "parentRunId", "ParentRunID"), parentToolCallId: stringValue(raw, "parentToolCallId", "ParentToolCallID"),
     model: stringValue(raw, "model", "Model"), background: Boolean(raw.background ?? raw.Background),
     capabilityMode: stringValue(raw, "capabilityMode", "CapabilityMode"), isolation: stringValue(raw, "isolation", "Isolation"),
     cwd: stringValue(raw, "cwd", "CWD"), activity: stringValue(raw, "activity", "Activity"),
@@ -1162,8 +1429,53 @@ function normalizeSkill(raw: Record<string, unknown>): SkillEntry {
     name: stringValue(raw, "name", "Name"), description: stringValue(raw, "description", "Description"),
     sourcePath: stringValue(raw, "sourcePath", "SourcePath"), bundled: Boolean(raw.bundled ?? raw.Bundled),
     eager: Boolean(raw.eager ?? raw.Eager), disabled: Boolean(raw.disabled ?? raw.Disabled),
+    modelVisible: Boolean(raw.modelVisible ?? raw.ModelVisible),
     resourceCount: numberValue(raw.resourceCount ?? raw.ResourceCount),
   };
+}
+
+function normalizePlugin(raw: Record<string, unknown>): PluginEntry {
+  return {
+    id: stringValue(raw, "id", "ID"), name: stringValue(raw, "name", "Name"),
+    displayName: stringValue(raw, "displayName", "DisplayName"), version: stringValue(raw, "version", "Version"),
+    marketplace: stringValue(raw, "marketplace", "Marketplace"), description: stringValue(raw, "description", "Description"),
+    developerName: stringValue(raw, "developerName", "DeveloperName"), category: stringValue(raw, "category", "Category"),
+    brandColor: stringValue(raw, "brandColor", "BrandColor"), logoPath: stringValue(raw, "logoPath", "LogoPath"),
+    enabled: Boolean(raw.enabled ?? raw.Enabled), skillCount: numberValue(raw.skillCount ?? raw.SkillCount),
+    mcpServerCount: numberValue(raw.mcpServerCount ?? raw.MCPServerCount), integratedMCPCount: numberValue(raw.integratedMCPCount ?? raw.IntegratedMCPCount),
+    hookCount: numberValue(raw.hookCount ?? raw.HookCount), hooksTrusted: Boolean(raw.hooksTrusted ?? raw.HooksTrusted),
+    hasApp: Boolean(raw.hasApp ?? raw.HasApp), capabilities: ((raw.capabilities ?? raw.Capabilities ?? []) as unknown[]).map(String),
+    status: stringValue(raw, "status", "Status"), warning: stringValue(raw, "warning", "Warning"),
+  };
+}
+
+function normalizeMCPServer(raw: Record<string, unknown>): MCPServerEntry {
+  const rawTools = (raw.tools ?? raw.Tools ?? []) as Array<Record<string, unknown>>;
+  return {
+    name: stringValue(raw, "name", "Name"), enabled: Boolean(raw.enabled ?? raw.Enabled),
+    state: stringValue(raw, "state", "State"), transport: stringValue(raw, "transport", "Transport"),
+    target: stringValue(raw, "target", "Target"), command: stringValue(raw, "command", "Command") || undefined,
+    args: ((raw.args ?? raw.Args ?? []) as unknown[]).map(String), cwd: stringValue(raw, "cwd", "CWD") || undefined,
+    inheritEnv: Boolean(raw.inheritEnv ?? raw.InheritEnv), url: stringValue(raw, "url", "URL") || undefined,
+    approval: stringValue(raw, "approval", "Approval"), maxConcurrency: numberValue(raw.maxConcurrency ?? raw.MaxConcurrency),
+    toolCount: numberValue(raw.toolCount ?? raw.ToolCount),
+    tools: rawTools.map((tool) => ({
+      name: stringValue(tool, "name", "Name"), description: stringValue(tool, "description", "Description"),
+      effect: stringValue(tool, "effect", "Effect"), requiresApproval: Boolean(tool.requiresApproval ?? tool.RequiresApproval),
+    })),
+    error: stringValue(raw, "error", "Error"),
+  };
+}
+
+export function parseMCPServers(raw: string | undefined): MCPServerEntry[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object").map(normalizeMCPServer);
+  } catch {
+    return [];
+  }
 }
 
 function normalizeBranch(raw: Record<string, unknown>): GitBranch {
@@ -1179,6 +1491,17 @@ function normalizeModel(raw: Record<string, unknown>): ModelOption {
 	if (raw.supportsParallel ?? raw.SupportsParallel) capabilities.add("parallel-tools");
 	if (raw.supportsReasoning ?? raw.SupportsReasoning) capabilities.add("reasoning");
 	if (raw.supportsStructured ?? raw.SupportsStructured) capabilities.add("structured-output");
+	const serviceTiers = (raw.serviceTiers ?? raw.ServiceTiers ?? []) as unknown[];
+	const supportsPriorityTier = serviceTiers.some((tier) => {
+		if (typeof tier === "string") return ["priority", "fast"].includes(tier.trim().toLocaleLowerCase());
+		if (!tier || typeof tier !== "object") return false;
+		const id = stringValue(tier as Record<string, unknown>, "id", "ID").trim().toLocaleLowerCase();
+		return id === "priority" || id === "fast";
+	});
+	const additionalSpeedTiers = ((raw.additionalSpeedTiers ?? raw.AdditionalSpeedTiers ?? []) as unknown[])
+		.map(String)
+		.map((tier) => tier.trim().toLocaleLowerCase());
+	if (supportsPriorityTier || additionalSpeedTiers.includes("fast")) capabilities.add("fast");
 	const inputModalities = ((raw.inputModalities ?? raw.InputModalities ?? []) as unknown[]).map(String);
 	const outputModalities = ((raw.outputModalities ?? raw.OutputModalities ?? []) as unknown[]).map(String);
   return {
@@ -1189,6 +1512,7 @@ function normalizeModel(raw: Record<string, unknown>): ModelOption {
 	  ...(capabilities.size > 0 ? { capabilities: [...capabilities] } : {}),
 	  ...(inputModalities.length > 0 ? { inputModalities } : {}),
 	  ...(outputModalities.length > 0 ? { outputModalities } : {}),
+	  ...(Boolean(raw.disabled ?? raw.Disabled) ? { disabled: true } : {}),
   };
 }
 
@@ -1213,12 +1537,23 @@ function parseContextUsage(raw: string | undefined, fallbackLimit = 0): ContextU
     const value = JSON.parse(raw) as Record<string, unknown>;
     const inputTokens = numberValue(value.inputTokens ?? value.InputTokens);
     const outputTokens = numberValue(value.outputTokens ?? value.OutputTokens);
-    return {
+    const usage: ContextUsage = {
       inputTokens,
       outputTokens,
       contextLimit: numberValue(value.contextLimit ?? value.ContextLimit, fallbackLimit) || fallbackLimit,
       reported: Boolean(value.currentTurnMainReported ?? value.CurrentTurnMainReported ?? inputTokens > 0),
     };
+    const cacheInput = value.cacheInputTokens ?? value.CacheInputTokens;
+    const cachedInput = value.cachedInputTokens ?? value.CachedInputTokens;
+    const cacheWrite = value.cacheWriteTokens ?? value.CacheWriteTokens;
+    const cacheReported = value.cacheReported ?? value.CacheReported;
+    const cacheWriteReported = value.cacheWriteReported ?? value.CacheWriteReported;
+    if (cacheInput !== undefined) usage.cacheInputTokens = numberValue(cacheInput);
+    if (cachedInput !== undefined) usage.cachedInputTokens = numberValue(cachedInput);
+    if (cacheWrite !== undefined) usage.cacheWriteTokens = numberValue(cacheWrite);
+    if (cacheReported !== undefined) usage.cacheReported = cacheReported === true || cacheReported === "true";
+    if (cacheWriteReported !== undefined) usage.cacheWriteReported = cacheWriteReported === true || cacheWriteReported === "true";
+    return usage;
   } catch {
     return emptyContextUsage(fallbackLimit);
   }
@@ -1227,8 +1562,19 @@ function parseContextUsage(raw: string | undefined, fallbackLimit = 0): ContextU
 function projectContextUsage(current: ContextUsage, data: Record<string, string>, state?: string): ContextUsage {
   if (data.factSnapshot === "true" && data.usageSnapshot) return parseContextUsage(data.usageSnapshot, current.contextLimit);
   const requestKind = data.requestKind || "main";
-  if (requestKind !== "main" || data.aggregateOnly === "true") return current;
+  const cacheReported = data.cacheStatus === "reported";
+  const cacheWriteReported = data.cacheWriteStatus === "reported";
+  const next: ContextUsage = {
+    ...current,
+    cacheInputTokens: (current.cacheInputTokens ?? 0) + (cacheReported && data.inputTokens !== undefined ? numberValue(data.inputTokens) : 0),
+    cachedInputTokens: (current.cachedInputTokens ?? 0) + (data.cachedInputTokens === undefined ? 0 : numberValue(data.cachedInputTokens)),
+    cacheWriteTokens: (current.cacheWriteTokens ?? 0) + (data.cacheWriteTokens === undefined ? 0 : numberValue(data.cacheWriteTokens)),
+    cacheReported: current.cacheReported || cacheReported,
+    cacheWriteReported: current.cacheWriteReported || cacheWriteReported,
+  };
+  if (requestKind !== "main" || data.aggregateOnly === "true") return next;
   return {
+    ...next,
     inputTokens: data.inputTokens === undefined ? current.inputTokens : numberValue(data.inputTokens),
     outputTokens: data.outputTokens === undefined ? current.outputTokens : numberValue(data.outputTokens),
     contextLimit: data.contextLimit === undefined ? current.contextLimit : numberValue(data.contextLimit, current.contextLimit),
@@ -1264,6 +1610,8 @@ function upsertAgent(agents: AgentState[], agent: AgentState): AgentState[] {
       ...agent,
       type: agent.type || current.type,
       description: agent.description || current.description,
+      parentRunId: agent.parentRunId || current.parentRunId,
+      parentToolCallId: agent.parentToolCallId || current.parentToolCallId,
       model: agent.model || current.model,
       capabilityMode: agent.capabilityMode || current.capabilityMode,
       isolation: agent.isolation || current.isolation,

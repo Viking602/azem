@@ -1,6 +1,6 @@
 # Persistence and Recovery
 
-Last verified: 2026-08-06
+Last verified: 2026-08-10
 
 Azem stores configuration and durable runtime state locally. SQLite is the
 authoritative store for sessions, projections, governed agent execution, usage,
@@ -12,15 +12,16 @@ memory, desktop projects, semantic context, and recovery metadata. Current schem
 
 | Data | Path rule |
 |---|---|
-| Configuration | `$XDG_CONFIG_HOME/azem/config.yaml`, or `~/.config/azem/config.yaml` |
+| Configuration | Windows: `%AppData%\azem\config.yaml`; other platforms: `$XDG_CONFIG_HOME/azem/config.yaml`, or `~/.config/azem/config.yaml` |
 | SQLite database | Next to configuration as `azem.db` |
 | Attachments and other data | `$XDG_DATA_HOME/azem`, or the platform data directory |
 | Runtime state and logs | `$XDG_STATE_HOME/azem`, or the platform user-cache directory |
 
 Azem creates its directories with mode `0700`, and protects the database and
-upgrade backup with mode `0600`. SQLite and file credential stores rely on
-filesystem permissions; use the system keyring when stronger credential
-protection is required.
+upgrade backup with mode `0600` where the platform supports POSIX permission
+bits. SQLite and file credential stores rely on filesystem permissions; use
+Keychain, Windows Credential Manager, or the platform keyring when stronger
+credential protection is required.
 
 ## Schema definitions
 
@@ -117,10 +118,17 @@ queries.
 
 ## Crash recovery
 
-At exclusive startup, `PrepareRecovery` treats active leases as belonging to
-the prior process and expires them immediately. It quarantines incomplete
-action attempts and provider requests so the runtime does not replay unknown
-side effects blindly.
+Before `PrepareRecovery`, each process acquires `azem.db.runtime.lock`. The
+first live process holds it exclusively while recovering, then downgrades it to
+a shared lock for the rest of its lifetime. Additional desktop windows wait
+for that boundary and hold only a shared lock, so they cannot expire leases,
+interrupt Subagents, or quarantine provider requests owned by another live
+process. If the exclusive owner exits before publishing a completed recovery,
+one waiter takes over recovery instead of accepting a partial boundary.
+
+Only an exclusive owner treats active leases as belonging to a prior process
+and expires them immediately. It quarantines incomplete action attempts and
+provider requests so the runtime does not replay unknown side effects blindly.
 
 Recovery then:
 
@@ -163,7 +171,8 @@ Run the persistence suite:
 go test ./internal/store/sqlite
 ```
 
-Required coverage includes previous-schema upgrade, schema 18 control-plane
+Required coverage includes runtime-fence ownership and failed-owner takeover,
+previous-schema upgrade, schema 18 control-plane
 tables and indexes, schema 19 project ownership backfill, schema 20 compaction-state
 invalidation with canonical data retention, current-version reopen, automatic backup, and rejection of a future schema. Run
 `GOWORK=off go test ./...` before release.

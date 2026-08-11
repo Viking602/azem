@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Azem 子智能体任务徽记</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #e9e7e1;
+      --paper: #f8f7f3;
+      --paper-strong: #fffefa;
+      --ink: #1d1d1a;
+      --muted: #777771;
+      --faint: #a5a49d;
+      --line: #dedbd3;
+      --line-strong: #cbc7be;
+      --accent: #f06b45;
+      --shadow: 0 24px 70px rgb(31 29 24 / 12%), 0 2px 8px rgb(31 29 24 / 6%);
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --canvas: #171816;
+      --paper: #20211e;
+      --paper-strong: #252622;
+      --ink: #f2f0e9;
+      --muted: #aaa9a2;
+      --faint: #777871;
+      --line: #343630;
+      --line-strong: #454840;
+      --shadow: 0 24px 70px rgb(0 0 0 / 34%), 0 2px 8px rgb(0 0 0 / 18%);
+    }
+    * { box-sizing: border-box; }
+    body { min-width: 960px; margin: 0; background: var(--canvas); color: var(--ink); font-family: -apple-system, "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif; }
+    button, select { font: inherit; }
+    button { border: 0; cursor: pointer; }
+    .stage { width: min(1320px, calc(100vw - 56px)); min-height: calc(100vh - 56px); margin: 28px auto; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 22px; background: var(--paper); box-shadow: var(--shadow); }
+    header { min-height: 104px; display: flex; align-items: center; justify-content: space-between; gap: 32px; padding: 24px 30px; border-bottom: 1px solid var(--line); }
+    .eyebrow { margin: 0 0 6px; color: var(--accent); font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .16em; }
+    h1 { margin: 0; font-size: 27px; font-weight: 630; letter-spacing: -.035em; }
+    .subhead { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
+    .controls { display: flex; align-items: center; gap: 8px; }
+    .controls button, .controls select { height: 34px; padding: 0 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper-strong); color: var(--muted); }
+    .controls button:hover, .controls select:hover { border-color: var(--line-strong); color: var(--ink); }
+    main { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(360px, .8fr); }
+    .inventory { padding: 28px 30px 34px; border-right: 1px solid var(--line); }
+    .section-label { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
+    .section-label h2 { margin: 0; font-size: 14px; font-weight: 650; letter-spacing: -.01em; }
+    .section-label span { color: var(--faint); font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .icon-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .icon-card { min-height: 92px; display: grid; grid-template-columns: 46px minmax(0, 1fr); align-items: center; gap: 13px; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-strong); transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
+    .icon-card:hover { border-color: color-mix(in srgb, var(--role) 35%, var(--line)); box-shadow: 0 12px 30px -24px color-mix(in srgb, var(--role) 65%, transparent); transform: translateY(-2px); }
+    .icon-card strong, .icon-card small { display: block; }
+    .icon-card strong { font-size: 13px; font-weight: 630; }
+    .icon-card small { margin-top: 4px; color: var(--faint); font-size: 10px; }
+    .glyph { --size: 34px; width: var(--size); height: var(--size); display: inline-grid; place-items: center; flex: 0 0 var(--size); border-radius: 34%; background: color-mix(in srgb, var(--role) 8%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--role) 12%, transparent); color: var(--role); }
+    .glyph svg { width: 84%; height: 84%; overflow: visible; }
+    .glyph .structure, .glyph .secondary { fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+    .glyph .secondary { stroke: var(--secondary); }
+    .glyph .anchor { fill: currentColor; stroke: var(--paper); stroke-width: 1; transform-box: fill-box; transform-origin: center; }
+    .glyph.running .anchor { animation: signal 1.7s ease-in-out infinite; }
+    .preview { padding: 28px 24px 34px; }
+    .run-card { overflow: hidden; border: 1px solid var(--line-strong); border-radius: 15px; background: var(--paper-strong); box-shadow: 0 12px 34px -28px rgb(20 20 17 / 32%); }
+    .run-head { min-height: 76px; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+    .run-mark { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 9px; color: var(--accent); font: 700 15px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .run-head strong, .run-head small { display: block; }
+    .run-head strong { font-size: 14px; }
+    .run-head small { margin-top: 4px; color: var(--faint); font-size: 10px; }
+    .run-status { color: #318a68; font-size: 11px; font-weight: 650; }
+    .agent-list { display: grid; padding: 6px; }
+    .agent-row { min-height: 58px; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 7px 9px; border-radius: 9px; }
+    .agent-row:hover { background: color-mix(in srgb, var(--line) 45%, transparent); }
+    .agent-row strong, .agent-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-row strong { font-size: 12px; font-weight: 620; }
+    .agent-row small { margin-top: 3px; color: var(--faint); font-size: 10px; }
+    .agent-row em { color: #318a68; font-size: 10px; font-style: normal; }
+    .scale-strip { display: grid; gap: 10px; margin-top: 20px; padding: 15px; border-top: 1px solid var(--line); }
+    .scale-row { display: flex; align-items: center; gap: 15px; min-height: 38px; }
+    .scale-row code { width: 32px; color: var(--faint); font-size: 9px; }
+    .scale-row span:last-child { color: var(--muted); font-size: 11px; }
+    footer { display: flex; justify-content: space-between; gap: 20px; padding: 14px 30px; border-top: 1px solid var(--line); color: var(--faint); font-size: 10px; }
+    @keyframes signal { 0%, 100% { opacity: .62; transform: scale(.82); } 48% { opacity: 1; transform: scale(1.08); } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <section class="stage" data-screen-label="Azem Subagent Identity System">
+    <header>
+      <div><p class="eyebrow">AZEM / AGENT IDENTITIES</p><h1>子智能体任务徽记</h1><p class="subhead">以职责结构编码身份，不再使用 Codex App 的四瓣子智能体图标。</p></div>
+      <div class="controls"><select id="scale" aria-label="图标尺寸"><option value="34">34px 列表</option><option value="26">26px 时间线</option><option value="20">20px 堆叠</option><option value="14">14px 标签</option></select><button id="state" type="button">运行信号：开</button><button id="theme" type="button">深色</button></div>
+    </header>
+    <main>
+      <section class="inventory"><div class="section-label"><h2>角色谱系</h2><span>12 SEMANTIC MARKS</span></div><div class="icon-grid" id="icon-grid"></div></section>
+      <aside class="preview"><div class="section-label"><h2>真实界面密度</h2><span>RUN CARD / DRAWER</span></div><section class="run-card"><div class="run-head"><span class="run-mark">⌘</span><span><strong>4 个子智能体协作</strong><small>架构 · 安全 · 前端 · 后端</small></span><em class="run-status">4 个运行中</em></div><div class="agent-list" id="agent-list"></div><div class="scale-strip" id="scale-strip"></div></section></aside>
+    </main>
+    <footer><span>形态来源：Azem 前端任务结构与角色提示词</span><span>锚点负责运行信号 · 轮廓负责角色识别</span></footer>
+  </section>
+  <script>
+    const roles = [
+      ["architecture", "架构", "拓扑与模块边界", "#6474b9", "#9aa5d7"], ["security", "安全", "权限与副作用", "#bf5d71", "#e0a0ad"],
+      ["interface", "前端", "界面与交互状态", "#8b6cc7", "#b8a5df"], ["systems", "后端", "运行时与持久化", "#4f83a6", "#91b7ce"],
+      ["verify", "验证", "测试与回归矩阵", "#318a68", "#82bda7"], ["plan", "规划", "路径与决策拆分", "#a66c3f", "#d2a57f"],
+      ["explore", "探索", "定位与空间搜索", "#3f8c98", "#87bbc2"], ["research", "研究", "资料与证据收集", "#5979ad", "#96acd0"],
+      ["report", "汇报", "结论与文档交付", "#8a7462", "#b9aa9d"], ["build", "实现", "编码与结构装配", "#c35e4c", "#df9b8e"],
+      ["review", "审查", "差异与风险判断", "#c07a3e", "#dda977"], ["general", "通用", "自定义子智能体", "#6f746f", "#a9ada8"]
+    ];
+    const marks = {
+      architecture: '<path class="structure" d="M7 9.5v2.5h10V9.5M12 12v2.5"/><rect class="structure" x="3.75" y="3.75" width="6.5" height="5.75" rx="1.4"/><rect class="secondary" x="13.75" y="3.75" width="6.5" height="5.75" rx="1.4"/><rect class="structure" x="8.75" y="14.5" width="6.5" height="5.75" rx="1.4"/><circle class="anchor" cx="12" cy="12" r="1.35"/>',
+      security: '<path class="structure" d="M12 3.25 19 6v5.5c0 4.25-2.55 7.2-7 9.1-4.45-1.9-7-4.85-7-9.1V6z"/><path class="secondary" d="M12 11.8v3.3"/><circle class="anchor" cx="12" cy="9.7" r="1.65"/>',
+      interface: '<rect class="structure" x="3.5" y="4.25" width="17" height="15.5" rx="2.4"/><path class="secondary" d="M3.75 8.8h16.5M8 13h8M8 16h5"/><circle class="anchor" cx="6.5" cy="6.55" r="1.05"/>',
+      systems: '<rect class="structure" x="3.5" y="4" width="17" height="6" rx="2"/><rect class="secondary" x="3.5" y="14" width="17" height="6" rx="2"/><path class="structure" d="M9.5 7h7M9.5 17h7"/><circle class="anchor" cx="6.6" cy="7" r="1.25"/><circle class="anchor" cx="6.6" cy="17" r="1.25"/>',
+      verify: '<circle class="structure" cx="12" cy="12" r="8.25"/><path class="secondary" d="m7.8 12.2 2.7 2.8 5.9-6.2"/><circle class="anchor" cx="18.35" cy="6.55" r="1.35"/>',
+      plan: '<path class="structure" d="M6 17.5V7h6v10h6V7"/><circle class="secondary" cx="6" cy="18" r="2.1"/><circle class="secondary" cx="12" cy="6" r="2.1"/><circle class="secondary" cx="18" cy="6" r="2.1"/><circle class="anchor" cx="12" cy="18" r="1.65"/>',
+      explore: '<path class="structure" d="M18.4 15.7A7.7 7.7 0 1 1 19 9.9"/><path class="secondary" d="m13.4 10.6 5.3-5.3-2 6.9-6.9 2z"/><circle class="anchor" cx="14.25" cy="9.75" r="1.35"/>',
+      research: '<path class="structure" d="M3.75 5.25c3.7-.7 6.45.25 8.25 2.3v11.2c-1.8-2.05-4.55-3-8.25-2.3z"/><path class="secondary" d="M20.25 5.25c-3.7-.7-6.45.25-8.25 2.3v11.2c1.8-2.05 4.55-3 8.25-2.3z"/><circle class="anchor" cx="12" cy="7.55" r="1.3"/>',
+      report: '<path class="structure" d="M6 3.75h8l4 4v12.5H6zM14 3.75v4h4"/><path class="secondary" d="M9 12h6M9 15.5h4"/><circle class="anchor" cx="8.2" cy="8.15" r="1.2"/>',
+      build: '<path class="structure" d="M8 4H4v16h4M16 4h4v16h-4"/><path class="secondary" d="m12 6 4.5 6-4.5 6-4.5-6z"/><circle class="anchor" cx="12" cy="12" r="1.7"/>',
+      review: '<path class="structure" d="M12 3.5 20.5 12 12 20.5 3.5 12z"/><path class="secondary" d="M7.2 12c1.3-1.85 2.9-2.75 4.8-2.75s3.5.9 4.8 2.75c-1.3 1.85-2.9 2.75-4.8 2.75S8.5 13.85 7.2 12Z"/><circle class="anchor" cx="12" cy="12" r="1.55"/>',
+      general: '<path class="structure" d="m12 3.5 7.35 4.25v8.5L12 20.5l-7.35-4.25v-8.5zM7 9.2l5 2.8 5-2.8M12 12v5.1"/><circle class="anchor" cx="12" cy="12" r="1.55"/>'
+    };
+    let running = true;
+    const glyph = (role, size = 34) => `<span class="glyph ${running ? 'running' : ''}" style="--size:${size}px;--role:${role[3]};--secondary:${role[4]}"><svg viewBox="0 0 24 24" aria-hidden="true">${marks[role[0]]}</svg></span>`;
+    function render() {
+      const size = Number(document.querySelector('#scale').value);
+      document.querySelector('#icon-grid').innerHTML = roles.map(role => `<article class="icon-card" style="--role:${role[3]}">${glyph(role, size)}<span><strong>${role[1]}</strong><small>${role[2]}</small></span></article>`).join('');
+      const live = [roles[0], roles[1], roles[2], roles[3]];
+      const names = ['审查架构与文档一致性', '审查安全边界', '审查前端改动', '审查 Go 后端改动'];
+      document.querySelector('#agent-list').innerHTML = live.map((role, index) => `<div class="agent-row">${glyph(role, 34)}<span><strong>${names[index]}</strong><small>${role[2]}</small></span><em>运行中</em></div>`).join('');
+      document.querySelector('#scale-strip').innerHTML = [14,20,26,34].map(n => `<div class="scale-row"><code>${n}px</code>${glyph(roles[6], n)}<span>${n === 14 ? '子会话标签' : n === 20 ? '堆叠摘要' : n === 26 ? '时间线列表' : '抽屉主列表'}</span></div>`).join('');
+    }
+    document.querySelector('#scale').addEventListener('change', render);
+    document.querySelector('#state').addEventListener('click', event => { running = !running; event.currentTarget.textContent = `运行信号：${running ? '开' : '关'}`; render(); });
+    document.querySelector('#theme').addEventListener('click', event => { const dark = document.documentElement.dataset.theme !== 'dark'; document.documentElement.dataset.theme = dark ? 'dark' : ''; event.currentTarget.textContent = dark ? '浅色' : '深色'; });
+    render();
+  </script>
+</body>
+</html>

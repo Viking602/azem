@@ -13,6 +13,14 @@ import (
 	"time"
 )
 
+func TestDefaultClientFollowsProxyResolver(t *testing.T) {
+	client := NewClient()
+	transport, ok := client.HTTP.Transport().(*http.Transport)
+	if !ok || transport.Proxy == nil {
+		t.Fatalf("Grok transport = %#v", client.HTTP.Transport())
+	}
+}
+
 func TestDiscoveryAndDevicePolling(t *testing.T) {
 	var polls atomic.Int32
 	var server *httptest.Server

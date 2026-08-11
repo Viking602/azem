@@ -39,3 +39,12 @@ func TestResolvePathsHonorsXDGConfigHome(t *testing.T) {
 		t.Fatalf("database = %q, want %q", paths.Database, want)
 	}
 }
+
+func TestDefaultConfigRootUsesWindowsAppData(t *testing.T) {
+	if got := defaultConfigRoot("windows", `C:\Users\user`, `C:\Users\user\AppData\Roaming`); got != `C:\Users\user\AppData\Roaming` {
+		t.Fatalf("Windows config root = %q", got)
+	}
+	if got := defaultConfigRoot("darwin", "/Users/user", "/Users/user/Library/Application Support"); got != "/Users/user/.config" {
+		t.Fatalf("macOS config root = %q", got)
+	}
+}

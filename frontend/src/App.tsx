@@ -1,11 +1,12 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { execute, initialise, isDesktopRuntime, subscribe, subscribePullRequests } from "./bridge";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Check, ChevronDown, Command, Search } from "lucide-react";
+import { execute, initialise, isDesktopRuntime, openProject, subscribe, subscribePullRequests } from "./bridge";
 import AgentSideChat from "./components/AgentSideChat";
 import Inspector from "./components/Inspector";
 import Sidebar from "./components/Sidebar";
 import ThreadSurface from "./components/ThreadSurface";
 import { translator } from "./i18n";
-import { normalizeUIFont, useRuntimeStore } from "./store";
+import { normalizeUIFont, shouldMarkSessionUnread, useRuntimeStore } from "./store";
 import { refreshPullRequestDashboard } from "./pullRequests";
 import type { RuntimeEvent } from "./types";
 
@@ -17,9 +18,39 @@ const SettingsDialog = lazy(() => import("./components/SettingsDialog"));
 const PullRequestPanel = lazy(() => import("./components/PullRequestPanel"));
 
 const STREAM_FRAME_INTERVAL_MS = 32;
+const PROJECTION_RESYNC_DELAY_MS = 32;
 const STREAM_EVENT_KINDS = new Set(["text_delta", "thinking_delta"]);
 const TERMINAL_EVENT_KINDS = new Set(["run_finished", "run_failed", "run_cancelled"]);
+const HIGH_PRIORITY_EVENT_KINDS = new Set([
+  ...TERMINAL_EVENT_KINDS,
+  "approval_requested",
+  "approval_resolved",
+]);
+
+// Interaction-blocking and terminal events must not wait behind the rAF-paced
+// streaming queue (which can be paused in background windows or delayed by the
+// per-frame text budget): dispatch them immediately.
+export function isHighPriorityEvent(kind: string): boolean {
+  return HIGH_PRIORITY_EVENT_KINDS.has(kind);
+}
 const SYSTEM_FONT_STACK = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif';
+
+function refreshProjection(event: RuntimeEvent, timers: Map<string, number>, setError: (message: string) => void) {
+  const sessionId = event.sessionId;
+  if (event.kind !== "projection_resync" || !sessionId || sessionId !== useRuntimeStore.getState().currentSessionId) return;
+  window.clearTimeout(timers.get(sessionId));
+  timers.set(sessionId, window.setTimeout(() => {
+    timers.delete(sessionId);
+    void execute({ kind: "refresh_session", target: sessionId, sessionId })
+      .catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
+  }, PROJECTION_RESYNC_DELAY_MS));
+}
+
+function persistForeignSessionCompletion(event: RuntimeEvent, setError: (message: string) => void) {
+  if (!shouldMarkSessionUnread(useRuntimeStore.getState(), event)) return;
+  void execute({ kind: "mark_session_unread", target: event.sessionId, sessionId: event.sessionId })
+    .catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
+}
 
 function interfaceFontStack(font: string) {
   if (font === "system") return SYSTEM_FONT_STACK;
@@ -92,13 +123,14 @@ export default function App() {
   const uiFont = useRuntimeStore((state) => state.uiFont);
   const uiFontSize = useRuntimeStore((state) => state.uiFontSize);
   const [appearanceReady, setAppearanceReady] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(238);
+  const [sidebarWidth, setSidebarWidth] = useState(246);
   const queue = useRef<RuntimeEvent[]>([]);
   const frame = useRef(0);
   const lastFlush = useRef(-Infinity);
 
   useEffect(() => {
     let workspaceRefreshTimer = 0;
+    const projectionRefreshTimers = new Map<string, number>();
     const refreshWorkspace = () => {
       window.clearTimeout(workspaceRefreshTimer);
       workspaceRefreshTimer = window.setTimeout(() => {
@@ -118,10 +150,23 @@ export default function App() {
       if (queue.current.length) frame.current = requestAnimationFrame(flush);
     };
     const unsubscribe = subscribe((event) => {
-      queue.current.push(event);
-      if (!frame.current) frame.current = requestAnimationFrame(flush);
+      persistForeignSessionCompletion(event, setError);
+      refreshProjection(event, projectionRefreshTimers, setError);
+      if (isHighPriorityEvent(event.kind)) {
+        // 高优先级事件不等 rAF：先整体应用已排队的流式事件（保持 sequence
+        // 单调，避免低序号文本被 lastSequence 去重丢弃），再立即派发本事件。
+        if (frame.current) { cancelAnimationFrame(frame.current); frame.current = 0; }
+        const pending = queue.current;
+        queue.current = [];
+        if (pending.length) applyEvents(pending);
+        applyEvents([event]);
+        lastFlush.current = performance.now();
+      } else {
+        queue.current.push(event);
+        if (!frame.current) frame.current = requestAnimationFrame(flush);
+      }
       const tool = event.data?.name ?? "";
-      if (["run_finished", "run_failed", "run_cancelled"].includes(event.kind) ||
+      if (TERMINAL_EVENT_KINDS.has(event.kind) ||
           (event.kind === "tool_finished" && ["coding.edit_hashline", "coding.write_file", "coding.gofmt"].includes(tool))) refreshWorkspace();
     });
     const unsubscribePullRequests = subscribePullRequests((monitor) => useRuntimeStore.getState().updatePullRequestMonitor(monitor));
@@ -131,8 +176,10 @@ export default function App() {
         hydrate(value, !isDesktopRuntime());
         void Promise.all([
           execute({ kind: "list_sessions" }),
+          execute({ kind: "list_git_branches" }),
           execute({ kind: "list_models", sessionId: value.sessionId }),
           execute({ kind: "list_model_providers", sessionId: value.sessionId }),
+          execute({ kind: "list_model_routes", sessionId: value.sessionId }),
         ]).catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
         void refreshPullRequestDashboard();
         const sessionId = new URLSearchParams(location.search).get("session");
@@ -144,6 +191,7 @@ export default function App() {
       unsubscribePullRequests();
       if (frame.current) cancelAnimationFrame(frame.current);
       window.clearTimeout(workspaceRefreshTimer);
+      for (const timer of projectionRefreshTimers.values()) window.clearTimeout(timer);
       window.removeEventListener("focus", refreshWorkspace);
     };
   }, [applyEvents, hydrate, setError]);
@@ -181,6 +229,15 @@ export default function App() {
       if (primary && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setCommandOpen(true);
+      } else if (primary && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        void execute({ kind: "new_session" }).then(() => useRuntimeStore.getState().setView("thread")).catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
+      } else if (primary && event.key === "2") {
+        event.preventDefault();
+        useRuntimeStore.getState().setView("files");
+      } else if (primary && event.key === "3") {
+        event.preventDefault();
+        useRuntimeStore.getState().setView("changes");
       } else if (primary && event.key === ",") {
         event.preventDefault();
         setSettingsOpen(true);
@@ -204,12 +261,17 @@ export default function App() {
           requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".inspector-toggle")?.focus());
           return;
         }
+        if (useRuntimeStore.getState().view === "files" || useRuntimeStore.getState().view === "changes") {
+          event.preventDefault();
+          useRuntimeStore.getState().setView("projects");
+          return;
+        }
         if (running) document.querySelector<HTMLButtonElement>("[data-cancel-run]")?.click();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [commandOpen, running, setCommandOpen, setSettingsOpen, settingsOpen]);
+  }, [commandOpen, running, setCommandOpen, setError, setSettingsOpen, settingsOpen]);
 
   if (!snapshot) {
     // Language not hydrated yet — default to zh-CN until snapshot arrives.
@@ -218,17 +280,20 @@ export default function App() {
 
   const hasContext = blocks.length > 0 || running;
   const showPullRequest = Boolean(selectedPullRequestNumber);
-  const showSideChat = !showPullRequest && (view === "thread" || view === "agents") && Boolean(selectedAgentId);
+  const showAgentDetailDrawer = !showPullRequest && (view === "thread" || view === "agents") && Boolean(selectedAgentId);
   const showAgentDrawer = view === "agents" && !selectedAgentId;
-  const showInspector = !showPullRequest && view === "thread" && hasContext && inspectorOpen && !showSideChat;
-  const layoutMode = showPullRequest ? "pull-request" : showSideChat ? "agent" : showInspector ? "open" : "closed";
+  const showInspector = !showPullRequest && view === "thread" && hasContext && inspectorOpen && !showAgentDetailDrawer;
+  // Subagent inspection is an overlay, not another workspace column. Opening a
+  // child conversation must never reflow or squeeze the parent transcript.
+  const layoutMode = showPullRequest ? "pull-request" : showInspector ? "open" : "closed";
   const t = translator(snapshot.language);
   const lazyFallback = <div className="app-loading"><span className="azem-mark" />{t("loading")}</div>;
   return (
     <div className="desktop-shell" data-runtime={String(isDesktopRuntime())} data-platform={navigator.platform} style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}>
+      <AppTitleBar />
       <div className="workspace-grid" data-inspector={layoutMode}>
         <Sidebar />
-        <ResizeHandle value={sidebarWidth} setValue={setSidebarWidth} min={210} max={320} />
+        <ResizeHandle value={sidebarWidth} setValue={setSidebarWidth} min={224} max={340} />
         <main className="workspace-main">
           {view === "thread" || view === "agents" ? (
             <ThreadSurface />
@@ -245,8 +310,14 @@ export default function App() {
               <SubagentsDrawer />
             </div>
           </Suspense>}
+          {showAgentDetailDrawer && (
+            <div className="subagent-detail-drawer-layer" onClick={(event) => {
+              if (event.target === event.currentTarget) useRuntimeStore.getState().selectAgent("");
+            }}>
+              <AgentSideChat />
+            </div>
+          )}
         </main>
-        {showSideChat && <AgentSideChat />}
         {showPullRequest && <Suspense fallback={null}><PullRequestPanel /></Suspense>}
       </div>
       {settingsOpen && (
@@ -261,6 +332,99 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function AppTitleBar() {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const branches = useRuntimeStore((state) => state.branches);
+  const projects = useRuntimeStore((state) => state.projects);
+  const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
+  const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
+  const setSettingsOpen = useRuntimeStore((state) => state.setSettingsOpen);
+  const setError = useRuntimeStore((state) => state.setError);
+  const [projectOpen, setProjectOpen] = useState(false);
+  const [projectSearch, setProjectSearch] = useState("");
+  const projectSwitch = useRef<HTMLDivElement>(null);
+  const t = translator(snapshot.language);
+  const project = snapshot.workspace.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
+  const branch = branches.find((item) => item.current)?.name || snapshot.currentBranch || t("noBranches");
+  const catalog = projects.some((item) => item.workspace === snapshot.workspace)
+    ? projects
+    : [{ workspace: snapshot.workspace, updatedAt: "" }, ...projects];
+  const visibleProjects = useMemo(() => {
+    const query = projectSearch.trim().toLowerCase();
+    if (!query) return catalog;
+    return catalog.filter((item) => `${projectName(item.workspace)} ${item.workspace}`.toLowerCase().includes(query));
+  }, [catalog, projectSearch]);
+
+  useEffect(() => {
+    if (!projectOpen) return;
+    const close = (event: PointerEvent) => {
+      if (projectSwitch.current && !projectSwitch.current.contains(event.target as Node)) setProjectOpen(false);
+    };
+    const closeWithKeyboard = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setProjectOpen(false);
+        setProjectSearch("");
+      }
+    };
+    document.addEventListener("pointerdown", close, true);
+    document.addEventListener("keydown", closeWithKeyboard);
+    return () => {
+      document.removeEventListener("pointerdown", close, true);
+      document.removeEventListener("keydown", closeWithKeyboard);
+    };
+  }, [projectOpen]);
+
+  return <header className="app-titlebar titlebar-region">
+    <div className="window-controls" aria-hidden="true"><i /><i /><i /></div>
+    <div className="titlebar-project-switch" ref={projectSwitch}>
+      <button type="button" className="titlebar-project" title={snapshot.workspace} aria-haspopup="listbox" aria-expanded={projectOpen} onClick={() => setProjectOpen((open) => !open)}>
+        <strong>{project}</strong><b aria-hidden="true">/</b><span>{branch}</span><ChevronDown size={14} />
+      </button>
+      {projectOpen && <section className="titlebar-project-popover" aria-label={snapshot.language === "zh-CN" ? "切换项目与分支" : "Switch project and branch"}>
+        <header><strong>{snapshot.language === "zh-CN" ? "项目与分支" : "Projects and branches"}</strong><span>{snapshot.language === "zh-CN" ? "选择工作上下文" : "Choose work context"}</span></header>
+        <label className="titlebar-project-search"><Search size={14} /><input autoFocus value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder={snapshot.language === "zh-CN" ? "搜索项目或分支…" : "Search projects or branches…"} /><kbd>⌘⇧O</kbd></label>
+        <div className="titlebar-project-options" role="listbox">
+          {visibleProjects.map((item) => {
+            const selected = item.workspace === snapshot.workspace;
+            const name = projectName(item.workspace);
+            const prototypeDemo = snapshot.workspace.endsWith("/azem");
+            const optionBranch = selected ? branch : prototypeDemo && name === "llmux" ? "feat/usage-store" : prototypeDemo && name === "venat" ? "main" : compactParent(item.workspace);
+            const optionMeta = selected
+              ? snapshot.language === "zh-CN" ? `${workspaceChangedFiles} 个改动` : `${workspaceChangedFiles} changes`
+              : prototypeDemo && name === "llmux" ? "1 个 PR"
+                : prototypeDemo && name === "venat" ? snapshot.language === "zh-CN" ? "工作树干净" : "Clean"
+                  : "";
+            return <button key={item.workspace} type="button" role="option" aria-selected={selected} onClick={() => {
+              setProjectOpen(false);
+              if (selected) useRuntimeStore.getState().setView("projects");
+              else void openProject(item.workspace).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+            }}>
+              <span className="titlebar-project-letter">{name.slice(0, 1).toUpperCase()}</span>
+              <span><strong>{name}</strong><small>{optionBranch}</small></span>
+              <em>{optionMeta}</em>
+              <Check size={14} />
+            </button>;
+          })}
+        </div>
+        {visibleProjects.length === 0 && <p>{snapshot.language === "zh-CN" ? "没有匹配的项目" : "No matching projects"}</p>}
+        <footer><span>↑↓ {snapshot.language === "zh-CN" ? "导航" : "Navigate"}</span><span>↵ {snapshot.language === "zh-CN" ? "选择" : "Select"}</span><span>esc {snapshot.language === "zh-CN" ? "关闭" : "Close"}</span></footer>
+      </section>}
+    </div>
+    <button type="button" className="titlebar-command" onClick={() => setCommandOpen(true)} aria-label={t("command")}>
+      <span>{snapshot.language === "zh-CN" ? "搜索、跳转或执行命令" : "Search, jump, or run a command"}</span><kbd><Command size={11} />K</kbd>
+    </button>
+  </header>;
+}
+
+function projectName(workspace: string) {
+  return workspace.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
+}
+
+function compactParent(workspace: string) {
+  const parts = workspace.split(/[\\/]/).filter(Boolean);
+  return parts.slice(-2, -1)[0] || workspace;
 }
 
 function ResizeHandle({ value, setValue, min, max }: { value: number; setValue: (value: number) => void; min: number; max: number }) {

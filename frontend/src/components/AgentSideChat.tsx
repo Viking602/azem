@@ -9,7 +9,7 @@ import SubagentGlyph from "./SubagentGlyph";
 import { formatDuration } from "./ThreadSurface";
 import { TimelineFeed } from "./Timeline";
 
-/** Codex-style docked side chat for subagent transcripts. */
+/** Focused drawer for one subagent transcript. */
 export default function AgentSideChat() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const agents = useRuntimeStore((state) => state.agents);
@@ -19,41 +19,45 @@ export default function AgentSideChat() {
   const selectAgent = useRuntimeStore((state) => state.selectAgent);
   const setError = useRuntimeStore((state) => state.setError);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const followTail = useRef(true);
   const language = snapshot.language;
   const t = translator(language);
   const agent = agents.find((item) => item.id === selectedAgentId) || null;
   const running = isSubagentActive(agent?.state);
   const cancellable = agent?.state === "initializing" || agent?.state === "queued" || agent?.state === "running" || agent?.state === "started";
   const role = agent ? subagentDisplayName(agent, agents, language) : selectedAgentId || t("subagents");
+  const activeRunId = agentBlocks.reduce((latest, block) => block.runId || latest, "") || agent?.previewRunId || "";
   const live = useLiveAgentStats(agent, agentBlocks, selectedAgentId, running);
 
-  // Initial hydrate + light poll while running so the side chat stays live even if a frame was missed.
+  // Hydrate once. Live agent events are the source of truth; polling the full
+  // transcript repeatedly made large subagent chats deserialize and rerender
+  // every 1.5 seconds.
   useEffect(() => {
     if (!selectedAgentId) return;
     let cancelled = false;
-    const inspect = () => {
-      void execute({ kind: "inspect_agent", target: selectedAgentId, sessionId: currentSessionId })
-        .catch((cause) => {
-          if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-        });
-    };
-    inspect();
-    const shouldPoll = running;
-    if (!shouldPoll) return () => { cancelled = true; };
-    const timer = window.setInterval(inspect, 1500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [currentSessionId, selectedAgentId, running, setError]);
+    followTail.current = true;
+    requestAnimationFrame(() => titleRef.current?.focus());
+    void execute({ kind: "inspect_agent", target: selectedAgentId, sessionId: currentSessionId })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { cancelled = true; };
+  }, [currentSessionId, selectedAgentId, setError]);
 
   useEffect(() => {
     const node = scrollRef.current;
-    if (!node) return;
-    node.scrollTop = node.scrollHeight;
+    if (!node || !followTail.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (followTail.current) node.scrollTop = node.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
   }, [agentBlocks, selectedAgentId]);
 
-  const close = () => selectAgent("");
+  const close = () => {
+    selectAgent("");
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".subagent-summary-button, .subagent-run-card-summary")?.focus());
+  };
   const cancel = async () => {
     if (!selectedAgentId) return;
     try { await execute({ kind: "cancel_agent", target: selectedAgentId, sessionId: currentSessionId }); }
@@ -78,14 +82,14 @@ export default function AgentSideChat() {
   };
 
   return (
-    <aside className="agent-side-chat" aria-label={t("sideChat")}>
+    <aside className="agent-side-chat" role="dialog" aria-modal="true" aria-labelledby="subagent-detail-title">
       <header className="agent-side-chat-header">
         <div className="agent-side-chat-heading">
-          {agent ? <SubagentGlyph agent={agent} size={20} /> : <Bot size={18} aria-hidden="true" />}
+          {agent ? <SubagentGlyph agent={agent} size={34} /> : <Bot size={24} aria-hidden="true" />}
           <div className="agent-side-chat-title">
-            <strong title={role}>{role}</strong>
+            <span>{t("subagentConversation")}</span>
+            <h2 id="subagent-detail-title" ref={titleRef} tabIndex={-1} title={role}>{role}</h2>
             <small>
-              <span className="agent-side-chat-role">{t("subagents")}</span>
               <em data-state={agent?.state || "idle"}>{subagentStatusLabel(agent?.state, language)}</em>
               {(running || live.elapsedMs > 0) ? <time>{formatDuration(live.elapsedMs)}</time> : null}
             </small>
@@ -104,32 +108,48 @@ export default function AgentSideChat() {
       </header>
 
       {agents.length > 1 && (
-        <div className="agent-side-chat-tabs" role="tablist" aria-label={t("subagents")}>
-          {agents.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="tab"
-              aria-selected={item.id === selectedAgentId}
-              tabIndex={item.id === selectedAgentId ? 0 : -1}
-              aria-controls="subagent-detail-panel"
-              className={item.id === selectedAgentId ? "active" : ""}
-              data-agent-tab={item.id}
-              onClick={() => switchAgent(item.id)}
-              onKeyDown={(event) => navigateTabs(event, item.id)}
-              title={subagentDisplayName(item, agents, language)}
-              aria-label={`${subagentDisplayName(item, agents, language)}，${subagentStatusLabel(item.state, language)}`}
-            >
-              <SubagentGlyph agent={item} size={14} />
-              <span>{item.type || subagentDisplayName(item, agents, language)}</span>
-            </button>
-          ))}
+        <div className="agent-side-chat-switcher">
+          <span>{t("subagentTeam")}</span>
+          <div className="agent-side-chat-tabs" role="tablist" aria-label={t("subagents")}>
+            {agents.map((item) => {
+              const itemName = subagentDisplayName(item, agents, language);
+              return <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={item.id === selectedAgentId}
+                tabIndex={item.id === selectedAgentId ? 0 : -1}
+                aria-controls="subagent-detail-panel"
+                className={item.id === selectedAgentId ? "active" : ""}
+                data-agent-tab={item.id}
+                onClick={() => switchAgent(item.id)}
+                onKeyDown={(event) => navigateTabs(event, item.id)}
+                title={itemName}
+                aria-label={`${itemName}，${subagentStatusLabel(item.state, language)}`}
+              >
+                <SubagentGlyph agent={item} size={24} />
+              </button>;
+            })}
+          </div>
+          <em>{agents.length}</em>
         </div>
       )}
 
+      {agent?.description && <div className="agent-side-chat-brief"><span>{t("subagentCurrentTask")}</span><p>{agent.description}</p></div>}
       <AgentMetaBar agent={agent} language={language} toolCalls={live.toolCalls} tokensUsed={live.tokensUsed} />
 
-      <div className="agent-side-chat-scroll" id="subagent-detail-panel" role="tabpanel" aria-label={role} ref={scrollRef}>
+      <div
+        className="agent-side-chat-scroll"
+        id="subagent-detail-panel"
+        role="tabpanel"
+        aria-label={role}
+        ref={scrollRef}
+        onScroll={(event) => {
+          const node = event.currentTarget;
+          followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+        }}
+      >
+        <div className="agent-side-chat-feed-title"><strong>{t("subagentActivity")}</strong><span data-state={agent?.state || "idle"}>{subagentStatusLabel(agent?.state, language)}</span></div>
         {agentBlocks.length === 0 ? (
           <div className="agent-side-chat-empty">
             {running ? <LoaderCircle className="spin" size={20} /> : <Bot size={22} />}
@@ -137,8 +157,13 @@ export default function AgentSideChat() {
           </div>
         ) : (
           <div className="agent-side-chat-transcript">
-            {/* Same full TimelineFeed as main thread — no compact truncation. */}
-            <TimelineFeed blocks={agentBlocks} language={language} />
+            <TimelineFeed
+              blocks={agentBlocks}
+              language={language}
+              activeRunId={activeRunId}
+              running={running}
+              foldActiveProcess
+            />
           </div>
         )}
       </div>
@@ -213,4 +238,3 @@ function AgentMetaBar({ agent, language, toolCalls, tokensUsed }: {
     </div>
   );
 }
-

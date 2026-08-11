@@ -46,7 +46,6 @@ func Profiles() []Profile {
 		baseURL := current.BaseURL
 		if override := map[string]string{
 			"freemodel": "https://cc.freemodel.dev/v1",
-			"opencode":  "https://opencode.ai/zen/v1",
 			"xpersona":  "https://www.xpersona.co/v1",
 		}[current.ID]; baseURL == "" {
 			baseURL = override
@@ -73,6 +72,9 @@ func LookupProfile(id string) (Profile, bool) {
 
 func CanonicalProviderID(id string) string {
 	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "opencode" {
+		return "opencode-zen"
+	}
 	if profile, ok := compat.Lookup(id); ok {
 		return profile.ID
 	}

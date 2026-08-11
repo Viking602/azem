@@ -73,6 +73,33 @@ func TestProviderStreamSinkPersistsUnphasedToolTurnTextAsCommentary(t *testing.T
 	}
 }
 
+func TestProviderStreamSinkMarksUnphasedTextAsPendingFinalAnswer(t *testing.T) {
+	host := NewService(context.Background(), config.Default())
+	sink := host.providerStreamSink("s", "r", "deepseek", "deepseek-v4-flash", "high", "llmux:deepseek")
+	if err := sink.Emit(context.Background(), stream.Frame{Kind: stream.FrameText, Text: "最终正文"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := host.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventTextDelta || event.Text != "最终正文" || event.TextPhase != string(hyprovider.TextPhaseFinalAnswer) || event.Data["textPhasePending"] != "true" {
+		t.Fatalf("text event=%+v", event)
+	}
+
+	explicit := host.providerStreamSink("s", "explicit", "chatgpt", "gpt", "high", "responses")
+	if err := explicit.Emit(context.Background(), stream.Frame{Kind: stream.FrameText, Text: "明确正文", TextPhase: hyprovider.TextPhaseFinalAnswer}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = host.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.TextPhase != string(hyprovider.TextPhaseFinalAnswer) || event.Data["textPhasePending"] != "" {
+		t.Fatalf("explicit text event=%+v", event)
+	}
+}
+
 func TestMeteredProviderDriverPersistsTerminalFactsAndUsesDistinctRequestIDs(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "meter.db"))

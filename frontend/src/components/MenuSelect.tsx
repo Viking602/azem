@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Search } from "lucide-react";
 
-export type MenuSelectOption = { value: string; label: string; keywords?: string[]; icon?: ReactNode; disabled?: boolean };
+export type MenuSelectOption = { value: string; label: string; caption?: string; keywords?: string[]; icon?: ReactNode; disabled?: boolean };
 
 type MenuCoords = {
+  position: "fixed" | "absolute";
   top?: number;
   bottom?: number;
   left: number;
@@ -19,12 +20,13 @@ function portalRoot(anchor: HTMLElement | null): HTMLElement {
   return document.body;
 }
 
-export default function MenuSelect({ value, options, onChange, ariaLabel, className = "", disabled = false, placement = "bottom", fit = "default", searchable = false, searchPlaceholder = "Search…", emptyLabel = "No matches" }: {
+export default function MenuSelect({ value, options, onChange, ariaLabel, className = "", panelClassName = "", disabled = false, placement = "bottom", fit = "default", searchable = false, searchPlaceholder = "Search…", emptyLabel = "No matches", showSelectedIcon = true, menuWidth, menuAlign = "left" }: {
   value: string;
   options: MenuSelectOption[];
   onChange: (value: string) => void;
   ariaLabel: string;
   className?: string;
+  panelClassName?: string;
   disabled?: boolean;
   placement?: "top" | "bottom";
   /** full: show complete option labels in a wider floating menu */
@@ -32,6 +34,9 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
   searchable?: boolean;
   searchPlaceholder?: string;
   emptyLabel?: string;
+  showSelectedIcon?: boolean;
+  menuWidth?: number;
+  menuAlign?: "left" | "right";
 }) {
   const details = useRef<HTMLDetailsElement>(null);
   const optionsRef = useRef<HTMLDivElement>(null);
@@ -52,24 +57,35 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
       setCoords(null);
       return;
     }
+    const host = portalRoot(root);
     const rect = summary.getBoundingClientRect();
+    const hostRect = host.getBoundingClientRect();
+    const inDialog = host instanceof HTMLDialogElement;
+    const boundaryLeft = inDialog ? hostRect.left : 0;
+    const boundaryTop = inDialog ? hostRect.top : 0;
+    const boundaryWidth = inDialog && hostRect.width > 0 ? hostRect.width : window.innerWidth;
+    const boundaryHeight = inDialog && hostRect.height > 0 ? hostRect.height : window.innerHeight;
+    const boundaryRight = boundaryLeft + boundaryWidth;
+    const boundaryBottom = boundaryTop + boundaryHeight;
     const gap = 6;
-    const spaceBelow = window.innerHeight - rect.bottom - gap;
-    const spaceAbove = rect.top - gap;
+    const spaceBelow = boundaryBottom - rect.bottom - gap;
+    const spaceAbove = rect.top - boundaryTop - gap;
     const preferBottom = placement === "bottom";
     const openBottom = preferBottom
       ? spaceBelow >= 140 || spaceBelow >= spaceAbove
       : spaceAbove < 140 && spaceBelow > spaceAbove;
     const available = Math.max(120, openBottom ? spaceBelow : spaceAbove);
     const maxHeight = Math.min(fit === "full" ? 360 : 280, available);
-    const minWidth = fit === "full" ? Math.max(rect.width, 240) : rect.width;
-    const width = Math.min(Math.max(minWidth, rect.width), Math.max(160, window.innerWidth - 16));
-    // Keep the panel on-screen horizontally.
-    const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - width - 8));
+    const minWidth = menuWidth ?? (fit === "full" ? Math.max(rect.width, 240) : rect.width);
+    const width = Math.min(Math.max(minWidth, rect.width), Math.max(160, boundaryWidth - 16));
+    // Keep the panel inside the viewport or modal-dialog portal.
+    const naturalLeft = menuAlign === "right" ? rect.right - width : rect.left;
+    const viewportLeft = Math.min(Math.max(boundaryLeft + 8, naturalLeft), Math.max(boundaryLeft + 8, boundaryRight - width - 8));
+    const left = viewportLeft - boundaryLeft;
     setCoords(openBottom
-      ? { top: rect.bottom + gap, left, width, maxHeight }
-      : { bottom: window.innerHeight - rect.top + gap, left, width, maxHeight });
-  }, [fit, placement]);
+      ? { position: inDialog ? "absolute" : "fixed", top: rect.bottom - boundaryTop + gap, left, width, maxHeight }
+      : { position: inDialog ? "absolute" : "fixed", bottom: boundaryBottom - rect.top + gap, left, width, maxHeight });
+  }, [fit, menuAlign, menuWidth, placement]);
 
   useEffect(() => {
     const close = (event: PointerEvent) => {
@@ -125,10 +141,10 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
   const menu = open && coords ? createPortal(
     <div
       ref={optionsRef}
-      className="menu-select-options menu-select-options-portal"
+      className={`menu-select-options menu-select-options-portal ${panelClassName}`.trim()}
       data-fit={fit}
       style={{
-        position: "fixed",
+        position: coords.position,
         top: coords.top,
         bottom: coords.bottom,
         left: coords.left,
@@ -161,7 +177,7 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
           title={option.label}
           key={option.value}
           onClick={() => choose(option.value)}
-        ><Check size={13} />{option.icon}<span>{option.label}</span></button>)}
+        ><Check size={13} />{option.icon}<span className={option.caption ? "menu-select-option-copy" : undefined}><strong>{option.label}</strong>{option.caption && <small>{option.caption}</small>}</span></button>)}
         {visibleOptions.length === 0 && <div className="menu-select-empty" role="status">{emptyLabel}</div>}
       </div>
     </div>,
@@ -206,7 +222,7 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
             focusOption(event.key === "ArrowDown" ? "first" : "last");
           });
         }}
-      >{selected?.icon}<span className="menu-select-value">{selected?.label ?? value}</span><ChevronDown size={12} /></summary>
+      >{showSelectedIcon && selected?.icon}<span className={`menu-select-value ${selected?.caption ? "has-caption" : ""}`}><strong>{selected?.label ?? value}</strong>{selected?.caption && <small>{selected.caption}</small>}</span><ChevronDown size={12} /></summary>
     </details>
     {menu}
   </>;

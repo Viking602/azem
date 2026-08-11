@@ -1513,6 +1513,8 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 		{ID: "old-user", Role: message.RoleUser, Text: "original request", RunID: "old-run", Metadata: map[string]string{"task_id": "source"}},
 		{ID: "old-tool-call", Role: message.RoleAssistant, Text: "checking", ToolCalls: []message.ToolCall{{ID: "call", Name: "coding.read_file"}}},
 		message.NewToolResult(message.ToolResult{ToolCallID: "call", Name: "coding.read_file", Content: "secret"}),
+		{Role: message.RoleAssistant, Text: semanticStateSafetyLabel + `{"version":1}`, Kind: message.KindCompactionSummary, Visibility: message.VisibilityPrivate},
+		{Role: message.RoleAssistant, Text: "private runtime context", Visibility: message.VisibilityPrivate},
 		{ID: "old-answer", Role: message.RoleAssistant, Text: "source answer", RunID: "old-run"},
 	})
 	if err != nil {
@@ -1708,6 +1710,7 @@ func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T)
 		},
 		{ID: "result", Role: message.RoleTool, RunID: "run-tool", ToolResult: &message.ToolResult{ToolCallID: "matched", Name: "coding.read_file", Content: "result"}},
 		{ID: "orphan", Role: message.RoleTool, RunID: "run-orphan", ToolResult: &message.ToolResult{ToolCallID: "unknown", Name: "coding.read_file", Content: "orphan"}},
+		{ID: "final", Role: message.RoleAssistant, RunID: "run-child", Text: "done"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1716,7 +1719,7 @@ func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(blocks) != 6 {
+	if len(blocks) != 7 {
 		t.Fatalf("blocks = %#v", blocks)
 	}
 	for index, want := range []struct {
@@ -1724,10 +1727,11 @@ func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T)
 	}{
 		{"msg-1-user", "user", "completed", "run-user"},
 		{"msg-2-thinking", "thinking", "completed", "run-child"},
-		{"msg-2-text", "assistant", "completed", "run-child"},
+		{"msg-2-text", "commentary", "completed", "run-child"},
 		{"call-matched", "tool", "completed", "run-child"},
 		{"call-missing", "tool", "failed", "run-child"},
 		{"result-4", "tool", "failed", "run-orphan"},
+		{"msg-5-text", "assistant", "completed", "run-child"},
 	} {
 		got := blocks[index]
 		if got.ID != want.id || got.Kind != want.kind || got.State != want.state || got.RunID != want.runID {
@@ -1736,6 +1740,20 @@ func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T)
 	}
 	if !strings.Contains(blocks[3].Content, "result") || !strings.Contains(blocks[4].Content, "missing tool result") {
 		t.Fatalf("tool result mapping = %#v", blocks)
+	}
+}
+
+func TestSubagentLiveTextSettlesAsCommentaryBeforeTool(t *testing.T) {
+	blocks := []AgentTranscriptBlock{
+		{Kind: "thinking", RunID: "child", State: "streaming"},
+		{Kind: "assistant", RunID: "child", State: "streaming"},
+	}
+	settleSubagentProcessText(blocks, "child")
+	if blocks[0].State != "completed" || blocks[1].Kind != "commentary" || blocks[1].State != "completed" {
+		t.Fatalf("settled blocks = %#v", blocks)
+	}
+	if got := subagentTextKind(hyprovider.TextPhaseCommentary, false); got != "commentary" {
+		t.Fatalf("explicit commentary kind = %q", got)
 	}
 }
 

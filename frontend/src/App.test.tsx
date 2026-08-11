@@ -1,17 +1,30 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import App, { takeRuntimeEventFrame } from "./App";
+// @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
+import { readFileSync } from "node:fs";
+import App, { isHighPriorityEvent, takeRuntimeEventFrame } from "./App";
 import { execute } from "./bridge";
 import { useRuntimeStore } from "./store";
-import type { RuntimeEvent, Snapshot } from "./types";
+import type { RuntimeEvent, Session, Snapshot } from "./types";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => undefined });
 
+const prototypeStyles = readFileSync("src/prototype.css", "utf8");
+const conceptStyles = readFileSync("../designs/azem-ui-motion-concept/styles.css", "utf8");
+const bridgeRuntime = vi.hoisted(() => ({ listener: null as ((event: RuntimeEvent) => void) | null }));
+
 vi.mock("./bridge", async (importOriginal) => {
   const original = await importOriginal<typeof import("./bridge")>();
-  return { ...original, execute: vi.fn(original.execute) };
+  return {
+    ...original,
+    execute: vi.fn(original.execute),
+    subscribe: vi.fn((listener: (event: RuntimeEvent) => void) => {
+      bridgeRuntime.listener = listener;
+      return () => { if (bridgeRuntime.listener === listener) bridgeRuntime.listener = null; };
+    }),
+  };
 });
 
 let container: HTMLDivElement | null = null;
@@ -25,11 +38,37 @@ afterEach(async () => {
   document.documentElement.style.removeProperty("--ui-font-size");
   root = null;
   container = null;
+  bridgeRuntime.listener = null;
   vi.mocked(execute).mockClear();
 });
 
 describe("application interactions", () => {
-  it("refreshes session and model catalogs after initialisation", async () => {
+  it("reserves a macOS titlebar safe area before the project switcher", () => {
+    expect(prototypeStyles).toMatch(/\.desktop-shell\s*\{[^}]*--mac-titlebar-safe-area:\s*96px;/s);
+    expect(prototypeStyles).toMatch(/data-platform\*="mac"[^}]*\.titlebar-project-switch\s*\{[^}]*padding-left:\s*var\(--mac-titlebar-safe-area\);/s);
+    expect(prototypeStyles).toMatch(/data-platform\*="mac"[^}]*\.titlebar-project\s*\{[^}]*padding-left:\s*6px;/s);
+    expect(conceptStyles).toMatch(/\.project-switch\s*\{[^}]*margin-left:\s*96px;/s);
+    expect(conceptStyles).toMatch(/\.project-switch-popover\s*\{[^}]*left:\s*96px;/s);
+  });
+
+  it("centers the command trigger against the full titlebar", () => {
+    expect(prototypeStyles).toMatch(/\.titlebar-command\s*\{[^}]*position:\s*absolute;[^}]*left:\s*50%;[^}]*transform:\s*translateX\(-50%\);/s);
+    expect(conceptStyles).toMatch(/\.command-trigger\s*\{[^}]*position:\s*absolute;[^}]*left:\s*50%;[^}]*transform:\s*translateX\(-50%\);/s);
+    expect(conceptStyles).toMatch(/\.command-trigger:hover\s*\{[^}]*transform:\s*translate\(-50%,\s*-1px\);/s);
+  });
+
+  it("keeps the interface font stepper centered inside all three grid columns", () => {
+    expect(prototypeStyles).toMatch(/\.appearance-card \.font-size-control > button:not\(\.text-button\),\s*\.appearance-card \.font-size-control output\s*\{[^}]*width:\s*100%;[^}]*height:\s*100%;[^}]*white-space:\s*nowrap;/s);
+    expect(prototypeStyles).toMatch(/\.appearance-card \.font-size-control output\s*\{[^}]*border-inline:\s*1px solid var\(--line\);/s);
+  });
+
+  it("pins the remaining-provider notice to the directory footer", () => {
+    expect(prototypeStyles).toMatch(/\.provider-directory\s*\{[^}]*display:\s*grid;[^}]*grid-template-rows:\s*auto minmax\(0,\s*1fr\) auto;/s);
+    expect(prototypeStyles).toMatch(/\.provider-list\s*\{[^}]*min-height:\s*0;[^}]*max-height:\s*none;/s);
+    expect(prototypeStyles).toMatch(/\.provider-more\s*\{[^}]*align-self:\s*end;/s);
+  });
+
+  it("refreshes session, Git, and model catalogs after initialisation", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -37,8 +76,12 @@ describe("application interactions", () => {
     await act(async () => root?.render(<App />));
 
     expect(execute).toHaveBeenCalledWith({ kind: "list_sessions" });
+    expect(execute).toHaveBeenCalledWith({ kind: "list_git_branches" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_models", sessionId: "session-demo" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_model_providers", sessionId: "session-demo" });
+    expect(execute).toHaveBeenCalledWith({ kind: "list_model_routes", sessionId: "session-demo" });
+    expect(container.textContent).not.toContain("重播流式输出");
+    expect(container.textContent).not.toContain("Replay stream");
   });
 
   it("paces streaming text without breaking Unicode or event order", () => {
@@ -61,6 +104,43 @@ describe("application interactions", () => {
     const reduced = [{ sequence: 1, kind: "text_delta", text: "x".repeat(3000) }];
     expect(takeRuntimeEventFrame(calm)[0]?.text).toHaveLength(72);
     expect(takeRuntimeEventFrame(reduced, true)[0]?.text).toHaveLength(2048);
+  });
+
+  it("classifies interaction and terminal events as high priority", () => {
+    expect(isHighPriorityEvent("approval_requested")).toBe(true);
+    expect(isHighPriorityEvent("approval_resolved")).toBe(true);
+    expect(isHighPriorityEvent("run_finished")).toBe(true);
+    expect(isHighPriorityEvent("run_cancelled")).toBe(true);
+    expect(isHighPriorityEvent("run_failed")).toBe(true);
+    expect(isHighPriorityEvent("text_delta")).toBe(false);
+    expect(isHighPriorityEvent("thinking_delta")).toBe(false);
+    expect(isHighPriorityEvent("tool_finished")).toBe(false);
+    expect(isHighPriorityEvent("session_loaded")).toBe(false);
+  });
+
+  it("persists an unread marker when a foreign main run finishes", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root?.render(<App />));
+
+    const sessions: Session[] = [
+      { id: "session-a", workspace: "/tmp/azem", title: "后台任务", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString() },
+      { id: "session-b", workspace: "/tmp/azem", title: "当前会话", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString() },
+    ];
+    await act(async () => useRuntimeStore.setState({
+      sessions, currentSessionId: "session-b", globalRunId: "run-a", globalRunSessionId: "session-a",
+    }));
+    vi.mocked(execute).mockClear();
+
+    await act(async () => bridgeRuntime.listener?.({
+      sequence: 1, kind: "run_finished", sessionId: "session-a", runId: "run-a",
+    }));
+
+    expect(execute).toHaveBeenCalledWith({
+      kind: "mark_session_unread", target: "session-a", sessionId: "session-a",
+    });
+    expect(useRuntimeStore.getState().sessions.find((session) => session.id === "session-a")?.unread).toBe(true);
   });
 
   it("suppresses the browser context menu across the document", async () => {
@@ -97,33 +177,120 @@ describe("application interactions", () => {
       reasoning: "high", agentMode: "single", language: "zh-CN", approvalMode: "prompt",
       queueMode: "queue", subagentConcurrency: 2, chatgptFastMode: false, sequence: 0,
     };
-    useRuntimeStore.setState({
-      snapshot,
-      view: "agents",
-      blocks: [{ id: "answer-1", kind: "assistant", content: "主会话仍然可见" }],
-      selectedAgentId: "",
-      agents: [{
+    const agent = {
         id: "agent-1", type: "worker", description: "检查界面", model: "gpt-5.6-sol",
         background: true, capabilityMode: "read-only", isolation: "none", cwd: "/tmp/azem",
         activity: "", warning: "", worktreePath: "", toolCalls: 1, turns: 1, tokensUsed: 20,
         elapsedMs: 1000, state: "completed", summary: "已完成", preview: "已完成",
         previewKind: "assistant", previewRunId: "child-1", elapsedObservedAt: Date.now(),
-      }],
-    });
+      } as const;
+    const runningAgent = {
+      ...agent,
+      id: "agent-2",
+      type: "review",
+      description: "审查交互层级",
+      state: "running",
+      preview: "正在审查交互层级",
+      previewRunId: "child-2",
+    } as const;
+    const queuedAgent = {
+      ...agent,
+      id: "agent-3",
+      type: "explore",
+      description: "验证抽屉信息流",
+      state: "queued",
+      preview: "等待执行",
+      previewRunId: "child-3",
+    } as const;
+    useRuntimeStore.setState({ snapshot });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
 
     await act(async () => root?.render(<App />));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    await act(async () => useRuntimeStore.setState({
+      snapshot,
+      view: "agents",
+      blocks: [{ id: "answer-1", kind: "assistant", content: "主会话仍然可见" }],
+      selectedAgentId: "",
+      agents: [agent, runningAgent, queuedAgent],
+    }));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
+    expect(useRuntimeStore.getState().view).toBe("agents");
+    expect(useRuntimeStore.getState().selectedAgentId).toBe("");
+    expect(useRuntimeStore.getState().agents).toHaveLength(3);
     expect(container.querySelector(".thread-surface")).not.toBeNull();
-    expect(container.querySelector(".subagents-drawer-layer")).not.toBeNull();
+    await vi.waitFor(() => expect(container?.querySelector(".subagents-drawer-layer")).not.toBeNull());
+    expect(container.querySelectorAll(".subagent-group")).toHaveLength(3);
+    expect(container.textContent).toContain("运行中");
+    expect(container.textContent).toContain("排队中");
+    expect(container.textContent).toContain("已结束");
     await act(async () => container?.querySelector<HTMLButtonElement>(".subagent-row > button")?.click());
-    expect(container.querySelector(".subagents-drawer-layer")).toBeNull();
-    expect(container.querySelector(".agent-side-chat")).not.toBeNull();
+    await vi.waitFor(() => expect(container?.querySelector(".subagents-drawer-layer")).toBeNull());
+    await vi.waitFor(() => expect(container?.querySelector(".subagent-detail-drawer-layer")).not.toBeNull());
+    await vi.waitFor(() => expect(container?.querySelector(".agent-side-chat")).not.toBeNull());
+    expect(container.querySelector(".workspace-grid")?.getAttribute("data-inspector")).not.toBe("agent");
+    const agentTabs = [...container.querySelectorAll<HTMLButtonElement>(".agent-side-chat-tabs button")];
+    expect(agentTabs).toHaveLength(3);
+    expect(agentTabs.every((button) => button.textContent === "" && Boolean(button.title) && Boolean(button.getAttribute("aria-label")))).toBe(true);
     await act(async () => container?.querySelector<HTMLButtonElement>(".agent-side-chat-actions button:last-child")?.click());
-    expect(container.querySelector(".subagents-drawer-layer")).not.toBeNull();
+    await vi.waitFor(() => expect(container?.querySelector(".subagents-drawer-layer")).not.toBeNull());
     await act(async () => container?.querySelector<HTMLDivElement>(".subagents-drawer-layer")?.click());
     expect(useRuntimeStore.getState().view).toBe("thread");
+  });
+
+  it("expands the inspector roster before opening a subagent conversation drawer", async () => {
+    const snapshot: Snapshot = {
+      workspace: "/tmp/azem", sessionId: "s1", provider: "chatgpt", model: "gpt-5.6-sol",
+      reasoning: "high", agentMode: "single", language: "zh-CN", approvalMode: "prompt",
+      queueMode: "queue", subagentConcurrency: 2, chatgptFastMode: false, sequence: 0,
+    };
+    const agent = {
+      id: "agent-direct", type: "review", description: "审查前端改动", model: "gpt-5.6-sol",
+      background: true, capabilityMode: "read-only", isolation: "none", cwd: "/tmp/azem",
+      activity: "正在核对交互状态", warning: "", worktreePath: "", toolCalls: 1, turns: 1, tokensUsed: 20,
+      elapsedMs: 1000, state: "running", summary: "", preview: "正在核对交互状态",
+      previewKind: "thinking", previewRunId: "child-direct", elapsedObservedAt: Date.now(),
+    } as const;
+    useRuntimeStore.setState({ snapshot });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    await act(async () => useRuntimeStore.setState({
+      snapshot,
+      view: "thread",
+      currentSessionId: "s1",
+      blocks: [{ id: "answer-direct", kind: "assistant", content: "主会话" }],
+      inspectorOpen: true,
+      selectedAgentId: "",
+      agents: [agent],
+    }));
+
+    await vi.waitFor(() => expect(container?.querySelector(".subagent-summary-button")).not.toBeNull());
+    const summary = container!.querySelector<HTMLButtonElement>(".subagent-summary-button")!;
+    const inspectorList = container!.querySelector<HTMLDivElement>(".inspector-subagent-list")!;
+    expect(summary.getAttribute("aria-expanded")).toBe("false");
+    expect(inspectorList.hidden).toBe(true);
+    await act(async () => summary.click());
+    expect(summary.getAttribute("aria-expanded")).toBe("true");
+    expect(inspectorList.hidden).toBe(false);
+
+    await act(async () => container?.querySelector<HTMLButtonElement>(".inspector-subagent-row")?.click());
+    await vi.waitFor(() => expect(container?.querySelector(".subagent-detail-drawer-layer")).not.toBeNull());
+    await vi.waitFor(() => expect(container?.querySelector(".agent-side-chat")).not.toBeNull());
+    expect(useRuntimeStore.getState()).toMatchObject({ view: "thread", selectedAgentId: "agent-direct" });
+    expect(execute).toHaveBeenCalledWith({ kind: "inspect_agent", target: "agent-direct", sessionId: "s1" });
+    await act(async () => useRuntimeStore.setState({
+      agentBlocks: [{
+        id: "child-progress", kind: "commentary", runId: "child-direct", title: "progress",
+        content: "正在核对交互状态", state: "completed", data: { elapsedMs: "1000" },
+      }],
+    }));
+    expect(container?.querySelector(".agent-side-chat .process-fold-label")?.textContent).toBe("处理中");
   });
 });

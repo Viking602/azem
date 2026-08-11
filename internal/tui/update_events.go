@@ -101,6 +101,54 @@ func (m *AppModel) applyEvent(event app.Event) {
 		m.queueApproval(event)
 	case app.EventApprovalResolved:
 		m.resolveApproval(event)
+	case app.EventUserInputRequested:
+		planningInput, err := planningInputFromEvent(event.UserInputID, event.Data["questions"])
+		if err != nil {
+			m.errorBanner = err.Error()
+			break
+		}
+		m.planningInput = planningInput
+		m.planningOther = false
+		question, _ := planningInput.current()
+		m.transcript = append(m.transcript, Block{ID: event.UserInputID, Kind: BlockQuestion, RunID: event.RunID, ToolCallID: event.ToolCallID, UserInputID: event.UserInputID, Title: question.Header, Content: question.Question, State: "pending"})
+		m.status = "Awaiting input"
+		m.openOverlay(OverlayUserInput)
+	case app.EventUserInputResolved:
+		for index := range m.transcript {
+			if m.transcript[index].UserInputID == event.UserInputID {
+				m.transcript[index].State = first(event.State, "answered")
+			}
+		}
+		m.planningInput = nil
+		m.planningOther = false
+		m.composer.Placeholder = m.tr("composer.placeholder")
+		if m.overlay == OverlayUserInput {
+			_ = m.closeOverlay()
+		}
+		m.status = "Running"
+	case app.EventPlanProposed:
+		for index := range m.transcript {
+			if m.transcript[index].Kind == BlockPlan && m.transcript[index].State == "proposed" {
+				m.transcript[index].State = "superseded"
+			}
+		}
+		m.planReview = &PlanReviewView{ID: event.PlanID, Title: event.Data["title"], Body: event.Text, Version: first(event.Data["version"], "1"), State: "proposed"}
+		m.transcript = append(m.transcript, Block{ID: event.PlanID, Kind: BlockPlan, RunID: event.RunID, ToolCallID: event.ToolCallID, PlanID: event.PlanID, Title: event.Data["title"], Content: event.Text, State: "proposed"})
+		m.planMode = true
+		m.openOverlay(OverlayPlan)
+	case app.EventPlanResolved:
+		for index := range m.transcript {
+			if m.transcript[index].PlanID == event.PlanID {
+				m.transcript[index].State = "approved"
+			}
+		}
+		m.planMode = false
+		if m.planReview != nil && m.planReview.ID == event.PlanID {
+			m.planReview.State = "approved"
+		}
+		if m.overlay == OverlayPlan {
+			_ = m.closeOverlay()
+		}
 	case app.EventApprovalMode:
 		m.approvalMode = ApprovalMode(event.State)
 		m.autoReviewAvailable, _ = strconv.ParseBool(event.Data["auto_review_available"])
@@ -456,6 +504,7 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 		State            string               `json:"state"`
 		Collapsed        bool                 `json:"collapsed"`
 		Attachments      []session.Attachment `json:"attachments"`
+		Data             map[string]string    `json:"data"`
 		Sequence         int64                `json:"-"`
 	}
 	if err := json.Unmarshal([]byte(event.Data["blocks"]), &recovered); err != nil {
@@ -503,6 +552,10 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	_, _, _, todoHeight := m.todoPaneBounds()
 	m.scrollTodoPane(0, todoHeight)
 	m.transcript = make([]Block, 0, len(recovered)+len(toolRecords))
+	m.planReview = nil
+	m.planningInput = nil
+	m.planningOther = false
+	m.planMode = false
 	m.transcriptTop = 0
 	toolIndex := 0
 	for _, block := range recovered {
@@ -514,8 +567,13 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 		m.transcript = append(m.transcript, Block{
 			ID: first(block.AgentID, block.ID), Kind: kind, RunID: block.RunID,
 			ToolCallID: block.ParentToolCallID, Title: block.Title, Content: content,
+			UserInputID: block.Data["userInputId"], PlanID: block.Data["planId"],
 			State: block.State, Collapsed: block.Collapsed || defaultToolCollapsed(kind, block.State), Attachments: block.Attachments,
 		})
+		if kind == BlockPlan && block.State == "proposed" {
+			m.planMode = true
+			m.planReview = &PlanReviewView{ID: block.Data["planId"], Title: block.Title, Body: block.Content, Version: first(block.Data["version"], "1"), State: block.State}
+		}
 		for toolIndex < len(toolRecords) && toolRecords[toolIndex].AnchorSequence <= block.Sequence {
 			m.transcript = append(m.transcript, m.recoveredToolBlock(toolRecords[toolIndex]))
 			toolIndex++
@@ -546,6 +604,9 @@ func (m *AppModel) loadSessionEvent(event app.Event) {
 	m.restoreUsage(event.Data["usage"])
 	if sessions := event.Data["sessions"]; sessions != "" {
 		_ = json.Unmarshal([]byte(sessions), &m.sessions)
+	}
+	if m.planReview != nil {
+		m.openOverlay(OverlayPlan)
 	}
 }
 

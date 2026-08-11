@@ -21,6 +21,25 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestPluginsConfigDefaultsAndLoad(t *testing.T) {
+	cfg := Default()
+	if !cfg.Plugins.Enabled || !cfg.Plugins.ImportCodex || cfg.Plugins.TrustHooks {
+		t.Fatalf("plugin defaults = %#v", cfg.Plugins)
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nplugins:\n  enabled: true\n  import_codex: false\n  trust_hooks: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Plugins.Enabled || loaded.Plugins.ImportCodex || !loaded.Plugins.TrustHooks {
+		t.Fatalf("loaded plugins = %#v", loaded.Plugins)
+	}
+}
+
 func TestHooksConfigDefaultsAndLoad(t *testing.T) {
 	cfg := Default()
 	if !cfg.Hooks.Enabled || cfg.Hooks.TrustProject || cfg.Hooks.ClaudeCompatibility || cfg.Hooks.DefaultTimeoutParsed != 5*time.Second || cfg.Hooks.FailurePolicy != "open" {
@@ -166,6 +185,114 @@ func TestUpdateSessionModelDefaultsPersistsProviderModelReasoning(t *testing.T) 
 	}
 }
 
+func TestUpdateSubscriptionDisabledModelsPreservesProviderSettings(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "version: 1\nproviders:\n  chatgpt:\n    enabled: true\n    catalog_ttl: 5m\n    fast_mode: true\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSubscriptionDisabledModels(path, "chatgpt", []string{"codex-auto-review"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Providers.ChatGPT.FastMode || !reflect.DeepEqual(loaded.Providers.ChatGPT.DisabledModels, []string{"codex-auto-review"}) {
+		t.Fatalf("chatgpt config = %#v", loaded.Providers.ChatGPT)
+	}
+}
+
+func TestUpdateSkillsSelectionPreservesSettingsAndRemovesEmptyLists(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# keep skills comment\nversion: 1\nskills:\n  enabled: true\n  trust_project: true\n  additional_dirs: [custom-skills]\n  eager: [old]\nworkspace:\n  allow_write: true\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSkillsSelection(path, []string{"verify"}, []string{"old", "simplify"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# keep skills comment") {
+		t.Fatalf("skills update lost the existing comment:\n%s", data)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Skills.Enabled || !loaded.Skills.TrustProject || !loaded.Workspace.AllowWrite ||
+		!reflect.DeepEqual(loaded.Skills.Eager, []string{"verify"}) ||
+		!reflect.DeepEqual(loaded.Skills.Disabled, []string{"old", "simplify"}) {
+		t.Fatalf("persisted skills config = %#v", loaded.Skills)
+	}
+	if err := UpdateSkillsSelection(path, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "eager:") || strings.Contains(string(data), "disabled:") {
+		t.Fatalf("empty skill selections remained in config:\n%s", data)
+	}
+	if err := UpdateSkillsSelection(path, []string{"same"}, []string{"same"}); err == nil {
+		t.Fatal("skill was accepted as both eager and disabled")
+	}
+
+	selectionOnly := filepath.Join(root, "selection-only.yaml")
+	if err := os.WriteFile(selectionOnly, []byte("version: 1\nskills:\n  disabled: [temporary]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSkillsSelection(selectionOnly, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(selectionOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "skills:") {
+		t.Fatalf("empty skills mapping remained after restoring the last disabled skill:\n%s", data)
+	}
+}
+
+func TestUpdateMCPServerPersistsValidatedEntryAndPreservesOtherSettings(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# keep MCP comment\nversion: 1\ndefaults:\n  language: zh-CN\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server, err := UpdateMCPServer(path, "local_docs", MCPServerConfig{
+		Enabled: true, Transport: "stdio", Command: "docs-mcp", Args: []string{"serve"}, Approval: "never",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.ConnectTimeout != "30s" || server.CallTimeout != "60s" || server.MaxConcurrency != 2 {
+		t.Fatalf("normalized MCP defaults = %#v", server)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# keep MCP comment") || !strings.Contains(string(data), "language: zh-CN") {
+		t.Fatalf("MCP update lost unrelated configuration:\n%s", data)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.MCP.Servers["local_docs"]
+	if !got.Enabled || got.Transport != "stdio" || got.Command != "docs-mcp" || !reflect.DeepEqual(got.Args, []string{"serve"}) || got.Approval != "never" {
+		t.Fatalf("persisted MCP server = %#v", got)
+	}
+}
+
 func TestUpdateModelRoutePreservesYAMLAndDeletesOnlyRouteScalars(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -268,6 +395,24 @@ func TestUpdateLLMuxProviderMigratesLegacyUnderscoreID(t *testing.T) {
 	}
 	if strings.Contains(string(data), "alibaba_coding_plan") || !strings.Contains(string(data), "alibaba-coding-plan") {
 		t.Fatalf("legacy provider ID was not migrated:\n%s", data)
+	}
+}
+
+func TestUpdateLLMuxProviderMigratesLegacyOpenCodeID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := "providers:\n  llmux:\n    opencode:\n      enabled: false\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateLLMuxProvider(path, "opencode", LLMuxProviderConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "    opencode:") || !strings.Contains(string(data), "opencode-zen:") {
+		t.Fatalf("legacy OpenCode provider ID was not migrated:\n%s", data)
 	}
 }
 
@@ -394,6 +539,52 @@ func TestUpdatePlanModelRoutePersistsAndResets(t *testing.T) {
 	}
 }
 
+func TestUpdateApprovalModelRoutePersistsAndResets(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n# keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "deepseek", Model: "deepseek-v4-flash", Reasoning: "high"}
+	if err := UpdateModelRoute(path, "approval", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Approval != route {
+		t.Fatalf("approval route = %#v, error=%v", loaded.Agents.Approval, err)
+	}
+	if err := ResetModelRoute(path, "approval", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Approval != (ModelRouteConfig{}) {
+		t.Fatalf("reset approval route = %#v, error=%v", loaded.Agents.Approval, err)
+	}
+}
+
+func TestUpdateVisionModelRoutePersistsAndResets(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n# keep vision route comment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "openrouter", Model: "google/gemini-vision", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "vision", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Vision != route {
+		t.Fatalf("vision route = %#v, error=%v", loaded.Agents.Vision, err)
+	}
+	if err := ResetModelRoute(path, "vision", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Vision != (ModelRouteConfig{}) {
+		t.Fatalf("reset vision route = %#v, error=%v", loaded.Agents.Vision, err)
+	}
+}
+
 func TestUpdateTitleModelRoutePersistsAndResetsToInherited(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -421,7 +612,8 @@ func TestPhase3ContextDefaultsAndValidation(t *testing.T) {
 	defaults := Default().Agents.Context
 	if !defaults.Enabled || defaults.TargetRatio != .45 || defaults.SoftTriggerRatio != .68 ||
 		defaults.HardTriggerRatio != .82 || !defaults.BackgroundPrepare ||
-		defaults.ReserveOutputTokens != 16384 || defaults.ReserveReasoningTokens != 8192 {
+		defaults.ReserveOutputTokens != 16384 || defaults.ReserveReasoningTokens != 8192 ||
+		defaults.MaxSummaryTokens != 8192 {
 		t.Fatalf("defaults=%+v", defaults)
 	}
 	for _, mutate := range []func(*ContextConfig){
@@ -1166,6 +1358,35 @@ func TestUpdateSubagentMaxConcurrencyPreservesConfig(t *testing.T) {
 	}
 	if err := UpdateSubagentMaxConcurrency(path, 0); err == nil {
 		t.Fatal("zero concurrency was accepted")
+	}
+}
+
+func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "version: 1\n# capacity comment\nworkspace:\n  shell:\n    max_concurrency: 2\nagents:\n  subagents:\n    await_timeout: 10m\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateShellMaxConcurrency(path, 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSubagentAwaitTimeout(path, 30); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(updated)
+	if !strings.Contains(text, "# capacity comment") || !strings.Contains(text, "max_concurrency: 4") || !strings.Contains(text, "await_timeout: 30s") {
+		t.Fatalf("updated config:\n%s", updated)
+	}
+	if err := UpdateShellMaxConcurrency(path, 0); err == nil {
+		t.Fatal("zero shell concurrency was accepted")
+	}
+	if err := UpdateSubagentAwaitTimeout(path, 4); err == nil {
+		t.Fatal("too-short await timeout was accepted")
 	}
 }
 

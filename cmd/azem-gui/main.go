@@ -64,7 +64,7 @@ func run() error {
 	options := application.Options{
 		Name: "Azem", Description: "Project-first agent workspace",
 		Assets: application.AssetOptions{Handler: application.AssetFileServerFS(azemfrontend.Assets)},
-		Mac:    application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
+		Mac:    desktopMacOptions(newWindow),
 		OnShutdown: func() {
 			if windowTracker != nil {
 				windowTracker.Flush()
@@ -105,6 +105,18 @@ func run() error {
 		handleDeepLink(event.Context().URL())
 	})
 	return desktopApp.Run()
+}
+
+func desktopMacOptions(independentWindow bool) application.MacOptions {
+	options := application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true}
+	if independentWindow {
+		// Project and session windows keep an isolated runtime so work in another
+		// workspace can continue, but they are windows of the existing Azem app
+		// from the user's perspective. Accessory processes do not create another
+		// Dock or Cmd-Tab application entry on macOS.
+		options.ActivationPolicy = application.ActivationPolicyAccessory
+	}
+	return options
 }
 
 func bootstrapDesktop(ctx context.Context, startupWorkspace, workspaceOverride, configFile string) (azemapp.BootstrapResult, error) {

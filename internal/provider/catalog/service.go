@@ -27,6 +27,7 @@ const (
 
 type Model struct {
 	ID                   string         `json:"id"`
+	Disabled             bool           `json:"disabled,omitempty"`
 	Name                 string         `json:"name,omitempty"`
 	Description          string         `json:"description,omitempty"`
 	ContextWindow        int            `json:"contextWindow,omitempty"`

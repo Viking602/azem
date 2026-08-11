@@ -275,6 +275,74 @@ func (s *Service) LoadArtifact(ctx context.Context, sessionID, id string) (Conte
 	return value, nil
 }
 
+// UpdateLatestBlockState updates the newest matching durable UI block without
+// appending a second transcript entry. It is used for interactive lifecycle
+// records such as questions and plan proposals, whose content is immutable but
+// whose review state must survive an application restart.
+func (s *Service) UpdateLatestBlockState(ctx context.Context, sessionID, kind, dataKey, dataValue, expectedState, nextState string, data map[string]string) (Block, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Block{}, err
+	}
+	defer tx.Rollback()
+	rows, err := dbgen.New(tx).ListSessionBlocks(ctx, sessionID)
+	if err != nil {
+		return Block{}, err
+	}
+	for index := len(rows) - 1; index >= 0; index-- {
+		block, matches, err := matchingLifecycleBlock(rows[index].Data, kind, dataKey, dataValue, expectedState)
+		if err != nil {
+			return Block{}, err
+		}
+		if !matches {
+			continue
+		}
+		setLifecycleBlockState(&block, nextState, data)
+		encoded, err := json.Marshal(block)
+		if err != nil {
+			return Block{}, err
+		}
+		queries := dbgen.New(tx)
+		if err := queries.UpdateSessionBlockData(ctx, dbgen.UpdateSessionBlockDataParams{Data: encoded, SessionID: sessionID, Sequence: rows[index].Sequence}); err != nil {
+			return Block{}, err
+		}
+		now := time.Now().UTC().UnixNano()
+		if err := queries.TouchProjection(ctx, dbgen.TouchProjectionParams{UpdatedAt: now, SessionID: sessionID}); err != nil {
+			return Block{}, err
+		}
+		if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
+			return Block{}, err
+		}
+		block.Sequence = rows[index].Sequence
+		return block, tx.Commit()
+	}
+	return Block{}, fmt.Errorf("matching %s block was not found", kind)
+}
+
+func matchingLifecycleBlock(encoded []byte, kind, dataKey, dataValue, expectedState string) (Block, bool, error) {
+	var block Block
+	if err := json.Unmarshal(encoded, &block); err != nil {
+		return Block{}, false, fmt.Errorf("decode session block: %w", err)
+	}
+	if block.Kind != kind || (expectedState != "" && block.State != expectedState) {
+		return block, false, nil
+	}
+	if dataKey != "" && (block.Data == nil || block.Data[dataKey] != dataValue) {
+		return block, false, nil
+	}
+	return block, true, nil
+}
+
+func setLifecycleBlockState(block *Block, state string, data map[string]string) {
+	block.State = state
+	if block.Data == nil {
+		block.Data = map[string]string{}
+	}
+	for key, value := range data {
+		block.Data[key] = value
+	}
+}
+
 func NewService(db *sql.DB) *Service { return &Service{db: db} }
 
 func sessionFromDB(row dbgen.Session) Session {

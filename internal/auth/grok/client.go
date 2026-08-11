@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"resty.dev/v3"
+
+	"github.com/Viking602/azem/internal/netproxy"
 )
 
 const (
@@ -70,7 +72,7 @@ type Tokens struct {
 
 func NewClient() *Client {
 	return &Client{
-		HTTP: resty.New().SetTimeout(30 * time.Second), DiscoveryURL: "https://auth.x.ai/.well-known/openid-configuration",
+		HTTP: newHTTPClient(), DiscoveryURL: "https://auth.x.ai/.well-known/openid-configuration",
 		ClientID: DefaultClientID, Scope: DefaultScope,
 	}
 }
@@ -475,9 +477,15 @@ func (c *Client) httpClient() *resty.Client {
 	c.httpMu.Lock()
 	defer c.httpMu.Unlock()
 	if c.HTTP == nil {
-		c.HTTP = resty.New().SetTimeout(30 * time.Second)
+		c.HTTP = newHTTPClient()
 	}
 	return c.HTTP
+}
+
+func newHTTPClient() *resty.Client {
+	client := resty.New().SetTimeout(30 * time.Second)
+	netproxy.ConfigureTransport(client.Transport())
+	return client
 }
 
 func (c *Client) Close() error {

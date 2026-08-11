@@ -83,10 +83,28 @@ func validateLLMuxProvider(id string, provider LLMuxProviderConfig) error {
 	return nil
 }
 
+func validateDisabledModels(provider string, models []string) error {
+	if len(models) > 2048 {
+		return fmt.Errorf("providers.%s.disabled_models must contain at most 2048 models", provider)
+	}
+	seen := make(map[string]bool, len(models))
+	for _, model := range models {
+		if model != strings.TrimSpace(model) || model == "" || len(model) > 256 || seen[model] {
+			return fmt.Errorf("providers.%s.disabled_models contains an empty, oversized, or repeated model ID", provider)
+		}
+		seen[model] = true
+	}
+	return nil
+}
+
 func ValidateLLMuxProvider(id string, provider LLMuxProviderConfig) error {
 	return validateLLMuxProvider(canonicalLLMuxProviderID(id), provider)
 }
 
 func canonicalLLMuxProviderID(id string) string {
-	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(id)), "_", "-")
+	id = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(id)), "_", "-")
+	if id == "opencode" {
+		return "opencode-zen"
+	}
+	return id
 }

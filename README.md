@@ -24,7 +24,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 | **Governed execution** | Prompt, Auto Review, and YOLO approval modes for file, shell, and external actions |
 | **Durable state** | SQLite-backed sessions, runs, approvals, leases, side-effect reconciliation, and Team resume |
 | **Multiple providers** | ChatGPT through Codex-compatible OAuth and Grok through API or CLI-proxy transport |
-| **Extensible tools** | MCP servers over stdio or Streamable HTTP, plus dynamically loaded Agent Skills |
+| **Extensible tools** | Codex-compatible plugins, MCP servers over stdio or Streamable HTTP, plus dynamically loaded Agent Skills |
 | **Multi-agent work** | Structured team mode and resumable subagents with optional Git worktree isolation |
 
 ## Quick Start
@@ -50,7 +50,25 @@ make gui
 open dist/Azem.app
 ```
 
+For Windows, build the native executable with:
+
+```powershell
+make gui-windows
+.\dist\windows-amd64\Azem.exe
+```
+
+Windows requires the WebView2 Runtime and uses PowerShell for agent and
+background commands. PowerShell 7 (`pwsh.exe`) is preferred when installed;
+the built-in Windows PowerShell is the fallback. Bash hooks additionally
+require Git Bash.
+
 The desktop app and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. The React UI receives a bounded event projection; it does not expose arbitrary shell or filesystem bindings.
+
+On macOS, Azem follows the active system HTTP, HTTPS, and SOCKS proxy settings
+automatically, including the bypass list. This matches the network path used by
+Chromium/Electron applications such as Codex when the desktop app is launched
+from Finder and has no shell proxy environment. `HTTP_PROXY`, `HTTPS_PROXY`,
+and `NO_PROXY` remain explicit per-process overrides on every platform.
 
 Desktop text output is presented in frame-paced chunks. Rendering is capped independently from the display refresh rate, large backlogs catch up automatically, and reduced-motion preferences disable animation without disabling bounded rendering.
 
@@ -62,6 +80,11 @@ and Windows uses the installed Windows font collection; typography changes
 preview immediately without modifying project or runtime configuration.
 
 While a desktop turn is running, the composer supports Codex-style **Queue** and **Steer** delivery. Queue holds ordered, editable follow-ups for the next turn; Steer injects text or image guidance at the next model boundary without cancelling completed tool work. `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` elsewhere uses the opposite mode for one message. Queues are session-scoped, stay in order, and pause after an interrupted run until explicitly resumed.
+
+If you switch to another conversation while a turn continues, its session row
+keeps the running indicator. A successful or failed background completion adds
+a blue unread dot, persisted across refreshes; opening that conversation clears
+the dot.
 
 The desktop **Pull Requests** workspace uses the authenticated [GitHub CLI](https://cli.github.com/) for the repository at the workspace root. It lists the current and open pull requests, checks, files, comments, reviews, and merge state; supported mutations include editing, review requests, comments, reviews, draft/ready transitions, close/reopen, merge, and auto-merge. Merge requests are pinned to the displayed head commit so a stale panel cannot merge a newer revision.
 
@@ -113,16 +136,18 @@ Azem streams progress in the terminal and asks for approval when the selected po
 ## Core Features
 
 - File discovery, reading, searching, patch editing, formatting, testing, and shell execution
+- Codex-style desktop workspace browser and change-review surface with lazy file trees, bounded tabs, virtualized text viewing, image previews, directory-folded large change sets, and per-file unified diffs loaded on demand
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
+- Interactive planning mode with durable `ask` questions, versioned plan proposals, review and revision turns, and an explicit Execute Plan handoff into a new ordinary implementation turn
 - OpenAI/ChatGPT and Grok subscription login with live model catalogs, remaining weekly quota, reset time, and credit balance, plus llmux-backed OpenAI, Anthropic, Google, Mistral, Cohere, xAI, OpenRouter, DeepSeek, local inference, and other compatible providers in one searchable, progressively loaded desktop registry; enabled API providers can fetch their live model list and merge models.dev capabilities, while providers flagged for Anthropic Messages use that protocol instead of OpenAI Chat Completions
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
 - Persistent conversations start in a fresh session on every launch; use `/resume` to reopen prior sessions with their context, tool history, and recap
-- Durable main-agent tool timelines preserve read, search, edit, test, and shell history across cancellation and process restarts; observed file hashes let resumed turns reuse unchanged evidence and target only stale paths
+- Durable main-agent timelines use the model's own action update as the visible progress step, keep its related read, search, edit, test, and shell calls expandable underneath, and preserve that history across cancellation and process restarts; observed file hashes let resumed turns reuse unchanged evidence and target only stale paths
 - Durable action attempts and reconciliation of unknown side effects after interruption; Team and eligible Single-Agent runs resume automatically without replaying completed side effects
 - Retry handling for transient ChatGPT transport failures before output is emitted
 - MCP server discovery, reconnect, concurrency controls, and per-tool policies
-- Agent Skills discovery from user, project, configured, and bundled directories
+- Agent Skills discovery from user, project, configured, and bundled directories, with searchable desktop controls that can stop unneeded Skills from loading while keeping them available for later restoration
 - Planner, Implementer, Reviewer, and Reporter team workflow
 - Background subagents with role, persona, model, budget, resume, and cancellation controls
 - Independent tool calls dispatch in parallel while shell and subagent runtimes enforce their configured concurrency limits
@@ -231,6 +256,18 @@ Without `-config`, Azem reads `azem/config.yaml` from the operating system's use
 | `/help` | Open help |
 | `/quit` | Quit Azem |
 
+### Planning workflow
+
+Planning mode is a separate, read-only conversation phase. The planner may use
+`ask` to present one to three concrete questions with selectable answers, then
+publishes a durable proposal with `submit_plan`. You can ask follow-up questions
+or request changes without leaving planning mode; every new proposal supersedes
+the previous version while preserving the review history. Selecting **Execute
+Plan** is the only approval action. Azem then starts a new ordinary turn with
+the approved proposal attached as trusted private context and restores the full
+implementation tool set. Reopening the session restores unresolved questions
+and the latest proposed plan in both the terminal and desktop applications.
+
 ## Configuration
 
 Pass a custom configuration file with:
@@ -272,6 +309,7 @@ providers:
     enabled: true
     catalog_ttl: 5m
     fast_mode: false       # supported subscription models only; faster responses use more credits
+    disabled_models: []   # hidden from pickers and rejected by the runtime
   grok:
     enabled: true
     catalog_ttl: 5m
@@ -284,6 +322,7 @@ providers:
       base_url: "" # empty uses llmux's provider default
       models:
         - id: anthropic/claude-sonnet-4.5
+          disabled: false # keep visible in settings but allow one-click disabling
           name: Claude Sonnet 4.5
           context_window: 200000
           max_output_tokens: 64000 # positive per-request ceiling; 0 means unknown/unset, not unlimited
@@ -317,6 +356,16 @@ agents:
     provider: ""
     model: ""
     reasoning: ""
+  approval:
+    # Reviewer for "Approve for me"; any enabled provider/model is supported.
+    provider: chatgpt
+    model: gpt-5.6-luna
+    reasoning: low
+  vision:
+    # Explicit image-capable helper for text-only main models. Empty disables fallback.
+    provider: ""
+    model: ""
+    reasoning: ""
   compaction:
     # Empty provider/model inherit the active model; empty reasoning uses low.
     provider: ""
@@ -332,7 +381,7 @@ agents:
     reserve_output_tokens: 16384
     reserve_reasoning_tokens: 8192
     min_reclaim_tokens: 16000
-    max_summary_tokens: 4096
+    max_summary_tokens: 8192
     large_tool_result_tokens: 12000
     history_retrieval_tokens: 4096 # private, session-scoped SQLite FTS evidence budget
   subagents:
@@ -360,9 +409,28 @@ skills:
   eager: []
   disabled: []
 
+plugins:
+  enabled: true
+  import_codex: true         # import installed plugins from the shared Codex directory
+  trust_hooks: false         # installation is not execution trust; opt in explicitly
+
 mcp:
   servers: {}
 ```
+
+The desktop **Settings → Extensions** page manages `skills.disabled` directly.
+Stopping a Skill removes it from model context, slash suggestions, eager
+activation, and the runtime registry. It remains in the catalog so it can be
+restored later. If an eager Skill is stopped, Azem removes it from `eager`;
+restoring it returns it in on-demand mode.
+
+The same Extensions page projects the real MCP manager rather than inferring
+servers from installed plugins. It lists local and remote servers, live
+connection state, imported tool count, and approval mode. Servers can be
+enabled, disabled, refreshed, reconnected, or added from the desktop; every
+change is validated, written to `mcp.servers`, and applied to the live manager
+without restarting Azem. New connections start in the background so Settings
+does not freeze while a process or network service comes online.
 
 ### Approval modes
 
@@ -371,16 +439,27 @@ Use `Shift+Tab` to cycle between modes:
 | Mode | Behavior |
 |---|---|
 | **Prompt** | Ask the user before governed actions |
-| **Auto Review** | Ask an authenticated reviewer model to assess actions and show its decision, risk, and rationale in the transcript |
+| **Auto Review** | Ask the model configured by `agents.approval` to assess actions and show its decision, risk, and rationale in the transcript |
 | **YOLO** | Approve actions automatically; use only in trusted environments |
 
 The configured tool effect and approval policy still determine which operations enter the approval flow. Approval cards remain separate from subsequent tool and diff blocks, so a review decision is not mistaken for completed execution.
 
 ## MCP Integrations
 
+The desktop app also imports enabled plugins from the current Codex plugin
+directory. A valid plugin has `.codex-plugin/plugin.json`; its declared Skills
+and eligible MCP servers are attached to the Azem runtime at startup. Plugin
+hooks remain disabled unless `plugins.trust_hooks` is enabled, and `.app.json`
+connections are shown as requiring separate authorization. See
+[Plugin compatibility](docs/plugins.md) for the supported standard and security
+boundaries.
+
 Azem includes the read-only [grep.app](https://grep.app) MCP server by default, exposed as `mcp__grep__searchGitHub`. It searches public GitHub repositories for literal code patterns. Override or disable it through `mcp.servers.grep` in the configuration file.
 
 Azem also supports custom local stdio servers and remote Streamable HTTP servers.
+Use **Settings → Extensions → MCP services → Add MCP service** to create one,
+or edit the equivalent YAML below. The desktop form accepts only `env:NAME` or
+`keyring:NAME` secret references; it never stores or projects plaintext values.
 
 ### stdio
 
@@ -434,6 +513,8 @@ Azem follows operating-system user-directory conventions and creates an `azem` s
 | Runtime state | `azem/` under the user cache or state directory |
 
 On Linux, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` override the corresponding base directories.
+On Windows, configuration and the database live under `%AppData%\azem`, while
+runtime state and logs use the operating-system cache directory.
 
 Credentials can be stored in SQLite, the system keyring, or a permission-restricted JSON file. SQLite and file storage rely on filesystem permissions and do not provide application-level encryption at rest. Use the system keyring when stronger local credential protection is required.
 
@@ -444,7 +525,10 @@ provider can fetch its authenticated model list and display the exact
 models.dev context limits, modalities, capabilities, and reasoning levels
 before saving the catalog. Subscription and llmux catalogs resolve provider
 slugs and aliases through models.dev, so every model picker shows the friendly
-models.dev name while requests still use the provider's actual model ID.
+models.dev name while requests still use the provider's actual model ID. Every
+provider uses the same model cards: one click disables or re-enables a model;
+disabled models remain manageable in Settings but disappear from model and
+role-route selectors and are rejected by the runtime.
 
 ## Security Model
 
@@ -486,6 +570,7 @@ docs/                   Maintainer architecture, persistence, and testing guides
 Maintainer documentation:
 
 - [Architecture](docs/architecture.md)
+- [Desktop application and workspace browser](docs/desktop.md)
 - [Persistence and recovery](docs/persistence.md)
 - [Testing and desktop smoke checks](docs/testing.md)
 

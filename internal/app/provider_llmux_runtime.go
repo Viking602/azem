@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/Viking602/azem/internal/auth"
@@ -14,7 +15,7 @@ import (
 )
 
 func (r *ProviderRuntime) resolveLLMuxDriverForAccount(ctx context.Context, providerID, modelID, requestedReasoning, accountID string) (auth.Account, string, int, hyprovider.Driver, error) {
-	providerID = strings.ToLower(strings.TrimSpace(providerID))
+	providerID = llmuxdriver.CanonicalProviderID(providerID)
 	profile, ok := llmuxdriver.LookupProfile(providerID)
 	if !ok {
 		return auth.Account{}, "", 0, nil, fmt.Errorf("unsupported provider %q", providerID)
@@ -44,6 +45,7 @@ func (r *ProviderRuntime) resolveLLMuxDriverForAccount(ctx context.Context, prov
 	driver, err := llmuxdriver.New(llmuxdriver.Config{
 		ProviderID: providerID, APIKey: apiKey, BaseURL: baseURL,
 		Models: []string{selected.ID}, ReasoningEffort: reasoning, MaxOutputTokens: selected.MaxOutputTokens,
+		DisableImages: len(selected.InputModalities) > 0 && !slices.Contains(selected.InputModalities, "image"),
 	})
 	return account, selected.ID, selected.ContextWindow, driver, err
 }
@@ -79,6 +81,7 @@ func (r *ProviderRuntime) llmuxCredential(ctx context.Context, profile llmuxdriv
 }
 
 func (r *ProviderRuntime) resolvedLLMuxReasoningEffort(providerID, modelID, requested string) (string, error) {
+	providerID = llmuxdriver.CanonicalProviderID(providerID)
 	r.mu.RLock()
 	provider, ok := r.cfg.Providers.LLMux[providerID]
 	r.mu.RUnlock()
@@ -93,11 +96,19 @@ func (r *ProviderRuntime) resolvedLLMuxReasoningEffort(providerID, modelID, requ
 }
 
 func configuredModel(providerID string, models []config.LLMuxModelConfig, modelID string) (catalog.Model, error) {
-	if modelID == "" && len(models) > 0 {
-		modelID = models[0].ID
+	if modelID == "" {
+		for _, model := range models {
+			if !model.Disabled {
+				modelID = model.ID
+				break
+			}
+		}
 	}
 	for _, model := range configuredCatalogModels(models) {
 		if model.MatchesID(modelID) {
+			if model.Disabled {
+				return catalog.Model{}, fmt.Errorf("model %q is disabled for %s", model.ID, providerID)
+			}
 			return model, nil
 		}
 	}
@@ -108,7 +119,7 @@ func configuredModel(providerID string, models []config.LLMuxModelConfig, modelI
 // models. Subscription providers (chatgpt/grok) intentionally return 0 because
 // their transports omit or reject max_output_tokens on the main path.
 func (r *ProviderRuntime) modelMaxOutputTokens(providerID, modelID string) int {
-	providerID = strings.ToLower(strings.TrimSpace(providerID))
+	providerID = llmuxdriver.CanonicalProviderID(providerID)
 	if providerID == "" || providerID == "chatgpt" || providerID == "grok" {
 		return 0
 	}

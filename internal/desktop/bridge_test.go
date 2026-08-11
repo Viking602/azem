@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,16 @@ import (
 	azemapp "github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
 )
+
+func TestCurrentGitBranch(t *testing.T) {
+	root := t.TempDir()
+	if output, err := exec.Command("git", "-C", root, "init", "--initial-branch=main").CombinedOutput(); err != nil {
+		t.Fatalf("init git repository: %v: %s", err, output)
+	}
+	if got := currentGitBranch(context.Background(), root); got != "main" {
+		t.Fatalf("currentGitBranch() = %q, want main", got)
+	}
+}
 
 func TestBridgeInitialiseAndEventProjection(t *testing.T) {
 	cfg := config.Default()
@@ -91,10 +102,19 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionResolveApproval) {
 		t.Fatal("approval resolution must be available to the desktop")
 	}
+	if !allowedAction(azemapp.ActionResolveUserInput) || !allowedAction(azemapp.ActionResolvePlan) {
+		t.Fatal("planning interaction actions must be available to the desktop")
+	}
 	if !allowedAction(azemapp.ActionListModels) {
 		t.Fatal("model catalog must be available to the desktop")
 	}
-	if !allowedAction(azemapp.ActionListModelProviders) || !allowedAction(azemapp.ActionDiscoverProviderModels) || !allowedAction(azemapp.ActionSetModelProvider) {
+	if !allowedAction(azemapp.ActionSetSkillEnabled) {
+		t.Fatal("skill availability must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionSetMCPEnabled) || !allowedAction(azemapp.ActionUpsertMCPServer) {
+		t.Fatal("MCP services must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionListModelProviders) || !allowedAction(azemapp.ActionDiscoverProviderModels) || !allowedAction(azemapp.ActionSetModelProvider) || !allowedAction(azemapp.ActionSetModelEnabled) {
 		t.Fatal("llmux model provider actions must be available to the desktop")
 	}
 	if !allowedAction(azemapp.ActionSetQueueMode) {
@@ -105,6 +125,9 @@ func TestAllowedDesktopActions(t *testing.T) {
 	}
 	if !allowedAction(azemapp.ActionSetChatGPTFastMode) {
 		t.Fatal("ChatGPT fast mode must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionRefreshSession) {
+		t.Fatal("session projection refresh must be available to the desktop")
 	}
 	if !allowedAction(azemapp.ActionCreateGitBranch) {
 		t.Fatal("git branch creation must be available to the desktop")

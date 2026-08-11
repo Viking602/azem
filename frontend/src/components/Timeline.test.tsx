@@ -1,10 +1,106 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, it } from "vitest";
-import type { Block } from "../types";
+import { describe, expect, it, vi } from "vitest";
+import { useRuntimeStore } from "../store";
+import type { AgentState, Block } from "../types";
 import { TimelineFeed } from "./Timeline";
 
+function runningAgent(id: string, toolCallId: string, description: string): AgentState {
+  return {
+    id, type: "review", description, parentRunId: "run-delegated", parentToolCallId: toolCallId,
+    model: "gpt-5.6-sol", background: false, capabilityMode: "read-only", isolation: "none", cwd: ".",
+    activity: "正在审查", warning: "", worktreePath: "", toolCalls: 1, turns: 1, tokensUsed: 1200,
+    elapsedMs: 12_000, state: "running", summary: "", preview: "正在审查", previewKind: "commentary",
+    previewRunId: `child-${id}`, elapsedObservedAt: Date.now(),
+  };
+}
+
 describe("Codex-style process timeline", () => {
+  it("promotes parallel subagents into one clickable run card and hides the empty thinking heartbeat", async () => {
+    const previousAgents = useRuntimeStore.getState().agents;
+    const previousSelection = useRuntimeStore.getState().selectedAgentId;
+    const descriptions = ["审查架构与模块边界", "审查安全与系统边界", "评估前端复杂度与性能", "评估测试与工程保障"];
+    const agents = descriptions.map((description, index) => runningAgent(`agent-${index}`, `spawn-${index}`, description));
+    const blocks: Block[] = [
+      {
+        id: "progress", kind: "commentary", runId: "run-delegated", title: "progress", state: "completed",
+        content: "**并行审阅高风险面**\n覆盖架构、安全、前端与工程保障",
+      },
+      { id: "empty-thinking", kind: "thinking", runId: "run-delegated", content: "", state: "streaming" },
+      ...descriptions.map((description, index): Block => ({
+        id: `spawn-${index}`, toolCallId: `spawn-${index}`, kind: "tool", runId: "run-delegated",
+        title: "subagent.spawn", state: "completed", data: { arguments: JSON.stringify({ description, subagent_type: "review" }) },
+      })),
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => useRuntimeStore.setState({ agents, selectedAgentId: "" }));
+      await act(async () => root.render(createElement(TimelineFeed, {
+        blocks, language: "zh-CN", activeRunId: "run-delegated", running: true, waitingForModel: true,
+      })));
+
+      const card = container.querySelector<HTMLElement>(".subagent-run-card");
+      expect(card?.getAttribute("data-state")).toBe("running");
+      expect(card?.textContent).toContain("4 个子智能体协作");
+      expect(card?.textContent).toContain("4 个运行中");
+      expect(card?.textContent).toContain("0 / 4 已结束");
+      expect(card?.querySelector(".subagent-run-mark")).not.toBeNull();
+      expect(card?.querySelector(".subagent-run-glyphs")).toBeNull();
+      expect(card?.textContent).not.toContain("+2");
+      expect(container.querySelectorAll(".timeline-step")).toHaveLength(1);
+      expect(container.querySelector(".reasoning-placeholder")).toBeNull();
+      expect(container.querySelector(".reasoning-trace")).toBeNull();
+      expect(container.textContent).not.toContain("思考中");
+
+      const summary = card?.querySelector<HTMLButtonElement>(".subagent-run-card-summary");
+      await act(async () => summary?.click());
+      expect(summary?.getAttribute("aria-expanded")).toBe("true");
+      expect(card?.querySelectorAll(".subagent-run-row")).toHaveLength(4);
+      for (const description of descriptions) expect(card?.textContent).toContain(description);
+
+      await act(async () => card?.querySelector<HTMLButtonElement>(".subagent-run-row")?.click());
+      expect(useRuntimeStore.getState().selectedAgentId).toBe("agent-0");
+
+      await act(async () => useRuntimeStore.setState({
+        agents: agents.map((agent) => ({ ...agent, state: "completed", summary: "审查完成" })),
+      }));
+      expect(card?.getAttribute("data-state")).toBe("completed");
+      expect(card?.textContent).toContain("4 个已结束");
+      expect(card?.querySelector<HTMLElement>(".subagent-run-progress > i")?.style.width).toBe("100%");
+    } finally {
+      await act(async () => root.unmount());
+      useRuntimeStore.setState({ agents: previousAgents, selectedAgentId: previousSelection });
+      container.remove();
+    }
+  });
+
+  it("renders planning questions and the latest executable plan as durable cards", async () => {
+    const questions = JSON.stringify([{
+      id: "scope", header: "范围", question: "选择实现范围",
+      options: [
+        { label: "完整", description: "包含实现和验证", recommended: true },
+        { label: "最小", description: "仅修改核心路径" },
+      ],
+    }]);
+    const blocks: Block[] = [
+      { id: "ask-1", kind: "question", userInputId: "ask-1", state: "pending", title: "需要你的选择", data: { questions } },
+      { id: "plan-1", kind: "plan", planId: "plan-1", state: "proposed", title: "规划交互", content: "## 实现\n\n接入 `ask` 工具。", data: { version: "2" } },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
+
+    expect(container.querySelector(".planning-question")?.textContent).toContain("选择实现范围");
+    expect(container.querySelector(".planning-options button em")?.textContent).toBe("推荐");
+    expect(container.querySelector(".plan-review")?.textContent).toContain("计划 v2");
+    expect(container.querySelector(".plan-review h2")?.textContent).toBe("实现");
+    expect(container.querySelectorAll(".plan-review footer button")).toHaveLength(3);
+    await act(async () => root.unmount());
+  });
+
   it("marks live assistant output as busy without rendering a cursor inside Markdown", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
@@ -16,6 +112,320 @@ describe("Codex-style process timeline", () => {
 
     await act(async () => root.render(createElement(TimelineFeed, { blocks: [{ ...live, state: "completed" }], language: "zh-CN" })));
     expect(container.querySelector(".stream-cursor")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it("labels an active folded process as processing and advances its elapsed time", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T00:00:00Z"));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const progress: Block = {
+      id: "progress", kind: "commentary", runId: "child-run", title: "progress", state: "completed",
+      content: "**分派专项审查**\n覆盖安全、架构和前端边界",
+    };
+    const tool: Block = {
+      id: "tool", kind: "tool", runId: "child-run", title: "subagent.spawn", state: "running",
+      data: { elapsedMs: "2100" },
+    };
+
+    try {
+      await act(async () => root.render(createElement(TimelineFeed, {
+        blocks: [progress, tool], language: "zh-CN", activeRunId: "child-run", running: true, foldActiveProcess: true,
+      })));
+      const fold = container.querySelector<HTMLDetailsElement>(".process-fold");
+      expect(fold?.getAttribute("data-state")).toBe("running");
+      expect(fold?.querySelector(".process-fold-label")?.textContent).toBe("处理中");
+      expect(fold?.querySelector(":scope > summary time")?.textContent).toBe("2s");
+      expect(fold?.querySelector(".model-progress-step time")?.textContent).toBe("2s");
+
+      await act(async () => { vi.advanceTimersByTime(2100); });
+      expect(fold?.querySelector(":scope > summary time")?.textContent).toBe("4s");
+      expect(fold?.querySelector(".model-progress-step time")?.textContent).toBe("4s");
+
+      await act(async () => root.render(createElement(TimelineFeed, {
+        blocks: [progress, { ...tool, state: "completed", data: { elapsedMs: "4300" } }],
+        language: "zh-CN", running: false, foldActiveProcess: true,
+      })));
+      expect(container.querySelector(".process-fold")?.getAttribute("data-state")).toBe("completed");
+      expect(container.querySelector(".process-fold-label")?.textContent).toBe("已处理");
+      expect(container.querySelector(".process-fold > summary time")?.textContent).toBe("4s");
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("restores a running progress timer from durable timestamps after switching sessions", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T04:31:35Z"));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const startedAt = Date.parse("2026-08-10T04:30:00Z");
+    const progress: Block = {
+      id: "progress", kind: "commentary", runId: "run", title: "progress", state: "completed",
+      content: "**并行审阅高风险面**\n等待子智能体返回",
+      data: { startedAt: String(startedAt), completedAt: String(startedAt + 3_000), elapsedMs: "3000" },
+    };
+    const spawn: Block = {
+      id: "spawn", kind: "tool", runId: "run", title: "subagent.spawn", state: "running",
+      data: { startedAt: String(startedAt + 3_000) },
+    };
+
+    try {
+      await act(async () => root.render(createElement(TimelineFeed, {
+        blocks: [progress, spawn], language: "zh-CN", activeRunId: "run", running: true,
+      })));
+      expect(container.querySelector(".model-progress-step time")?.textContent).toBe("1m35s");
+
+      await act(async () => { vi.advanceTimersByTime(2_100); });
+      expect(container.querySelector(".model-progress-step time")?.textContent).toBe("1m37s");
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the streaming final answer outside the process rail without remounting it on completion", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const thinking: Block = { id: "thinking", kind: "thinking", runId: "run", content: "检查完成", state: "completed" };
+    const answer: Block = { id: "answer", kind: "assistant", runId: "run", content: "最终正文", textPhase: "final_answer", state: "streaming" };
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [thinking, answer], language: "zh-CN", activeRunId: "run", running: true })));
+    const streamingNode = container.querySelector(".assistant-block");
+    expect(streamingNode).not.toBeNull();
+    expect(streamingNode?.closest(".process-entries")).toBeNull();
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [thinking, { ...answer, state: "completed" }], language: "zh-CN" })));
+    expect(container.querySelector(".assistant-block")).toBe(streamingNode);
+    expect(container.querySelector(".assistant-block")?.closest(".process-fold")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it("shows the newest completed process as the conversation context while older work stays folded", async () => {
+    const blocks: Block[] = [
+      { id: "old-thinking", kind: "thinking", runId: "old-run", content: "旧过程", state: "completed" },
+      { id: "old-answer", kind: "assistant", runId: "old-run", content: "旧回答", textPhase: "final_answer", state: "completed" },
+      { id: "new-thinking", kind: "thinking", runId: "new-run", content: "新过程", state: "completed", data: { elapsedMs: "2300" } },
+      { id: "new-answer", kind: "assistant", runId: "new-run", content: "新回答", textPhase: "final_answer", state: "completed" },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
+
+    const folds = Array.from(container.querySelectorAll<HTMLDetailsElement>(".process-fold"));
+    expect(folds).toHaveLength(2);
+    expect(folds[0]?.open).toBe(false);
+    expect(folds[1]?.open).toBe(true);
+    expect(folds[1]?.querySelector(".process-entries")?.textContent).toContain("新过程");
+    expect(Array.from(container.querySelectorAll(".final-answer-marker")).map((node) => node.textContent))
+      .toEqual(["最终回答", "最终回答"]);
+
+    await act(async () => {
+      folds[1]!.open = false;
+      folds[1]!.dispatchEvent(new Event("toggle"));
+    });
+    await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
+    expect(container.querySelectorAll<HTMLDetailsElement>(".process-fold")[1]?.open).toBe(false);
+
+    await act(async () => root.unmount());
+  });
+
+  it("does not promote ambiguous live text or duplicate an explicit answer section", async () => {
+    const blocks: Block[] = [
+      { id: "thinking", kind: "thinking", runId: "run", content: "检查", state: "completed" },
+      { id: "pending", kind: "assistant", runId: "run", content: "待确认", textPhase: "final_answer", state: "streaming", data: { textPhasePending: "true" } },
+      { id: "section", kind: "status", runId: "run", title: "方案结论", state: "ready", data: { variant: "section" } },
+      { id: "answer", kind: "assistant", runId: "run", content: "完成", textPhase: "final_answer", state: "completed" },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
+
+    expect(container.querySelectorAll(".section-marker")).toHaveLength(1);
+    expect(container.querySelector(".section-marker")?.textContent).toBe("方案结论");
+    await act(async () => root.unmount());
+  });
+
+  it("visually separates an unresolved unphased stream from settled final prose", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const pending: Block = {
+      id: "pending-phase", kind: "assistant", runId: "run", content: "最后确认测试和 diff。",
+      textPhase: "final_answer", state: "streaming", data: { textPhasePending: "true" },
+    };
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [pending], language: "zh-CN", activeRunId: "run", running: true,
+    })));
+    expect(container.querySelector(".assistant-block.phase-pending")).not.toBeNull();
+    expect(container.querySelector(".assistant-block.phase-pending .streaming-text p")?.textContent).toBe("最后确认测试和 diff。");
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [{ ...pending, state: "completed" }], language: "zh-CN",
+    })));
+    expect(container.querySelector(".assistant-block.phase-pending")).toBeNull();
+    expect(container.querySelector(".assistant-block.timeline-prose")?.textContent).toContain("最后确认测试和 diff。");
+    await act(async () => root.unmount());
+  });
+
+  it("keeps generic progress labels out of the visual process trail", async () => {
+    const blocks: Block[] = [
+      { id: "progress-en", kind: "commentary", title: "progress", content: "读取当前状态。", state: "completed" },
+      { id: "progress-zh", kind: "commentary", title: "进度更新", content: "继续核对样式。", state: "completed" },
+      { id: "progress-specific", kind: "commentary", title: "视觉核对", content: "保留有意义的阶段标题。", state: "completed" },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
+
+    expect(Array.from(container.querySelectorAll(".commentary-label")).map((node) => node.textContent)).toEqual(["视觉核对"]);
+    expect(container.textContent).not.toContain("progress");
+    expect(container.textContent).not.toContain("进度更新");
+    await act(async () => root.unmount());
+  });
+
+  it("uses model commentary as the primary progress step and nests its tools", async () => {
+    const blocks: Block[] = [
+      {
+        id: "progress-done", kind: "commentary", runId: "run", title: "progress", state: "completed",
+        content: "**读取当前前端结构**\nApp、Sidebar、Timeline 与 Inspector",
+        data: { startedAt: "1000", completedAt: "1100" },
+      },
+      {
+        id: "read", kind: "tool", runId: "run", title: "coding.read_file", state: "completed",
+        content: "{\"path\":\"frontend/src/components/Timeline.tsx\"}",
+        data: { startedAt: "1100", completedAt: "2200", elapsedMs: "1100" },
+      },
+      {
+        id: "progress-live", kind: "commentary", runId: "run", title: "progress", state: "completed",
+        content: "**构建高保真交互原型**\n页面、工具与文本共享一套节奏",
+      },
+      {
+        id: "edit", kind: "tool", runId: "run", title: "coding.edit_hashline", state: "running",
+        content: "{\"path\":\"frontend/src/prototype.css\"}", data: { elapsedMs: "4200" },
+      },
+      {
+        id: "legacy", kind: "commentary", runId: "run", title: "progress", state: "streaming",
+        content: "这是一段旧会话模型输出，不能被前端擅自截成标题。",
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks, language: "zh-CN", activeRunId: "run", running: true,
+    })));
+
+    const steps = Array.from(container.querySelectorAll<HTMLDetailsElement>(".model-progress-step"));
+    expect(steps).toHaveLength(2);
+    expect(steps[0]?.querySelector("strong")?.textContent).toBe("读取当前前端结构");
+    expect(steps[0]?.querySelector("small")?.textContent).toBe("App、Sidebar、Timeline 与 Inspector");
+    expect(steps[0]?.querySelector("time")?.textContent).toBe("1s");
+    expect(steps[0]?.getAttribute("data-state")).toBe("settled");
+    expect(steps[0]?.querySelector(".timeline-step-neutral-dot")).not.toBeNull();
+    expect(steps[0]?.querySelector(".timeline-step-mark svg")).toBeNull();
+    expect(steps[1]?.getAttribute("data-state")).toBe("running");
+    expect(steps[1]?.getAttribute("aria-current")).toBe("step");
+    expect(steps[1]?.querySelector("time")?.textContent).toBe("4s");
+    expect(container.querySelector(".commentary-block")?.textContent).toContain("不能被前端擅自截成标题");
+    expect(container.querySelector(".model-progress-tools")).toBeNull();
+
+    await act(async () => {
+      steps[0]!.open = true;
+      steps[0]!.dispatchEvent(new Event("toggle"));
+    });
+    expect(steps[0]?.querySelector(".model-progress-tools")?.textContent).toContain("读取文件");
+    expect(container.querySelectorAll(".process-entries > .tool-block")).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
+  it("keeps model-authored progress neutral when a nested command fails", async () => {
+    const blocks: Block[] = [
+      {
+        id: "progress-validation", kind: "commentary", runId: "run-validation", title: "progress", state: "completed",
+        content: "**执行项目验证矩阵**\n继续运行其余验证命令",
+      },
+      {
+        id: "go-test", kind: "tool", runId: "run-validation", title: "coding.shell", state: "failed",
+        content: JSON.stringify({ command: "GOWORK=off go test ./..." }),
+      },
+      {
+        id: "frontend-test", kind: "tool", runId: "run-validation", title: "coding.shell", state: "completed",
+        content: JSON.stringify({ command: "cd frontend && bun run test" }),
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
+
+    const progress = container.querySelector<HTMLDetailsElement>(".model-progress-step");
+    expect(progress?.getAttribute("data-state")).toBe("settled");
+    expect(progress?.querySelector(".timeline-step-neutral-dot")).not.toBeNull();
+    expect(progress?.querySelector(":scope > summary .timeline-step-mark svg")).toBeNull();
+
+    await act(async () => {
+      progress!.open = true;
+      progress!.dispatchEvent(new Event("toggle"));
+    });
+    expect(progress?.querySelector('.tool-block[data-state="failed"] .tool-status')?.textContent).toBe("失败");
+
+    await act(async () => root.unmount());
+  });
+
+  it("renders live Markdown immediately and keeps settled structure stable as content grows", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const live: Block = {
+      id: "live-markdown", kind: "assistant", state: "streaming",
+      content: "## 检查结果\n\n- **架构**通过\n- `测试`通过\n\n---\n\n继续核对。",
+    };
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [live], language: "zh-CN" })));
+    const heading = container.querySelector(".streaming-text h2");
+    expect(heading?.textContent).toBe("检查结果");
+    expect(container.querySelectorAll(".streaming-text li")).toHaveLength(2);
+    expect(container.querySelector(".streaming-text strong")?.textContent).toBe("架构");
+    expect(container.querySelector(".streaming-text code")?.textContent).toBe("测试");
+    expect(container.querySelector(".streaming-text hr")).not.toBeNull();
+    expect(container.querySelector(".streaming-text-reveal")).not.toBeNull();
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [{ ...live, content: `${live.content}\n\n### 新证据\n\n第三段。` }], language: "zh-CN",
+    })));
+    expect(container.querySelector(".streaming-text h2")).toBe(heading);
+    expect(container.querySelector(".streaming-text h3")?.textContent).toBe("新证据");
+    const revealIDs = Array.from(container.querySelectorAll<HTMLElement>("[data-stream-reveal]"));
+    const latestRevealID = Math.max(...revealIDs.map((node) => Number(node.dataset.streamReveal)));
+    expect(revealIDs.filter((node) => Number(node.dataset.streamReveal) === latestRevealID).map((node) => node.textContent).join(""))
+      .toBe("新证据第三段。");
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [{ ...live, state: "completed" }], language: "zh-CN" })));
+    expect(container.querySelector(".streaming-text")).toBeNull();
+    expect(container.querySelector(".assistant-block h2")?.textContent).toBe("检查结果");
+    await act(async () => root.unmount());
+  });
+
+  it("reveals only appended text while keeping the live paragraph mounted", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const live: Block = { id: "live-tail", kind: "assistant", state: "streaming", content: "正在输出" };
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [live], language: "zh-CN" })));
+    const paragraph = container.querySelector(".streaming-text p");
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [{ ...live, content: "正在输出，继续" }], language: "zh-CN",
+    })));
+    expect(container.querySelector(".streaming-text p")).toBe(paragraph);
+    const revealIDs = Array.from(container.querySelectorAll<HTMLElement>("[data-stream-reveal]"));
+    const latestRevealID = Math.max(...revealIDs.map((node) => Number(node.dataset.streamReveal)));
+    expect(revealIDs.filter((node) => Number(node.dataset.streamReveal) === latestRevealID).map((node) => node.textContent).join(""))
+      .toBe("，继续");
     await act(async () => root.unmount());
   });
 
@@ -57,7 +467,7 @@ describe("Codex-style process timeline", () => {
     expect(Array.from(container.querySelectorAll(".syntax-function")).map((node) => node.textContent)).toEqual(["read", "parse"]);
     expect(container.querySelector(".edited-files-summary")?.textContent).toContain("已编辑 1 个文件");
     expect(container.querySelector(".edited-files-summary")?.textContent).toContain("frontend/src/ThreadSurface.tsx");
-    expect(container.querySelector(".run-status-marker")?.textContent).toBe("你在 1m05s 后停止了");
+    expect(container.querySelector(".run-status-marker:not(.section-marker)")?.textContent).toBe("你在 1m05s 后停止了");
     expect(container.querySelector<HTMLButtonElement>('.code-diff button[aria-label="复制差异"]')).not.toBeNull();
 
     await act(async () => root.unmount());
@@ -88,13 +498,14 @@ describe("Codex-style process timeline", () => {
       blocks, language: "zh-CN", activeRunId: "run-pending", running: true,
     })));
 
-    expect(container.querySelectorAll(".tool-group")).toHaveLength(2);
-    expect(container.querySelectorAll(".process-entries > .tool-block")).toHaveLength(3);
+    expect(container.querySelectorAll(".timeline-step-list")).toHaveLength(1);
+    expect(container.querySelectorAll(".timeline-step")).toHaveLength(7);
+    expect(container.querySelectorAll(".tool-group, .process-entries > .tool-block")).toHaveLength(0);
     expect(container.textContent).toContain("需要审批");
     expect(container.textContent).toContain("排队中");
     expect(container.querySelector(".file-change-entry")).toBeNull();
-    expect(container.querySelector(".tool-block .spin")).not.toBeNull();
-    expect(Array.from(container.querySelectorAll<HTMLDetailsElement>(".tool-block, .tool-group"))
+    expect(container.querySelector('.timeline-step[data-state="running"]')?.getAttribute("aria-current")).toBe("step");
+    expect(Array.from(container.querySelectorAll<HTMLDetailsElement>(".timeline-step"))
       .every((details) => !details.open)).toBe(true);
 
     await act(async () => root.unmount());
@@ -167,6 +578,12 @@ describe("Codex-style process timeline", () => {
 
     await act(async () => root.render(createElement(TimelineFeed, { blocks: [block], language: "zh-CN" })));
 
+    expect(container.querySelector(".tool-result")).toBeNull();
+    const details = container.querySelector<HTMLDetailsElement>(".tool-block")!;
+    await act(async () => {
+      details.open = true;
+      details.dispatchEvent(new Event("toggle"));
+    });
     const result = container.querySelector<HTMLElement>(".tool-result")!;
     expect(result.textContent).toContain("RUN  v4.1.10");
     expect(result.textContent).not.toContain("\u001b");

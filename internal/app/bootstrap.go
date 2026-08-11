@@ -19,6 +19,8 @@ import (
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/netproxy"
+	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
@@ -45,6 +47,7 @@ type bootstrapAssembly struct {
 
 	store           *sqlitestore.Provider
 	skillCatalog    *skills.Catalog
+	pluginCatalog   plugins.Integration
 	sessions        *session.Service
 	coding          *agentservice.Service
 	subagentRuns    *agentservice.SQLSubagentRunStore
@@ -56,6 +59,8 @@ type bootstrapAssembly struct {
 	manager         *mcpruntime.Manager
 	registry        *hooks.Registry
 	recoveryService *recovery.Service
+	recoveryFence   sqlitestore.RecoveryFence
+	shouldRecover   bool
 }
 
 func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
@@ -75,6 +80,7 @@ func BootstrapDesktopAtWorkspace(ctx context.Context, startupWorkspace string, c
 }
 
 func bootstrap(ctx context.Context, startupWorkspace, configFile string, forceWorkspace, desktopMode bool) (BootstrapResult, error) {
+	netproxy.InstallDefaultTransport()
 	assembly := bootstrapAssembly{ctx: ctx}
 	result, err := assembly.build(startupWorkspace, configFile, forceWorkspace, desktopMode)
 	if err != nil {
@@ -86,6 +92,11 @@ func bootstrap(ctx context.Context, startupWorkspace, configFile string, forceWo
 
 func (b *bootstrapAssembly) build(startupWorkspace, configFile string, forceWorkspace, desktopMode bool) (BootstrapResult, error) {
 	if err := b.loadConfiguration(startupWorkspace, configFile, forceWorkspace, desktopMode); err != nil {
+		return BootstrapResult{}, err
+	}
+	var err error
+	b.recoveryFence, b.shouldRecover, err = sqlitestore.AcquireRecoveryFence(b.ctx, b.paths.Database)
+	if err != nil {
 		return BootstrapResult{}, err
 	}
 	if err := b.buildCore(forceWorkspace, desktopMode); err != nil {
@@ -135,7 +146,41 @@ func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile strin
 		return fmt.Errorf("resolve config directory for skills: %w", err)
 	}
 	b.cfg, b.paths, b.homeDir, b.configDir = cfg, paths, homeDir, configDir
+	b.loadPlugins(desktopMode)
 	return nil
+}
+
+func (b *bootstrapAssembly) loadPlugins(desktopMode bool) {
+	if !desktopMode || os.Getenv("AZEM_FAKE_PROVIDER") == "1" || !b.cfg.Plugins.Enabled || !b.cfg.Plugins.ImportCodex {
+		return
+	}
+	b.pluginCatalog = plugins.Discover(b.ctx, plugins.Options{
+		HomeDir: b.homeDir, DataDir: b.paths.DataDir, TrustHooks: b.cfg.Plugins.TrustHooks,
+	})
+	b.mergePlugins()
+}
+
+func (b *bootstrapAssembly) mergePlugins() {
+	seenSkills := make(map[string]bool, len(b.cfg.Skills.AdditionalDirs)+len(b.pluginCatalog.SkillDirs))
+	mergedSkills := make([]string, 0, len(b.cfg.Skills.AdditionalDirs)+len(b.pluginCatalog.SkillDirs))
+	for _, path := range append(append([]string(nil), b.cfg.Skills.AdditionalDirs...), b.pluginCatalog.SkillDirs...) {
+		clean := filepath.Clean(path)
+		if clean == "." || seenSkills[clean] {
+			continue
+		}
+		seenSkills[clean] = true
+		mergedSkills = append(mergedSkills, path)
+	}
+	b.cfg.Skills.AdditionalDirs = mergedSkills
+	if b.cfg.MCP.Servers == nil {
+		b.cfg.MCP.Servers = map[string]config.MCPServerConfig{}
+	}
+	for name, server := range b.pluginCatalog.MCPServers {
+		if _, configured := b.cfg.MCP.Servers[name]; configured {
+			continue
+		}
+		b.cfg.MCP.Servers[name] = server
+	}
 }
 
 func (b *bootstrapAssembly) restoreDesktopWorkspace(paths *config.Paths) error {
@@ -235,6 +280,8 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 
 func (b *bootstrapAssembly) wireService() error {
 	b.service = NewService(b.ctx, b.cfg)
+	b.service.attachRuntimeFence(b.recoveryFence)
+	b.recoveryFence = nil
 	b.attachHooks()
 	b.service.SetConfigPath(b.paths.ConfigFile)
 	b.service.AttachDurable(b.sessions, b.coding)
@@ -243,6 +290,7 @@ func (b *bootstrapAssembly) wireService() error {
 	b.service.AttachMemory(memory.NewService(b.store.DB(), b.cfg.Workspace.Root), recap.NewService(b.store.DB(), b.cfg.Workspace.Root))
 	b.service.AttachAuth(b.authentication, b.modelCatalog)
 	b.service.AttachSkills(b.skillCatalog)
+	b.service.AttachPlugins(pluginCatalogEntries(b.pluginCatalog), pluginDiagnostics(b.pluginCatalog))
 
 	b.manager = mcpruntime.NewManager(b.cfg.MCP.Servers, fmt.Sprintf("azem/%d", config.CurrentVersion), func(_ context.Context, reference string) (string, error) {
 		return config.ResolveReference(reference, os.LookupEnv, authservice.LookupKeyringSecret)
@@ -265,6 +313,12 @@ func (b *bootstrapAssembly) wireService() error {
 
 func (b *bootstrapAssembly) attachHooks() {
 	sources := hookSources(b.cfg.Hooks, b.configDir, b.homeDir, b.paths.Workspace)
+	for _, source := range b.pluginCatalog.HookSources {
+		if dataDir := source.Environment["PLUGIN_DATA"]; dataDir != "" {
+			_ = os.MkdirAll(dataDir, 0o700)
+		}
+		sources = append(sources, hooks.Source{Path: source.Path, Trusted: true, Environment: source.Environment})
+	}
 	hookOptions := hooks.Options{Sources: sources, DefaultTimeout: b.cfg.Hooks.DefaultTimeoutParsed, FailurePolicy: hooks.FailurePolicy(b.cfg.Hooks.FailurePolicy)}
 	b.registry = hooks.Discover(hookOptions)
 	b.service.AttachHooks(hooks.Dispatcher{Registry: b.registry, Runner: hooks.Runner{Workspace: b.paths.Workspace}})
@@ -326,6 +380,10 @@ func (b *bootstrapAssembly) start() error {
 }
 
 func (b *bootstrapAssembly) recover() error {
+	if !b.shouldRecover {
+		b.service.AttachReconcileResolver(b.coding)
+		return nil
+	}
 	summary, err := b.recoveryService.Recover(b.ctx)
 	if err != nil {
 		return err
@@ -333,7 +391,7 @@ func (b *bootstrapAssembly) recover() error {
 	b.service.AttachRecovery(summary)
 	b.service.emitRecoveryState()
 	b.service.AttachReconcileResolver(b.coding)
-	return nil
+	return b.service.finishRuntimeRecovery()
 }
 
 func (b *bootstrapAssembly) emitStartupInstructions() {
@@ -370,6 +428,7 @@ func (b *bootstrapAssembly) startBackgroundRuntimes() {
 func (b *bootstrapAssembly) close() {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(b.ctx), 5*time.Second)
 	defer cancel()
+	defer closeRecoveryFence(b.recoveryFence)
 	if b.service != nil {
 		_ = b.service.Shutdown(cleanupCtx)
 		return
@@ -383,6 +442,12 @@ func (b *bootstrapAssembly) close() {
 	}
 	if b.store != nil {
 		_ = b.store.Close(cleanupCtx)
+	}
+}
+
+func closeRecoveryFence(fence sqlitestore.RecoveryFence) {
+	if fence != nil {
+		_ = fence.Close()
 	}
 }
 

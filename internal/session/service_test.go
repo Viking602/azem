@@ -15,6 +15,38 @@ import (
 	"github.com/Viking602/venat/message"
 )
 
+func TestUpdateLatestBlockStateTargetsNewestMatchingProposal(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "block-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, planID := range []string{"plan-1", "plan-2"} {
+		if _, err := service.AppendBlock(ctx, "session", Block{Kind: "plan", State: "proposed", Data: map[string]string{"planId": planID}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	updated, err := service.UpdateLatestBlockState(ctx, "session", "plan", "planId", "plan-2", "proposed", "approved", map[string]string{"approvedBy": "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != "approved" || updated.Data["approvedBy"] != "user" {
+		t.Fatalf("updated block = %+v", updated)
+	}
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Blocks[0].State != "proposed" || projection.Blocks[1].State != "approved" {
+		t.Fatalf("projection blocks = %+v", projection.Blocks)
+	}
+}
+
 func TestPhase3ArtifactRoundTripAfterReopenAndDeduplicates(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "artifacts.db")

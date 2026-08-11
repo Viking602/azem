@@ -5,12 +5,16 @@ package background
 import (
 	"os"
 	"os/exec"
+	"strconv"
 )
 
 func configureProcess(*exec.Cmd) {}
 
 func terminatePID(pid int) error {
 	if pid <= 0 {
+		return nil
+	}
+	if err := exec.Command("taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(pid)).Run(); err == nil {
 		return nil
 	}
 	process, err := os.FindProcess(pid)

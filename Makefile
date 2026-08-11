@@ -4,7 +4,7 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X 'main.version=$(VERSION)' -X 'main.gitCommit=$(GIT_COMMIT)' -X 'main.buildTime=$(BUILD_TIME)'
 
-.PHONY: build gui frontend test test-gui sqlc architecture-check
+.PHONY: build gui gui-windows frontend test test-gui sqlc architecture-check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/azem
@@ -29,9 +29,17 @@ ifeq ($(shell uname -s),Darwin)
 	codesign --force --sign - --timestamp=none dist/Azem.app/Contents/MacOS/Azem
 	codesign --force --sign - --timestamp=none dist/Azem.app
 	codesign --verify --deep --strict --verbose=2 dist/Azem.app
+else ifeq ($(shell go env GOOS),windows)
+	go build -ldflags "-H windowsgui $(LDFLAGS)" -o Azem.exe ./cmd/azem-gui
 else
 	go build -ldflags "$(LDFLAGS)" -o azem-gui ./cmd/azem-gui
 endif
+
+WINDOWS_ARCH ?= amd64
+
+gui-windows: frontend
+	mkdir -p dist/windows-$(WINDOWS_ARCH)
+	GOOS=windows GOARCH=$(WINDOWS_ARCH) CGO_ENABLED=0 go build -ldflags "-H windowsgui $(LDFLAGS)" -o dist/windows-$(WINDOWS_ARCH)/Azem.exe ./cmd/azem-gui
 
 test:
 	go test ./...

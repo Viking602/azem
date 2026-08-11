@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Viking602/azem/internal/netproxy"
 )
 
 const DefaultModelsDevURL = "https://models.dev/api.json"
@@ -66,7 +68,8 @@ func FetchModelsDev(ctx context.Context, client *http.Client, endpoint string) (
 		return ModelsDevCatalog{}, fmt.Errorf("models.dev catalog URL must use https (http is allowed only for localhost)")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+		client = netproxy.NewHTTPClient(20 * time.Second)
+		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {

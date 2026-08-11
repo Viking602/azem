@@ -50,14 +50,15 @@ describe("ReasoningEffortSlider helpers", () => {
   });
 
   it("insets stop positions so end ticks stay inside the pill", () => {
+    expect(THUMB_INSET_PX).toBe(18);
     expect(stopStyle(0).left).toContain(`${THUMB_INSET_PX}px`);
     expect(stopStyle(1).left).toContain(`100% - ${THUMB_INSET_PX * 2}px`);
-    expect(fillWidthStyle(0.5).width).toContain(`100% - ${THUMB_INSET_PX * 2}px`);
+    expect(fillWidthStyle(0.5).clipPath).toContain(`100% - ${THUMB_INSET_PX * 2}px`);
   });
 
   it("uses zero fill width at the minimum stop (no blue crescent)", () => {
-    expect(fillWidthStyle(0)).toEqual({ width: "0px" });
-    expect(fillWidthStyle(-1)).toEqual({ width: "0px" });
+    expect(fillWidthStyle(0)).toEqual({ clipPath: "inset(0 100% 0 0)" });
+    expect(fillWidthStyle(-1)).toEqual({ clipPath: "inset(0 100% 0 0)" });
   });
 
   it("matches Codex max-burst particle count", () => {

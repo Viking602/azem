@@ -90,6 +90,8 @@ func ReviewFailure(err error) ReviewFailureKind {
 type Reviewer struct {
 	driver       *Driver
 	streamDriver hyprovider.Driver
+	models       []string
+	reasoning    string
 	timeout      time.Duration
 }
 
@@ -101,7 +103,19 @@ func NewReviewer(driver *Driver, timeout ...time.Duration) (*Reviewer, error) {
 	if len(timeout) > 0 && timeout[0] > 0 {
 		reviewTimeout = timeout[0]
 	}
-	return &Reviewer{driver: driver, streamDriver: driver, timeout: reviewTimeout}, nil
+	return &Reviewer{driver: driver, streamDriver: driver, models: append([]string(nil), driver.models...), reasoning: "low", timeout: reviewTimeout}, nil
+}
+
+func NewProviderReviewer(driver hyprovider.Driver, model, reasoning string, timeout ...time.Duration) (*Reviewer, error) {
+	model = strings.TrimSpace(model)
+	if driver == nil || model == "" {
+		return nil, fmt.Errorf("approval reviewer provider and model are required")
+	}
+	reviewTimeout := approvalReviewTimeout
+	if len(timeout) > 0 && timeout[0] > 0 {
+		reviewTimeout = timeout[0]
+	}
+	return &Reviewer{streamDriver: driver, models: []string{model}, reasoning: strings.TrimSpace(reasoning), timeout: reviewTimeout}, nil
 }
 
 func (r *Reviewer) WithDriver(driver hyprovider.Driver) *Reviewer {
@@ -111,21 +125,23 @@ func (r *Reviewer) WithDriver(driver hyprovider.Driver) *Reviewer {
 }
 
 func (r *Reviewer) Review(ctx context.Context, request ApprovalReviewRequest) (ApprovalReview, error) {
-	if r == nil || r.driver == nil || r.streamDriver == nil {
+	if r == nil || r.streamDriver == nil || len(r.models) == 0 {
 		return ApprovalReview{}, reviewError(ReviewFailureProvider, errors.New("reviewer is not configured"))
 	}
 	if len(request.Arguments) == 0 || !json.Valid(request.Arguments) {
 		return ApprovalReview{}, reviewError(ReviewFailureInvalidRequest, errors.New("tool arguments are not valid JSON"))
 	}
-	active, err := r.driver.auth.HasActiveChatGPTAccount(ctx)
-	if ctx.Err() != nil {
-		return ApprovalReview{}, reviewError(ReviewFailureCancelled, ctx.Err())
-	}
-	if err != nil {
-		return ApprovalReview{}, reviewError(ReviewFailureAuthentication, err)
-	}
-	if !active {
-		return ApprovalReview{}, reviewError(ReviewFailureAuthentication, errors.New("no active ChatGPT account"))
+	if r.driver != nil {
+		active, err := r.driver.auth.HasActiveChatGPTAccount(ctx)
+		if ctx.Err() != nil {
+			return ApprovalReview{}, reviewError(ReviewFailureCancelled, ctx.Err())
+		}
+		if err != nil {
+			return ApprovalReview{}, reviewError(ReviewFailureAuthentication, err)
+		}
+		if !active {
+			return ApprovalReview{}, reviewError(ReviewFailureAuthentication, errors.New("no active ChatGPT account"))
+		}
 	}
 
 	models := r.reviewModels()
@@ -164,15 +180,17 @@ func (r *Reviewer) reviewModel(ctx context.Context, request ApprovalReviewReques
 	if contextErr := reviewContextError(ctx, reviewCtx); contextErr != nil {
 		return ApprovalReview{}, contextErr
 	}
-	if active, checkErr := r.driver.auth.HasActiveChatGPTAccount(context.WithoutCancel(ctx)); checkErr == nil && !active {
-		return ApprovalReview{}, reviewError(ReviewFailureAuthentication, lastErr)
+	if r.driver != nil {
+		if active, checkErr := r.driver.auth.HasActiveChatGPTAccount(context.WithoutCancel(ctx)); checkErr == nil && !active {
+			return ApprovalReview{}, reviewError(ReviewFailureAuthentication, lastErr)
+		}
 	}
 	return ApprovalReview{}, lastErr
 }
 
 func (r *Reviewer) reviewModels() []string {
-	models := make([]string, 0, len(r.driver.models))
-	for _, model := range r.driver.models {
+	models := make([]string, 0, len(r.models))
+	for _, model := range r.models {
 		model = strings.TrimSpace(model)
 		if model != "" && !oneOf(model, models...) {
 			models = append(models, model)
@@ -195,7 +213,7 @@ func (r *Reviewer) reviewOnce(ctx context.Context, request ApprovalReviewRequest
 			message.NewText(message.RoleSystem, guardianSystemPolicy()),
 			message.NewText(message.RoleUser, string(payload)),
 		},
-		Metadata: map[string]string{"reasoning_effort": "low"},
+		Metadata: map[string]string{"reasoning_effort": r.reasoning},
 		ResponseFormat: &hyprovider.ResponseFormat{
 			Type:   "json_schema",
 			Name:   "approval_review",
@@ -271,8 +289,14 @@ func approvalReviewSchema() *message.JSONSchema {
 }
 
 func parseApprovalReview(value string) (ApprovalReview, error) {
-	if strings.TrimSpace(value) == "" {
+	value = strings.TrimSpace(value)
+	if value == "" {
 		return ApprovalReview{}, errors.New("approval reviewer returned empty output")
+	}
+	var err error
+	value, err = unwrapWholeJSONFence(value)
+	if err != nil {
+		return ApprovalReview{}, err
 	}
 	decoder := json.NewDecoder(strings.NewReader(value))
 	decoder.DisallowUnknownFields()
@@ -301,6 +325,28 @@ func parseApprovalReview(value string) (ApprovalReview, error) {
 		return ApprovalReview{}, errors.New("approval review rationale is empty")
 	}
 	return assessment, nil
+}
+
+func unwrapWholeJSONFence(value string) (string, error) {
+	if !strings.HasPrefix(value, "```") {
+		return value, nil
+	}
+	lines := strings.Split(value, "\n")
+	if len(lines) < 3 {
+		return "", errors.New("approval review contains an incomplete JSON fence")
+	}
+	opening := strings.ToLower(strings.TrimSpace(lines[0]))
+	if opening != "```" && opening != "```json" {
+		return "", fmt.Errorf("approval review uses unsupported fence %q", strings.TrimSpace(lines[0]))
+	}
+	if strings.TrimSpace(lines[len(lines)-1]) != "```" {
+		return "", errors.New("approval review contains content outside its JSON fence")
+	}
+	body := strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+	if body == "" || strings.Contains(body, "```") {
+		return "", errors.New("approval review JSON fence is empty or nested")
+	}
+	return body, nil
 }
 
 func classifyReviewFailure(err error) (ReviewFailureKind, bool) {

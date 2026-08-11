@@ -37,40 +37,43 @@ var mainInstructionFingerprint = func() string {
 func turnInstructions(planMode bool) (string, string) {
 	instructions := mainInstructions
 	if planMode {
-		instructions += "\n\n" + planModeInstructions
+		instructions = planModeInstructions
 	}
 	sum := sha256.Sum256([]byte(instructions))
 	return instructions, hex.EncodeToString(sum[:])
 }
 
 type TurnRequest struct {
-	SessionID          string
-	Prompt             string
-	Provider           string
-	Model              string
-	History            []session.Block
-	Reasoning          string
-	AgentMode          string
-	PlanMode           bool
-	DisableSubagents   bool
-	ActiveSkills       []string
-	Images             []session.Attachment
-	Todo               session.TodoList
-	privateContext     string
-	accountID          string
-	historicalContext  string
-	resuming           bool
-	budgetRestored     bool
-	maxTokens          int64
-	maxToolCalls       int
-	maxWallClock       time.Duration
-	startedAt          time.Time
-	usedTokens         int64
-	usedToolCalls      int
-	modelHistory       session.ModelHistory
-	toolRecords        []session.ToolRecord
-	checkpointBoundary *int64
-	immutableIdentity  string
+	SessionID              string
+	Prompt                 string
+	Provider               string
+	Model                  string
+	History                []session.Block
+	Reasoning              string
+	AgentMode              string
+	PlanMode               bool
+	DisableSubagents       bool
+	ActiveSkills           []string
+	Images                 []session.Attachment
+	Todo                   session.TodoList
+	privateContext         string
+	visionContext          string
+	approvedPlanArtifactID string
+	approvedPlanContext    string
+	accountID              string
+	historicalContext      string
+	resuming               bool
+	budgetRestored         bool
+	maxTokens              int64
+	maxToolCalls           int
+	maxWallClock           time.Duration
+	startedAt              time.Time
+	usedTokens             int64
+	usedToolCalls          int
+	modelHistory           session.ModelHistory
+	toolRecords            []session.ToolRecord
+	checkpointBoundary     *int64
+	immutableIdentity      string
 }
 
 type turnContext struct {
@@ -81,6 +84,8 @@ type turnContext struct {
 	modelID                   string
 	runID                     string
 	privateContext            string
+	visionContext             string
+	approvedPlanContext       string
 	historicalContext         string
 	resuming                  bool
 	history                   []session.Block
@@ -243,6 +248,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 		value.Visibility = message.VisibilityPrivate
 		messages = append(messages, value)
 	}
+	if text := strings.TrimSpace(c.approvedPlanContext); text != "" {
+		value := message.NewText(message.RoleSystem, "[Trusted approved execution plan]\n"+text)
+		value.Visibility = message.VisibilityPrivate
+		messages = append(messages, value)
+	}
 	todo, err := c.currentTodo(ctx)
 	if err != nil {
 		return nil, err
@@ -267,6 +277,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	}
 	if historical != "" {
 		data := message.NewText(message.RoleUser, "<historical-evidence-json>\n"+historical+"\n</historical-evidence-json>")
+		data.Visibility = message.VisibilityPrivate
+		messages = append(messages, data)
+	}
+	if visual := visionEvidenceText(c.visionContext); visual != "" {
+		data := message.NewText(message.RoleUser, visual)
 		data.Visibility = message.VisibilityPrivate
 		messages = append(messages, data)
 	}

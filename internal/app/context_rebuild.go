@@ -214,7 +214,14 @@ func normalizeStateFact(collection string, fact *StateFactV1, authorities map[st
 	}
 	validSources := normalizedFactSources(*fact, authorities)
 	if len(validSources) == 0 {
-		return fmt.Errorf("semantic %s fact %q has no valid source", collection, fact.Text)
+		// A carried fact can outlive the exact authority class the model chose
+		// for it. Never invent provenance and never promote authority: retain a
+		// deterministic real source, but downgrade the fact to agent inference.
+		validSources = fallbackFactSource("agent", authorities)
+		if len(validSources) == 0 {
+			return fmt.Errorf("semantic %s fact %q has no valid source", collection, fact.Text)
+		}
+		fact.Authority, fact.Confidence = "agent", "inferred"
 	}
 	if fact.Authority == "user" && !sourcesContainAuthority(validSources, authorities, "user") {
 		fact.Authority, fact.Confidence = "agent", "inferred"

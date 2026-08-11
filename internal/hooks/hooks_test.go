@@ -77,6 +77,25 @@ func TestDiscoveryRegistersEveryClaudeEventAndAzemExtension(t *testing.T) {
 	}
 }
 
+func TestPluginSourceEnvironmentReachesHookProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell command")
+	}
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"printf '%s' \"$PLUGIN_ROOT\""}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry := Discover(Options{Sources: []Source{{Path: path, Trusted: true, Environment: map[string]string{"PLUGIN_ROOT": "/plugin/demo"}}}})
+	commands := registry.Commands(SessionStart)
+	if len(commands) != 1 {
+		t.Fatalf("commands = %#v", commands)
+	}
+	result := (Runner{Workspace: t.TempDir()}).Run(context.Background(), commands[0], Envelope{HookEventName: SessionStart})
+	if result.Failure != nil || result.Stdout != "/plugin/demo" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestClaudeCommandOptionsAndPermissionCondition(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	settings := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo ok","if":"Bash(git *)","shell":"bash","timeout":86400,"statusMessage":"Checking git","once":true,"async":true}]}]}}`

@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,6 +54,38 @@ func TestReloadIsAtomic(t *testing.T) {
 	}
 	if len(after.Eager) != 1 || after.Eager[0] != "demo" {
 		t.Fatalf("eager = %#v, want [demo]", after.Eager)
+	}
+}
+
+func TestUpdateConfigPersistsBeforePublishingDisabledSnapshot(t *testing.T) {
+	root := t.TempDir()
+	writeTestSkill(t, root, "demo", "Demo skill", "DEMO_BODY")
+	catalog, err := Load(LoadOptions{Config: config.SkillsConfig{Enabled: true, AdditionalDirs: []string{root}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := config.SkillsConfig{Enabled: true, AdditionalDirs: []string{root}, Disabled: []string{"demo"}}
+	if err := catalog.UpdateConfig(disabled, func() error { return errors.New("persist failed") }); err == nil {
+		t.Fatal("UpdateConfig accepted a failed persistence callback")
+	}
+	if _, ok := catalog.Snapshot().Registry.Get("demo"); !ok {
+		t.Fatal("failed persistence published the disabled snapshot")
+	}
+	if err := catalog.UpdateConfig(disabled, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := catalog.Snapshot()
+	if _, ok := snapshot.Registry.Get("demo"); ok {
+		t.Fatal("disabled skill remained registered")
+	}
+	if len(snapshot.Entries) == 0 || !snapshot.Entries[0].Disabled {
+		t.Fatalf("disabled entry = %#v", snapshot.Entries)
+	}
+	if err := catalog.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := catalog.Snapshot().Registry.Get("demo"); ok {
+		t.Fatal("reload lost the updated disabled selection")
 	}
 }
 

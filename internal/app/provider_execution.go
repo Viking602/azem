@@ -64,9 +64,19 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 			} else if err := commentary.flush(ctx); err != nil {
 				return err
 			}
+			// Anthropic-style transports do not label assistant text phases. Keep the
+			// stable final-answer projection, but mark it unresolved until a tool or
+			// terminal boundary proves whether this turn was commentary or the final
+			// answer. The desktop can then avoid presenting provisional work as final
+			// prose without moving the streaming node between timeline containers.
+			textPhase := frame.TextPhase
+			if textPhase == "" {
+				textPhase = hyprovider.TextPhaseFinalAnswer
+				data["textPhasePending"] = "true"
+			}
 			if !s.emit(ctx, Event{
 				Kind: EventTextDelta, SessionID: sessionID, RunID: runID,
-				State: "streaming", Text: frame.Text, TextPhase: string(frame.TextPhase), Data: data,
+				State: "streaming", Text: frame.Text, TextPhase: string(textPhase), Data: data,
 			}) {
 				return eventDeliveryError(ctx)
 			}
@@ -93,15 +103,23 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 				if err := timeline.finish(ctx, *frame.ToolResult); err != nil {
 					return err
 				}
+				content := boundedUTF8(frame.ToolResult.Content, maxToolRecordPreviewBytes)
+				structured := frame.ToolResult.Structured
+				if len(structured) > maxInlineToolRecordBytes {
+					structured = nil
+				}
 				state := "completed"
 				if frame.ToolResult.IsError {
 					state = "failed"
 				}
 				data["name"] = frame.ToolResult.Name
-				if len(frame.ToolResult.Structured) > 0 {
-					data["structured"] = string(frame.ToolResult.Structured)
+				if len(structured) > 0 {
+					data["structured"] = string(structured)
 				}
-				if !s.emit(ctx, Event{Kind: EventToolFinished, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolResult.ToolCallID, State: state, Text: frame.ToolResult.Content, Data: data}) {
+				if content != frame.ToolResult.Content || len(structured) != len(frame.ToolResult.Structured) {
+					data["projection_truncated"] = "true"
+				}
+				if !s.emit(ctx, Event{Kind: EventToolFinished, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolResult.ToolCallID, State: state, Text: content, Data: data}) {
 					return eventDeliveryError(ctx)
 				}
 			}
@@ -456,7 +474,11 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 }
 
 func teamPrompt(request TurnRequest) string {
-	return request.Prompt
+	prompt := request.Prompt
+	if visual := visionEvidenceText(request.visionContext); visual != "" {
+		prompt = strings.TrimSpace(prompt) + "\n\n" + visual
+	}
+	return strings.TrimSpace(prompt)
 }
 
 type teamExecutionPolicy struct {
@@ -482,7 +504,7 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 	if err != nil {
 		return teamExecutionPolicy{}, err
 	}
-	policy := teamExecutionPolicy{contextBudget: budget, attachmentRoot: s.attachments.Root, images: CloneAttachments(request.Images)}
+	policy := teamExecutionPolicy{contextBudget: budget, attachmentRoot: s.attachments.Root, images: effectiveTurnImages(request)}
 	policy.resourceClaims, err = topLevelWorkspaceWriteClaims(
 		s.cfg.Workspace.AllowWrite, s.cfg.Workspace.ShellPolicy, s.cfg.Workspace.Root,
 	)

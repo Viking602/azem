@@ -1,6 +1,6 @@
 # Architecture
 
-Last verified: 2026-08-06
+Last verified: 2026-08-08
 
 Azem is a local-first coding agent with two user interfaces over one Go
 runtime. The terminal and desktop applications share configuration, agent
@@ -74,6 +74,7 @@ into focused runtime and storage packages. Cycles are forbidden by
 TUI command or desktop TurnRequest
   -> app.Service validates session, mode, Skills, and active-run state
   -> ProviderRuntime resolves provider/model and builds the Venat engine
+  -> known text-only main model + images invokes agents.vision and substitutes private textual evidence
   -> approval policy governs file, shell, MCP, and external actions
   -> durable run, action attempts, tool records, and projections are persisted
   -> eventBroker emits ordered runtime events
@@ -83,7 +84,54 @@ TUI command or desktop TurnRequest
 
 The desktop Bridge exposes named methods and a bounded runtime projection. Add
 a Bridge method only when a desktop feature needs a real application operation;
-never expose an arbitrary command runner to avoid adding a backend endpoint.
+never expose an arbitrary command runner or general filesystem API. The
+workspace browser and workspace change review are deliberate read-only
+exceptions with relative-path, resolved-symlink, entry-count, file-size,
+Git-output, timeout, and binary-content enforcement in
+`internal/desktop/workspace_files.go` and
+`internal/desktop/workspace_changes.go`; React cannot weaken those boundaries.
+
+## Planning lifecycle
+
+Planning uses the same session, block, event, provider, and recovery services as
+ordinary turns. It is a mode of the shared runtime, not a second agent engine:
+
+```text
+plan turn (read-only tools + ask + submit_plan)
+  -> question block (pending -> answered)
+  -> plan_v1 context artifact + plan block (proposed)
+  -> follow-up or revision plan turn (supersedes prior proposal)
+  -> explicit Execute Plan action (approved)
+  -> new ordinary turn with trusted approved-plan context
+```
+
+`ask` persists its question before waiting, so the GUI and TUI can resolve it
+through the same typed action and a restarted process can continue from the
+durable block. `submit_plan` is terminal for the planning turn and stores the
+full proposal as a context artifact; timeline blocks contain the review
+projection and version relationship. Asking about or revising a proposal keeps
+planning mode active. Approval never resumes the read-only planner in place: it
+starts a fresh ordinary turn, restores the configured implementation tools, and
+injects only the approved artifact through a private runtime field. Recovery
+persists that artifact ID in the run manifest.
+
+The approved artifact also carries an execution-scheduling contract. For a
+non-trivial plan, the parent agent remains the orchestrator and integration
+owner, computes the dependency-ready task frontier, and dispatches independent
+tasks to suitable subagents in one parallel tool batch. Plan tasks declare
+dependencies, exclusive file or symbol ownership, acceptance criteria, and
+expected evidence so concurrent writers never share a hotspot. Shared
+integration work stays parent-owned, and small linear changes avoid delegation
+overhead. This policy uses the existing parallel Venat tool mode and the live
+subagent catalog; it does not create a separate planner executor.
+
+Delegated completion is never authoritative by itself. The parent tracks each
+task through running and terminal states, requires the requested artifacts and
+evidence, and diagnoses failed, cancelled, or stalled work before retrying or
+reassigning it. Review preferably comes from a different subagent than the
+author, but its verdict remains evidence: the parent still inspects the actual
+diff and files and directly observes the required verification before advancing
+dependent work or accepting the final result.
 
 ## Desktop project ownership
 
@@ -128,6 +176,29 @@ a run is active so repeated smooth-scroll animations cannot compete with text
 rendering. Visual activity indicators use only opacity and transforms and are
 disabled by `prefers-reduced-motion`.
 
+The event broker coalesces replaceable text, reasoning, and tool-progress
+projections by stream identity even when independent streams interleave. If the
+bounded projection queue reaches its high-water mark, it discards only those
+replaceable events and emits `projection_resync`; it never turns renderer speed
+into a provider execution error. Desktop and TUI consumers reload the durable
+session projection through `refresh_session`, and a degraded run emits another
+resync after its terminal event so the completed transcript is authoritative.
+Approvals, tool lifecycle transitions, and run terminal events remain ordered
+and lossless.
+
+Active assistant and commentary blocks render as inexpensive pre-wrapped text.
+Completed blocks switch to full Markdown, and settled timeline rows use native
+`content-visibility` containment so offscreen history does not participate in
+every streamed frame.
+
+Subagent transcripts retain their durable source, but the desktop projection
+bounds each tool block and hydrates a selected child once; subsequent live
+events append deltas instead of polling and retransmitting the full transcript.
+Collapsed tool details do not parse or mount terminal output until the user
+opens them. Agent tool results are also bounded before Venat checkpoints, which
+prevents broad searches and generated-file matches from multiplying into an
+oversized execution snapshot.
+
 ## Tool lifecycle and side effects
 
 Tool state is authoritative in the backend:
@@ -162,6 +233,10 @@ declared module version, not an adjacent checkout, defines behavior.
   reserved for their subscription drivers.
 - **MCP:** configure stdio or Streamable HTTP servers through `internal/mcp`;
   keep secrets as environment or keyring references.
+- **Plugins:** `internal/plugins` validates the Codex plugin manifest and
+  projects enabled plugin Skills, MCP descriptors, hook sources, and App
+  requirements into existing runtime boundaries. It does not create a second
+  Skill, MCP, or hook implementation.
 - **Skills:** add user, project, configured, or bundled Skill directories;
   activation must flow through the existing `activeSkills` request field.
 - **Hooks:** discover supported hook sources through `internal/hooks`; preserve

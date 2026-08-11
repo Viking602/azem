@@ -3,8 +3,10 @@ import type { Block } from "../types";
 import {
   classifyToolCategory,
   formatToolPresentation,
+  groupProcessTimelineBlocks,
   groupTimelineBlocks,
   isRunningTool,
+  parseModelProgress,
   segmentProcessTrail,
   summarizeToolGroup,
 } from "./toolTimeline";
@@ -31,6 +33,21 @@ describe("process trail segmentation", () => {
     expect(process.blocks).toHaveLength(3);
   });
 
+  it("keeps one subagent conversation in one completed process segment", () => {
+    const blocks: Block[] = [
+      { id: "thinking-1", kind: "thinking", runId: "child", state: "completed" },
+      { id: "progress-1", kind: "commentary", runId: "child", state: "completed" },
+      { id: "tool-1", kind: "tool", runId: "child", state: "completed" },
+      { id: "thinking-2", kind: "thinking", runId: "child", state: "completed" },
+      { id: "progress-2", kind: "commentary", runId: "child", state: "completed" },
+      { id: "tool-2", kind: "tool", runId: "child", state: "completed" },
+      { id: "final", kind: "assistant", runId: "child", content: "done", state: "completed" },
+    ];
+    const segments = segmentProcessTrail(blocks);
+    expect(segments.map((item) => item.kind)).toEqual(["process", "block"]);
+    expect(segments[0]).toMatchObject({ kind: "process", active: false, blocks: blocks.slice(0, 6) });
+  });
+
   it("keeps the active run process expanded and hides agent noise", () => {
     const blocks: Block[] = [
       { id: "u1", kind: "user", content: "go", state: "submitted" },
@@ -48,9 +65,71 @@ describe("process trail segmentation", () => {
     const segments = segmentProcessTrail([tool("shell", "coding.shell", "progress")]);
     expect(segments[0]).toMatchObject({ kind: "process", active: true });
   });
+
+  it("keeps the observed live elapsed time when the running tail has no completion stamp", () => {
+    const segments = segmentProcessTrail([
+      { id: "progress", kind: "commentary", state: "completed", data: { startedAt: "1000", completedAt: "1100" } },
+      { id: "tool", kind: "tool", state: "running", data: { startedAt: "1100", elapsedMs: "4800" } },
+    ]);
+    expect(segments[0]).toMatchObject({ kind: "process", active: true, elapsedMs: 4800 });
+  });
+
+  it("keeps an active process clock continuous after session rehydration", () => {
+    const startedAt = Date.parse("2026-08-10T04:30:00Z");
+    const reloadedAt = Date.parse("2026-08-10T04:31:35Z");
+    const segments = segmentProcessTrail([
+      {
+        id: "progress", kind: "commentary", runId: "run", state: "completed",
+        content: "**并行审阅高风险面**\n等待子智能体返回",
+        data: { startedAt: String(startedAt), completedAt: String(startedAt + 3_000), elapsedMs: "3000" },
+      },
+      {
+        id: "spawn", kind: "tool", runId: "run", state: "running",
+        data: { startedAt: String(startedAt + 3_000) },
+      },
+    ], { activeRunId: "run", running: true, now: reloadedAt });
+
+    expect(segments[0]).toMatchObject({ kind: "process", active: true, elapsedMs: 95_000 });
+  });
 });
 
 describe("tool timeline grouping", () => {
+  it("recognizes only the explicit model progress contract", () => {
+    expect(parseModelProgress("**读取当前前端结构**\nApp、Sidebar、Timeline 与 Inspector"))
+      .toEqual({ title: "读取当前前端结构", detail: "App、Sidebar、Timeline 与 Inspector" });
+    expect(parseModelProgress("**构建高保真交互原"))
+      .toEqual({ title: "构建高保真交互原", detail: "" });
+    expect(parseModelProgress("我先读取当前结构，然后再修改。"))
+      .toBeNull();
+    expect(parseModelProgress("**跨行标题\n不应被猜测**"))
+      .toBeNull();
+  });
+
+  it("attaches announced tools to model-authored progress steps", () => {
+    const commentary: Block = {
+      id: "progress", kind: "commentary", state: "completed",
+      content: "**读取当前前端结构**\nTimeline 与事件投影",
+    };
+    const legacy: Block = {
+      id: "legacy", kind: "commentary", state: "completed",
+      content: "旧会话仍然保留自然段。",
+    };
+    const entries = groupProcessTimelineBlocks([
+      commentary,
+      tool("read", "coding.read_file"),
+      tool("search", "coding.search"),
+      legacy,
+    ], "zh-CN");
+
+    expect(entries.map((entry) => entry.kind)).toEqual(["model-progress", "block"]);
+    expect(entries[0]).toMatchObject({
+      kind: "model-progress",
+      presentation: { title: "读取当前前端结构", detail: "Timeline 与事件投影" },
+      blocks: [{ id: "read" }, { id: "search" }],
+    });
+    expect(entries[1]).toMatchObject({ kind: "block", block: { id: "legacy" } });
+  });
+
   it("classifies azem tool titles", () => {
     expect(classifyToolCategory("coding.search")).toBe("search");
     expect(classifyToolCategory("coding.read_file")).toBe("read");

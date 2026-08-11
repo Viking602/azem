@@ -26,7 +26,7 @@ func ResolvePaths(startupWorkspace string) (Paths, error) {
 	if err != nil {
 		return Paths{}, fmt.Errorf("resolve user home directory: %w", err)
 	}
-	configRoot := filepath.Join(home, ".config")
+	configRoot := defaultConfigRoot(runtime.GOOS, home, platformConfigRoot)
 	dataRoot, err := userDataDir(platformConfigRoot)
 	if err != nil {
 		return Paths{}, fmt.Errorf("resolve user data directory: %w", err)
@@ -60,6 +60,13 @@ func ResolvePaths(startupWorkspace string) (Paths, error) {
 		LogFile:    filepath.Join(stateDir, "azem.log"),
 		Workspace:  workspace,
 	}, nil
+}
+
+func defaultConfigRoot(goos, home, platformConfigRoot string) string {
+	if goos == "windows" {
+		return platformConfigRoot
+	}
+	return filepath.Join(home, ".config")
 }
 
 func EnsureDirectories(paths Paths) error {

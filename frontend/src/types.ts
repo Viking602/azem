@@ -1,10 +1,11 @@
-export type View = "thread" | "projects" | "pullRequests" | "runs" | "agents" | "extensions" | "recovery";
+export type View = "thread" | "projects" | "files" | "changes" | "pullRequests" | "runs" | "agents" | "extensions" | "recovery";
 export type InspectorTab = "environment" | "changes" | "agents" | "context";
 export type DeliveryMode = "queue" | "guide";
 export type TextPhase = "commentary" | "final_answer";
 
 export interface Snapshot {
   workspace: string;
+  currentBranch?: string;
   sessionId: string;
   provider: string;
   model: string;
@@ -14,6 +15,8 @@ export interface Snapshot {
   approvalMode: string;
   queueMode: DeliveryMode;
   subagentConcurrency: number;
+  shellConcurrency?: number;
+  subagentAwaitSeconds?: number;
   chatgptFastMode: boolean;
   sequence: number;
   pullRequestMonitors?: PullRequestMonitorState[];
@@ -81,8 +84,9 @@ export interface ActionRequest {
   offset?: number;
   limit?: number;
   route?: ModelRoute;
-	provider?: ModelProvider;
-	secret?: string;
+  provider?: ModelProvider;
+  secret?: string;
+  payload?: unknown;
 }
 
 export interface Session {
@@ -104,7 +108,63 @@ export interface Project {
   updatedAt: string;
 }
 
-export type BlockKind = "user" | "thinking" | "commentary" | "assistant" | "tool" | "approval" | "diff" | "status" | "agent" | "hook" | "error";
+export interface WorkspaceEntry {
+  name: string;
+  path: string;
+  directory: boolean;
+  symlink?: boolean;
+  hidden?: boolean;
+  size?: number;
+  modifiedAt?: string;
+}
+
+export interface WorkspaceDirectory {
+  path: string;
+  entries: WorkspaceEntry[];
+  truncated?: boolean;
+}
+
+export interface WorkspaceFile {
+  path: string;
+  name: string;
+  kind: "text" | "image" | "binary";
+  language?: string;
+  mediaType?: string;
+  content?: string;
+  size: number;
+  lineCount?: number;
+  modifiedAt?: string;
+  truncated?: boolean;
+}
+
+export type WorkspaceChangeStatus = "modified" | "added" | "deleted" | "renamed" | "type_changed" | "untracked";
+
+export interface WorkspaceChangeFile {
+  path: string;
+  status: WorkspaceChangeStatus;
+  indexStatus?: WorkspaceChangeStatus;
+  worktreeStatus?: WorkspaceChangeStatus;
+  additions: number;
+  deletions: number;
+  binary?: boolean;
+}
+
+export interface WorkspaceChangeSet {
+  repository: boolean;
+  branch?: string;
+  base?: string;
+  additions: number;
+  deletions: number;
+  files: WorkspaceChangeFile[];
+  truncated?: boolean;
+}
+
+export interface WorkspaceChange extends WorkspaceChangeFile {
+  patch?: string;
+  truncated?: boolean;
+}
+
+export type BlockKind = "user" | "thinking" | "commentary" | "assistant" | "tool" | "approval" | "question" | "plan" | "diff" | "status" | "agent" | "hook" | "error";
 
 export interface Block {
   id: string;
@@ -113,6 +173,8 @@ export interface Block {
   agentId?: string;
   toolCallId?: string;
   approvalId?: string;
+  userInputId?: string;
+  planId?: string;
   title?: string;
   content?: string;
   textPhase?: TextPhase;
@@ -129,6 +191,8 @@ export interface AgentState {
   id: string;
   type: string;
   description: string;
+  parentRunId?: string;
+  parentToolCallId?: string;
   model: string;
   background: boolean;
   capabilityMode: string;
@@ -180,7 +244,73 @@ export interface SkillEntry {
   bundled: boolean;
   eager: boolean;
   disabled: boolean;
+  modelVisible: boolean;
   resourceCount: number;
+}
+
+export interface MCPToolEntry {
+  name: string;
+  description: string;
+  effect: string;
+  requiresApproval: boolean;
+}
+
+export interface MCPServerEntry {
+  name: string;
+  enabled: boolean;
+  state: "disabled" | "connecting" | "ready" | "degraded" | "stopped" | string;
+  transport: "stdio" | "streamable_http" | string;
+  target: string;
+  command?: string;
+  args: string[];
+  cwd?: string;
+  inheritEnv: boolean;
+  url?: string;
+  approval: "always" | "never" | string;
+  maxConcurrency: number;
+  toolCount: number;
+  tools: MCPToolEntry[];
+  error: string;
+}
+
+export interface MCPServerMutation {
+  name: string;
+  enabled: boolean;
+  transport: "stdio" | "streamable_http";
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  inheritEnv?: boolean;
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  connectTimeout?: string;
+  callTimeout?: string;
+  maxConcurrency?: number;
+  approval?: "always" | "never";
+}
+
+export interface PluginEntry {
+  id: string;
+  name: string;
+  displayName: string;
+  version: string;
+  marketplace: string;
+  description: string;
+  developerName: string;
+  category: string;
+  brandColor: string;
+  logoPath: string;
+  enabled: boolean;
+  skillCount: number;
+  mcpServerCount: number;
+  integratedMCPCount: number;
+  hookCount: number;
+  hooksTrusted: boolean;
+  hasApp: boolean;
+  capabilities: string[];
+  status: string;
+  warning: string;
 }
 
 export interface GitBranch {
@@ -372,6 +502,7 @@ export interface ModelRoute {
 
 export interface LLMuxModelConfig {
 	id: string;
+	disabled?: boolean;
 	name?: string;
 	aliases?: string[];
 	description?: string;
@@ -449,6 +580,8 @@ export interface RuntimeEvent {
   agentId?: string;
   toolCallId?: string;
   approvalId?: string;
+  userInputId?: string;
+  planId?: string;
   text?: string;
   textPhase?: TextPhase;
   state?: string;
@@ -458,6 +591,7 @@ export interface RuntimeEvent {
   agentCatalog?: Array<Record<string, unknown>>;
   agentSnapshots?: Array<Record<string, unknown>>;
   skillCatalog?: Array<Record<string, unknown>>;
+  pluginCatalog?: Array<Record<string, unknown>>;
   contextProfile?: ContextProfile;
   todo?: TodoList;
   recap?: unknown;

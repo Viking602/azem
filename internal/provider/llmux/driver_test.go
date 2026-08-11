@@ -7,12 +7,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/provider/responses"
 	sdk "github.com/Viking602/llmux"
 	"github.com/Viking602/llmux/provider/anthropic"
 	"github.com/Viking602/llmux/provider/openai/compat"
+	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
 
@@ -50,7 +54,7 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 	if !foundOpenAI || !foundOpenRouter {
 		t.Fatalf("missing expected profiles: openai=%v openrouter=%v", foundOpenAI, foundOpenRouter)
 	}
-	if profile, ok := LookupProfile("opencode"); !ok || profile.BaseURL != "https://opencode.ai/zen/v1" {
+	if profile, ok := LookupProfile("opencode"); !ok || profile.ID != "opencode-zen" || profile.BaseURL != "https://opencode.ai/zen/v1" {
 		t.Fatalf("opencode profile = %+v, found=%v", profile, ok)
 	}
 	stream := &streamAdapter{inner: &sliceStream{parts: []sdk.Part{
@@ -158,5 +162,75 @@ func TestAnthropicCompatibleProviderUsesConfiguredOutputLimit(t *testing.T) {
 	}
 	if gotMaxTokens != 384000 {
 		t.Fatalf("wire max_tokens = %d, want 384000", gotMaxTokens)
+	}
+}
+
+func TestTextOnlyModelOmitsHistoricalImages(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(path, testImagePNG(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	historical := message.NewText(message.RoleUser, "look at this")
+	historical.Metadata = map[string]string{
+		"azem.attachments": `[{"id":"img1","name":"shot.png","mime":"image/png","path":` + jsonString(path) + `}]`,
+	}
+	converted, _, err := convertRequest(hyprovider.Request{
+		Model: "deepseek-v4-flash",
+		Messages: []message.Message{
+			historical,
+			message.NewText(message.RoleAssistant, "I saw it."),
+			message.NewText(message.RoleUser, "continue without the image"),
+		},
+		ExtraBody: map[string]any{
+			responses.AttachmentRootExtraKey: dir,
+			disableImageInputExtraKey:        true,
+		},
+	}, "", "opencode-go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(converted.Messages) != 3 || len(converted.Messages[0].Content) != 1 {
+		t.Fatalf("converted messages = %+v", converted.Messages)
+	}
+	part := converted.Messages[0].Content[0]
+	if part.Kind != sdk.ContentText || !strings.Contains(part.Text, omittedImageNotice) {
+		t.Fatalf("historical image part = %+v, want text omission notice", part)
+	}
+}
+
+func TestTextOnlyModelRejectsCurrentImageLocally(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(path, testImagePNG(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current := message.NewText(message.RoleUser, "look at this")
+	current.Metadata = map[string]string{
+		"azem.attachments": `[{"id":"img1","name":"shot.png","mime":"image/png","path":` + jsonString(path) + `}]`,
+	}
+	_, _, err := convertRequest(hyprovider.Request{
+		Model:    "deepseek-v4-flash",
+		Messages: []message.Message{current},
+		ExtraBody: map[string]any{
+			responses.AttachmentRootExtraKey: dir,
+			disableImageInputExtraKey:        true,
+		},
+	}, "", "opencode-go")
+	if err == nil || !strings.Contains(err.Error(), "does not support image input") {
+		t.Fatalf("convertRequest error = %v, want local image capability rejection", err)
+	}
+}
+
+func jsonString(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func testImagePNG() []byte {
+	return []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde,
 	}
 }

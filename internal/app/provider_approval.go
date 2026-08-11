@@ -148,7 +148,7 @@ func (d *governedAgentTool) Prepare(ctx context.Context, call tool.Call, sink to
 				}, updateErr
 			}
 			executed, executeErr := d.coding.ExecutePreparedDriver(runCtx, d.run, d.driver, call, updates)
-			return executed.Result, executeErr
+			return boundAgentToolResult(executed.Result), executeErr
 		},
 	}, nil
 }
@@ -680,6 +680,9 @@ func (s *Service) automaticApproval(
 ) (approvalResolution, error) {
 	event.State = "reviewing"
 	event.Data["reviewer"] = codex.ApprovalReviewerModel
+	if s.providers != nil {
+		event.Data["reviewer"] = firstNonempty(s.providers.approvalModelRoute(ctx, event.SessionID).Model, event.Data["reviewer"])
+	}
 	if !s.emit(ctx, event) {
 		return approvalResolution{}, eventDeliveryError(ctx)
 	}
@@ -687,18 +690,6 @@ func (s *Service) automaticApproval(
 	providerRequest, err := request.codexRequest()
 	failureKind := codex.ReviewFailureInvalidRequest
 	var assessment codex.ApprovalReview
-	if err == nil {
-		if s.authentication == nil {
-			err = fmt.Errorf("authentication is unavailable")
-			failureKind = codex.ReviewFailureAuthentication
-		} else if active, authErr := s.authentication.HasActiveChatGPTAccount(ctx); authErr != nil {
-			err = authErr
-			failureKind = codex.ReviewFailureAuthentication
-		} else if !active {
-			err = fmt.Errorf("no active ChatGPT account is available")
-			failureKind = codex.ReviewFailureAuthentication
-		}
-	}
 	if err == nil {
 		if s.providers == nil {
 			err = fmt.Errorf("provider runtime is unavailable")
@@ -757,7 +748,7 @@ func (s *Service) automaticApproval(
 	}
 
 	rationale := boundedReviewText(assessment.Rationale, 600)
-	event.Data["reviewer"] = firstNonempty(assessment.Model, codex.ApprovalReviewerModel)
+	event.Data["reviewer"] = firstNonempty(assessment.Model, event.Data["reviewer"])
 	if assessment.Outcome == "allow" {
 		decisionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		decisionErr := decide(decisionCtx, agentservice.ApprovalOnce, event.Data["reviewer"])
@@ -854,26 +845,6 @@ func boundedReviewText(value string, limit int) string {
 func (s *Service) setApprovalMode(ctx context.Context, mode ApprovalMode) error {
 	if mode != ApprovalModePrompt && mode != ApprovalModeAutoReview && mode != ApprovalModeYolo {
 		return fmt.Errorf("invalid approval mode %q", mode)
-	}
-	if mode == ApprovalModeAutoReview {
-		if s.authentication == nil {
-			s.mu.Lock()
-			s.approvalMode = ApprovalModePrompt
-			s.mu.Unlock()
-			s.emitApprovalMode(s.ctx)
-			return fmt.Errorf("authentication is unavailable")
-		}
-		active, err := s.authentication.HasActiveChatGPTAccount(ctx)
-		if err != nil || !active {
-			s.mu.Lock()
-			s.approvalMode = ApprovalModePrompt
-			s.mu.Unlock()
-			s.emitApprovalMode(s.ctx)
-			if err != nil {
-				return err
-			}
-			return fmt.Errorf("Approve for me requires an active ChatGPT account")
-		}
 	}
 	s.mu.Lock()
 	previousMode := s.approvalMode

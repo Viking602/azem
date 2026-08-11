@@ -58,7 +58,7 @@ func (m AppModel) renderBlock(block Block, index int, width int) []string {
 			return append(lines, m.renderDiffContent(block.Content, width+2)...)
 		}
 		return append(lines, m.renderToolContent(block, width)...)
-	case BlockAgent, BlockDiff, BlockError:
+	case BlockAgent, BlockQuestion, BlockPlan, BlockDiff, BlockError:
 		toggle := "▾"
 		if block.Collapsed {
 			toggle = "▸"

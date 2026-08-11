@@ -183,6 +183,45 @@ func TestSessionStartHookRunsOnceWhenReturningToSession(t *testing.T) {
 	}
 }
 
+func requireHookTestSuccess(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSwitchingSessionDoesNotEmitSessionEnd(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX shell command")
+	}
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "hooks.json")
+	configJSON := `{"hooks":{` +
+		`"SessionStart":[{"hooks":[{"type":"command","command":"printf 'start:%s\\n' \"$AZEM_SESSION_ID\" >> \"$HOOK_LOG\""}]}],` +
+		`"SessionEnd":[{"hooks":[{"type":"command","command":"printf 'end:%s\\n' \"$AZEM_SESSION_ID\" >> \"$HOOK_LOG\""}]}]}}`
+	requireHookTestSuccess(t, os.WriteFile(path, []byte(configJSON), 0o600))
+	logPath := filepath.Join(workspace, "hook.log")
+	cfg := config.Default()
+	cfg.Workspace.Root = workspace
+	service := NewService(context.Background(), cfg)
+	service.AttachHooks(hooks.Dispatcher{
+		Registry: hooks.Discover(hooks.Options{Sources: []hooks.Source{{Path: path, Trusted: true}}}),
+		Runner:   hooks.Runner{Environment: []string{"HOOK_LOG=" + logPath}},
+	})
+	requireHookTestSuccess(t, service.switchSessionHooks(context.Background(), "session-a", "resume", "model"))
+	service.mu.Lock()
+	service.currentSession = "session-a"
+	service.activeSession = "session-a"
+	service.activeRun = "run-a"
+	service.mu.Unlock()
+	requireHookTestSuccess(t, service.switchSessionHooks(context.Background(), "session-b", "resume", "model"))
+	contents, err := os.ReadFile(logPath)
+	requireHookTestSuccess(t, err)
+	if string(contents) != "start:session-a\nstart:session-b\n" {
+		t.Fatalf("switch hook sequence = %q", contents)
+	}
+}
+
 func TestMCPElicitationHooksCanAnswerAndOverrideResult(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("POSIX shell command")

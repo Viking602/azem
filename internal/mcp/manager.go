@@ -216,6 +216,57 @@ func (m *Manager) Reconnect(ctx context.Context, name string) error {
 	return m.connectWithRetry(ctx, name)
 }
 
+// Configure installs or replaces one server definition without replacing the
+// manager pointer held by active provider runtimes. Enabled servers enter the
+// connecting state; the caller owns starting Reconnect so UI mutations remain
+// responsive while network/process startup runs in the background.
+func (m *Manager) Configure(name string, serverConfig config.MCPServerConfig) (config.MCPServerConfig, error) {
+	name = strings.TrimSpace(name)
+	normalized, err := config.NormalizeMCPServer(name, serverConfig)
+	if err != nil {
+		return config.MCPServerConfig{}, err
+	}
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return config.MCPServerConfig{}, ErrManagerClosed
+	}
+	current := m.servers[name]
+	if current == nil {
+		current = &server{state: StateDisabled}
+		m.servers[name] = current
+	}
+	connection := current.connection
+	current.client = nil
+	current.connection = nil
+	current.tools = nil
+	current.diagnostics = nil
+	if connection != nil {
+		m.closing = append(m.closing, connection)
+	}
+	attempt := m.attempts[name]
+	if attempt != nil {
+		delete(m.attempts, name)
+		m.closing = append(m.closing, attempt)
+	}
+	m.config[name] = normalized
+	m.mu.Unlock()
+
+	if connection != nil {
+		connection.close()
+	}
+	if attempt != nil && attempt != connection {
+		attempt.close()
+	}
+	if normalized.Enabled {
+		m.transition(name, StateConnecting, nil)
+	} else {
+		m.transition(name, StateDisabled, nil)
+	}
+	return normalized, nil
+}
+
 func (m *Manager) Refresh(ctx context.Context, name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -385,9 +436,15 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("resolve environment: %w", err)
 	}
+	for key, value := range serverConfig.RuntimeEnv {
+		environment[key] = value
+	}
 	headerValues, err := m.resolveMap(ctx, serverConfig.Headers)
 	if err != nil {
 		return fmt.Errorf("resolve headers: %w", err)
+	}
+	for key, value := range serverConfig.RuntimeHeaders {
+		headerValues[key] = value
 	}
 	headers := make(http.Header, len(headerValues))
 	for key, value := range headerValues {
@@ -547,7 +604,7 @@ func (m *Manager) transition(name string, state State, cause error) {
 	current.state = state
 	if cause != nil {
 		current.lastError = cause.Error()
-	} else if state == StateReady {
+	} else if state == StateReady || state == StateDisabled {
 		current.lastError = ""
 	}
 	sink := m.sink

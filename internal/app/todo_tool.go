@@ -35,7 +35,7 @@ func (d *todoDriver) Definition() tool.Definition {
 		"id": {Type: "string"}, "title": {Type: "string"},
 		"items": {Type: "array", Items: &itemSchema},
 	}, Required: []string{"title", "items"}, AdditionalProperties: &additional}
-	return tool.Definition{Name: "todo", Description: "Maintain the durable session plan. init may omit expected_revision and safely replaces the latest stored plan; later mutations require expected_revision from the latest snapshot. Read with view when the latest revision is unknown.", InputSchema: tool.Schema{
+	return tool.Definition{Name: "todo", Description: "Maintain the durable session plan. After completing one item, immediately call done by itself and wait for the returned snapshot before continuing; never batch mutating todo calls. done automatically advances the next pending item, so do not follow it with start. init may omit expected_revision and safely replaces the latest stored plan; later mutations require expected_revision from the latest snapshot. Read with view when the latest revision is unknown.", InputSchema: tool.Schema{
 		Type: "object", Properties: map[string]tool.Schema{
 			"op": {Type: "string", Enum: []string{"init", "view", "start", "done", "append", "cancel", "remove"}}, "expected_revision": {Type: "integer"},
 			"goal": {Type: "string"}, "phases": {Type: "array", Items: &phaseSchema}, "item_id": {Type: "string"}, "phase_id": {Type: "string"}, "content": {Type: "string"},
@@ -132,7 +132,7 @@ func applyTodoOp(todo *session.TodoList, in todoInput) error {
 			for ii := range todo.Phases[pi].Items {
 				other := &todo.Phases[pi].Items[ii]
 				if other.Status == session.TodoInProgress && other.ID != item.ID {
-					other.Status = session.TodoPending
+					return fmt.Errorf("todo item %q is already in progress", other.ID)
 				}
 			}
 		}

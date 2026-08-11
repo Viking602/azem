@@ -35,6 +35,7 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 		"local": {
 			Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1,
 			Approval: "always", Env: map[string]string{"TOKEN": "env:TOKEN"}, Headers: map[string]string{"Authorization": "keyring:MCP"},
+			RuntimeEnv: map[string]string{"PLUGIN_ROOT": "/plugin"}, RuntimeHeaders: map[string]string{"X-Plugin": "demo"},
 			ToolOverrides: map[string]config.ToolOverride{"safe": {Effect: "read_only", Approval: "never"}},
 		},
 	}, "test-version", func(_ context.Context, reference string) (string, error) {
@@ -53,7 +54,7 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 	if client.initializedName != "azem" || client.initializedVersion != "test-version" {
 		t.Fatalf("initialize = %q %q", client.initializedName, client.initializedVersion)
 	}
-	if gotEnv["TOKEN"] != "resolved:env:TOKEN" || gotHeaders.Get("Authorization") != "resolved:keyring:MCP" {
+	if gotEnv["TOKEN"] != "resolved:env:TOKEN" || gotEnv["PLUGIN_ROOT"] != "/plugin" || gotHeaders.Get("Authorization") != "resolved:keyring:MCP" || gotHeaders.Get("X-Plugin") != "demo" {
 		t.Fatalf("environment=%v headers=%v", gotEnv, gotHeaders)
 	}
 	drivers := manager.Snapshot()
@@ -374,6 +375,39 @@ func TestManagerRefreshWithoutNameRefreshesEveryReadyServer(t *testing.T) {
 	}
 	if got := definitionNames(manager.Snapshot()); !reflect.DeepEqual(got, []string{"mcp__first__after", "mcp__second__after"}) {
 		t.Fatalf("refreshed catalog = %v", got)
+	}
+}
+
+func TestManagerConfigureAddsConnectsAndDisablesServer(t *testing.T) {
+	client := &fakeClient{tools: []message.ToolDefinition{{Name: "status", InputSchema: message.JSONSchema{Type: "object"}}}}
+	manager := NewManager(nil, "test", nil, Options{
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+			return client, nil
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	defer func() { _ = manager.Close() }()
+
+	normalized, err := manager.Configure("demo", config.MCPServerConfig{Enabled: true, Transport: "stdio", Command: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.ConnectTimeout != "30s" || manager.Servers()[0].State != StateConnecting {
+		t.Fatalf("configured MCP = %#v, snapshot = %#v", normalized, manager.Servers())
+	}
+	if err := manager.Reconnect(context.Background(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	ready := manager.Servers()[0]
+	if ready.State != StateReady || ready.ToolCount != 1 {
+		t.Fatalf("ready MCP snapshot = %#v", ready)
+	}
+	if _, err := manager.Configure("demo", config.MCPServerConfig{Enabled: false, Transport: "stdio", Command: "demo"}); err != nil {
+		t.Fatal(err)
+	}
+	disabled := manager.Servers()[0]
+	if disabled.State != StateDisabled || disabled.ToolCount != 0 || disabled.LastError != "" {
+		t.Fatalf("disabled MCP snapshot = %#v", disabled)
 	}
 }
 

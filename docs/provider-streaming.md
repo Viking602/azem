@@ -1,6 +1,6 @@
 # Provider Streaming
 
-Last verified: 2026-08-07
+Last verified: 2026-08-10
 
 Azem normalizes every provider into Venat's `provider.Driver` contract. The
 application runtime owns provider/model selection, retries, usage persistence,
@@ -52,6 +52,26 @@ attachments into llmux requests. Attachment bytes pass through the existing
 trusted-root, symlink, MIME, count, and size validation before they reach the
 SDK.
 
+Automatic approval does not assume that every provider protocol implements
+native response schemas. Its system policy carries the exact JSON decision
+contract in addition to `ResponseFormat`. The decoder accepts a raw decision
+object or a whole-response `json` fence, then rejects unknown fields, invalid
+enums, empty rationale, trailing prose, nested fences, and tool calls. A parse
+failure remains fail-closed and the protected action is not executed.
+
+The selected model's advertised input modalities are authoritative. If a model
+explicitly accepts text but not images, historical image parts are replaced by
+a stable omission notice so a user can continue the session after switching
+models. For an image on the current user turn, the runtime first uses the
+independently configured `agents.vision` route to extract bounded textual
+evidence, removes image parts from the text-only main request, and injects the
+description as a private user-evidence message. The original user attachment
+remains durable session data. A missing, unavailable, or explicitly text-only
+vision route fails with an actionable error before the main provider call.
+Models whose modalities are unknown keep the compatibility behavior instead of
+being guessed text-only, while image-capable main models retain the native
+direct-image path.
+
 Only `run_id`, `session_id`, and `agent_id` metadata cross the provider
 boundary. Credentials are injected when the driver is constructed and are not
 placed in message metadata or events.
@@ -72,6 +92,43 @@ input, cached input, cache write, reasoning, output, and total token fields when
 the upstream protocol reports them. Encrypted or opaque provider continuation
 state is returned to the runtime without exposing it as visible text.
 
+## UI projection backpressure
+
+Provider execution and UI delivery are separate reliability domains. Text,
+reasoning, and tool-progress deltas are replaceable projections: the event
+broker batches them by session, run, agent, tool, and text phase. Independent
+interleaved streams therefore do not defeat coalescing.
+
+When the projection queue reaches its byte or event high-water mark, Azem drops
+only replaceable queued deltas and emits `projection_resync`. Desktop and TUI
+consumers reload the durable session through the read-only `refresh_session`
+action. If compaction happened during a run, the broker emits a final resync
+after the terminal event so completed or failed persisted blocks replace any
+partial display. Approval requests, tool lifecycle transitions, and terminal
+events are not discarded. A slow or suspended renderer must never surface as a
+provider error.
+
+Interactive planning uses the same lossless lifecycle channel. Question
+requested/resolved and plan proposed/resolved events are durable state
+transitions, not replaceable text deltas, so UI backpressure cannot silently
+drop a pending choice or an Execute Plan decision. Session refresh reconstructs
+their question and plan blocks when a renderer reconnects.
+
+Tool results remain complete in the durable tool record or Artifact V2 store.
+The live event carries at most the existing 16 KiB content preview and omits
+structured payloads larger than the 64 KiB inline limit. Streaming assistant
+and commentary text is parsed as Markdown on every coalesced UI frame. Only the
+latest eight provider ranges receive a bounded fade/blur reveal; older ranges
+settle into ordinary text without growing the timeline DOM indefinitely.
+
+Before an announced tool group, the executable main prompt emits commentary as
+an explicit bold action-title line followed by one short target/evidence line.
+The desktop recognizes only that contract as a progress step, derives its
+active/completed/failed state and wall-clock duration from the commentary plus
+the immediately following tools, and keeps those tools expandable inside the
+step. Unformatted commentary from older sessions or a non-conforming provider
+is never guessed or truncated into a title and retains the prose renderer.
+
 Unlike OpenAI Responses, Anthropic Messages and the other llmux transports do
 not label streamed text as commentary or final output. Azem keeps that text
 streaming provisionally: if the provider starts a tool, the preceding text is
@@ -88,7 +145,11 @@ visible output consistent across transports.
 
 Authentication, permission, invalid request, not found, rate limit, server,
 and stream errors map to Venat's typed error categories. Cancellation and
-deadlines terminate as aborted runs rather than retryable provider failures.
+deadlines from the run's caller terminate as aborted runs rather than retryable
+provider failures. A response-header timeout or transport cancellation while
+the caller context is still healthy is a retryable stream-open failure; this
+distinction prevents one transient 30-second connection stall from terminating
+a long-running main or subagent run.
 
 ## Verification
 

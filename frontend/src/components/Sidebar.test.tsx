@@ -8,6 +8,7 @@ import Sidebar from "./Sidebar";
 
 vi.mock("../bridge", () => ({
   createProject: vi.fn(), execute: vi.fn(), openProject: vi.fn().mockResolvedValue(undefined), openProjectSession: vi.fn().mockResolvedValue(undefined), selectProjectFolder: vi.fn(),
+  isDesktopRuntime: vi.fn(() => true),
   subscribeSessionMenu: vi.fn(() => () => undefined),
 }));
 
@@ -19,6 +20,25 @@ const snapshot: Snapshot = {
 
 describe("Sidebar project sessions", () => {
   afterEach(() => vi.clearAllMocks());
+
+  it("slides the shared switcher indicator between projects and workspace", async () => {
+    useRuntimeStore.setState({ snapshot, projects: [], sessions: [], currentSessionId: "session-1", view: "thread" });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(<Sidebar />));
+    const switcher = container.querySelector<HTMLElement>(".sidebar-switcher")!;
+    const tabs = container.querySelectorAll<HTMLButtonElement>('.sidebar-switcher [role="tab"]');
+    expect(switcher.dataset.active).toBe("projects");
+    expect(tabs[0]!.getAttribute("aria-selected")).toBe("true");
+    expect(tabs[1]!.getAttribute("aria-selected")).toBe("false");
+
+    await act(async () => tabs[1]!.click());
+    expect(switcher.dataset.active).toBe("workspace");
+    expect(tabs[0]!.getAttribute("aria-selected")).toBe("false");
+    expect(tabs[1]!.getAttribute("aria-selected")).toBe("true");
+    await act(async () => root.unmount());
+  });
 
   it("shows five sessions until expanded and starts a new session from the project row", async () => {
     const sessions: Session[] = Array.from({ length: 7 }, (_, index) => ({
@@ -35,8 +55,80 @@ describe("Sidebar project sessions", () => {
     await act(async () => container.querySelector<HTMLButtonElement>(".show-more-sessions")!.click());
     expect(container.querySelectorAll(".thread-list > button:not(.show-more-sessions)")).toHaveLength(7);
 
-    await act(async () => container.querySelector<HTMLButtonElement>('.project-action[aria-label="新会话"]')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('.project-action[aria-label="新对话"]')!.click());
     expect(execute).toHaveBeenCalledWith({ kind: "new_session", target: "", sessionId: "session-1" });
+    await act(async () => root.unmount());
+  });
+
+  it("marks an expanded project without a pull request as a sessions-only tree", async () => {
+    const sessions: Session[] = [{
+      id: "session-1", workspace: snapshot.workspace, title: "分析工作区修改内容", providerId: "chatgpt",
+      modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString(),
+    }];
+    useRuntimeStore.setState({
+      snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions,
+      currentSessionId: "session-1", view: "thread", pullRequestDashboard: null,
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(<Sidebar />));
+    const project = container.querySelector<HTMLElement>(".project-node")!;
+    expect(project.dataset.projectLayout).toBe("sessions-only");
+    expect(project.dataset.expanded).toBe("true");
+    expect(project.querySelector(":scope > .project-heading + .thread-list")).not.toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it("shows a lightweight spinner only on the running session", async () => {
+    const sessions: Session[] = ["session-1", "session-2"].map((id) => ({
+      id, workspace: snapshot.workspace, title: id === "session-1" ? "当前会话" : "后台运行会话", providerId: "chatgpt",
+      modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString(),
+    }));
+    useRuntimeStore.setState({
+      snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions,
+      currentSessionId: "session-1", view: "thread", running: false,
+      globalRunId: "run-2", globalRunSessionId: "session-2",
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(<Sidebar />));
+    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list > button"));
+    const current = buttons.find((button) => button.title === "当前会话")!;
+    const active = buttons.find((button) => button.title === "后台运行会话")!;
+    expect(current.querySelector(".session-running-indicator")).toBeNull();
+    expect(current.getAttribute("aria-busy")).toBe("false");
+    expect(active.querySelector(".session-running-indicator")).not.toBeNull();
+    expect(active.getAttribute("aria-busy")).toBe("true");
+
+    await act(async () => useRuntimeStore.setState({ globalRunId: "", globalRunSessionId: "" }));
+    expect(container.querySelector(".session-running-indicator")).toBeNull();
+
+    await act(async () => useRuntimeStore.setState({ running: true }));
+    expect(current.querySelector(".session-running-indicator")).not.toBeNull();
+    expect(active.querySelector(".session-running-indicator")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it("shows an unread blue dot only for a background session that completed away from view", async () => {
+    const sessions: Session[] = [
+      { id: "session-1", workspace: snapshot.workspace, title: "当前会话", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString() },
+      { id: "session-2", workspace: snapshot.workspace, title: "后台已完成", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", unread: true, updatedAt: new Date().toISOString() },
+    ];
+    useRuntimeStore.setState({
+      snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions,
+      currentSessionId: "session-1", view: "thread", running: false, globalRunId: "", globalRunSessionId: "",
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(<Sidebar />));
+    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list > button"));
+    expect(buttons.find((button) => button.title === "当前会话")?.querySelector(".session-unread")).toBeNull();
+    const unread = buttons.find((button) => button.title === "后台已完成")?.querySelector<HTMLElement>(".session-unread");
+    expect(unread).not.toBeNull();
+    expect(unread?.title).toBe("未读");
     await act(async () => root.unmount());
   });
 
@@ -51,9 +143,9 @@ describe("Sidebar project sessions", () => {
     const root = createRoot(container);
 
     await act(async () => root.render(<Sidebar />));
-    expect(Array.from(container.querySelectorAll(".project-toggle span")).map((node) => node.textContent)).toEqual(["azem", "synara"]);
+    expect(Array.from(container.querySelectorAll(".project-heading-copy strong")).map((node) => node.textContent)).toEqual(["azem", "synara"]);
     await act(async () => container.querySelectorAll<HTMLButtonElement>(".project-toggle")[1]!.click());
-    await act(async () => Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list button")).find((button) => button.textContent === "Synara 会话")!.click());
+    await act(async () => Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list button")).find((button) => button.textContent?.includes("Synara 会话"))!.click());
 
     expect(openProjectSession).toHaveBeenCalledWith(other, "session-other");
     await act(async () => root.unmount());

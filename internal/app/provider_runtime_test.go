@@ -44,6 +44,15 @@ import (
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
+func requireInstructionFragments(t *testing.T, category string, fragments []string) {
+	t.Helper()
+	for _, fragment := range fragments {
+		if !strings.Contains(mainInstructions, fragment) {
+			t.Errorf("main instructions omit %s %q", category, fragment)
+		}
+	}
+}
+
 func TestMainInstructionsContract(t *testing.T) {
 	wantHeadings := []string{
 		"## Role and priorities",
@@ -77,11 +86,17 @@ func TestMainInstructionsContract(t *testing.T) {
 			t.Errorf("main instructions do not list %q", name)
 		}
 	}
+	requireInstructionFragments(t, "concurrency rule", []string{"hydaelyn_read_skill_resource", "Never mix skill-resource reads and `subagent.spawn`", "own parallel batch"})
 	for _, grammar := range []string{"`¶PATH#TAG`", "`replace N..M:`", "`+final content`", "Never use `@@` hunks", "`-old` rows"} {
 		if !strings.Contains(mainInstructions, grammar) {
 			t.Errorf("main instructions omit hashline grammar %q", grammar)
 		}
 	}
+	requireInstructionFragments(t, "runtime contract", []string{
+		"exactly one mutating `todo` call", "never batch Todo mutations", "`done` automatically advances",
+		"actual lifecycle", "failed, cancelled, and stalled", "review as an approval gate", "independently inspect the changed files",
+		"**<concise action title>**", "<specific target or immediate evidence>", "18 CJK characters or eight English words",
+	})
 	for _, unsupported := range []string{"lsp", "ast_edit", "browser", "worker.run"} {
 		if strings.Contains(mainInstructions, unsupported) {
 			t.Errorf("main instructions mention unsupported tool %q", unsupported)
@@ -305,14 +320,14 @@ func TestArtifactV2ReadModesStayBounded(t *testing.T) {
 func TestSingleRunManifestAcceptsEmptyResolvedSkillSet(t *testing.T) {
 	manifest := singleRunManifest{
 		Version: 2, Provider: "chatgpt", AccountID: "account-1", Model: "model", Reasoning: "minimal",
-		ActiveSkills: []string{}, PlanMode: true, StaticIdentity: "identity", StartedAt: time.Now().UTC(),
+		ActiveSkills: []string{}, PlanMode: true, ApprovedPlanID: "plan-artifact", StaticIdentity: "identity", StartedAt: time.Now().UTC(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	decoded, err := decodeSingleRunManifest(string(encoded))
-	if err != nil || decoded.AccountID != manifest.AccountID || !decoded.PlanMode || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
+	if err != nil || decoded.AccountID != manifest.AccountID || !decoded.PlanMode || decoded.ApprovedPlanID != "plan-artifact" || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
 		t.Fatalf("decoded empty-skill manifest=%+v error=%v", decoded, err)
 	}
 }
@@ -329,13 +344,15 @@ func TestPlanModeToolDriversKeepOnlyReadOnlyOperations(t *testing.T) {
 		planModeTestDriver{tool.Definition{Name: "coding.read_file", EffectType: tool.EffectReadOnly}},
 		planModeTestDriver{tool.Definition{Name: subagentSpawnTool, EffectType: tool.EffectReadOnly}},
 		planModeTestDriver{tool.Definition{Name: subagentKillTool, EffectType: tool.EffectReadOnly}},
+		&askDriver{},
+		&submitPlanDriver{},
 		planModeTestDriver{tool.Definition{Name: "coding.write_file", EffectType: tool.EffectWrite}},
 		planModeTestDriver{tool.Definition{Name: "coding.shell", EffectType: tool.EffectExternalSideEffect}},
 	}
-	if got, want := toolDriverNames(planModeToolDrivers(drivers)), []string{"coding.read_file", subagentSpawnTool}; !reflect.DeepEqual(got, want) {
+	if got, want := toolDriverNames(planModeToolDrivers(drivers)), []string{"coding.read_file", subagentSpawnTool, askToolName, submitPlanToolName}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("plan mode tools = %v, want %v", got, want)
 	}
-	for _, required := range []string{"read-only", "read-only subagents", "Do not write implementation code"} {
+	for _, required := range []string{"read-only tools", "do not implement it", "submit_plan", "Execute plan", "why", "how", "Execution graph", "depends_on", "Mermaid"} {
 		if !strings.Contains(planModeInstructions, required) {
 			t.Fatalf("plan mode instructions omit %q", required)
 		}
@@ -770,6 +787,28 @@ func TestPhase3DurableProvenanceUsesSequence(t *testing.T) {
 	}
 }
 
+func TestPhase3ProvenanceMismatchDowngradesToSupportedAgentFact(t *testing.T) {
+	normalized, err := normalizeSemanticStateV1(
+		`{"version":1,"objective":{"text":"continue the review","status":"active","authority":"agent","confidence":"inferred","sources":[{"kind":"checkpoint","id":"carried:evidence"}]},"constraints":[{"text":"Plugin manifest paths must remain inside the plugin root.","status":"active","authority":"workspace","confidence":"verified","sources":[{"kind":"checkpoint","id":"invented:workspace"}]}]}`,
+		map[string]string{"checkpoint:carried:evidence": "agent"},
+	)
+	if err != nil {
+		t.Fatalf("mismatched carried provenance rejected: %v", err)
+	}
+	var state SemanticStateV1
+	if err := json.Unmarshal([]byte(normalized), &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Constraints) != 1 {
+		t.Fatalf("constraints=%+v", state.Constraints)
+	}
+	fact := state.Constraints[0]
+	if fact.Authority != "agent" || fact.Confidence != "inferred" ||
+		!reflect.DeepEqual(fact.Sources, []EvidenceRefV1{{Kind: "checkpoint", ID: "carried:evidence"}}) {
+		t.Fatalf("downgraded fact=%+v", fact)
+	}
+}
+
 func TestSemanticPatchSkipsUnchangedFacts(t *testing.T) {
 	fact := StateFactV1{ID: "objective-1", Text: "ship", Status: "active", Authority: "user", Confidence: "reported", Sources: []EvidenceRefV1{{Kind: "sequence", ID: "1"}}}
 	state := SemanticStateV1{Version: 1, Objective: fact}
@@ -1125,6 +1164,10 @@ func TestModelMaxOutputTokensUsesConfiguredCatalogLimit(t *testing.T) {
 	}
 	if got := runtime.modelMaxOutputTokens("chatgpt", "gpt-5.6-sol"); got != 0 {
 		t.Fatalf("subscription max output tokens = %d, want 0", got)
+	}
+	cfg.Providers.LLMux["opencode-zen"] = config.LLMuxProviderConfig{Enabled: true, Models: []config.LLMuxModelConfig{{ID: "gpt-test", MaxOutputTokens: 8192}}}
+	if got := runtime.modelMaxOutputTokens("opencode", "gpt-test"); got != 8192 {
+		t.Fatalf("legacy OpenCode max output tokens = %d, want 8192", got)
 	}
 }
 
@@ -2096,12 +2139,55 @@ func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) 
 	if _, err := compactionSummarizer(inner, "grok", "model", "low", "cache", 1_000, 200)(context.Background(), transcript); err == nil || len(inner.requests) != 0 {
 		t.Fatalf("oversized summary input requests=%d error=%v", len(inner.requests), err)
 	}
-	oversizedOutput := &compactionTestDriver{streams: [][]hyprovider.Event{{
-		{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
-		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
-	}}}
-	if _, err := compactionSummarizer(oversizedOutput, "grok", "model", "low", "cache", 1_000, 200)(context.Background(), "small input"); err == nil || !strings.Contains(err.Error(), "summary output requires") {
+	oversizedOutput := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+	if _, err := compactionSummarizer(oversizedOutput, "grok", "model", "low", "cache", 1_000, 200)(context.Background(), "small input"); err == nil || !strings.Contains(err.Error(), "after 2 repairs") {
 		t.Fatalf("oversized summary output error=%v", err)
+	}
+	if len(oversizedOutput.requests) != 3 || !strings.Contains(oversizedOutput.requests[1].Messages[1].Text, "Rewrite the candidate") || !strings.Contains(oversizedOutput.requests[1].Messages[1].Text, "at most 544 UTF-8 bytes") {
+		t.Fatalf("oversized summary repair requests=%#v", oversizedOutput.requests)
+	}
+	twoStageRepair := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("x", 900)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("x", 810)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("x", 500)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+	if got, err := compactionSummarizer(twoStageRepair, "chatgpt", "model", "low", "cache", 1_000, 200)(context.Background(), "small input"); err != nil || len(got) != 500 || len(twoStageRepair.requests) != 3 {
+		t.Fatalf("two-stage repaired summary bytes=%d requests=%d error=%v", len(got), len(twoStageRepair.requests), err)
+	}
+	repairedOutput := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: "compact summary"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+	if got, err := compactionSummarizer(repairedOutput, "chatgpt", "model", "low", "cache", 1_000, 200)(context.Background(), "small input"); err != nil || got != "compact summary" {
+		t.Fatalf("repaired summary=%q error=%v", got, err)
 	}
 	chatGPT := &compactionTestDriver{streams: [][]hyprovider.Event{{
 		{Kind: hyprovider.EventTextDelta, Text: "summary"},
@@ -2112,6 +2198,17 @@ func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) 
 	}
 	if extra := chatGPT.requests[0].ExtraBody; extra["prompt_cache_key"] != "cache" || extra["max_output_tokens"] != nil {
 		t.Fatalf("ChatGPT summary extra body: %#v", extra)
+	}
+	instructions := chatGPT.requests[0].Messages[0].Text
+	if !strings.Contains(instructions, "at most 800 UTF-8 bytes") || !strings.Contains(instructions, "hard limit") {
+		t.Fatalf("ChatGPT summary instructions do not carry the configured output limit: %q", instructions)
+	}
+}
+
+func TestCompactionSummaryLimitRetainsLargeSemanticState(t *testing.T) {
+	summaryTokens, inputTokens := resolveCompactionLimits(272_000, 8192)
+	if summaryTokens != 8192 || inputTokens != 262_784 {
+		t.Fatalf("compaction limits = summary %d input %d", summaryTokens, inputTokens)
 	}
 }
 
@@ -3235,7 +3332,7 @@ func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
 			t.Errorf("review evidence=%v", evidence)
 		}
 		requestChecked.Store(true)
-		writeAutomaticReviewWithUsage(writer, `{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized bounded write"}`)
+		writeAutomaticReviewWithUsage(writer, "```json\n"+`{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized bounded write"}`+"\n```")
 	})
 	modeEvent := nextApprovalEvent(t, harness.host, EventApprovalMode)
 	if modeEvent.State != "auto_review" || modeEvent.Data["auto_review_available"] != "true" {
@@ -3500,7 +3597,7 @@ func TestAutoReviewTimeoutFallsBackToUserApproval(t *testing.T) {
 	modelsMu.Lock()
 	gotModels := append([]string(nil), models...)
 	modelsMu.Unlock()
-	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerFallbackModel, codex.ApprovalReviewerModel}
+	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerModel, codex.ApprovalReviewerModel}
 	if !reflect.DeepEqual(gotModels, wantModels) {
 		t.Fatalf("review models=%v, want %v", gotModels, wantModels)
 	}
@@ -3529,7 +3626,7 @@ func TestAutoReviewTimeoutFallsBackToUserApproval(t *testing.T) {
 	}
 }
 
-func TestAutoReviewTimeoutSwitchesModelAndUsesSuccessfulRetry(t *testing.T) {
+func TestAutoReviewTimeoutRetriesConfiguredModel(t *testing.T) {
 	var requests atomic.Int32
 	var modelsMu sync.Mutex
 	var models []string
@@ -3567,11 +3664,11 @@ func TestAutoReviewTimeoutSwitchesModelAndUsesSuccessfulRetry(t *testing.T) {
 	modelsMu.Lock()
 	gotModels := append([]string(nil), models...)
 	modelsMu.Unlock()
-	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerFallbackModel}
+	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerModel}
 	if !reflect.DeepEqual(gotModels, wantModels) {
 		t.Fatalf("review models=%v, want %v", gotModels, wantModels)
 	}
-	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != codex.ApprovalReviewerFallbackModel {
+	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != codex.ApprovalReviewerModel {
 		t.Fatalf("retry decider=%q", decider)
 	}
 }
@@ -3617,13 +3714,13 @@ func TestAutoReviewCallerDeadlineStopsWithoutRetryOrManualApproval(t *testing.T)
 	}
 }
 
-func TestAutoReviewModeRequiresChatGPTAndDoesNotTakePendingHumanApproval(t *testing.T) {
+func TestAutoReviewModeIsProviderIndependentAndDoesNotTakePendingHumanApproval(t *testing.T) {
 	unauthed := NewService(context.Background(), config.Default())
-	if err := unauthed.setApprovalMode(context.Background(), ApprovalModeAutoReview); err == nil {
-		t.Fatal("automatic mode accepted without authentication")
+	if err := unauthed.setApprovalMode(context.Background(), ApprovalModeAutoReview); err != nil {
+		t.Fatalf("automatic mode requires a specific provider: %v", err)
 	}
-	if unauthed.approvalMode != ApprovalModePrompt {
-		t.Fatalf("unauthorized mode=%q", unauthed.approvalMode)
+	if unauthed.approvalMode != ApprovalModeAutoReview {
+		t.Fatalf("automatic mode=%q", unauthed.approvalMode)
 	}
 
 	var reviews atomic.Int32
@@ -3683,30 +3780,28 @@ func TestAutoReviewModeRequiresChatGPTAndDoesNotTakePendingHumanApproval(t *test
 		t.Fatalf("logout event=%+v", loggedOut)
 	}
 	modeEvent := nextApprovalEvent(t, harness.host, EventApprovalMode)
-	if modeEvent.State != "prompt" || modeEvent.Data["auto_review_available"] != "false" ||
-		harness.host.approvalMode != ApprovalModePrompt {
+	if modeEvent.State != "auto_review" || modeEvent.Data["auto_review_available"] != "true" ||
+		harness.host.approvalMode != ApprovalModeAutoReview {
 		t.Fatalf("logout mode projection=%+v service_mode=%q", modeEvent, harness.host.approvalMode)
 	}
 	if err := harness.host.ExecuteAction(context.Background(), Action{
 		Kind: ActionSetApprovalMode, Target: string(ApprovalModeAutoReview),
-	}); err == nil {
-		t.Fatal("direct automatic mode action succeeded after logout")
+	}); err != nil {
+		t.Fatalf("automatic mode rejected after provider logout: %v", err)
 	}
-	harness.host.mu.Lock()
-	harness.host.approvalMode = ApprovalModeAutoReview
-	harness.host.mu.Unlock()
+	_ = nextApprovalEvent(t, harness.host, EventApprovalMode)
 	call := tool.Call{ID: "auth-race", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"blocked.txt"}`)}
 	reviewPending := prepareAutomaticApproval(t, harness, call)
 	resolution, err := harness.host.awaitApproval(
 		context.Background(), "session", "agent-1", "main", harness.run, call, reviewPending,
 	)
 	if err != nil || resolution.Mode != agentservice.ApprovalDenied ||
-		!strings.Contains(resolution.DenialMessage, "(authentication)") {
+		!strings.Contains(resolution.DenialMessage, "(provider)") {
 		t.Fatalf("post-logout review=%+v error=%v", resolution, err)
 	}
 	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
 	failed := nextApprovalEvent(t, harness.host, EventApprovalResolved)
-	if failed.State != "auto_failed" || failed.Data["error_kind"] != "authentication" || reviews.Load() != 0 {
+	if failed.State != "auto_failed" || failed.Data["error_kind"] != "provider" || reviews.Load() != 0 {
 		t.Fatalf("post-logout review event=%+v reviewer_calls=%d", failed, reviews.Load())
 	}
 }
@@ -3827,7 +3922,14 @@ func TestResolveLLMuxDriverUsesConfiguredModelAndStoredCredential(t *testing.T) 
 
 func newAutoReviewHarness(t *testing.T, handler http.HandlerFunc) autoReviewHarness {
 	t.Helper()
-	server := httptest.NewServer(handler)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-5.6-luna","title":"GPT-5.6 Luna","supported_reasoning_levels":["low"],"supports_tools":true}]}`))
+			return
+		}
+		handler(writer, request)
+	}))
 	t.Cleanup(server.Close)
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
@@ -3856,7 +3958,9 @@ func newAutoReviewHarness(t *testing.T, handler http.HandlerFunc) autoReviewHarn
 	t.Cleanup(func() { _ = coding.Close(context.Background()) })
 	cfg := config.Default()
 	cfg.Workspace.Root = t.TempDir()
-	runtime, err := NewProviderRuntime(cfg, authentication, catalog.NewService(store.DB(), authentication), coding, t.TempDir())
+	modelCatalog := catalog.NewService(store.DB(), authentication)
+	modelCatalog.Endpoints["chatgpt"] = server.URL
+	runtime, err := NewProviderRuntime(cfg, authentication, modelCatalog, coding, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

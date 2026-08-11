@@ -84,6 +84,7 @@ type Command struct {
 	Timeout       time.Duration
 	FailurePolicy FailurePolicy
 	Source        string
+	Environment   map[string]string
 	matcher       *regexp.Regexp
 	exact         []string
 }

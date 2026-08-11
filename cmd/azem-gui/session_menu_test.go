@@ -3,10 +3,48 @@
 package main
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
+
+func TestIndependentWindowDoesNotRegisterAnotherMacApplication(t *testing.T) {
+	primary := desktopMacOptions(false)
+	if primary.ActivationPolicy != application.ActivationPolicyRegular {
+		t.Fatalf("primary activation policy = %d, want regular", primary.ActivationPolicy)
+	}
+	if !primary.ApplicationShouldTerminateAfterLastWindowClosed {
+		t.Fatal("primary app must terminate after its last window closes")
+	}
+
+	secondary := desktopMacOptions(true)
+	if secondary.ActivationPolicy != application.ActivationPolicyAccessory {
+		t.Fatalf("secondary activation policy = %d, want accessory", secondary.ActivationPolicy)
+	}
+	if !secondary.ApplicationShouldTerminateAfterLastWindowClosed {
+		t.Fatal("secondary app must terminate after its window closes")
+	}
+}
+
+func TestSessionWindowURLCarriesAssetVersion(t *testing.T) {
+	raw := sessionWindowURLWithVersion("session-1", "2026-08-09T11:04:09Z")
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Query().Get("session"); got != "session-1" {
+		t.Fatalf("session = %q, want session-1", got)
+	}
+	if got := parsed.Query().Get("assets"); got != "2026-08-09T11:04:09Z" {
+		t.Fatalf("assets = %q, want build timestamp", got)
+	}
+	if got := sessionWindowURLWithVersion("", "unknown"); got != "/" {
+		t.Fatalf("unknown-version root URL = %q, want /", got)
+	}
+}
 
 func TestValidSessionID(t *testing.T) {
 	tests := []struct {

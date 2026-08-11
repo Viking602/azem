@@ -11,6 +11,14 @@ import (
 	"testing"
 )
 
+func TestDefaultClientFollowsProxyResolver(t *testing.T) {
+	client := NewClient()
+	transport, ok := client.HTTP.Transport().(*http.Transport)
+	if !ok || transport.Proxy == nil {
+		t.Fatalf("ChatGPT transport = %#v", client.HTTP.Transport())
+	}
+}
+
 func TestPKCEAuthorizationAndExchange(t *testing.T) {
 	var form url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

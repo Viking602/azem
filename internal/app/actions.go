@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Viking602/venat/api"
 
@@ -41,12 +42,15 @@ const (
 	ActionNewSession             ActionKind = "new_session"
 	ActionListSessions           ActionKind = "list_sessions"
 	ActionResumeSession          ActionKind = "resume_session"
+	ActionRefreshSession         ActionKind = "refresh_session"
 	ActionRenameSession          ActionKind = "rename_session"
 	ActionPinSession             ActionKind = "pin_session"
 	ActionArchiveSession         ActionKind = "archive_session"
 	ActionMarkSessionUnread      ActionKind = "mark_session_unread"
 	ActionCompact                ActionKind = "compact"
 	ActionResolveApproval        ActionKind = "resolve_approval"
+	ActionResolveUserInput       ActionKind = "resolve_user_input"
+	ActionResolvePlan            ActionKind = "resolve_plan"
 	ActionSetApprovalMode        ActionKind = "set_approval_mode"
 	ActionSetLanguage            ActionKind = "set_language"
 	ActionSetQueueMode           ActionKind = "set_queue_mode"
@@ -57,8 +61,11 @@ const (
 	ActionCancelAgent            ActionKind = "cancel_agent"
 	ActionRefreshMCP             ActionKind = "refresh_mcp"
 	ActionReconnectMCP           ActionKind = "reconnect_mcp"
+	ActionSetMCPEnabled          ActionKind = "set_mcp_enabled"
+	ActionUpsertMCPServer        ActionKind = "upsert_mcp_server"
 	ActionListSkills             ActionKind = "list_skills"
 	ActionReloadSkills           ActionKind = "reload_skills"
+	ActionSetSkillEnabled        ActionKind = "set_skill_enabled"
 	ActionListMemories           ActionKind = "list_memories"
 	ActionRemember               ActionKind = "remember"
 	ActionForgetMemory           ActionKind = "forget_memory"
@@ -67,10 +74,13 @@ const (
 	ActionListModelProviders     ActionKind = "list_model_providers"
 	ActionDiscoverProviderModels ActionKind = "discover_provider_models"
 	ActionSetModelProvider       ActionKind = "set_model_provider"
+	ActionSetModelEnabled        ActionKind = "set_model_enabled"
 	ActionListModelRoutes        ActionKind = "list_model_routes"
 	ActionSetModelRoute          ActionKind = "set_model_route"
 	ActionResetModelRoute        ActionKind = "reset_model_route"
 	ActionSetSubagentConcurrency ActionKind = "set_subagent_concurrency"
+	ActionSetShellConcurrency    ActionKind = "set_shell_concurrency"
+	ActionSetSubagentAwait       ActionKind = "set_subagent_await_timeout"
 	ActionSetChatGPTFastMode     ActionKind = "set_chatgpt_fast_mode"
 	ActionSetSessionPreferences  ActionKind = "set_session_preferences"
 	ActionListBackground         ActionKind = "list_background"
@@ -94,6 +104,7 @@ type Action struct {
 	CWD       string
 	Offset    int
 	Limit     int
+	Payload   json.RawMessage
 }
 
 type ActionExecutor interface {
@@ -160,12 +171,30 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		return s.discoverModelProvider(ctx, action.Provider, action.Secret)
 	case ActionSetModelProvider:
 		return s.updateModelProvider(ctx, action.Provider, action.Secret)
+	case ActionSetModelEnabled:
+		enabled, err := strconv.ParseBool(strings.TrimSpace(action.Decision))
+		if err != nil {
+			return fmt.Errorf("model enabled state must be true or false")
+		}
+		return s.setModelEnabled(ctx, action.Target, action.Name, enabled)
 	case ActionSetSubagentConcurrency:
 		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))
 		if err != nil || maxConcurrency < 1 {
 			return fmt.Errorf("subagent max concurrency must be positive")
 		}
 		return s.updateSubagentMaxConcurrency(ctx, maxConcurrency)
+	case ActionSetShellConcurrency:
+		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))
+		if err != nil || maxConcurrency < 1 {
+			return fmt.Errorf("shell max concurrency must be positive")
+		}
+		return s.updateShellMaxConcurrency(ctx, maxConcurrency)
+	case ActionSetSubagentAwait:
+		seconds, err := strconv.Atoi(strings.TrimSpace(action.Target))
+		if err != nil || seconds < 5 || seconds > 3600 {
+			return fmt.Errorf("subagent await timeout must be between 5 and 3600 seconds")
+		}
+		return s.updateSubagentAwaitTimeout(ctx, time.Duration(seconds)*time.Second)
 	case ActionSetChatGPTFastMode:
 		enabled, err := strconv.ParseBool(strings.TrimSpace(action.Target))
 		if err != nil {
@@ -232,6 +261,12 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		}
 		_ = s.emitContextProfile(ctx, action.SessionID)
 		return nil
+	case ActionSetSkillEnabled:
+		enabled, err := strconv.ParseBool(strings.TrimSpace(action.Decision))
+		if err != nil {
+			return fmt.Errorf("skill enabled state must be true or false")
+		}
+		return s.setSkillEnabled(ctx, action.Target, enabled, action.SessionID)
 	case ActionSetApprovalMode:
 		return s.setApprovalMode(ctx, ApprovalMode(action.Target))
 	case ActionSetLanguage:
@@ -298,6 +333,10 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 			return nil
 		}
 		return fmt.Errorf("approval %q is not pending", action.Target)
+	case ActionResolveUserInput:
+		return s.resolveUserInput(ctx, action.SessionID, action.Target, action.Payload)
+	case ActionResolvePlan:
+		return s.resolvePlan(ctx, action.SessionID, action.Target, action.Decision)
 	case ActionReconcileAttempt:
 		if s.reconciler == nil {
 			return fmt.Errorf("action reconciliation is unavailable")
@@ -366,6 +405,9 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 			return err
 		}
 		return s.emitSessionList(ctx)
+	case ActionRefreshSession:
+		_, err := s.emitSessionProjection(ctx, action.Target, "refreshed", false)
+		return err
 	case ActionListSessions:
 		return s.emitSessionList(ctx)
 	case ActionRenameSession:
@@ -388,10 +430,7 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		}
 		return s.emitSessionList(ctx)
 	case ActionMarkSessionUnread:
-		if err := s.sessions.SetUIState(ctx, action.Target, "unread", true); err != nil {
-			return err
-		}
-		return s.emitSessionList(ctx)
+		return s.markSessionUnread(ctx, action.Target)
 	case ActionCompact:
 		if s.sessions == nil {
 			return fmt.Errorf("session store is unavailable")
@@ -514,6 +553,14 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		reconnectErr := s.mcp.Reconnect(ctx, action.Target)
 		snapshotErr := s.emitMCPSnapshot(ctx)
 		return errors.Join(reconnectErr, snapshotErr)
+	case ActionSetMCPEnabled:
+		enabled, err := strconv.ParseBool(action.Decision)
+		if err != nil {
+			return fmt.Errorf("invalid MCP enabled state %q", action.Decision)
+		}
+		return s.setMCPServerEnabled(ctx, action.Target, enabled)
+	case ActionUpsertMCPServer:
+		return s.upsertMCPServer(ctx, action.Payload)
 	default:
 		return fmt.Errorf("unsupported action %q", action.Kind)
 	}
@@ -752,6 +799,8 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 		{Scope: "main", Label: "Main", Route: config.ModelRouteConfig{Provider: s.cfg.Defaults.Provider, Model: s.cfg.Defaults.Model, Reasoning: s.cfg.Defaults.Reasoning}},
 		{Scope: "title", Label: "Title", Route: s.cfg.Agents.Title},
 		{Scope: "plan", Label: "Plan", Route: s.cfg.Agents.Plan},
+		{Scope: "approval", Label: "Approval", Route: s.cfg.Agents.Approval},
+		{Scope: "vision", Label: "Vision", Route: s.cfg.Agents.Vision},
 		{Scope: "compaction", Label: "Compaction", Route: s.cfg.Agents.Compaction},
 	}
 	names := make([]string, 0, len(s.cfg.Agents.Subagents.Roles))
@@ -769,11 +818,13 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 func (s *Service) modelRoutesEvent(state string) Event {
 	s.mu.Lock()
 	maxConcurrency := s.cfg.Agents.Subagents.MaxConcurrency
+	shellConcurrency := s.cfg.Workspace.Shell.MaxConcurrency
+	awaitSeconds := int(s.cfg.Agents.Subagents.AwaitDuration.Seconds())
 	fastMode := s.cfg.Providers.ChatGPT.FastMode
 	s.mu.Unlock()
 	return Event{
 		Kind: EventModelRoutes, State: state, ModelRoutes: s.modelRouteEntries(),
-		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
+		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
 	}
 }
 
@@ -791,7 +842,7 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "compaction" && entry.Scope != "subagent" {
+	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "compaction" && entry.Scope != "subagent" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
 	if entry.Scope != "subagent" && entry.Role != "" {
@@ -817,8 +868,18 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		if s.providers == nil {
 			return fmt.Errorf("provider runtime is unavailable")
 		}
-		if _, _, _, _, err := s.providers.resolveDriver(ctx, route.Provider, route.Model, route.Reasoning); err != nil {
+		account, modelID, _, _, err := s.providers.resolveDriver(ctx, route.Provider, route.Model, route.Reasoning)
+		if err != nil {
 			return err
+		}
+		if entry.Scope == "vision" {
+			known, supported, supportErr := s.providers.modelImageInputSupport(ctx, route.Provider, account.ID, modelID)
+			if supportErr != nil {
+				return supportErr
+			}
+			if known && !supported {
+				return fmt.Errorf("model %q does not accept image input and cannot be used as the vision assistant", modelID)
+			}
 		}
 	}
 	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
@@ -846,6 +907,10 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		s.cfg.Agents.Title = route
 	} else if entry.Scope == "plan" {
 		s.cfg.Agents.Plan = route
+	} else if entry.Scope == "approval" {
+		s.cfg.Agents.Approval = route
+	} else if entry.Scope == "vision" {
+		s.cfg.Agents.Vision = route
 	} else if entry.Scope == "compaction" {
 		s.cfg.Agents.Compaction = route
 	} else {
@@ -890,6 +955,64 @@ func (s *Service) updateSubagentMaxConcurrency(ctx context.Context, maxConcurren
 	s.mu.Unlock()
 	if s.providers != nil {
 		s.providers.UpdateSubagentMaxConcurrency(maxConcurrency)
+	}
+	s.emit(ctx, s.modelRoutesEvent("updated"))
+	return nil
+}
+
+func (s *Service) updateShellMaxConcurrency(ctx context.Context, maxConcurrency int) error {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	s.mu.Lock()
+	currentSession := s.currentSession
+	s.mu.Unlock()
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateShellMaxConcurrency(s.configPath, maxConcurrency)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.cfg.Workspace.Shell.MaxConcurrency = maxConcurrency
+	s.mu.Unlock()
+	if s.coding != nil {
+		s.coding.UpdateShellMaxConcurrency(maxConcurrency)
+	}
+	s.emit(ctx, s.modelRoutesEvent("updated"))
+	return nil
+}
+
+func (s *Service) updateSubagentAwaitTimeout(ctx context.Context, timeout time.Duration) error {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	seconds := int(timeout.Seconds())
+	s.mu.Lock()
+	currentSession := s.currentSession
+	s.mu.Unlock()
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateSubagentAwaitTimeout(s.configPath, seconds)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.cfg.Agents.Subagents.AwaitTimeout = timeout.String()
+	s.cfg.Agents.Subagents.AwaitDuration = timeout
+	s.mu.Unlock()
+	if s.providers != nil {
+		s.providers.UpdateSubagentAwaitTimeout(timeout)
 	}
 	s.emit(ctx, s.modelRoutesEvent("updated"))
 	return nil
@@ -1073,6 +1196,19 @@ func (s *Service) createSession(ctx context.Context, title string) error {
 	return nil
 }
 
+func (s *Service) markSessionUnread(ctx context.Context, sessionID string) error {
+	s.mu.Lock()
+	visible := s.currentSession == sessionID
+	s.mu.Unlock()
+	if visible {
+		return nil
+	}
+	if err := s.sessions.SetUIState(ctx, sessionID, "unread", true); err != nil {
+		return err
+	}
+	return s.emitSessionList(ctx)
+}
+
 func (s *Service) ForkSession(ctx context.Context, sourceID string, activate bool) (string, error) {
 	if s.sessions == nil {
 		return "", fmt.Errorf("session store is unavailable")
@@ -1096,35 +1232,61 @@ func (s *Service) ForkSession(ctx context.Context, sourceID string, activate boo
 }
 
 func (s *Service) emitSession(ctx context.Context, id string) error {
+	modelID, err := s.emitSessionProjection(ctx, id, "loaded", true)
+	if err != nil {
+		return err
+	}
+	if err := s.switchSessionHooks(ctx, id, "resume", modelID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.currentSession = id
+	s.mu.Unlock()
+	_ = s.emitContextProfile(ctx, id)
+	return nil
+}
+
+func (s *Service) emitSessionProjection(ctx context.Context, id, state string, activate bool) (string, error) {
 	if s.sessions == nil {
-		return fmt.Errorf("session store is unavailable")
+		return "", fmt.Errorf("session store is unavailable")
 	}
 	if id == "" {
-		return fmt.Errorf("session id is required")
+		return "", fmt.Errorf("session id is required")
 	}
 	projection, err := s.sessions.LoadProjection(ctx, id)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := s.rememberWorkspaceSession(ctx, id); err != nil {
-		return err
+	if activate {
+		if err := s.rememberWorkspaceSession(ctx, id); err != nil {
+			return "", err
+		}
 	}
 	blocks, err := json.Marshal(projection.Blocks)
 	if err != nil {
-		return err
+		return "", err
 	}
 	todo, err := s.sessions.LoadTodo(ctx, id)
 	if err != nil {
-		return err
+		return "", err
 	}
 	currentRecap, err := s.loadRecap(ctx, id)
 	if err != nil {
-		return err
+		return "", err
 	}
 	s.rememberSessionUsage(id, projection.Usage)
 	data := sessionProjectionData(projection, string(blocks))
+	s.addActiveRunProjection(data, id)
+	s.emit(ctx, Event{
+		Kind: EventSessionLoaded, SessionID: id, State: state,
+		Data: data, AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,
+	})
+	return projection.Session.ModelID, nil
+}
+
+func (s *Service) addActiveRunProjection(data map[string]string, sessionID string) {
 	s.mu.Lock()
-	active := s.activeRun != "" && s.activeSession == id
+	active := s.activeRun != "" && s.activeSession == sessionID
 	activeRunID := s.activeRun
 	activeSessionID := s.activeSession
 	s.mu.Unlock()
@@ -1136,18 +1298,6 @@ func (s *Service) emitSession(ctx context.Context, id string) error {
 		data["globalActiveRunID"] = activeRunID
 		data["globalActiveSessionID"] = activeSessionID
 	}
-	s.emit(ctx, Event{
-		Kind: EventSessionLoaded, SessionID: id, State: "loaded",
-		Data: data, AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,
-	})
-	if err := s.switchSessionHooks(ctx, id, "resume", projection.Session.ModelID); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.currentSession = id
-	s.mu.Unlock()
-	_ = s.emitContextProfile(ctx, id)
-	return nil
 }
 
 func (s *Service) subagentSnapshots(ctx context.Context, sessionID string) []AgentSnapshotPayload {
@@ -1257,6 +1407,7 @@ func (s *Service) login(ctx context.Context, provider string) error {
 	}
 	models = s.catalog.EnrichWithModelsDev(ctx, models)
 
+	models.Models = s.catalogModelsWithAvailability(account.Provider, models.Models)
 	encoded, err := json.Marshal(models.Models)
 	if err != nil {
 		return err
@@ -1286,6 +1437,7 @@ func (s *Service) emitAuthCatalog(ctx context.Context) {
 				continue
 			}
 			models = s.catalog.EnrichWithModelsDev(ctx, models)
+			models.Models = s.catalogModelsWithAvailability(account.Provider, models.Models)
 			encoded, err := json.Marshal(models.Models)
 			if err != nil {
 				continue
@@ -1322,27 +1474,20 @@ func (s *Service) emitMCPSnapshot(ctx context.Context) error {
 	if s.mcp == nil {
 		return fmt.Errorf("no MCP manager is attached")
 	}
-	type toolView struct {
-		Name             string `json:"name"`
-		Description      string `json:"description,omitempty"`
-		Effect           string `json:"effect,omitempty"`
-		RequiresApproval bool   `json:"requiresApproval,omitempty"`
-	}
-	type view struct {
-		Name      string     `json:"name"`
-		State     string     `json:"state"`
-		ToolCount int        `json:"toolCount"`
-		Tools     []toolView `json:"tools,omitempty"`
-		Error     string     `json:"error"`
-	}
 	snapshots := s.mcp.Servers()
-	values := make([]view, 0, len(snapshots))
+	values := make([]mcpServerView, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		tools := make([]toolView, 0, len(snapshot.Tools))
+		tools := make([]mcpToolView, 0, len(snapshot.Tools))
 		for _, tool := range snapshot.Tools {
-			tools = append(tools, toolView{Name: tool.Name, Description: tool.Description, Effect: tool.Effect, RequiresApproval: tool.RequiresApproval})
+			tools = append(tools, mcpToolView{
+				Name: tool.Name, Description: tool.Description,
+				Effect: tool.Effect, RequiresApproval: tool.RequiresApproval,
+			})
 		}
-		values = append(values, view{Name: snapshot.Name, State: string(snapshot.State), ToolCount: snapshot.ToolCount, Tools: tools, Error: snapshot.LastError})
+		values = append(values, buildMCPServerView(
+			snapshot.Name, string(snapshot.State), snapshot.ToolCount,
+			tools, snapshot.LastError, s.cfg.MCP.Servers[snapshot.Name],
+		))
 	}
 	encoded, err := json.Marshal(values)
 	if err != nil {
@@ -1354,4 +1499,50 @@ func (s *Service) emitMCPSnapshot(ctx context.Context) error {
 	s.mu.Unlock()
 	_ = s.emitContextProfile(ctx, sessionID)
 	return nil
+}
+
+type mcpToolView struct {
+	Name             string `json:"name"`
+	Description      string `json:"description,omitempty"`
+	Effect           string `json:"effect,omitempty"`
+	RequiresApproval bool   `json:"requiresApproval,omitempty"`
+}
+
+type mcpServerView struct {
+	Name           string        `json:"name"`
+	Enabled        bool          `json:"enabled"`
+	State          string        `json:"state"`
+	Transport      string        `json:"transport"`
+	Target         string        `json:"target"`
+	Command        string        `json:"command,omitempty"`
+	Args           []string      `json:"args,omitempty"`
+	CWD            string        `json:"cwd,omitempty"`
+	InheritEnv     bool          `json:"inheritEnv,omitempty"`
+	URL            string        `json:"url,omitempty"`
+	Approval       string        `json:"approval"`
+	MaxConcurrency int           `json:"maxConcurrency"`
+	ToolCount      int           `json:"toolCount"`
+	Tools          []mcpToolView `json:"tools,omitempty"`
+	Error          string        `json:"error"`
+}
+
+func buildMCPServerView(
+	name string,
+	state string,
+	toolCount int,
+	tools []mcpToolView,
+	lastError string,
+	serverConfig config.MCPServerConfig,
+) mcpServerView {
+	target := serverConfig.URL
+	if serverConfig.Transport == "stdio" {
+		target = strings.TrimSpace(strings.Join(append([]string{serverConfig.Command}, serverConfig.Args...), " "))
+	}
+	return mcpServerView{
+		Name: name, Enabled: serverConfig.Enabled, State: state,
+		Transport: serverConfig.Transport, Target: target, Command: serverConfig.Command,
+		Args: append([]string(nil), serverConfig.Args...), CWD: serverConfig.CWD, InheritEnv: serverConfig.InheritEnv,
+		URL: serverConfig.URL, Approval: serverConfig.Approval, MaxConcurrency: serverConfig.MaxConcurrency,
+		ToolCount: toolCount, Tools: tools, Error: lastError,
+	}
 }

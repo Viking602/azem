@@ -1414,6 +1414,61 @@ func TestApprovalOverlayExecutesExplicitDecision(t *testing.T) {
 	}
 }
 
+func TestPlanningQuestionOverlayCollectsAndResolvesAnswers(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status, model.runID = "Running", "run-plan"
+	questions := `[{"id":"scope","header":"范围","question":"选择实现范围","options":[{"label":"完整","description":"实现并验证","recommended":true},{"label":"最小","description":"仅核心路径"}]}]`
+	model.applyEvent(app.Event{Kind: app.EventUserInputRequested, SessionID: "default", RunID: "run-plan", ToolCallID: "ask-call", UserInputID: "ask-1", State: "pending", Data: map[string]string{"questions": questions}})
+	if model.overlay != OverlayUserInput || model.planningInput == nil || model.status != "Awaiting input" {
+		t.Fatalf("planning question = overlay:%q input:%#v status:%q", model.overlay, model.planningInput, model.status)
+	}
+
+	updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = updated.(AppModel)
+	if !model.planningInput.canConfirm() {
+		t.Fatal("first option was not selected")
+	}
+	updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	model = updated.(AppModel)
+	updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	model = updated.(AppModel)
+	updated, cmd := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("question confirmation did not return an action")
+	}
+	result := cmd().(actionResultMsg)
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionResolveUserInput || runtime.actions[0].Target != "ask-1" || !strings.Contains(string(runtime.actions[0].Payload), `"完整"`) {
+		t.Fatalf("planning action = %#v", runtime.actions)
+	}
+}
+
+func TestPlanOverlayStartsExplicitOrdinaryExecution(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.status, model.runID = "Running", "run-plan"
+	model.applyEvent(app.Event{Kind: app.EventPlanProposed, SessionID: "default", RunID: "run-plan", PlanID: "plan-1", Text: "1. Implement\n2. Verify", State: "proposed", Data: map[string]string{"title": "Ship", "version": "2"}})
+	if model.overlay != OverlayPlan || model.planReview == nil || !model.planMode {
+		t.Fatalf("plan review = overlay:%q plan:%#v planMode:%v", model.overlay, model.planReview, model.planMode)
+	}
+	model.applyEvent(app.Event{Kind: app.EventRunFinished, SessionID: "default", RunID: "run-plan"})
+	model.overlayCursor = 2
+	updated, cmd := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("execute plan did not return an action")
+	}
+	result := cmd().(actionResultMsg)
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionResolvePlan || runtime.actions[0].Target != "plan-1" || runtime.actions[0].Decision != "execute" {
+		t.Fatalf("plan action = %#v", runtime.actions)
+	}
+}
+
 func TestManualCompactShowsModelProgressAndRestoresReadyOnNoop(t *testing.T) {
 	runtime := &recordedRuntime{}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
@@ -3276,7 +3331,7 @@ func TestViewFitsRealTerminalBoundsAcrossResponsiveLayouts(t *testing.T) {
 	}{{1, 1}, {5, 4}, {12, 5}, {20, 8}, {39, 12}, {40, 12}, {80, 24}, {120, 40}}
 	overlays := []Overlay{
 		OverlayNone, OverlayHelp, OverlayStatus, OverlayCommand, OverlayProvider, OverlayModel, OverlayModelRoutes, OverlaySettings, OverlaySubagentConcurrency, OverlaySkills,
-		OverlayReasoning, OverlaySessions, OverlayBranches, OverlayBranchConfirm, OverlayApproval, OverlayCancel, OverlayDiff, OverlayAgents,
+		OverlayReasoning, OverlaySessions, OverlayBranches, OverlayBranchConfirm, OverlayApproval, OverlayUserInput, OverlayPlan, OverlayCancel, OverlayDiff, OverlayAgents,
 		OverlayAgentDetail, OverlayAgentTypes, OverlayPersonas, OverlayMCP, OverlayMCPDetail, OverlayBackground, OverlayBackgroundDetail,
 		OverlayRecovery, OverlayError,
 	}

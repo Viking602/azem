@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	hyprovider "github.com/Viking602/venat/provider"
+
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -35,6 +37,67 @@ func TestReviewerAllowsAndDeniesValidAssessments(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProviderReviewerUsesConfiguredModelWithoutChatGPTAuthentication(t *testing.T) {
+	driver := &configuredReviewDriver{}
+	reviewer, err := NewProviderReviewer(driver, "deepseek-v4-flash", "high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessment, err := reviewer.Review(context.Background(), validReviewRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assessment.Outcome != "allow" || assessment.Model != "deepseek-v4-flash" {
+		t.Fatalf("assessment=%+v", assessment)
+	}
+	if driver.request.Model != "deepseek-v4-flash" || driver.request.Metadata["reasoning_effort"] != "high" {
+		t.Fatalf("request=%+v", driver.request)
+	}
+}
+
+func TestProviderReviewerAcceptsWholeFencedJSONFromAnthropicCompatibleModel(t *testing.T) {
+	driver := &configuredReviewDriver{output: "```json\n" + validReviewJSON("allow") + "\n```"}
+	reviewer, err := NewProviderReviewer(driver, "deepseek-v4-flash", "low")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessment, err := reviewer.Review(context.Background(), validReviewRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assessment.Outcome != "allow" || assessment.Rationale != "configured model" {
+		t.Fatalf("assessment=%+v", assessment)
+	}
+	if policy := driver.request.Messages[0].Text; !strings.Contains(policy, "Return exactly one JSON object") || !strings.Contains(policy, `"risk_level"`) {
+		t.Fatalf("review output contract missing from policy: %q", policy)
+	}
+}
+
+type configuredReviewDriver struct {
+	request hyprovider.Request
+	output  string
+}
+
+func (*configuredReviewDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "configured-review"}
+}
+
+func (d *configuredReviewDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	d.request = request
+	output := d.output
+	if output == "" {
+		output = validReviewJSON("allow")
+	}
+	return hyprovider.NewSliceStream([]hyprovider.Event{
+		{Kind: hyprovider.EventTextDelta, Text: output},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}), nil
+}
+
+func validReviewJSON(outcome string) string {
+	return fmt.Sprintf(`{"risk_level":"low","user_authorization":"high","outcome":%q,"rationale":"configured model"}`, outcome)
 }
 
 func TestReviewerPinsStrictSchemaModelAndNoTools(t *testing.T) {
@@ -128,6 +191,9 @@ func TestReviewerRejectsMalformedOutputsAndToolCalls(t *testing.T) {
 		}},
 		{name: "extra field", serve: func(writer http.ResponseWriter) {
 			writeReviewSSE(writer, `{"risk_level":"low","user_authorization":"high","outcome":"allow","rationale":"safe","extra":true}`, true)
+		}},
+		{name: "prose around fenced JSON", serve: func(writer http.ResponseWriter) {
+			writeReviewSSE(writer, "Decision:\n```json\n"+validReviewJSON("allow")+"\n```", true)
 		}},
 		{name: "tool call", serve: func(writer http.ResponseWriter) {
 			writer.Header().Set("Content-Type", "text/event-stream")

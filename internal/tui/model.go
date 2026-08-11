@@ -28,6 +28,8 @@ const (
 	BlockAssistant BlockKind = "assistant"
 	BlockTool      BlockKind = "tool"
 	BlockApproval  BlockKind = "approval"
+	BlockQuestion  BlockKind = "question"
+	BlockPlan      BlockKind = "plan"
 	BlockAgent     BlockKind = "agent"
 	BlockDiff      BlockKind = "diff"
 	BlockHook      BlockKind = "hook"
@@ -51,6 +53,8 @@ type Block struct {
 	Kind        BlockKind
 	RunID       string
 	ToolCallID  string
+	UserInputID string
+	PlanID      string
 	Title       string
 	Arguments   string
 	Content     string
@@ -171,6 +175,8 @@ const (
 	OverlayBranches            Overlay = "branches"
 	OverlayBranchConfirm       Overlay = "branch_confirm"
 	OverlayApproval            Overlay = "approval"
+	OverlayUserInput           Overlay = "user_input"
+	OverlayPlan                Overlay = "plan"
 	OverlayCancel              Overlay = "cancel"
 	OverlayDiff                Overlay = "diff"
 	OverlayAgents              Overlay = "agents"
@@ -459,6 +465,9 @@ type AppModel struct {
 	auth                     map[string]AuthView
 	approval                 *ApprovalView
 	pendingApprovals         []ApprovalView
+	planningInput            *PlanningInputView
+	planningOther            bool
+	planReview               *PlanReviewView
 	usage                    UsageView
 	contextProfile           app.ContextProfile
 	contextProfileError      string

@@ -1,6 +1,6 @@
 # Testing
 
-Last verified: 2026-08-06
+Last verified: 2026-08-08
 
 Azem spans a Go runtime, SQLite, Bubble Tea, Wails, and a React frontend. Passing
 one package is not enough when a change crosses those boundaries. Start with
@@ -42,6 +42,13 @@ Packaged desktop application:
 make gui
 ```
 
+Windows desktop cross-build (amd64 by default; set `WINDOWS_ARCH=arm64` for
+Windows on Arm):
+
+```bash
+make gui-windows
+```
+
 ## Verification by change type
 
 | Change | Narrow check | Complete check |
@@ -50,6 +57,7 @@ make gui
 | Go formatting | `gofmt -w <changed.go>` | `git diff --check` |
 | React component/store/style | Run the matching Vitest file during iteration | `make test-gui` |
 | Desktop Bridge or Wails lifecycle | `go test ./internal/desktop ./cmd/azem-gui` | `make test-gui`, `make gui`, real app launch |
+| Workspace file browser | `go test ./internal/desktop -run Workspace` and `cd frontend && bun run test -- WorkspaceFilesPage.test.tsx` | `make test-gui`, `make gui`, real tree/text/image/binary smoke |
 | SQLite migration/adapter | `go test ./internal/store/sqlite` | `GOWORK=off go test ./...` plus real upgrade/reopen evidence |
 | Venat version/contract | Affected agent and adapter packages | `GOWORK=off go mod tidy`, `GOWORK=off go test ./...`, `GOWORK=off make gui` |
 | Provider streaming | Provider parser and driver tests | App runtime, session persistence, frontend reducer/timeline tests |
@@ -80,8 +88,8 @@ starts. On macOS:
 3. Launch `open dist/Azem.app` or `dist/Azem.app/Contents/MacOS/Azem`.
 4. Confirm the main window renders and the current workspace appears.
 5. Open an existing session or create a new one.
-6. Confirm the composer, model controls, timeline, and project navigation are
-   interactive.
+6. Confirm the composer, model controls, timeline, project navigation, and
+   Workspace file tree/viewer are interactive.
 7. Exercise the changed path and one failure path.
 8. Quit the application and confirm shutdown does not leave the database
    locked or the process running.
@@ -89,6 +97,21 @@ starts. On macOS:
 For visual-only changes, also check light/dark appearance, narrow layout,
 keyboard focus, reduced motion where relevant, and readable approval/error
 states.
+
+On Windows, launch `dist\windows-amd64\Azem.exe` and repeat steps 4–8. Also
+verify one foreground PowerShell command, cancellation of a command that has a
+child process, a background command stop, system-font enumeration, clipboard
+image paste, browser login, and Credential Manager storage. The WebView2
+Runtime is required; Bash hooks require Git Bash, while PowerShell hooks work
+with either PowerShell 7 or the built-in Windows PowerShell.
+
+Compilation-only checks for both supported Windows architectures can run on a
+non-Windows host without executing the generated test binaries:
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -exec=/usr/bin/true ./...
+GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go test -exec=/usr/bin/true ./...
+```
 
 ## Live provider tests
 
