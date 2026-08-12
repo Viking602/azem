@@ -1103,7 +1103,9 @@ describe("runtime event projection", () => {
     expect(container.textContent).toContain("执行计划");
     expect(container.textContent).toContain("在桌面端展示任务进度");
     expect(container.textContent).toContain("添加 Inspector 展示");
-    expect(container.textContent).toContain("2 / 3");
+    expect(container.querySelector(".todo-section .inspector-section-header small")?.textContent).toBe("2 / 3");
+    expect(container.textContent?.match(/2 \/ 3/g)).toHaveLength(1);
+    expect(container.querySelector(".todo-progress-row > span")).toBeNull();
     expect(container.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("2");
     expect(container.querySelector('[data-status="in_progress"]')).toBeNull();
     await act(async () => root.unmount());

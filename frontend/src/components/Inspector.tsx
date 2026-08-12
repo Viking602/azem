@@ -231,7 +231,6 @@ function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["lang
       <div className="todo-progress-track" role="progressbar" aria-label={tFormat(language, "todoProgress", { done: completed, total: items.length })} aria-valuemin={0} aria-valuemax={items.length} aria-valuenow={completed}>
         <span style={{ width: `${percentage}%` }} />
       </div>
-      <span>{completed}/{items.length}</span>
     </div>
     <div className="todo-phases">
       {todo.phases.map((phase) => <div className="todo-phase" key={phase.id || phase.title}>
