@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Command, GitBranch, Search } from "lucide-react";
-import { execute, initialise, isDesktopRuntime, subscribe, subscribePullRequests } from "./bridge";
+import { execute, initialise, isDesktopRuntime, resumeSession, subscribe, subscribePullRequests } from "./bridge";
 import AgentSideChat from "./components/AgentSideChat";
 import Inspector from "./components/Inspector";
 import Sidebar from "./components/Sidebar";
@@ -182,8 +182,17 @@ export default function App() {
           execute({ kind: "list_model_routes", sessionId: value.sessionId }),
         ]).catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
         void refreshPullRequestDashboard();
-        const sessionId = new URLSearchParams(location.search).get("session");
-        if (sessionId && isDesktopRuntime()) await execute({ kind: "resume_session", target: sessionId, sessionId });
+        const parameters = new URLSearchParams(location.search);
+        const sessionId = parameters.get("session");
+        const hasSearchSequence = parameters.has("searchSequence");
+        const searchSequence = Number(parameters.get("searchSequence"));
+        if (sessionId && isDesktopRuntime()) {
+          if (hasSearchSequence && Number.isSafeInteger(searchSequence) && searchSequence >= 0) {
+            useRuntimeStore.getState().setSessionSearchTarget({ sessionId, sequence: searchSequence });
+          }
+          const projection = await resumeSession(sessionId);
+          if (projection) applyEvents([projection]);
+        }
       })
       .catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
     return () => {

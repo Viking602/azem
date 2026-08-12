@@ -30,7 +30,7 @@ func TestIndependentWindowDoesNotRegisterAnotherMacApplication(t *testing.T) {
 }
 
 func TestSessionWindowURLCarriesAssetVersion(t *testing.T) {
-	raw := sessionWindowURLWithVersion("session-1", "2026-08-09T11:04:09Z")
+	raw := sessionWindowURLWithVersion("session-1", "2026-08-09T11:04:09Z", 42)
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -41,8 +41,15 @@ func TestSessionWindowURLCarriesAssetVersion(t *testing.T) {
 	if got := parsed.Query().Get("assets"); got != "2026-08-09T11:04:09Z" {
 		t.Fatalf("assets = %q, want build timestamp", got)
 	}
-	if got := sessionWindowURLWithVersion("", "unknown"); got != "/" {
+	if got := parsed.Query().Get("searchSequence"); got != "42" {
+		t.Fatalf("searchSequence = %q, want 42", got)
+	}
+	if got := sessionWindowURLWithVersion("", "unknown", -1); got != "/" {
 		t.Fatalf("unknown-version root URL = %q, want /", got)
+	}
+	zero, err := url.Parse(sessionWindowURLWithVersion("session-0", "unknown", 0))
+	if err != nil || zero.Query().Get("searchSequence") != "0" {
+		t.Fatalf("zero search sequence was not preserved: %q, %v", zero, err)
 	}
 }
 

@@ -1,6 +1,6 @@
 # Persistence and Recovery
 
-Last verified: 2026-08-10
+Last verified: 2026-08-12
 
 Azem stores configuration and durable runtime state locally. SQLite is the
 authoritative store for sessions, projections, governed agent execution, usage,
@@ -99,6 +99,14 @@ Schema 20 replaces the pre-release compaction checkpoint format:
 - `context_manifests` records the exact ordered context segments, exclusions, policy version, and active manifest hash.
 
 The migration deliberately invalidates replaceable `model_history` and prompt-cache identity so no legacy summary can enter the new kernel. It preserves canonical blocks, Todo, tool records, artifacts, Memory, Recap, project ownership, and every other authoritative store.
+
+`history_fts` is also the durable conversation-content index used by desktop
+global search. Insert, update, delete, and session-cascade triggers keep
+canonical user blocks and completed assistant blocks synchronized. Global
+search never indexes mutable agent/process output or cancelled partial answers,
+and it returns FTS snippets rather than loading complete block payloads into
+React. Session-title matching scans only the short local title column; content
+matching and ranking remain on FTS5.
 
 ## Stored data groups
 

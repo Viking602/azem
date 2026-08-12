@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,7 +81,7 @@ func (c sessionMenuController) register(name string, pinned bool) {
 	c.add(menu, c.text("在新工作树中继续", "Continue in New Worktree"), c.continueInWorktree)
 	menu.AddSeparator()
 	c.add(menu, c.text("在新窗口中打开", "Open in New Window"), func(id string) {
-		c.report(launchSessionWindow(c.configFile, id, c.workspace, true))
+		c.report(launchSessionWindow(c.configFile, id, c.workspace, true, -1))
 	})
 	c.app.ContextMenu.Add(name, menu)
 }
@@ -111,7 +112,7 @@ func (c sessionMenuController) continueInWorktree(id string) {
 	}
 	worktree, err := azemapp.PrepareSessionWorktree(context.Background(), c.workspace, filepath.Join(c.dataDir, "session-worktrees"), continuedID)
 	if err == nil {
-		err = launchSessionWindow(c.configFile, continuedID, worktree.CWD, true)
+		err = launchSessionWindow(c.configFile, continuedID, worktree.CWD, true, -1)
 	}
 	if err == nil {
 		return
@@ -125,11 +126,11 @@ func (c sessionMenuController) continueInWorktree(id string) {
 	c.report(err)
 }
 
-func sessionWindowURL(sessionID string) string {
-	return sessionWindowURLWithVersion(sessionID, buildTime)
+func sessionWindowURL(sessionID string, searchSequence int64) string {
+	return sessionWindowURLWithVersion(sessionID, buildTime, searchSequence)
 }
 
-func sessionWindowURLWithVersion(sessionID, assetVersion string) string {
+func sessionWindowURLWithVersion(sessionID, assetVersion string, searchSequence int64) string {
 	query := url.Values{}
 	if value := strings.TrimSpace(sessionID); value != "" {
 		query.Set("session", value)
@@ -138,6 +139,9 @@ func sessionWindowURLWithVersion(sessionID, assetVersion string) string {
 		// WKWebView may retain the previous wails:// document between launches.
 		// A build-scoped document URL forces it to load the new hashed asset graph.
 		query.Set("assets", value)
+	}
+	if searchSequence >= 0 {
+		query.Set("searchSequence", strconv.FormatInt(searchSequence, 10))
 	}
 	if encoded := query.Encode(); encoded != "" {
 		return "/?" + encoded
@@ -239,7 +243,7 @@ func validSessionID(id string) bool {
 	return true
 }
 
-func launchSessionWindow(configFile, sessionID, workspace string, forceWorkspace bool) error {
+func launchSessionWindow(configFile, sessionID, workspace string, forceWorkspace bool, searchSequence int64) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate Azem executable: %w", err)
@@ -247,6 +251,9 @@ func launchSessionWindow(configFile, sessionID, workspace string, forceWorkspace
 	arguments := []string{"--new-window"}
 	if strings.TrimSpace(sessionID) != "" {
 		arguments = append(arguments, "--session", sessionID)
+	}
+	if searchSequence >= 0 {
+		arguments = append(arguments, "--search-sequence", strconv.FormatInt(searchSequence, 10))
 	}
 	if configFile != "" {
 		absoluteConfig, err := filepath.Abs(configFile)

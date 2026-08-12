@@ -23,6 +23,8 @@ import type {
   Project,
   RuntimeEvent,
   Session,
+  SessionSearchTarget,
+  SettingsSearchTarget,
   SessionRecap,
   SkillEntry,
   Snapshot,
@@ -121,7 +123,9 @@ export interface RuntimeData {
   inspectorTab: InspectorTab;
   inspectorOpen: boolean;
   settingsOpen: boolean;
+  settingsTarget: SettingsSearchTarget | null;
   commandOpen: boolean;
+  sessionSearchTarget: SessionSearchTarget | null;
   planMode: boolean;
   attachments: Attachment[];
   // Follow-up queues are process-local but session-scoped, matching Codex navigation behavior.
@@ -140,8 +144,9 @@ interface RuntimeActions {
   setInspectorTab: (tab: InspectorTab) => void;
   setInspectorOpen: (open: boolean) => void;
   selectAgent: (agentId: string) => void;
-  setSettingsOpen: (open: boolean) => void;
+  setSettingsOpen: (open: boolean, target?: SettingsSearchTarget) => void;
   setCommandOpen: (open: boolean) => void;
+  setSessionSearchTarget: (target: SessionSearchTarget | null) => void;
   setPullRequestDashboard: (dashboard: PullRequestDashboard) => void;
   selectPullRequest: (number: number | null) => void;
   setPullRequestDetail: (response: PullRequestDetailResponse) => void;
@@ -222,7 +227,9 @@ const initialData: RuntimeData = {
   inspectorTab: "environment",
   inspectorOpen: true,
   settingsOpen: false,
+  settingsTarget: null,
   commandOpen: false,
+  sessionSearchTarget: null,
   planMode: false,
   attachments: [],
   queuedPrompts: [],
@@ -269,8 +276,13 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
     agentBlocks: selectedAgentId && selectedAgentId === state.selectedAgentId ? state.agentBlocks : [],
     inspectorTab: selectedAgentId ? "agents" : state.inspectorTab,
   })),
-  setSettingsOpen: (settingsOpen) => set({ settingsOpen, commandOpen: false }),
+  setSettingsOpen: (settingsOpen, settingsTarget) => set({
+    settingsOpen,
+    settingsTarget: settingsOpen ? settingsTarget ?? null : null,
+    commandOpen: false,
+  }),
   setCommandOpen: (commandOpen) => set({ commandOpen }),
+  setSessionSearchTarget: (sessionSearchTarget) => set({ sessionSearchTarget }),
   setPullRequestDashboard: (pullRequestDashboard) => set({ pullRequestDashboard, pullRequestLoading: false, pullRequestError: "" }),
   selectPullRequest: (selectedPullRequestNumber) => set((state) => ({
     selectedPullRequestNumber,
@@ -1388,8 +1400,8 @@ export function mergeSessionTranscript(
   const result: Block[] = [];
   const usedAnchors = new Set<number>();
   blocks.forEach((block, index) => {
-    result.push(block);
     const sequence = sequences[index] ?? index;
+    result.push({ ...block, sequence });
     const anchored = byAnchor.get(sequence);
     if (!anchored) return;
     result.push(...anchored);

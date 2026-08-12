@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/venat/message"
@@ -170,6 +171,99 @@ func TestPhase6SearchHistoryIsolationSafetyBudgetsAndProvenance(t *testing.T) {
 	defer store.Close(ctx)
 	if reopened, err := NewService(store.DB()).SearchHistory(ctx, "one", "needle", 8, 4096, 4096); err != nil || len(reopened) != 2 {
 		t.Fatalf("reopened search=%+v err=%v", reopened, err)
+	}
+}
+
+func TestSearchSessionsFindsTitlesAndBoundedCanonicalMessageSnippets(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "global-search.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	workspace := t.TempDir()
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []Session{
+		{ID: "session-title", Title: "Searchable Release Notes"},
+		{ID: "session-body", Title: "Unrelated title"},
+	} {
+		if _, err := service.Ensure(ctx, value); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.SetWorkspaceSession(ctx, workspace, value.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	longContent := strings.Repeat("unrelated prefix ", 80) + "durable needle phrase " + strings.Repeat("unrelated suffix ", 80)
+	sequence, err := service.AppendBlock(ctx, "session-body", Block{Kind: "user", Content: longContent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "session-body", Block{Kind: "assistant", State: "cancelled", Content: "cancelled-only-token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	titles, err := service.SearchSessions(ctx, "searchable", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(titles) != 1 || titles[0].SessionID != "session-title" || titles[0].Kind != "title" || titles[0].Workspace != workspace {
+		t.Fatalf("title results = %+v", titles)
+	}
+	messages, err := service.SearchSessions(ctx, `needle " ( ) : * -`, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].SessionID != "session-body" || messages[0].Kind != "user" || messages[0].Sequence != sequence {
+		t.Fatalf("message results = %+v", messages)
+	}
+	if !strings.Contains(messages[0].Preview, "needle") || len(messages[0].Preview) >= len(longContent) {
+		t.Fatalf("message preview is not bounded: %q", messages[0].Preview)
+	}
+	if cancelled, err := service.SearchSessions(ctx, "cancelled-only-token", 10); err != nil || len(cancelled) != 0 {
+		t.Fatalf("cancelled assistant leaked into global search: %+v, %v", cancelled, err)
+	}
+	if empty, err := service.SearchSessions(ctx, "", 10); err != nil || len(empty) != 0 {
+		t.Fatalf("empty search = %+v, %v", empty, err)
+	}
+}
+
+func BenchmarkSearchSessionsFTS(b *testing.B) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(b.TempDir(), "global-search-benchmark.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = store.Close(ctx) })
+	service := NewService(store.DB())
+	now := time.Now().UTC().UnixNano()
+	tx, err := store.DB().BeginTx(ctx, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for index := 0; index < 2000; index++ {
+		id := fmt.Sprintf("session-search-%d", index)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,title,created_at,updated_at) VALUES(?,?,?,?)`, id, fmt.Sprintf("Conversation %d", index), now+int64(index), now+int64(index)); err != nil {
+			b.Fatal(err)
+		}
+		data, _ := json.Marshal(Block{Kind: "user", Content: fmt.Sprintf("performance needle %d durable message", index)})
+		if _, err := tx.ExecContext(ctx, `INSERT INTO session_blocks(session_id,sequence,kind,data) VALUES(?,1,'user',?)`, id, data); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		results, err := service.SearchSessions(ctx, "performance needle 1999", 24)
+		if err != nil || len(results) != 1 {
+			b.Fatalf("results=%d err=%v", len(results), err)
+		}
 	}
 }
 

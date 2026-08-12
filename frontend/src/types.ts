@@ -168,6 +168,7 @@ export type BlockKind = "user" | "thinking" | "commentary" | "assistant" | "tool
 
 export interface Block {
   id: string;
+  sequence?: number;
   kind: BlockKind;
   runId?: string;
   agentId?: string;
@@ -182,6 +183,28 @@ export interface Block {
   collapsed?: boolean;
   data?: Record<string, string>;
   attachments?: Attachment[];
+}
+
+export type SettingsSection = "catalog" | "models" | "subagents" | "governance" | "appearance" | "extensions";
+
+export interface SettingsSearchTarget {
+  section: SettingsSection;
+  id: string;
+}
+
+export interface SessionSearchTarget {
+  sessionId: string;
+  sequence?: number;
+}
+
+export interface SessionSearchResult {
+  sessionId: string;
+  workspace: string;
+  title: string;
+  kind: "title" | "user" | "assistant";
+  preview?: string;
+  sequence?: number;
+  updatedAt: string;
 }
 
 export type AgentPreviewKind = "" | "thinking" | "commentary" | "assistant";

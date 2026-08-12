@@ -150,10 +150,121 @@ type HistoryRecord struct {
 	Content    string `json:"content,omitempty"`
 }
 
+// SessionSearchResult is the bounded desktop projection for global search.
+// Message results contain only an FTS-generated snippet and the durable block
+// sequence required to focus the matching transcript entry.
+type SessionSearchResult struct {
+	SessionID string    `json:"sessionId"`
+	Workspace string    `json:"workspace"`
+	Title     string    `json:"title"`
+	Kind      string    `json:"kind"`
+	Preview   string    `json:"preview,omitempty"`
+	Sequence  int64     `json:"sequence"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 const (
 	defaultHistoryLimit = 8
 	maxHistoryLimit     = 20
+	defaultSearchLimit  = 20
+	maxSearchLimit      = 30
+	maxSearchQueryRunes = 200
 )
+
+// SearchSessions searches session titles and durable canonical conversation
+// blocks across every project. Conversation content stays in SQLite: only a
+// short FTS snippet is returned to the desktop renderer.
+func (s *Service) SearchSessions(ctx context.Context, query string, limit int) ([]SessionSearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	query = truncateRunes(query, maxSearchQueryRunes)
+	if limit <= 0 {
+		limit = defaultSearchLimit
+	}
+	if limit > maxSearchLimit {
+		limit = maxSearchLimit
+	}
+
+	results := make([]SessionSearchResult, 0, limit)
+	titleRows, err := s.db.QueryContext(ctx, `SELECT s.id,COALESCE(sw.workspace,''),s.title,s.updated_at
+		FROM sessions s
+		LEFT JOIN session_workspaces sw ON sw.session_id=s.id
+		WHERE instr(lower(s.title),lower(?))>0
+		ORDER BY CASE
+			WHEN lower(s.title)=lower(?) THEN 0
+			WHEN instr(lower(s.title),lower(?))=1 THEN 1
+			ELSE 2 END,
+			s.updated_at DESC
+		LIMIT ?`, query, query, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search session titles: %w", err)
+	}
+	for titleRows.Next() {
+		var result SessionSearchResult
+		var updatedAt int64
+		if err := titleRows.Scan(&result.SessionID, &result.Workspace, &result.Title, &updatedAt); err != nil {
+			titleRows.Close()
+			return nil, err
+		}
+		result.Kind = "title"
+		result.UpdatedAt = time.Unix(0, updatedAt).UTC()
+		results = append(results, result)
+	}
+	if err := titleRows.Err(); err != nil {
+		titleRows.Close()
+		return nil, err
+	}
+	if err := titleRows.Close(); err != nil {
+		return nil, err
+	}
+	if len(results) >= limit {
+		return results[:limit], nil
+	}
+
+	match := safeSessionSearchMatch(query)
+	if match == "" {
+		return results, nil
+	}
+	remaining := limit - len(results)
+	rows, err := s.db.QueryContext(ctx, `SELECT f.session_id,COALESCE(sw.workspace,''),s.title,
+		b.kind,b.sequence,snippet(history_fts,0,'','',' … ',24),s.updated_at
+		FROM history_fts f
+		JOIN sessions s ON s.id=f.session_id
+		JOIN session_blocks b ON b.session_id=f.session_id AND f.source_type='sequence' AND 'sequence:'||b.sequence=f.source_id
+		LEFT JOIN session_workspaces sw ON sw.session_id=f.session_id
+		WHERE history_fts MATCH ? AND
+			(b.kind='user' OR (b.kind='assistant' AND COALESCE(json_extract(b.data,'$.state'),'') IN ('','completed')))
+		ORDER BY bm25(history_fts),s.updated_at DESC
+		LIMIT ?`, match, remaining)
+	if err != nil {
+		return nil, fmt.Errorf("search session messages: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var result SessionSearchResult
+		var updatedAt int64
+		if err := rows.Scan(&result.SessionID, &result.Workspace, &result.Title, &result.Kind, &result.Sequence, &result.Preview, &updatedAt); err != nil {
+			return nil, err
+		}
+		result.Preview = strings.TrimSpace(result.Preview)
+		result.UpdatedAt = time.Unix(0, updatedAt).UTC()
+		results = append(results, result)
+	}
+	return results, rows.Err()
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
 
 // SearchHistory searches only durable, canonical sources in one session. The
 // payload budget is approximate (four UTF-8 bytes per token) and is also
@@ -215,6 +326,14 @@ func (s *Service) SearchHistory(ctx context.Context, sessionID, query string, li
 }
 
 func safeHistoryMatch(query string) string {
+	return safeFTSMatch(query, " OR ")
+}
+
+func safeSessionSearchMatch(query string) string {
+	return safeFTSMatch(query, " AND ")
+}
+
+func safeFTSMatch(query, operator string) string {
 	words := strings.FieldsFunc(query, func(r rune) bool {
 		return !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r >= 0x80)
 	})
@@ -225,7 +344,7 @@ func safeHistoryMatch(query string) string {
 			quoted = append(quoted, `"`+strings.ReplaceAll(word, `"`, `""`)+`"`)
 		}
 	}
-	return strings.Join(quoted, " OR ")
+	return strings.Join(quoted, operator)
 }
 
 func truncateUTF8Bytes(value string, limit int) string {

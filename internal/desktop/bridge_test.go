@@ -11,7 +11,9 @@ import (
 
 	azemapp "github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
+	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
 func TestCurrentGitBranch(t *testing.T) {
@@ -53,6 +55,59 @@ func TestBridgeSkillCatalogDirectReadback(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("shared .agents skill missing from direct snapshot: %#v", snapshot.Entries)
+	}
+}
+
+func TestBridgeSearchSessionsReturnsBoundedReadOnlyResults(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "search.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-search", Title: "Indexed task"}); err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := sessions.AppendBlock(ctx, "session-search", session.Block{Kind: "user", Content: "bridge searchable content"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := azemapp.NewService(ctx, config.Default())
+	runtime.AttachDurable(sessions, nil)
+	bridge := &Bridge{runtime: runtime, ctx: ctx}
+	results, err := bridge.SearchSessions("searchable", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Sequence != sequence || results[0].Preview == "" {
+		t.Fatalf("search results = %+v", results)
+	}
+}
+
+func TestBridgeResumeSessionReturnsDurableProjectionDirectly(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "resume.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-resume", Title: "Resume target"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "session-resume", session.Block{Kind: "user", Content: "durable search target"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := azemapp.NewService(ctx, config.Default())
+	runtime.AttachDurable(sessions, nil)
+	bridge := &Bridge{runtime: runtime, ctx: ctx}
+	event, err := bridge.ResumeSession("session-resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != string(azemapp.EventSessionLoaded) || event.SessionID != "session-resume" || !strings.Contains(event.Data["blocks"], "durable search target") {
+		t.Fatalf("direct resume projection = %+v", event)
 	}
 }
 

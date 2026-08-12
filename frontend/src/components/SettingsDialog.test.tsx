@@ -417,4 +417,26 @@ describe("SettingsDialog", () => {
 		await act(async () => root.unmount());
 		container.remove();
 	});
+
+	it("opens a global-search target on the exact settings control", async () => {
+		const scrollIntoView = vi.fn();
+		Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+		useRuntimeStore.setState({
+			snapshot, approvalMode: snapshot.approvalMode, modelRoutes: [], modelsByProvider: {}, agentCatalog: [], modelProviders: [],
+			skills: [], plugins: [], settingsOpen: true, settingsTarget: { section: "appearance", id: "appearance:font-size" },
+		});
+		const container = document.createElement("div");
+		document.body.append(container);
+		const root = createRoot(container);
+		await act(async () => root.render(<SettingsDialog />));
+		await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+
+		expect(container.querySelector(".settings-main")?.getAttribute("data-section")).toBe("appearance");
+		const target = container.querySelector<HTMLElement>('[data-setting-id="appearance:font-size"]');
+		expect(target).not.toBeNull();
+		expect(scrollIntoView).toHaveBeenCalled();
+
+		await act(async () => root.unmount());
+		container.remove();
+	});
 });

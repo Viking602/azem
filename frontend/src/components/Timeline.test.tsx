@@ -887,4 +887,27 @@ describe("Codex-style process timeline", () => {
 
     await act(async () => root.unmount());
   });
+
+  it("focuses the durable message sequence selected by global search", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    useRuntimeStore.setState({ currentSessionId: "session-search", sessionSearchTarget: { sessionId: "session-search", sequence: 42 } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const block: Block = { id: "answer-search", sequence: 42, kind: "assistant", content: "命中的持久化回答", state: "completed" };
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [block], language: "zh-CN" })));
+    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+
+    const target = container.querySelector<HTMLElement>('[data-session-sequence="42"]');
+    expect(target?.textContent).toContain("命中的持久化回答");
+    expect(target?.classList.contains("timeline-search-hit")).toBe(true);
+    expect(target?.closest(".session-turn-current")?.classList.contains("timeline-search-reveal")).toBe(true);
+    expect(scrollIntoView).toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+    useRuntimeStore.getState().setSessionSearchTarget(null);
+    container.remove();
+  });
 });

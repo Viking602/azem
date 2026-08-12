@@ -64,6 +64,8 @@ require Git Bash.
 
 The desktop app and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. The React UI receives a bounded event projection; it does not expose arbitrary shell or filesystem bindings.
 
+Desktop global search (`Cmd+K` on macOS or `Ctrl+K` elsewhere) searches application actions, every settings control and configured model/MCP/Skill/plugin name, session titles, and durable user/assistant conversation content across projects. Settings results open and focus the exact control. Conversation-content results return a short SQLite FTS snippet and jump to the durable matching message; cross-project results open the owning project first. Input is debounced, stale responses are discarded, and complete transcripts are never copied into the frontend search index.
+
 On macOS, Azem follows the active system HTTP, HTTPS, and SOCKS proxy settings
 automatically, including the bypass list. This matches the network path used by
 Chromium/Electron applications such as Codex when the desktop app is launched

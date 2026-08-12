@@ -2,7 +2,7 @@ import { Browser, Call, Dialogs, Events } from "@wailsio/runtime";
 import type {
   ActionRequest, Attachment, PullRequest, PullRequestDashboard, PullRequestDetailResponse,
   PullRequestMonitorState, PullRequestMutationRequest, RuntimeEvent, Snapshot, TurnRequest,
-  SkillEntry, WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
+  SessionSearchResult, SkillEntry, WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
 } from "./types";
 
 const EVENT_NAME = "azem:event";
@@ -101,9 +101,20 @@ export async function openWorkspaceTerminal(): Promise<void> {
   await Call.ByName(`${bridgeName}.OpenTerminal`);
 }
 
-export async function openProjectSession(path: string, sessionId: string): Promise<void> {
+export async function openProjectSession(path: string, sessionId: string, sequence?: number): Promise<void> {
   if (!isDesktopRuntime()) return;
-  await Call.ByName(`${bridgeName}.OpenProjectSession`, path, sessionId);
+  await Call.ByName(`${bridgeName}.OpenProjectSession`, path, sessionId, sequence ?? -1);
+}
+
+export async function searchSessions(query: string, limit = 20): Promise<SessionSearchResult[]> {
+  if (!isDesktopRuntime()) return [];
+  const result = await Call.ByName(`${bridgeName}.SearchSessions`, query, limit) as SessionSearchResult[] | null;
+  return Array.isArray(result) ? result : [];
+}
+
+export async function resumeSession(sessionId: string): Promise<RuntimeEvent | null> {
+  if (!isDesktopRuntime()) return null;
+  return Call.ByName(`${bridgeName}.ResumeSession`, sessionId) as Promise<RuntimeEvent>;
 }
 
 export async function listWorkspaceEntries(path = ""): Promise<WorkspaceDirectory> {

@@ -1,6 +1,6 @@
 # Security
 
-Last verified: 2026-08-10
+Last verified: 2026-08-12
 
 Azem is a local development agent. Its approvals, typed Bridge, credential
 stores, and durable action ledger are governance boundaries, not an operating-
@@ -14,6 +14,16 @@ matches the work you intend to authorize.
 - The Wails Bridge exposes a closed action allowlist. Its workspace viewer has
   only bounded read methods; it does not expose an arbitrary shell, write, or
   unrestricted filesystem method.
+- Global session search is a separate read-only Bridge method. It accepts at
+  most 200 characters and returns at most 30 title/message matches. Message
+  content remains in SQLite; the WebView receives only a short FTS snippet,
+  session/project identity, and the stable block sequence needed to navigate.
+  Cross-project launch arguments contain the sequence but never the search
+  query or matched conversation text.
+- The typed session-resume Bridge call clears only that session's unread state,
+  updates the current workspace-session pointer, and returns the same bounded
+  durable projection already used by the event stream. It does not add a new
+  filesystem, shell, provider, or external-network capability.
 - Built-in tools, MCP tools, hooks, and GitHub operations are separate external
   boundaries and remain subject to their own validation and approval policy.
 - Model output, repository text, PR content, tool output, and remote responses

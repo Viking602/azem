@@ -133,7 +133,7 @@ type Bridge struct {
 	cfg          config.Config
 	workspace    string
 	sessionID    string
-	openProject  func(string, string) error
+	openProject  func(string, string, int64) error
 	emit         EventEmitter
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -143,7 +143,7 @@ type Bridge struct {
 	prMonitor    *githubpr.Monitor
 }
 
-func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventEmitter, openProject func(string, string) error) *Bridge {
+func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventEmitter, openProject func(string, string, int64) error) *Bridge {
 	ctx, cancel := context.WithCancel(parent)
 	bridge := &Bridge{
 		runtime: boot.Service, cfg: boot.Config, workspace: boot.Paths.Workspace,
@@ -301,6 +301,31 @@ func (b *Bridge) Execute(request ActionRequest) error {
 		Provider: request.Provider, Secret: request.Secret,
 		Name: request.Name, CWD: request.CWD, Offset: request.Offset, Limit: request.Limit, Payload: request.Payload,
 	})
+}
+
+// SearchSessions is a bounded read-only lookup over the durable SQLite FTS
+// index. A short deadline keeps stale command-palette requests from occupying
+// the desktop Bridge after the user has continued typing.
+func (b *Bridge) SearchSessions(query string, limit int) ([]session.SessionSearchResult, error) {
+	ctx, cancel := context.WithTimeout(b.ctx, 750*time.Millisecond)
+	defer cancel()
+	return b.runtime.SearchSessions(ctx, query, limit)
+}
+
+// ResumeSession returns a direct durable projection in addition to the normal
+// runtime event. The readback makes navigation deterministic for the window
+// that initiated it while preserving the event stream for every other window.
+func (b *Bridge) ResumeSession(sessionID string) (Event, error) {
+	ctx, cancel := context.WithTimeout(b.ctx, 2*time.Second)
+	defer cancel()
+	if err := b.runtime.ExecuteAction(ctx, azemapp.Action{Kind: azemapp.ActionResumeSession, Target: sessionID, SessionID: sessionID}); err != nil {
+		return Event{}, err
+	}
+	event, err := b.runtime.SessionProjection(ctx, sessionID)
+	if err != nil {
+		return Event{}, err
+	}
+	return eventDTO(event), nil
 }
 
 func (b *Bridge) PullRequestDashboard() (githubpr.Dashboard, error) {

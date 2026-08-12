@@ -1275,41 +1275,59 @@ func (s *Service) emitSession(ctx context.Context, id string) error {
 }
 
 func (s *Service) emitSessionProjection(ctx context.Context, id, state string, activate bool) (string, error) {
-	if s.sessions == nil {
-		return "", fmt.Errorf("session store is unavailable")
-	}
-	if id == "" {
-		return "", fmt.Errorf("session id is required")
-	}
-	projection, err := s.sessions.LoadProjection(ctx, id)
+	event, modelID, err := s.buildSessionProjectionEvent(ctx, id, state, activate)
 	if err != nil {
 		return "", err
 	}
+	s.emit(ctx, event)
+	return modelID, nil
+}
+
+// SessionProjection returns the same durable projection used by the event
+// stream without depending on an asynchronous renderer broadcast. Desktop
+// navigation uses this readback after a resume action so the initiating window
+// can update immediately even when another window is consuming runtime events.
+func (s *Service) SessionProjection(ctx context.Context, id string) (Event, error) {
+	event, _, err := s.buildSessionProjectionEvent(ctx, id, "loaded", false)
+	return event, err
+}
+
+func (s *Service) buildSessionProjectionEvent(ctx context.Context, id, state string, activate bool) (Event, string, error) {
+	if s.sessions == nil {
+		return Event{}, "", fmt.Errorf("session store is unavailable")
+	}
+	if id == "" {
+		return Event{}, "", fmt.Errorf("session id is required")
+	}
+	projection, err := s.sessions.LoadProjection(ctx, id)
+	if err != nil {
+		return Event{}, "", err
+	}
 	if activate {
 		if err := s.rememberWorkspaceSession(ctx, id); err != nil {
-			return "", err
+			return Event{}, "", err
 		}
 	}
 	blocks, err := json.Marshal(projection.Blocks)
 	if err != nil {
-		return "", err
+		return Event{}, "", err
 	}
 	todo, err := s.sessions.LoadTodo(ctx, id)
 	if err != nil {
-		return "", err
+		return Event{}, "", err
 	}
 	currentRecap, err := s.loadRecap(ctx, id)
 	if err != nil {
-		return "", err
+		return Event{}, "", err
 	}
 	s.rememberSessionUsage(id, projection.Usage)
 	data := sessionProjectionData(projection, string(blocks))
 	s.addActiveRunProjection(data, id)
-	s.emit(ctx, Event{
+	event := Event{
 		Kind: EventSessionLoaded, SessionID: id, State: state,
 		Data: data, AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,
-	})
-	return projection.Session.ModelID, nil
+	}
+	return event, projection.Session.ModelID, nil
 }
 
 func (s *Service) addActiveRunProjection(data map[string]string, sessionID string) {
@@ -1378,6 +1396,15 @@ func (s *Service) RememberProject(ctx context.Context, workspace string) error {
 		return err
 	}
 	return s.emitSessionList(ctx)
+}
+
+// SearchSessions exposes the durable global session index without routing a
+// read-only query through the asynchronous event stream.
+func (s *Service) SearchSessions(ctx context.Context, query string, limit int) ([]session.SessionSearchResult, error) {
+	if s.sessions == nil {
+		return nil, fmt.Errorf("session store is unavailable")
+	}
+	return s.sessions.SearchSessions(ctx, query, limit)
 }
 
 func (s *Service) login(ctx context.Context, provider string) error {

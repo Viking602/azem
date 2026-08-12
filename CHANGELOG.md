@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Desktop global search: make Command-K search actions, settings and configured
+  catalogs, session titles, and durable user/assistant conversation content
+  across projects. Settings results focus the exact control; conversation
+  results show a bounded FTS snippet and jump to the stable matching message,
+  including across project windows. Debounce database reads, discard stale
+  responses, cap results, and keep complete transcripts out of frontend state.
+
 - Extensions: scan universal `~/.agents/skills` by default. Codex plugins are
   cataloged as optional imports and copied only after the user selects an
   individual plugin; local and imported plugin icons are validated and shown

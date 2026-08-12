@@ -11,7 +11,7 @@ import ProviderIcon from "./ProviderIcon";
 
 const PROVIDER_PAGE_SIZE = 24;
 
-export default function ModelProviderSettings({ providers, modelsByProvider, sessionId, language, setError, addRequest = 0 }: { providers: ModelProvider[]; modelsByProvider: Record<string, ModelOption[]>; sessionId: string; language: Language; setError: (message: string) => void; addRequest?: number }) {
+export default function ModelProviderSettings({ providers, modelsByProvider, sessionId, language, setError, addRequest = 0, selectedProviderID = "" }: { providers: ModelProvider[]; modelsByProvider: Record<string, ModelOption[]>; sessionId: string; language: Language; setError: (message: string) => void; addRequest?: number; selectedProviderID?: string }) {
 	const t = translator(language);
 	const [query, setQuery] = useState("");
 	const [visibleCount, setVisibleCount] = useState(PROVIDER_PAGE_SIZE);
@@ -33,6 +33,11 @@ export default function ModelProviderSettings({ providers, modelsByProvider, ses
 	useEffect(() => {
 		if (!selectedID && selected) setSelectedID(selected.ID);
 	}, [selected, selectedID]);
+	useEffect(() => {
+		if (selectedProviderID && providers.some((provider) => provider.ID === selectedProviderID)) {
+			setSelectedID(selectedProviderID);
+		}
+	}, [providers, selectedProviderID]);
 	useEffect(() => {
 		if (addRequest <= 0) return;
 		setCustomProvider(blankProvider(language));
@@ -65,13 +70,13 @@ export default function ModelProviderSettings({ providers, modelsByProvider, ses
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [sessionId]);
 	const emptyMessage = loadError || (loading ? t("loadingProviders") : t("noProviders"));
-	return <section className="settings-pane"><header><div><h2>{t("modelSettings")}</h2><p>{t("modelSettingsHint")}</p></div><button className="small-button" disabled={loading} onClick={() => void refresh()}><RefreshCw size={13} className={loading ? "spin" : undefined} />{loading ? t("loadingProviders") : t("refresh")}</button></header>
+	return <section className="settings-pane" data-setting-id={selected ? `provider:${selected.ID}` : undefined}><header data-setting-id="section:catalog"><div><h2>{t("modelSettings")}</h2><p>{t("modelSettingsHint")}</p></div><button className="small-button" disabled={loading} onClick={() => void refresh()}><RefreshCw size={13} className={loading ? "spin" : undefined} />{loading ? t("loadingProviders") : t("refresh")}</button></header>
 		{loadError && <div className="settings-inline-error" role="alert">{loadError}</div>}
 		<div className="provider-settings">
 			<div className="provider-directory settings-card">
 				<label className="provider-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={language === "zh-CN" ? "搜索供应商" : "Search providers"} disabled={loading && providers.length === 0} /></label>
 				<div className="provider-list" onScroll={(event) => loadMore(event.currentTarget)}>
-					{visible.map((provider) => <button key={provider.ID} className={selected?.ID === provider.ID ? "active" : ""} onClick={() => setSelectedID(provider.ID)}><span className="provider-identity"><ProviderIcon provider={provider.ID} logoID={provider.ModelsDevID} /><span><strong>{provider.DisplayName}</strong><small>{providerDirectoryDetail(provider, language)}</small></span></span><em className={`${provider.Enabled ? "enabled" : ""} ${provider.QuotaAvailable ? "quota" : ""}`}>{providerDirectoryStatus(provider, language)}</em></button>)}
+					{visible.map((provider) => <button key={provider.ID} data-setting-id={`provider:${provider.ID}`} className={selected?.ID === provider.ID ? "active" : ""} onClick={() => setSelectedID(provider.ID)}><span className="provider-identity"><ProviderIcon provider={provider.ID} logoID={provider.ModelsDevID} /><span><strong>{provider.DisplayName}</strong><small>{providerDirectoryDetail(provider, language)}</small></span></span><em className={`${provider.Enabled ? "enabled" : ""} ${provider.QuotaAvailable ? "quota" : ""}`}>{providerDirectoryStatus(provider, language)}</em></button>)}
 					{providers.length === 0 && <div className="settings-empty provider-list-empty" aria-live="polite">{loading && <span className="azem-mark" aria-hidden="true" />}{emptyMessage}</div>}
 					<button className={selectedID === "__custom__" ? "active custom-provider-entry" : "custom-provider-entry"} onClick={() => { setCustomProvider(blankProvider(language)); setSelectedID("__custom__"); }}><span className="provider-identity"><span className="provider-add-icon">+</span><span><strong>{language === "zh-CN" ? "自定义提供方" : "Custom provider"}</strong><small>{language === "zh-CN" ? "OpenAI 兼容 API" : "OpenAI compatible API"}</small></span></span><em>{language === "zh-CN" ? "未启用" : "Disabled"}</em></button>
 				</div>

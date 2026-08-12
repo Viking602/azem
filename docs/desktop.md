@@ -1,6 +1,6 @@
 # Desktop application
 
-Last verified: 2026-08-11
+Last verified: 2026-08-12
 
 Azem's desktop application is a Wails window over the same Go runtime used by
 the TUI. React owns presentation state; it does not duplicate provider,
@@ -58,6 +58,25 @@ status, and recent project sessions. Files and Changes are child routes and
 always expose an explicit Back to Workspace control; Escape follows the same
 route. Command-N starts a conversation in the current project, while Command-2
 and Command-3 open Files and Changes.
+
+Command-K opens one global search surface over actions, settings, session
+titles, and durable conversation content. Settings and configured catalog
+entries are filtered in memory because that catalog is already bounded UI
+state. Session content stays in SQLite and uses the existing FTS5 history
+index; the direct read-only Bridge method returns at most 30 rows containing
+only the session owner, title, match kind, stable block sequence, timestamp,
+and a 24-token snippet. The command surface waits 160 ms after input, ignores
+responses from older queries, and never downloads complete transcripts.
+
+Selecting a settings result opens its owning section and scrolls to the stable
+setting identifier. Selecting a message result resumes the owning session and
+reads its durable projection directly back to the initiating window, then
+scrolls to the canonical block sequence. This readback avoids relying on the
+timing of a cross-window event broadcast. Long transcripts temporarily realize
+only the matching turn before measuring its scroll position, then return to
+normal `content-visibility` virtualization. A result owned by another project
+opens that isolated workspace runtime with only the session ID and sequence in
+the startup arguments; the search text is not passed to the child process.
 
 Session rows project the process-wide main-run owner independently from the
 conversation currently on screen. If that foreign run succeeds or fails, the

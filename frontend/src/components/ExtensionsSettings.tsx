@@ -17,6 +17,7 @@ interface ExtensionsSettingsProps {
   openAddRequest?: number;
   executeAction: (request: ActionRequest) => Promise<void>;
   onError: (message: string) => void;
+  targetTab?: ExtensionTab;
 }
 
 interface MCPFormDraft {
@@ -39,6 +40,7 @@ export default function ExtensionsSettings({
   openAddRequest = 0,
   executeAction,
   onError,
+  targetTab,
 }: ExtensionsSettingsProps) {
   const t = translator(language);
   const mcpServers = useRuntimeStore((state) => state.mcpServers);
@@ -58,6 +60,10 @@ export default function ExtensionsSettings({
     }
     previousAddRequest.current = openAddRequest;
   }, [openAddRequest]);
+
+  useEffect(() => {
+    if (targetTab) setTab(targetTab);
+  }, [targetTab]);
 
   const run = async (request: ActionRequest) => {
     try {
@@ -79,7 +85,7 @@ export default function ExtensionsSettings({
     }]);
   };
 
-  return <section className="extension-hub" aria-label={t("extensionOverview")}>
+  return <section className="extension-hub" aria-label={t("extensionOverview")} data-setting-id={`extensions:${tab}`}>
     <div className="extension-overview">
       <div className="extension-overview-copy">
         <span className="extension-overview-mark"><Plug size={17} /></span>
@@ -93,9 +99,9 @@ export default function ExtensionsSettings({
     </div>
 
     <div className="extension-tabbar" role="tablist" aria-label={t("extensionOverview")}>
-      <ExtensionTabButton active={tab === "mcp"} icon={Server} label={t("extensionTabMCP")} count={mcpServers.length} onClick={() => setTab("mcp")} />
-      <ExtensionTabButton active={tab === "skills"} icon={Sparkles} label={t("extensionTabSkills")} count={skills.length} onClick={() => setTab("skills")} />
-      <ExtensionTabButton active={tab === "plugins"} icon={Plug} label={t("extensionTabPlugins")} count={plugins.length} onClick={() => setTab("plugins")} />
+      <ExtensionTabButton targetID="extensions:mcp" active={tab === "mcp"} icon={Server} label={t("extensionTabMCP")} count={mcpServers.length} onClick={() => setTab("mcp")} />
+      <ExtensionTabButton targetID="extensions:skills" active={tab === "skills"} icon={Sparkles} label={t("extensionTabSkills")} count={skills.length} onClick={() => setTab("skills")} />
+      <ExtensionTabButton targetID="extensions:plugins" active={tab === "plugins"} icon={Plug} label={t("extensionTabPlugins")} count={plugins.length} onClick={() => setTab("plugins")} />
     </div>
 
     <ExtensionContent tab={tab} language={language} mcpServers={mcpServers} skills={skills} plugins={plugins} run={run} refreshSkills={refreshSkills} openDrawer={() => setDrawerOpen(true)} />
@@ -111,8 +117,8 @@ function ExtensionMetric({ value, label, tone = "neutral" }: { value: React.Reac
   return <article data-tone={tone}><strong>{value}</strong><small>{label}</small></article>;
 }
 
-function ExtensionTabButton({ active, icon: Icon, label, count, onClick }: { active: boolean; icon: typeof Server; label: string; count: number; onClick: () => void }) {
-  return <button type="button" role="tab" aria-selected={active} className={active ? "active" : ""} onClick={onClick}><Icon size={14} /><span>{label}</span><em>{count}</em></button>;
+function ExtensionTabButton({ active, icon: Icon, label, count, onClick, targetID }: { active: boolean; icon: typeof Server; label: string; count: number; onClick: () => void; targetID: string }) {
+  return <button type="button" role="tab" data-setting-id={targetID} aria-selected={active} className={active ? "active" : ""} onClick={onClick}><Icon size={14} /><span>{label}</span><em>{count}</em></button>;
 }
 
 function ExtensionContent({ tab, language, mcpServers, skills, plugins, run, refreshSkills, openDrawer }: {

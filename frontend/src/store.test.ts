@@ -36,7 +36,7 @@ function state(): RuntimeData {
     runId: "", running: false, globalRunId: "", globalRunSessionId: "", runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
     lastSequence: 0, error: "", view: "thread", inspectorTab: "environment", inspectorOpen: true,
-    settingsOpen: false, commandOpen: false, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system", uiFont: "system", uiFontSize: 14,
+    settingsOpen: false, settingsTarget: null, commandOpen: false, sessionSearchTarget: null, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system", uiFont: "system", uiFontSize: 14,
   };
 }
 
@@ -642,6 +642,7 @@ describe("runtime event projection", () => {
     expect(JSON.parse(restored[1]?.data?.structured || "{}")).toMatchObject({
       sections: [{ path: "src/app.ts", firstChangedLine: 3, diff: "-old\n+next" }],
     });
+    expect(restored[0]?.sequence).toBe(1);
   });
 
   it("keeps approval beside the tool timeline and resolves it in place", () => {

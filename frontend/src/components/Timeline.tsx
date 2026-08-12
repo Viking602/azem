@@ -44,8 +44,42 @@ function TimelineFeedView({
   foldActiveProcess?: boolean;
   collapseCompletedProcess?: boolean;
 }) {
+  const searchTarget = useRuntimeStore((state) => state.sessionSearchTarget);
+  const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
+  const feed = useRef<HTMLDivElement>(null);
   const activeDelegation = useRuntimeStore((state) => Boolean(activeRunId) && state.agents.some((agent) =>
     isSubagentActive(agent.state) && agent.parentRunId === activeRunId));
+  useEffect(() => {
+    if (!searchTarget || searchTarget.sessionId !== currentSessionId) return;
+    if (searchTarget.sequence == null) {
+      useRuntimeStore.getState().setSessionSearchTarget(null);
+      return;
+    }
+    let clearTimer = 0;
+    let revealRoot: HTMLElement | null = null;
+    const frame = requestAnimationFrame(() => {
+      const node = feed.current?.querySelector<HTMLElement>(`[data-session-sequence="${searchTarget.sequence}"]`);
+      if (!node) return;
+      revealRoot = node.closest<HTMLElement>(".session-history-turn, .session-turn-current");
+      revealRoot?.classList.add("timeline-search-reveal");
+      // Long transcripts use content-visibility for normal scrolling. Force the
+      // selected turn to acquire its real height before scrollIntoView so the
+      // browser cannot center the match using a stale intrinsic placeholder.
+      if (revealRoot) void revealRoot.offsetHeight;
+      node.scrollIntoView?.({ block: "center", behavior: document.documentElement.dataset.reduceMotion === "true" ? "auto" : "smooth" });
+      node.classList.add("timeline-search-hit");
+      clearTimer = window.setTimeout(() => {
+        node.classList.remove("timeline-search-hit");
+        revealRoot?.classList.remove("timeline-search-reveal");
+        useRuntimeStore.getState().setSessionSearchTarget(null);
+      }, 1800);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(clearTimer);
+      revealRoot?.classList.remove("timeline-search-reveal");
+    };
+  }, [blocks, currentSessionId, searchTarget]);
   // Side chat stays flat/compact; main session uses document projection.
   if (compact) {
     return <div className="timeline-feed compact">
@@ -64,7 +98,7 @@ function TimelineFeedView({
       && (!activeRunId || !block.runId || block.runId === activeRunId));
 
   const multiTurn = projection.turns.length > 1;
-  return <div className="timeline-feed session-document">
+  return <div className="timeline-feed session-document" ref={feed}>
     {projection.turns.map((turn, index) => {
       const current = index === projection.currentIndex;
       return current
@@ -654,7 +688,7 @@ type TimelineBlockProps = {
 function TimelineBlockView({ block, language, compact = false, nested = false }: TimelineBlockProps) {
   const sessionId = useRuntimeStore((state) => state.currentSessionId || state.snapshot?.sessionId || "");
   if (block.kind === "user") {
-    return <article className="user-block">
+    return <article className="user-block" data-session-sequence={block.sequence}>
       {block.attachments?.length ? <div className="user-attachments">{block.attachments.map((item) => <AttachmentPreview key={item.id} attachment={item} sessionId={sessionId} language={language} variant="message" />)}</div> : null}
       {block.content ? <p>{block.content}</p> : null}
     </article>;
@@ -680,7 +714,7 @@ function TimelineBlockView({ block, language, compact = false, nested = false }:
     const active = ["streaming", "running", "started", "progress"].includes(block.state || "");
     const phasePending = active && block.data?.textPhasePending === "true";
     // Prose body — primary transcript content (Synara ChatMarkdown tier).
-    return <article className={`assistant-block markdown timeline-prose ${active ? "streaming" : ""} ${phasePending ? "phase-pending" : ""} ${compact ? "compact" : ""}`} aria-busy={active || undefined}>
+    return <article className={`assistant-block markdown timeline-prose ${active ? "streaming" : ""} ${phasePending ? "phase-pending" : ""} ${compact ? "compact" : ""}`} aria-busy={active || undefined} data-session-sequence={block.sequence}>
       {active
         ? <StreamingText content={block.content || ""} debugReplay={import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "running"} />
         : <Markdown>{block.content || ""}</Markdown>}
