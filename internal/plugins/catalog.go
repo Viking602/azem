@@ -2,11 +2,13 @@ package plugins
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -29,6 +31,7 @@ type Entry struct {
 	DisplayName        string
 	Version            string
 	Marketplace        string
+	Origin             string
 	Description        string
 	DeveloperName      string
 	Category           string
@@ -45,6 +48,7 @@ type Entry struct {
 	Capabilities       []string
 	Status             string
 	Warning            string
+	Imported           bool
 }
 
 type Diagnostic struct {
@@ -67,10 +71,12 @@ type Integration struct {
 }
 
 type Options struct {
-	HomeDir     string
-	DataDir     string
-	TrustHooks  bool
-	ListPlugins func(context.Context) ([]byte, error)
+	HomeDir      string
+	DataDir      string
+	ImportCodex  bool
+	CodexImports []string
+	TrustHooks   bool
+	ListPlugins  func(context.Context) ([]byte, error)
 }
 
 type installedCatalog struct {
@@ -84,6 +90,7 @@ type installedPlugin struct {
 	Version     string       `json:"version"`
 	Installed   bool         `json:"installed"`
 	Enabled     bool         `json:"enabled"`
+	Origin      string       `json:"origin,omitempty"`
 	Source      pluginSource `json:"source"`
 }
 
@@ -134,26 +141,39 @@ type manifestPaths struct {
 
 func Discover(ctx context.Context, options Options) Integration {
 	result := Integration{MCPServers: map[string]config.MCPServerConfig{}}
-	if strings.TrimSpace(options.HomeDir) == "" {
-		result.Diagnostics = append(result.Diagnostics, Diagnostic{Message: "plugin discovery requires a home directory"})
-		return result
-	}
-	list := options.ListPlugins
-	if list == nil {
-		list = listWithCodex
-	}
-	encoded, err := list(ctx)
+	packageDir, err := ensurePackageDirectory(options)
 	if err != nil {
-		result.Diagnostics = append(result.Diagnostics, Diagnostic{Message: fmt.Sprintf("codex plugin list failed: %v", err)})
+		result.Diagnostics = append(result.Diagnostics, Diagnostic{Message: err.Error()})
 		return result
 	}
-	var catalog installedCatalog
-	if err := json.Unmarshal(encoded, &catalog); err != nil {
-		result.Diagnostics = append(result.Diagnostics, Diagnostic{Message: fmt.Sprintf("decode codex plugin catalog: %v", err)})
-		return result
+	var codexCatalog []installedPlugin
+	if options.ImportCodex {
+		var diagnostics []Diagnostic
+		codexCatalog, diagnostics = syncSelectedCodexPlugins(ctx, options, packageDir)
+		result.Diagnostics = append(result.Diagnostics, diagnostics...)
 	}
-	for _, installed := range catalog.Installed {
+	installed, diagnostics := installedPackages(packageDir)
+	result.Diagnostics = append(result.Diagnostics, diagnostics...)
+	selected := stringSet(options.CodexImports)
+	loaded := make(map[string]struct{}, len(installed))
+	for _, installed := range installed {
+		if installed.Origin == "codex" {
+			if _, chosen := selected[installed.PluginID]; !chosen {
+				continue
+			}
+		}
 		mergeInstalledPlugin(&result, options, installed)
+		loaded[installed.PluginID] = struct{}{}
+	}
+	for _, available := range codexCatalog {
+		if _, exists := loaded[available.PluginID]; exists {
+			continue
+		}
+		result.Entries = append(result.Entries, Entry{
+			ID: available.PluginID, Name: available.Name, DisplayName: available.Name,
+			Version: available.Version, Marketplace: available.Marketplace, Origin: "codex_available",
+			Description: "可选择复制到 Azem 后启用", Enabled: false, Status: "available",
+		})
 	}
 	sort.Slice(result.Entries, func(i, j int) bool {
 		return strings.ToLower(result.Entries[i].DisplayName) < strings.ToLower(result.Entries[j].DisplayName)
@@ -211,7 +231,7 @@ func listWithCodex(parent context.Context) ([]byte, error) {
 
 func inspectPlugin(options Options, installed installedPlugin) (Entry, string, map[string]config.MCPServerConfig, HookSource, []Diagnostic) {
 	entry := Entry{ID: installed.PluginID, Name: installed.Name, DisplayName: installed.Name, Version: installed.Version,
-		Marketplace: installed.Marketplace, Enabled: installed.Enabled, Status: "ready"}
+		Marketplace: installed.Marketplace, Origin: installed.Origin, Enabled: installed.Enabled, Status: "ready", Imported: true}
 	servers := map[string]config.MCPServerConfig{}
 	root, err := pluginRoot(options.HomeDir, installed)
 	if err != nil {
@@ -235,7 +255,7 @@ func inspectPlugin(options Options, installed installedPlugin) (Entry, string, m
 	entry.DeveloperName, entry.Category = value.Interface.DeveloperName, value.Interface.Category
 	entry.BrandColor, entry.Capabilities = value.Interface.BrandColor, append([]string(nil), value.Interface.Capabilities...)
 	paths, diagnostics := resolveManifestPaths(root, entry.ID, value)
-	entry.LogoPath = paths.logo
+	entry.LogoPath, diagnostics = pluginLogoDataURL(paths.logo, diagnostics, entry.ID)
 	skillDir := paths.skills
 	entry.SkillCount = countSkillDirectories(skillDir)
 	mcpDiagnostics := integrateMCPServers(&entry, servers, root, pluginDataRoot(options.DataDir, installed), paths.mcp)
@@ -299,11 +319,16 @@ func integrateMCPServers(entry *Entry, servers map[string]config.MCPServerConfig
 	var diagnostics []Diagnostic
 	for name, descriptor := range descriptors {
 		serverName := uniqueServerName(entry.Name, name, servers)
+		if entry.Origin == "codex" && entry.Marketplace == "openai-bundled" && entry.Name == "computer-use" {
+			entry.Warning = appendWarning(entry.Warning, "Codex computer-use 启动器不兼容 Azem，未注册为 MCP")
+			continue
+		}
 		server, warning, buildErr := buildMCPServer(root, dataRoot, descriptor)
 		if buildErr != nil {
 			diagnostics = append(diagnostics, Diagnostic{PluginID: entry.ID, Path: descriptorPath, Message: name + ": " + buildErr.Error()})
 			continue
 		}
+		server.Managed = true
 		entry.Warning = appendWarning(entry.Warning, warning)
 		servers[serverName] = server
 		entry.IntegratedMCPCount += boolCount(server.Enabled)
@@ -311,25 +336,46 @@ func integrateMCPServers(entry *Entry, servers map[string]config.MCPServerConfig
 	return diagnostics
 }
 
-func pluginRoot(home string, installed installedPlugin) (string, error) {
-	candidates := []string{installed.Source.Path}
-	if installed.Marketplace != "" && installed.Name != "" && installed.Version != "" {
-		candidates = append(candidates, filepath.Join(home, ".codex", "plugins", "cache", installed.Marketplace, installed.Name, installed.Version))
+func pluginLogoDataURL(path string, diagnostics []Diagnostic, pluginID string) (string, []Diagnostic) {
+	if strings.TrimSpace(path) == "" {
+		return "", diagnostics
 	}
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			continue
-		}
-		absolute, err := filepath.Abs(candidate)
-		if err != nil {
-			continue
-		}
-		if info, err := os.Stat(filepath.Join(absolute, ".codex-plugin", "plugin.json")); err == nil && info.Mode().IsRegular() {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", append(diagnostics, Diagnostic{PluginID: pluginID, Path: path, Message: "read plugin icon: " + err.Error()})
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil || len(data) == 0 || len(data) > 1<<20 {
+		return "", append(diagnostics, Diagnostic{PluginID: pluginID, Path: path, Message: "plugin icon must be a non-empty image no larger than 1 MiB"})
+	}
+	contentType := http.DetectContentType(data)
+	if strings.EqualFold(filepath.Ext(path), ".svg") {
+		contentType = "image/svg+xml"
+	}
+	allowed := map[string]bool{"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true, "image/svg+xml": true}
+	if !allowed[contentType] {
+		return "", append(diagnostics, Diagnostic{PluginID: pluginID, Path: path, Message: "plugin icon has an unsupported image type"})
+	}
+	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data), diagnostics
+}
+
+func stringSet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		result[strings.TrimSpace(value)] = struct{}{}
+	}
+	return result
+}
+
+func pluginRoot(_ string, installed installedPlugin) (string, error) {
+	absolute, err := filepath.Abs(strings.TrimSpace(installed.Source.Path))
+	if err == nil {
+		if info, statErr := os.Stat(filepath.Join(absolute, ".codex-plugin", "plugin.json")); statErr == nil && info.Mode().IsRegular() {
 			return absolute, nil
 		}
 	}
-	return "", fmt.Errorf("installed plugin root is unavailable for %s", installed.PluginID)
+	return "", fmt.Errorf("Azem plugin root is unavailable for %s", installed.PluginID)
 }
 
 func resolvePluginPath(root, reference string) (string, error) {

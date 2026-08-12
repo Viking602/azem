@@ -371,6 +371,11 @@ agents:
     provider: ""
     model: ""
     reasoning: ""
+  recap:
+    # Lightweight model used after each successful turn for the right-sidebar recap.
+    provider: chatgpt
+    model: gpt-5.6-luna
+    reasoning: low
   context:
     enabled: true
     background_prepare: true
@@ -411,7 +416,8 @@ skills:
 
 plugins:
   enabled: true
-  import_codex: true         # import installed plugins from the shared Codex directory
+  import_codex: true         # list available Codex plugins for explicit selection
+  codex_imports: []          # exact plugin IDs selected for copying into Azem
   trust_hooks: false         # installation is not execution trust; opt in explicitly
 
 mcp:
@@ -446,11 +452,17 @@ The configured tool effect and approval policy still determine which operations 
 
 ## MCP Integrations
 
-The desktop app also imports enabled plugins from the current Codex plugin
-directory. A valid plugin has `.codex-plugin/plugin.json`; its declared Skills
-and eligible MCP servers are attached to the Azem runtime at startup. Plugin
-hooks remain disabled unless `plugins.trust_hooks` is enabled, and `.app.json`
-connections are shown as requiring separate authorization. See
+The desktop app loads plugins only from Azem's own `plugin-packages` data
+directory. Install a plugin directly under `plugin-packages/local/<plugin>`, or
+use **Settings → Extensions → Plugins** to select individual entries discovered
+from Codex. Only selected IDs are copied into
+`plugin-packages/codex/<marketplace>/<plugin>`. Imported packages remain
+available from the Azem-owned copy and are never executed directly from a
+Codex source or cache directory. A valid plugin has
+`.codex-plugin/plugin.json`; its declared Skills and eligible MCP servers are
+attached to the Azem runtime at startup. Plugin hooks remain disabled unless
+`plugins.trust_hooks` is enabled, and `.app.json` connections are shown as
+requiring separate authorization. See
 [Plugin compatibility](docs/plugins.md) for the supported standard and security
 boundaries.
 
@@ -460,6 +472,9 @@ Azem also supports custom local stdio servers and remote Streamable HTTP servers
 Use **Settings → Extensions → MCP services → Add MCP service** to create one,
 or edit the equivalent YAML below. The desktop form accepts only `env:NAME` or
 `keyring:NAME` secret references; it never stores or projects plaintext values.
+Every service can also be deleted from this page. Deletion stops the live
+connection, atomically removes its definition, and records a tombstone in
+`mcp.removed_servers` so built-in or plugin catalogs cannot recreate it.
 
 ### stdio
 
@@ -511,6 +526,7 @@ Azem follows operating-system user-directory conventions and creates an `azem` s
 | Configuration | `azem/config.yaml` under the user configuration directory |
 | Database | `azem/azem.db` under the user configuration directory |
 | Runtime state | `azem/` under the user cache or state directory |
+| Plugin packages | `azem/plugin-packages/` under the user data directory |
 
 On Linux, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` override the corresponding base directories.
 On Windows, configuration and the database live under `%AppData%\azem`, while

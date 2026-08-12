@@ -412,6 +412,52 @@ func TestManagerConfigureAddsConnectsAndDisablesServer(t *testing.T) {
 	}
 }
 
+func TestManagerRemoveStopsConnectionAndDropsFutureTools(t *testing.T) {
+	client := &fakeClient{tools: []message.ToolDefinition{{Name: "status", InputSchema: message.JSONSchema{Type: "object"}}}}
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"demo": {Enabled: true, Transport: "stdio", Command: "demo", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
+	}, "test", nil, Options{
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+			return client, nil
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.Snapshot()) != 1 {
+		t.Fatalf("initial MCP tools = %v", definitionNames(manager.Snapshot()))
+	}
+	if err := manager.Remove("demo"); err != nil {
+		t.Fatal(err)
+	}
+	if servers := manager.Servers(); len(servers) != 0 || len(manager.Snapshot()) != 0 {
+		t.Fatalf("removed MCP remains visible: servers=%#v tools=%v", servers, definitionNames(manager.Snapshot()))
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client.mu.Lock()
+	closed := client.closed
+	client.mu.Unlock()
+	if !closed {
+		t.Fatal("removed MCP client was not closed")
+	}
+}
+
+func TestManagerRemovesManagedServer(t *testing.T) {
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"grep": {Enabled: false, Transport: "streamable_http", URL: "https://mcp.grep.app", Managed: true},
+	}, "test", nil, Options{})
+	defer func() { _ = manager.Close() }()
+	if err := manager.Remove("grep"); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.Servers()) != 0 {
+		t.Fatal("managed MCP server remained after removal")
+	}
+}
+
 func TestManagerRetriesConnectionWithBoundedBackoff(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{}

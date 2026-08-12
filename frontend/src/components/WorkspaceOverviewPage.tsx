@@ -163,7 +163,7 @@ function relativeTime(value: string, language: "en" | "zh-CN") {
 function activityLabel(session: Session, isRunning: boolean, language: "en" | "zh-CN") {
   if (isRunning) return language === "zh-CN" ? "刚刚 · 正在运行" : "Just now · Running";
   if (!isDesktopRuntime() && language === "zh-CN") {
-    if (session.title === "Codex 插件兼容设计") return "昨天 · 已完成";
+    if (session.title === "插件兼容设计") return "昨天 · 已完成";
     if (session.title === "语义上下文重建") return "8 月 7 日 · 已完成";
   }
   return `${relativeTime(session.updatedAt, language)} · ${language === "zh-CN" ? "已完成" : "Completed"}`;

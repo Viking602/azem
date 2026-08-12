@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { execute, listSystemFonts } from "../bridge";
+import { execute, listSkillCatalog, listSystemFonts } from "../bridge";
 import { useRuntimeStore } from "../store";
 import type { Snapshot } from "../types";
 import SettingsDialog from "./SettingsDialog";
@@ -18,6 +18,10 @@ Object.defineProperty(HTMLDialogElement.prototype, "close", {
 
 vi.mock("../bridge", () => ({
 	execute: vi.fn(() => Promise.resolve()),
+	listSkillCatalog: vi.fn(() => Promise.resolve({
+		entries: [],
+		diagnostics: [],
+	})),
 	listSystemFonts: vi.fn(() => Promise.resolve([
 		{ family: "PingFang SC", label: "苹方-简" },
 		{ family: "Songti SC", label: "宋体-简" },
@@ -41,6 +45,27 @@ async function enterInput(input: HTMLInputElement, value: string) {
 describe("SettingsDialog", () => {
   afterEach(() => vi.clearAllMocks());
 
+	it("reads the current skill catalog directly when settings opens", async () => {
+		vi.mocked(listSkillCatalog).mockResolvedValueOnce({
+			entries: [{ name: "shared-review", description: "Shared review", sourcePath: "/home/.agents/skills/shared-review/SKILL.md", bundled: false, eager: false, disabled: false, modelVisible: true, resourceCount: 0 }],
+			diagnostics: [],
+		});
+		useRuntimeStore.setState({
+			snapshot, approvalMode: snapshot.approvalMode, modelRoutes: [], modelsByProvider: {},
+			agentCatalog: [], skills: [], plugins: [], modelProviders: [], settingsOpen: true,
+		});
+		const container = document.createElement("div");
+		document.body.append(container);
+		const root = createRoot(container);
+		await act(async () => root.render(<SettingsDialog />));
+		await act(async () => Promise.resolve());
+
+		expect(listSkillCatalog).toHaveBeenCalledTimes(1);
+		expect(useRuntimeStore.getState().skills.map((skill) => skill.name)).toContain("shared-review");
+		await act(async () => root.unmount());
+		container.remove();
+	});
+
   it("loads role routes and saves a subagent model selection", async () => {
     useRuntimeStore.setState({
       snapshot,
@@ -51,6 +76,7 @@ describe("SettingsDialog", () => {
         { Scope: "plan", Role: "", Label: "Plan", Route: {} },
 		{ Scope: "approval", Role: "", Label: "Approval", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
 		{ Scope: "vision", Role: "", Label: "Vision", Route: {} },
+		{ Scope: "recap", Role: "", Label: "Recap", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
         { Scope: "subagent", Role: "explore", Label: "Explore", Route: {} },
       ],
       agentCatalog: [{ name: "explore", description: "只读探索代码库", model: "", reasoning: "", capabilityMode: "read-only", isolation: "none", source: "builtin", enabled: true }],
@@ -83,7 +109,8 @@ describe("SettingsDialog", () => {
     expect(execute).toHaveBeenCalledWith({ kind: "list_agent_types", sessionId: "session-1" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_models", sessionId: "session-1" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_model_providers", sessionId: "session-1" });
-    expect(container.querySelectorAll(".route-row")).toHaveLength(5);
+	expect(execute).toHaveBeenCalledWith({ kind: "list_plugins", sessionId: "session-1" });
+    expect(container.querySelectorAll(".route-row")).toHaveLength(6);
     expect(container.querySelectorAll(".route-card")).toHaveLength(2);
     expect(container.querySelector(".model-routes-pane > .route-groups")).not.toBeNull();
     expect(container.querySelectorAll(".route-card > header")[0]?.textContent).toContain("核心工作流");
@@ -94,6 +121,9 @@ describe("SettingsDialog", () => {
     expect(titleRoute.textContent).toContain("5.6 Luna");
 	const approvalRoute = Array.from(container.querySelectorAll<HTMLElement>(".route-row")).find((row) => row.textContent?.includes("审批模型"))!;
 	expect(approvalRoute.textContent).toContain("5.6 Luna");
+	const recapRoute = Array.from(container.querySelectorAll<HTMLElement>(".route-row")).find((row) => row.textContent?.includes("回顾模型"))!;
+	expect(recapRoute.textContent).toContain("每轮完成后生成右侧栏的简短会话回顾");
+	expect(recapRoute.textContent).toContain("5.6 Luna");
 	const visionRoute = Array.from(container.querySelectorAll<HTMLElement>(".route-row")).find((row) => row.textContent?.includes("视觉模型"))!;
 	expect(visionRoute.textContent).toContain("未配置");
 	const visionModelMenu = visionRoute.querySelector<HTMLDetailsElement>(".route-model-menu")!;
@@ -361,12 +391,14 @@ describe("SettingsDialog", () => {
 	});
 
 	it("disables a skill from settings while keeping it visible for re-enabling", async () => {
+		const entries = [
+			{ name: "verify", description: "验证当前工作区", sourcePath: "bundled/verify", bundled: true, eager: true, disabled: false, modelVisible: true, resourceCount: 2 },
+			{ name: "unused-design", description: "当前项目不需要加载", sourcePath: "~/.codex/skills/unused-design", bundled: false, eager: false, disabled: true, modelVisible: false, resourceCount: 4 },
+		];
+		vi.mocked(listSkillCatalog).mockResolvedValueOnce({ entries, diagnostics: [] });
 		useRuntimeStore.setState({
 			snapshot, approvalMode: snapshot.approvalMode, modelRoutes: [], modelsByProvider: {}, agentCatalog: [], modelProviders: [], settingsOpen: true,
-			skills: [
-				{ name: "verify", description: "验证当前工作区", sourcePath: "bundled/verify", bundled: true, eager: true, disabled: false, modelVisible: true, resourceCount: 2 },
-				{ name: "unused-design", description: "当前项目不需要加载", sourcePath: "~/.codex/skills/unused-design", bundled: false, eager: false, disabled: true, modelVisible: false, resourceCount: 4 },
-			],
+			skills: entries,
 		});
 		const container = document.createElement("div");
 		document.body.append(container);

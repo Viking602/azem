@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/Viking602/azem/internal/config"
@@ -47,6 +49,9 @@ func (s *Service) upsertMCPServer(ctx context.Context, payload json.RawMessage) 
 		ConnectTimeout: strings.TrimSpace(mutation.ConnectTimeout), CallTimeout: strings.TrimSpace(mutation.CallTimeout),
 		MaxConcurrency: mutation.MaxConcurrency, Approval: strings.TrimSpace(mutation.Approval),
 	}
+	if current, ok := s.cfg.MCP.Servers[name]; ok {
+		server.Managed = current.Managed
+	}
 	return s.applyMCPServer(ctx, name, server)
 }
 
@@ -58,6 +63,40 @@ func (s *Service) setMCPServerEnabled(ctx context.Context, name string, enabled 
 	}
 	server.Enabled = enabled
 	return s.applyMCPServer(ctx, name, server)
+}
+
+func (s *Service) deleteMCPServer(ctx context.Context, name string) error {
+	if s.mcp == nil {
+		return fmt.Errorf("no MCP manager is attached")
+	}
+	name = strings.TrimSpace(name)
+	server, ok := s.cfg.MCP.Servers[name]
+	if !ok {
+		return fmt.Errorf("mcp server %q not found", name)
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.DeleteMCPServer(s.configPath, name)
+		}); err != nil {
+			return err
+		}
+	}
+	if err := s.mcp.Remove(name); err != nil {
+		if s.configPath == "" {
+			return err
+		}
+		rollbackErr := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			_, restoreErr := config.UpdateMCPServer(s.configPath, name, server)
+			return restoreErr
+		})
+		return errors.Join(err, rollbackErr)
+	}
+	delete(s.cfg.MCP.Servers, name)
+	if !slices.Contains(s.cfg.MCP.RemovedServers, name) {
+		s.cfg.MCP.RemovedServers = append(s.cfg.MCP.RemovedServers, name)
+		slices.Sort(s.cfg.MCP.RemovedServers)
+	}
+	return s.emitMCPSnapshot(ctx)
 }
 
 func (s *Service) applyMCPServer(ctx context.Context, name string, server config.MCPServerConfig) error {
@@ -85,6 +124,9 @@ func (s *Service) applyMCPServer(ctx context.Context, name string, server config
 		s.cfg.MCP.Servers = make(map[string]config.MCPServerConfig)
 	}
 	s.cfg.MCP.Servers[name] = normalized
+	s.cfg.MCP.RemovedServers = slices.DeleteFunc(s.cfg.MCP.RemovedServers, func(candidate string) bool {
+		return candidate == name
+	})
 	if err := s.emitMCPSnapshot(ctx); err != nil {
 		return err
 	}

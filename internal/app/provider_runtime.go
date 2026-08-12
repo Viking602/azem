@@ -161,6 +161,12 @@ func (r *ProviderRuntime) titleModelRouteSnapshot() config.ModelRouteConfig {
 	return r.cfg.Agents.Title
 }
 
+func (r *ProviderRuntime) recapModelRouteSnapshot() config.ModelRouteConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cfg.Agents.Recap
+}
+
 func (r *ProviderRuntime) routeTurn(request TurnRequest) TurnRequest {
 	if !request.PlanMode {
 		return request
@@ -191,6 +197,7 @@ func (r *ProviderRuntime) UpdateModelRoute(scope, role string, route config.Mode
 		"approval":   &r.cfg.Agents.Approval,
 		"vision":     &r.cfg.Agents.Vision,
 		"compaction": &r.cfg.Agents.Compaction,
+		"recap":      &r.cfg.Agents.Recap,
 	}
 	if target := routeTargets[scope]; target != nil {
 		*target = route
@@ -1407,7 +1414,7 @@ func (r *ProviderRuntime) GenerateRecap(ctx context.Context, input recapGenerati
 			modelID = firstNonempty(saved.ModelID, modelID)
 		}
 	}
-	route, _ := r.modelRouteSnapshot()
+	route := r.recapModelRouteSnapshot()
 	if route != (config.ModelRouteConfig{}) {
 		providerID, modelID, reasoning = route.Provider, route.Model, route.Reasoning
 	}

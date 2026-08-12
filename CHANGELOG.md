@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Extensions: scan universal `~/.agents/skills` by default. Codex plugins are
+  cataloged as optional imports and copied only after the user selects an
+  individual plugin; local and imported plugin icons are validated and shown
+  without exposing local filesystem paths.
+
+- MCP services: make every stdio and Streamable HTTP service deletable,
+  including built-in and plugin-provided entries. Deletion writes a persistent
+  tombstone, removes future tool snapshots, and closes the live connection so
+  bootstrap cannot recreate it. The Codex-only `computer-use` launcher is no
+  longer registered, and stale direct Codex temporary-path references are
+  removed during desktop startup.
+
+- Desktop process rows: remove the white marker halo while hovering thinking,
+  tool-step, and tool-summary rows. The compact dot/check marker now remains
+  visually integrated with the row highlight instead of expanding into a
+  detached white circle.
+
+- Desktop recap: restore and live-update the durable session recap in the
+  right-side Inspector, including its summary, goal, open items, boundary, and
+  revision. Add an independent `agents.recap` model route to Role models with
+  atomic YAML persistence and live runtime updates; recap generation no longer
+  reuses the semantic compaction model.
+
 - DeepSeek cache accounting: normalize Anthropic-compatible `input_tokens` plus
   `cache_read_input_tokens` into the inclusive input total used by Azem, and
   mark DeepSeek's cache-read counter as reported even when the hit is zero.
@@ -212,11 +235,14 @@
   Workspace path resolution rejects traversal and symlink escapes before any
   file reaches the WebView.
 
-- Extensions: import enabled plugins from the shared Codex plugin directory.
-  Azem validates `.codex-plugin/plugin.json`, attaches plugin Skills and
-  eligible MCP servers to the existing runtime, exposes capability and degraded
-  states in the desktop Extensions page, keeps plugin Hooks opt-in, and marks
-  App/OAuth connections as requiring separate authorization.
+- Extensions: present the capability as Plugins and load only from Azem's own
+  `plugin-packages` data directory. Plugins can be installed directly under
+  `local`, while Codex imports are copied through a validated staged replacement
+  under `codex`; runtime paths never point at Codex storage and the last valid
+  copy survives a later Codex import failure. Settings explicitly reloads the
+  plugin snapshot so early startup events cannot leave the catalog empty. The
+  existing Skill, MCP, opt-in Hook, and App/OAuth degraded-state boundaries
+  remain unchanged.
 
 - Models: use one card layout for subscription and llmux catalogs and add a
   persistent one-click model availability toggle. Disabled models remain in

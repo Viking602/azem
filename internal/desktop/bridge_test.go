@@ -11,6 +11,7 @@ import (
 
 	azemapp "github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/skills"
 )
 
 func TestCurrentGitBranch(t *testing.T) {
@@ -20,6 +21,38 @@ func TestCurrentGitBranch(t *testing.T) {
 	}
 	if got := currentGitBranch(context.Background(), root); got != "main" {
 		t.Fatalf("currentGitBranch() = %q, want main", got)
+	}
+}
+
+func TestBridgeSkillCatalogDirectReadback(t *testing.T) {
+	home := t.TempDir()
+	skillDir := filepath.Join(home, ".agents", "skills", "shared-review")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nname: shared-review\ndescription: Shared review\n---\nReview carefully.\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := skills.Load(skills.LoadOptions{HomeDir: home, Config: config.SkillsConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := azemapp.NewService(context.Background(), config.Default())
+	runtime.AttachSkills(catalog)
+	snapshot, err := (&Bridge{runtime: runtime}).SkillCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range snapshot.Entries {
+		if entry.Name == "shared-review" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("shared .agents skill missing from direct snapshot: %#v", snapshot.Entries)
 	}
 }
 
@@ -132,7 +165,10 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionSetSkillEnabled) {
 		t.Fatal("skill availability must be configurable from the desktop")
 	}
-	if !allowedAction(azemapp.ActionSetMCPEnabled) || !allowedAction(azemapp.ActionUpsertMCPServer) {
+	if !allowedAction(azemapp.ActionSetPluginImported) {
+		t.Fatal("Codex plugin import selection must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionSetMCPEnabled) || !allowedAction(azemapp.ActionUpsertMCPServer) || !allowedAction(azemapp.ActionDeleteMCPServer) {
 		t.Fatal("MCP services must be configurable from the desktop")
 	}
 	if !allowedAction(azemapp.ActionListModelProviders) || !allowedAction(azemapp.ActionDiscoverProviderModels) || !allowedAction(azemapp.ActionSetModelProvider) || !allowedAction(azemapp.ActionSetModelEnabled) {

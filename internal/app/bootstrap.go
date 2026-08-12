@@ -14,13 +14,11 @@ import (
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
-	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/netproxy"
-	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
@@ -35,32 +33,6 @@ type BootstrapResult struct {
 	Paths     config.Paths
 	SessionID string
 	Service   *Service
-}
-
-type bootstrapAssembly struct {
-	ctx              context.Context
-	cfg              config.Config
-	paths            config.Paths
-	homeDir          string
-	configDir        string
-	startupSessionID string
-
-	store           *sqlitestore.Provider
-	skillCatalog    *skills.Catalog
-	pluginCatalog   plugins.Integration
-	sessions        *session.Service
-	coding          *agentservice.Service
-	subagentRuns    *agentservice.SQLSubagentRunStore
-	authentication  *authservice.Service
-	modelCatalog    *catalog.Service
-	providerRuntime *ProviderRuntime
-
-	service         *Service
-	manager         *mcpruntime.Manager
-	registry        *hooks.Registry
-	recoveryService *recovery.Service
-	recoveryFence   sqlitestore.RecoveryFence
-	shouldRecover   bool
 }
 
 func Bootstrap(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
@@ -146,41 +118,7 @@ func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile strin
 		return fmt.Errorf("resolve config directory for skills: %w", err)
 	}
 	b.cfg, b.paths, b.homeDir, b.configDir = cfg, paths, homeDir, configDir
-	b.loadPlugins(desktopMode)
-	return nil
-}
-
-func (b *bootstrapAssembly) loadPlugins(desktopMode bool) {
-	if !desktopMode || os.Getenv("AZEM_FAKE_PROVIDER") == "1" || !b.cfg.Plugins.Enabled || !b.cfg.Plugins.ImportCodex {
-		return
-	}
-	b.pluginCatalog = plugins.Discover(b.ctx, plugins.Options{
-		HomeDir: b.homeDir, DataDir: b.paths.DataDir, TrustHooks: b.cfg.Plugins.TrustHooks,
-	})
-	b.mergePlugins()
-}
-
-func (b *bootstrapAssembly) mergePlugins() {
-	seenSkills := make(map[string]bool, len(b.cfg.Skills.AdditionalDirs)+len(b.pluginCatalog.SkillDirs))
-	mergedSkills := make([]string, 0, len(b.cfg.Skills.AdditionalDirs)+len(b.pluginCatalog.SkillDirs))
-	for _, path := range append(append([]string(nil), b.cfg.Skills.AdditionalDirs...), b.pluginCatalog.SkillDirs...) {
-		clean := filepath.Clean(path)
-		if clean == "." || seenSkills[clean] {
-			continue
-		}
-		seenSkills[clean] = true
-		mergedSkills = append(mergedSkills, path)
-	}
-	b.cfg.Skills.AdditionalDirs = mergedSkills
-	if b.cfg.MCP.Servers == nil {
-		b.cfg.MCP.Servers = map[string]config.MCPServerConfig{}
-	}
-	for name, server := range b.pluginCatalog.MCPServers {
-		if _, configured := b.cfg.MCP.Servers[name]; configured {
-			continue
-		}
-		b.cfg.MCP.Servers[name] = server
-	}
+	return b.loadPlugins(desktopMode)
 }
 
 func (b *bootstrapAssembly) restoreDesktopWorkspace(paths *config.Paths) error {
@@ -336,17 +274,6 @@ func (b *bootstrapAssembly) attachHooks() {
 		}
 		b.service.ensureHookWatcher().watchConfig(source.Path, kind)
 	}
-}
-
-func (b *bootstrapAssembly) attachBackground() error {
-	manager, err := backgroundservice.NewManager(backgroundservice.Options{
-		Root: b.paths.Workspace, LogDir: filepath.Join(b.paths.StateDir, "background"),
-	})
-	if err != nil {
-		return err
-	}
-	b.service.AttachBackground(manager)
-	return nil
 }
 
 func (b *bootstrapAssembly) attachRecovery(teamResumer recovery.TeamResumer, runResumer recovery.RunResumer) error {

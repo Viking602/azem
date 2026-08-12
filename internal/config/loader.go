@@ -72,7 +72,7 @@ func UpdateDefault(path, key, value string) error {
 
 // UpdateModelRoute atomically updates a nested model route while preserving
 // unrelated YAML fields and comments. Supported scopes are "title", "plan",
-// "approval", "vision", "compaction", and "subagent"; role is required only for the latter.
+// "approval", "vision", "compaction", "recap", and "subagent"; role is required only for the latter.
 func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	keys := []string{"agents"}
 	switch scope {
@@ -101,6 +101,11 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 			return fmt.Errorf("role is not valid for compaction route")
 		}
 		keys = append(keys, "compaction")
+	case "recap":
+		if role != "" {
+			return fmt.Errorf("role is not valid for recap route")
+		}
+		keys = append(keys, "recap")
 	case "subagent":
 		if strings.TrimSpace(role) == "" {
 			return fmt.Errorf("role is required for subagent route")
@@ -114,7 +119,7 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	}
 	return updateYAML(path, func(root *yaml.Node) {
 		mapping := ensureMappingPath(root, keys...)
-		persistInheritedRoute := (scope == "title" || scope == "approval") && route == (ModelRouteConfig{})
+		persistInheritedRoute := (scope == "title" || scope == "approval" || scope == "recap") && route == (ModelRouteConfig{})
 		for key, value := range map[string]string{"provider": route.Provider, "model": route.Model, "reasoning": route.Reasoning} {
 			if strings.TrimSpace(value) == "" {
 				if persistInheritedRoute {
@@ -268,6 +273,27 @@ func UpdateSkillsSelection(path string, eager, disabled []string) error {
 	})
 }
 
+// UpdateCodexPluginImports persists the explicit set of Codex plugins the user
+// chose to copy into Azem. Discovery alone never implies import.
+func UpdateCodexPluginImports(path string, pluginIDs []string) error {
+	candidate := Default()
+	candidate.Plugins.CodexImports = append([]string(nil), pluginIDs...)
+	if err := candidate.Validate(); err != nil {
+		return err
+	}
+	pluginIDs = candidate.Plugins.CodexImports
+	return updateYAML(path, func(root *yaml.Node) {
+		pluginsNode := ensureMappingPath(root, "plugins")
+		deleteMappingValue(pluginsNode, "codex_imports")
+		if len(pluginIDs) == 0 {
+			return
+		}
+		var encoded yaml.Node
+		_ = encoded.Encode(pluginIDs)
+		pluginsNode.Content = append(pluginsNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "codex_imports"}, &encoded)
+	})
+}
+
 // UpdateMCPServer atomically stores one validated MCP server without rewriting
 // unrelated configuration sections. The complete entry is persisted so user,
 // built-in, and plugin-provided servers share one restart-safe representation.
@@ -281,14 +307,77 @@ func UpdateMCPServer(path, name string, server MCPServerConfig) (MCPServerConfig
 		return MCPServerConfig{}, fmt.Errorf("encode MCP server: %w", err)
 	}
 	err = updateYAML(path, func(root *yaml.Node) {
-		servers := ensureMappingPath(root, "mcp", "servers")
+		mcpNode := ensureMappingPath(root, "mcp")
+		servers := ensureMappingPath(mcpNode, "servers")
 		deleteMappingValue(servers, name)
 		servers.Content = append(servers.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: name}, &encoded)
+		removeMCPServerTombstone(mcpNode, name)
 	})
 	if err != nil {
 		return MCPServerConfig{}, err
 	}
 	return normalized, nil
+}
+
+// DeleteMCPServer atomically removes one MCP definition and records an explicit
+// tombstone. The tombstone prevents built-in and plugin catalogs from silently
+// recreating a service after restart.
+func DeleteMCPServer(path, name string) error {
+	name = strings.TrimSpace(name)
+	if !mcpServerNamePattern.MatchString(name) {
+		return fmt.Errorf("mcp server name %q must match [a-z0-9_-]+", name)
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		mcpNode := ensureMappingPath(root, "mcp")
+		servers := mappingValue(mcpNode, "servers")
+		if servers != nil {
+			deleteMappingValue(servers, name)
+			if len(servers.Content) == 0 {
+				deleteMappingValue(mcpNode, "servers")
+			}
+		}
+		removed := mcpServerTombstones(mcpNode)
+		if !slices.Contains(removed, name) {
+			removed = append(removed, name)
+		}
+		slices.Sort(removed)
+		var encoded yaml.Node
+		_ = encoded.Encode(removed)
+		deleteMappingValue(mcpNode, "removed_servers")
+		mcpNode.Content = append(mcpNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "removed_servers"}, &encoded)
+	})
+}
+
+func removeMCPServerTombstone(mcpNode *yaml.Node, name string) {
+	removed := mcpServerTombstones(mcpNode)
+	kept := removed[:0]
+	for _, candidate := range removed {
+		if candidate != name {
+			kept = append(kept, candidate)
+		}
+	}
+	deleteMappingValue(mcpNode, "removed_servers")
+	if len(kept) == 0 {
+		return
+	}
+	slices.Sort(kept)
+	var encoded yaml.Node
+	_ = encoded.Encode(kept)
+	mcpNode.Content = append(mcpNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "removed_servers"}, &encoded)
+}
+
+func mcpServerTombstones(mcpNode *yaml.Node) []string {
+	removedNode := mappingValue(mcpNode, "removed_servers")
+	if removedNode == nil || removedNode.Kind != yaml.SequenceNode {
+		return nil
+	}
+	removed := make([]string, 0, len(removedNode.Content))
+	for _, item := range removedNode.Content {
+		if item.Kind == yaml.ScalarNode && strings.TrimSpace(item.Value) != "" {
+			removed = append(removed, strings.TrimSpace(item.Value))
+		}
+	}
+	return removed
 }
 
 func UpdateLLMuxProvider(path, id string, provider LLMuxProviderConfig) error {
@@ -547,15 +636,28 @@ func load(path string, startupWorkspace string, forceWorkspace bool) (Config, er
 func mergeBuiltInMCPServers(cfg *Config, root *yaml.Node) error {
 	builtIns := builtInMCPServers()
 	merged := make(map[string]MCPServerConfig, len(builtIns)+len(cfg.MCP.Servers))
+	removed := make(map[string]struct{}, len(cfg.MCP.RemovedServers))
+	for _, name := range cfg.MCP.RemovedServers {
+		removed[strings.TrimSpace(name)] = struct{}{}
+	}
 	for name, server := range builtIns {
+		if _, suppressed := removed[name]; suppressed {
+			continue
+		}
 		merged[name] = server
 	}
 	for name, server := range cfg.MCP.Servers {
+		if _, suppressed := removed[name]; suppressed {
+			continue
+		}
 		merged[name] = server
 	}
 	mcpNode := mappingValue(root, "mcp")
 	serversNode := mappingValue(mcpNode, "servers")
 	for name, server := range builtIns {
+		if _, suppressed := removed[name]; suppressed {
+			continue
+		}
 		override := mappingValue(serversNode, name)
 		if override == nil {
 			continue

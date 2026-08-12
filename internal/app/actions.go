@@ -63,7 +63,10 @@ const (
 	ActionReconnectMCP           ActionKind = "reconnect_mcp"
 	ActionSetMCPEnabled          ActionKind = "set_mcp_enabled"
 	ActionUpsertMCPServer        ActionKind = "upsert_mcp_server"
+	ActionDeleteMCPServer        ActionKind = "delete_mcp_server"
 	ActionListSkills             ActionKind = "list_skills"
+	ActionListPlugins            ActionKind = "list_plugins"
+	ActionSetPluginImported      ActionKind = "set_plugin_imported"
 	ActionReloadSkills           ActionKind = "reload_skills"
 	ActionSetSkillEnabled        ActionKind = "set_skill_enabled"
 	ActionListMemories           ActionKind = "list_memories"
@@ -249,6 +252,15 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		return nil
 	case ActionListSkills:
 		return s.emitSkillCatalog(ctx, "listed")
+	case ActionListPlugins:
+		s.emit(ctx, Event{Kind: EventPluginCatalog, State: "listed", PluginCatalog: s.pluginCatalog, PluginDiagnostics: s.pluginDiagnostics})
+		return nil
+	case ActionSetPluginImported:
+		imported, err := strconv.ParseBool(strings.TrimSpace(action.Decision))
+		if err != nil {
+			return fmt.Errorf("plugin imported decision must be true or false: %w", err)
+		}
+		return s.setCodexPluginImported(ctx, action.Target, imported)
 	case ActionReloadSkills:
 		if s.skillCatalog == nil {
 			return fmt.Errorf("skills are unavailable")
@@ -561,6 +573,8 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		return s.setMCPServerEnabled(ctx, action.Target, enabled)
 	case ActionUpsertMCPServer:
 		return s.upsertMCPServer(ctx, action.Payload)
+	case ActionDeleteMCPServer:
+		return s.deleteMCPServer(ctx, action.Target)
 	default:
 		return fmt.Errorf("unsupported action %q", action.Kind)
 	}
@@ -802,6 +816,7 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 		{Scope: "approval", Label: "Approval", Route: s.cfg.Agents.Approval},
 		{Scope: "vision", Label: "Vision", Route: s.cfg.Agents.Vision},
 		{Scope: "compaction", Label: "Compaction", Route: s.cfg.Agents.Compaction},
+		{Scope: "recap", Label: "Recap", Route: s.cfg.Agents.Recap},
 	}
 	names := make([]string, 0, len(s.cfg.Agents.Subagents.Roles))
 	for name := range s.cfg.Agents.Subagents.Roles {
@@ -842,7 +857,7 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "compaction" && entry.Scope != "subagent" {
+	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "compaction" && entry.Scope != "recap" && entry.Scope != "subagent" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
 	if entry.Scope != "subagent" && entry.Role != "" {
@@ -913,6 +928,8 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		s.cfg.Agents.Vision = route
 	} else if entry.Scope == "compaction" {
 		s.cfg.Agents.Compaction = route
+	} else if entry.Scope == "recap" {
+		s.cfg.Agents.Recap = route
 	} else {
 		role := s.cfg.Agents.Subagents.Roles[entry.Role]
 		role.Provider, role.Model, role.Reasoning = route.Provider, route.Model, route.Reasoning
@@ -1095,8 +1112,23 @@ func (s *Service) updateSessionPreferences(ctx context.Context, action Action) e
 }
 
 func (s *Service) emitSkillCatalog(ctx context.Context, state string) error {
+	entries, diagnostics, err := s.SkillCatalogSnapshot()
+	if err != nil {
+		return err
+	}
+	s.emit(ctx, Event{
+		Kind: EventSkillCatalog, State: state,
+		SkillCatalog: entries, SkillDiagnostics: diagnostics,
+	})
+	return nil
+}
+
+// SkillCatalogSnapshot returns the current durable projection without relying
+// on the asynchronous UI event pump. Desktop settings uses this for an
+// immediate readback after opening or reloading the catalog.
+func (s *Service) SkillCatalogSnapshot() ([]SkillCatalogEntry, []SkillDiagnostic, error) {
 	if s.skillCatalog == nil {
-		return fmt.Errorf("skills are unavailable")
+		return nil, nil, fmt.Errorf("skills are unavailable")
 	}
 	snapshot := s.skillCatalog.Snapshot()
 	entries := make([]SkillCatalogEntry, len(snapshot.Entries))
@@ -1111,11 +1143,7 @@ func (s *Service) emitSkillCatalog(ctx context.Context, state string) error {
 	for i, diagnostic := range snapshot.Diagnostics {
 		diagnostics[i] = SkillDiagnostic{Path: diagnostic.Path, Message: diagnostic.Message}
 	}
-	s.emit(ctx, Event{
-		Kind: EventSkillCatalog, State: state,
-		SkillCatalog: entries, SkillDiagnostics: diagnostics,
-	})
-	return nil
+	return entries, diagnostics, nil
 }
 
 func (s *Service) agentTypeCatalog() []AgentCatalogEntry {
@@ -1524,6 +1552,7 @@ type mcpServerView struct {
 	ToolCount      int           `json:"toolCount"`
 	Tools          []mcpToolView `json:"tools,omitempty"`
 	Error          string        `json:"error"`
+	Removable      bool          `json:"removable"`
 }
 
 func buildMCPServerView(
@@ -1543,6 +1572,6 @@ func buildMCPServerView(
 		Transport: serverConfig.Transport, Target: target, Command: serverConfig.Command,
 		Args: append([]string(nil), serverConfig.Args...), CWD: serverConfig.CWD, InheritEnv: serverConfig.InheritEnv,
 		URL: serverConfig.URL, Approval: serverConfig.Approval, MaxConcurrency: serverConfig.MaxConcurrency,
-		ToolCount: toolCount, Tools: tools, Error: lastError,
+		ToolCount: toolCount, Tools: tools, Error: lastError, Removable: true,
 	}
 }

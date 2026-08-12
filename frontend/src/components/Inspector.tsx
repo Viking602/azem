@@ -13,7 +13,7 @@ import {
 import { useRuntimeStore } from "../store";
 import { contextCacheMetrics, contextComposition, contextOccupancy } from "../contextUsage";
 import type { ContextCompositionGroup } from "../contextUsage";
-import type { AgentState, ContextProfile, Snapshot, TodoList, TodoStatus } from "../types";
+import type { AgentState, ContextProfile, SessionRecap, Snapshot, TodoList, TodoStatus } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
 
 
@@ -26,6 +26,7 @@ export default function Inspector() {
   const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
   const agents = useRuntimeStore((state) => state.agents);
   const todo = useRuntimeStore((state) => state.todo);
+  const recap = useRuntimeStore((state) => state.recap);
   const backgroundProcesses = useRuntimeStore((state) => state.backgroundProcesses);
   const contextProfile = useRuntimeStore((state) => state.contextProfile);
   const contextUsage = useRuntimeStore((state) => state.contextUsage);
@@ -67,6 +68,7 @@ export default function Inspector() {
           <ContextComposition groups={composition.groups} totalTokens={composition.totalTokens} estimated={composition.estimated} language={snapshot.language} />
           <ContextDiagnostics profile={contextProfile} language={snapshot.language} />
         </section>
+        <RecapSummary recap={recap} language={snapshot.language} />
         {todo && todo.phases.length > 0 && <TodoPlan todo={todo} language={snapshot.language} />}
         {agents.length > 0 && (
           <SubagentSummary
@@ -94,6 +96,25 @@ export default function Inspector() {
       </div>
     </aside>
   );
+}
+
+function RecapSummary({ recap, language }: { recap: SessionRecap | null; language: Snapshot["language"] }) {
+  const t = translator(language);
+  return <section className="inspector-section recap-section" aria-label={t("recapTitle")}>
+    <header className="inspector-section-header">
+      <h2>{t("recapTitle")}</h2>
+      {recap && <small>r{recap.Revision}</small>}
+    </header>
+    {!recap ? <p className="recap-empty">{t("recapEmpty")}</p> : <div className="recap-content">
+      {recap.Summary && <p className="recap-summary">{recap.Summary}</p>}
+      {recap.Goal && <div><span>{t("recapGoal")}</span><p>{recap.Goal}</p></div>}
+      {recap.OpenItems && <div><span>{t("recapOpenItems")}</span><p className="recap-open-items">{recap.OpenItems}</p></div>}
+      <footer>
+        <span>{t("recapBoundary")}</span>
+        <code title={recap.CoveredBoundary}>{recap.CoveredBoundary || "—"}</code>
+      </footer>
+    </div>}
+  </section>;
 }
 
 function ContextComposition({ groups, totalTokens, estimated, language }: {

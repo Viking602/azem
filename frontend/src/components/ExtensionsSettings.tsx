@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle, AppWindow, Box, Globe2, LockKeyhole, PackageOpen,
-  Plug, Plus, RefreshCw, RotateCw, Server, Sparkles, Terminal, Wrench, X,
+  Plug, Plus, RefreshCw, RotateCw, Server, Sparkles, Terminal, Trash2, Wrench, X,
 } from "lucide-react";
 import { tFormat, translator, type Language } from "../i18n";
+import { listSkillCatalog } from "../bridge";
 import { useRuntimeStore } from "../store";
 import type { ActionRequest, MCPServerEntry, MCPServerMutation } from "../types";
 import SkillCatalogManager from "./SkillCatalogManager";
@@ -67,6 +68,16 @@ export default function ExtensionsSettings({
       throw cause;
     }
   };
+  const refreshSkills = async () => {
+    await run({ kind: "reload_skills" });
+    const catalog = await listSkillCatalog();
+    useRuntimeStore.getState().applyEvents([{
+      sequence: 0,
+      kind: "skill_catalog",
+      state: "reloaded",
+      skillCatalog: catalog.entries as unknown as Array<Record<string, unknown>>,
+    }]);
+  };
 
   return <section className="extension-hub" aria-label={t("extensionOverview")}>
     <div className="extension-overview">
@@ -75,8 +86,7 @@ export default function ExtensionsSettings({
         <div><strong>{t("extensionOverview")}</strong><small>{t("extensionMCPHint")}</small></div>
       </div>
       <div className="extension-stat-grid">
-        <ExtensionMetric value={mcpServers.length} label={t("mcpServicesMetric")} tone="blue" />
-        <ExtensionMetric value={connectedMCP} label={t("mcpConnectedMetric")} tone="green" />
+        <ExtensionMetric value={`${connectedMCP} / ${mcpServers.length}`} label={t("mcpConnectedServicesMetric")} tone="green" />
         <ExtensionMetric value={`${enabledSkills}/${skills.length}`} label={t("extensionSkillsMetric")} />
         <ExtensionMetric value={`${enabledPlugins}/${plugins.length}`} label={t("extensionPluginsMetric")} />
       </div>
@@ -88,7 +98,7 @@ export default function ExtensionsSettings({
       <ExtensionTabButton active={tab === "plugins"} icon={Plug} label={t("extensionTabPlugins")} count={plugins.length} onClick={() => setTab("plugins")} />
     </div>
 
-    <ExtensionContent tab={tab} language={language} mcpServers={mcpServers} skills={skills} plugins={plugins} run={run} openDrawer={() => setDrawerOpen(true)} />
+    <ExtensionContent tab={tab} language={language} mcpServers={mcpServers} skills={skills} plugins={plugins} run={run} refreshSkills={refreshSkills} openDrawer={() => setDrawerOpen(true)} />
 
     {drawerOpen && <AddMCPDrawer language={language} onClose={() => setDrawerOpen(false)} onSave={async (payload) => {
       await run({ kind: "upsert_mcp_server", payload });
@@ -105,18 +115,19 @@ function ExtensionTabButton({ active, icon: Icon, label, count, onClick }: { act
   return <button type="button" role="tab" aria-selected={active} className={active ? "active" : ""} onClick={onClick}><Icon size={14} /><span>{label}</span><em>{count}</em></button>;
 }
 
-function ExtensionContent({ tab, language, mcpServers, skills, plugins, run, openDrawer }: {
+function ExtensionContent({ tab, language, mcpServers, skills, plugins, run, refreshSkills, openDrawer }: {
   tab: ExtensionTab;
   language: Language;
   mcpServers: ReturnType<typeof useRuntimeStore.getState>["mcpServers"];
   skills: ReturnType<typeof useRuntimeStore.getState>["skills"];
   plugins: ReturnType<typeof useRuntimeStore.getState>["plugins"];
   run: (request: ActionRequest) => Promise<void>;
+  refreshSkills: () => Promise<void>;
   openDrawer: () => void;
 }) {
   if (tab === "mcp") return <MCPServicesPanel language={language} servers={mcpServers} run={run} openDrawer={openDrawer} />;
-  if (tab === "skills") return <section className="extension-panel" role="tabpanel"><SkillCatalogManager skills={skills} language={language} onReload={() => run({ kind: "reload_skills" })} onSetEnabled={(name, enabled) => run({ kind: "set_skill_enabled", target: name, decision: String(enabled) })} /></section>;
-  return <PluginsPanel language={language} plugins={plugins} />;
+  if (tab === "skills") return <section className="extension-panel" role="tabpanel"><SkillCatalogManager skills={skills} language={language} onReload={refreshSkills} onSetEnabled={(name, enabled) => run({ kind: "set_skill_enabled", target: name, decision: String(enabled) })} /></section>;
+  return <PluginsPanel language={language} plugins={plugins} run={run} />;
 }
 
 function MCPServicesPanel({ language, servers, run, openDrawer }: {
@@ -127,6 +138,7 @@ function MCPServicesPanel({ language, servers, run, openDrawer }: {
 }) {
   const t = translator(language);
   const [pendingServers, setPendingServers] = useState<Set<string>>(new Set());
+  const [deleteTarget, setDeleteTarget] = useState<MCPServerEntry | null>(null);
   const setEnabled = async (server: MCPServerEntry) => {
     setPendingServers((current) => new Set(current).add(server.name));
     try { await run({ kind: "set_mcp_enabled", target: server.name, decision: String(!server.enabled) }); }
@@ -138,31 +150,77 @@ function MCPServicesPanel({ language, servers, run, openDrawer }: {
       });
     }
   };
-  return <section className="extension-panel" role="tabpanel">
+  const remove = async (server: MCPServerEntry) => {
+    setPendingServers((current) => new Set(current).add(server.name));
+    try {
+      await run({ kind: "delete_mcp_server", target: server.name });
+      setDeleteTarget(null);
+    } catch {
+      // run already reports the actionable error through the settings surface.
+    } finally {
+      setPendingServers((current) => {
+        const next = new Set(current);
+        next.delete(server.name);
+        return next;
+      });
+    }
+  };
+  return <>
+    <section className="extension-panel" role="tabpanel">
     <header className="extension-panel-header"><div><h2>{t("extensionMCPTitle")}</h2><p>{t("mcpRuntimeHint")}</p></div><div className="extension-panel-actions"><button type="button" className="subtle-button" onClick={() => void run({ kind: "refresh_mcp" })}><RefreshCw size={13} />{t("refreshMCP")}</button><button type="button" className="primary-button" onClick={openDrawer}><Plus size={13} />{t("addMCPServer")}</button></div></header>
-    {servers.length === 0 ? <ExtensionEmpty icon={Server} title={t("noMCPServers")} hint={t("noMCPServersHint")} action={<button type="button" className="primary-button" onClick={openDrawer}><Plus size={13} />{t("addMCPServer")}</button>} /> : <div className="mcp-server-list">{servers.map((server) => <MCPServerRow key={server.name} server={server} language={language} pending={pendingServers.has(server.name)} onToggle={() => void setEnabled(server)} onReconnect={() => void run({ kind: "reconnect_mcp", target: server.name })} />)}</div>}
-  </section>;
+    {servers.length === 0 ? <ExtensionEmpty icon={Server} title={t("noMCPServers")} hint={t("noMCPServersHint")} action={<button type="button" className="primary-button" onClick={openDrawer}><Plus size={13} />{t("addMCPServer")}</button>} /> : <div className="mcp-server-list">{servers.map((server) => <MCPServerRow key={server.name} server={server} language={language} pending={pendingServers.has(server.name)} onToggle={() => void setEnabled(server)} onReconnect={() => void run({ kind: "reconnect_mcp", target: server.name })} onDelete={() => setDeleteTarget(server)} />)}</div>}
+    </section>
+    {deleteTarget && <DeleteMCPDialog server={deleteTarget} language={language} pending={pendingServers.has(deleteTarget.name)} onCancel={() => setDeleteTarget(null)} onConfirm={() => void remove(deleteTarget)} />}
+  </>;
 }
 
-function PluginsPanel({ language, plugins }: { language: Language; plugins: ReturnType<typeof useRuntimeStore.getState>["plugins"] }) {
+function PluginsPanel({ language, plugins, run }: { language: Language; plugins: ReturnType<typeof useRuntimeStore.getState>["plugins"]; run: (request: ActionRequest) => Promise<void> }) {
   const t = translator(language);
+	const [pending, setPending] = useState<Set<string>>(new Set());
+	const chooseImport = async (plugin: typeof plugins[number], imported: boolean) => {
+		setPending((current) => new Set(current).add(plugin.id));
+		try {
+			await run({ kind: "set_plugin_imported", target: plugin.id, decision: String(imported) });
+		} finally {
+			setPending((current) => {
+				const next = new Set(current);
+				next.delete(plugin.id);
+				return next;
+			});
+		}
+	};
   return <section className="extension-panel" role="tabpanel">
-    <header className="extension-panel-header"><div><h2>{t("extensionPluginsTitle")}</h2><p>{language === "zh-CN" ? "复用已安装并启用的 Codex 插件；Hooks 仍保持默认不信任。" : "Reuse installed and enabled Codex plugins; hooks remain untrusted by default."}</p></div></header>
-    {plugins.length === 0 ? <ExtensionEmpty icon={PackageOpen} title={t("noPluginsInstalled")} hint={t("noPluginsInstalledHint")} /> : <div className="plugin-grid extension-plugin-grid">{plugins.map((plugin) => <PluginCard key={plugin.id} plugin={plugin} language={language} />)}</div>}
+    <header className="extension-panel-header"><div><h2>{t("extensionPluginsTitle")}</h2><p>{t("extensionPluginsHint")}</p></div></header>
+    {plugins.length === 0 ? <ExtensionEmpty icon={PackageOpen} title={t("noPluginsInstalled")} hint={t("noPluginsInstalledHint")} /> : <div className="plugin-grid extension-plugin-grid">{plugins.map((plugin) => <PluginCard key={plugin.id} plugin={plugin} language={language} pending={pending.has(plugin.id)} onImport={(imported) => void chooseImport(plugin, imported)} />)}</div>}
   </section>;
 }
 
-function PluginCard({ plugin, language }: { plugin: ReturnType<typeof useRuntimeStore.getState>["plugins"][number]; language: Language }) {
+function PluginCard({ plugin, language, pending, onImport }: { plugin: ReturnType<typeof useRuntimeStore.getState>["plugins"][number]; language: Language; pending: boolean; onImport: (imported: boolean) => void }) {
   const disabled = !plugin.enabled || plugin.status === "invalid";
+	const canImport = plugin.origin === "codex_available";
+	const canStopImport = plugin.origin === "codex";
+	const icon = plugin.logoPath.startsWith("data:image/")
+		? <img className="plugin-logo" src={plugin.logoPath} alt="" />
+		: <Plug size={16} />;
   return <article className={`plugin-card ${disabled ? "disabled" : ""}`}>
-    <div className="plugin-card-heading"><span className="plugin-mark" style={{ "--plugin-color": plugin.brandColor || "var(--muted)" } as React.CSSProperties}><Plug size={16} /></span><div><strong>{plugin.displayName || plugin.name}</strong><small>{plugin.marketplace} · {plugin.version}</small></div><em>{pluginStatusLabel(plugin.enabled, plugin.status, language)}</em></div>
+    <div className="plugin-card-heading"><span className="plugin-mark" style={{ "--plugin-color": plugin.brandColor || "var(--muted)" } as React.CSSProperties}>{icon}</span><div><strong>{plugin.displayName || plugin.name}</strong><small>{pluginOriginLabel(plugin.origin, plugin.marketplace, plugin.version, language)}</small></div><em>{pluginStatusLabel(plugin.enabled, plugin.status, language)}</em></div>
     <p>{plugin.description}</p>
     <PluginCapabilities plugin={plugin} language={language} />
     {plugin.warning && <small className="plugin-warning">{plugin.warning}</small>}
+		{(canImport || canStopImport) && <button type="button" className="subtle-button plugin-import-button" disabled={pending} onClick={() => onImport(canImport)}>{pending ? (language === "zh-CN" ? "保存中…" : "Saving…") : canImport ? (language === "zh-CN" ? "导入到 Azem" : "Import into Azem") : (language === "zh-CN" ? "停止导入" : "Stop importing")}</button>}
   </article>;
 }
 
+function pluginOriginLabel(origin: string, marketplace: string, version: string, language: Language) {
+  const source = origin === "codex" || origin === "codex_available"
+    ? (language === "zh-CN" ? `从 Codex 导入 · ${marketplace}` : `Imported from Codex · ${marketplace}`)
+    : (language === "zh-CN" ? "Azem 目录" : "Azem directory");
+  return version ? `${source} · ${version}` : source;
+}
+
 function pluginStatusLabel(enabled: boolean, status: string, language: Language) {
+	if (status === "available") return language === "zh-CN" ? "可导入" : "Available";
+	if (status === "restart_required") return language === "zh-CN" ? "重启后生效" : "Restart required";
   if (!enabled) return language === "zh-CN" ? "已停用" : "Disabled";
   if (status === "ready") return language === "zh-CN" ? "已接入" : "Connected";
   return language === "zh-CN" ? "部分接入" : "Partial";
@@ -178,7 +236,7 @@ function PluginCapabilities({ plugin, language }: { plugin: ReturnType<typeof us
   </div>;
 }
 
-function MCPServerRow({ server, language, pending, onToggle, onReconnect }: { server: MCPServerEntry; language: Language; pending: boolean; onToggle: () => void; onReconnect: () => void }) {
+function MCPServerRow({ server, language, pending, onToggle, onReconnect, onDelete }: { server: MCPServerEntry; language: Language; pending: boolean; onToggle: () => void; onReconnect: () => void; onDelete: () => void }) {
   const t = translator(language);
   const ready = server.enabled && server.state === "ready";
   const TransportIcon = server.transport === "stdio" ? Terminal : Globe2;
@@ -190,7 +248,7 @@ function MCPServerRow({ server, language, pending, onToggle, onReconnect }: { se
       <MCPServerMeta server={server} language={language} />
       <MCPServerError error={server.error} />
     </div>
-    <MCPServerActions server={server} language={language} pending={pending} onToggle={onToggle} onReconnect={onReconnect} />
+    <MCPServerActions server={server} language={language} pending={pending} onToggle={onToggle} onReconnect={onReconnect} onDelete={onDelete} />
   </article>;
 }
 
@@ -215,13 +273,35 @@ function MCPServerError({ error }: { error: string }) {
   return <small className="mcp-server-error"><AlertTriangle size={11} />{error}</small>;
 }
 
-function MCPServerActions({ server, language, pending, onToggle, onReconnect }: { server: MCPServerEntry; language: Language; pending: boolean; onToggle: () => void; onReconnect: () => void }) {
+function MCPServerActions({ server, language, pending, onToggle, onReconnect, onDelete }: { server: MCPServerEntry; language: Language; pending: boolean; onToggle: () => void; onReconnect: () => void; onDelete: () => void }) {
   const t = translator(language);
   const reconnectLabel = tFormat(language, "reconnectMCP", { server: server.name });
+  const deleteLabel = tFormat(language, "deleteMCP", { server: server.name });
   const toggleLabel = tFormat(language, server.enabled ? "disableMCP" : "enableMCP", { server: server.name });
   return <div className="mcp-server-actions">
-    {server.enabled && <button type="button" className="mcp-reconnect" onClick={onReconnect} aria-label={reconnectLabel} title={reconnectLabel}><RotateCw size={14} /></button>}
+    {server.removable && <button type="button" className="mcp-delete" onClick={onDelete} aria-label={deleteLabel} title={deleteLabel} disabled={pending}><Trash2 size={14} /></button>}
+    {server.enabled && <button type="button" className="mcp-reconnect" onClick={onReconnect} aria-label={reconnectLabel} title={reconnectLabel} disabled={pending}><RotateCw size={14} /></button>}
     <div className="mcp-server-state"><span>{server.enabled ? t("skillEnabled") : t("skillDisabled")}</span><button type="button" role="switch" aria-checked={server.enabled} aria-label={toggleLabel} className={`skill-state-switch ${server.enabled ? "on" : ""} ${pending ? "pending" : ""}`} disabled={pending} onClick={onToggle}><i /></button></div>
+  </div>;
+}
+
+function DeleteMCPDialog({ server, language, pending, onCancel, onConfirm }: { server: MCPServerEntry; language: Language; pending: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const t = translator(language);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !pending) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onCancel, pending]);
+  return <div className="mcp-delete-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onCancel(); }}>
+    <section className="mcp-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-mcp-title" aria-describedby="delete-mcp-description">
+      <span className="mcp-delete-mark"><Trash2 size={17} /></span>
+      <div><h2 id="delete-mcp-title">{tFormat(language, "deleteMCPTitle", { server: server.name })}</h2><p id="delete-mcp-description">{t("deleteMCPHint")}</p></div>
+      <footer><button ref={cancelRef} type="button" className="subtle-button" onClick={onCancel} disabled={pending}>{t("mcpCancel")}</button><button type="button" className="mcp-delete-confirm" onClick={onConfirm} disabled={pending}>{pending ? t("deletingMCP") : t("deleteMCPConfirm")}</button></footer>
+    </section>
   </div>;
 }
 

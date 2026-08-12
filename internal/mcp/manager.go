@@ -32,7 +32,10 @@ const (
 	StateStopped    State = "stopped"
 )
 
-var ErrManagerClosed = errors.New("mcp manager is closed")
+var (
+	ErrManagerClosed = errors.New("mcp manager is closed")
+	ErrServerRemoved = errors.New("mcp server was removed")
+)
 
 // maxMCPModelOutputBytes bounds one MCP result before it enters provider
 // context, durable model history, or UI events. Unlike shell output, MCP
@@ -190,7 +193,10 @@ func (m *Manager) Start(ctx context.Context) error {
 	names := m.names()
 	var startErr error
 	for _, name := range names {
-		serverConfig := m.config[name]
+		serverConfig, ok := m.serverConfig(name)
+		if !ok {
+			continue
+		}
 		if !serverConfig.Enabled {
 			m.transition(name, StateDisabled, nil)
 			continue
@@ -206,7 +212,7 @@ func (m *Manager) Reconnect(ctx context.Context, name string) error {
 	if m.isClosed() {
 		return ErrManagerClosed
 	}
-	serverConfig, ok := m.config[name]
+	serverConfig, ok := m.serverConfig(name)
 	if !ok {
 		return fmt.Errorf("mcp server %q not found", name)
 	}
@@ -216,6 +222,51 @@ func (m *Manager) Reconnect(ctx context.Context, name string) error {
 	}
 	m.closeClient(name)
 	return m.connectWithRetry(ctx, name)
+}
+
+// Remove drops one server from future tool snapshots and begins closing any
+// active or in-flight connection. Persistence owns whether a catalog-provided
+// service may be recreated on the next bootstrap.
+func (m *Manager) Remove(name string) error {
+	name = strings.TrimSpace(name)
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrManagerClosed
+	}
+	_, ok := m.config[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("mcp server %q not found", name)
+	}
+	current := m.servers[name]
+	var connection *connectionAttempt
+	if current != nil {
+		connection = current.connection
+	}
+	attempt := m.attempts[name]
+	delete(m.config, name)
+	delete(m.servers, name)
+	delete(m.attempts, name)
+	if connection != nil {
+		m.closing = append(m.closing, connection)
+	}
+	if attempt != nil && attempt != connection {
+		m.closing = append(m.closing, attempt)
+	}
+	sink := m.sink
+	m.mu.Unlock()
+
+	if connection != nil {
+		connection.close()
+	}
+	if attempt != nil && attempt != connection {
+		attempt.close()
+	}
+	if sink != nil {
+		sink(Event{Server: name, State: StateStopped, At: time.Now().UTC()})
+	}
+	return nil
 }
 
 // Configure installs or replaces one server definition without replacing the
@@ -303,7 +354,10 @@ func (m *Manager) Refresh(ctx context.Context, name string) error {
 		return fmt.Errorf("mcp server %q is not connected", name)
 	}
 	m.transition(name, StateConnecting, nil)
-	serverConfig := m.config[name]
+	serverConfig, ok := m.serverConfig(name)
+	if !ok {
+		return ErrServerRemoved
+	}
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout(serverConfig))
 	defer cancel()
 	drivers, diagnostics, err := m.importTools(callCtx, name, serverConfig, client)
@@ -418,7 +472,7 @@ func (m *Manager) connectWithRetry(ctx context.Context, name string) error {
 			return nil
 		} else {
 			lastErr = err
-			if errors.Is(err, ErrManagerClosed) {
+			if errors.Is(err, ErrManagerClosed) || errors.Is(err, ErrServerRemoved) {
 				return err
 			}
 			m.transition(name, StateDegraded, err)
@@ -433,7 +487,10 @@ func (m *Manager) connectWithRetry(ctx context.Context, name string) error {
 }
 
 func (m *Manager) connectOnce(ctx context.Context, name string) error {
-	serverConfig := m.config[name]
+	serverConfig, ok := m.serverConfig(name)
+	if !ok {
+		return ErrServerRemoved
+	}
 	environment, err := m.resolveMap(ctx, serverConfig.Env)
 	if err != nil {
 		return fmt.Errorf("resolve environment: %w", err)
@@ -461,6 +518,12 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 		attempt.finishDial(nil)
 		attempt.close()
 		return ErrManagerClosed
+	}
+	if _, exists := m.config[name]; !exists {
+		m.mu.Unlock()
+		attempt.finishDial(nil)
+		attempt.close()
+		return ErrServerRemoved
 	}
 	previous := m.attempts[name]
 	m.attempts[name] = attempt
@@ -496,9 +559,13 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	}
 	m.mu.Lock()
 	current := m.servers[name]
-	if m.closed || m.attempts[name] != attempt {
+	if m.closed {
 		m.mu.Unlock()
 		return ErrManagerClosed
+	}
+	if current == nil || m.attempts[name] != attempt {
+		m.mu.Unlock()
+		return ErrServerRemoved
 	}
 	old := current.connection
 	current.client = client
@@ -652,6 +719,13 @@ func (m *Manager) names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (m *Manager) serverConfig(name string) (config.MCPServerConfig, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	serverConfig, ok := m.config[name]
+	return serverConfig, ok
 }
 
 func (m *Manager) isClosed() bool {

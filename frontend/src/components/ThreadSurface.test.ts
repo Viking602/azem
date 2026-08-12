@@ -89,6 +89,7 @@ describe("composer slash commands", () => {
 		expect(prototypeStyles).toMatch(/\.commentary-block\s*\{[^}]*line-height:\s*1\.72;[^}]*text-wrap:\s*pretty;/s);
 		expect(prototypeStyles).toMatch(/\.commentary-block\.active \.commentary-marker i\s*\{[^}]*background:\s*var\(--blue\);/s);
 		expect(prototypeStyles).toMatch(/\.reasoning-summary\s*\{[^}]*grid-template-columns:\s*15px minmax\(0, 1fr\) auto;/s);
+		expect(prototypeStyles).toMatch(/button\.reasoning-summary:hover \.azem-thinking-mark,[\s\S]*?\.timeline-step > summary:hover \.timeline-step-mark,[\s\S]*?\.tool-block summary:hover \.tool-leading,[\s\S]*?\.tool-group summary:hover \.tool-leading\s*\{[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
 		expect(prototypeStyles).toMatch(/\.reasoning-body\s*\{[^}]*margin:\s*-1px 0 5px 7px;[^}]*line-height:\s*1\.68;/s);
 		expect(prototypeStyles).toMatch(/\.reasoning-step::before\s*\{[^}]*display:\s*none;/s);
 	});

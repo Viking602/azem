@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -137,6 +138,7 @@ type AgentsConfig struct {
 	Approval   ModelRouteConfig `yaml:"approval" json:"approval"`
 	Vision     ModelRouteConfig `yaml:"vision" json:"vision"`
 	Compaction ModelRouteConfig `yaml:"compaction" json:"compaction"`
+	Recap      ModelRouteConfig `yaml:"recap" json:"recap"`
 	Context    ContextConfig    `yaml:"context"`
 	Subagents  SubagentConfig   `yaml:"subagents"`
 }
@@ -187,13 +189,15 @@ type SkillsConfig struct {
 	Disabled       []string `yaml:"disabled,omitempty"`
 }
 
-// PluginsConfig controls importing plugins installed through the Codex plugin
-// directory. Hooks remain opt-in because installing or enabling a plugin does
-// not by itself establish trust in executable lifecycle commands.
+// PluginsConfig controls Azem's own plugin package directory. ImportCodex
+// enables discovery while CodexImports is the explicit copy allowlist; runtime
+// loading never executes directly from the Codex cache. Hooks remain explicitly
+// trusted.
 type PluginsConfig struct {
-	Enabled     bool `yaml:"enabled"`
-	ImportCodex bool `yaml:"import_codex"`
-	TrustHooks  bool `yaml:"trust_hooks"`
+	Enabled      bool     `yaml:"enabled"`
+	ImportCodex  bool     `yaml:"import_codex"`
+	CodexImports []string `yaml:"codex_imports,omitempty"`
+	TrustHooks   bool     `yaml:"trust_hooks"`
 }
 
 type TeamConfig struct {
@@ -265,7 +269,8 @@ type SubagentContractItem struct {
 }
 
 type MCPConfig struct {
-	Servers map[string]MCPServerConfig `yaml:"servers"`
+	Servers        map[string]MCPServerConfig `yaml:"servers"`
+	RemovedServers []string                   `yaml:"removed_servers,omitempty"`
 }
 
 type MCPServerConfig struct {
@@ -289,6 +294,10 @@ type MCPServerConfig struct {
 	ToolOverrides   map[string]ToolOverride `yaml:"tool_overrides,omitempty"`
 	ConnectDuration time.Duration           `yaml:"-"`
 	CallDuration    time.Duration           `yaml:"-"`
+	// Managed records catalog ownership for diagnostics and migration. It does
+	// not restrict deletion: removed catalog entries are suppressed explicitly
+	// through MCPConfig.RemovedServers.
+	Managed bool `yaml:"managed,omitempty" json:"-"`
 }
 
 type ToolOverride struct {
@@ -318,6 +327,7 @@ func Default() Config {
 			Team:     TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
 			Title:    ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
 			Approval: ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
+			Recap:    ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
 			Context: ContextConfig{
 				Enabled: true, SoftTriggerRatio: .68, HardTriggerRatio: .82, TargetRatio: .45, BackgroundPrepare: true, SafetyMarginRatio: .08,
 				ReserveOutputTokens: 16384, ReserveReasoningTokens: 8192, MinReclaimTokens: 16000,
@@ -348,6 +358,7 @@ func builtInMCPServers() map[string]MCPServerConfig {
 		"grep": {
 			Enabled: true, Transport: "streamable_http", URL: "https://mcp.grep.app",
 			ConnectTimeout: "30s", CallTimeout: "60s", MaxConcurrency: 2, Approval: "never",
+			Managed: true,
 			ToolOverrides: map[string]ToolOverride{
 				"searchGitHub": {Effect: "read_only", Approval: "never"},
 			},
@@ -488,6 +499,9 @@ func (c *Config) Validate() error {
 	if err := validateModelRoute("agents.compaction", c.Agents.Compaction); err != nil {
 		return err
 	}
+	if err := validateModelRoute("agents.recap", c.Agents.Recap); err != nil {
+		return err
+	}
 	contextConfig := c.Agents.Context
 	if contextConfig.TargetRatio <= 0 || contextConfig.SoftTriggerRatio <= contextConfig.TargetRatio || contextConfig.HardTriggerRatio <= contextConfig.SoftTriggerRatio || contextConfig.HardTriggerRatio >= 1 || contextConfig.SafetyMarginRatio < 0 || contextConfig.SafetyMarginRatio >= 1 || contextConfig.HardTriggerRatio+contextConfig.SafetyMarginRatio > 1 {
 		return fmt.Errorf("agents.context ratios must satisfy 0 < target_ratio < soft_trigger_ratio < hard_trigger_ratio < 1 and hard_trigger_ratio+safety_margin_ratio <= 1")
@@ -498,6 +512,22 @@ func (c *Config) Validate() error {
 	if err := c.validateSubagents(); err != nil {
 		return err
 	}
+	removedServers := make([]string, 0, len(c.MCP.RemovedServers))
+	removedSet := make(map[string]struct{}, len(c.MCP.RemovedServers))
+	for _, name := range c.MCP.RemovedServers {
+		name = strings.TrimSpace(name)
+		if !mcpServerNamePattern.MatchString(name) {
+			return fmt.Errorf("removed mcp server name %q must match [a-z0-9_-]+", name)
+		}
+		if _, duplicate := removedSet[name]; duplicate {
+			continue
+		}
+		removedSet[name] = struct{}{}
+		removedServers = append(removedServers, name)
+		delete(c.MCP.Servers, name)
+	}
+	slices.Sort(removedServers)
+	c.MCP.RemovedServers = removedServers
 	for name, server := range c.MCP.Servers {
 		normalized, err := NormalizeMCPServer(name, server)
 		if err != nil {
@@ -628,6 +658,24 @@ func (c *Config) validateSkills() error {
 	if len(c.Skills.AdditionalDirs) > 56 {
 		return fmt.Errorf("skills.additional_dirs must contain at most 56 entries")
 	}
+	if len(c.Plugins.CodexImports) > 128 {
+		return fmt.Errorf("plugins.codex_imports must contain at most 128 entries")
+	}
+	pluginImports := make([]string, 0, len(c.Plugins.CodexImports))
+	seenPluginImports := make(map[string]struct{}, len(c.Plugins.CodexImports))
+	for _, pluginID := range c.Plugins.CodexImports {
+		pluginID = strings.TrimSpace(pluginID)
+		if pluginID == "" || len(pluginID) > 256 || strings.ContainsAny(pluginID, "\r\n\x00") {
+			return fmt.Errorf("plugins.codex_imports contains an invalid plugin id")
+		}
+		if _, exists := seenPluginImports[pluginID]; exists {
+			continue
+		}
+		seenPluginImports[pluginID] = struct{}{}
+		pluginImports = append(pluginImports, pluginID)
+	}
+	slices.Sort(pluginImports)
+	c.Plugins.CodexImports = pluginImports
 	eager := make(map[string]struct{}, len(c.Skills.Eager))
 	for _, name := range c.Skills.Eager {
 		if strings.TrimSpace(name) == "" {

@@ -162,6 +162,7 @@ type PluginCatalogEntry struct {
 	DisplayName        string
 	Version            string
 	Marketplace        string
+	Origin             string
 	Description        string
 	DeveloperName      string
 	Category           string
@@ -177,6 +178,7 @@ type PluginCatalogEntry struct {
 	Capabilities       []string
 	Status             string
 	Warning            string
+	Imported           bool
 }
 
 type PluginDiagnostic struct {

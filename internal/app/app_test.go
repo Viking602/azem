@@ -1267,7 +1267,7 @@ func TestBootstrapEmitsSkillSnapshot(t *testing.T) {
 
 func TestBootstrapEmitsPluginSnapshot(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
-	service.AttachPlugins([]PluginCatalogEntry{{ID: "demo@market", DisplayName: "Demo", Enabled: true, SkillCount: 1}}, nil)
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "demo@market", DisplayName: "Demo", Origin: "codex", Enabled: true, SkillCount: 1}}, nil)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -1284,8 +1284,86 @@ func TestBootstrapEmitsPluginSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bootstrap.Kind != EventBootstrapDone || plugins.Kind != EventPluginCatalog || len(plugins.PluginCatalog) != 1 || plugins.PluginCatalog[0].ID != "demo@market" {
+	if bootstrap.Kind != EventBootstrapDone || plugins.Kind != EventPluginCatalog || len(plugins.PluginCatalog) != 1 || plugins.PluginCatalog[0].ID != "demo@market" || plugins.PluginCatalog[0].Origin != "codex" {
 		t.Fatalf("bootstrap=%+v plugin snapshot=%+v", bootstrap, plugins)
+	}
+}
+
+func TestListPluginsReemitsTheCurrentSnapshot(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "local@local", DisplayName: "Local", Origin: "local", Enabled: true}}, []PluginDiagnostic{{PluginID: "broken@local", Message: "invalid"}})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionListPlugins}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventPluginCatalog || event.State != "listed" || len(event.PluginCatalog) != 1 || event.PluginCatalog[0].Origin != "local" || len(event.PluginDiagnostics) != 1 {
+		t.Fatalf("plugin list event = %+v", event)
+	}
+}
+
+func TestSetCodexPluginImportedPersistsExplicitSelection(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), config.Default())
+	service.SetConfigPath(path)
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "demo@market", Name: "demo", Origin: "codex_available", Status: "available"}}, nil)
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "demo@market", Decision: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(loaded.Plugins.CodexImports, "demo@market") || service.pluginCatalog[0].Status != "restart_required" || service.pluginCatalog[0].Origin != "codex" {
+		t.Fatalf("plugin import selection = %#v catalog=%#v", loaded.Plugins, service.pluginCatalog)
+	}
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "demo@market", Decision: "false"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Plugins.CodexImports) != 0 || service.pluginCatalog[0].Origin != "codex_available" {
+		t.Fatalf("plugin import removal = %#v catalog=%#v", loaded.Plugins, service.pluginCatalog)
+	}
+}
+
+func TestDesktopLoadsAzemPluginsWhenCodexImportIsDisabled(t *testing.T) {
+	t.Setenv("AZEM_FAKE_PROVIDER", "")
+	home := t.TempDir()
+	dataDir := filepath.Join(home, "data")
+	pluginRoot := filepath.Join(dataDir, "plugin-packages", "local", "review")
+	if err := os.MkdirAll(filepath.Join(pluginRoot, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := []byte(`{"name":"review","version":"1.0.0","description":"Local review plugin"}`)
+	if err := os.WriteFile(filepath.Join(pluginRoot, ".codex-plugin", "plugin.json"), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Plugins.Enabled = true
+	cfg.Plugins.ImportCodex = false
+	assembly := bootstrapAssembly{ctx: context.Background(), cfg: cfg, homeDir: home, paths: config.Paths{DataDir: dataDir}}
+
+	assembly.loadPlugins(true)
+
+	if len(assembly.pluginCatalog.Entries) != 1 || assembly.pluginCatalog.Entries[0].Origin != "local" || assembly.pluginCatalog.Entries[0].Root != pluginRoot {
+		t.Fatalf("local plugin catalog = %#v", assembly.pluginCatalog)
 	}
 }
 
@@ -1495,8 +1573,8 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	}
 	if got := []string{
 		event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Scope, event.ModelRoutes[3].Scope, event.ModelRoutes[4].Scope,
-		event.ModelRoutes[5].Scope, event.ModelRoutes[6].Role, event.ModelRoutes[7].Role, event.ModelRoutes[8].Role,
-	}; !reflect.DeepEqual(got, []string{"main", "title", "plan", "approval", "vision", "compaction", "alpha", "off", "zeta"}) {
+		event.ModelRoutes[5].Scope, event.ModelRoutes[6].Scope, event.ModelRoutes[7].Role, event.ModelRoutes[8].Role, event.ModelRoutes[9].Role,
+	}; !reflect.DeepEqual(got, []string{"main", "title", "plan", "approval", "vision", "compaction", "recap", "alpha", "off", "zeta"}) {
 		t.Fatalf("route order = %v", got)
 	}
 	clone := event.Clone()

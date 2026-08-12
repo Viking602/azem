@@ -257,6 +257,7 @@ export interface MCPToolEntry {
 
 export interface MCPServerEntry {
   name: string;
+  removable: boolean;
   enabled: boolean;
   state: "disabled" | "connecting" | "ready" | "degraded" | "stopped" | string;
   transport: "stdio" | "streamable_http" | string;
@@ -296,6 +297,7 @@ export interface PluginEntry {
   displayName: string;
   version: string;
   marketplace: string;
+  origin: "codex" | "local" | string;
   description: string;
   developerName: string;
   category: string;
@@ -311,6 +313,7 @@ export interface PluginEntry {
   capabilities: string[];
   status: string;
   warning: string;
+	imported?: boolean;
 }
 
 export interface GitBranch {
@@ -572,6 +575,17 @@ export interface ContextProfile {
   exclusions?: Array<{ source_ref: string; reason: string }>;
 }
 
+export interface SessionRecap {
+  SessionID: string;
+  Anchor: string;
+  CoveredBoundary: string;
+  Goal: string;
+  Summary: string;
+  OpenItems: string;
+  Revision: number;
+  UpdatedAt: string;
+}
+
 export interface RuntimeEvent {
   sequence: number;
   kind: string;
@@ -594,7 +608,7 @@ export interface RuntimeEvent {
   pluginCatalog?: Array<Record<string, unknown>>;
   contextProfile?: ContextProfile;
   todo?: TodoList;
-  recap?: unknown;
+  recap?: SessionRecap;
   modelRoutes?: ModelRoute[];
 	modelProviders?: ModelProvider[];
   background?: Array<Record<string, unknown>>;

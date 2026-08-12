@@ -83,6 +83,11 @@ type ActionRequest struct {
 	Provider  *azemapp.ModelProviderEntry `json:"provider,omitempty"`
 	Secret    string                      `json:"secret,omitempty"`
 }
+
+type SkillCatalogSnapshot struct {
+	Entries     []azemapp.SkillCatalogEntry `json:"entries"`
+	Diagnostics []azemapp.SkillDiagnostic   `json:"diagnostics"`
+}
 type PullRequestDetail struct {
 	PullRequest githubpr.PullRequest  `json:"pullRequest"`
 	Monitor     githubpr.MonitorState `json:"monitor"`
@@ -187,6 +192,14 @@ func (b *Bridge) Initialise() Snapshot {
 		Sequence:             b.sequence.Load(),
 		PullRequestMonitors:  b.prMonitor.States(),
 	}
+}
+
+func (b *Bridge) SkillCatalog() (SkillCatalogSnapshot, error) {
+	entries, diagnostics, err := b.runtime.SkillCatalogSnapshot()
+	if err != nil {
+		return SkillCatalogSnapshot{}, err
+	}
+	return SkillCatalogSnapshot{Entries: entries, Diagnostics: diagnostics}, nil
 }
 
 func currentGitBranch(ctx context.Context, workspace string) string {
@@ -371,6 +384,7 @@ func (b *Bridge) prime() {
 		{Kind: azemapp.ActionListModelRoutes},
 		{Kind: azemapp.ActionListAgentTypes, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListSkills, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListPlugins, SessionID: b.sessionID},
 	}
 	for _, action := range actions {
 		if err := b.runtime.ExecuteAction(b.ctx, action); err != nil && !errors.Is(err, context.Canceled) {
@@ -425,8 +439,8 @@ func allowedAction(kind azemapp.ActionKind) bool {
 		azemapp.ActionSetLanguage, azemapp.ActionSetQueueMode, azemapp.ActionReconcileAttempt,
 		azemapp.ActionInspectAgent, azemapp.ActionListAgentTypes, azemapp.ActionListPersonas,
 		azemapp.ActionCancelAgent, azemapp.ActionRefreshMCP, azemapp.ActionReconnectMCP,
-		azemapp.ActionSetMCPEnabled, azemapp.ActionUpsertMCPServer,
-		azemapp.ActionListSkills, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
+		azemapp.ActionSetMCPEnabled, azemapp.ActionUpsertMCPServer, azemapp.ActionDeleteMCPServer,
+		azemapp.ActionListSkills, azemapp.ActionListPlugins, azemapp.ActionSetPluginImported, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
 		azemapp.ActionListMemories, azemapp.ActionRemember, azemapp.ActionForgetMemory,
 		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled,
 		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,

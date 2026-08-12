@@ -1154,6 +1154,23 @@ func TestTitleModelRouteIsIndependentFromPlanAndCompaction(t *testing.T) {
 	}
 }
 
+func TestRecapModelRouteIsIndependentFromCompaction(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-summary", Reasoning: "minimal"}
+	runtime := &ProviderRuntime{cfg: cfg}
+	if initial := runtime.recapModelRouteSnapshot(); initial != (config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"}) {
+		t.Fatalf("default recap route = %#v", initial)
+	}
+	recapRoute := config.ModelRouteConfig{Provider: "deepseek", Model: "deepseek-v4-flash", Reasoning: "low"}
+	runtime.UpdateModelRoute("recap", "", recapRoute)
+	if got := runtime.recapModelRouteSnapshot(); got != recapRoute {
+		t.Fatalf("recap route = %#v", got)
+	}
+	if runtime.cfg.Agents.Compaction != cfg.Agents.Compaction {
+		t.Fatalf("recap route changed compaction route: %#v", runtime.cfg.Agents.Compaction)
+	}
+}
+
 func TestModelMaxOutputTokensUsesConfiguredCatalogLimit(t *testing.T) {
 	cfg := config.Default()
 	cfg.Providers.LLMux["deepseek"] = config.LLMuxProviderConfig{Enabled: true, Models: []config.LLMuxModelConfig{{

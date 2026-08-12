@@ -18,7 +18,7 @@ operating-system user configuration directory; `-config` selects another file.
 | `retry` | Agent retry count and exponential backoff bounds |
 | `agents` | Main, Team, title, plan, compaction, context, and subagent routes/budgets |
 | `skills` | Discovery, trust, eager activation, and disabled entries |
-| `plugins` | Codex plugin-directory import and explicit hook trust |
+| `plugins` | Azem-owned plugin packages, optional Codex copy import, and explicit hook trust |
 | `mcp` | Stdio or HTTP servers, environment, headers, timeouts, and tool policies |
 | `hooks` | Lifecycle command handlers and failure policy |
 | `memory`, `recap`, `background` | Optional supporting runtime services |
@@ -35,6 +35,11 @@ runtime settings. Existing in-flight shell commands and subagents are allowed
 to finish; the new capacity applies to subsequent admission decisions.
 
 ## Skills
+
+Azem scans universal user Skills from `~/.agents/skills` by default, alongside
+the legacy `~/.claude/skills`, Azem's configured directory, bundled Skills, and
+explicit `skills.additional_dirs`. Project-local Skills remain gated by
+`skills.trust_project`.
 
 `skills.disabled` is the durable deny list for discovered Skill names. The
 desktop Extensions page exposes every discovered Skill, including stopped
@@ -53,13 +58,16 @@ configuration.
 ## MCP servers
 
 The desktop Extensions page uses the typed `refresh_mcp`, `reconnect_mcp`,
-`set_mcp_enabled`, and `upsert_mcp_server` actions. Its catalog comes from the
+`set_mcp_enabled`, `upsert_mcp_server`, and `delete_mcp_server` actions. Its catalog comes from the
 live MCP manager, so configured servers remain visible even when no Codex
 plugin is installed. Enabling or adding a server first validates and atomically
 updates `mcp.servers`, reconfigures the existing manager instance, publishes a
 fresh runtime snapshot, and then connects asynchronously. Disabling a server
 closes its current connection and removes its imported tools from subsequent
-agent tool snapshots.
+agent tool snapshots. Deleting any server atomically removes its YAML entry,
+records the name in `mcp.removed_servers`, drops it from the live manager, and
+closes its connection. The tombstone prevents built-in and plugin catalogs from
+reconstructing the service after restart; adding the same name clears it.
 
 Local entries use `transport: stdio`, a command, an argv list, and optional
 working directory. Remote entries use `transport: streamable_http` and an HTTPS
@@ -92,16 +100,24 @@ written to `config.yaml` or emitted to desktop events.
 plugins:
   enabled: true
   import_codex: true
+  codex_imports: []
   trust_hooks: false
 ```
 
-`import_codex` reads the installed and enabled catalog returned by
-`codex plugin list --json` when the desktop runtime starts. Skills and eligible
-MCP servers are merged into the in-memory runtime configuration; this never
-rewrites `config.yaml`. `trust_hooks` defaults to false because executable
-plugin hooks require an explicit trust decision. Plugin changes take effect in
-a newly started desktop session. The compatibility matrix and manifest rules
-are documented in [plugins.md](plugins.md).
+The runtime always scans the Azem data directory at
+`plugin-packages/`. Install Azem-only plugins under
+`plugin-packages/local/<plugin>`. When `import_codex` is true, desktop startup
+reads `codex plugin list --json` only to build an available-import catalog.
+Nothing is copied or executed until its plugin ID is selected in
+`codex_imports` through Settings. Selected packages are copied to
+`plugin-packages/codex/<marketplace>/<plugin>` before scanning. Codex directories
+are never runtime roots, and an existing selected Azem copy remains usable if
+Codex is temporarily unavailable. Skills and eligible MCP servers from selected
+copies are merged into the in-memory runtime configuration.
+`trust_hooks` defaults to false because executable plugin hooks require an
+explicit trust decision. Plugin changes take effect in a newly started desktop
+session. The compatibility matrix and manifest rules are documented in
+[plugins.md](plugins.md).
 
 ## llmux providers and models
 
@@ -187,7 +203,7 @@ llmux models.
 Desktop Role models configures these independent routes:
 
 - `main`: `defaults.provider`, `defaults.model`, and `defaults.reasoning`.
-- `title`, `plan`, `approval`, `vision`, and `compaction`: matching entries under `agents`.
+- `title`, `plan`, `approval`, `vision`, `compaction`, and `recap`: matching entries under `agents`.
 - `subagent`: the named role under `agents.subagents.routes`.
 
 Non-main empty routes inherit from the active session except `vision`, which is
@@ -210,6 +226,12 @@ wrap that single object in one complete `json` Markdown fence; Azem unwraps
 only that whole-response form and then applies the same strict field, enum, and
 trailing-content validation. Prose mixed with a decision remains invalid and
 fails closed.
+
+`agents.recap` independently selects the lightweight model that writes the
+bounded continuity summary shown in the desktop Inspector after a successful
+turn. It defaults to ChatGPT Luna at low reasoning. Clearing the route restores
+normal non-main inheritance from the active session; changing it never changes
+the semantic compaction route or the current conversation model.
 
 When the selected main model advertises text input but no image input, Azem
 sends the current turn's validated images to `agents.vision`. The helper returns

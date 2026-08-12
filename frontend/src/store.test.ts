@@ -32,7 +32,7 @@ function state(): RuntimeData {
     skills: [], mcpServers: [], plugins: [], branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
     pullRequestMonitors: new Map(), pullRequestLoading: false, pullRequestMutating: false, pullRequestError: "",
     modelRoutes: [], modelProviders: [], modelsByProvider: {}, contextProfile: null,
-    contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recovery: [],
+    contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recap: null, recovery: [],
     runId: "", running: false, globalRunId: "", globalRunSessionId: "", runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
     lastSequence: 0, error: "", view: "thread", inspectorTab: "environment", inspectorOpen: true,
@@ -90,6 +90,30 @@ describe("runtime event projection", () => {
     expect(restored.blocks[0]).toMatchObject({ kind: "plan", planId: "artifact-1", state: "proposed" });
   });
 
+  it("restores and updates the current session recap without leaking foreign session events", () => {
+    const persisted = {
+      SessionID: "s1", Anchor: "/tmp/azem", CoveredBoundary: "run-1", Revision: 1,
+      Goal: "补齐回顾", Summary: "已恢复持久化回顾。", OpenItems: "pending: 验证更新", UpdatedAt: "2026-08-12T00:00:00Z",
+    };
+    const restored = reduceEvents(state(), [{
+      sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded", recap: persisted,
+      data: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", blocks: "[]", blockSequences: "[]", toolRecords: "[]" },
+    }]);
+    expect(restored.recap).toEqual(persisted);
+
+    const foreign = reduceEvents(restored, [{
+      sequence: 2, kind: "recap_state", sessionId: "s2", state: "updated",
+      recap: { ...persisted, SessionID: "s2", Summary: "其他会话", Revision: 2 },
+    }]);
+    expect(foreign.recap).toEqual(persisted);
+
+    const updated = reduceEvents(foreign, [{
+      sequence: 3, kind: "recap_state", sessionId: "s1", state: "updated",
+      recap: { ...persisted, Summary: "当前会话已实时更新。", Revision: 2 },
+    }]);
+    expect(updated.recap).toMatchObject({ Summary: "当前会话已实时更新。", Revision: 2 });
+  });
+
   it("restores persisted attachment MIME metadata after reopening a session", () => {
     const restored = reduceEvents(state(), [{
       sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded",
@@ -111,12 +135,12 @@ describe("runtime event projection", () => {
 	it("projects the plugin catalog and capability counts", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "plugin_catalog", pluginCatalog: [{
-				ID: "demo@market", Name: "demo", DisplayName: "Demo", Version: "1.0.0", Marketplace: "market",
+				ID: "demo@market", Name: "demo", DisplayName: "Demo", Version: "1.0.0", Marketplace: "market", Origin: "codex",
 				Enabled: true, SkillCount: 2, MCPServerCount: 2, IntegratedMCPCount: 1,
 				HookCount: 1, HooksTrusted: false, HasApp: true, Capabilities: ["Read"], Status: "degraded",
 			}],
 		}]);
-		expect(projected.plugins[0]).toMatchObject({ id: "demo@market", displayName: "Demo", skillCount: 2, integratedMCPCount: 1, hasApp: true });
+		expect(projected.plugins[0]).toMatchObject({ id: "demo@market", displayName: "Demo", origin: "codex", skillCount: 2, integratedMCPCount: 1, hasApp: true });
 	});
 
 	it("projects MCP snapshots and live connection transitions", () => {

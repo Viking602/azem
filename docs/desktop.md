@@ -90,9 +90,22 @@ succeeds, so a failed save cannot make the current window disagree with the
 next launch. MCP is a separate first-class tab driven by `mcp_state` snapshots,
 not by plugin counts. It exposes live server state, imported tool count,
 refresh/reconnect controls, persistent enable switches, and a validated add
-drawer for stdio and Streamable HTTP services. The add and enable actions reuse
-the active manager instance and establish connections in the background, so
-the Settings renderer never blocks on MCP startup.
+drawer for stdio and Streamable HTTP services. Every entry exposes a confirmed
+delete action that removes the node-preserved configuration and live manager
+entry together, then records a restart-safe tombstone so catalogs cannot
+recreate it.
+The add, enable, and delete actions reuse the active manager instance, while
+connections start and stop in the background so Settings never blocks on MCP
+lifecycle work.
+
+The Plugins tab calls the capability simply **Plugins**, identifies local,
+available-from-Codex, and selected Codex entries, and provides an explicit
+per-plugin import control. Only selected entries are copied and later executed
+from Azem's own `plugin-packages` data directory. Valid icons are projected as
+bounded image data; the frontend never receives a local path or presents a
+Codex cache path as an active runtime source. Opening Settings explicitly requests the
+current plugin snapshot, so startup event timing cannot leave a populated
+runtime looking like an empty catalog.
 
 Live assistant text renders new grapheme clusters as a bounded per-character
 fade-and-rise tail. The already settled prefix becomes plain text, so long
@@ -108,6 +121,11 @@ cache**, so both numbers reconcile with the displayed hit rate. Context
 composition uses the runtime request profile and marks its token estimates
 explicitly; category rows expand to the bounded concrete contributions such as
 individual messages, tool results, Skill payloads, and MCP definitions.
+The same scroll surface also restores the current session's durable recap and
+updates it directly from `recap_state` after each successful turn. The card
+shows the bounded summary, current goal, open items, covered run boundary, and
+revision; an empty session renders an explicit not-yet-generated state instead
+of silently omitting the capability.
 
 ## Workspace file browser
 

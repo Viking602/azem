@@ -145,6 +145,12 @@ collapsible. Unformatted commentary from older sessions or a non-conforming
 provider is never guessed or truncated into a title and retains the prose
 renderer.
 
+Session recap generation uses its own `agents.recap` model route and usage kind.
+It no longer borrows `agents.compaction`, so choosing a cheap short-text model
+for the Inspector summary cannot change the semantic context writer. The
+result remains bounded and durable, and `recap_state` projects the saved
+revision without mixing this private continuity data into assistant output.
+
 Unlike OpenAI Responses, Anthropic Messages and the other llmux transports do
 not label streamed text as commentary or final output. Azem keeps that text
 streaming provisionally: if the provider starts a tool, the preceding text is

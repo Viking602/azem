@@ -23,6 +23,7 @@ import type {
   Project,
   RuntimeEvent,
   Session,
+  SessionRecap,
   SkillEntry,
   Snapshot,
   TodoList,
@@ -101,6 +102,7 @@ export interface RuntimeData {
   contextProfile: ContextProfile | null;
   contextUsage: ContextUsage;
   todo: TodoList | null;
+  recap: SessionRecap | null;
   recovery: Array<Record<string, unknown>>;
   runId: string;
   running: boolean;
@@ -201,6 +203,7 @@ const initialData: RuntimeData = {
   contextProfile: null,
   contextUsage: emptyContextUsage(),
   todo: null,
+  recap: null,
   recovery: [],
   runId: "",
   running: false,
@@ -253,6 +256,7 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
     error: "",
     selectedAgentId: "",
     agentBlocks: [],
+    recap: null,
     selectedPullRequestNumber: null,
     pullRequestDetail: null,
     view: "thread",
@@ -431,6 +435,7 @@ const SESSION_SCOPED_EVENTS: Record<string, true> = {
   context_profile: true,
   context_usage: true,
   todo_updated: true,
+  recap_state: true,
   run_finished: true,
   run_cancelled: true,
   run_failed: true,
@@ -525,6 +530,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
         next.currentTitle = next.sessions.find((item) => item.id === event.sessionId)?.title ?? next.currentTitle;
         next.agents = (event.agentSnapshots ?? []).map(normalizeAgentSnapshot);
         next.todo = event.todo ?? null;
+        next.recap = event.recap ?? null;
         next.attachments = [];
         next.contextProfile = null;
 		const contextLimit = findModelOption(next.modelsByProvider[data.provider] ?? [], data.model)?.contextWindow ?? 0;
@@ -735,6 +741,9 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "todo_updated":
       next.todo = event.todo ?? null;
       break;
+    case "recap_state":
+      if (event.recap) next.recap = event.recap;
+      break;
     case "model_routes":
       next.modelRoutes = event.modelRoutes ?? [];
       if (next.snapshot) next.snapshot = {
@@ -864,7 +873,7 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
   };
   const sessions: Session[] = [
     session,
-    { ...session, id: "session-codex-plugins", title: "Codex 插件兼容设计", updatedAt: "2026-08-08T10:20:00Z" },
+    { ...session, id: "session-codex-plugins", title: "插件兼容设计", updatedAt: "2026-08-08T10:20:00Z" },
     { ...session, id: "session-semantic-context", title: "语义上下文重建", updatedAt: "2026-08-07T08:00:00Z" },
     { ...session, id: "session-llmux-limits", workspace: "/Users/viking/GolandProjects/llmux", title: "Normalize usage limits", updatedAt: "2026-08-09T08:00:00Z", unread: true },
     { ...session, id: "session-llmux-release", workspace: "/Users/viking/GolandProjects/llmux", title: "发布 v0.2.4", updatedAt: "2026-08-08T02:00:00Z" },
@@ -888,6 +897,16 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
     runId: mode === "running" ? "run-demo" : "",
     runStartedAt: Date.now() - 402_000,
     activity: mode === "running" ? "tool" : "completed",
+    recap: mode === "empty" ? null : {
+      SessionID: snapshot.sessionId,
+      Anchor: snapshot.workspace,
+      CoveredBoundary: "run-demo",
+      Goal: "完成桌面运行时体验优化",
+      Summary: "核心交互已完成，正在执行最终验证并整理交付证据。",
+      OpenItems: "in_progress: 运行完整前端与桌面测试",
+      Revision: 3,
+      UpdatedAt: new Date().toISOString(),
+    },
     approvalMode: snapshot.approvalMode,
     pullRequestMonitors: new Map((snapshot.pullRequestMonitors ?? []).map((monitor) => [monitor.number, monitor])),
     branches: [{ name: "main", current: true }, { name: "feat/usage-store", current: false }],
@@ -900,15 +919,15 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
       { name: "github", description: "Pull Request、Issue 与检查状态", sourcePath: "~/.codex/plugins/github", bundled: false, eager: false, disabled: false, modelVisible: true, resourceCount: 3 },
     ],
     mcpServers: [
-      { name: "grep", enabled: true, state: "ready", transport: "streamable_http", target: "https://mcp.grep.app", url: "https://mcp.grep.app", args: [], inheritEnv: false, approval: "never", maxConcurrency: 2, toolCount: 1, tools: [{ name: "searchGitHub", description: "Search public GitHub code", effect: "read_only", requiresApproval: false }], error: "" },
-      { name: "local-docs", enabled: false, state: "disabled", transport: "stdio", target: "npx -y @modelcontextprotocol/server-filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem"], inheritEnv: true, approval: "always", maxConcurrency: 1, toolCount: 0, tools: [], error: "" },
+      { name: "grep", removable: false, enabled: true, state: "ready", transport: "streamable_http", target: "https://mcp.grep.app", url: "https://mcp.grep.app", args: [], inheritEnv: false, approval: "never", maxConcurrency: 2, toolCount: 1, tools: [{ name: "searchGitHub", description: "Search public GitHub code", effect: "read_only", requiresApproval: false }], error: "" },
+      { name: "local-docs", removable: true, enabled: false, state: "disabled", transport: "stdio", target: "npx -y @modelcontextprotocol/server-filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem"], inheritEnv: true, approval: "always", maxConcurrency: 1, toolCount: 0, tools: [], error: "" },
     ],
     plugins: [
-      { id: "waza@demo", name: "waza", displayName: "Waza", version: "3.33.0", marketplace: "openai", description: "工程健康、研究、UI 与写作工作流", developerName: "OpenAI", category: "Developer Tools", brandColor: "#3278ef", logoPath: "", enabled: true, skillCount: 6, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "ready", warning: "" },
-      { id: "github@demo", name: "github", displayName: "GitHub", version: "0.1.9", marketplace: "openai", description: "仓库、PR、Issue、Review 与 CI", developerName: "GitHub", category: "Developer Tools", brandColor: "#181717", logoPath: "", enabled: true, skillCount: 2, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: true, capabilities: ["Skills", "MCP"], status: "degraded", warning: "OAuth 等待授权" },
-      { id: "kami@demo", name: "kami", displayName: "Kami", version: "1.12.0", marketplace: "kami", description: "文档与产品页面排版", developerName: "Kami", category: "Productivity", brandColor: "#6d5efc", logoPath: "", enabled: true, skillCount: 1, mcpServerCount: 0, integratedMCPCount: 0, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills"], status: "ready", warning: "" },
-      { id: "custom@demo", name: "custom", displayName: "Custom Toolkit", version: "0.8.0", marketplace: "local", description: "包含未信任的生命周期 Hooks", developerName: "Azem", category: "Local", brandColor: "#ff6a3d", logoPath: "", enabled: true, skillCount: 3, mcpServerCount: 0, integratedMCPCount: 0, hookCount: 2, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "Hooks"], status: "degraded", warning: "Hooks 等待显式信任" },
-      { id: "disabled@demo", name: "disabled", displayName: "实验扩展", version: "0.1.0", marketplace: "local", description: "未启用的实验能力", developerName: "Azem", category: "Experimental", brandColor: "#8b8b84", logoPath: "", enabled: false, skillCount: 1, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "disabled", warning: "" },
+      { id: "waza@demo", name: "waza", displayName: "Waza", version: "3.33.0", marketplace: "openai", origin: "codex", description: "工程健康、研究、UI 与写作工作流", developerName: "OpenAI", category: "Developer Tools", brandColor: "#3278ef", logoPath: "", enabled: true, skillCount: 6, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "ready", warning: "" },
+      { id: "github@demo", name: "github", displayName: "GitHub", version: "0.1.9", marketplace: "openai", origin: "codex", description: "仓库、PR、Issue、Review 与 CI", developerName: "GitHub", category: "Developer Tools", brandColor: "#181717", logoPath: "", enabled: true, skillCount: 2, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: true, capabilities: ["Skills", "MCP"], status: "degraded", warning: "OAuth 等待授权" },
+      { id: "kami@demo", name: "kami", displayName: "Kami", version: "1.12.0", marketplace: "kami", origin: "codex", description: "文档与产品页面排版", developerName: "Kami", category: "Productivity", brandColor: "#6d5efc", logoPath: "", enabled: true, skillCount: 1, mcpServerCount: 0, integratedMCPCount: 0, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills"], status: "ready", warning: "" },
+      { id: "custom@demo", name: "custom", displayName: "Custom Toolkit", version: "0.8.0", marketplace: "local", origin: "local", description: "包含未信任的生命周期 Hooks", developerName: "Azem", category: "Local", brandColor: "#ff6a3d", logoPath: "", enabled: true, skillCount: 3, mcpServerCount: 0, integratedMCPCount: 0, hookCount: 2, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "Hooks"], status: "degraded", warning: "Hooks 等待显式信任" },
+      { id: "disabled@demo", name: "disabled", displayName: "实验扩展", version: "0.1.0", marketplace: "local", origin: "local", description: "未启用的实验能力", developerName: "Azem", category: "Experimental", brandColor: "#8b8b84", logoPath: "", enabled: false, skillCount: 1, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "disabled", warning: "" },
     ],
     modelRoutes: [
       { Scope: "main", Role: "", Label: "主会话", Route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
@@ -916,6 +935,7 @@ function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeData> {
       { Scope: "approval", Role: "", Label: "审批", Route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
       { Scope: "vision", Role: "", Label: "视觉", Route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
       { Scope: "compaction", Role: "", Label: "上下文压缩", Route: { provider: "chatgpt", model: "gpt-5.3-spark", reasoning: "low" } },
+      { Scope: "recap", Role: "", Label: "会话回顾", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
       { Scope: "subagent", Role: "research", Label: "Research", Route: { provider: "chatgpt", model: "gpt-5.3-spark", reasoning: "medium" } },
       { Scope: "subagent", Role: "review", Label: "Review", Route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
     ],
@@ -1499,7 +1519,7 @@ function normalizePlugin(raw: Record<string, unknown>): PluginEntry {
   return {
     id: stringValue(raw, "id", "ID"), name: stringValue(raw, "name", "Name"),
     displayName: stringValue(raw, "displayName", "DisplayName"), version: stringValue(raw, "version", "Version"),
-    marketplace: stringValue(raw, "marketplace", "Marketplace"), description: stringValue(raw, "description", "Description"),
+    marketplace: stringValue(raw, "marketplace", "Marketplace"), origin: stringValue(raw, "origin", "Origin") || "local", description: stringValue(raw, "description", "Description"),
     developerName: stringValue(raw, "developerName", "DeveloperName"), category: stringValue(raw, "category", "Category"),
     brandColor: stringValue(raw, "brandColor", "BrandColor"), logoPath: stringValue(raw, "logoPath", "LogoPath"),
     enabled: Boolean(raw.enabled ?? raw.Enabled), skillCount: numberValue(raw.skillCount ?? raw.SkillCount),
@@ -1507,13 +1527,14 @@ function normalizePlugin(raw: Record<string, unknown>): PluginEntry {
     hookCount: numberValue(raw.hookCount ?? raw.HookCount), hooksTrusted: Boolean(raw.hooksTrusted ?? raw.HooksTrusted),
     hasApp: Boolean(raw.hasApp ?? raw.HasApp), capabilities: ((raw.capabilities ?? raw.Capabilities ?? []) as unknown[]).map(String),
     status: stringValue(raw, "status", "Status"), warning: stringValue(raw, "warning", "Warning"),
+		imported: Boolean(raw.imported ?? raw.Imported),
   };
 }
 
 function normalizeMCPServer(raw: Record<string, unknown>): MCPServerEntry {
   const rawTools = (raw.tools ?? raw.Tools ?? []) as Array<Record<string, unknown>>;
   return {
-    name: stringValue(raw, "name", "Name"), enabled: Boolean(raw.enabled ?? raw.Enabled),
+    name: stringValue(raw, "name", "Name"), removable: Boolean(raw.removable ?? raw.Removable), enabled: Boolean(raw.enabled ?? raw.Enabled),
     state: stringValue(raw, "state", "State"), transport: stringValue(raw, "transport", "Transport"),
     target: stringValue(raw, "target", "Target"), command: stringValue(raw, "command", "Command") || undefined,
     args: ((raw.args ?? raw.Args ?? []) as unknown[]).map(String), cwd: stringValue(raw, "cwd", "CWD") || undefined,

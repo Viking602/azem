@@ -22,7 +22,7 @@ describe("Inspector", () => {
   it("opens workspace change review from the environment summary", async () => {
     useRuntimeStore.setState({
       snapshot, view: "thread", currentSessionId: "session-1", blocks: [], agents: [], backgroundProcesses: [],
-      branches: [{ name: "main", current: true }], workspaceAdditions: 12, workspaceDeletions: 4, todo: null, contextProfile: null,
+      branches: [{ name: "main", current: true }], workspaceAdditions: 12, workspaceDeletions: 4, todo: null, recap: null, contextProfile: null,
     });
     const container = document.createElement("div");
     const root = createRoot(container);
@@ -42,6 +42,10 @@ describe("Inspector", () => {
       snapshot, view: "thread", currentSessionId: "session-1", blocks: [], agents: [], backgroundProcesses: [],
       branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
       todo: null,
+      recap: {
+        SessionID: "session-1", Anchor: "/workspace/azem", CoveredBoundary: "run-7", Revision: 3,
+        Goal: "补齐右侧栏回顾", Summary: "回顾已投影到当前会话。", OpenItems: "pending: 验证模型路由", UpdatedAt: "2026-08-12T00:00:00Z",
+      },
       contextUsage: {
         inputTokens: 14_000, outputTokens: 1_000, contextLimit: 128_000, reported: true,
         cacheInputTokens: 20_000, cachedInputTokens: 15_000, cacheWriteTokens: 2_000,
@@ -63,6 +67,9 @@ describe("Inspector", () => {
     expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("命中缓存11k");
     expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("总缓存14k");
     expect(container.querySelector(".context-composition")?.textContent).toContain("上下文构成");
+    expect(container.querySelector(".recap-section")?.textContent).toContain("会话回顾r3");
+    expect(container.querySelector(".recap-section")?.textContent).toContain("回顾已投影到当前会话。");
+    expect(container.querySelector(".recap-section")?.textContent).toContain("验证模型路由");
     const toggle = container.querySelector<HTMLButtonElement>(".context-composition-bar")!;
     const groups = container.querySelector<HTMLDivElement>(".context-composition-groups")!;
     expect(toggle.getAttribute("aria-expanded")).toBe("false");

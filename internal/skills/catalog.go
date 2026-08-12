@@ -287,6 +287,9 @@ func discoveryRoots(options LoadOptions) ([]string, error) {
 			candidates = append(candidates, rootCandidate{path: filepath.Join(base, directory, "skills"), optional: true})
 		}
 	}
+	// Venat owns the shared .agents and .venat roots through UserDir. Keep
+	// Azem-specific compatibility roots here so the same path is never scanned
+	// twice and reported as shadowing itself.
 	appendConventional(options.HomeDir, ".claude")
 	if options.ConfigDir != "" {
 		candidates = append(candidates, rootCandidate{path: filepath.Join(options.ConfigDir, "skills"), optional: true})

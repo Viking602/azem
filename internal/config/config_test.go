@@ -28,14 +28,14 @@ func TestPluginsConfigDefaultsAndLoad(t *testing.T) {
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(path, []byte("version: 1\nplugins:\n  enabled: true\n  import_codex: false\n  trust_hooks: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("version: 1\nplugins:\n  enabled: true\n  import_codex: false\n  codex_imports: [demo@market]\n  trust_hooks: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := Load(path, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !loaded.Plugins.Enabled || loaded.Plugins.ImportCodex || !loaded.Plugins.TrustHooks {
+	if !loaded.Plugins.Enabled || loaded.Plugins.ImportCodex || !loaded.Plugins.TrustHooks || !reflect.DeepEqual(loaded.Plugins.CodexImports, []string{"demo@market"}) {
 		t.Fatalf("loaded plugins = %#v", loaded.Plugins)
 	}
 }
@@ -290,6 +290,67 @@ func TestUpdateMCPServerPersistsValidatedEntryAndPreservesOtherSettings(t *testi
 	got := loaded.MCP.Servers["local_docs"]
 	if !got.Enabled || got.Transport != "stdio" || got.Command != "docs-mcp" || !reflect.DeepEqual(got.Args, []string{"serve"}) || got.Approval != "never" {
 		t.Fatalf("persisted MCP server = %#v", got)
+	}
+}
+
+func TestDeleteMCPServerPreservesOtherSettingsAndWritesTombstone(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# keep this comment\nversion: 1\ndefaults:\n  language: zh-CN\nmcp:\n  servers:\n    local_docs:\n      enabled: false\n      transport: stdio\n      command: docs-mcp\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteMCPServer(path, "local_docs"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "removed_servers:") || !strings.Contains(string(data), "- local_docs") {
+		t.Fatalf("MCP deletion tombstone was not persisted:\n%s", data)
+	}
+	if !strings.Contains(string(data), "# keep this comment") || !strings.Contains(string(data), "language: zh-CN") {
+		t.Fatalf("MCP delete lost unrelated configuration:\n%s", data)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loaded.MCP.Servers["local_docs"]; ok {
+		t.Fatalf("deleted MCP server returned after reload: %#v", loaded.MCP.Servers)
+	}
+	if !reflect.DeepEqual(loaded.MCP.RemovedServers, []string{"local_docs"}) {
+		t.Fatalf("removed MCP servers = %#v", loaded.MCP.RemovedServers)
+	}
+}
+
+func TestDeleteBuiltInMCPServerStaysRemovedUntilReadded(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteMCPServer(path, "grep"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := loaded.MCP.Servers["grep"]; exists {
+		t.Fatal("deleted built-in MCP server reappeared")
+	}
+	server := builtInMCPServers()["grep"]
+	if _, err := UpdateMCPServer(path, "grep", server); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := loaded.MCP.Servers["grep"]; !exists || len(loaded.MCP.RemovedServers) != 0 {
+		t.Fatalf("re-added built-in MCP = %#v removed=%#v", loaded.MCP.Servers, loaded.MCP.RemovedServers)
 	}
 }
 
@@ -585,6 +646,29 @@ func TestUpdateVisionModelRoutePersistsAndResets(t *testing.T) {
 	}
 }
 
+func TestUpdateRecapModelRoutePersistsAndResets(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n# keep recap route comment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "deepseek", Model: "deepseek-v4-flash", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "recap", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Recap != route {
+		t.Fatalf("recap route = %#v, error=%v", loaded.Agents.Recap, err)
+	}
+	if err := ResetModelRoute(path, "recap", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Recap != (ModelRouteConfig{}) {
+		t.Fatalf("reset recap route = %#v, error=%v", loaded.Agents.Recap, err)
+	}
+}
+
 func TestUpdateTitleModelRoutePersistsAndResetsToInherited(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -748,7 +832,7 @@ func TestDefaultIncludesBuiltInGrepMCPServer(t *testing.T) {
 	if !ok {
 		t.Fatal("default config omitted built-in grep MCP server")
 	}
-	if !server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" || server.Approval != "never" {
+	if !server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" || server.Approval != "never" || !server.Managed {
 		t.Fatalf("built-in grep MCP server = %#v", server)
 	}
 	override, ok := server.ToolOverrides["searchGitHub"]
@@ -772,7 +856,7 @@ func TestLoadCanOverrideBuiltInGrepMCPServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := cfg.MCP.Servers["grep"]
-	if server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" {
+	if server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" || !server.Managed {
 		t.Fatalf("disabled built-in grep MCP server = %#v", server)
 	}
 	if local := cfg.MCP.Servers["local"]; local.Command != "local-mcp" {

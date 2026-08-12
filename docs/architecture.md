@@ -233,10 +233,12 @@ declared module version, not an adjacent checkout, defines behavior.
   reserved for their subscription drivers.
 - **MCP:** configure stdio or Streamable HTTP servers through `internal/mcp`;
   keep secrets as environment or keyring references.
-- **Plugins:** `internal/plugins` validates the Codex plugin manifest and
-  projects enabled plugin Skills, MCP descriptors, hook sources, and App
-  requirements into existing runtime boundaries. It does not create a second
-  Skill, MCP, or hook implementation.
+- **Plugins:** `internal/plugins` scans Azem-owned packages, copies optional
+  Codex imports into that package directory through a staged replacement, then
+  validates manifests and projects plugin Skills, MCP descriptors, hook
+  sources, and App requirements into existing runtime boundaries. Runtime
+  capability paths never point at Codex storage, and this layer does not create
+  a second Skill, MCP, or hook implementation.
 - **Skills:** add user, project, configured, or bundled Skill directories;
   activation must flow through the existing `activeSkills` request field.
 - **Hooks:** discover supported hook sources through `internal/hooks`; preserve

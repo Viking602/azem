@@ -243,6 +243,19 @@ func TestProjectTrustDisabledAndEagerValidation(t *testing.T) {
 	}
 }
 
+func TestLoadsUniversalAgentsSkillsByDefault(t *testing.T) {
+	home := t.TempDir()
+	writeTestSkill(t, filepath.Join(home, ".agents", "skills"), "shared-review", "Shared review", "SHARED_BODY")
+	catalog, err := Load(LoadOptions{HomeDir: home, Config: config.SkillsConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := catalog.Snapshot().Registry.Get("shared-review")
+	if !ok || !strings.Contains(entry.Body, "SHARED_BODY") {
+		t.Fatalf("universal .agents skill was not loaded: %#v", catalog.Snapshot().Entries)
+	}
+}
+
 func TestCatalogBudgetAndResources(t *testing.T) {
 	root := t.TempDir()
 	longDescription := strings.Repeat("界", 300)

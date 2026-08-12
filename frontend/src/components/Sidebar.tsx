@@ -209,7 +209,7 @@ function relativeSessionTime(value: string, language: "en" | "zh-CN") {
 function sidebarSessionLabel(title: string, updatedAt: string, running: boolean, language: "en" | "zh-CN") {
   if (running) return language === "zh-CN" ? "刚刚 · 正在运行" : "Just now · Running";
   if (language === "zh-CN" && !isDesktopRuntime()) {
-    if (title === "Codex 插件兼容设计") return "昨天 · 已完成";
+    if (title === "插件兼容设计") return "昨天 · 已完成";
     if (title === "语义上下文重建") return "8 月 7 日 · 已完成";
     if (title === "发布 v0.2.4") return "周五 · 等待检查";
   }

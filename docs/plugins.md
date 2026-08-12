@@ -1,9 +1,9 @@
 # Plugin compatibility
 
-Last verified: 2026-08-08
+Last verified: 2026-08-12
 
-Azem follows the universal plugin directory shared by ChatGPT and Codex. The
-current authoritative specification is the OpenAI
+Azem supports the OpenAI plugin package format, but owns its plugin storage.
+The current authoritative package specification is the OpenAI
 [plugin builder guide](https://developers.openai.com/plugins/build/plugins) and
 [plugin concepts guide](https://developers.openai.com/plugins/concepts/plugins).
 
@@ -26,8 +26,31 @@ The manifest supports identity and discovery fields (`name`, `version`,
 `description`, `author`, `homepage`, `repository`, `license`, `keywords`) and
 an `interface` object for display name, developer, category, capabilities,
 URLs, prompts, color, icons, logos, and screenshots. Azem currently consumes
-only the fields needed for runtime integration and the Extensions catalog; it
-preserves the plugin directory as the source of truth.
+only the fields needed for runtime integration and the Extensions catalog.
+
+## Azem plugin directory
+
+The runtime scans only `<Azem data>/plugin-packages`; it never executes a
+plugin directly from a Codex installation or cache directory.
+
+```text
+plugin-packages/
+  local/<plugin>/                    # installed directly for Azem
+  codex/<marketplace>/<plugin>/      # Azem-owned copy imported from Codex
+```
+
+On macOS and Windows, `<Azem data>` is the operating-system user configuration
+directory plus `azem`; on Linux it is `${XDG_DATA_HOME:-~/.local/share}/azem`.
+`XDG_DATA_HOME` overrides the data root on every platform.
+
+To install directly, copy a complete plugin directory under
+`plugin-packages/local/`. To import from Codex, enable `plugins.import_codex`.
+At desktop startup Azem reads `codex plugin list --json`, copies every reported
+installed package into a staging directory, validates the copied manifest, and
+atomically replaces its previous copy. The copied package records the Codex
+enabled state and source identity. If Codex is unavailable later, the existing
+Azem copy remains discoverable; the running plugin root and every `PLUGIN_ROOT`
+value still point at Azem storage.
 
 `.mcp.json` may be a direct server map or wrap the map in `mcpServers` or
 `mcp_servers`. Azem recognizes stdio descriptors (`command`, `args`, `cwd`,
@@ -44,18 +67,24 @@ preserves the plugin directory as the source of truth.
 | OAuth-only HTTP MCP | Cataloged but disabled until Azem has an authenticated connection |
 | Hooks | Cataloged; executed only when `plugins.trust_hooks: true` |
 | `.app.json` | Cataloged as an App requirement; requires separate connector authorization |
-| Interface assets | Validated and cataloged; the desktop currently renders a native plugin mark rather than reading arbitrary local images |
+| Interface assets | Validated and cataloged; supported icons up to 1 MiB render from bounded image data |
 
-Azem reads the installed/enabled state from `codex plugin list --json`, then
-uses the installed source or the standard cache location
-`~/.codex/plugins/cache/<marketplace>/<plugin>/<version>/`. Plugin changes are
-loaded at desktop startup, matching the upstream rule that plugin state applies
-to a new session.
+Directly installed plugins are loaded at desktop startup. Codex plugins first
+appear as available choices; selecting one persists its ID in
+`plugins.codex_imports`, and the next desktop startup copies and loads only that
+selection. Removing the selection stops loading it after restart while leaving
+the dormant copy recoverable.
 
 ## Security boundary
 
 - Installation does not imply hook trust.
+- Codex paths are import sources only; runtime loading is restricted to the
+  Azem package directory.
+- Codex discovery does not imply import. Unselected packages contribute no
+  Skills, MCP servers, Hooks, or Apps.
 - Invalid or escaping manifest paths are rejected.
+- Plugin icons are limited to supported image formats and 1 MiB, then projected
+  as image data rather than local paths.
 - Descriptor files are bounded to 1 MiB and must contain one JSON document.
 - Plugin MCP names are namespaced to avoid overriding user-configured servers.
 - Plugin environment and headers remain runtime-only and are never written to

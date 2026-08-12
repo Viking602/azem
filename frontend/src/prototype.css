@@ -731,6 +731,10 @@ html[data-reduce-motion="true"] *::after { animation-duration: .01ms !important;
 .reasoning-trace { margin: 5px 0 10px; color: color-mix(in srgb, var(--muted) 88%, var(--faint)); font-size: var(--text-chat); line-height: 1.72; }
 .reasoning-summary { min-height: 31px; width: fit-content; display: inline-grid; grid-template-columns: 15px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 1px 7px 1px 0; border-radius: 7px; color: var(--faint); font-size: var(--text-sm); font-weight: 560; transition: background .14s ease, color .14s ease, transform .16s cubic-bezier(.22, 1, .36, 1); }
 button.reasoning-summary:hover { background: color-mix(in srgb, var(--paper-muted) 68%, transparent); color: var(--muted); transform: translateX(2px); }
+button.reasoning-summary:hover .azem-thinking-mark,
+.timeline-step > summary:hover .timeline-step-mark,
+.tool-block summary:hover .tool-leading,
+.tool-group summary:hover .tool-leading { background: transparent; box-shadow: none; }
 .reasoning-trace.streaming .reasoning-summary { color: color-mix(in srgb, var(--ink) 72%, var(--muted)); }
 .azem-thinking-mark { width: 15px; height: 15px; flex-basis: 15px; background: var(--paper); box-shadow: 0 0 0 3px var(--paper); color: color-mix(in srgb, var(--faint) 72%, var(--muted)); }
 .azem-thinking-mark i:first-child { inset: 4px; border: 0; background: currentColor; }

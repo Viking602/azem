@@ -107,12 +107,19 @@ header credentials must be `env:` or `keyring:` references. Runtime snapshots
 include connection metadata and imported tool descriptions but omit configured
 environment maps, headers, resolved credentials, and plugin-scoped literal
 values. Disabling a server closes its live client; already-running turns retain
-only the immutable tool snapshot acquired when that turn began.
+only the immutable tool snapshot acquired when that turn began. Deleting a
+user-owned server requires explicit confirmation and removes only its validated
+local configuration and runtime connection. Built-in and plugin-contributed
+servers cannot be deleted through this action, preventing an apparent deletion
+that would silently reappear from its owning catalog on restart.
 
-Codex plugin installation and plugin-hook trust are separate decisions. Azem
-validates every manifest path against the plugin root, imports only plugins
-reported as installed and enabled by Codex, and never treats plugin Hooks as
-trusted by default. Literal plugin MCP environment values remain runtime-only;
+Plugin installation and plugin-hook trust are separate decisions. Azem loads
+only from its permission-restricted `plugin-packages` data directory. A plugin
+may be installed directly there; Codex integration uses Codex paths only as
+copy sources, validates the staged copy, and then activates an Azem-owned
+package. The runtime never executes a plugin from a Codex source or cache path.
+Azem validates every manifest path against the active copied root and never
+treats plugin Hooks as trusted by default. Literal plugin MCP environment values remain runtime-only;
 they are not serialized into Azem configuration or desktop events. Remote MCP
 descriptors without an explicit bearer-token environment variable remain
 disabled until Azem has an authenticated connection, and `.app.json` metadata

@@ -2,7 +2,7 @@ import { Browser, Call, Dialogs, Events } from "@wailsio/runtime";
 import type {
   ActionRequest, Attachment, PullRequest, PullRequestDashboard, PullRequestDetailResponse,
   PullRequestMonitorState, PullRequestMutationRequest, RuntimeEvent, Snapshot, TurnRequest,
-  WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
+  SkillEntry, WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
 } from "./types";
 
 const EVENT_NAME = "azem:event";
@@ -45,6 +45,20 @@ export async function startTurn(request: TurnRequest): Promise<string> {
 export async function execute(request: ActionRequest): Promise<void> {
   if (!isDesktopRuntime()) return;
   await Call.ByName(`${bridgeName}.Execute`, request);
+}
+
+export interface SkillCatalogSnapshot {
+  entries: SkillEntry[];
+  diagnostics: Array<{ path: string; message: string }>;
+}
+
+export async function listSkillCatalog(): Promise<SkillCatalogSnapshot> {
+  if (!isDesktopRuntime()) return { entries: [], diagnostics: [] };
+  const result = await Call.ByName(`${bridgeName}.SkillCatalog`) as Partial<SkillCatalogSnapshot> | null;
+  return {
+    entries: Array.isArray(result?.entries) ? result.entries : [],
+    diagnostics: Array.isArray(result?.diagnostics) ? result.diagnostics : [],
+  };
 }
 
 export interface SystemFont {

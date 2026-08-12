@@ -3,7 +3,7 @@ import {
   ArrowLeft, Bot, Check, CornerDownRight, Database, Gauge, Hand, Languages, List, Minus, Palette, Plus,
   RefreshCw, Search, Settings2, ShieldAlert, ShieldCheck, X,
 } from "lucide-react";
-import { execute, listSystemFonts, type SystemFont } from "../bridge";
+import { execute, listSkillCatalog, listSystemFonts, type SystemFont } from "../bridge";
 import { reasoningLabel, sortReasoningLevels, tFormat, translator, type Language } from "../i18n";
 import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ModelOption } from "../store";
 import type { DeliveryMode, ModelProvider, ModelRoute, ModelRouteConfig } from "../types";
@@ -79,12 +79,21 @@ export default function SettingsDialog() {
       close();
     };
     node.addEventListener("cancel", onCancel);
+	const refreshSkillCatalog = listSkillCatalog().then((catalog) => {
+		useRuntimeStore.getState().applyEvents([{
+			sequence: 0,
+			kind: "skill_catalog",
+			state: "listed",
+			skillCatalog: catalog.entries as unknown as Array<Record<string, unknown>>,
+		}]);
+	});
     void Promise.all([
       execute({ kind: "list_model_routes", sessionId: snapshot.sessionId }),
       execute({ kind: "list_agent_types", sessionId: snapshot.sessionId }),
       execute({ kind: "list_models", sessionId: snapshot.sessionId }),
 	  execute({ kind: "list_model_providers", sessionId: snapshot.sessionId }),
-	  execute({ kind: "list_skills", sessionId: snapshot.sessionId }),
+	  refreshSkillCatalog,
+	  execute({ kind: "list_plugins", sessionId: snapshot.sessionId }),
 	  execute({ kind: "refresh_mcp", sessionId: snapshot.sessionId }),
     ]).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
     return () => {
@@ -319,6 +328,7 @@ function routeTitle(route: ModelRoute, language: Language) {
   if (route.Scope === "approval") return t("routeApproval");
   if (route.Scope === "vision") return t("routeVision");
   if (route.Scope === "compaction") return t("routeCompaction");
+  if (route.Scope === "recap") return t("routeRecap");
   if (route.Role === "research") return language === "zh-CN" ? "研究与文档" : "Research and documentation";
   if (route.Role === "review") return language === "zh-CN" ? "编码与审查" : "Coding and review";
   return route.Role || route.Label;
@@ -331,6 +341,7 @@ function routeDescription(route: ModelRoute, description: string, language: Lang
   if (route.Scope === "approval") return t("routeApprovalHint");
   if (route.Scope === "vision") return t("routeVisionHint");
 	if (route.Scope === "compaction") return t("routeCompactionHint");
+	if (route.Scope === "recap") return t("routeRecapHint");
 	if (route.Role === "research") return language === "zh-CN" ? "检索、映射、说明文档" : "Research, mapping, and documentation";
 	if (route.Role === "review") return language === "zh-CN" ? "实现、调试、架构判断" : "Implementation, debugging, and architecture";
   return description || tFormat(language, "routeSubagentHint", { role: route.Role || route.Label });
