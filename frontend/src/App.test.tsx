@@ -58,6 +58,12 @@ describe("application interactions", () => {
     expect(conceptStyles).toMatch(/\.command-trigger:hover\s*\{[^}]*transform:\s*translate\(-50%,\s*-1px\);/s);
   });
 
+  it("lets long branch names grow without reaching the centered command trigger", () => {
+    expect(prototypeStyles).toMatch(/\.titlebar-project-switch\s*\{[^}]*width:\s*min\(560px,\s*calc\(50vw - 246px\)\);/s);
+    expect(prototypeStyles).toMatch(/\.titlebar-project\s*\{[^}]*width:\s*fit-content;[^}]*max-width:\s*calc\(100% - 82px\);/s);
+    expect(prototypeStyles).toMatch(/\.titlebar-project span\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;/s);
+  });
+
   it("keeps the interface font stepper centered inside all three grid columns", () => {
     expect(prototypeStyles).toMatch(/\.appearance-card \.font-size-control > button:not\(\.text-button\),\s*\.appearance-card \.font-size-control output\s*\{[^}]*width:\s*100%;[^}]*height:\s*100%;[^}]*white-space:\s*nowrap;/s);
     expect(prototypeStyles).toMatch(/\.appearance-card \.font-size-control output\s*\{[^}]*border-inline:\s*1px solid var\(--line\);/s);

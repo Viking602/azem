@@ -235,7 +235,7 @@
 .model-controls > summary:hover { background: var(--paper-muted); }
 .context-meter > summary { width: 22px; height: 22px; border-radius: 6px; }
 .context-meter > summary svg { width: 20px; height: 20px; }
-.titlebar-project-switch { width: min(500px, 42vw); }
+.titlebar-project-switch { width: min(560px, calc(50vw - 246px)); }
 .titlebar-project { width: min(470px, 100%); max-width: 100%; }
 .titlebar-project strong { min-width: max-content; flex: 0 0 auto; overflow: visible; text-overflow: clip; }
 .titlebar-project span { min-width: 0; flex: 1 1 auto; max-width: 340px; overflow: hidden; text-overflow: ellipsis; }
@@ -519,8 +519,10 @@ html[data-reduce-motion="true"] *::after { animation-duration: .01ms !important;
   width: min(460px, calc(100% - 48px));
   transform: translateX(-50%);
 }
-.titlebar-project-switch { width: min(370px, 100%); }
-.titlebar-project { width: min(288px, calc(100% - 82px)); max-width: calc(100% - 82px); margin-left: 74px; padding-left: 6px; }
+/* The centered command trigger is 460px wide. Its 230px half-width plus a
+   16px safety gap defines the right edge available to long branch names. */
+.titlebar-project-switch { width: min(560px, calc(50vw - 246px)); }
+.titlebar-project { width: fit-content; max-width: calc(100% - 82px); margin-left: 74px; padding-left: 6px; }
 .titlebar-project strong { color: var(--ink-soft); }
 .titlebar-project span { max-width: none; color: var(--muted); }
 
