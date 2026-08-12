@@ -36,8 +36,6 @@ const (
 	PromptCacheBreakpointExtraKey  = "azem_prompt_cache_breakpoint"
 	PromptCacheBreakpointLastUser  = "last-user"
 	PromptCacheBreakpointFirstItem = "first-item"
-	maxWireImages                  = 6
-	maxWireImageBytes              = 8 << 20
 )
 
 // Prompt-cache models describe provider-specific billing/reporting semantics.
@@ -304,9 +302,6 @@ func wireUserMessage(current message.Message, attachmentRoot string, breakpoint 
 	if err != nil {
 		return nil, false, err
 	}
-	if len(attachments) > maxWireImages {
-		return nil, false, fmt.Errorf("responses request has %d images; maximum is %d", len(attachments), maxWireImages)
-	}
 	for _, att := range attachments {
 		part, err := wireInputImage(att, attachmentRoot)
 		if err != nil {
@@ -356,9 +351,6 @@ func LoadImageAttachments(metadata map[string]string, attachmentRoot string) ([]
 	if err != nil {
 		return nil, err
 	}
-	if len(attachments) > maxWireImages {
-		return nil, fmt.Errorf("responses request has %d images; maximum is %d", len(attachments), maxWireImages)
-	}
 	images := make([]ImageAttachment, 0, len(attachments))
 	for _, attachment := range attachments {
 		image, err := loadImageAttachment(attachment, attachmentRoot)
@@ -396,18 +388,15 @@ func loadImageAttachment(att wireAttachment, attachmentRoot string) (ImageAttach
 	}
 	defer file.Close()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxWireImageBytes {
-		return ImageAttachment{}, fmt.Errorf("image %q is not a regular file within the %d MiB limit", firstNonEmpty(att.Name, path), maxWireImageBytes>>20)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
+		return ImageAttachment{}, fmt.Errorf("image %q is not a non-empty regular file", firstNonEmpty(att.Name, path))
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maxWireImageBytes+1))
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return ImageAttachment{}, fmt.Errorf("read image %q: %w", firstNonEmpty(att.Name, path), err)
 	}
 	if len(data) == 0 {
 		return ImageAttachment{}, fmt.Errorf("image %q is empty", firstNonEmpty(att.Name, path))
-	}
-	if len(data) > maxWireImageBytes {
-		return ImageAttachment{}, fmt.Errorf("image %q exceeds the %d MiB limit", firstNonEmpty(att.Name, path), maxWireImageBytes>>20)
 	}
 	mimeType := strings.ToLower(strings.TrimSpace(strings.SplitN(http.DetectContentType(data[:min(len(data), 512)]), ";", 2)[0]))
 	if mimeType == "image/jpg" {

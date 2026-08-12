@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- DeepSeek cache accounting: normalize Anthropic-compatible `input_tokens` plus
+  `cache_read_input_tokens` into the inclusive input total used by Azem, and
+  mark DeepSeek's cache-read counter as reported even when the hit is zero.
+  Real cache hits now produce the correct desktop percentage instead of
+  appearing as `Not reported`. Anthropic request conversion now hoists only
+  leading system messages; later trusted host context remains in the message
+  tail so it no longer rewrites the long-conversation prefix on every turn.
+  The Inspector keeps two decimal places without rounding the hit rate to an
+  integer, so a 99.52% result is no longer displayed as 100%.
+
+- Image attachments: remove Azem's product-wide limit of six images per turn
+  and 8 MiB per image. Trusted session ownership, symlink containment,
+  regular-file checks, and detected image-format validation remain enforced;
+  request limits now come from the selected provider instead of a shared local
+  ceiling.
+
+- Desktop progress: require one explicit title/detail update before every
+  individual tool call or parallel tool batch. If a provider skips it, the
+  runtime inserts one durable fallback before exposing the tool event. The
+  desktop now keeps adjacent reasoning, tool calls, and diffs inside that same
+  progress step; active steps open automatically instead of rendering separate
+  zero-second thinking rows.
+
+- Semantic context rebuild: raise the default durable semantic-state budget
+  from 8,192 to 32,768 tokens and remove the fixed 8,192-token ceiling.
+  Configured budgets may use up to one quarter of the writer context window;
+  generation headroom remains separate from the durable state size. Reject every
+  `length`/`max_turns` result even when it contains truncated JSON, then retry
+  once at low reasoning. Successful activations now
+  advance the shared in-memory semantic revision so repeated automatic
+  compactions do not submit revision 0 after revision 1 is already durable.
+  Oversized candidates use the configured durable-state budget during bounded
+  repair instead of repeatedly spending the larger generation allowance.
+  The same bounded reasoning fallback covers title and recap generation
+  without hiding ordinary provider failures.
+
+- Grok subscriptions: accept both object- and tier-array pricing metadata from
+  the live xAI model catalog so an authenticated account can finish catalog
+  loading instead of failing during login restoration.
+
+- Runtime scheduling: a transient workspace resource-claim conflict now keeps
+  the main task queued and retries it after the current writer releases or its
+  lease expires. The conflict no longer becomes a raw terminal Provider error.
+
+- Desktop progress: ignore one decorative emoji prefix before the explicit
+  two-line progress contract. Skill-authored updates now keep the same compact
+  title/detail typography as ordinary model progress while streaming.
+
 - Desktop Subagents: render the detail drawer with the same reading width,
   message typography, and hierarchy as the main conversation. User instructions
   and final answers stay in the transcript while only process work uses the

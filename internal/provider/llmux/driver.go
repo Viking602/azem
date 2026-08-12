@@ -128,7 +128,7 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 		if err != nil {
 			return nil, mapError(err)
 		}
-		return &streamAdapter{inner: stream, reporter: reporter, names: names}, nil
+		return &streamAdapter{inner: stream, reporter: reporter, names: names, provider: d.providerID}, nil
 	}
 	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
 		Delay: d.retryDelay, MaxDelay: d.maxRetryDelay, Observer: d.retryObserver,

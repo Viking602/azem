@@ -381,7 +381,7 @@ agents:
     reserve_output_tokens: 16384
     reserve_reasoning_tokens: 8192
     min_reclaim_tokens: 16000
-    max_summary_tokens: 8192
+    max_summary_tokens: 32768
     large_tool_result_tokens: 12000
     history_retrieval_tokens: 4096 # private, session-scoped SQLite FTS evidence budget
   subagents:

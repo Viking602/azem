@@ -1,11 +1,11 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, Command, Search } from "lucide-react";
-import { execute, initialise, isDesktopRuntime, openProject, subscribe, subscribePullRequests } from "./bridge";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Check, ChevronDown, Command, GitBranch, Search } from "lucide-react";
+import { execute, initialise, isDesktopRuntime, subscribe, subscribePullRequests } from "./bridge";
 import AgentSideChat from "./components/AgentSideChat";
 import Inspector from "./components/Inspector";
 import Sidebar from "./components/Sidebar";
 import ThreadSurface from "./components/ThreadSurface";
-import { translator } from "./i18n";
+import { tFormat, translator } from "./i18n";
 import { normalizeUIFont, shouldMarkSessionUnread, useRuntimeStore } from "./store";
 import { refreshPullRequestDashboard } from "./pullRequests";
 import type { RuntimeEvent } from "./types";
@@ -337,35 +337,29 @@ export default function App() {
 function AppTitleBar() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const branches = useRuntimeStore((state) => state.branches);
-  const projects = useRuntimeStore((state) => state.projects);
   const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
   const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
-  const setSettingsOpen = useRuntimeStore((state) => state.setSettingsOpen);
   const setError = useRuntimeStore((state) => state.setError);
-  const [projectOpen, setProjectOpen] = useState(false);
-  const [projectSearch, setProjectSearch] = useState("");
-  const projectSwitch = useRef<HTMLDivElement>(null);
+  const [branchOpen, setBranchOpen] = useState(false);
+  const [branchSearch, setBranchSearch] = useState("");
+  const branchSwitch = useRef<HTMLDivElement>(null);
   const t = translator(snapshot.language);
   const project = snapshot.workspace.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
   const branch = branches.find((item) => item.current)?.name || snapshot.currentBranch || t("noBranches");
-  const catalog = projects.some((item) => item.workspace === snapshot.workspace)
-    ? projects
-    : [{ workspace: snapshot.workspace, updatedAt: "" }, ...projects];
-  const visibleProjects = useMemo(() => {
-    const query = projectSearch.trim().toLowerCase();
-    if (!query) return catalog;
-    return catalog.filter((item) => `${projectName(item.workspace)} ${item.workspace}`.toLowerCase().includes(query));
-  }, [catalog, projectSearch]);
+  const visibleBranches = branches
+    .filter((item) => !branchSearch.trim() || item.name.toLowerCase().includes(branchSearch.trim().toLowerCase()))
+    .slice()
+    .sort((left, right) => Number(right.current) - Number(left.current) || left.name.localeCompare(right.name));
 
   useEffect(() => {
-    if (!projectOpen) return;
+    if (!branchOpen) return;
     const close = (event: PointerEvent) => {
-      if (projectSwitch.current && !projectSwitch.current.contains(event.target as Node)) setProjectOpen(false);
+      if (branchSwitch.current && !branchSwitch.current.contains(event.target as Node)) setBranchOpen(false);
     };
     const closeWithKeyboard = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setProjectOpen(false);
-        setProjectSearch("");
+        setBranchOpen(false);
+        setBranchSearch("");
       }
     };
     document.addEventListener("pointerdown", close, true);
@@ -374,57 +368,64 @@ function AppTitleBar() {
       document.removeEventListener("pointerdown", close, true);
       document.removeEventListener("keydown", closeWithKeyboard);
     };
-  }, [projectOpen]);
+  }, [branchOpen]);
+
+  const switchBranch = async (name: string, confirmDirty = false) => {
+    if (!name || name === branch) {
+      setBranchOpen(false);
+      setBranchSearch("");
+      return;
+    }
+    try {
+      await execute({
+        kind: "switch_git_branch",
+        target: name,
+        decision: confirmDirty ? "confirm_dirty" : undefined,
+      });
+      setBranchOpen(false);
+      setBranchSearch("");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!confirmDirty && /uncommitted changes/i.test(message)) {
+        if (window.confirm(tFormat(snapshot.language, "dirtySwitchConfirm", { branch: name }))) {
+          await switchBranch(name, true);
+        }
+        return;
+      }
+      setError(message);
+    }
+  };
 
   return <header className="app-titlebar titlebar-region">
     <div className="window-controls" aria-hidden="true"><i /><i /><i /></div>
-    <div className="titlebar-project-switch" ref={projectSwitch}>
-      <button type="button" className="titlebar-project" title={snapshot.workspace} aria-haspopup="listbox" aria-expanded={projectOpen} onClick={() => setProjectOpen((open) => !open)}>
+    <div className="titlebar-project-switch" ref={branchSwitch}>
+      <button type="button" className="titlebar-project" title={`${project} / ${branch}`} aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} onClick={() => setBranchOpen((open) => !open)}>
         <strong>{project}</strong><b aria-hidden="true">/</b><span>{branch}</span><ChevronDown size={14} />
       </button>
-      {projectOpen && <section className="titlebar-project-popover" aria-label={snapshot.language === "zh-CN" ? "切换项目与分支" : "Switch project and branch"}>
-        <header><strong>{snapshot.language === "zh-CN" ? "项目与分支" : "Projects and branches"}</strong><span>{snapshot.language === "zh-CN" ? "选择工作上下文" : "Choose work context"}</span></header>
-        <label className="titlebar-project-search"><Search size={14} /><input autoFocus value={projectSearch} onChange={(event) => setProjectSearch(event.target.value)} placeholder={snapshot.language === "zh-CN" ? "搜索项目或分支…" : "Search projects or branches…"} /><kbd>⌘⇧O</kbd></label>
+      {branchOpen && <section className="titlebar-project-popover" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}>
+        <header><strong>{snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}</strong><span>{project}</span></header>
+        <label className="titlebar-project-search"><Search size={14} /><input autoFocus value={branchSearch} onChange={(event) => setBranchSearch(event.target.value)} placeholder={`${t("searchBranches")}…`} aria-label={t("searchBranches")} /></label>
         <div className="titlebar-project-options" role="listbox">
-          {visibleProjects.map((item) => {
-            const selected = item.workspace === snapshot.workspace;
-            const name = projectName(item.workspace);
-            const prototypeDemo = snapshot.workspace.endsWith("/azem");
-            const optionBranch = selected ? branch : prototypeDemo && name === "llmux" ? "feat/usage-store" : prototypeDemo && name === "venat" ? "main" : compactParent(item.workspace);
-            const optionMeta = selected
-              ? snapshot.language === "zh-CN" ? `${workspaceChangedFiles} 个改动` : `${workspaceChangedFiles} changes`
-              : prototypeDemo && name === "llmux" ? "1 个 PR"
-                : prototypeDemo && name === "venat" ? snapshot.language === "zh-CN" ? "工作树干净" : "Clean"
-                  : "";
-            return <button key={item.workspace} type="button" role="option" aria-selected={selected} onClick={() => {
-              setProjectOpen(false);
-              if (selected) useRuntimeStore.getState().setView("projects");
-              else void openProject(item.workspace).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-            }}>
-              <span className="titlebar-project-letter">{name.slice(0, 1).toUpperCase()}</span>
-              <span><strong>{name}</strong><small>{optionBranch}</small></span>
-              <em>{optionMeta}</em>
+          {visibleBranches.map((item) => {
+            const currentDetail = workspaceChangedFiles > 0
+              ? tFormat(snapshot.language, "uncommittedFiles", { count: workspaceChangedFiles })
+              : t("clean");
+            return <button key={item.name} type="button" role="option" aria-selected={item.current} title={item.name} onClick={() => void switchBranch(item.name)}>
+              <span className="titlebar-project-letter"><GitBranch size={14} /></span>
+              <span><strong>{item.name}</strong><small>{item.current ? currentDetail : t("local")}</small></span>
+              <em>{item.current ? snapshot.language === "zh-CN" ? "当前" : "Current" : ""}</em>
               <Check size={14} />
             </button>;
           })}
         </div>
-        {visibleProjects.length === 0 && <p>{snapshot.language === "zh-CN" ? "没有匹配的项目" : "No matching projects"}</p>}
-        <footer><span>↑↓ {snapshot.language === "zh-CN" ? "导航" : "Navigate"}</span><span>↵ {snapshot.language === "zh-CN" ? "选择" : "Select"}</span><span>esc {snapshot.language === "zh-CN" ? "关闭" : "Close"}</span></footer>
+        {visibleBranches.length === 0 && <p>{t("noMatchingBranches")}</p>}
+        <footer><span>↵ {snapshot.language === "zh-CN" ? "切换" : "Switch"}</span><span>esc {snapshot.language === "zh-CN" ? "关闭" : "Close"}</span></footer>
       </section>}
     </div>
     <button type="button" className="titlebar-command" onClick={() => setCommandOpen(true)} aria-label={t("command")}>
       <span>{snapshot.language === "zh-CN" ? "搜索、跳转或执行命令" : "Search, jump, or run a command"}</span><kbd><Command size={11} />K</kbd>
     </button>
   </header>;
-}
-
-function projectName(workspace: string) {
-  return workspace.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
-}
-
-function compactParent(workspace: string) {
-  const parts = workspace.split(/[\\/]/).filter(Boolean);
-  return parts.slice(-2, -1)[0] || workspace;
 }
 
 function ResizeHandle({ value, setValue, min, max }: { value: number; setValue: (value: number) => void; min: number; max: number }) {

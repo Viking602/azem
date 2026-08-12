@@ -197,6 +197,11 @@ provider/model is resolved by the live provider runtime before the change is
 persisted. A vision route whose catalog explicitly excludes image input is
 rejected; models with incomplete modality metadata remain selectable for
 provider compatibility.
+Internal structured and short-text generation first honors the configured
+reasoning effort. If a reasoning model exhausts its output budget before
+emitting any final text, Azem retries that internal request once at `low`
+reasoning; ordinary provider failures and empty completed responses still fail
+explicitly.
 `agents.approval` accepts any enabled subscription or llmux provider/model. If
 unset, it inherits the active session route like the other non-main routes.
 The reviewer always receives an explicit JSON-only output contract. Providers

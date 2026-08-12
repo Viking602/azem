@@ -16,6 +16,7 @@ import (
 const (
 	disableImageInputExtraKey = "azem.disable_image_input"
 	omittedImageNotice        = "[Image attachment omitted because the selected model accepts text input only.]"
+	trustedHostContextPrefix  = "[Trusted host context]\n"
 )
 
 func convertRequest(request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, *toolNames, error) {
@@ -85,22 +86,13 @@ func convertMessages(input []message.Message, attachmentRoot string, names *tool
 	messages := make([]sdk.Message, 0, len(input))
 	instructions := make([]string, 0, 2)
 	lastUser := lastUserMessageIndex(input)
+	conversationStarted := false
 	for index, current := range input {
 		switch current.Role {
 		case message.RoleSystem:
-			if current.Text == "" {
-				continue
-			}
-			if current.Visibility == message.VisibilityPrivate {
-				if developerMessages {
-					messages = append(messages, sdk.TextMessage(sdk.RoleDeveloper, current.Text))
-				} else {
-					instructions = append(instructions, current.Text)
-				}
-			} else {
-				instructions = append(instructions, current.Text)
-			}
+			messages, instructions = appendSystemMessage(messages, instructions, current, anthropicProtocol, developerMessages, conversationStarted)
 		case message.RoleUser, message.RoleCustom:
+			conversationStarted = true
 			parts, err := userContentParts(current, attachmentRoot, disableImages, index == lastUser)
 			if err != nil {
 				return nil, "", err
@@ -109,12 +101,14 @@ func convertMessages(input []message.Message, attachmentRoot string, names *tool
 				messages = append(messages, sdk.Message{Role: sdk.RoleUser, Content: parts})
 			}
 		case message.RoleAssistant:
+			conversationStarted = true
 			converted, err := assistantMessage(current, names)
 			if err != nil {
 				return nil, "", err
 			}
 			messages = append(messages, converted)
 		case message.RoleTool:
+			conversationStarted = true
 			if current.ToolResult == nil {
 				return nil, "", fmt.Errorf("tool message %q has no result", current.ID)
 			}
@@ -135,6 +129,34 @@ func convertMessages(input []message.Message, attachmentRoot string, names *tool
 		}
 	}
 	return messages, strings.Join(instructions, "\n\n"), nil
+}
+
+func appendSystemMessage(messages []sdk.Message, instructions []string, current message.Message, anthropicProtocol, developerMessages, conversationStarted bool) ([]sdk.Message, []string) {
+	if current.Text == "" {
+		return messages, instructions
+	}
+	// Anthropic exposes one top-level system field and no mid-conversation
+	// system role. Hoisting a later host message into that field rewrites
+	// the prefix ahead of every prior turn, defeating DeepSeek's automatic
+	// prefix cache. Keep late host context at its original tail position.
+	if anthropicProtocol {
+		return appendAnthropicSystemMessage(messages, instructions, current, developerMessages, conversationStarted)
+	}
+	return appendLeadingSystemMessage(messages, instructions, current, developerMessages)
+}
+
+func appendAnthropicSystemMessage(messages []sdk.Message, instructions []string, current message.Message, developerMessages, conversationStarted bool) ([]sdk.Message, []string) {
+	if conversationStarted {
+		return append(messages, sdk.TextMessage(sdk.RoleUser, trustedHostContextPrefix+current.Text)), instructions
+	}
+	return appendLeadingSystemMessage(messages, instructions, current, developerMessages)
+}
+
+func appendLeadingSystemMessage(messages []sdk.Message, instructions []string, current message.Message, developerMessages bool) ([]sdk.Message, []string) {
+	if current.Visibility == message.VisibilityPrivate && developerMessages {
+		return append(messages, sdk.TextMessage(sdk.RoleDeveloper, current.Text)), instructions
+	}
+	return messages, append(instructions, current.Text)
 }
 
 func lastUserMessageIndex(input []message.Message) int {

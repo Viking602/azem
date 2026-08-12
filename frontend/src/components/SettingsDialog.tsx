@@ -4,7 +4,7 @@ import {
   RefreshCw, Search, Settings2, ShieldAlert, ShieldCheck, X,
 } from "lucide-react";
 import { execute, listSystemFonts, type SystemFont } from "../bridge";
-import { tFormat, translator, type Language } from "../i18n";
+import { reasoningLabel, sortReasoningLevels, tFormat, translator, type Language } from "../i18n";
 import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ModelOption } from "../store";
 import type { DeliveryMode, ModelProvider, ModelRoute, ModelRouteConfig } from "../types";
 import MenuSelect from "./MenuSelect";
@@ -19,7 +19,7 @@ export default function SettingsDialog() {
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const modelRoutes = useRuntimeStore((state) => state.modelRoutes);
-	const coreModelRoutes = modelRoutes.filter((route) => route.Scope !== "subagent");
+  const coreModelRoutes = modelRoutes.filter((route) => route.Scope !== "subagent" && route.Scope !== "main");
 	const subagentModelRoutes = modelRoutes.filter((route) => route.Scope === "subagent");
   const modelProviders = useRuntimeStore((state) => state.modelProviders);
   const catalogModelCount = modelProviders.reduce((total, provider) => total + provider.Models.length, 0);
@@ -233,6 +233,10 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
   const model = findModelOption(providerModels, requestedModel)?.id || providerModels[0]?.id || "";
   const modelInfo = findModelOption(providerModels, model);
   const reasoning = value.reasoning || modelInfo?.defaultReasoning || snapshot.reasoning;
+  const reasoningLevels = sortReasoningLevels([
+    ...(modelInfo?.reasoningLevels ?? []),
+    reasoning,
+  ]);
   const inherited = !value.provider && !value.model && !value.reasoning;
   const title = routeTitle(route, language);
   const configuredModelOptions = routeModelOptions(modelsByProvider, modelProviders, requiresExplicitRoute);
@@ -256,11 +260,30 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
     setValue(nextValue);
     void action("set_model_route", "", { ...route, Route: nextValue });
   };
+  const selectReasoning = (nextReasoning: string) => {
+    const nextValue = { provider, model, reasoning: nextReasoning };
+    setValue(nextValue);
+    void action("set_model_route", "", { ...route, Route: nextValue });
+  };
 
   return <div className="route-row">
     <ProviderIcon provider={provider || snapshot.provider} size={19} className="route-provider-icon" />
     <div className="route-copy"><strong>{title}</strong><small>{routeDescription(route, description, language)}</small></div>
-    <MenuSelect className="route-model-menu" panelClassName="route-model-options" value={selectedValue} options={allModelOptions} onChange={selectModel} ariaLabel={`${title} ${t("model")}`} searchable searchPlaceholder={t("searchModels")} emptyLabel={t("noMatchingModels")} fit="full" showSelectedIcon={false} menuWidth={292} menuAlign="right" />
+    <div className="route-controls">
+      <MenuSelect className="route-model-menu" panelClassName="route-model-options" value={selectedValue} options={allModelOptions} onChange={selectModel} ariaLabel={`${title} ${t("model")}`} searchable searchPlaceholder={t("searchModels")} emptyLabel={t("noMatchingModels")} fit="full" showSelectedIcon={false} menuWidth={292} menuAlign="right" />
+      <MenuSelect
+        className="route-reasoning-menu"
+        panelClassName="route-reasoning-options"
+        value={reasoning}
+        options={reasoningLevels.map((level) => ({ value: level, label: reasoningLabel(level, language) }))}
+        onChange={selectReasoning}
+        ariaLabel={`${title} ${t("reasoning")}`}
+        disabled={reasoningLevels.length <= 1}
+        showSelectedIcon={false}
+        menuWidth={148}
+        menuAlign="right"
+      />
+    </div>
   </div>;
 }
 

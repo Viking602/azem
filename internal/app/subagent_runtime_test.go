@@ -238,7 +238,9 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 				childUsage = event
 			}
 		case EventTextDelta:
-			answer += event.Text
+			if event.TextPhase != string(hyprovider.TextPhaseCommentary) {
+				answer += event.Text
+			}
 		case EventApprovalRequested:
 			if err := service.ExecuteAction(ctx, Action{Kind: ActionResolveApproval, Target: event.ApprovalID, Decision: "once"}); err != nil {
 				t.Fatal(err)

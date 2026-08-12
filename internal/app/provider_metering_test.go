@@ -11,6 +11,7 @@ import (
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
+	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/stream"
 )
@@ -70,6 +71,71 @@ func TestProviderStreamSinkPersistsUnphasedToolTurnTextAsCommentary(t *testing.T
 	}
 	if len(projection.Blocks) != 1 || projection.Blocks[0].Kind != "commentary" || projection.Blocks[0].Content != "先检查代码。" {
 		t.Fatalf("blocks=%+v", projection.Blocks)
+	}
+}
+
+func TestProviderStreamSinkSynthesizesOneCommentaryBeforeEachToolBatch(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err = sessions.Ensure(ctx, session.Session{ID: "s", Title: "tool announcements"}); err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, config.Default())
+	host.sessions = sessions
+	sink := host.providerStreamSink("s", "r", "deepseek", "deepseek-v4-flash", "high", "llmux:deepseek")
+	for _, call := range []message.ToolCall{
+		{ID: "read", Name: "coding.read_file", Arguments: []byte(`{"path":"README.md"}`)},
+		{ID: "search", Name: "coding.search", Arguments: []byte(`{"query":"main"}`)},
+	} {
+		if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameToolCall, ToolCall: &call}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameDone, StopReason: hyprovider.StopReasonToolUse}); err != nil {
+		t.Fatal(err)
+	}
+	third := message.ToolCall{ID: "test", Name: "coding.go_test", Arguments: []byte(`{"packages":["./internal/app"]}`)}
+	if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameToolCall, ToolCall: &third}); err != nil {
+		t.Fatal(err)
+	}
+
+	projection, err := sessions.LoadProjection(ctx, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var commentaries []session.Block
+	for _, block := range projection.Blocks {
+		if block.Kind == "commentary" {
+			commentaries = append(commentaries, block)
+			if block.Content != fallbackToolAnnouncement {
+				t.Fatalf("commentary=%q", block.Content)
+			}
+		}
+	}
+	if len(commentaries) != 2 {
+		t.Fatalf("commentaries=%+v blocks=%+v", commentaries, projection.Blocks)
+	}
+	wantEvents := []EventKind{
+		EventTextDelta, EventToolStarted, EventToolStarted,
+		EventContextUsage,
+		EventTextDelta, EventToolStarted,
+	}
+	for index, want := range wantEvents {
+		event, nextErr := host.NextEvent(ctx)
+		if nextErr != nil {
+			t.Fatalf("event %d: %v", index, nextErr)
+		}
+		if event.Kind != want {
+			t.Fatalf("event %d kind=%q, want %q", index, event.Kind, want)
+		}
+		if event.Kind == EventTextDelta && (event.Text != fallbackToolAnnouncement || event.TextPhase != string(hyprovider.TextPhaseCommentary)) {
+			t.Fatalf("announcement event=%+v", event)
+		}
 	}
 }
 

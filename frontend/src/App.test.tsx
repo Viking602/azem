@@ -12,6 +12,7 @@ import type { RuntimeEvent, Session, Snapshot } from "./types";
 Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => undefined });
 
 const prototypeStyles = readFileSync("src/prototype.css", "utf8");
+const applicationStyles = readFileSync("src/styles.css", "utf8");
 const conceptStyles = readFileSync("../designs/azem-ui-motion-concept/styles.css", "utf8");
 const bridgeRuntime = vi.hoisted(() => ({ listener: null as ((event: RuntimeEvent) => void) | null }));
 
@@ -74,6 +75,7 @@ describe("application interactions", () => {
     root = createRoot(container);
 
     await act(async () => root?.render(<App />));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
     expect(execute).toHaveBeenCalledWith({ kind: "list_sessions" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_git_branches" });
@@ -82,6 +84,49 @@ describe("application interactions", () => {
     expect(execute).toHaveBeenCalledWith({ kind: "list_model_routes", sessionId: "session-demo" });
     expect(container.textContent).not.toContain("重播流式输出");
     expect(container.textContent).not.toContain("Replay stream");
+  });
+
+  it("keeps the empty launcher title without a logo", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+    await act(async () => useRuntimeStore.setState({ view: "thread", blocks: [], running: false }));
+
+    expect(container.querySelector(".empty-composer-heading h1")?.textContent).toBe("准备开始什么？");
+    expect(container.querySelector(".empty-launch-mark")).toBeNull();
+  });
+
+  it("uses the titlebar control for branches and keeps the project label intact", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+    const trigger = container.querySelector<HTMLButtonElement>(".titlebar-project");
+    expect(trigger?.getAttribute("aria-label")).toBe("切换分支");
+    expect(trigger?.querySelector("strong")?.textContent).toBe("azem");
+
+    await act(async () => trigger?.click());
+    const popover = container.querySelector<HTMLElement>(".titlebar-project-popover");
+    expect(popover?.getAttribute("aria-label")).toBe("切换分支");
+    expect(popover?.textContent).not.toContain("项目与分支");
+    expect(popover?.textContent).not.toContain("llmux");
+    expect(popover?.textContent).toContain("feat/usage-store");
+
+    vi.mocked(execute).mockClear();
+    const branchOption = Array.from(popover?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])
+      .find((option) => option.textContent?.includes("feat/usage-store"));
+    await act(async () => branchOption?.click());
+    expect(execute).toHaveBeenCalledWith({ kind: "switch_git_branch", target: "feat/usage-store", decision: undefined });
+  });
+
+  it("keeps long branch catalogs inside a scrollable viewport", () => {
+    expect(applicationStyles).toMatch(/\.titlebar-project-popover\s*\{[^}]*max-height:\s*min\(540px,\s*calc\(100vh - 58px\)\);[^}]*overflow:\s*hidden;/s);
+    expect(applicationStyles).toMatch(/\.titlebar-project-options\s*\{[^}]*max-height:\s*min\(420px,\s*calc\(100vh - 160px\)\);[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain;/s);
   });
 
   it("paces streaming text without breaking Unicode or event order", () => {

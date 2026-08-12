@@ -194,6 +194,10 @@ func (s *Service) ImportImageBytes(sessionID, name, mimeType string, data []byte
 	return s.attachments.ImportBytes(sessionID, name, mimeType, data)
 }
 
+func (s *Service) ReadImageAttachment(sessionID string, attachment session.Attachment) ([]byte, error) {
+	return s.attachments.Read(sessionID, attachment)
+}
+
 func (s *Service) loadRecap(ctx context.Context, sessionID string) (*recap.Recap, error) {
 	if s.recap == nil {
 		return nil, nil

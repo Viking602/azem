@@ -16,6 +16,28 @@ function runningAgent(id: string, toolCallId: string, description: string): Agen
 }
 
 describe("Codex-style process timeline", () => {
+  it("renders sent image attachments as clickable thumbnails", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const image = "data:image/png;base64,iVBORw==";
+    const block: Block = {
+      id: "user-image", kind: "user", content: "检查这张图",
+      attachments: [{ id: "image-1", name: "screen.png", mimeType: "image/png", path: image, size: 4 }],
+    };
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [block], language: "zh-CN" })));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+    const thumbnail = container.querySelector<HTMLImageElement>('.user-attachments .attachment-preview-image img');
+    expect(thumbnail?.getAttribute("src")).toBe(image);
+    await act(async () => container.querySelector<HTMLButtonElement>('.attachment-preview-image')?.click());
+    expect(document.querySelector('.attachment-lightbox-canvas img')?.getAttribute("src")).toBe(image);
+    await act(async () => document.querySelector<HTMLButtonElement>('.attachment-lightbox header button')?.click());
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("promotes parallel subagents into one clickable run card and hides the empty thinking heartbeat", async () => {
     const previousAgents = useRuntimeStore.getState().agents;
     const previousSelection = useRuntimeStore.getState().selectedAgentId;
@@ -366,7 +388,9 @@ describe("Codex-style process timeline", () => {
     expect(steps[1]?.getAttribute("aria-current")).toBe("step");
     expect(steps[1]?.querySelector("time")?.textContent).toBe("4s");
     expect(container.querySelector(".commentary-block")?.textContent).toContain("不能被前端擅自截成标题");
-    expect(container.querySelector(".model-progress-tools")).toBeNull();
+    expect(steps[0]?.querySelector(".model-progress-tools")).toBeNull();
+    expect(steps[1]?.open).toBe(true);
+    expect(steps[1]?.querySelector(".model-progress-tools")?.textContent).toContain("编辑文件");
 
     await act(async () => {
       steps[0]!.open = true;
@@ -374,6 +398,63 @@ describe("Codex-style process timeline", () => {
     });
     expect(steps[0]?.querySelector(".model-progress-tools")?.textContent).toContain("读取文件");
     expect(container.querySelectorAll(".process-entries > .tool-block")).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
+  it("keeps reasoning inside the active announced tool step", async () => {
+    const blocks: Block[] = [
+      {
+        id: "thinking-before", kind: "thinking", runId: "run", state: "completed",
+        content: "先确认调用边界", data: { elapsedMs: "1200" },
+      },
+      {
+        id: "progress", kind: "commentary", runId: "run", title: "progress", state: "completed",
+        content: "**调查运行时入口**\n读取流事件与前端投影",
+      },
+      {
+        id: "thinking-live", kind: "thinking", runId: "run", state: "streaming",
+        content: "正在核对事件顺序",
+      },
+      {
+        id: "search", kind: "tool", runId: "run", title: "coding.search", state: "running",
+        content: JSON.stringify({ query: "FrameToolCall" }),
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks, language: "zh-CN", activeRunId: "run", running: true,
+    })));
+
+    const step = container.querySelector<HTMLDetailsElement>(".model-progress-step");
+    expect(step?.open).toBe(true);
+    expect(step?.querySelector("strong")?.textContent).toBe("调查运行时入口");
+    expect(step?.querySelectorAll(".model-progress-tools .reasoning-trace")).toHaveLength(2);
+    expect(step?.querySelector('.model-progress-tools .tool-block[data-state="running"]')).not.toBeNull();
+    expect(container.querySelectorAll(".process-entries > .reasoning-trace")).toHaveLength(0);
+
+    await act(async () => root.unmount());
+  });
+
+  it("keeps emoji-prefixed model progress on the same compact step projection", async () => {
+    const blocks: Block[] = [{
+      id: "progress-skill", kind: "commentary", runId: "run", title: "progress", state: "completed",
+      content: "🥷\n\n**加载深审规则**\n读取整库审计模式后建立证据清单。",
+      data: { startedAt: "1000", completedAt: "7000" },
+    }];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
+
+    const step = container.querySelector<HTMLDetailsElement>(".model-progress-step");
+    expect(step?.querySelector("strong")?.textContent).toBe("加载深审规则");
+    expect(step?.querySelector("small")?.textContent).toBe("读取整库审计模式后建立证据清单。");
+    expect(step?.querySelector("time")?.textContent).toBe("6s");
+    expect(container.querySelector(".commentary-block")).toBeNull();
+    expect(container.textContent).not.toContain("🥷");
 
     await act(async () => root.unmount());
   });
@@ -507,6 +588,61 @@ describe("Codex-style process timeline", () => {
     container.remove();
   });
 
+  it("matches Codex file-summary density by folding after three files", async () => {
+    const files = ["one.go", "two.go", "three.go", "four.go", "five.go"];
+    const blocks: Block[] = [
+      { id: "user-files", kind: "user", content: "修改这些文件", state: "completed" },
+      {
+        id: "edit-files", kind: "tool", runId: "run-files", title: "coding.edit_hashline", state: "completed",
+        data: { structured: JSON.stringify({ sections: files.map((path) => ({
+          path,
+          firstChangedLine: 1,
+          diff: "-old\n+new",
+        })) }) },
+      },
+      { id: "answer-files", kind: "assistant", runId: "run-files", content: "完成。", state: "completed" },
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
+
+    const summary = container.querySelector(".edited-files-summary")!;
+    expect(summary.querySelectorAll("li")).toHaveLength(3);
+    expect(summary.textContent).toContain("再显示 2 个文件");
+    const toggle = summary.querySelector<HTMLButtonElement>(".edited-files-toggle")!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    await act(async () => toggle.click());
+
+    expect(summary.querySelectorAll("li")).toHaveLength(5);
+    expect(summary.textContent).toContain("收起");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("omits zero file-change totals and uses a compact deletion sign", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const blocks: Block[] = [{
+      id: "insert-only", kind: "tool", runId: "run-insert", title: "coding.edit_hashline", state: "completed",
+      data: { structured: JSON.stringify({ sections: [{ path: "src/app.ts", firstChangedLine: 1, diff: "+const added = true;" }] }) },
+    }];
+
+    await act(async () => root.render(createElement(TimelineFeed, { blocks, language: "zh-CN" })));
+
+    const totals = container.querySelector(".file-change-totals");
+    expect(totals?.textContent).toBe("+1");
+    expect(totals?.querySelector(".minus")).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("keeps a running hashline edit in the file-change presentation as it completes", async () => {
     const runningEdit: Block = {
       id: "edit-live", kind: "tool", runId: "run-live-edit", title: "coding.edit_hashline", state: "running",
@@ -534,7 +670,7 @@ describe("Codex-style process timeline", () => {
     expect(runningEntry?.getAttribute("aria-busy")).toBe("true");
     expect(runningEntry?.textContent).toContain("正在编辑文件");
     expect(runningEntry?.textContent).toContain("+3");
-    expect(runningEntry?.textContent).toContain("−3");
+    expect(runningEntry?.textContent).toContain("-3");
     expect(container.querySelector(".tool-block")).toBeNull();
 
     await act(async () => root.render(createElement(TimelineFeed, {
@@ -553,6 +689,43 @@ describe("Codex-style process timeline", () => {
     expect(completedEntry).toBe(runningEntry);
     expect(completedEntry?.getAttribute("aria-busy")).toBeNull();
     expect(completedEntry?.textContent).toContain("已编辑的文件");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("never exposes raw edit arguments while an active file change is not yet parseable", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const rawEdit = "¶src/app.ts#ABCD\nreplace block 4:\n+const unrendered = true;";
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [{
+        id: "edit-partial", kind: "tool", runId: "run-live-edit", title: "coding.edit_hashline", state: "running",
+        data: { arguments: JSON.stringify({ input: rawEdit }) },
+      }],
+      language: "zh-CN", activeRunId: "run-live-edit", running: true,
+    })));
+
+    expect(container.querySelector('.file-change-entry[data-state="running"]')).not.toBeNull();
+    expect(container.querySelector(".tool-block")).toBeNull();
+    expect(container.textContent).toContain("正在编辑文件");
+    expect(container.textContent).not.toContain("unrendered");
+    expect(container.querySelector(".file-change-totals")).toBeNull();
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [{
+        id: "edit-partial-step", kind: "tool", runId: "run-live-edit", title: "coding.edit_hashline", state: "running",
+        content: rawEdit,
+        data: { arguments: JSON.stringify({ input: rawEdit }), presentation: "steps" },
+      }],
+      language: "zh-CN", activeRunId: "run-live-edit", running: true,
+    })));
+
+    expect(container.querySelector('.file-change-entry[data-state="running"]')).not.toBeNull();
+    expect(container.querySelector(".timeline-step")).toBeNull();
+    expect(container.textContent).not.toContain("unrendered");
 
     await act(async () => root.unmount());
     container.remove();
@@ -651,6 +824,44 @@ describe("Codex-style process timeline", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+  it("projects multi-turn sessions as continuous scroll with user bubbles and process folds", async () => {
+    const blocks: Block[] = [
+      { id: "u1", kind: "user", content: "分析 Timeline 问题", state: "completed" },
+      { id: "a1", kind: "assistant", runId: "run-1", content: "过程透明但难读", textPhase: "final_answer", state: "completed" },
+      { id: "u2", kind: "user", content: "给出非 Timeline 方案", state: "completed" },
+      {
+        id: "tool", kind: "tool", runId: "run-2", title: "coding.read_file", state: "completed",
+        data: { elapsedMs: "1200" },
+      },
+      { id: "a2", kind: "assistant", runId: "run-2", content: "采用工作文档投影", textPhase: "final_answer", state: "completed" },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks, language: "zh-CN", collapseCompletedProcess: true,
+    })));
+
+    expect(container.querySelector(".timeline-feed.session-document")).not.toBeNull();
+    // History stays expanded for continuous scroll — no fold-row chrome.
+    expect(container.querySelector(".session-history-turn > summary")).toBeNull();
+    expect(container.querySelectorAll(".session-history-turn")).toHaveLength(1);
+    expect(container.querySelector(".session-history-turn .session-turn-index")?.textContent).toBe("回合 01");
+    expect(container.querySelector(".session-history-turn .user-block")?.textContent).toContain("分析 Timeline 问题");
+    expect(container.querySelector(".session-history-turn .assistant-block")?.textContent).toContain("过程透明但难读");
+    // Current turn uses the same user bubble, not a task-brief card.
+    expect(container.querySelector(".session-turn-current.task-brief")).toBeNull();
+    expect(container.querySelector(".session-turn-current .task-brief")).toBeNull();
+    expect(container.querySelector(".session-turn-current .session-turn-index")?.textContent).toBe("当前回合");
+    expect(container.querySelector(".session-turn-current .user-block")?.textContent).toContain("给出非 Timeline 方案");
+    expect(container.querySelector(".session-turn-current .assistant-block")?.textContent).toContain("采用工作文档投影");
+    const process = container.querySelector<HTMLDetailsElement>(".session-turn-current .process-fold");
+    expect(process?.getAttribute("data-state")).toBe("completed");
+    expect(process?.open).toBe(false);
+
+    await act(async () => root.unmount());
+  });
+
   it("renders ANSI command output as styled text without escape glyphs", async () => {
     const ansi = "\u001b[1m\u001b[30m\u001b[46m RUN \u001b[49m\u001b[39m\u001b[22m \u001b[36mv4.1.10\u001b[39m";
     const block: Block = {

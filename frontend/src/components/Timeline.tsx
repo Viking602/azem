@@ -1,5 +1,5 @@
 import {
-  Check, ChevronDown, ChevronRight, CircleStop, Clock3, Command, FileCode2, FilePenLine, ImagePlus,
+  Check, ChevronDown, ChevronRight, CircleStop, Clock3, Command, FileCode2, FilePenLine,
   LoaderCircle, MessageCircleQuestion, PencilLine, Play, ShieldCheck, X,
 } from "lucide-react";
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
@@ -14,19 +14,26 @@ import { useRuntimeStore } from "../store";
 import type { AgentState, Block, Snapshot } from "../types";
 import {
   formatDuration, formatToolPresentation, groupProcessTimelineBlocks, isActiveProcessBlock, isRunningTool,
-  processElapsedMs, segmentProcessTrail, summarizeToolGroup, type ProcessTimelineEntry,
+  processElapsedMs, summarizeToolGroup, type ProcessTimelineEntry,
 } from "./toolTimeline";
 import AnsiText from "./AnsiText";
+import AttachmentPreview from "./AttachmentPreview";
 import CodeDiff from "./CodeDiff";
 import SubagentGlyph from "./SubagentGlyph";
 import {
-  aggregateEditedFiles, fileChangesForBlock, pendingFileChangeSummaryForBlock,
+  fileChangesForBlock, isActiveFileChangeBlock, pendingFileChangeSummaryForBlock,
   type EditedFileSummary, type FileChange,
 } from "./fileChanges";
+import {
+  projectSessionDocument,
+  turnEditedFiles,
+  type SessionTurn,
+  type SessionTurnItem,
+} from "./sessionDocument";
 
 function TimelineFeedView({
   blocks, language, compact = false, activeRunId = "", running = false, waitingForModel = false,
-  foldActiveProcess = false, collapseCompletedProcess = false,
+  foldActiveProcess = true, collapseCompletedProcess = false,
 }: {
   blocks: Block[];
   language: Snapshot["language"];
@@ -39,94 +46,194 @@ function TimelineFeedView({
 }) {
   const activeDelegation = useRuntimeStore((state) => Boolean(activeRunId) && state.agents.some((agent) =>
     isSubagentActive(agent.state) && agent.parentRunId === activeRunId));
-  // Side chat stays flat; main transcript folds completed process trails like Codex.
+  // Side chat stays flat/compact; main session uses document projection.
   if (compact) {
     return <div className="timeline-feed compact">
       <ProcessEntries blocks={blocks} language={language} compact />
     </div>;
   }
 
-  const segments = segmentProcessTrail(blocks, { activeRunId, running });
-  const decorated = segments.map((segment, index) => ({
-    segment,
-    index,
-    runId: segment.kind === "block"
-      ? segment.block.runId || ""
-      : segment.blocks.find((block) => block.runId)?.runId || "",
-  }));
-  const latestProcessIndex = decorated.reduce(
-    (latest, item) => item.segment.kind === "process" ? item.index : latest,
-    -1,
-  );
-  const processRuns = new Set(decorated
-    .filter((item) => item.segment.kind === "process" && item.runId)
-    .map((item) => item.runId));
-  const blocksByRun = new Map<string, Block[]>();
-  for (const block of blocks) {
-    if (!block.runId) continue;
-    const runBlocks = blocksByRun.get(block.runId) ?? [];
-    runBlocks.push(block);
-    blocksByRun.set(block.runId, runBlocks);
-  }
-  const changesByRun = new Map<string, EditedFileSummary>();
-  for (const [runId, runBlocks] of blocksByRun) {
-    const summary = aggregateEditedFiles(runBlocks);
-    if (summary.files.length) changesByRun.set(runId, summary);
-  }
-  const lastContentIndexByRun = new Map<string, number>();
-  for (const item of decorated) {
-    if (!item.runId || (item.segment.kind === "block" && item.segment.block.kind === "status")) continue;
-    lastContentIndexByRun.set(item.runId, item.index);
-  }
+  // Document mode projects blocks into reading turns. Process is a foldable
+  // attachment by default so the answer body stays the primary surface.
+  const foldProcess = foldActiveProcess;
+  const collapseCompleted = collapseCompletedProcess;
+  const projection = projectSessionDocument(blocks, { activeRunId, running });
   const runningSpawn = blocks.some((block) => isSubagentSpawnBlock(block) && isRunningTool(block));
   const showThinkingPlaceholder = waitingForModel && !activeDelegation && !runningSpawn
     && !blocks.some((block) => isActiveReasoning(block)
       && (!activeRunId || !block.runId || block.runId === activeRunId));
 
-  return <div className="timeline-feed">
-    {decorated.map(({ segment, index, runId }) => {
-      const previousSegment = decorated[index - 1]?.segment;
-      const explicitAnswerSection = previousSegment?.kind === "block"
-        && previousSegment.block.kind === "status"
-        && previousSegment.block.data?.variant === "section";
-      const showAnswerSection = segment.kind === "block"
-        && segment.block.kind === "assistant"
-        && segment.block.data?.textPhasePending !== "true"
-        && processRuns.has(runId)
-        && !explicitAnswerSection;
-      const content = segment.kind === "block"
-        ? <TimelineBlock block={segment.block} language={language} />
-        : segment.active
-          ? foldActiveProcess
-            ? <ProcessFold
-                blocks={segment.blocks}
-                elapsedMs={segment.elapsedMs}
-                language={language}
-                featured={index === latestProcessIndex}
-                active
-                collapseCompleted={collapseCompletedProcess}
-              />
-            : <ProcessEntries blocks={segment.blocks} language={language} active />
-          : <ProcessFold
-              blocks={segment.blocks}
-              elapsedMs={segment.elapsedMs}
-              language={language}
-              featured={index === latestProcessIndex}
-              collapseCompleted={collapseCompletedProcess}
-            />;
-      const summary = changesByRun.get(runId);
-      const showSummary = summary
-        && lastContentIndexByRun.get(runId) === index
-        && !(running && runId === activeRunId);
-      const key = segment.kind === "block" ? segment.block.id : segment.id;
-      return <Fragment key={key}>
-        {showAnswerSection ? <AnswerSection language={language} /> : null}
-        {content}
-        {showSummary ? <EditedFilesSummary summary={summary} language={language} /> : null}
-      </Fragment>;
+  const multiTurn = projection.turns.length > 1;
+  return <div className="timeline-feed session-document">
+    {projection.turns.map((turn, index) => {
+      const current = index === projection.currentIndex;
+      return current
+        ? <CurrentSessionTurn
+            key={turn.id}
+            turn={turn}
+            language={language}
+            activeRunId={activeRunId}
+            running={running}
+            multiTurn={multiTurn}
+            foldActiveProcess={foldProcess}
+            collapseCompletedProcess={collapseCompleted}
+          />
+        : <HistorySessionTurn
+            key={turn.id}
+            turn={turn}
+            language={language}
+            index={index}
+            activeRunId={activeRunId}
+            running={running}
+            foldActiveProcess={foldProcess}
+            collapseCompletedProcess
+          />;
     })}
     {showThinkingPlaceholder ? <ThinkingPlaceholder language={language} /> : null}
   </div>;
+}
+
+function CurrentSessionTurn({
+  turn, language, activeRunId, running, multiTurn, foldActiveProcess, collapseCompletedProcess,
+}: {
+  turn: SessionTurn;
+  language: Snapshot["language"];
+  activeRunId: string;
+  running: boolean;
+  multiTurn: boolean;
+  foldActiveProcess: boolean;
+  collapseCompletedProcess: boolean;
+}) {
+  const t = translator(language);
+  const fileSummary = turnEditedFiles(turn, { activeRunId, running });
+  return <section
+    className={`session-turn session-turn-current${multiTurn ? " has-history-context" : ""}`}
+    data-screen-label="current-turn"
+  >
+    {multiTurn ? <div className="session-turn-label">
+      <span className="session-turn-index current">{t("currentTurn")}</span>
+      {running ? <em data-live="true">{t("processing")}</em> : null}
+    </div> : null}
+    {turn.user ? <TimelineBlock block={turn.user} language={language} /> : null}
+    <TurnItems
+      turn={turn}
+      language={language}
+      foldActiveProcess={foldActiveProcess}
+      collapseCompletedProcess={collapseCompletedProcess}
+    />
+    {fileSummary ? <EditedFilesSummary summary={fileSummary} language={language} /> : null}
+  </section>;
+}
+
+/** Past turns stay fully expanded so users scroll up — no fold-row chrome. */
+function HistorySessionTurn({
+  turn, language, index, activeRunId, running, foldActiveProcess, collapseCompletedProcess,
+}: {
+  turn: SessionTurn;
+  language: Snapshot["language"];
+  index: number;
+  activeRunId: string;
+  running: boolean;
+  foldActiveProcess: boolean;
+  collapseCompletedProcess: boolean;
+}) {
+  const t = translator(language);
+  const fileSummary = turnEditedFiles(turn, { activeRunId, running });
+  return <section className="session-turn session-history-turn" data-turn={String(index + 1).padStart(2, "0")}>
+    <div className="session-turn-label">
+      <span className="session-turn-index">{tFormat(language, "turnIndex", { n: String(index + 1).padStart(2, "0") })}</span>
+    </div>
+    {turn.user ? <TimelineBlock block={turn.user} language={language} /> : null}
+    <TurnItems
+      turn={turn}
+      language={language}
+      foldActiveProcess={foldActiveProcess}
+      collapseCompletedProcess={collapseCompletedProcess}
+    />
+    {fileSummary ? <EditedFilesSummary summary={fileSummary} language={language} /> : null}
+  </section>;
+}
+
+function TurnItems({
+  turn, language, foldActiveProcess, collapseCompletedProcess,
+}: {
+  turn: SessionTurn;
+  language: Snapshot["language"];
+  foldActiveProcess: boolean;
+  collapseCompletedProcess: boolean;
+}) {
+  const processIndexes = turn.items
+    .map((item, index) => item.kind === "process" ? index : -1)
+    .filter((index) => index >= 0);
+  const latestProcessIndex = processIndexes.at(-1) ?? -1;
+  const processRuns = new Set(
+    turn.items.flatMap((item) => {
+      if (item.kind === "process") {
+        return item.blocks.map((block) => block.runId || "").filter(Boolean);
+      }
+      return item.block.runId ? [item.block.runId] : [];
+    }),
+  );
+
+  return <>
+    {turn.items.map((item, index) => {
+      const previous = turn.items[index - 1];
+      return <Fragment key={itemKey(item)}>
+        {shouldShowAnswerSection(item, previous, processRuns) ? <AnswerSection language={language} /> : null}
+        <TurnItemView
+          item={item}
+          language={language}
+          featured={item.kind === "process" && index === latestProcessIndex}
+          foldActiveProcess={foldActiveProcess}
+          collapseCompletedProcess={collapseCompletedProcess}
+        />
+      </Fragment>;
+    })}
+  </>;
+}
+
+function itemKey(item: SessionTurnItem) {
+  return item.kind === "process" ? item.id : item.block.id;
+}
+
+function shouldShowAnswerSection(
+  item: SessionTurnItem,
+  previous: SessionTurnItem | undefined,
+  processRuns: Set<string>,
+) {
+  if (item.kind !== "block" || item.block.kind !== "assistant") return false;
+  if (item.block.data?.textPhasePending === "true") return false;
+  const explicit = previous?.kind === "block"
+    && previous.block.kind === "status"
+    && previous.block.data?.variant === "section";
+  if (explicit) return false;
+  const runId = item.block.runId || "";
+  return Boolean(runId && processRuns.has(runId));
+}
+
+function TurnItemView({
+  item, language, featured, foldActiveProcess, collapseCompletedProcess,
+}: {
+  item: SessionTurnItem;
+  language: Snapshot["language"];
+  featured: boolean;
+  foldActiveProcess: boolean;
+  collapseCompletedProcess: boolean;
+}) {
+  if (item.kind === "block") {
+    return <TimelineBlock block={item.block} language={language} />;
+  }
+  if (item.active && !foldActiveProcess) {
+    return <ProcessEntries blocks={item.blocks} language={language} active />;
+  }
+  return <ProcessFold
+    blocks={item.blocks}
+    elapsedMs={item.elapsedMs}
+    language={language}
+    featured={featured}
+    active={item.active}
+    collapseCompleted={collapseCompletedProcess}
+  />;
 }
 
 type TimelineFeedProps = Parameters<typeof TimelineFeedView>[0];
@@ -326,7 +433,10 @@ function ModelProgressStep({ entry, detailBlocks = entry.blocks, language }: {
     role="listitem"
     aria-current={running ? "step" : undefined}
     aria-label={entry.presentation.title}
-    onToggle={(event) => setOpened(event.currentTarget.open)}
+    open={running || opened}
+    onToggle={(event) => {
+      if (!running) setOpened(event.currentTarget.open);
+    }}
   >
     <summary>
       <span className="timeline-step-mark" aria-hidden="true">
@@ -338,10 +448,17 @@ function ModelProgressStep({ entry, detailBlocks = entry.blocks, language }: {
       </div>
       {time ? <time>{time}</time> : null}
     </summary>
-    {opened && detailBlocks.length ? <div className="timeline-step-detail model-progress-tools">
-      {detailBlocks.map((block) => <ToolTimelineBlock key={block.id} block={block} language={language} compact nested />)}
+    {(running || opened) && detailBlocks.length ? <div className="timeline-step-detail model-progress-tools">
+      {detailBlocks.map((block) => <ModelProgressDetail key={block.id} block={block} language={language} />)}
     </div> : null}
   </details>;
+}
+
+function ModelProgressDetail({ block, language }: { block: Block; language: Snapshot["language"] }) {
+  if (block.kind === "thinking") return <ReasoningTrace block={block} language={language} />;
+  if (block.kind === "tool") return <ToolTimelineBlock block={block} language={language} compact nested />;
+  if (block.kind === "diff") return <DiffBlock block={block} language={language} nested />;
+  return <TimelineBlock block={block} language={language} compact />;
 }
 
 function isSubagentSpawnBlock(block: Block) {
@@ -475,7 +592,9 @@ function ToolGroup({ blocks, summary, language }: { blocks: Block[]; summary: st
 
 function ToolStepList({ blocks, language }: { blocks: Block[]; language: Snapshot["language"] }) {
   return <div className="timeline-step-list" role="list">
-    {blocks.map((block) => fileChangesForBlock(block).length || pendingFileChangeSummaryForBlock(block)
+    {blocks.map((block) => fileChangesForBlock(block).length
+      || pendingFileChangeSummaryForBlock(block)
+      || isActiveFileChangeBlock(block)
       ? <ToolTimelineBlock key={block.id} block={block} language={language} />
       : <ToolStep key={block.id} block={block} language={language} />)}
   </div>;
@@ -533,10 +652,11 @@ type TimelineBlockProps = {
 };
 
 function TimelineBlockView({ block, language, compact = false, nested = false }: TimelineBlockProps) {
+  const sessionId = useRuntimeStore((state) => state.currentSessionId || state.snapshot?.sessionId || "");
   if (block.kind === "user") {
     return <article className="user-block">
-      {block.attachments?.length ? <div className="user-attachments">{block.attachments.map((item) => <span key={item.id}><ImagePlus size={13} />{item.name}</span>)}</div> : null}
-      <p>{block.content}</p>
+      {block.attachments?.length ? <div className="user-attachments">{block.attachments.map((item) => <AttachmentPreview key={item.id} attachment={item} sessionId={sessionId} language={language} variant="message" />)}</div> : null}
+      {block.content ? <p>{block.content}</p> : null}
     </article>;
   }
   if (block.kind === "commentary") {
@@ -602,8 +722,8 @@ function ToolTimelineBlock({ block, language, compact = false, nested = false }:
     return <FileChangeBlock changes={fileChanges} language={language} nested={nested} />;
   }
   const pendingSummary = pendingFileChangeSummaryForBlock(block);
-  if (pendingSummary) {
-    return <FileChangeBlock changes={[]} summary={pendingSummary} language={language} nested={nested} running />;
+  if (pendingSummary || isActiveFileChangeBlock(block)) {
+    return <FileChangeBlock changes={[]} summary={pendingSummary ?? undefined} language={language} nested={nested} running />;
   }
   return <ToolDisclosure block={block} language={language} compact={compact} nested={nested} />;
 }
@@ -1044,7 +1164,7 @@ function FileChangeBlock({ changes, summary, language, nested, running = false }
       <span className="work-entry-icon" aria-hidden="true"><FileCode2 size={13} /></span>
       <span className="work-entry-label">{t(running ? "editingFiles" : "editedFiles")}</span>
       <span className="file-change-chevron" aria-hidden="true"><ChevronDown size={13} /></span>
-      <span className="file-change-totals"><span className="plus">+{additions}</span><span className="minus">−{deletions}</span></span>
+      {additions > 0 || deletions > 0 ? <span className="file-change-totals">{additions > 0 ? <span className="plus">+{additions}</span> : null}{deletions > 0 ? <span className="minus">-{deletions}</span> : null}</span> : null}
     </summary>
     {running
       ? <div className="tool-detail-empty">{t("toolExecuting")}</div>
@@ -1072,20 +1192,36 @@ function RunStatusMarker({ block, language }: { block: Block; language: Snapshot
   return <div className="run-status-marker"><span>{label}</span></div>;
 }
 
+const COLLAPSED_EDITED_FILE_COUNT = 3;
+
 function EditedFilesSummary({ summary, language }: { summary: EditedFileSummary; language: Snapshot["language"] }) {
   const t = translator(language);
+  const [expanded, setExpanded] = useState(false);
   const label = summary.files.length === 1
     ? t("editedOneFile")
     : tFormat(language, "editedFileCount", { count: String(summary.files.length) });
+  const hiddenCount = Math.max(0, summary.files.length - COLLAPSED_EDITED_FILE_COUNT);
+  const visibleFiles = expanded ? summary.files : summary.files.slice(0, COLLAPSED_EDITED_FILE_COUNT);
   return <article className="edited-files-summary">
     <header>
-      <span className="edited-files-icon" aria-hidden="true"><FilePenLine size={16} /></span>
+      <span className="edited-files-icon" aria-hidden="true"><FilePenLine size={18} /></span>
       <div><strong>{label}</strong><span><b className="plus">+{summary.additions}</b><b className="minus">−{summary.deletions}</b></span></div>
     </header>
-    <ul>{summary.files.map((file) => <li key={file.path}>
+    <ul>{visibleFiles.map((file) => <li key={file.path}>
       <span title={file.path}>{file.path}</span>
       <span><b className="plus">+{file.additions}</b><b className="minus">−{file.deletions}</b></span>
     </li>)}</ul>
+    {hiddenCount > 0 ? <button
+      type="button"
+      className="edited-files-toggle"
+      aria-expanded={expanded}
+      onClick={() => setExpanded((value) => !value)}
+    >
+      <span>{expanded
+        ? t("editedFilesShowLess")
+        : tFormat(language, "editedFilesShowMore", { count: String(hiddenCount) })}</span>
+      <ChevronDown size={14} aria-hidden="true" />
+    </button> : null}
   </article>;
 }
 

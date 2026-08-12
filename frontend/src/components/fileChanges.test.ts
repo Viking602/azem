@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Block } from "../types";
-import { aggregateEditedFiles, fileChangesForBlock, pendingFileChangeSummaryForBlock } from "./fileChanges";
+import {
+  aggregateEditedFiles, fileChangesForBlock, isActiveFileChangeBlock, pendingFileChangeSummaryForBlock,
+} from "./fileChanges";
 
 describe("file change extraction", () => {
   it("reads structured hashline edits and write-file arguments without raw patch parsing", () => {
@@ -76,6 +78,15 @@ describe("file change extraction", () => {
       ...running,
       data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\nreplace block 4:\n+func next() {}" }) },
     })).toBeNull();
+    expect(isActiveFileChangeBlock({
+      ...running,
+      data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\nreplace block 4:\n+func next() {}" }) },
+    })).toBe(true);
+    expect(isActiveFileChangeBlock({ ...running, state: "queued" })).toBe(false);
+    expect(isActiveFileChangeBlock({
+      ...running,
+      data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\ndelete 4", dryRun: true }) },
+    })).toBe(false);
   });
 
   it("falls back to the compact edit result stored in durable tool output", () => {

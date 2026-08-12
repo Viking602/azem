@@ -14,6 +14,7 @@ import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore
 import type { Attachment, Block, DeliveryMode, ModelRoute, QueuedPrompt, SkillEntry, Snapshot } from "../types";
 import ReasoningEffortSlider, { isHighCostReasoning } from "./ReasoningEffortSlider";
 import ComposerModelPicker from "./ComposerModelPicker";
+import AttachmentPreview from "./AttachmentPreview";
 import ProviderIcon from "./ProviderIcon";
 import { TimelineFeed } from "./Timeline";
 export { approvalPresentation } from "./Timeline";
@@ -271,7 +272,7 @@ export default function ThreadSurface() {
 
   useEffect(() => {
     if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: running ? "instant" : "smooth" });
-  }, [blocks, following, running]);
+  }, [blocks, following, queuedPrompts.length, running]);
 
   useEffect(() => setDeliveryMode(snapshot.queueMode ?? "queue"), [currentSessionId, snapshot.queueMode]);
   useEffect(() => {
@@ -437,7 +438,7 @@ export default function ThreadSurface() {
         >
             {empty ? (
               <div className="empty-composer-wrap">
-                <div className="empty-composer-heading"><span className="azem-mark empty-launch-mark" aria-hidden="true" /><h1>{t("promptTitle")}</h1><p>{t("promptSubtitle")}</p></div>
+                <div className="empty-composer-heading"><h1>{t("promptTitle")}</h1><p>{t("promptSubtitle")}</p></div>
                 <div className="composer-stack">
                   {queue}
                   <Composer
@@ -469,12 +470,14 @@ export default function ThreadSurface() {
                       activeRunId={runId}
                       running={running}
                       waitingForModel={running && (activity === "waiting_model" || activity === "thinking")}
+                      foldActiveProcess
+                      collapseCompletedProcess
                     />
                     {error && <div className="inline-error" role="alert">{error}</div>}
                   </div>
                 </div>
-                {!following && <button className="jump-latest" aria-label={t("jumpLatest")} title={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
                 <div className="composer-dock">
+                  {!following && <button className="jump-latest" aria-label={t("jumpLatest")} title={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
                   <div className="composer-stack">
                     {queue}
                     <Composer
@@ -754,7 +757,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
           </section>}
         </div>}
         {selectedSkill && <div className="composer-skill"><WandSparkles size={17} aria-hidden="true" /><span>{selectedSkill.name}</span></div>}
-        {attachments.length > 0 && <div className="attachment-row">{attachments.map((item) => <span key={item.id}><ImagePlus size={13} />{item.name}<button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.id)}><X size={12} /></button></span>)}</div>}
+        {attachments.length > 0 && <div className="attachment-row">{attachments.map((item) => <AttachmentPreview key={item.id} attachment={item} sessionId={currentSessionId} language={snapshot.language} variant="composer" onRemove={() => removeAttachment(item.id)} />)}</div>}
         <textarea id="azem-composer" value={visiblePrompt} onChange={(event) => setPrompt(skillPrefix + event.target.value)} onPaste={(event) => {
           const images = pastedImages(event.clipboardData);
           if (images.length > 0) {

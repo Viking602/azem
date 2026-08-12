@@ -90,6 +90,24 @@ describe("runtime event projection", () => {
     expect(restored.blocks[0]).toMatchObject({ kind: "plan", planId: "artifact-1", state: "proposed" });
   });
 
+  it("restores persisted attachment MIME metadata after reopening a session", () => {
+    const restored = reduceEvents(state(), [{
+      sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded",
+      data: {
+        provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single",
+        blocks: JSON.stringify([{
+          kind: "user", content: "检查截图",
+          attachments: [{ id: "image-1", name: "screen.png", mime: "image/png", path: "/tmp/screen.png", size: 42 }],
+        }]),
+        blockSequences: "[1]", toolRecords: "[]",
+      },
+    }]);
+
+    expect(restored.blocks[0]?.attachments).toEqual([{
+      id: "image-1", name: "screen.png", mimeType: "image/png", path: "/tmp/screen.png", size: 42,
+    }]);
+  });
+
 	it("projects the plugin catalog and capability counts", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "plugin_catalog", pluginCatalog: [{
@@ -1004,13 +1022,13 @@ describe("runtime event projection", () => {
       data: { factSnapshot: "true", usageSnapshot: JSON.stringify({
         inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, currentTurnMainReported: true,
         cacheInputTokens: 120_000, cachedInputTokens: 72_000, cacheWriteTokens: 9_000,
-        cacheReported: true, cacheWriteReported: true,
+        uncachedInputTokens: 18_000, cacheReported: true, mainCacheReported: true, cacheWriteReported: true,
       }) },
     }]);
     expect(projected.contextUsage).toEqual({
       inputTokens: 90_000, outputTokens: 6_000, contextLimit: 128_000, reported: true,
       cacheInputTokens: 120_000, cachedInputTokens: 72_000, cacheWriteTokens: 9_000,
-      cacheReported: true, cacheWriteReported: true,
+      uncachedInputTokens: 18_000, cacheReported: true, mainCacheReported: true, cacheWriteReported: true,
     });
   });
 

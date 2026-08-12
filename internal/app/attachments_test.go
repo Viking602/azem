@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +39,65 @@ func TestImportBytesStoresImage(t *testing.T) {
 	}
 	if err := store.ValidateSessionAttachments("session-2", []session.Attachment{att}); err == nil || !strings.Contains(err.Error(), "does not belong") {
 		t.Fatalf("cross-session attachment validation = %v", err)
+	}
+}
+
+func TestAttachmentStoreReadKeepsSessionBoundary(t *testing.T) {
+	store := NewAttachmentStore(filepath.Join(t.TempDir(), "attachments"))
+	want := minimalPNG()
+	att, err := store.ImportBytes("session-1", "preview.png", "image/png", want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Read("session-1", att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("attachment bytes = %x, want %x", got, want)
+	}
+	if _, err := store.Read("session-2", att); err == nil || !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("cross-session read error = %v", err)
+	}
+}
+
+func TestAttachmentStoreAllowsImagesBeyondLegacyLimits(t *testing.T) {
+	store := NewAttachmentStore(filepath.Join(t.TempDir(), "attachments"))
+	large := make([]byte, (8<<20)+1)
+	copy(large, minimalPNG())
+	largeAttachment, err := store.ImportBytes("session-1", "large.png", "image/png", large)
+	if err != nil {
+		t.Fatalf("import image larger than legacy limit: %v", err)
+	}
+	read, err := store.Read("session-1", largeAttachment)
+	if err != nil {
+		t.Fatalf("read image larger than legacy limit: %v", err)
+	}
+	if len(read) != len(large) {
+		t.Fatalf("large attachment bytes = %d, want %d", len(read), len(large))
+	}
+	sourcePath := filepath.Join(t.TempDir(), "large-source.png")
+	if err := os.WriteFile(sourcePath, large, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	importedFromPath, err := store.Import("session-1", sourcePath)
+	if err != nil {
+		t.Fatalf("import image path larger than legacy limit: %v", err)
+	}
+	if importedFromPath.Size != int64(len(large)) {
+		t.Fatalf("path attachment bytes = %d, want %d", importedFromPath.Size, len(large))
+	}
+
+	attachments := make([]session.Attachment, 0, 7)
+	for index := 0; index < 7; index++ {
+		att, importErr := store.ImportBytes("session-1", fmt.Sprintf("shot-%d.png", index), "image/png", minimalPNG())
+		if importErr != nil {
+			t.Fatal(importErr)
+		}
+		attachments = append(attachments, att)
+	}
+	if err := store.ValidateSessionAttachments("session-1", attachments); err != nil {
+		t.Fatalf("validate more than six images: %v", err)
 	}
 }
 

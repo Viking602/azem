@@ -24,8 +24,22 @@ export function isFileChangeTool(name = "") {
   return name === "coding.edit_hashline" || name === "coding.write_file";
 }
 
+export function isActiveFileChangeBlock(block: Block) {
+  const name = block.title || block.data?.name || "";
+  if (block.kind !== "tool"
+    || !["running", "started", "streaming", "progress"].includes(block.state || "")
+    || !isFileChangeTool(name)) return false;
+  if (name !== "coding.edit_hashline") return true;
+  try {
+    const input = JSON.parse(block.data?.arguments || block.content || "") as { dryRun?: unknown };
+    return input.dryRun !== true;
+  } catch {
+    return true;
+  }
+}
+
 export function pendingFileChangeSummaryForBlock(block: Block): EditedFileSummary | null {
-  if (block.kind !== "tool" || !["running", "started", "streaming", "progress"].includes(block.state || "")) return null;
+  if (!isActiveFileChangeBlock(block)) return null;
   const name = block.title || block.data?.name || "";
   const argumentsText = block.data?.arguments || block.content || "";
   if (name === "coding.write_file") {

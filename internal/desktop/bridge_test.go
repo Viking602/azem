@@ -98,6 +98,27 @@ func TestImportClipboardImageReturnsNilWhenClipboardHasNoImage(t *testing.T) {
 	}
 }
 
+func TestAttachmentDataURLReadsOnlySessionImage(t *testing.T) {
+	runtime := azemapp.NewService(context.Background(), config.Default())
+	runtime.AttachAttachments(filepath.Join(t.TempDir(), "attachments"))
+	item, err := runtime.ImportImageBytes("session-1", "preview.png", "image/png", []byte{0x89, 0x50, 0x4e, 0x47})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &Bridge{runtime: runtime}
+	attachment := attachmentFromSession(item)
+	got, err := bridge.AttachmentDataURL("session-1", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "data:image/png;base64,iVBORw==" {
+		t.Fatalf("data URL = %q", got)
+	}
+	if _, err := bridge.AttachmentDataURL("session-2", attachment); err == nil || !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("cross-session preview error = %v", err)
+	}
+}
+
 func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionResolveApproval) {
 		t.Fatal("approval resolution must be available to the desktop")

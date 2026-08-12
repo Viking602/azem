@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -71,6 +72,65 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 	}
 }
 
+func TestDeepSeekStreamReportsInclusiveCacheUsage(t *testing.T) {
+	for _, test := range []cacheUsageExpectation{
+		{name: "deepseek cache hit", provider: "deepseek", input: 4_336, cached: 4_608, wantInput: 8_944, wantTotal: 8_964, wantReported: true},
+		{name: "deepseek zero hit", provider: "deepseek", input: 8_499, wantInput: 8_499, wantTotal: 8_519, wantReported: true},
+		{name: "unknown provider stays unreported", provider: "custom", input: 4_336, cached: 4_608, wantInput: 4_336, wantTotal: 4_356, wantReported: false},
+	} {
+		t.Log(test.name)
+		assertCacheUsage(t, test)
+	}
+}
+
+type cacheUsageExpectation struct {
+	name         string
+	provider     string
+	input        int
+	cached       int
+	wantInput    int
+	wantTotal    int
+	wantReported bool
+}
+
+type cacheUsageObservation struct {
+	eventInput     int
+	eventCached    int
+	eventTotal     int
+	reportedInput  int
+	reportedCached int
+	reportedTotal  int
+	cacheReported  bool
+}
+
+func assertCacheUsage(t *testing.T, test cacheUsageExpectation) {
+	t.Helper()
+	var details responses.UsageDetails
+	stream := &streamAdapter{
+		provider: test.provider,
+		reporter: func(got responses.UsageDetails) { details = got },
+		inner: &sliceStream{parts: []sdk.Part{{
+			Kind: sdk.PartFinish, FinishReason: sdk.FinishStop,
+			Usage: sdk.Usage{InputTokens: test.input, CachedInputTokens: test.cached, OutputTokens: 20, TotalTokens: test.input + 20},
+		}}},
+	}
+	done, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cacheUsageObservation{
+		eventInput: done.Usage.InputTokens, eventCached: done.Usage.CachedInputTokens, eventTotal: done.Usage.TotalTokens,
+		reportedInput: details.InputTokens, reportedCached: details.CachedTokens, reportedTotal: details.TotalTokens, cacheReported: details.CacheReported,
+	}
+	want := cacheUsageObservation{
+		eventInput: test.wantInput, eventCached: test.cached, eventTotal: test.wantTotal,
+		reportedInput: test.wantInput, reportedCached: test.cached, reportedTotal: test.wantTotal, cacheReported: test.wantReported,
+	}
+	if got != want {
+		t.Fatalf("usage = %+v, reported = %+v, want input=%d cached=%d total=%d reported=%v", done.Usage, details, test.wantInput, test.cached, test.wantTotal, test.wantReported)
+	}
+}
+
 func TestConvertRequestHonorsMaxOutputTokens(t *testing.T) {
 	fromExtra, _, err := convertRequest(hyprovider.Request{
 		Model:     "deepseek-v4-pro",
@@ -128,6 +188,41 @@ func TestAnthropicCompatibleProviderUsesMessagesProtocol(t *testing.T) {
 	}
 	if _, ok := provider.(*anthropic.Provider); !ok {
 		t.Fatalf("alibaba provider = %T, want *anthropic.Provider", provider)
+	}
+}
+
+func TestAnthropicConversionKeepsLatePrivateSystemContextInMessageTail(t *testing.T) {
+	lateSystem := message.NewText(message.RoleSystem, "dynamic trusted context")
+	lateSystem.Visibility = message.VisibilityPrivate
+	converted, _, err := convertRequest(hyprovider.Request{
+		Model: "deepseek-v4-flash",
+		Messages: []message.Message{
+			message.NewText(message.RoleSystem, "stable core instructions"),
+			message.NewText(message.RoleUser, "stable long prefix"),
+			message.NewText(message.RoleAssistant, "prior answer"),
+			lateSystem,
+			message.NewText(message.RoleUser, "new question"),
+		},
+	}, "", "deepseek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type requestPrefix struct {
+		instructions string
+		messages     []sdk.Message
+	}
+	got := requestPrefix{instructions: converted.Instructions, messages: converted.Messages}
+	want := requestPrefix{
+		instructions: "stable core instructions",
+		messages: []sdk.Message{
+			sdk.TextMessage(sdk.RoleUser, "stable long prefix"),
+			sdk.TextMessage(sdk.RoleAssistant, "prior answer"),
+			sdk.TextMessage(sdk.RoleUser, trustedHostContextPrefix+"dynamic trusted context"),
+			sdk.TextMessage(sdk.RoleUser, "new question"),
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("converted request prefix = %+v, want %+v", got, want)
 	}
 }
 

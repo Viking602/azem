@@ -86,8 +86,12 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 			}
 		case stream.FrameToolCall:
 			if frame.ToolCall != nil {
+				fallback := commentary.ensureToolAnnouncement()
 				if err := commentary.flush(ctx); err != nil {
 					return err
+				}
+				if !s.emitSyntheticToolAnnouncement(ctx, sessionID, runID, fallback) {
+					return eventDeliveryError(ctx)
 				}
 				if err := timeline.start(ctx, *frame.ToolCall); err != nil {
 					return err
@@ -128,8 +132,10 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 				if err := commentary.flush(ctx); err != nil {
 					return err
 				}
+				commentary.endToolBatch()
 			} else {
 				commentary.discard()
+				commentary.endToolBatch()
 			}
 			if factMetered {
 				return nil
@@ -152,11 +158,23 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 			}
 		case stream.FrameError:
 			commentary.discard()
+			commentary.endToolBatch()
 			if frame.Err != nil {
 				return frame.Err
 			}
 		}
 		return nil
+	})
+}
+
+func (s *Service) emitSyntheticToolAnnouncement(ctx context.Context, sessionID, runID, text string) bool {
+	if text == "" {
+		return true
+	}
+	return s.emit(ctx, Event{
+		Kind: EventTextDelta, SessionID: sessionID, RunID: runID,
+		State: "streaming", Text: text, TextPhase: string(hyprovider.TextPhaseCommentary),
+		Data: map[string]string{"synthetic": "tool_announcement"},
 	})
 }
 
@@ -187,7 +205,10 @@ type durableCommentaryCollector struct {
 	sessionID, runID string
 	content          strings.Builder
 	startedAt        time.Time
+	batchAnnounced   bool
 }
+
+const fallbackToolAnnouncement = "**执行工具步骤**\n调用所需工具并根据实际结果继续。"
 
 func (c *durableCommentaryCollector) append(chunk string) {
 	if chunk == "" {
@@ -199,12 +220,21 @@ func (c *durableCommentaryCollector) append(chunk string) {
 	c.content.WriteString(chunk)
 }
 
+func (c *durableCommentaryCollector) ensureToolAnnouncement() string {
+	if c.batchAnnounced || strings.TrimSpace(c.content.String()) != "" {
+		return ""
+	}
+	c.append(fallbackToolAnnouncement)
+	return fallbackToolAnnouncement
+}
+
 func (c *durableCommentaryCollector) flush(ctx context.Context) error {
 	content := c.content.String()
 	if strings.TrimSpace(content) == "" {
 		c.discard()
 		return nil
 	}
+	c.batchAnnounced = true
 	if c.store == nil {
 		c.discard()
 		return nil
@@ -236,6 +266,10 @@ func (c *durableCommentaryCollector) flush(ctx context.Context) error {
 func (c *durableCommentaryCollector) discard() {
 	c.content.Reset()
 	c.startedAt = time.Time{}
+}
+
+func (c *durableCommentaryCollector) endToolBatch() {
+	c.batchAnnounced = false
 }
 
 type reasoningTraceCollector struct {
@@ -342,7 +376,9 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		return uiSink.Emit(ctx, frame)
 	})
 	workerCtx := agentservice.DelegatedApprovalContext(ctx)
-	executionOutcome, runErr = s.coding.ExecuteRun(workerCtx, run, engine, sink)
+	executionOutcome, runErr = executeMainRunUntilAvailable(ctx, func() (hyworker.ExecutionOutcome, error) {
+		return s.coding.ExecuteRun(workerCtx, run, engine, sink)
+	})
 	result = executionOutcome.Result
 	finalText := sanitizeFinalAnswerText(finalAnswer.resolve(result.Text))
 	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {
@@ -471,6 +507,40 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
 	}
 	s.emitTerminal(ctx, Event{Kind: EventRunFinished, SessionID: request.SessionID, RunID: run.RunID, State: "completed"})
+}
+
+func resourceClaimRetryDelay(now time.Time, decision api.ResourceClaimDecision) time.Duration {
+	delay := time.Second
+	for _, conflict := range decision.Conflicts {
+		untilExpiry := conflict.ExpiresAt.Sub(now)
+		if untilExpiry > 0 && untilExpiry < delay {
+			delay = untilExpiry
+		}
+	}
+	if delay < 100*time.Millisecond {
+		return 100 * time.Millisecond
+	}
+	return delay
+}
+
+func executeMainRunUntilAvailable(ctx context.Context, execute func() (hyworker.ExecutionOutcome, error)) (hyworker.ExecutionOutcome, error) {
+	for {
+		outcome, err := execute()
+		var unavailable *hyworker.TaskExecutionUnavailableError
+		if !errors.As(err, &unavailable) || ctx.Err() != nil {
+			return outcome, err
+		}
+		// Resource claims serialize writers; they are not a provider failure.
+		// Keep the dispatched main task alive and retry it just like subagents do
+		// instead of persisting a raw "resource claims denied" terminal block.
+		timer := time.NewTimer(resourceClaimRetryDelay(time.Now().UTC(), unavailable.ResourceClaims))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return outcome, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func teamPrompt(request TurnRequest) string {

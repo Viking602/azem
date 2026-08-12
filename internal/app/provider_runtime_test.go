@@ -87,6 +87,7 @@ func TestMainInstructionsContract(t *testing.T) {
 		}
 	}
 	requireInstructionFragments(t, "concurrency rule", []string{"hydaelyn_read_skill_resource", "Never mix skill-resource reads and `subagent.spawn`", "own parallel batch"})
+	requireInstructionFragments(t, "tool announcement", []string{"Before every tool call or parallel batch", "A single routine read still requires", "Never emit a tool call before this commentary"})
 	for _, grammar := range []string{"`¶PATH#TAG`", "`replace N..M:`", "`+final content`", "Never use `@@` hunks", "`-old` rows"} {
 		if !strings.Contains(mainInstructions, grammar) {
 			t.Errorf("main instructions omit hashline grammar %q", grammar)
@@ -1375,7 +1376,9 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 		}
 		switch event.Kind {
 		case EventTextDelta:
-			output.WriteString(event.Text)
+			if event.TextPhase != string(hyprovider.TextPhaseCommentary) {
+				output.WriteString(event.Text)
+			}
 		case EventContextUsage:
 			if event.State == "reported" {
 				if event.Data["inputTokens"] != "" {
@@ -1447,7 +1450,12 @@ finished:
 	if sessionProjection.Usage.CacheWriteTokens != 5 || sessionProjection.Usage.MainCacheWrite != 5 {
 		t.Fatalf("persisted cache writes = %+v", sessionProjection.Usage)
 	}
-	if len(sessionProjection.Blocks) != 2 || sessionProjection.Blocks[1].Content != "Created and verified." {
+	if len(sessionProjection.Blocks) != 3 ||
+		sessionProjection.Blocks[1].Kind != "commentary" ||
+		sessionProjection.Blocks[1].Content != fallbackToolAnnouncement ||
+		sessionProjection.Blocks[2].Kind != "assistant" ||
+		sessionProjection.Blocks[2].TextPhase != string(hyprovider.TextPhaseFinalAnswer) ||
+		sessionProjection.Blocks[2].Content != "Created and verified." {
 		t.Fatalf("session projection = %+v", sessionProjection.Blocks)
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2130,6 +2138,133 @@ func TestLazyCompactionDefaultsToLowReasoning(t *testing.T) {
 	}
 }
 
+func TestCompactionSummaryRetriesWithLowReasoningAfterReasoningExhaustsOutput(t *testing.T) {
+	driver := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventThinkingDelta, Thinking: "reasoning consumed the output budget"},
+			{Kind: hyprovider.EventTextDelta, Text: `{"version":1,"objective":{"text":"truncated`},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonMaxTurns},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: "summary"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+
+	got, err := compactionSummarizer(driver, "deepseek", "deepseek-v4-flash", "max", "cache", 128_000, 8_192)(context.Background(), "history")
+	if err != nil || got != "summary" {
+		t.Fatalf("compaction summary=%q error=%v", got, err)
+	}
+	if len(driver.requests) != 2 {
+		t.Fatalf("compaction requests=%d, want reasoning fallback retry", len(driver.requests))
+	}
+	if got := driver.requests[0].Metadata["reasoning_effort"]; got != "max" {
+		t.Fatalf("initial reasoning effort=%q", got)
+	}
+	if got := driver.requests[1].Metadata["reasoning_effort"]; got != "low" {
+		t.Fatalf("fallback reasoning effort=%q", got)
+	}
+	if got := driver.requests[0].ExtraBody["max_output_tokens"]; got != 32_768 {
+		t.Fatalf("reasoning generation budget=%v, want 32768 tokens of headroom", got)
+	}
+	if got := driver.requests[1].ExtraBody["max_output_tokens"]; got != 16_384 {
+		t.Fatalf("low-reasoning generation budget=%v, want 16384 tokens of JSON completion headroom", got)
+	}
+}
+
+func TestMainRunWaitsForWorkspaceClaimInsteadOfFailing(t *testing.T) {
+	calls := 0
+	outcome, err := executeMainRunUntilAvailable(context.Background(), func() (hyworker.ExecutionOutcome, error) {
+		calls++
+		if calls == 1 {
+			return hyworker.ExecutionOutcome{}, &hyworker.TaskExecutionUnavailableError{
+				TaskID: "waiting-task",
+				ResourceClaims: api.ResourceClaimDecision{
+					Reason: api.ResourceClaimDeniedConflict,
+					Conflicts: []api.ResourceClaim{{
+						ID: "active-writer", ExpiresAt: time.Now().UTC().Add(time.Millisecond),
+					}},
+				},
+			}
+		}
+		return hyworker.ExecutionOutcome{State: hyworker.ExecutionCompleted}, nil
+	})
+	if err != nil || outcome.State != hyworker.ExecutionCompleted || calls != 2 {
+		t.Fatalf("outcome=%+v calls=%d error=%v", outcome, calls, err)
+	}
+}
+
+func TestTurnContextAdvancesSemanticRevisionAfterEachActivation(t *testing.T) {
+	manager := turnContext{
+		sessionID:          "session-1",
+		runID:              "run-1",
+		staticIdentity:     "static",
+		coordinator:        &compactionCoordinator{},
+		semanticCheckpoint: session.SemanticCheckpointV1{SessionID: "session-1", State: json.RawMessage(`{"version":1}`)},
+	}
+	persistedRevision := int64(0)
+	manager.activateCompaction = func(_ context.Context, messages []message.Message, _ string) error {
+		_, commit := extractContextCheckpointMetadata(messages)
+		if commit == nil {
+			return errors.New("missing semantic commit")
+		}
+		if commit.BaseRevision != persistedRevision {
+			return fmt.Errorf("semantic state source is stale: expected revision %d, current revision %d", commit.BaseRevision, persistedRevision)
+		}
+		persistedRevision++
+		return nil
+	}
+
+	for revision := int64(0); revision < 2; revision++ {
+		source := []message.Message{
+			message.NewText(message.RoleSystem, "rules"),
+			message.NewText(message.RoleUser, fmt.Sprintf("request-%d", revision)),
+		}
+		summary := message.NewText(message.RoleAssistant, semanticStateSafetyLabel+semanticStateForTest(fmt.Sprintf("objective-%d", revision)))
+		summary.Kind = message.KindCompactionSummary
+		metadata, err := buildContextCheckpointMetadata(manager, "automatic_hard", source, []message.Message{summary}, semanticStateForTest(fmt.Sprintf("objective-%d", revision)), nil, 512)
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary, err = attachContextCheckpoint(summary, metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = manager.activateCompactionResult(context.Background(), []message.Message{summary}); err != nil {
+			t.Fatalf("activation %d failed: %v", revision+1, err)
+		}
+	}
+	if persistedRevision != 2 {
+		t.Fatalf("persisted semantic revision=%d, want 2", persistedRevision)
+	}
+}
+
+func TestShortInternalGenerationRetriesWithLowReasoningAfterOutputExhaustion(t *testing.T) {
+	driver := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventThinkingDelta, Thinking: "reasoning consumed the output budget"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonMaxTurns},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: "concise result"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+	request := hyprovider.Request{
+		Model:     "deepseek-v4-flash",
+		Metadata:  map[string]string{"reasoning_effort": "max"},
+		ExtraBody: map[string]any{"max_output_tokens": 256},
+	}
+
+	got, err := collectProviderTextWithReasoningFallback(context.Background(), driver, request, "recap")
+	if err != nil || got != "concise result" {
+		t.Fatalf("short generation=%q error=%v", got, err)
+	}
+	if len(driver.requests) != 2 || driver.requests[1].Metadata["reasoning_effort"] != "low" {
+		t.Fatalf("short generation requests=%#v", driver.requests)
+	}
+}
+
 func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) {
 	inner := &compactionTestDriver{streams: [][]hyprovider.Event{{
 		{Kind: hyprovider.EventTextDelta, Text: "## Objective\n- continue"},
@@ -2153,11 +2288,14 @@ func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) 
 			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
 		},
 	}}
-	if _, err := compactionSummarizer(oversizedOutput, "grok", "model", "low", "cache", 1_000, 200)(context.Background(), "small input"); err == nil || !strings.Contains(err.Error(), "after 2 repairs") {
+	if _, err := compactionSummarizer(oversizedOutput, "grok", "model", "low", "cache", 2_000, 200)(context.Background(), "small input"); err == nil || !strings.Contains(err.Error(), "after 2 repairs") {
 		t.Fatalf("oversized summary output error=%v", err)
 	}
 	if len(oversizedOutput.requests) != 3 || !strings.Contains(oversizedOutput.requests[1].Messages[1].Text, "Rewrite the candidate") || !strings.Contains(oversizedOutput.requests[1].Messages[1].Text, "at most 544 UTF-8 bytes") {
 		t.Fatalf("oversized summary repair requests=%#v", oversizedOutput.requests)
+	}
+	if got := oversizedOutput.requests[1].ExtraBody["max_output_tokens"]; got != 200 {
+		t.Fatalf("repair generation budget=%v, want final-state limit 200", got)
 	}
 	twoStageRepair := &compactionTestDriver{streams: [][]hyprovider.Event{
 		{
@@ -2173,7 +2311,7 @@ func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) 
 			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
 		},
 	}}
-	if got, err := compactionSummarizer(twoStageRepair, "chatgpt", "model", "low", "cache", 1_000, 200)(context.Background(), "small input"); err != nil || len(got) != 500 || len(twoStageRepair.requests) != 3 {
+	if got, err := compactionSummarizer(twoStageRepair, "chatgpt", "model", "low", "cache", 2_000, 200)(context.Background(), "small input"); err != nil || len(got) != 500 || len(twoStageRepair.requests) != 3 {
 		t.Fatalf("two-stage repaired summary bytes=%d requests=%d error=%v", len(got), len(twoStageRepair.requests), err)
 	}
 	repairedOutput := &compactionTestDriver{streams: [][]hyprovider.Event{
@@ -2186,7 +2324,7 @@ func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) 
 			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
 		},
 	}}
-	if got, err := compactionSummarizer(repairedOutput, "chatgpt", "model", "low", "cache", 1_000, 200)(context.Background(), "small input"); err != nil || got != "compact summary" {
+	if got, err := compactionSummarizer(repairedOutput, "chatgpt", "model", "low", "cache", 2_000, 200)(context.Background(), "small input"); err != nil || got != "compact summary" {
 		t.Fatalf("repaired summary=%q error=%v", got, err)
 	}
 	chatGPT := &compactionTestDriver{streams: [][]hyprovider.Event{{
@@ -2206,8 +2344,8 @@ func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) 
 }
 
 func TestCompactionSummaryLimitRetainsLargeSemanticState(t *testing.T) {
-	summaryTokens, inputTokens := resolveCompactionLimits(272_000, 8192)
-	if summaryTokens != 8192 || inputTokens != 262_784 {
+	summaryTokens, inputTokens := resolveCompactionLimits(272_000, 32768)
+	if summaryTokens != 32768 || inputTokens != 238_208 {
 		t.Fatalf("compaction limits = summary %d input %d", summaryTokens, inputTokens)
 	}
 }

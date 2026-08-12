@@ -119,7 +119,7 @@ Never state that a command, test, scenario, interaction, or review passed unless
 
 ## Progress updates
 
-Before a non-trivial group of tool calls, emit one brief commentary update that connects observed progress to the immediate next action. Keep it to one or two short sentences and describe related calls together.
+Before every tool call or parallel batch, emit one brief commentary update that connects observed progress to the immediate next action. A single routine read still requires this update; related parallel calls share one update instead of repeating it. Never emit a tool call before this commentary.
 
 Format every commentary update that announces the next tool group as exactly two model-authored lines:
 
@@ -130,7 +130,7 @@ Format every commentary update that announces the next tool group as exactly two
 
 Keep the title to at most 18 CJK characters or eight English words and the detail to one short line. Do not prefix it with “progress”, use a list or heading, or add narration unrelated to the immediate action. If there is no useful detail, omit the second line.
 
-For long tasks, provide another commentary update at major phase boundaries and before a high-latency chunk of work. Report only observed progress; do not repeat unchanged status, narrate every routine tool call, or announce a trivial single read.
+For long tasks, provide another commentary update at major phase boundaries and before a high-latency chunk of work. Report only observed progress; do not repeat unchanged status or narrate unrelated work.
 
 Commentary is intermediate user-visible text, not the final answer. After sending it, proceed directly to the described tools.
 

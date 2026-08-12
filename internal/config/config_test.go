@@ -613,7 +613,7 @@ func TestPhase3ContextDefaultsAndValidation(t *testing.T) {
 	if !defaults.Enabled || defaults.TargetRatio != .45 || defaults.SoftTriggerRatio != .68 ||
 		defaults.HardTriggerRatio != .82 || !defaults.BackgroundPrepare ||
 		defaults.ReserveOutputTokens != 16384 || defaults.ReserveReasoningTokens != 8192 ||
-		defaults.MaxSummaryTokens != 8192 {
+		defaults.MaxSummaryTokens != 32768 {
 		t.Fatalf("defaults=%+v", defaults)
 	}
 	for _, mutate := range []func(*ContextConfig){

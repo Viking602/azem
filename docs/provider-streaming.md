@@ -13,7 +13,7 @@ parsing.
 |---|---|
 | `chatgpt` | Existing Codex Responses subscription driver |
 | `grok` | Existing xAI API or CLI-proxy subscription driver |
-| llmux profile IDs | `internal/provider/llmux`, backed by llmux v0.2.3 |
+| llmux profile IDs | `internal/provider/llmux`, backed by llmux v0.2.4 |
 
 The llmux adapter supports its native OpenAI, Anthropic, Google, Mistral,
 Cohere, and xAI providers plus its OpenAI-compatible registry. ChatGPT and Grok
@@ -49,8 +49,16 @@ The adapter converts Venat system/developer/user/assistant/tool messages,
 structured tool schemas, stop sequences, output limits, response schemas,
 reasoning effort, parallel-tool preference, provider state, and image
 attachments into llmux requests. Attachment bytes pass through the existing
-trusted-root, symlink, MIME, count, and size validation before they reach the
-SDK.
+trusted-root, symlink, regular-file, and detected-MIME validation before they
+reach the SDK. Azem does not impose a shared image-count or per-image byte cap;
+the selected provider remains authoritative for its request limits.
+
+Anthropic Messages exposes one top-level system field but no mid-conversation
+system role. The adapter hoists only the leading system messages into that
+field. Later trusted host context remains at its original message-tail position
+as a marked user message. This preserves the exact long-conversation prefix
+required by DeepSeek's automatic context cache instead of rewriting the prefix
+on every turn.
 
 Automatic approval does not assume that every provider protocol implements
 native response schemas. Its system policy carries the exact JSON decision
@@ -89,8 +97,12 @@ llmux error             -> typed Venat provider error
 
 Tool-call finishes take precedence over a generic stop reason. Usage retains
 input, cached input, cache write, reasoning, output, and total token fields when
-the upstream protocol reports them. Encrypted or opaque provider continuation
-state is returned to the runtime without exposing it as visible text.
+the upstream protocol reports them. DeepSeek's Anthropic-compatible usage
+reports uncached input and cache-read input as separate counters; the adapter
+normalizes them into Azem's inclusive input total and treats a reported zero as
+a real zero-percent hit rather than an unsupported metric. Encrypted or opaque
+provider continuation state is returned to the runtime without exposing it as
+visible text.
 
 ## UI projection backpressure
 
@@ -121,13 +133,17 @@ and commentary text is parsed as Markdown on every coalesced UI frame. Only the
 latest eight provider ranges receive a bounded fade/blur reveal; older ranges
 settle into ordinary text without growing the timeline DOM indefinitely.
 
-Before an announced tool group, the executable main prompt emits commentary as
-an explicit bold action-title line followed by one short target/evidence line.
-The desktop recognizes only that contract as a progress step, derives its
-active/completed/failed state and wall-clock duration from the commentary plus
-the immediately following tools, and keeps those tools expandable inside the
-step. Unformatted commentary from older sessions or a non-conforming provider
-is never guessed or truncated into a title and retains the prose renderer.
+Before every individual tool call or related parallel batch, the executable
+main prompt emits commentary as an explicit bold action-title line followed by
+one short target/evidence line. A related parallel batch shares one update. If
+a provider emits a tool without the required commentary, the host persists and
+projects one fallback update before the first tool event; later tools in the
+same batch do not duplicate it. The desktop recognizes only that title/detail
+contract as a progress step, combines adjacent reasoning, tools, and diffs into
+the step, and opens it while any nested work is active. Completed steps remain
+collapsible. Unformatted commentary from older sessions or a non-conforming
+provider is never guessed or truncated into a title and retains the prose
+renderer.
 
 Unlike OpenAI Responses, Anthropic Messages and the other llmux transports do
 not label streamed text as commentary or final output. Azem keeps that text

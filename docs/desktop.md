@@ -171,6 +171,10 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   deltas as short fade/blur ranges inside the parsed Markdown tree, so headings,
   lists, emphasis, and code render immediately while only newly appended text
   animates. Full-response replay remains restricted to the development demo.
+- `frontend/src/components/AttachmentPreview.tsx` owns image thumbnails in the
+  composer and user transcript plus the full-size local viewer. Preview bytes
+  come from the focused `AttachmentDataURL` Bridge method after the application
+  validates session ownership and the detected MIME type.
 - `frontend/src/components/SubagentsPage.tsx` owns the grouped current-session
   collaboration roster. `AgentSideChat.tsx` owns the overlay child transcript
   drawer and icon-only accessible member switcher.

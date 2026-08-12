@@ -48,6 +48,20 @@ describe("process trail segmentation", () => {
     expect(segments[0]).toMatchObject({ kind: "process", active: false, blocks: blocks.slice(0, 6) });
   });
 
+  it("keeps live diff projections inside the same process segment", () => {
+    const blocks: Block[] = [
+      { id: "progress-1", kind: "commentary", runId: "run-live", state: "completed" },
+      { id: "edit", kind: "tool", runId: "run-live", title: "coding.edit_hashline", state: "completed" },
+      { id: "diff", kind: "diff", runId: "run-live", title: "frontend/src/App.tsx", state: "ready" },
+      { id: "progress-2", kind: "commentary", runId: "run-live", state: "streaming" },
+    ];
+
+    const segments = segmentProcessTrail(blocks, { activeRunId: "run-live", running: true });
+
+    expect(segments).toHaveLength(1);
+    expect(segments[0]).toMatchObject({ kind: "process", active: true, blocks });
+  });
+
   it("keeps the active run process expanded and hides agent noise", () => {
     const blocks: Block[] = [
       { id: "u1", kind: "user", content: "go", state: "submitted" },
@@ -128,6 +142,34 @@ describe("tool timeline grouping", () => {
       blocks: [{ id: "read" }, { id: "search" }],
     });
     expect(entries[1]).toMatchObject({ kind: "block", block: { id: "legacy" } });
+  });
+
+  it("folds adjacent thinking and diffs into the announced tool step", () => {
+    const commentary: Block = {
+      id: "progress", kind: "commentary", state: "completed",
+      content: "**核对调用路径**\n先定位入口，再验证实际结果",
+    };
+    const before: Block = { id: "thinking-before", kind: "thinking", state: "completed", content: "形成调查顺序" };
+    const after: Block = { id: "thinking-after", kind: "thinking", state: "completed", content: "核对命中位置" };
+    const diff: Block = { id: "diff", kind: "diff", state: "completed", content: "" };
+    const entries = groupProcessTimelineBlocks([
+      before,
+      commentary,
+      after,
+      tool("read", "coding.read_file"),
+      diff,
+    ], "zh-CN");
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      kind: "model-progress",
+      blocks: [
+        { id: "thinking-before" },
+        { id: "thinking-after" },
+        { id: "read" },
+        { id: "diff" },
+      ],
+    });
   });
 
   it("classifies azem tool titles", () => {

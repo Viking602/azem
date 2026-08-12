@@ -332,7 +332,27 @@ type grokCatalogModel struct {
 	Capabilities     []string       `json:"capabilities"`
 	InputModalities  []string       `json:"input_modalities"`
 	OutputModalities []string       `json:"output_modalities"`
-	Pricing          map[string]any `json:"pricing"`
+	Pricing          catalogPricing `json:"pricing"`
+}
+
+type catalogPricing map[string]any
+
+func (pricing *catalogPricing) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*pricing = nil
+		return nil
+	}
+	var object map[string]any
+	if err := json.Unmarshal(data, &object); err == nil {
+		*pricing = object
+		return nil
+	}
+	var tiers []any
+	if err := json.Unmarshal(data, &tiers); err != nil {
+		return fmt.Errorf("decode model pricing: %w", err)
+	}
+	*pricing = catalogPricing{"tiers": tiers}
+	return nil
 }
 
 func decode(provider string, data []byte) ([]Model, bool, string, error) {
@@ -416,7 +436,7 @@ func decode(provider string, data []byte) ([]Model, bool, string, error) {
 			if contextWindow == 0 {
 				contextWindow = item.ContextWindow
 			}
-			model := Model{ID: item.ID, Name: first(item.Name, item.ID), Aliases: item.Aliases, ContextWindow: contextWindow, InputModalities: item.InputModalities, OutputModalities: item.OutputModalities, Pricing: item.Pricing}
+			model := Model{ID: item.ID, Name: first(item.Name, item.ID), Aliases: item.Aliases, ContextWindow: contextWindow, InputModalities: item.InputModalities, OutputModalities: item.OutputModalities, Pricing: map[string]any(item.Pricing)}
 			for _, capability := range item.Capabilities {
 				switch capability {
 				case "tools", "tool_use":

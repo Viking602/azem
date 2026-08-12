@@ -3,8 +3,8 @@ package llmuxdriver
 import (
 	"encoding/json"
 	"io"
+	"reflect"
 	"regexp"
-	"strings"
 	"testing"
 
 	sdk "github.com/Viking602/llmux"
@@ -172,39 +172,64 @@ func TestConvertRequestGroupsParallelToolResultsForAnthropicProtocol(t *testing.
 	}
 }
 
-func TestConvertRequestUsesInstructionsForPrivateSystemOnAnthropicFollowup(t *testing.T) {
+func TestConvertRequestUsesInstructionsForPrivateSystemOnNonAnthropicFollowup(t *testing.T) {
+	request := privateSystemFollowupRequest()
+	for _, providerID := range []string{"google", "mistral", "cohere"} {
+		assertNonAnthropicPrivateSystemFollowup(t, request, providerID)
+	}
+}
+
+type convertedRequestPrefix struct {
+	instructions string
+	messages     []sdk.Message
+}
+
+func assertNonAnthropicPrivateSystemFollowup(t *testing.T, request hyprovider.Request, providerID string) {
+	t.Helper()
+	converted, _, err := convertRequest(request, "", providerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMessages := []sdk.Message{
+		sdk.TextMessage(sdk.RoleUser, "first question"),
+		sdk.TextMessage(sdk.RoleAssistant, "first answer"),
+		sdk.TextMessage(sdk.RoleUser, "follow-up question"),
+	}
+	got := convertedRequestPrefix{instructions: converted.Instructions, messages: converted.Messages}
+	want := convertedRequestPrefix{instructions: "base instructions\n\ntrusted follow-up context", messages: wantMessages}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s private system conversion: instructions=%q messages=%+v", providerID, converted.Instructions, converted.Messages)
+	}
+}
+
+func TestConvertRequestPreservesPrivateSystemRoleOnOpenAIFollowup(t *testing.T) {
+	converted, _, err := convertRequest(privateSystemFollowupRequest(), "", "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMessages := []sdk.Message{
+		sdk.TextMessage(sdk.RoleUser, "first question"),
+		sdk.TextMessage(sdk.RoleAssistant, "first answer"),
+		sdk.TextMessage(sdk.RoleDeveloper, "trusted follow-up context"),
+		sdk.TextMessage(sdk.RoleUser, "follow-up question"),
+	}
+	got := convertedRequestPrefix{instructions: converted.Instructions, messages: converted.Messages}
+	want := convertedRequestPrefix{instructions: "base instructions", messages: wantMessages}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("openai private system conversion: instructions=%q messages=%+v", converted.Instructions, converted.Messages)
+	}
+}
+
+func privateSystemFollowupRequest() hyprovider.Request {
 	private := message.NewText(message.RoleSystem, "trusted follow-up context")
 	private.Visibility = message.VisibilityPrivate
-	request := hyprovider.Request{Messages: []message.Message{
+	return hyprovider.Request{Messages: []message.Message{
 		message.NewText(message.RoleSystem, "base instructions"),
 		message.NewText(message.RoleUser, "first question"),
 		message.NewText(message.RoleAssistant, "first answer"),
 		private,
 		message.NewText(message.RoleUser, "follow-up question"),
 	}}
-
-	for _, providerID := range []string{"anthropic", "deepseek", "google", "mistral", "cohere"} {
-		converted, _, err := convertRequest(request, "", providerID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(converted.Instructions, "base instructions") || !strings.Contains(converted.Instructions, "trusted follow-up context") {
-			t.Fatalf("%s instructions = %q", providerID, converted.Instructions)
-		}
-		for _, current := range converted.Messages {
-			if current.Role == sdk.RoleDeveloper {
-				t.Fatalf("%s follow-up leaked unsupported developer role: %+v", providerID, current)
-			}
-		}
-	}
-
-	converted, _, err := convertRequest(request, "", "openai")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(converted.Messages) != 4 || converted.Messages[2].Role != sdk.RoleDeveloper {
-		t.Fatalf("openai private system role was not preserved: %+v", converted.Messages)
-	}
 }
 
 func TestStreamAdapterRestoresCanonicalToolNames(t *testing.T) {

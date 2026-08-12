@@ -125,7 +125,7 @@ export async function guide(sessionId: string, runId: string, text: string, atta
 export async function importAttachment(sessionId: string, file: File): Promise<Attachment> {
   const encoded = await fileToBase64(file);
   if (!isDesktopRuntime()) {
-    return { id: `demo-${Date.now()}`, name: file.name, mimeType: file.type, path: file.name, size: file.size };
+    return { id: `demo-${Date.now()}`, name: file.name, mimeType: file.type, path: `data:${file.type};base64,${encoded}`, size: file.size };
   }
   return Call.ByName(`${bridgeName}.ImportAttachment`, sessionId, file.name, file.type, encoded) as Promise<Attachment>;
 }
@@ -133,6 +133,11 @@ export async function importAttachment(sessionId: string, file: File): Promise<A
 export async function importClipboardImage(sessionId: string): Promise<Attachment | null> {
   if (!isDesktopRuntime()) return null;
   return Call.ByName(`${bridgeName}.ImportClipboardImage`, sessionId) as Promise<Attachment | null>;
+}
+
+export async function attachmentDataURL(sessionId: string, attachment: Attachment): Promise<string> {
+  if (!isDesktopRuntime()) return attachment.path.startsWith("data:image/") ? attachment.path : "";
+  return Call.ByName(`${bridgeName}.AttachmentDataURL`, sessionId, attachment) as Promise<string>;
 }
 export async function getPullRequestDashboard(): Promise<PullRequestDashboard> {
   if (!isDesktopRuntime()) return demoDashboard();

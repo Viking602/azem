@@ -959,7 +959,8 @@ func lazyCompactionResolver(resolve func(context.Context, string, string, string
 		metered := newCompactionUsageDriver(driver, report, resolvedProvider, resolvedModel, resolvedReasoning)
 		configured := firstCompactionSummaryLimit(configuredSummaryTokens)
 		maxSummary, _ := resolveCompactionLimits(contextWindow, configured)
-		inputBudget = maxCompactionInputTokens(contextWindow, maxSummary)
+		generationOutput := compactionGenerationOutputTokens(contextWindow, maxSummary, resolvedReasoning)
+		inputBudget = maxCompactionInputTokens(contextWindow, generationOutput)
 		summarizer = compactionSummarizer(metered, resolvedProvider, resolvedModel, resolvedReasoning, cacheKey, contextWindow, maxSummary)
 		return summarizer, inputBudget, nil
 	}
@@ -1070,26 +1071,48 @@ func (s *budgetedProviderStream) Recv() (hyprovider.Event, error) {
 }
 
 type compactionSummaryRequester struct {
-	driver          hyprovider.Driver
-	providerID      string
-	modelID         string
-	reasoning       string
-	cacheKey        string
-	maxOutputTokens int
+	driver                hyprovider.Driver
+	providerID            string
+	modelID               string
+	reasoning             string
+	cacheKey              string
+	maxOutputTokens       int
+	lowOutputTokens       int
+	reasoningOutputTokens int
 }
 
 func (r compactionSummaryRequester) request(ctx context.Context, input string) (string, error) {
+	result, err := r.requestWithReasoning(ctx, input, r.reasoning)
+	var empty *providerOutputExhaustedError
+	if err == nil || !errors.As(err, &empty) || !canLowerInternalReasoning(r.reasoning) {
+		return result, err
+	}
+	return r.requestWithReasoning(ctx, input, "low")
+}
+
+func (r compactionSummaryRequester) requestWithReasoning(ctx context.Context, input, reasoning string) (string, error) {
+	generationTokens := r.lowOutputTokens
+	if generationTokens <= 0 {
+		generationTokens = r.maxOutputTokens
+	}
+	if canLowerInternalReasoning(reasoning) && r.reasoningOutputTokens > generationTokens {
+		generationTokens = r.reasoningOutputTokens
+	}
+	return r.requestWithBudget(ctx, input, reasoning, generationTokens)
+}
+
+func (r compactionSummaryRequester) requestWithBudget(ctx context.Context, input, reasoning string, generationTokens int) (string, error) {
 	request := hyprovider.Request{
 		Model: r.modelID,
 		Messages: []message.Message{
 			message.NewText(message.RoleSystem, compactionSummaryInstructions(r.maxOutputTokens)),
 			message.NewText(message.RoleUser, input),
 		},
-		Metadata:  map[string]string{compactionRequestMetadataKey: "true", "reasoning_effort": r.reasoning},
+		Metadata:  map[string]string{compactionRequestMetadataKey: "true", "reasoning_effort": reasoning},
 		ExtraBody: map[string]any{"prompt_cache_key": r.cacheKey},
 	}
 	if r.providerID != "chatgpt" {
-		request.ExtraBody["max_output_tokens"] = r.maxOutputTokens
+		request.ExtraBody["max_output_tokens"] = generationTokens
 	}
 	stream, err := r.driver.Stream(ctx, request)
 	if err != nil {
@@ -1099,9 +1122,28 @@ func (r compactionSummaryRequester) request(ctx context.Context, input string) (
 	return readCompactionSummaryStream(ctx, stream)
 }
 
+func canLowerInternalReasoning(reasoning string) bool {
+	switch strings.ToLower(strings.TrimSpace(reasoning)) {
+	case "", "none", "minimal", "low":
+		return false
+	default:
+		return true
+	}
+}
+
+type providerOutputExhaustedError struct {
+	operation  string
+	stopReason hyprovider.StopReason
+}
+
+func (e *providerOutputExhaustedError) Error() string {
+	return fmt.Sprintf("%s provider exhausted its output budget after stopping with %s", e.operation, e.stopReason)
+}
+
 func readCompactionSummaryStream(ctx context.Context, stream hyprovider.Stream) (string, error) {
 	var text strings.Builder
 	done := false
+	stopReason := hyprovider.StopReasonUnknown
 	for {
 		event, recvErr := stream.Recv()
 		if recvErr == io.EOF {
@@ -1124,6 +1166,7 @@ func readCompactionSummaryStream(ctx context.Context, stream hyprovider.Stream) 
 				return "", fmt.Errorf("summary provider stopped with %s", event.StopReason)
 			}
 			done = true
+			stopReason = event.StopReason
 			break
 		}
 	}
@@ -1134,6 +1177,9 @@ func readCompactionSummaryStream(ctx context.Context, stream hyprovider.Stream) 
 		return "", fmt.Errorf("summary provider ended without completion")
 	}
 	result := strings.TrimSpace(text.String())
+	if stopReason == hyprovider.StopReasonMaxTurns {
+		return "", &providerOutputExhaustedError{operation: "summary", stopReason: stopReason}
+	}
 	if result == "" {
 		return "", fmt.Errorf("summary provider returned empty output")
 	}
@@ -1150,7 +1196,10 @@ func repairOversizedCompactionSummary(ctx context.Context, requester compactionS
 		if len(repairInput) > maxInputBytes {
 			return "", fmt.Errorf("summary output requires %d bytes but configured limit allows %d", len(result), maxBytes)
 		}
-		repaired, repairErr := requester.request(ctx, repairInput)
+		// Repair is a convergence pass, not another reasoning task. Keep it on
+		// the bounded low-reasoning route so hidden thinking cannot consume the
+		// output allowance needed to emit the replacement JSON.
+		repaired, repairErr := requester.requestWithBudget(ctx, repairInput, "low", requester.maxOutputTokens)
 		if repairErr != nil {
 			return "", fmt.Errorf("repair oversized summary (attempt %d): %w", attempt, repairErr)
 		}
@@ -1163,12 +1212,14 @@ func repairOversizedCompactionSummary(ctx context.Context, requester compactionS
 }
 
 func compactionSummarizer(driver hyprovider.Driver, providerID, modelID, reasoning, cacheKey string, contextWindow, maxOutputTokens int) func(context.Context, string) (string, error) {
+	lowOutputTokens := compactionLowOutputTokens(contextWindow, maxOutputTokens)
+	reasoningOutputTokens := compactionGenerationOutputTokens(contextWindow, maxOutputTokens, reasoning)
 	requester := compactionSummaryRequester{
 		driver: driver, providerID: providerID, modelID: modelID, reasoning: reasoning,
-		cacheKey: cacheKey, maxOutputTokens: maxOutputTokens,
+		cacheKey: cacheKey, maxOutputTokens: maxOutputTokens, lowOutputTokens: lowOutputTokens, reasoningOutputTokens: reasoningOutputTokens,
 	}
 	return func(ctx context.Context, transcript string) (string, error) {
-		maxInputBytes := contextTokenBytes(contextWindow - maxOutputTokens - 256)
+		maxInputBytes := contextTokenBytes(contextWindow - reasoningOutputTokens - 256)
 		transcript = strings.ToValidUTF8(transcript, "�")
 		if strings.TrimSpace(transcript) == "" || maxInputBytes <= 0 {
 			return "", fmt.Errorf("summary input does not fit model context")
@@ -1184,6 +1235,45 @@ func compactionSummarizer(driver hyprovider.Driver, providerID, modelID, reasoni
 	}
 }
 
+func compactionGenerationOutputTokens(contextWindow, summaryTokens int, reasoning string) int {
+	lowOutputTokens := compactionLowOutputTokens(contextWindow, summaryTokens)
+	if !canLowerInternalReasoning(reasoning) || summaryTokens <= 0 {
+		return lowOutputTokens
+	}
+	// Reasoning-capable providers count hidden thinking and the final JSON
+	// against the same output allowance. Reserve three additional summary-sized
+	// windows for thinking. The low-reasoning retry still gets two summary-sized
+	// windows so it can emit a complete JSON value before host-side convergence.
+	withReasoningHeadroom := summaryTokens * 4
+	if summaryTokens > int(^uint(0)>>1)/4 {
+		withReasoningHeadroom = int(^uint(0) >> 1)
+	}
+	if maximumGeneration := contextWindow - summaryTokens - 1024; maximumGeneration > 0 && withReasoningHeadroom > maximumGeneration {
+		withReasoningHeadroom = maximumGeneration
+	}
+	if withReasoningHeadroom < lowOutputTokens {
+		return lowOutputTokens
+	}
+	return withReasoningHeadroom
+}
+
+func compactionLowOutputTokens(contextWindow, summaryTokens int) int {
+	if summaryTokens <= 0 {
+		return summaryTokens
+	}
+	withCompletionHeadroom := summaryTokens * 2
+	if summaryTokens > int(^uint(0)>>1)/2 {
+		withCompletionHeadroom = int(^uint(0) >> 1)
+	}
+	if maximumGeneration := contextWindow - summaryTokens - 1024; maximumGeneration > 0 && withCompletionHeadroom > maximumGeneration {
+		withCompletionHeadroom = maximumGeneration
+	}
+	if withCompletionHeadroom < summaryTokens {
+		return summaryTokens
+	}
+	return withCompletionHeadroom
+}
+
 func compactionSummaryInstructions(maxOutputTokens int) string {
 	maxBytes := contextTokenBytes(maxOutputTokens)
 	return fmt.Sprintf(`%s
@@ -1192,12 +1282,7 @@ Output budget: the complete JSON response must be at most %d UTF-8 bytes. Keep a
 }
 
 func maxCompactionSummaryTokens(contextWindow int) int {
-	const maximum = 8192
-	reserved := contextWindow / 4
-	if reserved <= 0 || reserved > maximum {
-		return maximum
-	}
-	return reserved
+	return max(1, contextWindow/4)
 }
 
 func resolveCompactionLimits(contextWindow, configuredSummaryTokens int) (summaryTokens, inputTokens int) {
@@ -1274,7 +1359,7 @@ func (r *ProviderRuntime) GenerateTitle(ctx context.Context, input titleGenerati
 	if providerID != "chatgpt" {
 		request.ExtraBody["max_output_tokens"] = 64
 	}
-	generated, err := collectProviderText(ctx, driver, request, "title")
+	generated, err := collectProviderTextWithReasoningFallback(ctx, driver, request, "title")
 	if err != nil {
 		return "", err
 	}
@@ -1358,7 +1443,7 @@ func (r *ProviderRuntime) GenerateRecap(ctx context.Context, input recapGenerati
 	if providerID != "chatgpt" {
 		request.ExtraBody["max_output_tokens"] = maxOutputTokens
 	}
-	return collectProviderText(ctx, driver, request, "recap")
+	return collectProviderTextWithReasoningFallback(ctx, driver, request, "recap")
 }
 
 func recapInput(input recapGenerationRequest, maxBytes int) (string, error) {
@@ -1421,6 +1506,9 @@ func collectProviderText(ctx context.Context, driver hyprovider.Driver, request 
 			}
 			return "", fmt.Errorf("%s provider stream failed", operation)
 		case hyprovider.EventDone:
+			if event.StopReason == hyprovider.StopReasonMaxTurns {
+				return "", &providerOutputExhaustedError{operation: operation, stopReason: event.StopReason}
+			}
 			if event.StopReason != hyprovider.StopReasonComplete {
 				return "", fmt.Errorf("%s provider stopped with %s", operation, event.StopReason)
 			}
@@ -1431,6 +1519,18 @@ func collectProviderText(ctx context.Context, driver hyprovider.Driver, request 
 			return result, nil
 		}
 	}
+}
+
+func collectProviderTextWithReasoningFallback(ctx context.Context, driver hyprovider.Driver, request hyprovider.Request, operation string) (string, error) {
+	result, err := collectProviderText(ctx, driver, request, operation)
+	var exhausted *providerOutputExhaustedError
+	if err == nil || !errors.As(err, &exhausted) || !canLowerInternalReasoning(request.Metadata["reasoning_effort"]) {
+		return result, err
+	}
+	retry := request
+	retry.Metadata = maps.Clone(request.Metadata)
+	retry.Metadata["reasoning_effort"] = "low"
+	return collectProviderText(ctx, driver, retry, operation)
 }
 
 func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projection session.Projection) (session.CompactionPlan, bool, error) {
@@ -1504,7 +1604,8 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 		largeToolTokens:      r.cfg.Agents.Context.LargeToolResultTokens,
 		subagentFinishedAtNS: subagentFinishedAtNS, subagentID: subagentID,
 		resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
-			return compactionSummarizer(metered, providerID, modelID, reasoning, projection.Session.ID+":compaction", contextWindow, maxSummaryTokens), maxCompactionInputTokens(contextWindow, maxSummaryTokens), nil
+			generationOutput := compactionGenerationOutputTokens(contextWindow, maxSummaryTokens, reasoning)
+			return compactionSummarizer(metered, providerID, modelID, reasoning, projection.Session.ID+":compaction", contextWindow, maxSummaryTokens), maxCompactionInputTokens(contextWindow, generationOutput), nil
 		},
 	}
 	compacted, err := manager.prepareCompactionReason(ctx, messages, manualBudget.HardTrigger, "manual")

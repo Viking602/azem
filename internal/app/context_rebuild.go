@@ -388,9 +388,10 @@ func flattenSemanticFacts(state SemanticStateV1) map[string]semanticFactEntry {
 }
 
 func buildContextCheckpointMetadata(c turnContext, reason string, source, result []message.Message, summaryBody string, authorities map[string]string, target int) (contextCheckpointMetadata, error) {
+	checkpoint := c.currentSemanticCheckpoint()
 	var previous SemanticStateV1
-	if len(c.semanticCheckpoint.State) > 0 {
-		_ = json.Unmarshal(c.semanticCheckpoint.State, &previous)
+	if len(checkpoint.State) > 0 {
+		_ = json.Unmarshal(checkpoint.State, &previous)
 	}
 	var next SemanticStateV1
 	if err := json.Unmarshal([]byte(summaryBody), &next); err != nil {
@@ -398,15 +399,15 @@ func buildContextCheckpointMetadata(c turnContext, reason string, source, result
 	}
 	digest := semanticSourceDigest(source, authorities)
 	cursor := semanticCursor(source, c.todo, c.toolRecords, c.subagentFinishedAtNS, c.subagentID)
-	patch := semanticStatePatch(c.semanticCheckpoint.Revision, cursor, digest, previous, next)
+	patch := semanticStatePatch(checkpoint.Revision, cursor, digest, previous, next)
 	stateJSON, _ := json.Marshal(next)
 	patchJSON, _ := json.Marshal(patch)
-	checkpointID := fmt.Sprintf("semantic-%d-%s", c.semanticCheckpoint.Revision+1, digest[:16])
-	manifest := newContextManifest(c, reason, source, result, authorities, target, cursor, c.semanticCheckpoint.Revision+1)
+	checkpointID := fmt.Sprintf("semantic-%d-%s", checkpoint.Revision+1, digest[:16])
+	manifest := newContextManifest(c, reason, source, result, authorities, target, cursor, checkpoint.Revision+1)
 	return contextCheckpointMetadata{
 		Manifest: manifest,
 		Commit: session.SemanticCommit{
-			CheckpointID: checkpointID, BaseRevision: c.semanticCheckpoint.Revision, Cursor: cursor,
+			CheckpointID: checkpointID, BaseRevision: checkpoint.Revision, Cursor: cursor,
 			State: stateJSON, Patch: patchJSON, SourceDigest: digest,
 		},
 	}, nil

@@ -66,7 +66,9 @@ export interface ContextUsage {
   cacheInputTokens?: number;
   cachedInputTokens?: number;
   cacheWriteTokens?: number;
+  uncachedInputTokens?: number;
   cacheReported?: boolean;
+  mainCacheReported?: boolean;
   cacheWriteReported?: boolean;
 }
 
@@ -1297,6 +1299,23 @@ function normalizeProject(raw: Record<string, unknown>): Project {
   return { workspace: stringValue(raw, "workspace", "Workspace"), updatedAt: stringValue(raw, "updatedAt", "UpdatedAt") };
 }
 
+function normalizeAttachment(raw: unknown): Attachment | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const item = raw as Record<string, unknown>;
+  return {
+    id: stringValue(item, "id", "ID"),
+    name: stringValue(item, "name", "Name"),
+    mimeType: stringValue(item, "mimeType", "MIMEType") || stringValue(item, "mime", "MIME"),
+    path: stringValue(item, "path", "Path"),
+    size: Number(item.size ?? item.Size ?? 0),
+  };
+}
+
+function normalizeAttachments(raw: unknown): Attachment[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.map(normalizeAttachment).filter((item): item is Attachment => item !== null);
+}
+
 function normalizeBlock(raw: Record<string, unknown>, index: number): Block {
   const rawData = raw.data ?? raw.Data;
   const normalizedData = rawData && typeof rawData === "object" && !Array.isArray(rawData)
@@ -1321,7 +1340,7 @@ function normalizeBlock(raw: Record<string, unknown>, index: number): Block {
     state: stringValue(raw, "state", "State"),
     collapsed: Boolean(raw.collapsed ?? raw.Collapsed),
     data,
-    attachments: (raw.attachments ?? raw.Attachments) as Attachment[] | undefined,
+    attachments: normalizeAttachments(raw.attachments ?? raw.Attachments),
   };
 }
 
@@ -1588,12 +1607,16 @@ function parseContextUsage(raw: string | undefined, fallbackLimit = 0): ContextU
     const cacheInput = value.cacheInputTokens ?? value.CacheInputTokens;
     const cachedInput = value.cachedInputTokens ?? value.CachedInputTokens;
     const cacheWrite = value.cacheWriteTokens ?? value.CacheWriteTokens;
+    const uncachedInput = value.uncachedInputTokens ?? value.UncachedInputTokens;
     const cacheReported = value.cacheReported ?? value.CacheReported;
+    const mainCacheReported = value.mainCacheReported ?? value.MainCacheReported;
     const cacheWriteReported = value.cacheWriteReported ?? value.CacheWriteReported;
     if (cacheInput !== undefined) usage.cacheInputTokens = numberValue(cacheInput);
     if (cachedInput !== undefined) usage.cachedInputTokens = numberValue(cachedInput);
     if (cacheWrite !== undefined) usage.cacheWriteTokens = numberValue(cacheWrite);
+    if (uncachedInput !== undefined) usage.uncachedInputTokens = numberValue(uncachedInput);
     if (cacheReported !== undefined) usage.cacheReported = cacheReported === true || cacheReported === "true";
+    if (mainCacheReported !== undefined) usage.mainCacheReported = mainCacheReported === true || mainCacheReported === "true";
     if (cacheWriteReported !== undefined) usage.cacheWriteReported = cacheWriteReported === true || cacheWriteReported === "true";
     return usage;
   } catch {
@@ -1615,10 +1638,15 @@ function projectContextUsage(current: ContextUsage, data: Record<string, string>
     cacheWriteReported: current.cacheWriteReported || cacheWriteReported,
   };
   if (requestKind !== "main" || data.aggregateOnly === "true") return next;
+  const { uncachedInputTokens: _uncachedInputTokens, mainCacheReported: _mainCacheReported, ...main } = next;
   return {
-    ...next,
+    ...main,
     inputTokens: data.inputTokens === undefined ? current.inputTokens : numberValue(data.inputTokens),
     outputTokens: data.outputTokens === undefined ? current.outputTokens : numberValue(data.outputTokens),
+    ...(cacheReported && data.uncachedInputTokens !== undefined ? {
+      uncachedInputTokens: numberValue(data.uncachedInputTokens),
+      mainCacheReported: true,
+    } : {}),
     contextLimit: data.contextLimit === undefined ? current.contextLimit : numberValue(data.contextLimit, current.contextLimit),
     reported: current.reported || state === "reported" || data.cacheStatus === "reported",
   };

@@ -82,13 +82,13 @@ describe("SettingsDialog", () => {
     expect(execute).toHaveBeenCalledWith({ kind: "list_model_routes", sessionId: "session-1" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_agent_types", sessionId: "session-1" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_models", sessionId: "session-1" });
-	expect(execute).toHaveBeenCalledWith({ kind: "list_model_providers", sessionId: "session-1" });
-	expect(container.querySelectorAll(".route-row")).toHaveLength(6);
-	expect(container.querySelectorAll(".route-card")).toHaveLength(2);
-	expect(container.querySelector(".model-routes-pane > .route-groups")).not.toBeNull();
-	expect(container.querySelectorAll(".route-card > header")[0]?.textContent).toContain("核心工作流");
-	expect(container.querySelectorAll(".route-card > header")[1]?.textContent).toContain("子智能体默认模型");
-	expect(container.textContent).toContain("主模型");
+    expect(execute).toHaveBeenCalledWith({ kind: "list_model_providers", sessionId: "session-1" });
+    expect(container.querySelectorAll(".route-row")).toHaveLength(5);
+    expect(container.querySelectorAll(".route-card")).toHaveLength(2);
+    expect(container.querySelector(".model-routes-pane > .route-groups")).not.toBeNull();
+    expect(container.querySelectorAll(".route-card > header")[0]?.textContent).toContain("核心工作流");
+    expect(container.querySelectorAll(".route-card > header")[1]?.textContent).toContain("子智能体默认模型");
+    expect(Array.from(container.querySelectorAll(".route-copy strong")).some((node) => node.textContent === "主模型")).toBe(false);
     const titleRoute = Array.from(container.querySelectorAll<HTMLElement>(".route-row")).find((row) => row.textContent?.includes("会话标题"))!;
     expect(titleRoute.textContent).toContain("根据首轮用户消息自动生成侧栏会话标题");
     expect(titleRoute.textContent).toContain("5.6 Luna");
@@ -117,6 +117,16 @@ describe("SettingsDialog", () => {
     expect(execute).toHaveBeenCalledWith({
       kind: "set_model_route", target: "", sessionId: "session-1",
       route: { Scope: "subagent", Role: "explore", Label: "Explore", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "medium" } },
+    });
+    vi.mocked(execute).mockClear();
+    const reasoningMenu = explore.querySelector<HTMLDetailsElement>(".route-reasoning-menu")!;
+    expect(reasoningMenu.querySelector("summary")?.getAttribute("aria-label")).toBe("explore 推理强度");
+    reasoningMenu.open = true;
+    await act(async () => reasoningMenu.dispatchEvent(new Event("toggle", { bubbles: true })));
+    await act(async () => container.querySelector<HTMLButtonElement>('.menu-select-options-portal [data-value="low"]')!.click());
+    expect(execute).toHaveBeenCalledWith({
+      kind: "set_model_route", target: "", sessionId: "session-1",
+      route: { Scope: "subagent", Role: "explore", Label: "Explore", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
     });
 	const subagentsNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("子智能体"))!;
 	await act(async () => subagentsNav.click());

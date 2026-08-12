@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,6 +61,61 @@ func TestBuildUserMessageWithImageAttachment(t *testing.T) {
 	}
 	if payload.Input[0].Content[1].Type != "input_image" || !strings.HasPrefix(payload.Input[0].Content[1].ImageURL, "data:image/png;base64,") {
 		t.Fatalf("image part = %+v", payload.Input[0].Content[1])
+	}
+}
+
+func TestBuildAllowsImagesBeyondLegacyLimits(t *testing.T) {
+	dir := t.TempDir()
+	attachments := make([]map[string]any, 0, 7)
+	for index := 0; index < 7; index++ {
+		path := filepath.Join(dir, fmt.Sprintf("shot-%d.png", index))
+		if err := os.WriteFile(path, testPNG(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		attachments = append(attachments, map[string]any{
+			"id": fmt.Sprintf("img%d", index), "name": filepath.Base(path), "mime": "image/png", "path": path,
+		})
+	}
+	encodedAttachments, err := json.Marshal(attachments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := message.NewText(message.RoleUser, "compare these")
+	user.Metadata = map[string]string{"azem.attachments": string(encodedAttachments)}
+	data, err := Build(hyprovider.Request{
+		Model: "gpt-test", Messages: []message.Message{user},
+		ExtraBody: map[string]any{AttachmentRootExtraKey: dir},
+	}, BuildOptions{})
+	if err != nil {
+		t.Fatalf("build request with more than six images: %v", err)
+	}
+	var payload struct {
+		Input []struct {
+			Content []struct {
+				Type string `json:"type"`
+			} `json:"content"`
+		} `json:"input"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Input) != 1 || len(payload.Input[0].Content) != 8 {
+		t.Fatalf("content parts = %d, want text plus seven images", len(payload.Input[0].Content))
+	}
+
+	largePath := filepath.Join(dir, "large.png")
+	large := make([]byte, (8<<20)+1)
+	copy(large, testPNG())
+	if err := os.WriteFile(largePath, large, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	largeUser := imageMessage(largePath)
+	images, err := LoadImageAttachments(largeUser.Metadata, dir)
+	if err != nil {
+		t.Fatalf("load image larger than legacy limit: %v", err)
+	}
+	if len(images) != 1 || len(images[0].Data) != len(large) {
+		t.Fatalf("loaded images = %d with %d bytes", len(images), len(images[0].Data))
 	}
 }
 

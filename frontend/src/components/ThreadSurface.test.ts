@@ -52,6 +52,12 @@ describe("composer slash commands", () => {
 		expect(threadSurface).toContain('behavior: running ? "instant" : "smooth"');
 	});
 
+	it("keeps the active composer in document flow instead of reserving a viewport-sized blank", () => {
+		expect(styles).toMatch(/\.composer-dock\s*\{[^}]*position:\s*relative;[^}]*flex:\s*0 0 auto;[^}]*justify-content:\s*center;/s);
+		expect(styles).not.toMatch(/\.thread-surface:has\(\.queued-prompts\) \.transcript\s*\{[^}]*padding-bottom:/s);
+		expect(threadSurface).toContain("[blocks, following, queuedPrompts.length, running]");
+	});
+
 	it("restores the approved content-stage transition when switching sessions", () => {
 		expect(sessionStageMotion(false)).toMatchObject({
 			initial: { opacity: 0, y: 7, filter: "blur(2px)" },
@@ -131,7 +137,8 @@ describe("composer slash commands", () => {
 	});
 
 	it("keeps the complete new-conversation launcher and direct fast-mode control", () => {
-		expect(threadSurface).toContain('className="azem-mark empty-launch-mark"');
+		expect(threadSurface).not.toContain('className="azem-mark empty-launch-mark"');
+		expect(threadSurface).toContain('className="empty-composer-heading"><h1>{t("promptTitle")}</h1>');
 		expect(threadSurface).toContain('{showContextBar ? <ComposerContextBar /> : null}');
 		expect(threadSurface).toContain('className={`effort-panel-speed');
 		expect(threadSurface).toContain('onClick={() => onSpeedChange(fastActive ? "standard" : "fast")}');

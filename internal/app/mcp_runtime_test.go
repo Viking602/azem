@@ -245,7 +245,9 @@ func testConfiguredTurnMCP(t *testing.T, callErr error, expectedAnswer, expected
 			}
 			approved = true
 		case EventTextDelta:
-			answer += event.Text
+			if event.TextPhase != "commentary" {
+				answer += event.Text
+			}
 		case EventRunFailed:
 			t.Fatalf("run failed: %s", event.Text)
 		case EventRunFinished:

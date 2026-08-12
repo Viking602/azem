@@ -250,6 +250,25 @@ func (b *Bridge) ImportClipboardImage(sessionID string) (*Attachment, error) {
 	return &attachment, nil
 }
 
+func (b *Bridge) AttachmentDataURL(sessionID string, attachment Attachment) (string, error) {
+	if b.runtime == nil {
+		return "", fmt.Errorf("runtime is unavailable")
+	}
+	item := attachmentsToSession([]Attachment{attachment})[0]
+	data, err := b.runtime.ReadImageAttachment(sessionID, item)
+	if err != nil {
+		return "", err
+	}
+	mimeType := strings.TrimSpace(attachment.MIMEType)
+	if mimeType == "image/jpg" {
+		mimeType = "image/jpeg"
+	}
+	if mimeType == "" {
+		return "", fmt.Errorf("attachment MIME type is required")
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+}
+
 func (b *Bridge) Guide(sessionID, runID, text string, attachments []Attachment) error {
 	return b.runtime.GuideActiveTurnWithAttachments(sessionID, runID, text, attachmentsToSession(attachments))
 }

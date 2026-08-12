@@ -197,7 +197,11 @@ export type ProcessTimelineEntry = TimelineEntry | {
  * truncated into a synthetic title.
  */
 export function parseModelProgress(content = ""): ModelProgressPresentation | null {
-  const raw = plainAnsiText(content).trimStart();
+  let raw = plainAnsiText(content).trimStart();
+  // Skills may prepend a decorative emoji marker before the model's explicit
+  // two-line progress contract. It is presentation metadata, not a separate
+  // prose paragraph, so keep the commentary on the compact progress path.
+  raw = raw.replace(/^(?:\p{Extended_Pictographic}[\uFE0F\u200D\p{Emoji_Modifier}]*)[ \t]*(?:\r?\n[ \t]*)*(?=\*\*)/u, "");
   if (!raw.startsWith("**")) return null;
 
   const lineEnd = raw.indexOf("\n");
@@ -359,14 +363,18 @@ export function groupProcessTimelineBlocks(blocks: Block[], language: Language):
       continue;
     }
 
+	const leadingThinking: Block[] = [];
+	while (plainBlocks.at(-1)?.kind === "thinking") {
+		leadingThinking.unshift(plainBlocks.pop()!);
+	}
     flushPlain();
     let end = index + 1;
-    while (end < blocks.length && blocks[end]?.kind === "tool") end += 1;
+    while (end < blocks.length && isModelProgressDetail(blocks[end]!)) end += 1;
     entries.push({
       kind: "model-progress",
       id: `model-progress-${block.id}`,
       block,
-      blocks: blocks.slice(index + 1, end),
+      blocks: [...leadingThinking, ...blocks.slice(index + 1, end)],
       presentation,
     });
     index = end;
@@ -375,9 +383,19 @@ export function groupProcessTimelineBlocks(blocks: Block[], language: Language):
   return entries;
 }
 
+function isModelProgressDetail(block: Block) {
+  return block.kind === "thinking" || block.kind === "tool" || block.kind === "diff";
+}
+
 /** Kinds that form the collapsible process trail ("经过"), not final outcomes. */
 export function isProcessBlock(block: Block) {
-  return block.kind === "thinking" || block.kind === "commentary" || block.kind === "tool";
+  return block.kind === "thinking"
+    || block.kind === "commentary"
+    || block.kind === "tool"
+    // diff_ready is a live projection of the tool immediately before it. If
+    // it sits outside the process trail, it splits one running turn into
+    // multiple folds until a session reload drops that ephemeral projection.
+    || block.kind === "diff";
 }
 
 /** Agent / hook lifecycle noise — hide from the main transcript (Codex-style). */

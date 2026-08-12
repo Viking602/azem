@@ -46,13 +46,20 @@ Directory listings and previews have fixed limits; binary files are not copied
 into the WebView, and supported raster images have a separate 8 MiB cap. This
 boundary is read-only and does not replace approval for agent file tools.
 
-The image-assistance route reuses the same trusted-root, symlink, MIME, count,
-and size validation as the main provider path. It sends the image only to the
-explicitly configured `agents.vision` provider. Its bounded textual result is
+The image-assistance route reuses the same trusted-root, symlink, regular-file,
+and detected-MIME validation as the main provider path. It sends the image only
+to the explicitly configured `agents.vision` provider. Its bounded textual result is
 labelled as untrusted visual evidence and enters the main model as a private
 user-evidence message, never as trusted system or hook instructions. Selecting
 this route therefore authorizes image bytes to cross that provider boundary;
 API credentials remain isolated to each provider driver.
+
+Local composer and transcript thumbnails use the focused `AttachmentDataURL`
+Bridge method. It accepts the complete attachment record, validates that its
+resolved path belongs to the requested session's durable attachment directory,
+reapplies supported-image content detection, and only then returns a local
+data URL to the WebView. It is not an arbitrary path reader and does not send
+preview bytes over the network.
 
 Workspace change review is also read-only. It runs fixed Git subcommands with
 argv, a deadline, bounded stdout/stderr, external diffs disabled, and the pager

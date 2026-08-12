@@ -45,7 +45,7 @@ describe("Inspector", () => {
       contextUsage: {
         inputTokens: 14_000, outputTokens: 1_000, contextLimit: 128_000, reported: true,
         cacheInputTokens: 20_000, cachedInputTokens: 15_000, cacheWriteTokens: 2_000,
-        cacheReported: true, cacheWriteReported: true,
+        uncachedInputTokens: 2_800, cacheReported: true, mainCacheReported: true, cacheWriteReported: true,
       },
       contextProfile: {
         source: "request", estimated: true, contributions: [
@@ -59,9 +59,9 @@ describe("Inspector", () => {
     const root = createRoot(container);
 
     await act(async () => root.render(<Inspector />));
-    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("缓存命中率75%");
-    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("命中缓存15k");
-    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("总缓存20k");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("缓存命中率80%");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("命中缓存11k");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("总缓存14k");
     expect(container.querySelector(".context-composition")?.textContent).toContain("上下文构成");
     const toggle = container.querySelector<HTMLButtonElement>(".context-composition-bar")!;
     const groups = container.querySelector<HTMLDivElement>(".context-composition-groups")!;

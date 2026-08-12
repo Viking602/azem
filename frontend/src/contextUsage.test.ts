@@ -33,6 +33,40 @@ describe("context cache metrics", () => {
       cacheInputTokens: 12, cachedInputTokens: 0, cacheReported: true,
     })).toMatchObject({ reported: true, hitRate: 0 });
   });
+
+  it("prefers the latest main request over cold-start and auxiliary request totals", () => {
+    const current = {
+      ...usage,
+      inputTokens: 32_456,
+      uncachedInputTokens: 5_320,
+      mainCacheReported: true,
+      cacheInputTokens: 171_338,
+      cachedInputTokens: 103_936,
+    } as ContextUsage;
+
+    expect(contextCacheMetrics(current)).toEqual({
+      reported: true,
+      hitRate: 83.6,
+      cachedTokens: 27_136,
+      totalCacheTokens: 32_456,
+    });
+  });
+
+  it("shows two decimal places without rounding the cache hit rate to an integer", () => {
+    expect(contextCacheMetrics({
+      inputTokens: 55_817,
+      uncachedInputTokens: 265,
+      outputTokens: 10,
+      contextLimit: 1_000_000,
+      reported: true,
+      mainCacheReported: true,
+    })).toEqual({
+      reported: true,
+      hitRate: 99.52,
+      cachedTokens: 55_552,
+      totalCacheTokens: 55_817,
+    });
+  });
 });
 
 describe("context composition", () => {
