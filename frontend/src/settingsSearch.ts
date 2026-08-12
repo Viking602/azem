@@ -15,7 +15,7 @@ const staticSettings: Copy[] = [
   ["section:models", "models", "模型路由", "Model routing", "为标题、规划、审批、视觉、压缩、回顾和子智能体分配模型", "Assign models for titles, planning, approval, vision, compaction, recap, and subagents", ["route", "reasoning", "思考深度", "recap"]],
   ["subagents:concurrency", "subagents", "子智能体并发", "Subagent concurrency", "设置同时运行的团队成员上限", "Set the maximum number of concurrent team members", ["agent", "并发", "capacity"]],
   ["subagents:shell", "subagents", "Shell 并发", "Shell concurrency", "设置本地命令的独立并发容量", "Set independent local command capacity", ["terminal", "命令", "并发"]],
-  ["subagents:timeout", "subagents", "启动超时", "Start timeout", "设置资源与租约的等待上限", "Set the resource and lease wait limit", ["await", "lease", "等待"]],
+  ["subagents:timeout", "subagents", "前台等待窗口", "Foreground wait window", "窗口结束后安全任务转为后台继续，不会被取消", "Safe tasks continue in the background when the window ends; they are not cancelled", ["await", "background", "等待", "后台", "长程"]],
   ["subagents:scheduling", "subagents", "调度策略", "Scheduling policy", "查看并行分发、进度投影和资源排队行为", "Review parallel dispatch, progress projection, and capacity queuing", ["parallel", "queued", "排队"]],
   ["governance:approval", "governance", "默认审批模式", "Default approval mode", "逐次确认、自动审查或 YOLO", "Prompt, automatic review, or YOLO", ["approval", "auto review", "审批"]],
   ["governance:messages", "governance", "运行中消息", "Messages while running", "选择加入队列或实时引导", "Choose queueing or immediate guidance", ["queue", "guide", "队列", "引导"]],

@@ -99,8 +99,10 @@ Settings use one Codex-style full-window layout with a searchable left
 navigation and a consistent content column. Model catalog, model routing,
 Subagents, Governance and approvals, Appearance, and Extensions remain complete
 sections rather than separate modal variants. The Subagents section updates the
-live subagent capacity, independent shell capacity, and admission wait timeout,
-then persists those validated values to the existing configuration file.
+live subagent capacity, independent shell capacity, and foreground wait window,
+then persists those validated values to the existing configuration file. Ending
+that window never cancels a child: safe work becomes background work, while
+shared-workspace writes keep waiting.
 Extensions contains the shared Skill loading manager used by the secondary
 Extensions page: discovered Skills stay searchable when stopped, and the
 accessible switch sends only the typed `set_skill_enabled` action. The runtime

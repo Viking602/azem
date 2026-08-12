@@ -950,8 +950,8 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid = Default()
 	invalid.Agents.Subagents.AwaitTimeout = "30m"
 	invalid.Agents.Subagents.Budget.MaxWallClock = "20m"
-	if err := invalid.Validate(); err == nil {
-		t.Fatal("await timeout beyond wall-clock budget was accepted")
+	if err := invalid.Validate(); err != nil {
+		t.Fatalf("foreground wait window was incorrectly treated as a task runtime limit: %v", err)
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.Budget.MaxTokens = -1

@@ -1112,7 +1112,7 @@ func TestPlanModeCapsSubagentAtReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.CapabilityMode != "read-only" || profile.RequestedIsolation != "none" || subagentMayRunInBackground(profile) {
+	if profile.CapabilityMode != "read-only" || profile.RequestedIsolation != "none" || !subagentMayRunInBackground(profile) {
 		t.Fatalf("plan subagent profile = %#v", profile)
 	}
 	allowed := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
@@ -1215,7 +1215,7 @@ func (metadataOnlyDriver) Stream(context.Context, hyprovider.Request) (hyprovide
 	return hyprovider.NewSliceStream(nil), nil
 }
 
-func TestReadOnlyBackgroundRequestWaitsAndCancelsWithParentContext(t *testing.T) {
+func TestParentWaitCancellationDetachesReadOnlyChildWithoutCancellingIt(t *testing.T) {
 	ctx := context.Background()
 	providerStore, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
@@ -1242,7 +1242,7 @@ func TestReadOnlyBackgroundRequestWaitsAndCancelsWithParentContext(t *testing.T)
 	cancel()
 	call := tool.Call{
 		ID: "spawn", Name: subagentSpawnTool,
-		Arguments: json.RawMessage(`{"prompt":"inspect","description":"queued child","subagent_type":"explore","background":true}`),
+		Arguments: json.RawMessage(`{"prompt":"inspect","description":"queued child","subagent_type":"explore"}`),
 	}
 	result, err := driver.Execute(callCtx, call, nil)
 	if err != nil || result.IsError {
@@ -1252,25 +1252,26 @@ func TestReadOnlyBackgroundRequestWaitsAndCancelsWithParentContext(t *testing.T)
 	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["status"] != "cancelled" {
-		t.Fatalf("cancelled wait payload = %#v", payload)
+	if payload["status"] != "queued" || payload["continuing_in_background"] != true {
+		t.Fatalf("detached wait payload = %#v", payload)
 	}
 	runs, err := store.List(ctx, "session")
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("stored runs=%#v err=%v", runs, err)
 	}
-	if runs[0].Background || runs[0].State != agentservice.SubagentCancelled {
-		t.Fatalf("foreground child = %#v", runs[0])
+	if !runs[0].Background || runs[0].State != agentservice.SubagentQueued {
+		t.Fatalf("detached child = %#v", runs[0])
 	}
 	runtime.mu.Lock()
 	_, active := runtime.active[runs[0].ID]
 	runtime.mu.Unlock()
-	if active {
-		t.Fatal("cancelled foreground child remained active")
+	if !active {
+		t.Fatal("detached child was cancelled with its parent wait")
 	}
+	runtime.Cancel("session", runs[0].ID)
 }
 
-func TestBackgroundRequiresWriteCapableWorktree(t *testing.T) {
+func TestBackgroundAllowsReadOnlyOrIsolatedWrites(t *testing.T) {
 	cfg := config.Default().Agents.Subagents
 	runtime := subagentRuntime{cfg: cfg}
 	parent := subagentParentRuntime{ProviderID: "chatgpt", ModelID: "model", WorkspaceRoot: t.TempDir()}
@@ -1279,7 +1280,8 @@ func TestBackgroundRequiresWriteCapableWorktree(t *testing.T) {
 		input subagentSpawnInput
 		want  bool
 	}{
-		{name: "explore worktree", input: subagentSpawnInput{SubagentType: "explore", Isolation: "worktree"}},
+		{name: "explore shared workspace", input: subagentSpawnInput{SubagentType: "explore", Isolation: "none"}, want: true},
+		{name: "explore worktree", input: subagentSpawnInput{SubagentType: "explore", Isolation: "worktree"}, want: true},
 		{name: "writer shared workspace", input: subagentSpawnInput{SubagentType: "worker", Isolation: "none"}},
 		{name: "writer worktree", input: subagentSpawnInput{SubagentType: "worker", Isolation: "worktree"}, want: true},
 	} {
@@ -1553,7 +1555,7 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 	if spawned.ID == source.ID || spawned.ParentRunID != "new-parent" || spawned.Type != source.Type ||
 		spawned.Provider != source.Provider || spawned.Model != source.Model || spawned.Reasoning != source.Reasoning || spawned.CapabilityMode != source.CapabilityMode ||
 		spawned.RequestedIsolation != source.RequestedIsolation || spawned.CWD != source.CWD || spawned.WorktreePath != "" ||
-		spawned.Description != "new description" || spawned.Background {
+		spawned.Description != "new description" || !spawned.Background {
 		t.Fatalf("resumed run = %#v", spawned)
 	}
 	runtime.mu.Lock()
@@ -1990,6 +1992,102 @@ func (s *gatedSubagentStream) Recv() (hyprovider.Event, error) {
 }
 
 func (*gatedSubagentStream) Close() error { return nil }
+
+func TestForegroundWaitWindowDetachesLongReadOnlyTaskWithoutCancellingIt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	coding, err := agentservice.NewService(providerStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.AwaitDuration = 20 * time.Millisecond
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(ctx)
+	provider := newGatedSubagentDriver()
+	parent := subagentParentRuntime{
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(),
+	}
+	driver := &subagentSpawnDriver{runtime: runtime, parent: parent}
+	call := tool.Call{
+		ID: "spawn", Name: subagentSpawnTool,
+		Arguments: json.RawMessage(`{"prompt":"long inspection","description":"inspect for a long time","subagent_type":"explore"}`),
+	}
+	returned := make(chan tool.Result, 1)
+	go func() {
+		result, executeErr := driver.Execute(ctx, call, nil)
+		if executeErr != nil {
+			t.Errorf("spawn long subagent: %v", executeErr)
+		}
+		returned <- result
+	}()
+	select {
+	case <-provider.started:
+	case <-ctx.Done():
+		t.Fatal("long subagent did not start")
+	}
+	var result tool.Result
+	select {
+	case result = <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("foreground wait window did not release the parent")
+	}
+	assertDetachedSubagentResult(t, result)
+	runs, err := store.List(ctx, "session")
+	if err != nil || len(runs) != 1 || !runs[0].Background || runs[0].State != agentservice.SubagentRunning {
+		t.Fatalf("persisted detached run = %#v, err=%v", runs, err)
+	}
+	assertUnboundedSubagentTasks(t, ctx, coding, runs[0].ChildRunID)
+	provider.release <- struct{}{}
+	snapshots := runtime.Query(ctx, "session", []string{runs[0].ID}, 3*time.Second)
+	if len(snapshots) != 1 || !snapshots[0].Found || snapshots[0].Run.State != agentservice.SubagentCompleted {
+		t.Fatalf("long subagent did not complete after detaching = %#v", snapshots)
+	}
+}
+
+func assertDetachedSubagentResult(t *testing.T, result tool.Result) {
+	t.Helper()
+	if result.IsError {
+		t.Fatalf("foreground wait result = %#v", result)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["status"] != "running" || payload["background"] != true || payload["continuing_in_background"] != true {
+		t.Fatalf("detached long subagent payload = %#v", payload)
+	}
+}
+
+func assertUnboundedSubagentTasks(t *testing.T, ctx context.Context, coding *agentservice.Service, runID string) {
+	t.Helper()
+	tasks, err := coding.Runner().ListTasks(ctx, runID)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("durable subagent task budget = %#v, err=%v", tasks, err)
+	}
+	for _, task := range tasks {
+		if task.Budget == nil {
+			continue // Venat normalizes an all-zero budget to nil: unbounded.
+		}
+		if task.Budget.MaxTokens != 0 || task.Budget.MaxToolCalls != 0 || task.Budget.MaxSteps != 0 || task.Budget.MaxWallClock != 0 {
+			t.Fatalf("long subagent received a hidden runtime budget = %#v", task.Budget)
+		}
+	}
+}
 
 func TestSubagentCoordinatorEnforcesConcurrencyAndFIFOQueue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

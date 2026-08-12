@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Long-running subagents: remove implicit cancellation when a foreground wait
+  reaches `agents.subagents.await_timeout` or when the parent tool wait ends.
+  Read-only and isolated worktree tasks can continue in the background and be
+  polled with `subagent.get_output`; shared-workspace writers keep waiting
+  safely. Default token, tool-call, turn, and wall-clock budgets remain truly
+  unbounded, while explicit child cancellation and application shutdown still
+  terminate work intentionally.
+
 - Desktop global search: make Command-K search actions, settings and configured
   catalogs, session titles, and durable user/assistant conversation content
   across projects. Settings results focus the exact control; conversation

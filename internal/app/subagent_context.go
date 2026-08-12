@@ -95,6 +95,12 @@ func subagentMayMutateWorkspace(profile effectiveSubagentProfile) bool {
 }
 
 func subagentMayRunInBackground(profile effectiveSubagentProfile) bool {
+	// Read-only work is safe to detach from the parent tool call because it
+	// cannot race the parent for workspace mutations. This is the common path
+	// for long investigations that the parent polls with subagent.get_output.
+	if !subagentMayMutateWorkspace(profile) {
+		return true
+	}
 	if profile.RequestedIsolation != "worktree" {
 		return false
 	}

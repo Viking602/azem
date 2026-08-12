@@ -355,6 +355,49 @@ func (r *subagentRuntime) updateAwaitTimeout(timeout time.Duration) {
 	r.mu.Unlock()
 }
 
+func (r *subagentRuntime) foregroundWaitWindow() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cfg.AwaitDuration
+}
+
+// continueInBackground releases only the parent tool wait. The child execution
+// context is owned by the application runtime, so it keeps running until it
+// completes, is explicitly killed, is included in an explicit parent stop, or
+// the application shuts down. safeOnly prevents a live shared-workspace writer
+// from racing its parent after the tool call returns.
+func (r *subagentRuntime) continueInBackground(sessionID, id string, safeOnly bool) (agentservice.SubagentSnapshot, bool, error) {
+	r.mu.Lock()
+	active := r.active[id]
+	if active == nil || active.run.SessionID != sessionID || active.terminalizing || active.terminalized || subagentTerminal(active.run.State) {
+		r.mu.Unlock()
+		return r.snapshot(id, sessionID), false, nil
+	}
+	if active.run.Background {
+		snapshot := r.snapshotFromActiveLocked(active)
+		r.mu.Unlock()
+		return snapshot, true, nil
+	}
+	if safeOnly && !subagentMayRunInBackground(active.profile) {
+		snapshot := r.snapshotFromActiveLocked(active)
+		r.mu.Unlock()
+		return snapshot, false, nil
+	}
+	detached := cloneSubagentRun(active.run)
+	detached.Background = true
+	if err := r.store.Save(r.ctx, detached); err != nil {
+		snapshot := r.snapshotFromActiveLocked(active)
+		r.mu.Unlock()
+		return snapshot, false, err
+	}
+	active.run = detached
+	snapshot := r.snapshotFromActiveLocked(active)
+	r.signalChangedLocked()
+	r.mu.Unlock()
+	r.emitState(detached, string(detached.State))
+	return snapshot, true, nil
+}
+
 func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, parent subagentParentRuntime) (agentservice.SubagentRun, error) {
 	return r.spawn(input, parent, nil)
 }

@@ -206,18 +206,20 @@ type TeamConfig struct {
 }
 
 type SubagentConfig struct {
-	Enabled        bool                             `yaml:"enabled"`
-	MaxDepth       int                              `yaml:"max_depth"`
-	MaxConcurrency int                              `yaml:"max_concurrency"`
-	AwaitTimeout   string                           `yaml:"await_timeout"`
-	AwaitDuration  time.Duration                    `yaml:"-"`
-	AutoWake       bool                             `yaml:"auto_wake"`
-	Toggle         map[string]bool                  `yaml:"toggle,omitempty"`
-	Models         map[string]string                `yaml:"models,omitempty"`
-	Routes         map[string]ModelRouteConfig      `yaml:"routes,omitempty"`
-	Roles          map[string]SubagentRoleConfig    `yaml:"roles,omitempty"`
-	Personas       map[string]SubagentPersonaConfig `yaml:"personas,omitempty"`
-	Budget         SubagentBudgetConfig             `yaml:"budget"`
+	Enabled        bool `yaml:"enabled"`
+	MaxDepth       int  `yaml:"max_depth"`
+	MaxConcurrency int  `yaml:"max_concurrency"`
+	// AwaitTimeout is the foreground tool-call wait window, not a child
+	// execution timeout. Safe work continues in the background when it elapses.
+	AwaitTimeout  string                           `yaml:"await_timeout"`
+	AwaitDuration time.Duration                    `yaml:"-"`
+	AutoWake      bool                             `yaml:"auto_wake"`
+	Toggle        map[string]bool                  `yaml:"toggle,omitempty"`
+	Models        map[string]string                `yaml:"models,omitempty"`
+	Routes        map[string]ModelRouteConfig      `yaml:"routes,omitempty"`
+	Roles         map[string]SubagentRoleConfig    `yaml:"roles,omitempty"`
+	Personas      map[string]SubagentPersonaConfig `yaml:"personas,omitempty"`
+	Budget        SubagentBudgetConfig             `yaml:"budget"`
 }
 
 type SubagentBudgetConfig struct {
@@ -720,9 +722,6 @@ func (c *Config) validateSubagents() error {
 	}
 	if subagents.Budget.MaxToolCalls < 0 || subagents.Budget.MaxTurns < 0 {
 		return fmt.Errorf("agents.subagents tool-call and turn budgets must be non-negative (zero is unbounded)")
-	}
-	if wallClock > 0 && await > wallClock {
-		return fmt.Errorf("agents.subagents.await_timeout must not exceed budget.max_wall_clock")
 	}
 	subagents.AwaitDuration = await
 	subagents.Budget.MaxWallClockDuration = wallClock

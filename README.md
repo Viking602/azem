@@ -395,7 +395,7 @@ agents:
     enabled: true
     max_depth: 1
     max_concurrency: 2
-    await_timeout: 10m
+    await_timeout: 10m       # foreground wait window; safe work continues in the background after it elapses
     auto_wake: true
     routes:
       explore:

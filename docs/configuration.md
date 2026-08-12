@@ -26,13 +26,22 @@ operating-system user configuration directory; `-config` selects another file.
 The maintained example in [README.md](../README.md#configuration) shows the
 current field names and defaults. Duration values use Go duration syntax.
 
-The desktop Subagents settings surface edits three live runtime limits without
-restarting the application: `agents.subagents.max_concurrency`,
-`workspace.shell.max_concurrency`, and `agents.subagents.await_timeout`.
-Changes pass through validated application actions, update the active runtime,
-and are persisted with the same node-preserving YAML writer used by the other
-runtime settings. Existing in-flight shell commands and subagents are allowed
-to finish; the new capacity applies to subsequent admission decisions.
+The desktop Subagents settings surface edits two live capacity limits and one
+foreground wait window without restarting the application:
+`agents.subagents.max_concurrency`, `workspace.shell.max_concurrency`, and
+`agents.subagents.await_timeout`. The await value never limits child runtime.
+When it elapses, read-only or isolated worktree tasks continue in the background
+and the parent can inspect them with `subagent.get_output`; a shared-workspace
+writer keeps waiting in the foreground rather than racing the parent or being
+cancelled. Changes pass through validated application actions, update the
+active runtime, and are persisted with the same node-preserving YAML writer
+used by the other runtime settings. Existing work is allowed to finish.
+
+Subagent token, tool-call, turn, and wall-clock budgets default to zero, which
+means unbounded. A child is cancelled only by explicit `subagent.kill`, a user
+stop that explicitly includes children, or application shutdown. Provider
+context windows still require semantic compaction, but that is not a cumulative
+task-size ceiling.
 
 ## Skills
 
