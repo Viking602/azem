@@ -19,6 +19,7 @@ type streamAdapter struct {
 	inner     sdk.Stream
 	reporter  responses.UsageReporter
 	names     *toolNames
+	provider  string
 	requestID string
 	toolUse   bool
 }
@@ -63,6 +64,7 @@ func (s *streamAdapter) Recv() (hyprovider.Event, error) {
 }
 
 func (s *streamAdapter) finish(part sdk.Part) hyprovider.Event {
+	part.Usage = normalizeProviderUsage(s.provider, part.Usage)
 	usage := hyprovider.Usage{
 		InputTokens: part.Usage.InputTokens, CachedInputTokens: part.Usage.CachedInputTokens,
 		CacheWriteInputTokens: part.Usage.CacheWriteInputTokens, OutputTokens: part.Usage.OutputTokens,
@@ -81,6 +83,22 @@ func (s *streamAdapter) finish(part sdk.Part) hyprovider.Event {
 		reason = hyprovider.StopReasonToolUse
 	}
 	return hyprovider.Event{Kind: hyprovider.EventDone, StopReason: reason, Usage: usage, ProviderState: append(json.RawMessage(nil), part.ProviderState...)}
+}
+
+// normalizeProviderUsage translates provider wire accounting into Venat's
+// inclusive input-token convention. DeepSeek's Anthropic-compatible response
+// reports cache misses in input_tokens and cache hits separately in
+// cache_read_input_tokens. llmux v0.2.4 preserves the values but neither adds
+// them nor marks the cache field as reported, which makes a real hit appear as
+// an unsupported metric in the desktop.
+func normalizeProviderUsage(provider string, usage sdk.Usage) sdk.Usage {
+	if provider != "deepseek" {
+		return usage
+	}
+	usage.InputTokens += usage.CachedInputTokens + usage.CacheWriteInputTokens
+	usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+	usage.CachedInputTokensReported = true
+	return usage
 }
 
 func (s *streamAdapter) Close() error { return s.inner.Close() }

@@ -1,0 +1,143 @@
+/*
+ * Beautiful UI primitives adapted for Azem.
+ * Source: https://www.beautifului.dev/ — Copyright (c) 2026 Shane Levine, MIT.
+ */
+
+:root {
+  --canvas: #f1f2f3;
+  --sidebar: #f7f8f9;
+  --paper: #ffffff;
+  --paper-strong: #ffffff;
+  --paper-muted: #f4f5f6;
+  --hover: #e7e9eb;
+  --ink: #1f2124;
+  --ink-soft: #45484d;
+  --muted: #62656b;
+  --faint: #9a9da3;
+  --line: #ecedef;
+  --line-strong: #e0e2e5;
+  --accent: #0285ff;
+  --accent-soft: #e9f3ff;
+  --blue: #0285ff;
+  --green: #189a4d;
+  --red: #e3474c;
+  --amber: #ef720c;
+  --shadow: 0 0 0 1px var(--line), 0 1px 2px rgb(16 24 40 / 4%), 0 2px 6px rgb(16 24 40 / 3%);
+  --shadow-low: var(--shadow);
+  --shadow-float: 0 0 0 1px var(--line), 0 8px 28px rgb(0 0 0 / 7%);
+  --bui-radius-chip: 6px;
+  --bui-radius-control: 8px;
+  --bui-radius-card: 10px;
+  --bui-ease-out: cubic-bezier(.23, 1, .32, 1);
+}
+
+:root[data-theme="dark"] {
+  --canvas: #1c1d1f;
+  --sidebar: #1f2022;
+  --paper: #232427;
+  --paper-strong: #232427;
+  --paper-muted: #2a2b2e;
+  --hover: #313236;
+  --ink: #f2f3f4;
+  --ink-soft: #c7c9cd;
+  --muted: #a5a8ad;
+  --faint: #6c6f75;
+  --line: #2e3033;
+  --line-strong: #3a3c40;
+  --accent: #3d9aff;
+  --accent-soft: rgb(61 154 255 / 16%);
+  --blue: #3d9aff;
+  --green: #3dbb72;
+  --red: #ee5c61;
+  --amber: #f68f3c;
+  --shadow: 0 0 0 1px var(--line), 0 1px 2px rgb(0 0 0 / 20%), 0 2px 6px rgb(0 0 0 / 20%);
+  --shadow-low: var(--shadow);
+  --shadow-float: 0 0 0 1px var(--line-strong), 0 8px 28px rgb(0 0 0 / 34%);
+}
+
+.bui-thinking-state .reasoning-summary {
+  min-height: 28px;
+  gap: 8px;
+  margin-left: -6px;
+  padding: 4px 6px;
+  border-radius: var(--bui-radius-control);
+  transition: background-color 100ms ease, color 100ms ease;
+}
+.bui-thinking-state .reasoning-summary:hover:not(:disabled) { background: var(--hover); transform: none; }
+.bui-thinking-mark { width: 16px; height: 16px; flex-basis: 16px; color: var(--muted); }
+.bui-thinking-mark i:first-child {
+  inset: 1px;
+  border: 0;
+  border-radius: 0;
+  background: currentColor;
+  clip-path: polygon(50% 0, 61% 35%, 100% 50%, 61% 65%, 50% 100%, 39% 65%, 0 50%, 39% 35%);
+}
+.bui-thinking-mark i:last-child { display: none; }
+.bui-thinking-mark.active { color: var(--ink-soft); animation: bui-thinking-pulse 1.4s ease-in-out infinite; }
+.bui-thinking-body { margin-left: 7px; padding-left: 16px; border-left-color: var(--line); }
+
+.bui-streaming-text { position: relative; }
+.bui-streaming-text.active > :last-child::after {
+  content: "";
+  width: 2px;
+  height: 12px;
+  display: inline-block;
+  margin-left: 3px;
+  border-radius: 99px;
+  background: var(--ink);
+  vertical-align: -.08em;
+  animation: bui-caret 850ms ease-in-out infinite;
+}
+.bui-streaming-text .streaming-text-reveal { animation-duration: 420ms; animation-timing-function: cubic-bezier(.22, .61, .25, 1); }
+
+.bui-tool-row > summary { border-radius: var(--bui-radius-control); }
+.bui-tool-row > summary:hover { background: var(--hover); transform: none; }
+.bui-tool-row[data-state="running"] > summary { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.bui-tool-row[data-state="running"] .timeline-step-mark { color: var(--accent); }
+
+.bui-approval-card {
+  border-color: var(--line);
+  border-radius: var(--bui-radius-card);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+.bui-approval-card .approval-heading { background: var(--paper); }
+.bui-approval-card .approval-icon { border-radius: var(--bui-radius-control); background: var(--accent-soft); color: var(--accent); }
+.bui-approval-card .approval-target { border: 0; border-radius: var(--bui-radius-control); background: color-mix(in srgb, var(--canvas) 68%, var(--paper)); box-shadow: inset 0 1px 2px rgb(0 0 0 / 8%); }
+.bui-approval-card .approval-actions button { border-radius: var(--bui-radius-control); box-shadow: 0 0 0 1px var(--line-strong), 0 1px 2px rgb(16 24 40 / 5%); }
+.bui-approval-card .approval-actions button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+.bui-approval-card .approval-actions button:active { transform: scale(.96); }
+
+.bui-task-row { min-height: 30px; border-radius: var(--bui-radius-chip); transition: background-color 150ms ease; }
+.bui-task-row[data-status="in_progress"] { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.bui-task-row[data-status="in_progress"] > svg { color: var(--accent); }
+
+@keyframes bui-thinking-pulse { 0%, 100% { opacity: .55; transform: scale(.9); } 50% { opacity: 1; transform: scale(1); } }
+@keyframes bui-caret { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --canvas: #1c1d1f;
+    --sidebar: #1f2022;
+    --paper: #232427;
+    --paper-strong: #232427;
+    --paper-muted: #2a2b2e;
+    --hover: #313236;
+    --ink: #f2f3f4;
+    --ink-soft: #c7c9cd;
+    --muted: #a5a8ad;
+    --faint: #6c6f75;
+    --line: #2e3033;
+    --line-strong: #3a3c40;
+    --accent: #3d9aff;
+    --accent-soft: rgb(61 154 255 / 16%);
+    --blue: #3d9aff;
+    --green: #3dbb72;
+    --red: #ee5c61;
+    --amber: #f68f3c;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bui-thinking-mark.active, .bui-streaming-text.active > :last-child::after { animation: none; }
+}

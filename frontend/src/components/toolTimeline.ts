@@ -178,6 +178,66 @@ export type TimelineEntry =
   | { kind: "block"; block: Block }
   | { kind: "tool-group"; id: string; blocks: Block[]; summary: string; running: boolean };
 
+export type ModelProgressPresentation = {
+  title: string;
+  detail: string;
+};
+
+export type ProcessTimelineEntry = TimelineEntry | {
+  kind: "model-progress";
+  id: string;
+  block: Block;
+  blocks: Block[];
+  presentation: ModelProgressPresentation;
+};
+
+/**
+ * Recognize the explicit two-line commentary contract emitted by the model.
+ * Old prose commentary deliberately returns null instead of being guessed or
+ * truncated into a synthetic title.
+ */
+export function parseModelProgress(content = ""): ModelProgressPresentation | null {
+  let raw = plainAnsiText(content).trimStart();
+  // Skills may prepend a decorative emoji marker before the model's explicit
+  // two-line progress contract. It is presentation metadata, not a separate
+  // prose paragraph, so keep the commentary on the compact progress path.
+  raw = raw.replace(/^(?:\p{Extended_Pictographic}[\uFE0F\u200D\p{Emoji_Modifier}]*)[ \t]*(?:\r?\n[ \t]*)*(?=\*\*)/u, "");
+  if (!raw.startsWith("**")) return null;
+
+  const lineEnd = raw.indexOf("\n");
+  const closing = raw.indexOf("**", 2);
+  if (closing < 0) {
+    if (lineEnd >= 0) return null;
+    const title = plainProgressText(raw.slice(2));
+    return title ? { title, detail: "" } : null;
+  }
+  if (lineEnd >= 0 && lineEnd < closing) return null;
+
+  const title = plainProgressText(raw.slice(2, closing));
+  if (!title) return null;
+  return {
+    title,
+    detail: plainProgressText(raw.slice(closing + 2)),
+  };
+}
+
+function plainProgressText(content: string) {
+  return content
+    .replace(/^```[^\n]*\n?/gmu, "")
+    .replace(/^```$/gmu, "")
+    .replace(/^#{1,6}[ \t]+/gmu, "")
+    .replace(/^>[ \t]?/gmu, "")
+    .replace(/^(\s*)(?:[-*+]|\d+[.)])[ \t]+/gmu, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/gu, "$1")
+    .replace(/`([^`\n]+)`/gu, "$1")
+    .replace(/\*\*([^*]+)\*\*/gu, "$1")
+    .replace(/__([^_]+)__/gu, "$1")
+    .replace(/~~([^~]+)~~/gu, "$1")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
 export function isRunningTool(block: Block) {
   return block.kind === "tool" && ["running", "started", "streaming", "progress"].includes(block.state || "");
 }
@@ -239,6 +299,22 @@ export function groupTimelineBlocks(blocks: Block[], language: Language): Timeli
   let index = 0;
   while (index < blocks.length) {
     const block = blocks[index]!;
+    if (block.kind === "tool" && block.data?.presentation === "steps") {
+      let end = index + 1;
+      while (end < blocks.length && blocks[end]?.kind === "tool" && blocks[end]?.data?.presentation === "steps") end += 1;
+      const group = blocks.slice(index, end);
+      if (group.length >= MIN_TOOL_GROUP_SIZE) {
+        entries.push({
+          kind: "tool-group",
+          id: `tool-steps-${group[0]!.id}-${group.length}`,
+          blocks: group,
+          summary: summarizeToolGroup(group, language),
+          running: group.some(isRunningTool),
+        });
+        index = end;
+        continue;
+      }
+    }
     if (!isCollapsibleTool(block)) {
       entries.push({ kind: "block", block });
       index += 1;
@@ -263,9 +339,63 @@ export function groupTimelineBlocks(blocks: Block[], language: Language): Timeli
   return entries;
 }
 
+/**
+ * Make model-authored progress the primary step and tuck the tool calls it
+ * announces underneath. Unformatted commentary and orphaned tools keep the
+ * existing timeline behavior for durable backwards compatibility.
+ */
+export function groupProcessTimelineBlocks(blocks: Block[], language: Language): ProcessTimelineEntry[] {
+  const entries: ProcessTimelineEntry[] = [];
+  let plainBlocks: Block[] = [];
+  const flushPlain = () => {
+    if (!plainBlocks.length) return;
+    entries.push(...groupTimelineBlocks(plainBlocks, language));
+    plainBlocks = [];
+  };
+
+  let index = 0;
+  while (index < blocks.length) {
+    const block = blocks[index]!;
+    const presentation = block.kind === "commentary" ? parseModelProgress(block.content || "") : null;
+    if (!presentation) {
+      plainBlocks.push(block);
+      index += 1;
+      continue;
+    }
+
+	const leadingThinking: Block[] = [];
+	while (plainBlocks.at(-1)?.kind === "thinking") {
+		leadingThinking.unshift(plainBlocks.pop()!);
+	}
+    flushPlain();
+    let end = index + 1;
+    while (end < blocks.length && isModelProgressDetail(blocks[end]!)) end += 1;
+    entries.push({
+      kind: "model-progress",
+      id: `model-progress-${block.id}`,
+      block,
+      blocks: [...leadingThinking, ...blocks.slice(index + 1, end)],
+      presentation,
+    });
+    index = end;
+  }
+  flushPlain();
+  return entries;
+}
+
+function isModelProgressDetail(block: Block) {
+  return block.kind === "thinking" || block.kind === "tool" || block.kind === "diff";
+}
+
 /** Kinds that form the collapsible process trail ("经过"), not final outcomes. */
 export function isProcessBlock(block: Block) {
-  return block.kind === "thinking" || block.kind === "commentary" || block.kind === "tool";
+  return block.kind === "thinking"
+    || block.kind === "commentary"
+    || block.kind === "tool"
+    // diff_ready is a live projection of the tool immediately before it. If
+    // it sits outside the process trail, it splits one running turn into
+    // multiple folds until a session reload drops that ephemeral projection.
+    || block.kind === "diff";
 }
 
 /** Agent / hook lifecycle noise — hide from the main transcript (Codex-style). */
@@ -283,7 +413,7 @@ export type ProcessSegment =
  */
 export function segmentProcessTrail(
   blocks: Block[],
-  options: { activeRunId?: string; running?: boolean } = {},
+  options: { activeRunId?: string; running?: boolean; now?: number } = {},
 ): ProcessSegment[] {
   const visible = blocks.filter((block) => !isHiddenTimelineBlock(block));
   const segments: ProcessSegment[] = [];
@@ -299,13 +429,22 @@ export function segmentProcessTrail(
     while (end < visible.length && isProcessBlock(visible[end]!)) end += 1;
     const processBlocks = visible.slice(index, end);
     const runId = processBlocks.find((item) => item.runId)?.runId || "";
-    const active = processBlocks.some((item) => isActiveProcessBlock(item))
+    const hasActiveBlock = processBlocks.some((item) => isActiveProcessBlock(item));
+    const active = hasActiveBlock
       || Boolean(options.running && runId && runId === options.activeRunId);
     segments.push({
       kind: "process",
       id: `process-${processBlocks[0]!.id}-${processBlocks.length}`,
       blocks: processBlocks,
-      elapsedMs: processElapsedMs(processBlocks),
+      // A provider can finish the spawn/read tools for the latest progress
+      // step and then wait for subagents without emitting another live block.
+      // Keep that process duration anchored to its durable startedAt timestamp
+      // so switching away and reloading the session cannot reset the clock to
+      // the last individual tool duration.
+      elapsedMs: processElapsedMs(
+        processBlocks,
+        active ? options.now ?? Date.now() : 0,
+      ),
       active,
     });
     index = end;
@@ -313,11 +452,11 @@ export function segmentProcessTrail(
   return segments;
 }
 
-function isActiveProcessBlock(block: Block) {
+export function isActiveProcessBlock(block: Block) {
   return ["running", "started", "streaming", "progress"].includes(block.state || "");
 }
 
-function processElapsedMs(blocks: Block[]) {
+export function processElapsedMs(blocks: Block[], activeUntil = 0) {
   let stamped = 0;
   let minStart = Infinity;
   let maxEnd = 0;
@@ -330,8 +469,13 @@ function processElapsedMs(blocks: Block[]) {
     if (end > 0) maxEnd = Math.max(maxEnd, end);
   }
   // Prefer wall-clock span across the process trail when timestamps exist.
-  if (minStart < Infinity && maxEnd > minStart) return maxEnd - minStart;
-  return stamped;
+  // Only epoch-millisecond starts can be extended to the present; fixtures
+  // and legacy relative timestamps must keep their recorded duration.
+  const liveSpan = activeUntil > 0 && minStart >= 1e12 && activeUntil >= minStart
+    ? activeUntil - minStart
+    : 0;
+  if (minStart < Infinity && maxEnd > minStart) return Math.max(stamped, maxEnd - minStart, liveSpan);
+  return Math.max(stamped, liveSpan);
 }
 
 export function formatDuration(milliseconds: number) {

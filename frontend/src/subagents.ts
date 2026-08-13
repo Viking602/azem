@@ -7,14 +7,48 @@ const PREVIEW_LIMIT = 240;
 const LIFECYCLE_COPY = /^(?:initializing|started|running|queued|waiting|editing|cancelling|completed|failed|cancelled|canceled|interrupted|idle)$/i;
 const TOOL_ACTIVITY = /^(?:coding[._]|subagent[._]|context[._]|hydaelyn[._])/i;
 
-const IDENTITY_PALETTES = [
-  ["#e66aa0", "#f3a8c7"],
-  ["#67c6a6", "#a7e2ce"],
-  ["#8d73e8", "#c1b2f5"],
-  ["#ec7b70", "#f3aaa3"],
-  ["#4ba7d8", "#9bd0eb"],
-  ["#d79545", "#efc083"],
-] as const;
+export type SubagentGlyphKind =
+  | "architecture"
+  | "security"
+  | "interface"
+  | "systems"
+  | "verify"
+  | "plan"
+  | "explore"
+  | "research"
+  | "report"
+  | "build"
+  | "review"
+  | "general";
+
+const ROLE_IDENTITIES: Record<SubagentGlyphKind, readonly [string, string]> = {
+  architecture: ["#6474b9", "#9aa5d7"],
+  security: ["#bf5d71", "#e0a0ad"],
+  interface: ["#8b6cc7", "#b8a5df"],
+  systems: ["#4f83a6", "#91b7ce"],
+  verify: ["#318a68", "#82bda7"],
+  plan: ["#a66c3f", "#d2a57f"],
+  explore: ["#3f8c98", "#87bbc2"],
+  research: ["#5979ad", "#96acd0"],
+  report: ["#8a7462", "#b9aa9d"],
+  build: ["#c35e4c", "#df9b8e"],
+  review: ["#c07a3e", "#dda977"],
+  general: ["#6f746f", "#a9ada8"],
+};
+
+const ROLE_RULES: readonly [SubagentGlyphKind, RegExp][] = [
+  ["security", /security|secure|permission|approval|compliance|auth|threat|abuse|安全|权限|审批|合规|认证|授权|威胁|滥用/i],
+  ["architecture", /architecture|architect|module|boundary|coupling|dependency|架构|模块|边界|依赖|耦合|文档一致/i],
+  ["interface", /frontend|front-end|\bui\b|\bux\b|accessib|render|前端|界面|交互|可访问|渲染|样式/i],
+  ["systems", /backend|back-end|\bgo\b|runtime|server|database|storage|scheduler|persistence|后端|运行时|服务端|数据库|存储|调度|持久化/i],
+  ["verify", /verify|verification|\btest|\bqa\b|quality|regression|验证|测试|工程保障|质量|回归/i],
+  ["plan", /\bplan|planner|planning|规划|计划|方案/i],
+  ["explore", /explore|investigat|debug|diagnos|定位|探索|调查|排查|分析/i],
+  ["research", /research|search|资料|研究|调研|检索/i],
+  ["report", /report|reporter|document|writer|汇报|报告|文档|总结/i],
+  ["build", /worker|implement|engineer|develop|coding|\bcode\b|\bfix\b|实现|编码|修复|开发/i],
+  ["review", /review|audit|审查|审阅|评估|复核/i],
+];
 
 export function isSubagentActive(state: string | undefined) {
   return Boolean(ACTIVE_STATES[(state || "").toLowerCase()]);
@@ -108,16 +142,11 @@ export function formatSubagentElapsed(elapsedMs: number) {
   return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 }
 
-export function subagentVisualIdentity(agent: Pick<AgentState, "id" | "type">) {
-  const source = agent.id || agent.type || "subagent";
-  let hash = 2166136261;
-  for (let index = 0; index < source.length; index += 1) {
-    hash ^= source.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  const normalized = hash >>> 0;
-  const palette = IDENTITY_PALETTES[normalized % IDENTITY_PALETTES.length]!;
-  return { accent: palette[0], secondary: palette[1], variant: normalized % 4 };
+export function subagentVisualIdentity(agent: Pick<AgentState, "id" | "type"> & Partial<Pick<AgentState, "description">>) {
+  const source = `${agent.type || ""} ${agent.id || ""} ${agent.description || ""}`.trim();
+  const kind = ROLE_RULES.find(([, pattern]) => pattern.test(source))?.[0] || "general";
+  const palette = ROLE_IDENTITIES[kind];
+  return { kind, accent: palette[0], secondary: palette[1] };
 }
 
 function compactLine(value: string | undefined) {

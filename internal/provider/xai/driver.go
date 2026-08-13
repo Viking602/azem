@@ -13,6 +13,7 @@ import (
 	hyprovider "github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/auth"
+	"github.com/Viking602/azem/internal/netproxy"
 	"github.com/Viking602/azem/internal/provider/responses"
 )
 
@@ -163,6 +164,7 @@ func (t *CLIProxyTransport) restyClient() *resty.Client {
 	defer t.clientMu.Unlock()
 	if t.Client == nil {
 		t.Client = resty.New()
+		netproxy.ConfigureTransport(t.Client.Transport())
 	}
 	return t.Client
 }

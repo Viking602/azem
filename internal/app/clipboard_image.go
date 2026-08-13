@@ -176,7 +176,7 @@ $path = Join-Path $env:TEMP ("azem-clipboard-" + [guid]::NewGuid().ToString() + 
 $img.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
 Write-Output $path
 `
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
 	out, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(out))
 	if err != nil {

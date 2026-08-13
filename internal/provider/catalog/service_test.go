@@ -99,12 +99,15 @@ func TestCatalogCachingETagAndAccountIsolation(t *testing.T) {
 }
 
 func TestGrokCatalogDecode(t *testing.T) {
-	models, more, after, err := decode("grok", []byte(`{"data":[{"id":"grok-code","capabilities":["tools","reasoning"]}],"has_more":true,"last_id":"cursor"}`))
+	models, more, after, err := decode("grok", []byte(`{"data":[{"id":"grok-code","capabilities":["tools","reasoning"],"pricing":[{"input":3,"output":15}]}],"has_more":true,"last_id":"cursor"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(models) != 1 || !models[0].SupportsTools || !models[0].SupportsReasoning || !more || after != "cursor" {
 		t.Fatalf("models=%+v more=%v after=%q", models, more, after)
+	}
+	if tiers, ok := models[0].Pricing["tiers"].([]any); !ok || len(tiers) != 1 {
+		t.Fatalf("array pricing was not preserved: %#v", models[0].Pricing)
 	}
 }
 

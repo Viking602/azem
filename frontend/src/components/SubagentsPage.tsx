@@ -1,38 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Plus, X } from "lucide-react";
-import { execute } from "../bridge";
-import { tFormat, translator } from "../i18n";
+import { Bot, X } from "lucide-react";
+import { translator } from "../i18n";
 import {
   formatSubagentElapsed,
   isSubagentActive,
   subagentDisplayName,
   subagentElapsedMs,
   subagentPreviewText,
+  subagentSummaryLabel,
   subagentStatusLabel,
 } from "../subagents";
 import { useRuntimeStore } from "../store";
 import type { AgentState } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
 
-const INITIAL_VISIBLE_AGENTS = 4;
-
 export default function SubagentsPage() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const agents = useRuntimeStore((state) => state.agents);
-  const selectedAgentId = useRuntimeStore((state) => state.selectedAgentId);
-  const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
   const setView = useRuntimeStore((state) => state.setView);
   const selectAgent = useRuntimeStore((state) => state.selectAgent);
-  const setError = useRuntimeStore((state) => state.setError);
-  const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const titleRef = useRef<HTMLHeadingElement>(null);
   const language = snapshot.language;
   const t = translator(language);
   const orderedAgents = useMemo(() => [...agents].reverse(), [agents]);
   const hasActiveAgents = agents.some((agent) => isSubagentActive(agent.state));
-  const visibleAgents = expanded ? orderedAgents : orderedAgents.slice(0, INITIAL_VISIBLE_AGENTS);
-  const hidden = Math.max(0, orderedAgents.length - visibleAgents.length);
+  const groups = useMemo(() => [
+    { key: "active", label: t("subagentActiveGroup"), agents: orderedAgents.filter((agent) => isSubagentActive(agent.state)) },
+    { key: "queued", label: t("subagentQueuedGroup"), agents: orderedAgents.filter((agent) => agent.state === "queued") },
+    { key: "finished", label: t("subagentFinishedGroup"), agents: orderedAgents.filter((agent) => !isSubagentActive(agent.state) && agent.state !== "queued") },
+  ].filter((group) => group.agents.length > 0), [orderedAgents, t]);
+  const activeCount = groups.find((group) => group.key === "active")?.agents.length ?? 0;
+  const queuedCount = groups.find((group) => group.key === "queued")?.agents.length ?? 0;
+  const finishedCount = groups.find((group) => group.key === "finished")?.agents.length ?? 0;
 
   useEffect(() => {
     titleRef.current?.focus();
@@ -50,45 +50,28 @@ export default function SubagentsPage() {
     requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".inspector-toggle")?.focus());
   };
 
-  const newThread = async () => {
-    try {
-      selectAgent("");
-      await execute({ kind: "new_session", sessionId: currentSessionId });
-      setView("thread");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  };
-
-  const inspectAgent = async (agentId: string) => {
-    selectAgent(agentId);
-    try {
-      await execute({ kind: "inspect_agent", target: agentId, sessionId: currentSessionId });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  };
+  const inspectAgent = (agentId: string) => selectAgent(agentId);
 
   return (
-    <section className="subagents-page" aria-labelledby="subagents-page-title">
+    <section className="subagents-page" role="dialog" aria-modal="true" aria-labelledby="subagents-page-title">
       <header className="subagents-page-bar titlebar-region">
-        <div className="subagents-page-tab" aria-current="page">
-          <Bot size={16} aria-hidden="true" />
-          <h1 id="subagents-page-title" ref={titleRef} tabIndex={-1}>{t("subagents")}</h1>
-          <button type="button" className="subagents-close" onClick={closePage} title={t("closeSubagents")} aria-label={t("closeSubagents")}>
-            <X size={14} />
-          </button>
+        <div className="subagents-page-heading">
+          <span>{t("subagentCenterEyebrow")}</span>
+          <h1 id="subagents-page-title" ref={titleRef} tabIndex={-1}>{t("subagentCenter")}</h1>
+          <p aria-live="polite">{subagentSummaryLabel(agents, language)}</p>
         </div>
-        <button type="button" className="icon-button subagents-new-thread" onClick={() => void newThread()} title={t("newSession")} aria-label={t("newSession")}>
-          <Plus size={17} />
+        <button type="button" className="subagents-close" onClick={closePage} title={t("closeSubagents")} aria-label={t("closeSubagents")}>
+          <X size={16} />
         </button>
       </header>
 
       <div className="subagents-page-scroll">
         <div className="subagents-page-content">
-          <p className="subagents-page-count" aria-live="polite">
-            {tFormat(language, "subagentsStarted", { count: agents.length })}
-          </p>
+          <div className="subagents-overview" aria-label={t("subagentCenter")}>
+            <div data-state="active"><strong>{activeCount}</strong><span>{t("subagentActiveGroup")}</span></div>
+            <div data-state="queued"><strong>{queuedCount}</strong><span>{t("subagentQueuedGroup")}</span></div>
+            <div data-state="finished"><strong>{finishedCount}</strong><span>{t("subagentFinishedGroup")}</span></div>
+          </div>
 
           {agents.length === 0 ? (
             <div className="subagents-empty">
@@ -96,31 +79,21 @@ export default function SubagentsPage() {
               <p>{t("noAgents")}</p>
             </div>
           ) : (
-            <>
-              <ul className="subagents-list">
-                {visibleAgents.map((agent) => (
-                  <SubagentRow
+            <div className="subagent-groups">
+              {groups.map((group) => <section className="subagent-group" data-group={group.key} key={group.key}>
+                <header><h2>{group.label}</h2><span>{group.agents.length}</span></header>
+                <ul className="subagents-list">
+                  {group.agents.map((agent) => <SubagentRow
                     key={agent.id}
                     agent={agent}
                     agents={agents}
                     language={language}
                     now={now}
-                    selected={selectedAgentId === agent.id}
                     inspect={inspectAgent}
-                  />
-                ))}
-              </ul>
-              {hidden > 0 && (
-                <button type="button" className="subagents-show-more" onClick={() => setExpanded(true)}>
-                  {tFormat(language, "subagentsShowMore", { count: hidden })}
-                </button>
-              )}
-              {expanded && orderedAgents.length > INITIAL_VISIBLE_AGENTS && (
-                <button type="button" className="subagents-show-more" onClick={() => setExpanded(false)}>
-                  {t("subagentsShowLess")}
-                </button>
-              )}
-            </>
+                  />)}
+                </ul>
+              </section>)}
+            </div>
           )}
         </div>
       </div>
@@ -128,13 +101,12 @@ export default function SubagentsPage() {
   );
 }
 
-function SubagentRow({ agent, agents, language, now, selected, inspect }: {
+function SubagentRow({ agent, agents, language, now, inspect }: {
   agent: AgentState;
   agents: AgentState[];
   language: "en" | "zh-CN";
   now: number;
-  selected: boolean;
-  inspect: (agentId: string) => Promise<void>;
+  inspect: (agentId: string) => void;
 }) {
   const name = subagentDisplayName(agent, agents, language);
   const preview = subagentPreviewText(agent, name, language);
@@ -142,28 +114,24 @@ function SubagentRow({ agent, agents, language, now, selected, inspect }: {
   const elapsed = subagentElapsedMs(agent, now);
   const elapsedLabel = formatSubagentElapsed(elapsed);
   const active = isSubagentActive(agent.state);
-  const meta = agent.state === "queued"
-    ? status
-    : active
-      ? elapsedLabel
-      : elapsed > 0
-        ? `${status} · ${elapsedLabel}`
-        : status;
+  const showElapsed = agent.state !== "queued" && (active || elapsed > 0);
 
   return (
     <li className="subagent-row" data-state={agent.state}>
       <button
         type="button"
-        className={selected ? "active" : ""}
-        onClick={() => void inspect(agent.id)}
-        aria-label={`${name}，${status}，${meta}`}
+        onClick={() => inspect(agent.id)}
+        aria-label={`${name}，${status}${showElapsed ? `，${elapsedLabel}` : ""}`}
       >
         <SubagentGlyph agent={agent} size={34} />
         <span className="subagent-row-copy">
           <strong title={name}>{name}</strong>
           <span title={preview}>{preview}</span>
         </span>
-        {active ? <time className="subagent-row-meta" aria-label={`${status} ${elapsedLabel}`}>{elapsedLabel}</time> : <span className="subagent-row-meta">{meta}</span>}
+        <span className="subagent-row-meta">
+          <em data-state={agent.state}>{status}</em>
+          {showElapsed ? <time aria-label={`${status} ${elapsedLabel}`}>{elapsedLabel}</time> : null}
+        </span>
       </button>
     </li>
   );

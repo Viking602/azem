@@ -12,6 +12,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@iconify-icons/vscode-icons": "^1.2.29",
+    "@iconify/react": "^6.0.2",
     "@wailsio/runtime": "3.0.0-alpha2.119",
     "lucide-react": "^0.468.0",
     "motion": "^13.0.0",

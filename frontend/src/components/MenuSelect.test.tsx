@@ -72,4 +72,40 @@ describe("MenuSelect", () => {
     await act(async () => root.unmount());
     dialog.remove();
   });
+
+  it("positions a dialog menu relative to its portal instead of adding viewport offsets twice", async () => {
+    const dialog = document.createElement("dialog");
+    Object.defineProperty(dialog, "open", { configurable: true, get: () => true });
+    dialog.getBoundingClientRect = () => ({
+      x: 100, y: 40, left: 100, top: 40, right: 900, bottom: 640,
+      width: 800, height: 600, toJSON: () => ({}),
+    });
+    document.body.append(dialog);
+    const root = createRoot(dialog);
+    await act(async () => root.render(
+      <MenuSelect
+        value="system"
+        options={[{ value: "system", label: "系统默认" }, { value: "font", label: "字体" }]}
+        onChange={() => {}}
+        ariaLabel="界面字体"
+        fit="full"
+        searchable
+      />,
+    ));
+
+    const details = dialog.querySelector<HTMLDetailsElement>("details")!;
+    const summary = details.querySelector<HTMLElement>("summary")!;
+    summary.getBoundingClientRect = () => ({
+      x: 560, y: 400, left: 560, top: 400, right: 760, bottom: 440,
+      width: 200, height: 40, toJSON: () => ({}),
+    });
+    await openMenu(details);
+
+    const panel = dialog.querySelector<HTMLElement>(".menu-select-options-portal")!;
+    expect(panel.style.position).toBe("absolute");
+    expect(panel.style.left).toBe("460px");
+    expect(panel.style.top).toBe("406px");
+    await act(async () => root.unmount());
+    dialog.remove();
+  });
 });

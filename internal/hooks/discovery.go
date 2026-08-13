@@ -14,8 +14,9 @@ import (
 )
 
 type Source struct {
-	Path    string
-	Trusted bool
+	Path        string
+	Trusted     bool
+	Environment map[string]string
 }
 type Options struct {
 	Sources        []Source
@@ -88,7 +89,7 @@ func Discover(options Options) *Registry {
 			continue
 		}
 		for _, path := range paths {
-			r.load(path, options, seen)
+			r.load(path, source.Environment, options, seen)
 		}
 	}
 	return r
@@ -120,7 +121,7 @@ func sourceFiles(path string) ([]string, error) {
 	return paths, nil
 }
 
-func (r *Registry) load(path string, options Options, seen map[string]bool) {
+func (r *Registry) load(path string, environment map[string]string, options Options, seen map[string]bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		r.diag(path, "", err)
@@ -198,7 +199,7 @@ func (r *Registry) load(path string, options Options, seen map[string]bool) {
 				}
 				c := Command{Event: event, Name: name, Matcher: g.Matcher, If: h.If, RawCommand: h.Command, Args: append([]string(nil), h.Args...),
 					Shell: h.Shell, StatusMessage: h.StatusMessage, Once: h.Once, Async: h.Async,
-					Timeout: timeout, FailurePolicy: policy, Source: path}
+					Timeout: timeout, FailurePolicy: policy, Source: path, Environment: cloneEnvironment(environment)}
 				if err := compileMatcher(&c); err != nil {
 					r.diag(path, event, err)
 					continue
@@ -211,6 +212,14 @@ func (r *Registry) load(path string, options Options, seen map[string]bool) {
 			}
 		}
 	}
+}
+
+func cloneEnvironment(source map[string]string) map[string]string {
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
 }
 func (r *Registry) Claim(command Command) bool {
 	if !command.Once {

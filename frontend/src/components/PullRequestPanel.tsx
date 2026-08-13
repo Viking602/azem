@@ -6,8 +6,7 @@ import {
   LoaderCircle, MessageCircle, Pencil, RefreshCw, RotateCcw, Send, ShieldCheck, UserRound,
   UserRoundPlus, X, XCircle,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { Markdown } from "./Markdown";
 import GitHubAvatar from "./GitHubAvatar";
 import { execute, openExternalURL } from "../bridge";
 import { translator } from "../i18n";
@@ -180,11 +179,15 @@ function MonitorBanner({ monitor, openSession }: { monitor?: PullRequestMonitorS
 function DescriptionSection({ pullRequest, edit }: { pullRequest: PullRequest; edit: () => void }) {
   const language = useRuntimeStore((state) => state.snapshot?.language ?? "zh-CN");
   const t = translator(language);
+  const markdownComponents = useMemo(() => ({
+    a: (props: ComponentProps<"a">) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} />,
+    img: InertMarkdownImage,
+  }), [pullRequest.url]);
   return <details className="pull-request-section-fold" open>
     <summary><span>{t("description")}</span><ChevronDown size={15} /></summary>
     <div className="pull-request-section-actions"><button className="icon-button" type="button" aria-label={t("editPullRequest")} onClick={edit}><Pencil size={14} /></button></div>
     <div className="pull-request-markdown">
-      {pullRequest.body ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} />, img: InertMarkdownImage }}>{pullRequest.body}</ReactMarkdown> : <p>—</p>}
+      {pullRequest.body ? <Markdown components={markdownComponents}>{pullRequest.body}</Markdown> : <p>—</p>}
     </div>
   </details>;
 }
@@ -259,6 +262,10 @@ function ActivityRow({ item }: { item: PullRequestActivity }) {
 function CommentsSection({ pullRequest, review }: { pullRequest: PullRequest; review: () => void }) {
   const language = useRuntimeStore((state) => state.snapshot?.language ?? "zh-CN");
   const mutating = useRuntimeStore((state) => state.pullRequestMutating);
+  const commentComponents = useMemo(() => ({
+    a: (props: ComponentProps<"a">) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} />,
+    img: InertMarkdownImage,
+  }), [pullRequest.url]);
   const t = translator(language);
   const [body, setBody] = useState("");
   const submit = async (event: FormEvent) => {
@@ -268,7 +275,7 @@ function CommentsSection({ pullRequest, review }: { pullRequest: PullRequest; re
   };
   return <section className="pull-request-comments" aria-labelledby="pull-request-comments-heading">
     <header><h2 id="pull-request-comments-heading">{t("comments")} · {pullRequest.comments.length}</h2><button type="button" onClick={review}><ShieldCheck size={14} />{t("review")}</button></header>
-    <div className="pull-request-comment-list">{pullRequest.comments.length === 0 ? <div className="pull-request-section-empty"><MessageCircle size={16} />{t("noComments")}</div> : pullRequest.comments.map((comment) => <article key={comment.id || `${comment.author.login}-${comment.createdAt}`}><header><Actor actor={comment.author} /><time dateTime={comment.createdAt}>{dateLabel(comment.createdAt)}</time></header><div className="pull-request-markdown compact"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: (props) => <SafeMarkdownAnchor {...props} baseURL={pullRequest.url} />, img: InertMarkdownImage }}>{comment.body}</ReactMarkdown></div></article>)}</div>
+    <div className="pull-request-comment-list">{pullRequest.comments.length === 0 ? <div className="pull-request-section-empty"><MessageCircle size={16} />{t("noComments")}</div> : pullRequest.comments.map((comment) => <article key={comment.id || `${comment.author.login}-${comment.createdAt}`}><header><Actor actor={comment.author} /><time dateTime={comment.createdAt}>{dateLabel(comment.createdAt)}</time></header><div className="pull-request-markdown compact"><Markdown components={commentComponents}>{comment.body}</Markdown></div></article>)}</div>
     {pullRequest.state === "OPEN" && <form className="pull-request-comment-composer" onSubmit={(event) => void submit(event)}><label className="sr-only" htmlFor="pull-request-comment">{t("commentPlaceholder")}</label><textarea id="pull-request-comment" value={body} onChange={(event) => setBody(event.target.value)} placeholder={t("commentPlaceholder")} /><button type="submit" aria-label={t("postComment")} title={t("postComment")} disabled={mutating || !body.trim()}><Send size={15} /></button></form>}
   </section>;
 }

@@ -95,6 +95,12 @@ func subagentMayMutateWorkspace(profile effectiveSubagentProfile) bool {
 }
 
 func subagentMayRunInBackground(profile effectiveSubagentProfile) bool {
+	// Read-only work is safe to detach from the parent tool call because it
+	// cannot race the parent for workspace mutations. This is the common path
+	// for long investigations that the parent polls with subagent.get_output.
+	if !subagentMayMutateWorkspace(profile) {
+		return true
+	}
 	if profile.RequestedIsolation != "worktree" {
 		return false
 	}
@@ -167,6 +173,7 @@ func transcriptToAgentBlocks(encoded json.RawMessage) ([]AgentTranscriptBlock, e
 	if err := json.Unmarshal(encoded, &messages); err != nil {
 		return nil, fmt.Errorf("decode subagent transcript: %w", err)
 	}
+	messages = slices.DeleteFunc(messages, internalSubagentTranscriptMessage)
 	blocks := make([]AgentTranscriptBlock, 0, len(messages))
 	callIndex := make(map[string]int)
 	for index, item := range messages {
@@ -181,7 +188,7 @@ func transcriptToAgentBlocks(encoded json.RawMessage) ([]AgentTranscriptBlock, e
 				blocks = append(blocks, AgentTranscriptBlock{ID: fmt.Sprintf("msg-%d-thinking", index), Kind: "thinking", RunID: item.RunID, Content: item.Thinking, State: "completed"})
 			}
 			if item.Text != "" {
-				blocks = append(blocks, AgentTranscriptBlock{ID: fmt.Sprintf("msg-%d-text", index), Kind: "assistant", RunID: item.RunID, Content: item.Text, State: "completed"})
+				blocks = append(blocks, AgentTranscriptBlock{ID: fmt.Sprintf("msg-%d-text", index), Kind: subagentTextKind("", len(item.ToolCalls) > 0), RunID: item.RunID, Content: item.Text, State: "completed"})
 			}
 			for _, call := range item.ToolCalls {
 				callIndex[call.ID] = len(blocks)
@@ -210,7 +217,66 @@ func transcriptToAgentBlocks(encoded json.RawMessage) ([]AgentTranscriptBlock, e
 		blocks[index].State = "failed"
 		appendAgentBlockContent(&blocks[index], "missing tool result")
 	}
+	boundAgentTranscriptBlocks(blocks)
 	return blocks, nil
+}
+
+// Compaction checkpoints and other private messages are model context, not
+// conversation content. Keep them durable for resume/validation while never
+// projecting them into the side chat or seeding them into a resumed subagent.
+func internalSubagentTranscriptMessage(item message.Message) bool {
+	return item.Visibility == message.VisibilityPrivate || item.Kind == message.KindCompactionSummary
+}
+
+const (
+	maxAgentTranscriptToolBytes = 16 << 10
+	maxAgentTranscriptTextBytes = 64 << 10
+)
+
+// boundedAgentTranscriptBlock is the desktop projection boundary. Durable
+// transcripts remain complete, while opening a subagent cannot inject a
+// multi-megabyte tool result into one Wails event and the React tree.
+func boundedAgentTranscriptBlock(block AgentTranscriptBlock) AgentTranscriptBlock {
+	limit := maxAgentTranscriptTextBytes
+	if block.Kind == "tool" {
+		limit = maxAgentTranscriptToolBytes
+	}
+	block.ContentBytes = len(block.Content)
+	if block.ContentBytes <= limit {
+		return block
+	}
+	block.Content = utf8Prefix(block.Content, limit)
+	block.ContentTruncated = true
+	return block
+}
+
+func boundAgentTranscriptBlocks(blocks []AgentTranscriptBlock) {
+	for index := range blocks {
+		blocks[index] = boundedAgentTranscriptBlock(blocks[index])
+	}
+}
+
+func subagentTextKind(phase hyprovider.TextPhase, followedByTools bool) string {
+	if phase == hyprovider.TextPhaseCommentary || phase == "" && followedByTools {
+		return "commentary"
+	}
+	return "assistant"
+}
+
+func settleSubagentProcessText(blocks []AgentTranscriptBlock, runID string) {
+	for index := len(blocks) - 1; index >= 0; index-- {
+		block := &blocks[index]
+		if block.RunID != runID || block.Kind == "tool" {
+			break
+		}
+		if block.Kind == "assistant" {
+			block.Kind = "commentary"
+			block.Title = "progress"
+		}
+		if block.Kind == "thinking" || block.Kind == "commentary" {
+			block.State = "completed"
+		}
+	}
 }
 
 func appendAgentDelta(blocks *[]AgentTranscriptBlock, kind, runID, title, content string) {

@@ -22,3 +22,31 @@ func TestCreateProjectDirectory(t *testing.T) {
 		t.Fatal("existing project directory must not be overwritten")
 	}
 }
+
+func TestExpandProjectLocation(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		location string
+		want     string
+	}{
+		{name: "default", want: filepath.Join(home, "Documents")},
+		{name: "home", location: "~", want: home},
+		{name: "home child", location: "~/Projects", want: filepath.Join(home, "Projects")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := expandProjectLocation(test.location)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("expandProjectLocation(%q) = %q, want %q", test.location, got, test.want)
+			}
+		})
+	}
+}

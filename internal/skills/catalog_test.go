@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,6 +54,38 @@ func TestReloadIsAtomic(t *testing.T) {
 	}
 	if len(after.Eager) != 1 || after.Eager[0] != "demo" {
 		t.Fatalf("eager = %#v, want [demo]", after.Eager)
+	}
+}
+
+func TestUpdateConfigPersistsBeforePublishingDisabledSnapshot(t *testing.T) {
+	root := t.TempDir()
+	writeTestSkill(t, root, "demo", "Demo skill", "DEMO_BODY")
+	catalog, err := Load(LoadOptions{Config: config.SkillsConfig{Enabled: true, AdditionalDirs: []string{root}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := config.SkillsConfig{Enabled: true, AdditionalDirs: []string{root}, Disabled: []string{"demo"}}
+	if err := catalog.UpdateConfig(disabled, func() error { return errors.New("persist failed") }); err == nil {
+		t.Fatal("UpdateConfig accepted a failed persistence callback")
+	}
+	if _, ok := catalog.Snapshot().Registry.Get("demo"); !ok {
+		t.Fatal("failed persistence published the disabled snapshot")
+	}
+	if err := catalog.UpdateConfig(disabled, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := catalog.Snapshot()
+	if _, ok := snapshot.Registry.Get("demo"); ok {
+		t.Fatal("disabled skill remained registered")
+	}
+	if len(snapshot.Entries) == 0 || !snapshot.Entries[0].Disabled {
+		t.Fatalf("disabled entry = %#v", snapshot.Entries)
+	}
+	if err := catalog.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := catalog.Snapshot().Registry.Get("demo"); ok {
+		t.Fatal("reload lost the updated disabled selection")
 	}
 }
 
@@ -207,6 +240,19 @@ func TestProjectTrustDisabledAndEagerValidation(t *testing.T) {
 	offSnapshot := off.Snapshot()
 	if len(offSnapshot.Entries) != 0 || len(offSnapshot.Registry.List()) != 0 {
 		t.Fatalf("disabled catalog is not empty: %#v", offSnapshot)
+	}
+}
+
+func TestLoadsUniversalAgentsSkillsByDefault(t *testing.T) {
+	home := t.TempDir()
+	writeTestSkill(t, filepath.Join(home, ".agents", "skills"), "shared-review", "Shared review", "SHARED_BODY")
+	catalog, err := Load(LoadOptions{HomeDir: home, Config: config.SkillsConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := catalog.Snapshot().Registry.Get("shared-review")
+	if !ok || !strings.Contains(entry.Body, "SHARED_BODY") {
+		t.Fatalf("universal .agents skill was not loaded: %#v", catalog.Snapshot().Entries)
 	}
 }
 

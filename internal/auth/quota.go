@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"resty.dev/v3"
+
+	"github.com/Viking602/azem/internal/auth/grok"
 )
 
 const (
 	DefaultChatGPTQuotaURL    = "https://chatgpt.com/backend-api/wham/usage"
 	DefaultGrokQuotaURL       = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
-	defaultGrokClientVersion  = "0.2.121"
 	subscriptionQuotaBodySize = 1 << 20
 )
 
@@ -44,7 +45,7 @@ func (s *Service) SubscriptionQuota(ctx context.Context, provider, accountID str
 			request.SetResponseBodyLimit(subscriptionQuotaBodySize).
 				SetHeader("X-XAI-Token-Auth", "xai-grok-cli").
 				SetHeader("x-userid", accountID).
-				SetHeader("x-grok-client-version", defaultGrokClientVersion).
+				SetHeader("x-grok-client-version", grok.DefaultClientVersion).
 				SetHeader("User-Agent", "azem/1")
 		}
 	default:

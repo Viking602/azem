@@ -37,40 +37,43 @@ var mainInstructionFingerprint = func() string {
 func turnInstructions(planMode bool) (string, string) {
 	instructions := mainInstructions
 	if planMode {
-		instructions += "\n\n" + planModeInstructions
+		instructions = planModeInstructions
 	}
 	sum := sha256.Sum256([]byte(instructions))
 	return instructions, hex.EncodeToString(sum[:])
 }
 
 type TurnRequest struct {
-	SessionID          string
-	Prompt             string
-	Provider           string
-	Model              string
-	History            []session.Block
-	Reasoning          string
-	AgentMode          string
-	PlanMode           bool
-	DisableSubagents   bool
-	ActiveSkills       []string
-	Images             []session.Attachment
-	Todo               session.TodoList
-	privateContext     string
-	accountID          string
-	historicalContext  string
-	resuming           bool
-	budgetRestored     bool
-	maxTokens          int64
-	maxToolCalls       int
-	maxWallClock       time.Duration
-	startedAt          time.Time
-	usedTokens         int64
-	usedToolCalls      int
-	modelHistory       session.ModelHistory
-	toolRecords        []session.ToolRecord
-	checkpointBoundary *int64
-	immutableIdentity  string
+	SessionID              string
+	Prompt                 string
+	Provider               string
+	Model                  string
+	History                []session.Block
+	Reasoning              string
+	AgentMode              string
+	PlanMode               bool
+	DisableSubagents       bool
+	ActiveSkills           []string
+	Images                 []session.Attachment
+	Todo                   session.TodoList
+	privateContext         string
+	visionContext          string
+	approvedPlanArtifactID string
+	approvedPlanContext    string
+	accountID              string
+	historicalContext      string
+	resuming               bool
+	budgetRestored         bool
+	maxTokens              int64
+	maxToolCalls           int
+	maxWallClock           time.Duration
+	startedAt              time.Time
+	usedTokens             int64
+	usedToolCalls          int
+	modelHistory           session.ModelHistory
+	toolRecords            []session.ToolRecord
+	checkpointBoundary     *int64
+	immutableIdentity      string
 }
 
 type turnContext struct {
@@ -81,6 +84,8 @@ type turnContext struct {
 	modelID                   string
 	runID                     string
 	privateContext            string
+	visionContext             string
+	approvedPlanContext       string
 	historicalContext         string
 	resuming                  bool
 	history                   []session.Block
@@ -115,14 +120,53 @@ type turnContext struct {
 // an optimization. After a crash the durable active checkpoint and canonical
 // tail remain authoritative and the next hard trigger compacts synchronously.
 type compactionCoordinator struct {
-	mu        sync.Mutex
-	hash      string
-	source    []message.Message
-	done      chan struct{}
-	cancel    context.CancelFunc
-	result    []message.Message
-	err       error
-	activated string
+	mu                 sync.Mutex
+	hash               string
+	source             []message.Message
+	done               chan struct{}
+	cancel             context.CancelFunc
+	result             []message.Message
+	err                error
+	activated          string
+	semanticCheckpoint session.SemanticCheckpointV1
+}
+
+func cloneSemanticCheckpoint(checkpoint session.SemanticCheckpointV1) session.SemanticCheckpointV1 {
+	checkpoint.State = append(json.RawMessage(nil), checkpoint.State...)
+	return checkpoint
+}
+
+func (c turnContext) currentSemanticCheckpoint() session.SemanticCheckpointV1 {
+	if c.coordinator == nil {
+		return cloneSemanticCheckpoint(c.semanticCheckpoint)
+	}
+	c.coordinator.mu.Lock()
+	defer c.coordinator.mu.Unlock()
+	if c.coordinator.semanticCheckpoint.Revision > 0 || len(c.coordinator.semanticCheckpoint.State) > 0 {
+		return cloneSemanticCheckpoint(c.coordinator.semanticCheckpoint)
+	}
+	return cloneSemanticCheckpoint(c.semanticCheckpoint)
+}
+
+// recordActivatedSemanticCheckpointLocked advances the in-memory source of
+// truth only after the durable activation transaction succeeds. The shared
+// coordinator outlives turnContext value copies used by background workers.
+func (c turnContext) recordActivatedSemanticCheckpointLocked(result []message.Message) {
+	if c.coordinator == nil {
+		return
+	}
+	commit, _ := extractContextCheckpoint(result)
+	if commit == nil {
+		return
+	}
+	c.coordinator.semanticCheckpoint = session.SemanticCheckpointV1{
+		ID:           commit.CheckpointID,
+		SessionID:    c.sessionID,
+		Revision:     commit.BaseRevision + 1,
+		Cursor:       commit.Cursor,
+		State:        append(json.RawMessage(nil), commit.State...),
+		SourceDigest: commit.SourceDigest,
+	}
 }
 
 func compactionSourceHash(history []message.Message, target int, static string) string {
@@ -170,6 +214,7 @@ func (c turnContext) activateCompactionResult(ctx context.Context, result []mess
 	if err := c.activateCompaction(ctx, result, identity); err != nil {
 		return result, err
 	}
+	c.recordActivatedSemanticCheckpointLocked(result)
 	c.coordinator.activated = identity
 	return result, nil
 }
@@ -243,6 +288,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 		value.Visibility = message.VisibilityPrivate
 		messages = append(messages, value)
 	}
+	if text := strings.TrimSpace(c.approvedPlanContext); text != "" {
+		value := message.NewText(message.RoleSystem, "[Trusted approved execution plan]\n"+text)
+		value.Visibility = message.VisibilityPrivate
+		messages = append(messages, value)
+	}
 	todo, err := c.currentTodo(ctx)
 	if err != nil {
 		return nil, err
@@ -267,6 +317,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	}
 	if historical != "" {
 		data := message.NewText(message.RoleUser, "<historical-evidence-json>\n"+historical+"\n</historical-evidence-json>")
+		data.Visibility = message.VisibilityPrivate
+		messages = append(messages, data)
+	}
+	if visual := visionEvidenceText(c.visionContext); visual != "" {
+		data := message.NewText(message.RoleUser, visual)
 		data.Visibility = message.VisibilityPrivate
 		messages = append(messages, data)
 	}
@@ -476,8 +531,9 @@ func (c turnContext) prepareCompactionReason(ctx context.Context, history []mess
 		return original, fmt.Errorf("compact context: compaction model is unavailable")
 	}
 	previousStates := make([]string, 0, 1)
-	if c.semanticCheckpoint.Revision > 0 && len(c.semanticCheckpoint.State) > 0 {
-		previousStates = append(previousStates, string(c.semanticCheckpoint.State))
+	checkpoint := c.currentSemanticCheckpoint()
+	if checkpoint.Revision > 0 && len(checkpoint.State) > 0 {
+		previousStates = append(previousStates, string(checkpoint.State))
 	}
 	withoutSummaries := make([]message.Message, 0, len(history))
 	for _, current := range history {
@@ -706,6 +762,7 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 							coord.mu.Unlock()
 							return history, activateErr
 						}
+						c.recordActivatedSemanticCheckpointLocked(result)
 					}
 					coord.activated = activationIdentity
 					if c.compactHooks != nil {

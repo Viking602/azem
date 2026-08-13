@@ -110,6 +110,7 @@ cursor 由 canonical sequence、Todo revision、最后完成 tool、最后完成
 - `(session_id, base_revision, source_digest)` 幂等。
 - cursor 只能单调前进。
 - writer 失败、输出非法、事务失败或 stale activation 时不推进 revision/cursor。
+- durable activation 成功后，同一 run 的共享 coordinator 立即推进内存 checkpoint；后续 soft/hard writer 必须使用新 revision、state 与 cursor。
 - stale checkpoint 不得覆盖新用户 turn。
 
 ## 7. 统一 Planner
@@ -127,6 +128,8 @@ Planner 的 mandatory 顺序：
 自动 soft prepare 在后台只启动一个 writer；相同 source 不重复工作。hard threshold、手动 `/compact` 和 `/rebuild` 同步执行同一 planner。prepared source 仅在仍是当前 history 前缀时激活，append-only tail 通过完整性校验后合并。
 
 预算统一来自现有 `ContextConfig` 和模型 context window：soft/hard/target、安全余量、输出/推理 reserve、最小回收、最大 summary、large tool 和 history retrieval。不存在第二套手动切割参数。
+
+semantic writer 首次请求保留所配置的 reasoning effort，并将模型生成预算与最终 semantic state 上限分离。默认 durable state 预算为 32,768 tokens，并允许配置到 writer 上下文窗口的四分之一；以 272k writer 为例，高思考生成最多获得 131,072 tokens、低思考重试获得 65,536 tokens，最终状态仍按配置预算持久化。任何以 `length` / `max_turns` 结束的结果都视为截断，即使已经产生半截 JSON；writer 丢弃它并仅以 `low` reasoning 重试一次。正常完成但正文为空、鉴权错误和其他流错误仍明确失败，不会激活空 checkpoint；超出配置预算的结果仍保留两次低思考收敛修复，但不再被固定的 8,192-token ceiling 卡住。
 
 ## 8. ContextManifestV1
 

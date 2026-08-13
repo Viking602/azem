@@ -238,7 +238,9 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 				childUsage = event
 			}
 		case EventTextDelta:
-			answer += event.Text
+			if event.TextPhase != string(hyprovider.TextPhaseCommentary) {
+				answer += event.Text
+			}
 		case EventApprovalRequested:
 			if err := service.ExecuteAction(ctx, Action{Kind: ActionResolveApproval, Target: event.ApprovalID, Decision: "once"}); err != nil {
 				t.Fatal(err)
@@ -1110,7 +1112,7 @@ func TestPlanModeCapsSubagentAtReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.CapabilityMode != "read-only" || profile.RequestedIsolation != "none" || subagentMayRunInBackground(profile) {
+	if profile.CapabilityMode != "read-only" || profile.RequestedIsolation != "none" || !subagentMayRunInBackground(profile) {
 		t.Fatalf("plan subagent profile = %#v", profile)
 	}
 	allowed := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
@@ -1213,7 +1215,7 @@ func (metadataOnlyDriver) Stream(context.Context, hyprovider.Request) (hyprovide
 	return hyprovider.NewSliceStream(nil), nil
 }
 
-func TestReadOnlyBackgroundRequestWaitsAndCancelsWithParentContext(t *testing.T) {
+func TestParentWaitCancellationDetachesReadOnlyChildWithoutCancellingIt(t *testing.T) {
 	ctx := context.Background()
 	providerStore, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
@@ -1240,7 +1242,7 @@ func TestReadOnlyBackgroundRequestWaitsAndCancelsWithParentContext(t *testing.T)
 	cancel()
 	call := tool.Call{
 		ID: "spawn", Name: subagentSpawnTool,
-		Arguments: json.RawMessage(`{"prompt":"inspect","description":"queued child","subagent_type":"explore","background":true}`),
+		Arguments: json.RawMessage(`{"prompt":"inspect","description":"queued child","subagent_type":"explore"}`),
 	}
 	result, err := driver.Execute(callCtx, call, nil)
 	if err != nil || result.IsError {
@@ -1250,25 +1252,26 @@ func TestReadOnlyBackgroundRequestWaitsAndCancelsWithParentContext(t *testing.T)
 	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["status"] != "cancelled" {
-		t.Fatalf("cancelled wait payload = %#v", payload)
+	if payload["status"] != "queued" || payload["continuing_in_background"] != true {
+		t.Fatalf("detached wait payload = %#v", payload)
 	}
 	runs, err := store.List(ctx, "session")
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("stored runs=%#v err=%v", runs, err)
 	}
-	if runs[0].Background || runs[0].State != agentservice.SubagentCancelled {
-		t.Fatalf("foreground child = %#v", runs[0])
+	if !runs[0].Background || runs[0].State != agentservice.SubagentQueued {
+		t.Fatalf("detached child = %#v", runs[0])
 	}
 	runtime.mu.Lock()
 	_, active := runtime.active[runs[0].ID]
 	runtime.mu.Unlock()
-	if active {
-		t.Fatal("cancelled foreground child remained active")
+	if !active {
+		t.Fatal("detached child was cancelled with its parent wait")
 	}
+	runtime.Cancel("session", runs[0].ID)
 }
 
-func TestBackgroundRequiresWriteCapableWorktree(t *testing.T) {
+func TestBackgroundAllowsReadOnlyOrIsolatedWrites(t *testing.T) {
 	cfg := config.Default().Agents.Subagents
 	runtime := subagentRuntime{cfg: cfg}
 	parent := subagentParentRuntime{ProviderID: "chatgpt", ModelID: "model", WorkspaceRoot: t.TempDir()}
@@ -1277,7 +1280,8 @@ func TestBackgroundRequiresWriteCapableWorktree(t *testing.T) {
 		input subagentSpawnInput
 		want  bool
 	}{
-		{name: "explore worktree", input: subagentSpawnInput{SubagentType: "explore", Isolation: "worktree"}},
+		{name: "explore shared workspace", input: subagentSpawnInput{SubagentType: "explore", Isolation: "none"}, want: true},
+		{name: "explore worktree", input: subagentSpawnInput{SubagentType: "explore", Isolation: "worktree"}, want: true},
 		{name: "writer shared workspace", input: subagentSpawnInput{SubagentType: "worker", Isolation: "none"}},
 		{name: "writer worktree", input: subagentSpawnInput{SubagentType: "worker", Isolation: "worktree"}, want: true},
 	} {
@@ -1513,6 +1517,8 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 		{ID: "old-user", Role: message.RoleUser, Text: "original request", RunID: "old-run", Metadata: map[string]string{"task_id": "source"}},
 		{ID: "old-tool-call", Role: message.RoleAssistant, Text: "checking", ToolCalls: []message.ToolCall{{ID: "call", Name: "coding.read_file"}}},
 		message.NewToolResult(message.ToolResult{ToolCallID: "call", Name: "coding.read_file", Content: "secret"}),
+		{Role: message.RoleAssistant, Text: semanticStateSafetyLabel + `{"version":1}`, Kind: message.KindCompactionSummary, Visibility: message.VisibilityPrivate},
+		{Role: message.RoleAssistant, Text: "private runtime context", Visibility: message.VisibilityPrivate},
 		{ID: "old-answer", Role: message.RoleAssistant, Text: "source answer", RunID: "old-run"},
 	})
 	if err != nil {
@@ -1549,7 +1555,7 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 	if spawned.ID == source.ID || spawned.ParentRunID != "new-parent" || spawned.Type != source.Type ||
 		spawned.Provider != source.Provider || spawned.Model != source.Model || spawned.Reasoning != source.Reasoning || spawned.CapabilityMode != source.CapabilityMode ||
 		spawned.RequestedIsolation != source.RequestedIsolation || spawned.CWD != source.CWD || spawned.WorktreePath != "" ||
-		spawned.Description != "new description" || spawned.Background {
+		spawned.Description != "new description" || !spawned.Background {
 		t.Fatalf("resumed run = %#v", spawned)
 	}
 	runtime.mu.Lock()
@@ -1708,6 +1714,7 @@ func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T)
 		},
 		{ID: "result", Role: message.RoleTool, RunID: "run-tool", ToolResult: &message.ToolResult{ToolCallID: "matched", Name: "coding.read_file", Content: "result"}},
 		{ID: "orphan", Role: message.RoleTool, RunID: "run-orphan", ToolResult: &message.ToolResult{ToolCallID: "unknown", Name: "coding.read_file", Content: "orphan"}},
+		{ID: "final", Role: message.RoleAssistant, RunID: "run-child", Text: "done"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1716,7 +1723,7 @@ func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(blocks) != 6 {
+	if len(blocks) != 7 {
 		t.Fatalf("blocks = %#v", blocks)
 	}
 	for index, want := range []struct {
@@ -1724,10 +1731,11 @@ func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T)
 	}{
 		{"msg-1-user", "user", "completed", "run-user"},
 		{"msg-2-thinking", "thinking", "completed", "run-child"},
-		{"msg-2-text", "assistant", "completed", "run-child"},
+		{"msg-2-text", "commentary", "completed", "run-child"},
 		{"call-matched", "tool", "completed", "run-child"},
 		{"call-missing", "tool", "failed", "run-child"},
 		{"result-4", "tool", "failed", "run-orphan"},
+		{"msg-5-text", "assistant", "completed", "run-child"},
 	} {
 		got := blocks[index]
 		if got.ID != want.id || got.Kind != want.kind || got.State != want.state || got.RunID != want.runID {
@@ -1736,6 +1744,20 @@ func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T)
 	}
 	if !strings.Contains(blocks[3].Content, "result") || !strings.Contains(blocks[4].Content, "missing tool result") {
 		t.Fatalf("tool result mapping = %#v", blocks)
+	}
+}
+
+func TestSubagentLiveTextSettlesAsCommentaryBeforeTool(t *testing.T) {
+	blocks := []AgentTranscriptBlock{
+		{Kind: "thinking", RunID: "child", State: "streaming"},
+		{Kind: "assistant", RunID: "child", State: "streaming"},
+	}
+	settleSubagentProcessText(blocks, "child")
+	if blocks[0].State != "completed" || blocks[1].Kind != "commentary" || blocks[1].State != "completed" {
+		t.Fatalf("settled blocks = %#v", blocks)
+	}
+	if got := subagentTextKind(hyprovider.TextPhaseCommentary, false); got != "commentary" {
+		t.Fatalf("explicit commentary kind = %q", got)
 	}
 }
 
@@ -1971,6 +1993,102 @@ func (s *gatedSubagentStream) Recv() (hyprovider.Event, error) {
 
 func (*gatedSubagentStream) Close() error { return nil }
 
+func TestForegroundWaitWindowDetachesLongReadOnlyTaskWithoutCancellingIt(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	coding, err := agentservice.NewService(providerStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.AwaitDuration = 20 * time.Millisecond
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(ctx)
+	provider := newGatedSubagentDriver()
+	parent := subagentParentRuntime{
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(),
+	}
+	driver := &subagentSpawnDriver{runtime: runtime, parent: parent}
+	call := tool.Call{
+		ID: "spawn", Name: subagentSpawnTool,
+		Arguments: json.RawMessage(`{"prompt":"long inspection","description":"inspect for a long time","subagent_type":"explore"}`),
+	}
+	returned := make(chan tool.Result, 1)
+	go func() {
+		result, executeErr := driver.Execute(ctx, call, nil)
+		if executeErr != nil {
+			t.Errorf("spawn long subagent: %v", executeErr)
+		}
+		returned <- result
+	}()
+	select {
+	case <-provider.started:
+	case <-ctx.Done():
+		t.Fatal("long subagent did not start")
+	}
+	var result tool.Result
+	select {
+	case result = <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("foreground wait window did not release the parent")
+	}
+	assertDetachedSubagentResult(t, result)
+	runs, err := store.List(ctx, "session")
+	if err != nil || len(runs) != 1 || !runs[0].Background || runs[0].State != agentservice.SubagentRunning {
+		t.Fatalf("persisted detached run = %#v, err=%v", runs, err)
+	}
+	assertUnboundedSubagentTasks(t, ctx, coding, runs[0].ChildRunID)
+	provider.release <- struct{}{}
+	snapshots := runtime.Query(ctx, "session", []string{runs[0].ID}, 3*time.Second)
+	if len(snapshots) != 1 || !snapshots[0].Found || snapshots[0].Run.State != agentservice.SubagentCompleted {
+		t.Fatalf("long subagent did not complete after detaching = %#v", snapshots)
+	}
+}
+
+func assertDetachedSubagentResult(t *testing.T, result tool.Result) {
+	t.Helper()
+	if result.IsError {
+		t.Fatalf("foreground wait result = %#v", result)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["status"] != "running" || payload["background"] != true || payload["continuing_in_background"] != true {
+		t.Fatalf("detached long subagent payload = %#v", payload)
+	}
+}
+
+func assertUnboundedSubagentTasks(t *testing.T, ctx context.Context, coding *agentservice.Service, runID string) {
+	t.Helper()
+	tasks, err := coding.Runner().ListTasks(ctx, runID)
+	if err != nil || len(tasks) != 2 {
+		t.Fatalf("durable subagent task budget = %#v, err=%v", tasks, err)
+	}
+	for _, task := range tasks {
+		if task.Budget == nil {
+			continue // Venat normalizes an all-zero budget to nil: unbounded.
+		}
+		if task.Budget.MaxTokens != 0 || task.Budget.MaxToolCalls != 0 || task.Budget.MaxSteps != 0 || task.Budget.MaxWallClock != 0 {
+			t.Fatalf("long subagent received a hidden runtime budget = %#v", task.Budget)
+		}
+	}
+}
+
 func TestSubagentCoordinatorEnforcesConcurrencyAndFIFOQueue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2090,12 +2208,201 @@ func TestSubagentCoordinatorAppliesConcurrencyUpdate(t *testing.T) {
 		t.Fatalf("second task started before update: %q", started)
 	case <-time.After(50 * time.Millisecond):
 	}
-	runtime.updateMaxConcurrency(2)
+	runtime.updateMaxConcurrency(0)
 	if started := <-driver.started; started != "two" {
-		t.Fatalf("task started after update = %q", started)
+		t.Fatalf("task started after unbounded update = %q", started)
 	}
 	driver.release <- struct{}{}
 	driver.release <- struct{}{}
+}
+
+type recursiveSubagentDriver struct {
+	mu       sync.Mutex
+	requests []hyprovider.Request
+	rootKey  string
+}
+
+func (*recursiveSubagentDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "test", Models: []string{"model"}}
+}
+
+func (d *recursiveSubagentDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	d.mu.Lock()
+	d.requests = append(d.requests, request)
+	cacheKey := fmt.Sprint(request.ExtraBody["prompt_cache_key"])
+	if d.rootKey == "" {
+		d.rootKey = cacheKey
+	}
+	nested := cacheKey != d.rootKey
+	d.mu.Unlock()
+	hasToolResult := false
+	for _, current := range request.Messages {
+		hasToolResult = hasToolResult || current.ToolResult != nil
+	}
+	if nested {
+		return hyprovider.NewSliceStream([]hyprovider.Event{
+			{Kind: hyprovider.EventTextDelta, Text: "nested completed"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		}), nil
+	}
+	if !hasToolResult {
+		arguments := json.RawMessage(`{"prompt":"nested delegation","description":"nested delegation","subagent_type":"explore","background":false}`)
+		return hyprovider.NewSliceStream([]hyprovider.Event{
+			{Kind: hyprovider.EventToolCall, ToolCall: &message.ToolCall{ID: "nested-spawn", Name: subagentSpawnTool, Arguments: arguments}},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonToolUse},
+		}), nil
+	}
+	return hyprovider.NewSliceStream([]hyprovider.Event{
+		{Kind: hyprovider.EventTextDelta, Text: "root completed"},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}), nil
+}
+
+func newRecursiveTestRuntime(t *testing.T, ctx context.Context) (*subagentRuntime, *agentservice.SQLSubagentRunStore, *agentservice.Service) {
+	t.Helper()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = providerStore.Close(context.Background()) })
+	coding, err := agentservice.NewService(providerStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coding.Close(context.Background()) })
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.MaxConcurrency = 1
+	cfg.MaxDepth = 2
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Shutdown(context.Background()) })
+	return runtime, store, coding
+}
+
+func TestRecursiveSubagentMakesProgressWhenConcurrencyIsOne(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runtime, store, coding := newRecursiveTestRuntime(t, ctx)
+	driver := &recursiveSubagentDriver{}
+	parent := subagentParentRuntime{
+		SessionID: "recursive-session", ParentRunID: "main-run", ParentAgentID: "azem-main",
+		ProviderID: "test", ModelID: "model", Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir(),
+	}
+	root, err := runtime.Spawn(ctx, subagentSpawnInput{
+		Prompt: "root delegation", Description: "root delegation", SubagentType: "explore",
+	}, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := runtime.Query(ctx, parent.SessionID, []string{root.ID}, 5*time.Second)
+	if len(snapshots) != 1 || snapshots[0].Run.State != agentservice.SubagentCompleted {
+		t.Fatalf("recursive root did not complete: %#v", snapshots)
+	}
+	runs, err := store.List(ctx, parent.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("recursive run count = %d, want 2: %#v", len(runs), runs)
+	}
+	for _, run := range runs {
+		if run.State != agentservice.SubagentCompleted {
+			t.Fatalf("recursive child did not complete: %#v", run)
+		}
+	}
+	driver.mu.Lock()
+	requestCount := len(driver.requests)
+	driver.mu.Unlock()
+	if requestCount != 3 {
+		t.Fatalf("recursive provider requests = %d, want root + nested + root resume", requestCount)
+	}
+}
+
+func TestSubagentDriversHonorRecursionDepth(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	coding, err := agentservice.NewService(providerStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+	cfg := config.Default().Agents.Subagents
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(ctx)
+	parent := subagentParentRuntime{
+		SessionID: "depth-session", ParentRunID: "run", ParentAgentID: "agent",
+		ProviderID: "test", ModelID: "model", Driver: metadataOnlyDriver{}, Coding: coding, WorkspaceRoot: t.TempDir(),
+	}
+	for _, test := range []struct {
+		depth int
+		want  int
+	}{{depth: 0, want: 3}, {depth: 1, want: 3}, {depth: 2, want: 0}} {
+		parent.Depth = test.depth
+		drivers, err := runtime.Drivers(parent)
+		if err != nil || len(drivers) != test.want {
+			t.Fatalf("drivers at depth %d = %d, want %d, err=%v", test.depth, len(drivers), test.want, err)
+		}
+	}
+	runtime.updateMaxDepth(-1)
+	parent.Depth = 99
+	drivers, err := runtime.Drivers(parent)
+	if err != nil || len(drivers) != 3 {
+		t.Fatalf("unlimited depth drivers = %d, err=%v", len(drivers), err)
+	}
+}
+
+type advisoryCaptureDriver struct {
+	requests []hyprovider.Request
+}
+
+func (*advisoryCaptureDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "test", Models: []string{"model"}}
+}
+
+func (d *advisoryCaptureDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	d.requests = append(d.requests, request)
+	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone}}), nil
+}
+
+func TestAdvisoryRequestBudgetWarnsOnceWithoutStopping(t *testing.T) {
+	inner := &advisoryCaptureDriver{}
+	driver := &advisoryBudgetDriver{inner: inner, limit: 1, enabled: true}
+	request := hyprovider.Request{Messages: []message.Message{
+		message.NewText(message.RoleSystem, "stable rules"),
+		message.NewText(message.RoleUser, "finish the task"),
+	}}
+	for range 3 {
+		stream, err := driver.Stream(context.Background(), request)
+		if err != nil {
+			t.Fatalf("advisory wrapper stopped the request: %v", err)
+		}
+		_, _ = stream.Recv()
+		_ = stream.Close()
+	}
+	if len(inner.requests) != 3 || len(inner.requests[0].Messages) != 2 || len(inner.requests[1].Messages) != 3 || len(inner.requests[2].Messages) != 2 {
+		t.Fatalf("advisory request shapes = %#v", inner.requests)
+	}
+	notice := inner.requests[1].Messages[1]
+	if notice.Role != message.RoleSystem || notice.Visibility != message.VisibilityPrivate || !strings.Contains(notice.Text, "not a cancellation or hard limit") {
+		t.Fatalf("advisory notice = %#v", notice)
+	}
 }
 
 type recoveringSubagentDriver struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/Viking602/azem/internal/config"
@@ -94,6 +95,71 @@ func TestTodoInitRejectsForgedSubagentBinding(t *testing.T) {
 	})
 	if err == nil || err.Error() != "subagentRunId is owned by subagent.spawn" {
 		t.Fatalf("forged binding error=%v", err)
+	}
+}
+
+func TestTodoStartCannotReplaceCurrentItem(t *testing.T) {
+	todo := session.TodoList{Phases: []session.TodoPhase{{Title: "Build", Items: []session.TodoItem{
+		{ID: "current", Content: "finish current", Status: session.TodoInProgress},
+		{ID: "next", Content: "start later", Status: session.TodoPending},
+	}}}}
+	want := todo.Clone()
+
+	err := applyTodoOp(&todo, todoInput{Op: "start", ItemID: "next"})
+	if err == nil || err.Error() != `todo item "current" is already in progress` {
+		t.Fatalf("start while another item is current error=%v", err)
+	}
+	if !reflect.DeepEqual(todo, want) {
+		t.Fatalf("rejected start changed todo: got=%+v want=%+v", todo, want)
+	}
+}
+
+func TestTodoConcurrentMutationsCannotSkipCurrentItem(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "todo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1", Title: "Todo"}); err != nil {
+		t.Fatal(err)
+	}
+	driver := &todoDriver{sessionID: "session-1", store: sessions}
+	initialized, err := sessions.UpdateTodo(ctx, "session-1", 0, func(todo *session.TodoList) error {
+		todo.Goal = "ship"
+		todo.Phases = []session.TodoPhase{{Title: "Build", Items: []session.TodoItem{
+			{ID: "current", Content: "finish current", Status: session.TodoInProgress},
+			{ID: "next", Content: "finish next", Status: session.TodoPending},
+			{ID: "later", Content: "start later", Status: session.TodoPending},
+		}}}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := func(op, itemID string) json.RawMessage {
+		encoded, _ := json.Marshal(map[string]any{"op": op, "expected_revision": initialized.Revision, "item_id": itemID})
+		return encoded
+	}
+	results, err := tool.NewBus(driver).ExecuteBatch(ctx, []tool.Call{
+		{ID: "done-current", Name: "todo", Arguments: arguments("done", "current")},
+		{ID: "done-next", Name: "todo", Arguments: arguments("done", "next")},
+		{ID: "start-later", Name: "todo", Arguments: arguments("start", "later")},
+	}, tool.ModeParallel, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 || results[0].IsError || !results[1].IsError || !results[2].IsError {
+		t.Fatalf("parallel todo results=%+v", results)
+	}
+	got, err := sessions.LoadTodo(ctx, "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := got.Phases[0].Items
+	if got.Revision != initialized.Revision+1 || items[0].Status != session.TodoCompleted || items[1].Status != session.TodoInProgress || items[2].Status != session.TodoPending {
+		t.Fatalf("parallel todo state=%+v", got)
 	}
 }
 

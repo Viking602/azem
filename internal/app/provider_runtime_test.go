@@ -44,6 +44,15 @@ import (
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
+func requireInstructionFragments(t *testing.T, category string, fragments []string) {
+	t.Helper()
+	for _, fragment := range fragments {
+		if !strings.Contains(mainInstructions, fragment) {
+			t.Errorf("main instructions omit %s %q", category, fragment)
+		}
+	}
+}
+
 func TestMainInstructionsContract(t *testing.T) {
 	wantHeadings := []string{
 		"## Role and priorities",
@@ -77,11 +86,18 @@ func TestMainInstructionsContract(t *testing.T) {
 			t.Errorf("main instructions do not list %q", name)
 		}
 	}
+	requireInstructionFragments(t, "concurrency rule", []string{"hydaelyn_read_skill_resource", "Never mix skill-resource reads and `subagent.spawn`", "own parallel batch"})
+	requireInstructionFragments(t, "tool announcement", []string{"Before every tool call or parallel batch", "A single routine read still requires", "Never emit a tool call before this commentary"})
 	for _, grammar := range []string{"`¶PATH#TAG`", "`replace N..M:`", "`+final content`", "Never use `@@` hunks", "`-old` rows"} {
 		if !strings.Contains(mainInstructions, grammar) {
 			t.Errorf("main instructions omit hashline grammar %q", grammar)
 		}
 	}
+	requireInstructionFragments(t, "runtime contract", []string{
+		"exactly one mutating `todo` call", "never batch Todo mutations", "`done` automatically advances",
+		"actual lifecycle", "failed, cancelled, and stalled", "review as an approval gate", "independently inspect the changed files",
+		"**<concise action title>**", "<specific target or immediate evidence>", "18 CJK characters or eight English words",
+	})
 	for _, unsupported := range []string{"lsp", "ast_edit", "browser", "worker.run"} {
 		if strings.Contains(mainInstructions, unsupported) {
 			t.Errorf("main instructions mention unsupported tool %q", unsupported)
@@ -305,14 +321,14 @@ func TestArtifactV2ReadModesStayBounded(t *testing.T) {
 func TestSingleRunManifestAcceptsEmptyResolvedSkillSet(t *testing.T) {
 	manifest := singleRunManifest{
 		Version: 2, Provider: "chatgpt", AccountID: "account-1", Model: "model", Reasoning: "minimal",
-		ActiveSkills: []string{}, PlanMode: true, StaticIdentity: "identity", StartedAt: time.Now().UTC(),
+		ActiveSkills: []string{}, PlanMode: true, ApprovedPlanID: "plan-artifact", StaticIdentity: "identity", StartedAt: time.Now().UTC(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	decoded, err := decodeSingleRunManifest(string(encoded))
-	if err != nil || decoded.AccountID != manifest.AccountID || !decoded.PlanMode || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
+	if err != nil || decoded.AccountID != manifest.AccountID || !decoded.PlanMode || decoded.ApprovedPlanID != "plan-artifact" || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
 		t.Fatalf("decoded empty-skill manifest=%+v error=%v", decoded, err)
 	}
 }
@@ -329,13 +345,15 @@ func TestPlanModeToolDriversKeepOnlyReadOnlyOperations(t *testing.T) {
 		planModeTestDriver{tool.Definition{Name: "coding.read_file", EffectType: tool.EffectReadOnly}},
 		planModeTestDriver{tool.Definition{Name: subagentSpawnTool, EffectType: tool.EffectReadOnly}},
 		planModeTestDriver{tool.Definition{Name: subagentKillTool, EffectType: tool.EffectReadOnly}},
+		&askDriver{},
+		&submitPlanDriver{},
 		planModeTestDriver{tool.Definition{Name: "coding.write_file", EffectType: tool.EffectWrite}},
 		planModeTestDriver{tool.Definition{Name: "coding.shell", EffectType: tool.EffectExternalSideEffect}},
 	}
-	if got, want := toolDriverNames(planModeToolDrivers(drivers)), []string{"coding.read_file", subagentSpawnTool}; !reflect.DeepEqual(got, want) {
+	if got, want := toolDriverNames(planModeToolDrivers(drivers)), []string{"coding.read_file", subagentSpawnTool, askToolName, submitPlanToolName}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("plan mode tools = %v, want %v", got, want)
 	}
-	for _, required := range []string{"read-only", "read-only subagents", "Do not write implementation code"} {
+	for _, required := range []string{"read-only tools", "do not implement it", "submit_plan", "Execute plan", "why", "how", "Execution graph", "depends_on", "Mermaid"} {
 		if !strings.Contains(planModeInstructions, required) {
 			t.Fatalf("plan mode instructions omit %q", required)
 		}
@@ -770,6 +788,28 @@ func TestPhase3DurableProvenanceUsesSequence(t *testing.T) {
 	}
 }
 
+func TestPhase3ProvenanceMismatchDowngradesToSupportedAgentFact(t *testing.T) {
+	normalized, err := normalizeSemanticStateV1(
+		`{"version":1,"objective":{"text":"continue the review","status":"active","authority":"agent","confidence":"inferred","sources":[{"kind":"checkpoint","id":"carried:evidence"}]},"constraints":[{"text":"Plugin manifest paths must remain inside the plugin root.","status":"active","authority":"workspace","confidence":"verified","sources":[{"kind":"checkpoint","id":"invented:workspace"}]}]}`,
+		map[string]string{"checkpoint:carried:evidence": "agent"},
+	)
+	if err != nil {
+		t.Fatalf("mismatched carried provenance rejected: %v", err)
+	}
+	var state SemanticStateV1
+	if err := json.Unmarshal([]byte(normalized), &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Constraints) != 1 {
+		t.Fatalf("constraints=%+v", state.Constraints)
+	}
+	fact := state.Constraints[0]
+	if fact.Authority != "agent" || fact.Confidence != "inferred" ||
+		!reflect.DeepEqual(fact.Sources, []EvidenceRefV1{{Kind: "checkpoint", ID: "carried:evidence"}}) {
+		t.Fatalf("downgraded fact=%+v", fact)
+	}
+}
+
 func TestSemanticPatchSkipsUnchangedFacts(t *testing.T) {
 	fact := StateFactV1{ID: "objective-1", Text: "ship", Status: "active", Authority: "user", Confidence: "reported", Sources: []EvidenceRefV1{{Kind: "sequence", ID: "1"}}}
 	state := SemanticStateV1{Version: 1, Objective: fact}
@@ -1114,6 +1154,23 @@ func TestTitleModelRouteIsIndependentFromPlanAndCompaction(t *testing.T) {
 	}
 }
 
+func TestRecapModelRouteIsIndependentFromCompaction(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-summary", Reasoning: "minimal"}
+	runtime := &ProviderRuntime{cfg: cfg}
+	if initial := runtime.recapModelRouteSnapshot(); initial != (config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"}) {
+		t.Fatalf("default recap route = %#v", initial)
+	}
+	recapRoute := config.ModelRouteConfig{Provider: "deepseek", Model: "deepseek-v4-flash", Reasoning: "low"}
+	runtime.UpdateModelRoute("recap", "", recapRoute)
+	if got := runtime.recapModelRouteSnapshot(); got != recapRoute {
+		t.Fatalf("recap route = %#v", got)
+	}
+	if runtime.cfg.Agents.Compaction != cfg.Agents.Compaction {
+		t.Fatalf("recap route changed compaction route: %#v", runtime.cfg.Agents.Compaction)
+	}
+}
+
 func TestModelMaxOutputTokensUsesConfiguredCatalogLimit(t *testing.T) {
 	cfg := config.Default()
 	cfg.Providers.LLMux["deepseek"] = config.LLMuxProviderConfig{Enabled: true, Models: []config.LLMuxModelConfig{{
@@ -1125,6 +1182,10 @@ func TestModelMaxOutputTokensUsesConfiguredCatalogLimit(t *testing.T) {
 	}
 	if got := runtime.modelMaxOutputTokens("chatgpt", "gpt-5.6-sol"); got != 0 {
 		t.Fatalf("subscription max output tokens = %d, want 0", got)
+	}
+	cfg.Providers.LLMux["opencode-zen"] = config.LLMuxProviderConfig{Enabled: true, Models: []config.LLMuxModelConfig{{ID: "gpt-test", MaxOutputTokens: 8192}}}
+	if got := runtime.modelMaxOutputTokens("opencode", "gpt-test"); got != 8192 {
+		t.Fatalf("legacy OpenCode max output tokens = %d, want 8192", got)
 	}
 }
 
@@ -1332,7 +1393,9 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 		}
 		switch event.Kind {
 		case EventTextDelta:
-			output.WriteString(event.Text)
+			if event.TextPhase != string(hyprovider.TextPhaseCommentary) {
+				output.WriteString(event.Text)
+			}
 		case EventContextUsage:
 			if event.State == "reported" {
 				if event.Data["inputTokens"] != "" {
@@ -1404,7 +1467,12 @@ finished:
 	if sessionProjection.Usage.CacheWriteTokens != 5 || sessionProjection.Usage.MainCacheWrite != 5 {
 		t.Fatalf("persisted cache writes = %+v", sessionProjection.Usage)
 	}
-	if len(sessionProjection.Blocks) != 2 || sessionProjection.Blocks[1].Content != "Created and verified." {
+	if len(sessionProjection.Blocks) != 3 ||
+		sessionProjection.Blocks[1].Kind != "commentary" ||
+		sessionProjection.Blocks[1].Content != fallbackToolAnnouncement ||
+		sessionProjection.Blocks[2].Kind != "assistant" ||
+		sessionProjection.Blocks[2].TextPhase != string(hyprovider.TextPhaseFinalAnswer) ||
+		sessionProjection.Blocks[2].Content != "Created and verified." {
 		t.Fatalf("session projection = %+v", sessionProjection.Blocks)
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2087,6 +2155,133 @@ func TestLazyCompactionDefaultsToLowReasoning(t *testing.T) {
 	}
 }
 
+func TestCompactionSummaryRetriesWithLowReasoningAfterReasoningExhaustsOutput(t *testing.T) {
+	driver := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventThinkingDelta, Thinking: "reasoning consumed the output budget"},
+			{Kind: hyprovider.EventTextDelta, Text: `{"version":1,"objective":{"text":"truncated`},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonMaxTurns},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: "summary"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+
+	got, err := compactionSummarizer(driver, "deepseek", "deepseek-v4-flash", "max", "cache", 128_000, 8_192)(context.Background(), "history")
+	if err != nil || got != "summary" {
+		t.Fatalf("compaction summary=%q error=%v", got, err)
+	}
+	if len(driver.requests) != 2 {
+		t.Fatalf("compaction requests=%d, want reasoning fallback retry", len(driver.requests))
+	}
+	if got := driver.requests[0].Metadata["reasoning_effort"]; got != "max" {
+		t.Fatalf("initial reasoning effort=%q", got)
+	}
+	if got := driver.requests[1].Metadata["reasoning_effort"]; got != "low" {
+		t.Fatalf("fallback reasoning effort=%q", got)
+	}
+	if got := driver.requests[0].ExtraBody["max_output_tokens"]; got != 32_768 {
+		t.Fatalf("reasoning generation budget=%v, want 32768 tokens of headroom", got)
+	}
+	if got := driver.requests[1].ExtraBody["max_output_tokens"]; got != 16_384 {
+		t.Fatalf("low-reasoning generation budget=%v, want 16384 tokens of JSON completion headroom", got)
+	}
+}
+
+func TestMainRunWaitsForWorkspaceClaimInsteadOfFailing(t *testing.T) {
+	calls := 0
+	outcome, err := executeMainRunUntilAvailable(context.Background(), func() (hyworker.ExecutionOutcome, error) {
+		calls++
+		if calls == 1 {
+			return hyworker.ExecutionOutcome{}, &hyworker.TaskExecutionUnavailableError{
+				TaskID: "waiting-task",
+				ResourceClaims: api.ResourceClaimDecision{
+					Reason: api.ResourceClaimDeniedConflict,
+					Conflicts: []api.ResourceClaim{{
+						ID: "active-writer", ExpiresAt: time.Now().UTC().Add(time.Millisecond),
+					}},
+				},
+			}
+		}
+		return hyworker.ExecutionOutcome{State: hyworker.ExecutionCompleted}, nil
+	})
+	if err != nil || outcome.State != hyworker.ExecutionCompleted || calls != 2 {
+		t.Fatalf("outcome=%+v calls=%d error=%v", outcome, calls, err)
+	}
+}
+
+func TestTurnContextAdvancesSemanticRevisionAfterEachActivation(t *testing.T) {
+	manager := turnContext{
+		sessionID:          "session-1",
+		runID:              "run-1",
+		staticIdentity:     "static",
+		coordinator:        &compactionCoordinator{},
+		semanticCheckpoint: session.SemanticCheckpointV1{SessionID: "session-1", State: json.RawMessage(`{"version":1}`)},
+	}
+	persistedRevision := int64(0)
+	manager.activateCompaction = func(_ context.Context, messages []message.Message, _ string) error {
+		_, commit := extractContextCheckpointMetadata(messages)
+		if commit == nil {
+			return errors.New("missing semantic commit")
+		}
+		if commit.BaseRevision != persistedRevision {
+			return fmt.Errorf("semantic state source is stale: expected revision %d, current revision %d", commit.BaseRevision, persistedRevision)
+		}
+		persistedRevision++
+		return nil
+	}
+
+	for revision := int64(0); revision < 2; revision++ {
+		source := []message.Message{
+			message.NewText(message.RoleSystem, "rules"),
+			message.NewText(message.RoleUser, fmt.Sprintf("request-%d", revision)),
+		}
+		summary := message.NewText(message.RoleAssistant, semanticStateSafetyLabel+semanticStateForTest(fmt.Sprintf("objective-%d", revision)))
+		summary.Kind = message.KindCompactionSummary
+		metadata, err := buildContextCheckpointMetadata(manager, "automatic_hard", source, []message.Message{summary}, semanticStateForTest(fmt.Sprintf("objective-%d", revision)), nil, 512)
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary, err = attachContextCheckpoint(summary, metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = manager.activateCompactionResult(context.Background(), []message.Message{summary}); err != nil {
+			t.Fatalf("activation %d failed: %v", revision+1, err)
+		}
+	}
+	if persistedRevision != 2 {
+		t.Fatalf("persisted semantic revision=%d, want 2", persistedRevision)
+	}
+}
+
+func TestShortInternalGenerationRetriesWithLowReasoningAfterOutputExhaustion(t *testing.T) {
+	driver := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventThinkingDelta, Thinking: "reasoning consumed the output budget"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonMaxTurns},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: "concise result"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+	request := hyprovider.Request{
+		Model:     "deepseek-v4-flash",
+		Metadata:  map[string]string{"reasoning_effort": "max"},
+		ExtraBody: map[string]any{"max_output_tokens": 256},
+	}
+
+	got, err := collectProviderTextWithReasoningFallback(context.Background(), driver, request, "recap")
+	if err != nil || got != "concise result" {
+		t.Fatalf("short generation=%q error=%v", got, err)
+	}
+	if len(driver.requests) != 2 || driver.requests[1].Metadata["reasoning_effort"] != "low" {
+		t.Fatalf("short generation requests=%#v", driver.requests)
+	}
+}
+
 func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) {
 	inner := &compactionTestDriver{streams: [][]hyprovider.Event{{
 		{Kind: hyprovider.EventTextDelta, Text: "## Objective\n- continue"},
@@ -2096,12 +2291,58 @@ func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) 
 	if _, err := compactionSummarizer(inner, "grok", "model", "low", "cache", 1_000, 200)(context.Background(), transcript); err == nil || len(inner.requests) != 0 {
 		t.Fatalf("oversized summary input requests=%d error=%v", len(inner.requests), err)
 	}
-	oversizedOutput := &compactionTestDriver{streams: [][]hyprovider.Event{{
-		{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
-		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
-	}}}
-	if _, err := compactionSummarizer(oversizedOutput, "grok", "model", "low", "cache", 1_000, 200)(context.Background(), "small input"); err == nil || !strings.Contains(err.Error(), "summary output requires") {
+	oversizedOutput := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+	if _, err := compactionSummarizer(oversizedOutput, "grok", "model", "low", "cache", 2_000, 200)(context.Background(), "small input"); err == nil || !strings.Contains(err.Error(), "after 2 repairs") {
 		t.Fatalf("oversized summary output error=%v", err)
+	}
+	if len(oversizedOutput.requests) != 3 || !strings.Contains(oversizedOutput.requests[1].Messages[1].Text, "Rewrite the candidate") || !strings.Contains(oversizedOutput.requests[1].Messages[1].Text, "at most 544 UTF-8 bytes") {
+		t.Fatalf("oversized summary repair requests=%#v", oversizedOutput.requests)
+	}
+	if got := oversizedOutput.requests[1].ExtraBody["max_output_tokens"]; got != 200 {
+		t.Fatalf("repair generation budget=%v, want final-state limit 200", got)
+	}
+	twoStageRepair := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("x", 900)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("x", 810)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("x", 500)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+	if got, err := compactionSummarizer(twoStageRepair, "chatgpt", "model", "low", "cache", 2_000, 200)(context.Background(), "small input"); err != nil || len(got) != 500 || len(twoStageRepair.requests) != 3 {
+		t.Fatalf("two-stage repaired summary bytes=%d requests=%d error=%v", len(got), len(twoStageRepair.requests), err)
+	}
+	repairedOutput := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{
+			{Kind: hyprovider.EventTextDelta, Text: strings.Repeat("summary", 200)},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+		{
+			{Kind: hyprovider.EventTextDelta, Text: "compact summary"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		},
+	}}
+	if got, err := compactionSummarizer(repairedOutput, "chatgpt", "model", "low", "cache", 2_000, 200)(context.Background(), "small input"); err != nil || got != "compact summary" {
+		t.Fatalf("repaired summary=%q error=%v", got, err)
 	}
 	chatGPT := &compactionTestDriver{streams: [][]hyprovider.Event{{
 		{Kind: hyprovider.EventTextDelta, Text: "summary"},
@@ -2112,6 +2353,17 @@ func TestCompactionSummarizerRejectsOversizedInputWithoutClipping(t *testing.T) 
 	}
 	if extra := chatGPT.requests[0].ExtraBody; extra["prompt_cache_key"] != "cache" || extra["max_output_tokens"] != nil {
 		t.Fatalf("ChatGPT summary extra body: %#v", extra)
+	}
+	instructions := chatGPT.requests[0].Messages[0].Text
+	if !strings.Contains(instructions, "at most 800 UTF-8 bytes") || !strings.Contains(instructions, "hard limit") {
+		t.Fatalf("ChatGPT summary instructions do not carry the configured output limit: %q", instructions)
+	}
+}
+
+func TestCompactionSummaryLimitRetainsLargeSemanticState(t *testing.T) {
+	summaryTokens, inputTokens := resolveCompactionLimits(272_000, 32768)
+	if summaryTokens != 32768 || inputTokens != 238_208 {
+		t.Fatalf("compaction limits = summary %d input %d", summaryTokens, inputTokens)
 	}
 }
 
@@ -3235,7 +3487,7 @@ func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
 			t.Errorf("review evidence=%v", evidence)
 		}
 		requestChecked.Store(true)
-		writeAutomaticReviewWithUsage(writer, `{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized bounded write"}`)
+		writeAutomaticReviewWithUsage(writer, "```json\n"+`{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized bounded write"}`+"\n```")
 	})
 	modeEvent := nextApprovalEvent(t, harness.host, EventApprovalMode)
 	if modeEvent.State != "auto_review" || modeEvent.Data["auto_review_available"] != "true" {
@@ -3500,7 +3752,7 @@ func TestAutoReviewTimeoutFallsBackToUserApproval(t *testing.T) {
 	modelsMu.Lock()
 	gotModels := append([]string(nil), models...)
 	modelsMu.Unlock()
-	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerFallbackModel, codex.ApprovalReviewerModel}
+	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerModel, codex.ApprovalReviewerModel}
 	if !reflect.DeepEqual(gotModels, wantModels) {
 		t.Fatalf("review models=%v, want %v", gotModels, wantModels)
 	}
@@ -3529,7 +3781,7 @@ func TestAutoReviewTimeoutFallsBackToUserApproval(t *testing.T) {
 	}
 }
 
-func TestAutoReviewTimeoutSwitchesModelAndUsesSuccessfulRetry(t *testing.T) {
+func TestAutoReviewTimeoutRetriesConfiguredModel(t *testing.T) {
 	var requests atomic.Int32
 	var modelsMu sync.Mutex
 	var models []string
@@ -3567,11 +3819,11 @@ func TestAutoReviewTimeoutSwitchesModelAndUsesSuccessfulRetry(t *testing.T) {
 	modelsMu.Lock()
 	gotModels := append([]string(nil), models...)
 	modelsMu.Unlock()
-	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerFallbackModel}
+	wantModels := []string{codex.ApprovalReviewerModel, codex.ApprovalReviewerModel}
 	if !reflect.DeepEqual(gotModels, wantModels) {
 		t.Fatalf("review models=%v, want %v", gotModels, wantModels)
 	}
-	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != codex.ApprovalReviewerFallbackModel {
+	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != codex.ApprovalReviewerModel {
 		t.Fatalf("retry decider=%q", decider)
 	}
 }
@@ -3617,13 +3869,13 @@ func TestAutoReviewCallerDeadlineStopsWithoutRetryOrManualApproval(t *testing.T)
 	}
 }
 
-func TestAutoReviewModeRequiresChatGPTAndDoesNotTakePendingHumanApproval(t *testing.T) {
+func TestAutoReviewModeIsProviderIndependentAndDoesNotTakePendingHumanApproval(t *testing.T) {
 	unauthed := NewService(context.Background(), config.Default())
-	if err := unauthed.setApprovalMode(context.Background(), ApprovalModeAutoReview); err == nil {
-		t.Fatal("automatic mode accepted without authentication")
+	if err := unauthed.setApprovalMode(context.Background(), ApprovalModeAutoReview); err != nil {
+		t.Fatalf("automatic mode requires a specific provider: %v", err)
 	}
-	if unauthed.approvalMode != ApprovalModePrompt {
-		t.Fatalf("unauthorized mode=%q", unauthed.approvalMode)
+	if unauthed.approvalMode != ApprovalModeAutoReview {
+		t.Fatalf("automatic mode=%q", unauthed.approvalMode)
 	}
 
 	var reviews atomic.Int32
@@ -3683,30 +3935,28 @@ func TestAutoReviewModeRequiresChatGPTAndDoesNotTakePendingHumanApproval(t *test
 		t.Fatalf("logout event=%+v", loggedOut)
 	}
 	modeEvent := nextApprovalEvent(t, harness.host, EventApprovalMode)
-	if modeEvent.State != "prompt" || modeEvent.Data["auto_review_available"] != "false" ||
-		harness.host.approvalMode != ApprovalModePrompt {
+	if modeEvent.State != "auto_review" || modeEvent.Data["auto_review_available"] != "true" ||
+		harness.host.approvalMode != ApprovalModeAutoReview {
 		t.Fatalf("logout mode projection=%+v service_mode=%q", modeEvent, harness.host.approvalMode)
 	}
 	if err := harness.host.ExecuteAction(context.Background(), Action{
 		Kind: ActionSetApprovalMode, Target: string(ApprovalModeAutoReview),
-	}); err == nil {
-		t.Fatal("direct automatic mode action succeeded after logout")
+	}); err != nil {
+		t.Fatalf("automatic mode rejected after provider logout: %v", err)
 	}
-	harness.host.mu.Lock()
-	harness.host.approvalMode = ApprovalModeAutoReview
-	harness.host.mu.Unlock()
+	_ = nextApprovalEvent(t, harness.host, EventApprovalMode)
 	call := tool.Call{ID: "auth-race", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"blocked.txt"}`)}
 	reviewPending := prepareAutomaticApproval(t, harness, call)
 	resolution, err := harness.host.awaitApproval(
 		context.Background(), "session", "agent-1", "main", harness.run, call, reviewPending,
 	)
 	if err != nil || resolution.Mode != agentservice.ApprovalDenied ||
-		!strings.Contains(resolution.DenialMessage, "(authentication)") {
+		!strings.Contains(resolution.DenialMessage, "(provider)") {
 		t.Fatalf("post-logout review=%+v error=%v", resolution, err)
 	}
 	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
 	failed := nextApprovalEvent(t, harness.host, EventApprovalResolved)
-	if failed.State != "auto_failed" || failed.Data["error_kind"] != "authentication" || reviews.Load() != 0 {
+	if failed.State != "auto_failed" || failed.Data["error_kind"] != "provider" || reviews.Load() != 0 {
 		t.Fatalf("post-logout review event=%+v reviewer_calls=%d", failed, reviews.Load())
 	}
 }
@@ -3827,7 +4077,14 @@ func TestResolveLLMuxDriverUsesConfiguredModelAndStoredCredential(t *testing.T) 
 
 func newAutoReviewHarness(t *testing.T, handler http.HandlerFunc) autoReviewHarness {
 	t.Helper()
-	server := httptest.NewServer(handler)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-5.6-luna","title":"GPT-5.6 Luna","supported_reasoning_levels":["low"],"supports_tools":true}]}`))
+			return
+		}
+		handler(writer, request)
+	}))
 	t.Cleanup(server.Close)
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
@@ -3856,7 +4113,9 @@ func newAutoReviewHarness(t *testing.T, handler http.HandlerFunc) autoReviewHarn
 	t.Cleanup(func() { _ = coding.Close(context.Background()) })
 	cfg := config.Default()
 	cfg.Workspace.Root = t.TempDir()
-	runtime, err := NewProviderRuntime(cfg, authentication, catalog.NewService(store.DB(), authentication), coding, t.TempDir())
+	modelCatalog := catalog.NewService(store.DB(), authentication)
+	modelCatalog.Endpoints["chatgpt"] = server.URL
+	runtime, err := NewProviderRuntime(cfg, authentication, modelCatalog, coding, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/Viking602/azem/internal/config"
@@ -314,6 +316,107 @@ func (s *Service) updateModelProvider(ctx context.Context, entry *ModelProviderE
 	return s.emitModelProviders(ctx, "updated")
 }
 
+func (s *Service) setModelEnabled(ctx context.Context, providerID, modelID string, enabled bool) error {
+	providerID = llmuxdriver.CanonicalProviderID(providerID)
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" || len(modelID) > 256 {
+		return fmt.Errorf("model ID is required and must not exceed 256 characters")
+	}
+	if providerID != "chatgpt" && providerID != "grok" {
+		return s.setLLMuxModelEnabled(ctx, providerID, modelID, enabled)
+	}
+	return s.setSubscriptionModelEnabled(ctx, providerID, modelID, enabled)
+}
+
+func (s *Service) setLLMuxModelEnabled(ctx context.Context, providerID, modelID string, enabled bool) error {
+	entries, err := s.modelProviderEntries(ctx)
+	if err != nil {
+		return err
+	}
+	for index := range entries {
+		if entries[index].ID != providerID {
+			continue
+		}
+		for modelIndex := range entries[index].Models {
+			if entries[index].Models[modelIndex].ID == modelID {
+				entries[index].Models[modelIndex].Disabled = !enabled
+				return s.updateModelProvider(ctx, &entries[index], "")
+			}
+		}
+		return fmt.Errorf("model %q is not configured for %s", modelID, providerID)
+	}
+	return fmt.Errorf("unsupported model provider %q", providerID)
+}
+
+func (s *Service) setSubscriptionModelEnabled(ctx context.Context, providerID, modelID string, enabled bool) error {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	s.mu.Lock()
+	currentSession := s.currentSession
+	var disabled []string
+	if providerID == "chatgpt" {
+		disabled = append([]string(nil), s.cfg.Providers.ChatGPT.DisabledModels...)
+	} else {
+		disabled = append([]string(nil), s.cfg.Providers.Grok.DisabledModels...)
+	}
+	s.mu.Unlock()
+	disabled = setModelDisabled(disabled, modelID, !enabled)
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateSubscriptionDisabledModels(s.configPath, providerID, disabled)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	if providerID == "chatgpt" {
+		s.cfg.Providers.ChatGPT.DisabledModels = append([]string(nil), disabled...)
+	} else {
+		s.cfg.Providers.Grok.DisabledModels = append([]string(nil), disabled...)
+	}
+	s.mu.Unlock()
+	if s.providers != nil {
+		s.providers.UpdateSubscriptionDisabledModels(providerID, disabled)
+	}
+	s.emitAuthCatalog(ctx)
+	return s.emitModelProviders(ctx, "model_availability_updated")
+}
+
+func setModelDisabled(models []string, modelID string, disabled bool) []string {
+	result := make([]string, 0, len(models)+1)
+	for _, existing := range models {
+		if existing != modelID {
+			result = append(result, existing)
+		}
+	}
+	if disabled {
+		result = append(result, modelID)
+		sort.Strings(result)
+	}
+	return result
+}
+
+func (s *Service) catalogModelsWithAvailability(provider string, models []catalog.Model) []catalog.Model {
+	s.mu.Lock()
+	var disabled []string
+	if provider == "chatgpt" {
+		disabled = append([]string(nil), s.cfg.Providers.ChatGPT.DisabledModels...)
+	} else if provider == "grok" {
+		disabled = append([]string(nil), s.cfg.Providers.Grok.DisabledModels...)
+	}
+	s.mu.Unlock()
+	result := append([]catalog.Model(nil), models...)
+	for index := range result {
+		result[index].Disabled = slices.Contains(disabled, result[index].ID)
+	}
+	return result
+}
+
 func (s *Service) emitConfiguredModelCatalog(ctx context.Context, provider string, models []config.LLMuxModelConfig) {
 	encoded, err := json.Marshal(configuredCatalogModels(models))
 	if err == nil {
@@ -325,7 +428,7 @@ func configuredCatalogModels(models []config.LLMuxModelConfig) []catalog.Model {
 	result := make([]catalog.Model, 0, len(models))
 	for _, model := range models {
 		result = append(result, catalog.Model{
-			ID: model.ID, Name: model.Name, Aliases: append([]string(nil), model.Aliases...), Description: model.Description, ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
+			ID: model.ID, Disabled: model.Disabled, Name: model.Name, Aliases: append([]string(nil), model.Aliases...), Description: model.Description, ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
 			ReasoningLevels: append([]string(nil), model.ReasoningLevels...), DefaultReasoning: model.DefaultReasoning,
 			SupportsTools: hasCapability(model.Capabilities, "tools"), SupportsParallel: hasCapability(model.Capabilities, "parallel-tools"),
 			SupportsReasoning:  hasCapability(model.Capabilities, "reasoning") || len(model.ReasoningLevels) > 0,

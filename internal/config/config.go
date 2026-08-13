@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -28,6 +29,7 @@ type Config struct {
 	Agents    AgentsConfig    `yaml:"agents"`
 	MCP       MCPConfig       `yaml:"mcp"`
 	Skills    SkillsConfig    `yaml:"skills"`
+	Plugins   PluginsConfig   `yaml:"plugins"`
 	Hooks     HooksConfig     `yaml:"hooks"`
 	Retry     RetryConfig     `yaml:"retry"`
 }
@@ -97,6 +99,7 @@ type LLMuxProviderConfig struct {
 
 type LLMuxModelConfig struct {
 	ID               string   `yaml:"id" json:"id"`
+	Disabled         bool     `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	Name             string   `yaml:"name,omitempty" json:"name,omitempty"`
 	Aliases          []string `yaml:"aliases,omitempty" json:"aliases,omitempty"`
 	Description      string   `yaml:"description,omitempty" json:"description,omitempty"`
@@ -110,9 +113,10 @@ type LLMuxModelConfig struct {
 }
 
 type ProviderConfig struct {
-	Enabled    bool          `yaml:"enabled"`
-	CatalogTTL time.Duration `yaml:"-"`
-	TTL        string        `yaml:"catalog_ttl"`
+	Enabled        bool          `yaml:"enabled"`
+	DisabledModels []string      `yaml:"disabled_models,omitempty"`
+	CatalogTTL     time.Duration `yaml:"-"`
+	TTL            string        `yaml:"catalog_ttl"`
 }
 
 type ChatGPTConfig struct {
@@ -131,7 +135,10 @@ type AgentsConfig struct {
 	Team       TeamConfig       `yaml:"team"`
 	Title      ModelRouteConfig `yaml:"title" json:"title"`
 	Plan       ModelRouteConfig `yaml:"plan" json:"plan"`
+	Approval   ModelRouteConfig `yaml:"approval" json:"approval"`
+	Vision     ModelRouteConfig `yaml:"vision" json:"vision"`
 	Compaction ModelRouteConfig `yaml:"compaction" json:"compaction"`
+	Recap      ModelRouteConfig `yaml:"recap" json:"recap"`
 	Context    ContextConfig    `yaml:"context"`
 	Subagents  SubagentConfig   `yaml:"subagents"`
 }
@@ -182,27 +189,45 @@ type SkillsConfig struct {
 	Disabled       []string `yaml:"disabled,omitempty"`
 }
 
+// PluginsConfig controls Azem's own plugin package directory. ImportCodex
+// enables discovery while CodexImports is the explicit copy allowlist; runtime
+// loading never executes directly from the Codex cache. Hooks remain explicitly
+// trusted.
+type PluginsConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	ImportCodex  bool     `yaml:"import_codex"`
+	CodexImports []string `yaml:"codex_imports,omitempty"`
+	TrustHooks   bool     `yaml:"trust_hooks"`
+}
+
 type TeamConfig struct {
 	MaxConcurrency int `yaml:"max_concurrency"`
 	MaxTicks       int `yaml:"max_ticks"`
 }
 
 type SubagentConfig struct {
-	Enabled        bool                             `yaml:"enabled"`
-	MaxDepth       int                              `yaml:"max_depth"`
-	MaxConcurrency int                              `yaml:"max_concurrency"`
-	AwaitTimeout   string                           `yaml:"await_timeout"`
-	AwaitDuration  time.Duration                    `yaml:"-"`
-	AutoWake       bool                             `yaml:"auto_wake"`
-	Toggle         map[string]bool                  `yaml:"toggle,omitempty"`
-	Models         map[string]string                `yaml:"models,omitempty"`
-	Routes         map[string]ModelRouteConfig      `yaml:"routes,omitempty"`
-	Roles          map[string]SubagentRoleConfig    `yaml:"roles,omitempty"`
-	Personas       map[string]SubagentPersonaConfig `yaml:"personas,omitempty"`
-	Budget         SubagentBudgetConfig             `yaml:"budget"`
+	Enabled        bool `yaml:"enabled"`
+	MaxDepth       int  `yaml:"max_depth"`
+	MaxConcurrency int  `yaml:"max_concurrency"`
+	// AwaitTimeout is the foreground tool-call wait window, not a child
+	// execution timeout. Safe work continues in the background when it elapses.
+	AwaitTimeout  string                           `yaml:"await_timeout"`
+	AwaitDuration time.Duration                    `yaml:"-"`
+	AutoWake      bool                             `yaml:"auto_wake"`
+	Toggle        map[string]bool                  `yaml:"toggle,omitempty"`
+	Models        map[string]string                `yaml:"models,omitempty"`
+	Routes        map[string]ModelRouteConfig      `yaml:"routes,omitempty"`
+	Roles         map[string]SubagentRoleConfig    `yaml:"roles,omitempty"`
+	Personas      map[string]SubagentPersonaConfig `yaml:"personas,omitempty"`
+	Budget        SubagentBudgetConfig             `yaml:"budget"`
 }
 
 type SubagentBudgetConfig struct {
+	// SoftRequests injects one private wrap-up reminder before the next provider
+	// request after the threshold is reached. It is advisory only: unlike the
+	// hard limits below, it never cancels or fails a subagent run.
+	SoftRequests      int  `yaml:"soft_requests"`
+	SoftRequestNotice bool `yaml:"soft_request_notice"`
 	// MaxTokens optionally limits cumulative provider-reported usage for one
 	// subagent run. It defaults to zero so subagents can finish their assigned
 	// coding task. A positive value is checked between requests and can be
@@ -251,19 +276,24 @@ type SubagentContractItem struct {
 }
 
 type MCPConfig struct {
-	Servers map[string]MCPServerConfig `yaml:"servers"`
+	Servers        map[string]MCPServerConfig `yaml:"servers"`
+	RemovedServers []string                   `yaml:"removed_servers,omitempty"`
 }
 
 type MCPServerConfig struct {
-	Enabled         bool                    `yaml:"enabled"`
-	Transport       string                  `yaml:"transport"`
-	Command         string                  `yaml:"command,omitempty"`
-	Args            []string                `yaml:"args,omitempty"`
-	CWD             string                  `yaml:"cwd,omitempty"`
-	InheritEnv      bool                    `yaml:"inherit_env"`
-	Env             map[string]string       `yaml:"env,omitempty"`
+	Enabled    bool              `yaml:"enabled"`
+	Transport  string            `yaml:"transport"`
+	Command    string            `yaml:"command,omitempty"`
+	Args       []string          `yaml:"args,omitempty"`
+	CWD        string            `yaml:"cwd,omitempty"`
+	InheritEnv bool              `yaml:"inherit_env"`
+	Env        map[string]string `yaml:"env,omitempty"`
+	// RuntimeEnv contains plugin-scoped literal environment values. It is never
+	// serialized into configuration or emitted in runtime events.
+	RuntimeEnv      map[string]string       `yaml:"-" json:"-"`
 	URL             string                  `yaml:"url,omitempty"`
 	Headers         map[string]string       `yaml:"headers,omitempty"`
+	RuntimeHeaders  map[string]string       `yaml:"-" json:"-"`
 	ConnectTimeout  string                  `yaml:"connect_timeout"`
 	CallTimeout     string                  `yaml:"call_timeout"`
 	MaxConcurrency  int                     `yaml:"max_concurrency"`
@@ -271,6 +301,10 @@ type MCPServerConfig struct {
 	ToolOverrides   map[string]ToolOverride `yaml:"tool_overrides,omitempty"`
 	ConnectDuration time.Duration           `yaml:"-"`
 	CallDuration    time.Duration           `yaml:"-"`
+	// Managed records catalog ownership for diagnostics and migration. It does
+	// not restrict deletion: removed catalog entries are suppressed explicitly
+	// through MCPConfig.RemovedServers.
+	Managed bool `yaml:"managed,omitempty" json:"-"`
 }
 
 type ToolOverride struct {
@@ -296,25 +330,29 @@ func Default() Config {
 			MaxDelay: "5m", MaxDelayDuration: 5 * time.Minute,
 		},
 		Agents: AgentsConfig{
-			Main:  MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
-			Team:  TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
-			Title: ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
+			Main:     MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
+			Team:     TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
+			Title:    ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
+			Approval: ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
+			Recap:    ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
 			Context: ContextConfig{
 				Enabled: true, SoftTriggerRatio: .68, HardTriggerRatio: .82, TargetRatio: .45, BackgroundPrepare: true, SafetyMarginRatio: .08,
 				ReserveOutputTokens: 16384, ReserveReasoningTokens: 8192, MinReclaimTokens: 16000,
-				MaxSummaryTokens: 4096, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
+				MaxSummaryTokens: 32768, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
 			},
 			Subagents: SubagentConfig{
-				Enabled: true, MaxDepth: 1, MaxConcurrency: 2, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
+				Enabled: true, MaxDepth: 2, MaxConcurrency: 32, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
+					SoftRequests: 200, SoftRequestNotice: true,
 					MaxTokens: 0, MaxToolCalls: 0, MaxTurns: 0,
 					MaxWallClock: "0s",
 				},
 			},
 		},
-		Skills: SkillsConfig{Enabled: true, TrustProject: false},
+		Skills:  SkillsConfig{Enabled: true, TrustProject: false},
+		Plugins: PluginsConfig{Enabled: true, ImportCodex: true, TrustHooks: false},
 		Hooks: HooksConfig{
 			Enabled: true, ClaudeCompatibility: false, DefaultTimeout: "5s",
 			DefaultTimeoutParsed: 5 * time.Second, FailurePolicy: "open",
@@ -328,6 +366,7 @@ func builtInMCPServers() map[string]MCPServerConfig {
 		"grep": {
 			Enabled: true, Transport: "streamable_http", URL: "https://mcp.grep.app",
 			ConnectTimeout: "30s", CallTimeout: "60s", MaxConcurrency: 2, Approval: "never",
+			Managed: true,
 			ToolOverrides: map[string]ToolOverride{
 				"searchGitHub": {Effect: "read_only", Approval: "never"},
 			},
@@ -416,6 +455,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("providers.%s.catalog_ttl must be a positive duration", name)
 		}
 		provider.CatalogTTL = ttl
+		if err := validateDisabledModels(name, provider.DisabledModels); err != nil {
+			return err
+		}
 	}
 	if c.Providers.Grok.Transport != "api" && c.Providers.Grok.Transport != "cli_proxy" {
 		return fmt.Errorf("providers.grok.transport must be api or cli_proxy")
@@ -456,7 +498,16 @@ func (c *Config) Validate() error {
 	if err := validateModelRoute("agents.plan", c.Agents.Plan); err != nil {
 		return err
 	}
+	if err := validateModelRoute("agents.approval", c.Agents.Approval); err != nil {
+		return err
+	}
+	if err := validateModelRoute("agents.vision", c.Agents.Vision); err != nil {
+		return err
+	}
 	if err := validateModelRoute("agents.compaction", c.Agents.Compaction); err != nil {
+		return err
+	}
+	if err := validateModelRoute("agents.recap", c.Agents.Recap); err != nil {
 		return err
 	}
 	contextConfig := c.Agents.Context
@@ -469,78 +520,144 @@ func (c *Config) Validate() error {
 	if err := c.validateSubagents(); err != nil {
 		return err
 	}
-	for name, server := range c.MCP.Servers {
+	removedServers := make([]string, 0, len(c.MCP.RemovedServers))
+	removedSet := make(map[string]struct{}, len(c.MCP.RemovedServers))
+	for _, name := range c.MCP.RemovedServers {
+		name = strings.TrimSpace(name)
 		if !mcpServerNamePattern.MatchString(name) {
-			return fmt.Errorf("mcp server name %q must match [a-z0-9_-]+", name)
+			return fmt.Errorf("removed mcp server name %q must match [a-z0-9_-]+", name)
 		}
-		if server.ConnectTimeout == "" {
-			server.ConnectTimeout = "30s"
+		if _, duplicate := removedSet[name]; duplicate {
+			continue
 		}
-		if server.CallTimeout == "" {
-			server.CallTimeout = "60s"
+		removedSet[name] = struct{}{}
+		removedServers = append(removedServers, name)
+		delete(c.MCP.Servers, name)
+	}
+	slices.Sort(removedServers)
+	c.MCP.RemovedServers = removedServers
+	for name, server := range c.MCP.Servers {
+		normalized, err := NormalizeMCPServer(name, server)
+		if err != nil {
+			return err
 		}
-		if server.MaxConcurrency == 0 {
-			server.MaxConcurrency = 2
-		}
-		if server.Approval == "" {
-			server.Approval = "always"
-		}
-		var err error
-		server.ConnectDuration, err = time.ParseDuration(server.ConnectTimeout)
-		if err != nil || server.ConnectDuration <= 0 {
-			return fmt.Errorf("mcp.servers.%s.connect_timeout must be a positive duration", name)
-		}
-		server.CallDuration, err = time.ParseDuration(server.CallTimeout)
-		if err != nil || server.CallDuration <= 0 {
-			return fmt.Errorf("mcp.servers.%s.call_timeout must be a positive duration", name)
-		}
-		if server.MaxConcurrency < 1 {
-			return fmt.Errorf("mcp.servers.%s.max_concurrency must be positive", name)
-		}
-		if server.Approval != "always" && server.Approval != "never" {
-			return fmt.Errorf("mcp.servers.%s.approval must be always or never", name)
-		}
-		switch server.Transport {
-		case "stdio":
-			if strings.TrimSpace(server.Command) == "" {
-				return fmt.Errorf("mcp.servers.%s.command is required for stdio", name)
-			}
-		case "streamable_http":
-			endpoint, parseErr := url.Parse(server.URL)
-			if parseErr != nil || endpoint.Host == "" {
-				return fmt.Errorf("mcp.servers.%s.url is invalid", name)
-			}
-			if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && isLoopbackHost(endpoint.Hostname())) {
-				return fmt.Errorf("mcp.servers.%s.url must use https (http is allowed only for localhost)", name)
-			}
-		default:
-			return fmt.Errorf("mcp.servers.%s.transport must be stdio or streamable_http", name)
-		}
-		for key, reference := range server.Env {
-			if err := validateSecretReference(reference); err != nil {
-				return fmt.Errorf("mcp.servers.%s.env.%s: %w", name, key, err)
-			}
-		}
-		for key, reference := range server.Headers {
-			if err := validateSecretReference(reference); err != nil {
-				return fmt.Errorf("mcp.servers.%s.headers.%s: %w", name, key, err)
-			}
-		}
-		for toolName, override := range server.ToolOverrides {
-			if strings.TrimSpace(toolName) == "" {
-				return fmt.Errorf("mcp.servers.%s.tool_overrides contains an empty tool name", name)
-			}
-			if override.Effect != "read_only" && override.Effect != "write" && override.Effect != "external_side_effect" {
-				return fmt.Errorf("mcp.servers.%s.tool_overrides.%s.effect is invalid", name, toolName)
-			}
-			if override.Approval != "always" && override.Approval != "never" {
-				return fmt.Errorf("mcp.servers.%s.tool_overrides.%s.approval must be always or never", name, toolName)
-			}
-		}
-		c.MCP.Servers[name] = server
+		c.MCP.Servers[name] = normalized
 	}
 	if runtime.GOOS == "js" && c.Auth.Store == "keyring" {
 		return fmt.Errorf("keyring credential storage is unavailable on js")
+	}
+	return nil
+}
+
+// NormalizeMCPServer validates one MCP server and fills the same runtime
+// defaults used during full configuration loading. Desktop mutations use this
+// boundary before persisting or changing a live connection.
+func NormalizeMCPServer(name string, server MCPServerConfig) (MCPServerConfig, error) {
+	name = strings.TrimSpace(name)
+	if !mcpServerNamePattern.MatchString(name) {
+		return MCPServerConfig{}, fmt.Errorf("mcp server name %q must match [a-z0-9_-]+", name)
+	}
+	server = applyMCPServerDefaults(server)
+	if err := parseMCPServerTimeouts(name, &server); err != nil {
+		return MCPServerConfig{}, err
+	}
+	if err := validateMCPServerPolicy(name, server); err != nil {
+		return MCPServerConfig{}, err
+	}
+	if err := validateMCPTransport(name, server); err != nil {
+		return MCPServerConfig{}, err
+	}
+	if err := validateMCPReferences(name, "env", server.Env); err != nil {
+		return MCPServerConfig{}, err
+	}
+	if err := validateMCPReferences(name, "headers", server.Headers); err != nil {
+		return MCPServerConfig{}, err
+	}
+	if err := validateMCPToolOverrides(name, server.ToolOverrides); err != nil {
+		return MCPServerConfig{}, err
+	}
+	return server, nil
+}
+
+func applyMCPServerDefaults(server MCPServerConfig) MCPServerConfig {
+	if server.ConnectTimeout == "" {
+		server.ConnectTimeout = "30s"
+	}
+	if server.CallTimeout == "" {
+		server.CallTimeout = "60s"
+	}
+	if server.MaxConcurrency == 0 {
+		server.MaxConcurrency = 2
+	}
+	if server.Approval == "" {
+		server.Approval = "always"
+	}
+	return server
+}
+
+func parseMCPServerTimeouts(name string, server *MCPServerConfig) error {
+	var err error
+	server.ConnectDuration, err = time.ParseDuration(server.ConnectTimeout)
+	if err != nil || server.ConnectDuration <= 0 {
+		return fmt.Errorf("mcp.servers.%s.connect_timeout must be a positive duration", name)
+	}
+	server.CallDuration, err = time.ParseDuration(server.CallTimeout)
+	if err != nil || server.CallDuration <= 0 {
+		return fmt.Errorf("mcp.servers.%s.call_timeout must be a positive duration", name)
+	}
+	return nil
+}
+
+func validateMCPServerPolicy(name string, server MCPServerConfig) error {
+	if server.MaxConcurrency < 1 {
+		return fmt.Errorf("mcp.servers.%s.max_concurrency must be positive", name)
+	}
+	if server.Approval != "always" && server.Approval != "never" {
+		return fmt.Errorf("mcp.servers.%s.approval must be always or never", name)
+	}
+	return nil
+}
+
+func validateMCPTransport(name string, server MCPServerConfig) error {
+	switch server.Transport {
+	case "stdio":
+		if strings.TrimSpace(server.Command) == "" {
+			return fmt.Errorf("mcp.servers.%s.command is required for stdio", name)
+		}
+	case "streamable_http":
+		endpoint, parseErr := url.Parse(server.URL)
+		if parseErr != nil || endpoint.Host == "" {
+			return fmt.Errorf("mcp.servers.%s.url is invalid", name)
+		}
+		if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && isLoopbackHost(endpoint.Hostname())) {
+			return fmt.Errorf("mcp.servers.%s.url must use https (http is allowed only for localhost)", name)
+		}
+	default:
+		return fmt.Errorf("mcp.servers.%s.transport must be stdio or streamable_http", name)
+	}
+	return nil
+}
+
+func validateMCPReferences(name, group string, references map[string]string) error {
+	for key, reference := range references {
+		if err := validateSecretReference(reference); err != nil {
+			return fmt.Errorf("mcp.servers.%s.%s.%s: %w", name, group, key, err)
+		}
+	}
+	return nil
+}
+
+func validateMCPToolOverrides(name string, overrides map[string]ToolOverride) error {
+	for toolName, override := range overrides {
+		if strings.TrimSpace(toolName) == "" {
+			return fmt.Errorf("mcp.servers.%s.tool_overrides contains an empty tool name", name)
+		}
+		if override.Effect != "read_only" && override.Effect != "write" && override.Effect != "external_side_effect" {
+			return fmt.Errorf("mcp.servers.%s.tool_overrides.%s.effect is invalid", name, toolName)
+		}
+		if override.Approval != "always" && override.Approval != "never" {
+			return fmt.Errorf("mcp.servers.%s.tool_overrides.%s.approval must be always or never", name, toolName)
+		}
 	}
 	return nil
 }
@@ -549,6 +666,24 @@ func (c *Config) validateSkills() error {
 	if len(c.Skills.AdditionalDirs) > 56 {
 		return fmt.Errorf("skills.additional_dirs must contain at most 56 entries")
 	}
+	if len(c.Plugins.CodexImports) > 128 {
+		return fmt.Errorf("plugins.codex_imports must contain at most 128 entries")
+	}
+	pluginImports := make([]string, 0, len(c.Plugins.CodexImports))
+	seenPluginImports := make(map[string]struct{}, len(c.Plugins.CodexImports))
+	for _, pluginID := range c.Plugins.CodexImports {
+		pluginID = strings.TrimSpace(pluginID)
+		if pluginID == "" || len(pluginID) > 256 || strings.ContainsAny(pluginID, "\r\n\x00") {
+			return fmt.Errorf("plugins.codex_imports contains an invalid plugin id")
+		}
+		if _, exists := seenPluginImports[pluginID]; exists {
+			continue
+		}
+		seenPluginImports[pluginID] = struct{}{}
+		pluginImports = append(pluginImports, pluginID)
+	}
+	slices.Sort(pluginImports)
+	c.Plugins.CodexImports = pluginImports
 	eager := make(map[string]struct{}, len(c.Skills.Eager))
 	for _, name := range c.Skills.Eager {
 		if strings.TrimSpace(name) == "" {
@@ -577,8 +712,11 @@ func (c *Config) validateSkills() error {
 
 func (c *Config) validateSubagents() error {
 	subagents := &c.Agents.Subagents
-	if subagents.MaxDepth != 1 || subagents.MaxConcurrency < 1 {
-		return fmt.Errorf("agents.subagents.max_depth must be 1 and max_concurrency positive")
+	if subagents.MaxDepth < -1 {
+		return fmt.Errorf("agents.subagents.max_depth must be -1 (unlimited) or non-negative")
+	}
+	if subagents.MaxConcurrency < 0 {
+		return fmt.Errorf("agents.subagents.max_concurrency must be non-negative (zero is unbounded)")
 	}
 	await, err := time.ParseDuration(subagents.AwaitTimeout)
 	if err != nil || await <= 0 {
@@ -594,8 +732,8 @@ func (c *Config) validateSubagents() error {
 	if subagents.Budget.MaxToolCalls < 0 || subagents.Budget.MaxTurns < 0 {
 		return fmt.Errorf("agents.subagents tool-call and turn budgets must be non-negative (zero is unbounded)")
 	}
-	if wallClock > 0 && await > wallClock {
-		return fmt.Errorf("agents.subagents.await_timeout must not exceed budget.max_wall_clock")
+	if subagents.Budget.SoftRequests < 0 {
+		return fmt.Errorf("agents.subagents.budget.soft_requests must be non-negative (zero disables the reminder)")
 	}
 	subagents.AwaitDuration = await
 	subagents.Budget.MaxWallClockDuration = wallClock

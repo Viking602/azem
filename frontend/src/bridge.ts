@@ -2,6 +2,7 @@ import { Browser, Call, Dialogs, Events } from "@wailsio/runtime";
 import type {
   ActionRequest, Attachment, PullRequest, PullRequestDashboard, PullRequestDetailResponse,
   PullRequestMonitorState, PullRequestMutationRequest, RuntimeEvent, Snapshot, TurnRequest,
+  SessionSearchResult, SkillEntry, WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
 } from "./types";
 
 const EVENT_NAME = "azem:event";
@@ -14,16 +15,19 @@ export const isDesktopRuntime = () =>
   (location.protocol === "wails:" || Boolean((window as Window & { _wails?: { environment?: { OS?: string } } })._wails?.environment?.OS));
 
 export const demoSnapshot: Snapshot = {
-  workspace: "/workspace/azem",
+  workspace: "/Users/viking/GolandProjects/azem",
   sessionId: "session-demo",
   provider: "chatgpt",
-  model: "gpt-5.6-sol",
+  model: "gpt-5.6",
   reasoning: "high",
   agentMode: "single",
   language: "zh-CN",
   approvalMode: "auto_review",
   queueMode: "queue",
-  subagentConcurrency: 2,
+  subagentConcurrency: 6,
+  subagentMaxDepth: 2,
+  shellConcurrency: 4,
+  subagentAwaitSeconds: 30,
   chatgptFastMode: false,
   sequence: 0,
   pullRequestMonitors: [],
@@ -42,6 +46,20 @@ export async function startTurn(request: TurnRequest): Promise<string> {
 export async function execute(request: ActionRequest): Promise<void> {
   if (!isDesktopRuntime()) return;
   await Call.ByName(`${bridgeName}.Execute`, request);
+}
+
+export interface SkillCatalogSnapshot {
+  entries: SkillEntry[];
+  diagnostics: Array<{ path: string; message: string }>;
+}
+
+export async function listSkillCatalog(): Promise<SkillCatalogSnapshot> {
+  if (!isDesktopRuntime()) return { entries: [], diagnostics: [] };
+  const result = await Call.ByName(`${bridgeName}.SkillCatalog`) as Partial<SkillCatalogSnapshot> | null;
+  return {
+    entries: Array.isArray(result?.entries) ? result.entries : [],
+    diagnostics: Array.isArray(result?.diagnostics) ? result.diagnostics : [],
+  };
 }
 
 export interface SystemFont {
@@ -69,9 +87,9 @@ export async function selectProjectFolder(title: string, buttonText: string): Pr
   });
 }
 
-export async function createProject(name: string): Promise<string> {
+export async function createProject(name: string, location: string, initialiseGit: boolean): Promise<string> {
   if (!isDesktopRuntime()) return "";
-  return Call.ByName(`${bridgeName}.CreateProject`, name) as Promise<string>;
+  return Call.ByName(`${bridgeName}.CreateProject`, name, location, initialiseGit) as Promise<string>;
 }
 
 export async function openProject(path: string): Promise<void> {
@@ -79,9 +97,45 @@ export async function openProject(path: string): Promise<void> {
   await Call.ByName(`${bridgeName}.OpenProject`, path);
 }
 
-export async function openProjectSession(path: string, sessionId: string): Promise<void> {
+export async function openWorkspaceTerminal(): Promise<void> {
   if (!isDesktopRuntime()) return;
-  await Call.ByName(`${bridgeName}.OpenProjectSession`, path, sessionId);
+  await Call.ByName(`${bridgeName}.OpenTerminal`);
+}
+
+export async function openProjectSession(path: string, sessionId: string, sequence?: number): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await Call.ByName(`${bridgeName}.OpenProjectSession`, path, sessionId, sequence ?? -1);
+}
+
+export async function searchSessions(query: string, limit = 20): Promise<SessionSearchResult[]> {
+  if (!isDesktopRuntime()) return [];
+  const result = await Call.ByName(`${bridgeName}.SearchSessions`, query, limit) as SessionSearchResult[] | null;
+  return Array.isArray(result) ? result : [];
+}
+
+export async function resumeSession(sessionId: string): Promise<RuntimeEvent | null> {
+  if (!isDesktopRuntime()) return null;
+  return Call.ByName(`${bridgeName}.ResumeSession`, sessionId) as Promise<RuntimeEvent>;
+}
+
+export async function listWorkspaceEntries(path = ""): Promise<WorkspaceDirectory> {
+  if (!isDesktopRuntime()) return demoWorkspaceDirectory(path);
+  return Call.ByName(`${bridgeName}.WorkspaceEntries`, path) as Promise<WorkspaceDirectory>;
+}
+
+export async function readWorkspaceFile(path: string): Promise<WorkspaceFile> {
+  if (!isDesktopRuntime()) return demoWorkspaceFile(path);
+  return Call.ByName(`${bridgeName}.WorkspaceFile`, path) as Promise<WorkspaceFile>;
+}
+
+export async function listWorkspaceChanges(): Promise<WorkspaceChangeSet> {
+  if (!isDesktopRuntime()) return demoWorkspaceChanges();
+  return Call.ByName(`${bridgeName}.WorkspaceChanges`) as Promise<WorkspaceChangeSet>;
+}
+
+export async function readWorkspaceChange(path: string): Promise<WorkspaceChange> {
+  if (!isDesktopRuntime()) return demoWorkspaceChange(path);
+  return Call.ByName(`${bridgeName}.WorkspaceChange`, path) as Promise<WorkspaceChange>;
 }
 
 export async function cancelActive(includeChildren = false): Promise<boolean> {
@@ -97,7 +151,7 @@ export async function guide(sessionId: string, runId: string, text: string, atta
 export async function importAttachment(sessionId: string, file: File): Promise<Attachment> {
   const encoded = await fileToBase64(file);
   if (!isDesktopRuntime()) {
-    return { id: `demo-${Date.now()}`, name: file.name, mimeType: file.type, path: file.name, size: file.size };
+    return { id: `demo-${Date.now()}`, name: file.name, mimeType: file.type, path: `data:${file.type};base64,${encoded}`, size: file.size };
   }
   return Call.ByName(`${bridgeName}.ImportAttachment`, sessionId, file.name, file.type, encoded) as Promise<Attachment>;
 }
@@ -105,6 +159,11 @@ export async function importAttachment(sessionId: string, file: File): Promise<A
 export async function importClipboardImage(sessionId: string): Promise<Attachment | null> {
   if (!isDesktopRuntime()) return null;
   return Call.ByName(`${bridgeName}.ImportClipboardImage`, sessionId) as Promise<Attachment | null>;
+}
+
+export async function attachmentDataURL(sessionId: string, attachment: Attachment): Promise<string> {
+  if (!isDesktopRuntime()) return attachment.path.startsWith("data:image/") ? attachment.path : "";
+  return Call.ByName(`${bridgeName}.AttachmentDataURL`, sessionId, attachment) as Promise<string>;
 }
 export async function getPullRequestDashboard(): Promise<PullRequestDashboard> {
   if (!isDesktopRuntime()) return demoDashboard();
@@ -191,17 +250,80 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+const demoWorkspaceDirectories: Record<string, WorkspaceDirectory> = {
+  "": { path: "", entries: [
+    { name: "frontend", path: "frontend", directory: true, size: 31 },
+  ] },
+  frontend: { path: "frontend", entries: [
+    { name: "src", path: "frontend/src", directory: true, size: 28 },
+  ] },
+  "frontend/src": { path: "frontend/src", entries: [
+    { name: "Timeline.tsx", path: "frontend/src/components/Timeline.tsx", directory: false, size: 28420 },
+    { name: "styles.css", path: "frontend/src/styles.css", directory: false, size: 48210 },
+    { name: "App.tsx", path: "frontend/src/App.tsx", directory: false, size: 17321 },
+    { name: "components", path: "frontend/src/components", directory: true, size: 19 },
+  ] },
+  "frontend/src/components": { path: "frontend/src/components", entries: [
+    { name: "Timeline.tsx", path: "frontend/src/components/Timeline.tsx", directory: false, size: 28420 },
+    { name: "Sidebar.tsx", path: "frontend/src/components/Sidebar.tsx", directory: false, size: 10320 },
+    { name: "ThreadSurface.tsx", path: "frontend/src/components/ThreadSurface.tsx", directory: false, size: 64210 },
+  ] },
+  internal: { path: "internal", entries: [
+    { name: "app", path: "internal/app", directory: true },
+    { name: "desktop", path: "internal/desktop", directory: true },
+  ] },
+};
+
+function demoWorkspaceDirectory(path: string): WorkspaceDirectory {
+  return structuredClone(demoWorkspaceDirectories[path] ?? { path, entries: [] });
+}
+
+function demoWorkspaceFile(path: string): WorkspaceFile {
+  const samples: Record<string, string> = {
+    "README.md": "# Azem\n\nA local-first coding agent with a shared Go runtime and desktop workspace.\n",
+    "go.mod": "module github.com/Viking602/azem\n\ngo 1.25.0\n",
+    "frontend/src/App.tsx": "export default function App() {\n  return <div className=\"desktop-shell\">Azem</div>;\n}\n",
+    "frontend/src/components/Timeline.tsx": "return <div className=\"streaming-text\">\n  {reduceMotion ? text : presentation.chunks.map(\n    (chunk) => <motion.span\n      initial={{ opacity: 0, filter: \"blur(5px)\" }}\n      animate={{ opacity: 1, filter: \"blur(0px)\" }}\n      transition={streamReveal}\n    >{chunk.text}</motion.span>\n  )}\n</div>;\n",
+  };
+  const content = samples[path] ?? `// Preview for ${path}\n`;
+  return { path, name: path.split("/").at(-1) ?? path, kind: "text", language: path.split(".").at(-1), content, size: content.length, lineCount: content.split("\n").length };
+}
+
+function demoWorkspaceChanges(): WorkspaceChangeSet {
+  return {
+    repository: true, branch: "main", base: "HEAD", additions: 186, deletions: 32,
+    files: [
+      { path: "frontend/src/components/Sidebar.tsx", status: "modified", additions: 38, deletions: 12 },
+      { path: "frontend/src/styles.css", status: "modified", additions: 92, deletions: 14 },
+      { path: "frontend/src/components/WorkspaceFilesPage.tsx", status: "added", additions: 41, deletions: 0 },
+      { path: "docs/desktop.md", status: "modified", additions: 15, deletions: 6 },
+    ],
+  };
+}
+
+function demoWorkspaceChange(path: string): WorkspaceChange {
+  const file = demoWorkspaceChanges().files.find((item) => item.path === path) ?? { path, status: "modified" as const, additions: 0, deletions: 0 };
+  if (path === "frontend/src/styles.css") return {
+    ...file,
+    patch: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,1 +1,5 @@\n- transition: opacity .14s ease;\n+ transition: opacity var(--motion-fast) var(--ease-out),\n+             transform var(--motion-fast) var(--ease-out);\n+ @media (prefers-reduced-motion: reduce) {\n+   *, *::before, *::after { animation-duration: .01ms; }\n+ }`,
+  };
+  return {
+    ...file,
+    patch: `diff --git a/${file.path} b/${file.path}\n--- a/${file.path}\n+++ b/${file.path}\n@@ -18,5 +18,9 @@\n export default function App() {\n-  return <main>Azem</main>;\n+  return <main className=\"workspace\">Azem</main>;\n+  // Preserve reduced-motion behavior.\n+  // Reveal only the newest streaming glyphs.\n+  // Keep the transition within the shared motion tokens.\n }`,
+  };
+}
+
 const demoAuthor = { login: "Viking602", name: "Viking", url: "https://github.com/Viking602", avatarUrl: "https://avatars.githubusercontent.com/Viking602?size=64" };
-let demoMonitor: PullRequestMonitorState = { number: 24, enabled: false, status: "disabled" };
+let demoMonitor: PullRequestMonitorState = { number: 128, enabled: false, status: "disabled" };
 const demoMonitorListeners = new Set<(state: PullRequestMonitorState) => void>();
 
 let demoPullRequest: PullRequest = {
-  number: 24,
-  title: "feat: add Wails desktop GUI",
+  number: 128,
+  title: "UI motion system",
   state: "OPEN",
   draft: false,
   author: demoAuthor,
-  headRefName: "codex/gui-desktop-experience",
+  headRefName: "main",
   headRefOid: "22043f967b31270b19f6a7b772b9154988e83061",
   baseRefName: "main",
   additions: 4332,
@@ -210,7 +332,7 @@ let demoPullRequest: PullRequest = {
   reviewDecision: "",
   mergeable: "MERGEABLE",
   mergeStateStatus: "CLEAN",
-  url: "https://github.com/Viking602/azem/pull/24",
+  url: "https://github.com/Viking602/azem/pull/128",
   createdAt: "2026-08-01T16:16:46Z",
   updatedAt: "2026-08-02T13:14:54Z",
   body: "## Summary\n\n- add a Wails v3 desktop entry backed by the existing Azem bootstrap and controlled action bridge\n- implement the supplied three-panel GUI design across timeline, diffs, approvals, subagents, recovery, extensions, command palette, and categorized settings\n- batch high-frequency runtime events per animation frame and keep secondary surfaces layered over the main workspace\n\n## Verification\n\n- `go test ./...`\n- `make test-gui`\n- `make gui`",
@@ -238,7 +360,7 @@ let demoPullRequest: PullRequest = {
     { path: "frontend/src/styles.css", additions: 1180, deletions: 20 },
     { path: "internal/desktop/bridge.go", additions: 270, deletions: 0 },
   ],
-  checks: { total: 0, pending: 0, passing: 0, failing: 0, neutral: 0, skipped: 0 },
+  checks: { total: 6, pending: 0, passing: 6, failing: 0, neutral: 0, skipped: 0 },
   checksDetail: [],
   activity: [
     { kind: "created", actor: demoAuthor, title: "opened pull request", at: "2026-08-01T16:16:46Z", url: "https://github.com/Viking602/azem/pull/24" },

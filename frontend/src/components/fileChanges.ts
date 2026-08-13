@@ -24,6 +24,38 @@ export function isFileChangeTool(name = "") {
   return name === "coding.edit_hashline" || name === "coding.write_file";
 }
 
+export function isActiveFileChangeBlock(block: Block) {
+  const name = block.title || block.data?.name || "";
+  if (block.kind !== "tool"
+    || !["running", "started", "streaming", "progress"].includes(block.state || "")
+    || !isFileChangeTool(name)) return false;
+  if (name !== "coding.edit_hashline") return true;
+  try {
+    const input = JSON.parse(block.data?.arguments || block.content || "") as { dryRun?: unknown };
+    return input.dryRun !== true;
+  } catch {
+    return true;
+  }
+}
+
+export function pendingFileChangeSummaryForBlock(block: Block): EditedFileSummary | null {
+  if (!isActiveFileChangeBlock(block)) return null;
+  const name = block.title || block.data?.name || "";
+  const argumentsText = block.data?.arguments || block.content || "";
+  if (name === "coding.write_file") {
+    const changes = writeFileChanges(argumentsText);
+    return changes.length ? summarizeChanges(changes) : null;
+  }
+  if (name !== "coding.edit_hashline") return null;
+  try {
+    const input = JSON.parse(argumentsText) as { input?: unknown; dryRun?: unknown };
+    if (input.dryRun === true || typeof input.input !== "string") return null;
+    return summarizeHashlinePlan(input.input);
+  } catch {
+    return null;
+  }
+}
+
 export function fileChangesForBlock(block: Block): FileChange[] {
   if (block.kind === "diff") return diffEventChanges(block);
   if (block.kind !== "tool" || !isFileChangeTool(block.title || block.data?.name || "")) return [];
@@ -53,6 +85,90 @@ export function aggregateEditedFiles(blocks: Block[]): EditedFileSummary {
     additions: files.reduce((total, file) => total + file.additions, 0),
     deletions: files.reduce((total, file) => total + file.deletions, 0),
   };
+}
+
+function summarizeChanges(changes: FileChange[]): EditedFileSummary {
+  const files = changes.map(({ path, additions, deletions }) => ({ path, additions, deletions }));
+  return {
+    files,
+    additions: files.reduce((total, file) => total + file.additions, 0),
+    deletions: files.reduce((total, file) => total + file.deletions, 0),
+  };
+}
+
+function summarizeHashlinePlan(input: string): EditedFileSummary | null {
+  const state: HashlinePlanState = { byPath: new Map(), current: null, bodyRequired: false, bodyLines: 0 };
+  for (const rawLine of input.replace(/\r\n?/gu, "\n").split("\n")) {
+    if (!consumeHashlinePlanLine(state, rawLine.trimEnd())) return null;
+  }
+  if (!finishHashlineOperation(state) || state.byPath.size === 0) return null;
+
+  const files = [...state.byPath.values()];
+  return {
+    files,
+    additions: files.reduce((total, file) => total + file.additions, 0),
+    deletions: files.reduce((total, file) => total + file.deletions, 0),
+  };
+}
+
+type HashlinePlanFile = { path: string; additions: number; deletions: number };
+type HashlinePlanState = {
+  byPath: Map<string, HashlinePlanFile>;
+  current: HashlinePlanFile | null;
+  bodyRequired: boolean;
+  bodyLines: number;
+};
+
+function consumeHashlinePlanLine(state: HashlinePlanState, line: string) {
+  if (line.startsWith("¶")) return openHashlinePlanSection(state, line);
+  if (!line.trim()) return finishHashlineOperation(state);
+  if (!state.current) return false;
+  if (line.startsWith("+")) return appendHashlinePlanBody(state);
+  if (!finishHashlineOperation(state)) return false;
+
+  const operation = plannedHashlineOperation(line);
+  if (!operation) return false;
+  state.current.deletions += operation.deletions;
+  state.bodyRequired = operation.bodyRequired;
+  return true;
+}
+
+function openHashlinePlanSection(state: HashlinePlanState, line: string) {
+  if (!finishHashlineOperation(state)) return false;
+  const hash = line.lastIndexOf("#");
+  const path = hash > 1 ? line.slice(1, hash).trim() : "";
+  if (!path) return false;
+  state.current = state.byPath.get(path) ?? { path, additions: 0, deletions: 0 };
+  state.byPath.set(path, state.current);
+  return true;
+}
+
+function appendHashlinePlanBody(state: HashlinePlanState) {
+  if (!state.bodyRequired || !state.current) return false;
+  state.current.additions += 1;
+  state.bodyLines += 1;
+  return true;
+}
+
+function finishHashlineOperation(state: HashlinePlanState) {
+  if (state.bodyRequired && state.bodyLines === 0) return false;
+  state.bodyRequired = false;
+  state.bodyLines = 0;
+  return true;
+}
+
+function plannedHashlineOperation(line: string): { deletions: number; bodyRequired: boolean } | null {
+  if (/^(?:replace|delete) block\b/u.test(line)) return null;
+  const range = /^(replace|delete) (\d+)(?:\.\.(\d+))?:?$/u.exec(line);
+  if (range) {
+    const start = Number(range[2]);
+    const end = Number(range[3] || range[2]);
+    if (start < 1 || end < start) return null;
+    return { deletions: end - start + 1, bodyRequired: range[1] === "replace" };
+  }
+  return /^insert (?:before \d+|after \d+|head|tail):?$/u.test(line)
+    ? { deletions: 0, bodyRequired: true }
+    : null;
 }
 
 function parseStructuredSections(value: string): RawSection[] {

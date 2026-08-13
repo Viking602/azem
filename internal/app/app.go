@@ -39,6 +39,11 @@ type activeGuidanceMessage struct {
 	Attachments []session.Attachment
 }
 
+type runtimeRecoveryFence interface {
+	Close() error
+	FinishRecovery() error
+}
+
 type Service struct {
 	cfg                config.Config
 	configPath         string
@@ -69,6 +74,7 @@ type Service struct {
 	coding             *agentservice.Service
 	providers          *ProviderRuntime
 	liveApprovals      map[string]*liveApproval
+	liveUserInputs     map[string]*liveUserInput
 	teamApprovals      map[string]struct{}
 	approvalMode       ApprovalMode
 	autoReviewDenials  map[string]*autoReviewDenialTracker
@@ -79,6 +85,8 @@ type Service struct {
 	recovery           recovery.Summary
 	reconciler         ReconcileResolver
 	skillCatalog       *skills.Catalog
+	pluginCatalog      []PluginCatalogEntry
+	pluginDiagnostics  []PluginDiagnostic
 	hooks              hooks.Dispatcher
 	hookOptions        hooks.Options
 	hookWatcher        *hookWatcher
@@ -92,6 +100,7 @@ type Service struct {
 	historySearch      func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error)
 	recapGenerator     func(context.Context, recapGenerationRequest) (string, error)
 	titleGenerator     func(context.Context, titleGenerationRequest) (string, error)
+	runtimeFence       runtimeRecoveryFence
 }
 
 func NewService(parent context.Context, cfg config.Config) *Service {
@@ -104,7 +113,7 @@ func NewService(parent context.Context, cfg config.Config) *Service {
 	}
 	return &Service{
 		cfg: cfg, events: newEventBroker(eventDeltaCoalesceWindow), ctx: ctx, cancel: cancel,
-		shutdownDone: make(chan struct{}), liveApprovals: make(map[string]*liveApproval),
+		shutdownDone: make(chan struct{}), liveApprovals: make(map[string]*liveApproval), liveUserInputs: make(map[string]*liveUserInput),
 		teamApprovals: make(map[string]struct{}), autoReviewDenials: make(map[string]*autoReviewDenialTracker),
 		hookSessions: make(map[string]struct{}), hookInitialUsers: make(map[string]string), hookInitialContext: make(map[string]string), hookAsyncContext: make(map[string][]string), approvalMode: approvalMode,
 		sessionUsage: make(map[string]session.Usage),
@@ -115,6 +124,26 @@ func (s *Service) SetConfigPath(path string) {
 	s.configPath = path
 	if path != "" {
 		s.ensureHookWatcher().watchConfig(path, "user_settings")
+	}
+}
+
+func (s *Service) attachRuntimeFence(fence runtimeRecoveryFence) {
+	s.runtimeFence = fence
+}
+
+func (s *Service) finishRuntimeRecovery() error {
+	if s.runtimeFence == nil {
+		return nil
+	}
+	return s.runtimeFence.FinishRecovery()
+}
+
+func (s *Service) closeRuntimeFence() {
+	if s.runtimeFence == nil {
+		return
+	}
+	if err := s.runtimeFence.Close(); err != nil {
+		s.shutdownErr = errors.Join(s.shutdownErr, err)
 	}
 }
 
@@ -165,6 +194,10 @@ func (s *Service) ImportImageBytes(sessionID, name, mimeType string, data []byte
 	return s.attachments.ImportBytes(sessionID, name, mimeType, data)
 }
 
+func (s *Service) ReadImageAttachment(sessionID string, attachment session.Attachment) ([]byte, error) {
+	return s.attachments.Read(sessionID, attachment)
+}
+
 func (s *Service) loadRecap(ctx context.Context, sessionID string) (*recap.Recap, error) {
 	if s.recap == nil {
 		return nil, nil
@@ -203,25 +236,22 @@ func (s *Service) handleAuthStatusChange(ctx context.Context, change authservice
 }
 
 func (s *Service) emitApprovalMode(ctx context.Context) {
-	available := false
-	if s.authentication != nil {
-		active, err := s.authentication.HasActiveChatGPTAccount(ctx)
-		available = err == nil && active
-	}
 	s.mu.Lock()
-	if !available && s.approvalMode == ApprovalModeAutoReview {
-		s.approvalMode = ApprovalModePrompt
-	}
 	mode := s.approvalMode
 	s.mu.Unlock()
 	s.emit(ctx, Event{
 		Kind: EventApprovalMode, State: string(mode),
-		Data: map[string]string{"auto_review_available": strconv.FormatBool(available)},
+		Data: map[string]string{"auto_review_available": "true"},
 	})
 }
 
 func (s *Service) AttachSkills(catalog *skills.Catalog) {
 	s.skillCatalog = catalog
+}
+
+func (s *Service) AttachPlugins(entries []PluginCatalogEntry, diagnostics []PluginDiagnostic) {
+	s.pluginCatalog = append([]PluginCatalogEntry(nil), entries...)
+	s.pluginDiagnostics = append([]PluginDiagnostic(nil), diagnostics...)
 }
 
 func (s *Service) AttachProviderRuntime(runtime *ProviderRuntime) {
@@ -256,6 +286,7 @@ func (s *Service) Bootstrap() {
 	if s.skillCatalog != nil {
 		_ = s.emitSkillCatalog(s.ctx, "snapshot")
 	}
+	s.emit(s.ctx, Event{Kind: EventPluginCatalog, State: "snapshot", PluginCatalog: s.pluginCatalog, PluginDiagnostics: s.pluginDiagnostics})
 	s.emitRecoveryState()
 	s.emitApprovalMode(s.ctx)
 	_ = s.emitContextProfile(s.ctx, "")
@@ -708,6 +739,14 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		return "", err
 	}
 	request.privateContext = privateContext
+	if request.approvedPlanArtifactID != "" {
+		request.approvedPlanContext, err = s.approvedPlanContext(runCtx, request.SessionID, request.approvedPlanArtifactID)
+		if err != nil {
+			cancel()
+			s.clearRun("starting")
+			return "", err
+		}
+	}
 	if initialUser != "" {
 		request.History = append(request.History, session.Block{Kind: "user", Title: "SessionStart hook", Content: initialUser, State: "hook"})
 	}
@@ -741,7 +780,6 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	}
 
 	if request.AgentMode == "team" {
-		goal := teamPrompt(request)
 		resolution, err := s.providers.TeamResolver(runCtx, request)
 		if err != nil {
 			cancel()
@@ -772,6 +810,13 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 				return "", fmt.Errorf("persist user turn: %w", err)
 			}
 		}
+		request, err = s.providers.prepareVisionAssistance(runCtx, request, runID, resolution.accountID, resolution.modelID)
+		if err != nil {
+			cancel()
+			s.clearRun(runID)
+			return "", err
+		}
+		goal := teamPrompt(request)
 		s.startSessionTitleGeneration(titleGenerationRequest{SessionID: request.SessionID, RunID: runID, Prompt: request.Prompt}, autoTitleCurrent)
 		handedOff = true
 		go s.runProviderTeam(runCtx, request, runID, goal, resolution)
@@ -961,9 +1006,18 @@ func (s *Service) CancelActiveWithChildren(children bool) bool {
 		providers.CancelParentSubagents(sessionID, runID)
 	}
 	if coding != nil && runID != "" && runID != "starting" {
-		cancelCtx, cancelRun := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _ = coding.CancelTrackedRun(cancelCtx, runID)
-		cancelRun()
+		// The durable coordinator owns the terminal cancellation cause, but it
+		// waits for the active tool/provider execution to unwind before returning.
+		// Never make the desktop Bridge wait on that cleanup: MCP processes can
+		// acknowledge context cancellation slowly even though the stop request has
+		// already reached the coordinator.
+		go func() {
+			cancelCtx, cancelRun := context.WithTimeout(context.Background(), 5*time.Second)
+			_, _ = coding.CancelTrackedRun(cancelCtx, runID)
+			cancelRun()
+			cancel()
+		}()
+		return true
 	}
 	cancel()
 	return true
@@ -992,7 +1046,6 @@ func (s *Service) shutdown() {
 	defer close(s.shutdownDone)
 	s.mu.Lock()
 	s.shuttingDown = true
-	sessionID := firstNonempty(s.activeSession, s.currentSession)
 	if s.activeEnd != nil {
 		if s.activeCancelIntent == "" {
 			s.activeCancelIntent = "shutdown"
@@ -1007,11 +1060,9 @@ func (s *Service) shutdown() {
 		}
 	}
 	subagentShutdownCancel()
-	if sessionID != "" {
-		hookCtx, hookCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-		s.endSessionHooks(hookCtx, sessionID, "prompt_input_exit")
-		hookCancel()
-	}
+	hookCtx, hookCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	s.endAllSessionHooks(hookCtx, "prompt_input_exit")
+	hookCancel()
 	s.cancel()
 	mcpCtx, mcpCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer mcpCancel()
@@ -1063,6 +1114,7 @@ func (s *Service) shutdown() {
 	if err := <-mcpReclosed; err != nil {
 		s.shutdownErr = errors.Join(s.shutdownErr, err)
 	}
+	s.closeRuntimeFence()
 }
 
 func (s *Service) runFakeTurn(ctx context.Context, sessionID string, runID string, prompt string) {

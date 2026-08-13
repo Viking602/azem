@@ -1,0 +1,18 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "子智能体协作卡片与详情页": {
+      "versions": [
+        {
+          "path": "index.html",
+          "createdAt": "2026-08-11T07:31:39.436Z",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-08-11T07:31:39.437Z",
+  "updatedAt": "2026-08-11T07:31:39.437Z"
+}

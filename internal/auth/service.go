@@ -12,10 +12,13 @@ import (
 
 	"resty.dev/v3"
 
+	hyprovider "github.com/Viking602/venat/provider"
+
 	"golang.org/x/sync/singleflight"
 
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
+	"github.com/Viking602/azem/internal/netproxy"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
@@ -66,12 +69,15 @@ func NewService(db *sql.DB, store CredentialStore, chatgptClient *chatgpt.Client
 	if grokClient == nil {
 		grokClient = grok.NewClient()
 	}
+	httpClient := resty.New().SetTimeout(30 * time.Second)
+	netproxy.ConfigureTransport(httpClient.Transport())
+	streamClient := resty.NewWithTransportSettings(&resty.TransportSettings{
+		ResponseHeaderTimeout: 30 * time.Second,
+	}).SetResponseDoNotParse(true)
+	netproxy.ConfigureTransport(streamClient.Transport())
 	return &Service{
 		db: db, store: store, chatgpt: chatgptClient, grok: grokClient,
-		httpClient: resty.New().SetTimeout(30 * time.Second),
-		streamClient: resty.NewWithTransportSettings(&resty.TransportSettings{
-			ResponseHeaderTimeout: 30 * time.Second,
-		}).SetResponseDoNotParse(true),
+		httpClient: httpClient, streamClient: streamClient,
 	}
 }
 
@@ -317,7 +323,27 @@ func (s *Service) DoStreamWithRefresh(
 	url string,
 	configure func(*resty.Request),
 ) (*resty.Response, error) {
-	return s.doWithRefresh(ctx, s.streamClient, provider, accountID, method, url, configure)
+	response, err := s.doWithRefresh(ctx, s.streamClient, provider, accountID, method, url, configure)
+	return response, classifyStreamOpenError(ctx, provider, err)
+}
+
+// classifyStreamOpenError keeps caller cancellation terminal while converting
+// an independently cancelled transport wait into a retryable stream-open
+// failure. net/http can surface ResponseHeaderTimeout as context cancellation
+// even though the run context remains healthy; treating both cases alike made
+// one transient 30-second header stall terminate a long-running agent.
+func classifyStreamOpenError(ctx context.Context, provider string, err error) error {
+	if err == nil || ctx.Err() != nil {
+		return err
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &hyprovider.Error{
+			Provider: provider,
+			Kind:     hyprovider.ErrorStream,
+			Message:  "stream response did not start: " + err.Error(),
+		}
+	}
+	return err
 }
 
 func (s *Service) doWithRefresh(

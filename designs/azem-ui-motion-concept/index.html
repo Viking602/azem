@@ -1,0 +1,878 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-motion="full" data-icon-treatment="bare">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Azem UI Motion Concept</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <svg class="icon-symbols" aria-hidden="true">
+    <defs>
+      <symbol id="icon-hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v3"/><path d="M14 10V4a2 2 0 0 0-4 0v5"/><path d="M10 9.5V6a2 2 0 0 0-4 0v7"/><path d="M6 13V9a2 2 0 0 0-4 0v6"/><path d="M18 8a2 2 0 1 1 4 0v5a9 9 0 0 1-9 9h-1c-3 0-4.7-.9-6.4-2.6L2 16"/></symbol>
+      <symbol id="icon-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="m9 12 2 2 4-4"/></symbol>
+      <symbol id="icon-shield-alert" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3Z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+      <symbol id="icon-queue" viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h8"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></symbol>
+      <symbol id="icon-guide" viewBox="0 0 24 24"><path d="M5 5v6a4 4 0 0 0 4 4h10"/><path d="m15 11 4 4-4 4"/></symbol>
+      <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+      <symbol id="icon-bolt" viewBox="0 0 24 24"><path d="m13 2-7 12h6l-1 8 7-12h-6z"/></symbol>
+      <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></symbol>
+      <symbol id="icon-home" viewBox="0 0 24 24"><path d="m4 10 8-7 8 7"/><path d="M6 9v11h12V9"/><path d="M10 20v-6h4v6"/></symbol>
+      <symbol id="icon-message" viewBox="0 0 24 24"><path d="M20 15a4 4 0 0 1-4 4H8l-5 3 1.5-5A7 7 0 0 1 3 13V8a4 4 0 0 1 4-4h9a4 4 0 0 1 4 4Z"/></symbol>
+      <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3Z"/><path d="M3 7V5h7l2 2"/></symbol>
+    </defs>
+  </svg>
+  <div class="prototype" data-screen-label="Azem 工作台主界面">
+    <header class="titlebar">
+      <div class="window-controls" aria-label="窗口控制">
+        <span class="window-dot close"></span>
+        <span class="window-dot minimize"></span>
+        <span class="window-dot maximize"></span>
+      </div>
+      <div class="project-switch-wrap">
+        <button class="project-switch" type="button" aria-haspopup="listbox" aria-expanded="false" data-project-switch>
+          <span class="project-switch-project" data-project-switch-name>azem</span>
+          <span class="project-switch-separator" aria-hidden="true">/</span>
+          <span class="project-switch-branch" data-project-switch-branch>main</span>
+          <svg class="ui-icon chevron" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+        </button>
+        <section class="project-switch-popover" aria-label="切换项目与分支" data-project-switch-popover hidden>
+          <header><strong>项目与分支</strong><span>选择工作上下文</span></header>
+          <label class="project-switch-search">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-search"/></svg>
+            <input type="search" placeholder="搜索项目或分支…" autocomplete="off" data-project-switch-search>
+            <kbd>⌘⇧O</kbd>
+          </label>
+          <div class="project-switch-options" role="listbox" aria-label="项目列表">
+            <button class="selected" type="button" role="option" aria-selected="true" data-project-switch-option="azem" data-project-switch-option-branch="main">
+              <span class="project-folder">A</span><span><strong>azem</strong><small>main</small></span><em>4 个改动</em><svg class="ui-icon"><use href="#icon-check"/></svg>
+            </button>
+            <button type="button" role="option" aria-selected="false" data-project-switch-option="llmux" data-project-switch-option-branch="feat/usage-store">
+              <span class="project-folder violet">L</span><span><strong>llmux</strong><small>feat/usage-store</small></span><em>1 个 PR</em><svg class="ui-icon"><use href="#icon-check"/></svg>
+            </button>
+            <button type="button" role="option" aria-selected="false" data-project-switch-option="venat" data-project-switch-option-branch="main">
+              <span class="project-folder blue">V</span><span><strong>venat</strong><small>main</small></span><em>工作树干净</em><svg class="ui-icon"><use href="#icon-check"/></svg>
+            </button>
+          </div>
+          <p class="project-switch-empty" data-project-switch-empty hidden>没有匹配的项目</p>
+          <footer><span>↑↓ 导航</span><span>↵ 选择</span><span>esc 关闭</span></footer>
+        </section>
+      </div>
+      <button class="command-trigger" type="button" data-command-open>
+        <span>搜索、跳转或执行命令</span>
+        <kbd>⌘ K</kbd>
+      </button>
+      <div class="title-actions">
+        <button class="text-button" type="button" data-replay>重播流式输出</button>
+        <button class="icon-label-button" type="button" data-motion-open><span>动</span>动效规范</button>
+      </div>
+    </header>
+
+    <div class="workspace" data-inspector="open">
+      <aside class="sidebar" aria-label="项目与任务">
+        <div class="mode-switch" data-mode="chat">
+          <span class="mode-pill" aria-hidden="true"></span>
+          <button class="active" type="button" data-mode-target="chat">会话</button>
+          <button type="button" data-mode-target="workspace">工作区</button>
+        </div>
+
+        <nav class="primary-nav" aria-label="主要导航">
+          <button class="nav-item" type="button" data-view="home"><svg class="ui-icon nav-glyph" aria-hidden="true"><use href="#icon-plus"/></svg><span>新对话</span><kbd>⌘N</kbd></button>
+          <button class="nav-item" type="button" data-command-open><svg class="ui-icon nav-glyph" aria-hidden="true"><use href="#icon-search"/></svg><span>搜索</span><kbd>⌘K</kbd></button>
+        </nav>
+
+        <section class="project-list" aria-label="项目列表">
+          <header>
+            <span>项目</span>
+            <button type="button" aria-label="添加项目" aria-expanded="false" data-project-add-toggle>＋</button>
+          </header>
+
+          <div class="project-add-popover" data-project-add-popover hidden>
+            <button type="button" data-choose-folder><span class="popover-icon">⌁</span><span><strong>打开已有文件夹</strong><small>添加本地 Git 工作区</small></span><kbd>⌘O</kbd></button>
+            <button type="button" data-project-create-open><span class="popover-icon">＋</span><span><strong>新建项目</strong><small>创建目录并初始化仓库</small></span></button>
+          </div>
+
+          <article class="project-node active" data-project-node="azem" data-expanded="true">
+            <button class="project-node-header" type="button" data-project-toggle>
+              <span class="project-chevron">⌄</span><span class="project-folder">A</span>
+              <span class="project-identity"><strong>azem</strong><small><i></i> main · 4 个改动</small></span>
+              <span class="project-count">3</span>
+            </button>
+            <button class="project-new-thread" type="button" aria-label="在 azem 中新建对话" title="在 azem 中新建对话" data-new-thread-project="azem"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"/></svg></button>
+            <div class="project-children">
+              <button class="project-pr-row passing" type="button" data-toast="打开 PR #128">
+                <span class="pr-glyph">⑂</span><span><strong>UI motion system</strong><small>#128 · 6/6 检查通过</small></span><em>PR</em>
+              </button>
+              <div class="project-sessions">
+                <button class="task active" type="button" data-thread="motion"><span class="task-state running"></span><span><strong>优化 Azem 的 UI 动效</strong><small>刚刚 · 正在运行</small></span></button>
+                <button class="task" type="button" data-thread="plugins"><span class="task-state"></span><span><strong>Codex 插件兼容设计</strong><small>昨天 · 已完成</small></span></button>
+                <button class="task" type="button" data-thread="context"><span class="task-state"></span><span><strong>语义上下文重建</strong><small>8 月 7 日 · 已完成</small></span></button>
+              </div>
+            </div>
+          </article>
+
+          <article class="project-node" data-project-node="llmux" data-expanded="true">
+            <button class="project-node-header" type="button" data-project-toggle>
+              <span class="project-chevron">⌄</span><span class="project-folder violet">L</span>
+              <span class="project-identity"><strong>llmux</strong><small><i></i> feat/usage-store</small></span>
+              <span class="project-pr-count warning">1 PR</span>
+            </button>
+            <button class="project-new-thread" type="button" aria-label="在 llmux 中新建对话" title="在 llmux 中新建对话" data-new-thread-project="llmux"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"/></svg></button>
+            <div class="project-children">
+              <button class="project-pr-row failing" type="button" data-toast="打开 PR #45">
+                <span class="pr-glyph">⑂</span><span><strong>Normalize usage limits</strong><small>#45 · 2 项检查失败</small></span><em>PR</em>
+              </button>
+              <div class="project-sessions compact">
+                <button class="task" type="button" data-thread="release"><span class="task-state"></span><span><strong>发布 v0.2.4</strong><small>周五 · 等待检查</small></span></button>
+              </div>
+            </div>
+          </article>
+
+          <article class="project-node" data-project-node="venat" data-expanded="false">
+            <button class="project-node-header" type="button" data-project-toggle>
+              <span class="project-chevron">›</span><span class="project-folder blue">V</span>
+              <span class="project-identity"><strong>venat</strong><small><i></i> main · 工作树干净</small></span>
+              <span class="project-pr-count">2 PR</span>
+            </button>
+            <button class="project-new-thread" type="button" aria-label="在 venat 中新建对话" title="在 venat 中新建对话" data-new-thread-project="venat"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"/></svg></button>
+            <div class="project-children">
+              <button class="project-pr-row passing" type="button" data-toast="打开 PR #92">
+                <span class="pr-glyph">⑂</span><span><strong>Parallel dispatch guard</strong><small>#92 · 等待审查</small></span><em>PR</em>
+              </button>
+              <div class="project-sessions compact">
+                <button class="task" type="button" data-thread="scheduler"><span class="task-state"></span><span><strong>调度器并发验证</strong><small>8 月 6 日 · 已完成</small></span></button>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <footer class="sidebar-footer">
+          <button type="button" data-settings-open><span class="nav-glyph">⌁</span><span>设置</span><kbd>⌘,</kbd></button>
+        </footer>
+      </aside>
+
+      <main class="main-stage" aria-live="polite">
+        <section class="view-layer" data-view-panel="home" data-screen-label="Azem 新对话" aria-hidden="true" inert>
+          <div class="home-launcher">
+            <section class="home-launch-content" aria-labelledby="home-launch-title">
+              <header class="home-greeting">
+                <span class="azem-mark large" aria-hidden="true"></span>
+                <h1 id="home-launch-title">准备开始什么？</h1>
+                <p>选择一个项目，然后描述要交给 Azem 完成的任务。</p>
+              </header>
+
+              <div class="home-composer" data-home-composer>
+                <div class="home-project-picker">
+                  <button class="home-project-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-home-project-trigger>
+                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"/></svg>
+                    <span data-home-project-label>azem</span>
+                    <small data-home-project-branch>main</small>
+                    <svg class="ui-icon chevron-icon" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+                  </button>
+                  <div class="home-project-menu" role="listbox" aria-label="选择项目" data-home-project-menu hidden>
+                    <button class="selected" type="button" role="option" aria-selected="true" data-home-project-option="azem" data-home-project-option-branch="main"><span class="project-folder">A</span><span><strong>azem</strong><small>main · 4 个改动</small></span><svg class="ui-icon"><use href="#icon-check"/></svg></button>
+                    <button type="button" role="option" aria-selected="false" data-home-project-option="llmux" data-home-project-option-branch="feat/usage-store"><span class="project-folder violet">L</span><span><strong>llmux</strong><small>feat/usage-store · 1 个 PR</small></span><svg class="ui-icon"><use href="#icon-check"/></svg></button>
+                    <button type="button" role="option" aria-selected="false" data-home-project-option="venat" data-home-project-option-branch="main"><span class="project-folder blue">V</span><span><strong>venat</strong><small>main · 工作树干净</small></span><svg class="ui-icon"><use href="#icon-check"/></svg></button>
+                  </div>
+                </div>
+
+                <textarea rows="3" aria-label="创建新任务" placeholder="描述要完成的任务，@ 引用文件，/ 使用技能…" data-home-task-input></textarea>
+
+                <footer>
+                  <div class="home-composer-tools">
+                    <button class="bare-icon-button" type="button" aria-label="添加上下文" title="添加上下文" data-toast="添加文件、图片或上下文"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"/></svg></button>
+                    <button type="button" data-toast="新对话审批模式">自动审查 <span>⌄</span></button>
+                    <button type="button" data-toast="新对话计划模式"><i></i> Plan</button>
+                  </div>
+                  <div class="home-model-summary">
+                    <button class="home-fast-toggle" type="button" aria-label="Fast 模式" aria-pressed="false" data-home-fast-toggle><svg class="ui-icon" aria-hidden="true"><use href="#icon-bolt"/></svg></button>
+                    <img src="https://models.dev/logos/openai.svg" alt="OpenAI">
+                    <button type="button" data-toast="新对话模型选择">GPT-5.6 <strong>高</strong> <span>⌄</span></button>
+                    <button class="home-send" type="button" aria-label="创建任务" data-home-task-submit>↑</button>
+                  </div>
+                </footer>
+              </div>
+
+              <div class="home-suggestions" aria-label="任务模板">
+                <button type="button" data-home-suggestion="分析当前项目的代码改动，按风险高低给出结论"><strong>检查代码改动</strong><span>查看当前工作树的风险</span></button>
+                <button type="button" data-home-suggestion="定位当前项目失败的 CI 检查，并修复根因"><strong>修复失败检查</strong><span>定位 CI 与测试问题</span></button>
+                <button type="button" data-home-suggestion="理解当前需求并整理一份可以直接执行的实现计划"><strong>制定实现计划</strong><span>拆分步骤与验收标准</span></button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view-layer active" data-view-panel="thread" data-thread-mode="existing" data-screen-label="任务会话" aria-hidden="false">
+          <header class="thread-header">
+            <div class="thread-title"><span class="eyebrow" data-thread-eyebrow>DESIGN TASK</span><strong data-thread-title>优化 Azem 的 UI 动效</strong><small data-thread-workspace>工作树 · main</small></div>
+            <div class="thread-stage-tabs" role="tablist" aria-label="任务阶段">
+              <button type="button" role="tab" aria-selected="false" data-thread-stage-target="thinking">思考中</button>
+              <button class="active" type="button" role="tab" aria-selected="true" data-thread-stage-target="executing">执行中</button>
+              <button type="button" role="tab" aria-selected="false" data-thread-stage-target="completed">已完成</button>
+            </div>
+            <div class="thread-actions">
+              <span class="live-status" data-thread-status="running"><i></i><span data-thread-status-label>运行中</span></span>
+              <button class="square-button" type="button" title="检查器" data-inspector-toggle>侧栏</button>
+            </div>
+          </header>
+
+          <div class="transcript-viewport">
+            <section class="new-thread-blank" data-new-thread-blank aria-hidden="true" hidden>
+              <svg class="ui-icon" aria-hidden="true"><use href="#icon-message"/></svg>
+              <span class="eyebrow">NEW CONVERSATION</span>
+              <h2>开始一个新对话</h2>
+              <p>当前会话已绑定到 <strong data-new-thread-project-name>azem</strong>，文件、改动和命令都会从该项目获取上下文。</p>
+              <div class="new-thread-binding"><span data-new-thread-project-path>azem</span><i></i><span data-new-thread-project-branch>main</span></div>
+              <div class="new-thread-prompts" aria-label="快捷任务">
+                <button type="button" data-new-thread-prompt="分析当前项目的代码改动并给出风险排序">分析当前改动</button>
+                <button type="button" data-new-thread-prompt="检查当前项目失败的 CI，并定位最可能的根因">修复失败检查</button>
+                <button type="button" data-new-thread-prompt="基于当前项目整理一份可执行的实现计划">整理实现计划</button>
+              </div>
+            </section>
+            <section class="thread-stage-panel" data-thread-stage-panel="thinking" data-screen-label="任务思考进度" aria-hidden="true" inert>
+              <div class="transcript">
+                <article class="user-message">
+                  <p>给我一个具体优化这个项目 UI 的方案，页面切换和文字流式输出的动效都要有。</p>
+                </article>
+
+                <article class="thinking-status-surface">
+                  <header>
+                    <span class="thinking-pulse" aria-hidden="true"></span>
+                    <div><strong>正在推演界面结构</strong><small>思考努力度：高 · 已用 8 秒</small></div>
+                    <span>3 个方向</span>
+                  </header>
+                  <ol class="reasoning-sequence">
+                    <li class="done"><span>01</span><div><strong>识别产品主路径</strong><small>会话、项目、文件、改动与设置</small></div><em>完成</em></li>
+                    <li class="current"><span>02</span><div><strong>整理任务生命周期</strong><small>思考中、执行中、已完成需要独立且完整</small></div><em>进行中</em></li>
+                    <li><span>03</span><div><strong>匹配组件与事件</strong><small>保持现有 Timeline、Inspector 与模型控制</small></div><em>等待</em></li>
+                  </ol>
+                </article>
+
+                <article class="commentary-message thinking-commentary">
+                  <span class="commentary-node" aria-hidden="true"><i></i></span>
+                  <div>
+                    <small>思考进度</small>
+                    <p>重点不是增加更多装饰，而是让每个阶段都回答一个明确问题：现在系统在想什么、正在执行什么、最后交付了什么。</p>
+                  </div>
+                </article>
+
+                <section class="reasoning-outline" aria-label="当前方案方向">
+                  <header><span>当前方案方向</span><small>根据代码结构实时整理</small></header>
+                  <div><span>01</span><strong>会话主路径</strong><p>用同一页面承载完整生命周期，状态切换不改变用户的空间位置。</p></div>
+                  <div><span>02</span><strong>多项目操作</strong><p>项目、PR 与会话保持列表关系，折叠后仍能看到远端状态。</p></div>
+                  <div><span>03</span><strong>设置与模型</strong><p>供应商、路由、审批、思考努力度和 Fast 模式都保留完整入口。</p></div>
+                </section>
+              </div>
+            </section>
+
+            <section class="thread-stage-panel active" data-thread-stage-panel="executing" data-screen-label="任务执行进度" aria-hidden="false">
+              <div class="transcript">
+                <article class="user-message">
+                  <p>给我一个具体优化这个项目 UI 的方案，页面切换和文字流式输出的动效都要有。</p>
+                </article>
+
+                <section class="process-trail" aria-label="执行过程">
+                  <div class="process-line" aria-hidden="true"></div>
+                  <article class="process-entry completed">
+                    <span class="process-node">✓</span>
+                    <div><strong>读取当前前端结构</strong><small>App、Sidebar、Timeline 与 Inspector</small></div>
+                    <time>1.2s</time>
+                  </article>
+                  <article class="process-entry completed">
+                    <span class="process-node">✓</span>
+                    <div><strong>提取视觉与动效基线</strong><small>暖白纸面 · 8 个流式尾部节点 · reduced motion</small></div>
+                    <time>0.8s</time>
+                  </article>
+                  <article class="process-entry active" data-live-step>
+                    <span class="process-node"><i></i></span>
+                    <div><strong>构建高保真交互原型</strong><small>页面、工具与文本共享一套节奏</small></div>
+                    <time data-elapsed>4.6s</time>
+                  </article>
+                </section>
+
+                <article class="commentary-message">
+                  <span class="commentary-node" aria-hidden="true"><i></i></span>
+                  <div>
+                    <small>进度更新</small>
+                    <p>我会保留 Azem 现有的暖色工作台语气，把动效集中在“状态发生变化”的瞬间：页面切换建立空间关系，工具状态沿轨迹推进，流式文字只让新到达的尾部逐渐显现。</p>
+                  </div>
+                </article>
+
+                <article class="tool-card" data-tool-state="running">
+                  <header>
+                    <span class="tool-icon">⌘</span>
+                    <div><strong>渲染交互原型</strong><small>designs/azem-ui-motion-concept</small></div>
+                    <div class="tool-status-cluster">
+                      <span class="tool-state-label"><i></i>运行中</span>
+                      <div class="tool-progress" aria-hidden="true"><span></span></div>
+                    </div>
+                  </header>
+                  <footer><span>4 个文件</span><span>浏览器验证</span><span>示例图导出</span></footer>
+                </article>
+
+                <article class="assistant-message active-stream">
+                  <div class="answer-kicker"><span></span>方案结论</div>
+                  <div class="stream-output" data-stream-output aria-hidden="true"></div>
+                  <span class="sr-only" data-stream-announcement aria-live="polite"></span>
+                </article>
+              </div>
+            </section>
+
+            <section class="thread-stage-panel" data-thread-stage-panel="completed" data-screen-label="方案完成结果" aria-hidden="true" inert>
+              <div class="transcript completed-transcript">
+                <article class="user-message">
+                  <p>给我一个具体优化这个项目 UI 的方案，页面切换和文字流式输出的动效都要有。</p>
+                </article>
+
+                <article class="completion-heading">
+                  <svg class="ui-icon" aria-hidden="true"><use href="#icon-check"/></svg>
+                  <div><span class="eyebrow">DELIVERED</span><h2>Azem UI 优化方案已完成</h2><p>任务生命周期、项目导航、工作区页面和设置界面已经整理成一套连续、可执行的产品方案。</p></div>
+                  <span class="completion-time">完成于 12:48</span>
+                </article>
+
+                <section class="delivery-summary" aria-label="方案交付范围">
+                  <header><h3>完整页面范围</h3><span>12 个可交互页面与状态</span></header>
+                  <div class="delivery-row"><span>01</span><strong>任务生命周期</strong><p>思考中、执行中、已完成三种完整页面；流式正文逐字浮现，不再显示尾部光标。</p><em>3 页</em></div>
+                  <div class="delivery-row"><span>02</span><strong>多项目工作区</strong><p>项目、会话和 PR 保持列表层级，支持折叠、状态提示和并行切换。</p><em>1 页</em></div>
+                  <div class="delivery-row"><span>03</span><strong>文件与改动</strong><p>文件树、代码预览、变更摘要、风险与 diff 均有独立完整视图。</p><em>2 页</em></div>
+                  <div class="delivery-row"><span>04</span><strong>完整设置</strong><p>模型目录、模型路由、子智能体、治理审批、外观和扩展全部保留。</p><em>6 页</em></div>
+                </section>
+
+                <section class="completion-validation" aria-label="验证结果">
+                  <header><h3>交付验证</h3><span>全部通过</span></header>
+                  <div><strong>浏览器交互</strong><small>页面切换、搜索、滑块与弹层</small><span>通过</span></div>
+                  <div><strong>流式性能</strong><small>动态尾部不超过 8 个字符节点</small><span>通过</span></div>
+                  <div><strong>减弱动效</strong><small>系统偏好开启时立即显示正文</small><span>通过</span></div>
+                </section>
+
+                <article class="completion-note">
+                  <div><strong>确认这版方案</strong><p>如果方向仍需调整，可以继续修改计划；确认无误后再开始实现，执行过程会回到运行页面持续同步进度。</p></div>
+                  <div class="completion-actions"><button type="button" data-revise-plan>继续修改计划</button><button class="primary" type="button" data-start-implementation>开始实现</button></div>
+                </article>
+              </div>
+            </section>
+          </div>
+
+          <div class="composer-dock">
+            <div class="composer-card">
+              <textarea rows="1" aria-label="给 Azem 发送消息" placeholder="继续描述你想调整的界面…"></textarea>
+              <footer>
+                <div class="composer-tools">
+                  <button class="attach-control" type="button" aria-label="添加附件">＋</button>
+                  <button class="composer-control" type="button" aria-expanded="false" data-composer-menu-toggle="approval"><span class="control-icon" data-approval-icon><svg class="ui-icon"><use href="#icon-shield-check"/></svg></span><span data-approval-label>自动审查</span><span class="control-chevron">⌄</span></button>
+                  <button class="composer-control plan-control" type="button" aria-pressed="false" data-plan-toggle><span class="control-icon">◐</span><span>Plan</span></button>
+                </div>
+                <div class="context-ring" title="上下文使用 38%"><span>38</span></div>
+                <button class="model-control-trigger" type="button" aria-expanded="false" data-composer-menu-toggle="model">
+                  <img class="models-dev-icon selected-provider-icon" data-selected-provider src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true">
+                  <svg class="ui-icon model-fast-indicator" data-fast-indicator hidden aria-hidden="true"><use href="#icon-bolt"/></svg>
+                  <span data-model-label>GPT-5.6</span>
+                  <small data-effort-label>高</small>
+                  <span class="control-chevron">⌄</span>
+                </button>
+                <button class="send-button" type="button" data-toast="原型消息未连接运行时">↑</button>
+              </footer>
+
+              <div class="composer-popover approval-popover" data-composer-popover="approval" hidden>
+                <header><strong>审批模式</strong><small>控制工具执行边界</small></header>
+                <button type="button" data-approval-option="prompt" data-icon-ref="icon-hand"><span class="menu-option-icon"><svg class="ui-icon"><use href="#icon-hand"/></svg></span><span><strong>每次询问</strong><small>写入、网络和外部操作前确认</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+                <button class="selected" type="button" data-approval-option="auto_review" data-icon-ref="icon-shield-check"><span class="menu-option-icon"><svg class="ui-icon"><use href="#icon-shield-check"/></svg></span><span><strong>自动审查</strong><small>由审批模型按安全策略判断</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+                <button class="danger" type="button" data-approval-option="yolo" data-icon-ref="icon-shield-alert"><span class="menu-option-icon"><svg class="ui-icon"><use href="#icon-shield-alert"/></svg></span><span><strong>快速执行</strong><small>仅保留系统硬性安全边界</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+              </div>
+
+              <div class="composer-popover model-popover" data-composer-popover="model" hidden>
+                <header><strong>模型与思考</strong><small>仅应用到当前会话</small></header>
+                <label class="model-search-field">
+                  <svg class="ui-icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                  <input type="search" placeholder="搜索模型或提供方" autocomplete="off" aria-label="搜索会话模型" data-model-search>
+                  <kbd>⌘F</kbd>
+                </label>
+                <div class="model-option-list" data-model-option-list>
+                  <button class="selected" type="button" data-model-option="GPT-5.6" data-provider-logo="openai" data-model-keywords="chatgpt openai gpt-5.6 推理 图像 工具"><img class="models-dev-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>GPT-5.6</strong><small>ChatGPT · 推理 · 图像 · 工具</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+                  <button type="button" data-model-option="GPT-5.5 Codex" data-provider-logo="openai" data-model-keywords="chatgpt openai gpt-5.5 codex 代码 工具"><img class="models-dev-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>GPT-5.5 Codex</strong><small>ChatGPT · 代码 · 工具调用</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+                  <button type="button" data-model-option="GPT-5.3 Spark" data-provider-logo="openai" data-model-keywords="chatgpt openai gpt-5.3 spark 快速 低成本"><img class="models-dev-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>GPT-5.3 Spark</strong><small>ChatGPT · 快速响应 · 低成本</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+                  <button type="button" data-model-option="Grok 4.20" data-provider-logo="xai" data-model-keywords="grok xai grok 4.20 推理 图像 工具"><img class="models-dev-icon" src="https://models.dev/logos/xai.svg" alt="" aria-hidden="true"><span><strong>Grok 4.20</strong><small>Grok · 推理 · 图像 · 工具</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+                  <button type="button" data-model-option="Grok Code Fast" data-provider-logo="xai" data-model-keywords="grok xai code fast 快速 代码"><img class="models-dev-icon" src="https://models.dev/logos/xai.svg" alt="" aria-hidden="true"><span><strong>Grok Code Fast</strong><small>Grok · 代码 · 快速响应</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+                  <button type="button" data-model-option="Claude Sonnet 4" data-provider-logo="openrouter" data-model-keywords="openrouter claude sonnet 4 推理 图像"><img class="models-dev-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><span><strong>Claude Sonnet 4</strong><small>OpenRouter · 推理 · 图像</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+                  <button type="button" data-model-option="Gemini 2.5 Pro" data-provider-logo="openrouter" data-model-keywords="openrouter google gemini 2.5 pro 长上下文 图像"><img class="models-dev-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><span><strong>Gemini 2.5 Pro</strong><small>OpenRouter · 长上下文 · 图像</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+                  <p class="model-search-empty" data-model-search-empty hidden>没有匹配的模型</p>
+                </div>
+                <section class="effort-selector">
+                  <div class="effort-toolbar">
+                    <span class="effort-copy"><strong>思考努力度</strong><small>越高越深入，响应时间更长</small></span>
+                    <span class="fast-control-wrap" data-fast-control>
+                      <button class="fast-mode-toggle" type="button" aria-label="Fast 模式" aria-pressed="false" data-fast-toggle><svg class="ui-icon" aria-hidden="true"><use href="#icon-bolt"/></svg></button>
+                      <span class="fast-mode-tip" role="tooltip"><strong>1.5 倍速</strong><small>用量更多</small></span>
+                    </span>
+                  </div>
+                  <div class="effort-slider" style="--effort-pct: 66.667%" data-effort-slider>
+                    <div class="effort-rail" aria-hidden="true">
+                      <span class="effort-fill"></span>
+                      <span class="effort-stops"><i class="is-passed"></i><i class="is-passed"></i><i class="is-active"></i><i></i></span>
+                    </div>
+                    <input type="range" min="0" max="3" step="0.01" value="2" aria-label="思考努力度" aria-valuetext="高" data-effort-range>
+                    <div class="effort-labels">
+                      <button type="button" data-effort-index="0">低</button>
+                      <button type="button" data-effort-index="1">中</button>
+                      <button class="selected" type="button" data-effort-index="2">高</button>
+                      <button type="button" data-effort-index="3">极高</button>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view-layer" data-view-panel="workspace" data-screen-label="工作区概览" aria-hidden="true" inert>
+          <header class="workspace-page-header">
+            <div class="workspace-project-title">
+              <span class="eyebrow">WORKSPACE</span>
+              <div><h1>azem</h1><span class="workspace-branch"><i></i>main</span></div>
+              <p>/Users/viking/GolandProjects/azem</p>
+            </div>
+            <div class="workspace-header-actions">
+              <button class="subtle-button" type="button" data-toast="已在终端中打开项目">打开终端</button>
+              <button class="primary-button" type="button" data-new-thread-project="azem">在此项目新建对话</button>
+            </div>
+          </header>
+
+          <nav class="workspace-tabs" aria-label="工作区导航">
+            <button class="active" type="button" aria-current="page">概览</button>
+            <button type="button" data-view-jump="files">项目文件</button>
+            <button type="button" data-view-jump="changes">代码改动 <span>4</span></button>
+            <button type="button" data-toast="打开 Pull Requests">Pull Requests <span>1</span></button>
+          </nav>
+
+          <div class="workspace-overview">
+            <section class="workspace-primary" aria-labelledby="workspace-changes-title">
+              <header class="workspace-section-heading">
+                <div><h2 id="workspace-changes-title">工作树改动</h2><p>4 个文件 · +186 −32</p></div>
+                <button type="button" data-view-jump="changes">查看全部改动</button>
+              </header>
+              <div class="workspace-change-list">
+                <button type="button" data-view-jump="changes">
+                  <span class="workspace-file-status modified">M</span>
+                  <span><strong>Sidebar.tsx</strong><small>frontend/src/components</small></span>
+                  <em><b>+38</b> −12</em>
+                </button>
+                <button type="button" data-view-jump="changes">
+                  <span class="workspace-file-status modified">M</span>
+                  <span><strong>styles.css</strong><small>frontend/src</small></span>
+                  <em><b>+92</b> −14</em>
+                </button>
+                <button type="button" data-view-jump="changes">
+                  <span class="workspace-file-status added">A</span>
+                  <span><strong>WorkspaceFilesPage.tsx</strong><small>frontend/src/components</small></span>
+                  <em><b>+41</b> −0</em>
+                </button>
+                <button type="button" data-view-jump="changes">
+                  <span class="workspace-file-status modified">M</span>
+                  <span><strong>desktop.md</strong><small>docs</small></span>
+                  <em><b>+15</b> −6</em>
+                </button>
+              </div>
+              <footer class="workspace-change-footer">
+                <span><i class="clean-dot"></i>架构规则通过</span>
+                <span>未暂存改动</span>
+              </footer>
+            </section>
+
+            <aside class="workspace-secondary">
+              <section class="workspace-side-section" aria-labelledby="workspace-pr-title">
+                <header class="workspace-section-heading compact">
+                  <div><h2 id="workspace-pr-title">Pull Request</h2><p>当前分支关联</p></div>
+                  <button type="button" data-toast="打开 PR #128">查看</button>
+                </header>
+                <button class="workspace-pr" type="button" data-toast="打开 PR #128">
+                  <span class="workspace-pr-index">#128</span>
+                  <strong>UI motion system</strong>
+                  <small>6 / 6 检查通过 · 等待审查</small>
+                  <span class="workspace-checks" aria-label="6 项检查全部通过"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                </button>
+              </section>
+
+              <section class="workspace-side-section" aria-labelledby="workspace-activity-title">
+                <header class="workspace-section-heading compact">
+                  <div><h2 id="workspace-activity-title">最近活动</h2><p>当前项目的会话</p></div>
+                </header>
+                <div class="workspace-activity-list">
+                  <button type="button" data-workspace-thread="motion"><span class="task-state running"></span><span><strong>优化 Azem 的 UI 动效</strong><small>刚刚 · 正在运行</small></span></button>
+                  <button type="button" data-workspace-thread="plugins"><span class="task-state"></span><span><strong>Codex 插件兼容设计</strong><small>昨天 · 已完成</small></span></button>
+                  <button type="button" data-workspace-thread="context"><span class="task-state"></span><span><strong>语义上下文重建</strong><small>8 月 7 日 · 已完成</small></span></button>
+                </div>
+              </section>
+
+              <section class="workspace-repository-status" aria-label="仓库状态">
+                <span>仓库状态</span>
+                <strong><i></i>本地领先 2 个提交</strong>
+                <button type="button" data-toast="已检查远端状态">检查远端</button>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view-layer" data-view-panel="files" data-screen-label="项目文件" aria-hidden="true" inert>
+          <header class="page-header workspace-subpage-header">
+            <div class="workspace-subpage-heading">
+              <button class="workspace-back-link" type="button" aria-label="返回工作区概览" data-workspace-back><span aria-hidden="true">←</span><span>工作区</span><kbd>Esc</kbd></button>
+              <div><span class="eyebrow">WORKSPACE FILES</span><h1>项目文件</h1><p>让目录层级更清楚，预览与上下文动作保持同一视线。</p></div>
+            </div>
+            <button class="subtle-button" type="button" data-toast="文件搜索">搜索文件</button>
+          </header>
+          <div class="files-layout">
+            <div class="file-tree">
+              <div class="file-search">⌕ <span>按名称筛选</span><kbd>⌘P</kbd></div>
+              <button class="folder open" type="button">⌄ frontend <small>31</small></button>
+              <button class="folder open indent-1" type="button">⌄ src <small>28</small></button>
+              <button class="file active indent-2" type="button" data-file="Timeline.tsx"><span class="file-kind ts">TS</span>Timeline.tsx<small>M</small></button>
+              <button class="file indent-2" type="button" data-file="styles.css"><span class="file-kind css">#</span>styles.css<small>M</small></button>
+              <button class="file indent-2" type="button" data-file="App.tsx"><span class="file-kind ts">TS</span>App.tsx<small>M</small></button>
+              <button class="folder indent-1" type="button">› components <small>19</small></button>
+            </div>
+            <article class="file-preview">
+              <header><div><span class="file-kind ts">TS</span><strong data-file-title>Timeline.tsx</strong><small>frontend/src/components</small></div><button type="button" data-toast="已加入会话上下文">加入上下文</button></header>
+              <pre data-code-preview><code><span class="ln">462</span>return &lt;div className="streaming-text"&gt;
+<span class="ln">463</span>  {reduceMotion ? text : presentation.chunks.map(
+<span class="ln">464</span>    (chunk) =&gt; &lt;motion.span
+<span class="ln hot">465</span>      initial={{ opacity: 0, filter: "blur(5px)" }}
+<span class="ln hot">466</span>      animate={{ opacity: 1, filter: "blur(0px)" }}
+<span class="ln">467</span>      transition={streamReveal}
+<span class="ln">468</span>    &gt;{chunk.text}&lt;/motion.span&gt;
+<span class="ln">469</span>  )}
+<span class="ln">470</span>&lt;/div&gt;;</code></pre>
+            </article>
+          </div>
+        </section>
+
+        <section class="view-layer" data-view-panel="changes" data-screen-label="代码改动" aria-hidden="true" inert>
+          <header class="page-header workspace-subpage-header">
+            <div class="workspace-subpage-heading">
+              <button class="workspace-back-link" type="button" aria-label="返回工作区概览" data-workspace-back><span aria-hidden="true">←</span><span>工作区</span><kbd>Esc</kbd></button>
+              <div><span class="eyebrow">WORKSPACE REVIEW</span><h1>代码改动</h1><p>把变更摘要、风险和 diff 放进连续的审查路径。</p></div>
+            </div>
+            <button class="primary-button" type="button" data-toast="已准备审查">开始审查</button>
+          </header>
+          <div class="changes-page">
+            <div class="change-summary">
+              <article><span>04</span><small>变更文件</small></article>
+              <article><span class="plus">+186</span><small>新增</small></article>
+              <article><span class="minus">−32</span><small>删除</small></article>
+              <article><span>0</span><small>架构违规</small></article>
+            </div>
+            <div class="review-file-list">
+              <button class="active" type="button"><span class="file-kind css">#</span><strong>styles.css</strong><small>动效 token 与页面过渡</small><em>+92 −14</em></button>
+              <button type="button"><span class="file-kind ts">TS</span><strong>Timeline.tsx</strong><small>流式文字渐显</small><em>+44 −8</em></button>
+              <button type="button"><span class="file-kind ts">TS</span><strong>App.tsx</strong><small>页面切换舞台</small><em>+31 −6</em></button>
+            </div>
+            <article class="diff-preview">
+              <header><strong>styles.css</strong><span>Motion system</span></header>
+              <pre><code><span class="diff-remove">- transition: opacity .14s ease;</span>
+<span class="diff-add">+ transition: opacity var(--motion-fast) var(--ease-out),</span>
+<span class="diff-add">+             transform var(--motion-fast) var(--ease-out);</span>
+
+<span class="diff-add">+ @media (prefers-reduced-motion: reduce) {</span>
+<span class="diff-add">+   *, *::before, *::after { animation-duration: .01ms; }</span>
+<span class="diff-add">+ }</span></code></pre>
+            </article>
+          </div>
+        </section>
+      </main>
+
+      <aside class="inspector" aria-label="运行上下文">
+        <header><div><span class="eyebrow">LIVE CONTEXT</span><strong>运行上下文</strong></div><button type="button" data-inspector-toggle>×</button></header>
+        <div class="inspector-scroll">
+          <section class="inspector-section">
+            <div class="section-heading"><h2>上下文内核</h2><span class="status-chip current">CURRENT</span></div>
+            <div class="context-orbit"><div class="orbit-value"><strong data-context-value>38%</strong><small data-context-detail>62k / 164k</small></div><span class="orbit arc-1"></span><span class="orbit arc-2"></span><span class="orbit arc-3"></span></div>
+            <div class="metric-grid"><span>语义版本</span><strong>r12</strong><span>写入延迟</span><strong class="good">0</strong><span>片段</span><strong>8</strong></div>
+          </section>
+          <section class="inspector-section">
+            <div class="section-heading"><h2 data-plan-heading>执行计划</h2><span data-plan-count>2 / 4</span></div>
+            <div class="plan-progress"><span data-plan-progress-bar></span></div>
+            <ol class="plan-list" data-plan-list>
+              <li class="done"><span>✓</span><p>分析当前界面与事件链</p></li>
+              <li class="done"><span>✓</span><p>建立视觉与动效 token</p></li>
+              <li class="current"><span></span><p>制作交互原型与示例图<small>正在执行</small></p></li>
+              <li><span>4</span><p>验证性能与 reduced motion</p></li>
+            </ol>
+          </section>
+          <section class="inspector-section">
+            <div class="section-heading"><h2>工作区</h2><button type="button" data-view-jump="changes">查看改动</button></div>
+            <div class="workspace-facts"><div><span>分支</span><strong>main</strong></div><div><span>文件</span><strong>+4</strong></div><div><span>质量</span><strong>6242</strong></div></div>
+          </section>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="command-backdrop" data-command-backdrop hidden>
+    <section class="command-palette" role="dialog" aria-modal="true" aria-label="命令面板">
+      <header><span>⌕</span><input type="text" placeholder="搜索命令、任务或文件…" data-command-input><kbd>esc</kbd></header>
+      <div class="command-results">
+        <small>建议</small>
+        <button type="button" data-command="home"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"/></svg><strong>新对话</strong><kbd>⌘N</kbd></button>
+        <button type="button" data-command="files"><span>▤</span><strong>查看项目文件</strong><kbd>⌘2</kbd></button>
+        <button type="button" data-command="changes"><span>±</span><strong>查看代码改动</strong><kbd>⌘3</kbd></button>
+        <button type="button" data-command="motion"><span>动</span><strong>打开动效规范</strong><kbd>⌘M</kbd></button>
+      </div>
+      <footer><span><i></i> 选择</span><span>↑↓ 导航</span><span>esc 关闭</span></footer>
+    </section>
+  </div>
+
+  <div class="settings-backdrop" data-settings-backdrop hidden>
+    <section class="settings-dialog" role="dialog" aria-modal="true" aria-label="设置">
+      <aside class="settings-sidebar">
+        <header><button class="settings-back" type="button" data-settings-close><span aria-hidden="true">←</span><strong>返回工作台</strong></button></header>
+        <label class="settings-search"><span>⌕</span><input type="search" placeholder="搜索设置…" data-settings-search><kbd>⌘F</kbd></label>
+        <nav aria-label="设置分类">
+          <small>系统</small>
+          <button class="active" type="button" data-settings-section="catalog"><span>◫</span><strong>模型目录</strong><em>8</em></button>
+          <button type="button" data-settings-section="models"><span>⇄</span><strong>模型路由</strong></button>
+          <button type="button" data-settings-section="subagents"><span>⌬</span><strong>子智能体</strong></button>
+          <small>偏好</small>
+          <button type="button" data-settings-section="governance"><span>◇</span><strong>治理与审批</strong></button>
+          <button type="button" data-settings-section="appearance"><span>◐</span><strong>外观</strong></button>
+          <button type="button" data-settings-section="extensions"><span>✦</span><strong>扩展</strong><em>5</em></button>
+        </nav>
+        <footer><span>配置自动保存到本机</span><small>Azem v0.8.0</small></footer>
+      </aside>
+
+      <div class="settings-main">
+        <div class="settings-scroll" data-settings-scroll>
+          <section class="settings-page active" data-settings-page="catalog" data-screen-label="设置：模型目录" data-settings-keywords="模型 provider 凭据 api key base url chatgpt grok llmux">
+            <header class="settings-page-heading"><div><h2>模型目录</h2><p>管理订阅模型与 OpenAI 兼容提供方。凭据只存放在系统钥匙串。</p></div><button class="settings-primary" type="button" data-toast="已准备添加提供方">＋ 添加提供方</button></header>
+            <div class="catalog-layout">
+              <div class="provider-list">
+                <label class="provider-search">
+                  <svg class="ui-icon" aria-hidden="true"><use href="#icon-search"/></svg>
+                  <input type="search" placeholder="搜索供应商" autocomplete="off" aria-label="搜索供应商" data-provider-search>
+                  <kbd>⌘F</kbd>
+                </label>
+                <small data-provider-group-label="enabled">已启用 · 3</small>
+                <button class="active" type="button" data-provider-tab="chatgpt" data-provider-entry data-provider-group="enabled" data-provider-keywords="chatgpt openai 订阅 subscription pro 额度 quota gpt"><img class="models-dev-icon provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>ChatGPT</strong><small>Pro 20x · 额外 US$12.50</small></span><em>38.5%</em></button>
+                <button type="button" data-provider-tab="grok" data-provider-entry data-provider-group="enabled" data-provider-keywords="grok xai 订阅 subscription plus 额度 quota"><img class="models-dev-icon provider-icon" src="https://models.dev/logos/xai.svg" alt="" aria-hidden="true"><span><strong>Grok</strong><small>订阅驱动 · 额外额度可用</small></span><em>72%</em></button>
+                <button type="button" data-provider-tab="openrouter" data-provider-entry data-provider-group="enabled" data-provider-keywords="openrouter llmux openai 兼容 api key 模型"><img class="models-dev-icon provider-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><span><strong>OpenRouter</strong><small>llmux · 3 个模型</small></span><i></i></button>
+                <small data-provider-group-label="disabled">未启用</small>
+                <button class="muted" type="button" data-provider-entry data-provider-group="disabled" data-provider-keywords="自定义 custom openai 兼容 compatible api provider 提供方"><span class="provider-add-icon" aria-hidden="true">＋</span><span><strong>自定义提供方</strong><small>OpenAI 兼容 API</small></span></button>
+                <p class="provider-empty" data-provider-empty hidden><strong>未找到供应商</strong><small>尝试名称、驱动或能力关键词</small></p>
+              </div>
+              <div class="provider-detail">
+                <div class="provider-panel active" data-provider-panel="chatgpt">
+                  <section class="settings-card provider-card">
+                    <header><div><img class="models-dev-icon provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><div><strong>ChatGPT</strong><small>订阅驱动 · Pro 20x</small></div></div><label class="switch"><input type="checkbox" checked><span></span></label></header>
+                    <div class="settings-field-grid">
+                      <label><span>身份验证</span><div class="credential-ok"><i></i>已连接 · viking@example.com</div></label>
+                      <label><span>API 地址</span><div class="readonly-field">由订阅驱动管理 <small>只读</small></div></label>
+                    </div>
+                    <section class="subscription-quota-compact" aria-label="ChatGPT 订阅额度">
+                      <header><strong>订阅额度</strong><small>来自订阅服务的实时额度</small></header>
+                      <div class="quota-grid">
+                        <article><div><strong>每周额度</strong><span>剩余 38.5%</span></div><div class="quota-track"><span style="width: 38.5%"></span></div><small>8 月 12 日 08:00 重置</small></article>
+                        <article class="quota-balance"><strong>额外额度</strong><span>US$12.50</span><small>用完每周额度后继续使用</small></article>
+                      </div>
+                    </section>
+                  </section>
+                  <section class="settings-card model-catalog-card">
+                    <header><div><strong>可用模型</strong><small>选择模型后可在“模型路由”中分配用途</small></div><span>3 / 3 已启用</span></header>
+                    <div class="model-row"><img class="models-dev-icon model-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>GPT-5.6</strong><small>推理 · 图像 · 工具调用</small></span><em>当前主模型</em><label class="switch"><input type="checkbox" checked><span></span></label></div>
+                    <div class="model-row"><img class="models-dev-icon model-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>GPT-5.5 Codex</strong><small>代码 · 工具调用</small></span><em>子智能体</em><label class="switch"><input type="checkbox" checked><span></span></label></div>
+                    <div class="model-row"><img class="models-dev-icon model-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>GPT-5.3 Spark</strong><small>快速 · 低成本</small></span><em>标题生成</em><label class="switch"><input type="checkbox" checked><span></span></label></div>
+                  </section>
+                </div>
+
+                <div class="provider-panel" data-provider-panel="grok" hidden>
+                  <section class="settings-card provider-card">
+                    <header><div><img class="models-dev-icon provider-icon" src="https://models.dev/logos/xai.svg" alt="" aria-hidden="true"><div><strong>Grok</strong><small>订阅驱动 · Plus</small></div></div><label class="switch"><input type="checkbox" checked><span></span></label></header>
+                    <div class="settings-field-grid">
+                      <label><span>身份验证</span><div class="credential-ok"><i></i>已连接 · viking@x.example</div></label>
+                      <label><span>API 地址</span><div class="readonly-field">由订阅驱动管理 <small>只读</small></div></label>
+                    </div>
+                    <section class="subscription-quota-compact" aria-label="Grok 订阅额度">
+                      <header><strong>订阅额度</strong><small>来自订阅服务的实时额度</small></header>
+                      <div class="quota-grid">
+                        <article><div><strong>每周额度</strong><span>剩余 72%</span></div><div class="quota-track"><span style="width: 72%"></span></div><small>8 月 11 日 21:30 重置</small></article>
+                        <article class="quota-balance"><strong>额外额度</strong><span>无限额度</span><small>当前订阅账户可用</small></article>
+                      </div>
+                    </section>
+                  </section>
+                  <section class="settings-card model-catalog-card">
+                    <header><div><strong>可用模型</strong><small>订阅服务实时返回</small></div><span>2 / 2 已启用</span></header>
+                    <div class="model-row"><img class="models-dev-icon model-provider-icon" src="https://models.dev/logos/xai.svg" alt="" aria-hidden="true"><span><strong>Grok 4.20</strong><small>推理 · 图像 · 工具调用</small></span><em>可用</em><label class="switch"><input type="checkbox" checked><span></span></label></div>
+                    <div class="model-row"><img class="models-dev-icon model-provider-icon" src="https://models.dev/logos/xai.svg" alt="" aria-hidden="true"><span><strong>Grok Code Fast</strong><small>代码 · 快速响应</small></span><em>可用</em><label class="switch"><input type="checkbox" checked><span></span></label></div>
+                    <div class="model-row model-row-placeholder"><span class="model-placeholder-mark" aria-hidden="true"></span><span><strong>目录已同步</strong><small>当前订阅返回 2 个模型</small></span></div>
+                  </section>
+                </div>
+
+                <div class="provider-panel" data-provider-panel="openrouter" hidden>
+                  <section class="settings-card provider-card">
+                    <header><div><img class="models-dev-icon provider-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><div><strong>OpenRouter</strong><small>llmux · OpenAI 兼容 API</small></div></div><label class="switch"><input type="checkbox" checked><span></span></label></header>
+                    <div class="settings-field-grid">
+                      <label><span>API Key</span><div class="credential-ok"><i></i>已存储在系统钥匙串</div></label>
+                      <label><span>API 地址</span><div class="readonly-field">openrouter.ai/api/v1 <small>预设</small></div></label>
+                    </div>
+                    <aside class="provider-info-note">API 提供方按账户余额计费，不显示订阅周额度或额外额度。</aside>
+                  </section>
+                  <section class="settings-card model-catalog-card">
+                    <header><div><strong>可用模型</strong><small>通过 OpenRouter 路由</small></div><span>3 / 3 已启用</span></header>
+                    <div class="model-row"><img class="models-dev-icon model-provider-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><span><strong>Claude Sonnet 4</strong><small>推理 · 图像 · 工具调用</small></span><em>可用</em><label class="switch"><input type="checkbox" checked><span></span></label></div>
+                    <div class="model-row"><img class="models-dev-icon model-provider-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><span><strong>Gemini 2.5 Pro</strong><small>长上下文 · 图像</small></span><em>可用</em><label class="switch"><input type="checkbox" checked><span></span></label></div>
+                    <div class="model-row"><img class="models-dev-icon model-provider-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><span><strong>DeepSeek V3.1</strong><small>代码 · 低成本</small></span><em>可用</em><label class="switch"><input type="checkbox" checked><span></span></label></div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-page" data-settings-page="models" data-screen-label="设置：模型路由" data-settings-keywords="模型 路由 title plan approval vision compaction subagent">
+            <header class="settings-page-heading"><div><h2>模型路由</h2><p>为不同工作阶段选择独立模型；缺失或禁用的路由会明确阻止运行。</p></div><span class="settings-status"><i></i>配置有效</span></header>
+            <section class="settings-card route-card">
+              <header><div><strong>核心工作流</strong><small>主会话与关键判断</small></div></header>
+              <div class="route-row"><img class="models-dev-icon route-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>主模型</strong><small>对话、工具编排与最终回答</small></span><button class="route-model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-route-model-trigger data-model-id="gpt-5.6" data-provider-logo="openai"><span><strong data-route-model-name>GPT-5.6</strong><small data-route-provider-name>ChatGPT</small></span><svg class="ui-icon"><use href="#icon-chevron-down"/></svg></button></div>
+              <div class="route-row"><img class="models-dev-icon route-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>规划模型</strong><small>计划模式与任务拆分</small></span><button class="route-model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-route-model-trigger data-model-id="gpt-5.6" data-provider-logo="openai"><span><strong data-route-model-name>GPT-5.6</strong><small data-route-provider-name>ChatGPT</small></span><svg class="ui-icon"><use href="#icon-chevron-down"/></svg></button></div>
+              <div class="route-row"><img class="models-dev-icon route-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>审批模型</strong><small>自动审批的结构化安全判断</small></span><button class="route-model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-route-model-trigger data-model-id="gpt-5.5-codex" data-provider-logo="openai"><span><strong data-route-model-name>GPT-5.5 Codex</strong><small data-route-provider-name>ChatGPT</small></span><svg class="ui-icon"><use href="#icon-chevron-down"/></svg></button></div>
+              <div class="route-row"><img class="models-dev-icon route-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>视觉模型</strong><small>主模型不支持图片时的辅助路由</small></span><button class="route-model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-route-model-trigger data-model-id="gpt-5.6" data-provider-logo="openai"><span><strong data-route-model-name>GPT-5.6</strong><small data-route-provider-name>ChatGPT</small></span><svg class="ui-icon"><use href="#icon-chevron-down"/></svg></button></div>
+              <div class="route-row"><img class="models-dev-icon route-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>上下文压缩</strong><small>语义状态与长会话压缩</small></span><button class="route-model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-route-model-trigger data-model-id="gpt-5.3-spark" data-provider-logo="openai"><span><strong data-route-model-name>GPT-5.3 Spark</strong><small data-route-provider-name>ChatGPT</small></span><svg class="ui-icon"><use href="#icon-chevron-down"/></svg></button></div>
+            </section>
+            <section class="settings-card route-card">
+              <header><div><strong>子智能体默认模型</strong><small>角色仍可在定义中覆盖此配置</small></div></header>
+              <div class="route-row"><img class="models-dev-icon route-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>研究与文档</strong><small>检索、映射、说明文档</small></span><button class="route-model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-route-model-trigger data-model-id="gpt-5.3-spark" data-provider-logo="openai"><span><strong data-route-model-name>GPT-5.3 Spark</strong><small data-route-provider-name>ChatGPT</small></span><svg class="ui-icon"><use href="#icon-chevron-down"/></svg></button></div>
+              <div class="route-row"><img class="models-dev-icon route-provider-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>编码与审查</strong><small>实现、调试、架构判断</small></span><button class="route-model-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-route-model-trigger data-model-id="gpt-5.5-codex" data-provider-logo="openai"><span><strong data-route-model-name>GPT-5.5 Codex</strong><small data-route-provider-name>ChatGPT</small></span><svg class="ui-icon"><use href="#icon-chevron-down"/></svg></button></div>
+            </section>
+          </section>
+
+          <section class="settings-page" data-settings-page="subagents" data-screen-label="设置：子智能体" data-settings-keywords="子智能体 并发 调度 shell 资源 team agent">
+            <header class="settings-page-heading"><div><h2>子智能体</h2><p>控制团队运行的并发容量和资源隔离；前台工具与子智能体分别限流。</p></div></header>
+            <div class="settings-metric-grid">
+              <article><span>子智能体并发</span><div class="stepper"><button type="button" data-stepper="down">−</button><strong data-stepper-value>6</strong><button type="button" data-stepper="up">＋</button></div><small>团队成员上限</small></article>
+              <article><span>Shell 并发</span><div class="stepper"><button type="button">−</button><strong>4</strong><button type="button">＋</button></div><small>本地命令独立容量</small></article>
+              <article><span>启动超时</span><div class="value-select"><strong>30</strong><small>秒</small><span>⌄</span></div><small>资源与租约等待上限</small></article>
+            </div>
+            <section class="settings-card scheduling-card">
+              <header><div><strong>调度策略</strong><small>当前定义使用并行工具分发</small></div><span class="settings-status"><i></i>Parallel</span></header>
+              <label><span><strong>在主会话中显示子智能体进度</strong><small>把状态摘要投影到当前任务，不混入最终回答</small></span><span class="switch"><input type="checkbox" checked><span></span></span></label>
+              <label><span><strong>完成后保留结果卡片</strong><small>会话重开后仍可检查任务、耗时和输出</small></span><span class="switch"><input type="checkbox" checked><span></span></span></label>
+              <label><span><strong>资源不足时排队</strong><small>保持 queued 状态，不提前显示为运行中</small></span><span class="switch"><input type="checkbox" checked><span></span></span></label>
+            </section>
+          </section>
+
+          <section class="settings-page" data-settings-page="governance" data-screen-label="设置：治理与审批" data-settings-keywords="治理 审批 prompt auto review yolo queue guide 安全">
+            <header class="settings-page-heading"><div><h2>治理与审批</h2><p>设置默认审批边界和运行中消息处理方式；单个任务可临时覆盖。</p></div></header>
+            <section class="settings-card governance-form">
+              <div class="governance-setting-row">
+                <span class="governance-setting-copy"><strong>默认审批模式</strong><small>控制工具执行边界</small></span>
+                <div class="governance-options governance-segmented approval-grid">
+                  <label><input type="radio" name="approval"><span class="governance-icon"><svg class="ui-icon"><use href="#icon-hand"/></svg></span><span><strong>每次询问</strong><small>逐次确认</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></label>
+                  <label class="selected"><input type="radio" name="approval" checked><span class="governance-icon"><svg class="ui-icon"><use href="#icon-shield-check"/></svg></span><span><strong>自动审查</strong><small>策略判断</small></span><em>推荐</em><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></label>
+                  <label><input type="radio" name="approval"><span class="governance-icon"><svg class="ui-icon"><use href="#icon-shield-alert"/></svg></span><span><strong>快速执行</strong><small>硬性边界</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></label>
+                </div>
+              </div>
+
+              <div class="governance-setting-row">
+                <span class="governance-setting-copy"><strong>运行中的新消息</strong><small>收到补充输入时</small></span>
+                <div class="governance-options governance-segmented message-grid">
+                  <label class="selected"><input type="radio" name="message-mode" checked><span class="governance-icon"><svg class="ui-icon"><use href="#icon-queue"/></svg></span><span><strong>加入队列</strong><small>按顺序处理</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></label>
+                  <label><input type="radio" name="message-mode"><span class="governance-icon"><svg class="ui-icon"><use href="#icon-guide"/></svg></span><span><strong>实时引导</strong><small>尽快注入</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></label>
+                </div>
+              </div>
+
+              <div class="governance-setting-row governance-safety-row">
+                <span class="governance-setting-copy"><strong>审批决策校验</strong><small>仅接受完整 JSON；无效内容不会执行原操作</small></span>
+                <em><svg class="ui-icon"><use href="#icon-shield-check"/></svg><span><i></i>失败关闭</span></em>
+              </div>
+            </section>
+          </section>
+
+          <section class="settings-page" data-settings-page="appearance" data-screen-label="设置：外观" data-settings-keywords="外观 语言 主题 暖白 深色 字体 字号 动效 reduced motion">
+            <header class="settings-page-heading"><div><h2>外观</h2><p>外观只改变界面呈现，不影响会话、模型和项目数据。</p></div></header>
+            <section class="settings-card appearance-card">
+              <div class="appearance-row"><span><strong>界面语言</strong><small>应用菜单、按钮与系统消息</small></span><div class="segmented-control"><button class="active" type="button">简体中文</button><button type="button">English</button></div></div>
+              <div class="appearance-row theme-row"><span><strong>主题</strong><small>跟随系统可自动切换明暗</small></span><div class="theme-options"><button class="active" type="button" data-settings-theme="light"><span class="theme-preview light"><i></i></span><small>暖白</small></button><button type="button" data-settings-theme="dark"><span class="theme-preview dark"><i></i></span><small>夜间</small></button><button type="button" data-settings-theme="system"><span class="theme-preview system"><i></i></span><small>跟随系统</small></button></div></div>
+              <div class="appearance-row"><span><strong>界面字体</strong><small>使用已安装的本机字体</small></span><div class="custom-select font-select" data-custom-select="font" data-value="system">
+                <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-custom-select-trigger><span class="font-select-preview" data-custom-select-preview>Aa</span><span class="custom-select-copy"><strong data-custom-select-label>系统默认</strong><small data-custom-select-caption>SF Pro Text · 苹方</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron-down"/></svg></button>
+                <div class="custom-select-menu" role="listbox" aria-label="界面字体" data-custom-select-menu hidden>
+                  <button class="font-option system-font" type="button" role="option" aria-selected="true" data-custom-select-option data-value="system" data-label="系统默认" data-caption="SF Pro Text · 苹方"><span class="font-option-preview">Ag</span><span><strong>系统默认</strong><small>SF Pro Text · 苹方</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-check"/></svg></button>
+                  <button class="font-option inter-font" type="button" role="option" aria-selected="false" data-custom-select-option data-value="inter" data-label="Inter" data-caption="清晰中性 · 拉丁优先"><span class="font-option-preview">Ag</span><span><strong>Inter</strong><small>清晰中性 · 拉丁优先</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-check"/></svg></button>
+                  <button class="font-option plex-font" type="button" role="option" aria-selected="false" data-custom-select-option data-value="plex" data-label="IBM Plex Sans" data-caption="技术感 · 字面更开阔"><span class="font-option-preview">Ag</span><span><strong>IBM Plex Sans</strong><small>技术感 · 字面更开阔</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-check"/></svg></button>
+                </div>
+              </div></div>
+              <div class="appearance-row"><span><strong>界面字号</strong><small>范围 11–20 px</small></span><div class="font-size-control"><button type="button" data-font-size="down">A−</button><strong data-font-size-value>14 px</strong><button type="button" data-font-size="up">A＋</button></div></div>
+              <div class="appearance-row"><span><strong>减弱动态效果</strong><small>将场景切换与流式渐显缩短为即时更新</small></span><label class="switch"><input type="checkbox" data-reduce-motion><span></span></label></div>
+            </section>
+          </section>
+
+          <section class="settings-page" data-settings-page="extensions" data-screen-label="设置：扩展" data-settings-keywords="扩展 plugin skill mcp hook oauth app trust 插件 技能">
+            <header class="settings-page-heading"><div><h2>扩展</h2><p>Codex 插件复用现有 Skill 与 MCP 运行时；Hooks 默认不受信任。</p></div><button class="settings-primary" type="button" data-toast="打开插件目录">浏览目录</button></header>
+            <div class="extension-summary"><article><strong>5</strong><small>已启用插件</small></article><article><strong>12</strong><small>可用 Skills</small></article><article><strong>3</strong><small>MCP 服务</small></article><article><strong class="amber">1</strong><small>需要授权</small></article></div>
+            <section class="settings-card extensions-card">
+              <div class="extension-row"><span class="extension-logo">W</span><span><strong>Waza</strong><small>工程健康、研究、UI 与写作工作流</small><span class="capabilities"><i>6 Skills</i><i>1 MCP</i></span></span><em class="extension-state ready">已启用</em><button type="button">•••</button></div>
+              <div class="extension-row"><span class="extension-logo purple">K</span><span><strong>Kami</strong><small>文档排版与产品页面</small><span class="capabilities"><i>1 Skill</i></span></span><em class="extension-state ready">已启用</em><button type="button">•••</button></div>
+              <div class="extension-row"><span class="extension-logo dark">G</span><span><strong>GitHub</strong><small>仓库、PR、Issue、Review 与 CI</small><span class="capabilities"><i>2 Skills</i><i>OAuth</i></span></span><em class="extension-state attention">需要授权</em><button type="button" data-toast="开始 GitHub 授权">连接</button></div>
+              <div class="extension-row"><span class="extension-logo coral">C</span><span><strong>Custom Toolkit</strong><small>包含未信任的生命周期 Hooks</small><span class="capabilities"><i>3 Skills</i><i>2 Hooks</i></span></span><em class="extension-state guarded">Hooks 已阻止</em><button type="button">•••</button></div>
+            </section>
+          </section>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="route-model-popover" role="listbox" aria-label="选择路由模型" data-route-model-popover hidden>
+    <label class="route-model-search">
+      <svg class="ui-icon" aria-hidden="true"><use href="#icon-search"/></svg>
+      <input type="search" placeholder="搜索模型或提供方" autocomplete="off" aria-label="搜索路由模型" data-route-model-search>
+      <kbd>⌘F</kbd>
+    </label>
+    <div class="route-model-list" data-route-model-list>
+      <button type="button" role="option" data-route-model-option data-model-id="gpt-5.6" data-model-name="GPT-5.6" data-provider-name="ChatGPT" data-provider-logo="openai" data-search="chatgpt openai gpt-5.6 推理 图像 工具"><img class="models-dev-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>GPT-5.6</strong><small>ChatGPT · 推理 · 图像 · 工具</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+      <button type="button" role="option" data-route-model-option data-model-id="gpt-5.5-codex" data-model-name="GPT-5.5 Codex" data-provider-name="ChatGPT" data-provider-logo="openai" data-search="chatgpt openai gpt-5.5 codex 代码 工具"><img class="models-dev-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>GPT-5.5 Codex</strong><small>ChatGPT · 代码 · 工具调用</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+      <button type="button" role="option" data-route-model-option data-model-id="gpt-5.3-spark" data-model-name="GPT-5.3 Spark" data-provider-name="ChatGPT" data-provider-logo="openai" data-search="chatgpt openai gpt-5.3 spark 快速 低成本"><img class="models-dev-icon" src="https://models.dev/logos/openai.svg" alt="" aria-hidden="true"><span><strong>GPT-5.3 Spark</strong><small>ChatGPT · 快速响应 · 低成本</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+      <button type="button" role="option" data-route-model-option data-model-id="grok-4.20" data-model-name="Grok 4.20" data-provider-name="Grok" data-provider-logo="xai" data-search="grok xai grok 4.20 推理 图像 工具"><img class="models-dev-icon" src="https://models.dev/logos/xai.svg" alt="" aria-hidden="true"><span><strong>Grok 4.20</strong><small>Grok · 推理 · 图像 · 工具</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+      <button type="button" role="option" data-route-model-option data-model-id="grok-code-fast" data-model-name="Grok Code Fast" data-provider-name="Grok" data-provider-logo="xai" data-search="grok xai code fast 快速 代码"><img class="models-dev-icon" src="https://models.dev/logos/xai.svg" alt="" aria-hidden="true"><span><strong>Grok Code Fast</strong><small>Grok · 代码 · 快速响应</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+      <button type="button" role="option" data-route-model-option data-model-id="claude-sonnet-4" data-model-name="Claude Sonnet 4" data-provider-name="OpenRouter" data-provider-logo="openrouter" data-search="openrouter anthropic claude sonnet 4 推理 图像"><img class="models-dev-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><span><strong>Claude Sonnet 4</strong><small>OpenRouter · 推理 · 图像</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+      <button type="button" role="option" data-route-model-option data-model-id="gemini-2.5-pro" data-model-name="Gemini 2.5 Pro" data-provider-name="OpenRouter" data-provider-logo="openrouter" data-search="openrouter google gemini 2.5 pro 长上下文 图像"><img class="models-dev-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><span><strong>Gemini 2.5 Pro</strong><small>OpenRouter · 长上下文 · 图像</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+      <button type="button" role="option" data-route-model-option data-model-id="deepseek-v3.1" data-model-name="DeepSeek V3.1" data-provider-name="OpenRouter" data-provider-logo="openrouter" data-search="openrouter deepseek v3.1 代码 低成本"><img class="models-dev-icon" src="https://models.dev/logos/openrouter.svg" alt="" aria-hidden="true"><span><strong>DeepSeek V3.1</strong><small>OpenRouter · 代码 · 低成本</small></span><i><svg class="ui-icon"><use href="#icon-check"/></svg></i></button>
+      <p class="route-model-empty" data-route-model-empty hidden>没有匹配的模型</p>
+    </div>
+  </div>
+
+  <div class="project-create-backdrop" data-project-create-backdrop hidden>
+    <form class="project-create-dialog" data-project-create-form>
+      <header><div><span class="eyebrow">NEW PROJECT</span><h2>新建项目</h2></div><button type="button" data-project-create-close>×</button></header>
+      <div class="project-create-body">
+        <label><span>项目名称</span><input type="text" value="new-project" data-project-name></label>
+        <label><span>存放位置</span><div class="path-field"><input type="text" value="~/Projects"><button type="button" data-toast="选择存放位置">浏览…</button></div></label>
+        <label class="checkbox-row"><input type="checkbox" checked><span><strong>初始化 Git 仓库</strong><small>创建 .git 并使用 main 作为默认分支</small></span></label>
+      </div>
+      <footer><button type="button" data-project-create-close>取消</button><button class="settings-primary" type="submit">创建并打开</button></footer>
+    </form>
+  </div>
+
+  <aside class="motion-sheet" data-motion-sheet aria-hidden="true" inert>
+    <header><div><span class="eyebrow">MOTION SYSTEM</span><h2>动效规范</h2></div><button type="button" data-motion-close>×</button></header>
+    <div class="motion-sheet-body">
+      <section class="motion-controls">
+        <label><span>主题</span><div class="custom-select compact-select" data-custom-select="theme" data-value="light"><button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-custom-select-trigger><span class="custom-select-copy"><strong data-custom-select-label>暖白</strong><small data-custom-select-caption>明亮纸面</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron-down"/></svg></button><div class="custom-select-menu" role="listbox" aria-label="主题" data-custom-select-menu hidden><button type="button" role="option" aria-selected="true" data-custom-select-option data-value="light" data-label="暖白" data-caption="明亮纸面"><span><strong>暖白</strong><small>明亮纸面</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-check"/></svg></button><button type="button" role="option" aria-selected="false" data-custom-select-option data-value="dark" data-label="夜间" data-caption="低光环境"><span><strong>夜间</strong><small>低光环境</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-check"/></svg></button></div></div></label>
+        <label><span>运动</span><div class="custom-select compact-select" data-custom-select="motion" data-value="full"><button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" data-custom-select-trigger><span class="custom-select-copy"><strong data-custom-select-label>完整</strong><small data-custom-select-caption>保留过渡</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron-down"/></svg></button><div class="custom-select-menu" role="listbox" aria-label="运动" data-custom-select-menu hidden><button type="button" role="option" aria-selected="true" data-custom-select-option data-value="full" data-label="完整" data-caption="保留过渡"><span><strong>完整</strong><small>保留过渡</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-check"/></svg></button><button type="button" role="option" aria-selected="false" data-custom-select-option data-value="reduced" data-label="减弱" data-caption="即时切换"><span><strong>减弱</strong><small>即时切换</small></span><svg class="ui-icon" aria-hidden="true"><use href="#icon-check"/></svg></button></div></div></label>
+      </section>
+      <section class="motion-spec-list">
+        <article><span class="motion-swatch micro"></span><div><strong>即时反馈</strong><p>悬停、按压、状态点</p></div><code>120–160ms</code></article>
+        <article><span class="motion-swatch component"></span><div><strong>组件切换</strong><p>折叠、菜单、工具状态</p></div><code>180–240ms</code></article>
+        <article><span class="motion-swatch scene"></span><div><strong>场景切换</strong><p>页面、检查器、命令面板</p></div><code>260–340ms</code></article>
+        <article><span class="motion-swatch stream"></span><div><strong>流式文字</strong><p>仅动画最新 8 个尾部片段</p></div><code>220–280ms</code></article>
+      </section>
+      <section class="principles">
+        <h3>三条约束</h3>
+        <p><span>01</span>动效表达空间或状态变化，不为静态内容增加噪音。</p>
+        <p><span>02</span>流式显现不改变事件顺序，不延迟最终文本落定。</p>
+        <p><span>03</span>所有过渡在 reduced motion 下变成即时切换。</p>
+      </section>
+    </div>
+  </aside>
+
+  <div class="toast" role="status" aria-live="polite" data-toast-output></div>
+</body>
+</html>

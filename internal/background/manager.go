@@ -470,6 +470,11 @@ func (m *Manager) resolveCWD(value string) (string, error) {
 
 func shellCommand(ctx context.Context, command string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
+		for _, name := range []string{"pwsh.exe", "powershell.exe"} {
+			if path, err := exec.LookPath(name); err == nil {
+				return exec.CommandContext(ctx, path, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command)
+			}
+		}
 		return exec.CommandContext(ctx, "cmd.exe", "/d", "/s", "/c", command)
 	}
 	return exec.CommandContext(ctx, "/bin/sh", "-c", command)

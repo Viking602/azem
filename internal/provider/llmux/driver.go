@@ -17,6 +17,7 @@ import (
 	sdkxai "github.com/Viking602/llmux/provider/xai"
 	hyprovider "github.com/Viking602/venat/provider"
 
+	"github.com/Viking602/azem/internal/netproxy"
 	"github.com/Viking602/azem/internal/provider/responses"
 )
 
@@ -27,6 +28,7 @@ type Config struct {
 	Models          []string
 	ReasoningEffort string
 	MaxOutputTokens int
+	DisableImages   bool
 	Client          *http.Client
 }
 
@@ -39,12 +41,16 @@ type Driver struct {
 	retryDelay      func(int) time.Duration
 	maxRetryDelay   time.Duration
 	retryObserver   hyprovider.RetryObserver
+	disableImages   bool
 }
 
 func New(config Config) (*Driver, error) {
 	config.ProviderID = strings.ToLower(strings.TrimSpace(config.ProviderID))
 	if config.ProviderID == "" {
 		return nil, fmt.Errorf("llmux provider ID is empty")
+	}
+	if config.Client == nil {
+		config.Client = netproxy.NewHTTPClient(0)
 	}
 	provider, err := newProvider(config)
 	if err != nil {
@@ -60,6 +66,7 @@ func New(config Config) (*Driver, error) {
 	return &Driver{
 		provider: provider, model: model, providerID: config.ProviderID,
 		models: append([]string(nil), config.Models...), reasoningEffort: config.ReasoningEffort,
+		disableImages: config.DisableImages,
 	}, nil
 }
 
@@ -100,6 +107,10 @@ func (d *Driver) SetRetryObserver(observer hyprovider.RetryObserver) { d.retryOb
 func (d *Driver) SetMaxRetryDelay(delay time.Duration)               { d.maxRetryDelay = delay }
 
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	if d.disableImages {
+		request.ExtraBody = cloneExtraBody(request.ExtraBody)
+		request.ExtraBody[disableImageInputExtraKey] = true
+	}
 	converted, names, err := convertRequest(request, d.reasoningEffort, d.providerID)
 	if err != nil {
 		return nil, err
@@ -117,11 +128,19 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 		if err != nil {
 			return nil, mapError(err)
 		}
-		return &streamAdapter{inner: stream, reporter: reporter, names: names}, nil
+		return &streamAdapter{inner: stream, reporter: reporter, names: names, provider: d.providerID}, nil
 	}
 	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
 		Delay: d.retryDelay, MaxDelay: d.maxRetryDelay, Observer: d.retryObserver,
 	})
+}
+
+func cloneExtraBody(input map[string]any) map[string]any {
+	cloned := make(map[string]any, len(input)+1)
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 var (

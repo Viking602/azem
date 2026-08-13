@@ -21,6 +21,25 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestPluginsConfigDefaultsAndLoad(t *testing.T) {
+	cfg := Default()
+	if !cfg.Plugins.Enabled || !cfg.Plugins.ImportCodex || cfg.Plugins.TrustHooks {
+		t.Fatalf("plugin defaults = %#v", cfg.Plugins)
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nplugins:\n  enabled: true\n  import_codex: false\n  codex_imports: [demo@market]\n  trust_hooks: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Plugins.Enabled || loaded.Plugins.ImportCodex || !loaded.Plugins.TrustHooks || !reflect.DeepEqual(loaded.Plugins.CodexImports, []string{"demo@market"}) {
+		t.Fatalf("loaded plugins = %#v", loaded.Plugins)
+	}
+}
+
 func TestHooksConfigDefaultsAndLoad(t *testing.T) {
 	cfg := Default()
 	if !cfg.Hooks.Enabled || cfg.Hooks.TrustProject || cfg.Hooks.ClaudeCompatibility || cfg.Hooks.DefaultTimeoutParsed != 5*time.Second || cfg.Hooks.FailurePolicy != "open" {
@@ -166,6 +185,175 @@ func TestUpdateSessionModelDefaultsPersistsProviderModelReasoning(t *testing.T) 
 	}
 }
 
+func TestUpdateSubscriptionDisabledModelsPreservesProviderSettings(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "version: 1\nproviders:\n  chatgpt:\n    enabled: true\n    catalog_ttl: 5m\n    fast_mode: true\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSubscriptionDisabledModels(path, "chatgpt", []string{"codex-auto-review"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Providers.ChatGPT.FastMode || !reflect.DeepEqual(loaded.Providers.ChatGPT.DisabledModels, []string{"codex-auto-review"}) {
+		t.Fatalf("chatgpt config = %#v", loaded.Providers.ChatGPT)
+	}
+}
+
+func TestUpdateSkillsSelectionPreservesSettingsAndRemovesEmptyLists(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# keep skills comment\nversion: 1\nskills:\n  enabled: true\n  trust_project: true\n  additional_dirs: [custom-skills]\n  eager: [old]\nworkspace:\n  allow_write: true\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSkillsSelection(path, []string{"verify"}, []string{"old", "simplify"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# keep skills comment") {
+		t.Fatalf("skills update lost the existing comment:\n%s", data)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Skills.Enabled || !loaded.Skills.TrustProject || !loaded.Workspace.AllowWrite ||
+		!reflect.DeepEqual(loaded.Skills.Eager, []string{"verify"}) ||
+		!reflect.DeepEqual(loaded.Skills.Disabled, []string{"old", "simplify"}) {
+		t.Fatalf("persisted skills config = %#v", loaded.Skills)
+	}
+	if err := UpdateSkillsSelection(path, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "eager:") || strings.Contains(string(data), "disabled:") {
+		t.Fatalf("empty skill selections remained in config:\n%s", data)
+	}
+	if err := UpdateSkillsSelection(path, []string{"same"}, []string{"same"}); err == nil {
+		t.Fatal("skill was accepted as both eager and disabled")
+	}
+
+	selectionOnly := filepath.Join(root, "selection-only.yaml")
+	if err := os.WriteFile(selectionOnly, []byte("version: 1\nskills:\n  disabled: [temporary]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSkillsSelection(selectionOnly, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(selectionOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "skills:") {
+		t.Fatalf("empty skills mapping remained after restoring the last disabled skill:\n%s", data)
+	}
+}
+
+func TestUpdateMCPServerPersistsValidatedEntryAndPreservesOtherSettings(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# keep MCP comment\nversion: 1\ndefaults:\n  language: zh-CN\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server, err := UpdateMCPServer(path, "local_docs", MCPServerConfig{
+		Enabled: true, Transport: "stdio", Command: "docs-mcp", Args: []string{"serve"}, Approval: "never",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.ConnectTimeout != "30s" || server.CallTimeout != "60s" || server.MaxConcurrency != 2 {
+		t.Fatalf("normalized MCP defaults = %#v", server)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# keep MCP comment") || !strings.Contains(string(data), "language: zh-CN") {
+		t.Fatalf("MCP update lost unrelated configuration:\n%s", data)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.MCP.Servers["local_docs"]
+	if !got.Enabled || got.Transport != "stdio" || got.Command != "docs-mcp" || !reflect.DeepEqual(got.Args, []string{"serve"}) || got.Approval != "never" {
+		t.Fatalf("persisted MCP server = %#v", got)
+	}
+}
+
+func TestDeleteMCPServerPreservesOtherSettingsAndWritesTombstone(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# keep this comment\nversion: 1\ndefaults:\n  language: zh-CN\nmcp:\n  servers:\n    local_docs:\n      enabled: false\n      transport: stdio\n      command: docs-mcp\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteMCPServer(path, "local_docs"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "removed_servers:") || !strings.Contains(string(data), "- local_docs") {
+		t.Fatalf("MCP deletion tombstone was not persisted:\n%s", data)
+	}
+	if !strings.Contains(string(data), "# keep this comment") || !strings.Contains(string(data), "language: zh-CN") {
+		t.Fatalf("MCP delete lost unrelated configuration:\n%s", data)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loaded.MCP.Servers["local_docs"]; ok {
+		t.Fatalf("deleted MCP server returned after reload: %#v", loaded.MCP.Servers)
+	}
+	if !reflect.DeepEqual(loaded.MCP.RemovedServers, []string{"local_docs"}) {
+		t.Fatalf("removed MCP servers = %#v", loaded.MCP.RemovedServers)
+	}
+}
+
+func TestDeleteBuiltInMCPServerStaysRemovedUntilReadded(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteMCPServer(path, "grep"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := loaded.MCP.Servers["grep"]; exists {
+		t.Fatal("deleted built-in MCP server reappeared")
+	}
+	server := builtInMCPServers()["grep"]
+	if _, err := UpdateMCPServer(path, "grep", server); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := loaded.MCP.Servers["grep"]; !exists || len(loaded.MCP.RemovedServers) != 0 {
+		t.Fatalf("re-added built-in MCP = %#v removed=%#v", loaded.MCP.Servers, loaded.MCP.RemovedServers)
+	}
+}
+
 func TestUpdateModelRoutePreservesYAMLAndDeletesOnlyRouteScalars(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -268,6 +456,24 @@ func TestUpdateLLMuxProviderMigratesLegacyUnderscoreID(t *testing.T) {
 	}
 	if strings.Contains(string(data), "alibaba_coding_plan") || !strings.Contains(string(data), "alibaba-coding-plan") {
 		t.Fatalf("legacy provider ID was not migrated:\n%s", data)
+	}
+}
+
+func TestUpdateLLMuxProviderMigratesLegacyOpenCodeID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := "providers:\n  llmux:\n    opencode:\n      enabled: false\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateLLMuxProvider(path, "opencode", LLMuxProviderConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "    opencode:") || !strings.Contains(string(data), "opencode-zen:") {
+		t.Fatalf("legacy OpenCode provider ID was not migrated:\n%s", data)
 	}
 }
 
@@ -394,6 +600,75 @@ func TestUpdatePlanModelRoutePersistsAndResets(t *testing.T) {
 	}
 }
 
+func TestUpdateApprovalModelRoutePersistsAndResets(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n# keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "deepseek", Model: "deepseek-v4-flash", Reasoning: "high"}
+	if err := UpdateModelRoute(path, "approval", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Approval != route {
+		t.Fatalf("approval route = %#v, error=%v", loaded.Agents.Approval, err)
+	}
+	if err := ResetModelRoute(path, "approval", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Approval != (ModelRouteConfig{}) {
+		t.Fatalf("reset approval route = %#v, error=%v", loaded.Agents.Approval, err)
+	}
+}
+
+func TestUpdateVisionModelRoutePersistsAndResets(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n# keep vision route comment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "openrouter", Model: "google/gemini-vision", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "vision", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Vision != route {
+		t.Fatalf("vision route = %#v, error=%v", loaded.Agents.Vision, err)
+	}
+	if err := ResetModelRoute(path, "vision", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Vision != (ModelRouteConfig{}) {
+		t.Fatalf("reset vision route = %#v, error=%v", loaded.Agents.Vision, err)
+	}
+}
+
+func TestUpdateRecapModelRoutePersistsAndResets(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n# keep recap route comment\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "deepseek", Model: "deepseek-v4-flash", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "recap", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Recap != route {
+		t.Fatalf("recap route = %#v, error=%v", loaded.Agents.Recap, err)
+	}
+	if err := ResetModelRoute(path, "recap", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Recap != (ModelRouteConfig{}) {
+		t.Fatalf("reset recap route = %#v, error=%v", loaded.Agents.Recap, err)
+	}
+}
+
 func TestUpdateTitleModelRoutePersistsAndResetsToInherited(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -421,7 +696,8 @@ func TestPhase3ContextDefaultsAndValidation(t *testing.T) {
 	defaults := Default().Agents.Context
 	if !defaults.Enabled || defaults.TargetRatio != .45 || defaults.SoftTriggerRatio != .68 ||
 		defaults.HardTriggerRatio != .82 || !defaults.BackgroundPrepare ||
-		defaults.ReserveOutputTokens != 16384 || defaults.ReserveReasoningTokens != 8192 {
+		defaults.ReserveOutputTokens != 16384 || defaults.ReserveReasoningTokens != 8192 ||
+		defaults.MaxSummaryTokens != 32768 {
 		t.Fatalf("defaults=%+v", defaults)
 	}
 	for _, mutate := range []func(*ContextConfig){
@@ -556,7 +832,7 @@ func TestDefaultIncludesBuiltInGrepMCPServer(t *testing.T) {
 	if !ok {
 		t.Fatal("default config omitted built-in grep MCP server")
 	}
-	if !server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" || server.Approval != "never" {
+	if !server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" || server.Approval != "never" || !server.Managed {
 		t.Fatalf("built-in grep MCP server = %#v", server)
 	}
 	override, ok := server.ToolOverrides["searchGitHub"]
@@ -580,7 +856,7 @@ func TestLoadCanOverrideBuiltInGrepMCPServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := cfg.MCP.Servers["grep"]
-	if server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" {
+	if server.Enabled || server.Transport != "streamable_http" || server.URL != "https://mcp.grep.app" || !server.Managed {
 		t.Fatalf("disabled built-in grep MCP server = %#v", server)
 	}
 	if local := cfg.MCP.Servers["local"]; local.Command != "local-mcp" {
@@ -645,11 +921,12 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		t.Fatalf("main agent budget = %#v", cfg.Agents.Main)
 	}
 	subagents := cfg.Agents.Subagents
-	if !subagents.Enabled || subagents.MaxDepth != 1 || subagents.MaxConcurrency != 2 ||
+	if !subagents.Enabled || subagents.MaxDepth != 2 || subagents.MaxConcurrency != 32 ||
 		subagents.AwaitDuration != 10*time.Minute || !subagents.AutoWake {
 		t.Fatalf("subagent defaults = %#v", subagents)
 	}
-	if subagents.Budget.MaxTokens != 0 || subagents.Budget.MaxToolCalls != 0 ||
+	if subagents.Budget.SoftRequests != 200 || !subagents.Budget.SoftRequestNotice ||
+		subagents.Budget.MaxTokens != 0 || subagents.Budget.MaxToolCalls != 0 ||
 		subagents.Budget.MaxTurns != 0 || subagents.Budget.MaxWallClockDuration != 0 {
 		t.Fatalf("subagent budget = %#v", subagents.Budget)
 	}
@@ -667,15 +944,20 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	}
 
 	invalid := Default()
-	invalid.Agents.Subagents.MaxDepth = 2
+	invalid.Agents.Subagents.MaxDepth = -2
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("invalid max_depth was accepted")
 	}
 	invalid = Default()
+	invalid.Agents.Subagents.MaxConcurrency = -1
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative max_concurrency was accepted")
+	}
+	invalid = Default()
 	invalid.Agents.Subagents.AwaitTimeout = "30m"
 	invalid.Agents.Subagents.Budget.MaxWallClock = "20m"
-	if err := invalid.Validate(); err == nil {
-		t.Fatal("await timeout beyond wall-clock budget was accepted")
+	if err := invalid.Validate(); err != nil {
+		t.Fatalf("foreground wait window was incorrectly treated as a task runtime limit: %v", err)
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.Budget.MaxTokens = -1
@@ -686,6 +968,11 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid.Agents.Subagents.Budget.MaxToolCalls = -1
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("negative tool-call budget was accepted")
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.Budget.SoftRequests = -1
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative soft request budget was accepted")
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.Budget.MaxTurns = -1
@@ -1164,8 +1451,46 @@ func TestUpdateSubagentMaxConcurrencyPreservesConfig(t *testing.T) {
 	if !strings.Contains(string(updated), "# keep this comment") || !strings.Contains(string(updated), "max_concurrency: 6") || !strings.Contains(string(updated), "language: zh-CN") {
 		t.Fatalf("updated config:\n%s", updated)
 	}
-	if err := UpdateSubagentMaxConcurrency(path, 0); err == nil {
-		t.Fatal("zero concurrency was accepted")
+	if err := UpdateSubagentMaxConcurrency(path, 0); err != nil {
+		t.Fatalf("unbounded concurrency was rejected: %v", err)
+	}
+	if err := UpdateSubagentMaxConcurrency(path, -1); err == nil {
+		t.Fatal("negative concurrency was accepted")
+	}
+}
+
+func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "version: 1\n# capacity comment\nworkspace:\n  shell:\n    max_concurrency: 2\nagents:\n  subagents:\n    await_timeout: 10m\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateShellMaxConcurrency(path, 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSubagentAwaitTimeout(path, 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSubagentMaxDepth(path, -1); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(updated)
+	if !strings.Contains(text, "# capacity comment") || !strings.Contains(text, "max_concurrency: 4") || !strings.Contains(text, "max_depth: -1") || !strings.Contains(text, "await_timeout: 30s") {
+		t.Fatalf("updated config:\n%s", updated)
+	}
+	if err := UpdateShellMaxConcurrency(path, 0); err == nil {
+		t.Fatal("zero shell concurrency was accepted")
+	}
+	if err := UpdateSubagentAwaitTimeout(path, 4); err == nil {
+		t.Fatal("too-short await timeout was accepted")
+	}
+	if err := UpdateSubagentMaxDepth(path, -2); err == nil {
+		t.Fatal("invalid recursive depth was accepted")
 	}
 }
 

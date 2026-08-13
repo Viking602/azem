@@ -36,8 +36,11 @@ const (
 	ActionNewSession             = app.ActionNewSession
 	ActionListSessions           = app.ActionListSessions
 	ActionResumeSession          = app.ActionResumeSession
+	ActionRefreshSession         = app.ActionRefreshSession
 	ActionCompact                = app.ActionCompact
 	ActionResolveApproval        = app.ActionResolveApproval
+	ActionResolveUserInput       = app.ActionResolveUserInput
+	ActionResolvePlan            = app.ActionResolvePlan
 	ActionSetApprovalMode        = app.ActionSetApprovalMode
 	ActionSetLanguage            = app.ActionSetLanguage
 	ActionReconcileAttempt       = app.ActionReconcileAttempt

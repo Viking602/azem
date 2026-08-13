@@ -907,6 +907,15 @@ func (s *Service) ActiveShellExecutions() []ShellExecutionSnapshot {
 	return s.shellRuntime.snapshot()
 }
 
+// UpdateShellMaxConcurrency changes the foreground shell admission limit for
+// new calls without interrupting commands that are already running.
+func (s *Service) UpdateShellMaxConcurrency(maxConcurrency int) {
+	if s == nil || s.shellRuntime == nil || maxConcurrency < 1 {
+		return
+	}
+	s.shellRuntime.updateMaxConcurrency(maxConcurrency)
+}
+
 func scopeForCall(definition tool.Definition, call tool.Call) invocationScope {
 	target := normalizedTarget(call.Arguments)
 	if target == "" {

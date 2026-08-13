@@ -119,7 +119,12 @@ func (r Runner) Run(ctx context.Context, c Command, e Envelope) (result RunResul
 	if len(c.Args) > 0 {
 		cmd = exec.CommandContext(ctx, c.RawCommand, c.Args...)
 	} else if c.Shell == "powershell" {
-		cmd = exec.CommandContext(ctx, "pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", c.RawCommand)
+		powershell := powerShell()
+		if powershell == "" {
+			result.Failure = errors.New("powershell hook requires PowerShell")
+			return result
+		}
+		cmd = exec.CommandContext(ctx, powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", c.RawCommand)
 	} else if runtime.GOOS == "windows" {
 		bash := windowsBash()
 		if bash == "" {
@@ -141,6 +146,9 @@ func (r Runner) Run(ctx context.Context, c Command, e Envelope) (result RunResul
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	env := append(os.Environ(), r.Environment...)
+	for key, value := range c.Environment {
+		env = append(env, key+"="+value)
+	}
 	env = append(env, "AZEM_HOOK_EVENT="+string(e.HookEventName), "AZEM_HOOK_NAME="+c.Name, "AZEM_SESSION_ID="+e.SessionID, "AZEM_RUN_ID="+e.RunID, "AZEM_AGENT_ID="+e.AgentID, "AZEM_WORKSPACE_ROOT="+r.Workspace, "CLAUDE_PROJECT_DIR="+r.Workspace)
 	cmd.Env = env
 	err = cmd.Run()
@@ -221,6 +229,19 @@ func windowsBash() string {
 	}
 	for _, path := range []string{`C:\Program Files\Git\bin\bash.exe`, `C:\Program Files\Git\usr\bin\bash.exe`} {
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	return ""
+}
+
+func powerShell() string {
+	candidates := []string{"pwsh"}
+	if runtime.GOOS == "windows" {
+		candidates = []string{"pwsh.exe", "powershell.exe"}
+	}
+	for _, candidate := range candidates {
+		if path, err := exec.LookPath(candidate); err == nil {
 			return path
 		}
 	}

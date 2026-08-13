@@ -49,12 +49,14 @@ type ShellExecutionSnapshot struct {
 
 type shellRuntime struct {
 	ctx     context.Context
-	sem     chan struct{}
 	mu      sync.Mutex
 	wg      sync.WaitGroup
 	active  map[string]ShellExecutionSnapshot
 	opts    ShellOptions
 	closing bool
+	running int
+	limit   int
+	changed chan struct{}
 }
 
 func newShellRuntime(ctx context.Context, opts ShellOptions) *shellRuntime {
@@ -72,7 +74,7 @@ func newShellRuntime(ctx context.Context, opts ShellOptions) *shellRuntime {
 	if opts.MaxWallClockDuration <= 0 {
 		opts.MaxWallClockDuration = defaults.MaxWallClockDuration
 	}
-	return &shellRuntime{ctx: ctx, sem: make(chan struct{}, opts.MaxConcurrency), active: map[string]ShellExecutionSnapshot{}, opts: opts}
+	return &shellRuntime{ctx: ctx, active: map[string]ShellExecutionSnapshot{}, opts: opts, limit: opts.MaxConcurrency, changed: make(chan struct{})}
 }
 
 func (r *shellRuntime) snapshot() []ShellExecutionSnapshot {
@@ -98,7 +100,57 @@ func (r *shellRuntime) begin() bool {
 func (r *shellRuntime) shutdown() {
 	r.mu.Lock()
 	r.closing = true
+	r.signalChangedLocked()
 	r.mu.Unlock()
+}
+
+func (r *shellRuntime) acquire(ctx context.Context) error {
+	for {
+		r.mu.Lock()
+		if r.closing {
+			r.mu.Unlock()
+			return fmt.Errorf("service shutting down")
+		}
+		if r.running < r.limit {
+			r.running++
+			r.mu.Unlock()
+			return nil
+		}
+		changed := r.changed
+		r.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-r.ctx.Done():
+			return fmt.Errorf("service shutting down")
+		case <-changed:
+		}
+	}
+}
+
+func (r *shellRuntime) release() {
+	r.mu.Lock()
+	if r.running > 0 {
+		r.running--
+	}
+	r.signalChangedLocked()
+	r.mu.Unlock()
+}
+
+func (r *shellRuntime) updateMaxConcurrency(maxConcurrency int) {
+	if maxConcurrency < 1 {
+		return
+	}
+	r.mu.Lock()
+	r.limit = maxConcurrency
+	r.opts.MaxConcurrency = maxConcurrency
+	r.signalChangedLocked()
+	r.mu.Unlock()
+}
+
+func (r *shellRuntime) signalChangedLocked() {
+	close(r.changed)
+	r.changed = make(chan struct{})
 }
 
 type shellDriver struct {
@@ -160,9 +212,13 @@ func newRuntimeShellDriver(root, approval, allowNetwork string, runtime *shellRu
 
 func (d *shellDriver) Definition() tool.Definition {
 	additional := false
+	description := "Run a foreground command. timeout_seconds is the maximum interval without stdout/stderr output; active output extends that interval, but every command has an independent 10-minute wall-clock limit. Detached/background processes are not permitted."
+	if runtime.GOOS == "windows" {
+		description += " Commands use PowerShell on Windows."
+	}
 	return tool.Definition{
 		Name:        ToolShell,
-		Description: "Run a foreground command. timeout_seconds is the maximum interval without stdout/stderr output; active output extends that interval, but every command has an independent 10-minute wall-clock limit. Detached/background processes are not permitted.",
+		Description: description,
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{
@@ -178,12 +234,16 @@ func (d *shellDriver) Definition() tool.Definition {
 		RequiresActionTask: true,
 		RiskLevel:          "high",
 		PolicyTags:         []string{"coding", "shell", "workspace"},
-		Metadata:           map[string]string{"approval": d.approval, "network": d.allowNetwork},
+		Metadata:           map[string]string{"approval": d.approval, "network": d.allowNetwork, "platform": runtime.GOOS},
 	}
 }
 
 // rejectDetached is defense in depth. Process-group/job ownership is the actual boundary.
 func rejectDetached(command string) bool {
+	return rejectDetachedForOS(command, runtime.GOOS)
+}
+
+func rejectDetachedForOS(command, goos string) bool {
 	var quote byte
 	escaped := false
 	for index := 0; index < len(command); index++ {
@@ -207,6 +267,11 @@ func rejectDetached(command string) bool {
 			continue
 		}
 		if current == '&' {
+			// PowerShell uses & as its foreground invocation operator. The Windows
+			// Job Object remains the process-tree containment boundary.
+			if goos == "windows" {
+				continue
+			}
 			if index+1 < len(command) && command[index+1] == '&' {
 				index++
 				continue
@@ -222,6 +287,18 @@ func rejectDetached(command string) bool {
 		}
 	}
 	return false
+}
+
+func shellCommand(command string) *exec.Cmd {
+	if runtime.GOOS != "windows" {
+		return exec.Command("/bin/sh", "-c", command)
+	}
+	for _, name := range []string{"pwsh.exe", "powershell.exe"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return exec.Command(path, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command)
+		}
+	}
+	return exec.Command("cmd.exe", "/d", "/s", "/c", command)
 }
 
 func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
@@ -242,14 +319,10 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	if input.Network && d.allowNetwork == "deny" {
 		return shellError(call, "network access is disabled by workspace.allow_network"), nil
 	}
-	select {
-	case d.runtime.sem <- struct{}{}:
-		defer func() { <-d.runtime.sem }()
-	case <-ctx.Done():
-		return shellError(call, ctx.Err().Error()), nil
-	case <-d.runtime.ctx.Done():
-		return shellError(call, "service shutting down"), nil
+	if err := d.runtime.acquire(ctx); err != nil {
+		return shellError(call, err.Error()), nil
 	}
+	defer d.runtime.release()
 	if ctx.Err() != nil || d.runtime.ctx.Err() != nil {
 		return shellError(call, "command cancelled before start"), nil
 	}
@@ -264,12 +337,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 		}
 		inactivityTimeout = time.Duration(input.TimeoutSeconds) * time.Second
 	}
-	var command *exec.Cmd
-	if runtime.GOOS == "windows" {
-		command = exec.Command("cmd.exe", "/d", "/s", "/c", input.Command)
-	} else {
-		command = exec.Command("/bin/sh", "-c", input.Command)
-	}
+	command := shellCommand(input.Command)
 	supervisor, ownerErr := newShellSupervisor(command)
 	if ownerErr != nil {
 		return shellError(call, "prepare process owner: "+ownerErr.Error()), nil

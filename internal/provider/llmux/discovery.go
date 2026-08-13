@@ -13,6 +13,7 @@ import (
 	sdk "github.com/Viking602/llmux"
 	"github.com/Viking602/llmux/provider/openai"
 
+	"github.com/Viking602/azem/internal/netproxy"
 	"github.com/Viking602/azem/internal/provider/catalog"
 )
 
@@ -29,7 +30,8 @@ type DiscoveryConfig struct {
 func DiscoverModels(ctx context.Context, config DiscoveryConfig) ([]catalog.Model, string, string, error) {
 	client := config.Client
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+		client = netproxy.NewHTTPClient(20 * time.Second)
+		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	}
 	models, providerErr := fetchProviderModels(ctx, client, config)
 	modelsDevURL := strings.TrimSpace(config.ModelsDevURL)

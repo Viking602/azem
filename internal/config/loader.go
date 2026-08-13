@@ -72,7 +72,7 @@ func UpdateDefault(path, key, value string) error {
 
 // UpdateModelRoute atomically updates a nested model route while preserving
 // unrelated YAML fields and comments. Supported scopes are "title", "plan",
-// "compaction", and "subagent"; role is required only for the latter.
+// "approval", "vision", "compaction", "recap", and "subagent"; role is required only for the latter.
 func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	keys := []string{"agents"}
 	switch scope {
@@ -86,11 +86,26 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 			return fmt.Errorf("role is not valid for plan route")
 		}
 		keys = append(keys, "plan")
+	case "approval":
+		if role != "" {
+			return fmt.Errorf("role is not valid for approval route")
+		}
+		keys = append(keys, "approval")
+	case "vision":
+		if role != "" {
+			return fmt.Errorf("role is not valid for vision route")
+		}
+		keys = append(keys, "vision")
 	case "compaction":
 		if role != "" {
 			return fmt.Errorf("role is not valid for compaction route")
 		}
 		keys = append(keys, "compaction")
+	case "recap":
+		if role != "" {
+			return fmt.Errorf("role is not valid for recap route")
+		}
+		keys = append(keys, "recap")
 	case "subagent":
 		if strings.TrimSpace(role) == "" {
 			return fmt.Errorf("role is required for subagent route")
@@ -104,10 +119,10 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	}
 	return updateYAML(path, func(root *yaml.Node) {
 		mapping := ensureMappingPath(root, keys...)
-		persistInheritedTitle := scope == "title" && route == (ModelRouteConfig{})
+		persistInheritedRoute := (scope == "title" || scope == "approval" || scope == "recap") && route == (ModelRouteConfig{})
 		for key, value := range map[string]string{"provider": route.Provider, "model": route.Model, "reasoning": route.Reasoning} {
 			if strings.TrimSpace(value) == "" {
-				if persistInheritedTitle {
+				if persistInheritedRoute {
 					setMappingScalar(mapping, key, "")
 				} else {
 					deleteMappingValue(mapping, key)
@@ -156,13 +171,45 @@ func ResetModelRoute(path, scope, role string) error {
 }
 
 func UpdateSubagentMaxConcurrency(path string, maxConcurrency int) error {
-	if maxConcurrency < 1 {
-		return fmt.Errorf("agents.subagents.max_concurrency must be positive")
+	if maxConcurrency < 0 {
+		return fmt.Errorf("agents.subagents.max_concurrency must be non-negative")
 	}
 	return updateYAML(path, func(root *yaml.Node) {
 		subagents := ensureMappingPath(root, "agents", "subagents")
 		setMappingScalar(subagents, "max_concurrency", strconv.Itoa(maxConcurrency))
 		mappingValue(subagents, "max_concurrency").Tag = "!!int"
+	})
+}
+
+func UpdateSubagentMaxDepth(path string, maxDepth int) error {
+	if maxDepth < -1 {
+		return fmt.Errorf("agents.subagents.max_depth must be -1 or non-negative")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		subagents := ensureMappingPath(root, "agents", "subagents")
+		setMappingScalar(subagents, "max_depth", strconv.Itoa(maxDepth))
+		mappingValue(subagents, "max_depth").Tag = "!!int"
+	})
+}
+
+func UpdateShellMaxConcurrency(path string, maxConcurrency int) error {
+	if maxConcurrency < 1 {
+		return fmt.Errorf("workspace.shell.max_concurrency must be positive")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		shell := ensureMappingPath(root, "workspace", "shell")
+		setMappingScalar(shell, "max_concurrency", strconv.Itoa(maxConcurrency))
+		mappingValue(shell, "max_concurrency").Tag = "!!int"
+	})
+}
+
+func UpdateSubagentAwaitTimeout(path string, seconds int) error {
+	if seconds < 5 || seconds > 3600 {
+		return fmt.Errorf("agents.subagents.await_timeout must be between 5 and 3600 seconds")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		subagents := ensureMappingPath(root, "agents", "subagents")
+		setMappingScalar(subagents, "await_timeout", fmt.Sprintf("%ds", seconds))
 	})
 }
 
@@ -172,6 +219,176 @@ func UpdateChatGPTFastMode(path string, enabled bool) error {
 		setMappingScalar(chatGPT, "fast_mode", strconv.FormatBool(enabled))
 		mappingValue(chatGPT, "fast_mode").Tag = "!!bool"
 	})
+}
+
+func UpdateSubscriptionDisabledModels(path, provider string, models []string) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "chatgpt" && provider != "grok" {
+		return fmt.Errorf("subscription provider must be chatgpt or grok")
+	}
+	if err := validateDisabledModels(provider, models); err != nil {
+		return err
+	}
+	var encoded yaml.Node
+	if err := encoded.Encode(models); err != nil {
+		return fmt.Errorf("encode disabled models: %w", err)
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		entry := ensureMappingPath(root, "providers", provider)
+		deleteMappingValue(entry, "disabled_models")
+		if len(models) > 0 {
+			entry.Content = append(entry.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "disabled_models"}, &encoded)
+		}
+	})
+}
+
+// UpdateSkillsSelection atomically persists the eager and disabled skill sets
+// while preserving every unrelated user setting and YAML comment.
+func UpdateSkillsSelection(path string, eager, disabled []string) error {
+	candidate := Default()
+	candidate.Skills.Eager = append([]string(nil), eager...)
+	candidate.Skills.Disabled = append([]string(nil), disabled...)
+	if err := candidate.validateSkills(); err != nil {
+		return err
+	}
+	eager = append([]string(nil), eager...)
+	disabled = append([]string(nil), disabled...)
+	slices.Sort(eager)
+	slices.Sort(disabled)
+	var eagerNode, disabledNode yaml.Node
+	if err := eagerNode.Encode(eager); err != nil {
+		return fmt.Errorf("encode eager skills: %w", err)
+	}
+	if err := disabledNode.Encode(disabled); err != nil {
+		return fmt.Errorf("encode disabled skills: %w", err)
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		skills := mappingValue(root, "skills")
+		if skills == nil && len(eager)+len(disabled) == 0 {
+			return
+		}
+		if skills == nil {
+			skills = ensureMappingPath(root, "skills")
+		}
+		deleteMappingValue(skills, "eager")
+		deleteMappingValue(skills, "disabled")
+		if len(eager) > 0 {
+			skills.Content = append(skills.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "eager"}, &eagerNode)
+		}
+		if len(disabled) > 0 {
+			skills.Content = append(skills.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "disabled"}, &disabledNode)
+		}
+		if len(skills.Content) == 0 {
+			deleteMappingValue(root, "skills")
+		}
+	})
+}
+
+// UpdateCodexPluginImports persists the explicit set of Codex plugins the user
+// chose to copy into Azem. Discovery alone never implies import.
+func UpdateCodexPluginImports(path string, pluginIDs []string) error {
+	candidate := Default()
+	candidate.Plugins.CodexImports = append([]string(nil), pluginIDs...)
+	if err := candidate.Validate(); err != nil {
+		return err
+	}
+	pluginIDs = candidate.Plugins.CodexImports
+	return updateYAML(path, func(root *yaml.Node) {
+		pluginsNode := ensureMappingPath(root, "plugins")
+		deleteMappingValue(pluginsNode, "codex_imports")
+		if len(pluginIDs) == 0 {
+			return
+		}
+		var encoded yaml.Node
+		_ = encoded.Encode(pluginIDs)
+		pluginsNode.Content = append(pluginsNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "codex_imports"}, &encoded)
+	})
+}
+
+// UpdateMCPServer atomically stores one validated MCP server without rewriting
+// unrelated configuration sections. The complete entry is persisted so user,
+// built-in, and plugin-provided servers share one restart-safe representation.
+func UpdateMCPServer(path, name string, server MCPServerConfig) (MCPServerConfig, error) {
+	normalized, err := NormalizeMCPServer(name, server)
+	if err != nil {
+		return MCPServerConfig{}, err
+	}
+	var encoded yaml.Node
+	if err := encoded.Encode(normalized); err != nil {
+		return MCPServerConfig{}, fmt.Errorf("encode MCP server: %w", err)
+	}
+	err = updateYAML(path, func(root *yaml.Node) {
+		mcpNode := ensureMappingPath(root, "mcp")
+		servers := ensureMappingPath(mcpNode, "servers")
+		deleteMappingValue(servers, name)
+		servers.Content = append(servers.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: name}, &encoded)
+		removeMCPServerTombstone(mcpNode, name)
+	})
+	if err != nil {
+		return MCPServerConfig{}, err
+	}
+	return normalized, nil
+}
+
+// DeleteMCPServer atomically removes one MCP definition and records an explicit
+// tombstone. The tombstone prevents built-in and plugin catalogs from silently
+// recreating a service after restart.
+func DeleteMCPServer(path, name string) error {
+	name = strings.TrimSpace(name)
+	if !mcpServerNamePattern.MatchString(name) {
+		return fmt.Errorf("mcp server name %q must match [a-z0-9_-]+", name)
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		mcpNode := ensureMappingPath(root, "mcp")
+		servers := mappingValue(mcpNode, "servers")
+		if servers != nil {
+			deleteMappingValue(servers, name)
+			if len(servers.Content) == 0 {
+				deleteMappingValue(mcpNode, "servers")
+			}
+		}
+		removed := mcpServerTombstones(mcpNode)
+		if !slices.Contains(removed, name) {
+			removed = append(removed, name)
+		}
+		slices.Sort(removed)
+		var encoded yaml.Node
+		_ = encoded.Encode(removed)
+		deleteMappingValue(mcpNode, "removed_servers")
+		mcpNode.Content = append(mcpNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "removed_servers"}, &encoded)
+	})
+}
+
+func removeMCPServerTombstone(mcpNode *yaml.Node, name string) {
+	removed := mcpServerTombstones(mcpNode)
+	kept := removed[:0]
+	for _, candidate := range removed {
+		if candidate != name {
+			kept = append(kept, candidate)
+		}
+	}
+	deleteMappingValue(mcpNode, "removed_servers")
+	if len(kept) == 0 {
+		return
+	}
+	slices.Sort(kept)
+	var encoded yaml.Node
+	_ = encoded.Encode(kept)
+	mcpNode.Content = append(mcpNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "removed_servers"}, &encoded)
+}
+
+func mcpServerTombstones(mcpNode *yaml.Node) []string {
+	removedNode := mappingValue(mcpNode, "removed_servers")
+	if removedNode == nil || removedNode.Kind != yaml.SequenceNode {
+		return nil
+	}
+	removed := make([]string, 0, len(removedNode.Content))
+	for _, item := range removedNode.Content {
+		if item.Kind == yaml.ScalarNode && strings.TrimSpace(item.Value) != "" {
+			removed = append(removed, strings.TrimSpace(item.Value))
+		}
+	}
+	return removed
 }
 
 func UpdateLLMuxProvider(path, id string, provider LLMuxProviderConfig) error {
@@ -187,6 +404,9 @@ func UpdateLLMuxProvider(path, id string, provider LLMuxProviderConfig) error {
 		providers := ensureMappingPath(root, "providers", "llmux")
 		deleteMappingValue(providers, id)
 		deleteMappingValue(providers, strings.ReplaceAll(id, "-", "_"))
+		if id == "opencode-zen" {
+			deleteMappingValue(providers, "opencode")
+		}
 		providers.Content = append(providers.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: id}, &encoded)
 	})
 }
@@ -427,15 +647,28 @@ func load(path string, startupWorkspace string, forceWorkspace bool) (Config, er
 func mergeBuiltInMCPServers(cfg *Config, root *yaml.Node) error {
 	builtIns := builtInMCPServers()
 	merged := make(map[string]MCPServerConfig, len(builtIns)+len(cfg.MCP.Servers))
+	removed := make(map[string]struct{}, len(cfg.MCP.RemovedServers))
+	for _, name := range cfg.MCP.RemovedServers {
+		removed[strings.TrimSpace(name)] = struct{}{}
+	}
 	for name, server := range builtIns {
+		if _, suppressed := removed[name]; suppressed {
+			continue
+		}
 		merged[name] = server
 	}
 	for name, server := range cfg.MCP.Servers {
+		if _, suppressed := removed[name]; suppressed {
+			continue
+		}
 		merged[name] = server
 	}
 	mcpNode := mappingValue(root, "mcp")
 	serversNode := mappingValue(mcpNode, "servers")
 	for name, server := range builtIns {
+		if _, suppressed := removed[name]; suppressed {
+			continue
+		}
 		override := mappingValue(serversNode, name)
 		if override == nil {
 			continue

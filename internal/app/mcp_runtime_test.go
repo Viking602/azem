@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Viking602/venat/message"
+	mcpclient "github.com/Viking602/venat/transport/mcp/client"
 	"github.com/Viking602/venat/transport/mcpcontract"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
@@ -29,6 +32,7 @@ import (
 type appFakeMCPClient struct {
 	calls    atomic.Int32
 	lastTool string
+	callErr  error
 }
 
 func (c *appFakeMCPClient) Initialize(context.Context, string, string) (mcpcontract.InitializeResult, error) {
@@ -42,6 +46,9 @@ func (c *appFakeMCPClient) ListTools(context.Context) ([]message.ToolDefinition,
 func (c *appFakeMCPClient) CallTool(_ context.Context, name string, _ map[string]any) (mcpcontract.CallToolResult, error) {
 	c.calls.Add(1)
 	c.lastTool = name
+	if c.callErr != nil {
+		return mcpcontract.CallToolResult{}, c.callErr
+	}
 	return mcpcontract.CallToolResult{Content: []mcpcontract.ContentBlock{{Type: "text", Text: "remote ok"}}}, nil
 }
 
@@ -93,6 +100,15 @@ func TestRefreshMCPActionWithoutTargetRefreshesConnectedServers(t *testing.T) {
 }
 
 func TestConfiguredTurnSnapshotsAndGovernsMCPTool(t *testing.T) {
+	testConfiguredTurnMCP(t, nil, "Remote status checked.", "remote ok")
+}
+
+func TestConfiguredTurnSurvivesMCPTransportRejection(t *testing.T) {
+	testConfiguredTurnMCP(t, &mcpclient.RPCError{Code: -32005, Message: "rejected by transport"}, "Remote status unavailable; the run continued.", "jsonrpc error -32005: rejected by transport")
+}
+
+func testConfiguredTurnMCP(t *testing.T, callErr error, expectedAnswer, expectedToolResult string) {
+	t.Helper()
 	var responseCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer access" || request.Header.Get("ChatGPT-Account-ID") != "acct" {
@@ -103,11 +119,18 @@ func TestConfiguredTurnSnapshotsAndGovernsMCPTool(t *testing.T) {
 			writer.Header().Set("Content-Type", "application/json")
 			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-mcp","title":"GPT MCP","context_window":128000,"supports_tools":true}]}`))
 		case "/responses":
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Errorf("read provider request: %v", err)
+			}
 			writer.Header().Set("Content-Type", "text/event-stream")
 			if responseCalls.Add(1) == 1 {
 				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"mcp-1\",\"name\":\"mcp__demo__status\",\"arguments\":\"{}\"}}\n\n")
 			} else {
-				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Remote status checked.\"}\n\n")
+				if !strings.Contains(string(body), expectedToolResult) {
+					t.Errorf("follow-up provider request omitted MCP tool result %q: %s", expectedToolResult, body)
+				}
+				_, _ = fmt.Fprintf(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":%q}\n\n", expectedAnswer)
 			}
 			_, _ = fmt.Fprintf(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-%d\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n", responseCalls.Load())
 		default:
@@ -148,7 +171,7 @@ func TestConfiguredTurnSnapshotsAndGovernsMCPTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerRuntime.ChatGPTEndpoint = server.URL + "/responses"
-	client := &appFakeMCPClient{}
+	client := &appFakeMCPClient{callErr: callErr}
 	manager := mcpruntime.NewManager(map[string]config.MCPServerConfig{
 		"demo": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1, Approval: "always"},
 	}, "test", nil, mcpruntime.Options{
@@ -222,7 +245,9 @@ func TestConfiguredTurnSnapshotsAndGovernsMCPTool(t *testing.T) {
 			}
 			approved = true
 		case EventTextDelta:
-			answer += event.Text
+			if event.TextPhase != "commentary" {
+				answer += event.Text
+			}
 		case EventRunFailed:
 			t.Fatalf("run failed: %s", event.Text)
 		case EventRunFinished:
@@ -231,8 +256,11 @@ func TestConfiguredTurnSnapshotsAndGovernsMCPTool(t *testing.T) {
 	}
 
 finished:
-	if !approved || answer != "Remote status checked." || client.calls.Load() != 1 || client.lastTool != "status" {
+	if !approved || answer != expectedAnswer || client.calls.Load() != 1 || client.lastTool != "status" {
 		t.Fatalf("MCP approved=%v answer=%q calls=%d tool=%q", approved, answer, client.calls.Load(), client.lastTool)
+	}
+	if servers := manager.Servers(); len(servers) != 1 || servers[0].State != mcpruntime.StateReady {
+		t.Fatalf("MCP call broke reusable connection: %#v", servers)
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()

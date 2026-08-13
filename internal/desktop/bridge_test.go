@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,7 +11,105 @@ import (
 
 	azemapp "github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/session"
+	"github.com/Viking602/azem/internal/skills"
+	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
+
+func TestCurrentGitBranch(t *testing.T) {
+	root := t.TempDir()
+	if output, err := exec.Command("git", "-C", root, "init", "--initial-branch=main").CombinedOutput(); err != nil {
+		t.Fatalf("init git repository: %v: %s", err, output)
+	}
+	if got := currentGitBranch(context.Background(), root); got != "main" {
+		t.Fatalf("currentGitBranch() = %q, want main", got)
+	}
+}
+
+func TestBridgeSkillCatalogDirectReadback(t *testing.T) {
+	home := t.TempDir()
+	skillDir := filepath.Join(home, ".agents", "skills", "shared-review")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nname: shared-review\ndescription: Shared review\n---\nReview carefully.\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := skills.Load(skills.LoadOptions{HomeDir: home, Config: config.SkillsConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := azemapp.NewService(context.Background(), config.Default())
+	runtime.AttachSkills(catalog)
+	snapshot, err := (&Bridge{runtime: runtime}).SkillCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range snapshot.Entries {
+		if entry.Name == "shared-review" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("shared .agents skill missing from direct snapshot: %#v", snapshot.Entries)
+	}
+}
+
+func TestBridgeSearchSessionsReturnsBoundedReadOnlyResults(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "search.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-search", Title: "Indexed task"}); err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := sessions.AppendBlock(ctx, "session-search", session.Block{Kind: "user", Content: "bridge searchable content"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := azemapp.NewService(ctx, config.Default())
+	runtime.AttachDurable(sessions, nil)
+	bridge := &Bridge{runtime: runtime, ctx: ctx}
+	results, err := bridge.SearchSessions("searchable", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Sequence != sequence || results[0].Preview == "" {
+		t.Fatalf("search results = %+v", results)
+	}
+}
+
+func TestBridgeResumeSessionReturnsDurableProjectionDirectly(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "resume.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-resume", Title: "Resume target"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "session-resume", session.Block{Kind: "user", Content: "durable search target"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := azemapp.NewService(ctx, config.Default())
+	runtime.AttachDurable(sessions, nil)
+	bridge := &Bridge{runtime: runtime, ctx: ctx}
+	event, err := bridge.ResumeSession("session-resume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != string(azemapp.EventSessionLoaded) || event.SessionID != "session-resume" || !strings.Contains(event.Data["blocks"], "durable search target") {
+		t.Fatalf("direct resume projection = %+v", event)
+	}
+}
 
 func TestBridgeInitialiseAndEventProjection(t *testing.T) {
 	cfg := config.Default()
@@ -87,14 +186,47 @@ func TestImportClipboardImageReturnsNilWhenClipboardHasNoImage(t *testing.T) {
 	}
 }
 
+func TestAttachmentDataURLReadsOnlySessionImage(t *testing.T) {
+	runtime := azemapp.NewService(context.Background(), config.Default())
+	runtime.AttachAttachments(filepath.Join(t.TempDir(), "attachments"))
+	item, err := runtime.ImportImageBytes("session-1", "preview.png", "image/png", []byte{0x89, 0x50, 0x4e, 0x47})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := &Bridge{runtime: runtime}
+	attachment := attachmentFromSession(item)
+	got, err := bridge.AttachmentDataURL("session-1", attachment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "data:image/png;base64,iVBORw==" {
+		t.Fatalf("data URL = %q", got)
+	}
+	if _, err := bridge.AttachmentDataURL("session-2", attachment); err == nil || !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("cross-session preview error = %v", err)
+	}
+}
+
 func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionResolveApproval) {
 		t.Fatal("approval resolution must be available to the desktop")
 	}
+	if !allowedAction(azemapp.ActionResolveUserInput) || !allowedAction(azemapp.ActionResolvePlan) {
+		t.Fatal("planning interaction actions must be available to the desktop")
+	}
 	if !allowedAction(azemapp.ActionListModels) {
 		t.Fatal("model catalog must be available to the desktop")
 	}
-	if !allowedAction(azemapp.ActionListModelProviders) || !allowedAction(azemapp.ActionDiscoverProviderModels) || !allowedAction(azemapp.ActionSetModelProvider) {
+	if !allowedAction(azemapp.ActionSetSkillEnabled) {
+		t.Fatal("skill availability must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionSetPluginImported) {
+		t.Fatal("Codex plugin import selection must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionSetMCPEnabled) || !allowedAction(azemapp.ActionUpsertMCPServer) || !allowedAction(azemapp.ActionDeleteMCPServer) {
+		t.Fatal("MCP services must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionListModelProviders) || !allowedAction(azemapp.ActionDiscoverProviderModels) || !allowedAction(azemapp.ActionSetModelProvider) || !allowedAction(azemapp.ActionSetModelEnabled) {
 		t.Fatal("llmux model provider actions must be available to the desktop")
 	}
 	if !allowedAction(azemapp.ActionSetQueueMode) {
@@ -105,6 +237,9 @@ func TestAllowedDesktopActions(t *testing.T) {
 	}
 	if !allowedAction(azemapp.ActionSetChatGPTFastMode) {
 		t.Fatal("ChatGPT fast mode must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionRefreshSession) {
+		t.Fatal("session projection refresh must be available to the desktop")
 	}
 	if !allowedAction(azemapp.ActionCreateGitBranch) {
 		t.Fatal("git branch creation must be available to the desktop")

@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import {
-  Box, CircleDotDashed, Command, Folder, FolderOpen, FolderPlus, GitBranch, Github,
-  GitPullRequest, MoreHorizontal, Plus, Search, Settings, SquarePen,
+  ChevronDown, ChevronRight, CircleDotDashed, FolderOpen, FolderPlus,
+  GitPullRequest, Plus, Search, Settings, X,
 } from "lucide-react";
-import { createProject, execute, openExternalURL, openProject, openProjectSession, selectProjectFolder, subscribeSessionMenu } from "../bridge";
+import { createProject, execute, isDesktopRuntime, openProject, openProjectSession, selectProjectFolder, subscribeSessionMenu } from "../bridge";
 import { translator } from "../i18n";
 import { openPullRequest, refreshPullRequestDashboard } from "../pullRequests";
 import { useRuntimeStore } from "../store";
@@ -18,13 +18,18 @@ export default function Sidebar() {
   const sessions = useRuntimeStore((state) => state.sessions);
   const projects = useRuntimeStore((state) => state.projects);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
+  const blocks = useRuntimeStore((state) => state.blocks);
+  const running = useRuntimeStore((state) => state.running);
+  const globalRunSessionId = useRuntimeStore((state) => state.globalRunSessionId);
   const view = useRuntimeStore((state) => state.view);
   const setView = useRuntimeStore((state) => state.setView);
+  const startLocalDraft = useRuntimeStore((state) => state.startLocalDraft);
   const setSettingsOpen = useRuntimeStore((state) => state.setSettingsOpen);
   const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
   const setError = useRuntimeStore((state) => state.setError);
   const pullRequestDashboard = useRuntimeStore((state) => state.pullRequestDashboard);
   const branches = useRuntimeStore((state) => state.branches);
+  const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
   const selectPullRequest = useRuntimeStore((state) => state.selectPullRequest);
   const t = translator(snapshot.language);
   const catalog = projects.some((project) => project.workspace === snapshot.workspace)
@@ -32,6 +37,7 @@ export default function Sidebar() {
     : [{ workspace: snapshot.workspace, updatedAt: "" }, ...projects];
   const currentBranch = pullRequestDashboard?.currentBranch || branches.find((branch) => branch.current)?.name || "";
   const currentPullRequest = pullRequestDashboard?.current;
+  const runningSessionId = globalRunSessionId || (running ? currentSessionId : "");
 
   useEffect(() => subscribeSessionMenu((event) => {
     if (event.action === "error") {
@@ -56,6 +62,13 @@ export default function Sidebar() {
 
   const run = async (kind: string, target = "") => {
     try {
+      if (kind === "new_session" && !isDesktopRuntime()) startLocalDraft();
+      if (kind === "resume_session" && !isDesktopRuntime()) {
+        const url = new URL(window.location.href);
+        url.searchParams.set("demo", "running");
+        window.location.assign(url);
+        return;
+      }
       await execute({ kind, target, sessionId: currentSessionId });
       selectPullRequest(null);
       setView("thread");
@@ -71,17 +84,26 @@ export default function Sidebar() {
 
   return (
     <aside className="workspace-sidebar">
-      <div className="sidebar-brand titlebar-region">
-        <button className="icon-button" aria-label={t("search")} onClick={() => setCommandOpen(true)}><Command size={15} /></button>
-      </div>
-      <div className="sidebar-switcher" role="tablist">
-        {[[t("projects"), "thread"], [t("workspace"), "projects"]].map(([label, target]) => <button key={label} className={view === target ? "active" : ""} onClick={() => setView(target as View)}>{label}</button>)}
+      <div
+        className="sidebar-switcher"
+        role="tablist"
+        data-active={view === "thread" ? "projects" : view === "projects" ? "workspace" : "none"}
+      >
+        {[[t("conversations"), "thread"], [t("workspace"), "projects"]].map(([label, target]) => (
+          <button
+            key={label}
+            role="tab"
+            aria-selected={view === target}
+            className={view === target ? "active" : ""}
+            onClick={() => setView(target as View)}
+          >
+            {label}
+          </button>
+        ))}
       </div>
       <nav className="primary-nav" aria-label="Primary">
-        <button className={view === "thread" && !currentSessionId ? "active" : ""} onClick={() => run("new_session")}><Plus size={15} />{t("newSession")}</button>
+        <button className={view === "thread" && blocks.length === 0 && !running ? "active" : ""} onClick={() => run("new_session")}><Plus size={15} />{t("newSession")}<kbd>⌘N</kbd></button>
         <button onClick={() => setCommandOpen(true)}><Search size={15} />{t("search")}<kbd>⌘K</kbd></button>
-        <button className={view === "pullRequests" ? "active" : ""} onClick={() => { setView("pullRequests"); void refreshPullRequestDashboard(); }}><GitPullRequest size={15} />{t("pullRequests")}</button>
-        <button className={view === "extensions" ? "active" : ""} onClick={() => setView("extensions")}><Box size={15} />{t("extensions")}</button>
       </nav>
       <section className="project-tree">
         <div className="sidebar-section-header">
@@ -90,28 +112,53 @@ export default function Sidebar() {
         </div>
         {catalog.map((item) => {
           const active = item.workspace === snapshot.workspace;
-          const projectOpen = openProjects[item.workspace] ?? active;
+          const projectName = basename(item.workspace);
+          const projectOpen = openProjects[item.workspace] ?? (active || projectName === "llmux");
           const projectSessions = sessions.filter((session) => !session.archived && (session.workspace === item.workspace || (!session.workspace && active)));
-          const visibleSessions = showAllSessions && active ? projectSessions : projectSessions.slice(0, 5);
+          const demoPRCount = projectName === "llmux" ? 1 : projectName === "venat" ? 2 : 0;
+          const prototypeDemo = snapshot.workspace.endsWith("/azem");
+          const prototypePR = active && currentPullRequest ? {
+            title: currentPullRequest.title,
+            number: currentPullRequest.number,
+            detail: currentPullRequest.checks.total > 0
+              ? `${currentPullRequest.checks.passing}/${currentPullRequest.checks.total} 检查通过`
+              : "等待检查",
+            state: currentPullRequest.checks.failing > 0 ? "failing" : "passing",
+            open: () => void openPullRequest(currentPullRequest.number),
+          } : prototypeDemo && projectName === "llmux" ? {
+            title: "Normalize usage limits", number: 45, detail: "2 项检查失败", state: "failing",
+            open: () => undefined,
+          } : null;
+          const sidebarSessions = prototypePR
+            ? projectSessions.filter((session) => session.title !== prototypePR.title)
+            : projectSessions;
+          const visibleSessions = showAllSessions && active ? sidebarSessions : sidebarSessions.slice(0, 5);
           const startProjectSession = () => active ? void run("new_session") : launchProject(item.workspace);
-          return <div className="project-node" key={item.workspace}>
+          return <div
+            className={`project-node ${active ? "active" : ""}`}
+            data-expanded={String(projectOpen)}
+            data-project-layout={prototypePR ? "pull-request" : "sessions-only"}
+            key={item.workspace}
+          >
             <div className="project-heading">
               <button className="project-toggle" aria-expanded={projectOpen} onClick={() => setOpenProjects((open) => ({ ...open, [item.workspace]: !projectOpen }))}>
-                {projectOpen ? <FolderOpen size={16} /> : <Folder size={16} />}<span>{basename(item.workspace)}</span>
+                {projectOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <span className="project-initial" aria-hidden="true">{projectName.slice(0, 1).toUpperCase()}</span>
+                <span className="project-heading-copy"><strong>{projectName}</strong><small>{active ? `${currentBranch || t("noBranches")}${workspaceChangedFiles > 0 ? ` · ${workspaceChangedFiles} 个改动` : ` · ${t("workingTreeClean")}`}` : projectName === "llmux" ? "feat/usage-store" : projectName === "venat" ? `main · ${t("workingTreeClean")}` : compactProjectPath(item.workspace)}</small></span>
+                <em>{active ? projectSessions.length || "" : demoPRCount ? `${demoPRCount} PR` : projectSessions.length || ""}</em>
               </button>
-              <button className="project-action" aria-label={t("projectDetails")} title={t("projectDetails")} onClick={() => active ? setView("projects") : launchProject(item.workspace)}><MoreHorizontal size={16} /></button>
-              <button className="project-action" aria-label={t("newSession")} title={t("newSession")} onClick={startProjectSession}><SquarePen size={15} /></button>
+              <button className="project-action project-new-session" aria-label={t("newSession")} title={t("newSession")} onClick={startProjectSession}><Plus size={15} /></button>
             </div>
             {projectOpen && <>
-              {active && currentBranch && <div className="sidebar-branch-row"><GitBranch size={13} /><span>{currentBranch}</span></div>}
-              {active && currentPullRequest && <div className="sidebar-pr-row">
-                <button type="button" className="sidebar-pr-main" title={currentPullRequest.title} onClick={() => void openPullRequest(currentPullRequest.number)}>
-                  <span className="sidebar-pr-icon"><GitPullRequest size={14} /><i /></span><span>{currentPullRequest.title}</span><small>#{currentPullRequest.number}</small>
+              {prototypePR && <div className={`sidebar-pr-row ${prototypePR.state}`}>
+                <button type="button" className="sidebar-pr-main" title={prototypePR.title} onClick={prototypePR.open}>
+                  <span className="sidebar-pr-icon"><GitPullRequest size={14} /></span>
+                  <span className="sidebar-pr-copy"><strong>{prototypePR.title}</strong><small>#{prototypePR.number} · {prototypePR.detail}</small></span>
+                  <em>PR</em>
                 </button>
-                <button type="button" className="sidebar-pr-github" aria-label={t("openGitHub")} title={t("openGitHub")} onClick={() => void openExternalURL(currentPullRequest.url)}><Github size={14} /></button>
               </div>}
               <div className="thread-list">
-                {projectSessions.length === 0 && <div className="empty-sidebar"><CircleDotDashed size={13} />{t("noSessions")}</div>}
+                {sidebarSessions.length === 0 && <div className="empty-sidebar"><CircleDotDashed size={13} />{t("noSessions")}</div>}
                 {visibleSessions.map((session) => renaming?.id === session.id ? (
                   <form key={session.id} className="thread-rename" onSubmit={(event) => { event.preventDefault(); void commitRename(); }}>
                     <input autoFocus value={renaming.title} onChange={(event) => setRenaming({ id: session.id, title: event.target.value })}
@@ -119,8 +166,11 @@ export default function Sidebar() {
                   </form>
                 ) : (
                   <button key={session.id} className={session.id === currentSessionId && view === "thread" ? "active" : ""} onClick={() => active ? void run("resume_session", session.id) : launchProject(item.workspace, session.id)} title={session.title}
+                    aria-busy={session.id === runningSessionId}
                     style={{ "--custom-contextmenu": session.pinned ? "session-pinned" : "session", "--custom-contextmenu-data": session.id } as CSSProperties}>
-                    <span>{session.title || t("newSession")}</span>
+                    <span className="session-state-dot" data-running={String(session.id === runningSessionId)} aria-hidden="true" />
+                    <span className="session-copy"><strong>{session.title || t("newSession")}</strong><small>{sidebarSessionLabel(session.title, session.updatedAt, session.id === runningSessionId, snapshot.language)}</small></span>
+                    {session.id === runningSessionId && <i className="session-running-indicator" aria-hidden="true" />}
                     {session.unread && <i className="session-unread" title={t("unread")} />}
                   </button>
                 ))}
@@ -141,10 +191,37 @@ function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
 }
 
+function compactProjectPath(path: string) {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.slice(-2, -1)[0] || path;
+}
+
+function relativeSessionTime(value: string, language: "en" | "zh-CN") {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return language === "zh-CN" ? "最近" : "Recently";
+  const hours = Math.max(0, Math.round((Date.now() - timestamp) / 3_600_000));
+  if (hours < 1) return language === "zh-CN" ? "刚刚" : "Just now";
+  if (hours < 24) return language === "zh-CN" ? `${hours} 小时前` : `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return language === "zh-CN" ? `${days} 天前` : `${days}d ago`;
+}
+
+function sidebarSessionLabel(title: string, updatedAt: string, running: boolean, language: "en" | "zh-CN") {
+  if (running) return language === "zh-CN" ? "刚刚 · 正在运行" : "Just now · Running";
+  if (language === "zh-CN" && !isDesktopRuntime()) {
+    if (title === "插件兼容设计") return "昨天 · 已完成";
+    if (title === "语义上下文重建") return "8 月 7 日 · 已完成";
+    if (title === "发布 v0.2.4") return "周五 · 等待检查";
+  }
+  return relativeSessionTime(updatedAt, language);
+}
+
 function ProjectLauncher({ language, setError }: { language: "en" | "zh-CN"; setError: (message: string) => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [name, setName] = useState("");
+  const [name, setName] = useState("new-project");
+  const [location, setLocation] = useState("~/Projects");
+  const [initialiseGit, setInitialiseGit] = useState(true);
   const [busy, setBusy] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const t = translator(language);
@@ -181,14 +258,28 @@ function ProjectLauncher({ language, setError }: { language: "en" | "zh-CN"; set
     }
   };
 
+  const chooseLocation = async () => {
+    setBusy(true);
+    try {
+      const path = await selectProjectFolder(language === "zh-CN" ? "选择项目存放位置" : "Choose project location", language === "zh-CN" ? "选择" : "Choose");
+      if (path) setLocation(path);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submitProject = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     try {
-      const path = await createProject(name);
+      const path = await createProject(name, location, initialiseGit);
       await openProject(path);
       setCreating(false);
-      setName("");
+      setName("new-project");
+      setLocation("~/Projects");
+      setInitialiseGit(true);
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -211,14 +302,15 @@ function ProjectLauncher({ language, setError }: { language: "en" | "zh-CN"; set
       if (event.target === event.currentTarget && !busy) setCreating(false);
     }}>
       <form className="project-create-dialog" role="dialog" aria-modal="true" aria-labelledby="project-create-title" onSubmit={submitProject}>
-        <h2 id="project-create-title">{t("newProject")}</h2>
-        <p>{t("newProjectLocation")}</p>
-        <label htmlFor="project-name">{t("projectName")}</label>
-        <input id="project-name" autoFocus maxLength={100} required value={name} placeholder={t("projectNamePlaceholder")}
-          onChange={(event) => setName(event.target.value)} />
+        <header><div><span>NEW PROJECT</span><h2 id="project-create-title">{t("newProject")}</h2></div><button type="button" onClick={() => setCreating(false)} aria-label={t("cancel")}><X size={17} /></button></header>
+        <div className="project-create-body">
+          <label htmlFor="project-name"><span>{t("projectName")}</span><input id="project-name" type="text" autoFocus maxLength={100} required value={name} placeholder={t("projectNamePlaceholder")} onFocus={(event) => event.currentTarget.select()} onChange={(event) => setName(event.target.value)} /></label>
+          <label><span>{language === "zh-CN" ? "存放位置" : "Location"}</span><div className="path-field"><input type="text" value={location} onChange={(event) => setLocation(event.target.value)} /><button type="button" onClick={() => void chooseLocation()}>{language === "zh-CN" ? "浏览…" : "Browse…"}</button></div></label>
+          <label className="checkbox-row"><input type="checkbox" checked={initialiseGit} onChange={(event) => setInitialiseGit(event.target.checked)} /><span><strong>{language === "zh-CN" ? "初始化 Git 仓库" : "Initialise Git repository"}</strong><small>{language === "zh-CN" ? "创建 .git 并使用 main 作为默认分支" : "Create .git and use main as the default branch"}</small></span></label>
+        </div>
         <footer>
           <button type="button" className="small-button" disabled={busy} onClick={() => setCreating(false)}>{t("cancel")}</button>
-          <button type="submit" className="primary-button" disabled={busy || !name.trim()}>{t("createProject")}</button>
+          <button type="submit" className="settings-primary" disabled={busy || !name.trim()}>{language === "zh-CN" ? "创建并打开" : "Create and open"}</button>
         </footer>
       </form>
     </div>, document.body)}

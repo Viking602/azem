@@ -7,12 +7,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/provider/responses"
 	sdk "github.com/Viking602/llmux"
 	"github.com/Viking602/llmux/provider/anthropic"
 	"github.com/Viking602/llmux/provider/openai/compat"
+	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
 
@@ -50,7 +55,7 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 	if !foundOpenAI || !foundOpenRouter {
 		t.Fatalf("missing expected profiles: openai=%v openrouter=%v", foundOpenAI, foundOpenRouter)
 	}
-	if profile, ok := LookupProfile("opencode"); !ok || profile.BaseURL != "https://opencode.ai/zen/v1" {
+	if profile, ok := LookupProfile("opencode"); !ok || profile.ID != "opencode-zen" || profile.BaseURL != "https://opencode.ai/zen/v1" {
 		t.Fatalf("opencode profile = %+v, found=%v", profile, ok)
 	}
 	stream := &streamAdapter{inner: &sliceStream{parts: []sdk.Part{
@@ -64,6 +69,65 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 	done, err := stream.Recv()
 	if err != nil || done.Kind != hyprovider.EventDone || done.StopReason != hyprovider.StopReasonComplete || done.Usage.TotalTokens != 5 {
 		t.Fatalf("done event = %+v, error = %v", done, err)
+	}
+}
+
+func TestDeepSeekStreamReportsInclusiveCacheUsage(t *testing.T) {
+	for _, test := range []cacheUsageExpectation{
+		{name: "deepseek cache hit", provider: "deepseek", input: 4_336, cached: 4_608, wantInput: 8_944, wantTotal: 8_964, wantReported: true},
+		{name: "deepseek zero hit", provider: "deepseek", input: 8_499, wantInput: 8_499, wantTotal: 8_519, wantReported: true},
+		{name: "unknown provider stays unreported", provider: "custom", input: 4_336, cached: 4_608, wantInput: 4_336, wantTotal: 4_356, wantReported: false},
+	} {
+		t.Log(test.name)
+		assertCacheUsage(t, test)
+	}
+}
+
+type cacheUsageExpectation struct {
+	name         string
+	provider     string
+	input        int
+	cached       int
+	wantInput    int
+	wantTotal    int
+	wantReported bool
+}
+
+type cacheUsageObservation struct {
+	eventInput     int
+	eventCached    int
+	eventTotal     int
+	reportedInput  int
+	reportedCached int
+	reportedTotal  int
+	cacheReported  bool
+}
+
+func assertCacheUsage(t *testing.T, test cacheUsageExpectation) {
+	t.Helper()
+	var details responses.UsageDetails
+	stream := &streamAdapter{
+		provider: test.provider,
+		reporter: func(got responses.UsageDetails) { details = got },
+		inner: &sliceStream{parts: []sdk.Part{{
+			Kind: sdk.PartFinish, FinishReason: sdk.FinishStop,
+			Usage: sdk.Usage{InputTokens: test.input, CachedInputTokens: test.cached, OutputTokens: 20, TotalTokens: test.input + 20},
+		}}},
+	}
+	done, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cacheUsageObservation{
+		eventInput: done.Usage.InputTokens, eventCached: done.Usage.CachedInputTokens, eventTotal: done.Usage.TotalTokens,
+		reportedInput: details.InputTokens, reportedCached: details.CachedTokens, reportedTotal: details.TotalTokens, cacheReported: details.CacheReported,
+	}
+	want := cacheUsageObservation{
+		eventInput: test.wantInput, eventCached: test.cached, eventTotal: test.wantTotal,
+		reportedInput: test.wantInput, reportedCached: test.cached, reportedTotal: test.wantTotal, cacheReported: test.wantReported,
+	}
+	if got != want {
+		t.Fatalf("usage = %+v, reported = %+v, want input=%d cached=%d total=%d reported=%v", done.Usage, details, test.wantInput, test.cached, test.wantTotal, test.wantReported)
 	}
 }
 
@@ -127,6 +191,41 @@ func TestAnthropicCompatibleProviderUsesMessagesProtocol(t *testing.T) {
 	}
 }
 
+func TestAnthropicConversionKeepsLatePrivateSystemContextInMessageTail(t *testing.T) {
+	lateSystem := message.NewText(message.RoleSystem, "dynamic trusted context")
+	lateSystem.Visibility = message.VisibilityPrivate
+	converted, _, err := convertRequest(hyprovider.Request{
+		Model: "deepseek-v4-flash",
+		Messages: []message.Message{
+			message.NewText(message.RoleSystem, "stable core instructions"),
+			message.NewText(message.RoleUser, "stable long prefix"),
+			message.NewText(message.RoleAssistant, "prior answer"),
+			lateSystem,
+			message.NewText(message.RoleUser, "new question"),
+		},
+	}, "", "deepseek")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type requestPrefix struct {
+		instructions string
+		messages     []sdk.Message
+	}
+	got := requestPrefix{instructions: converted.Instructions, messages: converted.Messages}
+	want := requestPrefix{
+		instructions: "stable core instructions",
+		messages: []sdk.Message{
+			sdk.TextMessage(sdk.RoleUser, "stable long prefix"),
+			sdk.TextMessage(sdk.RoleAssistant, "prior answer"),
+			sdk.TextMessage(sdk.RoleUser, trustedHostContextPrefix+"dynamic trusted context"),
+			sdk.TextMessage(sdk.RoleUser, "new question"),
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("converted request prefix = %+v, want %+v", got, want)
+	}
+}
+
 func TestAnthropicCompatibleProviderUsesConfiguredOutputLimit(t *testing.T) {
 	gotMaxTokens := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -158,5 +257,75 @@ func TestAnthropicCompatibleProviderUsesConfiguredOutputLimit(t *testing.T) {
 	}
 	if gotMaxTokens != 384000 {
 		t.Fatalf("wire max_tokens = %d, want 384000", gotMaxTokens)
+	}
+}
+
+func TestTextOnlyModelOmitsHistoricalImages(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(path, testImagePNG(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	historical := message.NewText(message.RoleUser, "look at this")
+	historical.Metadata = map[string]string{
+		"azem.attachments": `[{"id":"img1","name":"shot.png","mime":"image/png","path":` + jsonString(path) + `}]`,
+	}
+	converted, _, err := convertRequest(hyprovider.Request{
+		Model: "deepseek-v4-flash",
+		Messages: []message.Message{
+			historical,
+			message.NewText(message.RoleAssistant, "I saw it."),
+			message.NewText(message.RoleUser, "continue without the image"),
+		},
+		ExtraBody: map[string]any{
+			responses.AttachmentRootExtraKey: dir,
+			disableImageInputExtraKey:        true,
+		},
+	}, "", "opencode-go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(converted.Messages) != 3 || len(converted.Messages[0].Content) != 1 {
+		t.Fatalf("converted messages = %+v", converted.Messages)
+	}
+	part := converted.Messages[0].Content[0]
+	if part.Kind != sdk.ContentText || !strings.Contains(part.Text, omittedImageNotice) {
+		t.Fatalf("historical image part = %+v, want text omission notice", part)
+	}
+}
+
+func TestTextOnlyModelRejectsCurrentImageLocally(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(path, testImagePNG(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current := message.NewText(message.RoleUser, "look at this")
+	current.Metadata = map[string]string{
+		"azem.attachments": `[{"id":"img1","name":"shot.png","mime":"image/png","path":` + jsonString(path) + `}]`,
+	}
+	_, _, err := convertRequest(hyprovider.Request{
+		Model:    "deepseek-v4-flash",
+		Messages: []message.Message{current},
+		ExtraBody: map[string]any{
+			responses.AttachmentRootExtraKey: dir,
+			disableImageInputExtraKey:        true,
+		},
+	}, "", "opencode-go")
+	if err == nil || !strings.Contains(err.Error(), "does not support image input") {
+		t.Fatalf("convertRequest error = %v, want local image capability rejection", err)
+	}
+}
+
+func jsonString(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func testImagePNG() []byte {
+	return []byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+		0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde,
 	}
 }

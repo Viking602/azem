@@ -40,7 +40,7 @@ func TestShellUsesWorkspaceAndReturnsStructuredExit(t *testing.T) {
 
 func TestShellDefinitionPreservesApprovalAndNetworkPolicy(t *testing.T) {
 	definition := newShellDriver(t.TempDir(), "allow", "prompt").Definition()
-	if definition.Metadata["approval"] != "allow" || definition.Metadata["network"] != "prompt" {
+	if definition.Metadata["approval"] != "allow" || definition.Metadata["network"] != "prompt" || definition.Metadata["platform"] != runtime.GOOS {
 		t.Fatalf("shell metadata=%#v", definition.Metadata)
 	}
 }
@@ -347,6 +347,34 @@ func TestShellRejectsDetachedForms(t *testing.T) {
 			t.Errorf("rejected foreground command %q", command)
 		}
 	}
+	if rejectDetachedForOS(`& "C:\Program Files\Git\bin\git.exe" status`, "windows") {
+		t.Fatal("rejected the PowerShell foreground invocation operator")
+	}
+}
+
+func TestShellRuntimeConcurrencyCanGrowWithoutInterruptingActiveCalls(t *testing.T) {
+	runtime := newShellRuntime(context.Background(), ShellOptions{MaxConcurrency: 1})
+	if err := runtime.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	acquired := make(chan error, 1)
+	go func() { acquired <- runtime.acquire(context.Background()) }()
+	select {
+	case err := <-acquired:
+		t.Fatalf("second slot acquired before resize: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	runtime.updateMaxConcurrency(2)
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second slot did not acquire after resize")
+	}
+	runtime.release()
+	runtime.release()
 }
 
 func TestServiceSharesShellConcurrencyAndCloseDrainsRegistry(t *testing.T) {

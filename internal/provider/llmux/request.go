@@ -13,6 +13,12 @@ import (
 	"github.com/Viking602/azem/internal/provider/responses"
 )
 
+const (
+	disableImageInputExtraKey = "azem.disable_image_input"
+	omittedImageNotice        = "[Image attachment omitted because the selected model accepts text input only.]"
+	trustedHostContextPrefix  = "[Trusted host context]\n"
+)
+
 func convertRequest(request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, *toolNames, error) {
 	names := newToolNames(request.Tools)
 	anthropicProtocol := providerID == "anthropic"
@@ -21,7 +27,14 @@ func convertRequest(request hyprovider.Request, defaultReasoningEffort, provider
 		anthropicProtocol = profile.Protocol == compat.ProtocolAnthropic
 		developerMessages = profile.Protocol == compat.ProtocolResponses
 	}
-	messages, instructions, err := convertMessages(request.Messages, stringExtra(request.ExtraBody, responses.AttachmentRootExtraKey), names, anthropicProtocol, developerMessages)
+	messages, instructions, err := convertMessages(
+		request.Messages,
+		stringExtra(request.ExtraBody, responses.AttachmentRootExtraKey),
+		names,
+		anthropicProtocol,
+		developerMessages,
+		boolExtraValue(request.ExtraBody, disableImageInputExtraKey),
+	)
 	if err != nil {
 		return sdk.Request{}, nil, err
 	}
@@ -69,26 +82,18 @@ func convertRequest(request hyprovider.Request, defaultReasoningEffort, provider
 	return sdk.Request{Messages: messages, Instructions: instructions, Metadata: sanitizedMetadata(request.Metadata), Options: options}, names, nil
 }
 
-func convertMessages(input []message.Message, attachmentRoot string, names *toolNames, anthropicProtocol, developerMessages bool) ([]sdk.Message, string, error) {
+func convertMessages(input []message.Message, attachmentRoot string, names *toolNames, anthropicProtocol, developerMessages, disableImages bool) ([]sdk.Message, string, error) {
 	messages := make([]sdk.Message, 0, len(input))
 	instructions := make([]string, 0, 2)
-	for _, current := range input {
+	lastUser := lastUserMessageIndex(input)
+	conversationStarted := false
+	for index, current := range input {
 		switch current.Role {
 		case message.RoleSystem:
-			if current.Text == "" {
-				continue
-			}
-			if current.Visibility == message.VisibilityPrivate {
-				if developerMessages {
-					messages = append(messages, sdk.TextMessage(sdk.RoleDeveloper, current.Text))
-				} else {
-					instructions = append(instructions, current.Text)
-				}
-			} else {
-				instructions = append(instructions, current.Text)
-			}
+			messages, instructions = appendSystemMessage(messages, instructions, current, anthropicProtocol, developerMessages, conversationStarted)
 		case message.RoleUser, message.RoleCustom:
-			parts, err := userContentParts(current, attachmentRoot)
+			conversationStarted = true
+			parts, err := userContentParts(current, attachmentRoot, disableImages, index == lastUser)
 			if err != nil {
 				return nil, "", err
 			}
@@ -96,12 +101,14 @@ func convertMessages(input []message.Message, attachmentRoot string, names *tool
 				messages = append(messages, sdk.Message{Role: sdk.RoleUser, Content: parts})
 			}
 		case message.RoleAssistant:
+			conversationStarted = true
 			converted, err := assistantMessage(current, names)
 			if err != nil {
 				return nil, "", err
 			}
 			messages = append(messages, converted)
 		case message.RoleTool:
+			conversationStarted = true
 			if current.ToolResult == nil {
 				return nil, "", fmt.Errorf("tool message %q has no result", current.ID)
 			}
@@ -124,19 +131,76 @@ func convertMessages(input []message.Message, attachmentRoot string, names *tool
 	return messages, strings.Join(instructions, "\n\n"), nil
 }
 
-func userContentParts(current message.Message, attachmentRoot string) ([]sdk.ContentPart, error) {
-	parts := make([]sdk.ContentPart, 0, 2)
-	if text := strings.TrimSpace(current.Text); text != "" {
-		parts = append(parts, sdk.ContentPart{Kind: sdk.ContentText, Text: text})
+func appendSystemMessage(messages []sdk.Message, instructions []string, current message.Message, anthropicProtocol, developerMessages, conversationStarted bool) ([]sdk.Message, []string) {
+	if current.Text == "" {
+		return messages, instructions
 	}
+	// Anthropic exposes one top-level system field and no mid-conversation
+	// system role. Hoisting a later host message into that field rewrites
+	// the prefix ahead of every prior turn, defeating DeepSeek's automatic
+	// prefix cache. Keep late host context at its original tail position.
+	if anthropicProtocol {
+		return appendAnthropicSystemMessage(messages, instructions, current, developerMessages, conversationStarted)
+	}
+	return appendLeadingSystemMessage(messages, instructions, current, developerMessages)
+}
+
+func appendAnthropicSystemMessage(messages []sdk.Message, instructions []string, current message.Message, developerMessages, conversationStarted bool) ([]sdk.Message, []string) {
+	if conversationStarted {
+		return append(messages, sdk.TextMessage(sdk.RoleUser, trustedHostContextPrefix+current.Text)), instructions
+	}
+	return appendLeadingSystemMessage(messages, instructions, current, developerMessages)
+}
+
+func appendLeadingSystemMessage(messages []sdk.Message, instructions []string, current message.Message, developerMessages bool) ([]sdk.Message, []string) {
+	if current.Visibility == message.VisibilityPrivate && developerMessages {
+		return append(messages, sdk.TextMessage(sdk.RoleDeveloper, current.Text)), instructions
+	}
+	return messages, append(instructions, current.Text)
+}
+
+func lastUserMessageIndex(input []message.Message) int {
+	for index := len(input) - 1; index >= 0; index-- {
+		if input[index].Role == message.RoleUser || input[index].Role == message.RoleCustom {
+			return index
+		}
+	}
+	return -1
+}
+
+func userContentParts(current message.Message, attachmentRoot string, disableImages, currentTurn bool) ([]sdk.ContentPart, error) {
+	parts := make([]sdk.ContentPart, 0, 2)
+	text := strings.TrimSpace(current.Text)
 	images, err := responses.LoadImageAttachments(current.Metadata, attachmentRoot)
 	if err != nil {
 		return nil, err
+	}
+	text, images, err = applyImageInputPolicy(text, images, disableImages, currentTurn)
+	if err != nil {
+		return nil, err
+	}
+	if text != "" {
+		parts = append(parts, sdk.ContentPart{Kind: sdk.ContentText, Text: text})
 	}
 	for _, image := range images {
 		parts = append(parts, sdk.ContentPart{Kind: sdk.ContentImage, Data: image.Data, MediaType: image.MediaType})
 	}
 	return parts, nil
+}
+
+func applyImageInputPolicy(text string, images []responses.ImageAttachment, disableImages, currentTurn bool) (string, []responses.ImageAttachment, error) {
+	if !disableImages || len(images) == 0 {
+		return text, images, nil
+	}
+	if currentTurn {
+		return "", nil, fmt.Errorf("selected model does not support image input; remove the image or choose a vision-capable model")
+	}
+	return strings.TrimSpace(strings.Join([]string{text, omittedImageNotice}, "\n\n")), nil, nil
+}
+
+func boolExtraValue(extra map[string]any, key string) bool {
+	value, _ := boolExtra(extra, key)
+	return value
 }
 
 func assistantMessage(current message.Message, names *toolNames) (sdk.Message, error) {

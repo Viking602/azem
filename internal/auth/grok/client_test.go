@@ -13,15 +13,37 @@ import (
 	"time"
 )
 
+func TestDefaultClientFollowsProxyResolver(t *testing.T) {
+	client := NewClient()
+	transport, ok := client.HTTP.Transport().(*http.Transport)
+	if !ok || transport.Proxy == nil {
+		t.Fatalf("Grok transport = %#v", client.HTTP.Transport())
+	}
+}
+
 func TestDiscoveryAndDevicePolling(t *testing.T) {
 	var polls atomic.Int32
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
+		if request.URL.Path == "/device" || request.URL.Path == "/token" {
+			if got := request.Header.Get("x-grok-client-version"); got != "0.2.121" {
+				t.Errorf("client version header = %q, want %q", got, "0.2.121")
+			}
+			if got := request.Header.Get("x-grok-client-surface"); got != "ui" {
+				t.Errorf("client surface header = %q, want %q", got, "ui")
+			}
+		}
 		switch request.URL.Path {
 		case "/.well-known/openid-configuration":
 			_ = json.NewEncoder(writer).Encode(Discovery{Issuer: server.URL, DeviceAuthorizationEndpoint: server.URL + "/device", TokenEndpoint: server.URL + "/token", RevocationEndpoint: server.URL + "/revoke"})
 		case "/device":
+			if err := request.ParseForm(); err != nil {
+				t.Error(err)
+			}
+			if got := request.Form.Get("referrer"); got != "grok-build" {
+				t.Errorf("device referrer = %q, want %q", got, "grok-build")
+			}
 			_ = json.NewEncoder(writer).Encode(map[string]any{"device_code": "device", "user_code": "ABCD", "verification_uri": server.URL + "/verify", "expires_in": 600, "interval": 1})
 		case "/token":
 			if polls.Add(1) == 1 {

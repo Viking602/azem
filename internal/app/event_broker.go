@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sync"
 	"time"
 )
@@ -14,15 +13,26 @@ const (
 	maxQueuedEventCount      = 4096
 )
 
-var errEventBrokerOverloaded = errors.New("UI event backlog exceeded the safe limit")
-
 type eventPublishStatus uint8
 
 const (
 	eventPublishAccepted eventPublishStatus = iota
 	eventPublishClosed
-	eventPublishOverloaded
 )
+
+type eventRunKey struct {
+	sessionID string
+	runID     string
+}
+
+type eventStreamKey struct {
+	kind       EventKind
+	sessionID  string
+	runID      string
+	agentID    string
+	toolCallID string
+	textPhase  string
+}
 
 type queuedEvent struct {
 	event   Event
@@ -41,16 +51,18 @@ type eventBroker struct {
 	queuedBytes int
 	notify      chan struct{}
 	closed      bool
-	overloaded  bool
 	window      time.Duration
 	maxBytes    int
 	maxEvents   int
+	pending     map[eventStreamKey]int
+	degraded    map[eventRunKey]bool
 }
 
 func newEventBroker(window time.Duration) *eventBroker {
 	return &eventBroker{
 		notify: make(chan struct{}), window: window,
 		maxBytes: maxQueuedEventBytes, maxEvents: maxQueuedEventCount,
+		pending: make(map[eventStreamKey]int), degraded: make(map[eventRunKey]bool),
 	}
 }
 
@@ -61,26 +73,11 @@ func (b *eventBroker) Publish(event Event) eventPublishStatus {
 		return eventPublishClosed
 	}
 	terminal := isTerminalEvent(event.Kind)
-	if b.overloaded && !terminal {
-		return eventPublishOverloaded
-	}
 	event = event.Clone()
 	if isCoalescibleEvent(event.Kind) {
-		if len(b.queue) > b.head && sameEventStream(b.queue[len(b.queue)-1].event, event) {
-			current := &b.queue[len(b.queue)-1]
-			previousSize := current.size
-			mergeCoalescibleEvent(current, event)
-			b.queuedBytes += current.size - previousSize
-		} else {
-			current := newQueuedEvent(event, time.Now().Add(b.window), true)
-			b.queue = append(b.queue, current)
-			b.queuedBytes += current.size
-		}
+		b.appendCoalescible(event)
+		b.compactOverLimit()
 		b.signal()
-		if b.queuedBytes > b.maxBytes || len(b.queue)-b.head > b.maxEvents {
-			b.overloaded = true
-			return eventPublishOverloaded
-		}
 		return eventPublishAccepted
 	}
 	// A lifecycle event is an ordering barrier. Any delta that precedes it must
@@ -92,25 +89,42 @@ func (b *eventBroker) Publish(event Event) eventPublishStatus {
 		}
 		b.queue[index].readyAt = time.Time{}
 	}
+	clear(b.pending)
 	current := newQueuedEvent(event, time.Time{}, false)
 	b.queue = append(b.queue, current)
 	b.queuedBytes += current.size
-	if b.queuedBytes > b.maxBytes || len(b.queue)-b.head > b.maxEvents {
-		b.overloaded = true
-		if !terminal {
-			b.signal()
-			return eventPublishOverloaded
+	b.compactOverLimit()
+	if terminal {
+		key := runKey(event)
+		if b.degraded[key] {
+			b.appendResync(key, "final")
+			delete(b.degraded, key)
 		}
 	}
 	b.signal()
 	return eventPublishAccepted
 }
 
+func (b *eventBroker) appendCoalescible(event Event) {
+	key := streamKey(event)
+	if index, ok := b.pending[key]; ok && index >= b.head && index < len(b.queue) {
+		current := &b.queue[index]
+		previousSize := current.size
+		mergeCoalescibleEvent(current, event)
+		b.queuedBytes += current.size - previousSize
+		return
+	}
+	current := newQueuedEvent(event, time.Now().Add(b.window), true)
+	b.queue = append(b.queue, current)
+	b.pending[key] = len(b.queue) - 1
+	b.queuedBytes += current.size
+}
+
 func eventDeliveryError(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return errEventBrokerOverloaded
+	return ioEOF{}
 }
 
 func (b *eventBroker) Next(ctx context.Context) (Event, error) {
@@ -123,8 +137,11 @@ func (b *eventBroker) Next(ctx context.Context) (Event, error) {
 				b.queue[b.head] = queuedEvent{}
 				b.head++
 				b.queuedBytes -= current.size
-				if b.overloaded && b.queuedBytes <= b.maxBytes/2 && len(b.queue)-b.head <= b.maxEvents/2 {
-					b.overloaded = false
+				if isCoalescibleEvent(current.event.Kind) {
+					key := streamKey(current.event)
+					if b.pending[key] < b.head {
+						delete(b.pending, key)
+					}
 				}
 				b.compact()
 				b.mu.Unlock()
@@ -199,6 +216,64 @@ func (b *eventBroker) compact() {
 		clear(b.queue[remaining:oldLength])
 		b.queue = b.queue[:remaining]
 		b.head = 0
+		b.rebuildPending()
+	}
+}
+
+// compactOverLimit discards only replaceable stream projections. The durable
+// session timeline remains authoritative, and a resync event asks consumers to
+// reload it. UI speed must never become a provider execution failure.
+func (b *eventBroker) compactOverLimit() {
+	if b.queuedBytes <= b.maxBytes && len(b.queue)-b.head <= b.maxEvents {
+		return
+	}
+	remaining := append([]queuedEvent(nil), b.queue[b.head:]...)
+	clear(b.queue)
+	b.queue = b.queue[:0]
+	b.head = 0
+	b.queuedBytes = 0
+	clear(b.pending)
+	affected := make(map[eventRunKey]struct{})
+	for _, current := range remaining {
+		if isCoalescibleEvent(current.event.Kind) {
+			key := runKey(current.event)
+			if key.sessionID != "" {
+				if !b.degraded[key] {
+					affected[key] = struct{}{}
+				}
+				b.degraded[key] = true
+			}
+			continue
+		}
+		b.queue = append(b.queue, current)
+		b.queuedBytes += current.size
+	}
+	for key := range affected {
+		b.appendResync(key, "degraded")
+	}
+}
+
+func (b *eventBroker) appendResync(key eventRunKey, state string) {
+	if key.sessionID == "" {
+		return
+	}
+	current := newQueuedEvent(Event{
+		Kind: EventProjectionResync, SessionID: key.sessionID, RunID: key.runID, State: state,
+	}, time.Time{}, false)
+	b.queue = append(b.queue, current)
+	b.queuedBytes += current.size
+}
+
+func (b *eventBroker) rebuildPending() {
+	clear(b.pending)
+	for index := len(b.queue) - 1; index >= b.head; index-- {
+		if !isCoalescibleEvent(b.queue[index].event.Kind) {
+			break
+		}
+		key := streamKey(b.queue[index].event)
+		if _, exists := b.pending[key]; !exists {
+			b.pending[key] = index
+		}
 	}
 }
 
@@ -220,13 +295,15 @@ func isTerminalEvent(kind EventKind) bool {
 	}
 }
 
-func sameEventStream(left, right Event) bool {
-	return left.Kind == right.Kind &&
-		left.SessionID == right.SessionID &&
-		left.RunID == right.RunID &&
-		left.AgentID == right.AgentID &&
-		left.ToolCallID == right.ToolCallID &&
-		left.TextPhase == right.TextPhase
+func runKey(event Event) eventRunKey {
+	return eventRunKey{sessionID: event.SessionID, runID: event.RunID}
+}
+
+func streamKey(event Event) eventStreamKey {
+	return eventStreamKey{
+		kind: event.Kind, sessionID: event.SessionID, runID: event.RunID,
+		agentID: event.AgentID, toolCallID: event.ToolCallID, textPhase: event.TextPhase,
+	}
 }
 
 func mergeCoalescibleEvent(target *queuedEvent, next Event) {

@@ -146,7 +146,9 @@ func TestConfiguredTeamTurnRunsAllRolesAndPersistsReporterAnswer(t *testing.T) {
 		case EventAgentState:
 			states[event.Data["role"]] = event.State
 		case EventTextDelta:
-			answer += event.Text
+			if event.TextPhase != "commentary" {
+				answer += event.Text
+			}
 		case EventApprovalRequested:
 			if event.Data["tool"] != "coding.write_file" || event.Data["target"] != "team.txt" {
 				t.Fatalf("team approval event=%+v", event)

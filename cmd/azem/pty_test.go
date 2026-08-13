@@ -57,6 +57,11 @@ func TestPTYStreamResizeCancelAndExit(t *testing.T) {
 	output := &bytes.Buffer{}
 	readUntil(t, reads, output, "READY FOR A TASK", 15*time.Second)
 	if _, err := terminal.Write([]byte("\x1b[Z")); err != nil {
+		t.Fatalf("enable automatic review mode: %v", err)
+	}
+	readUntil(t, reads, output, "SMART", 5*time.Second)
+	output.Reset()
+	if _, err := terminal.Write([]byte("\x1b[Z")); err != nil {
 		t.Fatalf("enable yolo approval mode: %v", err)
 	}
 	readUntil(t, reads, output, "FULL ACCESS", 5*time.Second)

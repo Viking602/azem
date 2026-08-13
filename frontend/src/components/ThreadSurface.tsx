@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ComponentType } from "react";
 import { createPortal } from "react-dom";
-import { motion, useAnimate } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 import {
   ArrowDown, ArrowUp, Bot, Box, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleDot, CircleStop,
   CornerUpRight, Folder, GitBranch, GripVertical, Hand, HardDrive, ImagePlus, Lightbulb, ListX, Minimize2,
   MoreHorizontal, Pencil, Plug, Plus, RefreshCw, RotateCcw, Search, Settings, ShieldAlert, ShieldCheck,
-  Sparkles, Trash2, WandSparkles, Zap, PanelRightClose, PanelRightOpen, X,
+  Sparkles, Trash2, WandSparkles, Zap, PanelRightOpen, X,
 } from "lucide-react";
 import { cancelActive, execute, guide, importAttachment, importClipboardImage, openProject, selectProjectFolder, startTurn } from "../bridge";
+import { contextOccupancy } from "../contextUsage";
 import { reasoningHint, sortReasoningLevels, tFormat, translator } from "../i18n";
-import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ContextUsage } from "../store";
-import type { Attachment, Block, ContextProfile, DeliveryMode, QueuedPrompt, SkillEntry, Snapshot } from "../types";
+import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore } from "../store";
+import type { Attachment, Block, DeliveryMode, ModelRoute, QueuedPrompt, SkillEntry, Snapshot } from "../types";
 import ReasoningEffortSlider, { isHighCostReasoning } from "./ReasoningEffortSlider";
+import ComposerModelPicker from "./ComposerModelPicker";
+import AttachmentPreview from "./AttachmentPreview";
 import ProviderIcon from "./ProviderIcon";
 import { TimelineFeed } from "./Timeline";
-import { formatDuration } from "./toolTimeline";
 export { approvalPresentation } from "./Timeline";
 export { formatDuration } from "./toolTimeline";
+export { contextOccupancy } from "../contextUsage";
 
 type SlashAction =
   | "new" | "compact" | "settings" | "skills" | "plan" | "fast"
@@ -38,12 +41,25 @@ type SlashContext = {
   planMode?: boolean;
   agentMode?: string;
   fast?: boolean;
+  fastAvailable?: boolean;
   contextPercent?: number;
-  provider?: string;
 };
 
-export function supportsFastMode(provider: string): boolean {
-  return provider === "chatgpt";
+export function supportsFastMode(provider: string, capabilities: readonly string[] = []): boolean {
+  return provider.trim().toLocaleLowerCase() === "chatgpt"
+    && capabilities.some((capability) => capability.trim().toLocaleLowerCase() === "fast");
+}
+
+export function branchMenuLayout(
+  trigger: { top: number; bottom: number },
+  viewportHeight: number,
+  edgeInset = 12,
+  gap = 8,
+): { placement: "above" | "below"; maxHeight: number } {
+  const above = Math.max(0, Math.min(trigger.top, viewportHeight) - edgeInset - gap);
+  const below = Math.max(0, viewportHeight - Math.max(trigger.bottom, 0) - edgeInset - gap);
+  const placement = above >= below ? "above" : "below";
+  return { placement, maxHeight: Math.floor(Math.min(420, placement === "above" ? above : below)) };
 }
 
 export function shouldReadNativeClipboard(clipboardData: DataTransfer): boolean {
@@ -111,7 +127,7 @@ const slashCommands: Array<{
   {
     action: "fast", aliases: ["fast", "speed", "快速"], zh: "快速", en: "Fast",
     zhDetail: "切换 ChatGPT 标准与快速速度", enDetail: "Toggle standard and fast ChatGPT speed", icon: Zap,
-    when: (context) => supportsFastMode(context.provider ?? ""),
+    when: (context) => Boolean(context.fastAvailable),
     detail: (context, language) => language === "zh-CN"
       ? (context.fast ? "当前快速模式 · 点击切回标准" : "1.5x 速度，用量更高")
       : (context.fast ? "Fast mode on · click for standard" : "1.5x speed, increased usage"),
@@ -198,6 +214,21 @@ export function parseSkillPrompt(input: string, language: Snapshot["language"]) 
 
 const approvalCycle = ["prompt", "auto_review", "yolo"] as const;
 
+const SESSION_STAGE_EASE = [0.16, 1, 0.3, 1] as const;
+
+export function sessionStageMotion(reducedMotion: boolean) {
+  if (reducedMotion) {
+    return {
+      initial: false as const,
+      animate: { opacity: 1, y: 0, filter: "blur(0px)", transition: { duration: 0 } },
+    };
+  }
+  return {
+    initial: { opacity: 0, y: 7, filter: "blur(2px)" },
+    animate: { opacity: 1, y: 0, filter: "blur(0px)", transition: { duration: 0.24, ease: SESSION_STAGE_EASE } },
+  };
+}
+
 export default function ThreadSurface() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const blocks = useRuntimeStore((state) => state.blocks);
@@ -205,7 +236,6 @@ export default function ThreadSurface() {
   const running = useRuntimeStore((state) => state.running);
   const runId = useRuntimeStore((state) => state.runId);
   const globalRunSessionId = useRuntimeStore((state) => state.globalRunSessionId);
-  const runStartedAt = useRuntimeStore((state) => state.runStartedAt);
   const activity = useRuntimeStore((state) => state.activity);
   const error = useRuntimeStore((state) => state.error);
   const planMode = useRuntimeStore((state) => state.planMode);
@@ -234,16 +264,31 @@ export default function ThreadSurface() {
   const setAgentMode = (_value: string) => undefined;
   const [following, setFollowing] = useState(true);
   const viewport = useRef<HTMLDivElement>(null);
+  const reduceMotion = useReducedMotion();
   const t = translator(snapshot.language);
   const empty = blocks.length === 0 && !running;
-  const elapsed = useElapsed(runStartedAt, running);
   const runtimeBusy = running || Boolean(globalRunSessionId);
+  const sessionMotion = sessionStageMotion(Boolean(reduceMotion));
 
   useEffect(() => {
     if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: running ? "instant" : "smooth" });
-  }, [blocks, following, running]);
+  }, [blocks, following, queuedPrompts.length, running]);
 
   useEffect(() => setDeliveryMode(snapshot.queueMode ?? "queue"), [currentSessionId, snapshot.queueMode]);
+  useEffect(() => {
+    const composePlanFollowUp = (event: Event) => {
+      const prefix = event instanceof CustomEvent && typeof event.detail?.prefix === "string" ? event.detail.prefix : "";
+      setPlanMode(true);
+      setPrompt(prefix);
+      requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLTextAreaElement>("#azem-composer");
+        input?.focus();
+        if (input) input.setSelectionRange(input.value.length, input.value.length);
+      });
+    };
+    window.addEventListener("azem:plan-compose", composePlanFollowUp);
+    return () => window.removeEventListener("azem:plan-compose", composePlanFollowUp);
+  }, [setPlanMode]);
   useEffect(() => {
     setPrompt("");
     clearAttachments();
@@ -383,60 +428,71 @@ export default function ThreadSurface() {
 
   return (
     <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`}>
-      <ThreadHeader empty={empty} elapsed={elapsed} />
-      {empty ? (
-        <div className="empty-composer-wrap">
-          <svg className="azem-symbol" viewBox="0 0 44 44" aria-hidden="true" focusable="false">
-            <path className="azem-symbol-sun" d="M7 31.5C3.7 20.1 8.9 8.2 20 4.6c8.8-2.8 17.2 2.8 19.1 11.3" />
-            <circle className="azem-symbol-sun-dot" cx="39.1" cy="15.9" r="2.8" />
-            <path className="azem-symbol-road" d="M5.5 37.6c7.2-6.8 13.9-10.6 24.2-12.8" />
-            <path className="azem-symbol-road azem-symbol-road-accent" d="M12 40c7.3-6.7 14.2-10.6 24.5-12.8" />
-          </svg>
-          <h1>{t("promptTitle")}</h1>
-          <div className="composer-stack">
-            {queue}
-            <Composer
-              prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
-              agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
-              running={running}
-              busy={runtimeBusy}
-              deliveryMode={deliveryMode}
-              showContextBar
-            />
-          </div>
-        </div>
-      ) : (
-        <>
-          <div className="transcript-viewport" ref={viewport} onScroll={(event) => {
-            const node = event.currentTarget;
-            setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 72);
-          }}>
-            <div className="transcript">
-              <TimelineFeed
-                blocks={blocks}
-                language={snapshot.language}
-                activeRunId={runId}
-                running={running}
-                waitingForModel={running && (activity === "waiting_model" || activity === "thinking")}
-              />
-              {error && <div className="inline-error" role="alert">{error}</div>}
-            </div>
-          </div>
-          {!following && <button className="jump-latest" aria-label={t("jumpLatest")} title={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
-          <div className="composer-dock">
-            <div className="composer-stack">
-              {queue}
-              <Composer
-                prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
-                agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
-                running={running} cancel={cancel}
-                busy={runtimeBusy}
-                deliveryMode={deliveryMode}
-              />
-            </div>
-          </div>
-        </>
-      )}
+      <ThreadHeader empty={empty} />
+      <div className="thread-session-viewport">
+        <motion.div
+          key={currentSessionId}
+          className="thread-session-stage"
+          initial={sessionMotion.initial}
+          animate={sessionMotion.animate}
+        >
+            {empty ? (
+              <div className="empty-composer-wrap">
+                <div className="empty-composer-heading"><h1>{t("promptTitle")}</h1><p>{t("promptSubtitle")}</p></div>
+                <div className="composer-stack">
+                  {queue}
+                  <Composer
+                    prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
+                    agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
+                    running={running}
+                    busy={runtimeBusy}
+                    deliveryMode={deliveryMode}
+                    showContextBar
+                  />
+                  <div className="empty-task-suggestions" aria-label={t("taskSuggestions")}>
+                    {emptySuggestions(snapshot.language).map((suggestion) => <button type="button" key={suggestion.title} onClick={() => {
+                      setPrompt(suggestion.prompt);
+                      requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#azem-composer")?.focus());
+                    }}><strong>{suggestion.title}</strong><span>{suggestion.detail}</span></button>)}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="transcript-viewport" ref={viewport} onScroll={(event) => {
+                  const node = event.currentTarget;
+                  setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 72);
+                }}>
+                  <div className="transcript">
+                    <TimelineFeed
+                      blocks={blocks}
+                      language={snapshot.language}
+                      activeRunId={runId}
+                      running={running}
+                      waitingForModel={running && (activity === "waiting_model" || activity === "thinking")}
+                      foldActiveProcess
+                      collapseCompletedProcess
+                    />
+                    {error && <div className="inline-error" role="alert">{error}</div>}
+                  </div>
+                </div>
+                <div className="composer-dock">
+                  {!following && <button className="jump-latest" aria-label={t("jumpLatest")} title={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
+                  <div className="composer-stack">
+                    {queue}
+                    <Composer
+                      prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
+                      agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
+                      running={running} cancel={cancel}
+                      busy={runtimeBusy}
+                      deliveryMode={deliveryMode}
+                    />
+                  </div>
+                </div>
+              </>
+            )}
+        </motion.div>
+      </div>
     </section>
   );
 }
@@ -522,24 +578,53 @@ function useQueuedTurnRunner(
   }, [beginTurn, busy, editingQueuedId, failQueuedPrompt, pauseReason, queuedPrompts, removeQueuedPrompt]);
 }
 
-function ThreadHeader({ empty, elapsed }: { empty: boolean; elapsed: string }) {
+function ThreadHeader({ empty }: { empty: boolean }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const title = useRuntimeStore((state) => state.currentTitle);
   const running = useRuntimeStore((state) => state.running);
+  const branches = useRuntimeStore((state) => state.branches);
   const t = translator(snapshot.language);
-  const heading = empty ? t("newSession") : title || t("newSession");
-  const status = headerStatus(running, elapsed, t);
-  return <header className="thread-header titlebar-region"><div><strong>{heading}</strong><span hidden={empty}>{status}</span></div><HeaderActions empty={empty} /></header>;
+  if (empty) return null;
+  const heading = title || t("newSession");
+  const status = headerStatus(running, t);
+  const stage = threadHeaderStage(running);
+  const branch = branches.find((item) => item.current)?.name || snapshot.currentBranch || t("noBranches");
+  const projectName = snapshot.workspace.split(/[\\/]/).filter(Boolean).at(-1) || t("workingTree");
+  return <header className="thread-header titlebar-region">
+    <div className="thread-heading-copy"><span className="thread-eyebrow">{heading.includes("UI") ? "DESIGN TASK" : "TASK"}</span><strong>{heading}</strong><small>{projectName} · {branch}</small></div>
+    <div className="thread-stage" role="status" aria-label={status}>
+      <span data-active={String(stage === "in-progress")}>{t("inProgress")}</span>
+      <span data-active={String(stage === "completed")}>{t("completed")}</span>
+    </div>
+    <span className="thread-runtime-status" data-running={String(running)}>{status}</span>
+    <HeaderActions empty={empty} />
+  </header>;
 }
 
-function headerStatus(running: boolean, elapsed: string, t: ReturnType<typeof translator>) { return running ? `${t("running")} · ${elapsed}` : t("ready"); }
+export function threadHeaderStage(running: boolean): "in-progress" | "completed" {
+  return running ? "in-progress" : "completed";
+}
+
+function headerStatus(running: boolean, t: ReturnType<typeof translator>) { return running ? t("running") : t("ready"); }
 
 function HeaderActions({ empty }: { empty: boolean }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const inspectorOpen = useRuntimeStore((state) => state.inspectorOpen);
   const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const t = translator(snapshot.language);
-  return <div className="thread-actions"><button hidden={empty} className="icon-button inspector-toggle" data-open={String(inspectorOpen)} title={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}><PanelRightClose className="inspector-open-icon" size={15} /><PanelRightOpen className="inspector-closed-icon" size={15} /></button></div>;
+  return <div className="thread-actions"><button hidden={empty} className="square-button inspector-toggle" data-open={String(inspectorOpen)} title={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}>{snapshot.language === "zh-CN" ? "侧栏" : "Panel"}</button></div>;
+}
+
+function emptySuggestions(language: Snapshot["language"]) {
+  return language === "zh-CN" ? [
+    { title: "检查代码改动", detail: "查看当前工作树的风险", prompt: "分析当前项目的代码改动，按风险高低给出结论" },
+    { title: "修复失败检查", detail: "定位测试与 CI 问题", prompt: "定位当前项目失败的测试或 CI 检查，并修复根因" },
+    { title: "制定实现计划", detail: "拆分步骤与验收标准", prompt: "理解当前需求并整理一份可以直接执行的实现计划" },
+  ] : [
+    { title: "Review changes", detail: "Assess working tree risk", prompt: "Review the current project changes and rank findings by risk." },
+    { title: "Fix checks", detail: "Trace test and CI failures", prompt: "Find the failed tests or CI checks and fix the root cause." },
+    { title: "Build a plan", detail: "Define steps and acceptance", prompt: "Turn the current requirement into an executable implementation plan." },
+  ];
 }
 
 function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMode, setAgentMode, planMode, setPlanMode, running, busy, cancel, deliveryMode, showContextBar = false }: {
@@ -563,11 +648,13 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
   const setError = useRuntimeStore((state) => state.setError);
   const setView = useRuntimeStore((state) => state.setView);
   const setSettingsOpen = useRuntimeStore((state) => state.setSettingsOpen);
+  const modelRoutes = useRuntimeStore((state) => state.modelRoutes);
   const slashMenu = useRef<HTMLDivElement>(null);
   const [slashCursor, setSlashCursor] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const t = translator(snapshot.language);
-  const { modelChoices, reasoningLevels, selectedModel, selectedModelName, changeModel, changeReasoning, changeSpeed } = useComposerModels(snapshot);
+  const composerRoute = effectiveComposerRoute(snapshot, planMode, modelRoutes);
+  const { modelChoices, reasoningLevels, selectedModel, selectedModelName, fastAvailable, changeModel, changeReasoning, changeSpeed } = useComposerModels(snapshot, composerRoute, planMode ? "plan" : "");
   const reasoningNames: Record<string, string> = {
     minimal: t("reasoningMinimal"), low: t("reasoningLow"), medium: t("reasoningMedium"),
     high: t("reasoningHigh"), xhigh: t("reasoningXHigh"), max: t("reasoningMax"), ultra: t("reasoningUltra"),
@@ -575,7 +662,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
   const approvalLabels: Record<string, string> = {
     prompt: t("promptApproval"), auto_review: t("autoReview"), yolo: t("yolo"),
   };
-  const selectedReasoningName = reasoningNames[snapshot.reasoning] ?? snapshot.reasoning;
+  const selectedReasoningName = reasoningNames[composerRoute.reasoning] ?? composerRoute.reasoning;
   const contextPercent = contextOccupancy(contextUsage, contextProfile).percentage;
   const skillInvocation = parseSkillPrompt(prompt, snapshot.language);
   const selectedSkill = skillInvocation
@@ -589,8 +676,8 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
     planMode,
     agentMode,
     fast: snapshot.chatgptFastMode,
+    fastAvailable,
     contextPercent,
-    provider: snapshot.provider,
   });
   const slashOpen = !busy && !slashDismissed && slashItems.length > 0;
   const commandItems = slashItems.map((item, index) => ({ item, index })).filter(({ item }) => item.kind === "command");
@@ -607,7 +694,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
   };
   const cycleReasoning = () => {
     if (!reasoningLevels.length) return;
-    const index = Math.max(0, reasoningLevels.indexOf(snapshot.reasoning));
+    const index = Math.max(0, reasoningLevels.indexOf(composerRoute.reasoning));
     changeReasoning(reasoningLevels[(index + 1) % reasoningLevels.length]!);
   };
   const chooseSlash = (item: SlashSuggestion) => {
@@ -644,8 +731,8 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
 
   return (
     <div className="composer-shell">
-      {showContextBar ? <ComposerContextBar /> : null}
       <div className="composer-card">
+        {showContextBar ? <ComposerContextBar /> : null}
         {slashOpen && <div id="slash-menu" ref={slashMenu} className="slash-menu" role="listbox" aria-label={t("slashCommands")}>
           {commandItems.length > 0 && <section className="slash-commands">
             {commandItems.map(({ item, index }) => {
@@ -670,7 +757,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
           </section>}
         </div>}
         {selectedSkill && <div className="composer-skill"><WandSparkles size={17} aria-hidden="true" /><span>{selectedSkill.name}</span></div>}
-        {attachments.length > 0 && <div className="attachment-row">{attachments.map((item) => <span key={item.id}><ImagePlus size={13} />{item.name}<button aria-label={`移除 ${item.name}`} onClick={() => removeAttachment(item.id)}><X size={12} /></button></span>)}</div>}
+        {attachments.length > 0 && <div className="attachment-row">{attachments.map((item) => <AttachmentPreview key={item.id} attachment={item} sessionId={currentSessionId} language={snapshot.language} variant="composer" onRemove={() => removeAttachment(item.id)} />)}</div>}
         <textarea id="azem-composer" value={visiblePrompt} onChange={(event) => setPrompt(skillPrefix + event.target.value)} onPaste={(event) => {
           const images = pastedImages(event.clipboardData);
           if (images.length > 0) {
@@ -684,7 +771,7 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
           void attachClipboard([]);
         }} onFocus={() => setSlashDismissed(false)} onBlur={() => setSlashDismissed(true)}
           aria-autocomplete="list" aria-expanded={slashOpen} aria-controls={slashOpen ? "slash-menu" : undefined} aria-activedescendant={slashOpen ? `slash-option-${slashCursor}` : undefined}
-          placeholder={busy ? running && deliveryMode === "guide" ? t("guidePlaceholder") : t("queuePlaceholder") : t("promptPlaceholder")} rows={2} onKeyDown={(event) => {
+          placeholder={busy ? running && deliveryMode === "guide" ? t("guidePlaceholder") : t("queuePlaceholder") : showContextBar ? snapshot.language === "zh-CN" ? "描述要完成的任务，@ 引用文件，/ 使用技能…" : "Describe a task, @ reference files, or / use skills…" : snapshot.language === "zh-CN" ? "继续描述你想调整的界面…" : "Continue describing what you want to adjust…"} rows={2} onKeyDown={(event) => {
           if (selectedSkill && event.key === "Backspace" && !visiblePrompt) {
             event.preventDefault();
             setPrompt("");
@@ -728,16 +815,25 @@ function Composer({ prompt, setPrompt, submit, attach, attachClipboard, agentMod
             onClick={() => setPlanMode(!planMode)}
           >
             <Lightbulb size={15} />
-            {planMode ? <span>{t("planLabel")}</span> : null}
+            <span>{t("planLabel")}</span>
           </button>
           <span className="toolbar-spacer" />
           <ContextMeter />
-          <ModelControls
-            running={running} models={modelChoices} selectedModel={selectedModel} selectedModelName={selectedModelName} selectedProvider={snapshot.provider}
-            reasoningLevels={reasoningLevels} selectedReasoning={snapshot.reasoning} selectedReasoningName={selectedReasoningName}
-            fast={snapshot.chatgptFastMode} reasoningNames={reasoningNames} onModelChange={changeModel} onReasoningChange={changeReasoning} onSpeedChange={changeSpeed}
-            modelLabel={t("model")} reasoningLabel={t("reasoning")} speedLabel={t("speed")} standardSpeed={t("standardSpeed")} fastSpeed={t("fastSpeed")} fastHint={t("fastModeHint")}
-            fasterLabel={t("reasoningFaster")} smarterLabel={t("reasoningSmarter")} advancedLabel={t("reasoningAdvanced")} backLabel={t("reasoningBack")}
+          {fastAvailable ? <span className={`composer-fast-mode ${snapshot.chatgptFastMode ? "active" : ""}`}>
+            <button
+              type="button"
+              aria-label={snapshot.language === "zh-CN" ? "Fast 模式" : "Fast mode"}
+              aria-pressed={snapshot.chatgptFastMode}
+              disabled={running}
+              onClick={() => changeSpeed(snapshot.chatgptFastMode ? "standard" : "fast")}
+            ><Zap size={15} /></button>
+            <span role="tooltip"><strong>{t("fastBoostTitle")}</strong><small>{t("fastBoostDetail")}</small></span>
+          </span> : null}
+          <ComposerModelPicker
+            running={running} models={modelChoices} selectedModel={selectedModel} selectedModelName={selectedModelName} selectedProvider={composerRoute.provider}
+            reasoningLevels={reasoningLevels} selectedReasoning={composerRoute.reasoning} selectedReasoningName={selectedReasoningName}
+            fast={snapshot.chatgptFastMode} fastAvailable={fastAvailable} reasoningNames={reasoningNames} onModelChange={changeModel} onReasoningChange={changeReasoning} onSpeedChange={changeSpeed}
+            fasterLabel={t("reasoningFaster")} smarterLabel={t("reasoningSmarter")}
             highCostHint={t("reasoningMaxHint")} fastBoostTitle={t("fastBoostTitle")} fastBoostDetail={t("fastBoostDetail")} language={snapshot.language}
           />
           {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={() => submitOrChooseSlash()} disabled={!prompt.trim() && attachments.length === 0} title={busy ? running && deliveryMode === "guide" ? t("guide") : t("queue") : t("send")}><ArrowUp size={17} strokeWidth={2.25} /></button>}
@@ -787,9 +883,18 @@ function ComposerContextBar() {
   const [creating, setCreating] = useState(false);
   const [newBranch, setNewBranch] = useState("");
   const [creatingBusy, setCreatingBusy] = useState(false);
+  const [branchLayout, setBranchLayout] = useState<ReturnType<typeof branchMenuLayout>>({ placement: "above", maxHeight: 420 });
   const branchMenu = useRef<HTMLDetailsElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const createRef = useRef<HTMLInputElement>(null);
+
+  const updateBranchLayout = useCallback(() => {
+    const node = branchMenu.current;
+    const summary = node?.querySelector(":scope > summary");
+    if (!node?.open || !(summary instanceof HTMLElement)) return;
+    const rect = summary.getBoundingClientRect();
+    setBranchLayout(branchMenuLayout(rect, window.visualViewport?.height ?? window.innerHeight));
+  }, []);
 
   const filteredBranches = branches
     .filter((branch) => !query.trim() || branch.name.toLowerCase().includes(query.trim().toLowerCase()))
@@ -814,7 +919,11 @@ function ComposerContextBar() {
     if (!node) return;
     const onToggle = () => {
       if (node.open) {
-        requestAnimationFrame(() => searchRef.current?.focus());
+        updateBranchLayout();
+        requestAnimationFrame(() => {
+          updateBranchLayout();
+          searchRef.current?.focus();
+        });
       } else {
         setQuery("");
         setCreating(false);
@@ -823,7 +932,16 @@ function ComposerContextBar() {
     };
     node.addEventListener("toggle", onToggle);
     return () => node.removeEventListener("toggle", onToggle);
-  }, []);
+  }, [updateBranchLayout]);
+
+  useEffect(() => {
+    window.addEventListener("resize", updateBranchLayout);
+    window.visualViewport?.addEventListener("resize", updateBranchLayout);
+    return () => {
+      window.removeEventListener("resize", updateBranchLayout);
+      window.visualViewport?.removeEventListener("resize", updateBranchLayout);
+    };
+  }, [updateBranchLayout]);
 
   useEffect(() => {
     if (creating) requestAnimationFrame(() => createRef.current?.focus());
@@ -897,7 +1015,13 @@ function ComposerContextBar() {
             <span>{currentBranch || t("branch")}</span>
             <ChevronDown size={11} />
           </summary>
-          <div className="composer-branch-panel" role="listbox" aria-label={t("branch")}>
+          <div
+            className="composer-branch-panel"
+            data-placement={branchLayout.placement}
+            style={{ maxHeight: branchLayout.maxHeight }}
+            role="listbox"
+            aria-label={t("branch")}
+          >
             <label className="composer-branch-search">
               <Search size={14} />
               <input
@@ -1001,7 +1125,7 @@ function ApprovalPicker({ value, disabled, language, onChange }: {
       return;
     }
     const rect = el.getBoundingClientRect();
-    const width = Math.min(340, window.innerWidth - 16);
+    const width = Math.min(294, window.innerWidth - 16);
     const left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8);
     const spaceAbove = rect.top - 8;
     const openUp = spaceAbove >= 220 || spaceAbove > window.innerHeight - rect.bottom;
@@ -1043,7 +1167,8 @@ function ApprovalPicker({ value, disabled, language, onChange }: {
       style={{ position: "fixed", top: box.top, bottom: box.bottom, left: box.left, width: box.width, zIndex: 220 }}
     >
       <header className="approval-picker-heading">
-        <span>{t("approvalMenuTitle")}</span>
+        <strong>{language === "zh-CN" ? "审批模式" : "Approval mode"}</strong>
+        <small>{language === "zh-CN" ? "控制工具执行边界" : "Control tool execution boundaries"}</small>
       </header>
       {approvalModes.map((mode) => {
         const Icon = mode.Icon;
@@ -1102,6 +1227,7 @@ function ApprovalPicker({ value, disabled, language, onChange }: {
       >
         <CurrentIcon size={14} />
         <span>{t(current.labelKey)}</span>
+        <ChevronDown size={11} />
       </summary>
     </details>
     {menu}
@@ -1285,14 +1411,13 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
   language: Snapshot["language"];
 }) {
   const modelProviders = useRuntimeStore((state) => state.modelProviders);
-  const [root, animate] = useAnimate<HTMLDetailsElement>();
+  const root = useRef<HTMLDetailsElement>(null);
   const summary = useRef<HTMLElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const advancedPage = useRef<HTMLDivElement>(null);
   const effortPage = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const hoverReady = useRef(false);
-  const widthAnimation = useRef(0);
   const closedWidth = useRef(190);
   const [open, setOpen] = useState(false);
   // Plan A: effort slider is the default surface; advanced keeps the classic menus.
@@ -1304,8 +1429,10 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
   const [modelProvider, setModelProvider] = useState("");
   const [menuBox, setMenuBox] = useState<{ top?: number; bottom?: number; left: number; width: number } | null>(null);
   const [subBox, setSubBox] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
+  const reduceMotion = useReducedMotion();
 
-  const fastAvailable = supportsFastMode(selectedProvider);
+  const selectedChoice = models.find((model) => modelKey(model.provider, model.id) === selectedModel);
+  const fastAvailable = supportsFastMode(selectedProvider, selectedChoice?.capabilities);
   const fastActive = fastAvailable && fast;
   const levels = sortReasoningLevels(reasoningLevels);
   const groups: ModelControlGroup[] = [
@@ -1382,28 +1509,6 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
       ? { bottom: window.innerHeight - rect.top + 8, left, width }
       : { top: rect.bottom + 8, left, width });
   }, [view]);
-
-  const animateControlWidth = useCallback((element: HTMLDetailsElement, expanded: boolean) => {
-    const collapsedWidth = closedWidth.current;
-    const openWidth = modelControlWidth(true, window.innerWidth);
-    const runningAnimation = element.getAnimations().some((item) => item.playState === "running");
-    const from = runningAnimation ? element.getBoundingClientRect().width : expanded ? collapsedWidth : openWidth;
-    const to = expanded ? openWidth : collapsedWidth;
-    const sequence = ++widthAnimation.current;
-    if (typeof element.animate !== "function" || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      element.style.removeProperty("width");
-      if (expanded) requestAnimationFrame(placeMenu);
-      return;
-    }
-    void animate(element, { width: [`${from}px`, `${to}px`] }, {
-      duration: .24,
-      ease: [.23, 1, .32, 1],
-    }).then(() => {
-      if (sequence !== widthAnimation.current) return;
-      element.style.removeProperty("width");
-      if (expanded) placeMenu();
-    });
-  }, [animate, placeMenu]);
 
   const placeSubmenu = useCallback((label: string) => {
     const row = rowRefs.current[label];
@@ -1524,6 +1629,9 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
   const activeOptions = modelGroupActive && active ? filterModelControlOptions(active.options, modelQuery, modelProvider) : active?.options ?? [];
   const highEffort = isHighCostReasoning(selectedReasoning);
   const activePageHeight = pageHeights[view] || "auto";
+  const pageTransition = reduceMotion
+    ? { duration: 0 }
+    : { duration: .22, ease: [.23, 1, .32, 1] as [number, number, number, number] };
 
   const menuPortal = open && menuBox ? createPortal(
     <motion.div
@@ -1545,7 +1653,7 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
         className="model-control-page-stack"
         initial={false}
         animate={{ height: activePageHeight }}
-        transition={{ duration: .26, ease: [.23, 1, .32, 1] }}
+        transition={pageTransition}
       >
         <motion.div
           ref={advancedPage}
@@ -1555,7 +1663,7 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
           inert={view !== "advanced"}
           initial={false}
           animate={{ y: view === "advanced" ? 0 : -pageHeights.advanced }}
-          transition={{ duration: .26, ease: [.23, 1, .32, 1] }}
+          transition={pageTransition}
           onAnimationComplete={() => setViewTransitioning(false)}
         >
           {groups.map((group) => (
@@ -1603,7 +1711,7 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
           inert={view !== "effort"}
           initial={false}
           animate={{ y: view === "effort" ? 0 : pageHeights.advanced }}
-          transition={{ duration: .26, ease: [.23, 1, .32, 1] }}
+          transition={pageTransition}
         >
           <div className="effort-panel">
             <div className="effort-panel-toolbar">
@@ -1734,7 +1842,6 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
           return;
         }
         const next = event.currentTarget.open;
-        animateControlWidth(event.currentTarget, next);
         setOpen(next);
         if (next) {
           setView((current) => nextModelControlView(current, "open"));
@@ -1756,7 +1863,6 @@ function ModelControls({ running, models, selectedModel, selectedModelName, sele
         data-high={String(highEffort)}
       >
         <ProviderIcon provider={selectedProvider} size={14} />
-        {fastActive ? <Zap size={12} className="model-controls-fast-icon" aria-hidden="true" /> : null}
         <span>{selectedModelName}</span>
         <small data-high={String(highEffort)}>{selectedReasoningName}</small>
         <ChevronDown size={12} className="model-controls-chevron" />
@@ -1796,55 +1902,42 @@ export function ContextMeter() {
   </details>;
 }
 
-export function contextOccupancy(usage: ContextUsage, profile: ContextProfile | null) {
-  let used = (profile?.contributions ?? []).reduce((total, item) => total + Math.max(0, item.tokens), 0) + Math.max(0, usage.outputTokens);
-  let estimated = Boolean(profile?.estimated);
-  if ((profile?.reportedInputTokens ?? 0) > 0) {
-    used = Math.max(0, profile!.reportedInputTokens!) + Math.max(0, profile!.reportedOutputTokens ?? 0);
-    estimated = false;
-  } else if (usage.inputTokens > 0) {
-    used = Math.max(0, usage.inputTokens) + Math.max(0, usage.outputTokens);
-    estimated = !usage.reported;
-  }
-  const limit = Math.max(0, usage.contextLimit);
-  const percentage = limit > 0 ? Math.min(100, Math.round(used * 100 / limit)) : 0;
-  return { used, limit, percentage, remaining: Math.max(0, limit - used), estimated };
-}
-
 function formatTokens(tokens: number) {
   if (tokens >= 1_000_000) return `${Number((tokens / 1_000_000).toFixed(tokens < 10_000_000 ? 1 : 0))}M`;
   if (tokens >= 1_000) return `${Number((tokens / 1_000).toFixed(tokens < 10_000 ? 1 : 0))}K`;
   return String(tokens);
 }
 
-function useElapsed(start: number, running: boolean) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!running) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [running]);
-  return formatDuration(start ? Math.max(0, now - start) : 0);
+type ComposerModel = { provider: string; id: string; name: string; aliases?: string[]; reasoningLevels: string[]; defaultReasoning?: string; capabilities?: string[] };
+
+type ComposerRoute = { provider: string; model: string; reasoning: string };
+
+export function effectiveComposerRoute(snapshot: Snapshot, planMode: boolean, modelRoutes: ModelRoute[]): ComposerRoute {
+  const plan = planMode ? modelRoutes.find((route) => route.Scope === "plan" && !route.Role)?.Route : undefined;
+  return {
+    provider: plan?.provider?.trim() || snapshot.provider,
+    model: plan?.model?.trim() || snapshot.model,
+    reasoning: plan?.reasoning?.trim() || snapshot.reasoning,
+  };
 }
 
-type ComposerModel = { provider: string; id: string; name: string; aliases?: string[]; reasoningLevels: string[]; defaultReasoning?: string };
-
-function useComposerModels(snapshot: Snapshot) {
+function useComposerModels(snapshot: Snapshot, activeRoute: ComposerRoute, routeScope: "" | "plan") {
   const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
   const setSessionModel = useRuntimeStore((state) => state.setSessionModel);
   const setChatGPTFastMode = useRuntimeStore((state) => state.setChatGPTFastMode);
   const setError = useRuntimeStore((state) => state.setError);
-  const providerModels = modelsByProvider[snapshot.provider] ?? [];
-  const catalogModel = findModelOption(providerModels, snapshot.model);
-  const fallbackModel: ComposerModel = { provider: snapshot.provider, id: snapshot.model, name: modelDisplayName(snapshot.model), aliases: [], reasoningLevels: [snapshot.reasoning].filter(Boolean) };
-  const catalogModels = Object.entries(modelsByProvider).flatMap(([provider, models]) => models.map((model) => ({ ...model, provider })));
+  const providerModels = modelsByProvider[activeRoute.provider] ?? [];
+  const catalogModel = findModelOption(providerModels, activeRoute.model);
+  const fallbackModel: ComposerModel = { provider: activeRoute.provider, id: activeRoute.model, name: modelDisplayName(activeRoute.model), aliases: [], reasoningLevels: [activeRoute.reasoning].filter(Boolean) };
+  const catalogModels = Object.entries(modelsByProvider).flatMap(([provider, models]) => models.filter((model) => !model.disabled).map((model) => ({ ...model, provider })));
   const modelChoices = [...new Map([...(catalogModel ? [] : [fallbackModel]), ...catalogModels].map((model) => [modelKey(model.provider, model.id), model])).values()];
   const catalogLevels = catalogModel?.reasoningLevels ?? [];
   // Keep Codex order (轻度→最高); never pin the current value to the top of the list.
-  const reasoningLevels = sortReasoningLevels(catalogLevels.length > 0 ? catalogLevels : [snapshot.reasoning].filter(Boolean));
-  const selectedModel = modelKey(snapshot.provider, catalogModel?.id ?? snapshot.model);
-  const selectedModelName = catalogModel?.name ?? modelDisplayName(snapshot.model);
+  const reasoningLevels = sortReasoningLevels(catalogLevels.length > 0 ? catalogLevels : [activeRoute.reasoning].filter(Boolean));
+  const selectedModel = modelKey(activeRoute.provider, catalogModel?.id ?? activeRoute.model);
+  const selectedModelName = catalogModel?.name ?? modelDisplayName(activeRoute.model);
+  const fastAvailable = supportsFastMode(activeRoute.provider, catalogModel?.capabilities);
   const persistSessionPreferences = (provider: string, model: string, reasoning: string, previous: { provider: string; model: string; reasoning: string }) => {
     execute({
       kind: "set_session_preferences",
@@ -1855,14 +1948,29 @@ function useComposerModels(snapshot: Snapshot) {
       setError(cause instanceof Error ? cause.message : String(cause));
     });
   };
+  const persistPlanRoute = (provider: string, model: string, reasoning: string) => {
+    execute({
+      kind: "set_model_route",
+      sessionId: currentSessionId,
+      route: { Scope: "plan", Role: "", Label: "Plan", Route: { provider, model, reasoning } },
+    }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  };
   const changeModel = (value: string) => {
     const choice = modelChoices.find((model) => modelKey(model.provider, model.id) === value)!;
-    const reasoning = [choice.defaultReasoning, ...choice.reasoningLevels, snapshot.reasoning].filter(Boolean)[0]!;
+    const reasoning = [choice.defaultReasoning, ...choice.reasoningLevels, activeRoute.reasoning].filter(Boolean)[0]!;
+    if (routeScope === "plan") {
+      persistPlanRoute(choice.provider, choice.id, reasoning);
+      return;
+    }
     const previous = { provider: snapshot.provider, model: snapshot.model, reasoning: snapshot.reasoning };
     setSessionModel(choice.provider, choice.id, reasoning);
     persistSessionPreferences(choice.provider, choice.id, reasoning, previous);
   };
   const changeReasoning = (reasoning: string) => {
+    if (routeScope === "plan") {
+      persistPlanRoute(activeRoute.provider, activeRoute.model, reasoning);
+      return;
+    }
     const previous = { provider: snapshot.provider, model: snapshot.model, reasoning: snapshot.reasoning };
     setSessionModel(snapshot.provider, snapshot.model, reasoning);
     persistSessionPreferences(snapshot.provider, snapshot.model, reasoning, previous);
@@ -1876,7 +1984,7 @@ function useComposerModels(snapshot: Snapshot) {
       setError(cause instanceof Error ? cause.message : String(cause));
     });
   };
-  return { modelChoices, reasoningLevels, selectedModel, selectedModelName, changeModel, changeReasoning, changeSpeed };
+  return { modelChoices, reasoningLevels, selectedModel, selectedModelName, fastAvailable, changeModel, changeReasoning, changeSpeed };
 }
 
 function modelKey(provider: string, model: string) { return `${provider}/${model}`; }

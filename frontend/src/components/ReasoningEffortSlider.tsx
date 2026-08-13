@@ -32,8 +32,8 @@ export function effortIntensity(ratio: number): EffortIntensity {
   return "low";
 }
 
-/** Half of the 28px Codex thumb — usable stop range is inset so dots stay inside the pill. */
-export const THUMB_INSET_PX = 14;
+/** Half of the 28px thumb plus 4px breathing room so the end stops do not hug the outer edge. */
+export const THUMB_INSET_PX = 18;
 
 /** Codex max-burst particle count (see model-picker-power-slider Burst). */
 export const CODEX_BURST_COUNT = 16;
@@ -52,10 +52,10 @@ export function stopStyle(ratio: number): { left: string } {
  * Fill ends at the thumb center. At ratio 0 width is 0 so no blue
  * crescent peeks past the left of the thumb (Codex min state).
  */
-export function fillWidthStyle(ratio: number): { width: string } {
-  if (ratio <= 0) return { width: "0px" };
+export function fillWidthStyle(ratio: number): { clipPath: string } {
+  if (ratio <= 0) return { clipPath: "inset(0 100% 0 0)" };
   return {
-    width: `calc(${THUMB_INSET_PX}px + (100% - ${THUMB_INSET_PX * 2}px) * ${ratio})`,
+    clipPath: `inset(0 calc(100% - (${THUMB_INSET_PX}px + (100% - ${THUMB_INSET_PX * 2}px) * ${Math.min(1, ratio)})) 0 0)`,
   };
 }
 
@@ -294,6 +294,9 @@ export default function ReasoningEffortSlider({
           ) : null}
           <div className="effort-slider-thumb" data-high={String(high)} data-end={String(atMax)} />
         </div>
+      </div>
+      <div className="effort-slider-labels" aria-hidden="true">
+        {sorted.map((level, index) => <span key={level} className={index === visualIndex ? "selected" : ""}>{labels[level] ?? level}</span>)}
       </div>
     </div>
   );

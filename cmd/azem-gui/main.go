@@ -31,9 +31,11 @@ func main() {
 
 func run() error {
 	var configFile, initialSession, workspaceOverride string
+	initialSearchSequence := int64(-1)
 	var showVersion, newWindow bool
 	flag.StringVar(&configFile, "config", "", "path to config.yaml")
 	flag.StringVar(&initialSession, "session", "", "session to open")
+	flag.Int64Var(&initialSearchSequence, "search-sequence", -1, "session block sequence to focus")
 	flag.StringVar(&workspaceOverride, "workspace", "", "workspace to open")
 	flag.BoolVar(&newWindow, "new-window", false, "open an independent window")
 	flag.BoolVar(&showVersion, "version", false, "print version")
@@ -64,7 +66,7 @@ func run() error {
 	options := application.Options{
 		Name: "Azem", Description: "Project-first agent workspace",
 		Assets: application.AssetOptions{Handler: application.AssetFileServerFS(azemfrontend.Assets)},
-		Mac:    application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true},
+		Mac:    desktopMacOptions(newWindow),
 		OnShutdown: func() {
 			if windowTracker != nil {
 				windowTracker.Flush()
@@ -80,14 +82,14 @@ func run() error {
 	}
 	options.SingleInstance = sessionSingleInstance(newWindow, &mainWindow, &handleDeepLink)
 	desktopApp := application.New(options)
-	bridge = desktop.NewBridge(ctx, boot, desktopApp.Event.Emit, func(workspace, sessionID string) error {
-		return launchSessionWindow(configFile, sessionID, workspace, true)
+	bridge = desktop.NewBridge(ctx, boot, desktopApp.Event.Emit, func(workspace, sessionID string, sequence int64) error {
+		return launchSessionWindow(configFile, sessionID, workspace, true, sequence)
 	})
 	desktopApp.RegisterService(application.NewService(bridge))
 	geometry := loadMainWindowGeometry(desktopApp, boot.Paths.StateDir)
 	windowOptions := application.WebviewWindowOptions{
 		Name: "main", Title: "Azem",
-		URL:              sessionWindowURL(initialSession),
+		URL:              sessionWindowURL(initialSession, initialSearchSequence),
 		BackgroundColour: application.NewRGB(245, 245, 243),
 		Mac: application.MacWindow{
 			InvisibleTitleBarHeight: 46,
@@ -105,6 +107,18 @@ func run() error {
 		handleDeepLink(event.Context().URL())
 	})
 	return desktopApp.Run()
+}
+
+func desktopMacOptions(independentWindow bool) application.MacOptions {
+	options := application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: true}
+	if independentWindow {
+		// Project and session windows keep an isolated runtime so work in another
+		// workspace can continue, but they are windows of the existing Azem app
+		// from the user's perspective. Accessory processes do not create another
+		// Dock or Cmd-Tab application entry on macOS.
+		options.ActivationPolicy = application.ActivationPolicyAccessory
+	}
+	return options
 }
 
 func bootstrapDesktop(ctx context.Context, startupWorkspace, workspaceOverride, configFile string) (azemapp.BootstrapResult, error) {

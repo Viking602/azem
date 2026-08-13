@@ -17,6 +17,8 @@ import (
 
 	"resty.dev/v3"
 
+	hyprovider "github.com/Viking602/venat/provider"
+
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -28,8 +30,26 @@ func TestStreamingHTTPClientHasNoTotalBodyTimeout(t *testing.T) {
 		t.Fatalf("streaming client total timeout = %v, want none", service.streamClient.Timeout())
 	}
 	transport, ok := service.streamClient.Transport().(*http.Transport)
-	if !ok || transport.ResponseHeaderTimeout != 30*time.Second {
+	if !ok || transport.ResponseHeaderTimeout != 30*time.Second || transport.Proxy == nil {
 		t.Fatalf("streaming transport = %#v", service.streamClient.Transport())
+	}
+	httpTransport, ok := service.httpClient.Transport().(*http.Transport)
+	if !ok || httpTransport.Proxy == nil {
+		t.Fatalf("request transport = %#v", service.httpClient.Transport())
+	}
+}
+
+func TestClassifyStreamOpenErrorRetriesTransportCancellationOnly(t *testing.T) {
+	transportCancellation := classifyStreamOpenError(context.Background(), "chatgpt", context.Canceled)
+	if !hyprovider.IsRetryableError(transportCancellation) {
+		t.Fatalf("healthy caller transport cancellation is not retryable: %v", transportCancellation)
+	}
+
+	callerCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	callerCancellation := classifyStreamOpenError(callerCtx, "chatgpt", context.Canceled)
+	if !errors.Is(callerCancellation, context.Canceled) || hyprovider.IsRetryableError(callerCancellation) {
+		t.Fatalf("caller cancellation classification=%v retryable=%v", callerCancellation, hyprovider.IsRetryableError(callerCancellation))
 	}
 }
 

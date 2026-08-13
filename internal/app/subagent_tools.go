@@ -44,7 +44,7 @@ type subagentSpawnDriver struct {
 
 func (d *subagentSpawnDriver) Definition() tool.Definition {
 	additional := false
-	description := "Spawn one supervised subagent task. Read-only and shared-workspace tasks block until terminal; only write-capable worktree tasks may run in the background."
+	description := "Spawn one supervised subagent task. Read-only and isolated worktree tasks may run in the background. A foreground wait window never limits task runtime: when the window ends, safe work continues in the background and can be checked with subagent.get_output; shared-workspace writes keep the foreground wait instead of being cancelled."
 	subagentType := tool.Schema{
 		Type:        "string",
 		Description: "Enabled role; omit only when enabled `worker` is desired, otherwise select an advertised role explicitly.",
@@ -94,7 +94,7 @@ func (d *subagentSpawnDriver) Definition() tool.Definition {
 				},
 				"background": {
 					Type:        "boolean",
-					Description: "Defaults false. Detached execution is honored only for a write-capable task with isolation=worktree; all other tasks block until terminal.",
+					Description: "Defaults false. Detached execution is available for read-only tasks and write-capable tasks with isolation=worktree. Shared-workspace writes stay foreground for mutation safety.",
 				},
 				"capability_mode": {
 					Type:        "string",
@@ -147,32 +147,74 @@ func (d *subagentSpawnDriver) Execute(ctx context.Context, call tool.Call, _ too
 	if run.Background {
 		return subagentJSONResult(call, map[string]any{"task_id": run.ID, "status": string(run.State), "description": run.Description, "type": run.Type, "warning": run.Warning}), nil
 	}
+	return subagentJSONResult(call, d.waitForForeground(ctx, run)), nil
+}
+
+func (d *subagentSpawnDriver) waitForForeground(ctx context.Context, run agentservice.SubagentRun) map[string]any {
 	snapshot := d.runtime.waitForForegroundStart(ctx, run.SessionID, run.ID)
-	done := d.runtime.parentDone(run.ID)
 	if snapshot.Found && subagentTerminal(snapshot.Run.State) {
 		_ = d.runtime.store.SetCompletionDelivered(d.runtime.ctx, run.ID, true)
-		return subagentJSONResult(call, foregroundSubagentResult(snapshot)), nil
+		return foregroundSubagentResult(snapshot)
 	}
-	timer := time.NewTimer(d.runtime.cfg.AwaitDuration)
+	done := d.runtime.parentDone(run.ID)
+	waitWindow := d.runtime.foregroundWaitWindow()
+	timer := time.NewTimer(waitWindow)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		d.runtime.Cancel(run.SessionID, run.ID)
-		snapshot := d.runtime.snapshot(run.ID, run.SessionID)
-		return subagentJSONResult(call, foregroundSubagentResult(snapshot)), nil
+		return d.detachAfterParentWait(run)
 	case <-timer.C:
-		d.runtime.Cancel(run.SessionID, run.ID)
-		snapshot := d.runtime.snapshot(run.ID, run.SessionID)
-		result := foregroundSubagentResult(snapshot)
-		result["warning"] = fmt.Sprintf("foreground wait timed out after %s; task cancelled", d.runtime.cfg.AwaitDuration)
-		return subagentJSONResult(call, result), nil
+		if result, detached := d.detachAfterWaitWindow(run, waitWindow); detached {
+			return result
+		}
+		// A shared-workspace writer cannot be detached safely while its parent
+		// may resume mutating the same files. Keep waiting without a runtime
+		// deadline; only explicit cancellation may stop the child.
+		if !waitForSubagentDone(ctx, done) {
+			return d.detachAfterParentWait(run)
+		}
 	case <-done:
 	}
 	snapshot = d.runtime.snapshot(run.ID, run.SessionID)
 	if snapshot.Found && subagentTerminal(snapshot.Run.State) {
 		_ = d.runtime.store.SetCompletionDelivered(d.runtime.ctx, run.ID, true)
 	}
-	return subagentJSONResult(call, foregroundSubagentResult(snapshot)), nil
+	return foregroundSubagentResult(snapshot)
+}
+
+func (d *subagentSpawnDriver) detachAfterParentWait(run agentservice.SubagentRun) map[string]any {
+	snapshot, _, detachErr := d.runtime.continueInBackground(run.SessionID, run.ID, false)
+	result := foregroundSubagentResult(snapshot)
+	result["continuing_in_background"] = true
+	result["warning"] = "parent wait ended; task continues in background and was not cancelled"
+	if detachErr != nil {
+		result["warning"] = fmt.Sprintf("parent wait ended; task is still running, but background state persistence failed: %v", detachErr)
+	}
+	return result
+}
+
+func (d *subagentSpawnDriver) detachAfterWaitWindow(run agentservice.SubagentRun, waitWindow time.Duration) (map[string]any, bool) {
+	snapshot, detached, detachErr := d.runtime.continueInBackground(run.SessionID, run.ID, true)
+	result := foregroundSubagentResult(snapshot)
+	if detachErr != nil {
+		result["warning"] = fmt.Sprintf("foreground wait window elapsed after %s; task is still running, but background state persistence failed: %v", waitWindow, detachErr)
+		return result, true
+	}
+	if !detached {
+		return nil, false
+	}
+	result["continuing_in_background"] = true
+	result["warning"] = fmt.Sprintf("foreground wait window elapsed after %s; task continues in background and was not cancelled", waitWindow)
+	return result, true
+}
+
+func waitForSubagentDone(ctx context.Context, done <-chan struct{}) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-done:
+		return true
+	}
 }
 
 func prepareSubagentTodoBinding(ctx context.Context, parent subagentParentRuntime, itemID string) (int64, error) {
@@ -434,10 +476,14 @@ func foregroundSubagentResult(snapshot agentservice.SubagentSnapshot) map[string
 		return map[string]any{"task_id": snapshot.Run.ID, "status": "not_found"}
 	}
 	run := snapshot.Run
-	return map[string]any{
+	result := map[string]any{
 		"task_id": run.ID, "status": string(run.State), "output": run.Output, "error": run.Error, "warning": run.Warning,
 		"usage": map[string]any{"tool_calls": run.ToolCalls, "turns": run.Turns, "tokens_used": run.TokensUsed},
 	}
+	if run.Background {
+		result["background"] = true
+	}
+	return result
 }
 
 func subagentSnapshotJSON(snapshot agentservice.SubagentSnapshot) map[string]any {

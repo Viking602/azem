@@ -15,6 +15,7 @@ import (
 
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
+	mcpclient "github.com/Viking602/venat/transport/mcp/client"
 	"github.com/Viking602/venat/transport/mcpcontract"
 
 	"github.com/Viking602/azem/internal/config"
@@ -35,6 +36,7 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 		"local": {
 			Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1,
 			Approval: "always", Env: map[string]string{"TOKEN": "env:TOKEN"}, Headers: map[string]string{"Authorization": "keyring:MCP"},
+			RuntimeEnv: map[string]string{"PLUGIN_ROOT": "/plugin"}, RuntimeHeaders: map[string]string{"X-Plugin": "demo"},
 			ToolOverrides: map[string]config.ToolOverride{"safe": {Effect: "read_only", Approval: "never"}},
 		},
 	}, "test-version", func(_ context.Context, reference string) (string, error) {
@@ -53,7 +55,7 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 	if client.initializedName != "azem" || client.initializedVersion != "test-version" {
 		t.Fatalf("initialize = %q %q", client.initializedName, client.initializedVersion)
 	}
-	if gotEnv["TOKEN"] != "resolved:env:TOKEN" || gotHeaders.Get("Authorization") != "resolved:keyring:MCP" {
+	if gotEnv["TOKEN"] != "resolved:env:TOKEN" || gotEnv["PLUGIN_ROOT"] != "/plugin" || gotHeaders.Get("Authorization") != "resolved:keyring:MCP" || gotHeaders.Get("X-Plugin") != "demo" {
 		t.Fatalf("environment=%v headers=%v", gotEnv, gotHeaders)
 	}
 	drivers := manager.Snapshot()
@@ -377,6 +379,85 @@ func TestManagerRefreshWithoutNameRefreshesEveryReadyServer(t *testing.T) {
 	}
 }
 
+func TestManagerConfigureAddsConnectsAndDisablesServer(t *testing.T) {
+	client := &fakeClient{tools: []message.ToolDefinition{{Name: "status", InputSchema: message.JSONSchema{Type: "object"}}}}
+	manager := NewManager(nil, "test", nil, Options{
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+			return client, nil
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	defer func() { _ = manager.Close() }()
+
+	normalized, err := manager.Configure("demo", config.MCPServerConfig{Enabled: true, Transport: "stdio", Command: "demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.ConnectTimeout != "30s" || manager.Servers()[0].State != StateConnecting {
+		t.Fatalf("configured MCP = %#v, snapshot = %#v", normalized, manager.Servers())
+	}
+	if err := manager.Reconnect(context.Background(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	ready := manager.Servers()[0]
+	if ready.State != StateReady || ready.ToolCount != 1 {
+		t.Fatalf("ready MCP snapshot = %#v", ready)
+	}
+	if _, err := manager.Configure("demo", config.MCPServerConfig{Enabled: false, Transport: "stdio", Command: "demo"}); err != nil {
+		t.Fatal(err)
+	}
+	disabled := manager.Servers()[0]
+	if disabled.State != StateDisabled || disabled.ToolCount != 0 || disabled.LastError != "" {
+		t.Fatalf("disabled MCP snapshot = %#v", disabled)
+	}
+}
+
+func TestManagerRemoveStopsConnectionAndDropsFutureTools(t *testing.T) {
+	client := &fakeClient{tools: []message.ToolDefinition{{Name: "status", InputSchema: message.JSONSchema{Type: "object"}}}}
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"demo": {Enabled: true, Transport: "stdio", Command: "demo", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
+	}, "test", nil, Options{
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+			return client, nil
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.Snapshot()) != 1 {
+		t.Fatalf("initial MCP tools = %v", definitionNames(manager.Snapshot()))
+	}
+	if err := manager.Remove("demo"); err != nil {
+		t.Fatal(err)
+	}
+	if servers := manager.Servers(); len(servers) != 0 || len(manager.Snapshot()) != 0 {
+		t.Fatalf("removed MCP remains visible: servers=%#v tools=%v", servers, definitionNames(manager.Snapshot()))
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client.mu.Lock()
+	closed := client.closed
+	client.mu.Unlock()
+	if !closed {
+		t.Fatal("removed MCP client was not closed")
+	}
+}
+
+func TestManagerRemovesManagedServer(t *testing.T) {
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"grep": {Enabled: false, Transport: "streamable_http", URL: "https://mcp.grep.app", Managed: true},
+	}, "test", nil, Options{})
+	defer func() { _ = manager.Close() }()
+	if err := manager.Remove("grep"); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.Servers()) != 0 {
+		t.Fatal("managed MCP server remained after removal")
+	}
+}
+
 func TestManagerRetriesConnectionWithBoundedBackoff(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{}
@@ -407,7 +488,7 @@ func TestManagerRetriesConnectionWithBoundedBackoff(t *testing.T) {
 
 func TestRemoteToolFailureDegradesWithoutReplay(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{tools: []message.ToolDefinition{{Name: "fail", InputSchema: message.JSONSchema{Type: "object"}}}, callErr: errors.New("remote failed")}
+	client := &fakeClient{tools: []message.ToolDefinition{{Name: "fail", InputSchema: message.JSONSchema{Type: "object"}}}, callErr: &mcpclient.RPCError{Code: -32004, Message: "server is closing"}}
 	manager := managerWithClient(client)
 	if err := manager.Start(ctx); err != nil {
 		t.Fatal(err)
@@ -421,6 +502,29 @@ func TestRemoteToolFailureDegradesWithoutReplay(t *testing.T) {
 	}
 	if manager.Servers()[0].State != StateDegraded || len(manager.Snapshot()) != 0 {
 		t.Fatalf("servers=%#v snapshot=%v", manager.Servers(), manager.Snapshot())
+	}
+}
+
+func TestRemoteToolTransportRejectionReturnsToolErrorWithoutFailingRun(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{
+		tools:   []message.ToolDefinition{{Name: "search", InputSchema: message.JSONSchema{Type: "object"}}},
+		callErr: &mcpclient.RPCError{Code: -32005, Message: "rejected by transport"},
+	}
+	manager := managerWithClient(client)
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	driver := manager.Snapshot()[0]
+	result, err := driver.Execute(ctx, tool.Call{ID: "call", Name: driver.Definition().Name}, nil)
+	if err != nil {
+		t.Fatalf("transport rejection escaped as a run-level error: %v", err)
+	}
+	if !result.IsError || result.ToolCallID != "call" || result.Name != driver.Definition().Name || !strings.Contains(result.Content, "rejected by transport") {
+		t.Fatalf("transport rejection result = %#v", result)
+	}
+	if manager.Servers()[0].State != StateReady || len(manager.Snapshot()) != 1 {
+		t.Fatalf("transport rejection broke a reusable connection: servers=%#v snapshot=%v", manager.Servers(), manager.Snapshot())
 	}
 }
 

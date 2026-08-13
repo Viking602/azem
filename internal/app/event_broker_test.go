@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -125,16 +126,37 @@ func TestEventBrokerKeepsIndependentStreamsSeparate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	first, err := broker.Next(ctx)
-	if err != nil || first.AgentID != "first" || first.Text != "a" {
+	if err != nil || first.AgentID != "first" || first.Text != "ac" {
 		t.Fatalf("first stream=%#v error=%v", first, err)
 	}
 	second, err := broker.Next(ctx)
 	if err != nil || second.AgentID != "second" || second.Text != "b" {
 		t.Fatalf("second stream=%#v error=%v", second, err)
 	}
-	third, err := broker.Next(ctx)
-	if err != nil || third.AgentID != "first" || third.Text != "c" {
-		t.Fatalf("third stream=%#v error=%v", third, err)
+	finished, err := broker.Next(ctx)
+	if err != nil || finished.Kind != EventRunFinished {
+		t.Fatalf("finished=%#v error=%v", finished, err)
+	}
+}
+
+func TestEventBrokerCoalescesInterleavedStreamsBeforeHighWater(t *testing.T) {
+	broker := newEventBroker(time.Hour)
+	broker.maxEvents = 2
+	for _, event := range []Event{
+		{Kind: EventTextDelta, SessionID: "session", RunID: "run", AgentID: "first", Text: "a"},
+		{Kind: EventTextDelta, SessionID: "session", RunID: "run", AgentID: "second", Text: "b"},
+		{Kind: EventTextDelta, SessionID: "session", RunID: "run", AgentID: "first", Text: "c"},
+	} {
+		if status := broker.Publish(event); status != eventPublishAccepted {
+			t.Fatalf("publish status=%v", status)
+		}
+	}
+	broker.mu.Lock()
+	queued := len(broker.queue) - broker.head
+	degraded := len(broker.degraded)
+	broker.mu.Unlock()
+	if queued != 2 || degraded != 0 {
+		t.Fatalf("queued=%d degraded=%d, want two coalesced streams", queued, degraded)
 	}
 }
 
@@ -205,30 +227,43 @@ func TestEventBrokerNextHonorsContextCancellation(t *testing.T) {
 	}
 }
 
-func TestEventBrokerOverloadPreservesAcceptedPrefixAndTerminalEvent(t *testing.T) {
+func TestEventBrokerBacklogCompactsProjectionAndRequestsFinalResync(t *testing.T) {
 	broker := newEventBroker(time.Hour)
 	broker.maxBytes = 32
 	status := broker.Publish(Event{Kind: EventTextDelta, RunID: "run", Text: strings.Repeat("x", 64)})
-	if status != eventPublishOverloaded {
-		t.Fatalf("overload status=%v", status)
+	if status != eventPublishAccepted {
+		t.Fatalf("publish status=%v", status)
 	}
-	if status := broker.Publish(Event{Kind: EventTextDelta, RunID: "run", Text: "not accepted"}); status != eventPublishOverloaded {
-		t.Fatalf("post-overload delta status=%v", status)
+	if status := broker.Publish(Event{Kind: EventTextDelta, SessionID: "session", RunID: "run", Text: strings.Repeat("y", 64)}); status != eventPublishAccepted {
+		t.Fatalf("backlogged delta status=%v", status)
 	}
-	if status := broker.Publish(Event{Kind: EventRunFailed, RunID: "run", Text: errEventBrokerOverloaded.Error()}); status != eventPublishAccepted {
+	if status := broker.Publish(Event{Kind: EventRunFinished, SessionID: "session", RunID: "run"}); status != eventPublishAccepted {
 		t.Fatalf("terminal status=%v", status)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	delta, err := broker.Next(ctx)
-	if err != nil || delta.Text != strings.Repeat("x", 64) {
-		t.Fatalf("accepted prefix=%#v error=%v", delta, err)
+	degraded := nextBrokerEvent(t, broker, ctx)
+	if degraded.Kind != EventProjectionResync || degraded.State != "degraded" {
+		t.Fatalf("degraded resync=%#v", degraded)
 	}
-	terminal, err := broker.Next(ctx)
-	if err != nil || terminal.Kind != EventRunFailed || terminal.Text != errEventBrokerOverloaded.Error() {
-		t.Fatalf("terminal=%#v error=%v", terminal, err)
+	terminal := nextBrokerEvent(t, broker, ctx)
+	if terminal.Kind != EventRunFinished {
+		t.Fatalf("terminal=%#v", terminal)
 	}
+	final := nextBrokerEvent(t, broker, ctx)
+	if final.Kind != EventProjectionResync || final.State != "final" {
+		t.Fatalf("final resync=%#v", final)
+	}
+}
+
+func nextBrokerEvent(t *testing.T, broker *eventBroker, ctx context.Context) Event {
+	t.Helper()
+	event, err := broker.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event
 }
 
 func TestEventBrokerBroadcastWakesConcurrentConsumers(t *testing.T) {
@@ -266,54 +301,74 @@ func TestEventBrokerBroadcastWakesConcurrentConsumers(t *testing.T) {
 	}
 }
 
-func TestProviderStreamStopsExplicitlyAfterEventBacklogOverload(t *testing.T) {
+func TestProviderStreamContinuesAfterEventBacklogCompaction(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
 	service.events.maxBytes = 32
 	sink := service.providerStreamSink("session", "run", "grok", "model", "high", "responses")
 	err := sink.Emit(context.Background(), stream.Frame{Kind: stream.FrameText, Text: strings.Repeat("x", 64)})
-	if !errors.Is(err, errEventBrokerOverloaded) {
-		t.Fatalf("provider sink error=%v", err)
+	if err != nil {
+		t.Fatalf("provider sink stopped on UI backlog: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	event, err := service.NextEvent(ctx)
-	if err != nil || event.Kind != EventTextDelta || event.Text != strings.Repeat("x", 64) {
-		t.Fatalf("accepted provider prefix=%#v error=%v", event, err)
+	if err != nil || event.Kind != EventProjectionResync || event.State != "degraded" {
+		t.Fatalf("projection resync=%#v error=%v", event, err)
+	}
+}
+
+func TestProviderToolResultUsesBoundedUIProjection(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	sink := service.providerStreamSink("session", "run", "grok", "model", "high", "responses")
+	result := tool.Result{
+		ToolCallID: "tool", Name: "coding.read_file",
+		Content:    strings.Repeat("x", maxToolRecordPreviewBytes*2),
+		Structured: json.RawMessage(strings.Repeat("y", maxInlineToolRecordBytes*2)),
+	}
+	if err := sink.Emit(context.Background(), stream.Frame{Kind: stream.FrameToolResult, ToolResult: &result}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventToolFinished || len(event.Text) > maxToolRecordPreviewBytes+64 || event.Data["structured"] != "" || event.Data["projection_truncated"] != "true" {
+		t.Fatalf("bounded tool projection=%#v", event)
 	}
 }
 
 func TestEventBrokerAccountsTinyCoalescedFragmentsByRetainedCapacity(t *testing.T) {
 	broker := newEventBroker(time.Hour)
 	broker.maxBytes = 128
-	acceptedBytes := 0
-	for {
-		status := broker.Publish(Event{Kind: EventTextDelta, RunID: "run", Text: "x"})
-		acceptedBytes++
-		if status == eventPublishOverloaded {
-			break
-		}
-		if acceptedBytes > 1024 {
-			t.Fatal("tiny fragments bypassed byte high-water mark")
+	for index := 0; index < 1024; index++ {
+		if status := broker.Publish(Event{Kind: EventTextDelta, SessionID: "session", RunID: "run", Text: "x"}); status != eventPublishAccepted {
+			t.Fatalf("fragment %d status=%v", index, status)
 		}
 	}
-	broker.Publish(Event{Kind: EventRunFailed, RunID: "run", Text: errEventBrokerOverloaded.Error()})
+	broker.mu.Lock()
+	queued := len(broker.queue) - broker.head
+	broker.mu.Unlock()
+	if queued > 2 {
+		t.Fatalf("replaceable projection grew without bound: %d queued events", queued)
+	}
+	broker.Publish(Event{Kind: EventRunFinished, SessionID: "session", RunID: "run"})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	delta, err := broker.Next(ctx)
-	if err != nil || delta.Text != strings.Repeat("x", acceptedBytes) {
-		t.Fatalf("accepted fragment prefix bytes=%d event=%#v error=%v", acceptedBytes, delta, err)
+	event, err := broker.Next(ctx)
+	if err != nil || event.Kind != EventProjectionResync {
+		t.Fatalf("projection resync=%#v error=%v", event, err)
 	}
 }
 
-func TestEventBrokerAccountsStructuredPayloads(t *testing.T) {
+func TestEventBrokerPreservesOversizedLifecycleSnapshot(t *testing.T) {
 	broker := newEventBroker(time.Hour)
 	broker.maxBytes = 256
 	status := broker.Publish(Event{
 		Kind: EventAgentDetail, AgentID: "agent",
 		AgentBlocks: []AgentTranscriptBlock{{Content: strings.Repeat("x", 1024)}},
 	})
-	if status != eventPublishOverloaded {
+	if status != eventPublishAccepted {
 		t.Fatalf("structured payload status=%v", status)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -324,11 +379,11 @@ func TestEventBrokerAccountsStructuredPayloads(t *testing.T) {
 	}
 }
 
-func TestTeamAnswerBacklogFailureCannotReportSuccess(t *testing.T) {
+func TestTeamAnswerBacklogDoesNotChangeSuccessfulOutcome(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
 	service.events.maxBytes = 32
-	if service.emit(context.Background(), Event{Kind: EventTextDelta, RunID: "run", Text: strings.Repeat("x", 64)}) {
-		t.Fatal("backlog setup did not overload broker")
+	if !service.emit(context.Background(), Event{Kind: EventTextDelta, SessionID: "session", RunID: "run", Text: strings.Repeat("x", 64)}) {
+		t.Fatal("UI backlog rejected replaceable projection")
 	}
 	execution := agentservice.TeamExecution{Result: multiagent.DriveResult{State: multiagent.TeamState{Tasks: []api.Task{{
 		Result: &api.TypedReport{Structured: map[string]any{"answer": "team answer"}},
@@ -339,7 +394,7 @@ func TestTeamAnswerBacklogFailureCannotReportSuccess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	finished := false
-	failed := false
+	resynced := false
 	for {
 		event, err := service.NextEvent(ctx)
 		if err != nil {
@@ -350,29 +405,51 @@ func TestTeamAnswerBacklogFailureCannotReportSuccess(t *testing.T) {
 			break
 		}
 		finished = finished || event.Kind == EventRunFinished
-		failed = failed || event.Kind == EventRunFailed && event.Text == errEventBrokerOverloaded.Error()
+		resynced = resynced || event.Kind == EventProjectionResync && event.State == "final"
 	}
-	if finished || !failed {
-		t.Fatalf("finished=%t failed=%t", finished, failed)
+	if !finished || !resynced {
+		t.Fatalf("finished=%t resynced=%t", finished, resynced)
 	}
 }
 
-func TestApprovalWaitFailsImmediatelyWhenRequestCannotBeDelivered(t *testing.T) {
+func TestApprovalRequestRemainsDeliverableAfterProjectionCompaction(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
 	service.events.maxBytes = 32
-	if service.emit(context.Background(), Event{Kind: EventTextDelta, RunID: "run", Text: strings.Repeat("x", 64)}) {
-		t.Fatal("backlog setup did not overload broker")
+	if !service.emit(context.Background(), Event{Kind: EventTextDelta, SessionID: "session", RunID: "run", Text: strings.Repeat("x", 64)}) {
+		t.Fatal("UI backlog rejected replaceable projection")
 	}
-	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
 	_, err := service.awaitTeamApproval(
-		context.Background(), "session", "run", "goal",
+		ctx, "session", "run", "goal",
 		tool.Call{ID: "call", Name: "coding.write_file"},
 		tool.Definition{Name: "coding.write_file", EffectType: tool.EffectWrite},
 	)
-	if !errors.Is(err, errEventBrokerOverloaded) {
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("approval error=%v", err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("approval waited despite invisible request: %s", elapsed)
+	service.events.Close()
+	for _, event := range drainBrokerEvents(t, service.events) {
+		if event.Kind == EventApprovalRequested && event.ApprovalID != "" {
+			return
+		}
+	}
+	t.Fatal("approval request was lost behind replaceable projection")
+}
+
+func drainBrokerEvents(t *testing.T, broker *eventBroker) []Event {
+	t.Helper()
+	var events []Event
+	for {
+		event, err := broker.Next(context.Background())
+		if err == nil {
+			events = append(events, event)
+			continue
+		}
+		var eof ioEOF
+		if !errors.As(err, &eof) {
+			t.Fatal(err)
+		}
+		return events
 	}
 }

@@ -16,8 +16,6 @@ import (
 
 const (
 	attachmentMetaKey   = "azem.attachments"
-	maxImagesPerTurn    = 6
-	maxImageBytes       = 8 << 20 // 8 MiB
 	maxImageReadProbe   = 512
 	defaultImageQuality = "auto"
 )
@@ -68,9 +66,6 @@ func (s AttachmentStore) Import(sessionID, sourcePath string) (session.Attachmen
 	}
 	if info.Size() <= 0 {
 		return session.Attachment{}, fmt.Errorf("image is empty")
-	}
-	if info.Size() > maxImageBytes {
-		return session.Attachment{}, fmt.Errorf("image exceeds %d MiB limit", maxImageBytes>>20)
 	}
 	file, err := os.Open(sourcePath)
 	if err != nil {
@@ -147,9 +142,6 @@ func (s AttachmentStore) ImportBytes(sessionID, name, mimeType string, data []by
 	}
 	if len(data) == 0 {
 		return session.Attachment{}, fmt.Errorf("image is empty")
-	}
-	if len(data) > maxImageBytes {
-		return session.Attachment{}, fmt.Errorf("image exceeds %d MiB limit", maxImageBytes>>20)
 	}
 	mimeType = normalizeImageMIME(mimeType)
 	if mimeType == "" || mimeType == "application/octet-stream" {
@@ -250,12 +242,27 @@ func (s AttachmentStore) ValidateSessionAttachments(sessionID string, atts []ses
 	return nil
 }
 
+// Read returns one image only after applying the same per-session ownership and
+// type checks used when submitting attachments to a model.
+func (s AttachmentStore) Read(sessionID string, att session.Attachment) ([]byte, error) {
+	if err := s.ValidateSessionAttachments(sessionID, []session.Attachment{att}); err != nil {
+		return nil, err
+	}
+	file, err := os.Open(att.Path)
+	if err != nil {
+		return nil, fmt.Errorf("open attachment %q: %w", att.Name, err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("read attachment %q: %w", att.Name, err)
+	}
+	return data, nil
+}
+
 func ValidateTurnAttachments(atts []session.Attachment) error {
 	if len(atts) == 0 {
 		return nil
-	}
-	if len(atts) > maxImagesPerTurn {
-		return fmt.Errorf("at most %d images can be attached per turn", maxImagesPerTurn)
 	}
 	seen := make(map[string]struct{}, len(atts))
 	for _, att := range atts {
@@ -275,9 +282,6 @@ func ValidateTurnAttachments(atts []session.Attachment) error {
 		}
 		if info.IsDir() || info.Size() <= 0 {
 			return fmt.Errorf("attachment %q is not a readable image file", att.Name)
-		}
-		if info.Size() > maxImageBytes {
-			return fmt.Errorf("attachment %q exceeds %d MiB limit", att.Name, maxImageBytes>>20)
 		}
 	}
 	return nil

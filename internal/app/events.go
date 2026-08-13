@@ -13,42 +13,48 @@ import (
 type EventKind string
 
 const (
-	EventBootstrapDone     EventKind = "bootstrap_done"
-	EventSessionLoaded     EventKind = "session_loaded"
-	EventTodoUpdated       EventKind = "todo_updated"
-	EventRunStarted        EventKind = "run_started"
-	EventContextUsage      EventKind = "context_usage"
-	EventContextProfile    EventKind = "context_profile"
-	EventAgentState        EventKind = "agent_state"
-	EventAgentDetail       EventKind = "agent_detail"
-	EventProviderRetry     EventKind = "provider_retry"
-	EventThinkingDelta     EventKind = "thinking_delta"
-	EventTextDelta         EventKind = "text_delta"
-	EventToolStarted       EventKind = "tool_started"
-	EventToolUpdate        EventKind = "tool_update"
-	EventToolFinished      EventKind = "tool_finished"
-	EventDiffReady         EventKind = "diff_ready"
-	EventApprovalRequested EventKind = "approval_requested"
-	EventApprovalResolved  EventKind = "approval_resolved"
-	EventApprovalMode      EventKind = "approval_mode"
-	EventModelCatalog      EventKind = "model_catalog"
-	EventModelProviders    EventKind = "model_providers"
-	EventSkillCatalog      EventKind = "skill_catalog"
-	EventAuthState         EventKind = "auth_state"
-	EventMCPState          EventKind = "mcp_state"
-	EventRecoveryState     EventKind = "recovery_state"
-	EventRunFinished       EventKind = "run_finished"
-	EventRunFailed         EventKind = "run_failed"
-	EventRunCancelled      EventKind = "run_cancelled"
-	EventHookStarted       EventKind = "hook_started"
-	EventHookFinished      EventKind = "hook_finished"
-	EventHookDiagnostic    EventKind = "hook_diagnostic"
-	EventMemoryState       EventKind = "memory_state"
-	EventRecapState        EventKind = "recap_state"
-	EventModelRoutes       EventKind = "model_routes"
-	EventBackgroundState   EventKind = "background_state"
-	EventBackgroundLogs    EventKind = "background_logs"
-	EventGitBranches       EventKind = "git_branches"
+	EventBootstrapDone      EventKind = "bootstrap_done"
+	EventSessionLoaded      EventKind = "session_loaded"
+	EventTodoUpdated        EventKind = "todo_updated"
+	EventRunStarted         EventKind = "run_started"
+	EventContextUsage       EventKind = "context_usage"
+	EventContextProfile     EventKind = "context_profile"
+	EventAgentState         EventKind = "agent_state"
+	EventAgentDetail        EventKind = "agent_detail"
+	EventProviderRetry      EventKind = "provider_retry"
+	EventThinkingDelta      EventKind = "thinking_delta"
+	EventTextDelta          EventKind = "text_delta"
+	EventProjectionResync   EventKind = "projection_resync"
+	EventToolStarted        EventKind = "tool_started"
+	EventToolUpdate         EventKind = "tool_update"
+	EventToolFinished       EventKind = "tool_finished"
+	EventDiffReady          EventKind = "diff_ready"
+	EventApprovalRequested  EventKind = "approval_requested"
+	EventApprovalResolved   EventKind = "approval_resolved"
+	EventUserInputRequested EventKind = "user_input_requested"
+	EventUserInputResolved  EventKind = "user_input_resolved"
+	EventPlanProposed       EventKind = "plan_proposed"
+	EventPlanResolved       EventKind = "plan_resolved"
+	EventApprovalMode       EventKind = "approval_mode"
+	EventModelCatalog       EventKind = "model_catalog"
+	EventModelProviders     EventKind = "model_providers"
+	EventSkillCatalog       EventKind = "skill_catalog"
+	EventPluginCatalog      EventKind = "plugin_catalog"
+	EventAuthState          EventKind = "auth_state"
+	EventMCPState           EventKind = "mcp_state"
+	EventRecoveryState      EventKind = "recovery_state"
+	EventRunFinished        EventKind = "run_finished"
+	EventRunFailed          EventKind = "run_failed"
+	EventRunCancelled       EventKind = "run_cancelled"
+	EventHookStarted        EventKind = "hook_started"
+	EventHookFinished       EventKind = "hook_finished"
+	EventHookDiagnostic     EventKind = "hook_diagnostic"
+	EventMemoryState        EventKind = "memory_state"
+	EventRecapState         EventKind = "recap_state"
+	EventModelRoutes        EventKind = "model_routes"
+	EventBackgroundState    EventKind = "background_state"
+	EventBackgroundLogs     EventKind = "background_logs"
+	EventGitBranches        EventKind = "git_branches"
 )
 
 type ModelRouteEntry struct {
@@ -111,13 +117,15 @@ type AgentStatePayload struct {
 }
 
 type AgentTranscriptBlock struct {
-	ID         string
-	Kind       string
-	RunID      string
-	ToolCallID string
-	Title      string
-	Content    string
-	State      string
+	ID               string
+	Kind             string
+	RunID            string
+	ToolCallID       string
+	Title            string
+	Content          string
+	ContentBytes     int
+	ContentTruncated bool
+	State            string
 }
 
 type AgentCatalogEntry struct {
@@ -146,6 +154,37 @@ type SkillCatalogEntry struct {
 type SkillDiagnostic struct {
 	Path    string
 	Message string
+}
+
+type PluginCatalogEntry struct {
+	ID                 string
+	Name               string
+	DisplayName        string
+	Version            string
+	Marketplace        string
+	Origin             string
+	Description        string
+	DeveloperName      string
+	Category           string
+	BrandColor         string
+	LogoPath           string
+	Enabled            bool
+	SkillCount         int
+	MCPServerCount     int
+	IntegratedMCPCount int
+	HookCount          int
+	HooksTrusted       bool
+	HasApp             bool
+	Capabilities       []string
+	Status             string
+	Warning            string
+	Imported           bool
+}
+
+type PluginDiagnostic struct {
+	PluginID string
+	Path     string
+	Message  string
 }
 
 type AgentSnapshotPayload struct {
@@ -208,33 +247,37 @@ func saturatingContextTokenSum(left, right int) int {
 }
 
 type Event struct {
-	Kind             EventKind
-	SessionID        string
-	RunID            string
-	AgentID          string
-	ToolCallID       string
-	ApprovalID       string
-	Text             string
-	TextPhase        string
-	State            string
-	Data             map[string]string
-	Agent            *AgentStatePayload
-	AgentBlocks      []AgentTranscriptBlock
-	AgentCatalog     []AgentCatalogEntry
-	AgentSnapshots   []AgentSnapshotPayload
-	SkillCatalog     []SkillCatalogEntry
-	SkillDiagnostics []SkillDiagnostic
-	ContextProfile   *ContextProfile
-	Todo             *session.TodoList
-	Memories         []memory.Memory
-	Recap            *recap.Recap
-	ModelRoutes      []ModelRouteEntry
-	ModelProviders   []ModelProviderEntry
-	Background       []backgroundservice.Process
-	BackgroundLogs   *backgroundservice.LogSnapshot
-	GitBranches      []GitBranchEntry
-	WorkspaceDirty   bool
-	At               time.Time
+	Kind              EventKind
+	SessionID         string
+	RunID             string
+	AgentID           string
+	ToolCallID        string
+	ApprovalID        string
+	UserInputID       string
+	PlanID            string
+	Text              string
+	TextPhase         string
+	State             string
+	Data              map[string]string
+	Agent             *AgentStatePayload
+	AgentBlocks       []AgentTranscriptBlock
+	AgentCatalog      []AgentCatalogEntry
+	AgentSnapshots    []AgentSnapshotPayload
+	SkillCatalog      []SkillCatalogEntry
+	SkillDiagnostics  []SkillDiagnostic
+	PluginCatalog     []PluginCatalogEntry
+	PluginDiagnostics []PluginDiagnostic
+	ContextProfile    *ContextProfile
+	Todo              *session.TodoList
+	Memories          []memory.Memory
+	Recap             *recap.Recap
+	ModelRoutes       []ModelRouteEntry
+	ModelProviders    []ModelProviderEntry
+	Background        []backgroundservice.Process
+	BackgroundLogs    *backgroundservice.LogSnapshot
+	GitBranches       []GitBranchEntry
+	WorkspaceDirty    bool
+	At                time.Time
 }
 
 func (e Event) Clone() Event {
@@ -263,6 +306,15 @@ func (e Event) Clone() Event {
 	}
 	if e.SkillDiagnostics != nil {
 		cloned.SkillDiagnostics = append([]SkillDiagnostic(nil), e.SkillDiagnostics...)
+	}
+	if e.PluginCatalog != nil {
+		cloned.PluginCatalog = append([]PluginCatalogEntry(nil), e.PluginCatalog...)
+		for i := range cloned.PluginCatalog {
+			cloned.PluginCatalog[i].Capabilities = append([]string(nil), e.PluginCatalog[i].Capabilities...)
+		}
+	}
+	if e.PluginDiagnostics != nil {
+		cloned.PluginDiagnostics = append([]PluginDiagnostic(nil), e.PluginDiagnostics...)
 	}
 	if e.ContextProfile != nil {
 		profile := *e.ContextProfile

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +148,9 @@ func clearRecoveredSharedWorkspaceClaim(ctx context.Context, parent subagentPare
 }
 
 type subagentParentRuntime struct {
+	// Depth is the task depth of the current parent. The main agent is depth 0;
+	// each spawned subagent increments it before exposing another spawn tool.
+	Depth                   int
 	SessionID               string
 	ParentRunID             string
 	ParentAgentID           string
@@ -230,8 +234,8 @@ func newSubagentRuntime(parent context.Context, cfg config.SubagentConfig, store
 	if store == nil {
 		return nil, fmt.Errorf("subagent runtime: store is nil")
 	}
-	if cfg.MaxConcurrency < 1 {
-		return nil, fmt.Errorf("subagent runtime: max concurrency must be positive")
+	if cfg.MaxConcurrency < 0 {
+		return nil, fmt.Errorf("subagent runtime: max concurrency must be non-negative")
 	}
 	cfg = cloneSubagentConfig(cfg)
 	ctx, cancel := context.WithCancel(parent)
@@ -243,10 +247,7 @@ func newSubagentRuntime(parent context.Context, cfg config.SubagentConfig, store
 }
 
 func (r *subagentRuntime) Drivers(parent subagentParentRuntime) ([]tool.Driver, error) {
-	r.mu.Lock()
-	enabled := r.cfg.Enabled
-	r.mu.Unlock()
-	if !enabled {
+	if !r.enabledForDepth(parent.Depth) {
 		return nil, nil
 	}
 	if parent.Coding == nil || parent.Driver == nil || parent.SessionID == "" || parent.ParentRunID == "" {
@@ -260,6 +261,14 @@ func (r *subagentRuntime) Drivers(parent subagentParentRuntime) ([]tool.Driver, 
 		&subagentGetOutputDriver{runtime: r, sessionID: parent.SessionID},
 		&subagentKillDriver{runtime: r, sessionID: parent.SessionID},
 	}, nil
+}
+
+func (r *subagentRuntime) enabledForDepth(depth int) bool {
+	r.mu.Lock()
+	enabled := r.cfg.Enabled
+	maxDepth := r.cfg.MaxDepth
+	r.mu.Unlock()
+	return enabled && (maxDepth < 0 || depth < maxDepth)
 }
 
 func (r *subagentRuntime) recoverInterrupted(parent subagentParentRuntime) error {
@@ -345,6 +354,62 @@ func (r *subagentRuntime) updateMaxConcurrency(maxConcurrency int) {
 	r.cfg.MaxConcurrency = maxConcurrency
 	r.pumpLocked()
 	r.mu.Unlock()
+}
+
+func (r *subagentRuntime) updateMaxDepth(maxDepth int) {
+	r.mu.Lock()
+	r.cfg.MaxDepth = maxDepth
+	r.mu.Unlock()
+}
+
+func (r *subagentRuntime) updateAwaitTimeout(timeout time.Duration) {
+	r.mu.Lock()
+	r.cfg.AwaitTimeout = timeout.String()
+	r.cfg.AwaitDuration = timeout
+	r.mu.Unlock()
+}
+
+func (r *subagentRuntime) foregroundWaitWindow() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cfg.AwaitDuration
+}
+
+// continueInBackground releases only the parent tool wait. The child execution
+// context is owned by the application runtime, so it keeps running until it
+// completes, is explicitly killed, is included in an explicit parent stop, or
+// the application shuts down. safeOnly prevents a live shared-workspace writer
+// from racing its parent after the tool call returns.
+func (r *subagentRuntime) continueInBackground(sessionID, id string, safeOnly bool) (agentservice.SubagentSnapshot, bool, error) {
+	r.mu.Lock()
+	active := r.active[id]
+	if active == nil || active.run.SessionID != sessionID || active.terminalizing || active.terminalized || subagentTerminal(active.run.State) {
+		r.mu.Unlock()
+		return r.snapshot(id, sessionID), false, nil
+	}
+	if active.run.Background {
+		snapshot := r.snapshotFromActiveLocked(active)
+		r.mu.Unlock()
+		return snapshot, true, nil
+	}
+	if safeOnly && !subagentMayRunInBackground(active.profile) {
+		snapshot := r.snapshotFromActiveLocked(active)
+		r.mu.Unlock()
+		return snapshot, false, nil
+	}
+	detached := cloneSubagentRun(active.run)
+	detached.Background = true
+	if err := r.store.Save(r.ctx, detached); err != nil {
+		snapshot := r.snapshotFromActiveLocked(active)
+		r.mu.Unlock()
+		return snapshot, false, err
+	}
+	active.run = detached
+	snapshot := r.snapshotFromActiveLocked(active)
+	r.signalChangedLocked()
+	r.mu.Unlock()
+	r.emitState(detached, string(detached.State))
+	return snapshot, true, nil
 }
 
 func (r *subagentRuntime) Spawn(_ context.Context, input subagentSpawnInput, parent subagentParentRuntime) (agentservice.SubagentRun, error) {
@@ -636,6 +701,7 @@ func sanitizedResumeSeed(encoded json.RawMessage) ([]message.Message, error) {
 	if err := json.Unmarshal(encoded, &transcript); err != nil {
 		return nil, fmt.Errorf("decode transcript: %w", err)
 	}
+	transcript = slices.DeleteFunc(transcript, internalSubagentTranscriptMessage)
 	seed := make([]message.Message, 0, len(transcript))
 	for _, item := range transcript {
 		if item.Role != message.RoleUser && item.Role != message.RoleAssistant {
@@ -652,9 +718,13 @@ func sanitizedResumeSeed(encoded json.RawMessage) ([]message.Message, error) {
 }
 
 func (r *subagentRuntime) pumpLocked() {
-	for r.running < r.cfg.MaxConcurrency && len(r.pending) > 0 {
-		id := r.pending[0]
-		r.pending = r.pending[1:]
+	for len(r.pending) > 0 {
+		index := r.nextRunnablePendingLocked()
+		if index < 0 {
+			return
+		}
+		id := r.pending[index]
+		r.pending = append(r.pending[:index], r.pending[index+1:]...)
 		active := r.active[id]
 		if active == nil || active.terminalizing || active.run.State != agentservice.SubagentQueued {
 			continue
@@ -664,6 +734,39 @@ func (r *subagentRuntime) pumpLocked() {
 		r.wg.Add(1)
 		go r.execute(id)
 	}
+}
+
+func (r *subagentRuntime) nextRunnablePendingLocked() int {
+	for index, id := range r.pending {
+		active := r.active[id]
+		if active == nil || active.terminalizing || active.run.State != agentservice.SubagentQueued || r.canStartLocked(active) {
+			return index
+		}
+	}
+	return -1
+}
+
+func (r *subagentRuntime) canStartLocked(active *activeSubagent) bool {
+	if r.cfg.MaxConcurrency == 0 || r.running < r.cfg.MaxConcurrency {
+		return true
+	}
+	if active == nil || active.parent.Depth == 0 {
+		return false
+	}
+	// A running parent may synchronously await its child while already holding
+	// a slot. Permit one child per parent beyond the global limit so recursive
+	// delegation cannot deadlock. Siblings remain queued until that child ends.
+	return !r.hasRunningChildForParentLocked(active.run.ParentAgentID)
+}
+
+func (r *subagentRuntime) hasRunningChildForParentLocked(parentAgentID string) bool {
+	for _, current := range r.active {
+		if current != nil && current.slot && !current.terminalizing &&
+			current.run.ParentAgentID == parentAgentID {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *subagentRuntime) execute(id string) {
@@ -858,6 +961,10 @@ func (r *subagentRuntime) execute(id string) {
 		}
 	}
 	observeProviderRetries(ctx, parent.Host, parent.SessionID, childRun.RunID, profile.Provider, childDriver)
+	nestedParentDriver := childDriver
+	childDriver = &advisoryBudgetDriver{
+		inner: childDriver, limit: r.cfg.Budget.SoftRequests, enabled: r.cfg.Budget.SoftRequestNotice,
+	}
 	childDriver = &budgetedProviderDriver{inner: childDriver, budget: usageBudget}
 	workspaceDrivers, err := parent.Coding.WorkspaceDrivers(ctx, profile.CWD)
 	if err != nil {
@@ -873,6 +980,39 @@ func (r *subagentRuntime) execute(id string) {
 		if !allowed[definition.Name] {
 			continue
 		}
+		governedDriver := &governedAgentTool{
+			definition: definition, driver: driver, coding: parent.Coding, run: childRun, host: parent.Host,
+			sessionID: parent.SessionID, agentID: id, agentType: profile.Type, parentToolCallID: parentToolCallID,
+			streamRunID: childRun.RunID, update: func(update tool.Update) { r.handleToolUpdate(id, update) },
+		}
+		metadata := hooks.Metadata{
+			SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type,
+			ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD,
+		}
+		dispatcher := hooks.Dispatcher{}
+		if parent.Host != nil {
+			dispatcher = parent.Host.hooks
+		}
+		governed = append(governed, hooks.WrapDriver(dispatcher, metadata, governedDriver))
+		toolNames = append(toolNames, definition.Name)
+	}
+	nestedDrivers, err := r.Drivers(subagentParentRuntime{
+		Depth:     parent.Depth + 1,
+		SessionID: parent.SessionID, ParentRunID: childRun.RunID, ParentAgentID: id,
+		ProviderID: profile.Provider, AccountID: profile.AccountID, ModelID: childModel, Reasoning: profile.Reasoning,
+		PlanMode: parent.PlanMode, ContextTokenTarget: contextTarget, ContextConfig: parent.ContextConfig,
+		WorkspaceRoot: profile.CWD, Driver: nestedParentDriver,
+		ResolveDriver: parent.ResolveDriver, ResolveAccountDriver: parent.ResolveAccountDriver,
+		CompactionRoute: parent.CompactionRoute, CompactionRouteSnapshot: parent.CompactionRouteSnapshot,
+		Coding: parent.Coding, Host: parent.Host,
+	})
+	if err != nil {
+		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", err)
+		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("build nested subagent tools: %w", err)})
+		return
+	}
+	for _, driver := range nestedDrivers {
+		definition := driver.Definition()
 		governedDriver := &governedAgentTool{
 			definition: definition, driver: driver, coding: parent.Coding, run: childRun, host: parent.Host,
 			sessionID: parent.SessionID, agentID: id, agentType: profile.Type, parentToolCallID: parentToolCallID,

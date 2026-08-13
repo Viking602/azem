@@ -21,6 +21,8 @@ import (
 
 	"github.com/zalando/go-keyring"
 	"resty.dev/v3"
+
+	"github.com/Viking602/azem/internal/netproxy"
 )
 
 const (
@@ -59,7 +61,7 @@ type PKCE struct {
 
 func NewClient() *Client {
 	return &Client{
-		HTTP: resty.New().SetTimeout(30 * time.Second), ClientID: DefaultClientID,
+		HTTP: newHTTPClient(), ClientID: DefaultClientID,
 		AuthorizeURL: "https://auth.openai.com/oauth/authorize", TokenURL: "https://auth.openai.com/oauth/token", RevokeURL: "https://auth.openai.com/oauth/revoke",
 	}
 }
@@ -336,9 +338,15 @@ func (c *Client) httpClient() *resty.Client {
 	c.httpMu.Lock()
 	defer c.httpMu.Unlock()
 	if c.HTTP == nil {
-		c.HTTP = resty.New().SetTimeout(30 * time.Second)
+		c.HTTP = newHTTPClient()
 	}
 	return c.HTTP
+}
+
+func newHTTPClient() *resty.Client {
+	client := resty.New().SetTimeout(30 * time.Second)
+	netproxy.ConfigureTransport(client.Transport())
+	return client
 }
 
 func (c *Client) Close() error {

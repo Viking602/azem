@@ -214,7 +214,14 @@ func normalizeStateFact(collection string, fact *StateFactV1, authorities map[st
 	}
 	validSources := normalizedFactSources(*fact, authorities)
 	if len(validSources) == 0 {
-		return fmt.Errorf("semantic %s fact %q has no valid source", collection, fact.Text)
+		// A carried fact can outlive the exact authority class the model chose
+		// for it. Never invent provenance and never promote authority: retain a
+		// deterministic real source, but downgrade the fact to agent inference.
+		validSources = fallbackFactSource("agent", authorities)
+		if len(validSources) == 0 {
+			return fmt.Errorf("semantic %s fact %q has no valid source", collection, fact.Text)
+		}
+		fact.Authority, fact.Confidence = "agent", "inferred"
 	}
 	if fact.Authority == "user" && !sourcesContainAuthority(validSources, authorities, "user") {
 		fact.Authority, fact.Confidence = "agent", "inferred"
@@ -381,9 +388,10 @@ func flattenSemanticFacts(state SemanticStateV1) map[string]semanticFactEntry {
 }
 
 func buildContextCheckpointMetadata(c turnContext, reason string, source, result []message.Message, summaryBody string, authorities map[string]string, target int) (contextCheckpointMetadata, error) {
+	checkpoint := c.currentSemanticCheckpoint()
 	var previous SemanticStateV1
-	if len(c.semanticCheckpoint.State) > 0 {
-		_ = json.Unmarshal(c.semanticCheckpoint.State, &previous)
+	if len(checkpoint.State) > 0 {
+		_ = json.Unmarshal(checkpoint.State, &previous)
 	}
 	var next SemanticStateV1
 	if err := json.Unmarshal([]byte(summaryBody), &next); err != nil {
@@ -391,15 +399,15 @@ func buildContextCheckpointMetadata(c turnContext, reason string, source, result
 	}
 	digest := semanticSourceDigest(source, authorities)
 	cursor := semanticCursor(source, c.todo, c.toolRecords, c.subagentFinishedAtNS, c.subagentID)
-	patch := semanticStatePatch(c.semanticCheckpoint.Revision, cursor, digest, previous, next)
+	patch := semanticStatePatch(checkpoint.Revision, cursor, digest, previous, next)
 	stateJSON, _ := json.Marshal(next)
 	patchJSON, _ := json.Marshal(patch)
-	checkpointID := fmt.Sprintf("semantic-%d-%s", c.semanticCheckpoint.Revision+1, digest[:16])
-	manifest := newContextManifest(c, reason, source, result, authorities, target, cursor, c.semanticCheckpoint.Revision+1)
+	checkpointID := fmt.Sprintf("semantic-%d-%s", checkpoint.Revision+1, digest[:16])
+	manifest := newContextManifest(c, reason, source, result, authorities, target, cursor, checkpoint.Revision+1)
 	return contextCheckpointMetadata{
 		Manifest: manifest,
 		Commit: session.SemanticCommit{
-			CheckpointID: checkpointID, BaseRevision: c.semanticCheckpoint.Revision, Cursor: cursor,
+			CheckpointID: checkpointID, BaseRevision: checkpoint.Revision, Cursor: cursor,
 			State: stateJSON, Patch: patchJSON, SourceDigest: digest,
 		},
 	}, nil

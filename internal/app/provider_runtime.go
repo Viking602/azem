@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +100,7 @@ type singleRunManifest struct {
 	Reasoning        string    `json:"reasoning"`
 	ActiveSkills     []string  `json:"active_skills"`
 	PlanMode         bool      `json:"plan_mode,omitempty"`
+	ApprovedPlanID   string    `json:"approved_plan_id,omitempty"`
 	DisableSubagents bool      `json:"disable_subagents"`
 	StaticIdentity   string    `json:"static_identity"`
 	MaxTokens        int64     `json:"max_tokens"`
@@ -159,6 +161,12 @@ func (r *ProviderRuntime) titleModelRouteSnapshot() config.ModelRouteConfig {
 	return r.cfg.Agents.Title
 }
 
+func (r *ProviderRuntime) recapModelRouteSnapshot() config.ModelRouteConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cfg.Agents.Recap
+}
+
 func (r *ProviderRuntime) routeTurn(request TurnRequest) TurnRequest {
 	if !request.PlanMode {
 		return request
@@ -183,14 +191,16 @@ func (r *ProviderRuntime) UpdateModelRoute(scope, role string, route config.Mode
 	if scope == "main" {
 		r.cfg.Defaults.Provider, r.cfg.Defaults.Model, r.cfg.Defaults.Reasoning = route.Provider, route.Model, route.Reasoning
 	}
-	if scope == "title" {
-		r.cfg.Agents.Title = route
+	routeTargets := map[string]*config.ModelRouteConfig{
+		"title":      &r.cfg.Agents.Title,
+		"plan":       &r.cfg.Agents.Plan,
+		"approval":   &r.cfg.Agents.Approval,
+		"vision":     &r.cfg.Agents.Vision,
+		"compaction": &r.cfg.Agents.Compaction,
+		"recap":      &r.cfg.Agents.Recap,
 	}
-	if scope == "plan" {
-		r.cfg.Agents.Plan = route
-	}
-	if scope == "compaction" {
-		r.cfg.Agents.Compaction = route
+	if target := routeTargets[scope]; target != nil {
+		*target = route
 	}
 	subagents := r.subagents
 	if scope == "subagent" {
@@ -230,10 +240,41 @@ func (r *ProviderRuntime) UpdateSubagentMaxConcurrency(maxConcurrency int) {
 	}
 }
 
+func (r *ProviderRuntime) UpdateSubagentMaxDepth(maxDepth int) {
+	r.mu.Lock()
+	r.cfg.Agents.Subagents.MaxDepth = maxDepth
+	subagents := r.subagents
+	r.mu.Unlock()
+	if subagents != nil {
+		subagents.updateMaxDepth(maxDepth)
+	}
+}
+
+func (r *ProviderRuntime) UpdateSubagentAwaitTimeout(timeout time.Duration) {
+	r.mu.Lock()
+	r.cfg.Agents.Subagents.AwaitTimeout = timeout.String()
+	r.cfg.Agents.Subagents.AwaitDuration = timeout
+	subagents := r.subagents
+	r.mu.Unlock()
+	if subagents != nil {
+		subagents.updateAwaitTimeout(timeout)
+	}
+}
+
 func (r *ProviderRuntime) UpdateChatGPTFastMode(enabled bool) {
 	r.mu.Lock()
 	r.cfg.Providers.ChatGPT.FastMode = enabled
 	r.mu.Unlock()
+}
+
+func (r *ProviderRuntime) UpdateSubscriptionDisabledModels(provider string, models []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if provider == "chatgpt" {
+		r.cfg.Providers.ChatGPT.DisabledModels = append([]string(nil), models...)
+	} else if provider == "grok" {
+		r.cfg.Providers.Grok.DisabledModels = append([]string(nil), models...)
+	}
 }
 
 func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agentservice.Run, hyagent.Engine, error) {
@@ -276,6 +317,11 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, appendErr.Error(), appendErr)
 			return nil, hyagent.Engine{}, fmt.Errorf("persist user turn: %w", appendErr)
 		}
+	}
+	request, err = r.prepareVisionAssistance(ctx, request, run.RunID, account.ID, modelID)
+	if err != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+		return nil, hyagent.Engine{}, err
 	}
 	durable, err := r.coding.Runner().Run(ctx, run.RunID)
 	if err != nil {
@@ -359,6 +405,13 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		toolNames = append(toolNames, "todo")
 		drivers = append(drivers, wrapHookDriver(host, host.hookMetadata(request.SessionID, run.RunID), &contextArtifactDriver{sessionID: request.SessionID, store: host.sessions}))
 		toolNames = append(toolNames, contextReadArtifactTool)
+		if request.PlanMode {
+			drivers = append(drivers,
+				&askDriver{sessionID: request.SessionID, runID: run.RunID, host: host},
+				&submitPlanDriver{sessionID: request.SessionID, runID: run.RunID, host: host},
+			)
+			toolNames = append(toolNames, askToolName, submitPlanToolName)
+		}
 	}
 	if manager != nil {
 		for _, external := range manager.Snapshot() {
@@ -466,11 +519,11 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	contextManager := turnContext{
 		sessionID:    request.SessionID,
 		instructions: instructions, instructionFingerprint: instructionFingerprint, providerID: request.Provider, modelID: modelID, runID: run.RunID,
-		privateContext: request.privateContext, historicalContext: request.historicalContext,
+		privateContext: request.privateContext, visionContext: request.visionContext, approvedPlanContext: request.approvedPlanContext, historicalContext: request.historicalContext,
 		resuming: request.resuming,
 		history:  request.History, modelHistory: request.modelHistory, toolRecords: request.toolRecords,
 		workspaceRoot: r.cfg.Workspace.Root, checkpointBoundary: request.checkpointBoundary,
-		images: CloneAttachments(request.Images), todo: request.Todo,
+		images: effectiveTurnImages(request), todo: request.Todo,
 		largeToolTokens:      r.cfg.Agents.Context.LargeToolResultTokens,
 		compactTargetTokens:  budgetConfig.Target,
 		minReclaimTokens:     r.cfg.Agents.Context.MinReclaimTokens,
@@ -795,7 +848,7 @@ func planModeToolDrivers(drivers []tool.Driver) []tool.Driver {
 	allowed := make([]tool.Driver, 0, len(drivers))
 	for _, driver := range drivers {
 		definition := driver.Definition()
-		if definition.EffectType == tool.EffectReadOnly && definition.Name != subagentKillTool {
+		if (definition.EffectType == tool.EffectReadOnly || definition.Name == submitPlanToolName) && definition.Name != subagentKillTool {
 			allowed = append(allowed, driver)
 		}
 	}
@@ -820,7 +873,7 @@ func (r *ProviderRuntime) persistSingleRunManifest(ctx context.Context, runID st
 	}
 	manifest := singleRunManifest{
 		Version: 2, Provider: request.Provider, AccountID: accountID, Model: resolvedModel, Reasoning: request.Reasoning,
-		ActiveSkills: append([]string(nil), activeSkills...), PlanMode: request.PlanMode, DisableSubagents: request.DisableSubagents,
+		ActiveSkills: append([]string(nil), activeSkills...), PlanMode: request.PlanMode, ApprovedPlanID: request.approvedPlanArtifactID, DisableSubagents: request.DisableSubagents,
 		StaticIdentity: staticIdentity, MaxTokens: r.cfg.Agents.Main.MaxTokens, MaxToolCalls: r.cfg.Agents.Main.MaxToolCalls,
 		MaxWallClockNS: int64(r.cfg.Agents.Main.MaxWallClockDuration), StartedAt: durable.CreatedAt.UTC(),
 	}
@@ -923,7 +976,8 @@ func lazyCompactionResolver(resolve func(context.Context, string, string, string
 		metered := newCompactionUsageDriver(driver, report, resolvedProvider, resolvedModel, resolvedReasoning)
 		configured := firstCompactionSummaryLimit(configuredSummaryTokens)
 		maxSummary, _ := resolveCompactionLimits(contextWindow, configured)
-		inputBudget = maxCompactionInputTokens(contextWindow, maxSummary)
+		generationOutput := compactionGenerationOutputTokens(contextWindow, maxSummary, resolvedReasoning)
+		inputBudget = maxCompactionInputTokens(contextWindow, generationOutput)
 		summarizer = compactionSummarizer(metered, resolvedProvider, resolvedModel, resolvedReasoning, cacheKey, contextWindow, maxSummary)
 		return summarizer, inputBudget, nil
 	}
@@ -1007,6 +1061,49 @@ type budgetedProviderDriver struct {
 	budget *providerUsageBudget
 }
 
+type advisoryBudgetDriver struct {
+	inner   hyprovider.Driver
+	mu      sync.Mutex
+	count   int
+	limit   int
+	enabled bool
+	warned  bool
+}
+
+func (d *advisoryBudgetDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }
+
+func (d *advisoryBudgetDriver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	if d.shouldInjectNotice() {
+		request.Messages = withAdvisoryRequestNotice(request.Messages)
+	}
+	return d.inner.Stream(ctx, request)
+}
+
+func (d *advisoryBudgetDriver) shouldInjectNotice() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.count++
+	showNotice := d.enabled && d.limit > 0 && d.count > d.limit && !d.warned
+	if showNotice {
+		d.warned = true
+	}
+	return showNotice
+}
+
+func withAdvisoryRequestNotice(messages []message.Message) []message.Message {
+	notice := message.NewText(message.RoleSystem,
+		"[Advisory request budget reached] Finish through the shortest correct path and summarize the result. This is not a cancellation or hard limit; continue when more work is required for correctness.")
+	notice.Visibility = message.VisibilityPrivate
+	insertAt := 0
+	for insertAt < len(messages) && messages[insertAt].Role == message.RoleSystem {
+		insertAt++
+	}
+	result := make([]message.Message, 0, len(messages)+1)
+	result = append(result, messages[:insertAt]...)
+	result = append(result, notice)
+	return append(result, messages[insertAt:]...)
+}
+
 func (d *budgetedProviderDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }
 
 func (d *budgetedProviderDriver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
@@ -1033,9 +1130,156 @@ func (s *budgetedProviderStream) Recv() (hyprovider.Event, error) {
 	return event, err
 }
 
+type compactionSummaryRequester struct {
+	driver                hyprovider.Driver
+	providerID            string
+	modelID               string
+	reasoning             string
+	cacheKey              string
+	maxOutputTokens       int
+	lowOutputTokens       int
+	reasoningOutputTokens int
+}
+
+func (r compactionSummaryRequester) request(ctx context.Context, input string) (string, error) {
+	result, err := r.requestWithReasoning(ctx, input, r.reasoning)
+	var empty *providerOutputExhaustedError
+	if err == nil || !errors.As(err, &empty) || !canLowerInternalReasoning(r.reasoning) {
+		return result, err
+	}
+	return r.requestWithReasoning(ctx, input, "low")
+}
+
+func (r compactionSummaryRequester) requestWithReasoning(ctx context.Context, input, reasoning string) (string, error) {
+	generationTokens := r.lowOutputTokens
+	if generationTokens <= 0 {
+		generationTokens = r.maxOutputTokens
+	}
+	if canLowerInternalReasoning(reasoning) && r.reasoningOutputTokens > generationTokens {
+		generationTokens = r.reasoningOutputTokens
+	}
+	return r.requestWithBudget(ctx, input, reasoning, generationTokens)
+}
+
+func (r compactionSummaryRequester) requestWithBudget(ctx context.Context, input, reasoning string, generationTokens int) (string, error) {
+	request := hyprovider.Request{
+		Model: r.modelID,
+		Messages: []message.Message{
+			message.NewText(message.RoleSystem, compactionSummaryInstructions(r.maxOutputTokens)),
+			message.NewText(message.RoleUser, input),
+		},
+		Metadata:  map[string]string{compactionRequestMetadataKey: "true", "reasoning_effort": reasoning},
+		ExtraBody: map[string]any{"prompt_cache_key": r.cacheKey},
+	}
+	if r.providerID != "chatgpt" {
+		request.ExtraBody["max_output_tokens"] = generationTokens
+	}
+	stream, err := r.driver.Stream(ctx, request)
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+	return readCompactionSummaryStream(ctx, stream)
+}
+
+func canLowerInternalReasoning(reasoning string) bool {
+	switch strings.ToLower(strings.TrimSpace(reasoning)) {
+	case "", "none", "minimal", "low":
+		return false
+	default:
+		return true
+	}
+}
+
+type providerOutputExhaustedError struct {
+	operation  string
+	stopReason hyprovider.StopReason
+}
+
+func (e *providerOutputExhaustedError) Error() string {
+	return fmt.Sprintf("%s provider exhausted its output budget after stopping with %s", e.operation, e.stopReason)
+}
+
+func readCompactionSummaryStream(ctx context.Context, stream hyprovider.Stream) (string, error) {
+	var text strings.Builder
+	done := false
+	stopReason := hyprovider.StopReasonUnknown
+	for {
+		event, recvErr := stream.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		if recvErr != nil {
+			return "", recvErr
+		}
+		if event.Kind == hyprovider.EventError {
+			if event.Err != nil {
+				return "", event.Err
+			}
+			return "", fmt.Errorf("summary provider stream failed")
+		}
+		if event.Kind == hyprovider.EventTextDelta {
+			text.WriteString(event.Text)
+		}
+		if event.Kind == hyprovider.EventDone {
+			if event.StopReason == hyprovider.StopReasonAborted || event.StopReason == hyprovider.StopReasonError {
+				return "", fmt.Errorf("summary provider stopped with %s", event.StopReason)
+			}
+			done = true
+			stopReason = event.StopReason
+			break
+		}
+	}
+	if !done {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("summary provider ended without completion")
+	}
+	result := strings.TrimSpace(text.String())
+	if stopReason == hyprovider.StopReasonMaxTurns {
+		return "", &providerOutputExhaustedError{operation: "summary", stopReason: stopReason}
+	}
+	if result == "" {
+		return "", fmt.Errorf("summary provider returned empty output")
+	}
+	return result, nil
+}
+
+func repairOversizedCompactionSummary(ctx context.Context, requester compactionSummaryRequester, result string, maxBytes, maxInputBytes int) (string, error) {
+	const maxRepairAttempts = 2
+	for attempt := 1; len(result) > maxBytes && attempt <= maxRepairAttempts; attempt++ {
+		// Ask for headroom instead of the exact byte ceiling. Providers can
+		// otherwise miss a 16 KiB limit by a few hundred bytes repeatedly.
+		targetBytes := maxBytes - max(256, maxBytes/8)
+		repairInput := fmt.Sprintf("The previous SemanticStateV1 response exceeded the hard output budget. Rewrite the candidate below as one valid SemanticStateV1 JSON object using at most %d UTF-8 bytes (the host hard limit is %d bytes). Preserve active constraints, blockers, failures, and next actions; remove redundant resolved history. Output JSON only.\n\nCANDIDATE:\n%s", targetBytes, maxBytes, result)
+		if len(repairInput) > maxInputBytes {
+			return "", fmt.Errorf("summary output requires %d bytes but configured limit allows %d", len(result), maxBytes)
+		}
+		// Repair is a convergence pass, not another reasoning task. Keep it on
+		// the bounded low-reasoning route so hidden thinking cannot consume the
+		// output allowance needed to emit the replacement JSON.
+		repaired, repairErr := requester.requestWithBudget(ctx, repairInput, "low", requester.maxOutputTokens)
+		if repairErr != nil {
+			return "", fmt.Errorf("repair oversized summary (attempt %d): %w", attempt, repairErr)
+		}
+		result = repaired
+	}
+	if len(result) > maxBytes {
+		return "", fmt.Errorf("summary output requires %d bytes after %d repairs but configured limit allows %d", len(result), maxRepairAttempts, maxBytes)
+	}
+	return result, nil
+}
+
 func compactionSummarizer(driver hyprovider.Driver, providerID, modelID, reasoning, cacheKey string, contextWindow, maxOutputTokens int) func(context.Context, string) (string, error) {
+	lowOutputTokens := compactionLowOutputTokens(contextWindow, maxOutputTokens)
+	reasoningOutputTokens := compactionGenerationOutputTokens(contextWindow, maxOutputTokens, reasoning)
+	requester := compactionSummaryRequester{
+		driver: driver, providerID: providerID, modelID: modelID, reasoning: reasoning,
+		cacheKey: cacheKey, maxOutputTokens: maxOutputTokens, lowOutputTokens: lowOutputTokens, reasoningOutputTokens: reasoningOutputTokens,
+	}
 	return func(ctx context.Context, transcript string) (string, error) {
-		maxInputBytes := contextTokenBytes(contextWindow - maxOutputTokens - 256)
+		maxInputBytes := contextTokenBytes(contextWindow - reasoningOutputTokens - 256)
 		transcript = strings.ToValidUTF8(transcript, "�")
 		if strings.TrimSpace(transcript) == "" || maxInputBytes <= 0 {
 			return "", fmt.Errorf("summary input does not fit model context")
@@ -1043,74 +1287,62 @@ func compactionSummarizer(driver hyprovider.Driver, providerID, modelID, reasoni
 		if len(transcript) > maxInputBytes {
 			return "", fmt.Errorf("summary input requires %d bytes but model context allows %d", len(transcript), maxInputBytes)
 		}
-		request := hyprovider.Request{
-			Model: modelID,
-			Messages: []message.Message{
-				message.NewText(message.RoleSystem, compactionSummaryPrompt),
-				message.NewText(message.RoleUser, transcript),
-			},
-			Metadata:  map[string]string{compactionRequestMetadataKey: "true", "reasoning_effort": reasoning},
-			ExtraBody: map[string]any{"prompt_cache_key": cacheKey},
-		}
-		if providerID != "chatgpt" {
-			request.ExtraBody["max_output_tokens"] = maxOutputTokens
-		}
-		stream, err := driver.Stream(ctx, request)
+		result, err := requester.request(ctx, transcript)
 		if err != nil {
 			return "", err
 		}
-		defer stream.Close()
-		var text strings.Builder
-		done := false
-		for {
-			event, recvErr := stream.Recv()
-			if recvErr == io.EOF {
-				break
-			}
-			if recvErr != nil {
-				return "", recvErr
-			}
-			if event.Kind == hyprovider.EventError {
-				if event.Err != nil {
-					return "", event.Err
-				}
-				return "", fmt.Errorf("summary provider stream failed")
-			}
-			if event.Kind == hyprovider.EventTextDelta {
-				text.WriteString(event.Text)
-			}
-			if event.Kind == hyprovider.EventDone {
-				if event.StopReason == hyprovider.StopReasonAborted || event.StopReason == hyprovider.StopReasonError {
-					return "", fmt.Errorf("summary provider stopped with %s", event.StopReason)
-				}
-				done = true
-				break
-			}
-		}
-		if !done {
-			if err := ctx.Err(); err != nil {
-				return "", err
-			}
-			return "", fmt.Errorf("summary provider ended without completion")
-		}
-		result := strings.TrimSpace(text.String())
-		if result == "" {
-			return "", fmt.Errorf("summary provider returned empty output")
-		}
-		if maxBytes := contextTokenBytes(maxOutputTokens); len(result) > maxBytes {
-			return "", fmt.Errorf("summary output requires %d bytes but configured limit allows %d", len(result), maxBytes)
-		}
-		return result, nil
+		return repairOversizedCompactionSummary(ctx, requester, result, contextTokenBytes(maxOutputTokens), maxInputBytes)
 	}
 }
 
-func maxCompactionSummaryTokens(contextWindow int) int {
-	const maximum = 4096
-	reserved := contextWindow / 4
-	if reserved <= 0 || reserved > maximum {
-		return maximum
+func compactionGenerationOutputTokens(contextWindow, summaryTokens int, reasoning string) int {
+	lowOutputTokens := compactionLowOutputTokens(contextWindow, summaryTokens)
+	if !canLowerInternalReasoning(reasoning) || summaryTokens <= 0 {
+		return lowOutputTokens
 	}
-	return reserved
+	// Reasoning-capable providers count hidden thinking and the final JSON
+	// against the same output allowance. Reserve three additional summary-sized
+	// windows for thinking. The low-reasoning retry still gets two summary-sized
+	// windows so it can emit a complete JSON value before host-side convergence.
+	withReasoningHeadroom := summaryTokens * 4
+	if summaryTokens > int(^uint(0)>>1)/4 {
+		withReasoningHeadroom = int(^uint(0) >> 1)
+	}
+	if maximumGeneration := contextWindow - summaryTokens - 1024; maximumGeneration > 0 && withReasoningHeadroom > maximumGeneration {
+		withReasoningHeadroom = maximumGeneration
+	}
+	if withReasoningHeadroom < lowOutputTokens {
+		return lowOutputTokens
+	}
+	return withReasoningHeadroom
+}
+
+func compactionLowOutputTokens(contextWindow, summaryTokens int) int {
+	if summaryTokens <= 0 {
+		return summaryTokens
+	}
+	withCompletionHeadroom := summaryTokens * 2
+	if summaryTokens > int(^uint(0)>>1)/2 {
+		withCompletionHeadroom = int(^uint(0) >> 1)
+	}
+	if maximumGeneration := contextWindow - summaryTokens - 1024; maximumGeneration > 0 && withCompletionHeadroom > maximumGeneration {
+		withCompletionHeadroom = maximumGeneration
+	}
+	if withCompletionHeadroom < summaryTokens {
+		return summaryTokens
+	}
+	return withCompletionHeadroom
+}
+
+func compactionSummaryInstructions(maxOutputTokens int) string {
+	maxBytes := contextTokenBytes(maxOutputTokens)
+	return fmt.Sprintf(`%s
+
+Output budget: the complete JSON response must be at most %d UTF-8 bytes. Keep active constraints, acceptance criteria, current work, failures, blockers, and next actions. Remove redundant wording and resolved history before exceeding this hard limit.`, compactionSummaryPrompt, maxBytes)
+}
+
+func maxCompactionSummaryTokens(contextWindow int) int {
+	return max(1, contextWindow/4)
 }
 
 func resolveCompactionLimits(contextWindow, configuredSummaryTokens int) (summaryTokens, inputTokens int) {
@@ -1187,7 +1419,7 @@ func (r *ProviderRuntime) GenerateTitle(ctx context.Context, input titleGenerati
 	if providerID != "chatgpt" {
 		request.ExtraBody["max_output_tokens"] = 64
 	}
-	generated, err := collectProviderText(ctx, driver, request, "title")
+	generated, err := collectProviderTextWithReasoningFallback(ctx, driver, request, "title")
 	if err != nil {
 		return "", err
 	}
@@ -1235,7 +1467,7 @@ func (r *ProviderRuntime) GenerateRecap(ctx context.Context, input recapGenerati
 			modelID = firstNonempty(saved.ModelID, modelID)
 		}
 	}
-	route, _ := r.modelRouteSnapshot()
+	route := r.recapModelRouteSnapshot()
 	if route != (config.ModelRouteConfig{}) {
 		providerID, modelID, reasoning = route.Provider, route.Model, route.Reasoning
 	}
@@ -1271,7 +1503,7 @@ func (r *ProviderRuntime) GenerateRecap(ctx context.Context, input recapGenerati
 	if providerID != "chatgpt" {
 		request.ExtraBody["max_output_tokens"] = maxOutputTokens
 	}
-	return collectProviderText(ctx, driver, request, "recap")
+	return collectProviderTextWithReasoningFallback(ctx, driver, request, "recap")
 }
 
 func recapInput(input recapGenerationRequest, maxBytes int) (string, error) {
@@ -1334,6 +1566,9 @@ func collectProviderText(ctx context.Context, driver hyprovider.Driver, request 
 			}
 			return "", fmt.Errorf("%s provider stream failed", operation)
 		case hyprovider.EventDone:
+			if event.StopReason == hyprovider.StopReasonMaxTurns {
+				return "", &providerOutputExhaustedError{operation: operation, stopReason: event.StopReason}
+			}
 			if event.StopReason != hyprovider.StopReasonComplete {
 				return "", fmt.Errorf("%s provider stopped with %s", operation, event.StopReason)
 			}
@@ -1344,6 +1579,18 @@ func collectProviderText(ctx context.Context, driver hyprovider.Driver, request 
 			return result, nil
 		}
 	}
+}
+
+func collectProviderTextWithReasoningFallback(ctx context.Context, driver hyprovider.Driver, request hyprovider.Request, operation string) (string, error) {
+	result, err := collectProviderText(ctx, driver, request, operation)
+	var exhausted *providerOutputExhaustedError
+	if err == nil || !errors.As(err, &exhausted) || !canLowerInternalReasoning(request.Metadata["reasoning_effort"]) {
+		return result, err
+	}
+	retry := request
+	retry.Metadata = maps.Clone(request.Metadata)
+	retry.Metadata["reasoning_effort"] = "low"
+	return collectProviderText(ctx, driver, retry, operation)
 }
 
 func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projection session.Projection) (session.CompactionPlan, bool, error) {
@@ -1417,7 +1664,8 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 		largeToolTokens:      r.cfg.Agents.Context.LargeToolResultTokens,
 		subagentFinishedAtNS: subagentFinishedAtNS, subagentID: subagentID,
 		resolveSummarizer: func(context.Context) (func(context.Context, string) (string, error), int, error) {
-			return compactionSummarizer(metered, providerID, modelID, reasoning, projection.Session.ID+":compaction", contextWindow, maxSummaryTokens), maxCompactionInputTokens(contextWindow, maxSummaryTokens), nil
+			generationOutput := compactionGenerationOutputTokens(contextWindow, maxSummaryTokens, reasoning)
+			return compactionSummarizer(metered, providerID, modelID, reasoning, projection.Session.ID+":compaction", contextWindow, maxSummaryTokens), maxCompactionInputTokens(contextWindow, generationOutput), nil
 		},
 	}
 	compacted, err := manager.prepareCompactionReason(ctx, messages, manualBudget.HardTrigger, "manual")
@@ -1810,40 +2058,43 @@ func observeProviderRetries(ctx context.Context, host *Service, sessionID, runID
 	})
 }
 
-func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context, sessionID, runID string) (*codex.Reviewer, error) {
-	accounts, err := r.auth.Accounts(ctx, "chatgpt")
-	if err != nil {
-		return nil, err
-	}
-	var accountID string
-	for _, account := range accounts {
-		if account.Status == "active" {
-			accountID = account.ID
-			break
+func (r *ProviderRuntime) approvalModelRoute(ctx context.Context, sessionID string) config.ModelRouteConfig {
+	r.mu.RLock()
+	providerID, modelID, reasoning := r.cfg.Defaults.Provider, r.cfg.Defaults.Model, r.cfg.Defaults.Reasoning
+	route := r.cfg.Agents.Approval
+	host := r.host
+	r.mu.RUnlock()
+	if host != nil && host.sessions != nil {
+		if saved, err := host.sessions.LoadSession(ctx, sessionID); err == nil {
+			providerID = firstNonempty(saved.ProviderID, providerID)
+			modelID = firstNonempty(saved.ModelID, modelID)
+			reasoning = firstNonempty(saved.Reasoning, reasoning)
 		}
 	}
-	if accountID == "" {
-		return nil, fmt.Errorf("no active ChatGPT account is available")
+	if route != (config.ModelRouteConfig{}) {
+		return route
 	}
-	driver, err := codex.New(r.auth, accountID, r.ChatGPTEndpoint, codex.ApprovalReviewerModels(), "low")
+	return config.ModelRouteConfig{Provider: providerID, Model: modelID, Reasoning: reasoning}
+}
+
+func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context, sessionID, runID string) (*codex.Reviewer, error) {
+	route := r.approvalModelRoute(ctx, sessionID)
+	providerID, modelID, reasoning := route.Provider, route.Model, route.Reasoning
+	r.mu.RLock()
+	host := r.host
+	r.mu.RUnlock()
+	_, resolvedModel, _, driver, err := r.resolveDriver(ctx, providerID, modelID, reasoning)
 	if err != nil {
 		return nil, err
 	}
-	r.mu.RLock()
-	host := r.host
-	fastMode := r.cfg.Providers.ChatGPT.FastMode
-	r.mu.RUnlock()
-	if fastMode {
-		driver.SetServiceTier(codex.FastServiceTier)
-	}
-	observeProviderRetries(ctx, host, sessionID, runID, "chatgpt", driver)
-	reviewer, err := codex.NewReviewer(driver, r.approvalReviewTimeout)
+	observeProviderRetries(ctx, host, sessionID, runID, providerID, driver)
+	reviewer, err := codex.NewProviderReviewer(driver, resolvedModel, reasoning, r.approvalReviewTimeout)
 	if err != nil || host == nil || host.sessions == nil {
 		return reviewer, err
 	}
 	return reviewer.WithDriver(&meteredProviderDriver{
 		inner: driver, store: host.sessions, host: host, sessionID: sessionID, runID: runID,
-		kind: "review", provider: "chatgpt", model: codex.ApprovalReviewerModel, transport: driver.Metadata().Name,
+		kind: "review", provider: providerID, model: resolvedModel, transport: driver.Metadata().Name,
 	}), nil
 }
 
@@ -1900,6 +2151,13 @@ func (r *ProviderRuntime) ResumeRun(_ context.Context, runID string) error {
 	}
 	request.ActiveSkills = append([]string(nil), manifest.ActiveSkills...)
 	request.PlanMode = manifest.PlanMode
+	request.approvedPlanArtifactID = manifest.ApprovedPlanID
+	if request.approvedPlanArtifactID != "" {
+		request.approvedPlanContext, err = host.approvedPlanContext(host.ctx, sessionID, request.approvedPlanArtifactID)
+		if err != nil {
+			return r.coding.RequireRunReconciliation(host.ctx, runID, "approved execution plan is missing or invalid")
+		}
+	}
 	request.DisableSubagents = manifest.DisableSubagents
 	request.immutableIdentity = manifest.StaticIdentity
 	request.budgetRestored = true
@@ -2121,12 +2379,28 @@ func (r *ProviderRuntime) resolveDriverForAccount(ctx context.Context, providerI
 	if err != nil {
 		return auth.Account{}, "", 0, nil, err
 	}
-	if modelID == "" && len(models.Models) > 0 {
-		modelID = models.Models[0].ID
+	r.mu.RLock()
+	var disabledModels []string
+	if providerID == "chatgpt" {
+		disabledModels = append([]string(nil), r.cfg.Providers.ChatGPT.DisabledModels...)
+	} else {
+		disabledModels = append([]string(nil), r.cfg.Providers.Grok.DisabledModels...)
+	}
+	r.mu.RUnlock()
+	if modelID == "" {
+		for _, model := range models.Models {
+			if !slices.Contains(disabledModels, model.ID) {
+				modelID = model.ID
+				break
+			}
+		}
 	}
 	var selectedModel catalog.Model
 	for _, model := range models.Models {
 		if model.MatchesID(modelID) {
+			if slices.Contains(disabledModels, model.ID) {
+				return auth.Account{}, "", 0, nil, fmt.Errorf("model %q is disabled for %s", model.ID, providerID)
+			}
 			selectedModel = model
 			break
 		}
