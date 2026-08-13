@@ -15,6 +15,7 @@ export interface Snapshot {
   approvalMode: string;
   queueMode: DeliveryMode;
   subagentConcurrency: number;
+  subagentMaxDepth?: number;
   shellConcurrency?: number;
   subagentAwaitSeconds?: number;
   chatgptFastMode: boolean;

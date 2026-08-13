@@ -21,6 +21,9 @@ import AttachmentPreview from "./AttachmentPreview";
 import CodeDiff from "./CodeDiff";
 import SubagentGlyph from "./SubagentGlyph";
 import {
+  ApprovalCard, StreamingText as BeautifulStreamingText, ThinkingState, ToolRow,
+} from "./beautiful-ui/Primitives";
+import {
   fileChangesForBlock, isActiveFileChangeBlock, pendingFileChangeSummaryForBlock,
   type EditedFileSummary, type FileChange,
 } from "./fileChanges";
@@ -659,7 +662,7 @@ function ToolStep({ block, language }: { block: Block; language: Snapshot["langu
     ? formatDuration(elapsedMs)
     : running ? translator(language)("running") : completed ? "" : toolStatusLabel(state, language);
   const label = block.title ? toolDisplayName(block.title, language) : translator(language)("toolGeneric");
-  return <details className="timeline-step" data-state={state} role="listitem" aria-current={running ? "step" : undefined} onToggle={(event) => setOpened(event.currentTarget.open)}>
+  return <ToolRow className="timeline-step" state={state} role="listitem" aria-current={running ? "step" : undefined} onToggle={(event) => setOpened(event.currentTarget.open)}>
     <summary>
       <span className="timeline-step-mark" aria-hidden="true">
         {running ? <span /> : completed ? <Check size={11} /> : failed ? <X size={10} /> : <span className="timeline-step-pending-dot" />}
@@ -675,7 +678,7 @@ function ToolStep({ block, language }: { block: Block; language: Snapshot["langu
         ? <ToolExecutionLog output={liveOutput} label={`${label} · ${translator(language)("fieldDetail")}`} />
         : presentation?.result ? <pre className="tool-result"><AnsiText text={presentation.result} /></pre> : null}
     </div> : null}
-  </details>;
+  </ToolRow>;
 }
 
 type TimelineBlockProps = {
@@ -791,9 +794,9 @@ function ToolDisclosure({ block, language, compact = false, nested = false }: Ti
     [opened, payload, language],
   );
   const truncated = block.data?.contentTruncated === "true";
-  return <details
+  return <ToolRow
     className={`tool-block work-entry ${nested ? "nested" : ""} ${compact ? "compact" : ""}`}
-    data-state={block.state || "completed"}
+    state={block.state || "completed"}
     onToggle={(event) => {
       const target = event.currentTarget;
       const next = target.open;
@@ -830,7 +833,7 @@ function ToolDisclosure({ block, language, compact = false, nested = false }: Ti
           : null}
       </div>
     ) : null}
-  </details>;
+  </ToolRow>;
 }
 
 type PlanningQuestion = {
@@ -1064,9 +1067,9 @@ function StreamingText({ content, debugReplay = false }: { content: string; debu
   const presentation = appendStreamingPresentation(presentationRef.current, visibleContent);
   presentationRef.current = presentation;
 
-  return <div className="streaming-text">
+  return <BeautifulStreamingText>
     <StreamingMarkdown ranges={presentation.ranges}>{visibleContent}</StreamingMarkdown>
-  </div>;
+  </BeautifulStreamingText>;
 }
 
 function ToolExecutionLog({ output, label }: { output: string; label: string }) {
@@ -1135,48 +1138,16 @@ function ReasoningTrace({ block, language }: { block: Block; language: Snapshot[
   // is the actionable source of truth; retain reasoning only once it has text.
   if (delegated && steps.length === 0) return null;
 
-  return <section className={`reasoning-trace ${active ? "streaming" : "completed"} ${open ? "open" : ""}`} aria-busy={active || undefined}>
-    <button
-      className="reasoning-summary"
-      type="button"
-      aria-expanded={open}
-      aria-controls={steps.length ? panelId : undefined}
-      onClick={() => setOpen((value) => !value)}
-      disabled={!steps.length}
-    >
-      <ReasoningMark active={active} />
-      <ReasoningLabel label={label} active={active} />
-      {steps.length ? <ChevronDown className="reasoning-chevron" size={13} aria-hidden="true" /> : null}
-    </button>
-    {steps.length ? <div className="reasoning-body" id={panelId} hidden={!open}>
-      {steps.map((step, index) => <p className="reasoning-step" key={index}>{step}</p>)}
-    </div> : null}
-  </section>;
+  return <ThinkingState active={active} expanded={open} label={label} panelId={panelId} disabled={!steps.length} onToggle={() => setOpen((value) => !value)}>
+    {steps.map((step, index) => <p className="reasoning-step" key={index}>{step}</p>)}
+  </ThinkingState>;
 }
 
 function ThinkingPlaceholder({ language }: { language: Snapshot["language"] }) {
   const label = translator(language)("thinkingActive");
-  return <div className="reasoning-trace reasoning-placeholder streaming" role="status" aria-live="polite" aria-busy="true">
-    <div className="reasoning-summary">
-      <ReasoningMark active />
-      <ReasoningLabel label={label} active />
-    </div>
+  return <div className="reasoning-placeholder" role="status" aria-live="polite">
+    <ThinkingState active expanded={false} label={label} disabled />
   </div>;
-}
-
-function ReasoningMark({ active }: { active: boolean }) {
-  return <span className={`azem-thinking-mark ${active ? "active" : ""}`} aria-hidden="true">
-    <i /><i />
-  </span>;
-}
-
-function ReasoningLabel({ label, active }: { label: string; active: boolean }) {
-  return <span className={`reasoning-label ${active ? "active" : ""}`}>
-    <span className="reasoning-label-base">{label}</span>
-    {active ? <span className="reasoning-label-sweep" aria-hidden="true">
-      <span className="reasoning-label-highlight">{label}</span>
-    </span> : null}
-  </span>;
 }
 
 function FileChangeBlock({ changes, summary, language, nested, running = false }: {
@@ -1276,11 +1247,11 @@ function ApprovalBlock({ block }: { block: Block }) {
   const pending = block.state === "pending";
   const denied = block.state === "deny" || block.state === "denied";
   const resolvedLabel = denied ? t("deny") : block.state === "session" ? t("approveSession") : t("approveOnce");
-  return <article className={`approval-block ${pending ? "pending" : "resolved"}`} data-risk={details.riskTone}>
+  return <ApprovalCard className={pending ? "pending" : "resolved"} state={pending ? "pending" : "resolved"} data-risk={details.riskTone}>
     <header className="approval-heading"><span className="approval-icon"><ShieldCheck size={17} /></span><div><small>{t("approvalTitle")}</small><strong>{details.tool}</strong></div><span className="approval-risk">{details.riskLabel}</span></header>
     <div className="approval-target"><span>{t("approvalTarget")}</span><code>{details.target}</code></div>
     <footer className="approval-footer"><p>{details.description}</p><div className="approval-actions">{pending ? <><button onClick={() => resolve("deny")}>{t("deny")}</button><button onClick={() => resolve("once")}>{t("approveOnce")}</button><button className="primary" onClick={() => resolve("session")}>{t("approveSession")}</button></> : <span className={denied ? "denied" : "approved"}>{denied ? <X size={14} /> : <Check size={14} />}{resolvedLabel}</span>}</div></footer>
-  </article>;
+  </ApprovalCard>;
 }
 
 export function approvalPresentation(block: Block, language: Snapshot["language"]) {

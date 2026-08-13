@@ -2208,12 +2208,201 @@ func TestSubagentCoordinatorAppliesConcurrencyUpdate(t *testing.T) {
 		t.Fatalf("second task started before update: %q", started)
 	case <-time.After(50 * time.Millisecond):
 	}
-	runtime.updateMaxConcurrency(2)
+	runtime.updateMaxConcurrency(0)
 	if started := <-driver.started; started != "two" {
-		t.Fatalf("task started after update = %q", started)
+		t.Fatalf("task started after unbounded update = %q", started)
 	}
 	driver.release <- struct{}{}
 	driver.release <- struct{}{}
+}
+
+type recursiveSubagentDriver struct {
+	mu       sync.Mutex
+	requests []hyprovider.Request
+	rootKey  string
+}
+
+func (*recursiveSubagentDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "test", Models: []string{"model"}}
+}
+
+func (d *recursiveSubagentDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	d.mu.Lock()
+	d.requests = append(d.requests, request)
+	cacheKey := fmt.Sprint(request.ExtraBody["prompt_cache_key"])
+	if d.rootKey == "" {
+		d.rootKey = cacheKey
+	}
+	nested := cacheKey != d.rootKey
+	d.mu.Unlock()
+	hasToolResult := false
+	for _, current := range request.Messages {
+		hasToolResult = hasToolResult || current.ToolResult != nil
+	}
+	if nested {
+		return hyprovider.NewSliceStream([]hyprovider.Event{
+			{Kind: hyprovider.EventTextDelta, Text: "nested completed"},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+		}), nil
+	}
+	if !hasToolResult {
+		arguments := json.RawMessage(`{"prompt":"nested delegation","description":"nested delegation","subagent_type":"explore","background":false}`)
+		return hyprovider.NewSliceStream([]hyprovider.Event{
+			{Kind: hyprovider.EventToolCall, ToolCall: &message.ToolCall{ID: "nested-spawn", Name: subagentSpawnTool, Arguments: arguments}},
+			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonToolUse},
+		}), nil
+	}
+	return hyprovider.NewSliceStream([]hyprovider.Event{
+		{Kind: hyprovider.EventTextDelta, Text: "root completed"},
+		{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
+	}), nil
+}
+
+func newRecursiveTestRuntime(t *testing.T, ctx context.Context) (*subagentRuntime, *agentservice.SQLSubagentRunStore, *agentservice.Service) {
+	t.Helper()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = providerStore.Close(context.Background()) })
+	coding, err := agentservice.NewService(providerStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coding.Close(context.Background()) })
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.MaxConcurrency = 1
+	cfg.MaxDepth = 2
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Shutdown(context.Background()) })
+	return runtime, store, coding
+}
+
+func TestRecursiveSubagentMakesProgressWhenConcurrencyIsOne(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runtime, store, coding := newRecursiveTestRuntime(t, ctx)
+	driver := &recursiveSubagentDriver{}
+	parent := subagentParentRuntime{
+		SessionID: "recursive-session", ParentRunID: "main-run", ParentAgentID: "azem-main",
+		ProviderID: "test", ModelID: "model", Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir(),
+	}
+	root, err := runtime.Spawn(ctx, subagentSpawnInput{
+		Prompt: "root delegation", Description: "root delegation", SubagentType: "explore",
+	}, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := runtime.Query(ctx, parent.SessionID, []string{root.ID}, 5*time.Second)
+	if len(snapshots) != 1 || snapshots[0].Run.State != agentservice.SubagentCompleted {
+		t.Fatalf("recursive root did not complete: %#v", snapshots)
+	}
+	runs, err := store.List(ctx, parent.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("recursive run count = %d, want 2: %#v", len(runs), runs)
+	}
+	for _, run := range runs {
+		if run.State != agentservice.SubagentCompleted {
+			t.Fatalf("recursive child did not complete: %#v", run)
+		}
+	}
+	driver.mu.Lock()
+	requestCount := len(driver.requests)
+	driver.mu.Unlock()
+	if requestCount != 3 {
+		t.Fatalf("recursive provider requests = %d, want root + nested + root resume", requestCount)
+	}
+}
+
+func TestSubagentDriversHonorRecursionDepth(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	coding, err := agentservice.NewService(providerStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+	cfg := config.Default().Agents.Subagents
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Shutdown(ctx)
+	parent := subagentParentRuntime{
+		SessionID: "depth-session", ParentRunID: "run", ParentAgentID: "agent",
+		ProviderID: "test", ModelID: "model", Driver: metadataOnlyDriver{}, Coding: coding, WorkspaceRoot: t.TempDir(),
+	}
+	for _, test := range []struct {
+		depth int
+		want  int
+	}{{depth: 0, want: 3}, {depth: 1, want: 3}, {depth: 2, want: 0}} {
+		parent.Depth = test.depth
+		drivers, err := runtime.Drivers(parent)
+		if err != nil || len(drivers) != test.want {
+			t.Fatalf("drivers at depth %d = %d, want %d, err=%v", test.depth, len(drivers), test.want, err)
+		}
+	}
+	runtime.updateMaxDepth(-1)
+	parent.Depth = 99
+	drivers, err := runtime.Drivers(parent)
+	if err != nil || len(drivers) != 3 {
+		t.Fatalf("unlimited depth drivers = %d, err=%v", len(drivers), err)
+	}
+}
+
+type advisoryCaptureDriver struct {
+	requests []hyprovider.Request
+}
+
+func (*advisoryCaptureDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "test", Models: []string{"model"}}
+}
+
+func (d *advisoryCaptureDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	d.requests = append(d.requests, request)
+	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone}}), nil
+}
+
+func TestAdvisoryRequestBudgetWarnsOnceWithoutStopping(t *testing.T) {
+	inner := &advisoryCaptureDriver{}
+	driver := &advisoryBudgetDriver{inner: inner, limit: 1, enabled: true}
+	request := hyprovider.Request{Messages: []message.Message{
+		message.NewText(message.RoleSystem, "stable rules"),
+		message.NewText(message.RoleUser, "finish the task"),
+	}}
+	for range 3 {
+		stream, err := driver.Stream(context.Background(), request)
+		if err != nil {
+			t.Fatalf("advisory wrapper stopped the request: %v", err)
+		}
+		_, _ = stream.Recv()
+		_ = stream.Close()
+	}
+	if len(inner.requests) != 3 || len(inner.requests[0].Messages) != 2 || len(inner.requests[1].Messages) != 3 || len(inner.requests[2].Messages) != 2 {
+		t.Fatalf("advisory request shapes = %#v", inner.requests)
+	}
+	notice := inner.requests[1].Messages[1]
+	if notice.Role != message.RoleSystem || notice.Visibility != message.VisibilityPrivate || !strings.Contains(notice.Text, "not a cancellation or hard limit") {
+		t.Fatalf("advisory notice = %#v", notice)
+	}
 }
 
 type recoveringSubagentDriver struct {

@@ -171,13 +171,24 @@ func ResetModelRoute(path, scope, role string) error {
 }
 
 func UpdateSubagentMaxConcurrency(path string, maxConcurrency int) error {
-	if maxConcurrency < 1 {
-		return fmt.Errorf("agents.subagents.max_concurrency must be positive")
+	if maxConcurrency < 0 {
+		return fmt.Errorf("agents.subagents.max_concurrency must be non-negative")
 	}
 	return updateYAML(path, func(root *yaml.Node) {
 		subagents := ensureMappingPath(root, "agents", "subagents")
 		setMappingScalar(subagents, "max_concurrency", strconv.Itoa(maxConcurrency))
 		mappingValue(subagents, "max_concurrency").Tag = "!!int"
+	})
+}
+
+func UpdateSubagentMaxDepth(path string, maxDepth int) error {
+	if maxDepth < -1 {
+		return fmt.Errorf("agents.subagents.max_depth must be -1 or non-negative")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		subagents := ensureMappingPath(root, "agents", "subagents")
+		setMappingScalar(subagents, "max_depth", strconv.Itoa(maxDepth))
+		mappingValue(subagents, "max_depth").Tag = "!!int"
 	})
 }
 

@@ -25,6 +25,7 @@ export const demoSnapshot: Snapshot = {
   approvalMode: "auto_review",
   queueMode: "queue",
   subagentConcurrency: 6,
+  subagentMaxDepth: 2,
   shellConcurrency: 4,
   subagentAwaitSeconds: 30,
   chatgptFastMode: false,

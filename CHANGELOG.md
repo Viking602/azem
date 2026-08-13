@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- OMP-style subagent scheduling: raise the default concurrency to 32, accept
+  zero as unbounded, and support recursive delegation with a default depth of
+  two (`-1` is unlimited, `0` disables delegation). A re-entrant child slot
+  prevents parent/child deadlock when the configured concurrency is one while
+  still queueing sibling work. The 200-request soft budget now emits one
+  private wrap-up reminder only; it never cancels or fails business work.
+
 - Long-running subagents: remove implicit cancellation when a foreground wait
   reaches `agents.subagents.await_timeout` or when the parent tool wait ends.
   Read-only and isolated worktree tasks can continue in the background and be

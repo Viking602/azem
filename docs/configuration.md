@@ -26,10 +26,13 @@ operating-system user configuration directory; `-config` selects another file.
 The maintained example in [README.md](../README.md#configuration) shows the
 current field names and defaults. Duration values use Go duration syntax.
 
-The desktop Subagents settings surface edits two live capacity limits and one
-foreground wait window without restarting the application:
-`agents.subagents.max_concurrency`, `workspace.shell.max_concurrency`, and
-`agents.subagents.await_timeout`. The await value never limits child runtime.
+The desktop Subagents settings surface edits recursive depth, two live capacity
+limits, and one foreground wait window without restarting the application:
+`agents.subagents.max_depth`, `agents.subagents.max_concurrency`,
+`workspace.shell.max_concurrency`, and `agents.subagents.await_timeout`.
+Subagent concurrency defaults to 32 and zero means unbounded. Recursive depth
+defaults to 2; zero disables delegation and `-1` removes the recursion cap.
+The await value never limits child runtime.
 When it elapses, read-only or isolated worktree tasks continue in the background
 and the parent can inspect them with `subagent.get_output`; a shared-workspace
 writer keeps waiting in the foreground rather than racing the parent or being
@@ -38,7 +41,10 @@ active runtime, and are persisted with the same node-preserving YAML writer
 used by the other runtime settings. Existing work is allowed to finish.
 
 Subagent token, tool-call, turn, and wall-clock budgets default to zero, which
-means unbounded. A child is cancelled only by explicit `subagent.kill`, a user
+means unbounded. `budget.soft_requests` defaults to 200 and injects one private
+wrap-up reminder when crossed; it is advisory and never stops the run. Set it
+to zero to disable the reminder. A child is cancelled only by explicit
+`subagent.kill`, a user
 stop that explicitly includes children, or application shutdown. Provider
 context windows still require semantic compaction, but that is not a cumulative
 task-size ceiling.

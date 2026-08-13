@@ -41,6 +41,7 @@ type Snapshot struct {
 	ApprovalMode         string                  `json:"approvalMode"`
 	QueueMode            string                  `json:"queueMode"`
 	SubagentConcurrency  int                     `json:"subagentConcurrency"`
+	SubagentMaxDepth     int                     `json:"subagentMaxDepth"`
 	ShellConcurrency     int                     `json:"shellConcurrency"`
 	SubagentAwaitSeconds int                     `json:"subagentAwaitSeconds"`
 	ChatGPTFastMode      bool                    `json:"chatgptFastMode"`
@@ -186,6 +187,7 @@ func (b *Bridge) Initialise() Snapshot {
 		Language: b.cfg.Defaults.Language, ApprovalMode: b.cfg.Defaults.ApprovalMode,
 		QueueMode:            b.cfg.Defaults.QueueMode,
 		SubagentConcurrency:  b.cfg.Agents.Subagents.MaxConcurrency,
+		SubagentMaxDepth:     b.cfg.Agents.Subagents.MaxDepth,
 		ShellConcurrency:     b.cfg.Workspace.Shell.MaxConcurrency,
 		SubagentAwaitSeconds: int(b.cfg.Agents.Subagents.AwaitDuration.Seconds()),
 		ChatGPTFastMode:      b.cfg.Providers.ChatGPT.FastMode,

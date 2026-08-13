@@ -240,6 +240,16 @@ func (r *ProviderRuntime) UpdateSubagentMaxConcurrency(maxConcurrency int) {
 	}
 }
 
+func (r *ProviderRuntime) UpdateSubagentMaxDepth(maxDepth int) {
+	r.mu.Lock()
+	r.cfg.Agents.Subagents.MaxDepth = maxDepth
+	subagents := r.subagents
+	r.mu.Unlock()
+	if subagents != nil {
+		subagents.updateMaxDepth(maxDepth)
+	}
+}
+
 func (r *ProviderRuntime) UpdateSubagentAwaitTimeout(timeout time.Duration) {
 	r.mu.Lock()
 	r.cfg.Agents.Subagents.AwaitTimeout = timeout.String()
@@ -1049,6 +1059,49 @@ func (b *providerUsageBudget) add(usage hyprovider.Usage) {
 type budgetedProviderDriver struct {
 	inner  hyprovider.Driver
 	budget *providerUsageBudget
+}
+
+type advisoryBudgetDriver struct {
+	inner   hyprovider.Driver
+	mu      sync.Mutex
+	count   int
+	limit   int
+	enabled bool
+	warned  bool
+}
+
+func (d *advisoryBudgetDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }
+
+func (d *advisoryBudgetDriver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	if d.shouldInjectNotice() {
+		request.Messages = withAdvisoryRequestNotice(request.Messages)
+	}
+	return d.inner.Stream(ctx, request)
+}
+
+func (d *advisoryBudgetDriver) shouldInjectNotice() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.count++
+	showNotice := d.enabled && d.limit > 0 && d.count > d.limit && !d.warned
+	if showNotice {
+		d.warned = true
+	}
+	return showNotice
+}
+
+func withAdvisoryRequestNotice(messages []message.Message) []message.Message {
+	notice := message.NewText(message.RoleSystem,
+		"[Advisory request budget reached] Finish through the shortest correct path and summarize the result. This is not a cancellation or hard limit; continue when more work is required for correctness.")
+	notice.Visibility = message.VisibilityPrivate
+	insertAt := 0
+	for insertAt < len(messages) && messages[insertAt].Role == message.RoleSystem {
+		insertAt++
+	}
+	result := make([]message.Message, 0, len(messages)+1)
+	result = append(result, messages[:insertAt]...)
+	result = append(result, notice)
+	return append(result, messages[insertAt:]...)
 }
 
 func (d *budgetedProviderDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }

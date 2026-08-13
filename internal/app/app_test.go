@@ -1582,8 +1582,11 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	if event.ModelRoutes[2].Route.Model != "architect" {
 		t.Fatal("event clone mutated source routes")
 	}
-	if event.Data["subagent_max_concurrency"] != "2" {
+	if event.Data["subagent_max_concurrency"] != "32" {
 		t.Fatalf("subagent concurrency = %q", event.Data["subagent_max_concurrency"])
+	}
+	if event.Data["subagent_max_depth"] != "2" {
+		t.Fatalf("subagent max depth = %q", event.Data["subagent_max_depth"])
 	}
 	if event.Data["chatgpt_fast_mode"] != "false" {
 		t.Fatalf("ChatGPT fast mode = %q", event.Data["chatgpt_fast_mode"])
@@ -1592,12 +1595,7 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 
 func TestSubagentConcurrencyActionPersistsAndEmits(t *testing.T) {
 	ctx := context.Background()
-	root := t.TempDir()
-	path := filepath.Join(root, "config.yaml")
-	service := NewService(ctx, config.Default())
-	service.SetConfigPath(path)
-	subagents := &subagentRuntime{cfg: config.Default().Agents.Subagents}
-	service.providers = &ProviderRuntime{cfg: config.Default(), subagents: subagents}
+	service, subagents, root, path := newSubagentSettingsService(t, ctx)
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentConcurrency, Target: "6"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1621,9 +1619,52 @@ func TestSubagentConcurrencyActionPersistsAndEmits(t *testing.T) {
 	if liveConcurrency != 6 {
 		t.Fatalf("live concurrency = %d", liveConcurrency)
 	}
-	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentConcurrency, Target: "0"}); err == nil {
-		t.Fatal("zero concurrency was accepted")
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentConcurrency, Target: "-1"}); err == nil {
+		t.Fatal("negative concurrency was accepted")
 	}
+}
+
+func TestUnboundedSubagentCapacityAndDepthPersist(t *testing.T) {
+	ctx := context.Background()
+	service, _, root, path := newSubagentSettingsService(t, ctx)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentConcurrency, Target: "0"}); err != nil {
+		t.Fatalf("unbounded concurrency was rejected: %v", err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["subagent_max_concurrency"] != "0" {
+		t.Fatalf("unbounded concurrency event = %#v", event.Data)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentDepth, Target: "3"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["subagent_max_depth"] != "3" {
+		t.Fatalf("depth event = %#v", event.Data)
+	}
+	loaded, err := config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Agents.Subagents.MaxConcurrency != 0 || loaded.Agents.Subagents.MaxDepth != 3 {
+		t.Fatalf("persisted recursive capacity = %#v", loaded.Agents.Subagents)
+	}
+}
+
+func newSubagentSettingsService(t *testing.T, ctx context.Context) (*Service, *subagentRuntime, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	service := NewService(ctx, config.Default())
+	service.SetConfigPath(path)
+	subagents := &subagentRuntime{cfg: config.Default().Agents.Subagents}
+	service.providers = &ProviderRuntime{cfg: config.Default(), subagents: subagents}
+	return service, subagents, root, path
 }
 
 func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {

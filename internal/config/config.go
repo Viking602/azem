@@ -223,6 +223,11 @@ type SubagentConfig struct {
 }
 
 type SubagentBudgetConfig struct {
+	// SoftRequests injects one private wrap-up reminder before the next provider
+	// request after the threshold is reached. It is advisory only: unlike the
+	// hard limits below, it never cancels or fails a subagent run.
+	SoftRequests      int  `yaml:"soft_requests"`
+	SoftRequestNotice bool `yaml:"soft_request_notice"`
 	// MaxTokens optionally limits cumulative provider-reported usage for one
 	// subagent run. It defaults to zero so subagents can finish their assigned
 	// coding task. A positive value is checked between requests and can be
@@ -336,10 +341,11 @@ func Default() Config {
 				MaxSummaryTokens: 32768, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
 			},
 			Subagents: SubagentConfig{
-				Enabled: true, MaxDepth: 1, MaxConcurrency: 2, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
+				Enabled: true, MaxDepth: 2, MaxConcurrency: 32, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
+					SoftRequests: 200, SoftRequestNotice: true,
 					MaxTokens: 0, MaxToolCalls: 0, MaxTurns: 0,
 					MaxWallClock: "0s",
 				},
@@ -706,8 +712,11 @@ func (c *Config) validateSkills() error {
 
 func (c *Config) validateSubagents() error {
 	subagents := &c.Agents.Subagents
-	if subagents.MaxDepth != 1 || subagents.MaxConcurrency < 1 {
-		return fmt.Errorf("agents.subagents.max_depth must be 1 and max_concurrency positive")
+	if subagents.MaxDepth < -1 {
+		return fmt.Errorf("agents.subagents.max_depth must be -1 (unlimited) or non-negative")
+	}
+	if subagents.MaxConcurrency < 0 {
+		return fmt.Errorf("agents.subagents.max_concurrency must be non-negative (zero is unbounded)")
 	}
 	await, err := time.ParseDuration(subagents.AwaitTimeout)
 	if err != nil || await <= 0 {
@@ -722,6 +731,9 @@ func (c *Config) validateSubagents() error {
 	}
 	if subagents.Budget.MaxToolCalls < 0 || subagents.Budget.MaxTurns < 0 {
 		return fmt.Errorf("agents.subagents tool-call and turn budgets must be non-negative (zero is unbounded)")
+	}
+	if subagents.Budget.SoftRequests < 0 {
+		return fmt.Errorf("agents.subagents.budget.soft_requests must be non-negative (zero disables the reminder)")
 	}
 	subagents.AwaitDuration = await
 	subagents.Budget.MaxWallClockDuration = wallClock

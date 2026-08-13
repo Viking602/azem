@@ -161,7 +161,7 @@ describe("SettingsDialog", () => {
 	const subagentsNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("子智能体"))!;
 	await act(async () => subagentsNav.click());
 	const subagentPane = container.querySelector(".subagent-settings-pane")!;
-	expect(subagentPane.querySelectorAll(".subagent-capacity-grid > section")).toHaveLength(3);
+	expect(subagentPane.querySelectorAll(".subagent-capacity-grid > section")).toHaveLength(4);
 	expect(subagentPane.querySelectorAll(".subagent-scheduling .runtime-invariant")).toHaveLength(3);
     await act(async () => root.unmount());
     container.remove();
@@ -361,7 +361,7 @@ describe("SettingsDialog", () => {
 
 	it("updates the live subagent, shell, and admission timeout limits", async () => {
 		useRuntimeStore.setState({
-			snapshot: { ...snapshot, subagentConcurrency: 4, shellConcurrency: 3, subagentAwaitSeconds: 600 },
+			snapshot: { ...snapshot, subagentConcurrency: 4, subagentMaxDepth: 2, shellConcurrency: 3, subagentAwaitSeconds: 600 },
 			approvalMode: snapshot.approvalMode, modelRoutes: [], modelsByProvider: {},
 			agentCatalog: [], skills: [], modelProviders: [], settingsOpen: true,
 		});
@@ -373,14 +373,19 @@ describe("SettingsDialog", () => {
 		const runtimeNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.querySelector("strong")?.textContent === "子智能体")!;
 		await act(async () => runtimeNav.click());
 		const capacityControls = container.querySelectorAll<HTMLElement>(".subagent-capacity-grid > section");
-		expect(capacityControls).toHaveLength(3);
+		expect(capacityControls).toHaveLength(4);
 		vi.mocked(execute).mockClear();
 		await act(async () => capacityControls[0].querySelectorAll<HTMLButtonElement>("button")[1].click());
-		await act(async () => capacityControls[1].querySelectorAll<HTMLButtonElement>("button")[0].click());
+		await act(async () => capacityControls[2].querySelectorAll<HTMLButtonElement>("button")[0].click());
 		expect(execute).toHaveBeenCalledWith({ kind: "set_subagent_concurrency", sessionId: "session-1", target: "5" });
 		expect(execute).toHaveBeenCalledWith({ kind: "set_shell_concurrency", sessionId: "session-1", target: "2" });
+		const depthMenu = capacityControls[1].querySelector<HTMLDetailsElement>(".capacity-depth-menu")!;
+		depthMenu.open = true;
+		await act(async () => depthMenu.dispatchEvent(new Event("toggle", { bubbles: true })));
+		await act(async () => container.querySelector<HTMLButtonElement>('.menu-select-options-portal [data-value="3"]')!.click());
+		expect(execute).toHaveBeenCalledWith({ kind: "set_subagent_depth", sessionId: "session-1", target: "3" });
 
-		const timeoutMenu = capacityControls[2].querySelector<HTMLDetailsElement>(".capacity-timeout-menu")!;
+		const timeoutMenu = capacityControls[3].querySelector<HTMLDetailsElement>(".capacity-timeout-menu")!;
 		timeoutMenu.open = true;
 		await act(async () => timeoutMenu.dispatchEvent(new Event("toggle", { bubbles: true })));
 		await act(async () => container.querySelector<HTMLButtonElement>('.menu-select-options-portal [data-value="30"]')!.click());

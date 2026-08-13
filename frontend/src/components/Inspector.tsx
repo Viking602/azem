@@ -15,6 +15,7 @@ import { contextCacheMetrics, contextComposition, contextOccupancy } from "../co
 import type { ContextCompositionGroup } from "../contextUsage";
 import type { AgentState, ContextProfile, SessionRecap, Snapshot, TodoList, TodoStatus } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
+import { TaskRow } from "./beautiful-ui/Primitives";
 
 
 export default function Inspector() {
@@ -238,10 +239,10 @@ function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["lang
         <div className="todo-items">
           {phase.items.map((item) => {
             const Icon = todoStatusIcon(item.status);
-            return <div className="todo-item" data-status={item.status} key={item.id || item.content} title={todoStatusLabel(item.status, language)}>
+            return <TaskRow state={item.status} key={item.id || item.content} title={todoStatusLabel(item.status, language)}>
               <Icon size={14} aria-hidden="true" />
               <span>{item.content}</span>
-            </div>;
+            </TaskRow>;
           })}
         </div>
       </div>)}

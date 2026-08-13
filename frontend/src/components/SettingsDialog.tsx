@@ -39,6 +39,7 @@ export default function SettingsDialog() {
   const [activeSection, setActiveSection] = useState<SettingsSection>(() => settingsTarget?.section ?? "catalog");
   const [query, setQuery] = useState("");
   const [concurrency, setConcurrency] = useState(snapshot.subagentConcurrency);
+  const [maxDepth, setMaxDepth] = useState(snapshot.subagentMaxDepth ?? 2);
   const [shellConcurrency, setShellConcurrency] = useState(snapshot.shellConcurrency ?? 2);
   const [awaitSeconds, setAwaitSeconds] = useState(snapshot.subagentAwaitSeconds ?? 600);
   const [addProviderRequest, setAddProviderRequest] = useState(0);
@@ -108,6 +109,7 @@ export default function SettingsDialog() {
   }, [setError, snapshot.language]);
 
   useEffect(() => setConcurrency(snapshot.subagentConcurrency), [snapshot.subagentConcurrency]);
+  useEffect(() => setMaxDepth(snapshot.subagentMaxDepth ?? 2), [snapshot.subagentMaxDepth]);
   useEffect(() => setShellConcurrency(snapshot.shellConcurrency ?? 2), [snapshot.shellConcurrency]);
   useEffect(() => setAwaitSeconds(snapshot.subagentAwaitSeconds ?? 600), [snapshot.subagentAwaitSeconds]);
   useEffect(() => {
@@ -193,8 +195,9 @@ export default function SettingsDialog() {
             </div>}
           </SettingsPane>}
           {activeSection === "subagents" && <SettingsPane settingID="section:subagents" title={t("settingsSubagents")} description={t("settingsSubagentsHint")} className="subagent-settings-pane">
-            <div className="subagent-capacity-grid" aria-label={snapshot.language === "zh-CN" ? "并发与超时" : "Concurrency and timeout"}>
-              <CapacityControl settingID="subagents:concurrency" label={snapshot.language === "zh-CN" ? "子智能体并发" : "Subagent concurrency"} description={snapshot.language === "zh-CN" ? "团队成员上限" : "Team member limit"}><CompactStepper value={concurrency} min={1} max={64} decrease={() => { const value = Math.max(1, concurrency - 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }} increase={() => { const value = Math.min(64, concurrency + 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }} /></CapacityControl>
+            <div className="subagent-capacity-grid" aria-label={snapshot.language === "zh-CN" ? "并发、递归与等待" : "Concurrency, recursion, and wait"}>
+              <CapacityControl settingID="subagents:concurrency" label={snapshot.language === "zh-CN" ? "子智能体并发" : "Subagent concurrency"} description={snapshot.language === "zh-CN" ? "0 表示无限；默认 32" : "0 is unlimited; default 32"}><CompactStepper value={concurrency} displayValue={concurrency === 0 ? (snapshot.language === "zh-CN" ? "无限" : "∞") : undefined} min={0} max={64} decrease={() => { const value = Math.max(0, concurrency - 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }} increase={() => { const value = Math.min(64, concurrency + 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }} /></CapacityControl>
+              <CapacityControl settingID="subagents:depth" label={snapshot.language === "zh-CN" ? "递归深度" : "Recursion depth"} description={snapshot.language === "zh-CN" ? "子智能体继续委派的层数" : "Levels of nested delegation"}><MenuSelect className="capacity-depth-menu" value={String(maxDepth)} options={[{ value: "-1", label: snapshot.language === "zh-CN" ? "无限" : "Unlimited" }, { value: "0", label: snapshot.language === "zh-CN" ? "关闭" : "None" }, ...[1, 2, 3].map((depth) => ({ value: String(depth), label: String(depth) }))]} onChange={(value) => { const depth = Number(value); setMaxDepth(depth); void action("set_subagent_depth", value); }} ariaLabel={snapshot.language === "zh-CN" ? "递归深度" : "Recursion depth"} /></CapacityControl>
               <CapacityControl settingID="subagents:shell" label={snapshot.language === "zh-CN" ? "Shell 并发" : "Shell concurrency"} description={snapshot.language === "zh-CN" ? "本地命令独立容量" : "Independent command capacity"}><CompactStepper value={shellConcurrency} min={1} max={16} decrease={() => { const value = Math.max(1, shellConcurrency - 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }} increase={() => { const value = Math.min(16, shellConcurrency + 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }} /></CapacityControl>
               <CapacityControl settingID="subagents:timeout" label={snapshot.language === "zh-CN" ? "前台等待窗口" : "Foreground wait window"} description={snapshot.language === "zh-CN" ? "窗口结束后安全任务转为后台继续，不会被取消" : "Safe tasks continue in the background when the window ends; they are not cancelled"}><MenuSelect className="capacity-timeout-menu" value={String(awaitSeconds)} options={[30, 60, 300, 600, 1800].map((seconds) => ({ value: String(seconds), label: seconds < 60 ? `${seconds} ${snapshot.language === "zh-CN" ? "秒" : "sec"}` : `${seconds / 60} ${snapshot.language === "zh-CN" ? "分钟" : "min"}` }))} onChange={(value) => { const seconds = Number(value); setAwaitSeconds(seconds); void action("set_subagent_await_timeout", value); }} ariaLabel={snapshot.language === "zh-CN" ? "前台等待窗口" : "Foreground wait window"} /></CapacityControl>
             </div>
@@ -255,8 +258,8 @@ function CapacityControl({ label, description, settingID, children }: { label: s
   return <section data-setting-id={settingID}><div><strong>{label}</strong><small>{description}</small></div>{children}</section>;
 }
 
-function CompactStepper({ value, min, max, decrease, increase }: { value: number; min: number; max: number; decrease: () => void; increase: () => void }) {
-  return <div className="compact-stepper"><button type="button" aria-label="Decrease" disabled={value <= min} onClick={decrease}><Minus size={13} /></button><output>{value}</output><button type="button" aria-label="Increase" disabled={value >= max} onClick={increase}><Plus size={13} /></button></div>;
+function CompactStepper({ value, displayValue, min, max, decrease, increase }: { value: number; displayValue?: string; min: number; max: number; decrease: () => void; increase: () => void }) {
+  return <div className="compact-stepper"><button type="button" aria-label="Decrease" disabled={value <= min} onClick={decrease}><Minus size={13} /></button><output>{displayValue ?? value}</output><button type="button" aria-label="Increase" disabled={value >= max} onClick={increase}><Plus size={13} /></button></div>;
 }
 
 function RuntimeInvariant({ label, hint }: { label: string; hint: string }) {

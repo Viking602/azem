@@ -393,8 +393,8 @@ agents:
     history_retrieval_tokens: 4096 # private, session-scoped SQLite FTS evidence budget
   subagents:
     enabled: true
-    max_depth: 1
-    max_concurrency: 2
+    max_depth: 2             # nested delegation levels; -1 is unlimited, 0 disables delegation
+    max_concurrency: 32      # running subagents; 0 is unlimited
     await_timeout: 10m       # foreground wait window; safe work continues in the background after it elapses
     auto_wake: true
     routes:
@@ -404,6 +404,8 @@ agents:
         model: grok-4.5
         reasoning: low
     budget:
+      soft_requests: 200    # one advisory wrap-up reminder; never cancels the run
+      soft_request_notice: true
       max_tokens: 0          # optional inter-request limit; the final request may overshoot it
       max_tool_calls: 0      # optional; 0 means unbounded
       max_turns: 0           # optional; 0 means unbounded

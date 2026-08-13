@@ -921,11 +921,12 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		t.Fatalf("main agent budget = %#v", cfg.Agents.Main)
 	}
 	subagents := cfg.Agents.Subagents
-	if !subagents.Enabled || subagents.MaxDepth != 1 || subagents.MaxConcurrency != 2 ||
+	if !subagents.Enabled || subagents.MaxDepth != 2 || subagents.MaxConcurrency != 32 ||
 		subagents.AwaitDuration != 10*time.Minute || !subagents.AutoWake {
 		t.Fatalf("subagent defaults = %#v", subagents)
 	}
-	if subagents.Budget.MaxTokens != 0 || subagents.Budget.MaxToolCalls != 0 ||
+	if subagents.Budget.SoftRequests != 200 || !subagents.Budget.SoftRequestNotice ||
+		subagents.Budget.MaxTokens != 0 || subagents.Budget.MaxToolCalls != 0 ||
 		subagents.Budget.MaxTurns != 0 || subagents.Budget.MaxWallClockDuration != 0 {
 		t.Fatalf("subagent budget = %#v", subagents.Budget)
 	}
@@ -943,9 +944,14 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	}
 
 	invalid := Default()
-	invalid.Agents.Subagents.MaxDepth = 2
+	invalid.Agents.Subagents.MaxDepth = -2
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("invalid max_depth was accepted")
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.MaxConcurrency = -1
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative max_concurrency was accepted")
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.AwaitTimeout = "30m"
@@ -962,6 +968,11 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid.Agents.Subagents.Budget.MaxToolCalls = -1
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("negative tool-call budget was accepted")
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.Budget.SoftRequests = -1
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative soft request budget was accepted")
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.Budget.MaxTurns = -1
@@ -1440,8 +1451,11 @@ func TestUpdateSubagentMaxConcurrencyPreservesConfig(t *testing.T) {
 	if !strings.Contains(string(updated), "# keep this comment") || !strings.Contains(string(updated), "max_concurrency: 6") || !strings.Contains(string(updated), "language: zh-CN") {
 		t.Fatalf("updated config:\n%s", updated)
 	}
-	if err := UpdateSubagentMaxConcurrency(path, 0); err == nil {
-		t.Fatal("zero concurrency was accepted")
+	if err := UpdateSubagentMaxConcurrency(path, 0); err != nil {
+		t.Fatalf("unbounded concurrency was rejected: %v", err)
+	}
+	if err := UpdateSubagentMaxConcurrency(path, -1); err == nil {
+		t.Fatal("negative concurrency was accepted")
 	}
 }
 
@@ -1458,12 +1472,15 @@ func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
 	if err := UpdateSubagentAwaitTimeout(path, 30); err != nil {
 		t.Fatal(err)
 	}
+	if err := UpdateSubagentMaxDepth(path, -1); err != nil {
+		t.Fatal(err)
+	}
 	updated, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(updated)
-	if !strings.Contains(text, "# capacity comment") || !strings.Contains(text, "max_concurrency: 4") || !strings.Contains(text, "await_timeout: 30s") {
+	if !strings.Contains(text, "# capacity comment") || !strings.Contains(text, "max_concurrency: 4") || !strings.Contains(text, "max_depth: -1") || !strings.Contains(text, "await_timeout: 30s") {
 		t.Fatalf("updated config:\n%s", updated)
 	}
 	if err := UpdateShellMaxConcurrency(path, 0); err == nil {
@@ -1471,6 +1488,9 @@ func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
 	}
 	if err := UpdateSubagentAwaitTimeout(path, 4); err == nil {
 		t.Fatal("too-short await timeout was accepted")
+	}
+	if err := UpdateSubagentMaxDepth(path, -2); err == nil {
+		t.Fatal("invalid recursive depth was accepted")
 	}
 }
 

@@ -144,7 +144,7 @@
 .subagent-capacity-grid strong, .subagent-capacity-grid small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.subagent-capacity-grid strong { font-size: 11px; }.subagent-capacity-grid small { margin-top: 4px; color: var(--faint); font-size: 9px; }
 .compact-stepper { width: 92px; height: 32px; display: grid; grid-template-columns: 29px 34px 29px; align-items: center; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-muted); }
 .compact-stepper button { height: 30px; display: grid; place-items: center; color: var(--muted); }.compact-stepper button:hover:not(:disabled) { color: var(--ink); }.compact-stepper button:disabled { opacity: .35; }.compact-stepper output { text-align: center; font-size: 12px; font-weight: 650; }
-.capacity-timeout-menu { width: 100px; }.capacity-timeout-menu > summary { height: 32px; border-radius: 8px; font-size: 10px; }
+.capacity-timeout-menu, .capacity-depth-menu { width: 100px; }.capacity-timeout-menu > summary, .capacity-depth-menu > summary { height: 32px; border-radius: 8px; font-size: 10px; }
 .subagent-scheduling { margin-top: 12px; overflow: hidden; }
 .subagent-scheduling > header { min-height: 52px; display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line); }.subagent-scheduling > header > div { min-width: 0; flex: 1; }.subagent-scheduling > header strong, .subagent-scheduling > header small { display: block; }.subagent-scheduling > header strong { font-size: 12px; }.subagent-scheduling > header small { margin-top: 3px; color: var(--faint); font-size: 9px; }.subagent-scheduling > header em { display: flex; align-items: center; gap: 7px; color: var(--green); font-size: 10px; font-style: normal; }.subagent-scheduling > header em i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .runtime-invariant { min-height: 52px; display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); }.runtime-invariant:last-child { border-bottom: 0; }.runtime-invariant > div { min-width: 0; flex: 1; }.runtime-invariant strong, .runtime-invariant small { display: block; }.runtime-invariant strong { font-size: 11px; }.runtime-invariant small { margin-top: 3px; color: var(--faint); font-size: 9px; }.runtime-invariant > span { width: 30px; height: 17px; display: flex; align-items: center; justify-content: flex-end; padding: 2px; border-radius: 999px; background: var(--green); }.runtime-invariant > span i { width: 13px; height: 13px; border-radius: 50%; background: white; box-shadow: 0 1px 2px rgb(0 0 0 / 18%); }
@@ -955,7 +955,7 @@ label.provider-state-control:hover { background: var(--paper-muted); }
 @media (max-width: 1240px) {
   .model-routes-pane .route-groups { grid-template-columns: 1fr; }
   .subagent-settings-pane { grid-template-columns: 1fr; }
-  .subagent-settings-pane .subagent-capacity-grid { height: auto; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .subagent-settings-pane .subagent-capacity-grid { height: auto; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .subagent-settings-pane .subagent-capacity-grid > section + section { border-top: 0; border-left: 1px solid var(--line); }
   .subagent-settings-pane .subagent-scheduling { height: auto; }
 }

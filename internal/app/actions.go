@@ -82,6 +82,7 @@ const (
 	ActionSetModelRoute          ActionKind = "set_model_route"
 	ActionResetModelRoute        ActionKind = "reset_model_route"
 	ActionSetSubagentConcurrency ActionKind = "set_subagent_concurrency"
+	ActionSetSubagentDepth       ActionKind = "set_subagent_depth"
 	ActionSetShellConcurrency    ActionKind = "set_shell_concurrency"
 	ActionSetSubagentAwait       ActionKind = "set_subagent_await_timeout"
 	ActionSetChatGPTFastMode     ActionKind = "set_chatgpt_fast_mode"
@@ -182,10 +183,16 @@ func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
 		return s.setModelEnabled(ctx, action.Target, action.Name, enabled)
 	case ActionSetSubagentConcurrency:
 		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))
-		if err != nil || maxConcurrency < 1 {
-			return fmt.Errorf("subagent max concurrency must be positive")
+		if err != nil || maxConcurrency < 0 {
+			return fmt.Errorf("subagent max concurrency must be non-negative")
 		}
 		return s.updateSubagentMaxConcurrency(ctx, maxConcurrency)
+	case ActionSetSubagentDepth:
+		maxDepth, err := strconv.Atoi(strings.TrimSpace(action.Target))
+		if err != nil || maxDepth < -1 {
+			return fmt.Errorf("subagent max depth must be -1 or non-negative")
+		}
+		return s.updateSubagentMaxDepth(ctx, maxDepth)
 	case ActionSetShellConcurrency:
 		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))
 		if err != nil || maxConcurrency < 1 {
@@ -833,13 +840,14 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 func (s *Service) modelRoutesEvent(state string) Event {
 	s.mu.Lock()
 	maxConcurrency := s.cfg.Agents.Subagents.MaxConcurrency
+	maxDepth := s.cfg.Agents.Subagents.MaxDepth
 	shellConcurrency := s.cfg.Workspace.Shell.MaxConcurrency
 	awaitSeconds := int(s.cfg.Agents.Subagents.AwaitDuration.Seconds())
 	fastMode := s.cfg.Providers.ChatGPT.FastMode
 	s.mu.Unlock()
 	return Event{
 		Kind: EventModelRoutes, State: state, ModelRoutes: s.modelRouteEntries(),
-		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
+		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "subagent_max_depth": strconv.Itoa(maxDepth), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
 	}
 }
 
@@ -972,6 +980,34 @@ func (s *Service) updateSubagentMaxConcurrency(ctx context.Context, maxConcurren
 	s.mu.Unlock()
 	if s.providers != nil {
 		s.providers.UpdateSubagentMaxConcurrency(maxConcurrency)
+	}
+	s.emit(ctx, s.modelRoutesEvent("updated"))
+	return nil
+}
+
+func (s *Service) updateSubagentMaxDepth(ctx context.Context, maxDepth int) error {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	s.mu.Lock()
+	currentSession := s.currentSession
+	s.mu.Unlock()
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateSubagentMaxDepth(s.configPath, maxDepth)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.cfg.Agents.Subagents.MaxDepth = maxDepth
+	s.mu.Unlock()
+	if s.providers != nil {
+		s.providers.UpdateSubagentMaxDepth(maxDepth)
 	}
 	s.emit(ctx, s.modelRoutesEvent("updated"))
 	return nil

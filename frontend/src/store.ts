@@ -761,6 +761,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       if (next.snapshot) next.snapshot = {
         ...next.snapshot,
         subagentConcurrency: numberValue(data.subagent_max_concurrency, next.snapshot.subagentConcurrency),
+        subagentMaxDepth: numberValue(data.subagent_max_depth, next.snapshot.subagentMaxDepth ?? 2),
         shellConcurrency: numberValue(data.shell_max_concurrency, next.snapshot.shellConcurrency ?? 2),
         subagentAwaitSeconds: numberValue(data.subagent_await_seconds, next.snapshot.subagentAwaitSeconds ?? 600),
         chatgptFastMode: data.chatgpt_fast_mode === "true",
