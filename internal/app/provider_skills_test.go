@@ -5,9 +5,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/session"
 )
 
 func TestProviderRuntimeLazySkillActivation(t *testing.T) {
@@ -183,6 +187,123 @@ func TestProviderRuntimeSkillResourceRequiresActivation(t *testing.T) {
 	waitForProviderRun(t, harness.service, activeRunID)
 	if harness.calls.Load() != 3 {
 		t.Fatalf("provider calls = %d, want 3", harness.calls.Load())
+	}
+}
+
+func TestProviderRuntimeReplaysActivatedSkillsOnLaterTurn(t *testing.T) {
+	const fixture = "REFERENCE_FIXTURE"
+	harness := newSkillRuntimeHarness(
+		t,
+		"---\nname: demo\ndescription: demo catalog\n---\nDEMO_BODY_SECRET\n",
+		map[string]string{"reference.txt": fixture},
+		func(call int, body string, writer http.ResponseWriter) {
+			switch call {
+			case 1:
+				writeProviderToolCall(writer, "replay-1", "activate-demo", "hydaelyn_activate_skill", `{"name":"demo"}`)
+			case 2:
+				if !strings.Contains(body, "DEMO_BODY_SECRET") {
+					t.Errorf("first turn omitted the activated skill body: %s", body)
+				}
+				writeProviderText(writer, "replay-2", "activated")
+			case 3:
+				if !strings.Contains(body, "DEMO_BODY_SECRET") {
+					t.Errorf("replayed turn omitted the previously activated skill body: %s", body)
+				}
+				writeProviderToolCall(writer, "replay-3", "read-after-replay", "hydaelyn_read_skill_resource", `{"skill":"demo","path":"reference.txt"}`)
+			case 4:
+				if !strings.Contains(body, fixture) {
+					t.Errorf("replayed resource fixture missing: %s", body)
+				}
+				writeProviderText(writer, "replay-4", "resource read")
+			default:
+				t.Errorf("unexpected provider call %d", call)
+				writeProviderText(writer, "replay-extra", "unexpected")
+			}
+		},
+	)
+	firstRun, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "replay-active", Prompt: "activate demo", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, firstRun)
+	secondRun, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "replay-active", Prompt: "read the reference", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, secondRun)
+	if harness.calls.Load() != 4 {
+		t.Fatalf("provider calls = %d, want 4", harness.calls.Load())
+	}
+}
+
+func TestProviderRuntimeDoesNotReplayDisabledOrDeletedSkills(t *testing.T) {
+	harness := newSkillRuntimeHarness(
+		t,
+		"---\nname: demo\ndescription: demo catalog\n---\nDEMO_BODY_SECRET\n",
+		map[string]string{"reference.txt": "REFERENCE_FIXTURE"},
+		func(call int, body string, writer http.ResponseWriter) {
+			switch call {
+			case 1:
+				writeProviderToolCall(writer, "gone-1", "activate-demo", "hydaelyn_activate_skill", `{"name":"demo"}`)
+			case 2:
+				writeProviderText(writer, "gone-2", "activated")
+			case 3:
+				if strings.Count(body, "--- skill: demo ---") != 1 || strings.Contains(body, `"name":"hydaelyn_read_skill_resource"`) {
+					t.Errorf("disabled skill remained activated or readable: %s", body)
+				}
+				writeProviderText(writer, "gone-3", "disabled")
+			default:
+				t.Errorf("unexpected provider call %d", call)
+				writeProviderText(writer, "gone-extra", "unexpected")
+			}
+		},
+	)
+	firstRun, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "replay-disabled", Prompt: "activate demo", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, firstRun)
+	if err := harness.catalog.UpdateConfig(config.SkillsConfig{
+		Enabled:        true,
+		AdditionalDirs: []string{filepath.Dir(filepath.Dir(harness.definitionPath))},
+		Disabled:       []string{"demo"},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	blockedRun, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "replay-disabled", Prompt: "read the reference", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, blockedRun)
+	if harness.calls.Load() != 3 {
+		t.Fatalf("provider calls = %d, want 3", harness.calls.Load())
+	}
+}
+
+func TestSessionActivatedSkillNamesIgnoresFailedAndUnknownSkills(t *testing.T) {
+	records := []session.ToolRecord{
+		{Name: "hydaelyn_activate_skill", State: session.ToolCompleted, Arguments: []byte(`{"name":"demo"}`)},
+		{Name: "hydaelyn_activate_skill", State: session.ToolFailed, Arguments: []byte(`{"name":"broken"}`)},
+		{Name: "hydaelyn_activate_skill", State: session.ToolCompleted, Structured: []byte(`{"name":"demo"}`)},
+		{Name: "coding.read_file", State: session.ToolCompleted, Arguments: []byte(`{"path":"x"}`)},
+	}
+	if got := sessionActivatedSkillNames(records); !reflect.DeepEqual(got, []string{"demo"}) {
+		t.Fatalf("activated=%v", got)
+	}
+	if got := filterResolvableSkills(nil, []string{"demo"}); got != nil {
+		t.Fatalf("nil registry=%v", got)
 	}
 }
 

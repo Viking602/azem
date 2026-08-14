@@ -38,6 +38,33 @@ describe("Codex-style process timeline", () => {
     container.remove();
   });
 
+  it("renders background subagent wake notices instead of user bubbles", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const wake: Block = {
+      id: "wake-1", kind: "user", state: "subagent_wake", sequence: 12,
+      title: "Subagent completion",
+      content: "Background subagent results are available.\nreview `child-1` reached failed.",
+      data: { tasks: JSON.stringify([{ id: "child-1", type: "review", state: "failed" }]) },
+    };
+    const legacy: Block = {
+      id: "user-1", kind: "user", content: "Background subagent child-1 (review) reached failed.",
+    };
+    await act(async () => root.render(createElement(TimelineFeed, { blocks: [wake, legacy], language: "zh-CN" })));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+    const notice = container.querySelector<HTMLElement>(".subagent-wake-notice");
+    expect(notice?.textContent).toContain("后台子代理失败");
+    expect(notice?.textContent).toContain("review · child-1 · failed");
+    expect(notice?.classList.contains("failed")).toBe(true);
+    expect(container.querySelectorAll(".user-block")).toHaveLength(1);
+    expect(container.querySelector(".user-block")?.textContent).toContain("Background subagent child-1");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("promotes parallel subagents into one clickable run card and hides the empty thinking heartbeat", async () => {
     const previousAgents = useRuntimeStore.getState().agents;
     const previousSelection = useRuntimeStore.getState().selectedAgentId;
@@ -201,9 +228,43 @@ describe("Codex-style process timeline", () => {
     expect(process?.open).toBe(false);
     expect(process?.querySelector(".process-fold-label")?.textContent).toBe("已处理");
 
-    await act(async () => process?.querySelector<HTMLElement>("summary")?.click());
+    await act(async () => {
+      if (!process) return;
+      process.open = true;
+      process.dispatchEvent(new Event("toggle"));
+    });
     expect(process?.open).toBe(true);
     expect(process?.textContent).toContain("核对边界");
+    await act(async () => root.unmount());
+  });
+
+  it("does not mount folded process entries until the trail is expanded", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const progress: Block = {
+      id: "folded-progress", kind: "commentary", runId: "child", state: "completed",
+      content: "**已完成核对**\n只在展开后出现",
+    };
+    const tool: Block = {
+      id: "folded-tool", kind: "tool", runId: "child", title: "coding.search", state: "completed",
+    };
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [progress, tool], language: "zh-CN", collapseCompletedProcess: true,
+    })));
+    const process = container.querySelector<HTMLDetailsElement>(".process-fold");
+    expect(process?.open).toBe(false);
+    expect(process?.querySelector(".process-entries")).toBeNull();
+    expect(process?.textContent).not.toContain("只在展开后出现");
+
+    await act(async () => {
+      if (!process) return;
+      process.open = true;
+      process.dispatchEvent(new Event("toggle"));
+    });
+    expect(process?.open).toBe(true);
+    expect(process?.querySelector(".process-entries")).not.toBeNull();
+    expect(process?.textContent).toContain("只在展开后出现");
     await act(async () => root.unmount());
   });
 

@@ -8,6 +8,24 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+func TestChildContextProfileDoesNotReplaceMainKernel(t *testing.T) {
+	model := NewModel(inertRuntime{}, ".", "chatgpt", "gpt-test", "high", "single")
+	model.applyEvent(app.Event{Kind: app.EventContextProfile, State: "estimated", ContextProfile: &app.ContextProfile{
+		Source: "bootstrap", Estimated: true,
+		Contributions: []app.ContextContribution{{Category: app.ContextCategoryCore, Name: "azem.core_instructions", Tokens: 100}},
+	}})
+	model.applyEvent(app.Event{
+		Kind: app.EventContextProfile, AgentID: "child-1", State: "estimated",
+		ContextProfile: &app.ContextProfile{
+			Source: "request", Estimated: true,
+			Contributions: []app.ContextContribution{{Category: app.ContextCategoryConversation, Name: "message:user:1", Tokens: 88_000}},
+		},
+	})
+	if len(model.contextProfile.Contributions) != 1 || model.contextProfile.Contributions[0].Name != "azem.core_instructions" {
+		t.Fatalf("child profile replaced main kernel: %#v", model.contextProfile)
+	}
+}
+
 func TestEstimatedContextProfileRendersSegmentedFooterImmediately(t *testing.T) {
 	model := NewModel(inertRuntime{}, ".", "chatgpt", "gpt-test", "high", "single")
 	model.usage.ContextLimit = 272_000

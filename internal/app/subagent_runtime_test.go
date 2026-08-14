@@ -1675,14 +1675,12 @@ func TestBackgroundCompletionAutoWakesIdleSessionOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wakeBlocks := 0
-	for _, block := range projection.Blocks {
-		if block.Kind == "user" && strings.Contains(block.Content, "Background subagent background-completion") {
-			wakeBlocks++
-		}
-	}
+	wakeBlocks := countSubagentWakeBlocks(projection.Blocks, "background-completion")
 	if wakeBlocks != 1 {
 		t.Fatalf("auto-wake blocks = %d, projection = %#v", wakeBlocks, projection.Blocks)
+	}
+	if !wakeBlockHasState(projection.Blocks, "background-completion") {
+		t.Fatalf("wake block missing subagent_wake state: %#v", projection.Blocks)
 	}
 	runtime.AutoWakePending("session")
 	time.Sleep(20 * time.Millisecond)
@@ -1690,15 +1688,162 @@ func TestBackgroundCompletionAutoWakesIdleSessionOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wakeBlocks = 0
-	for _, block := range projection.Blocks {
-		if block.Kind == "user" && strings.Contains(block.Content, "Background subagent background-completion") {
-			wakeBlocks++
-		}
-	}
-	if wakeBlocks != 1 {
+	if got := countSubagentWakeBlocks(projection.Blocks, "background-completion"); got != 1 {
 		t.Fatalf("completion was delivered more than once: %#v", projection.Blocks)
 	}
+}
+
+func TestBackgroundCompletionsBatchIntoOneWake(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	sessions := session.NewService(providerStore.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "session", Title: "Batch wake", ProviderID: "chatgpt", ModelID: "model", Reasoning: "high", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, cfg)
+	host.AttachDurable(sessions, nil)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := host.Shutdown(shutdownCtx); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	runtime, err := newSubagentRuntime(ctx, cfg.Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.cancel()
+	now := time.Now().UTC()
+	for _, run := range []agentservice.SubagentRun{
+		{
+			ID: "review-a", SessionID: "session", ParentRunID: "parent", Type: "review",
+			Description: "review first", State: agentservice.SubagentFailed, Background: true,
+			Error: "provider stream failed", StartedAt: now, FinishedAt: now,
+		},
+		{
+			ID: "review-b", SessionID: "session", ParentRunID: "parent", Type: "review",
+			Description: "review second", State: agentservice.SubagentCompleted, Background: true,
+			Output: "no blocking findings", StartedAt: now, FinishedAt: now.Add(time.Second),
+		},
+	} {
+		if err := store.Create(ctx, run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.hosts["session"] = host
+	runtime.AutoWakePending("session")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		first, err := store.Get(ctx, "review-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := store.Get(ctx, "review-b")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.CompletionDelivered && second.CompletionDelivered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("batch completion was not delivered: first=%#v second=%#v", first, second)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	projection, err := sessions.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countSubagentWakeBlocks(projection.Blocks, "review-a"); got != 1 {
+		t.Fatalf("review-a wake blocks = %d, projection = %#v", got, projection.Blocks)
+	}
+	if got := countSubagentWakeBlocks(projection.Blocks, "review-b"); got != 1 {
+		t.Fatalf("review-b wake blocks = %d, projection = %#v", got, projection.Blocks)
+	}
+	if total := countSubagentWakeBlocks(projection.Blocks, ""); total != 1 {
+		t.Fatalf("expected one batched wake block, got %d: %#v", total, projection.Blocks)
+	}
+}
+
+func TestListRunningBackgroundChildrenOmitsForegroundAndTerminal(t *testing.T) {
+	runtime := &subagentRuntime{active: map[string]*activeSubagent{
+		"bg-running": {run: agentservice.SubagentRun{
+			ID: "bg-running", SessionID: "session", ParentRunID: "parent", Type: "review",
+			Description: "still reviewing", State: agentservice.SubagentRunning, Background: true,
+		}},
+		"bg-queued": {run: agentservice.SubagentRun{
+			ID: "bg-queued", SessionID: "session", ParentRunID: "parent", Type: "explore",
+			State: agentservice.SubagentQueued, Background: true,
+		}},
+		"fg-running": {run: agentservice.SubagentRun{
+			ID: "fg-running", SessionID: "session", ParentRunID: "parent", Type: "review",
+			State: agentservice.SubagentRunning,
+		}},
+		"bg-other-parent": {run: agentservice.SubagentRun{
+			ID: "bg-other-parent", SessionID: "session", ParentRunID: "other", Type: "review",
+			State: agentservice.SubagentRunning, Background: true,
+		}},
+		"bg-delivered": {run: agentservice.SubagentRun{
+			ID: "bg-delivered", SessionID: "session", ParentRunID: "parent", Type: "review",
+			State: agentservice.SubagentRunning, Background: true, CompletionDelivered: true,
+		}},
+	}}
+	got := runtime.listRunningBackgroundChildren("session", "parent")
+	if len(got) != 2 || got[0].ID != "bg-queued" || got[1].ID != "bg-running" {
+		t.Fatalf("running background children = %#v", got)
+	}
+}
+
+func TestUserTurnBlockMarksSubagentWake(t *testing.T) {
+	block := userTurnBlock("run-wake", TurnRequest{
+		Prompt:   "Background subagent results are available.",
+		origin:   turnOriginSubagentWake,
+		wakeData: map[string]string{"tasks": `[{"id":"child-1","type":"review","state":"failed"}]`},
+	})
+	if block.Kind != "user" || block.Title != "Subagent completion" || block.State != subagentWakeBlockState {
+		t.Fatalf("wake block = %#v", block)
+	}
+	if block.Data["tasks"] != `[{"id":"child-1","type":"review","state":"failed"}]` {
+		t.Fatalf("wake data = %#v", block.Data)
+	}
+	ordinary := userTurnBlock("run-user", TurnRequest{Prompt: "hello"})
+	if ordinary.Title != "You" || ordinary.State != "" || ordinary.Data != nil {
+		t.Fatalf("ordinary user block = %#v", ordinary)
+	}
+}
+
+func countSubagentWakeBlocks(blocks []session.Block, taskID string) int {
+	count := 0
+	for _, block := range blocks {
+		if block.Kind != "user" || block.State != subagentWakeBlockState {
+			continue
+		}
+		if taskID == "" || strings.Contains(block.Content, taskID) {
+			count++
+		}
+	}
+	return count
+}
+
+func wakeBlockHasState(blocks []session.Block, taskID string) bool {
+	for _, block := range blocks {
+		if block.Kind == "user" && block.State == subagentWakeBlockState && strings.Contains(block.Content, taskID) {
+			return block.Title == "Subagent completion" && strings.Contains(block.Data["tasks"], taskID)
+		}
+	}
+	return false
 }
 
 func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T) {

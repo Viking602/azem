@@ -1036,6 +1036,7 @@ func (r *subagentRuntime) execute(id string) {
 		toolNames = append(toolNames, contextReadArtifactTool)
 	}
 	skillSnapshot := parent.Coding.SkillSnapshot()
+	activeSkills := mergeSkillNames(skillSnapshot.Eager, loadSessionActivatedSkills(ctx, parent.Host, parent.SessionID, skillSnapshot.Registry))
 	instructions := renderSubagentInstructions(profile)
 	if childContextWindow > 0 {
 		contextBudget, err = calculateContextBudget(profile.Provider, childModel, childContextWindow, estimateToolDefinitionTokens(governed), parent.ContextConfig)
@@ -1058,7 +1059,7 @@ func (r *subagentRuntime) execute(id string) {
 		}
 	}
 	spec := hyagent.Spec{
-		Skills: skillSnapshot.Eager, AvailableSkills: skillSnapshot.Available,
+		Skills: activeSkills, AvailableSkills: skillSnapshot.Available,
 		Instructions: instructions, Model: childModel, Tools: toolNames,
 		MaxTokens: maxOutputTokens,
 		LoopPolicy: hyagent.LoopPolicy{
@@ -1591,47 +1592,97 @@ func (r *subagentRuntime) AutoWakePending(sessionID string) {
 	if host == nil {
 		return
 	}
-	runs, err := r.store.List(r.ctx, sessionID)
-	if err != nil {
-		return
-	}
-	for _, run := range runs {
-		if run.Background && !run.CompletionDelivered && run.State != agentservice.SubagentCancelled && subagentTerminal(run.State) {
-			r.maybeAutoWake(host, run)
-			return
-		}
-	}
+	r.maybeAutoWakeSession(host, sessionID)
 }
 
 func (r *subagentRuntime) maybeAutoWake(host providerHost, run agentservice.SubagentRun) {
-	if !r.cfg.AutoWake || host == nil || !run.Background || run.CompletionDelivered ||
-		run.State == agentservice.SubagentCancelled || !subagentTerminal(run.State) {
+	if host == nil || strings.TrimSpace(run.SessionID) == "" {
+		return
+	}
+	r.maybeAutoWakeSession(host, run.SessionID)
+}
+
+func (r *subagentRuntime) maybeAutoWakeSession(host providerHost, sessionID string) {
+	if !r.cfg.AutoWake || host == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	pending, err := r.undeliveredBackgroundCompletions(sessionID)
+	if err != nil || len(pending) == 0 {
 		return
 	}
 	r.mu.Lock()
-	if r.ctx.Err() != nil || r.wakeInFlight[run.ID] {
+	if r.ctx.Err() != nil {
 		r.mu.Unlock()
 		return
 	}
-	r.wakeInFlight[run.ID] = true
+	claimed := make([]agentservice.SubagentRun, 0, len(pending))
+	for _, run := range pending {
+		if r.wakeInFlight[run.ID] {
+			continue
+		}
+		r.wakeInFlight[run.ID] = true
+		claimed = append(claimed, run)
+	}
+	if len(claimed) == 0 {
+		r.mu.Unlock()
+		return
+	}
 	r.wg.Add(1)
 	r.mu.Unlock()
 	go func() {
 		defer r.wg.Done()
 		defer func() {
 			r.mu.Lock()
-			delete(r.wakeInFlight, run.ID)
+			for _, run := range claimed {
+				delete(r.wakeInFlight, run.ID)
+			}
 			r.mu.Unlock()
 		}()
-		current, err := r.store.Get(r.ctx, run.ID)
-		if err != nil || current.CompletionDelivered || !host.CanStartAutoWake(current.SessionID) {
+		if !host.CanStartAutoWake(sessionID) {
+			return
+		}
+		current := make([]agentservice.SubagentRun, 0, len(claimed))
+		for _, run := range claimed {
+			latest, getErr := r.store.Get(r.ctx, run.ID)
+			if getErr != nil || latest.CompletionDelivered || latest.State == agentservice.SubagentCancelled ||
+				!latest.Background || !subagentTerminal(latest.State) {
+				continue
+			}
+			current = append(current, latest)
+		}
+		if len(current) == 0 {
 			return
 		}
 		if err := host.StartSubagentAutoWake(current); err != nil {
 			return
 		}
-		_ = r.store.SetCompletionDelivered(r.ctx, run.ID, true)
+		for _, run := range current {
+			_ = r.store.SetCompletionDelivered(r.ctx, run.ID, true)
+		}
 	}()
+}
+
+func (r *subagentRuntime) undeliveredBackgroundCompletions(sessionID string) ([]agentservice.SubagentRun, error) {
+	runs, err := r.store.List(r.ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	pending := make([]agentservice.SubagentRun, 0, len(runs))
+	for _, run := range runs {
+		if run.Background && !run.CompletionDelivered && run.State != agentservice.SubagentCancelled && subagentTerminal(run.State) {
+			pending = append(pending, run)
+		}
+	}
+	slices.SortFunc(pending, func(left, right agentservice.SubagentRun) int {
+		if left.FinishedAt.Equal(right.FinishedAt) {
+			return strings.Compare(left.ID, right.ID)
+		}
+		if left.FinishedAt.Before(right.FinishedAt) {
+			return -1
+		}
+		return 1
+	})
+	return pending, nil
 }
 
 func (r *subagentRuntime) compactionReporter(parent subagentParentRuntime, runID string) compactionUsageReporter {

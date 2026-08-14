@@ -210,6 +210,25 @@ func (r *subagentRuntime) Cancel(sessionID, id string) agentservice.SubagentCanc
 	return agentservice.SubagentCancelOutcome{Outcome: "cancel_requested", Snapshot: snapshot}
 }
 
+func (r *subagentRuntime) listRunningBackgroundChildren(sessionID, parentRunID string) []agentservice.SubagentRun {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	children := make([]agentservice.SubagentRun, 0)
+	for _, active := range r.active {
+		if active.run.SessionID != sessionID || active.run.ParentRunID != parentRunID || !active.run.Background {
+			continue
+		}
+		if active.run.CompletionDelivered || subagentTerminal(active.run.State) {
+			continue
+		}
+		children = append(children, active.run)
+	}
+	slices.SortFunc(children, func(left, right agentservice.SubagentRun) int {
+		return strings.Compare(left.ID, right.ID)
+	})
+	return children
+}
+
 func (r *subagentRuntime) HasActiveByParentRun(sessionID, parentRunID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

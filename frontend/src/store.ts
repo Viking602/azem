@@ -357,7 +357,7 @@ const SESSION_SCOPED_EVENTS: Record<string, true> = {
 const UNREAD_SESSION_TERMINALS = new Set(["run_finished", "run_failed"]);
 
 export function reduceEvents<T extends RuntimeData>(state: T, events: RuntimeEvent[]): T {
-  let next = { ...state, blocks: [...state.blocks], sessions: [...state.sessions], agents: [...state.agents] };
+  let next = state;
   for (const event of events) next = reduceEvent(next, event);
   return next;
 }

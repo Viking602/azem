@@ -301,6 +301,31 @@ func TestPhase3DurableProvenanceUsesSequence(t *testing.T) {
 	}
 }
 
+func TestNormalizeSemanticStateAcceptsWholeResponseJSONFence(t *testing.T) {
+	authorities := map[string]string{"sequence:42": "user"}
+	raw := "```json\n" + `{"version":1,"objective":{"text":"x","status":"active","authority":"user","confidence":"reported","sources":[{"kind":"sequence","id":"42"}]}}` + "\n```"
+	normalized, err := normalizeSemanticStateV1(raw, authorities)
+	if err != nil {
+		t.Fatalf("whole-response JSON fence rejected: %v", err)
+	}
+	var state SemanticStateV1
+	if err := json.Unmarshal([]byte(normalized), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Objective.Text != "x" {
+		t.Fatalf("objective=%q", state.Objective.Text)
+	}
+	if _, err := normalizeSemanticStateV1("Here is the state:\n```json\n"+`{"version":1,"objective":{"text":"x","status":"active","authority":"user","confidence":"reported","sources":[{"kind":"sequence","id":"42"}]}}`+"\n```", authorities); err == nil {
+		t.Fatal("accepted prose around a JSON fence")
+	}
+	if _, err := normalizeSemanticStateV1("```json\n"+`{"version":1}`+"\n```\n```json\n"+`{"version":1}`+"\n```", authorities); err == nil {
+		t.Fatal("accepted nested JSON fences")
+	}
+	if _, err := normalizeSemanticStateV1("```markdown\n"+`{"version":1,"objective":{"text":"x","status":"active","authority":"user","confidence":"reported","sources":[{"kind":"sequence","id":"42"}]}}`+"\n```", authorities); err == nil {
+		t.Fatal("accepted unsupported fence language")
+	}
+}
+
 func TestPhase3ProvenanceMismatchDowngradesToSupportedAgentFact(t *testing.T) {
 	normalized, err := normalizeSemanticStateV1(
 		`{"version":1,"objective":{"text":"continue the review","status":"active","authority":"agent","confidence":"inferred","sources":[{"kind":"checkpoint","id":"carried:evidence"}]},"constraints":[{"text":"Plugin manifest paths must remain inside the plugin root.","status":"active","authority":"workspace","confidence":"verified","sources":[{"kind":"checkpoint","id":"invented:workspace"}]}]}`,

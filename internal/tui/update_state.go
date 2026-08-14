@@ -527,6 +527,10 @@ func (m *AppModel) updateUsage(data map[string]string) {
 		return
 	}
 	requestKind := data["requestKind"]
+	if requestKind == "subagent" {
+		m.applySubagentUsage(data)
+		return
+	}
 	inputTokens, inputErr := strconv.Atoi(data["inputTokens"])
 	if inputErr == nil && data["inputTokens"] != "" {
 		if data["aggregateOnly"] != "true" {
@@ -629,6 +633,14 @@ func (m *AppModel) updateUsage(data map[string]string) {
 	}
 	if data["transport"] != "" {
 		m.usage.LastTransport = data["transport"]
+	}
+}
+
+func (m *AppModel) applySubagentUsage(data map[string]string) {
+	m.usage.LastRequestKind = "subagent"
+	if value, err := strconv.Atoi(data["inputTokens"]); err == nil && data["inputTokens"] != "" {
+		m.usage.SubagentInput += value
+		m.usage.SubagentRequests++
 	}
 }
 

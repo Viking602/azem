@@ -516,6 +516,7 @@ export function parseContextUsage(raw: string | undefined, fallbackLimit = 0): C
 export function projectContextUsage(current: ContextUsage, data: Record<string, string>, state?: string): ContextUsage {
   if (data.factSnapshot === "true" && data.usageSnapshot) return parseContextUsage(data.usageSnapshot, current.contextLimit);
   const requestKind = data.requestKind || "main";
+  if (requestKind === "subagent") return current;
   const cacheReported = data.cacheStatus === "reported";
   const cacheWriteReported = data.cacheWriteStatus === "reported";
   const next: ContextUsage = {

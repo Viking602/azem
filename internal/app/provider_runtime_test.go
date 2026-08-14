@@ -81,6 +81,7 @@ func TestMainInstructionsContract(t *testing.T) {
 	requireInstructionFragments(t, "runtime contract", []string{
 		"exactly one mutating `todo` call", "never batch Todo mutations", "`done` automatically advances",
 		"actual lifecycle", "failed, cancelled, and stalled", "review as an approval gate", "independently inspect the changed files",
+		"must stay foreground", "`timeout_ms`", "before any gated action or ending the turn",
 		"**<concise action title>**", "<specific target or immediate evidence>", "18 CJK characters or eight English words",
 	})
 	for _, unsupported := range []string{"lsp", "ast_edit", "browser", "worker.run"} {

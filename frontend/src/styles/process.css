@@ -1,6 +1,7 @@
 .timeline-feed { display: flex; flex-direction: column; gap: 0; }
 .timeline-feed.compact { gap: 0; }
 .timeline-feed > .user-block,
+.timeline-feed > .subagent-wake-notice,
 .timeline-feed > .assistant-block:not(.streaming),
 .timeline-feed > .commentary-block:not(.active),
 .timeline-feed > .process-fold,

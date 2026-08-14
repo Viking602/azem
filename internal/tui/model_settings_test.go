@@ -209,26 +209,31 @@ func TestContextCacheHitRateAccumulatesModelCallsWithinTurn(t *testing.T) {
 	}
 }
 
-func TestSubagentCacheUsageAggregatesWithoutReplacingMainContext(t *testing.T) {
+func TestSubagentCacheUsageDoesNotEnterMainContextKernel(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.usage.ContextLimit = 1_000
 	model.updateUsage(map[string]string{
 		"inputTokens": "100", "cachedInputTokens": "20", "outputTokens": "10", "cacheStatus": "reported",
 	})
 	model.updateUsage(map[string]string{
-		"inputTokens": "50", "cachedInputTokens": "40", "outputTokens": "5", "cacheStatus": "reported", "aggregateOnly": "true",
+		"inputTokens": "50", "cachedInputTokens": "40", "outputTokens": "5",
+		"cacheStatus": "reported", "aggregateOnly": "true", "requestKind": "subagent",
 	})
 	if model.usage.InputTokens != 100 || model.usage.OutputTokens != 10 {
 		t.Fatalf("subagent usage replaced main context occupancy: %+v", model.usage)
 	}
-	if model.usage.CacheInputTokens != 150 || model.usage.CachedInputTokens != 60 {
-		t.Fatalf("subagent cache usage was not aggregated: %+v", model.usage)
+	if model.usage.CacheInputTokens != 100 || model.usage.CachedInputTokens != 20 {
+		t.Fatalf("subagent cache leaked into main kernel: %+v", model.usage)
+	}
+	if model.usage.SubagentInput != 50 || model.usage.SubagentRequests != 1 {
+		t.Fatalf("subagent usage was not tracked separately: %+v", model.usage)
 	}
 	footer := ansi.Strip(model.renderContextUsage(200))
-	for _, wanted := range []string{"CACHE MAIN 20/100", "20.0%", "ALL 40.0%"} {
-		if !strings.Contains(footer, wanted) {
-			t.Fatalf("separated main/all cache footer missing %q: %q", wanted, footer)
-		}
+	if !strings.Contains(footer, "20.0%") {
+		t.Fatalf("main cache footer missing 20.0%%: %q", footer)
+	}
+	if strings.Contains(footer, "ALL") {
+		t.Fatalf("subagent usage appeared in main footer: %q", footer)
 	}
 }
 

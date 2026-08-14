@@ -132,7 +132,10 @@ type contextCheckpointMetadata struct {
 }
 
 func normalizeSemanticStateV1(raw string, authorities map[string]string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
+	trimmed, err := unwrapWholeJSONFence(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("semantic writer returned non-JSON output")
+	}
 	var state SemanticStateV1
 	if trimmed == "" || !json.Valid([]byte(trimmed)) {
 		return "", fmt.Errorf("semantic writer returned non-JSON output")
@@ -156,6 +159,28 @@ func normalizeSemanticStateV1(raw string, authorities map[string]string) (string
 	ensureSemanticCollections(&state)
 	encoded, err := json.Marshal(state)
 	return string(encoded), err
+}
+
+func unwrapWholeJSONFence(value string) (string, error) {
+	if !strings.HasPrefix(value, "```") {
+		return value, nil
+	}
+	lines := strings.Split(value, "\n")
+	if len(lines) < 3 {
+		return "", fmt.Errorf("semantic writer returned an incomplete JSON fence")
+	}
+	opening := strings.ToLower(strings.TrimSpace(lines[0]))
+	if opening != "```" && opening != "```json" {
+		return "", fmt.Errorf("semantic writer used unsupported fence %q", strings.TrimSpace(lines[0]))
+	}
+	if strings.TrimSpace(lines[len(lines)-1]) != "```" {
+		return "", fmt.Errorf("semantic writer returned content outside its JSON fence")
+	}
+	body := strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+	if body == "" || strings.Contains(body, "```") {
+		return "", fmt.Errorf("semantic writer JSON fence is empty or nested")
+	}
+	return body, nil
 }
 
 func normalizeSemanticFacts(state *SemanticStateV1, authorities map[string]string) (int, error) {

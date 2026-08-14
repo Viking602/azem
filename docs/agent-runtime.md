@@ -102,6 +102,19 @@ re-entrant child so synchronous recursive delegation cannot deadlock
 cancelled only by `subagent.kill`, an explicit include-children stop, or
 application shutdown (SUBAGENT-001).
 
+The main agent prompt requires review or verification that gates later work
+to stay foreground. If the model still backgrounds such a child and then
+tries to finish, `pending-background-children` (`internal/app/
+provider_subagent_guardrail.go`) injects one host retry listing the running
+task IDs and requiring `subagent.get_output` or an explicit independence
+claim. The guardrail never cancels children (SUBAGENT-004).
+
+When the session is idle, `AutoWakePending` collects every background child
+that is terminal, not cancelled, and not yet `CompletionDelivered`, then
+starts one wake turn. The wake user block keeps `kind=user` so it remains in
+model context, but sets `state=subagent_wake` and structured `data.tasks`
+(UI-013). Wake turns set `DisableSubagents` to prevent a spawn loop.
+
 ## Durable runs, tasks, and leases
 
 Every run owns a root task; execution requires a task lease with the

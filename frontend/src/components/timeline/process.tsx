@@ -47,12 +47,13 @@ export function ProcessFold({ blocks, elapsedMs, language, featured, active = fa
   const label = translator(language)(active ? "processing" : "processed");
   const liveElapsedMs = useLiveElapsed(elapsedMs, active);
   const duration = liveElapsedMs > 0 ? formatDuration(liveElapsedMs) : "";
+  const open = active || expanded;
   return <details
     className="process-fold"
     data-featured={featured || undefined}
     data-state={active ? "running" : "completed"}
     aria-busy={active || undefined}
-    open={active || expanded}
+    open={open}
     onToggle={(event) => {
       if (active) {
         event.currentTarget.open = true;
@@ -69,9 +70,9 @@ export function ProcessFold({ blocks, elapsedMs, language, featured, active = fa
       <span className="process-fold-label">{label}</span>
       {duration ? <time>{duration}</time> : null}
     </summary>
-    <div className="process-fold-body">
+    {open ? <div className="process-fold-body">
       <ProcessEntries blocks={blocks} language={language} active={active} />
-    </div>
+    </div> : null}
   </details>;
 }
 

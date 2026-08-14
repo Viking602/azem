@@ -336,6 +336,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	}
 	skillSnapshot := r.coding.SkillSnapshot()
 	activeSkills := mergeSkillNames(skillSnapshot.Eager, request.ActiveSkills)
+	activeSkills = mergeSkillNames(activeSkills, loadSessionActivatedSkills(ctx, host, request.SessionID, skillSnapshot.Registry))
 	instructions, instructionFingerprint := turnInstructions(request.PlanMode)
 	budgetConfig, err := calculateContextBudget(request.Provider, modelID, contextWindow, estimateToolDefinitionTokens(drivers), r.cfg.Agents.Context)
 	if err != nil {
@@ -633,6 +634,12 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			}
 			return hyagent.RetryOutput(guidanceMessages(guidance)...), nil
 		}))
+		if !request.DisableSubagents {
+			sessionID, parentRunID := request.SessionID, run.RunID
+			engine.OutputGuardrails = append(engine.OutputGuardrails, pendingBackgroundChildrenGuardrail(func() []backgroundChildStatus {
+				return backgroundChildStatuses(host.RunningBackgroundChildren(sessionID, parentRunID))
+			}))
+		}
 	}
 	return run, engine, nil
 }
@@ -972,6 +979,72 @@ func mergeSkillNames(eager, requested []string) []string {
 	return merged
 }
 
+func loadSessionActivatedSkills(ctx context.Context, host providerHost, sessionID string, registry *hyskill.Registry) []string {
+	if host == nil || host.Sessions() == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	records, err := host.Sessions().ListToolRecords(ctx, sessionID)
+	if err != nil {
+		return nil
+	}
+	return filterResolvableSkills(registry, sessionActivatedSkillNames(records))
+}
+
+func sessionActivatedSkillNames(records []session.ToolRecord) []string {
+	seen := make(map[string]struct{})
+	names := make([]string, 0)
+	for _, record := range records {
+		if record.Name != hyagent.SkillActivationToolName || record.State != session.ToolCompleted {
+			continue
+		}
+		name := activatedSkillName(record)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+func activatedSkillName(record session.ToolRecord) string {
+	var payload struct {
+		Name  string `json:"name"`
+		Skill string `json:"skill"`
+	}
+	for _, raw := range []json.RawMessage{record.Structured, record.Arguments} {
+		if len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		if json.Unmarshal(raw, &payload) != nil {
+			continue
+		}
+		if name := strings.TrimSpace(payload.Name); name != "" {
+			return name
+		}
+		if name := strings.TrimSpace(payload.Skill); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func filterResolvableSkills(registry *hyskill.Registry, names []string) []string {
+	if registry == nil || len(names) == 0 {
+		return nil
+	}
+	resolved := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, ok := registry.Get(name); ok {
+			resolved = append(resolved, name)
+		}
+	}
+	return resolved
+}
+
 func (r *ProviderRuntime) CancelSubagent(sessionID, id string) agentservice.SubagentCancelOutcome {
 	r.mu.RLock()
 	runtime := r.subagents
@@ -1003,6 +1076,16 @@ func (r *ProviderRuntime) CancelParentSubagents(sessionID, parentRunID string) {
 	if runtime != nil {
 		runtime.CancelByParentRun(sessionID, parentRunID, true)
 	}
+}
+
+func (r *ProviderRuntime) RunningBackgroundChildren(sessionID, parentRunID string) []agentservice.SubagentRun {
+	r.mu.RLock()
+	runtime := r.subagents
+	r.mu.RUnlock()
+	if runtime == nil {
+		return nil
+	}
+	return runtime.listRunningBackgroundChildren(sessionID, parentRunID)
 }
 
 func (r *ProviderRuntime) AutoWakePending(sessionID string) {

@@ -210,7 +210,7 @@ Artifact payload 与 SHA256 保持权威。preview 固定包含 version、kind�
 
 - `schemaVersion == len(migrations)`。
 - schema 20 migration 保留 canonical/Todo/Artifact，清除旧 ModelHistory/cache identity。
-- SemanticStateV1 严格 JSON 与 provenance 校验。
+- SemanticStateV1 严格 JSON 与 provenance 校验。宿主只接受裸 JSON，或一个包裹整个响应的 ` ``` ` / ` ```json ` 围栏；不从散文、嵌套围栏或其它围栏语言中提取 JSON。
 - 最近 3 个用户 turn 精确保留。
 - tool groups 不拆分。
 - map/reduce 输入有界，失败不改变 checkpoint。

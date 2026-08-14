@@ -181,7 +181,9 @@ streams do not accumulate animation nodes. `prefers-reduced-motion` bypasses the
 effect and renders the complete current text directly.
 
 The Live context Inspector keeps provider facts and estimated wire composition
-visually separate. Cache hit rate is calculated only from input for which the
+visually separate. Occupancy and cache hit rate come from the main agent only;
+subagent usage is persisted on the session's subagent counters and is not
+mixed into this kernel. Cache hit rate is calculated only from input for which the
 provider reported cache semantics; unsupported providers show **Not reported**
 instead of a misleading zero. The summary shows the matching cached-input
 tokens as **Cache hits** and the cache-reporting input denominator as **Total
@@ -276,7 +278,13 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   validates session ownership and the detected MIME type.
 - `frontend/src/components/SubagentsPage.tsx` owns the grouped current-session
   collaboration roster. `AgentSideChat.tsx` owns the overlay child transcript
-  drawer and icon-only accessible member switcher.
+  drawer and icon-only accessible member switcher. The drawer transcript
+  subscribes only to `agentBlocks`; `reduceEvents` must not replace the main
+  `blocks` array on a subagent delta. Folded `已处理` trails stay unmounted
+  until the user expands them, while live trails remain expanded (UI-007).
+  Background completion wake blocks stay `kind=user` for model context, but
+  `state=subagent_wake` renders as a left-aligned system notice instead of a
+  user bubble (UI-013). Legacy wake text without that state keeps the bubble.
 
 Keep direct Bridge calls narrow. Do not add a generic path reader, command
 runner, or mutation endpoint to support a presentation feature.

@@ -59,6 +59,22 @@ func TestUsageApplyAndPersistAcrossReload(t *testing.T) {
 	if usage.LastRequestKind != "team" || usage.LastProvider != "grok" || usage.LastModel != "grok-4.5" || usage.LastTransport != "xai-responses" {
 		t.Fatalf("usage attribution = %#v", usage)
 	}
+	usage.Apply(map[string]string{
+		"inputTokens": "400", "cachedInputTokens": "250", "outputTokens": "30",
+		"cacheWriteTokens": "12", "reasoningTokens": "9", "requestKind": "subagent",
+		"cacheStatus": "reported", "provider": "grok", "model": "child-model",
+	})
+	if usage.InputTokens != 68000 || usage.OutputTokens != 4000 || usage.CacheInputTokens != 68150 || usage.CachedInputTokens != 34100 {
+		t.Fatalf("subagent usage leaked into main kernel: %+v", usage)
+	}
+	if usage.SubagentInput != 400 || usage.SubagentCached != 250 || usage.SubagentOutput != 30 ||
+		usage.SubagentCacheWrite != 12 || usage.SubagentReasoning != 9 || usage.SubagentRequests != 1 ||
+		usage.SubagentReportedInput != 400 || !usage.SubagentCacheReported {
+		t.Fatalf("subagent usage = %+v", usage)
+	}
+	if usage.LastProvider != "grok" || usage.LastModel != "grok-4.5" {
+		t.Fatalf("subagent overwrote main provider attribution: %#v", usage)
+	}
 	if err := service.UpdateUsage(ctx, "session", usage); err != nil {
 		t.Fatal(err)
 	}

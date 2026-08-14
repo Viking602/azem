@@ -84,6 +84,8 @@ const messages = {
     toolGitDiff: "查看 Git 差异", toolActivateSkill: "加载技能", toolReadSkillResource: "读取技能资源", toolSpawn: "启动子智能体", toolGetSubagentOutput: "获取子智能体输出", toolStopSubagent: "停止子智能体",
     // Timeline / process
     thinking: "思考", thinkingActive: "思考中", executing: "执行中", thought: "思考过程", thoughtFor: "思考了 {duration}", progressUpdate: "进度更新", processed: "已处理", processedFor: "已处理 {duration}", processing: "处理中", finalAnswer: "最终回答",
+    subagentWakeCompleted: "后台子代理已完成", subagentWakeFailed: "后台子代理失败", subagentWakeMixed: "后台子代理已结束",
+    subagentWakeShowResult: "查看结果", subagentWakeTask: "{type} · {id} · {state}",
     currentTask: "当前任务", earlierTurn: "更早的回合",
     currentTurn: "当前回合", turnIndex: "回合 {n}",
     stoppedAfter: "你在 {duration} 后停止了", stopped: "你停止了运行",
@@ -355,6 +357,8 @@ const messages = {
     toolSearch: "Search Code", toolListFiles: "List Files", toolShell: "Run Command", toolGoTest: "Run Go Tests", toolGofmt: "Format Go Code",
     toolGitDiff: "View Git Diff", toolActivateSkill: "Load Skill", toolReadSkillResource: "Read Skill Resource", toolSpawn: "Start Subagent", toolGetSubagentOutput: "Get Subagent Output", toolStopSubagent: "Stop Subagent",
     thinking: "Thinking", thinkingActive: "Thinking", executing: "Executing", thought: "Thought", thoughtFor: "Thought for {duration}", progressUpdate: "Progress update", processed: "Worked", processedFor: "Worked for {duration}", processing: "Working", finalAnswer: "Final answer",
+    subagentWakeCompleted: "Background subagent completed", subagentWakeFailed: "Background subagent failed", subagentWakeMixed: "Background subagent finished",
+    subagentWakeShowResult: "Show result", subagentWakeTask: "{type} · {id} · {state}",
     currentTask: "Current task", earlierTurn: "Earlier turn",
     currentTurn: "Current turn", turnIndex: "Turn {n}",
     stoppedAfter: "You stopped after {duration}", stopped: "You stopped the run",

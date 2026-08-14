@@ -74,7 +74,14 @@ type TurnRequest struct {
 	toolRecords            []session.ToolRecord
 	checkpointBoundary     *int64
 	immutableIdentity      string
+	origin                 string
+	wakeData               map[string]string
 }
+
+const (
+	turnOriginSubagentWake = "subagent_wake"
+	subagentWakeBlockState = "subagent_wake"
+)
 
 type turnContext struct {
 	sessionID                 string

@@ -105,6 +105,10 @@ func (u *Usage) Apply(data map[string]string) {
 		return
 	}
 	requestKind := data["requestKind"]
+	if requestKind == "subagent" {
+		u.applySubagentUsage(data)
+		return
+	}
 	if value, ok := atoiData(data, "inputTokens"); ok {
 		if data["aggregateOnly"] != "true" {
 			u.InputTokens = value
@@ -189,6 +193,31 @@ func (u *Usage) Apply(data map[string]string) {
 		if value := strings.TrimSpace(data[key]); value != "" {
 			*destination = value
 		}
+	}
+}
+
+func (u *Usage) applySubagentUsage(data map[string]string) {
+	u.LastRequestKind = "subagent"
+	if value, ok := atoiData(data, "inputTokens"); ok {
+		u.SubagentInput += value
+		u.SubagentRequests++
+		if data["cacheStatus"] == "reported" {
+			u.SubagentReportedInput += value
+			u.SubagentReportedRequests++
+		}
+	}
+	if value, ok := atoiData(data, "cachedInputTokens"); ok {
+		u.SubagentCached += value
+		u.SubagentCacheReported = true
+	}
+	if value, ok := atoiData(data, "cacheWriteTokens"); ok {
+		u.SubagentCacheWrite += value
+	}
+	if value, ok := atoiData(data, "outputTokens"); ok {
+		u.SubagentOutput += value
+	}
+	if value, ok := atoiData(data, "reasoningTokens"); ok {
+		u.SubagentReasoning += value
 	}
 }
 

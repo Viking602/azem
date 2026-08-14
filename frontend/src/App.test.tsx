@@ -450,7 +450,11 @@ describe("application interactions", () => {
     expect(process?.open).toBe(false);
     expect(process?.querySelector(".process-fold-label")?.textContent).toBe("已处理");
 
-    await act(async () => process?.querySelector<HTMLElement>("summary")?.click());
+    await act(async () => {
+      if (!process) return;
+      process.open = true;
+      process.dispatchEvent(new Event("toggle"));
+    });
     expect(process?.open).toBe(true);
     expect(process?.textContent).toContain("核对安全边界");
   });

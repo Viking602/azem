@@ -1,4 +1,4 @@
-import { memo, useMemo, type ComponentProps } from "react";
+import { memo, useMemo, useRef, type ComponentProps } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -7,6 +7,16 @@ import remarkGfm from "remark-gfm";
 const GFM_PLUGINS: ComponentProps<typeof ReactMarkdown>["remarkPlugins"] = [remarkGfm];
 
 export type StreamingRevealRange = { id: number; start: number; end: number };
+
+export function sameRevealRanges(
+  left: readonly StreamingRevealRange[],
+  right: readonly StreamingRevealRange[],
+) {
+  return left.length === right.length && left.every((range, index) => {
+    const other = right[index];
+    return other !== undefined && range.id === other.id && range.start === other.start && range.end === other.end;
+  });
+}
 
 type MarkdownSyntaxNode = {
   type: string;
@@ -79,9 +89,11 @@ export const Markdown = memo(MarkdownBase, (previous, next) =>
  * same Markdown tree, so streaming never falls back to raw or pre-wrapped text.
  */
 export function StreamingMarkdown({ children, ranges }: { children: string; ranges: readonly StreamingRevealRange[] }) {
+  const stableRanges = useRef(ranges);
+  if (!sameRevealRanges(stableRanges.current, ranges)) stableRanges.current = ranges;
   const plugins = useMemo<ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>(
-    () => [remarkGfm, streamingRevealPlugin(ranges)],
-    [ranges],
+    () => [remarkGfm, streamingRevealPlugin(stableRanges.current)],
+    [stableRanges.current],
   );
   return <ReactMarkdown remarkPlugins={plugins}>{children}</ReactMarkdown>;
 }

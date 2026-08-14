@@ -65,7 +65,8 @@ type providerHost interface {
 
 	// Background subagent wake-up.
 	CanStartAutoWake(sessionID string) bool
-	StartSubagentAutoWake(run agentservice.SubagentRun) error
+	StartSubagentAutoWake(runs []agentservice.SubagentRun) error
+	RunningBackgroundChildren(sessionID, parentRunID string) []agentservice.SubagentRun
 }
 
 func (s *Service) BaseContext() context.Context { return s.ctx }
@@ -197,6 +198,13 @@ func (s *Service) FinishUserInput(live *liveUserInput) { s.finishUserInput(live)
 
 func (s *Service) CanStartAutoWake(sessionID string) bool { return s.canStartAutoWake(sessionID) }
 
-func (s *Service) StartSubagentAutoWake(run agentservice.SubagentRun) error {
-	return s.startSubagentAutoWake(run)
+func (s *Service) StartSubagentAutoWake(runs []agentservice.SubagentRun) error {
+	return s.startSubagentAutoWake(runs)
+}
+
+func (s *Service) RunningBackgroundChildren(sessionID, parentRunID string) []agentservice.SubagentRun {
+	if s.providers == nil {
+		return nil
+	}
+	return s.providers.RunningBackgroundChildren(sessionID, parentRunID)
 }

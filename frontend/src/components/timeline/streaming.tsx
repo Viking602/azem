@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { StreamingMarkdown, type StreamingRevealRange } from "../Markdown";
+import { sameRevealRanges, StreamingMarkdown, type StreamingRevealRange } from "../Markdown";
 import { StreamingText as BeautifulStreamingText } from "../beautiful-ui/Primitives";
 
 function revealGlyphs(text: string) {
@@ -56,9 +56,10 @@ function appendStreamingPresentation(current: StreamingPresentation, text: strin
     start: current.rendered.length + revealTailOffset(appended),
     end: text.length,
   };
+  const ranges = [...current.ranges, range].slice(-MAX_LIVE_REVEAL_CHUNKS);
   return {
     rendered: text,
-    ranges: [...current.ranges, range].slice(-MAX_LIVE_REVEAL_CHUNKS),
+    ranges: sameRevealRanges(current.ranges, ranges) ? current.ranges : ranges,
     nextID: current.nextID + 1,
   };
 }

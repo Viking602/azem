@@ -4,30 +4,25 @@ import { execute } from "../bridge";
 import { translator } from "../i18n";
 import { isSubagentActive, subagentDisplayName, subagentStatusLabel } from "../subagents";
 import { useRuntimeStore } from "../store";
-import type { AgentState } from "../types";
+import type { AgentState, Block, Snapshot } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
 import { formatDuration } from "./ThreadSurface";
 import { TimelineFeed } from "./Timeline";
 
 /** Focused drawer for one subagent transcript. */
 export default function AgentSideChat() {
-  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const language = useRuntimeStore((state) => state.snapshot?.language ?? "zh-CN");
   const agents = useRuntimeStore((state) => state.agents);
   const selectedAgentId = useRuntimeStore((state) => state.selectedAgentId);
-  const agentBlocks = useRuntimeStore((state) => state.agentBlocks);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
   const selectAgent = useRuntimeStore((state) => state.selectAgent);
   const setError = useRuntimeStore((state) => state.setError);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef<HTMLHeadingElement>(null);
-  const followTail = useRef(true);
-  const language = snapshot.language;
   const t = translator(language);
   const agent = agents.find((item) => item.id === selectedAgentId) || null;
   const running = isSubagentActive(agent?.state);
   const cancellable = agent?.state === "initializing" || agent?.state === "queued" || agent?.state === "running" || agent?.state === "started";
   const role = agent ? subagentDisplayName(agent, agents, language) : selectedAgentId || t("subagents");
-  const activeRunId = agentBlocks.reduce((latest, block) => block.runId || latest, "") || agent?.previewRunId || "";
   const liveElapsedMs = useLiveAgentElapsed(agent, selectedAgentId, running);
 
   // Hydrate once. Live agent events are the source of truth; polling the full
@@ -36,7 +31,6 @@ export default function AgentSideChat() {
   useEffect(() => {
     if (!selectedAgentId) return;
     let cancelled = false;
-    followTail.current = true;
     requestAnimationFrame(() => titleRef.current?.focus());
     void execute({ kind: "inspect_agent", target: selectedAgentId, sessionId: currentSessionId })
       .catch((cause) => {
@@ -44,15 +38,6 @@ export default function AgentSideChat() {
       });
     return () => { cancelled = true; };
   }, [currentSessionId, selectedAgentId, setError]);
-
-  useEffect(() => {
-    const node = scrollRef.current;
-    if (!node || !followTail.current) return;
-    const frame = requestAnimationFrame(() => {
-      if (followTail.current) node.scrollTop = node.scrollHeight;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [agentBlocks, selectedAgentId]);
 
   const close = () => {
     selectAgent("");
@@ -133,36 +118,86 @@ export default function AgentSideChat() {
         </div>
       )}
 
-      <div
-        className="agent-side-chat-scroll"
-        id="subagent-detail-panel"
-        role="tabpanel"
-        aria-label={role}
-        ref={scrollRef}
-        onScroll={(event) => {
-          const node = event.currentTarget;
-          followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
-        }}
-      >
-        {agentBlocks.length === 0 ? (
-          <div className="agent-side-chat-empty">
-            {running ? <LoaderCircle className="spin" size={20} /> : <Bot size={22} />}
-            <p>{agent?.description || (running ? t("syncingAgentTimeline") : t("emptySideChat"))}</p>
-          </div>
-        ) : (
-          <div className="agent-side-chat-transcript transcript">
-            <TimelineFeed
-              blocks={agentBlocks}
-              language={language}
-              activeRunId={activeRunId}
-              running={running}
-              collapseCompletedProcess
-            />
-          </div>
-        )}
-      </div>
+      <AgentSideChatTranscript
+        language={language}
+        running={running}
+        selectedAgentId={selectedAgentId}
+        previewRunId={agent?.previewRunId || ""}
+        emptyDescription={agent?.description || (running ? t("syncingAgentTimeline") : t("emptySideChat"))}
+        roleLabel={role}
+      />
     </aside>
   );
+}
+
+function AgentSideChatTranscript({
+  language, running, selectedAgentId, previewRunId, emptyDescription, roleLabel,
+}: {
+  language: Snapshot["language"];
+  running: boolean;
+  selectedAgentId: string;
+  previewRunId: string;
+  emptyDescription: string;
+  roleLabel: string;
+}) {
+  const agentBlocks = useRuntimeStore((state) => state.agentBlocks);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const followTail = useRef(true);
+  const lastTailKey = useRef("");
+  const activeRunId = agentBlocks.reduce((latest, block) => block.runId || latest, "") || previewRunId;
+
+  useEffect(() => {
+    followTail.current = true;
+    lastTailKey.current = "";
+  }, [selectedAgentId]);
+
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node || !followTail.current) return;
+    const last = agentBlocks.at(-1);
+    const tailKey = transcriptTailKey(selectedAgentId, agentBlocks, last);
+    if (tailKey === lastTailKey.current) return;
+    lastTailKey.current = tailKey;
+    const frame = requestAnimationFrame(() => {
+      if (followTail.current) node.scrollTop = node.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [agentBlocks, selectedAgentId]);
+
+  return (
+    <div
+      className="agent-side-chat-scroll"
+      id="subagent-detail-panel"
+      role="tabpanel"
+      aria-label={roleLabel}
+      ref={scrollRef}
+      onScroll={(event) => {
+        const node = event.currentTarget;
+        followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+      }}
+    >
+      {agentBlocks.length === 0 ? (
+        <div className="agent-side-chat-empty">
+          {running ? <LoaderCircle className="spin" size={20} /> : <Bot size={22} />}
+          <p>{emptyDescription}</p>
+        </div>
+      ) : (
+        <div className="agent-side-chat-transcript transcript">
+          <TimelineFeed
+            blocks={agentBlocks}
+            language={language}
+            activeRunId={activeRunId}
+            running={running}
+            collapseCompletedProcess
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function transcriptTailKey(selectedAgentId: string, blocks: Block[], last?: Block) {
+  return `${selectedAgentId}:${blocks.length}:${last?.id ?? ""}:${last?.content?.length ?? 0}:${last?.state ?? ""}`;
 }
 
 /** Derive live tool/elapsed stats even when agent_state events lag behind the stream. */

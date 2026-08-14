@@ -1,5 +1,5 @@
 import {
-  Check, ChevronDown, ChevronRight, CircleStop, Clock3, Command, FileCode2,
+  Bot, Check, ChevronDown, ChevronRight, CircleAlert, CircleStop, Clock3, Command, FileCode2,
   LoaderCircle, MessageCircleQuestion, PencilLine, Play, ShieldCheck, X,
 } from "lucide-react";
 import { memo, useMemo, useState } from "react";
@@ -33,6 +33,9 @@ export type TimelineBlockProps = {
 function TimelineBlockView({ block, language, compact = false, nested = false, siblings }: TimelineBlockProps) {
   const sessionId = useRuntimeStore((state) => state.currentSessionId || state.snapshot?.sessionId || "");
   if (block.kind === "user") {
+    if (block.state === "subagent_wake") {
+      return <SubagentWakeNotice block={block} language={language} />;
+    }
     return <article className="user-block" data-session-sequence={block.sequence}>
       {block.attachments?.length ? <div className="user-attachments">{block.attachments.map((item) => <AttachmentPreview key={item.id} attachment={item} sessionId={sessionId} language={language} variant="message" />)}</div> : null}
       {block.content ? <p>{block.content}</p> : null}
@@ -84,6 +87,66 @@ export function visibleCommentaryTitle(title = "") {
   const normalized = title.trim().toLocaleLowerCase();
   const genericTitles = new Set(["progress", "commentary", "progress update", "进度", "进度更新"]);
   return genericTitles.has(normalized) ? "" : title.trim();
+}
+
+type SubagentWakeTask = { id: string; type: string; state: string };
+
+function subagentWakeTasks(block: Block): SubagentWakeTask[] {
+  const raw = block.data?.tasks;
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const record = item as Record<string, unknown>;
+      const id = typeof record.id === "string" ? record.id.trim() : "";
+      if (!id) return [];
+      return [{
+        id,
+        type: typeof record.type === "string" ? record.type : "",
+        state: typeof record.state === "string" ? record.state : "",
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function subagentWakeTitleKey(tasks: SubagentWakeTask[]): "subagentWakeFailed" | "subagentWakeCompleted" | "subagentWakeMixed" {
+  if (tasks.length > 0 && tasks.every((task) => task.state === "failed")) return "subagentWakeFailed";
+  if (tasks.length > 0 && tasks.every((task) => task.state === "completed")) return "subagentWakeCompleted";
+  return "subagentWakeMixed";
+}
+
+function SubagentWakeNotice({ block, language }: { block: Block; language: Snapshot["language"] }) {
+  const t = translator(language);
+  const tasks = subagentWakeTasks(block);
+  const failed = tasks.some((task) => task.state === "failed") || (tasks.length === 0 && /reached failed/i.test(block.content || ""));
+  const title = t(subagentWakeTitleKey(tasks));
+  return <article
+    className={`subagent-wake-notice${failed ? " failed" : ""}`}
+    data-session-sequence={block.sequence}
+    data-state={block.state}
+  >
+    <span className="subagent-wake-marker" aria-hidden="true">{failed ? <CircleAlert size={15} /> : <Bot size={15} />}</span>
+    <div className="subagent-wake-body">
+      <strong>{title}</strong>
+      {tasks.length ? <ul>
+        {tasks.map((task) => <li key={task.id}>
+          {tFormat(language, "subagentWakeTask", {
+            type: task.type || "subagent",
+            id: task.id,
+            state: task.state || "unknown",
+          })}
+        </li>)}
+      </ul> : null}
+      {block.content ? <details>
+        <summary>{t("subagentWakeShowResult")}</summary>
+        <pre>{block.content}</pre>
+      </details> : null}
+    </div>
+  </article>;
 }
 
 function sameTimelineBlock(previous: TimelineBlockProps, next: TimelineBlockProps) {

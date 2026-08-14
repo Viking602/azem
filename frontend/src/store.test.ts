@@ -465,6 +465,17 @@ describe("runtime event projection", () => {
     expect(finished.agents[0]).toMatchObject({ state: "completed", preview: "已检查全部变更", previewKind: "assistant" });
   });
 
+  it("keeps the main transcript array identity across subagent text deltas", () => {
+    const blocks = [{ id: "main-1", kind: "assistant" as const, content: "主会话" }];
+    const base = { ...state(), selectedAgentId: "agent-1", blocks };
+    const projected = reduceEvents(base, [
+      { sequence: 1, kind: "text_delta", runId: "child-1", agentId: "agent-1", text: "侧栏增量" },
+    ]);
+    expect(projected.blocks).toBe(blocks);
+    expect(projected.agentBlocks).not.toBe(base.agentBlocks);
+    expect(projected.agentBlocks.at(-1)).toMatchObject({ kind: "assistant", content: "侧栏增量" });
+  });
+
   it("ignores other agents' live frames while a different side chat is open", () => {
     const projected = reduceEvents({ ...state(), selectedAgentId: "agent-a" }, [
       { sequence: 1, kind: "thinking_delta", runId: "c", agentId: "agent-b", text: "不该出现" },
@@ -1148,6 +1159,40 @@ describe("runtime event projection", () => {
     expect(projected.contextUsage).toEqual({
       inputTokens: 100, outputTokens: 9, contextLimit: 0, reported: true,
       cacheInputTokens: 160, cachedInputTokens: 70, cacheWriteTokens: 10,
+      cacheReported: true, cacheWriteReported: true,
+    });
+  });
+
+  it("keeps the main context kernel free of subagent occupancy and cache", () => {
+    const mainProfile = {
+      source: "request", estimated: true,
+      contributions: [{ category: "core", name: "azem.core_instructions", tokens: 1_200 }],
+    };
+    const projected = reduceEvents(state(), [
+      {
+        sequence: 1, kind: "context_profile", sessionId: "s1", state: "estimated",
+        contextProfile: mainProfile,
+      },
+      {
+        sequence: 2, kind: "context_usage", sessionId: "s1", state: "reported",
+        data: { requestKind: "main", inputTokens: "100", outputTokens: "9", cachedInputTokens: "40", cacheWriteTokens: "6", cacheStatus: "reported", cacheWriteStatus: "reported" },
+      },
+      {
+        sequence: 3, kind: "context_profile", sessionId: "s1", agentId: "child-1", state: "estimated",
+        contextProfile: {
+          source: "request", estimated: true,
+          contributions: [{ category: "conversation", name: "message:user:1", tokens: 88_000 }],
+        },
+      },
+      {
+        sequence: 4, kind: "context_usage", sessionId: "s1", state: "reported",
+        data: { requestKind: "subagent", aggregateOnly: "true", inputTokens: "80", outputTokens: "12", cachedInputTokens: "70", cacheWriteTokens: "8", cacheStatus: "reported", cacheWriteStatus: "reported" },
+      },
+    ]);
+    expect(projected.contextProfile).toEqual(mainProfile);
+    expect(projected.contextUsage).toEqual({
+      inputTokens: 100, outputTokens: 9, contextLimit: 0, reported: true,
+      cacheInputTokens: 100, cachedInputTokens: 40, cacheWriteTokens: 6,
       cacheReported: true, cacheWriteReported: true,
     });
   });

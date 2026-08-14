@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- Desktop Inspector: the context kernel occupancy and cache hit rate now
+  count only the main agent. Subagent usage is stored separately and no
+  longer replaces the main profile or cache totals.
+
+- Subagents: review or verification that gates later work must stay
+  foreground, or the parent must consume it with `subagent.get_output` before
+  ending the turn. If the parent still tries to finish while its background
+  children are running, the host injects one retry and does not cancel those
+  children. Changing `internal/app/prompts/main.md` rewrites the static
+  instruction prefix, so provider prefix-cache hits reset once and then stay
+  stable for later turns.
+
+- Subagents: background completion auto-wake now batches every undelivered
+  terminal child in the session into one turn. The wake message stays in the
+  model context as a user block, but the desktop renders it as a system
+  notice instead of a user bubble.
+
+- Semantic compaction: the host now accepts a SemanticStateV1 object that is
+  wrapped in one whole-response JSON fence, matching automatic-review
+  validation. Prose around a fence, nested fences, and other fence languages
+  still fail closed.
+
+- Skills: a later turn in the same session replays completed
+  `hydaelyn_activate_skill` records so previously loaded skills stay active.
+  Disabled or deleted skills are not replayed. Reading a resource that was
+  never activated still fails closed.
+
+- Subagent drawer: streaming no longer recopies the main transcript, folded
+  process trails stay unmounted until expanded, and the side chat transcript
+  no longer re-renders with every header preview update.
+
 - Desktop settings: **用量 / Usage** is a read-only token ledger under
   Preferences. It aggregates completed `provider_requests` for the current
   project or all projects (366-day window, bounded model/skill lists). Cache

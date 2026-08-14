@@ -71,6 +71,7 @@ export function reduceSessionEvent(next: RuntimeData, event: RuntimeEvent): void
       }
       break;
     case "context_profile":
+      if (event.agentId) break;
       next.contextProfile = event.contextProfile ?? null;
       break;
     case "context_usage":
