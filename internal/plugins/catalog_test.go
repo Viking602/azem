@@ -71,7 +71,7 @@ func assertPluginEntry(t *testing.T, result Integration) {
 	if entry.HookCount != 1 || entry.HooksTrusted || !entry.HasApp {
 		t.Fatalf("extension capability counts = %#v", entry)
 	}
-	if len(result.SkillDirs) != 1 || len(result.HookSources) != 0 {
+	if len(result.SkillDirs) != 1 || len(result.HookSources) != 1 {
 		t.Fatalf("integration = %#v", result)
 	}
 }
@@ -164,6 +164,26 @@ func TestDiscoverRejectsManifestPathOutsidePlugin(t *testing.T) {
 	result := Discover(context.Background(), Options{HomeDir: home, DataDir: data})
 	if len(result.Diagnostics) == 0 || len(result.SkillDirs) != 0 {
 		t.Fatalf("expected rejected path, got %#v", result)
+	}
+}
+
+func TestDiscoverImportsFromMarketplaceCheckoutWhenCodexListFails(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	sourceRoot := filepath.Join(home, ".codex", ".tmp", "marketplaces", "kami", "plugins", "kami")
+	mustWrite(t, filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), `{"name":"kami","version":"1.12.0","description":"Typeset documents","skills":"./skills/"}`)
+	mustWrite(t, filepath.Join(sourceRoot, "skills", "kami", "SKILL.md"), "---\nname: kami\ndescription: Typeset documents\n---\n")
+	result := Discover(context.Background(), Options{
+		HomeDir: home, DataDir: data, ImportCodex: true,
+		CodexImports: []string{"kami@kami"},
+		ListPlugins:  func(context.Context) ([]byte, error) { return nil, os.ErrNotExist },
+	})
+	copyRoot := filepath.Join(data, "plugin-packages", "codex", "kami", "kami")
+	if _, err := os.Stat(filepath.Join(copyRoot, "skills", "kami", "SKILL.md")); err != nil {
+		t.Fatalf("marketplace fallback copy: %v diagnostics=%#v", err, result.Diagnostics)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].Origin != "codex" || result.Entries[0].ID != "kami@kami" {
+		t.Fatalf("imported catalog = %#v", result.Entries)
 	}
 }
 

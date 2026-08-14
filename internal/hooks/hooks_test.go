@@ -77,6 +77,28 @@ func TestDiscoveryRegistersEveryClaudeEventAndAzemExtension(t *testing.T) {
 	}
 }
 
+func TestDisabledCommandIsNotDispatched(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell command")
+	}
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[{"hooks":[{"name":"notify","type":"command","command":"printf ran"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := Command{Event: SessionStart, Name: "notify", Source: path}
+	registry := Discover(Options{Sources: []Source{{Path: path, Trusted: true}}, Disabled: []string{CommandIdentity(command)}})
+	if len(registry.Commands(SessionStart)) != 1 {
+		t.Fatalf("disabled hooks must remain visible in the catalog: %#v", registry.Commands(SessionStart))
+	}
+	if !registry.IsDisabled(registry.Commands(SessionStart)[0]) {
+		t.Fatal("disabled hook was not marked")
+	}
+	result := Dispatcher{Registry: registry, Runner: Runner{Workspace: t.TempDir()}}.Dispatch(context.Background(), Envelope{HookEventName: SessionStart})
+	if len(result.Runs) != 0 {
+		t.Fatalf("disabled hook executed: %#v", result.Runs)
+	}
+}
+
 func TestPluginSourceEnvironmentReachesHookProcess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell command")

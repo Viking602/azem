@@ -69,6 +69,13 @@ type Diagnostic struct {
 	Message string
 }
 
+// CommandIdentity is the durable per-hook key stored in hooks.disabled.
+// The four fields are joined with a unit separator so Windows paths and
+// matcher alternation cannot collide with the encoding.
+func CommandIdentity(command Command) string {
+	return strings.Join([]string{string(command.Event), command.Name, filepath.Clean(command.Source), command.Matcher}, "\x1f")
+}
+
 type Command struct {
 	Event         Event
 	Name          string

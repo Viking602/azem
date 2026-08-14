@@ -55,7 +55,7 @@ export default function SkillCatalogManager({
       <div className="skill-filters" role="group" aria-label={t("filterSkills")}>
         {(["all", "enabled", "disabled"] as const).map((value) => <button type="button" key={value} className={filter === value ? "active" : ""} aria-pressed={filter === value} onClick={() => setFilter(value)}>{value === "all" ? t("skillFilterAll") : value === "enabled" ? t("skillFilterEnabled") : t("skillFilterDisabled")}<span>{value === "all" ? skills.length : value === "enabled" ? enabledCount : disabledCount}</span></button>)}
       </div>
-      <button type="button" className="skill-reload" onClick={() => void onReload()} aria-label={t("reloadSkills")} title={t("reloadSkills")}><RefreshCw size={14} /></button>
+      <button type="button" className="skill-reload" onClick={() => void onReload()} aria-label={t("reloadSkills")}><RefreshCw size={14} /></button>
     </div>
     {skills.length === 0 ? <div className="skill-manager-empty"><PackageOpen size={22} /><strong>{t("noSkills")}</strong><small>{t("noSkillsHint")}</small></div> : visibleSkills.length === 0 ? <div className="skill-manager-empty compact"><Search size={20} /><strong>{t("noMatchingSkills")}</strong></div> : <div className="skill-manager-list">
       {visibleSkills.map((skill) => {

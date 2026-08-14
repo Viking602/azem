@@ -128,7 +128,7 @@ function PendingFileEditRow({ block, language, nested = false }: { block: Block;
         <ShieldCheck size={13} />
       </span>
       <span className="work-entry-label">{t("toolEditFile")}</span>
-      {paths.length ? <span className="pending-file-edit-path" title={paths.join("\n")}>{paths.map((path) => path.split("/").pop()).join(" · ")}</span> : null}
+      {paths.length ? <span className="pending-file-edit-path">{paths.join(" · ")}</span> : null}
       <span className="tool-status">{toolStatusLabel(status, language)}</span>
     </div>
   </article>;

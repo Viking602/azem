@@ -87,7 +87,7 @@ export default function AgentSideChat() {
         <div className="agent-side-chat-heading">
           {agent ? <SubagentGlyph agent={agent} size={34} /> : <Bot size={24} aria-hidden="true" />}
           <div className="agent-side-chat-title">
-            <h2 id="subagent-detail-title" ref={titleRef} tabIndex={-1} title={role}>{role}</h2>
+            <h2 id="subagent-detail-title" ref={titleRef} tabIndex={-1}>{role}</h2>
             <small>
               <em data-state={agent?.state || "idle"}>{subagentStatusLabel(agent?.state, language)}</em>
               {(running || liveElapsedMs > 0) ? <time>{formatDuration(liveElapsedMs)}</time> : null}
@@ -96,11 +96,11 @@ export default function AgentSideChat() {
         </div>
         <div className="agent-side-chat-actions">
           {cancellable && (
-            <button type="button" className="icon-button" title={t("toolStopSubagent")} aria-label={t("toolStopSubagent")} onClick={() => void cancel()}>
+            <button type="button" className="icon-button" aria-label={t("toolStopSubagent")} onClick={() => void cancel()}>
               <Square size={13} />
             </button>
           )}
-          <button type="button" className="icon-button" title={t("closeSideChat")} aria-label={t("closeSideChat")} onClick={close}>
+          <button type="button" className="icon-button" aria-label={t("closeSideChat")} onClick={close}>
             <X size={15} />
           </button>
         </div>
@@ -123,7 +123,6 @@ export default function AgentSideChat() {
                 data-agent-tab={item.id}
                 onClick={() => switchAgent(item.id)}
                 onKeyDown={(event) => navigateTabs(event, item.id)}
-                title={itemName}
                 aria-label={`${itemName}，${subagentStatusLabel(item.state, language)}`}
               >
                 <SubagentGlyph agent={item} size={24} />

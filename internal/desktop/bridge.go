@@ -137,6 +137,7 @@ type Event struct {
 	Background        any                            `json:"background,omitempty"`
 	BackgroundLogs    any                            `json:"backgroundLogs,omitempty"`
 	GitBranches       []azemapp.GitBranchEntry       `json:"gitBranches,omitempty"`
+	UsageReport       *session.UsageReport           `json:"usageReport,omitempty"`
 	WorkspaceDirty    bool                           `json:"workspaceDirty,omitempty"`
 	At                time.Time                      `json:"at"`
 }
@@ -214,6 +215,28 @@ func (b *Bridge) SkillCatalog() (SkillCatalogSnapshot, error) {
 		return SkillCatalogSnapshot{}, err
 	}
 	return SkillCatalogSnapshot{Entries: entries, Diagnostics: diagnostics}, nil
+}
+
+func (b *Bridge) HookCatalog() (*azemapp.HookCatalogSnapshot, error) {
+	if b.runtime == nil {
+		return nil, fmt.Errorf("runtime is unavailable")
+	}
+	catalog := b.runtime.HookCatalogSnapshot()
+	if catalog == nil {
+		return &azemapp.HookCatalogSnapshot{}, nil
+	}
+	return catalog, nil
+}
+
+func (b *Bridge) UsageReport(scope string) (session.UsageReport, error) {
+	if b.runtime == nil {
+		return session.UsageReport{}, fmt.Errorf("runtime is unavailable")
+	}
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return b.runtime.UsageReport(ctx, scope)
 }
 
 func currentGitBranch(ctx context.Context, workspace string) string {
@@ -424,6 +447,7 @@ func (b *Bridge) prime() {
 		{Kind: azemapp.ActionListAgentTypes, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListSkills, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListPlugins, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListHooks, SessionID: b.sessionID},
 	}
 	for _, action := range actions {
 		if err := b.runtime.ExecuteAction(b.ctx, action); err != nil && !errors.Is(err, context.Canceled) {
@@ -464,7 +488,7 @@ func eventDTO(event azemapp.Event) Event {
 		PluginDiagnostics: event.PluginDiagnostics, HookCatalog: event.HookCatalog, ContextProfile: event.ContextProfile,
 		Todo: event.Todo, Memories: event.Memories, Recap: event.Recap,
 		ModelRoutes: event.ModelRoutes, ModelProviders: event.ModelProviders, Background: event.Background,
-		BackgroundLogs: event.BackgroundLogs, GitBranches: event.GitBranches,
+		BackgroundLogs: event.BackgroundLogs, GitBranches: event.GitBranches, UsageReport: event.UsageReport,
 		WorkspaceDirty: event.WorkspaceDirty, At: event.At,
 	}
 }
@@ -472,14 +496,14 @@ func eventDTO(event azemapp.Event) Event {
 func allowedAction(kind azemapp.ActionKind) bool {
 	switch kind {
 	case azemapp.ActionLogin, azemapp.ActionLogout,
-		azemapp.ActionNewSession, azemapp.ActionListSessions, azemapp.ActionResumeSession, azemapp.ActionRefreshSession,
+		azemapp.ActionNewSession, azemapp.ActionListSessions, azemapp.ActionListUsage, azemapp.ActionResumeSession, azemapp.ActionRefreshSession,
 		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionArchiveInactiveSessions, azemapp.ActionMarkSessionUnread,
 		azemapp.ActionCompact, azemapp.ActionResolveApproval, azemapp.ActionResolveUserInput, azemapp.ActionResolvePlan, azemapp.ActionSetApprovalMode,
 		azemapp.ActionSetLanguage, azemapp.ActionSetQueueMode, azemapp.ActionReconcileAttempt,
 		azemapp.ActionInspectAgent, azemapp.ActionListAgentTypes, azemapp.ActionListPersonas,
 		azemapp.ActionCancelAgent, azemapp.ActionRefreshMCP, azemapp.ActionReconnectMCP,
 		azemapp.ActionSetMCPEnabled, azemapp.ActionUpsertMCPServer, azemapp.ActionDeleteMCPServer,
-		azemapp.ActionListSkills, azemapp.ActionListPlugins, azemapp.ActionSetPluginImported, azemapp.ActionListHooks, azemapp.ActionSetPluginHooksTrusted, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
+		azemapp.ActionListSkills, azemapp.ActionListPlugins, azemapp.ActionSetPluginImported, azemapp.ActionListHooks, azemapp.ActionSetPluginHooksTrusted, azemapp.ActionSetHookEnabled, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
 		azemapp.ActionListMemories, azemapp.ActionRemember, azemapp.ActionForgetMemory,
 		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled,
 		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,

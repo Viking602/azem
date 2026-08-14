@@ -188,11 +188,10 @@
 }
 .pending-file-edit-path {
   min-width: 0;
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--faint);
   font-size: var(--text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 .file-change-entry.pending-file-edit .tool-status { margin-left: auto; }
 
@@ -218,13 +217,12 @@
 }
 .code-diff > header strong {
   min-width: 0;
-  overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--muted);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: var(--text-sm);
   font-weight: 520;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 .code-diff .diff-count { font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .code-diff > header button {
@@ -312,7 +310,7 @@
   gap: 12px;
   padding: 6px 16px;
 }
-.edited-files-summary li > span:first-child { min-width: 0; flex: 1; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.edited-files-summary li > span:first-child { min-width: 0; flex: 1; overflow-wrap: anywhere; color: var(--muted); white-space: normal; }
 .edited-files-summary li > span:last-child { display: flex; gap: 6px; flex: 0 0 auto; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .edited-files-toggle {
   width: 100%;

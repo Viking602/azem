@@ -2073,6 +2073,148 @@ func assertDetachedSubagentResult(t *testing.T, result tool.Result) {
 	}
 }
 
+func TestForegroundWaitUntilCompleteKeepsParentOnZeroWindow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runtime, provider, coding, store := newGatedForegroundHarness(t, ctx, 0)
+	defer runtime.Shutdown(ctx)
+	defer coding.Close(ctx)
+	returned := startGatedForegroundSpawn(t, ctx, runtime, provider, coding, `{"prompt":"long inspection","description":"inspect for a long time","subagent_type":"explore"}`)
+	select {
+	case result := <-returned:
+		t.Fatalf("zero wait window released the parent before completion: %#v", result)
+	case <-time.After(80 * time.Millisecond):
+	}
+	provider.release <- struct{}{}
+	var result tool.Result
+	select {
+	case result = <-returned:
+	case <-ctx.Done():
+		t.Fatal("zero wait window did not return after the child completed")
+	}
+	assertCompletedForegroundResult(t, result)
+	runs, err := store.List(ctx, "session")
+	if err != nil || len(runs) != 1 || runs[0].Background || runs[0].State != agentservice.SubagentCompleted {
+		t.Fatalf("zero-window completed run = %#v, err=%v", runs, err)
+	}
+}
+
+func TestZeroForegroundWaitDetachesOnlyWhenParentContextEnds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runtime, provider, coding, store := newGatedForegroundHarness(t, ctx, 0)
+	defer runtime.Shutdown(ctx)
+	defer coding.Close(ctx)
+	callCtx, stopWait := context.WithCancel(ctx)
+	returned := startGatedForegroundSpawn(t, callCtx, runtime, provider, coding, `{"prompt":"long inspection","description":"inspect for a long time","subagent_type":"explore"}`)
+	stopWait()
+	var result tool.Result
+	select {
+	case result = <-returned:
+	case <-ctx.Done():
+		t.Fatal("parent cancellation did not release the zero-window wait")
+	}
+	assertDetachedSubagentResult(t, result)
+	runs, err := store.List(ctx, "session")
+	if err != nil || len(runs) != 1 || !runs[0].Background || runs[0].State != agentservice.SubagentRunning {
+		t.Fatalf("parent-cancelled zero-window run = %#v, err=%v", runs, err)
+	}
+	assertUnboundedSubagentTasks(t, ctx, coding, runs[0].ChildRunID)
+	provider.release <- struct{}{}
+	snapshots := runtime.Query(ctx, "session", []string{runs[0].ID}, 3*time.Second)
+	if len(snapshots) != 1 || !snapshots[0].Found || snapshots[0].Run.State != agentservice.SubagentCompleted {
+		t.Fatalf("child did not complete after parent wait ended = %#v", snapshots)
+	}
+}
+
+func TestForegroundWaitWindowKeepsSharedWorkspaceWriterUntilComplete(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runtime, provider, coding, store := newGatedForegroundHarness(t, ctx, 20*time.Millisecond)
+	defer runtime.Shutdown(ctx)
+	defer coding.Close(ctx)
+	returned := startGatedForegroundSpawn(t, ctx, runtime, provider, coding, `{"prompt":"shared write","description":"edit the workspace","subagent_type":"worker"}`)
+	select {
+	case result := <-returned:
+		t.Fatalf("shared-workspace writer was detached after the wait window: %#v", result)
+	case <-time.After(80 * time.Millisecond):
+	}
+	provider.release <- struct{}{}
+	var result tool.Result
+	select {
+	case result = <-returned:
+	case <-ctx.Done():
+		t.Fatal("shared-workspace writer did not return after completion")
+	}
+	assertCompletedForegroundResult(t, result)
+	runs, err := store.List(ctx, "session")
+	if err != nil || len(runs) != 1 || runs[0].Background || runs[0].State != agentservice.SubagentCompleted {
+		t.Fatalf("shared-workspace writer run = %#v, err=%v", runs, err)
+	}
+}
+
+func newGatedForegroundHarness(t *testing.T, ctx context.Context, await time.Duration) (*subagentRuntime, *gatedSubagentDriver, *agentservice.Service, agentservice.SubagentRunStore) {
+	t.Helper()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { providerStore.Close(ctx) })
+	coding, err := agentservice.NewService(providerStore, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.AwaitDuration = await
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runtime, newGatedSubagentDriver(), coding, store
+}
+
+func startGatedForegroundSpawn(t *testing.T, ctx context.Context, runtime *subagentRuntime, provider *gatedSubagentDriver, coding *agentservice.Service, arguments string) <-chan tool.Result {
+	t.Helper()
+	parent := subagentParentRuntime{
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(),
+	}
+	driver := &subagentSpawnDriver{runtime: runtime, parent: parent}
+	call := tool.Call{ID: "spawn", Name: subagentSpawnTool, Arguments: json.RawMessage(arguments)}
+	returned := make(chan tool.Result, 1)
+	go func() {
+		result, executeErr := driver.Execute(ctx, call, nil)
+		if executeErr != nil {
+			t.Errorf("spawn foreground subagent: %v", executeErr)
+		}
+		returned <- result
+	}()
+	select {
+	case <-provider.started:
+	case <-ctx.Done():
+		t.Fatal("foreground subagent did not start")
+	}
+	return returned
+}
+
+func assertCompletedForegroundResult(t *testing.T, result tool.Result) {
+	t.Helper()
+	if result.IsError {
+		t.Fatalf("foreground wait result = %#v", result)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(result.Content), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["status"] != "completed" || payload["continuing_in_background"] == true || payload["background"] == true {
+		t.Fatalf("completed foreground payload = %#v", payload)
+	}
+}
+
 func assertUnboundedSubagentTasks(t *testing.T, ctx context.Context, coding *agentservice.Service, runID string) {
 	t.Helper()
 	tasks, err := coding.Runner().ListTasks(ctx, runID)

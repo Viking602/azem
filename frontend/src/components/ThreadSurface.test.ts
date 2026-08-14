@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 // @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
 import { readFileSync, readdirSync } from "node:fs";
 import type { SkillEntry, Snapshot } from "../types";
-import { branchMenuLayout, effectiveComposerRoute, filterModelControlOptions, modelControlWidth, namedClipboardImage, nextModelControlView, parseSkillPrompt, pastedImages, sessionStageMotion, shouldReadNativeClipboard, skillTitle, slashSuggestions, supportsFastMode, threadHeaderStage } from "./ThreadSurface";
+import { branchMenuLayout, composerOverlayGap, effectiveComposerRoute, filterModelControlOptions, modelControlWidth, namedClipboardImage, nextModelControlView, parseSkillPrompt, pastedImages, sessionStageMotion, shouldReadNativeClipboard, skillTitle, slashSuggestions, supportsFastMode, threadHeaderStage } from "./ThreadSurface";
 import { visibleCommentaryTitle } from "./Timeline";
 
 // styles.css is an import hub; concatenate the imported files in cascade order.
@@ -78,9 +78,19 @@ describe("composer slash commands", () => {
 		expect(threadSurface).toContain('behavior: running ? "instant" : "smooth"');
 	});
 
-	it("keeps the active composer in document flow instead of reserving a viewport-sized blank", () => {
-		expect(styles).toMatch(/\.composer-dock\s*\{[^}]*position:\s*relative;[^}]*flex:\s*0 0 auto;[^}]*justify-content:\s*center;/s);
+	it("overlays a transparent composer dock so the timeline stays visible and scrollable", () => {
+		expect(composerOverlayGap(0)).toBe(24);
+		expect(composerOverlayGap(156)).toBe(156);
+		expect(styles).toMatch(/\.composer-dock\s*\{[^}]*position:\s*absolute;[^}]*background:\s*transparent;[^}]*pointer-events:\s*none;/s);
+		expect(styles).toMatch(/\.composer-dock \.composer-stack,\s*\.composer-dock \.jump-latest\s*\{[^}]*pointer-events:\s*auto;/s);
+		expect(styles).not.toMatch(/\.composer-dock \.composer-card::before/);
+		expect(styles).not.toMatch(/\.composer-dock \.composer-stack::before/);
+		expect(styles).not.toMatch(/\.composer-dock \.composer-card::after/);
+		expect(styles).not.toMatch(/\.composer-dock \.composer-stack::after/);
+		expect(styles).not.toMatch(/\.composer-dock\s*\{[^}]*background:\s*var\(--paper\)/s);
 		expect(styles).not.toMatch(/\.thread-surface:has\(\.queued-prompts\) \.transcript\s*\{[^}]*padding-bottom:/s);
+		expect(threadSurface).toContain("composerOverlayGap(node.offsetHeight)");
+		expect(threadSurface).toContain("new ResizeObserver(sync)");
 		expect(threadSurface).toContain("[blocks, following, queuedPrompts.length, running]");
 	});
 
@@ -228,6 +238,14 @@ describe("composer slash commands", () => {
     expect(items.some((item) => item.value === "/fast")).toBe(true);
     expect(items.some((item) => item.value === "/skill:animation-systems")).toBe(true);
     expect(items.some((item) => item.value === "/skill:disabled-skill")).toBe(false);
+    expect(items.some((item) => item.action === "skills" || item.value === "/skills" || item.label === "技能")).toBe(false);
+    expect(items.some((item) => item.action === "inspector" || item.value === "/inspector" || item.label === "环境信息")).toBe(false);
+  });
+
+  it("does not surface the skills catalog or inspector commands when those queries are typed", () => {
+    expect(slashSuggestions("/skills", skills, "zh-CN").some((item) => item.action === "skills" || item.label === "技能")).toBe(false);
+    expect(slashSuggestions("/inspector", skills, "zh-CN").some((item) => item.action === "inspector" || item.label === "环境信息")).toBe(false);
+    expect(slashSuggestions("/环境", skills, "zh-CN").some((item) => item.action === "inspector" || item.label === "环境信息")).toBe(false);
   });
 
   it("matches skills by name or description and shows source badges", () => {

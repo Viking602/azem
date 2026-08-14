@@ -26,6 +26,13 @@ var extensionActionHandlers = map[ActionKind]actionHandler{
 		}
 		return s.setPluginHooksTrusted(ctx, trusted)
 	},
+	ActionSetHookEnabled: func(s *Service, ctx context.Context, action Action) error {
+		enabled, err := strconv.ParseBool(strings.TrimSpace(action.Decision))
+		if err != nil {
+			return fmt.Errorf("hook enabled state must be true or false")
+		}
+		return s.setHookEnabled(ctx, action.Target, enabled)
+	},
 	ActionSetPluginImported: func(s *Service, ctx context.Context, action Action) error {
 		imported, err := strconv.ParseBool(strings.TrimSpace(action.Decision))
 		if err != nil {

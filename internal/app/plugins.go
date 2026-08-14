@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ func (s *Service) AttachPluginRuntime(options plugins.Options, integration plugi
 
 func (s *Service) rememberPluginRuntime(integration plugins.Integration) {
 	s.pluginSkillDirs = append([]string(nil), integration.SkillDirs...)
+	s.pluginHookSources = append([]plugins.HookSource(nil), integration.HookSources...)
 	s.pluginMCPNames = s.pluginMCPNames[:0]
 	for name := range integration.MCPServers {
 		s.pluginMCPNames = append(s.pluginMCPNames, name)
@@ -46,10 +48,16 @@ func (s *Service) rememberPluginRuntime(integration plugins.Integration) {
 
 func (s *Service) setCodexPluginImported(ctx context.Context, pluginID string, imported bool) error {
 	pluginID = strings.TrimSpace(pluginID)
-	index := slices.IndexFunc(s.pluginCatalog, func(entry PluginCatalogEntry) bool { return entry.ID == pluginID })
+	if pluginID == "" {
+		return fmt.Errorf("plugin id is required")
+	}
+	index := slices.IndexFunc(s.pluginCatalog, func(entry PluginCatalogEntry) bool {
+		return pluginCatalogIdentity(entry) == pluginID || entry.ID == pluginID
+	})
 	if index < 0 {
 		return fmt.Errorf("plugin %q not found", pluginID)
 	}
+	pluginID = pluginCatalogIdentity(s.pluginCatalog[index])
 	entry := s.pluginCatalog[index]
 	if entry.Origin != "codex" && entry.Origin != "codex_available" {
 		return fmt.Errorf("plugin %q is not a Codex import", pluginID)
@@ -98,6 +106,7 @@ func (s *Service) reloadPluginRuntime(ctx context.Context) error {
 	options.CodexImports = append([]string(nil), s.cfg.Plugins.CodexImports...)
 	options.ImportCodex = s.cfg.Plugins.ImportCodex || len(options.CodexImports) > 0
 	options.TrustHooks = s.cfg.Plugins.TrustHooks
+	options.FallbackCatalog = s.codexListingJSON()
 	integration := plugins.Discover(ctx, options)
 	if err := s.applyPluginSkills(integration.SkillDirs); err != nil {
 		return err
@@ -211,6 +220,7 @@ func (s *Service) applyPluginHooks(sources []plugins.HookSource) {
 		}
 	}
 	s.hookOptions.Sources = kept
+	s.hookOptions.Disabled = append([]string(nil), s.cfg.Hooks.Disabled...)
 	s.hooks.Registry.Replace(hooks.Discover(s.hookOptions))
 }
 
@@ -246,9 +256,58 @@ func mergeSkillDirs(current, previousPlugin, nextPlugin []string) []string {
 	return result
 }
 
+func (s *Service) codexListingJSON() []byte {
+	type item struct {
+		PluginID    string `json:"pluginId"`
+		Name        string `json:"name"`
+		Marketplace string `json:"marketplaceName"`
+		Version     string `json:"version"`
+		Installed   bool   `json:"installed"`
+		Enabled     bool   `json:"enabled"`
+	}
+	installed := make([]item, 0, len(s.pluginCatalog))
+	for _, entry := range s.pluginCatalog {
+		if entry.Origin != "codex" && entry.Origin != "codex_available" {
+			continue
+		}
+		id := pluginCatalogIdentity(entry)
+		if id == "" {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			name = strings.TrimSpace(entry.DisplayName)
+		}
+		installed = append(installed, item{
+			PluginID: id, Name: name, Marketplace: entry.Marketplace, Version: entry.Version,
+			Installed: true, Enabled: true,
+		})
+	}
+	if len(installed) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(map[string]any{"installed": installed})
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func pluginCatalogIdentity(entry PluginCatalogEntry) string {
+	if id := strings.TrimSpace(entry.ID); id != "" {
+		return id
+	}
+	name := strings.TrimSpace(entry.Name)
+	marketplace := strings.TrimSpace(entry.Marketplace)
+	if name != "" && marketplace != "" {
+		return name + "@" + marketplace
+	}
+	return name
+}
+
 func pluginCatalogHasLoaded(entries []PluginCatalogEntry, pluginID string) bool {
 	for _, entry := range entries {
-		if entry.ID == pluginID && entry.Origin == "codex" {
+		if pluginCatalogIdentity(entry) == pluginID && entry.Origin == "codex" {
 			return true
 		}
 	}

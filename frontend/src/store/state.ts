@@ -24,6 +24,7 @@ import type {
   SkillEntry,
   Snapshot,
   TodoList,
+  UsageReport,
   View,
 } from "../types";
 import type { ContextUsage, ModelOption, UIFont } from "./normalize";
@@ -44,6 +45,7 @@ export interface RuntimeData {
   mcpServers: MCPServerEntry[];
   plugins: PluginEntry[];
   hookCatalog: HookCatalog;
+  usageReport: UsageReport | null;
   branches: GitBranch[];
   modelRoutes: ModelRoute[];
 	modelProviders: ModelProvider[];

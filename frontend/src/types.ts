@@ -190,7 +190,68 @@ export interface Block {
   attachments?: Attachment[];
 }
 
-export type SettingsSection = "catalog" | "models" | "subagents" | "governance" | "appearance" | "extensions" | "archive";
+export type SettingsSection = "catalog" | "models" | "subagents" | "governance" | "appearance" | "extensions" | "archive" | "usage";
+
+export type UsageScope = "project" | "all";
+
+export interface UsageDay {
+  date: string;
+  tokens: number;
+  requests: number;
+}
+
+export interface UsageKindRow {
+  kind: string;
+  tokens: number;
+  requests: number;
+}
+
+export interface UsageModelRow {
+  provider: string;
+  model: string;
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cacheReported: boolean;
+  cacheWriteReported: boolean;
+  requests: number;
+}
+
+export interface UsageSkillRow {
+  name: string;
+  activations: number;
+}
+
+export interface UsageReport {
+  scope: UsageScope | string;
+  workspace?: string;
+  from: string;
+  to: string;
+  empty: boolean;
+  requests: number;
+  sessions: number;
+  runs: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  reportedInputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cacheReported: boolean;
+  cacheWriteReported: boolean;
+  peakDay?: string;
+  peakDayTokens: number;
+  currentStreak: number;
+  longestStreak: number;
+  longestRunMs?: number;
+  days: UsageDay[];
+  kinds: UsageKindRow[];
+  models: UsageModelRow[];
+  skills: UsageSkillRow[];
+}
 
 export interface SettingsSearchTarget {
   section: SettingsSection;
@@ -334,12 +395,14 @@ export interface HookSourceEntry {
 }
 
 export interface HookCommandEntry {
+  id: string;
   name: string;
   event: string;
   matcher: string;
   command: string;
   source: string;
   origin: string;
+  enabled: boolean;
 }
 
 export interface HookDiagnostic {
@@ -598,6 +661,7 @@ export interface ModelProvider {
 	accountLabel?: string;
 	accountPlan?: string;
 	quotaAvailable?: boolean;
+	quotaPeriod?: "weekly" | "monthly" | "credits" | string;
 	quotaUsedPercent?: number;
 	quotaResetsAt?: number;
 	quotaBalance?: string;
@@ -672,6 +736,7 @@ export interface RuntimeEvent {
   skillCatalog?: Array<Record<string, unknown>>;
   pluginCatalog?: Array<Record<string, unknown>>;
   hookCatalog?: Record<string, unknown>;
+  usageReport?: UsageReport;
   contextProfile?: ContextProfile;
   todo?: TodoList;
   recap?: SessionRecap;

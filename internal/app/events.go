@@ -56,6 +56,7 @@ const (
 	EventBackgroundState    EventKind = "background_state"
 	EventBackgroundLogs     EventKind = "background_logs"
 	EventGitBranches        EventKind = "git_branches"
+	EventUsageReport        EventKind = "usage_report"
 )
 
 type ModelRouteEntry struct {
@@ -80,6 +81,7 @@ type ModelProviderEntry struct {
 	AccountLabel         string                    `json:"accountLabel,omitempty"`
 	AccountPlan          string                    `json:"accountPlan,omitempty"`
 	QuotaAvailable       bool                      `json:"quotaAvailable,omitempty"`
+	QuotaPeriod          string                    `json:"quotaPeriod,omitempty"`
 	QuotaUsedPercent     float64                   `json:"quotaUsedPercent,omitempty"`
 	QuotaResetsAt        int64                     `json:"quotaResetsAt,omitempty"`
 	QuotaBalance         string                    `json:"quotaBalance,omitempty"`
@@ -202,12 +204,14 @@ type HookSourceEntry struct {
 }
 
 type HookCommandEntry struct {
+	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Event   string `json:"event,omitempty"`
 	Matcher string `json:"matcher,omitempty"`
 	Command string `json:"command,omitempty"`
 	Source  string `json:"source,omitempty"`
 	Origin  string `json:"origin,omitempty"`
+	Enabled bool   `json:"enabled"`
 }
 
 type HookCatalogSnapshot struct {
@@ -314,6 +318,7 @@ type Event struct {
 	Background        []backgroundservice.Process
 	BackgroundLogs    *backgroundservice.LogSnapshot
 	GitBranches       []GitBranchEntry
+	UsageReport       *session.UsageReport
 	WorkspaceDirty    bool
 	At                time.Time
 }
@@ -405,6 +410,10 @@ func (e Event) Clone() Event {
 	}
 	if e.GitBranches != nil {
 		cloned.GitBranches = append([]GitBranchEntry(nil), e.GitBranches...)
+	}
+	if e.UsageReport != nil {
+		report := e.UsageReport.Clone()
+		cloned.UsageReport = &report
 	}
 	return cloned
 }

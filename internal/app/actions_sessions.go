@@ -34,6 +34,9 @@ var sessionActionHandlers = map[ActionKind]actionHandler{
 	ActionListSessions: func(s *Service, ctx context.Context, action Action) error {
 		return s.emitSessionList(ctx)
 	},
+	ActionListUsage: func(s *Service, ctx context.Context, action Action) error {
+		return s.emitUsageReport(ctx, action.Target, "listed")
+	},
 	ActionRenameSession: func(s *Service, ctx context.Context, action Action) error {
 		if err := s.sessions.Rename(ctx, action.Target, action.Name); err != nil {
 			return err

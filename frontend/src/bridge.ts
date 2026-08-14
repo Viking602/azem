@@ -2,7 +2,7 @@ import { Browser, Call, Dialogs, Events } from "@wailsio/runtime";
 import type {
   ActionRequest, Attachment, PullRequest, PullRequestDashboard, PullRequestDetailResponse,
   PullRequestMonitorState, PullRequestMutationRequest, RuntimeEvent, Snapshot, TurnRequest,
-  SessionSearchResult, SkillEntry, WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
+  SessionSearchResult, SkillEntry, UsageReport, UsageScope, WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
 } from "./types";
 
 const EVENT_NAME = "azem:event";
@@ -27,7 +27,7 @@ export const demoSnapshot: Snapshot = {
   subagentConcurrency: 6,
   subagentMaxDepth: 2,
   shellConcurrency: 4,
-  subagentAwaitSeconds: 30,
+  subagentAwaitSeconds: 0,
   chatgptFastMode: false,
   sequence: 0,
   pullRequestMonitors: [],
@@ -60,6 +60,24 @@ export async function listSkillCatalog(): Promise<SkillCatalogSnapshot> {
     entries: Array.isArray(result?.entries) ? result.entries : [],
     diagnostics: Array.isArray(result?.diagnostics) ? result.diagnostics : [],
   };
+}
+
+export async function listHookCatalog(): Promise<Record<string, unknown>> {
+  if (!isDesktopRuntime()) return { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] };
+  const result = await Call.ByName(`${bridgeName}.HookCatalog`) as Record<string, unknown> | null;
+  return result ?? { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] };
+}
+
+export async function listUsageReport(scope: UsageScope = "project"): Promise<UsageReport> {
+  if (!isDesktopRuntime()) {
+    return {
+      scope, from: "", to: "", empty: true, requests: 0, sessions: 0, runs: 0,
+      totalTokens: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, reportedInputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, cacheReported: false, cacheWriteReported: false,
+      peakDayTokens: 0, currentStreak: 0, longestStreak: 0, days: [], kinds: [], models: [], skills: [],
+    };
+  }
+  return Call.ByName(`${bridgeName}.UsageReport`, scope) as Promise<UsageReport>;
 }
 
 export interface SystemFont {

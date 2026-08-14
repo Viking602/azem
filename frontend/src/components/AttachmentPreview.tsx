@@ -84,7 +84,7 @@ export default function AttachmentPreview({ attachment, sessionId, language, var
       data-sized={frame ? "true" : undefined}
       style={frame ? { "--preview-display-w": `${frame.width}px`, "--preview-display-h": `${frame.height}px` } as React.CSSProperties : undefined}
     >
-      <button type="button" className="attachment-preview-image" aria-label={viewLabel} title={viewLabel} disabled={!source} onClick={() => setOpen(true)}>
+      <button type="button" className="attachment-preview-image" aria-label={viewLabel} disabled={!source} onClick={() => setOpen(true)}>
         {source
           ? <><img src={source} alt={attachment.name} onLoad={(event) => {
             const image = event.currentTarget;
@@ -92,13 +92,13 @@ export default function AttachmentPreview({ attachment, sessionId, language, var
           }} /><span className="attachment-preview-expand" aria-hidden="true"><Maximize2 size={12} /></span></>
           : <span className="attachment-preview-placeholder" aria-hidden="true">{loading ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}</span>}
       </button>
-      <figcaption title={attachment.name}>{attachment.name}</figcaption>
+      <figcaption>{attachment.name}</figcaption>
       {onRemove ? <button type="button" className="attachment-preview-remove" aria-label={`${language === "zh-CN" ? "移除" : "Remove"} ${attachment.name}`} onClick={onRemove}><X size={12} /></button> : null}
     </figure>
     {open && source ? createPortal(
       <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label={viewLabel} onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
         <section>
-          <header><strong>{attachment.name}</strong><button ref={closeButton} type="button" aria-label={closeLabel} title={closeLabel} onClick={() => setOpen(false)}><X size={17} /></button></header>
+          <header><strong>{attachment.name}</strong><button ref={closeButton} type="button" aria-label={closeLabel} onClick={() => setOpen(false)}><X size={17} /></button></header>
           <div className="attachment-lightbox-canvas"><img src={source} alt={attachment.name} /></div>
         </section>
       </div>,

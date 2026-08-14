@@ -1,6 +1,6 @@
 # Configuration
 
-Last verified: 2026-08-11
+Last verified: 2026-08-14
 
 `internal/config.Config` and `internal/config.Default` are authoritative. Azem
 strictly decodes YAML, applies defaults, and validates the complete result
@@ -26,17 +26,21 @@ operating-system user configuration directory; `-config` selects another file.
 The maintained example in [README.md](../README.md#configuration) shows the
 current field names and defaults. Duration values use Go duration syntax.
 
-The desktop Subagents settings surface edits recursive depth, two live capacity
-limits, and one foreground wait window without restarting the application:
+The desktop Subagents settings surface groups capacity and isolation controls,
+shows parallel dispatch as a read-only product invariant, and lists
+main-session display behavior separately. It edits recursive depth, two live
+capacity limits, and one foreground wait window without restarting the
+application:
 `agents.subagents.max_depth`, `agents.subagents.max_concurrency`,
 `workspace.shell.max_concurrency`, and `agents.subagents.await_timeout`.
 Subagent concurrency defaults to 32 and zero means unbounded. Recursive depth
 defaults to 2; zero disables delegation and `-1` removes the recursion cap.
-The await value never limits child runtime.
-When it elapses, read-only or isolated worktree tasks continue in the background
+`await_timeout` defaults to `0s`, which keeps the parent tool waiting until the
+foreground child completes. A positive duration never limits child runtime:
+when it elapses, read-only or isolated worktree tasks continue in the background
 and the parent can inspect them with `subagent.get_output`; a shared-workspace
 writer keeps waiting in the foreground rather than racing the parent or being
-cancelled. Changes pass through validated application actions, update the
+cancelled. `-1` is not a second unlimited sentinel and is rejected. Changes pass through validated application actions, update the
 active runtime, and are persisted with the same node-preserving YAML writer
 used by the other runtime settings. Existing work is allowed to finish.
 
@@ -136,6 +140,37 @@ and MCP still load without that decision. The compatibility matrix and
 manifest rules are documented in
 [plugins.md](plugins.md).
 
+## Hooks
+
+```yaml
+hooks:
+  enabled: true
+  trust_project: false
+  claude_compatibility: false
+  default_timeout: 5s
+  failure_policy: open
+  additional_paths: []
+  disabled: []
+```
+
+User and project hook files load from the existing discovery paths. Plugin
+hook files are always cataloged so Extensions can list them; they enter the
+runtime dispatcher only after `plugins.trust_hooks` is true.
+
+`hooks.disabled` is the durable deny list for individual hook identities, in
+the same shape as `skills.disabled`. Each identity is
+`event`, `name`, cleaned `source` path, and `matcher`, joined by a unit
+separator (`U+001F`). The desktop Extensions Hooks tab exposes every
+discovered command with a per-row switch. Its typed `set_hook_enabled` action
+validates the identity against the current catalog, persists the deny list
+atomically, rediscovers the in-memory registry, and then publishes a fresh
+`hook_catalog` snapshot. A disabled hook remains visible and is skipped at
+dispatch; it does not get a second execution or approval path.
+
+An enabled plugin hook still does not run until plugin hooks are trusted.
+Closing trust unloads plugin sources immediately and leaves `hooks.disabled`
+unchanged.
+
 ## llmux providers and models
 
 `providers.llmux` is keyed by a provider ID from llmux's profile registry.
@@ -210,8 +245,18 @@ OpenAI/ChatGPT and Grok subscription entries reuse the existing OAuth/CLI
 credential service and live subscription catalogs. They do not accept an API
 base URL or API key in Model settings; login, account status, plan, live weekly
 quota, reset time, available credit balance, model availability controls, and
-logout are projected into the same provider directory. Disabled subscription
-IDs persist in `providers.chatgpt.disabled_models` or
+logout are projected into the same provider directory. Grok identity prefers
+the email or handle from the ID token or CLI-proxy `/v1/user` profile; the
+settings page never shows access tokens. Grok quota first loads `/v1/user`
+without `x-userid`, then calls `/v1/billing?format=credits` with that live
+user id. Both GETs use the shared `internal/netproxy` transport and retry
+once after a connection EOF or reset. Billing parsing follows the Grok CLI
+credits JSON: `config.creditUsagePercent`, then
+`onDemandUsed`/`onDemandCap`, then a parseable `currentPeriod` as zero
+usage. The settings card labels that window weekly, monthly, or credits
+from `currentPeriod.type`. Quota failures keep the backend error on the
+settings page. Disabled
+subscription IDs persist in `providers.chatgpt.disabled_models` or
 `providers.grok.disabled_models` and follow the same picker/runtime rules as
 llmux models.
 
@@ -275,3 +320,12 @@ Preferences apply immediately, persist in the WebView's local storage, and do
 not modify `config.yaml`. Interface font size is clamped to 11–20 px; the
 default is the operating-system UI font at 14 px. Code blocks and tool output
 retain their dedicated monospace stack.
+
+## Usage ledger
+
+Settings → Usage is not a configuration surface. It reads completed
+`provider_requests` (and completed `hydaelyn_activate_skill` rows when present)
+for the current project or all projects. The query window is 366 local-calendar
+days, with at most 20 models and 20 skills returned. Cache counters use only
+`cache_reported` / `cache_write_reported` facts; unknown providers stay
+unreported. There is no YAML field and no usage polling.

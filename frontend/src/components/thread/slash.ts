@@ -1,7 +1,7 @@
 import type { ComponentType } from "react";
 import {
-  Bot, Box, Brain, CircleDot, Minimize2, PanelRightOpen, Plug, Plus, RefreshCw, RotateCcw, Settings,
-  ShieldCheck, Sparkles, Zap,
+  Bot, Box, Brain, CircleDot, Minimize2, Plug, Plus, RefreshCw, RotateCcw, Settings,
+  ShieldCheck, Zap,
 } from "lucide-react";
 import { translator } from "../../i18n";
 import type { SkillEntry, Snapshot } from "../../types";
@@ -62,10 +62,6 @@ const slashCommands: Array<{
     zhDetail: "打开 Azem 设置", enDetail: "Open Azem settings", icon: Settings,
   },
   {
-    action: "skills", aliases: ["skills", "extensions", "技能", "扩展"], zh: "技能", en: "Skills",
-    zhDetail: "查看可用技能目录", enDetail: "Browse available skills", icon: Sparkles,
-  },
-  {
     action: "reload-skills", aliases: ["reload", "reload-skills", "重新加载"], zh: "重新加载技能", en: "Reload skills",
     zhDetail: "重新扫描本地技能目录", enDetail: "Rescan local skill directories", icon: RefreshCw,
   },
@@ -102,10 +98,6 @@ const slashCommands: Array<{
     detail: (context, language) => language === "zh-CN"
       ? (context.reasoningLabel || "中")
       : (context.reasoningLabel || "Medium"),
-  },
-  {
-    action: "inspector", aliases: ["inspector", "context", "环境"], zh: "环境信息", en: "Inspector",
-    zhDetail: "打开右侧环境与变更面板", enDetail: "Open the environment and changes panel", icon: PanelRightOpen,
   },
   {
     action: "new", aliases: ["new", "chat", "新聊天", "新建"], zh: "新聊天", en: "New chat",

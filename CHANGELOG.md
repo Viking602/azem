@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+- Desktop settings: **用量 / Usage** is a read-only token ledger under
+  Preferences. It aggregates completed `provider_requests` for the current
+  project or all projects (366-day window, bounded model/skill lists). Cache
+  read/write follow reported inclusive semantics; unknown providers stay
+  unreported. Token activity is a 7×week heatmap with daily / weekly /
+  cumulative views over the same day series; empty days stay empty. The page
+  is loaded on demand through `Bridge.UsageReport`, not primed or polled.
+
+- Desktop settings: the English Preferences nav and page title for 治理与审批
+  is now **Approvals** instead of Governance & approvals. Chinese is unchanged.
+  Searching the previous English names still opens the same section.
+
+- Extensions Hooks: opening Settings or starting the desktop reads the current
+  hook catalog directly, so a populated list no longer appears as 0/0 until
+  refresh. Trusting plugin hooks persists `plugins.trust_hooks`, reloads the
+  runtime, and keeps the switch on. Each command can be enabled or disabled
+  through `hooks.disabled` / `set_hook_enabled`; untrusted plugin hooks still
+  do not run.
+
+- Desktop composer: the bottom input dock is a transparent overlay instead of
+  an opaque full-width paper bar, so the timeline stays visible and scrollable
+  beside the solid input card. There is no fade or mask above the card; the
+  card itself stays opaque.
+
+- Subagent foreground wait: default `agents.subagents.await_timeout` is now
+  `0s`, so the parent keeps waiting while a child is still running in the
+  foreground. Settings adds **直到完成 / Until done**. A positive window still
+  only releases the parent call; safe work continues in the background and is
+  not cancelled.
+
+- Desktop MCP: adding a service opens a centered settings modal instead of a
+  right-hand drawer. Fields, validation, and `upsert_mcp_server` are unchanged;
+  the overlay is hosted on the settings `<dialog>`.
+
+- Extensions Hooks: the trust confirmation uses the same single-line dialog
+  as MCP/plugin delete, stays clickable inside the settings `<dialog>`, and
+  shows a save error instead of closing with no action. Plugin hooks remain
+  off until the user confirms **信任并启用**.
+
+- Extensions plugins: clicking 导入 now copies a visible Codex package even
+  when a later `codex plugin list` fails, keeps the action error on the
+  settings page, and reconstructs `name@marketplace` when the wire omits `id`.
+
+- Grok subscription settings: show the account email or handle instead of
+  `anonymous-<hash>`, fetch live quota with the CLI-proxy `/v1/user` id as
+  `x-userid`, and surface the real quota error instead of only 获取失败.
+  `/v1/user` and `/v1/billing` retry once after a connection EOF or reset so a
+  dropped HTTP/2 stream through the desktop proxy does not fail the quota line;
+  a second failure still shows the real transport error. Grok billing now
+  accepts the live CLI-proxy credits shape used by CodexBar: omitted
+  `creditUsagePercent` falls back to on-demand used/cap or a zero-usage
+  current period, and the settings card labels weekly, monthly, or credits
+  from the reported period.
+
 - Desktop Extensions: add a Hooks tab that lists plugin, user, and project
   hook sources plus loaded commands. Plugin hooks stay off until the user
   explicitly trusts them; the decision persists as `plugins.trust_hooks` and

@@ -36,7 +36,8 @@ kbd { margin-left: auto; color: var(--faint); font-size: var(--text-xs); font-we
 .project-action:hover { background: color-mix(in srgb, var(--paper) 65%, transparent); color: var(--ink); }
 .thread-list { min-height: 0; overflow: visible; padding-left: 21px; }
 .thread-list button { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 30px; padding: 5px 8px; border-radius: 7px; text-align: left; color: var(--muted); font-size: var(--text-sm); overflow: hidden; }
-.thread-list button span { min-width: 0; flex: 1; display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.thread-list button span { min-width: 0; flex: 1; display: block; overflow: hidden; }
+.thread-list button .session-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-list button:hover, .thread-list button.active { background: var(--hover); color: var(--ink); }
 .thread-list .show-more-sessions { color: var(--faint); }
 .thread-list .show-more-sessions:hover { background: transparent; color: var(--muted); }

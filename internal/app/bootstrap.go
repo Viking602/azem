@@ -235,13 +235,19 @@ func (b *bootstrapAssembly) wireService() error {
 
 func (b *bootstrapAssembly) attachHooks() {
 	sources := hookSources(b.cfg.Hooks, b.configDir, b.homeDir, b.paths.Workspace)
-	for _, source := range b.pluginCatalog.HookSources {
-		if dataDir := source.Environment["PLUGIN_DATA"]; dataDir != "" {
-			_ = os.MkdirAll(dataDir, 0o700)
+	if b.cfg.Plugins.TrustHooks {
+		for _, source := range b.pluginCatalog.HookSources {
+			if dataDir := source.Environment["PLUGIN_DATA"]; dataDir != "" {
+				_ = os.MkdirAll(dataDir, 0o700)
+			}
+			sources = append(sources, hooks.Source{Path: source.Path, Trusted: true, Environment: source.Environment})
 		}
-		sources = append(sources, hooks.Source{Path: source.Path, Trusted: true, Environment: source.Environment})
 	}
-	hookOptions := hooks.Options{Sources: sources, DefaultTimeout: b.cfg.Hooks.DefaultTimeoutParsed, FailurePolicy: hooks.FailurePolicy(b.cfg.Hooks.FailurePolicy)}
+	hookOptions := hooks.Options{
+		Sources: sources, DefaultTimeout: b.cfg.Hooks.DefaultTimeoutParsed,
+		FailurePolicy: hooks.FailurePolicy(b.cfg.Hooks.FailurePolicy),
+		Disabled:      append([]string(nil), b.cfg.Hooks.Disabled...),
+	}
 	b.registry = hooks.Discover(hookOptions)
 	b.service.AttachHooks(hooks.Dispatcher{Registry: b.registry, Runner: hooks.Runner{Workspace: b.paths.Workspace}})
 	b.service.hookOptions = hookOptions

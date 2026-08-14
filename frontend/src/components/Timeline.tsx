@@ -305,7 +305,7 @@ function EditedFilesSummary({ summary, language }: { summary: EditedFileSummary;
       <div><strong>{label}</strong><span><b className="plus">+{summary.additions}</b><b className="minus">−{summary.deletions}</b></span></div>
     </header>
     <ul>{visibleFiles.map((file) => <li key={file.path}>
-      <span title={file.path}>{file.path}</span>
+      <span>{file.path}</span>
       <span><b className="plus">+{file.additions}</b><b className="minus">−{file.deletions}</b></span>
     </li>)}</ul>
     {hiddenCount > 0 ? <button

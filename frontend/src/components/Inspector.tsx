@@ -82,9 +82,9 @@ export default function Inspector() {
             openAgent={selectAgent}
           />
         )}
-        {backgroundProcesses.length > 0 && <section className="inspector-section"><header className="inspector-section-header"><h2>{t("backgroundProcesses")}</h2></header>{backgroundProcesses.map((process) => <div className="process-row" key={process.id}><SquareTerminal size={14} /><span><strong>{process.name || t("backgroundTerminal")}</strong><small title={process.command}>{process.command}</small></span><em data-state={process.state}>{process.state === "running" ? t("running") : process.state}</em></div>)}</section>}
+        {backgroundProcesses.length > 0 && <section className="inspector-section"><header className="inspector-section-header"><h2>{t("backgroundProcesses")}</h2></header>{backgroundProcesses.map((process) => <div className="process-row" key={process.id}><SquareTerminal size={14} /><span><strong>{process.name || t("backgroundTerminal")}</strong><small>{process.command}</small></span><em data-state={process.state}>{process.state === "running" ? t("running") : process.state}</em></div>)}</section>}
         {sources.length > 0 && <section className="inspector-section">
-          <header className="inspector-section-header"><h2>{t("sources")}</h2><button className="icon-button" title={t("attach")} aria-label={t("attach")} onClick={() => document.querySelector<HTMLInputElement>(".attach-button input")?.click()}><Plus size={15} /></button></header>
+          <header className="inspector-section-header"><h2>{t("sources")}</h2><button className="icon-button" aria-label={t("attach")} onClick={() => document.querySelector<HTMLInputElement>(".attach-button input")?.click()}><Plus size={15} /></button></header>
           {sources.map((source) => {
             const Icon = source.kind === "image" ? FileImage : source.kind === "search-url" ? Globe : Link2;
             const kindLabel = source.kind === "image" ? t("sourceImage") : source.kind === "search-url" ? t("sourceSearchURL") : t("sourceInputURL");
@@ -92,7 +92,6 @@ export default function Inspector() {
               type="button"
               className="source-row"
               key={source.id}
-              title={source.detail || source.href || source.title}
               aria-label={`${t("openSource")}：${source.title}`}
               onClick={() => {
                 if (source.kind === "image") {
@@ -115,7 +114,7 @@ export default function Inspector() {
         <section className="inspector-section inspector-workspace-section">
           <header className="inspector-section-header"><h2>{t("workspace")}</h2><button type="button" aria-label={t("reviewChanges")} onClick={() => setView("changes")}>{t("reviewChanges")}</button></header>
           <div className="inspector-workspace-facts">
-            <div><span>{t("branch")}</span><strong className="inspector-branch-value" title={currentBranch}>{currentBranch || t("noBranches")}</strong></div>
+            <div><span>{t("branch")}</span><strong className="inspector-branch-value">{currentBranch || t("noBranches")}</strong></div>
             <div><span>{snapshot.language === "zh-CN" ? "文件" : "Files"}</span><strong>{workspaceChangedFiles > 0 ? `+${workspaceChangedFiles}` : "0"}</strong></div>
             {prototypeDemo
               ? <div><span>{snapshot.language === "zh-CN" ? "质量" : "Quality"}</span><strong>6242</strong></div>
@@ -163,7 +162,6 @@ function ContextComposition({ groups, totalTokens, estimated, language }: {
         aria-controls={compositionGroupsId}
         aria-expanded={expanded}
         aria-label={language === "zh-CN" ? `${expanded ? "收起" : "展开"}上下文构成明细` : `${expanded ? "Collapse" : "Expand"} context composition details`}
-        title={language === "zh-CN" ? `点击${expanded ? "收起" : "展开"}上下文构成明细` : `Click to ${expanded ? "collapse" : "expand"} context composition details`}
         onClick={() => setExpanded((current) => !current)}
       >
         {groups.map((group) => <span key={group.category} data-category={group.category} style={{ width: `${group.percentage}%` }} />)}
@@ -178,7 +176,7 @@ function ContextComposition({ groups, totalTokens, estimated, language }: {
           </summary>
           <div className="context-composition-items">
             {group.items.map((item, index) => <div key={`${item.name}-${index}`}>
-              <span title={item.name}>{contextContributionLabel(item.name, language)}</span>
+              <span>{contextContributionLabel(item.name, language)}</span>
               <em>{formatCompactTokens(item.tokens)}</em>
             </div>)}
           </div>
@@ -228,7 +226,7 @@ function ContextDiagnostics({ profile, language }: { profile?: ContextProfile | 
       <span>{t("writerLag")}</span><strong data-state={(profile.writerLag ?? 0) > 0 ? "pending" : "current"}>{profile.writerLag ?? 0}</strong>
       <span>{t("contextSegments")}</span><strong>{segments.length}</strong>
     </div>
-    {profile.manifestHash && <code className="context-manifest-hash" title={profile.manifestHash}>{profile.manifestHash.slice(0, 12)}</code>}
+    {profile.manifestHash && <code className="context-manifest-hash">{profile.manifestHash}</code>}
     {segments.length > 0 && <div className="context-segment-list" aria-label={t("contextSegments")}>
       {segments.map((segment, index) => <div key={`${segment.kind}-${segment.content_hash}-${index}`}><span>{segment.kind.replaceAll("_", " ")}</span><em>~{formatCompactTokens(segment.token_estimate)}</em></div>)}
     </div>}
@@ -263,7 +261,7 @@ function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["lang
         <div className="todo-items">
           {phase.items.map((item) => {
             const Icon = todoStatusIcon(item.status);
-            return <TaskRow state={item.status} key={item.id || item.content} title={todoStatusLabel(item.status, language)}>
+            return <TaskRow state={item.status} key={item.id || item.content} aria-label={todoStatusLabel(item.status, language)}>
               <Icon size={14} aria-hidden="true" />
               <span>{item.content}</span>
             </TaskRow>;
@@ -374,8 +372,8 @@ function SubagentSummary({ agents, language, openAgent }: {
           >
             <SubagentGlyph agent={agent} size={24} />
             <span>
-              <strong title={name}>{name}</strong>
-              <small title={preview}>{preview}</small>
+              <strong>{name}</strong>
+              <small>{preview}</small>
             </span>
             <em>{status}</em>
           </button>;

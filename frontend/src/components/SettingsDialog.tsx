@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Archive, ArrowLeft, Bot, Check, CornerDownRight, Database, Gauge, Hand, Languages, List, Minus, Palette, Plus,
+  Archive, ArrowLeft, BarChart3, Bot, Check, CornerDownRight, Database, Gauge, Hand, List, Minus, Palette, Plus, Puzzle,
   RefreshCw, Search, Settings2, ShieldAlert, ShieldCheck, X,
 } from "lucide-react";
-import { execute, listSkillCatalog, listSystemFonts, type SystemFont } from "../bridge";
+import { execute, listHookCatalog, listSkillCatalog, listSystemFonts, type SystemFont } from "../bridge";
 import { reasoningLabel, sortReasoningLevels, tFormat, translator, type Language } from "../i18n";
-import { routeSearchID } from "../settingsSearch";
+import { routeSearchID, settingsSectionSearchAliases } from "../settingsSearch";
 import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ModelOption } from "../store";
 import type { ActionKind, DeliveryMode, ModelProvider, ModelRoute, ModelRouteConfig, SettingsSection } from "../types";
 import MenuSelect from "./MenuSelect";
@@ -13,6 +13,7 @@ import ModelProviderSettings from "./ModelProviderSettings";
 import ProviderIcon from "./ProviderIcon";
 import ArchiveSettings from "./ArchiveSettings";
 import ExtensionsSettings from "./ExtensionsSettings";
+import UsageSettings from "./UsageSettings";
 
 export default function SettingsDialog() {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -22,11 +23,8 @@ export default function SettingsDialog() {
   const coreModelRoutes = modelRoutes.filter((route) => route.scope !== "subagent" && route.scope !== "main");
 	const subagentModelRoutes = modelRoutes.filter((route) => route.scope === "subagent");
   const modelProviders = useRuntimeStore((state) => state.modelProviders);
-  const catalogModelCount = modelProviders.reduce((total, provider) => total + provider.models.length, 0);
   const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
   const agentCatalog = useRuntimeStore((state) => state.agentCatalog);
-  const plugins = useRuntimeStore((state) => state.plugins);
-  const archivedCount = useRuntimeStore((state) => state.sessions.filter((session) => session.archived).length);
   const theme = useRuntimeStore((state) => state.theme);
   const uiFont = useRuntimeStore((state) => state.uiFont);
   const uiFontSize = useRuntimeStore((state) => state.uiFontSize);
@@ -38,12 +36,13 @@ export default function SettingsDialog() {
   const setLanguage = useRuntimeStore((state) => state.setLanguage);
   const setQueueMode = useRuntimeStore((state) => state.setQueueMode);
   const setError = useRuntimeStore((state) => state.setError);
+  const error = useRuntimeStore((state) => state.error);
   const [activeSection, setActiveSection] = useState<SettingsSection>(() => settingsTarget?.section ?? "catalog");
   const [query, setQuery] = useState("");
   const [concurrency, setConcurrency] = useState(snapshot.subagentConcurrency);
   const [maxDepth, setMaxDepth] = useState(snapshot.subagentMaxDepth ?? 2);
   const [shellConcurrency, setShellConcurrency] = useState(snapshot.shellConcurrency ?? 2);
-  const [awaitSeconds, setAwaitSeconds] = useState(snapshot.subagentAwaitSeconds ?? 600);
+  const [awaitSeconds, setAwaitSeconds] = useState(snapshot.subagentAwaitSeconds ?? 0);
   const [addProviderRequest, setAddProviderRequest] = useState(0);
   const [systemFonts, setSystemFonts] = useState<SystemFont[]>([]);
   const [reducedMotion, setReducedMotion] = useState(() => localStorage.getItem("azem-reduced-motion") === "true");
@@ -59,10 +58,11 @@ export default function SettingsDialog() {
     { id: "subagents", label: t("subagentRuntime"), description: t("settingsSubagentsHint"), icon: Gauge },
     { id: "governance", label: t("settingsGovernance"), description: t("settingsGovernanceHint"), icon: Settings2 },
     { id: "appearance", label: t("appearance"), description: t("settingsAppearanceHint"), icon: Palette },
-    { id: "extensions", label: t("settingsExtensions"), description: t("settingsExtensionsHint"), icon: Languages },
+    { id: "extensions", label: t("settingsExtensions"), description: t("settingsExtensionsHint"), icon: Puzzle },
     { id: "archive", label: t("settingsArchive"), description: t("settingsArchiveHint"), icon: Archive },
+    { id: "usage", label: t("settingsUsage"), description: t("settingsNavUsage"), icon: BarChart3 },
   ];
-  const filteredSections = sections.filter((section) => `${section.label}${section.description}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const filteredSections = sections.filter((section) => `${section.label} ${section.description} ${(settingsSectionSearchAliases[section.id] ?? []).join(" ")}`.toLowerCase().includes(query.trim().toLowerCase()));
   const current = sections.find((section) => section.id === activeSection)!;
   const descriptions = useMemo(() => new Map(agentCatalog.map((agent) => [agent.name, agent.description])), [agentCatalog]);
 	const catalogPage: Partial<Record<SettingsSection, React.ReactNode>> = {
@@ -74,8 +74,9 @@ export default function SettingsDialog() {
     if (!node) return;
     previouslyFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (!node.open) node.showModal();
+    node.focus();
     requestAnimationFrame(() => {
-      node.querySelector<HTMLElement>(".settings-back, button, input, [tabindex]:not([tabindex='-1'])")?.focus();
+      node.focus();
     });
     const onCancel = (event: Event) => {
       event.preventDefault();
@@ -90,6 +91,14 @@ export default function SettingsDialog() {
 			skillCatalog: catalog.entries as unknown as Array<Record<string, unknown>>,
 		}]);
 	});
+	const refreshHookCatalog = listHookCatalog().then((catalog) => {
+		useRuntimeStore.getState().applyEvents([{
+			sequence: 0,
+			kind: "hook_catalog",
+			state: "listed",
+			hookCatalog: catalog,
+		}]);
+	});
     void Promise.all([
       execute({ kind: "list_model_routes", sessionId: snapshot.sessionId }),
       execute({ kind: "list_agent_types", sessionId: snapshot.sessionId }),
@@ -97,7 +106,7 @@ export default function SettingsDialog() {
 	  execute({ kind: "list_model_providers", sessionId: snapshot.sessionId }),
 	  refreshSkillCatalog,
 	  execute({ kind: "list_plugins", sessionId: snapshot.sessionId }),
-	  execute({ kind: "list_hooks", sessionId: snapshot.sessionId }),
+	  refreshHookCatalog,
 	  execute({ kind: "refresh_mcp", sessionId: snapshot.sessionId }),
 	  execute({ kind: "list_sessions", sessionId: snapshot.sessionId }),
     ]).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
@@ -115,7 +124,7 @@ export default function SettingsDialog() {
   useEffect(() => setConcurrency(snapshot.subagentConcurrency), [snapshot.subagentConcurrency]);
   useEffect(() => setMaxDepth(snapshot.subagentMaxDepth ?? 2), [snapshot.subagentMaxDepth]);
   useEffect(() => setShellConcurrency(snapshot.shellConcurrency ?? 2), [snapshot.shellConcurrency]);
-  useEffect(() => setAwaitSeconds(snapshot.subagentAwaitSeconds ?? 600), [snapshot.subagentAwaitSeconds]);
+  useEffect(() => setAwaitSeconds(snapshot.subagentAwaitSeconds ?? 0), [snapshot.subagentAwaitSeconds]);
   useEffect(() => {
     document.documentElement.dataset.reduceMotion = String(reducedMotion);
     localStorage.setItem("azem-reduced-motion", String(reducedMotion));
@@ -175,22 +184,23 @@ export default function SettingsDialog() {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
-  return <dialog ref={dialog} className="settings-dialog" aria-label={t("settings")}>
+  return <dialog ref={dialog} className="settings-dialog" tabIndex={-1} aria-label={t("settings")}>
     <div className="settings-shell">
       <aside className="settings-sidebar">
         <button className="settings-back" onClick={close}><ArrowLeft size={15} />{t("backToApp")}</button>
         <label className="settings-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("searchSettings")} /><kbd>⌘F</kbd></label>
         <div className="settings-nav-group">
           <span>{snapshot.language === "zh-CN" ? "系统" : "System"}</span>
-          {filteredSections.filter((section) => ["catalog", "models", "subagents"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span>{section.id === "catalog" && catalogModelCount > 0 ? <em>{catalogModelCount}</em> : null}</button>)}
+          {filteredSections.filter((section) => ["catalog", "models", "subagents"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span></button>)}
           <span>{snapshot.language === "zh-CN" ? "偏好" : "Preferences"}</span>
-          {filteredSections.filter((section) => ["governance", "appearance", "extensions", "archive"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span>{section.id === "extensions" && plugins.length > 0 ? <em>{plugins.length}</em> : section.id === "archive" && archivedCount > 0 ? <em>{archivedCount}</em> : null}</button>)}
+          {filteredSections.filter((section) => ["governance", "appearance", "extensions", "archive", "usage"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span></button>)}
         </div>
         <footer><small>{snapshot.language === "zh-CN" ? "配置自动保存到本机" : "Saved locally"}</small><small>Azem v0.8.0</small></footer>
       </aside>
       <main className="settings-main" data-section={activeSection}>
         <header className="settings-page-header"><div><h1>{current.label}</h1><p>{current.description}</p></div>{activeSection === "catalog" && <button className="settings-primary" onClick={() => setAddProviderRequest((value) => value + 1)}><Plus size={13} />{snapshot.language === "zh-CN" ? "添加提供方" : "Add provider"}</button>}{activeSection === "models" && <span className="settings-valid"><i />{snapshot.language === "zh-CN" ? "配置有效" : "Valid configuration"}</span>}<button className="icon-button settings-close" onClick={close} aria-label={t("closeSettings")}><X size={17} /></button></header>
         <div className="settings-content">
+          {error && <div className="settings-inline-error" role="alert">{error}</div>}
 		  {catalogPage[activeSection]}
           {activeSection === "models" && <SettingsPane settingID="section:models" title={t("settingsModels")} description={t("settingsModelsHint")} className="model-routes-pane" action={<button className="small-button" onClick={() => void action("list_model_routes")}><RefreshCw size={13} />{t("refresh")}</button>}>
             {modelRoutes.length === 0 ? <div className="settings-card settings-empty"><span className="azem-mark" />{t("loadingRoles")}</div> : <div className="route-groups">
@@ -199,18 +209,90 @@ export default function SettingsDialog() {
             </div>}
           </SettingsPane>}
           {activeSection === "subagents" && <SettingsPane settingID="section:subagents" title={t("settingsSubagents")} description={t("settingsSubagentsHint")} className="subagent-settings-pane">
-            <div className="subagent-capacity-grid" aria-label={snapshot.language === "zh-CN" ? "并发、递归与等待" : "Concurrency, recursion, and wait"}>
-              <CapacityControl settingID="subagents:concurrency" label={snapshot.language === "zh-CN" ? "子智能体并发" : "Subagent concurrency"} description={snapshot.language === "zh-CN" ? "0 表示无限；默认 32" : "0 is unlimited; default 32"}><CompactStepper value={concurrency} displayValue={concurrency === 0 ? (snapshot.language === "zh-CN" ? "无限" : "∞") : undefined} min={0} max={64} decrease={() => { const value = Math.max(0, concurrency - 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }} increase={() => { const value = Math.min(64, concurrency + 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }} /></CapacityControl>
-              <CapacityControl settingID="subagents:depth" label={snapshot.language === "zh-CN" ? "递归深度" : "Recursion depth"} description={snapshot.language === "zh-CN" ? "子智能体继续委派的层数" : "Levels of nested delegation"}><MenuSelect className="capacity-depth-menu" value={String(maxDepth)} options={[{ value: "-1", label: snapshot.language === "zh-CN" ? "无限" : "Unlimited" }, { value: "0", label: snapshot.language === "zh-CN" ? "关闭" : "None" }, ...[1, 2, 3].map((depth) => ({ value: String(depth), label: String(depth) }))]} onChange={(value) => { const depth = Number(value); setMaxDepth(depth); void action("set_subagent_depth", value); }} ariaLabel={snapshot.language === "zh-CN" ? "递归深度" : "Recursion depth"} /></CapacityControl>
-              <CapacityControl settingID="subagents:shell" label={snapshot.language === "zh-CN" ? "Shell 并发" : "Shell concurrency"} description={snapshot.language === "zh-CN" ? "本地命令独立容量" : "Independent command capacity"}><CompactStepper value={shellConcurrency} min={1} max={16} decrease={() => { const value = Math.max(1, shellConcurrency - 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }} increase={() => { const value = Math.min(16, shellConcurrency + 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }} /></CapacityControl>
-              <CapacityControl settingID="subagents:timeout" label={snapshot.language === "zh-CN" ? "前台等待窗口" : "Foreground wait window"} description={snapshot.language === "zh-CN" ? "窗口结束后安全任务转为后台继续，不会被取消" : "Safe tasks continue in the background when the window ends; they are not cancelled"}><MenuSelect className="capacity-timeout-menu" value={String(awaitSeconds)} options={[30, 60, 300, 600, 1800].map((seconds) => ({ value: String(seconds), label: seconds < 60 ? `${seconds} ${snapshot.language === "zh-CN" ? "秒" : "sec"}` : `${seconds / 60} ${snapshot.language === "zh-CN" ? "分钟" : "min"}` }))} onChange={(value) => { const seconds = Number(value); setAwaitSeconds(seconds); void action("set_subagent_await_timeout", value); }} ariaLabel={snapshot.language === "zh-CN" ? "前台等待窗口" : "Foreground wait window"} /></CapacityControl>
-            </div>
-            <div className="settings-card subagent-scheduling" data-setting-id="subagents:scheduling">
-              <header><div><strong>{snapshot.language === "zh-CN" ? "调度策略" : "Scheduling policy"}</strong><small>{snapshot.language === "zh-CN" ? "当前定义使用并行工具分发" : "Definitions use parallel tool dispatch"}</small></div><em><i />Parallel</em></header>
-              <RuntimeInvariant label={snapshot.language === "zh-CN" ? "在主会话中显示子智能体进度" : "Show subagent progress in the main conversation"} hint={snapshot.language === "zh-CN" ? "状态摘要投影到当前任务，不混入最终回答" : "Project state summaries without mixing them into the final answer"} />
-              <RuntimeInvariant label={snapshot.language === "zh-CN" ? "完成后保留结果卡片" : "Keep result cards after completion"} hint={snapshot.language === "zh-CN" ? "会话重开后仍可检查任务、耗时和输出" : "Inspect tasks, duration, and output after reopening"} />
-              <RuntimeInvariant label={snapshot.language === "zh-CN" ? "资源不足时排队" : "Queue when capacity is unavailable"} hint={snapshot.language === "zh-CN" ? "保持 queued 状态，不提前显示为运行中" : "Keep queued state without presenting it as running"} />
-            </div>
+            <section className="settings-card subagent-capacity" data-setting-id="subagents:capacity" aria-labelledby="subagent-capacity-title">
+              <header>
+                <div>
+                  <strong id="subagent-capacity-title">{t("subagentCapacityTitle")}</strong>
+                  <small>{t("subagentCapacityHint")}</small>
+                </div>
+              </header>
+              <SettingRow settingID="subagents:concurrency" label={t("subagentConcurrencyLabel")} description={t("subagentConcurrencyHint")}>
+                <CompactStepper
+                  value={concurrency}
+                  displayValue={concurrency === 0 ? t("subagentUnlimited") : undefined}
+                  min={0}
+                  max={64}
+                  decreaseLabel={t("decreaseValue")}
+                  increaseLabel={t("increaseValue")}
+                  decrease={() => { const value = Math.max(0, concurrency - 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }}
+                  increase={() => { const value = Math.min(64, concurrency + 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }}
+                />
+              </SettingRow>
+              <SettingRow settingID="subagents:depth" label={t("subagentDepthLabel")} description={t("subagentDepthHint")}>
+                <MenuSelect
+                  className="capacity-depth-menu"
+                  value={String(maxDepth)}
+                  options={[{ value: "-1", label: t("subagentUnlimited") }, { value: "0", label: t("subagentDepthNone") }, ...[1, 2, 3].map((depth) => ({ value: String(depth), label: String(depth) }))]}
+                  onChange={(value) => { const depth = Number(value); setMaxDepth(depth); void action("set_subagent_depth", value); }}
+                  ariaLabel={t("subagentDepthLabel")}
+                />
+              </SettingRow>
+              <SettingRow settingID="subagents:shell" label={t("subagentShellLabel")} description={t("subagentShellHint")}>
+                <CompactStepper
+                  value={shellConcurrency}
+                  min={1}
+                  max={16}
+                  decreaseLabel={t("decreaseValue")}
+                  increaseLabel={t("increaseValue")}
+                  decrease={() => { const value = Math.max(1, shellConcurrency - 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }}
+                  increase={() => { const value = Math.min(16, shellConcurrency + 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }}
+                />
+              </SettingRow>
+              <SettingRow settingID="subagents:timeout" label={t("subagentAwaitLabel")} description={t("subagentAwaitHint")}>
+                <MenuSelect
+                  className="capacity-timeout-menu"
+                  value={String(awaitSeconds)}
+                  options={[
+                    { value: "0", label: t("subagentAwaitUntilDone") },
+                    ...[30, 60, 300, 600, 1800].map((seconds) => ({
+                      value: String(seconds),
+                      label: seconds < 60 ? tFormat(snapshot.language, "subagentSeconds", { n: seconds }) : tFormat(snapshot.language, "subagentMinutes", { n: seconds / 60 }),
+                    })),
+                  ]}
+                  onChange={(value) => { const seconds = Number(value); setAwaitSeconds(seconds); void action("set_subagent_await_timeout", value); }}
+                  ariaLabel={t("subagentAwaitLabel")}
+                />
+              </SettingRow>
+            </section>
+            <section className="settings-card subagent-scheduling" data-setting-id="subagents:scheduling" aria-labelledby="subagent-scheduling-title">
+              <header>
+                <div>
+                  <strong id="subagent-scheduling-title">{t("subagentSchedulingTitle")}</strong>
+                  <small>{t("subagentSchedulingHint")}</small>
+                </div>
+              </header>
+              <div className="subagent-policy" role="note">
+                <div>
+                  <strong>{t("subagentSchedulingPolicy")}</strong>
+                  <p>{t("subagentSchedulingPolicyHint")}</p>
+                </div>
+                <div className="subagent-policy-value">
+                  <b>{t("subagentSchedulingParallel")}</b>
+                  <span>{t("subagentSchedulingReadOnly")}</span>
+                </div>
+              </div>
+            </section>
+            <section className="settings-card subagent-display" data-setting-id="subagents:display" aria-labelledby="subagent-display-title">
+              <header>
+                <div>
+                  <strong id="subagent-display-title">{t("subagentDisplayTitle")}</strong>
+                  <small>{t("subagentDisplayHint")}</small>
+                </div>
+              </header>
+              <DisplayFact settingID="subagents:progress" label={t("subagentShowProgress")} hint={t("subagentShowProgressHint")} status={t("subagentAlwaysOn")} />
+              <DisplayFact settingID="subagents:cards" label={t("subagentKeepCards")} hint={t("subagentKeepCardsHint")} status={t("subagentAlwaysOn")} />
+              <DisplayFact settingID="subagents:queue" label={t("subagentQueueWhenFull")} hint={t("subagentQueueWhenFullHint")} status={t("subagentAlwaysOn")} />
+            </section>
           </SettingsPane>}
           {activeSection === "governance" && <SettingsPane settingID="section:governance" title={t("settingsGovernance")} description={t("settingsGovernanceHint")} className="governance-pane">
             <div className="settings-card governance-settings">
@@ -241,6 +323,7 @@ export default function SettingsDialog() {
           </SettingsPane>}
           {activeSection === "extensions" && <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} executeAction={execute} onError={setError} targetTab={settingsTarget?.id === "extensions:skills" ? "skills" : settingsTarget?.id === "extensions:plugins" ? "plugins" : settingsTarget?.id === "extensions:hooks" ? "hooks" : "mcp"} />}
           {activeSection === "archive" && <SettingsPane settingID="section:archive" title={t("settingsArchive")} description={t("settingsArchiveHint")} className="archive-settings-pane"><ArchiveSettings language={snapshot.language} sessionId={snapshot.sessionId} onError={setError} /></SettingsPane>}
+          {activeSection === "usage" && <SettingsPane settingID="section:usage" title={t("settingsUsage")} description={t("settingsUsageHint")} className="usage-settings-pane"><UsageSettings language={snapshot.language} onError={setError} /></SettingsPane>}
         </div>
       </main>
     </div>
@@ -259,16 +342,30 @@ function GovernanceOption({ icon: Icon, label, hint, badge, selected, onClick }:
   return <button type="button" role="radio" aria-checked={selected} className={selected ? "selected" : ""} onClick={onClick}><Icon size={15} /><span><strong>{label}</strong><small>{hint}</small></span>{badge && <em>{badge}</em>}{selected && <Check className="governance-check" size={13} />}</button>;
 }
 
-function CapacityControl({ label, description, settingID, children }: { label: string; description: string; settingID?: string; children: React.ReactNode }) {
-  return <section data-setting-id={settingID}><div><strong>{label}</strong><small>{description}</small></div>{children}</section>;
+function CompactStepper({ value, displayValue, min, max, decrease, increase, decreaseLabel, increaseLabel }: {
+  value: number;
+  displayValue?: string;
+  min: number;
+  max: number;
+  decrease: () => void;
+  increase: () => void;
+  decreaseLabel: string;
+  increaseLabel: string;
+}) {
+  return <div className="compact-stepper">
+    <button type="button" aria-label={decreaseLabel} disabled={value <= min} onClick={decrease}><Minus size={13} /></button>
+    <output aria-live="polite">{displayValue ?? value}</output>
+    <button type="button" aria-label={increaseLabel} disabled={value >= max} onClick={increase}><Plus size={13} /></button>
+  </div>;
 }
 
-function CompactStepper({ value, displayValue, min, max, decrease, increase }: { value: number; displayValue?: string; min: number; max: number; decrease: () => void; increase: () => void }) {
-  return <div className="compact-stepper"><button type="button" aria-label="Decrease" disabled={value <= min} onClick={decrease}><Minus size={13} /></button><output>{displayValue ?? value}</output><button type="button" aria-label="Increase" disabled={value >= max} onClick={increase}><Plus size={13} /></button></div>;
-}
-
-function RuntimeInvariant({ label, hint }: { label: string; hint: string }) {
-  return <div className="runtime-invariant"><div><strong>{label}</strong><small>{hint}</small></div><span aria-label="Enabled"><i /></span></div>;
+function DisplayFact({ label, hint, settingID, status }: { label: string; hint: string; settingID: string; status: string }) {
+  return <div className="setting-row subagent-display-row" data-setting-id={settingID}>
+    <div><strong>{label}</strong><p>{hint}</p></div>
+    <div>
+      <span className="settings-switch on" role="switch" aria-checked="true" aria-disabled="true" aria-label={status}><span /></span>
+    </div>
+  </div>;
 }
 
 function RouteRow({ route, description, modelsByProvider, modelProviders, action, language }: {

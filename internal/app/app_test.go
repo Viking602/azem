@@ -1413,6 +1413,40 @@ func TestListPluginsReemitsTheCurrentSnapshot(t *testing.T) {
 	}
 }
 
+func TestBootstrapEmitsHookSnapshotAndDirectReadback(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachPlugins([]PluginCatalogEntry{{
+		ID: "demo@local", Name: "demo", DisplayName: "Demo", Origin: "local", Enabled: true,
+		HookCount: 2, HooksTrusted: false, Warning: "Hooks 等待用户信任",
+	}}, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	snapshot := service.HookCatalogSnapshot()
+	if snapshot == nil || snapshot.TrustHooks || len(snapshot.Sources) != 1 || snapshot.Sources[0].ID != "demo@local" {
+		t.Fatalf("direct hook snapshot before bootstrap = %+v", snapshot)
+	}
+	service.Bootstrap()
+	var catalog Event
+	for {
+		event, err := service.NextEvent(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == EventHookCatalog {
+			catalog = event
+			break
+		}
+	}
+	if catalog.State != "snapshot" || catalog.HookCatalog == nil || len(catalog.HookCatalog.Sources) != 1 {
+		t.Fatalf("bootstrap hook catalog = %+v", catalog)
+	}
+}
+
 func TestListHooksIncludesUntrustedPluginSources(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
 	service.AttachPlugins([]PluginCatalogEntry{{
@@ -1500,6 +1534,130 @@ func TestSetPluginHooksTrustedPersistsAndReloads(t *testing.T) {
 	if len(catalog.HookCatalog.Commands) == 0 {
 		t.Fatalf("trusted hook commands = %#v", catalog.HookCatalog.Commands)
 	}
+	if catalog.HookCatalog.Commands[0].ID == "" || !catalog.HookCatalog.Commands[0].Enabled {
+		t.Fatalf("trusted hook command identity = %#v", catalog.HookCatalog.Commands[0])
+	}
+
+	integration := plugins.Discover(context.Background(), plugins.Options{HomeDir: home, DataDir: data, TrustHooks: loaded.Plugins.TrustHooks})
+	reopened := NewService(context.Background(), loaded)
+	reopened.SetConfigPath(path)
+	reopened.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(hooks.Options{})})
+	reopened.AttachPlugins(pluginCatalogEntries(integration), nil)
+	reopened.AttachPluginRuntime(plugins.Options{HomeDir: home, DataDir: data}, integration)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := reopened.Shutdown(ctx); err != nil {
+			t.Errorf("reopened shutdown: %v", err)
+		}
+	})
+	restored := reopened.HookCatalogSnapshot()
+	if restored == nil || !restored.TrustHooks || len(restored.Sources) != 1 || !restored.Sources[0].Trusted || len(restored.Commands) == 0 {
+		t.Fatalf("reopened trusted hook catalog = %+v", restored)
+	}
+}
+
+func TestHookCatalogListsUntrustedPluginCommandsWithoutExecuting(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	root := filepath.Join(data, "plugin-packages", "local", "demo")
+	if err := os.MkdirAll(filepath.Join(root, ".codex-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".codex-plugin", "plugin.json"), []byte(`{"name":"demo","version":"1.0.0","description":"Demo","hooks":"./hooks.json"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "hooks.json"), []byte(`{"hooks":{"SessionStart":[{"hooks":[{"name":"notify","type":"command","command":"printf ran"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	integration := plugins.Discover(context.Background(), plugins.Options{HomeDir: home, DataDir: data})
+	service := NewService(context.Background(), config.Default())
+	service.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(hooks.Options{})})
+	service.AttachPlugins(pluginCatalogEntries(integration), nil)
+	service.AttachPluginRuntime(plugins.Options{HomeDir: home, DataDir: data}, integration)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	catalog := service.HookCatalogSnapshot()
+	if catalog.TrustHooks || len(catalog.Commands) != 1 || catalog.Commands[0].Name != "notify" || !catalog.Commands[0].Enabled {
+		t.Fatalf("untrusted plugin commands = %+v", catalog)
+	}
+	result := service.hooks.Dispatch(context.Background(), hooks.Envelope{HookEventName: hooks.SessionStart})
+	if len(result.Runs) != 0 {
+		t.Fatalf("untrusted plugin hook executed: %#v", result.Runs)
+	}
+}
+
+func TestSetHookEnabledPersistsAndDoesNotExecute(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hookPath := filepath.Join(home, "hooks.json")
+	if err := os.WriteFile(hookPath, []byte(`{"hooks":{"SessionStart":[{"hooks":[{"name":"notify","type":"command","command":"printf ran"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	service := NewService(context.Background(), cfg)
+	service.SetConfigPath(path)
+	options := hooks.Options{Sources: []hooks.Source{{Path: hookPath, Trusted: true}}}
+	service.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(options)})
+	service.hookOptions = options
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	listed := service.HookCatalogSnapshot()
+	if listed == nil || len(listed.Commands) != 1 || !listed.Commands[0].Enabled {
+		t.Fatalf("listed hooks = %+v", listed)
+	}
+	id := listed.Commands[0].ID
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetHookEnabled, Target: id, Decision: "false"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Hooks.Disabled) != 1 || loaded.Hooks.Disabled[0] != id || !reflect.DeepEqual(loaded.Hooks.Disabled, service.cfg.Hooks.Disabled) {
+		t.Fatalf("disabled hooks persisted=%v runtime=%v", loaded.Hooks.Disabled, service.cfg.Hooks.Disabled)
+	}
+	updated := service.HookCatalogSnapshot()
+	if updated == nil || len(updated.Commands) != 1 || updated.Commands[0].Enabled {
+		t.Fatalf("disabled hook catalog = %+v", updated)
+	}
+	result := service.hooks.Dispatch(context.Background(), hooks.Envelope{HookEventName: hooks.SessionStart})
+	if len(result.Runs) != 0 {
+		t.Fatalf("disabled hook executed: %#v", result.Runs)
+	}
+
+	reopened := NewService(context.Background(), loaded)
+	reopened.SetConfigPath(path)
+	reopenOptions := hooks.Options{Sources: []hooks.Source{{Path: hookPath, Trusted: true}}, Disabled: append([]string(nil), loaded.Hooks.Disabled...)}
+	reopened.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(reopenOptions)})
+	reopened.hookOptions = reopenOptions
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := reopened.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	restored := reopened.HookCatalogSnapshot()
+	if restored == nil || len(restored.Commands) != 1 || restored.Commands[0].Enabled || restored.Commands[0].ID != id {
+		t.Fatalf("reopened hook catalog = %+v", restored)
+	}
+	if err := reopened.ExecuteAction(context.Background(), Action{Kind: ActionSetHookEnabled, Target: "missing", Decision: "false"}); err == nil {
+		t.Fatal("missing hook was disabled")
+	}
 }
 
 func TestSetCodexPluginImportedActivatesImmediately(t *testing.T) {
@@ -1580,6 +1738,106 @@ func TestSetCodexPluginImportedActivatesImmediately(t *testing.T) {
 		return strings.HasSuffix(filepath.Clean(path), filepath.Join("plugin-packages", "codex", "market", "demo", "skills"))
 	}) {
 		t.Fatalf("unimported skill dir still attached: %#v", service.cfg.Skills.AdditionalDirs)
+	}
+}
+
+func TestSetCodexPluginImportedRejectsEmptyID(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "kami@kami", Name: "kami", Origin: "codex_available"}}, nil)
+	err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Decision: "true"})
+	if err == nil || !strings.Contains(err.Error(), "plugin id is required") {
+		t.Fatalf("empty plugin id = %v", err)
+	}
+}
+
+func TestSetCodexPluginImportedCopiesMarketplaceSourcePath(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	path := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := filepath.Join(home, ".codex", ".tmp", "marketplaces", "kami", "plugins", "kami")
+	if err := os.MkdirAll(filepath.Join(sourceRoot, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceRoot, "skills", "kami"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), []byte(`{"name":"kami","version":"1.12.0","description":"Typeset documents","skills":"./skills/"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "skills", "kami", "SKILL.md"), []byte("---\nname: kami\ndescription: Typeset documents\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalogJSON, err := json.Marshal(map[string]any{
+		"installed": []map[string]any{{
+			"pluginId": "kami@kami", "name": "kami", "marketplaceName": "kami", "version": "1.12.0",
+			"installed": true, "enabled": true,
+			"source": map[string]any{"source": "local", "path": sourceRoot},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), config.Default())
+	service.SetConfigPath(path)
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "kami@kami", Name: "kami", Marketplace: "kami", Origin: "codex_available", Status: "available"}}, nil)
+	service.AttachPluginRuntime(plugins.Options{
+		HomeDir: home, DataDir: data, ImportCodex: true,
+		ListPlugins: func(context.Context) ([]byte, error) { return catalogJSON, nil },
+	}, plugins.Integration{})
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "kami@kami", Decision: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	copyRoot := filepath.Join(data, "plugin-packages", "codex", "kami", "kami")
+	if _, err := os.Stat(filepath.Join(copyRoot, "skills", "kami", "SKILL.md")); err != nil {
+		t.Fatalf("imported marketplace copy: %v", err)
+	}
+	if len(service.pluginCatalog) != 1 || service.pluginCatalog[0].Origin != "codex" {
+		t.Fatalf("imported catalog = %#v", service.pluginCatalog)
+	}
+}
+
+func TestSetCodexPluginImportedUsesKnownCatalogWhenCodexListFails(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	path := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := filepath.Join(home, ".codex", ".tmp", "marketplaces", "kami", "plugins", "kami")
+	if err := os.MkdirAll(filepath.Join(sourceRoot, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceRoot, "skills", "kami"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), []byte(`{"name":"kami","version":"1.12.0","description":"Typeset documents","skills":"./skills/"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "skills", "kami", "SKILL.md"), []byte("---\nname: kami\ndescription: Typeset documents\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), config.Default())
+	service.SetConfigPath(path)
+	service.AttachPlugins([]PluginCatalogEntry{{
+		ID: "kami@kami", Name: "kami", Marketplace: "kami", Version: "1.12.0",
+		Origin: "codex_available", Status: "available",
+	}}, nil)
+	service.AttachPluginRuntime(plugins.Options{
+		HomeDir: home, DataDir: data, ImportCodex: true,
+		ListPlugins: func(context.Context) ([]byte, error) { return nil, os.ErrNotExist },
+	}, plugins.Integration{})
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "kami@kami", Decision: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	copyRoot := filepath.Join(data, "plugin-packages", "codex", "kami", "kami")
+	if _, err := os.Stat(filepath.Join(copyRoot, "skills", "kami", "SKILL.md")); err != nil {
+		t.Fatalf("imported known catalog copy: %v", err)
+	}
+	if len(service.pluginCatalog) != 1 || service.pluginCatalog[0].Origin != "codex" {
+		t.Fatalf("imported catalog = %#v", service.pluginCatalog)
 	}
 }
 
@@ -1949,11 +2207,37 @@ func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {
 	if liveAwait != 30*time.Second {
 		t.Fatalf("live await timeout = %s", liveAwait)
 	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "0"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["subagent_await_seconds"] != "0" {
+		t.Fatalf("wait-until-complete event = %#v", event.Data)
+	}
+	loaded, err = config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Agents.Subagents.AwaitDuration != 0 {
+		t.Fatalf("persisted wait-until-complete await = %s", loaded.Agents.Subagents.AwaitDuration)
+	}
+	subagents.mu.Lock()
+	liveAwait = subagents.cfg.AwaitDuration
+	subagents.mu.Unlock()
+	if liveAwait != 0 {
+		t.Fatalf("live wait-until-complete await = %s", liveAwait)
+	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellConcurrency, Target: "0"}); err == nil {
 		t.Fatal("zero shell concurrency was accepted")
 	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "4"}); err == nil {
 		t.Fatal("too-short await timeout was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "-1"}); err == nil {
+		t.Fatal("negative await timeout was accepted")
 	}
 }
 

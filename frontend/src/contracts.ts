@@ -8,6 +8,7 @@ export type ActionKind =
   | "logout"
   | "new_session"
   | "list_sessions"
+  | "list_usage"
   | "resume_session"
   | "refresh_session"
   | "rename_session"
@@ -37,6 +38,7 @@ export type ActionKind =
   | "set_plugin_imported"
   | "list_hooks"
   | "set_plugin_hooks_trusted"
+  | "set_hook_enabled"
   | "reload_skills"
   | "set_skill_enabled"
   | "list_memories"
@@ -111,6 +113,7 @@ export type EventKind =
   | "background_state"
   | "background_logs"
   | "git_branches"
+  | "usage_report"
   | "bridge_error"
 ;
 
@@ -119,6 +122,7 @@ export const ACTION_KINDS: readonly ActionKind[] = [
   "logout",
   "new_session",
   "list_sessions",
+  "list_usage",
   "resume_session",
   "refresh_session",
   "rename_session",
@@ -148,6 +152,7 @@ export const ACTION_KINDS: readonly ActionKind[] = [
   "set_plugin_imported",
   "list_hooks",
   "set_plugin_hooks_trusted",
+  "set_hook_enabled",
   "reload_skills",
   "set_skill_enabled",
   "list_memories",
@@ -221,5 +226,6 @@ export const EVENT_KINDS: readonly EventKind[] = [
   "background_state",
   "background_logs",
   "git_branches",
+  "usage_report",
   "bridge_error",
 ];

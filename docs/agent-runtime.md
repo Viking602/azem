@@ -88,8 +88,10 @@ Configuration lives under `agents.subagents` (`internal/config/config.go`):
   delegation entirely. Spawn tools are re-exposed to children at `Depth+1`
   while `enabledForDepth` allows it.
 - `max_concurrency` default 32; 0 means unbounded.
-- `await_timeout` default `10m` is the foreground tool-call wait window, not a
-  child execution timeout (see `docs/recovery.md` for detach semantics).
+- `await_timeout` default `0s` waits until the foreground child completes. A
+  positive duration is only the parent tool-call wait window, not a child
+  execution timeout (see `docs/recovery.md` for detach semantics). `-1` is
+  rejected.
 - States: `initializing → queued → running → completed/failed/cancelled/
   interrupted`, with `cancelling` as the transitional kill state.
 

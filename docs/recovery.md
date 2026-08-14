@@ -109,11 +109,13 @@ Foreground `subagent.spawn` waits inside the parent tool call, but a wait
 boundary releases only the parent call — it never cancels the child
 (SUBAGENT-001, `internal/app/subagent_tools.go`):
 
-- When the `agents.subagents.await_timeout` window (default `10m`) elapses,
-  `detachAfterWaitWindow` calls `subagentRuntime.continueInBackground` with
-  `safeOnly=true`. Read-only children and worktree-isolated writers
-  (`subagentMayRunInBackground`) detach and keep running durably in the
-  background; unsafe shared-workspace writers keep the parent waiting.
+- When `agents.subagents.await_timeout` is `0`/`0s` (the default), the parent
+  tool waits until the foreground child completes. A positive window is not a
+  child timeout: when it elapses, `detachAfterWaitWindow` calls
+  `subagentRuntime.continueInBackground` with `safeOnly=true`. Read-only
+  children and worktree-isolated writers (`subagentMayRunInBackground`) detach
+  and keep running durably in the background; unsafe shared-workspace writers
+  keep the parent waiting.
 - When the parent tool context itself ends, `detachAfterParentWait` detaches
   unconditionally; the tool result carries
   `continuing_in_background: true` and an explicit not-cancelled warning.

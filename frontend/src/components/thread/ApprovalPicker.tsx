@@ -131,7 +131,6 @@ export function ApprovalPicker({ value, disabled, language, onChange }: {
         ref={summary as React.RefObject<HTMLElement>}
         aria-label={t(current.labelKey)}
         aria-disabled={disabled}
-        title={t(current.labelKey)}
       >
         <CurrentIcon size={14} />
         <span>{t(current.labelKey)}</span>

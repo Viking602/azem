@@ -372,6 +372,8 @@ func (r *subagentRuntime) updateAwaitTimeout(timeout time.Duration) {
 func (r *subagentRuntime) foregroundWaitWindow() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Zero means wait until the foreground child completes. A positive
+	// duration only releases the parent tool call (SUBAGENT-001).
 	return r.cfg.AwaitDuration
 }
 

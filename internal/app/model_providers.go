@@ -26,6 +26,9 @@ func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntr
 	for _, account := range accounts {
 		if account.Status == "active" {
 			providerID := llmuxdriver.CanonicalProviderID(account.Provider)
+			if providerID == "grok" {
+				account = s.authentication.HydrateGrokAccount(ctx, account)
+			}
 			stored[providerID] = true
 			activeAccounts[providerID] = subscriptionAccount{account.ID, firstNonEmpty(account.DisplayName, account.Email, account.ID)}
 		}
@@ -272,15 +275,23 @@ func (s *Service) refreshSubscriptionQuotas(targets []ModelProviderEntry) {
 				continue
 			}
 			quota, quotaErr := s.authentication.SubscriptionQuota(ctx, entries[index].ID, entries[index].AccountID)
+			if label := firstNonEmpty(quota.DisplayName, quota.Email); label != "" {
+				entries[index].AccountLabel = label
+			}
+			if quota.Plan != "" {
+				entries[index].AccountPlan = quota.Plan
+			}
 			if quotaErr != nil {
 				entries[index].QuotaWarning = quotaErr.Error()
 				entries[index].QuotaAvailable = false
+				entries[index].QuotaPeriod = ""
 				entries[index].QuotaUsedPercent = 0
 				entries[index].QuotaResetsAt = 0
 				entries[index].QuotaBalance = ""
 				entries[index].QuotaUnlimited = false
 			} else {
 				entries[index].QuotaAvailable = true
+				entries[index].QuotaPeriod = quota.Period
 				entries[index].QuotaUsedPercent = quota.UsedPercent
 				entries[index].QuotaResetsAt = quota.ResetsAt
 				entries[index].QuotaBalance = quota.Balance

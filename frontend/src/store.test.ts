@@ -29,7 +29,7 @@ const snapshot: Snapshot = {
 function state(): RuntimeData {
   return {
     snapshot, sessions: [], projects: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], backgroundProcesses: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
-    skills: [], mcpServers: [], plugins: [], hookCatalog: { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] }, branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
+    skills: [], mcpServers: [], plugins: [], hookCatalog: { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] }, usageReport: null, branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
     pullRequestMonitors: new Map(), pullRequestLoading: false, pullRequestMutating: false, pullRequestError: "",
     modelRoutes: [], modelProviders: [], modelsByProvider: {}, contextProfile: null,
     contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recap: null, recovery: [],
@@ -143,6 +143,16 @@ describe("runtime event projection", () => {
 		expect(projected.plugins[0]).toMatchObject({ id: "demo@market", displayName: "Demo", origin: "codex", skillCount: 2, integratedMCPCount: 1, hasApp: true });
 	});
 
+	it("composes a Codex plugin id from name and marketplace when the wire omits id", () => {
+		const projected = reduceEvents(state(), [{
+			sequence: 1, kind: "plugin_catalog", pluginCatalog: [{
+				name: "kami", displayName: "kami", version: "1.12.0", marketplace: "kami", origin: "codex_available",
+				enabled: false, status: "available",
+			}],
+		}]);
+		expect(projected.plugins[0]?.id).toBe("kami@kami");
+	});
+
 	it("projects MCP snapshots and live connection transitions", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "mcp_state", state: "snapshot", data: { servers: JSON.stringify([{
@@ -190,6 +200,44 @@ describe("runtime event projection", () => {
       modelRoutes: [{ scope: "plan", role: "", label: "Plan", route: {} }],
     }]);
     expect(useRuntimeStore.getState().modelRoutes).toHaveLength(1);
+  });
+
+  it("applies a late usage report even after later sequences have been seen", () => {
+    const projected = reduceEvents(state(), [
+      { sequence: 8, kind: "plugin_catalog", pluginCatalog: [] },
+      {
+        sequence: 3, kind: "usage_report",
+        usageReport: {
+          scope: "project", from: "2025-08-14", to: "2026-08-14", empty: false,
+          requests: 2, sessions: 1, runs: 1, totalTokens: 40, inputTokens: 30, outputTokens: 10,
+          reasoningTokens: 0, reportedInputTokens: 30, cacheReadTokens: 12, cacheWriteTokens: 0,
+          cacheReported: true, cacheWriteReported: false, peakDayTokens: 40, currentStreak: 1, longestStreak: 1,
+          days: [{ date: "2026-08-14", tokens: 40, requests: 2 }],
+          kinds: [{ kind: "main", tokens: 40, requests: 2 }],
+          models: [{ provider: "chatgpt", model: "gpt-5.6", tokens: 40, inputTokens: 30, outputTokens: 10, cacheReadTokens: 12, cacheWriteTokens: 0, cacheReported: true, cacheWriteReported: false, requests: 2 }],
+          skills: [],
+        },
+      },
+    ]);
+    expect(projected.usageReport?.totalTokens).toBe(40);
+    expect(projected.usageReport?.models[0]).toMatchObject({ provider: "chatgpt", cacheReported: true });
+    expect(JSON.stringify(projected.usageReport)).not.toMatch(/secret|apiKey|api_key/i);
+  });
+
+  it("applies a late hook catalog even after later sequences have been seen", () => {
+    const projected = reduceEvents(state(), [
+      { sequence: 8, kind: "plugin_catalog", pluginCatalog: [] },
+      {
+        sequence: 3, kind: "hook_catalog",
+        hookCatalog: {
+          enabled: true, trustHooks: true,
+          sources: [{ id: "demo@local", name: "Demo", origin: "plugin", hookCount: 1, trusted: true }],
+          commands: [{ id: "hook-1", name: "notify", event: "SessionStart", enabled: true }],
+        },
+      },
+    ]);
+    expect(projected.hookCatalog.trustHooks).toBe(true);
+    expect(projected.hookCatalog.commands[0]).toMatchObject({ id: "hook-1", name: "notify", enabled: true });
   });
 
   it("shows the snapshot branch before the full git branch event arrives", () => {
@@ -713,6 +761,12 @@ describe("runtime event projection", () => {
     await act(async () => useRuntimeStore.setState({ attachments: [image] }));
     const send = container.querySelector<HTMLButtonElement>(".send-button")!;
     expect(send.disabled).toBe(false);
+    expect(send.getAttribute("title")).toBeNull();
+    expect(send.getAttribute("aria-label")).toBe("发送");
+    expect(container.querySelector(".approval-picker > summary")?.getAttribute("title")).toBeNull();
+    expect(container.querySelector(".plan-mode-toggle")?.getAttribute("title")).toBeNull();
+    expect(container.querySelector(".attach-button")?.getAttribute("title")).toBeNull();
+    expect(container.querySelector(".attach-button")?.getAttribute("aria-label")).toBe("添加图片");
     await act(async () => send.click());
     expect(useRuntimeStore.getState()).toMatchObject({ running: true, attachments: [] });
     expect(useRuntimeStore.getState().blocks.at(-1)).toMatchObject({ kind: "user", content: "", attachments: [image] });
@@ -1234,7 +1288,7 @@ describe("runtime event projection", () => {
     expect(container.textContent).toContain("r3");
     expect(container.textContent).toContain("automatic_hard");
     expect(container.textContent).toContain("semantic state");
-    expect(container.querySelector(".context-manifest-hash")?.textContent).toBe("abcdef012345");
+    expect(container.querySelector(".context-manifest-hash")?.textContent).toBe("abcdef0123456789");
     expect(container.querySelector('[data-state="pending"]')?.textContent).toBe("2");
     await act(async () => root.unmount());
   });

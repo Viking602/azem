@@ -4,7 +4,7 @@ import {
 	RefreshCw, Search, Type, Wrench,
 } from "lucide-react";
 import { execute } from "../bridge";
-import { tFormat, translator, type Language } from "../i18n";
+import { tFormat, translator, type Language, type MessageKey } from "../i18n";
 import { modelDisplayName, useRuntimeStore, type ModelOption } from "../store";
 import type { LLMuxModelConfig, ModelProvider, ModelRoute } from "../types";
 import ProviderIcon from "./ProviderIcon";
@@ -166,8 +166,8 @@ function ModelCard({ provider, model, index, language, working, badges, useLabel
 	const [openCapability, setOpenCapability] = useState("");
 	return <article className="subscription-model provider-model-card model-card" data-disabled={Boolean(model.disabled)} data-working={working}>
 		<div className="provider-model-card-main">
-			<div className="provider-model-identity"><ProviderIcon provider={provider.id} logoID={provider.modelsDevId} /><span><strong>{name}</strong></span></div>
-			<div className="provider-model-state">{useLabel && <em className="model-use-badge">{useLabel}</em>}<button className="model-card-toggle" disabled={!model.id || working} onClick={() => onToggle(model, index)} aria-pressed={!model.disabled} aria-label={tFormat(language, model.disabled ? "enableModel" : "disableModel", { model: name })}><span className="model-toggle-label">{model.disabled ? (language === "zh-CN" ? "未启用" : "Disabled") : (language === "zh-CN" ? "已启用" : "Enabled")}</span><span className={`settings-switch ${model.disabled ? "" : "on"}`} aria-hidden="true"><span /></span></button></div>
+			<div className="provider-model-identity"><ProviderIcon provider={provider.id} logoID={provider.modelsDevId} /><span><strong>{name}</strong>{useLabel && <em className="model-use-badge">{useLabel}</em>}</span></div>
+			<div className="provider-model-state"><button className="model-card-toggle" disabled={!model.id || working} onClick={() => onToggle(model, index)} aria-pressed={!model.disabled} aria-label={tFormat(language, model.disabled ? "enableModel" : "disableModel", { model: name })}><span className="model-toggle-label">{model.disabled ? (language === "zh-CN" ? "未启用" : "Disabled") : (language === "zh-CN" ? "已启用" : "Enabled")}</span><span className={`settings-switch ${model.disabled ? "" : "on"}`} aria-hidden="true"><span /></span></button></div>
 		</div>
 		<div className="provider-model-card-footer"><span className="subscription-model-capabilities" role="list" aria-label={t("modelCapabilities")}>{badges.map((badge) => {
 			const Icon = badge.icon;
@@ -219,14 +219,33 @@ function SubscriptionQuota({ provider, language }: { provider: ModelProvider; la
 		<div className="subscription-quota-heading"><strong>{t("subscriptionQuota")}</strong><small>{language === "zh-CN" ? "来自订阅服务的实时额度" : t("subscriptionQuotaHint")}</small></div>
 		{provider.quotaAvailable || provider.quotaUnlimited || provider.quotaBalance ? <div className="subscription-quota-grid">
 			{provider.quotaAvailable && <div className="subscription-quota-item">
-				<div><strong>{t("weeklyQuota")}</strong><span>{tFormat(language, "quotaRemaining", { percent: formatted })}</span></div>
-				<div className="subscription-quota-track" role="progressbar" aria-label={t("weeklyQuota")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={remaining}><span style={{ width: `${remaining}%` }} /></div>
+				<div><strong>{quotaWindowLabel(provider.quotaPeriod, t)}</strong><span>{tFormat(language, "quotaRemaining", { percent: formatted })}</span></div>
+				<div className="subscription-quota-track" role="progressbar" aria-label={quotaWindowLabel(provider.quotaPeriod, t)} aria-valuemin={0} aria-valuemax={100} aria-valuenow={remaining}><span style={{ width: `${remaining}%` }} /></div>
 				{Boolean(provider.quotaResetsAt) && <small>{tFormat(language, "quotaResetsAt", { time: formatQuotaReset(provider.quotaResetsAt!*1000, language) })}</small>}
 			</div>}
-			{(provider.quotaUnlimited || provider.quotaBalance) && <div className="subscription-quota-item subscription-quota-balance"><div><strong>{t("quotaBalance")}</strong><span>{provider.quotaUnlimited ? t("quotaUnlimited") : formatQuotaBalance(provider.quotaBalance!, language)}</span><small>{language === "zh-CN" ? (provider.quotaUnlimited ? "当前订阅账户可用" : "用完每周额度后继续使用") : "Available after the weekly allowance"}</small></div></div>}
+			{(provider.quotaUnlimited || provider.quotaBalance) && <div className="subscription-quota-item subscription-quota-balance"><div><strong>{t("quotaBalance")}</strong><span>{provider.quotaUnlimited ? t("quotaUnlimited") : formatQuotaBalance(provider.quotaBalance!, language)}</span><small>{quotaBalanceHint(provider.quotaPeriod, provider.quotaUnlimited, language)}</small></div></div>}
 		</div> : !provider.quotaWarning && <small className="subscription-quota-empty">{t("quotaUnavailable")}</small>}
-		{provider.quotaWarning && <small className="provider-model-warning" role="status">{t("quotaUnavailable")}</small>}
+		{provider.quotaWarning && <small className="subscription-quota-error" role="status">{tFormat(language, "quotaUnavailableReason", { reason: provider.quotaWarning })}</small>}
 	</section>;
+}
+
+function quotaWindowLabel(period: string | undefined, t: (key: MessageKey) => string) {
+	if (period === "monthly") return t("monthlyQuota");
+	if (period === "credits") return t("creditsQuota");
+	return t("weeklyQuota");
+}
+
+function quotaBalanceHint(period: string | undefined, unlimited: boolean | undefined, language: Language) {
+	if (language === "zh-CN") {
+		if (unlimited) return "当前订阅账户可用";
+		if (period === "monthly") return "用完每月额度后继续使用";
+		if (period === "credits") return "用完订阅额度后继续使用";
+		return "用完每周额度后继续使用";
+	}
+	if (unlimited) return "Available on this subscription";
+	if (period === "monthly") return "Available after the monthly allowance";
+	if (period === "credits") return "Available after the included allowance";
+	return "Available after the weekly allowance";
 }
 
 function formatQuotaBalance(value: string, language: Language) {
@@ -287,7 +306,7 @@ function ProviderEditor({ provider, sessionId, language, setError, creating = fa
 			} />
 			<div className={`provider-fields ${creating ? "provider-fields-creating" : ""}`}>
 				{creating && <><label><span>{language === "zh-CN" ? "提供方名称" : "Provider name"}</span><input value={draft.displayName} onChange={(event) => setDraft({ ...draft, displayName: event.target.value })} placeholder="Acme AI" /></label><label><span>{language === "zh-CN" ? "提供方 ID" : "Provider ID"}</span><input value={draft.id} onChange={(event) => setDraft({ ...draft, id: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "") })} placeholder="acme" /></label></>}
-				<label><span>{t("apiBaseURL")}</span><input value={draft.baseUrl} readOnly={Boolean(provider.defaultBaseUrl)} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder={provider.defaultBaseUrl || t("customAPIBaseURL")} title={provider.defaultBaseUrl ? t("officialAPIAddressLocked") : t("customAPIAddressHint")} /><small>{provider.defaultBaseUrl ? t("officialAPIAddressLocked") : t("customAPIAddressHint")}</small></label>
+				<label><span>{t("apiBaseURL")}</span><input value={draft.baseUrl} readOnly={Boolean(provider.defaultBaseUrl)} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder={provider.defaultBaseUrl || t("customAPIBaseURL")} /><small>{provider.defaultBaseUrl ? t("officialAPIAddressLocked") : t("customAPIAddressHint")}</small></label>
 				<label><span>{t("apiKey")}</span><input type="password" autoComplete="new-password" value={secret} onChange={(event) => setSecret(event.target.value)} placeholder={provider.credentialConfigured ? t("keepCredential") : provider.envKey} /><small>{credentialHint(provider, language)}</small></label>
 			</div>
 			<footer><button className="small-button primary" disabled={saving || !draft.id.trim() || !draft.displayName.trim() || !draft.baseUrl.trim()} onClick={() => void save()}>{saving ? t("saving") : t("saveProvider")}</button></footer>

@@ -58,14 +58,41 @@ describe("application interactions", () => {
     expect(conceptStyles).toMatch(/\.project-switch-popover\s*\{[^}]*left:\s*96px;/s);
   });
 
-  it("centers the command trigger against the full titlebar", () => {
-    expect(prototypeStyles).toMatch(/\.titlebar-command\s*\{[^}]*position:\s*absolute;[^}]*left:\s*50%;[^}]*transform:\s*translateX\(-50%\);/s);
-    expect(conceptStyles).toMatch(/\.command-trigger\s*\{[^}]*position:\s*absolute;[^}]*left:\s*50%;[^}]*transform:\s*translateX\(-50%\);/s);
-    expect(conceptStyles).toMatch(/\.command-trigger:hover\s*\{[^}]*transform:\s*translate\(-50%,\s*-1px\);/s);
+  it("omits the titlebar command bar and keeps sidebar search plus ⌘K", async () => {
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value(this: HTMLDialogElement) { this.setAttribute("open", ""); },
+    });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+    expect(container.querySelector(".titlebar-command")).toBeNull();
+    expect(container.textContent).not.toContain("搜索、跳转或执行命令");
+    expect(prototypeStyles).not.toMatch(/\.titlebar-command\s*\{/);
+    expect(applicationStyles).not.toMatch(/\.titlebar-command\s*\{/);
+    const sidebarSearch = Array.from(container.querySelectorAll<HTMLButtonElement>(".primary-nav button"))
+      .find((button) => button.textContent?.includes("搜索"));
+    expect(sidebarSearch?.textContent).toContain("⌘K");
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+    });
+    expect(useRuntimeStore.getState().commandOpen).toBe(true);
+    await act(async () => {
+      const started = Date.now();
+      while (!container?.querySelector(".command-dialog") && Date.now() - started < 2000) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    });
+    expect(container.querySelector(".command-dialog")).not.toBeNull();
   });
 
-  it("lets long branch names grow without reaching the centered command trigger", () => {
-    expect(prototypeStyles).toMatch(/\.titlebar-project-switch\s*\{[^}]*width:\s*min\(560px,\s*calc\(50vw - 246px\)\);/s);
+  it("lets long branch names grow across the titlebar", () => {
+    expect(prototypeStyles).toMatch(/\.titlebar-project-switch\s*\{[^}]*width:\s*min\(560px,\s*calc\(100% - 24px\)\);/s);
     expect(prototypeStyles).toMatch(/\.titlebar-project\s*\{[^}]*width:\s*fit-content;[^}]*max-width:\s*calc\(100% - 82px\);/s);
     expect(prototypeStyles).toMatch(/\.titlebar-project span\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;/s);
   });
@@ -120,6 +147,7 @@ describe("application interactions", () => {
 
     const trigger = container.querySelector<HTMLButtonElement>(".titlebar-project");
     expect(trigger?.getAttribute("aria-label")).toBe("切换分支");
+    expect(trigger?.getAttribute("title")).toBeNull();
     expect(trigger?.querySelector("strong")?.textContent).toBe("azem");
 
     await act(async () => trigger?.click());
@@ -240,6 +268,13 @@ describe("application interactions", () => {
     expect(applicationStyles).toMatch(/\.session-copy small\s*\{[^}]*font-size:\s*var\(--text-2xs\)/);
   });
 
+  it("keeps sidebar session titles on one line with ellipsis and no wrap", () => {
+    expect(applicationStyles).toMatch(/\.session-copy strong(?:,\s*\.session-copy small)?\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/s);
+    expect(applicationStyles).not.toMatch(/\.thread-list button \.session-copy\s*\{[^}]*white-space:\s*normal/);
+    expect(applicationStyles).not.toMatch(/\.session-copy strong\s*\{[^}]*white-space:\s*normal/);
+    expect(applicationStyles).not.toMatch(/\.session-copy strong\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  });
+
   it("keeps the thread mounted while subagents open in a drawer", async () => {
     const snapshot: Snapshot = {
       workspace: "/tmp/azem", sessionId: "s1", provider: "chatgpt", model: "gpt-5.6-sol",
@@ -303,7 +338,7 @@ describe("application interactions", () => {
     expect(container.querySelector(".workspace-grid")?.getAttribute("data-inspector")).not.toBe("agent");
     const agentTabs = [...container.querySelectorAll<HTMLButtonElement>(".agent-side-chat-tabs button")];
     expect(agentTabs).toHaveLength(3);
-    expect(agentTabs.every((button) => button.textContent === "" && Boolean(button.title) && Boolean(button.getAttribute("aria-label")))).toBe(true);
+    expect(agentTabs.every((button) => button.textContent === "" && !button.title && Boolean(button.getAttribute("aria-label")))).toBe(true);
     await act(async () => container?.querySelector<HTMLButtonElement>(".agent-side-chat-actions button:last-child")?.click());
     await vi.waitFor(() => expect(container?.querySelector(".subagents-drawer-layer")).not.toBeNull());
     await act(async () => container?.querySelector<HTMLDivElement>(".subagents-drawer-layer")?.click());

@@ -77,6 +77,11 @@ type Options struct {
 	CodexImports []string
 	TrustHooks   bool
 	ListPlugins  func(context.Context) ([]byte, error)
+	// FallbackCatalog is the last known `codex plugin list --json` payload.
+	// Import uses it when a live Codex listing is unavailable so an already
+	// displayed package can still be copied from the local Codex cache or
+	// marketplace checkout.
+	FallbackCatalog []byte
 }
 
 type installedCatalog struct {
@@ -199,7 +204,7 @@ func mergeInstalledPlugin(result *Integration, options Options, installed instal
 		result.SkillDirs = append(result.SkillDirs, skillDir)
 	}
 	mergeMCPServers(result.MCPServers, servers)
-	if options.TrustHooks && hookSource.Path != "" {
+	if hookSource.Path != "" {
 		result.HookSources = append(result.HookSources, hookSource)
 	}
 }

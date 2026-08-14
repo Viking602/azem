@@ -14,6 +14,16 @@ set of typed methods. Runtime mutations continue through validated application
 actions; read-only desktop integrations use focused methods with their own
 input and output limits.
 
+Desktop bootstrap primes sessions, git branches, model routes, agent types,
+Skills, plugins, and Hooks. Skills and Hooks also expose direct read-only
+Bridge methods (`SkillCatalog()`, `HookCatalog()`) so Settings can project the
+current snapshot after subscribe, without waiting for a `list_*` event that
+may have been emitted before the frontend listener. Usage is not primed:
+Settings → Usage calls `Bridge.UsageReport(scope)` only when that page opens
+or the user refreshes, so the event broker is not polled. `hook_catalog`,
+`skill_catalog`, `plugin_catalog`, and `usage_report` remain replaceable: a
+later sequence must not drop a catalog snapshot that the renderer still needs.
+
 Runtime events follow this path:
 
 ```text
@@ -96,17 +106,30 @@ but exposes each complete name and state through its accessible label, title,
 and keyboard tab behavior.
 
 Settings use one Codex-style full-window layout with a searchable left
-navigation and a consistent content column. Model catalog, model routing,
-Subagents, Governance and approvals, Appearance, Extensions, and Archive remain
-complete sections rather than separate modal variants. Archive lists every
-archived conversation grouped by its owning project, can bulk-archive unpinned
+navigation and a consistent content column. Opening Settings focuses the dialog
+surface rather than 返回工作台, so the WebView does not draw a default focus
+ring on that control. Escape and the back control still close Settings; Tab
+still reaches the back control and uses the product `:focus-visible` ring. Model catalog, model routing,
+Subagents, Approvals, Appearance, Extensions, Archive, and Usage remain
+complete sections rather than separate modal variants. Usage is a read-only
+ledger of completed `provider_requests` (and completed skill activations when
+those rows exist). The query is bounded to the last 366 local-calendar days
+and at most 20 models and 20 skills. Cache read/write follow the inclusive
+reported-fact rule: unknown providers stay unreported instead of becoming
+zero. Missing metrics render as —; an empty database does not invent a
+heatmap. Archive lists archived
+conversations grouped by owning project; groups start collapsed and paginate
+rows, and each row shows its project. It can bulk-archive unpinned
 sessions that have been idle for a chosen number of days, and restores a
 conversation to that project's sidebar. The current conversation and pinned
-rows are never bulk-archived. Opening an archived conversation unarchives it. The Subagents section updates the
-live subagent capacity, independent shell capacity, and foreground wait window,
-then persists those validated values to the existing configuration file. Ending
-that window never cancels a child: safe work becomes background work, while
-shared-workspace writes keep waiting.
+rows are never bulk-archived. Opening an archived conversation unarchives it. The Subagents section groups capacity and isolation controls, a read-only
+parallel scheduling note, and main-session display behavior. It updates the
+live subagent capacity, recursive depth, independent shell capacity, and
+foreground wait window, then persists those validated values to the existing
+configuration file. The wait defaults to until the foreground child completes
+(`0` / `0s`). A limited window never cancels a child: ending it only releases
+the parent call, safe work becomes background work, and shared-workspace
+writes keep waiting.
 Extensions contains the shared Skill loading manager used by the secondary
 Extensions page: discovered Skills stay searchable when stopped, and the
 accessible switch sends only the typed `set_skill_enabled` action. The runtime
@@ -115,7 +138,8 @@ succeeds, so a failed save cannot make the current window disagree with the
 next launch. MCP is a separate first-class tab driven by `mcp_state` snapshots,
 not by plugin counts. It exposes live server state, imported tool count,
 refresh/reconnect controls, persistent enable switches, and a validated add
-drawer for stdio and Streamable HTTP services. Every entry exposes a confirmed
+modal for stdio and Streamable HTTP services. The add form is a centered
+overlay hosted on the settings `<dialog>`, not a side drawer. Every entry exposes a confirmed
 delete action that removes the node-preserved configuration and live manager
 entry together, then records a restart-safe tombstone so catalogs cannot
 recreate it.
@@ -123,12 +147,22 @@ The add, enable, and delete actions reuse the active manager instance, while
 connections start and stop in the background so Settings never blocks on MCP
 lifecycle work.
 
-The Hooks tab lists plugin, user, and project hook sources together with any
-commands already loaded into the runtime. Plugin hooks remain untrusted until
-the user turns on **Trust plugin hooks**. That control persists
-`plugins.trust_hooks`, reloads the plugin hook sources immediately, and asks
-for confirmation before enabling. Turning it off unloads plugin hooks without
-removing the packages.
+The Hooks tab lists plugin, user, and project hook sources together with every
+discovered command. Opening Settings and the refresh control read
+`Bridge.HookCatalog()` directly, so a populated runtime cannot look empty
+until the user clicks refresh. Plugin hooks remain untrusted until the user
+turns on **Trust plugin hooks**. That control persists `plugins.trust_hooks`,
+reloads the plugin hook sources immediately, and asks for confirmation before
+enabling. The confirm overlay matches the MCP/plugin delete dialog: one-line
+title, warning copy, and right-aligned actions. It is hosted on the settings
+`<dialog>` so the primary **信任并启用** button stays clickable above the
+scrollable settings page. After a successful write the tab reads the catalog
+back so the switch stays on and imported plugin commands enter the list. A
+failed write stays on the Extensions error banner and does not flip the
+switch. Turning it off unloads plugin hooks without removing the packages.
+Each visible command has its own switch (`set_hook_enabled` /
+`hooks.disabled`). An untrusted plugin hook that is marked enabled still does
+not run.
 
 The Plugins tab calls the capability simply **Plugins**, lists local,
 available-from-Codex, and selected Codex entries as compact rows grouped by
@@ -224,6 +258,13 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   folding, lazy patch loading, hunk parsing, and review rendering.
 - `frontend/src/components/WorkspaceOverviewPage.tsx` owns the repository
   overview and routes into Files, Changes, Pull Requests, and project sessions.
+- `frontend/src/components/ThreadSurface.tsx` owns the session transcript and
+  the bottom composer. The dock overlays the timeline as a transparent,
+  `pointer-events: none` layer so conversation remains visible and scrollable
+  beside the solid input card; only the card, queue, and jump-latest control
+  receive pointer events. There is no fade, mask, or scrim above or around
+  the card; the dock itself is never an opaque full-width mask. Inspector,
+  when open, stays a normal right-hand panel.
 - `frontend/src/components/Timeline.tsx` owns bounded streaming reveal and live
   Markdown rendering. The production renderer keeps the latest eight provider
   deltas as short fade/blur ranges inside the parsed Markdown tree, so headings,
@@ -266,7 +307,7 @@ states, switch tabs, and confirm the file viewer and sidebar scroll
 independently. Then open Environment, click Changes, filter and expand a changed
 file, verify added/deleted lines, and confirm a large change set starts folded.
 Verify every child route returns to Workspace, each project can create a new
-conversation, settings retain all six sections, and streamed assistant text
+conversation, settings retain all eight sections including Usage, and streamed assistant text
 reveals character by character without a cursor or layout shift. Open Live
 context and verify cache metrics distinguish unsupported data from a zero hit
 rate, then expand at least one composition category and confirm its item rows

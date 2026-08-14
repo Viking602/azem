@@ -14,6 +14,7 @@ func AllActionKinds() []ActionKind {
 		ActionLogout,
 		ActionNewSession,
 		ActionListSessions,
+		ActionListUsage,
 		ActionResumeSession,
 		ActionRefreshSession,
 		ActionRenameSession,
@@ -43,6 +44,7 @@ func AllActionKinds() []ActionKind {
 		ActionSetPluginImported,
 		ActionListHooks,
 		ActionSetPluginHooksTrusted,
+		ActionSetHookEnabled,
 		ActionReloadSkills,
 		ActionSetSkillEnabled,
 		ActionListMemories,
@@ -119,5 +121,6 @@ func AllEventKinds() []EventKind {
 		EventBackgroundState,
 		EventBackgroundLogs,
 		EventGitBranches,
+		EventUsageReport,
 	}
 }

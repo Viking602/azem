@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Command, GitBranch, Search } from "lucide-react";
+import { Check, ChevronDown, GitBranch, Search } from "lucide-react";
 import { execute, initialise, isDesktopRuntime, resumeSession, subscribe, subscribePullRequests } from "./bridge";
 import AgentSideChat from "./components/AgentSideChat";
 import Inspector from "./components/Inspector";
@@ -347,7 +347,6 @@ function AppTitleBar() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const branches = useRuntimeStore((state) => state.branches);
   const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
-  const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
   const setError = useRuntimeStore((state) => state.setError);
   const [branchOpen, setBranchOpen] = useState(false);
   const [branchSearch, setBranchSearch] = useState("");
@@ -408,7 +407,7 @@ function AppTitleBar() {
   return <header className="app-titlebar titlebar-region">
     <div className="window-controls" aria-hidden="true"><i /><i /><i /></div>
     <div className="titlebar-project-switch" ref={branchSwitch}>
-      <button type="button" className="titlebar-project" title={`${project} / ${branch}`} aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} onClick={() => setBranchOpen((open) => !open)}>
+      <button type="button" className="titlebar-project" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} onClick={() => setBranchOpen((open) => !open)}>
         <strong>{project}</strong><b aria-hidden="true">/</b><span>{branch}</span><ChevronDown size={14} />
       </button>
       {branchOpen && <section className="titlebar-project-popover" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}>
@@ -419,7 +418,7 @@ function AppTitleBar() {
             const currentDetail = workspaceChangedFiles > 0
               ? tFormat(snapshot.language, "uncommittedFiles", { count: workspaceChangedFiles })
               : t("clean");
-            return <button key={item.name} type="button" role="option" aria-selected={item.current} title={item.name} onClick={() => void switchBranch(item.name)}>
+            return <button key={item.name} type="button" role="option" aria-selected={item.current} onClick={() => void switchBranch(item.name)}>
               <span className="titlebar-project-letter"><GitBranch size={14} /></span>
               <span><strong>{item.name}</strong><small>{item.current ? currentDetail : t("local")}</small></span>
               <em>{item.current ? snapshot.language === "zh-CN" ? "当前" : "Current" : ""}</em>
@@ -431,9 +430,6 @@ function AppTitleBar() {
         <footer><span>↵ {snapshot.language === "zh-CN" ? "切换" : "Switch"}</span><span>esc {snapshot.language === "zh-CN" ? "关闭" : "Close"}</span></footer>
       </section>}
     </div>
-    <button type="button" className="titlebar-command" onClick={() => setCommandOpen(true)} aria-label={t("command")}>
-      <span>{snapshot.language === "zh-CN" ? "搜索、跳转或执行命令" : "Search, jump, or run a command"}</span><kbd><Command size={11} />K</kbd>
-    </button>
   </header>;
 }
 

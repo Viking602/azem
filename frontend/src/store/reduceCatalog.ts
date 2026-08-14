@@ -6,6 +6,7 @@ import {
   normalizeModel,
   normalizePlugin,
   normalizeSkill,
+  normalizeUsageReport,
   numberValue,
   parseArray,
   parseMCPServers,
@@ -24,6 +25,9 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
       break;
     case "hook_catalog":
       next.hookCatalog = normalizeHookCatalog(event.hookCatalog);
+      break;
+    case "usage_report":
+      next.usageReport = normalizeUsageReport(event.usageReport);
       break;
     case "mcp_state": {
       if (event.state === "snapshot") {
@@ -48,7 +52,7 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
         subagentConcurrency: numberValue(data.subagent_max_concurrency, next.snapshot.subagentConcurrency),
         subagentMaxDepth: numberValue(data.subagent_max_depth, next.snapshot.subagentMaxDepth ?? 2),
         shellConcurrency: numberValue(data.shell_max_concurrency, next.snapshot.shellConcurrency ?? 2),
-        subagentAwaitSeconds: numberValue(data.subagent_await_seconds, next.snapshot.subagentAwaitSeconds ?? 600),
+        subagentAwaitSeconds: numberValue(data.subagent_await_seconds, next.snapshot.subagentAwaitSeconds ?? 0),
         chatgptFastMode: data.chatgpt_fast_mode === "true",
       };
       break;

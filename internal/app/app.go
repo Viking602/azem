@@ -93,6 +93,7 @@ type Service struct {
 	pluginOptions      plugins.Options
 	pluginSkillDirs    []string
 	pluginMCPNames     []string
+	pluginHookSources  []plugins.HookSource
 	hooks              hooks.Dispatcher
 	hookOptions        hooks.Options
 	hookWatcher        *hookWatcher

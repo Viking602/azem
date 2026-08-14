@@ -51,6 +51,7 @@ type HooksConfig struct {
 	DefaultTimeoutParsed time.Duration `yaml:"-"`
 	FailurePolicy        string        `yaml:"failure_policy"`
 	AdditionalPaths      []string      `yaml:"additional_paths,omitempty"`
+	Disabled             []string      `yaml:"disabled,omitempty"`
 }
 
 type DefaultsConfig struct {
@@ -210,7 +211,9 @@ type SubagentConfig struct {
 	MaxDepth       int  `yaml:"max_depth"`
 	MaxConcurrency int  `yaml:"max_concurrency"`
 	// AwaitTimeout is the foreground tool-call wait window, not a child
-	// execution timeout. Safe work continues in the background when it elapses.
+	// execution timeout. Zero waits until the foreground child completes.
+	// A positive duration only releases the parent; safe work continues
+	// in the background when it elapses.
 	AwaitTimeout  string                           `yaml:"await_timeout"`
 	AwaitDuration time.Duration                    `yaml:"-"`
 	AutoWake      bool                             `yaml:"auto_wake"`
@@ -344,7 +347,7 @@ func Default() Config {
 				MaxSummaryTokens: 32768, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
 			},
 			Subagents: SubagentConfig{
-				Enabled: true, MaxDepth: 2, MaxConcurrency: 32, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
+				Enabled: true, MaxDepth: 2, MaxConcurrency: 32, AwaitTimeout: "0s", AwaitDuration: 0, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
@@ -424,6 +427,9 @@ func (c *Config) Validate() error {
 	c.Hooks.DefaultTimeoutParsed = timeout
 	if c.Hooks.FailurePolicy != "open" && c.Hooks.FailurePolicy != "closed" {
 		return fmt.Errorf("hooks.failure_policy must be open or closed")
+	}
+	if err := c.validateHooksDisabled(); err != nil {
+		return err
 	}
 	if c.Defaults.AgentMode != "single" && c.Defaults.AgentMode != "team" {
 		return fmt.Errorf("defaults.agent_mode must be single or team")
@@ -713,6 +719,21 @@ func (c *Config) validateSkills() error {
 	return nil
 }
 
+func (c *Config) validateHooksDisabled() error {
+	seen := make(map[string]struct{}, len(c.Hooks.Disabled))
+	for _, id := range c.Hooks.Disabled {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return fmt.Errorf("hooks.disabled contains an empty hook identity")
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("hooks.disabled contains duplicate hook %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
 func (c *Config) validateSubagents() error {
 	subagents := &c.Agents.Subagents
 	if subagents.MaxDepth < -1 {
@@ -721,9 +742,9 @@ func (c *Config) validateSubagents() error {
 	if subagents.MaxConcurrency < 0 {
 		return fmt.Errorf("agents.subagents.max_concurrency must be non-negative (zero is unbounded)")
 	}
-	await, err := time.ParseDuration(subagents.AwaitTimeout)
-	if err != nil || await <= 0 {
-		return fmt.Errorf("agents.subagents.await_timeout must be a positive duration")
+	await, err := parseSubagentAwaitTimeout(subagents.AwaitTimeout)
+	if err != nil {
+		return err
 	}
 	wallClock, err := time.ParseDuration(subagents.Budget.MaxWallClock)
 	if err != nil || wallClock < 0 {
@@ -908,4 +929,28 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+const (
+	minSubagentAwaitSeconds = 5
+	maxSubagentAwaitSeconds = 3600
+)
+
+// ValidSubagentAwaitSeconds reports whether a settings or YAML update may store
+// this foreground wait. Zero waits until the foreground child completes;
+// otherwise the value must be between 5 and 3600 seconds.
+func ValidSubagentAwaitSeconds(seconds int) bool {
+	return seconds == 0 || (seconds >= minSubagentAwaitSeconds && seconds <= maxSubagentAwaitSeconds)
+}
+
+func parseSubagentAwaitTimeout(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "0" {
+		return 0, nil
+	}
+	await, err := time.ParseDuration(value)
+	if err != nil || await < 0 {
+		return 0, fmt.Errorf("agents.subagents.await_timeout must be a non-negative duration (zero waits until the foreground child completes)")
+	}
+	return await, nil
 }

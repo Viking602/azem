@@ -28,10 +28,10 @@ function DiffFile({ change, language }: { change: FileChange; language: Language
   };
   return <section className="code-diff" aria-label={`${t("editedFileDiff")} · ${change.path}`}>
     <header>
-      <strong title={change.path}>{filename}</strong>
+      <strong>{change.path}</strong>
       <span className="diff-count plus">+{change.additions}</span>
       <span className="diff-count minus">−{change.deletions}</span>
-      <button type="button" onClick={copy} aria-label={t("copyDiff")} title={t("copyDiff")}>
+      <button type="button" onClick={copy} aria-label={t("copyDiff")}>
         <Copy size={14} />
       </button>
     </header>

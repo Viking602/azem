@@ -21,7 +21,7 @@ export function ContextMeter() {
   }, []);
   const label = metrics.limit > 0 ? `${t("contextUsage")} ${metrics.percentage}%` : t("contextUnavailable");
   return <details ref={details} className="context-meter" data-tone={tone}>
-    <summary title={label} aria-label={label}>
+    <summary aria-label={label}>
       <svg viewBox="0 0 20 20" aria-hidden="true"><circle className="context-ring-track" cx="10" cy="10" r="7.5" pathLength="100" /><circle className="context-ring-value" cx="10" cy="10" r="7.5" pathLength="100" strokeDasharray={`${metrics.percentage} 100`} /></svg>
     </summary>
     <div className="context-meter-popover">

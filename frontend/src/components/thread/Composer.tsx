@@ -201,7 +201,7 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
           }
         }} />
         <div className="composer-toolbar">
-          <label className="icon-button attach-button" title={t("attach")}>
+          <label className="icon-button attach-button" aria-label={t("attach")}>
             <Plus size={15} />
             <input type="file" accept="image/*" multiple onChange={(event) => { attach(event.target.files); event.target.value = ""; }} />
           </label>
@@ -211,7 +211,6 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
             className="plan-mode-toggle"
             data-active={String(planMode)}
             disabled={running}
-            title={planMode ? t("plan") : t("planHint")}
             aria-pressed={planMode}
             aria-label={t("plan")}
             onClick={() => setPlanMode(!planMode)}
@@ -238,7 +237,7 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
             fasterLabel={t("reasoningFaster")} smarterLabel={t("reasoningSmarter")}
             highCostHint={t("reasoningMaxHint")} fastBoostTitle={t("fastBoostTitle")} fastBoostDetail={t("fastBoostDetail")} language={snapshot.language}
           />
-          {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} title={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={() => submitOrChooseSlash()} disabled={!prompt.trim() && attachments.length === 0} title={busy ? running && deliveryMode === "guide" ? t("guide") : t("queue") : t("send")}><ArrowUp size={17} strokeWidth={2.25} /></button>}
+          {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} aria-label={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={() => submitOrChooseSlash()} disabled={!prompt.trim() && attachments.length === 0} aria-label={busy ? running && deliveryMode === "guide" ? t("guide") : t("queue") : t("send")}><ArrowUp size={17} strokeWidth={2.25} /></button>}
         </div>
       </div>
     </div>
@@ -381,17 +380,17 @@ function ComposerContextBar() {
 
   return (
     <div className="composer-context-bar" aria-label={t("workspace")}>
-      <button type="button" className="composer-chip composer-chip-action" title={`${t("switchProject")}: ${snapshot.workspace}`} disabled={busy} onClick={() => void switchProject()}>
+      <button type="button" className="composer-chip composer-chip-action" aria-label={`${t("switchProject")}: ${project}`} disabled={busy} onClick={() => void switchProject()}>
         <Folder size={13} />
         <span>{project}</span>
       </button>
-      <span className="composer-chip" title={snapshot.workspace}>
+      <span className="composer-chip">
         <HardDrive size={13} />
         <span>{t("local")}</span>
       </span>
       {branches.length > 0 ? (
         <details ref={branchMenu} className="composer-branch-menu">
-          <summary className="composer-chip composer-chip-action" title={t("branch")}>
+          <summary className="composer-chip composer-chip-action">
             <GitBranch size={13} />
             <span>{currentBranch || t("branch")}</span>
             <ChevronDown size={11} />
@@ -424,7 +423,6 @@ function ComposerContextBar() {
                   aria-selected={branch.current}
                   className={branch.current ? "selected" : ""}
                   key={branch.name}
-                  title={branch.name}
                   onClick={() => void switchBranch(branch.name)}
                 >
                   <GitBranch size={14} />
@@ -468,7 +466,7 @@ function ComposerContextBar() {
           </div>
         </details>
       ) : (
-        <span className="composer-chip composer-chip-muted" title={t("noBranches")}>
+        <span className="composer-chip composer-chip-muted">
           <GitBranch size={13} />
           <span>{t("noBranches")}</span>
         </span>

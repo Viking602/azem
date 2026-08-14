@@ -64,7 +64,7 @@ function PullRequestRow({ pullRequest }: { pullRequest: PullRequestSummary }) {
       <CheckSummary pullRequest={pullRequest} />
       <span className="pull-request-diff"><b>+{pullRequest.additions.toLocaleString()}</b><em>-{pullRequest.deletions.toLocaleString()}</em></span>
     </button>
-    <button type="button" className="icon-button pull-request-open-github" aria-label={t("openGitHub")} title={t("openGitHub")} onClick={() => void openExternalURL(pullRequest.url)}><Github size={15} /></button>
+    <button type="button" className="icon-button pull-request-open-github" aria-label={t("openGitHub")} onClick={() => void openExternalURL(pullRequest.url)}><Github size={15} /></button>
   </article>;
 }
 

@@ -2,6 +2,7 @@ package grok
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,9 +23,13 @@ const (
 	DefaultClientID      = "b1a00492-073a-47ea-816f-4c329264a828"
 	DefaultClientVersion = "0.2.121"
 	DefaultScope         = "openid profile email offline_access grok-cli:access api:access"
+	DefaultUserURL       = "https://cli-chat-proxy.grok.com/v1/user?include=subscription"
+	DefaultQuotaURL      = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 	CompatibilityNotice  = "Grok sign-in uses the Grok CLI public-client compatibility surface and is experimental."
+	ClientModeHeadless   = "headless"
 	deviceClientSurface  = "ui"
 	deviceReferrer       = "grok-build"
+	userInfoBodySize     = 64 << 10
 )
 
 var (
@@ -35,6 +40,7 @@ var (
 type Client struct {
 	HTTP          *resty.Client
 	DiscoveryURL  string
+	UserURL       string
 	ClientID      string
 	Scope         string
 	AllowInsecure bool
@@ -67,10 +73,29 @@ type Tokens struct {
 	ExpiresAt    time.Time
 	AccountID    string
 	Email        string
+	DisplayName  string
 	Plan         string
 	ClientID     string
 	SourcePath   string
 	SourceKey    string
+}
+
+// Identity is the user-visible Grok account profile extracted from a token or
+// the CLI-proxy /v1/user response. DisplayName prefers an email or handle and
+// never uses a raw token.
+type Identity struct {
+	UserID      string
+	Email       string
+	DisplayName string
+	Plan        string
+}
+
+type UserInfo struct {
+	UserID           string
+	Email            string
+	FirstName        string
+	LastName         string
+	SubscriptionTier string
 }
 
 func NewClient() *Client {
@@ -312,6 +337,7 @@ func Import(path string) (Tokens, error) {
 	if result.AccessToken == "" && result.RefreshToken == "" {
 		return Tokens{}, fmt.Errorf("Grok credential has no access or refresh token")
 	}
+	applyTokenIdentity(&result)
 	return result, nil
 }
 
@@ -426,7 +452,146 @@ func decodeTokens(data []byte) (Tokens, error) {
 	if payload.ExpiresIn > 0 {
 		result.ExpiresAt = time.Now().UTC().Add(time.Duration(payload.ExpiresIn) * time.Second)
 	}
+	applyTokenIdentity(&result)
 	return result, nil
+}
+
+func applyTokenIdentity(tokens *Tokens) {
+	if tokens == nil {
+		return
+	}
+	identity := IdentityFromTokens(tokens.IDToken, tokens.AccessToken)
+	if tokens.AccountID == "" {
+		tokens.AccountID = identity.UserID
+	}
+	if tokens.Email == "" {
+		tokens.Email = identity.Email
+	}
+	if tokens.Plan == "" {
+		tokens.Plan = identity.Plan
+	}
+	if tokens.DisplayName == "" {
+		tokens.DisplayName = firstNonEmpty(identity.DisplayName, tokens.Email)
+	}
+}
+
+func IdentityFromTokens(idToken string, accessToken string) Identity {
+	claims := tokenClaims(idToken)
+	if len(claims) == 0 {
+		claims = tokenClaims(accessToken)
+	}
+	return identityFromClaims(claims)
+}
+
+func identityFromClaims(claims map[string]any) Identity {
+	email := claimString(claims, "email")
+	name := strings.TrimSpace(strings.TrimSpace(claimString(claims, "given_name") + " " + claimString(claims, "family_name")))
+	if name == "" {
+		name = claimString(claims, "name")
+	}
+	handle := firstNonEmpty(claimString(claims, "preferred_username"), claimString(claims, "nickname"), claimString(claims, "username"))
+	return Identity{
+		UserID:      firstNonEmpty(claimString(claims, "user_id"), claimString(claims, "uid"), claimString(claims, "account_id"), claimString(claims, "sub")),
+		Email:       email,
+		DisplayName: firstNonEmpty(email, name, handle),
+		Plan:        firstNonEmpty(claimString(claims, "tier"), claimString(claims, "subscription_tier"), claimString(claims, "plan")),
+	}
+}
+
+func (info UserInfo) DisplayName() string {
+	name := strings.TrimSpace(strings.TrimSpace(info.FirstName + " " + info.LastName))
+	return firstNonEmpty(info.Email, name)
+}
+
+func DecodeUserInfo(data []byte) (UserInfo, error) {
+	var payload struct {
+		UserID           string `json:"userId"`
+		UserIDSnake      string `json:"user_id"`
+		Email            string `json:"email"`
+		FirstName        string `json:"firstName"`
+		FirstNameSnake   string `json:"first_name"`
+		LastName         string `json:"lastName"`
+		LastNameSnake    string `json:"last_name"`
+		SubscriptionTier string `json:"subscriptionTier"`
+		TierSnake        string `json:"subscription_tier"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return UserInfo{}, fmt.Errorf("decode Grok user profile: %w", err)
+	}
+	info := UserInfo{
+		UserID:           firstNonEmpty(payload.UserID, payload.UserIDSnake),
+		Email:            strings.TrimSpace(payload.Email),
+		FirstName:        firstNonEmpty(payload.FirstName, payload.FirstNameSnake),
+		LastName:         firstNonEmpty(payload.LastName, payload.LastNameSnake),
+		SubscriptionTier: firstNonEmpty(payload.SubscriptionTier, payload.TierSnake),
+	}
+	if info.UserID == "" {
+		return UserInfo{}, fmt.Errorf("Grok user lookup returned no user id")
+	}
+	return info, nil
+}
+
+func (c *Client) User(ctx context.Context, accessToken string) (UserInfo, error) {
+	endpoint := c.UserURL
+	if endpoint == "" {
+		endpoint = DefaultUserURL
+	}
+	if err := c.validateEndpoint(endpoint); err != nil {
+		return UserInfo{}, err
+	}
+	if strings.TrimSpace(accessToken) == "" {
+		return UserInfo{}, fmt.Errorf("Grok user lookup requires an access token")
+	}
+	response, err := c.httpClient().R().
+		SetContext(ctx).
+		SetResponseBodyLimit(userInfoBodySize).
+		SetAuthToken(accessToken).
+		SetHeader("Accept", "application/json").
+		SetHeader("X-XAI-Token-Auth", "xai-grok-cli").
+		SetHeader("x-grok-client-version", DefaultClientVersion).
+		SetHeader("x-grok-client-mode", ClientModeHeadless).
+		SetHeader("User-Agent", "azem/1").
+		Get(endpoint)
+	if err != nil {
+		return UserInfo{}, err
+	}
+	if response.StatusCode()/100 != 2 {
+		return UserInfo{}, fmt.Errorf("Grok user lookup returned HTTP %d", response.StatusCode())
+	}
+	return DecodeUserInfo(response.Bytes())
+}
+
+func tokenClaims(token string) map[string]any {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	var claims map[string]any
+	if json.Unmarshal(data, &claims) != nil {
+		return nil
+	}
+	return claims
+}
+
+func claimString(claims map[string]any, key string) string {
+	if claims == nil {
+		return ""
+	}
+	value, _ := claims[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (c *Client) postDeviceForm(ctx context.Context, endpoint string, values url.Values) (*resty.Response, error) {

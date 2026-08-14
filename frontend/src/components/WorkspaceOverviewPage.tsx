@@ -71,7 +71,7 @@ export default function WorkspaceOverviewPage() {
       <div className="workspace-project-heading">
         <span className="workspace-eyebrow">WORKSPACE</span>
         <div><h1 id="workspace-overview-heading">{projectName}</h1><span className="workspace-current-branch"><i />{changes?.branch || pullRequestDashboard?.currentBranch || snapshot.currentBranch || t("noBranches")}</span></div>
-        <p title={snapshot.workspace}>{snapshot.workspace}</p>
+        <p>{snapshot.workspace}</p>
       </div>
       <div className="workspace-header-actions">
         <button type="button" className="workspace-open-terminal" onClick={() => void openWorkspaceTerminal().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}>{t("openTerminal")}</button>
@@ -126,7 +126,7 @@ export default function WorkspaceOverviewPage() {
 
 function ChangeRow({ file, open }: { file: WorkspaceChangeFile; open: () => void }) {
   const directory = file.path.split("/").slice(0, -1).join("/") || ".";
-  return <button type="button" onClick={open} title={file.path}>
+  return <button type="button" onClick={open}>
     <span className={`workspace-file-status ${file.status}`}>{statusLabel(file.status)}</span>
     <FileTypeIcon path={file.path} />
     <span><strong>{fileBasename(file.path)}</strong><small>{directory}</small></span>

@@ -30,6 +30,7 @@ export {
   modelDisplayName,
   normalizeUIFont,
   parseMCPServers,
+  pluginImportID,
   providerDisplayName,
 } from "./store/normalize";
 export type { ContextUsage, ModelOption, UIFont } from "./store/normalize";
@@ -94,6 +95,7 @@ const initialData: RuntimeData = {
   mcpServers: [],
   plugins: [],
   hookCatalog: { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] },
+  usageReport: null,
   branches: [],
   modelRoutes: [],
   modelProviders: [],
@@ -367,8 +369,10 @@ export const shouldMarkSessionUnread = (
   UNREAD_SESSION_TERMINALS.has(event.kind), Boolean(state.globalRunId), event.sessionId === state.globalRunSessionId,
   ["starting", event.runId ?? state.globalRunId].includes(state.globalRunId)].every(Boolean);
 
+const REPLACEABLE_CATALOG_KINDS = new Set(["skill_catalog", "plugin_catalog", "hook_catalog", "usage_report"]);
+
 function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
-  if (event.sequence && event.sequence <= state.lastSequence) return state;
+  if (event.sequence && event.sequence <= state.lastSequence && !REPLACEABLE_CATALOG_KINDS.has(event.kind)) return state;
   const markSessionUnread = shouldMarkSessionUnread(state, event);
   const next = { ...state, lastSequence: Math.max(state.lastSequence, event.sequence || 0) };
   // The backend permits only one main run process-wide. Track that lifecycle before
@@ -438,6 +442,7 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "skill_catalog":
     case "plugin_catalog":
     case "hook_catalog":
+    case "usage_report":
     case "mcp_state":
     case "model_routes":
     case "model_providers":

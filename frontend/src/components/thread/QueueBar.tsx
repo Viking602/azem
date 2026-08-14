@@ -53,14 +53,14 @@ export function QueuedPrompts({ items, running, pauseReason, editingId, delivery
         }}
       >
         <span className="queue-drag" aria-hidden="true"><GripVertical size={14} /></span>
-        <button className="queued-prompt-content" onClick={() => onEdit(item)} title={item.error || t("editMessage")}>
+        <button className="queued-prompt-content" onClick={() => onEdit(item)} aria-label={item.error || t("editMessage")}>
           {item.attachments.length > 0 && <ImagePlus size={14} />}
           <span>{item.text || item.attachments[0]?.name}</span>
         </button>
         {item.state === "failed"
-          ? <button className="queued-guide" title={item.error || t("queuedMessageFailed")} onClick={() => onRetry(item.id)}><RotateCcw size={14} />{t("retryMessage")}</button>
-          : <button className="queued-guide" disabled={!running} title={t("steerTooltip")} onClick={() => void onGuide(item)}><CornerUpRight size={14} />{t("guide")}</button>}
-        <button className="queued-icon" title={t("deleteMessage")} aria-label={t("deleteMessage")} onClick={() => onDelete(item)}><Trash2 size={14} /></button>
+          ? <button className="queued-guide" aria-label={item.error || t("queuedMessageFailed")} onClick={() => onRetry(item.id)}><RotateCcw size={14} />{t("retryMessage")}</button>
+          : <button className="queued-guide" disabled={!running} aria-label={t("steerTooltip")} onClick={() => void onGuide(item)}><CornerUpRight size={14} />{t("guide")}</button>}
+        <button className="queued-icon" aria-label={t("deleteMessage")} onClick={() => onDelete(item)}><Trash2 size={14} /></button>
         <QueueMenu
           item={item}
           queueing={deliveryMode === "queue"}
@@ -137,7 +137,7 @@ function QueueMenu({ item, queueing, canMoveUp, canMoveDown, onEdit, onMoveUp, o
   </div>;
   return <>
     <details ref={details} className="queue-menu" onToggle={() => requestAnimationFrame(place)}>
-      <summary aria-label={t("moreActions")} title={t("moreActions")}><MoreHorizontal size={15} /></summary>
+      <summary aria-label={t("moreActions")}><MoreHorizontal size={15} /></summary>
     </details>
     {menuBox ? createPortal(actions, document.body) : null}
   </>;

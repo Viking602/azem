@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { ArrowDown } from "lucide-react";
 import { cancelActive, execute, guide, importAttachment, importClipboardImage, startTurn } from "../bridge";
@@ -21,6 +21,10 @@ export { effectiveComposerRoute, supportsFastMode } from "./thread/composerModel
 export { parseSkillPrompt, skillTitle, slashSuggestions } from "./thread/slash";
 
 const SESSION_STAGE_EASE = [0.16, 1, 0.3, 1] as const;
+
+export function composerOverlayGap(dockHeight: number): number {
+  return Math.max(24, Math.ceil(dockHeight));
+}
 
 export function sessionStageMotion(reducedMotion: boolean) {
   if (reducedMotion) {
@@ -70,6 +74,7 @@ export default function ThreadSurface() {
   const setAgentMode = (_value: string) => undefined;
   const [following, setFollowing] = useState(true);
   const viewport = useRef<HTMLDivElement>(null);
+  const dock = useRef<HTMLDivElement>(null);
   const reduceMotion = useReducedMotion();
   const t = translator(snapshot.language);
   const empty = blocks.length === 0 && !running;
@@ -100,6 +105,25 @@ export default function ThreadSurface() {
     clearAttachments();
     setEditingQueuedId(null);
   }, [clearAttachments, currentSessionId]);
+  useLayoutEffect(() => {
+    const node = dock.current;
+    if (!node) return;
+    const stage = node.closest<HTMLElement>(".thread-session-stage");
+    if (!stage) return;
+    const sync = () => {
+      stage.style.setProperty("--transcript-bottom-gap", `${composerOverlayGap(node.offsetHeight)}px`);
+    };
+    sync();
+    if (typeof ResizeObserver === "undefined") {
+      return () => stage.style.removeProperty("--transcript-bottom-gap");
+    }
+    const observer = new ResizeObserver(sync);
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+      stage.style.removeProperty("--transcript-bottom-gap");
+    };
+  }, [empty]);
   const beginTurn = useTurnStarter(agentMode, planMode, setFollowing);
   useQueuedTurnRunner(
     queuedPrompts, runtimeBusy, queuePauseReason, editingQueuedId, beginTurn, removeQueuedPrompt, failQueuedPrompt,
@@ -281,8 +305,8 @@ export default function ThreadSurface() {
                     {error && <div className="inline-error" role="alert">{error}</div>}
                   </div>
                 </div>
-                <div className="composer-dock">
-                  {!following && <button className="jump-latest" aria-label={t("jumpLatest")} title={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
+                <div className="composer-dock" ref={dock}>
+                  {!following && <button className="jump-latest" aria-label={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
                   <div className="composer-stack">
                     {queue}
                     <Composer
@@ -417,7 +441,7 @@ function HeaderActions({ empty }: { empty: boolean }) {
   const inspectorOpen = useRuntimeStore((state) => state.inspectorOpen);
   const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const t = translator(snapshot.language);
-  return <div className="thread-actions"><button hidden={empty} className="square-button inspector-toggle" data-open={String(inspectorOpen)} title={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}>{snapshot.language === "zh-CN" ? "侧栏" : "Panel"}</button></div>;
+  return <div className="thread-actions"><button hidden={empty} className="square-button inspector-toggle" data-open={String(inspectorOpen)} aria-label={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}>{snapshot.language === "zh-CN" ? "侧栏" : "Panel"}</button></div>;
 }
 
 function emptySuggestions(language: Snapshot["language"]) {

@@ -138,7 +138,7 @@ export default function WorkspaceFilesPage() {
         {activePath ? <>
           <div className="workspace-file-toolbar">
             <div className="workspace-active-file">{isDesktopRuntime() ? <FileTypeIcon path={activePath} /> : <span className={`prototype-file-kind ${activePath.endsWith(".css") ? "css" : "ts"}`}>{activePath.endsWith(".css") ? "#" : "TS"}</span>}<strong>{fileBasename(activePath)}</strong><span>{pathParts(activePath).slice(0, -1).join("/")}</span></div>
-            <div className="workspace-file-meta"><button type="button" className="small-button"><Paperclip size={13} />{snapshot.language === "zh-CN" ? "加入上下文" : "Add to context"}</button><button type="button" className="icon-button" title={t("copyPath")} aria-label={t("copyPath")} onClick={() => void navigator.clipboard?.writeText(activePath)}><Copy size={14} /></button><button type="button" className="icon-button" title={t("refreshFiles")} aria-label={t("refreshFiles")} onClick={refresh}><RefreshCw size={14} /></button></div>
+            <div className="workspace-file-meta"><button type="button" className="small-button"><Paperclip size={13} />{snapshot.language === "zh-CN" ? "加入上下文" : "Add to context"}</button><button type="button" className="icon-button" aria-label={t("copyPath")} onClick={() => void navigator.clipboard?.writeText(activePath)}><Copy size={14} /></button><button type="button" className="icon-button" aria-label={t("refreshFiles")} onClick={refresh}><RefreshCw size={14} /></button></div>
           </div>
           <div className="workspace-file-content">
             {loadingFile && !activeFile ? <div className="workspace-file-empty"><LoaderCircle className="spin" size={24} /><p>{t("loadingFile")}</p></div> : <FilePreview file={activeFile} />}
@@ -158,7 +158,7 @@ function TreeBranch({ parent, depth, directories, expanded, loading, activePath,
   const entries = (directories[parent]?.entries ?? []).filter((entry) => !normalizedQuery || entry.directory || entry.name.toLocaleLowerCase().includes(normalizedQuery));
   return <>{entries.map((entry) => <div key={entry.path} role="treeitem" aria-expanded={entry.directory ? expanded.has(entry.path) : undefined}>
     <button type="button" className={`workspace-tree-row ${activePath === entry.path ? "active" : ""} ${entry.hidden ? "hidden" : ""}`} style={{ "--tree-depth": depth } as React.CSSProperties}
-      onClick={() => entry.directory ? onToggle(entry.path) : onOpen(entry.path)} title={entry.path}>
+      onClick={() => entry.directory ? onToggle(entry.path) : onOpen(entry.path)}>
       <span className="tree-caret">{entry.directory ? loading.has(entry.path) ? <LoaderCircle className="spin" size={12} /> : expanded.has(entry.path) ? <ChevronDown size={13} /> : <ChevronRight size={13} /> : null}</span>
       {entry.directory
         ? isDesktopRuntime() ? expanded.has(entry.path) ? <FolderOpen size={15} /> : <Folder size={15} /> : null

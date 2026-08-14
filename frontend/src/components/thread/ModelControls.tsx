@@ -318,7 +318,7 @@ export function ModelControls({ running, models, selectedModel, selectedModelNam
                 onClick={() => !running && setActiveGroup((current) => current === group.label ? null : group.label)}
               >
                 <span>{group.label}</span>
-                <small title={group.current}>{group.current}</small>
+                <small>{group.current}</small>
                 <ChevronRight size={13} />
               </button>
             </div>
@@ -328,7 +328,6 @@ export function ModelControls({ running, models, selectedModel, selectedModelNam
               type="button"
               className="model-control-back"
               aria-label={backLabel}
-              title={backLabel}
               onClick={() => {
                 transitionModelControlView("back");
               }}
@@ -366,7 +365,6 @@ export function ModelControls({ running, models, selectedModel, selectedModelNam
                   type="button"
                   className={`effort-panel-speed ${fastActive ? "active" : ""}`}
                   disabled={running}
-                  title={fastActive ? `${fastBoostTitle} · ${fastBoostDetail}` : `${standardSpeed} · ${fastHint}`}
                   aria-label={speedLabel}
                   aria-pressed={fastActive}
                   onClick={() => onSpeedChange(fastActive ? "standard" : "fast")}
@@ -448,7 +446,6 @@ export function ModelControls({ running, models, selectedModel, selectedModelNam
           disabled={running}
           className={`${option.provider ? "has-provider-icon" : ""} ${active.selected === option.value ? "selected" : ""}`.trim()}
           key={option.value}
-          title={option.hint ? `${option.label} — ${option.hint}` : undefined}
           onClick={() => choose(active.select, option.value)}
         >
           {option.provider ? <ProviderIcon provider={option.provider} /> : null}
@@ -491,9 +488,6 @@ export function ModelControls({ running, models, selectedModel, selectedModelNam
         ref={summary as React.RefObject<HTMLElement>}
         aria-disabled={running}
         aria-expanded={open}
-        title={fastActive
-          ? `${fastBoostTitle} · ${selectedModelName} · ${selectedReasoningName}`
-          : `${selectedModelName} · ${selectedReasoningName}`}
         data-fast={String(fastActive)}
         data-high={String(highEffort)}
       >

@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -162,4 +164,61 @@ func TestListModelProvidersDoesNotBlockOnSubscriptionQuota(t *testing.T) {
 	if chatgpt.QuotaAvailable {
 		t.Fatal("initial catalog must not wait for live subscription quota")
 	}
+}
+
+func TestListModelProvidersHydratesGrokAnonymousLabelFromJWT(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	credentials, err := authservice.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication := authservice.NewService(store.DB(), credentials, nil, nil)
+	authentication.GrokUserURL = "http://127.0.0.1:1/user"
+	authentication.GrokQuotaURL = "http://127.0.0.1:1/billing"
+	idToken := providerTestJWT(map[string]any{"sub": "jwt-user", "email": "owner@example.com"})
+	if _, err := credentials.Put(ctx, authservice.Credential{Provider: "grok", AccountID: "anonymous-be73a171915548ed", AccessToken: "access", IDToken: idToken}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().UnixNano()
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"anonymous-be73a171915548ed", "grok", "", "", "", "file:grok:anonymous-be73a171915548ed", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachAuth(authentication, nil)
+	started := time.Now()
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionListModelProviders}); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 750*time.Millisecond {
+		t.Fatalf("list_model_providers blocked for %s while hydrating Grok identity", elapsed)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var grokProvider ModelProviderEntry
+	for _, provider := range event.ModelProviders {
+		if provider.ID == "grok" {
+			grokProvider = provider
+			break
+		}
+	}
+	if grokProvider.AccountID != "anonymous-be73a171915548ed" || grokProvider.AccountLabel != "owner@example.com" {
+		t.Fatalf("grok provider = %+v", grokProvider)
+	}
+}
+
+func providerTestJWT(claims map[string]any) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		panic(err)
+	}
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }

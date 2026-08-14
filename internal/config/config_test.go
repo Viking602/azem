@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,40 @@ func TestHooksConfigDefaultsAndLoad(t *testing.T) {
 	cfg.Hooks.FailurePolicy = "unsafe"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("invalid hook failure policy accepted")
+	}
+}
+
+func TestHooksDisabledLoadUpdateAndValidation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	id := "SessionStart\x1fnotify\x1f" + filepath.Join(root, "hooks.json") + "\x1f"
+	if err := os.WriteFile(path, []byte("version: 1\nhooks:\n  disabled:\n    - "+strconv.Quote(id)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded.Hooks.Disabled, []string{id}) {
+		t.Fatalf("loaded disabled hooks = %#v", loaded.Hooks.Disabled)
+	}
+	if err := UpdateHooksDisabled(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared.Hooks.Disabled) != 0 {
+		t.Fatalf("cleared disabled hooks = %#v", cleared.Hooks.Disabled)
+	}
+	if err := UpdateHooksDisabled(path, []string{id, id}); err == nil {
+		t.Fatal("duplicate disabled hook was accepted")
+	}
+	invalid := Default()
+	invalid.Hooks.Disabled = []string{" "}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("empty disabled hook identity was accepted")
 	}
 }
 
@@ -940,7 +975,7 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	}
 	subagents := cfg.Agents.Subagents
 	if !subagents.Enabled || subagents.MaxDepth != 2 || subagents.MaxConcurrency != 32 ||
-		subagents.AwaitDuration != 10*time.Minute || !subagents.AutoWake {
+		subagents.AwaitTimeout != "0s" || subagents.AwaitDuration != 0 || !subagents.AutoWake {
 		t.Fatalf("subagent defaults = %#v", subagents)
 	}
 	if subagents.Budget.SoftRequests != 200 || !subagents.Budget.SoftRequestNotice ||
@@ -976,6 +1011,21 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid.Agents.Subagents.Budget.MaxWallClock = "20m"
 	if err := invalid.Validate(); err != nil {
 		t.Fatalf("foreground wait window was incorrectly treated as a task runtime limit: %v", err)
+	}
+	zeroWait := Default()
+	for _, value := range []string{"0s", "0"} {
+		zeroWait.Agents.Subagents.AwaitTimeout = value
+		if err := zeroWait.Validate(); err != nil {
+			t.Fatalf("await_timeout %q was rejected: %v", value, err)
+		}
+		if zeroWait.Agents.Subagents.AwaitDuration != 0 {
+			t.Fatalf("await_timeout %q duration = %s", value, zeroWait.Agents.Subagents.AwaitDuration)
+		}
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.AwaitTimeout = "-1s"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative await_timeout was accepted")
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.Budget.MaxTokens = -1
@@ -1504,8 +1554,21 @@ func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
 	if err := UpdateShellMaxConcurrency(path, 0); err == nil {
 		t.Fatal("zero shell concurrency was accepted")
 	}
+	if err := UpdateSubagentAwaitTimeout(path, 0); err != nil {
+		t.Fatalf("wait-until-complete await timeout was rejected: %v", err)
+	}
+	updated, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(updated), "await_timeout: 0s") {
+		t.Fatalf("zero await timeout was not persisted:\n%s", updated)
+	}
 	if err := UpdateSubagentAwaitTimeout(path, 4); err == nil {
 		t.Fatal("too-short await timeout was accepted")
+	}
+	if err := UpdateSubagentAwaitTimeout(path, -1); err == nil {
+		t.Fatal("negative await timeout was accepted")
 	}
 	if err := UpdateSubagentMaxDepth(path, -2); err == nil {
 		t.Fatal("invalid recursive depth was accepted")

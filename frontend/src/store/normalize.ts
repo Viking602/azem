@@ -13,6 +13,11 @@ import type {
   Project,
   Session,
   SkillEntry,
+  UsageDay,
+  UsageKindRow,
+  UsageModelRow,
+  UsageReport,
+  UsageSkillRow,
 } from "../types";
 
 export interface ModelOption {
@@ -264,11 +269,21 @@ export function normalizeSkill(raw: Record<string, unknown>): SkillEntry {
   };
 }
 
+export function pluginImportID(plugin: Pick<PluginEntry, "id" | "name" | "marketplace">): string {
+  const id = plugin.id.trim();
+  if (id) return id;
+  const name = plugin.name.trim();
+  const marketplace = plugin.marketplace.trim();
+  return name && marketplace ? `${name}@${marketplace}` : name;
+}
+
 export function normalizePlugin(raw: Record<string, unknown>): PluginEntry {
+  const name = stringValue(raw, "name");
+  const marketplace = stringValue(raw, "marketplace");
   return {
-    id: stringValue(raw, "id"), name: stringValue(raw, "name"),
-    displayName: stringValue(raw, "displayName"), version: stringValue(raw, "version"),
-    marketplace: stringValue(raw, "marketplace"), origin: stringValue(raw, "origin") || "local", description: stringValue(raw, "description"),
+    id: pluginImportID({ id: stringValue(raw, "id"), name, marketplace }),
+    name, displayName: stringValue(raw, "displayName"), version: stringValue(raw, "version"),
+    marketplace, origin: stringValue(raw, "origin") || "local", description: stringValue(raw, "description"),
     developerName: stringValue(raw, "developerName"), category: stringValue(raw, "category"),
     brandColor: stringValue(raw, "brandColor"), logoPath: stringValue(raw, "logoPath"),
     enabled: Boolean(raw.enabled), skillCount: numberValue(raw.skillCount),
@@ -300,17 +315,86 @@ export function normalizeHookCatalog(raw?: Record<string, unknown>): HookCatalog
       logoPath: stringValue(item, "logoPath") || undefined,
     })),
     commands: (commands as Array<Record<string, unknown>>).map((item) => ({
+      id: stringValue(item, "id"),
       name: stringValue(item, "name"),
       event: stringValue(item, "event"),
       matcher: stringValue(item, "matcher"),
       command: stringValue(item, "command"),
       source: stringValue(item, "source"),
       origin: stringValue(item, "origin"),
+      enabled: item.enabled !== false,
     })),
     diagnostics: (diagnostics as Array<Record<string, unknown>>).map((item) => ({
       source: stringValue(item, "source"),
       event: stringValue(item, "event") || undefined,
       message: stringValue(item, "message"),
+    })),
+  };
+}
+
+export function emptyUsageReport(): UsageReport {
+  return {
+    scope: "project", from: "", to: "", empty: true, requests: 0, sessions: 0, runs: 0,
+    totalTokens: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, reportedInputTokens: 0,
+    cacheReadTokens: 0, cacheWriteTokens: 0, cacheReported: false, cacheWriteReported: false,
+    peakDayTokens: 0, currentStreak: 0, longestStreak: 0, days: [], kinds: [], models: [], skills: [],
+  };
+}
+
+export function normalizeUsageReport(raw?: UsageReport | Record<string, unknown> | null): UsageReport {
+  const value = (raw ?? {}) as Record<string, unknown>;
+  const days = Array.isArray(value.days) ? value.days as Array<Record<string, unknown>> : [];
+  const kinds = Array.isArray(value.kinds) ? value.kinds as Array<Record<string, unknown>> : [];
+  const models = Array.isArray(value.models) ? value.models as Array<Record<string, unknown>> : [];
+  const skills = Array.isArray(value.skills) ? value.skills as Array<Record<string, unknown>> : [];
+  return {
+    scope: stringValue(value, "scope") || "project",
+    workspace: stringValue(value, "workspace") || undefined,
+    from: stringValue(value, "from"),
+    to: stringValue(value, "to"),
+    empty: Boolean(value.empty),
+    requests: numberValue(value.requests),
+    sessions: numberValue(value.sessions),
+    runs: numberValue(value.runs),
+    totalTokens: numberValue(value.totalTokens),
+    inputTokens: numberValue(value.inputTokens),
+    outputTokens: numberValue(value.outputTokens),
+    reasoningTokens: numberValue(value.reasoningTokens),
+    reportedInputTokens: numberValue(value.reportedInputTokens),
+    cacheReadTokens: numberValue(value.cacheReadTokens),
+    cacheWriteTokens: numberValue(value.cacheWriteTokens),
+    cacheReported: Boolean(value.cacheReported),
+    cacheWriteReported: Boolean(value.cacheWriteReported),
+    peakDay: stringValue(value, "peakDay") || undefined,
+    peakDayTokens: numberValue(value.peakDayTokens),
+    currentStreak: numberValue(value.currentStreak),
+    longestStreak: numberValue(value.longestStreak),
+    longestRunMs: numberValue(value.longestRunMs) || undefined,
+    days: days.map((item): UsageDay => ({
+      date: stringValue(item, "date"),
+      tokens: numberValue(item.tokens),
+      requests: numberValue(item.requests),
+    })),
+    kinds: kinds.map((item): UsageKindRow => ({
+      kind: stringValue(item, "kind"),
+      tokens: numberValue(item.tokens),
+      requests: numberValue(item.requests),
+    })),
+    models: models.map((item): UsageModelRow => ({
+      provider: stringValue(item, "provider"),
+      model: stringValue(item, "model"),
+      tokens: numberValue(item.tokens),
+      inputTokens: numberValue(item.inputTokens),
+      outputTokens: numberValue(item.outputTokens),
+      cacheReadTokens: numberValue(item.cacheReadTokens),
+      cacheWriteTokens: numberValue(item.cacheWriteTokens),
+      cacheReported: Boolean(item.cacheReported),
+      cacheWriteReported: Boolean(item.cacheWriteReported),
+      requests: numberValue(item.requests),
+    })),
+    skills: skills.map((item): UsageSkillRow => ({
+      name: stringValue(item, "name"),
+      activations: numberValue(item.activations),
     })),
   };
 }

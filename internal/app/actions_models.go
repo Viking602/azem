@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Viking602/azem/internal/config"
 )
 
 var modelActionHandlers = map[ActionKind]actionHandler{
@@ -65,8 +67,8 @@ var modelActionHandlers = map[ActionKind]actionHandler{
 	},
 	ActionSetSubagentAwait: func(s *Service, ctx context.Context, action Action) error {
 		seconds, err := strconv.Atoi(strings.TrimSpace(action.Target))
-		if err != nil || seconds < 5 || seconds > 3600 {
-			return fmt.Errorf("subagent await timeout must be between 5 and 3600 seconds")
+		if err != nil || !config.ValidSubagentAwaitSeconds(seconds) {
+			return fmt.Errorf("subagent await timeout must be 0 (wait until complete) or between 5 and 3600 seconds")
 		}
 		return s.updateSubagentAwaitTimeout(ctx, time.Duration(seconds)*time.Second)
 	},

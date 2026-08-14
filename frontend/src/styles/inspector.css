@@ -12,14 +12,14 @@
 .inspector-row-action:hover, .inspector-row-action:focus-visible { background: var(--hover); }
 .inspector-row-action > svg:last-child { color: var(--faint); }
 .inspector-value, .inspector-muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); text-align: right; }
-.inspector-branch-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--text-sm); }
+.inspector-branch-value { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--text-sm); white-space: normal; }
 .inspector-muted { color: var(--faint); }
 .inspector-menu > summary { min-width: 0; max-width: 130px; height: 27px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: var(--text-xs); }
-.process-row, .source-row { min-height: 37px; display: flex; align-items: center; gap: 9px; }.process-row > span { min-width: 0; flex: 1; }.process-row strong, .process-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.process-row strong { font-size: var(--text-sm); }.process-row small { margin-top: 2px; color: var(--faint); font-size: var(--text-2xs); }.process-row em { color: var(--faint); font-size: var(--text-2xs); font-style: normal; }.process-row em[data-state="running"] { color: var(--green); }
+.process-row, .source-row { min-height: 37px; display: flex; align-items: center; gap: 9px; }.process-row > span { min-width: 0; flex: 1; }.process-row strong, .process-row small { display: block; overflow-wrap: anywhere; white-space: normal; }.process-row strong { font-size: var(--text-sm); }.process-row small { margin-top: 2px; color: var(--faint); font-size: var(--text-2xs); }.process-row em { color: var(--faint); font-size: var(--text-2xs); font-style: normal; }.process-row em[data-state="running"] { color: var(--green); }
 .source-row { width: 100%; padding: 4px 6px; border: 0; border-radius: 8px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .source-row:hover, .source-row:focus-visible { background: var(--hover); }
 .source-row > span { min-width: 0; flex: 1; }
-.source-row strong, .source-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-row strong, .source-row small { display: block; overflow-wrap: anywhere; white-space: normal; }
 .source-row strong { font-size: var(--text-xs); font-weight: 560; color: var(--ink); }
 .source-row small { margin-top: 2px; color: var(--faint); font-size: var(--text-2xs); }
 .source-row > svg:last-child { flex: 0 0 auto; color: var(--faint); }
@@ -94,7 +94,7 @@
 .context-composition-items > div { min-height: 23px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .context-composition-items span { min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--text-2xs); text-overflow: ellipsis; white-space: nowrap; }
 .context-composition-items em { flex: 0 0 auto; color: var(--faint); font: 500 var(--text-2xs) var(--mono); font-style: normal; }
-.context-manifest-hash { display: block; padding: 7px 8px; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-muted); color: var(--faint); font-size: var(--text-2xs); letter-spacing: .08em; text-overflow: ellipsis; white-space: nowrap; }
+.context-manifest-hash { display: block; padding: 7px 8px; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 6px; background: var(--paper-muted); color: var(--faint); font-size: var(--text-2xs); letter-spacing: .08em; white-space: normal; }
 .context-segment-list { margin-top: 8px; border-top: 1px solid var(--line); }
 .context-segment-list > div { display: flex; justify-content: space-between; gap: 8px; padding: 5px 1px; border-bottom: 1px solid var(--line); font-size: var(--text-2xs); }
 .context-segment-list span { color: var(--muted); text-transform: capitalize; }
@@ -169,7 +169,7 @@
 .inspector-subagent-row:hover { background: var(--hover); }
 .inspector-subagent-row > span { min-width: 0; display: grid; gap: 1px; }
 .inspector-subagent-row strong,
-.inspector-subagent-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-subagent-row small { overflow-wrap: anywhere; white-space: normal; }
 .inspector-subagent-row strong { font-size: var(--text-sm); font-weight: 590; }
 .inspector-subagent-row small { color: var(--faint); font-size: var(--text-2xs); }
 .inspector-subagent-row em { color: var(--faint); font-size: var(--text-2xs); font-style: normal; white-space: nowrap; }
@@ -271,7 +271,7 @@
 .subagent-row > button:hover { background: color-mix(in srgb, var(--hover) 76%, transparent); }
 .subagent-row > button:active { transform: scale(.98); }
 .subagent-row-copy { min-width: 0; display: block; }
-.subagent-row-copy strong, .subagent-row-copy > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-row-copy strong, .subagent-row-copy > span { display: block; overflow-wrap: anywhere; white-space: normal; }
 .subagent-row-copy strong { color: var(--ink); font-size: var(--text-base); font-weight: 570; letter-spacing: -.012em; }
 .subagent-row-copy > span { margin-top: 3px; color: var(--muted); font-size: var(--text-sm); line-height: 1.4; }
 .subagent-row-meta { min-width: 70px; display: grid; justify-items: end; gap: 3px; justify-self: end; color: var(--faint); font-size: 10px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }

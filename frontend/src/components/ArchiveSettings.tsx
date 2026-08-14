@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ArchiveRestore, FolderOpen, Search } from "lucide-react";
+import { ArchiveRestore, ChevronDown, ChevronRight, FolderOpen, Search } from "lucide-react";
 import { execute, openProjectSession } from "../bridge";
 import { tFormat, translator, type Language } from "../i18n";
 import { formatRelativeTime, useRelativeNow } from "../relativeTime";
@@ -8,11 +8,16 @@ import type { ActionKind, Session } from "../types";
 import MenuSelect from "./MenuSelect";
 
 const ARCHIVE_DAY_OPTIONS = [7, 14, 30, 90] as const;
+export const ARCHIVE_PAGE_SIZE = 20;
 
 export interface ArchivedProjectGroup {
   workspace: string;
   name: string;
   sessions: Session[];
+}
+
+export function archivedProjectKey(workspace: string) {
+  return workspace || "unassigned";
 }
 
 export function groupArchivedSessions(sessions: Session[], query = ""): ArchivedProjectGroup[] {
@@ -62,12 +67,33 @@ export default function ArchiveSettings({ language, sessionId, onError }: {
   const t = translator(language);
   const [days, setDays] = useState<number>(30);
   const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState<Record<string, true>>({});
+  const [visibleCount, setVisibleCount] = useState<Record<string, number>>({});
   const [busy, setBusy] = useState(false);
   const archivedTimes = useMemo(() => sessions.filter((session) => session.archived).map((session) => session.updatedAt).filter(Boolean), [sessions]);
   const now = useRelativeNow(archivedTimes);
   const groups = useMemo(() => groupArchivedSessions(sessions, query), [query, sessions]);
   const archivedCount = sessions.filter((session) => session.archived).length;
   const pendingCount = countArchivableSessions(sessions, days, sessionId, now);
+  const searching = query.trim().length > 0;
+
+  const toggleGroup = (key: string) => {
+    setExpanded((current) => {
+      if (current[key]) {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      }
+      return { ...current, [key]: true };
+    });
+  };
+
+  const showMore = (key: string, total: number) => {
+    setVisibleCount((current) => ({
+      ...current,
+      [key]: Math.min(total, (current[key] ?? ARCHIVE_PAGE_SIZE) + ARCHIVE_PAGE_SIZE),
+    }));
+  };
 
   const run = async (kind: ActionKind, target: string, decision = "") => {
     try {
@@ -132,32 +158,58 @@ export default function ArchiveSettings({ language, sessionId, onError }: {
         </div>
         {archivedCount > 0 ? <em>{tFormat(language, "archivedSessionCount", { count: archivedCount })}</em> : null}
       </header>
-      {archivedCount > 0 ? <label className="archive-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("searchArchivedSessions")} /></label> : null}
-      {archivedCount === 0 ? <div className="archive-empty">{t("archivedEmpty")}</div> : groups.length === 0 ? <div className="archive-empty">{t("noMatchingArchivedSessions")}</div> : groups.map((group) => (
-        <article key={group.workspace || "unassigned"} className="archive-project">
-          <header>
-            <span className="archive-project-mark" aria-hidden="true"><FolderOpen size={14} /></span>
-            <div>
-              <strong>{group.workspace ? group.name : t("archivedUnassigned")}</strong>
-              {group.workspace ? <small>{group.workspace}</small> : null}
-            </div>
-            <em>{tFormat(language, "archivedSessionCount", { count: group.sessions.length })}</em>
-          </header>
-          <ul>
-            {group.sessions.map((session) => (
-              <li key={session.id} className="archive-session-row">
-                <button type="button" className="archive-session-open" onClick={() => void openSession(session)} disabled={busy} aria-label={t("openArchivedSession")}>
-                  <strong>{session.title || t("newSession")}</strong>
-                  <small>{formatRelativeTime(session.updatedAt, language, now)}</small>
+      {archivedCount > 0 ? <label className="archive-search"><Search size={14} /><input value={query} onChange={(event) => {
+        setQuery(event.target.value);
+        setVisibleCount({});
+      }} placeholder={t("searchArchivedSessions")} /></label> : null}
+      {archivedCount === 0 ? <div className="archive-empty">{t("archivedEmpty")}</div> : groups.length === 0 ? <div className="archive-empty">{t("noMatchingArchivedSessions")}</div> : <div className="archive-projects">
+        {groups.map((group) => {
+          const key = archivedProjectKey(group.workspace);
+          const name = group.workspace ? group.name : t("archivedUnassigned");
+          const isExpanded = searching || Boolean(expanded[key]);
+          const limit = visibleCount[key] ?? ARCHIVE_PAGE_SIZE;
+          const visibleSessions = group.sessions.slice(0, limit);
+          const remaining = group.sessions.length - visibleSessions.length;
+          return <article key={key} className="archive-project" data-archive-project={key} data-expanded={String(isExpanded)}>
+            <button
+              type="button"
+              className="archive-project-toggle"
+              aria-expanded={isExpanded}
+              onClick={() => toggleGroup(key)}
+            >
+              <span className="archive-project-caret" aria-hidden="true">{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+              <span className="archive-project-mark" aria-hidden="true"><FolderOpen size={14} /></span>
+              <div>
+                <strong>{name}</strong>
+                {group.workspace ? <small>{group.workspace}</small> : null}
+              </div>
+              <em>{tFormat(language, "archivedSessionCount", { count: group.sessions.length })}</em>
+            </button>
+            {isExpanded ? <ul>
+              {visibleSessions.map((session) => (
+                <li key={session.id} className="archive-session-row">
+                  <button type="button" className="archive-session-open" onClick={() => void openSession(session)} disabled={busy} aria-label={t("openArchivedSession")}>
+                    <strong>{session.title || t("newSession")}</strong>
+                    <small className="archive-session-meta">
+                      <span className="archive-session-project">{name}</span>
+                      {group.workspace ? <span className="archive-session-path">{group.workspace}</span> : null}
+                      <span>{formatRelativeTime(session.updatedAt, language, now)}</span>
+                    </small>
+                  </button>
+                  <button type="button" className="text-button" onClick={() => void run("archive_session", session.id, "false")} disabled={busy}>
+                    <ArchiveRestore size={13} />{t("restoreSession")}
+                  </button>
+                </li>
+              ))}
+              {remaining > 0 ? <li className="archive-load-more-row">
+                <button type="button" className="archive-load-more" onClick={() => showMore(key, group.sessions.length)}>
+                  {tFormat(language, "archiveLoadMore", { count: remaining })}
                 </button>
-                <button type="button" className="text-button" onClick={() => void run("archive_session", session.id, "false")} disabled={busy}>
-                  <ArchiveRestore size={13} />{t("restoreSession")}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </article>
-      ))}
+              </li> : null}
+            </ul> : null}
+          </article>;
+        })}
+      </div>}
     </section>
   </div>;
 }

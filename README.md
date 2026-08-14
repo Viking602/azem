@@ -74,6 +74,11 @@ and `NO_PROXY` remain explicit per-process overrides on every platform.
 
 Desktop text output is presented in frame-paced chunks. Rendering is capped independently from the display refresh rate, large backlogs catch up automatically, and reduced-motion preferences disable animation without disabling bounded rendering.
 
+Desktop **Settings → Usage** shows a project-scoped token ledger from completed
+provider requests: totals, a month-row activity calendar, main vs subagent
+breakdown, and model (and skill, when recorded) counts. Cache stays unreported
+for providers that do not report it.
+
 Desktop **Settings → Appearance** provides persistent global interface font,
 11–20 px font-size, language, and theme controls. The searchable font picker
 reads families installed on the host operating system and uses localized family
@@ -395,7 +400,7 @@ agents:
     enabled: true
     max_depth: 2             # nested delegation levels; -1 is unlimited, 0 disables delegation
     max_concurrency: 32      # running subagents; 0 is unlimited
-    await_timeout: 10m       # foreground wait window; safe work continues in the background after it elapses
+    await_timeout: 0s        # 0s waits until the foreground child completes; a positive duration only releases the parent
     auto_wake: true
     routes:
       explore:
@@ -424,15 +429,21 @@ plugins:
   codex_imports: []          # exact plugin IDs selected for copying into Azem
   trust_hooks: false         # installation is not execution trust; opt in explicitly
 
+hooks:
+  enabled: true
+  disabled: []               # per-hook deny list; plugin hooks still require trust_hooks
+
 mcp:
   servers: {}
 ```
 
-The desktop **Settings → Extensions** page manages `skills.disabled` directly.
-Stopping a Skill removes it from model context, slash suggestions, eager
-activation, and the runtime registry. It remains in the catalog so it can be
-restored later. If an eager Skill is stopped, Azem removes it from `eager`;
-restoring it returns it in on-demand mode.
+The desktop **Settings → Extensions** page manages `skills.disabled` and
+`hooks.disabled` directly. Stopping a Skill removes it from model context,
+slash suggestions, eager activation, and the runtime registry. It remains in
+the catalog so it can be restored later. If an eager Skill is stopped, Azem
+removes it from `eager`; restoring it returns it in on-demand mode. Each Hook
+row can be enabled or stopped without changing the global plugin-hook trust
+decision. An untrusted plugin hook that is marked enabled still does not run.
 
 The same Extensions page projects the real MCP manager rather than inferring
 servers from installed plugins. It lists local and remote servers, live

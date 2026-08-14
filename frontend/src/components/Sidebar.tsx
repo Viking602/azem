@@ -150,11 +150,11 @@ export default function Sidebar() {
                 <span className="project-heading-copy"><strong>{projectName}</strong><small>{active ? `${currentBranch || t("noBranches")}${workspaceChangedFiles > 0 ? ` · ${workspaceChangedFiles} 个改动` : ` · ${t("workingTreeClean")}`}` : projectName === "llmux" ? "feat/usage-store" : projectName === "venat" ? `main · ${t("workingTreeClean")}` : compactProjectPath(item.workspace)}</small></span>
                 <em>{active ? projectSessions.length || "" : demoPRCount ? `${demoPRCount} PR` : projectSessions.length || ""}</em>
               </button>
-              <button className="project-action project-new-session" aria-label={t("newSession")} title={t("newSession")} onClick={startProjectSession}><Plus size={15} /></button>
+              <button className="project-action project-new-session" aria-label={t("newSession")} onClick={startProjectSession}><Plus size={15} /></button>
             </div>
             {projectOpen && <>
               {prototypePR && <div className={`sidebar-pr-row ${prototypePR.state}`}>
-                <button type="button" className="sidebar-pr-main" title={prototypePR.title} onClick={prototypePR.open}>
+                <button type="button" className="sidebar-pr-main" onClick={prototypePR.open}>
                   <span className="sidebar-pr-icon"><GitPullRequest size={14} /></span>
                   <span className="sidebar-pr-copy"><strong>{prototypePR.title}</strong><small>#{prototypePR.number} · {prototypePR.detail}</small></span>
                   <em>PR</em>
@@ -168,13 +168,13 @@ export default function Sidebar() {
                       onBlur={() => setRenaming(null)} onKeyDown={(event) => { if (event.key === "Escape") setRenaming(null); }} aria-label={t("renameChat")} />
                   </form>
                 ) : (
-                  <button key={session.id} className={session.id === currentSessionId && view === "thread" ? "active" : ""} onClick={() => active ? void run("resume_session", session.id) : launchProject(item.workspace, session.id)} title={session.title}
+                  <button key={session.id} className={session.id === currentSessionId && view === "thread" ? "active" : ""} onClick={() => active ? void run("resume_session", session.id) : launchProject(item.workspace, session.id)}
                     aria-busy={session.id === runningSessionId}
                     style={{ "--custom-contextmenu": session.pinned ? "session-pinned" : "session", "--custom-contextmenu-data": session.id } as CSSProperties}>
                     <span className="session-state-dot" data-running={String(session.id === runningSessionId)} aria-hidden="true" />
                     <span className="session-copy"><strong>{session.title || t("newSession")}</strong><small>{sidebarSessionLabel(session.title, session.updatedAt, session.id === runningSessionId, snapshot.language, now)}</small></span>
                     {session.id === runningSessionId && <i className="session-running-indicator" aria-hidden="true" />}
-                    {session.unread && <i className="session-unread" title={t("unread")} />}
+                    {session.unread && <i className="session-unread" aria-label={t("unread")} />}
                   </button>
                 ))}
                 {active && projectSessions.length > 5 && <button className="show-more-sessions" onClick={() => setShowAllSessions((show) => !show)}>{t(showAllSessions ? "showLess" : "showMore")}</button>}
@@ -282,7 +282,7 @@ function ProjectLauncher({ language, setError }: { language: "en" | "zh-CN"; set
   };
 
   return <div className="project-launcher" ref={root}>
-    <button className="project-add-button" aria-label={t("addProject")} aria-expanded={menuOpen} aria-haspopup="menu" title={t("addProject")}
+    <button className="project-add-button" aria-label={t("addProject")} aria-expanded={menuOpen} aria-haspopup="menu"
       disabled={busy} onClick={() => setMenuOpen((open) => !open)}><Plus size={14} /></button>
     {menuOpen && <div className="project-add-menu" role="menu">
       <button role="menuitem" onClick={() => void chooseFolder()}>
