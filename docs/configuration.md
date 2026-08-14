@@ -130,8 +130,10 @@ are never runtime roots, and an existing selected Azem copy remains usable if
 Codex is temporarily unavailable. Skills and eligible MCP servers from selected
 copies are merged into the in-memory runtime configuration.
 `trust_hooks` defaults to false because executable plugin hooks require an
-explicit trust decision. Plugin changes take effect in a newly started desktop
-session. The compatibility matrix and manifest rules are documented in
+explicit trust decision from the Extensions Hooks tab. Enabling it persists
+the flag and loads those hook sources in the current process. Plugin Skills
+and MCP still load without that decision. The compatibility matrix and
+manifest rules are documented in
 [plugins.md](plugins.md).
 
 ## llmux providers and models

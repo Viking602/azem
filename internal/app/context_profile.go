@@ -118,7 +118,7 @@ func (r *ProviderRuntime) EstimateContextProfile(ctx context.Context, sessionID 
 	r.mu.RLock()
 	host, manager, subagents := r.host, r.mcp, r.subagents
 	r.mu.RUnlock()
-	if host != nil && host.sessions != nil {
+	if host != nil && host.Sessions() != nil {
 		profile.Contributions = appendToolContribution(profile.Contributions, ContextCategoryBuiltinTools, (&todoDriver{}).Definition())
 		profile.Contributions = appendToolContribution(profile.Contributions, ContextCategoryBuiltinTools, (&contextArtifactDriver{}).Definition())
 	}
@@ -132,17 +132,17 @@ func (r *ProviderRuntime) EstimateContextProfile(ctx context.Context, sessionID 
 			profile.Contributions = appendToolContribution(profile.Contributions, ContextCategoryMCP, driver.Definition())
 		}
 	}
-	if host != nil && host.sessions != nil && strings.TrimSpace(sessionID) != "" {
-		projection, loadErr := host.sessions.LoadProjection(ctx, sessionID)
+	if host != nil && host.Sessions() != nil && strings.TrimSpace(sessionID) != "" {
+		projection, loadErr := host.Sessions().LoadProjection(ctx, sessionID)
 		if loadErr == nil {
 			profile.Contributions = append(profile.Contributions, conversationContributions(projectionContextMessages(projection))...)
-			if record, manifestErr := host.sessions.LoadActiveContextManifest(ctx, sessionID); manifestErr == nil {
+			if record, manifestErr := host.Sessions().LoadActiveContextManifest(ctx, sessionID); manifestErr == nil {
 				var manifest ContextManifestV1
 				if json.Unmarshal(record.Data, &manifest) == nil {
 					applyContextManifestProfile(&profile, manifest)
 				}
 			}
-			if checkpoint, semanticErr := host.sessions.LoadSemanticCheckpoint(ctx, sessionID); semanticErr == nil {
+			if checkpoint, semanticErr := host.Sessions().LoadSemanticCheckpoint(ctx, sessionID); semanticErr == nil {
 				profile.SemanticRevision = checkpoint.Revision
 				profile.SemanticCursor = checkpoint.Cursor
 				highWater := canonicalProjectionHighWater(projection.Blocks)

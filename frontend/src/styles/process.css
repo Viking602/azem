@@ -1,0 +1,282 @@
+.timeline-feed { display: flex; flex-direction: column; gap: 0; }
+.timeline-feed.compact { gap: 0; }
+.timeline-feed > .user-block,
+.timeline-feed > .assistant-block:not(.streaming),
+.timeline-feed > .commentary-block:not(.active),
+.timeline-feed > .process-fold,
+.timeline-feed > .process-entries:not(.active),
+.timeline-feed > .edited-files-summary,
+.timeline-feed > .run-status-marker,
+.timeline-feed > .session-turn-current,
+.timeline-feed > .session-history-turn {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 180px;
+}
+
+/* Process fold = quiet meta disclosure (not body text). */
+.process-fold { margin: 10px 0 7px; }
+.process-fold > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  padding: 1px 4px 1px 0;
+  border-radius: 7px;
+  color: color-mix(in srgb, var(--muted) 74%, var(--faint));
+  font-size: var(--text-sm);
+  font-weight: 560;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.process-fold > summary::-webkit-details-marker { display: none; }
+.process-fold > summary:hover { color: var(--ink); }
+.process-fold[data-state="running"] > summary { color: var(--blue); cursor: default; pointer-events: none; }
+.process-fold[data-state="running"] .process-fold-chevrons { visibility: hidden; }
+.process-fold-chevrons {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  opacity: .7;
+}
+.process-fold-chevrons > * { position: absolute; inset: 0; }
+.process-fold[open] .closed-chevron,
+.process-fold:not([open]) .open-chevron { display: none; }
+.process-fold-label { letter-spacing: -0.005em; }
+.process-fold > summary time { color: var(--faint); font-family: var(--mono); font-size: var(--text-2xs); font-weight: 500; font-variant-numeric: tabular-nums; }
+.process-fold-body { margin: 5px 0 3px; padding: 0; }
+
+.process-entries { position: relative; display: flex; flex-direction: column; gap: 0; padding: 1px 0 5px; }
+/* Quiet process: no timeline spine; keep rail only for rare compact side trails. */
+.process-fold .process-entries::before,
+.session-document .process-entries::before { display: none; }
+.commentary-block {
+  position: relative;
+  min-width: 0;
+  margin: 7px 0 10px;
+  padding: 2px 0;
+  max-width: 62ch;
+  color: color-mix(in srgb, var(--ink) 91%, var(--muted));
+  font-size: calc(var(--text-chat) - 1px);
+  font-weight: 470;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.commentary-block.compact { margin: 5px 0 8px; }
+/* Process notes: title + body, without rail dots. */
+.process-fold .commentary-marker,
+.session-document .commentary-marker { display: none; }
+.commentary-marker {
+  position: absolute;
+  left: 0;
+  top: .42em;
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--paper);
+}
+.commentary-marker i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, #0785ff 72%, var(--muted));
+  box-shadow: 0 0 0 2px color-mix(in srgb, #0785ff 12%, transparent);
+}
+.commentary-block.active .commentary-marker i {
+  animation: commentary-pulse 1.8s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+/* Side-chat compact trail may still use a quiet rail. */
+.timeline-feed.compact .process-entries::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 13px;
+  bottom: 15px;
+  width: 1px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--blue) 20%, var(--line)) 0%, var(--line) 28%, var(--line) 86%, transparent 100%);
+}
+.timeline-feed.compact .commentary-block { padding-left: 23px; }
+.timeline-feed.compact .commentary-marker { display: grid; }
+.commentary-content > :first-child { margin-top: 0; }
+.commentary-content > :last-child { margin-bottom: 0; }
+.commentary-content p {
+  margin: 0 0 .45em;
+  color: color-mix(in srgb, var(--muted) 92%, var(--faint));
+  font-weight: 450;
+}
+.commentary-content li { margin: .12em 0; }
+.commentary-content strong {
+  display: block;
+  margin-bottom: 2px;
+  color: color-mix(in srgb, var(--ink) 82%, var(--muted));
+  font-size: var(--text-sm);
+  font-weight: 560;
+}
+.commentary-content code {
+  padding: .08em .3em;
+  border-radius: 4px;
+  background: var(--paper-muted);
+  font-size: .9em;
+}
+
+.reasoning-trace {
+  min-width: 0;
+  margin: 4px 0 9px;
+  color: var(--muted);
+  font-size: var(--text-chat);
+  line-height: var(--leading-chat);
+}
+.reasoning-summary {
+  min-width: 0;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 2px 3px 2px 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.3;
+  text-align: left;
+}
+button.reasoning-summary { cursor: pointer; }
+button.reasoning-summary:hover { color: var(--muted); }
+button.reasoning-summary:disabled { cursor: default; }
+.azem-thinking-mark {
+  position: relative;
+  z-index: 1;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  display: block;
+  border-radius: 50%;
+  background: var(--paper);
+  box-shadow: 0 0 0 2px var(--paper);
+  color: #0785ff;
+}
+.azem-thinking-mark i {
+  position: absolute;
+  border-radius: 50%;
+}
+.azem-thinking-mark i:first-child {
+  inset: 2px;
+  border: 1.5px solid currentColor;
+}
+.azem-thinking-mark i:last-child {
+  top: 0;
+  right: 0;
+  width: 5px;
+  height: 5px;
+  border: 1px solid var(--paper);
+  background: currentColor;
+  box-shadow: 0 0 4px color-mix(in srgb, currentColor 34%, transparent);
+}
+.azem-thinking-mark.active { animation: azem-thinking-pulse 1.8s cubic-bezier(.4, 0, .2, 1) infinite; }
+.reasoning-label {
+  position: relative;
+  display: inline-block;
+  white-space: nowrap;
+}
+.reasoning-label-base { color: currentColor; }
+.reasoning-label-sweep {
+  pointer-events: none;
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 100%;
+  overflow: hidden;
+  color: color-mix(in srgb, #0785ff 84%, var(--ink));
+  transform: translateX(-50%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 20% 30%, transparent 50% 100%);
+  mask-image: linear-gradient(90deg, transparent 0%, #000 20% 30%, transparent 50% 100%);
+  animation: reasoning-shimmer-sweep 4s steps(192, end) infinite;
+}
+.reasoning-label-highlight {
+  width: 100%;
+  display: block;
+  transform: translateX(50%);
+  animation: reasoning-shimmer-highlight 4s steps(192, end) infinite;
+}
+.reasoning-chevron {
+  flex: 0 0 auto;
+  opacity: .55;
+  transition: transform .16s ease;
+}
+.reasoning-trace:not(.open) .reasoning-chevron { transform: rotate(-90deg); }
+.reasoning-body {
+  position: relative;
+  margin: 3px 0 3px 6px;
+  padding: 5px 0 3px 18px;
+  border-left: 1px solid color-mix(in srgb, #0785ff 24%, var(--line));
+  color: var(--muted);
+  font-size: calc(var(--text-chat) - 1px);
+  line-height: 1.55;
+}
+.reasoning-step {
+  position: relative;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-weight: 440;
+  animation: reasoning-step-in .2s cubic-bezier(0, 0, .2, 1) both;
+}
+.reasoning-step::before {
+  content: "";
+  position: absolute;
+  left: -21px;
+  top: .63em;
+  width: 5px;
+  height: 5px;
+  border: 1px solid color-mix(in srgb, #0785ff 62%, var(--line));
+  border-radius: 50%;
+  background: var(--paper);
+}
+.reasoning-step + .reasoning-step { margin-top: 10px; }
+.reasoning-placeholder { margin-top: 8px; }
+@keyframes commentary-pulse {
+  0%, 100% { opacity: .68; transform: scale(.84); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+@keyframes reasoning-step-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes azem-thinking-pulse {
+  0%, 100% { opacity: .62; transform: translateY(1px); }
+  50% { opacity: 1; transform: none; }
+}
+@keyframes reasoning-shimmer-sweep {
+  0% { transform: translateX(-50%); }
+  25%, 100% { transform: translateX(125%); }
+}
+@keyframes reasoning-shimmer-highlight {
+  0% { transform: translateX(50%); }
+  25%, 100% { transform: translateX(-125%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .commentary-block.active .commentary-marker i,
+  .assistant-block.phase-pending::before,
+  .azem-thinking-mark.active,
+  .reasoning-label-sweep,
+  .reasoning-label-highlight,
+  .reasoning-step,
+  .streaming-text > :where(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre, table, hr) { animation: none; }
+}
+
+.run-status-marker {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 24px 0 18px;
+  color: var(--faint);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.run-status-marker::after { content: ""; height: 1px; flex: 1; background: var(--line); }
+

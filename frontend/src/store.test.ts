@@ -29,7 +29,7 @@ const snapshot: Snapshot = {
 function state(): RuntimeData {
   return {
     snapshot, sessions: [], projects: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], backgroundProcesses: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
-    skills: [], mcpServers: [], plugins: [], branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
+    skills: [], mcpServers: [], plugins: [], hookCatalog: { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] }, branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
     pullRequestMonitors: new Map(), pullRequestLoading: false, pullRequestMutating: false, pullRequestError: "",
     modelRoutes: [], modelProviders: [], modelsByProvider: {}, contextProfile: null,
     contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recap: null, recovery: [],
@@ -82,7 +82,7 @@ describe("runtime event projection", () => {
       sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded",
       data: {
         provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single",
-        blocks: JSON.stringify([{ ID: "p1", Kind: "plan", State: "proposed", Title: "Plan", Content: "Body", Data: { planId: "artifact-1", version: "1" } }]),
+        blocks: JSON.stringify([{ id: "p1", kind: "plan", state: "proposed", title: "Plan", content: "Body", data: { planId: "artifact-1", version: "1" } }]),
         blockSequences: "[1]", toolRecords: "[]",
       },
     }]);
@@ -92,8 +92,8 @@ describe("runtime event projection", () => {
 
   it("restores and updates the current session recap without leaking foreign session events", () => {
     const persisted = {
-      SessionID: "s1", Anchor: "/tmp/azem", CoveredBoundary: "run-1", Revision: 1,
-      Goal: "补齐回顾", Summary: "已恢复持久化回顾。", OpenItems: "pending: 验证更新", UpdatedAt: "2026-08-12T00:00:00Z",
+      sessionId: "s1", anchor: "/tmp/azem", coveredBoundary: "run-1", revision: 1,
+      goal: "补齐回顾", summary: "已恢复持久化回顾。", openItems: "pending: 验证更新", updatedAt: "2026-08-12T00:00:00Z",
     };
     const restored = reduceEvents(state(), [{
       sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded", recap: persisted,
@@ -103,15 +103,15 @@ describe("runtime event projection", () => {
 
     const foreign = reduceEvents(restored, [{
       sequence: 2, kind: "recap_state", sessionId: "s2", state: "updated",
-      recap: { ...persisted, SessionID: "s2", Summary: "其他会话", Revision: 2 },
+      recap: { ...persisted, sessionId: "s2", summary: "其他会话", revision: 2 },
     }]);
     expect(foreign.recap).toEqual(persisted);
 
     const updated = reduceEvents(foreign, [{
       sequence: 3, kind: "recap_state", sessionId: "s1", state: "updated",
-      recap: { ...persisted, Summary: "当前会话已实时更新。", Revision: 2 },
+      recap: { ...persisted, summary: "当前会话已实时更新。", revision: 2 },
     }]);
-    expect(updated.recap).toMatchObject({ Summary: "当前会话已实时更新。", Revision: 2 });
+    expect(updated.recap).toMatchObject({ summary: "当前会话已实时更新。", revision: 2 });
   });
 
   it("restores persisted attachment MIME metadata after reopening a session", () => {
@@ -135,9 +135,9 @@ describe("runtime event projection", () => {
 	it("projects the plugin catalog and capability counts", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "plugin_catalog", pluginCatalog: [{
-				ID: "demo@market", Name: "demo", DisplayName: "Demo", Version: "1.0.0", Marketplace: "market", Origin: "codex",
-				Enabled: true, SkillCount: 2, MCPServerCount: 2, IntegratedMCPCount: 1,
-				HookCount: 1, HooksTrusted: false, HasApp: true, Capabilities: ["Read"], Status: "degraded",
+				id: "demo@market", name: "demo", displayName: "Demo", version: "1.0.0", marketplace: "market", origin: "codex",
+				enabled: true, skillCount: 2, mcpServerCount: 2, integratedMCPCount: 1,
+				hookCount: 1, hooksTrusted: false, hasApp: true, capabilities: ["Read"], status: "degraded",
 			}],
 		}]);
 		expect(projected.plugins[0]).toMatchObject({ id: "demo@market", displayName: "Demo", origin: "codex", skillCount: 2, integratedMCPCount: 1, hasApp: true });
@@ -158,10 +158,10 @@ describe("runtime event projection", () => {
 	it("projects configured provider reasoning levels and resolves model aliases", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "model_providers", modelProviders: [{
-				ID: "deepseek", DisplayName: "DeepSeek", Backend: "anthropic",
-				DefaultBaseURL: "https://api.deepseek.com/anthropic", BaseURL: "", EnvKey: "DEEPSEEK_API_KEY",
-				Enabled: true, CredentialConfigured: true, CredentialSource: "stored",
-				Models: [{ id: "deepseek-v4-flash", aliases: ["deepseek/deepseek-v4-flash"], contextWindow: 1_000_000, reasoningLevels: ["low", "high", "max"], defaultReasoning: "max" }],
+				id: "deepseek", displayName: "DeepSeek", backend: "anthropic",
+				defaultBaseUrl: "https://api.deepseek.com/anthropic", baseUrl: "", envKey: "DEEPSEEK_API_KEY",
+				enabled: true, credentialConfigured: true, credentialSource: "stored",
+				models: [{ id: "deepseek-v4-flash", aliases: ["deepseek/deepseek-v4-flash"], contextWindow: 1_000_000, reasoningLevels: ["low", "high", "max"], defaultReasoning: "max" }],
 			}],
 		}]);
 		const models = projected.modelsByProvider.deepseek ?? [];
@@ -171,13 +171,13 @@ describe("runtime event projection", () => {
 	it("projects llmux provider settings without exposing a secret field", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "model_providers", modelProviders: [{
-				ID: "openrouter", DisplayName: "OpenRouter", Backend: "openai_compat",
-				DefaultBaseURL: "https://openrouter.ai/api/v1", BaseURL: "", EnvKey: "OPENROUTER_API_KEY",
-				Enabled: true, CredentialConfigured: true, CredentialSource: "stored",
-				Models: [{ id: "openai/gpt-test", contextWindow: 128000 }],
+				id: "openrouter", displayName: "OpenRouter", backend: "openai_compat",
+				defaultBaseUrl: "https://openrouter.ai/api/v1", baseUrl: "", envKey: "OPENROUTER_API_KEY",
+				enabled: true, credentialConfigured: true, credentialSource: "stored",
+				models: [{ id: "openai/gpt-test", contextWindow: 128000 }],
 			}],
 		}]);
-		expect(projected.modelProviders[0]).toMatchObject({ ID: "openrouter", CredentialSource: "stored" });
+		expect(projected.modelProviders[0]).toMatchObject({ id: "openrouter", credentialSource: "stored" });
 		expect(projected.modelProviders[0]).not.toHaveProperty("secret");
 	});
 
@@ -187,7 +187,7 @@ describe("runtime event projection", () => {
     useRuntimeStore.getState().applyEvents([{
       sequence: 4,
       kind: "model_routes",
-      modelRoutes: [{ Scope: "plan", Role: "", Label: "Plan", Route: {} }],
+      modelRoutes: [{ scope: "plan", role: "", label: "Plan", route: {} }],
     }]);
     expect(useRuntimeStore.getState().modelRoutes).toHaveLength(1);
   });
@@ -299,6 +299,17 @@ describe("runtime event projection", () => {
 		expect(failed.error).toBe("");
 		expect(failed.blocks.filter((block) => block.kind === "error")).toHaveLength(1);
 		expect(failed.blocks.at(-1)?.content).toBe("provider unavailable");
+	});
+
+	it("titles a run failure from the stable provider error code", () => {
+		const failed = reduceEvents({ ...state(), running: true, runId: "r1" }, [{
+			sequence: 1, kind: "run_failed", sessionId: "s1", runId: "r1",
+			text: "HTTP 401: token expired", data: { errorCode: "auth" },
+		}]);
+		const block = failed.blocks.at(-1);
+		expect(block?.kind).toBe("error");
+		expect(block?.title).toBe("认证失败");
+		expect(block?.data?.errorCode).toBe("auth");
 	});
 
   it("preserves queued and approval states until a tool actually runs", () => {
@@ -663,6 +674,18 @@ describe("runtime event projection", () => {
     expect(prompted.blocks[0]).toMatchObject({ kind: "approval", approvalId: "a1", state: "pending" });
   });
 
+  it("moves a queued tool into reviewing instead of leaving it queued during auto-review", () => {
+    const queued = reduceEvents(state(), [
+      { sequence: 1, kind: "tool_started", runId: "r1", toolCallId: "t1", state: "queued", data: { name: "coding.shell" } },
+    ]);
+    const reviewing = reduceEvents(queued, [
+      { sequence: 2, kind: "approval_requested", approvalId: "a1", toolCallId: "t1", state: "reviewing" },
+    ]);
+    expect(reviewing.blocks).toEqual([
+      expect.objectContaining({ kind: "tool", toolCallId: "t1", state: "reviewing_approval" }),
+    ]);
+  });
+
   it("builds approval UI fields without exposing the structured payload", () => {
     const details = approvalPresentation({ id: "a1", kind: "approval", content: "{\"command\":\"secret raw payload\"}", data: { tool: "coding.shell", target: "git status --short", effect: "external_side_effect", risk: "high" } }, "zh-CN");
     expect(details).toMatchObject({ tool: "运行命令", target: "git status --short", riskLabel: "高风险", description: "此操作可能影响工作区之外的系统。" });
@@ -997,7 +1020,7 @@ describe("runtime event projection", () => {
     ]);
     expect(projected.contextUsage.contextLimit).toBe(272_000);
 	expect(modelDisplayName("openai/gpt-5.6-sol", "openai/gpt-5.6-sol")).toBe("GPT 5.6 Sol");
-	expect(providerDisplayName("deepseek", [{ ...state().modelProviders[0]!, ID: "deepseek", DisplayName: "DeepSeek" }])).toBe("DeepSeek");
+	expect(providerDisplayName("deepseek", [{ ...state().modelProviders[0]!, id: "deepseek", displayName: "DeepSeek" }])).toBe("DeepSeek");
   });
 
   it("uses the subscription catalog context limit regardless of startup event order", () => {

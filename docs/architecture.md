@@ -199,6 +199,16 @@ opens them. Agent tool results are also bounded before Venat checkpoints, which
 prevents broad searches and generated-file matches from multiplying into an
 oversized execution snapshot.
 
+Oversized tool results spill instead of discarding bytes: when a governed tool
+(including MCP) returns more content or structured output than the 96 KiB
+model-side bound, the full payload is durably stored as a session context
+artifact (`tool_result_spill`) and the model-visible result keeps a bounded
+prefix plus an `artifact:<id>` locator with `context.read_artifact` retrieval
+guidance. The shell tool keeps its own earlier artifact spill; if the artifact
+write fails the result falls back to the plain lossy truncation, so a storage
+problem never fails the tool call. UI previews stay on their separate bounded
+projection (UI-002) and are unaffected.
+
 ## Tool lifecycle and side effects
 
 Tool state is authoritative in the backend:
@@ -206,6 +216,29 @@ Tool state is authoritative in the backend:
 ```text
 queued -> awaiting_approval -> running -> completed | failed
 ```
+
+Calls that can start immediately emit `running` instead of `queued`. Automatic
+review of non-workspace side effects emits `reviewing_approval` rather than a
+capacity queue. `queued` remains a wait for unavailable execution capacity or
+for a later permission prompt.
+
+The pipeline stages have fixed responsibilities:
+
+1. **Pre-execute** — `hooks.WrapDriver` dispatches `PreToolUse` (deny, rewrite
+   input, or force `ask`), then the governed layer applies approval policy
+   (`PrepareDriver`) and waits for the user or automatic review.
+2. **Monotonic guard** — a settled denial is terminal. The prepared execution
+   returns a complete error result with no execute closure, so no later stage
+   can flip it back to execution: `PostToolUse` hooks may append feedback or
+   rewrite MCP output for the model, but never clear the error state or run
+   the tool (regression: `TestMonotonicGuardDenialCannotBeFlippedBackToExecution`).
+3. **Execute** — the driver runs with shell/subagent concurrency limits and
+   the run context as the around-wrapper for cancellation and timeouts.
+4. **Post-execute** — results are rewritten only through defined channels:
+   spill of oversized output to session artifacts, `PostToolUse` hook output
+   rewrites, and the model-side result bound.
+5. **Observation** — durable tool records, file observations, and UI
+   projections read the settled result; they never mutate it.
 
 File changes appear only after execution produces evidence. Non-idempotent
 actions are recorded as durable action attempts. At startup, incomplete action

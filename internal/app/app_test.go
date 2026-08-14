@@ -22,7 +22,9 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
@@ -722,6 +724,105 @@ func TestNewSessionStaysEphemeralUntilFirstTurn(t *testing.T) {
 	}
 }
 
+func TestArchiveInactiveSessionsAndRestoreByProject(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "archive-inactive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB())
+	cfg := config.Default()
+	cfg.Workspace.Root = t.TempDir()
+	service := NewService(ctx, cfg)
+	service.AttachDurable(sessions, nil)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		if err := store.Close(shutdownCtx); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	alpha := t.TempDir()
+	beta := t.TempDir()
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	for _, item := range []struct {
+		id, title, workspace string
+		updatedAt            time.Time
+	}{
+		{"old-alpha", "Old Alpha", alpha, stale},
+		{"old-current", "Old Current", beta, stale},
+		{"fresh-beta", "Fresh Beta", beta, time.Now().UTC()},
+	} {
+		if _, err := sessions.Ensure(ctx, session.Session{ID: item.id, Title: item.title}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sessions.AppendBlock(ctx, item.id, session.Block{Kind: "user", Content: item.title}); err != nil {
+			t.Fatal(err)
+		}
+		if err := sessions.SetWorkspaceSession(ctx, item.workspace, item.id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, item.updatedAt.UnixNano(), item.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionArchiveInactiveSessions, Target: "30", SessionID: "old-current"}); err != nil {
+		t.Fatal(err)
+	}
+	listed := nextSessionList(t, service)
+	states := map[string]bool{}
+	workspaces := map[string]string{}
+	for _, item := range listed {
+		states[item.ID] = item.Archived
+		workspaces[item.ID] = item.Workspace
+	}
+	if !states["old-alpha"] || states["old-current"] || states["fresh-beta"] {
+		t.Fatalf("inactive archive flags=%v", states)
+	}
+	canonical := func(path string) string {
+		t.Helper()
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Clean(resolved)
+	}
+	if workspaces["old-alpha"] != canonical(alpha) || workspaces["old-current"] != canonical(beta) {
+		t.Fatalf("archived session projects=%v want alpha=%s beta=%s", workspaces, canonical(alpha), canonical(beta))
+	}
+
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionArchiveSession, Target: "old-alpha", Decision: "false"}); err != nil {
+		t.Fatal(err)
+	}
+	restored := nextSessionList(t, service)
+	for _, item := range restored {
+		if item.ID == "old-alpha" && item.Archived {
+			t.Fatalf("restored session remained archived: %#v", item)
+		}
+	}
+}
+
+func nextSessionList(t *testing.T, service *Service) []session.Session {
+	t.Helper()
+	event, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventSessionLoaded || event.State != "list" {
+		t.Fatalf("session list event=%+v", event)
+	}
+	var listed []session.Session
+	if err := json.Unmarshal([]byte(event.Data["sessions"]), &listed); err != nil {
+		t.Fatal(err)
+	}
+	return listed
+}
+
 func TestResumeSessionProjectsGlobalActiveRunOwner(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
@@ -1312,34 +1413,173 @@ func TestListPluginsReemitsTheCurrentSnapshot(t *testing.T) {
 	}
 }
 
-func TestSetCodexPluginImportedPersistsExplicitSelection(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "config.yaml")
+func TestListHooksIncludesUntrustedPluginSources(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachPlugins([]PluginCatalogEntry{{
+		ID: "demo@local", Name: "demo", DisplayName: "Demo", Origin: "local", Enabled: true,
+		HookCount: 2, HooksTrusted: false, Warning: "Hooks 等待用户信任",
+	}}, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionListHooks}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventHookCatalog || event.HookCatalog == nil || event.HookCatalog.TrustHooks || len(event.HookCatalog.Sources) != 1 {
+		t.Fatalf("hook catalog = %+v", event)
+	}
+	source := event.HookCatalog.Sources[0]
+	if source.ID != "demo@local" || source.Origin != "plugin" || source.HookCount != 2 || source.Trusted {
+		t.Fatalf("hook source = %#v", source)
+	}
+}
+
+func TestSetPluginHooksTrustedPersistsAndReloads(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	path := filepath.Join(home, "config.yaml")
 	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(data, "plugin-packages", "local", "demo")
+	if err := os.MkdirAll(filepath.Join(root, ".codex-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".codex-plugin", "plugin.json"), []byte(`{"name":"demo","version":"1.0.0","description":"Demo","hooks":"./hooks.json"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "hooks.json"), []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"true"}]}]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	service := NewService(context.Background(), config.Default())
 	service.SetConfigPath(path)
-	service.AttachPlugins([]PluginCatalogEntry{{ID: "demo@market", Name: "demo", Origin: "codex_available", Status: "available"}}, nil)
-	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "demo@market", Decision: "true"}); err != nil {
+	service.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(hooks.Options{})})
+	service.AttachPluginRuntime(plugins.Options{HomeDir: home, DataDir: data}, plugins.Integration{})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginHooksTrusted, Decision: "true"}); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := config.Load(path, root)
+	loaded, err := config.Load(path, home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(loaded.Plugins.CodexImports, "demo@market") || service.pluginCatalog[0].Status != "restart_required" || service.pluginCatalog[0].Origin != "codex" {
-		t.Fatalf("plugin import selection = %#v catalog=%#v", loaded.Plugins, service.pluginCatalog)
+	if !loaded.Plugins.TrustHooks || !service.cfg.Plugins.TrustHooks {
+		t.Fatalf("trust hooks persisted=%v runtime=%v", loaded.Plugins.TrustHooks, service.cfg.Plugins.TrustHooks)
+	}
+	var catalog Event
+	for {
+		event, err := service.NextEvent(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == EventHookCatalog {
+			catalog = event
+			break
+		}
+	}
+	if catalog.HookCatalog == nil || !catalog.HookCatalog.TrustHooks {
+		t.Fatalf("trusted hook catalog = %+v", catalog)
+	}
+	if len(catalog.HookCatalog.Sources) != 1 || !catalog.HookCatalog.Sources[0].Trusted || catalog.HookCatalog.Sources[0].HookCount != 1 {
+		t.Fatalf("trusted hook sources = %#v", catalog.HookCatalog.Sources)
+	}
+	if len(catalog.HookCatalog.Commands) == 0 {
+		t.Fatalf("trusted hook commands = %#v", catalog.HookCatalog.Commands)
+	}
+}
+
+func TestSetCodexPluginImportedActivatesImmediately(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	path := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := filepath.Join(home, ".codex", "plugins", "cache", "market", "demo", "1.0.0")
+	if err := os.MkdirAll(filepath.Join(sourceRoot, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceRoot, "skills", "review"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), []byte(`{"name":"demo","version":"1.0.0","description":"Demo plugin","skills":"./skills/"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "skills", "review", "SKILL.md"), []byte("---\nname: review\ndescription: Review work\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalogJSON, err := json.Marshal(map[string]any{
+		"installed": []map[string]any{{
+			"pluginId": "demo@market", "name": "demo", "marketplaceName": "market", "version": "1.0.0",
+			"installed": true, "enabled": true,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillCatalog, err := skills.Load(skills.LoadOptions{HomeDir: home, ConfigDir: home, Config: config.SkillsConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), config.Default())
+	service.SetConfigPath(path)
+	service.AttachSkills(skillCatalog)
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "demo@market", Name: "demo", Origin: "codex_available", Status: "available"}}, nil)
+	service.AttachPluginRuntime(plugins.Options{
+		HomeDir: home, DataDir: data, ImportCodex: true,
+		ListPlugins: func(context.Context) ([]byte, error) { return catalogJSON, nil },
+	}, plugins.Integration{})
+
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "demo@market", Decision: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyRoot := filepath.Join(data, "plugin-packages", "codex", "market", "demo")
+	if !slices.Contains(loaded.Plugins.CodexImports, "demo@market") {
+		t.Fatalf("plugin import selection = %#v", loaded.Plugins)
+	}
+	if len(service.pluginCatalog) != 1 || service.pluginCatalog[0].Origin != "codex" || service.pluginCatalog[0].Status != "ready" || service.pluginCatalog[0].Status == "restart_required" {
+		t.Fatalf("imported catalog = %#v", service.pluginCatalog)
+	}
+	if _, err := os.Stat(filepath.Join(copyRoot, "skills", "review", "SKILL.md")); err != nil {
+		t.Fatalf("imported copy: %v", err)
+	}
+	if !slices.ContainsFunc(service.cfg.Skills.AdditionalDirs, func(path string) bool {
+		return strings.HasSuffix(filepath.Clean(path), filepath.Join("plugin-packages", "codex", "market", "demo", "skills"))
+	}) {
+		t.Fatalf("skill dirs = %#v", service.cfg.Skills.AdditionalDirs)
 	}
 	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "demo@market", Decision: "false"}); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err = config.Load(path, root)
+	loaded, err = config.Load(path, home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(loaded.Plugins.CodexImports) != 0 || service.pluginCatalog[0].Origin != "codex_available" {
 		t.Fatalf("plugin import removal = %#v catalog=%#v", loaded.Plugins, service.pluginCatalog)
+	}
+	if slices.ContainsFunc(service.cfg.Skills.AdditionalDirs, func(path string) bool {
+		return strings.HasSuffix(filepath.Clean(path), filepath.Join("plugin-packages", "codex", "market", "demo", "skills"))
+	}) {
+		t.Fatalf("unimported skill dir still attached: %#v", service.cfg.Skills.AdditionalDirs)
 	}
 }
 

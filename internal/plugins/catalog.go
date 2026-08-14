@@ -116,6 +116,7 @@ type manifestUI struct {
 	Capabilities  []string `json:"capabilities"`
 	BrandColor    string   `json:"brandColor"`
 	Logo          string   `json:"logo"`
+	ComposerIcon  string   `json:"composerIcon"`
 }
 
 type mcpDescriptor struct {
@@ -133,6 +134,7 @@ type mcpDescriptor struct {
 
 type manifestPaths struct {
 	logo   string
+	icon   string
 	skills string
 	mcp    string
 	hooks  string
@@ -173,6 +175,7 @@ func Discover(ctx context.Context, options Options) Integration {
 			ID: available.PluginID, Name: available.Name, DisplayName: available.Name,
 			Version: available.Version, Marketplace: available.Marketplace, Origin: "codex_available",
 			Description: "可选择复制到 Azem 后启用", Enabled: false, Status: "available",
+			LogoPath: availablePluginLogo(options.HomeDir, available),
 		})
 	}
 	sort.Slice(result.Entries, func(i, j int) bool {
@@ -255,11 +258,17 @@ func inspectPlugin(options Options, installed installedPlugin) (Entry, string, m
 	entry.DeveloperName, entry.Category = value.Interface.DeveloperName, value.Interface.Category
 	entry.BrandColor, entry.Capabilities = value.Interface.BrandColor, append([]string(nil), value.Interface.Capabilities...)
 	paths, diagnostics := resolveManifestPaths(root, entry.ID, value)
-	entry.LogoPath, diagnostics = pluginLogoDataURL(paths.logo, diagnostics, entry.ID)
+	entry.LogoPath, diagnostics = pluginLogoDataURL(firstNonEmpty(paths.icon, paths.logo), diagnostics, entry.ID)
 	skillDir := paths.skills
 	entry.SkillCount = countSkillDirectories(skillDir)
 	mcpDiagnostics := integrateMCPServers(&entry, servers, root, pluginDataRoot(options.DataDir, installed), paths.mcp)
 	diagnostics = append(diagnostics, mcpDiagnostics...)
+	if entry.LogoPath != "" {
+		for name, server := range servers {
+			server.Icon = entry.LogoPath
+			servers[name] = server
+		}
+	}
 	entry.HookCount = boolCount(paths.hooks != "")
 	entry.HooksTrusted = options.TrustHooks && paths.hooks != ""
 	if paths.hooks != "" && !options.TrustHooks {
@@ -288,6 +297,7 @@ func resolveManifestPaths(root, pluginID string, value manifest) (manifestPaths,
 		target    *string
 	}{
 		{field: "interface.logo", reference: value.Interface.Logo, target: &paths.logo},
+		{field: "interface.composerIcon", reference: value.Interface.ComposerIcon, target: &paths.icon},
 		{field: "skills", reference: value.Skills, target: &paths.skills},
 		{field: "mcpServers", reference: value.MCPServers, target: &paths.mcp},
 		{field: "hooks", reference: value.Hooks, target: &paths.hooks},
@@ -334,6 +344,27 @@ func integrateMCPServers(entry *Entry, servers map[string]config.MCPServerConfig
 		entry.IntegratedMCPCount += boolCount(server.Enabled)
 	}
 	return diagnostics
+}
+
+func availablePluginLogo(homeDir string, installed installedPlugin) string {
+	root, err := codexPluginRoot(homeDir, installed)
+	if err != nil {
+		return ""
+	}
+	var value manifest
+	if decodeJSONFile(filepath.Join(root, ".codex-plugin", "plugin.json"), &value) != nil {
+		return ""
+	}
+	reference := firstNonEmpty(value.Interface.ComposerIcon, value.Interface.Logo)
+	if reference == "" {
+		return ""
+	}
+	resolved, err := resolvePluginPath(root, reference)
+	if err != nil {
+		return ""
+	}
+	data, _ := pluginLogoDataURL(resolved, nil, installed.PluginID)
+	return data
 }
 
 func pluginLogoDataURL(path string, diagnostics []Diagnostic, pluginID string) (string, []Diagnostic) {

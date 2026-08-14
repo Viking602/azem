@@ -29,7 +29,7 @@ type visionAssistantRun struct {
 	reasoning     string
 	contextWindow int
 	driver        hyprovider.Driver
-	host          *Service
+	host          providerHost
 }
 
 // modelImageInputSupport reports catalog-backed image support. Unknown
@@ -126,9 +126,9 @@ func (r *ProviderRuntime) resolveVisionAssistant(ctx context.Context, request Tu
 	if err != nil {
 		return visionAssistantRun{}, err
 	}
-	if host != nil && host.sessions != nil {
+	if host != nil && host.Sessions() != nil {
 		driver = &meteredProviderDriver{
-			inner: driver, store: host.sessions, host: host, sessionID: request.SessionID, runID: runID,
+			inner: driver, store: host.Sessions(), host: host, sessionID: request.SessionID, runID: runID,
 			kind: "vision", provider: route.Provider, model: visionModelID, transport: driver.Metadata().Name,
 		}
 	}
@@ -153,7 +153,7 @@ func (r *ProviderRuntime) validateVisionAssistantModel(ctx context.Context, rout
 	return reasoning, nil
 }
 
-func (r *ProviderRuntime) configuredVisionRoute(mainModelID string) (config.ModelRouteConfig, *Service, error) {
+func (r *ProviderRuntime) configuredVisionRoute(mainModelID string) (config.ModelRouteConfig, providerHost, error) {
 	r.mu.RLock()
 	route := r.cfg.Agents.Vision
 	host := r.host
@@ -193,10 +193,10 @@ func (r *ProviderRuntime) visionMaxOutputTokens(assistant visionAssistantRun) in
 
 func (r *ProviderRuntime) visionExtraBody(assistant visionAssistantRun, request TurnRequest, runID string, maxOutputTokens int) map[string]any {
 	extraBody := map[string]any{"prompt_cache_key": request.SessionID + ":vision:" + runID}
-	if assistant.host != nil && strings.TrimSpace(assistant.host.attachments.Root) != "" {
-		extraBody[responses.AttachmentRootExtraKey] = assistant.host.attachments.Root
+	if assistant.host != nil && strings.TrimSpace(assistant.host.AttachmentRoot()) != "" {
+		extraBody[responses.AttachmentRootExtraKey] = assistant.host.AttachmentRoot()
 	}
-	if reporter := r.responseUsageReporter(assistant.host, request.SessionID, runID, "vision", assistant.route.Provider, assistant.modelID, assistant.driver.Metadata().Name); reporter != nil && (assistant.host == nil || assistant.host.sessions == nil) {
+	if reporter := r.responseUsageReporter(assistant.host, request.SessionID, runID, "vision", assistant.route.Provider, assistant.modelID, assistant.driver.Metadata().Name); reporter != nil && (assistant.host == nil || assistant.host.Sessions() == nil) {
 		extraBody[responses.UsageReporterExtraKey] = reporter
 	}
 	if llmuxdriver.CanonicalProviderID(assistant.route.Provider) != "chatgpt" {

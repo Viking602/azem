@@ -4,7 +4,7 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X 'main.version=$(VERSION)' -X 'main.gitCommit=$(GIT_COMMIT)' -X 'main.buildTime=$(BUILD_TIME)'
 
-.PHONY: build gui gui-windows frontend test test-gui sqlc architecture-check
+.PHONY: build gui gui-windows frontend test test-gui sqlc architecture-check contracts contracts-check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/azem
@@ -41,7 +41,7 @@ gui-windows: frontend
 	mkdir -p dist/windows-$(WINDOWS_ARCH)
 	GOOS=windows GOARCH=$(WINDOWS_ARCH) CGO_ENABLED=0 go build -ldflags "-H windowsgui $(LDFLAGS)" -o dist/windows-$(WINDOWS_ARCH)/Azem.exe ./cmd/azem-gui
 
-test:
+test: contracts-check
 	go test ./...
 
 test-gui:
@@ -55,6 +55,12 @@ endif
 
 sqlc:
 	go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate
+
+contracts:
+	go run ./cmd/gen-contracts
+
+contracts-check:
+	go run ./cmd/gen-contracts -check
 
 architecture-check:
 	sentrux check .

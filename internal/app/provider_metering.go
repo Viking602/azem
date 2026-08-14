@@ -18,7 +18,7 @@ import (
 type meteredProviderDriver struct {
 	inner                                              hyprovider.Driver
 	store                                              *session.Service
-	host                                               *Service
+	host                                               providerHost
 	sessionID, runID, kind, provider, model, transport string
 }
 
@@ -53,7 +53,7 @@ func (d *meteredProviderDriver) Stream(ctx context.Context, request hyprovider.R
 	stream, err := d.inner.Stream(ctx, request)
 	if err != nil {
 		if persistErr := state.finish("failed", hyprovider.Usage{}); persistErr != nil && d.host != nil {
-			d.host.emit(d.host.ctx, Event{Kind: EventContextUsage, SessionID: d.sessionID, RunID: d.runID, State: "failed",
+			d.host.EmitEvent(d.host.BaseContext(), Event{Kind: EventContextUsage, SessionID: d.sessionID, RunID: d.runID, State: "failed",
 				Data: map[string]string{"factPersistenceError": persistErr.Error(), "requestKind": d.kind}})
 		}
 		return nil, err
@@ -103,8 +103,8 @@ func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) erro
 	}
 	f := *s.terminal
 	baseCtx := context.Background()
-	if s.driver.host != nil && s.driver.host.ctx != nil {
-		baseCtx = s.driver.host.ctx
+	if s.driver.host != nil && s.driver.host.BaseContext() != nil {
+		baseCtx = s.driver.host.BaseContext()
 	}
 	ctx := context.WithoutCancel(baseCtx)
 	if !s.factSaved {
@@ -134,7 +134,7 @@ func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) erro
 		eventState = "reported"
 	}
 	if s.driver.host != nil {
-		s.driver.host.emit(ctx, Event{Kind: EventContextUsage, SessionID: f.SessionID, RunID: f.RunID, State: eventState,
+		s.driver.host.EmitEvent(ctx, Event{Kind: EventContextUsage, SessionID: f.SessionID, RunID: f.RunID, State: eventState,
 			Data: map[string]string{"factSnapshot": "true", "usageSnapshot": string(encoded), "requestKind": f.RequestKind,
 				"inputTokens": fmt.Sprint(f.InputTokens), "cachedInputTokens": fmt.Sprint(f.CachedTokens), "outputTokens": fmt.Sprint(f.OutputTokens),
 				"totalTokens": fmt.Sprint(f.TotalTokens), "cacheWriteTokens": fmt.Sprint(f.CacheWriteTokens), "reasoningTokens": fmt.Sprint(f.ReasoningTokens),

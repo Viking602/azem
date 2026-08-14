@@ -173,6 +173,23 @@ the caller context is still healthy is a retryable stream-open failure; this
 distinction prevents one transient 30-second connection stall from terminating
 a long-running main or subagent run.
 
+## Stable error taxonomy
+
+`internal/provider/errcode` classifies every terminal provider failure into a
+stable, machine-readable code: `auth`, `quota`, `rate_limit`,
+`context_overflow`, `empty_response`, `invalid_request`, `server`,
+`transport`, `cancelled`, or `unknown`. Typed errors (the shared
+`responses.APIError` and Venat's provider error kinds) win over transport
+heuristics, and anything unrecognized classifies as `unknown` rather than a
+guess.
+
+The runtime attaches the code to the event payload as `Data["errorCode"]` on
+`run_failed` (main and team runs) and on `provider_retry` waiting events when
+a retry cause is known. Consumers use the code for presentation only — the
+desktop titles the failure block from the code and the block keeps the
+original error text — while Venat remains the single retry owner;
+`errcode.Retryable` is UI guidance, never a runtime retry decision.
+
 ## Verification
 
 Run the adapter, shared request, app runtime, desktop projection, and frontend

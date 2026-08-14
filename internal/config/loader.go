@@ -286,6 +286,14 @@ func UpdateSkillsSelection(path string, eager, disabled []string) error {
 
 // UpdateCodexPluginImports persists the explicit set of Codex plugins the user
 // chose to copy into Azem. Discovery alone never implies import.
+func UpdatePluginTrustHooks(path string, trusted bool) error {
+	return updateYAML(path, func(root *yaml.Node) {
+		pluginsNode := ensureMappingPath(root, "plugins")
+		setMappingScalar(pluginsNode, "trust_hooks", strconv.FormatBool(trusted))
+		mappingValue(pluginsNode, "trust_hooks").Tag = "!!bool"
+	})
+}
+
 func UpdateCodexPluginImports(path string, pluginIDs []string) error {
 	candidate := Default()
 	candidate.Plugins.CodexImports = append([]string(nil), pluginIDs...)

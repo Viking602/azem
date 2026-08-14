@@ -80,6 +80,41 @@ describe("Sidebar project sessions", () => {
     await act(async () => root.unmount());
   });
 
+  it("hides archived sessions from the project sidebar", async () => {
+    const sessions: Session[] = [
+      { id: "session-1", workspace: snapshot.workspace, title: "当前会话", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString() },
+      { id: "session-archived", workspace: snapshot.workspace, title: "已归档会话", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", archived: true, updatedAt: new Date().toISOString() },
+    ];
+    useRuntimeStore.setState({
+      snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions,
+      currentSessionId: "session-1", view: "thread",
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Sidebar />));
+    const titles = Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list > button")).map((button) => button.title);
+    expect(titles).toContain("当前会话");
+    expect(titles).not.toContain("已归档会话");
+    await act(async () => root.unmount());
+  });
+
+  it("shows minute-level session age instead of collapsing the last hour to 刚刚", async () => {
+    const sessions: Session[] = [{
+      id: "session-1", workspace: snapshot.workspace, title: "分析当前变更内容", providerId: "chatgpt",
+      modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single",
+      updatedAt: new Date(Date.now() - 17 * 60_000).toISOString(),
+    }];
+    useRuntimeStore.setState({
+      snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions,
+      currentSessionId: "session-1", view: "thread",
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Sidebar />));
+    expect(container.querySelector(".session-copy small")?.textContent).toBe("17 分钟前");
+    await act(async () => root.unmount());
+  });
+
   it("shows a lightweight spinner only on the running session", async () => {
     const sessions: Session[] = ["session-1", "session-2"].map((id) => ({
       id, workspace: snapshot.workspace, title: id === "session-1" ? "当前会话" : "后台运行会话", providerId: "chatgpt",

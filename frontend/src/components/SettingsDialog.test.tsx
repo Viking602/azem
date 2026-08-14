@@ -71,13 +71,13 @@ describe("SettingsDialog", () => {
       snapshot,
       approvalMode: snapshot.approvalMode,
       modelRoutes: [
-		{ Scope: "main", Role: "", Label: "Main", Route: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high" } },
-        { Scope: "title", Role: "", Label: "Title", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
-        { Scope: "plan", Role: "", Label: "Plan", Route: {} },
-		{ Scope: "approval", Role: "", Label: "Approval", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
-		{ Scope: "vision", Role: "", Label: "Vision", Route: {} },
-		{ Scope: "recap", Role: "", Label: "Recap", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
-        { Scope: "subagent", Role: "explore", Label: "Explore", Route: {} },
+		{ scope: "main", role: "", label: "Main", route: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high" } },
+        { scope: "title", role: "", label: "Title", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
+        { scope: "plan", role: "", label: "Plan", route: {} },
+		{ scope: "approval", role: "", label: "Approval", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
+		{ scope: "vision", role: "", label: "Vision", route: {} },
+		{ scope: "recap", role: "", label: "Recap", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
+        { scope: "subagent", role: "explore", label: "Explore", route: {} },
       ],
       agentCatalog: [{ name: "explore", description: "只读探索代码库", model: "", reasoning: "", capabilityMode: "read-only", isolation: "none", source: "builtin", enabled: true }],
       modelsByProvider: {
@@ -88,10 +88,10 @@ describe("SettingsDialog", () => {
         ],
       },
 	  modelProviders: [{
-		ID: "openrouter", DisplayName: "OpenRouter", Backend: "openai_compat",
-		DefaultBaseURL: "https://openrouter.ai/api/v1", BaseURL: "https://openrouter.ai/api/v1", EnvKey: "OPENROUTER_API_KEY",
-		Enabled: false, CredentialConfigured: false, CredentialSource: "none",
-		Models: [{ id: "openai/gpt-test", name: "GPT Test", contextWindow: 128000, reasoningLevels: ["low", "high"], defaultReasoning: "high" }],
+		id: "openrouter", displayName: "OpenRouter", backend: "openai_compat",
+		defaultBaseUrl: "https://openrouter.ai/api/v1", baseUrl: "https://openrouter.ai/api/v1", envKey: "OPENROUTER_API_KEY",
+		enabled: false, credentialConfigured: false, credentialSource: "none",
+		models: [{ id: "openai/gpt-test", name: "GPT Test", contextWindow: 128000, reasoningLevels: ["low", "high"], defaultReasoning: "high" }],
 	  }],
       skills: [],
       settingsOpen: true,
@@ -110,6 +110,8 @@ describe("SettingsDialog", () => {
     expect(execute).toHaveBeenCalledWith({ kind: "list_models", sessionId: "session-1" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_model_providers", sessionId: "session-1" });
 	expect(execute).toHaveBeenCalledWith({ kind: "list_plugins", sessionId: "session-1" });
+	expect(execute).toHaveBeenCalledWith({ kind: "list_hooks", sessionId: "session-1" });
+	expect(execute).toHaveBeenCalledWith({ kind: "list_sessions", sessionId: "session-1" });
     expect(container.querySelectorAll(".route-row")).toHaveLength(6);
     expect(container.querySelectorAll(".route-card")).toHaveLength(2);
     expect(container.querySelector(".model-routes-pane > .route-groups")).not.toBeNull();
@@ -146,7 +148,7 @@ describe("SettingsDialog", () => {
 
     expect(execute).toHaveBeenCalledWith({
       kind: "set_model_route", target: "", sessionId: "session-1",
-      route: { Scope: "subagent", Role: "explore", Label: "Explore", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "medium" } },
+      route: { scope: "subagent", role: "explore", label: "Explore", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "medium" } },
     });
     vi.mocked(execute).mockClear();
     const reasoningMenu = explore.querySelector<HTMLDetailsElement>(".route-reasoning-menu")!;
@@ -156,7 +158,7 @@ describe("SettingsDialog", () => {
     await act(async () => container.querySelector<HTMLButtonElement>('.menu-select-options-portal [data-value="low"]')!.click());
     expect(execute).toHaveBeenCalledWith({
       kind: "set_model_route", target: "", sessionId: "session-1",
-      route: { Scope: "subagent", Role: "explore", Label: "Explore", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
+      route: { scope: "subagent", role: "explore", label: "Explore", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
     });
 	const subagentsNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("子智能体"))!;
 	await act(async () => subagentsNav.click());
@@ -169,17 +171,17 @@ describe("SettingsDialog", () => {
 
 	it("saves an llmux provider and sends the API key only in the action", async () => {
 		const extraProviders = Array.from({ length: 55 }, (_, index) => ({
-			ID: index === 0 ? "ai302" : `provider-${String(index).padStart(2, "0")}`, DisplayName: index === 0 ? "302.AI" : `Provider ${index}`, Backend: "openai-compatible",
-			DefaultBaseURL: `https://provider-${index}.example/v1`, BaseURL: "", EnvKey: `PROVIDER_${index}_API_KEY`,
-			Enabled: false, CredentialConfigured: false, CredentialSource: "none" as const, ModelsDevID: index === 0 ? "302ai" : undefined, Models: [],
+			id: index === 0 ? "ai302" : `provider-${String(index).padStart(2, "0")}`, displayName: index === 0 ? "302.AI" : `Provider ${index}`, backend: "openai-compatible",
+			defaultBaseUrl: `https://provider-${index}.example/v1`, baseUrl: "", envKey: `PROVIDER_${index}_API_KEY`,
+			enabled: false, credentialConfigured: false, credentialSource: "none" as const, modelsDevId: index === 0 ? "302ai" : undefined, models: [],
 		}));
 		useRuntimeStore.setState({
 			snapshot, approvalMode: snapshot.approvalMode, modelRoutes: [], modelsByProvider: {}, agentCatalog: [], skills: [], settingsOpen: true,
 			modelProviders: [{
-				ID: "openrouter", DisplayName: "OpenRouter", Backend: "openai_compat",
-				DefaultBaseURL: "https://openrouter.ai/api/v1", BaseURL: "https://openrouter.ai/api/v1", EnvKey: "OPENROUTER_API_KEY",
-				Enabled: false, CredentialConfigured: false, CredentialSource: "none",
-				Models: [{ id: "openai/gpt-test", name: "GPT Test", contextWindow: 128000, maxOutputTokens: 32000, reasoningLevels: ["low", "high"], defaultReasoning: "high", capabilities: ["tools", "reasoning"], inputModalities: ["text", "image"], outputModalities: ["text"] }],
+				id: "openrouter", displayName: "OpenRouter", backend: "openai_compat",
+				defaultBaseUrl: "https://openrouter.ai/api/v1", baseUrl: "https://openrouter.ai/api/v1", envKey: "OPENROUTER_API_KEY",
+				enabled: false, credentialConfigured: false, credentialSource: "none",
+				models: [{ id: "openai/gpt-test", name: "GPT Test", contextWindow: 128000, maxOutputTokens: 32000, reasoningLevels: ["low", "high"], defaultReasoning: "high", capabilities: ["tools", "reasoning"], inputModalities: ["text", "image"], outputModalities: ["text"] }],
 			}, ...extraProviders],
 		});
 		const container = document.createElement("div");
@@ -242,13 +244,13 @@ describe("SettingsDialog", () => {
 		await act(async () => editor.querySelector<HTMLButtonElement>(".provider-model-actions .small-button")!.click());
 		expect(execute).toHaveBeenCalledWith({
 			kind: "discover_provider_models", sessionId: "session-1", secret: "sk-test",
-			provider: expect.objectContaining({ ID: "openrouter", Enabled: true }),
+			provider: expect.objectContaining({ id: "openrouter", enabled: true }),
 		});
 		vi.mocked(execute).mockClear();
 		await act(async () => editor.querySelector<HTMLButtonElement>("footer .small-button")!.click());
 		expect(execute).toHaveBeenCalledWith({
 			kind: "set_model_provider", sessionId: "session-1", secret: "sk-test",
-			provider: expect.objectContaining({ ID: "openrouter", Enabled: true, Models: [expect.objectContaining({ id: "openai/gpt-test" })] }),
+			provider: expect.objectContaining({ id: "openrouter", enabled: true, models: [expect.objectContaining({ id: "openai/gpt-test" })] }),
 		});
 		await act(async () => root.unmount());
 		container.remove();
@@ -257,8 +259,8 @@ describe("SettingsDialog", () => {
 	it("shows subscription providers in model settings and starts the existing login flow", async () => {
 		useRuntimeStore.setState({
 			snapshot, approvalMode: snapshot.approvalMode, modelRoutes: [
-				{ Scope: "approval", Role: "", Label: "Approval", Route: { provider: "chatgpt", model: "codex-auto-review", reasoning: "high" } },
-				{ Scope: "subagent", Role: "review", Label: "Review", Route: { provider: "chatgpt", model: "gpt-review-worker", reasoning: "high" } },
+				{ scope: "approval", role: "", label: "Approval", route: { provider: "chatgpt", model: "codex-auto-review", reasoning: "high" } },
+				{ scope: "subagent", role: "review", label: "Review", route: { provider: "chatgpt", model: "gpt-review-worker", reasoning: "high" } },
 			], modelsByProvider: {
 				chatgpt: [
 					{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol", reasoningLevels: ["medium", "high"] },
@@ -269,12 +271,12 @@ describe("SettingsDialog", () => {
 				grok: [{ id: "grok-4.20", name: "Grok 4.20", reasoningLevels: ["low", "medium", "high"] }],
 			}, agentCatalog: [], skills: [], settingsOpen: true,
 			modelProviders: [{
-				ID: "chatgpt", DisplayName: "OpenAI / ChatGPT 订阅", Backend: "subscription", Subscription: true,
-				DefaultBaseURL: "", BaseURL: "", EnvKey: "", Enabled: true, CredentialConfigured: true, CredentialSource: "stored", AccountID: "account-1", AccountLabel: "user@example.com", AccountPlan: "pro", ModelsDevID: "openai", Models: [],
-				QuotaAvailable: true, QuotaUsedPercent: 61.5, QuotaResetsAt: 1786500000, QuotaBalance: "12.50",
+				id: "chatgpt", displayName: "OpenAI / ChatGPT 订阅", backend: "subscription", subscription: true,
+				defaultBaseUrl: "", baseUrl: "", envKey: "", enabled: true, credentialConfigured: true, credentialSource: "stored", accountId: "account-1", accountLabel: "user@example.com", accountPlan: "pro", modelsDevId: "openai", models: [],
+				quotaAvailable: true, quotaUsedPercent: 61.5, quotaResetsAt: 1786500000, quotaBalance: "12.50",
 			}, {
-				ID: "grok", DisplayName: "Grok 订阅", Backend: "subscription", Subscription: true,
-				DefaultBaseURL: "", BaseURL: "", EnvKey: "", Enabled: true, CredentialConfigured: true, CredentialSource: "stored", AccountID: "account-2", AccountLabel: "grok@example.com", ModelsDevID: "xai", Models: [], QuotaWarning: "grok quota returned HTTP 500",
+				id: "grok", displayName: "Grok 订阅", backend: "subscription", subscription: true,
+				defaultBaseUrl: "", baseUrl: "", envKey: "", enabled: true, credentialConfigured: true, credentialSource: "stored", accountId: "account-2", accountLabel: "grok@example.com", modelsDevId: "xai", models: [], quotaWarning: "grok quota returned HTTP 500",
 			}],
 		});
 		const container = document.createElement("div");
@@ -312,13 +314,18 @@ describe("SettingsDialog", () => {
 		vi.mocked(execute).mockClear();
 		await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="禁用 GPT-5.6 Sol"]')!.click());
 		expect(execute).toHaveBeenCalledWith({ kind: "set_model_enabled", sessionId: "session-1", target: "chatgpt", name: "gpt-5.6-sol", decision: "false" });
-		await act(async () => useRuntimeStore.setState({ modelProviders: useRuntimeStore.getState().modelProviders.map((provider) => provider.ID === "chatgpt" ? { ...provider, AccountPlan: "prolite" } : provider) }));
+		await act(async () => useRuntimeStore.setState({ modelProviders: useRuntimeStore.getState().modelProviders.map((provider) => provider.id === "chatgpt" ? { ...provider, accountPlan: "prolite" } : provider) }));
 		expect(container.querySelector(".subscription-provider")?.textContent).toContain("订阅驱动 · Pro 5x");
 		const grok = Array.from(container.querySelectorAll<HTMLButtonElement>(".provider-list button")).find((button) => button.textContent?.includes("Grok 订阅"))!;
 		await act(async () => grok.click());
 		expect(container.querySelector(".subscription-provider")?.textContent).toContain("获取失败");
 		expect(container.querySelector(".subscription-provider")?.textContent).not.toContain("HTTP 500");
 		expect(container.querySelector(".subscription-model-note")?.textContent).toContain("Grok 4.20");
+		const refreshModels = Array.from(container.querySelectorAll<HTMLButtonElement>(".provider-model-actions button")).find((button) => button.textContent?.includes("获取模型"));
+		expect(refreshModels).not.toBeNull();
+		vi.mocked(execute).mockClear();
+		await act(async () => refreshModels!.click());
+		expect(execute).toHaveBeenCalledWith({ kind: "discover_provider_models", sessionId: "session-1", target: "grok" });
 		const chatgpt = Array.from(container.querySelectorAll<HTMLButtonElement>(".provider-list button")).find((button) => button.textContent?.includes("ChatGPT 订阅"))!;
 		await act(async () => chatgpt.click());
 		vi.mocked(execute).mockClear();
@@ -419,6 +426,31 @@ describe("SettingsDialog", () => {
 		await act(async () => container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="停用 verify"]')!.click());
 		expect(execute).toHaveBeenCalledWith({ kind: "set_skill_enabled", target: "verify", decision: "false", sessionId: "session-1" });
 
+		await act(async () => root.unmount());
+		container.remove();
+	});
+
+	it("opens the archive section with conversations grouped by project", async () => {
+		useRuntimeStore.setState({
+			snapshot, approvalMode: snapshot.approvalMode, modelRoutes: [], modelsByProvider: {}, agentCatalog: [], modelProviders: [],
+			skills: [], plugins: [], settingsOpen: true,
+			sessions: [
+				{ id: "archived-1", workspace: "/workspace/azem", title: "旧 Azem 会话", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", archived: true, updatedAt: "2026-01-01T00:00:00.000Z" },
+				{ id: "archived-2", workspace: "/workspace/venat", title: "旧 Venat 会话", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", archived: true, updatedAt: "2026-02-01T00:00:00.000Z" },
+			],
+		});
+		const container = document.createElement("div");
+		document.body.append(container);
+		const root = createRoot(container);
+		await act(async () => root.render(<SettingsDialog />));
+		const archiveNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.querySelector("strong")?.textContent === "归档")!;
+		expect(archiveNav.querySelector("em")?.textContent).toBe("2");
+		await act(async () => archiveNav.click());
+		expect(container.querySelector(".settings-main")?.getAttribute("data-section")).toBe("archive");
+		expect(container.textContent).toContain("旧 Azem 会话");
+		expect(container.textContent).toContain("旧 Venat 会话");
+		expect(container.textContent).toContain("/workspace/azem");
+		expect(container.textContent).toContain("/workspace/venat");
 		await act(async () => root.unmount());
 		container.remove();
 	});

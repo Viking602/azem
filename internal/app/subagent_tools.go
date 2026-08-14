@@ -222,10 +222,10 @@ func prepareSubagentTodoBinding(ctx context.Context, parent subagentParentRuntim
 	if itemID == "" {
 		return 0, nil
 	}
-	if parent.Host == nil || parent.Host.sessions == nil {
+	if parent.Host == nil || parent.Host.Sessions() == nil {
 		return 0, fmt.Errorf("todo store is unavailable")
 	}
-	todo, err := parent.Host.sessions.LoadTodo(ctx, parent.SessionID)
+	todo, err := parent.Host.Sessions().LoadTodo(ctx, parent.SessionID)
 	if err != nil {
 		return 0, err
 	}
@@ -247,7 +247,7 @@ func prepareSubagentTodoBinding(ctx context.Context, parent subagentParentRuntim
 }
 
 func commitSubagentTodoBinding(ctx context.Context, parent subagentParentRuntime, itemID, runID string, expectedRevision int64) error {
-	updated, err := parent.Host.sessions.UpdateTodo(ctx, parent.SessionID, expectedRevision, func(todo *session.TodoList) error {
+	updated, err := parent.Host.Sessions().UpdateTodo(ctx, parent.SessionID, expectedRevision, func(todo *session.TodoList) error {
 		for pi := range todo.Phases {
 			for ii := range todo.Phases[pi].Items {
 				item := &todo.Phases[pi].Items[ii]
@@ -266,7 +266,7 @@ func commitSubagentTodoBinding(ctx context.Context, parent subagentParentRuntime
 		return err
 	}
 	snapshot := updated.Clone()
-	parent.Host.emitTodoUpdated(parent.SessionID, snapshot)
+	parent.Host.EmitTodoUpdated(parent.SessionID, snapshot)
 	return nil
 }
 

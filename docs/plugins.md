@@ -25,8 +25,10 @@ plugin root, and must remain inside that root after symlink resolution.
 The manifest supports identity and discovery fields (`name`, `version`,
 `description`, `author`, `homepage`, `repository`, `license`, `keywords`) and
 an `interface` object for display name, developer, category, capabilities,
-URLs, prompts, color, icons, logos, and screenshots. Azem currently consumes
-only the fields needed for runtime integration and the Extensions catalog.
+URLs, prompts, color, icons, logos, and screenshots. Azem projects
+`composerIcon` or `logo` as bounded image data in the Extensions catalog, and
+reuses that mark on plugin-owned MCP rows. Skill directories may also supply
+`icon.svg` / `icon.png` (or a relative `metadata.icon`) for the Skills list.
 
 ## Azem plugin directory
 
@@ -65,15 +67,15 @@ value still point at Azem storage.
 | Local stdio MCP | Integrated with plugin-root working directory and `PLUGIN_ROOT` / `PLUGIN_DATA` environment |
 | HTTP MCP with bearer env | Integrated; the token stays an environment reference |
 | OAuth-only HTTP MCP | Cataloged but disabled until Azem has an authenticated connection |
-| Hooks | Cataloged; executed only when `plugins.trust_hooks: true` |
+| Hooks | Cataloged in the Extensions Hooks tab; executed only when `plugins.trust_hooks: true` |
 | `.app.json` | Cataloged as an App requirement; requires separate connector authorization |
 | Interface assets | Validated and cataloged; supported icons up to 1 MiB render from bounded image data |
 
 Directly installed plugins are loaded at desktop startup. Codex plugins first
 appear as available choices; selecting one persists its ID in
-`plugins.codex_imports`, and the next desktop startup copies and loads only that
-selection. Removing the selection stops loading it after restart while leaving
-the dormant copy recoverable.
+`plugins.codex_imports`, then copies the package into Azem and loads its Skills
+and MCP servers immediately. Removing the selection unloads those capabilities
+in the current process while leaving the dormant copy recoverable.
 
 ## Security boundary
 

@@ -20,11 +20,13 @@ import (
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
+	"github.com/Viking602/azem/internal/toolview"
 	"github.com/Viking602/venat/message"
 )
 
@@ -76,6 +78,7 @@ type Service struct {
 	liveApprovals      map[string]*liveApproval
 	liveUserInputs     map[string]*liveUserInput
 	teamApprovals      map[string]struct{}
+	autoReviews        map[string]*prefetchedAutoReview
 	approvalMode       ApprovalMode
 	autoReviewDenials  map[string]*autoReviewDenialTracker
 	mcp                *mcpruntime.Manager
@@ -87,6 +90,9 @@ type Service struct {
 	skillCatalog       *skills.Catalog
 	pluginCatalog      []PluginCatalogEntry
 	pluginDiagnostics  []PluginDiagnostic
+	pluginOptions      plugins.Options
+	pluginSkillDirs    []string
+	pluginMCPNames     []string
 	hooks              hooks.Dispatcher
 	hookOptions        hooks.Options
 	hookWatcher        *hookWatcher
@@ -114,7 +120,7 @@ func NewService(parent context.Context, cfg config.Config) *Service {
 	return &Service{
 		cfg: cfg, events: newEventBroker(eventDeltaCoalesceWindow), ctx: ctx, cancel: cancel,
 		shutdownDone: make(chan struct{}), liveApprovals: make(map[string]*liveApproval), liveUserInputs: make(map[string]*liveUserInput),
-		teamApprovals: make(map[string]struct{}), autoReviewDenials: make(map[string]*autoReviewDenialTracker),
+		teamApprovals: make(map[string]struct{}), autoReviews: make(map[string]*prefetchedAutoReview), autoReviewDenials: make(map[string]*autoReviewDenialTracker),
 		hookSessions: make(map[string]struct{}), hookInitialUsers: make(map[string]string), hookInitialContext: make(map[string]string), hookAsyncContext: make(map[string][]string), approvalMode: approvalMode,
 		sessionUsage: make(map[string]session.Usage),
 	}
@@ -287,6 +293,7 @@ func (s *Service) Bootstrap() {
 		_ = s.emitSkillCatalog(s.ctx, "snapshot")
 	}
 	s.emit(s.ctx, Event{Kind: EventPluginCatalog, State: "snapshot", PluginCatalog: s.pluginCatalog, PluginDiagnostics: s.pluginDiagnostics})
+	_ = s.emitHookCatalog(s.ctx, "snapshot")
 	s.emitRecoveryState()
 	s.emitApprovalMode(s.ctx)
 	_ = s.emitContextProfile(s.ctx, "")
@@ -542,6 +549,28 @@ func limitRunes(value string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
+// projectedToolRecord decorates a durable tool record with the shared
+// toolview file-change summary so reloaded sessions render the same
+// projection as live tool_finished events without frontend re-parsing.
+type projectedToolRecord struct {
+	session.ToolRecord
+	FileChange string `json:"fileChange,omitempty"`
+}
+
+func projectToolRecords(records []session.ToolRecord) []projectedToolRecord {
+	projected := make([]projectedToolRecord, 0, len(records))
+	for _, record := range records {
+		entry := projectedToolRecord{ToolRecord: record}
+		if record.State == session.ToolCompleted {
+			if summary, ok := toolview.CompletedFileChanges(record.Name, string(record.Arguments), string(record.Structured), record.Content); ok {
+				entry.FileChange = toolview.EncodeSummary(summary)
+			}
+		}
+		projected = append(projected, entry)
+	}
+	return projected
+}
+
 func sessionProjectionData(projection session.Projection, blocks string) map[string]string {
 	data := map[string]string{
 		"blocks": blocks, "lastRunID": projection.LastRunID,
@@ -550,7 +579,7 @@ func sessionProjectionData(projection session.Projection, blocks string) map[str
 		"checkpointGeneration": fmt.Sprint(projection.CheckpointGeneration),
 		"cacheEpoch":           fmt.Sprint(projection.CacheEpoch), "cacheIdentityHash": projection.CacheIdentityHash,
 	}
-	if encoded, err := json.Marshal(projection.ToolRecords); err == nil {
+	if encoded, err := json.Marshal(projectToolRecords(projection.ToolRecords)); err == nil {
 		data["toolRecords"] = string(encoded)
 	}
 	if len(projection.Blocks) > 0 {

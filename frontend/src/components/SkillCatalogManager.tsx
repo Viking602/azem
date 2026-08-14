@@ -61,7 +61,7 @@ export default function SkillCatalogManager({
       {visibleSkills.map((skill) => {
         const pending = pendingNames.has(skill.name);
         return <article key={skill.name} className={skill.disabled ? "disabled" : ""}>
-          <span className="skill-manager-icon"><Box size={16} /></span>
+          <span className="skill-manager-icon">{skill.logoPath?.startsWith("data:image/") ? <img src={skill.logoPath} alt="" /> : <Box size={16} />}</span>
           <div className="skill-manager-copy"><strong>{skill.name}</strong><small>{skill.description || skill.sourcePath}</small><div className="skill-manager-meta"><span>{skill.bundled ? t("skillBuiltin") : t("skillExternal")}</span><span>{skill.disabled ? t("skillNotLoaded") : skill.eager ? t("skillEager") : t("skillOnDemand")}</span><span>{skill.resourceCount} {t("skillResources")}</span></div></div>
           <div className="skill-manager-state"><span>{skill.disabled ? t("skillDisabled") : t("skillEnabled")}</span><button type="button" role="switch" aria-checked={!skill.disabled} aria-label={tFormat(language, skill.disabled ? "enableSkill" : "disableSkill", { skill: skill.name })} className={`skill-state-switch ${!skill.disabled ? "on" : ""} ${pending ? "pending" : ""}`} disabled={pending} onClick={() => void changeAvailability(skill)}><i /></button></div>
         </article>;

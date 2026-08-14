@@ -40,6 +40,24 @@ func TestPluginsConfigDefaultsAndLoad(t *testing.T) {
 	}
 }
 
+func TestUpdatePluginTrustHooksPreservesOtherPluginFields(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nplugins:\n  enabled: true\n  import_codex: true\n  codex_imports: [demo@market]\n  trust_hooks: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdatePluginTrustHooks(path, true); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Plugins.TrustHooks || !loaded.Plugins.ImportCodex || !reflect.DeepEqual(loaded.Plugins.CodexImports, []string{"demo@market"}) {
+		t.Fatalf("updated plugins = %#v", loaded.Plugins)
+	}
+}
+
 func TestHooksConfigDefaultsAndLoad(t *testing.T) {
 	cfg := Default()
 	if !cfg.Hooks.Enabled || cfg.Hooks.TrustProject || cfg.Hooks.ClaudeCompatibility || cfg.Hooks.DefaultTimeoutParsed != 5*time.Second || cfg.Hooks.FailurePolicy != "open" {

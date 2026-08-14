@@ -243,6 +243,24 @@ func (r *Registry) Commands(event Event) []Command {
 	return append([]Command(nil), r.commands[event]...)
 }
 
+func (r *Registry) AllCommands() []Command {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var events []Event
+	for event := range r.commands {
+		events = append(events, event)
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i] < events[j] })
+	var result []Command
+	for _, event := range events {
+		result = append(result, r.commands[event]...)
+	}
+	return result
+}
+
 func (r *Registry) Replace(next *Registry) {
 	if r == nil || next == nil {
 		return

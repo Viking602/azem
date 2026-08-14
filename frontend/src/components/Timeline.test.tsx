@@ -137,7 +137,7 @@ describe("Codex-style process timeline", () => {
     await act(async () => root.unmount());
   });
 
-  it("labels an active folded process as processing and advances its elapsed time", async () => {
+  it("keeps an active process expanded and only folds it after it finishes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-10T00:00:00Z"));
     const container = document.createElement("div");
@@ -155,15 +155,12 @@ describe("Codex-style process timeline", () => {
       await act(async () => root.render(createElement(TimelineFeed, {
         blocks: [progress, tool], language: "zh-CN", activeRunId: "child-run", running: true, foldActiveProcess: true,
       })));
-      const fold = container.querySelector<HTMLDetailsElement>(".process-fold");
-      expect(fold?.getAttribute("data-state")).toBe("running");
-      expect(fold?.querySelector(".process-fold-label")?.textContent).toBe("处理中");
-      expect(fold?.querySelector(":scope > summary time")?.textContent).toBe("2s");
-      expect(fold?.querySelector(".model-progress-step time")?.textContent).toBe("2s");
+      expect(container.querySelector(".process-fold")).toBeNull();
+      expect(container.textContent).toContain("分派专项审查");
+      expect(container.querySelector(".model-progress-step time")?.textContent).toBe("2s");
 
       await act(async () => { vi.advanceTimersByTime(2100); });
-      expect(fold?.querySelector(":scope > summary time")?.textContent).toBe("4s");
-      expect(fold?.querySelector(".model-progress-step time")?.textContent).toBe("4s");
+      expect(container.querySelector(".model-progress-step time")?.textContent).toBe("4s");
 
       await act(async () => root.render(createElement(TimelineFeed, {
         blocks: [progress, { ...tool, state: "completed", data: { elapsedMs: "4300" } }],
@@ -193,15 +190,14 @@ describe("Codex-style process timeline", () => {
       blocks: [progress, tool], language: "zh-CN", activeRunId: "child", running: true,
       foldActiveProcess: true, collapseCompletedProcess: true,
     })));
-    const process = container.querySelector<HTMLDetailsElement>(".process-fold");
-    expect(process?.open).toBe(true);
-    expect(process?.querySelector(".process-fold-label")?.textContent).toBe("处理中");
+    expect(container.querySelector(".process-fold")).toBeNull();
+    expect(container.textContent).toContain("核对边界");
 
     await act(async () => root.render(createElement(TimelineFeed, {
       blocks: [progress, { ...tool, state: "completed" }], language: "zh-CN",
       foldActiveProcess: true, collapseCompletedProcess: true,
     })));
-    expect(container.querySelector<HTMLDetailsElement>(".process-fold")).toBe(process);
+    const process = container.querySelector<HTMLDetailsElement>(".process-fold");
     expect(process?.open).toBe(false);
     expect(process?.querySelector(".process-fold-label")?.textContent).toBe("已处理");
 
@@ -694,6 +690,36 @@ describe("Codex-style process timeline", () => {
     container.remove();
   });
 
+  it("shows a shield and hides edit bodies while a file write is under review", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const rawEdit = "¶frontend/src/i18n.ts#1A65 replace 36:\n+ recapTitle: \"secret recap copy\"";
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [{
+        id: "edit-review", kind: "tool", runId: "run-review", title: "coding.edit_hashline",
+        state: "reviewing_approval",
+        data: { arguments: JSON.stringify({ input: rawEdit }) },
+      }],
+      language: "zh-CN", activeRunId: "run-review", running: true,
+    })));
+
+    expect(container.querySelector(".pending-file-edit")?.getAttribute("data-state")).toBe("reviewing_approval");
+    expect(container.querySelector('.pending-file-edit .work-entry-icon[data-icon="shield"]')).not.toBeNull();
+    expect(container.textContent).toContain("编辑文件");
+    expect(container.textContent).toContain("审核中");
+    expect(container.textContent).toContain("i18n.ts");
+    expect(container.textContent).not.toContain("secret recap copy");
+    expect(container.textContent).not.toContain("replace 36");
+    expect(container.textContent).not.toContain("¶frontend");
+    expect(container.querySelector(".tool-block")).toBeNull();
+    expect(container.querySelector(".file-change-entry[data-state='running']")).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("never exposes raw edit arguments while an active file change is not yet parseable", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -731,6 +757,62 @@ describe("Codex-style process timeline", () => {
     container.remove();
   });
 
+  it("reviews idle file edits together with a shield and hides edit bodies", async () => {
+    const rawEdit = "¶frontend/src/i18n.ts#1A65 replace 36:\n+ recapTitle: \"secret recap copy\"";
+    const edits: Block[] = ["edit-a", "edit-b", "edit-c"].map((id) => ({
+      id, kind: "tool", runId: "run-idle-edits", title: "coding.edit_hashline", state: "queued",
+      data: { arguments: JSON.stringify({ input: rawEdit }) },
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: edits, language: "zh-CN", activeRunId: "run-idle-edits", running: true,
+    })));
+
+    expect(container.querySelectorAll(".pending-file-edit[data-state='reviewing_approval']")).toHaveLength(3);
+    expect(container.querySelectorAll('.pending-file-edit .work-entry-icon[data-icon="shield"]')).toHaveLength(3);
+    expect(container.textContent).toContain("审核中");
+    expect(container.textContent).not.toContain("排队中");
+    expect(container.textContent).not.toContain("secret recap copy");
+    expect(container.textContent).not.toContain("replace 36");
+    expect(container.querySelector(".tool-block")).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("keeps a queued file edit behind an executing sibling", async () => {
+    const rawEdit = "¶src/app.ts#ABCD replace 4:\n+const next = 2;";
+    const blocks: Block[] = [
+      {
+        id: "edit-running", kind: "tool", runId: "run-busy-edit", title: "coding.edit_hashline", state: "running",
+        data: { arguments: JSON.stringify({ input: rawEdit }) },
+      },
+      {
+        id: "edit-queued", kind: "tool", runId: "run-busy-edit", title: "coding.edit_hashline", state: "queued",
+        data: { arguments: JSON.stringify({ input: rawEdit }) },
+      },
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks, language: "zh-CN", activeRunId: "run-busy-edit", running: true,
+    })));
+
+    expect(container.querySelector(".file-change-entry[data-state='running']")?.textContent).toContain("正在编辑文件");
+    expect(container.querySelector(".pending-file-edit[data-state='reviewing_approval']")?.textContent).toContain("审核中");
+    expect(container.querySelector('.pending-file-edit .work-entry-icon[data-icon="shield"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("排队中");
+    expect(container.textContent).not.toContain("const next");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("groups settled work without hiding queued and approval-bound tools", async () => {
     const blocks: Block[] = [
       { id: "read-1", kind: "tool", runId: "run-pending", title: "coding.read_file", state: "completed" },
@@ -756,11 +838,13 @@ describe("Codex-style process timeline", () => {
     })));
 
     expect(container.querySelectorAll(".timeline-step-list")).toHaveLength(1);
-    expect(container.querySelectorAll(".timeline-step")).toHaveLength(7);
+    expect(container.querySelectorAll(".timeline-step")).toHaveLength(6);
     expect(container.querySelectorAll(".tool-group, .process-entries > .tool-block")).toHaveLength(0);
     expect(container.textContent).toContain("需要审批");
     expect(container.textContent).toContain("排队中");
-    expect(container.querySelector(".file-change-entry")).toBeNull();
+    expect(container.querySelector('.pending-file-edit[data-state="awaiting_approval"]')).not.toBeNull();
+    expect(container.querySelector('.pending-file-edit .work-entry-icon[data-icon="shield"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("package main");
     expect(container.querySelector('.timeline-step[data-state="running"]')?.getAttribute("aria-current")).toBe("step");
     expect(Array.from(container.querySelectorAll<HTMLDetailsElement>(".timeline-step"))
       .every((details) => !details.open)).toBe(true);

@@ -27,6 +27,10 @@ const staticSettings: Copy[] = [
   ["extensions:mcp", "extensions", "MCP 服务", "MCP services", "添加、启停、重连或删除 MCP 服务", "Add, enable, reconnect, or delete MCP services", ["server", "工具", "tool"]],
   ["extensions:skills", "extensions", "Skills", "Skills", "管理通用 .agents 技能", "Manage shared .agents skills", ["技能", ".agents"]],
   ["extensions:plugins", "extensions", "插件", "Plugins", "选择并导入插件到 Azem 目录", "Select and import plugins into Azem's directory", ["plugin", "codex", "导入"]],
+  ["extensions:hooks", "extensions", "Hooks", "Hooks", "查看生命周期 Hooks，并单独信任插件 Hooks", "Inspect lifecycle hooks and explicitly trust plugin hooks", ["hook", "trust_hooks", "生命周期"]],
+  ["section:archive", "archive", "归档", "Archive", "归档过久未活动的会话，并按所属项目查看或恢复", "Archive inactive conversations and restore them by project", ["归档", "archive", "不活跃", "inactive"]],
+  ["archive:inactive", "archive", "归档不活跃会话", "Archive inactive conversations", "将超过指定天数未更新且未置顶的会话移出侧栏", "Move unpinned conversations that have been idle past the selected age out of the sidebar", ["inactive", "过期", "清理"]],
+  ["archive:list", "archive", "已归档会话", "Archived conversations", "按所属项目查看已归档会话并恢复", "Browse archived conversations by project and restore them", ["恢复", "restore", "项目"]],
 ];
 
 export function settingsSearchEntries(
@@ -46,31 +50,31 @@ export function settingsSearchEntries(
   }));
   for (const provider of providers) {
     entries.push({
-      id: `provider:${provider.ID}`,
+      id: `provider:${provider.id}`,
       section: "catalog",
-      title: provider.DisplayName || provider.ID,
+      title: provider.displayName || provider.id,
       description: language === "zh-CN" ? "模型提供方、登录与模型目录" : "Model provider, login, and model catalog",
-      keywords: [provider.ID, provider.Backend, "provider", "模型提供方"],
+      keywords: [provider.id, provider.backend, "provider", "模型提供方"],
     });
-    for (const model of provider.Models) {
+    for (const model of provider.models) {
       entries.push({
-        id: `provider:${provider.ID}`,
+        id: `provider:${provider.id}`,
         section: "catalog",
         title: model.name || model.id,
-        description: `${provider.DisplayName || provider.ID} · ${language === "zh-CN" ? "模型目录" : "Model catalog"}`,
-        keywords: [model.id, provider.ID, ...(model.capabilities ?? [])],
+        description: `${provider.displayName || provider.id} · ${language === "zh-CN" ? "模型目录" : "Model catalog"}`,
+        keywords: [model.id, provider.id, ...(model.capabilities ?? [])],
       });
     }
   }
   for (const route of routes) {
-    if (route.Scope === "main") continue;
+    if (route.scope === "main") continue;
     const title = routeSearchTitle(route, language);
     entries.push({
       id: routeSearchID(route),
       section: "models",
       title,
       description: language === "zh-CN" ? "模型、提供方与思考深度" : "Model, provider, and reasoning effort",
-      keywords: [route.Scope, route.Role, route.Label, "route", "模型路由", "reasoning"].filter(Boolean),
+      keywords: [route.scope, route.role, route.label, "route", "模型路由", "reasoning"].filter(Boolean),
     });
   }
   for (const server of mcpServers) {
@@ -95,7 +99,7 @@ export function filterSettings(entries: SettingsSearchEntry[], query: string) {
 }
 
 export function routeSearchID(route: ModelRoute) {
-  return `route:${route.Scope}:${route.Role || "default"}`;
+  return `route:${route.scope}:${route.role || "default"}`;
 }
 
 function routeSearchTitle(route: ModelRoute, language: "zh-CN" | "en") {
@@ -107,7 +111,7 @@ function routeSearchTitle(route: ModelRoute, language: "zh-CN" | "en") {
     compaction: ["上下文压缩模型", "Context compaction model"],
     recap: ["回顾模型", "Recap model"],
   };
-  const pair = names[route.Scope];
+  const pair = names[route.scope];
   if (pair) return language === "zh-CN" ? pair[0] : pair[1];
-  return route.Role || route.Label || (language === "zh-CN" ? "子智能体模型" : "Subagent model");
+  return route.role || route.label || (language === "zh-CN" ? "子智能体模型" : "Subagent model");
 }

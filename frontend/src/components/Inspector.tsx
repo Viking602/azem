@@ -1,8 +1,9 @@
 import { useEffect, useId, useState } from "react";
+import { createPortal } from "react-dom";
 import {
-  Check, ChevronRight, Circle, CircleDot, FileImage, ListChecks, Minus, Plus, SquareTerminal, X,
+  Check, ChevronRight, Circle, CircleDot, ExternalLink, FileImage, Globe, Link2, ListChecks, LoaderCircle, Minus, Plus, SquareTerminal, X,
 } from "lucide-react";
-import { execute } from "../bridge";
+import { attachmentDataURL, execute, openExternalURL } from "../bridge";
 import { tFormat, translator } from "../i18n";
 import {
   subagentDisplayName,
@@ -13,9 +14,10 @@ import {
 import { useRuntimeStore } from "../store";
 import { contextCacheMetrics, contextComposition, contextOccupancy } from "../contextUsage";
 import type { ContextCompositionGroup } from "../contextUsage";
-import type { AgentState, ContextProfile, SessionRecap, Snapshot, TodoList, TodoStatus } from "../types";
+import type { AgentState, Attachment, ContextProfile, SessionRecap, Snapshot, TodoList, TodoStatus } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
 import { TaskRow } from "./beautiful-ui/Primitives";
+import { collectConversationSources, type ConversationSource } from "./inspectorSources";
 
 
 export default function Inspector() {
@@ -37,7 +39,8 @@ export default function Inspector() {
   const setView = useRuntimeStore((state) => state.setView);
   const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const t = translator(snapshot.language);
-  const sources = Array.from(new Map(blocks.flatMap((block) => block.attachments ?? []).map((item) => [item.id || item.path, item])).values());
+  const sources = collectConversationSources(blocks, snapshot.language);
+  const [preview, setPreview] = useState<ConversationSource | null>(null);
   const currentBranch = branches.find((branch) => branch.current)?.name || "";
   const occupancy = contextOccupancy(contextUsage, contextProfile);
   const cache = contextCacheMetrics(contextUsage);
@@ -82,8 +85,33 @@ export default function Inspector() {
         {backgroundProcesses.length > 0 && <section className="inspector-section"><header className="inspector-section-header"><h2>{t("backgroundProcesses")}</h2></header>{backgroundProcesses.map((process) => <div className="process-row" key={process.id}><SquareTerminal size={14} /><span><strong>{process.name || t("backgroundTerminal")}</strong><small title={process.command}>{process.command}</small></span><em data-state={process.state}>{process.state === "running" ? t("running") : process.state}</em></div>)}</section>}
         {sources.length > 0 && <section className="inspector-section">
           <header className="inspector-section-header"><h2>{t("sources")}</h2><button className="icon-button" title={t("attach")} aria-label={t("attach")} onClick={() => document.querySelector<HTMLInputElement>(".attach-button input")?.click()}><Plus size={15} /></button></header>
-          {sources.map((source) => <div className="source-row" key={source.id || source.path}><FileImage size={14} /><span title={source.name}>{source.name}</span></div>)}
+          {sources.map((source) => {
+            const Icon = source.kind === "image" ? FileImage : source.kind === "search-url" ? Globe : Link2;
+            const kindLabel = source.kind === "image" ? t("sourceImage") : source.kind === "search-url" ? t("sourceSearchURL") : t("sourceInputURL");
+            return <button
+              type="button"
+              className="source-row"
+              key={source.id}
+              title={source.detail || source.href || source.title}
+              aria-label={`${t("openSource")}：${source.title}`}
+              onClick={() => {
+                if (source.kind === "image") {
+                  setPreview(source);
+                  return;
+                }
+                if (source.href) void openExternalURL(source.href).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+              }}
+            >
+              <Icon size={14} />
+              <span>
+                <strong>{source.title}</strong>
+                <small>{kindLabel}{source.detail && source.detail !== source.title ? ` · ${source.detail}` : ""}</small>
+              </span>
+              <ExternalLink size={12} aria-hidden="true" />
+            </button>;
+          })}
         </section>}
+        {preview?.attachment ? <SourceImageLightbox source={preview} sessionId={currentSessionId} language={snapshot.language} onClose={() => setPreview(null)} /> : null}
         <section className="inspector-section inspector-workspace-section">
           <header className="inspector-section-header"><h2>{t("workspace")}</h2><button type="button" aria-label={t("reviewChanges")} onClick={() => setView("changes")}>{t("reviewChanges")}</button></header>
           <div className="inspector-workspace-facts">
@@ -104,16 +132,12 @@ function RecapSummary({ recap, language }: { recap: SessionRecap | null; languag
   return <section className="inspector-section recap-section" aria-label={t("recapTitle")}>
     <header className="inspector-section-header">
       <h2>{t("recapTitle")}</h2>
-      {recap && <small>r{recap.Revision}</small>}
+      {recap && <small>r{recap.revision}</small>}
     </header>
     {!recap ? <p className="recap-empty">{t("recapEmpty")}</p> : <div className="recap-content">
-      {recap.Summary && <p className="recap-summary">{recap.Summary}</p>}
-      {recap.Goal && <div><span>{t("recapGoal")}</span><p>{recap.Goal}</p></div>}
-      {recap.OpenItems && <div><span>{t("recapOpenItems")}</span><p className="recap-open-items">{recap.OpenItems}</p></div>}
-      <footer>
-        <span>{t("recapBoundary")}</span>
-        <code title={recap.CoveredBoundary}>{recap.CoveredBoundary || "—"}</code>
-      </footer>
+      {recap.summary && <p className="recap-summary">{recap.summary}</p>}
+      {recap.goal && <div><span>{t("recapGoal")}</span><p>{recap.goal}</p></div>}
+      {recap.openItems && <div><span>{t("recapOpenItems")}</span><p className="recap-open-items">{recap.openItems}</p></div>}
     </div>}
   </section>;
 }
@@ -263,6 +287,48 @@ function todoStatusLabel(status: TodoStatus, language: Snapshot["language"]) {
   if (status === "cancelled") return t("cancelled");
   if (status === "in_progress") return t("todoInProgress");
   return t("todoPending");
+}
+
+function SourceImageLightbox({ source, sessionId, language, onClose }: {
+  source: ConversationSource;
+  sessionId: string;
+  language: Snapshot["language"];
+  onClose: () => void;
+}) {
+  const attachment = source.attachment as Attachment;
+  const [image, setImage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const t = translator(language);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    void attachmentDataURL(sessionId, attachment)
+      .then((value) => { if (active) setImage(value); })
+      .catch(() => { if (active) setImage(""); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [attachment, sessionId]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label={source.title} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section>
+        <header><strong>{source.title}</strong><button type="button" aria-label={t("closeSourceImage")} onClick={onClose}><X size={17} /></button></header>
+        <div className="attachment-lightbox-canvas">
+          {image ? <img src={image} alt={source.title} /> : <span className="attachment-preview-placeholder" aria-hidden="true">{loading ? <LoaderCircle className="spin" size={16} /> : <FileImage size={16} />}</span>}
+        </div>
+      </section>
+    </div>,
+    document.body,
+  );
 }
 
 function SubagentSummary({ agents, language, openAgent }: {

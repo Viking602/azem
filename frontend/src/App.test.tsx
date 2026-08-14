@@ -12,7 +12,13 @@ import type { RuntimeEvent, Session, Snapshot } from "./types";
 Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => undefined });
 
 const prototypeStyles = readFileSync("src/prototype.css", "utf8");
-const applicationStyles = readFileSync("src/styles.css", "utf8");
+// styles.css is an import hub; concatenate the imported files in cascade order.
+const applicationStyles = readFileSync("src/styles.css", "utf8")
+  .split("\n")
+  .map((line: string) => /^@import "\.\/(.+)";$/.exec(line)?.[1])
+  .filter((path: string | undefined): path is string => Boolean(path))
+  .map((path: string) => readFileSync(`src/${path}`, "utf8"))
+  .join("\n");
 const conceptStyles = readFileSync("../designs/azem-ui-motion-concept/styles.css", "utf8");
 const bridgeRuntime = vi.hoisted(() => ({ listener: null as ((event: RuntimeEvent) => void) | null }));
 
@@ -138,7 +144,7 @@ describe("application interactions", () => {
   it("paces streaming text without breaking Unicode or event order", () => {
     const text = `${"a".repeat(1023)}😀${"b".repeat(1100)}`;
     const queue: RuntimeEvent[] = [
-      { sequence: 10, kind: "text_delta", runId: "run", text, state: "streaming" },
+      { sequence: 10, kind: "text_delta" as const, runId: "run", text, state: "streaming" },
       { sequence: 11, kind: "run_finished", runId: "run" },
     ];
     const delivered: RuntimeEvent[] = [];
@@ -151,8 +157,8 @@ describe("application interactions", () => {
     expect(delivered.at(-2)?.sequence).toBe(10);
     expect(delivered[0]?.text?.endsWith("\uD83D")).toBe(false);
 
-    const calm = [{ sequence: 1, kind: "text_delta", text: "x".repeat(100) }];
-    const reduced = [{ sequence: 1, kind: "text_delta", text: "x".repeat(3000) }];
+    const calm = [{ sequence: 1, kind: "text_delta" as const, text: "x".repeat(100) }];
+    const reduced = [{ sequence: 1, kind: "text_delta" as const, text: "x".repeat(3000) }];
     expect(takeRuntimeEventFrame(calm)[0]?.text).toHaveLength(72);
     expect(takeRuntimeEventFrame(reduced, true)[0]?.text).toHaveLength(2048);
   });
@@ -220,6 +226,18 @@ describe("application interactions", () => {
     expect(useRuntimeStore.getState().uiFontSize).toBe(17);
     expect(document.documentElement.style.getPropertyValue("--ui-font-family")).toContain('"Songti SC"');
     expect(document.documentElement.style.getPropertyValue("--ui-font-size")).toBe("17px");
+  });
+
+  it("lets the sidebar session tree follow the interface font size", () => {
+    const desktopBlocks = [...applicationStyles.matchAll(/@media \(min-width: 981px\) \{[\s\S]*?\n\}/g)].map((match) => match[0]);
+    expect(desktopBlocks.length).toBeGreaterThan(0);
+    for (const block of desktopBlocks) {
+      expect(block).not.toMatch(/\.session-copy strong\s*\{[^}]*font-size:\s*\d+px/);
+      expect(block).not.toMatch(/\.session-copy small\s*\{[^}]*font-size:\s*\d+px/);
+      expect(block).not.toMatch(/\.project-heading-copy strong\s*\{[^}]*font-size:\s*\d+px/);
+    }
+    expect(applicationStyles).toMatch(/\.session-copy strong\s*\{[^}]*font-size:\s*var\(--text-sm\)/);
+    expect(applicationStyles).toMatch(/\.session-copy small\s*\{[^}]*font-size:\s*var\(--text-2xs\)/);
   });
 
   it("keeps the thread mounted while subagents open in a drawer", async () => {
@@ -342,7 +360,8 @@ describe("application interactions", () => {
         content: "正在核对交互状态", state: "completed", data: { elapsedMs: "1000" },
       }],
     }));
-    expect(container?.querySelector(".agent-side-chat .process-fold-label")?.textContent).toBe("处理中");
+    expect(container?.querySelector(".agent-side-chat .process-fold")).toBeNull();
+    expect(container?.querySelector(".agent-side-chat")?.textContent).toContain("正在核对交互状态");
   });
 
   it("renders a completed subagent transcript like the main conversation and folds only its process trail", async () => {

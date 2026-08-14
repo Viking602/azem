@@ -157,7 +157,6 @@ export default function AgentSideChat() {
               language={language}
               activeRunId={activeRunId}
               running={running}
-              foldActiveProcess
               collapseCompletedProcess
             />
           </div>

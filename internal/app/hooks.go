@@ -340,11 +340,11 @@ func (s *Service) autoCompactHooks(metadata hooks.Metadata) func(context.Context
 	}
 }
 
-func wrapHookDriver(host *Service, metadata hooks.Metadata, driver tool.Driver) tool.Driver {
+func wrapHookDriver(host providerHost, metadata hooks.Metadata, driver tool.Driver) tool.Driver {
 	if host == nil {
 		return driver
 	}
-	return hooks.WrapDriver(host.hooks, metadata, driver)
+	return hooks.WrapDriver(host.HookDispatcher(), metadata, driver)
 }
 
 func (s *Service) emitTodoUpdated(sessionID string, todo session.TodoList) bool {
@@ -502,4 +502,114 @@ func stopFailureKind(err error) string {
 	default:
 		return "unknown"
 	}
+}
+
+func (s *Service) emitHookCatalog(ctx context.Context, state string) error {
+	s.emit(ctx, Event{Kind: EventHookCatalog, State: state, HookCatalog: s.hookCatalogSnapshot()})
+	return nil
+}
+
+func (s *Service) hookCatalogSnapshot() *HookCatalogSnapshot {
+	catalog := &HookCatalogSnapshot{
+		Enabled:    s.cfg.Hooks.Enabled,
+		TrustHooks: s.cfg.Plugins.TrustHooks,
+	}
+	for _, plugin := range s.pluginCatalog {
+		if plugin.HookCount == 0 {
+			continue
+		}
+		catalog.Sources = append(catalog.Sources, HookSourceEntry{
+			ID: plugin.ID, Name: firstNonEmpty(plugin.DisplayName, plugin.Name, plugin.ID),
+			Origin: "plugin", PluginID: plugin.ID, HookCount: plugin.HookCount,
+			Trusted: plugin.HooksTrusted, Warning: plugin.Warning, LogoPath: plugin.LogoPath,
+		})
+	}
+	workspace := filepath.Clean(s.cfg.Workspace.Root)
+	configDir := ""
+	if s.configPath != "" {
+		configDir = filepath.Clean(filepath.Dir(s.configPath))
+	}
+	for _, source := range s.hookOptions.Sources {
+		if source.Environment["PLUGIN_ROOT"] != "" {
+			continue
+		}
+		origin := classifyHookSource(source.Path, workspace, configDir)
+		catalog.Sources = append(catalog.Sources, HookSourceEntry{
+			ID: "source:" + source.Path, Name: hookSourceName(source.Path, origin),
+			Origin: origin, Source: source.Path, Trusted: source.Trusted,
+		})
+	}
+	if s.hooks.Registry != nil {
+		for _, command := range s.hooks.Registry.AllCommands() {
+			origin := "user"
+			if command.Environment["PLUGIN_ROOT"] != "" {
+				origin = "plugin"
+			} else {
+				origin = classifyHookSource(command.Source, workspace, configDir)
+			}
+			catalog.Commands = append(catalog.Commands, HookCommandEntry{
+				Name: firstNonEmpty(command.Name, command.RawCommand), Event: string(command.Event),
+				Matcher: command.Matcher, Command: strings.TrimSpace(strings.Join(append([]string{command.RawCommand}, command.Args...), " ")),
+				Source: command.Source, Origin: origin,
+			})
+		}
+		for _, diagnostic := range s.hooks.Registry.Diagnostics {
+			catalog.Diagnostics = append(catalog.Diagnostics, HookDiagnostic{
+				Source: diagnostic.Source, Event: string(diagnostic.Event), Message: diagnostic.Message,
+			})
+		}
+	}
+	return catalog
+}
+
+func (s *Service) setPluginHooksTrusted(ctx context.Context, trusted bool) error {
+	previous := s.cfg.Plugins.TrustHooks
+	if err := s.persistPluginTrustHooks(trusted); err != nil {
+		return err
+	}
+	s.cfg.Plugins.TrustHooks = trusted
+	if strings.TrimSpace(s.pluginOptions.DataDir) != "" || strings.TrimSpace(s.pluginOptions.HomeDir) != "" {
+		if err := s.reloadPluginRuntime(ctx); err != nil {
+			s.cfg.Plugins.TrustHooks = previous
+			_ = s.persistPluginTrustHooks(previous)
+			return err
+		}
+		return nil
+	}
+	s.applyPluginHooks(nil)
+	return s.emitHookCatalog(ctx, "updated")
+}
+
+func (s *Service) persistPluginTrustHooks(trusted bool) error {
+	if s.configPath == "" {
+		return nil
+	}
+	return s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+		return config.UpdatePluginTrustHooks(s.configPath, trusted)
+	})
+}
+
+func classifyHookSource(path, workspace, configDir string) string {
+	clean := filepath.Clean(path)
+	if workspace != "" && workspace != "." && (strings.HasPrefix(clean, workspace+string(filepath.Separator)) || clean == workspace) {
+		return "project"
+	}
+	if configDir != "" && (strings.HasPrefix(clean, configDir+string(filepath.Separator)) || clean == configDir) {
+		return "user"
+	}
+	if strings.Contains(clean, string(filepath.Separator)+".claude"+string(filepath.Separator)) || strings.HasSuffix(clean, string(filepath.Separator)+".claude") {
+		return "user"
+	}
+	return "additional"
+}
+
+func hookSourceName(path, origin string) string {
+	base := filepath.Base(path)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return path
+	}
+	if origin == "project" {
+		return base
+	}
+	return path
 }

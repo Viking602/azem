@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, Bot, Check, CornerDownRight, Database, Gauge, Hand, Languages, List, Minus, Palette, Plus,
+  Archive, ArrowLeft, Bot, Check, CornerDownRight, Database, Gauge, Hand, Languages, List, Minus, Palette, Plus,
   RefreshCw, Search, Settings2, ShieldAlert, ShieldCheck, X,
 } from "lucide-react";
 import { execute, listSkillCatalog, listSystemFonts, type SystemFont } from "../bridge";
 import { reasoningLabel, sortReasoningLevels, tFormat, translator, type Language } from "../i18n";
 import { routeSearchID } from "../settingsSearch";
 import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ModelOption } from "../store";
-import type { DeliveryMode, ModelProvider, ModelRoute, ModelRouteConfig, SettingsSection } from "../types";
+import type { ActionKind, DeliveryMode, ModelProvider, ModelRoute, ModelRouteConfig, SettingsSection } from "../types";
 import MenuSelect from "./MenuSelect";
 import ModelProviderSettings from "./ModelProviderSettings";
 import ProviderIcon from "./ProviderIcon";
+import ArchiveSettings from "./ArchiveSettings";
 import ExtensionsSettings from "./ExtensionsSettings";
 
 export default function SettingsDialog() {
@@ -18,13 +19,14 @@ export default function SettingsDialog() {
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const modelRoutes = useRuntimeStore((state) => state.modelRoutes);
-  const coreModelRoutes = modelRoutes.filter((route) => route.Scope !== "subagent" && route.Scope !== "main");
-	const subagentModelRoutes = modelRoutes.filter((route) => route.Scope === "subagent");
+  const coreModelRoutes = modelRoutes.filter((route) => route.scope !== "subagent" && route.scope !== "main");
+	const subagentModelRoutes = modelRoutes.filter((route) => route.scope === "subagent");
   const modelProviders = useRuntimeStore((state) => state.modelProviders);
-  const catalogModelCount = modelProviders.reduce((total, provider) => total + provider.Models.length, 0);
+  const catalogModelCount = modelProviders.reduce((total, provider) => total + provider.models.length, 0);
   const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
   const agentCatalog = useRuntimeStore((state) => state.agentCatalog);
   const plugins = useRuntimeStore((state) => state.plugins);
+  const archivedCount = useRuntimeStore((state) => state.sessions.filter((session) => session.archived).length);
   const theme = useRuntimeStore((state) => state.theme);
   const uiFont = useRuntimeStore((state) => state.uiFont);
   const uiFontSize = useRuntimeStore((state) => state.uiFontSize);
@@ -43,7 +45,6 @@ export default function SettingsDialog() {
   const [shellConcurrency, setShellConcurrency] = useState(snapshot.shellConcurrency ?? 2);
   const [awaitSeconds, setAwaitSeconds] = useState(snapshot.subagentAwaitSeconds ?? 600);
   const [addProviderRequest, setAddProviderRequest] = useState(0);
-  const [addMCPRequest, setAddMCPRequest] = useState(0);
   const [systemFonts, setSystemFonts] = useState<SystemFont[]>([]);
   const [reducedMotion, setReducedMotion] = useState(() => localStorage.getItem("azem-reduced-motion") === "true");
   const t = translator(snapshot.language);
@@ -59,6 +60,7 @@ export default function SettingsDialog() {
     { id: "governance", label: t("settingsGovernance"), description: t("settingsGovernanceHint"), icon: Settings2 },
     { id: "appearance", label: t("appearance"), description: t("settingsAppearanceHint"), icon: Palette },
     { id: "extensions", label: t("settingsExtensions"), description: t("settingsExtensionsHint"), icon: Languages },
+    { id: "archive", label: t("settingsArchive"), description: t("settingsArchiveHint"), icon: Archive },
   ];
   const filteredSections = sections.filter((section) => `${section.label}${section.description}`.toLowerCase().includes(query.trim().toLowerCase()));
   const current = sections.find((section) => section.id === activeSection)!;
@@ -95,7 +97,9 @@ export default function SettingsDialog() {
 	  execute({ kind: "list_model_providers", sessionId: snapshot.sessionId }),
 	  refreshSkillCatalog,
 	  execute({ kind: "list_plugins", sessionId: snapshot.sessionId }),
+	  execute({ kind: "list_hooks", sessionId: snapshot.sessionId }),
 	  execute({ kind: "refresh_mcp", sessionId: snapshot.sessionId }),
+	  execute({ kind: "list_sessions", sessionId: snapshot.sessionId }),
     ]).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
     return () => {
       node.removeEventListener("cancel", onCancel);
@@ -158,7 +162,7 @@ export default function SettingsDialog() {
     };
   }, [activeSection, reducedMotion, settingsTarget]);
 
-  const action = async (kind: string, target = "", route?: ModelRoute) => {
+  const action = async (kind: ActionKind, target = "", route?: ModelRoute) => {
     try { await execute({ kind, target, route, sessionId: snapshot.sessionId }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
@@ -180,18 +184,18 @@ export default function SettingsDialog() {
           <span>{snapshot.language === "zh-CN" ? "系统" : "System"}</span>
           {filteredSections.filter((section) => ["catalog", "models", "subagents"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span>{section.id === "catalog" && catalogModelCount > 0 ? <em>{catalogModelCount}</em> : null}</button>)}
           <span>{snapshot.language === "zh-CN" ? "偏好" : "Preferences"}</span>
-          {filteredSections.filter((section) => ["governance", "appearance", "extensions"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span>{section.id === "extensions" && plugins.length > 0 ? <em>{plugins.length}</em> : null}</button>)}
+          {filteredSections.filter((section) => ["governance", "appearance", "extensions", "archive"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span>{section.id === "extensions" && plugins.length > 0 ? <em>{plugins.length}</em> : section.id === "archive" && archivedCount > 0 ? <em>{archivedCount}</em> : null}</button>)}
         </div>
         <footer><small>{snapshot.language === "zh-CN" ? "配置自动保存到本机" : "Saved locally"}</small><small>Azem v0.8.0</small></footer>
       </aside>
       <main className="settings-main" data-section={activeSection}>
-        <header className="settings-page-header"><div><h1>{current.label}</h1><p>{current.description}</p></div>{activeSection === "catalog" && <button className="settings-primary" onClick={() => setAddProviderRequest((value) => value + 1)}><Plus size={13} />{snapshot.language === "zh-CN" ? "添加提供方" : "Add provider"}</button>}{activeSection === "models" && <span className="settings-valid"><i />{snapshot.language === "zh-CN" ? "配置有效" : "Valid configuration"}</span>}{activeSection === "extensions" && <button className="settings-primary" onClick={() => setAddMCPRequest((value) => value + 1)}><Plus size={13} />{t("addMCPServer")}</button>}<button className="icon-button settings-close" onClick={close} aria-label={t("closeSettings")}><X size={17} /></button></header>
+        <header className="settings-page-header"><div><h1>{current.label}</h1><p>{current.description}</p></div>{activeSection === "catalog" && <button className="settings-primary" onClick={() => setAddProviderRequest((value) => value + 1)}><Plus size={13} />{snapshot.language === "zh-CN" ? "添加提供方" : "Add provider"}</button>}{activeSection === "models" && <span className="settings-valid"><i />{snapshot.language === "zh-CN" ? "配置有效" : "Valid configuration"}</span>}<button className="icon-button settings-close" onClick={close} aria-label={t("closeSettings")}><X size={17} /></button></header>
         <div className="settings-content">
 		  {catalogPage[activeSection]}
           {activeSection === "models" && <SettingsPane settingID="section:models" title={t("settingsModels")} description={t("settingsModelsHint")} className="model-routes-pane" action={<button className="small-button" onClick={() => void action("list_model_routes")}><RefreshCw size={13} />{t("refresh")}</button>}>
             {modelRoutes.length === 0 ? <div className="settings-card settings-empty"><span className="azem-mark" />{t("loadingRoles")}</div> : <div className="route-groups">
-              <section className="settings-card route-card"><header><div><strong>{snapshot.language === "zh-CN" ? "核心工作流" : "Core workflows"}</strong><small>{snapshot.language === "zh-CN" ? "主会话与关键判断" : "Main conversation and critical decisions"}</small></div></header>{coreModelRoutes.map((route) => <RouteRow key={`${route.Scope}-${route.Role}`} route={route} description={descriptions.get(route.Role) || route.Label} modelsByProvider={modelsByProvider} modelProviders={modelProviders} action={action} language={snapshot.language} />)}</section>
-              <section className="settings-card route-card"><header><div><strong>{snapshot.language === "zh-CN" ? "子智能体默认模型" : "Subagent defaults"}</strong><small>{snapshot.language === "zh-CN" ? "角色仍可在定义中覆盖此配置" : "Roles can still override this setting"}</small></div></header>{subagentModelRoutes.map((route) => <RouteRow key={`${route.Scope}-${route.Role}`} route={route} description={descriptions.get(route.Role) || route.Label} modelsByProvider={modelsByProvider} modelProviders={modelProviders} action={action} language={snapshot.language} />)}</section>
+              <section className="settings-card route-card"><header><div><strong>{snapshot.language === "zh-CN" ? "核心工作流" : "Core workflows"}</strong><small>{snapshot.language === "zh-CN" ? "主会话与关键判断" : "Main conversation and critical decisions"}</small></div></header>{coreModelRoutes.map((route) => <RouteRow key={`${route.scope}-${route.role}`} route={route} description={descriptions.get(route.role) || route.label} modelsByProvider={modelsByProvider} modelProviders={modelProviders} action={action} language={snapshot.language} />)}</section>
+              <section className="settings-card route-card"><header><div><strong>{snapshot.language === "zh-CN" ? "子智能体默认模型" : "Subagent defaults"}</strong><small>{snapshot.language === "zh-CN" ? "角色仍可在定义中覆盖此配置" : "Roles can still override this setting"}</small></div></header>{subagentModelRoutes.map((route) => <RouteRow key={`${route.scope}-${route.role}`} route={route} description={descriptions.get(route.role) || route.label} modelsByProvider={modelsByProvider} modelProviders={modelProviders} action={action} language={snapshot.language} />)}</section>
             </div>}
           </SettingsPane>}
           {activeSection === "subagents" && <SettingsPane settingID="section:subagents" title={t("settingsSubagents")} description={t("settingsSubagentsHint")} className="subagent-settings-pane">
@@ -235,7 +239,8 @@ export default function SettingsDialog() {
               <SettingRow settingID="appearance:motion" label={snapshot.language === "zh-CN" ? "减弱动态效果" : "Reduce motion"} description={snapshot.language === "zh-CN" ? "将场景切换与流式渐显缩短为即时更新" : "Make scene transitions and streaming reveals immediate"}><button type="button" role="switch" aria-checked={reducedMotion} className={`settings-switch ${reducedMotion ? "on" : ""}`} onClick={() => setReducedMotion((value) => !value)}><span /></button></SettingRow>
             </div>
           </SettingsPane>}
-          {activeSection === "extensions" && <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} openAddRequest={addMCPRequest} executeAction={execute} onError={setError} targetTab={settingsTarget?.id === "extensions:skills" ? "skills" : settingsTarget?.id === "extensions:plugins" ? "plugins" : "mcp"} />}
+          {activeSection === "extensions" && <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} executeAction={execute} onError={setError} targetTab={settingsTarget?.id === "extensions:skills" ? "skills" : settingsTarget?.id === "extensions:plugins" ? "plugins" : settingsTarget?.id === "extensions:hooks" ? "hooks" : "mcp"} />}
+          {activeSection === "archive" && <SettingsPane settingID="section:archive" title={t("settingsArchive")} description={t("settingsArchiveHint")} className="archive-settings-pane"><ArchiveSettings language={snapshot.language} sessionId={snapshot.sessionId} onError={setError} /></SettingsPane>}
         </div>
       </main>
     </div>
@@ -271,15 +276,15 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
   description: string;
   modelsByProvider: Record<string, ModelOption[]>;
   modelProviders: ModelProvider[];
-  action: (kind: string, target?: string, route?: ModelRoute) => Promise<void>;
+  action: (kind: ActionKind, target?: string, route?: ModelRoute) => Promise<void>;
   language: Language;
 }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const t = translator(language);
-  const [value, setValue] = useState<ModelRouteConfig>({ ...route.Route });
-  useEffect(() => setValue({ ...route.Route }), [route.Route.model, route.Route.provider, route.Route.reasoning]);
+  const [value, setValue] = useState<ModelRouteConfig>({ ...route.route });
+  useEffect(() => setValue({ ...route.route }), [route.route.model, route.route.provider, route.route.reasoning]);
 
-  const requiresExplicitRoute = route.Scope === "vision";
+  const requiresExplicitRoute = route.scope === "vision";
   const provider = value.provider || (requiresExplicitRoute ? "" : snapshot.provider);
   const providerModels = (modelsByProvider[provider] ?? []).filter((item) => isRouteModelVisible(item, requiresExplicitRoute));
   const requestedModel = value.model || (provider === snapshot.provider ? snapshot.model : "");
@@ -301,7 +306,7 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
     if (requiresExplicitRoute && next === "::") {
       const nextValue = { provider: "", model: "", reasoning: "" };
       setValue(nextValue);
-      void action("set_model_route", "", { ...route, Route: nextValue });
+      void action("set_model_route", "", { ...route, route: nextValue });
       return;
     }
     const separator = next.indexOf("::");
@@ -311,12 +316,12 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
     const nextReasoning = nextModel?.defaultReasoning || reasoning || snapshot.reasoning;
     const nextValue = { provider: nextProvider, model: nextModelID, reasoning: nextReasoning };
     setValue(nextValue);
-    void action("set_model_route", "", { ...route, Route: nextValue });
+    void action("set_model_route", "", { ...route, route: nextValue });
   };
   const selectReasoning = (nextReasoning: string) => {
     const nextValue = { provider, model, reasoning: nextReasoning };
     setValue(nextValue);
-    void action("set_model_route", "", { ...route, Route: nextValue });
+    void action("set_model_route", "", { ...route, route: nextValue });
   };
 
   return <div className="route-row" data-setting-id={routeSearchID(route)}>
@@ -366,27 +371,27 @@ function systemFontOptions(selected: string, fonts: SystemFont[]) {
 }
 function routeTitle(route: ModelRoute, language: Language) {
   const t = translator(language);
-	if (route.Scope === "main") return t("routeMain");
-  if (route.Scope === "title") return t("routeTitle");
-  if (route.Scope === "plan") return t("routePlan");
-  if (route.Scope === "approval") return t("routeApproval");
-  if (route.Scope === "vision") return t("routeVision");
-  if (route.Scope === "compaction") return t("routeCompaction");
-  if (route.Scope === "recap") return t("routeRecap");
-  if (route.Role === "research") return language === "zh-CN" ? "研究与文档" : "Research and documentation";
-  if (route.Role === "review") return language === "zh-CN" ? "编码与审查" : "Coding and review";
-  return route.Role || route.Label;
+	if (route.scope === "main") return t("routeMain");
+  if (route.scope === "title") return t("routeTitle");
+  if (route.scope === "plan") return t("routePlan");
+  if (route.scope === "approval") return t("routeApproval");
+  if (route.scope === "vision") return t("routeVision");
+  if (route.scope === "compaction") return t("routeCompaction");
+  if (route.scope === "recap") return t("routeRecap");
+  if (route.role === "research") return language === "zh-CN" ? "研究与文档" : "Research and documentation";
+  if (route.role === "review") return language === "zh-CN" ? "编码与审查" : "Coding and review";
+  return route.role || route.label;
 }
 function routeDescription(route: ModelRoute, description: string, language: Language) {
   const t = translator(language);
-	if (route.Scope === "main") return t("routeMainHint");
-  if (route.Scope === "title") return t("routeTitleHint");
-  if (route.Scope === "plan") return t("routePlanHint");
-  if (route.Scope === "approval") return t("routeApprovalHint");
-  if (route.Scope === "vision") return t("routeVisionHint");
-	if (route.Scope === "compaction") return t("routeCompactionHint");
-	if (route.Scope === "recap") return t("routeRecapHint");
-	if (route.Role === "research") return language === "zh-CN" ? "检索、映射、说明文档" : "Research, mapping, and documentation";
-	if (route.Role === "review") return language === "zh-CN" ? "实现、调试、架构判断" : "Implementation, debugging, and architecture";
-  return description || tFormat(language, "routeSubagentHint", { role: route.Role || route.Label });
+	if (route.scope === "main") return t("routeMainHint");
+  if (route.scope === "title") return t("routeTitleHint");
+  if (route.scope === "plan") return t("routePlanHint");
+  if (route.scope === "approval") return t("routeApprovalHint");
+  if (route.scope === "vision") return t("routeVisionHint");
+	if (route.scope === "compaction") return t("routeCompactionHint");
+	if (route.scope === "recap") return t("routeRecapHint");
+	if (route.role === "research") return language === "zh-CN" ? "检索、映射、说明文档" : "Research, mapping, and documentation";
+	if (route.role === "review") return language === "zh-CN" ? "实现、调试、架构判断" : "Implementation, debugging, and architecture";
+  return description || tFormat(language, "routeSubagentHint", { role: route.role || route.label });
 }

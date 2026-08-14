@@ -35,6 +35,7 @@ describe("ExtensionsSettings", () => {
         name: "grep", removable: true, enabled: true, state: "ready", transport: "streamable_http", target: "https://mcp.grep.app",
         args: [], inheritEnv: false, approval: "always", maxConcurrency: 2, toolCount: 3,
         tools: [{ name: "search", description: "Search code", effect: "read_only", requiresApproval: true }], error: "",
+        icon: "data:image/png;base64,aWNvbg==",
       }],
       skills: [], plugins: [],
     });
@@ -44,10 +45,12 @@ describe("ExtensionsSettings", () => {
 
     expect(view.host.textContent).toContain("grep");
     expect(view.host.textContent).toContain("https://mcp.grep.app");
+    expect(view.host.querySelector('.mcp-server-icon img[src^="data:image/png;base64,"]')).not.toBeNull();
     expect(view.host.textContent).toContain("3 个工具");
-		const overviewMetrics = view.host.querySelectorAll(".extension-stat-grid article");
-		expect(overviewMetrics).toHaveLength(3);
-		expect(overviewMetrics[0]?.textContent).toContain("1 / 1已连接 MCP");
+		const tabs = view.host.querySelectorAll<HTMLButtonElement>('.extension-tabbar [role="tab"]');
+		expect(tabs).toHaveLength(4);
+		expect(tabs[0]?.textContent).toContain("1/1");
+		expect(tabs[0]?.querySelector("em")?.getAttribute("title")).toBe("已连接 MCP");
     const toggle = view.host.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="停用 grep"]');
     expect(toggle).not.toBeNull();
     await act(async () => toggle!.click());
@@ -120,17 +123,87 @@ describe("ExtensionsSettings", () => {
       .find((button) => button.textContent?.includes("插件"));
     await act(async () => pluginsTab!.click());
 
-    expect(view.host.textContent).toContain("插件可直接安装到 Azem 的 plugin-packages/local");
+    expect(view.host.textContent).toContain("plugin-packages/local");
     expect(view.host.textContent).toContain("复制到 Azem 目录，不会直接读取 Codex 目录");
-    expect(view.host.textContent).toContain("从 Codex 导入 · market · 1.0.0");
-		expect(view.host.textContent).toContain("Azem 目录 · 1.0.0");
+    expect(view.host.textContent).toContain("Codex · market · 1.0.0");
+		expect(view.host.textContent).toContain("本机安装 · 1.0.0");
 		expect(view.host.textContent).not.toContain("Codex 插件");
+		expect(view.host.textContent).not.toContain("停止导入");
 		expect(view.host.querySelector('img[src^="data:image/png;base64,"]')).not.toBeNull();
-		const importButton = Array.from(view.host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "导入到 Azem");
+		expect(view.host.querySelector(".plugin-group-heading")?.textContent).toContain("已导入");
+		expect(view.host.textContent).toContain("可从 Codex 导入");
+		const availableRow = Array.from(view.host.querySelectorAll<HTMLElement>(".plugin-row")).find((row) => row.textContent?.includes("Optional"));
+		expect(availableRow?.classList.contains("disabled")).toBe(false);
+		const importButton = Array.from(view.host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "导入");
 		await act(async () => importButton!.click());
 		expect(executeAction).toHaveBeenCalledWith({ kind: "set_plugin_imported", target: "optional@market", decision: "true", sessionId: "session-1" });
+		const deleteButton = Array.from(view.host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.getAttribute("aria-label") === "删除 Review");
+		expect(deleteButton?.textContent).toBe("删除");
+		await act(async () => deleteButton!.click());
+		const dialog = view.host.querySelector<HTMLElement>('[role="alertdialog"]');
+		expect(dialog?.textContent).toContain("删除 Review？");
+		expect(dialog?.textContent).toContain("Codex 里的原包不受影响");
+		const confirm = Array.from(dialog!.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "删除");
+		await act(async () => confirm!.click());
+		expect(executeAction).toHaveBeenCalledWith({ kind: "set_plugin_imported", target: "review@market", decision: "false", sessionId: "session-1" });
   });
+
+	it("filters the plugin catalog without mixing available packages into the imported list", async () => {
+		const base = {
+			version: "1.0.0", description: "Plugin", developerName: "Azem", category: "Developer Tools",
+			brandColor: "", logoPath: "", enabled: true, skillCount: 1, mcpServerCount: 0,
+			integratedMCPCount: 0, hookCount: 0, hooksTrusted: false, hasApp: false,
+			capabilities: ["Skills"], status: "ready", warning: "",
+		};
+		useRuntimeStore.setState({
+			mcpServers: [], skills: [], plugins: [
+				{ ...base, id: "review@market", name: "review", displayName: "Review", marketplace: "market", origin: "codex" },
+				{ ...base, id: "optional@market", name: "optional", displayName: "Optional", marketplace: "market", origin: "codex_available", enabled: false, status: "available" },
+			],
+		});
+		const view = renderSettings(vi.fn(async () => undefined));
+		await view.render();
+		const pluginsTab = Array.from(view.host.querySelectorAll<HTMLButtonElement>('button[role="tab"]'))
+			.find((button) => button.textContent?.includes("插件"));
+		await act(async () => pluginsTab!.click());
+
+		const availableFilter = Array.from(view.host.querySelectorAll<HTMLButtonElement>(".plugin-toolbar button"))
+			.find((button) => button.textContent?.includes("可导入"));
+		await act(async () => availableFilter!.click());
+		expect(view.host.textContent).toContain("Optional");
+		expect(view.host.textContent).not.toContain("Review");
+		expect(view.host.querySelector(".plugin-group-heading")).toBeNull();
+	});
 });
+
+	it("lists hooks in Extensions and requires confirmation before trusting plugin hooks", async () => {
+		useRuntimeStore.setState({
+			mcpServers: [], skills: [], plugins: [],
+			hookCatalog: {
+				enabled: true, trustHooks: false,
+				sources: [{
+					id: "demo@local", name: "Ponytail", origin: "plugin", pluginId: "demo@local", source: "",
+					hookCount: 2, trusted: false, warning: "Hooks 等待用户信任",
+				}],
+				commands: [], diagnostics: [],
+			},
+		});
+		const executeAction = vi.fn(async (_request: ActionRequest) => undefined);
+		const view = renderSettings(executeAction);
+		await view.render();
+		const hooksTab = Array.from(view.host.querySelectorAll<HTMLButtonElement>('button[role="tab"]')).find((button) => button.textContent?.includes("Hooks"));
+		await act(async () => hooksTab!.click());
+		expect(view.host.textContent).toContain("Ponytail");
+		expect(view.host.textContent).toContain("待信任");
+		expect(view.host.textContent).toContain("2 个命令");
+		const toggle = view.host.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="信任插件 Hooks"]');
+		expect(toggle?.getAttribute("aria-checked")).toBe("false");
+		await act(async () => toggle!.click());
+		expect(executeAction).not.toHaveBeenCalled();
+		const confirm = Array.from(view.host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "信任并启用");
+		await act(async () => confirm!.click());
+		expect(executeAction).toHaveBeenCalledWith({ kind: "set_plugin_hooks_trusted", decision: "true", sessionId: "session-1" });
+	});
 
 async function setInput(input: HTMLInputElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;

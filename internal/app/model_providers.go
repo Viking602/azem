@@ -186,6 +186,44 @@ func (s *Service) modelProviderAPIKey(ctx context.Context, profile llmuxdriver.P
 	return "", "none", fmt.Errorf("%s requires an API key before models can be fetched", profile.DisplayName)
 }
 
+func (s *Service) refreshSubscriptionCatalog(ctx context.Context, providerID string) error {
+	if s.catalog == nil || s.authentication == nil {
+		return fmt.Errorf("subscription catalog is unavailable")
+	}
+	accounts, err := s.authentication.Accounts(ctx, providerID)
+	if err != nil {
+		return err
+	}
+	accountID := ""
+	for _, account := range accounts {
+		if account.Status == "active" {
+			accountID = account.ID
+			break
+		}
+	}
+	if accountID == "" {
+		return fmt.Errorf("%s is not signed in", providerID)
+	}
+	models, err := s.catalog.List(ctx, providerID, accountID, true)
+	if err != nil {
+		return err
+	}
+	models = s.catalog.EnrichWithModelsDev(ctx, models)
+	models.Models = s.catalogModelsWithAvailability(providerID, models.Models)
+	encoded, err := json.Marshal(models.Models)
+	if err != nil {
+		return err
+	}
+	state := "fresh"
+	if models.Stale {
+		state = "stale"
+	}
+	s.emit(ctx, Event{Kind: EventModelCatalog, State: state, Text: models.Warning, Data: map[string]string{
+		"provider": providerID, "accountID": accountID, "models": string(encoded),
+	}})
+	return nil
+}
+
 func (s *Service) emitModelProviders(ctx context.Context, state string) error {
 	if s.authentication == nil {
 		return fmt.Errorf("authentication is unavailable")

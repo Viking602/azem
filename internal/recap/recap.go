@@ -27,9 +27,14 @@ var recapSecrets = []struct {
 }
 
 type Recap struct {
-	SessionID, Anchor, CoveredBoundary, Goal, Summary, OpenItems string
-	Revision                                                     int
-	UpdatedAt                                                    time.Time
+	SessionID       string    `json:"sessionId"`
+	Anchor          string    `json:"anchor,omitempty"`
+	CoveredBoundary string    `json:"coveredBoundary,omitempty"`
+	Goal            string    `json:"goal,omitempty"`
+	Summary         string    `json:"summary,omitempty"`
+	OpenItems       string    `json:"openItems,omitempty"`
+	Revision        int       `json:"revision"`
+	UpdatedAt       time.Time `json:"updatedAt"`
 }
 type Service struct {
 	db     *sql.DB

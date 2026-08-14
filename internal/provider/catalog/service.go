@@ -15,13 +15,14 @@ import (
 	"resty.dev/v3"
 
 	"github.com/Viking602/azem/internal/auth"
+	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 )
 
 const (
 	DefaultChatGPTCatalogURL     = "https://chatgpt.com/backend-api/codex/models"
-	DefaultGrokCatalogURL        = "https://api.x.ai/v1/models"
-	DefaultGrokLanguageModelsURL = "https://api.x.ai/v1/language-models"
+	DefaultGrokCatalogURL        = "https://cli-chat-proxy.grok.com/v1/models"
+	DefaultGrokLanguageModelsURL = "https://cli-chat-proxy.grok.com/v1/language-models"
 	DefaultChatGPTClientVersion  = "0.144.3"
 )
 
@@ -229,12 +230,21 @@ func (s *Service) fetch(ctx context.Context, provider string, accountID string, 
 						request.SetHeader("originator", "codex_cli_rs")
 						request.SetHeader("User-Agent", "azem/1")
 					}
+					if provider == "grok" {
+						request.SetHeader("X-XAI-Token-Auth", "xai-grok-cli")
+						request.SetHeader("x-userid", accountID)
+						request.SetHeader("x-grok-client-version", grok.DefaultClientVersion)
+						request.SetHeader("User-Agent", "azem/1")
+					}
 					if sourceIndex == 0 && page == 0 && etag != "" {
 						request.SetHeader("If-None-Match", etag)
 					}
 				},
 			)
 			if err != nil {
+				if sourceIndex > 0 {
+					break
+				}
 				return Result{}, err
 			}
 			body := response.Bytes()
@@ -242,6 +252,9 @@ func (s *Service) fetch(ctx context.Context, provider string, accountID string, 
 				return s.extend(ctx, cached, s.ttl(provider))
 			}
 			if response.StatusCode()/100 != 2 {
+				if sourceIndex > 0 {
+					break
+				}
 				return Result{}, catalogHTTPError(provider, response.StatusCode(), body)
 			}
 			if sourceIndex == 0 && page == 0 {
@@ -249,6 +262,9 @@ func (s *Service) fetch(ctx context.Context, provider string, accountID string, 
 			}
 			pageModels, hasMore, after, err := decode(provider, body)
 			if err != nil {
+				if sourceIndex > 0 {
+					break
+				}
 				return Result{}, err
 			}
 			models = append(models, pageModels...)

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Block } from "../types";
 import {
-  aggregateEditedFiles, fileChangesForBlock, isActiveFileChangeBlock, pendingFileChangeSummaryForBlock,
+  aggregateEditedFiles, fileChangesForBlock, isActiveFileChangeBlock, isPendingFileChangeBlock,
+  pendingFileChangeSummaryForBlock, pendingFileEditPaths,
 } from "./fileChanges";
 
 describe("file change extraction", () => {
@@ -34,6 +35,32 @@ describe("file change extraction", () => {
       additions: 5,
       deletions: 1,
     });
+  });
+
+  it("prefers the backend fileChange projection over local payload parsing", () => {
+    const block: Block = {
+      id: "projected", kind: "tool", title: "coding.edit_hashline", state: "completed",
+      data: {
+        fileChange: JSON.stringify({
+          files: [{ path: "src/app.ts", firstChangedLine: 12, diff: "-old\n+new", additions: 1, deletions: 1 }],
+          additions: 1, deletions: 1,
+        }),
+        // Conflicting local payloads must be ignored when the projection exists.
+        structured: JSON.stringify({ sections: [{ path: "other.ts", firstChangedLine: 1, diff: "+wrong" }] }),
+      },
+    };
+    expect(fileChangesForBlock(block)).toEqual([
+      { path: "src/app.ts", firstChangedLine: 12, diff: "-old\n+new", additions: 1, deletions: 1 },
+    ]);
+
+    const malformed: Block = {
+      id: "malformed", kind: "tool", title: "coding.edit_hashline", state: "completed",
+      data: {
+        fileChange: "{not json",
+        structured: JSON.stringify({ sections: [{ path: "fallback.ts", firstChangedLine: 2, diff: "+ok" }] }),
+      },
+    };
+    expect(fileChangesForBlock(malformed)).toMatchObject([{ path: "fallback.ts", additions: 1, deletions: 0 }]);
   });
 
   it("does not present an unexecuted write as an edited file", () => {
@@ -87,6 +114,12 @@ describe("file change extraction", () => {
       ...running,
       data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\ndelete 4", dryRun: true }) },
     })).toBe(false);
+    expect(isPendingFileChangeBlock({ ...running, state: "reviewing_approval" })).toBe(true);
+    expect(pendingFileEditPaths({
+      ...running,
+      state: "reviewing_approval",
+      data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\ndelete 2..3\n+secret body" }) },
+    })).toEqual(["src/app.ts"]);
   });
 
   it("falls back to the compact edit result stored in durable tool output", () => {

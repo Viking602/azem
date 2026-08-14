@@ -111,6 +111,8 @@ cursor 由 canonical sequence、Todo revision、最后完成 tool、最后完成
 - cursor 只能单调前进。
 - writer 失败、输出非法、事务失败或 stale activation 时不推进 revision/cursor。
 - durable activation 成功后，同一 run 的共享 coordinator 立即推进内存 checkpoint；后续 soft/hard writer 必须使用新 revision、state 与 cursor。
+- stale activation 先加载 durable checkpoint，再以当前 revision 重试一次；不得用旧 revision 覆盖。
+- 进入同步压缩且 prepared source 不再是当前 history 前缀时，取消后台 prepare。
 - stale checkpoint 不得覆盖新用户 turn。
 
 ## 7. 统一 Planner
@@ -162,6 +164,17 @@ Artifact payload 与 SHA256 保持权威。preview 固定包含 version、kind�
 
 单次返回最多 64 KiB；binary 使用 base64 且原始读取最多 48 KiB；regex、offset、行号、模式和 limit 在工具边界验证。
 
+### 9.1 语义压缩前置无模型剪枝
+
+在语义 summarize 之前，`pruneStaleToolResults` 先做一层廉价剪枝：位于「保留的最近
+三个用户轮」边界之前、超过 1 KiB 的工具结果按由旧到新的顺序改写为
+`context_artifact` 定位符（payload 落 Artifact，引用 JSON 带 `"pruned":true`），
+一旦估算 token 降到目标以下立即停止。只有结果内容被原位替换，call/result 配对与
+消息顺序不变，`ValidateCompleteTurns` 语义不受影响。若仅靠剪枝已达标，则跳过
+模型 summarize，剪枝结果沿既有 activation 路径持久化；否则 summarizer 收到的
+是更小的剪枝后 transcript。既有 12k-token 的超大结果外置（normalize）先于
+剪枝执行，两者互不替代。
+
 ## 10. SQLite schema 20
 
 ### session_semantic_state
@@ -204,6 +217,10 @@ Artifact payload 与 SHA256 保持权威。preview 固定包含 version、kind�
 - semantic commit/manifest/ModelHistory 原子提交，stale CAS 明确失败。
 - Artifact 所有模式有界，oversized full 明确失败。
 - 自动、手动、Team、subagent 使用同一 summary limit resolver。
+- 模型可见 ⟺ 已落库：`turnContext.Build` 末尾断言每条公开可见消息可由
+  durable ModelHistory 检查点、durable 块、静态指令或当前 goal 重建；私有
+  消息（语义检查点、todo、plan artifact、tool continuity、hook/vision/历史
+  证据）按构造来自 durable 存储或确定性重执行。违反即显式失败该 turn。
 - 前端 typecheck/test/build 与 Inspector 投影通过。
 - `GOWORK=off go test ./...` 与 Sentrux rules 通过。
 

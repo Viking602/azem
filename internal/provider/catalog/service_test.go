@@ -111,6 +111,55 @@ func TestGrokCatalogDecode(t *testing.T) {
 	}
 }
 
+func TestGrokCatalogUsesCLIProxyHeadersAndIgnoresOptionalSourceFailure(t *testing.T) {
+	ctx := context.Background()
+	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	secrets, err := auth.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secrets.Put(ctx, auth.Credential{Provider: "grok", AccountID: "acct-1", AccessToken: "grok-token"}); err != nil {
+		t.Fatal(err)
+	}
+	grokClient := grok.NewClient()
+	grokClient.AllowInsecure = true
+	authentication := auth.NewService(provider.DB(), secrets, chatgpt.NewClient(), grokClient)
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		paths = append(paths, request.URL.Path)
+		if request.Header.Get("Authorization") != "Bearer grok-token" {
+			t.Errorf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		if request.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" || request.Header.Get("x-userid") != "acct-1" || request.Header.Get("x-grok-client-version") == "" {
+			t.Errorf("grok catalog headers=%v", request.Header)
+		}
+		if request.URL.Path == "/language-models" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"data":[{"id":"grok-4","name":"Grok 4","capabilities":["tools","reasoning"]}]}`))
+	}))
+	t.Cleanup(server.Close)
+	catalog := NewService(provider.DB(), authentication)
+	catalog.Endpoints["grok"] = server.URL + "/models"
+	catalog.AdditionalEndpoints["grok"] = []string{server.URL + "/language-models"}
+	result, err := catalog.List(ctx, "grok", "acct-1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Models) != 1 || result.Models[0].ID != "grok-4" || !result.Models[0].SupportsTools {
+		t.Fatalf("grok catalog=%+v", result)
+	}
+	if strings.Join(paths, ",") != "/models,/language-models" {
+		t.Fatalf("requested paths=%v", paths)
+	}
+}
+
 func TestPickerPreservesAccountScope(t *testing.T) {
 	picker, err := NewPicker(Result{Provider: "chatgpt", AccountID: "acct", Models: []Model{{ID: "a"}, {ID: "b"}}}, "b")
 	if err != nil {

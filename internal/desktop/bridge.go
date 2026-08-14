@@ -23,7 +23,18 @@ import (
 const (
 	EventName            = "azem:event"
 	PullRequestEventName = "azem:pull-request"
+
+	// EventKindBridgeError is emitted by the bridge itself when runtime
+	// delivery fails; it never originates from the app event stream.
+	EventKindBridgeError = "bridge_error"
 )
+
+// LocalEventKinds lists event kinds the desktop bridge injects locally on top
+// of the app runtime contract. cmd/gen-contracts merges them into the
+// generated TypeScript EventKind union.
+func LocalEventKinds() []string {
+	return []string{EventKindBridgeError}
+}
 
 type EventEmitter func(string, ...any) bool
 
@@ -116,6 +127,7 @@ type Event struct {
 	SkillDiagnostics  []azemapp.SkillDiagnostic      `json:"skillDiagnostics,omitempty"`
 	PluginCatalog     []azemapp.PluginCatalogEntry   `json:"pluginCatalog,omitempty"`
 	PluginDiagnostics []azemapp.PluginDiagnostic     `json:"pluginDiagnostics,omitempty"`
+	HookCatalog       *azemapp.HookCatalogSnapshot   `json:"hookCatalog,omitempty"`
 	ContextProfile    *azemapp.ContextProfile        `json:"contextProfile,omitempty"`
 	Todo              any                            `json:"todo,omitempty"`
 	Memories          any                            `json:"memories,omitempty"`
@@ -384,7 +396,7 @@ func (b *Bridge) startPullRequestRepair(ctx context.Context, pullRequest githubp
 		return "", err
 	}
 	if err := b.runtime.ExecuteAction(ctx, azemapp.Action{Kind: azemapp.ActionListSessions}); err != nil && !errors.Is(err, context.Canceled) {
-		b.emitEvent(Event{Kind: "bridge_error", State: "failed", Text: err.Error(), At: time.Now().UTC()})
+		b.emitEvent(Event{Kind: EventKindBridgeError, State: "failed", Text: err.Error(), At: time.Now().UTC()})
 	}
 	return sessionID, nil
 }
@@ -415,7 +427,7 @@ func (b *Bridge) prime() {
 	}
 	for _, action := range actions {
 		if err := b.runtime.ExecuteAction(b.ctx, action); err != nil && !errors.Is(err, context.Canceled) {
-			b.emitEvent(Event{Kind: "bridge_error", State: "failed", Text: err.Error(), At: time.Now().UTC()})
+			b.emitEvent(Event{Kind: EventKindBridgeError, State: "failed", Text: err.Error(), At: time.Now().UTC()})
 		}
 	}
 }
@@ -425,7 +437,7 @@ func (b *Bridge) pump() {
 		event, err := b.runtime.NextEvent(b.ctx)
 		if err != nil {
 			if b.ctx.Err() == nil {
-				b.emitEvent(Event{Kind: "bridge_error", State: "failed", Text: err.Error(), At: time.Now().UTC()})
+				b.emitEvent(Event{Kind: EventKindBridgeError, State: "failed", Text: err.Error(), At: time.Now().UTC()})
 			}
 			return
 		}
@@ -449,7 +461,7 @@ func eventDTO(event azemapp.Event) Event {
 		Agent: event.Agent, AgentBlocks: event.AgentBlocks, AgentCatalog: event.AgentCatalog,
 		AgentSnapshots: event.AgentSnapshots, SkillCatalog: event.SkillCatalog,
 		SkillDiagnostics: event.SkillDiagnostics, PluginCatalog: event.PluginCatalog,
-		PluginDiagnostics: event.PluginDiagnostics, ContextProfile: event.ContextProfile,
+		PluginDiagnostics: event.PluginDiagnostics, HookCatalog: event.HookCatalog, ContextProfile: event.ContextProfile,
 		Todo: event.Todo, Memories: event.Memories, Recap: event.Recap,
 		ModelRoutes: event.ModelRoutes, ModelProviders: event.ModelProviders, Background: event.Background,
 		BackgroundLogs: event.BackgroundLogs, GitBranches: event.GitBranches,
@@ -461,18 +473,18 @@ func allowedAction(kind azemapp.ActionKind) bool {
 	switch kind {
 	case azemapp.ActionLogin, azemapp.ActionLogout,
 		azemapp.ActionNewSession, azemapp.ActionListSessions, azemapp.ActionResumeSession, azemapp.ActionRefreshSession,
-		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionMarkSessionUnread,
+		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionArchiveInactiveSessions, azemapp.ActionMarkSessionUnread,
 		azemapp.ActionCompact, azemapp.ActionResolveApproval, azemapp.ActionResolveUserInput, azemapp.ActionResolvePlan, azemapp.ActionSetApprovalMode,
 		azemapp.ActionSetLanguage, azemapp.ActionSetQueueMode, azemapp.ActionReconcileAttempt,
 		azemapp.ActionInspectAgent, azemapp.ActionListAgentTypes, azemapp.ActionListPersonas,
 		azemapp.ActionCancelAgent, azemapp.ActionRefreshMCP, azemapp.ActionReconnectMCP,
 		azemapp.ActionSetMCPEnabled, azemapp.ActionUpsertMCPServer, azemapp.ActionDeleteMCPServer,
-		azemapp.ActionListSkills, azemapp.ActionListPlugins, azemapp.ActionSetPluginImported, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
+		azemapp.ActionListSkills, azemapp.ActionListPlugins, azemapp.ActionSetPluginImported, azemapp.ActionListHooks, azemapp.ActionSetPluginHooksTrusted, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
 		azemapp.ActionListMemories, azemapp.ActionRemember, azemapp.ActionForgetMemory,
 		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled,
 		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
 		azemapp.ActionResetModelRoute, azemapp.ActionSetSubagentConcurrency,
-		azemapp.ActionSetShellConcurrency, azemapp.ActionSetSubagentAwait,
+		azemapp.ActionSetSubagentDepth, azemapp.ActionSetShellConcurrency, azemapp.ActionSetSubagentAwait,
 		azemapp.ActionSetChatGPTFastMode, azemapp.ActionSetSessionPreferences, azemapp.ActionListBackground,
 		azemapp.ActionStartBackground, azemapp.ActionStopBackground, azemapp.ActionLogsBackground,
 		azemapp.ActionListGitBranches, azemapp.ActionSwitchGitBranch, azemapp.ActionCreateGitBranch:

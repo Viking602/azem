@@ -9,133 +9,36 @@ import (
 
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/session"
+	"github.com/Viking602/azem/internal/toolview"
 )
 
-type fileChangeSection struct {
-	Path             string `json:"path"`
-	FirstChangedLine int    `json:"firstChangedLine"`
-	Diff             string `json:"diff"`
-}
-
 func isFileChangeTool(name string) bool {
-	return name == "coding.edit_hashline" || name == "coding.write_file"
+	return toolview.IsFileChangeTool(name)
 }
 
+// summarizeFileChange renders the shared toolview projection into the TUI's
+// inline diff form. All parsing semantics live in internal/toolview so the
+// desktop frontend and the TUI can never diverge.
 func summarizeFileChange(name, arguments, structured, output string) (string, string, bool) {
-	type editResult struct {
-		Sections []fileChangeSection `json:"sections"`
-	}
-
-	var sections []fileChangeSection
-	switch name {
-	case "coding.edit_hashline":
-		var result editResult
-		if json.Unmarshal([]byte(structured), &result) == nil {
-			sections = result.Sections
-		}
-		if len(sections) == 0 {
-			sections = parseCompactEditOutput(output)
-		}
-	case "coding.write_file":
-		var input struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-		}
-		if json.Unmarshal([]byte(arguments), &input) != nil || input.Path == "" {
-			return "", "", false
-		}
-		lines := strings.Split(input.Content, "\n")
-		if input.Content == "" {
-			lines = nil
-		} else if strings.HasSuffix(input.Content, "\n") {
-			lines = lines[:len(lines)-1]
-		}
-		for index := range lines {
-			lines[index] = "+" + lines[index]
-		}
-		sections = []fileChangeSection{{Path: input.Path, FirstChangedLine: 1, Diff: strings.Join(lines, "\n")}}
-	default:
+	summary, ok := toolview.CompletedFileChanges(name, arguments, structured, output)
+	if !ok {
 		return "", "", false
 	}
-	if len(sections) == 0 {
-		return "", "", false
-	}
-
-	added, deleted := 0, 0
-	chunks := make([]string, 0, len(sections))
-	for _, section := range sections {
-		if section.Path == "" {
-			continue
-		}
-		for _, line := range strings.Split(section.Diff, "\n") {
-			if strings.HasPrefix(line, "+") {
-				added++
-			} else if strings.HasPrefix(line, "-") {
-				deleted++
-			}
-		}
-		header := "@@ " + section.Path
-		if section.FirstChangedLine > 0 {
-			header += fmt.Sprintf(":%d", section.FirstChangedLine)
-		}
-		header += " @@"
-		body := section.Diff
+	chunks := make([]string, 0, len(summary.Files))
+	for _, file := range summary.Files {
+		header := fmt.Sprintf("@@ %s:%d @@", file.Path, file.FirstChangedLine)
+		body := file.Diff
 		if body == "" {
 			body = "(empty file)"
 		}
 		chunks = append(chunks, header+"\n"+body)
 	}
-	if len(chunks) == 0 {
-		return "", "", false
+	title := summary.Files[0].Path
+	if len(summary.Files) > 1 {
+		title = fmt.Sprintf("%d files", len(summary.Files))
 	}
-	title := sections[0].Path
-	if len(sections) > 1 {
-		title = fmt.Sprintf("%d files", len(sections))
-	}
-	title += fmt.Sprintf("  +%d/-%d", added, deleted)
+	title += fmt.Sprintf("  +%d/-%d", summary.Additions, summary.Deletions)
 	return title, strings.Join(chunks, "\n\n"), true
-}
-
-func parseCompactEditOutput(output string) []fileChangeSection {
-	var result []fileChangeSection
-	var current *fileChangeSection
-	var diffLines []string
-	inDiff := false
-	flush := func() {
-		if current == nil {
-			return
-		}
-		current.Diff = strings.Trim(strings.Join(diffLines, "\n"), "\n")
-		if current.Path != "" && current.Diff != "" {
-			result = append(result, *current)
-		}
-	}
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "¶") {
-			flush()
-			path := strings.TrimPrefix(strings.SplitN(line, "#", 2)[0], "¶")
-			current = &fileChangeSection{Path: path}
-			diffLines = nil
-			inDiff = false
-			continue
-		}
-		if current == nil {
-			continue
-		}
-		if value, ok := strings.CutPrefix(line, "firstChangedLine: "); ok {
-			current.FirstChangedLine, _ = strconv.Atoi(strings.TrimSpace(value))
-			continue
-		}
-		if line == "--- compact diff ---" {
-			inDiff = true
-			continue
-		}
-		if inDiff {
-			diffLines = append(diffLines, line)
-		}
-	}
-	flush()
-	return result
 }
 
 func summarizeToolArguments(name, arguments string, catalogs ...i18n.Catalog) string {

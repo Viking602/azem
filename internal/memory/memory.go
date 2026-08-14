@@ -17,9 +17,15 @@ import (
 const MaxContentRunes = 8000
 
 type Memory struct {
-	ID, Content, Anchor, SessionID, Provenance, Status string
-	Importance                                         int
-	CreatedAt, UpdatedAt                               time.Time
+	ID         string    `json:"id"`
+	Content    string    `json:"content"`
+	Anchor     string    `json:"anchor,omitempty"`
+	SessionID  string    `json:"sessionId,omitempty"`
+	Provenance string    `json:"provenance,omitempty"`
+	Status     string    `json:"status,omitempty"`
+	Importance int       `json:"importance,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 type Service struct {

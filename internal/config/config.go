@@ -305,6 +305,9 @@ type MCPServerConfig struct {
 	// not restrict deletion: removed catalog entries are suppressed explicitly
 	// through MCPConfig.RemovedServers.
 	Managed bool `yaml:"managed,omitempty" json:"-"`
+	// Icon is a bounded data URL projected from a plugin asset. It is never
+	// written to configuration.
+	Icon string `yaml:"-" json:"-"`
 }
 
 type ToolOverride struct {

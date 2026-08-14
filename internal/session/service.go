@@ -17,18 +17,18 @@ import (
 )
 
 type Session struct {
-	ID         string
-	Workspace  string
-	Title      string
-	ProviderID string
-	ModelID    string
-	Reasoning  string
-	AgentMode  string
-	Pinned     bool
-	Archived   bool
-	Unread     bool
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID         string    `json:"id"`
+	Workspace  string    `json:"workspace"`
+	Title      string    `json:"title"`
+	ProviderID string    `json:"providerId,omitempty"`
+	ModelID    string    `json:"modelId,omitempty"`
+	Reasoning  string    `json:"reasoning,omitempty"`
+	AgentMode  string    `json:"agentMode,omitempty"`
+	Pinned     bool      `json:"pinned,omitempty"`
+	Archived   bool      `json:"archived,omitempty"`
+	Unread     bool      `json:"unread,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 type Block struct {
@@ -575,6 +575,69 @@ func (s *Service) SetUIState(ctx context.Context, id, field string, enabled bool
 		return fmt.Errorf("update session %s: %w", field, err)
 	}
 	return nil
+}
+
+const archivedSessionListCap = 500
+
+// SetArchived toggles the archived flag. Restoring a previously archived
+// session refreshes its updated timestamp so it returns to the active list.
+func (s *Service) SetArchived(ctx context.Context, id string, archived bool) error {
+	if _, err := s.LoadSession(ctx, id); err != nil {
+		return err
+	}
+	var current int
+	err := s.db.QueryRowContext(ctx, `SELECT archived FROM session_ui_state WHERE session_id=?`, id).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read session archive state: %w", err)
+	}
+	if err := s.SetUIState(ctx, id, "archived", archived); err != nil {
+		return err
+	}
+	if archived || current == 0 {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, time.Now().UTC().UnixNano(), id); err != nil {
+		return fmt.Errorf("touch restored session: %w", err)
+	}
+	return nil
+}
+
+// ArchiveInactive archives unpinned, unarchived sessions whose last update is
+// older than olderThan. skipIDs are left in the active list, typically the
+// currently visible session.
+func (s *Service) ArchiveInactive(ctx context.Context, olderThan time.Duration, skipIDs ...string) (int, error) {
+	if olderThan <= 0 {
+		return 0, fmt.Errorf("archive inactivity threshold must be positive")
+	}
+	sessions, err := s.List(ctx, 0)
+	if err != nil {
+		return 0, err
+	}
+	skip := make(map[string]struct{}, len(skipIDs))
+	for _, id := range skipIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			skip[id] = struct{}{}
+		}
+	}
+	cutoff := time.Now().UTC().Add(-olderThan)
+	archived := 0
+	for _, item := range sessions {
+		if item.Archived || item.Pinned {
+			continue
+		}
+		if _, found := skip[item.ID]; found {
+			continue
+		}
+		if !item.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		if err := s.SetUIState(ctx, item.ID, "archived", true); err != nil {
+			return archived, err
+		}
+		archived++
+	}
+	return archived, nil
 }
 
 func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
@@ -1177,10 +1240,24 @@ func (s *Service) List(ctx context.Context, limit int) ([]Session, error) {
 		values[index].Workspace = workspaces[values[index].ID]
 	}
 	sort.SliceStable(values, func(left, right int) bool { return values[left].Pinned && !values[right].Pinned })
-	if limit > 0 && len(values) > limit {
-		values = values[:limit]
+	if limit <= 0 {
+		return values, nil
 	}
-	return values, nil
+	active := make([]Session, 0, limit)
+	archived := make([]Session, 0)
+	for _, item := range values {
+		if item.Archived {
+			archived = append(archived, item)
+			continue
+		}
+		if len(active) < limit {
+			active = append(active, item)
+		}
+	}
+	if len(archived) > archivedSessionListCap {
+		archived = archived[:archivedSessionListCap]
+	}
+	return append(active, archived...), nil
 }
 
 func (s *Service) sessionUIStates(ctx context.Context) (map[string][3]bool, error) {

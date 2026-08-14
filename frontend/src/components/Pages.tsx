@@ -1,11 +1,10 @@
-import { useState } from "react";
 import {
-  AlertTriangle, Bot, CheckCircle2, Plus, RotateCcw, ShieldAlert, Wrench,
+  AlertTriangle, Bot, CheckCircle2, RotateCcw, ShieldAlert, Wrench,
 } from "lucide-react";
 import { execute } from "../bridge";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
-import type { View } from "../types";
+import type { ActionKind, View } from "../types";
 import PullRequestsPage from "./PullRequestsPage";
 import SubagentsPage from "./SubagentsPage";
 import WorkspaceFilesPage from "./WorkspaceFilesPage";
@@ -18,7 +17,7 @@ export default function Pages({ view }: { view: Exclude<View, "thread"> }) {
   const setView = useRuntimeStore((state) => state.setView);
   const setError = useRuntimeStore((state) => state.setError);
   const t = translator(snapshot.language);
-  const action = async (kind: string, target = "", decision = "") => {
+  const action = async (kind: ActionKind, target = "", decision = "") => {
     try { await execute({ kind, target, decision, sessionId: useRuntimeStore.getState().currentSessionId }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
@@ -41,14 +40,13 @@ function PageFrame({ eyebrow, title, description, action, children }: { eyebrow:
 function ExtensionsPage() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const setError = useRuntimeStore((state) => state.setError);
-  const [addMCPRequest, setAddMCPRequest] = useState(0);
   const t = translator(snapshot.language);
-  return <PageFrame eyebrow="Capabilities" title={t("settingsExtensions")} description={t("settingsExtensionsHint")} action={<button className="settings-primary" onClick={() => setAddMCPRequest((value) => value + 1)}><Plus size={13} />{t("addMCPServer")}</button>}>
-    <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} openAddRequest={addMCPRequest} executeAction={execute} onError={setError} />
+  return <PageFrame eyebrow="Capabilities" title={t("settingsExtensions")} description={t("settingsExtensionsHint")}>
+    <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} executeAction={execute} onError={setError} />
   </PageFrame>;
 }
 
-function RecoveryPage({ action }: { action: (kind: string, target?: string, decision?: string) => Promise<void> }) {
+function RecoveryPage({ action }: { action: (kind: ActionKind, target?: string, decision?: string) => Promise<void> }) {
   const recovery = useRuntimeStore((state) => state.recovery);
   return <PageFrame eyebrow="Safety" title="恢复中心" description="中断运行、未知副作用和恢复审批必须逐项确认。">
     {recovery.length === 0 ? <div className="quiet-empty"><CheckCircle2 size={28} /><h2>无需恢复</h2><p>没有中断运行或状态未知的工具操作。</p></div> : <div className="recovery-list">{recovery.map((item, index) => {

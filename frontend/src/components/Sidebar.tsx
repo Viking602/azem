@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown, ChevronRight, CircleDotDashed, FolderOpen, FolderPlus,
@@ -6,9 +6,10 @@ import {
 } from "lucide-react";
 import { createProject, execute, isDesktopRuntime, openProject, openProjectSession, selectProjectFolder, subscribeSessionMenu } from "../bridge";
 import { translator } from "../i18n";
+import { formatRelativeTime, useRelativeNow } from "../relativeTime";
 import { openPullRequest, refreshPullRequestDashboard } from "../pullRequests";
 import { useRuntimeStore } from "../store";
-import type { View } from "../types";
+import type { ActionKind, View } from "../types";
 
 export default function Sidebar() {
   const [openProjects, setOpenProjects] = useState<Record<string, boolean>>({});
@@ -38,6 +39,8 @@ export default function Sidebar() {
   const currentBranch = pullRequestDashboard?.currentBranch || branches.find((branch) => branch.current)?.name || "";
   const currentPullRequest = pullRequestDashboard?.current;
   const runningSessionId = globalRunSessionId || (running ? currentSessionId : "");
+  const sessionTimes = useMemo(() => sessions.map((session) => session.updatedAt).filter(Boolean), [sessions]);
+  const now = useRelativeNow(sessionTimes);
 
   useEffect(() => subscribeSessionMenu((event) => {
     if (event.action === "error") {
@@ -60,7 +63,7 @@ export default function Sidebar() {
     }
   };
 
-  const run = async (kind: string, target = "") => {
+  const run = async (kind: ActionKind, target = "") => {
     try {
       if (kind === "new_session" && !isDesktopRuntime()) startLocalDraft();
       if (kind === "resume_session" && !isDesktopRuntime()) {
@@ -169,7 +172,7 @@ export default function Sidebar() {
                     aria-busy={session.id === runningSessionId}
                     style={{ "--custom-contextmenu": session.pinned ? "session-pinned" : "session", "--custom-contextmenu-data": session.id } as CSSProperties}>
                     <span className="session-state-dot" data-running={String(session.id === runningSessionId)} aria-hidden="true" />
-                    <span className="session-copy"><strong>{session.title || t("newSession")}</strong><small>{sidebarSessionLabel(session.title, session.updatedAt, session.id === runningSessionId, snapshot.language)}</small></span>
+                    <span className="session-copy"><strong>{session.title || t("newSession")}</strong><small>{sidebarSessionLabel(session.title, session.updatedAt, session.id === runningSessionId, snapshot.language, now)}</small></span>
                     {session.id === runningSessionId && <i className="session-running-indicator" aria-hidden="true" />}
                     {session.unread && <i className="session-unread" title={t("unread")} />}
                   </button>
@@ -196,24 +199,15 @@ function compactProjectPath(path: string) {
   return parts.slice(-2, -1)[0] || path;
 }
 
-function relativeSessionTime(value: string, language: "en" | "zh-CN") {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return language === "zh-CN" ? "最近" : "Recently";
-  const hours = Math.max(0, Math.round((Date.now() - timestamp) / 3_600_000));
-  if (hours < 1) return language === "zh-CN" ? "刚刚" : "Just now";
-  if (hours < 24) return language === "zh-CN" ? `${hours} 小时前` : `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  return language === "zh-CN" ? `${days} 天前` : `${days}d ago`;
-}
-
-function sidebarSessionLabel(title: string, updatedAt: string, running: boolean, language: "en" | "zh-CN") {
-  if (running) return language === "zh-CN" ? "刚刚 · 正在运行" : "Just now · Running";
+function sidebarSessionLabel(title: string, updatedAt: string, running: boolean, language: "en" | "zh-CN", now: number) {
   if (language === "zh-CN" && !isDesktopRuntime()) {
     if (title === "插件兼容设计") return "昨天 · 已完成";
     if (title === "语义上下文重建") return "8 月 7 日 · 已完成";
     if (title === "发布 v0.2.4") return "周五 · 等待检查";
   }
-  return relativeSessionTime(updatedAt, language);
+  const time = formatRelativeTime(updatedAt, language, now);
+  if (running) return language === "zh-CN" ? `${time} · 运行中` : `${time} · Running`;
+  return time;
 }
 
 function ProjectLauncher({ language, setError }: { language: "en" | "zh-CN"; setError: (message: string) => void }) {

@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { Block } from "../types";
 import {
   classifyToolCategory,
+  displayedToolState,
   formatToolPresentation,
   groupProcessTimelineBlocks,
   groupTimelineBlocks,
+  isActiveProcessBlock,
+  isCapacityQueued,
   isRunningTool,
   parseModelProgress,
   segmentProcessTrail,
@@ -78,6 +81,39 @@ describe("process trail segmentation", () => {
     expect(isRunningTool(tool("shell", "coding.shell", "progress"))).toBe(true);
     const segments = segmentProcessTrail([tool("shell", "coding.shell", "progress")]);
     expect(segments[0]).toMatchObject({ kind: "process", active: true });
+  });
+
+  it("keeps a process live while tools are queued or waiting for approval", () => {
+    expect(isActiveProcessBlock(tool("edit", "coding.edit_hashline", "queued"))).toBe(true);
+    expect(isActiveProcessBlock(tool("write", "coding.write_file", "awaiting_approval"))).toBe(true);
+    const segments = segmentProcessTrail([
+      tool("edit-1", "coding.edit_hashline", "queued"),
+      tool("edit-2", "coding.edit_hashline", "queued"),
+    ]);
+    expect(segments[0]).toMatchObject({ kind: "process", active: true });
+  });
+
+  it("queues only when another tool in the same run is executing", () => {
+    const idle: Block[] = [
+      { id: "edit-1", kind: "tool", runId: "run-idle", title: "coding.edit_hashline", state: "queued" },
+      { id: "edit-2", kind: "tool", runId: "run-idle", title: "coding.edit_hashline", state: "queued" },
+    ];
+    expect(isCapacityQueued(idle[0]!, idle)).toBe(false);
+    expect(displayedToolState(idle[0]!, idle)).toBe("running");
+
+    const reviewing: Block[] = [
+      { id: "shell-1", kind: "tool", runId: "run-review", title: "coding.shell", state: "reviewing_approval" },
+      { id: "shell-2", kind: "tool", runId: "run-review", title: "coding.shell", state: "queued" },
+    ];
+    expect(isCapacityQueued(reviewing[1]!, reviewing)).toBe(false);
+    expect(displayedToolState(reviewing[1]!, reviewing)).toBe("running");
+
+    const busy: Block[] = [
+      { id: "shell-running", kind: "tool", runId: "run-busy", title: "coding.shell", state: "running" },
+      { id: "shell-wait", kind: "tool", runId: "run-busy", title: "coding.shell", state: "queued" },
+    ];
+    expect(isCapacityQueued(busy[1]!, busy)).toBe(true);
+    expect(displayedToolState(busy[1]!, busy)).toBe("queued");
   });
 
   it("keeps the observed live elapsed time when the running tail has no completion stamp", () => {
@@ -250,6 +286,16 @@ describe("tool timeline grouping", () => {
     expect(presentation.preview).not.toContain("{");
     expect(presentation.preview).not.toContain("\"path\"");
     expect(presentation.fields[0]?.value).toContain("MenuSelect.tsx");
+  });
+
+  it("does not preview raw hashline bodies", () => {
+    const presentation = formatToolPresentation(JSON.stringify({
+      input: "¶frontend/src/i18n.ts#1A65 replace 36:\n+ recapTitle: \"secret recap copy\"",
+    }), "zh-CN");
+    expect(presentation.preview).toContain("i18n.ts");
+    expect(presentation.preview).not.toContain("secret recap copy");
+    expect(presentation.preview).not.toContain("replace 36");
+    expect(presentation.fields.every((field) => !field.value.includes("secret recap copy"))).toBe(true);
   });
 
   it("humanizes commands and search queries", () => {

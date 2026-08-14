@@ -7,7 +7,7 @@ import SkillCatalogManager from "./SkillCatalogManager";
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const skills: SkillEntry[] = [
-  { name: "verify", description: "验证当前工作区", sourcePath: "bundled/verify", bundled: true, eager: true, disabled: false, modelVisible: true, resourceCount: 2 },
+  { name: "verify", description: "验证当前工作区", sourcePath: "bundled/verify", bundled: true, eager: true, disabled: false, modelVisible: true, resourceCount: 2, logoPath: "data:image/svg+xml;base64,PHN2Zz4=" },
   { name: "unused-design", description: "当前项目不需要加载", sourcePath: "~/.codex/skills/unused-design", bundled: false, eager: false, disabled: true, modelVisible: false, resourceCount: 4 },
 ];
 
@@ -24,6 +24,7 @@ describe("SkillCatalogManager", () => {
     await act(async () => root.render(<SkillCatalogManager skills={skills} language="zh-CN" onReload={onReload} onSetEnabled={onSetEnabled} />));
     expect(container.querySelector(".skill-manager-count")?.textContent).toContain("1/ 2");
     expect(container.querySelectorAll(".skill-manager-list article")).toHaveLength(2);
+    expect(container.querySelector('.skill-manager-icon img[src^="data:image/svg+xml;base64,"]')).not.toBeNull();
 
     const disabledFilter = Array.from(container.querySelectorAll<HTMLButtonElement>(".skill-filters button")).find((button) => button.textContent?.includes("已停用"))!;
     await act(async () => disabledFilter.click());

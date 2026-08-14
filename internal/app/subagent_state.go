@@ -9,6 +9,7 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/session"
+	"github.com/Viking602/azem/internal/toolview"
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/stream"
 	"github.com/Viking602/venat/tool"
@@ -366,6 +367,9 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 			event.State = "failed"
 		} else {
 			event.State = "completed"
+			if summary, ok := toolview.CompletedFileChanges(frame.ToolResult.Name, "", string(frame.ToolResult.Structured), frame.ToolResult.Content); ok {
+				event.Data["fileChange"] = toolview.EncodeSummary(summary)
+			}
 		}
 	case stream.FrameDone:
 		event.Kind = EventContextUsage
@@ -384,9 +388,9 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	}
 	if parent := r.parentHost(id); parent != nil {
 		if event.Kind == EventContextUsage {
-			event.Data["transport"] = parent.providerTransport(providerID)
+			event.Data["transport"] = parent.ProviderTransport(providerID)
 		}
-		parent.emit(parent.ctx, event)
+		parent.EmitEvent(parent.BaseContext(), event)
 	}
 }
 
@@ -437,7 +441,7 @@ func (r *subagentRuntime) handleToolUpdate(id string, update tool.Update) {
 	r.persistActivity(id)
 }
 
-func (r *subagentRuntime) parentHost(id string) *Service {
+func (r *subagentRuntime) parentHost(id string) providerHost {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if active := r.active[id]; active != nil {
@@ -449,7 +453,7 @@ func (r *subagentRuntime) parentHost(id string) *Service {
 func (r *subagentRuntime) persistActivity(id string) {
 	r.mu.Lock()
 	active := r.active[id]
-	if active == nil || active.parent.Host == nil || active.parent.Host.sessions == nil || active.activity == "" ||
+	if active == nil || active.parent.Host == nil || active.parent.Host.Sessions() == nil || active.activity == "" ||
 		active.activity == active.persistedActivity || time.Since(active.lastActivityPersist) < 500*time.Millisecond {
 		r.mu.Unlock()
 		return
@@ -460,7 +464,7 @@ func (r *subagentRuntime) persistActivity(id string) {
 	activity := active.activity
 	parent := active.parent.Host
 	r.mu.Unlock()
-	_ = parent.sessions.UpsertAgentBlock(parent.ctx, run.SessionID, run.ID, session.Block{
+	_ = parent.Sessions().UpsertAgentBlock(parent.BaseContext(), run.SessionID, run.ID, session.Block{
 		Kind: "agent", RunID: run.ParentRunID, AgentID: run.ID, ParentToolCallID: run.ParentToolCallID,
 		Title: run.Type, Content: activity, State: string(run.State),
 	})
@@ -472,7 +476,7 @@ func (r *subagentRuntime) emitState(run agentservice.SubagentRun, activity strin
 	if active != nil && active.activity != "" {
 		activity = active.activity
 	}
-	parent := (*Service)(nil)
+	parent := providerHost(nil)
 	if active != nil {
 		parent = active.parent.Host
 		active.persistedActivity = activity
@@ -482,18 +486,18 @@ func (r *subagentRuntime) emitState(run agentservice.SubagentRun, activity strin
 	r.emitStateTo(parent, run, activity)
 }
 
-func (r *subagentRuntime) emitStateTo(parent *Service, run agentservice.SubagentRun, activity string) {
+func (r *subagentRuntime) emitStateTo(parent providerHost, run agentservice.SubagentRun, activity string) {
 	if parent == nil {
 		return
 	}
-	if parent.sessions != nil {
+	if parent.Sessions() != nil {
 		content := firstNonempty(activity, run.Summary, run.Description)
-		_ = parent.sessions.UpsertAgentBlock(parent.ctx, run.SessionID, run.ID, session.Block{
+		_ = parent.Sessions().UpsertAgentBlock(parent.BaseContext(), run.SessionID, run.ID, session.Block{
 			Kind: "agent", RunID: run.ParentRunID, AgentID: run.ID, ParentToolCallID: run.ParentToolCallID,
 			Title: run.Type, Content: content, State: string(run.State),
 		})
 	}
-	parent.emit(parent.ctx, subagentStateEvent(run, activity))
+	parent.EmitEvent(parent.BaseContext(), subagentStateEvent(run, activity))
 }
 
 func subagentStateEvent(run agentservice.SubagentRun, activity string) Event {

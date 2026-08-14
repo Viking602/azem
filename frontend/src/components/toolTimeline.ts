@@ -21,8 +21,8 @@ export function formatToolPresentation(content = "", language: Language = "zh-CN
   const plainResult = plainAnsiText(result);
   const fields = args ? humanizeToolArgs(args, language) : [];
   const preview = fields.map((field) => field.value).filter(Boolean).join(" · ")
-    || (plainResult ? shorten(plainResult.replace(/\s+/g, " ").trim(), 80) : "")
-    || shorten(stripJsonNoise(plainAnsiText(trimmed)), 72);
+    || (plainResult && !looksLikeHashline(plainResult) ? shorten(plainResult.replace(/\s+/g, " ").trim(), 80) : "")
+    || (looksLikeHashline(trimmed) ? "" : shorten(stripJsonNoise(plainAnsiText(trimmed)), 72));
 
   return {
     preview,
@@ -103,12 +103,20 @@ function humanizeToolArgs(args: Record<string, unknown>, language: Language) {
   const skill = firstString(args, "skill", "name", "skill_name");
   if (skill && !path && !command && !query) push(t("fieldSkill"), skill);
 
-  const description = firstString(args, "description", "prompt", "instruction", "message", "content");
+  const description = firstString(args, "description", "prompt", "instruction", "message");
   if (description && fields.length === 0) push(t("fieldDetail"), shorten(description, 80));
 
+  const patch = firstString(args, "input", "patch");
+  if (patch && !path) {
+    const hashlinePaths = hashlineHeaderPaths(patch);
+    if (hashlinePaths.length) push(t("fieldPath"), hashlinePaths.map(shortenPath).join(", "));
+  }
+
   // Fallback: pick a few primitive fields without dumping whole JSON.
+  // Never surface Hashline / patch bodies as a preview field.
   if (fields.length === 0) {
     for (const [key, value] of Object.entries(args)) {
+      if (key === "input" || key === "patch" || key === "content" || key === "old_string" || key === "new_string") continue;
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
         push(key, value);
       }
@@ -116,6 +124,20 @@ function humanizeToolArgs(args: Record<string, unknown>, language: Language) {
     }
   }
   return fields;
+}
+
+function hashlineHeaderPaths(input: string): string[] {
+  const paths: string[] = [];
+  for (const rawLine of input.replace(/\r\n?/gu, "\n").split("\n")) {
+    const line = rawLine.trim();
+    const marker = line.startsWith("¶") ? "¶" : line.startsWith("[") ? "[" : "";
+    if (!marker) continue;
+    const hash = line.lastIndexOf("#");
+    if (hash <= marker.length) continue;
+    const path = line.slice(marker.length, hash).trim();
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
 }
 
 function firstString(args: Record<string, unknown>, ...keys: string[]) {
@@ -163,6 +185,10 @@ function shortenPath(path: string) {
 function shorten(text: string, max: number) {
   const value = text.trim();
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+function looksLikeHashline(text: string) {
+  return /¶|[^\n]*#\w+\s+(?:replace|delete|insert)\b/u.test(text);
 }
 
 function looksLikeJson(text: string) {
@@ -241,6 +267,24 @@ function plainProgressText(content: string) {
 export function isRunningTool(block: Block) {
   return block.kind === "tool" && ["running", "started", "streaming", "progress"].includes(block.state || "");
 }
+
+export function isOccupyingTool(block: Block) {
+  return isRunningTool(block);
+}
+
+export function isCapacityQueued(block: Block, blocks: Block[]) {
+  if (block.kind !== "tool" || block.state !== "queued") return false;
+  return blocks.some((candidate) => candidate.id !== block.id
+    && candidate.runId === block.runId
+    && isOccupyingTool(candidate));
+}
+
+/** Queue is a capacity wait. Idle announcements start immediately. */
+export function displayedToolState(block: Block, blocks: Block[]) {
+  if (block.state === "queued" && !isCapacityQueued(block, blocks)) return "running";
+  return block.state || "completed";
+}
+
 function isPendingTool(block: Block) {
   return block.kind === "tool"
     && ["queued", "awaiting_approval", "reviewing_approval"].includes(block.state || "");
@@ -409,7 +453,7 @@ export type ProcessSegment =
 
 /**
  * Segment the transcript so completed process trails can fold under “已处理”.
- * Active runs stay expanded (rendered flat via active=true).
+ * Active runs stay expanded and cannot collapse to a “处理中” summary.
  */
 export function segmentProcessTrail(
   blocks: Block[],
@@ -453,7 +497,7 @@ export function segmentProcessTrail(
 }
 
 export function isActiveProcessBlock(block: Block) {
-  return ["running", "started", "streaming", "progress"].includes(block.state || "");
+  return ["running", "started", "streaming", "progress", "queued", "awaiting_approval", "reviewing_approval"].includes(block.state || "");
 }
 
 export function processElapsedMs(blocks: Block[], activeUntil = 0) {

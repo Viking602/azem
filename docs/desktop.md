@@ -1,6 +1,6 @@
 # Desktop application
 
-Last verified: 2026-08-12
+Last verified: 2026-08-14
 
 Azem's desktop application is a Wails window over the same Go runtime used by
 the TUI. React owns presentation state; it does not duplicate provider,
@@ -97,8 +97,12 @@ and keyboard tab behavior.
 
 Settings use one Codex-style full-window layout with a searchable left
 navigation and a consistent content column. Model catalog, model routing,
-Subagents, Governance and approvals, Appearance, and Extensions remain complete
-sections rather than separate modal variants. The Subagents section updates the
+Subagents, Governance and approvals, Appearance, Extensions, and Archive remain
+complete sections rather than separate modal variants. Archive lists every
+archived conversation grouped by its owning project, can bulk-archive unpinned
+sessions that have been idle for a chosen number of days, and restores a
+conversation to that project's sidebar. The current conversation and pinned
+rows are never bulk-archived. Opening an archived conversation unarchives it. The Subagents section updates the
 live subagent capacity, independent shell capacity, and foreground wait window,
 then persists those validated values to the existing configuration file. Ending
 that window never cancels a child: safe work becomes background work, while
@@ -119,10 +123,19 @@ The add, enable, and delete actions reuse the active manager instance, while
 connections start and stop in the background so Settings never blocks on MCP
 lifecycle work.
 
-The Plugins tab calls the capability simply **Plugins**, identifies local,
-available-from-Codex, and selected Codex entries, and provides an explicit
-per-plugin import control. Only selected entries are copied and later executed
-from Azem's own `plugin-packages` data directory. Valid icons are projected as
+The Hooks tab lists plugin, user, and project hook sources together with any
+commands already loaded into the runtime. Plugin hooks remain untrusted until
+the user turns on **Trust plugin hooks**. That control persists
+`plugins.trust_hooks`, reloads the plugin hook sources immediately, and asks
+for confirmation before enabling. Turning it off unloads plugin hooks without
+removing the packages.
+
+The Plugins tab calls the capability simply **Plugins**, lists local,
+available-from-Codex, and selected Codex entries as compact rows grouped by
+import state, and provides an explicit per-plugin import control. Selecting a
+Codex entry copies it into Azem's `plugin-packages` directory and loads its
+Skills and MCP servers immediately. Removing the selection unloads those
+capabilities without deleting the dormant Azem copy. Valid icons are projected as
 bounded image data; the frontend never receives a local path or presents a
 Codex cache path as an active runtime source. Opening Settings explicitly requests the
 current plugin snapshot, so startup event timing cannot leave a populated
@@ -142,6 +155,12 @@ cache**, so both numbers reconcile with the displayed hit rate. Context
 composition uses the runtime request profile and marks its token estimates
 explicitly; category rows expand to the bounded concrete contributions such as
 individual messages, tool results, Skill payloads, and MCP definitions.
+Sources in the same Inspector collect image attachments, URLs typed into user
+messages, and URLs returned by web-search or web-fetch tools. Generic
+attachment names such as `image.png` become numbered labels. Clicking an image
+opens the existing preview lightbox; clicking a URL opens it in the system
+browser through `openExternalURL`.
+
 The same scroll surface also restores the current session's durable recap and
 updates it directly from `recap_state` after each successful turn. The card
 shows the bounded summary, current goal, open items, covered run boundary, and

@@ -1,16 +1,42 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import type { SkillEntry, Snapshot } from "../types";
 import { branchMenuLayout, effectiveComposerRoute, filterModelControlOptions, modelControlWidth, namedClipboardImage, nextModelControlView, parseSkillPrompt, pastedImages, sessionStageMotion, shouldReadNativeClipboard, skillTitle, slashSuggestions, supportsFastMode, threadHeaderStage } from "./ThreadSurface";
 import { visibleCommentaryTitle } from "./Timeline";
 
-const styles = readFileSync("src/styles.css", "utf8");
+// styles.css is an import hub; concatenate the imported files in cascade order.
+const styles = readFileSync("src/styles.css", "utf8")
+	.split("\n")
+	.map((line: string) => /^@import "\.\/(.+)";$/.exec(line)?.[1])
+	.filter((path: string | undefined): path is string => Boolean(path))
+	.map((path: string) => readFileSync(`src/${path}`, "utf8"))
+	.join("\n");
 const prototypeStyles = readFileSync("src/prototype.css", "utf8");
-const threadSurface = readFileSync("src/components/ThreadSurface.tsx", "utf8");
+// ThreadSurface.tsx is a composition root; include its thread/ submodules so
+// source-content assertions keep covering the complete composer surface.
+const threadSurface = [
+	"src/components/ThreadSurface.tsx",
+	...readdirSync("src/components/thread")
+		.slice()
+		.sort()
+		.map((name: string) => `src/components/thread/${name}`),
+]
+	.map((path: string) => readFileSync(path, "utf8"))
+	.join("\n");
 const composerModelPicker = readFileSync("src/components/ComposerModelPicker.tsx", "utf8");
 const agentSideChat = readFileSync("src/components/AgentSideChat.tsx", "utf8");
-const timeline = readFileSync("src/components/Timeline.tsx", "utf8");
+// Timeline.tsx is a composition root; include its timeline/ submodules so
+// source-content assertions keep covering the complete process rendering.
+const timeline = [
+	"src/components/Timeline.tsx",
+	...readdirSync("src/components/timeline")
+		.slice()
+		.sort()
+		.map((name: string) => `src/components/timeline/${name}`),
+]
+	.map((path: string) => readFileSync(path, "utf8"))
+	.join("\n");
 
 const skills: SkillEntry[] = [
   { name: "animation-systems", description: "Build polished motion", sourcePath: "~/.agents/skills/animation-systems", bundled: false, eager: false, disabled: false, modelVisible: true, resourceCount: 0 },
@@ -30,10 +56,10 @@ describe("composer slash commands", () => {
 			workspace: "/tmp/azem", sessionId: "session-1", provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max",
 			agentMode: "single", language: "zh-CN", approvalMode: "prompt", queueMode: "queue", subagentConcurrency: 2, chatgptFastMode: false, sequence: 0,
 		};
-		const routes = [{ Scope: "plan", Role: "", Label: "Plan", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } }];
+		const routes = [{ scope: "plan", role: "", label: "Plan", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } }];
 		expect(effectiveComposerRoute(snapshot, true, routes)).toEqual({ provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" });
 		expect(effectiveComposerRoute(snapshot, false, routes)).toEqual({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
-		expect(effectiveComposerRoute(snapshot, true, [{ Scope: "plan", Role: "", Label: "Plan", Route: {} }])).toEqual({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
+		expect(effectiveComposerRoute(snapshot, true, [{ scope: "plan", role: "", label: "Plan", route: {} }])).toEqual({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
 	});
 
 	it("does not start native text selection from the composer toolbar blank area", () => {

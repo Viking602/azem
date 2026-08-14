@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+- Desktop Extensions: add a Hooks tab that lists plugin, user, and project
+  hook sources plus loaded commands. Plugin hooks stay off until the user
+  explicitly trusts them; the decision persists as `plugins.trust_hooks` and
+  reloads the runtime immediately.
+
+- Desktop Inspector sources: keep user-typed URLs and web-search URLs
+  alongside images, give generic attachments numbered names instead of
+  repeating `image`, and open a source in a preview or the system browser.
+
+- Desktop archive: archive long-idle unpinned conversations, hide them from
+  the sidebar, and inspect or restore them in Settings grouped by project.
+  Opening an archived conversation restores it.
+
+- Desktop sidebar: session ages use minutes and update on the next label
+  boundary with a single timeout. Hidden windows do not tick.
+
+- Grok subscription catalog: fetch models from the Grok CLI proxy instead of
+  api.x.ai, keep optional language-model metadata best-effort, and add a
+  Fetch models button on the subscription catalog page.
+
+- Extensions catalog: show a plugin, skill, or MCP icon when the package
+  provides one (`composerIcon`/`logo`, skill `icon.svg`/`icon.png`, or the
+  parent plugin mark on plugin-owned MCP servers).
+
+- Extensions plugins: importing or removing a Codex plugin copies or unloads
+  it immediately. Skills and MCP from that package no longer wait for restart.
+
+- Desktop image attachments: conversation thumbnails follow the real image
+  aspect ratio up to 420×320, without a fixed 218×150 letterbox.
+
+- Extensions plugins: imported Codex packages now use 删除 instead of 停止导入,
+  with a confirm step. Import stays 导入. Local packages are labeled 本机安装.
+
+- Desktop transcript: an in-flight process stays expanded. It cannot collapse
+  to a 处理中 summary. Only after the trail finishes can it fold under 已处理.
+
+- Approvals: automatic review starts as soon as tools are announced, including
+  in-workspace file edits, so a batch of writes is reviewed in parallel
+  instead of sitting in 排队中. Reviewing rows show a shield and 审核中.
+  Pending review never uses the capacity-queue label. Review and approval
+  rows only show the file name; Hashline bodies and write payloads stay
+  hidden until the edit actually runs.
+
+- Desktop sidebar: session titles, timestamps, and the project heading now
+  follow the Appearance font size. The desktop layout pass no longer pins
+  those labels to 11px / 9px.
+
 - OMP-style subagent scheduling: raise the default concurrency to 32, accept
   zero as unbounded, and support recursive delegation with a default depth of
   two (`-1` is unlimited, `0` disables delegation). A re-entrant child slot
@@ -69,6 +116,12 @@
   desktop now keeps adjacent reasoning, tool calls, and diffs inside that same
   progress step; active steps open automatically instead of rendering separate
   zero-second thinking rows.
+
+- Semantic context rebuild: if automatic compaction tries to commit
+  revision 0 after revision 1 is already durable, reload the durable
+  checkpoint and retry instead of failing the run with
+  `semantic state source is stale`. Cancel leftover background prepares
+  when the live history is no longer a prefix of the prepared source.
 
 - Semantic context rebuild: raise the default durable semantic-state budget
   from 8,192 to 32,768 tokens and remove the fixed 8,192-token ceiling.

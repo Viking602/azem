@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,10 +18,8 @@ import (
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
-	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
-	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -37,63 +34,66 @@ const (
 type ActionKind string
 
 const (
-	ActionLogin                  ActionKind = "login"
-	ActionLogout                 ActionKind = "logout"
-	ActionNewSession             ActionKind = "new_session"
-	ActionListSessions           ActionKind = "list_sessions"
-	ActionResumeSession          ActionKind = "resume_session"
-	ActionRefreshSession         ActionKind = "refresh_session"
-	ActionRenameSession          ActionKind = "rename_session"
-	ActionPinSession             ActionKind = "pin_session"
-	ActionArchiveSession         ActionKind = "archive_session"
-	ActionMarkSessionUnread      ActionKind = "mark_session_unread"
-	ActionCompact                ActionKind = "compact"
-	ActionResolveApproval        ActionKind = "resolve_approval"
-	ActionResolveUserInput       ActionKind = "resolve_user_input"
-	ActionResolvePlan            ActionKind = "resolve_plan"
-	ActionSetApprovalMode        ActionKind = "set_approval_mode"
-	ActionSetLanguage            ActionKind = "set_language"
-	ActionSetQueueMode           ActionKind = "set_queue_mode"
-	ActionReconcileAttempt       ActionKind = "reconcile_attempt"
-	ActionInspectAgent           ActionKind = "inspect_agent"
-	ActionListAgentTypes         ActionKind = "list_agent_types"
-	ActionListPersonas           ActionKind = "list_personas"
-	ActionCancelAgent            ActionKind = "cancel_agent"
-	ActionRefreshMCP             ActionKind = "refresh_mcp"
-	ActionReconnectMCP           ActionKind = "reconnect_mcp"
-	ActionSetMCPEnabled          ActionKind = "set_mcp_enabled"
-	ActionUpsertMCPServer        ActionKind = "upsert_mcp_server"
-	ActionDeleteMCPServer        ActionKind = "delete_mcp_server"
-	ActionListSkills             ActionKind = "list_skills"
-	ActionListPlugins            ActionKind = "list_plugins"
-	ActionSetPluginImported      ActionKind = "set_plugin_imported"
-	ActionReloadSkills           ActionKind = "reload_skills"
-	ActionSetSkillEnabled        ActionKind = "set_skill_enabled"
-	ActionListMemories           ActionKind = "list_memories"
-	ActionRemember               ActionKind = "remember"
-	ActionForgetMemory           ActionKind = "forget_memory"
-	ActionShowRecap              ActionKind = "show_recap"
-	ActionListModels             ActionKind = "list_models"
-	ActionListModelProviders     ActionKind = "list_model_providers"
-	ActionDiscoverProviderModels ActionKind = "discover_provider_models"
-	ActionSetModelProvider       ActionKind = "set_model_provider"
-	ActionSetModelEnabled        ActionKind = "set_model_enabled"
-	ActionListModelRoutes        ActionKind = "list_model_routes"
-	ActionSetModelRoute          ActionKind = "set_model_route"
-	ActionResetModelRoute        ActionKind = "reset_model_route"
-	ActionSetSubagentConcurrency ActionKind = "set_subagent_concurrency"
-	ActionSetSubagentDepth       ActionKind = "set_subagent_depth"
-	ActionSetShellConcurrency    ActionKind = "set_shell_concurrency"
-	ActionSetSubagentAwait       ActionKind = "set_subagent_await_timeout"
-	ActionSetChatGPTFastMode     ActionKind = "set_chatgpt_fast_mode"
-	ActionSetSessionPreferences  ActionKind = "set_session_preferences"
-	ActionListBackground         ActionKind = "list_background"
-	ActionStartBackground        ActionKind = "start_background"
-	ActionStopBackground         ActionKind = "stop_background"
-	ActionLogsBackground         ActionKind = "logs_background"
-	ActionListGitBranches        ActionKind = "list_git_branches"
-	ActionSwitchGitBranch        ActionKind = "switch_git_branch"
-	ActionCreateGitBranch        ActionKind = "create_git_branch"
+	ActionLogin                   ActionKind = "login"
+	ActionLogout                  ActionKind = "logout"
+	ActionNewSession              ActionKind = "new_session"
+	ActionListSessions            ActionKind = "list_sessions"
+	ActionResumeSession           ActionKind = "resume_session"
+	ActionRefreshSession          ActionKind = "refresh_session"
+	ActionRenameSession           ActionKind = "rename_session"
+	ActionPinSession              ActionKind = "pin_session"
+	ActionArchiveSession          ActionKind = "archive_session"
+	ActionArchiveInactiveSessions ActionKind = "archive_inactive_sessions"
+	ActionMarkSessionUnread       ActionKind = "mark_session_unread"
+	ActionCompact                 ActionKind = "compact"
+	ActionResolveApproval         ActionKind = "resolve_approval"
+	ActionResolveUserInput        ActionKind = "resolve_user_input"
+	ActionResolvePlan             ActionKind = "resolve_plan"
+	ActionSetApprovalMode         ActionKind = "set_approval_mode"
+	ActionSetLanguage             ActionKind = "set_language"
+	ActionSetQueueMode            ActionKind = "set_queue_mode"
+	ActionReconcileAttempt        ActionKind = "reconcile_attempt"
+	ActionInspectAgent            ActionKind = "inspect_agent"
+	ActionListAgentTypes          ActionKind = "list_agent_types"
+	ActionListPersonas            ActionKind = "list_personas"
+	ActionCancelAgent             ActionKind = "cancel_agent"
+	ActionRefreshMCP              ActionKind = "refresh_mcp"
+	ActionReconnectMCP            ActionKind = "reconnect_mcp"
+	ActionSetMCPEnabled           ActionKind = "set_mcp_enabled"
+	ActionUpsertMCPServer         ActionKind = "upsert_mcp_server"
+	ActionDeleteMCPServer         ActionKind = "delete_mcp_server"
+	ActionListSkills              ActionKind = "list_skills"
+	ActionListPlugins             ActionKind = "list_plugins"
+	ActionSetPluginImported       ActionKind = "set_plugin_imported"
+	ActionListHooks               ActionKind = "list_hooks"
+	ActionSetPluginHooksTrusted   ActionKind = "set_plugin_hooks_trusted"
+	ActionReloadSkills            ActionKind = "reload_skills"
+	ActionSetSkillEnabled         ActionKind = "set_skill_enabled"
+	ActionListMemories            ActionKind = "list_memories"
+	ActionRemember                ActionKind = "remember"
+	ActionForgetMemory            ActionKind = "forget_memory"
+	ActionShowRecap               ActionKind = "show_recap"
+	ActionListModels              ActionKind = "list_models"
+	ActionListModelProviders      ActionKind = "list_model_providers"
+	ActionDiscoverProviderModels  ActionKind = "discover_provider_models"
+	ActionSetModelProvider        ActionKind = "set_model_provider"
+	ActionSetModelEnabled         ActionKind = "set_model_enabled"
+	ActionListModelRoutes         ActionKind = "list_model_routes"
+	ActionSetModelRoute           ActionKind = "set_model_route"
+	ActionResetModelRoute         ActionKind = "reset_model_route"
+	ActionSetSubagentConcurrency  ActionKind = "set_subagent_concurrency"
+	ActionSetSubagentDepth        ActionKind = "set_subagent_depth"
+	ActionSetShellConcurrency     ActionKind = "set_shell_concurrency"
+	ActionSetSubagentAwait        ActionKind = "set_subagent_await_timeout"
+	ActionSetChatGPTFastMode      ActionKind = "set_chatgpt_fast_mode"
+	ActionSetSessionPreferences   ActionKind = "set_session_preferences"
+	ActionListBackground          ActionKind = "list_background"
+	ActionStartBackground         ActionKind = "start_background"
+	ActionStopBackground          ActionKind = "stop_background"
+	ActionLogsBackground          ActionKind = "logs_background"
+	ActionListGitBranches         ActionKind = "list_git_branches"
+	ActionSwitchGitBranch         ActionKind = "switch_git_branch"
+	ActionCreateGitBranch         ActionKind = "create_git_branch"
 )
 
 type Action struct {
@@ -121,470 +121,6 @@ type ReconcileResolver interface {
 
 func (s *Service) AttachReconcileResolver(resolver ReconcileResolver) {
 	s.reconciler = resolver
-}
-
-func (s *Service) ExecuteAction(ctx context.Context, action Action) error {
-	switch action.Kind {
-	case ActionListGitBranches:
-		return s.emitGitBranches(ctx, "listed")
-	case ActionSwitchGitBranch:
-		return s.switchGitBranch(ctx, action.Target, action.Decision == "confirm_dirty")
-	case ActionCreateGitBranch:
-		return s.createGitBranch(ctx, action.Target)
-	case ActionListBackground:
-		return s.emitBackgroundSnapshot(ctx, "listed")
-	case ActionStartBackground:
-		if s.background == nil {
-			return fmt.Errorf("background runtime is unavailable")
-		}
-		if s.cfg.Workspace.ShellPolicy == "deny" {
-			return fmt.Errorf("background commands are disabled by workspace.shell_policy")
-		}
-		_, err := s.background.Start(ctx, backgroundservice.StartRequest{Name: action.Name, Command: action.Target, CWD: action.CWD})
-		if err != nil {
-			return err
-		}
-		return s.emitBackgroundSnapshot(ctx, "started")
-	case ActionStopBackground:
-		if s.background == nil {
-			return fmt.Errorf("background runtime is unavailable")
-		}
-		if err := s.background.Stop(ctx, action.Target); err != nil {
-			return err
-		}
-		return s.emitBackgroundSnapshot(ctx, "stopped")
-	case ActionLogsBackground:
-		if s.background == nil {
-			return fmt.Errorf("background runtime is unavailable")
-		}
-		snapshot, err := s.background.Logs(action.Target, action.Offset, action.Limit)
-		if err != nil {
-			return err
-		}
-		s.emit(ctx, Event{Kind: EventBackgroundLogs, State: "loaded", BackgroundLogs: &snapshot})
-		return nil
-	case ActionListModelRoutes:
-		s.emit(ctx, s.modelRoutesEvent("listed"))
-		return nil
-	case ActionListModels:
-		s.emitAuthCatalog(ctx)
-		return nil
-	case ActionListModelProviders:
-		return s.emitModelProviders(ctx, "listed")
-	case ActionDiscoverProviderModels:
-		return s.discoverModelProvider(ctx, action.Provider, action.Secret)
-	case ActionSetModelProvider:
-		return s.updateModelProvider(ctx, action.Provider, action.Secret)
-	case ActionSetModelEnabled:
-		enabled, err := strconv.ParseBool(strings.TrimSpace(action.Decision))
-		if err != nil {
-			return fmt.Errorf("model enabled state must be true or false")
-		}
-		return s.setModelEnabled(ctx, action.Target, action.Name, enabled)
-	case ActionSetSubagentConcurrency:
-		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))
-		if err != nil || maxConcurrency < 0 {
-			return fmt.Errorf("subagent max concurrency must be non-negative")
-		}
-		return s.updateSubagentMaxConcurrency(ctx, maxConcurrency)
-	case ActionSetSubagentDepth:
-		maxDepth, err := strconv.Atoi(strings.TrimSpace(action.Target))
-		if err != nil || maxDepth < -1 {
-			return fmt.Errorf("subagent max depth must be -1 or non-negative")
-		}
-		return s.updateSubagentMaxDepth(ctx, maxDepth)
-	case ActionSetShellConcurrency:
-		maxConcurrency, err := strconv.Atoi(strings.TrimSpace(action.Target))
-		if err != nil || maxConcurrency < 1 {
-			return fmt.Errorf("shell max concurrency must be positive")
-		}
-		return s.updateShellMaxConcurrency(ctx, maxConcurrency)
-	case ActionSetSubagentAwait:
-		seconds, err := strconv.Atoi(strings.TrimSpace(action.Target))
-		if err != nil || seconds < 5 || seconds > 3600 {
-			return fmt.Errorf("subagent await timeout must be between 5 and 3600 seconds")
-		}
-		return s.updateSubagentAwaitTimeout(ctx, time.Duration(seconds)*time.Second)
-	case ActionSetChatGPTFastMode:
-		enabled, err := strconv.ParseBool(strings.TrimSpace(action.Target))
-		if err != nil {
-			return fmt.Errorf("ChatGPT fast mode must be true or false")
-		}
-		return s.updateChatGPTFastMode(ctx, enabled)
-	case ActionSetSessionPreferences:
-		return s.updateSessionPreferences(ctx, action)
-	case ActionSetModelRoute:
-		return s.updateModelRoute(ctx, action.Route, false)
-	case ActionResetModelRoute:
-		return s.updateModelRoute(ctx, action.Route, true)
-	case ActionListMemories:
-		if s.memory == nil {
-			return fmt.Errorf("memory is unavailable")
-		}
-		items, err := s.memory.List(ctx, action.Target, 20)
-		if err != nil {
-			return err
-		}
-		s.emit(ctx, Event{Kind: EventMemoryState, State: "listed", Memories: items})
-		return nil
-	case ActionRemember:
-		if s.memory == nil {
-			return fmt.Errorf("memory is unavailable")
-		}
-		item, err := s.memory.Remember(ctx, action.Target, action.SessionID, "manual", 50)
-		if err != nil {
-			return err
-		}
-		s.emit(ctx, Event{Kind: EventMemoryState, SessionID: action.SessionID, State: "remembered", Memories: []memory.Memory{item}})
-		return nil
-	case ActionForgetMemory:
-		if s.memory == nil {
-			return fmt.Errorf("memory is unavailable")
-		}
-		if err := s.memory.Forget(ctx, action.Target); err != nil {
-			return err
-		}
-		s.emit(ctx, Event{Kind: EventMemoryState, State: "forgotten", Text: action.Target})
-		return nil
-	case ActionShowRecap:
-		item, err := s.loadRecap(ctx, action.SessionID)
-		if err != nil {
-			return err
-		}
-		state := "loaded"
-		if item == nil {
-			state = "empty"
-		}
-		s.emit(ctx, Event{Kind: EventRecapState, SessionID: action.SessionID, State: state, Recap: item})
-		return nil
-	case ActionListSkills:
-		return s.emitSkillCatalog(ctx, "listed")
-	case ActionListPlugins:
-		s.emit(ctx, Event{Kind: EventPluginCatalog, State: "listed", PluginCatalog: s.pluginCatalog, PluginDiagnostics: s.pluginDiagnostics})
-		return nil
-	case ActionSetPluginImported:
-		imported, err := strconv.ParseBool(strings.TrimSpace(action.Decision))
-		if err != nil {
-			return fmt.Errorf("plugin imported decision must be true or false: %w", err)
-		}
-		return s.setCodexPluginImported(ctx, action.Target, imported)
-	case ActionReloadSkills:
-		if s.skillCatalog == nil {
-			return fmt.Errorf("skills are unavailable")
-		}
-		if err := s.skillCatalog.Reload(); err != nil {
-			return err
-		}
-		if err := s.emitSkillCatalog(ctx, "reloaded"); err != nil {
-			return err
-		}
-		_ = s.emitContextProfile(ctx, action.SessionID)
-		return nil
-	case ActionSetSkillEnabled:
-		enabled, err := strconv.ParseBool(strings.TrimSpace(action.Decision))
-		if err != nil {
-			return fmt.Errorf("skill enabled state must be true or false")
-		}
-		return s.setSkillEnabled(ctx, action.Target, enabled, action.SessionID)
-	case ActionSetApprovalMode:
-		return s.setApprovalMode(ctx, ApprovalMode(action.Target))
-	case ActionSetLanguage:
-		if action.Target != "en" && action.Target != "zh-CN" {
-			return fmt.Errorf("invalid language %q", action.Target)
-		}
-		if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(s.currentSession, ""), func(e *hooks.Envelope) {
-			e.Source, e.FilePath = "user_settings", s.configPath
-		}); err != nil {
-			return err
-		}
-		if s.configPath != "" {
-			if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
-				return config.UpdateDefault(s.configPath, "language", action.Target)
-			}); err != nil {
-				return err
-			}
-		}
-		s.mu.Lock()
-		s.cfg.Defaults.Language = action.Target
-		s.mu.Unlock()
-		return nil
-	case ActionSetQueueMode:
-		if action.Target != "queue" && action.Target != "guide" {
-			return fmt.Errorf("invalid queue mode %q", action.Target)
-		}
-		if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(s.currentSession, ""), func(e *hooks.Envelope) {
-			e.Source, e.FilePath = "user_settings", s.configPath
-		}); err != nil {
-			return err
-		}
-		if s.configPath != "" {
-			if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
-				return config.UpdateDefault(s.configPath, "queue_mode", action.Target)
-			}); err != nil {
-				return err
-			}
-		}
-		s.mu.Lock()
-		s.cfg.Defaults.QueueMode = action.Target
-		s.mu.Unlock()
-		return nil
-	case ActionResolveApproval:
-		if s.coding == nil {
-			return fmt.Errorf("coding runtime is unavailable")
-		}
-		if resolved, err := s.resolveLiveApproval(ctx, action.Target, action.Decision, "user"); resolved {
-			return err
-		}
-		for index, pending := range s.recovery.Approvals {
-			if pending.Approval.ApprovalID != action.Target {
-				continue
-			}
-			if err := s.coding.ResolveRecoveredApproval(ctx, pending.Approval, pending.Token.TokenID, action.Decision); err != nil {
-				return err
-			}
-			if s.providers != nil {
-				if err := s.providers.ResumeRecoveredRun(ctx, pending.Approval.RunID); err != nil {
-					return fmt.Errorf("resume approved run %s: %w", pending.Approval.RunID, err)
-				}
-			}
-			s.recovery.Approvals = slices.Delete(s.recovery.Approvals, index, index+1)
-			s.emit(ctx, Event{Kind: EventApprovalResolved, RunID: pending.Approval.RunID, State: action.Decision, Text: pending.Approval.ApprovalID})
-			return nil
-		}
-		return fmt.Errorf("approval %q is not pending", action.Target)
-	case ActionResolveUserInput:
-		return s.resolveUserInput(ctx, action.SessionID, action.Target, action.Payload)
-	case ActionResolvePlan:
-		return s.resolvePlan(ctx, action.SessionID, action.Target, action.Decision)
-	case ActionReconcileAttempt:
-		if s.reconciler == nil {
-			return fmt.Errorf("action reconciliation is unavailable")
-		}
-		status, err := reconciledStatus(action.Decision)
-		if err != nil {
-			return err
-		}
-		attemptIndex := -1
-		runID := ""
-		for index, attempt := range s.recovery.ReconcileAttempts {
-			if attempt.AttemptID == action.Target {
-				attemptIndex = index
-				runID = attempt.RunID
-				break
-			}
-		}
-		if runID == "" {
-			return fmt.Errorf("reconciliation attempt %q is not pending", action.Target)
-		}
-		if err := s.reconciler.ResolveReconcileAttempt(ctx, action.Target, status, "user-confirmed"); err != nil {
-			return err
-		}
-		if s.providers != nil {
-			if err := s.providers.ResumeRecoveredRun(ctx, runID); err != nil {
-				return fmt.Errorf("resume reconciled run %s: %w", runID, err)
-			}
-		}
-		s.recovery.ReconcileAttempts = slices.Delete(s.recovery.ReconcileAttempts, attemptIndex, attemptIndex+1)
-		s.emit(ctx, Event{Kind: EventRecoveryState, RunID: runID, State: "reconciled", Text: action.Target, Data: map[string]string{"decision": string(status)}})
-		return nil
-	case ActionLogout:
-		if s.authentication == nil {
-			return fmt.Errorf("authentication is unavailable")
-		}
-		if action.Target == "" {
-			return fmt.Errorf("logout requires a provider or provider/account id")
-		}
-		provider, accountID, _ := strings.Cut(action.Target, "/")
-		if accountID == "" {
-			accounts, err := s.authentication.Accounts(ctx, provider)
-			if err != nil {
-				return err
-			}
-			for _, account := range accounts {
-				if account.Status == "active" {
-					accountID = account.ID
-					break
-				}
-			}
-		}
-		if accountID == "" {
-			return fmt.Errorf("no active %s account is available", provider)
-		}
-		if err := s.authentication.Logout(ctx, provider, accountID); err != nil {
-			return err
-		}
-		return s.emitModelProviders(ctx, "auth_updated")
-	case ActionNewSession:
-		return s.createSession(ctx, action.Target)
-	case ActionResumeSession:
-		if err := s.sessions.SetUIState(ctx, action.Target, "unread", false); err != nil {
-			return err
-		}
-		if err := s.emitSession(ctx, action.Target); err != nil {
-			return err
-		}
-		return s.emitSessionList(ctx)
-	case ActionRefreshSession:
-		_, err := s.emitSessionProjection(ctx, action.Target, "refreshed", false)
-		return err
-	case ActionListSessions:
-		return s.emitSessionList(ctx)
-	case ActionRenameSession:
-		if err := s.sessions.Rename(ctx, action.Target, action.Name); err != nil {
-			return err
-		}
-		return s.emitSessionList(ctx)
-	case ActionPinSession:
-		enabled, err := strconv.ParseBool(action.Decision)
-		if err != nil {
-			return fmt.Errorf("pin state must be true or false")
-		}
-		if err := s.sessions.SetUIState(ctx, action.Target, "pinned", enabled); err != nil {
-			return err
-		}
-		return s.emitSessionList(ctx)
-	case ActionArchiveSession:
-		if err := s.sessions.SetUIState(ctx, action.Target, "archived", true); err != nil {
-			return err
-		}
-		return s.emitSessionList(ctx)
-	case ActionMarkSessionUnread:
-		return s.markSessionUnread(ctx, action.Target)
-	case ActionCompact:
-		if s.sessions == nil {
-			return fmt.Errorf("session store is unavailable")
-		}
-		const compactReservation = "maintenance:compact"
-		s.mu.Lock()
-		if s.shuttingDown {
-			s.mu.Unlock()
-			return fmt.Errorf("application is shutting down")
-		}
-		if s.activeRun != "" {
-			s.mu.Unlock()
-			return ErrRunActive
-		}
-		s.activeRun = compactReservation
-		s.activeSession = action.Target
-		s.mu.Unlock()
-		defer s.clearRun(compactReservation)
-		projection, err := s.sessions.LoadProjection(ctx, action.Target)
-		if err != nil {
-			return err
-		}
-		if !manualCompactionEligible(projection.Blocks) {
-			return ErrNothingToCompact
-		}
-		if s.providers == nil {
-			return fmt.Errorf("compaction model runtime is unavailable")
-		}
-		if err := s.dispatchLifecycle(ctx, hooks.PreCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) { e.Trigger = "manual" }); err != nil {
-			return err
-		}
-		plan, changed, prepareErr := s.providers.PrepareManualCompaction(ctx, projection)
-		if prepareErr != nil {
-			return prepareErr
-		}
-		if !changed {
-			return ErrNothingToCompact
-		}
-		projection, err = s.sessions.CompactWithSummary(ctx, action.Target, plan)
-		if err != nil {
-			return err
-		}
-		// Compaction shrinks the live context. Clear stale main occupancy while
-		// preserving the independently attributed compaction and cache totals.
-		cleared, err := s.clearMainUsageOccupancy(ctx, action.Target, projection.Usage)
-		if err != nil {
-			return err
-		}
-		projection.Usage = cleared
-		blocks, err := json.Marshal(projection.Blocks)
-		if err != nil {
-			return err
-		}
-		todo, err := s.sessions.LoadTodo(ctx, action.Target)
-		if err != nil {
-			return err
-		}
-		currentRecap, err := s.loadRecap(ctx, action.Target)
-		if err != nil {
-			return err
-		}
-		s.emit(ctx, Event{
-			Kind: EventSessionLoaded, SessionID: action.Target, State: "compacted",
-			Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, action.Target), Todo: &todo, Recap: currentRecap,
-		})
-		_ = s.emitContextProfile(ctx, action.Target)
-		_ = s.dispatchLifecycle(ctx, hooks.PostCompact, s.hookMetadata(action.Target, ""), func(e *hooks.Envelope) {
-			e.Trigger = "manual"
-			e.CompactSummary = fmt.Sprintf("Session compacted to %d persisted blocks.", len(projection.Blocks))
-		})
-		return nil
-	case ActionLogin:
-		return s.login(ctx, action.Target)
-	case ActionInspectAgent:
-		if s.providers == nil {
-			return fmt.Errorf("subagent runtime is unavailable")
-		}
-		blocks, err := s.providers.DetailSubagent(ctx, action.SessionID, action.Target)
-		if err != nil {
-			return fmt.Errorf("inspect subagent %q: %w", action.Target, err)
-		}
-		s.emit(ctx, Event{
-			Kind: EventAgentDetail, SessionID: action.SessionID, AgentID: action.Target,
-			State: "detail", AgentBlocks: blocks,
-		})
-		return nil
-	case ActionListAgentTypes:
-		s.emit(ctx, Event{Kind: EventAgentDetail, SessionID: action.SessionID, State: "agent_types", AgentCatalog: s.agentTypeCatalog()})
-		return nil
-	case ActionListPersonas:
-		s.emit(ctx, Event{Kind: EventAgentDetail, SessionID: action.SessionID, State: "personas", AgentCatalog: s.personaCatalog()})
-		return nil
-	case ActionCancelAgent:
-		if s.providers == nil {
-			return fmt.Errorf("subagent runtime is unavailable")
-		}
-		outcome := s.providers.CancelSubagent(action.SessionID, action.Target)
-		if outcome.Outcome == "not_found" {
-			return fmt.Errorf("subagent %q was not found", action.Target)
-		}
-		s.emit(ctx, Event{
-			Kind: EventAgentDetail, SessionID: action.SessionID, AgentID: action.Target, State: outcome.Outcome,
-			Text: map[string]string{
-				"cancel_requested": "Child cancellation requested.",
-				"already_finished": "Child task already finished.",
-			}[outcome.Outcome],
-		})
-		return nil
-	case ActionRefreshMCP:
-		if s.mcp == nil {
-			return fmt.Errorf("no MCP manager is attached")
-		}
-		refreshErr := s.mcp.Refresh(ctx, action.Target)
-		snapshotErr := s.emitMCPSnapshot(ctx)
-		return errors.Join(refreshErr, snapshotErr)
-	case ActionReconnectMCP:
-		if s.mcp == nil {
-			return fmt.Errorf("no MCP manager is attached")
-		}
-		reconnectErr := s.mcp.Reconnect(ctx, action.Target)
-		snapshotErr := s.emitMCPSnapshot(ctx)
-		return errors.Join(reconnectErr, snapshotErr)
-	case ActionSetMCPEnabled:
-		enabled, err := strconv.ParseBool(action.Decision)
-		if err != nil {
-			return fmt.Errorf("invalid MCP enabled state %q", action.Decision)
-		}
-		return s.setMCPServerEnabled(ctx, action.Target, enabled)
-	case ActionUpsertMCPServer:
-		return s.upsertMCPServer(ctx, action.Payload)
-	case ActionDeleteMCPServer:
-		return s.deleteMCPServer(ctx, action.Target)
-	default:
-		return fmt.Errorf("unsupported action %q", action.Kind)
-	}
 }
 
 func (s *Service) emitGitBranches(ctx context.Context, state string) error {
@@ -1171,7 +707,7 @@ func (s *Service) SkillCatalogSnapshot() ([]SkillCatalogEntry, []SkillDiagnostic
 	for i, entry := range snapshot.Entries {
 		entries[i] = SkillCatalogEntry{
 			Name: entry.Name, Description: entry.Description, SourcePath: entry.SourcePath,
-			Bundled: entry.Bundled, Eager: entry.Eager, Disabled: entry.Disabled,
+			LogoPath: entry.LogoPath, Bundled: entry.Bundled, Eager: entry.Eager, Disabled: entry.Disabled,
 			ModelVisible: entry.ModelVisible, ResourceCount: entry.ResourceCount,
 		}
 	}
@@ -1400,6 +936,18 @@ func (s *Service) subagentSnapshots(ctx context.Context, sessionID string) []Age
 	return result
 }
 
+func archiveInactiveDays(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 30, nil
+	}
+	days, err := strconv.Atoi(raw)
+	if err != nil || days < 1 || days > 3650 {
+		return 0, fmt.Errorf("archive inactivity days must be between 1 and 3650")
+	}
+	return days, nil
+}
+
 func (s *Service) emitSessionList(ctx context.Context) error {
 	if s.sessions == nil {
 		return fmt.Errorf("session store is unavailable")
@@ -1616,6 +1164,7 @@ type mcpServerView struct {
 	Tools          []mcpToolView `json:"tools,omitempty"`
 	Error          string        `json:"error"`
 	Removable      bool          `json:"removable"`
+	Icon           string        `json:"icon,omitempty"`
 }
 
 func buildMCPServerView(
@@ -1635,6 +1184,6 @@ func buildMCPServerView(
 		Transport: serverConfig.Transport, Target: target, Command: serverConfig.Command,
 		Args: append([]string(nil), serverConfig.Args...), CWD: serverConfig.CWD, InheritEnv: serverConfig.InheritEnv,
 		URL: serverConfig.URL, Approval: serverConfig.Approval, MaxConcurrency: serverConfig.MaxConcurrency,
-		ToolCount: toolCount, Tools: tools, Error: lastError, Removable: true,
+		ToolCount: toolCount, Tools: tools, Error: lastError, Removable: true, Icon: serverConfig.Icon,
 	}
 }

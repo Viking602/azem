@@ -24,6 +24,26 @@ export function isFileChangeTool(name = "") {
   return name === "coding.edit_hashline" || name === "coding.write_file";
 }
 
+const pendingFileChangeStates = new Set(["queued", "awaiting_approval", "reviewing_approval"]);
+
+export function isPendingFileChangeBlock(block: Block) {
+  const name = block.title || block.data?.name || "";
+  return block.kind === "tool" && pendingFileChangeStates.has(block.state || "") && isFileChangeTool(name);
+}
+
+export function pendingFileEditPaths(block: Block): string[] {
+  if (!isFileChangeTool(block.title || block.data?.name || "")) return [];
+  const argumentsText = block.data?.arguments || block.content || "";
+  try {
+    const parsed = JSON.parse(argumentsText) as { path?: unknown; input?: unknown };
+    if (typeof parsed.path === "string" && parsed.path.trim()) return [parsed.path.trim()];
+    if (typeof parsed.input === "string") return hashlineHeaderPaths(parsed.input);
+  } catch {
+    return hashlineHeaderPaths(argumentsText);
+  }
+  return [];
+}
+
 export function isActiveFileChangeBlock(block: Block) {
   const name = block.title || block.data?.name || "";
   if (block.kind !== "tool"
@@ -61,11 +81,47 @@ export function fileChangesForBlock(block: Block): FileChange[] {
   if (block.kind !== "tool" || !isFileChangeTool(block.title || block.data?.name || "")) return [];
   if (block.state && block.state !== "completed") return [];
 
+  // The backend projects completed file changes once (internal/toolview) and
+  // ships them on live tool_finished events and durable tool records. Local
+  // parsing below remains only as a fallback for sessions persisted before
+  // the shared projection existed.
+  const projected = projectedFileChanges(block.data?.fileChange || "");
+  if (projected) return projected;
+
   const name = block.title || block.data?.name || "";
   if (name === "coding.write_file") return writeFileChanges(block.data?.arguments || "");
 
   const structured = parseStructuredSections(block.data?.structured || "");
   return normalizeSections(structured.length ? structured : parseCompactEditOutput(block.content || ""));
+}
+
+function projectedFileChanges(payload: string): FileChange[] | null {
+  if (!payload.trim()) return null;
+  try {
+    const parsed = JSON.parse(payload) as { files?: unknown };
+    if (!Array.isArray(parsed.files)) return null;
+    const changes: FileChange[] = [];
+    for (const raw of parsed.files as Array<Record<string, unknown>>) {
+      const path = typeof raw.path === "string" ? raw.path.trim() : "";
+      const diff = typeof raw.diff === "string" ? raw.diff : "";
+      if (!path || !diff) continue;
+      changes.push({
+        path,
+        firstChangedLine: positiveInteger(raw.firstChangedLine, 1),
+        diff,
+        additions: positiveCount(raw.additions),
+        deletions: positiveCount(raw.deletions),
+      });
+    }
+    return changes;
+  } catch {
+    return null;
+  }
+}
+
+function positiveCount(value: unknown) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : 0;
 }
 
 export function aggregateEditedFiles(blocks: Block[]): EditedFileSummary {
@@ -94,6 +150,20 @@ function summarizeChanges(changes: FileChange[]): EditedFileSummary {
     additions: files.reduce((total, file) => total + file.additions, 0),
     deletions: files.reduce((total, file) => total + file.deletions, 0),
   };
+}
+
+function hashlineHeaderPaths(input: string): string[] {
+  const paths: string[] = [];
+  for (const rawLine of input.replace(/\r\n?/gu, "\n").split("\n")) {
+    const line = rawLine.trim();
+    const marker = line.startsWith("¶") ? "¶" : line.startsWith("[") ? "[" : "";
+    if (!marker) continue;
+    const hash = line.lastIndexOf("#");
+    if (hash <= marker.length) continue;
+    const path = line.slice(marker.length, hash).trim();
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
 }
 
 function summarizeHashlinePlan(input: string): EditedFileSummary | null {

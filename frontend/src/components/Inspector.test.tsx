@@ -1,14 +1,18 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { execute } from "../bridge";
+import { attachmentDataURL, execute, openExternalURL } from "../bridge";
 import { useRuntimeStore } from "../store";
 import type { Snapshot } from "../types";
 import Inspector from "./Inspector";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock("../bridge", () => ({ execute: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("../bridge", () => ({
+  execute: vi.fn().mockResolvedValue(undefined),
+  openExternalURL: vi.fn().mockResolvedValue(undefined),
+  attachmentDataURL: vi.fn().mockResolvedValue("data:image/png;base64,abc"),
+}));
 
 const snapshot: Snapshot = {
   workspace: "/workspace/azem", sessionId: "session-1", provider: "chatgpt", model: "gpt-5.6-sol",
@@ -43,8 +47,8 @@ describe("Inspector", () => {
       branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
       todo: null,
       recap: {
-        SessionID: "session-1", Anchor: "/workspace/azem", CoveredBoundary: "run-7", Revision: 3,
-        Goal: "补齐右侧栏回顾", Summary: "回顾已投影到当前会话。", OpenItems: "pending: 验证模型路由", UpdatedAt: "2026-08-12T00:00:00Z",
+        sessionId: "session-1", anchor: "/workspace/azem", coveredBoundary: "run-7", revision: 3,
+        goal: "补齐右侧栏回顾", summary: "回顾已投影到当前会话。", openItems: "pending: 验证模型路由", updatedAt: "2026-08-12T00:00:00Z",
       },
       contextUsage: {
         inputTokens: 14_000, outputTokens: 1_000, contextLimit: 128_000, reported: true,
@@ -89,5 +93,44 @@ describe("Inspector", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(groups.hidden).toBe(true);
     await act(async () => root.unmount());
+  });
+
+  it("lists distinct image names with typed and web-search URLs, and opens them", async () => {
+    useRuntimeStore.setState({
+      snapshot, view: "thread", currentSessionId: "session-1", agents: [], backgroundProcesses: [],
+      branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, todo: null, recap: null, contextProfile: null,
+      blocks: [
+        {
+          id: "user-1", kind: "user", content: "看这个 https://github.com/Viking602/azem",
+          attachments: [{ id: "img-1", name: "image.png", mimeType: "image/png", path: "/tmp/image.png", size: 12 }],
+        },
+        {
+          id: "search-1", kind: "tool", title: "web_search",
+          content: JSON.stringify({ results: [{ title: "Azem 文档", url: "https://example.com/azem" }] }),
+        },
+      ],
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const rows = Array.from(container.querySelectorAll<HTMLButtonElement>(".source-row"));
+    expect(rows.map((row) => row.querySelector("strong")?.textContent)).toEqual(["图片 1", "github.com · azem", "Azem 文档"]);
+    expect(container.textContent).toContain("输入链接");
+    expect(container.textContent).toContain("网页搜索");
+
+    await act(async () => rows[1]!.click());
+    expect(openExternalURL).toHaveBeenCalledWith("https://github.com/Viking602/azem");
+
+    await act(async () => rows[0]!.click());
+    expect(attachmentDataURL).toHaveBeenCalled();
+    expect(document.querySelector(".attachment-lightbox strong")?.textContent).toBe("图片 1");
+
+    await act(async () => rows[2]!.click());
+    expect(openExternalURL).toHaveBeenCalledWith("https://example.com/azem");
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 });

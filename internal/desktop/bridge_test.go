@@ -128,13 +128,27 @@ func TestBridgeInitialiseAndEventProjection(t *testing.T) {
 	if snapshot.SessionID != "session-test" || snapshot.Model != cfg.Defaults.Model || snapshot.QueueMode != "queue" {
 		t.Fatalf("unexpected snapshot: %#v", snapshot)
 	}
-	select {
-	case event := <-events:
-		if event.Kind != string(azemapp.EventBootstrapDone) || event.Sequence == 0 {
-			t.Fatalf("unexpected event: %#v", event)
+	// Initialise starts two concurrent emitters: pump forwards runtime events
+	// (bootstrap_done first) while prime emits local bridge_error events for
+	// actions that need durable stores this minimal runtime never attached.
+	// Their interleaving is not ordered, so scan for the bootstrap event
+	// instead of asserting it arrives first.
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.Kind == string(azemapp.EventBootstrapDone) {
+				if event.Sequence == 0 {
+					t.Fatalf("bootstrap event missing sequence: %#v", event)
+				}
+				return
+			}
+			if event.Kind != EventKindBridgeError {
+				t.Fatalf("unexpected event before bootstrap_done: %#v", event)
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for projected bootstrap event")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for projected event")
 	}
 }
 
@@ -223,6 +237,9 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionSetPluginImported) {
 		t.Fatal("Codex plugin import selection must be configurable from the desktop")
 	}
+	if !allowedAction(azemapp.ActionListHooks) || !allowedAction(azemapp.ActionSetPluginHooksTrusted) {
+		t.Fatal("plugin hook trust must be configurable from the desktop")
+	}
 	if !allowedAction(azemapp.ActionSetMCPEnabled) || !allowedAction(azemapp.ActionUpsertMCPServer) || !allowedAction(azemapp.ActionDeleteMCPServer) {
 		t.Fatal("MCP services must be configurable from the desktop")
 	}
@@ -241,11 +258,25 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionRefreshSession) {
 		t.Fatal("session projection refresh must be available to the desktop")
 	}
+	if !allowedAction(azemapp.ActionArchiveSession) || !allowedAction(azemapp.ActionArchiveInactiveSessions) {
+		t.Fatal("session archive and restore must be available to the desktop")
+	}
 	if !allowedAction(azemapp.ActionCreateGitBranch) {
 		t.Fatal("git branch creation must be available to the desktop")
 	}
 	if allowedAction(azemapp.ActionKind("arbitrary_shell")) {
 		t.Fatal("unknown desktop actions must be rejected")
+	}
+}
+
+// TestAllowedDesktopActionsCoverEveryActionKind pins the bridge allowlist to
+// the complete runtime action contract so a newly added ActionKind cannot be
+// silently unreachable from the desktop (regression: set_subagent_depth).
+func TestAllowedDesktopActionsCoverEveryActionKind(t *testing.T) {
+	for _, kind := range azemapp.AllActionKinds() {
+		if !allowedAction(kind) {
+			t.Errorf("action kind %q is declared by the runtime but rejected by the desktop allowlist", kind)
+		}
 	}
 }
 

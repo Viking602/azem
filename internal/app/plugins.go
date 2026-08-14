@@ -3,10 +3,13 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/plugins"
 )
 
@@ -27,6 +30,20 @@ func pluginCatalogEntries(integration plugins.Integration) []PluginCatalogEntry 
 	return entries
 }
 
+func (s *Service) AttachPluginRuntime(options plugins.Options, integration plugins.Integration) {
+	s.pluginOptions = options
+	s.rememberPluginRuntime(integration)
+}
+
+func (s *Service) rememberPluginRuntime(integration plugins.Integration) {
+	s.pluginSkillDirs = append([]string(nil), integration.SkillDirs...)
+	s.pluginMCPNames = s.pluginMCPNames[:0]
+	for name := range integration.MCPServers {
+		s.pluginMCPNames = append(s.pluginMCPNames, name)
+	}
+	slices.Sort(s.pluginMCPNames)
+}
+
 func (s *Service) setCodexPluginImported(ctx context.Context, pluginID string, imported bool) error {
 	pluginID = strings.TrimSpace(pluginID)
 	index := slices.IndexFunc(s.pluginCatalog, func(entry PluginCatalogEntry) bool { return entry.ID == pluginID })
@@ -37,33 +54,219 @@ func (s *Service) setCodexPluginImported(ctx context.Context, pluginID string, i
 	if entry.Origin != "codex" && entry.Origin != "codex_available" {
 		return fmt.Errorf("plugin %q is not a Codex import", pluginID)
 	}
-	imports := append([]string(nil), s.cfg.Plugins.CodexImports...)
-	imports = slices.DeleteFunc(imports, func(candidate string) bool { return candidate == pluginID })
+	previous := append([]string(nil), s.cfg.Plugins.CodexImports...)
+	imports := slices.DeleteFunc(append([]string(nil), previous...), func(candidate string) bool { return candidate == pluginID })
 	if imported {
 		imports = append(imports, pluginID)
 	}
 	slices.Sort(imports)
-	if s.configPath != "" {
-		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
-			return config.UpdateCodexPluginImports(s.configPath, imports)
-		}); err != nil {
+	if err := s.persistCodexImports(imports); err != nil {
+		return err
+	}
+	s.cfg.Plugins.CodexImports = imports
+	if err := s.reloadPluginRuntime(ctx); err != nil {
+		s.restoreCodexImports(previous)
+		return err
+	}
+	if imported && !pluginCatalogHasLoaded(s.pluginCatalog, pluginID) {
+		s.restoreCodexImports(previous)
+		_ = s.reloadPluginRuntime(ctx)
+		return fmt.Errorf("import plugin %q failed: %s", pluginID, pluginImportFailure(s.pluginDiagnostics, pluginID))
+	}
+	return nil
+}
+
+func (s *Service) persistCodexImports(imports []string) error {
+	if s.configPath == "" {
+		return nil
+	}
+	return s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+		return config.UpdateCodexPluginImports(s.configPath, imports)
+	})
+}
+
+func (s *Service) restoreCodexImports(imports []string) {
+	s.cfg.Plugins.CodexImports = append([]string(nil), imports...)
+	_ = s.persistCodexImports(imports)
+}
+
+func (s *Service) reloadPluginRuntime(ctx context.Context) error {
+	options := s.pluginOptions
+	if strings.TrimSpace(options.DataDir) == "" && strings.TrimSpace(options.HomeDir) == "" {
+		return fmt.Errorf("plugin runtime is not attached")
+	}
+	options.CodexImports = append([]string(nil), s.cfg.Plugins.CodexImports...)
+	options.ImportCodex = s.cfg.Plugins.ImportCodex || len(options.CodexImports) > 0
+	options.TrustHooks = s.cfg.Plugins.TrustHooks
+	integration := plugins.Discover(ctx, options)
+	if err := s.applyPluginSkills(integration.SkillDirs); err != nil {
+		return err
+	}
+	if err := s.applyPluginMCP(ctx, integration.MCPServers); err != nil {
+		return err
+	}
+	s.applyPluginHooks(integration.HookSources)
+	s.rememberPluginRuntime(integration)
+	s.pluginCatalog = pluginCatalogEntries(integration)
+	s.pluginDiagnostics = pluginDiagnostics(integration)
+	s.emit(ctx, Event{Kind: EventPluginCatalog, State: "updated", PluginCatalog: s.pluginCatalog, PluginDiagnostics: s.pluginDiagnostics})
+	_ = s.emitHookCatalog(ctx, "updated")
+	if s.skillCatalog != nil {
+		if err := s.emitSkillCatalog(ctx, "reloaded"); err != nil {
 			return err
 		}
 	}
-	s.cfg.Plugins.CodexImports = imports
-	entry.Enabled = false
-	entry.Imported = imported
-	entry.Status = "restart_required"
-	if imported {
-		entry.Origin = "codex"
-		entry.Warning = "已选择导入；重启 Azem 后复制并启用"
-	} else {
-		entry.Origin = "codex_available"
-		entry.Warning = "已取消导入；重启 Azem 后停止加载"
-	}
-	s.pluginCatalog[index] = entry
-	s.emit(ctx, Event{Kind: EventPluginCatalog, State: "updated", PluginCatalog: s.pluginCatalog, PluginDiagnostics: s.pluginDiagnostics})
 	return nil
+}
+
+func (s *Service) applyPluginSkills(nextDirs []string) error {
+	s.cfg.Skills.AdditionalDirs = mergeSkillDirs(s.cfg.Skills.AdditionalDirs, s.pluginSkillDirs, nextDirs)
+	if s.skillCatalog == nil {
+		return nil
+	}
+	return s.skillCatalog.UpdateConfig(cloneSkillsConfig(s.cfg.Skills), nil)
+}
+
+func (s *Service) applyPluginMCP(ctx context.Context, next map[string]config.MCPServerConfig) error {
+	removed := make(map[string]struct{}, len(s.cfg.MCP.RemovedServers))
+	for _, name := range s.cfg.MCP.RemovedServers {
+		removed[name] = struct{}{}
+	}
+	previous := make(map[string]struct{}, len(s.pluginMCPNames))
+	for _, name := range s.pluginMCPNames {
+		previous[name] = struct{}{}
+	}
+	for name, server := range next {
+		if _, suppressed := removed[name]; suppressed {
+			continue
+		}
+		if current, exists := s.cfg.MCP.Servers[name]; exists {
+			if _, owned := previous[name]; !owned {
+				current.Managed = true
+				if server.Icon != "" {
+					current.Icon = server.Icon
+				}
+				s.cfg.MCP.Servers[name] = current
+				continue
+			}
+		}
+		server.Managed = true
+		icon := server.Icon
+		if s.mcp != nil {
+			normalized, err := config.NormalizeMCPServer(name, server)
+			if err != nil {
+				return err
+			}
+			normalized, err = s.mcp.Configure(name, normalized)
+			if err != nil {
+				return err
+			}
+			server = normalized
+		}
+		if icon != "" {
+			server.Icon = icon
+		}
+		if s.cfg.MCP.Servers == nil {
+			s.cfg.MCP.Servers = map[string]config.MCPServerConfig{}
+		}
+		s.cfg.MCP.Servers[name] = server
+		if s.mcp != nil && server.Enabled {
+			s.startMCPReconnect(name)
+		}
+	}
+	for name := range previous {
+		if _, keep := next[name]; keep {
+			continue
+		}
+		if s.mcp != nil {
+			if err := s.mcp.Remove(name); err != nil {
+				return err
+			}
+		}
+		delete(s.cfg.MCP.Servers, name)
+	}
+	if s.mcp != nil {
+		return s.emitMCPSnapshot(ctx)
+	}
+	return nil
+}
+
+func (s *Service) applyPluginHooks(sources []plugins.HookSource) {
+	if s.hooks.Registry == nil {
+		return
+	}
+	kept := make([]hooks.Source, 0, len(s.hookOptions.Sources))
+	for _, source := range s.hookOptions.Sources {
+		if source.Environment["PLUGIN_ROOT"] != "" {
+			continue
+		}
+		kept = append(kept, source)
+	}
+	if s.cfg.Plugins.TrustHooks {
+		for _, source := range sources {
+			if dataDir := source.Environment["PLUGIN_DATA"]; dataDir != "" {
+				_ = os.MkdirAll(dataDir, 0o700)
+			}
+			kept = append(kept, hooks.Source{Path: source.Path, Trusted: true, Environment: source.Environment})
+		}
+	}
+	s.hookOptions.Sources = kept
+	s.hooks.Registry.Replace(hooks.Discover(s.hookOptions))
+}
+
+func mergeSkillDirs(current, previousPlugin, nextPlugin []string) []string {
+	drop := make(map[string]struct{}, len(previousPlugin))
+	for _, path := range previousPlugin {
+		drop[filepath.Clean(path)] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(current)+len(nextPlugin))
+	result := make([]string, 0, len(current)+len(nextPlugin))
+	appendUnique := func(path string, skipDropped bool) {
+		clean := filepath.Clean(path)
+		if clean == "." || path == "" {
+			return
+		}
+		if skipDropped {
+			if _, dropped := drop[clean]; dropped {
+				return
+			}
+		}
+		if _, exists := seen[clean]; exists {
+			return
+		}
+		seen[clean] = struct{}{}
+		result = append(result, path)
+	}
+	for _, path := range current {
+		appendUnique(path, true)
+	}
+	for _, path := range nextPlugin {
+		appendUnique(path, false)
+	}
+	return result
+}
+
+func pluginCatalogHasLoaded(entries []PluginCatalogEntry, pluginID string) bool {
+	for _, entry := range entries {
+		if entry.ID == pluginID && entry.Origin == "codex" {
+			return true
+		}
+	}
+	return false
+}
+
+func pluginImportFailure(diagnostics []PluginDiagnostic, pluginID string) string {
+	for _, diagnostic := range diagnostics {
+		if diagnostic.PluginID == pluginID && strings.TrimSpace(diagnostic.Message) != "" {
+			return diagnostic.Message
+		}
+	}
+	for _, diagnostic := range diagnostics {
+		if strings.TrimSpace(diagnostic.Message) != "" {
+			return diagnostic.Message
+		}
+	}
+	return "Codex package could not be copied into Azem"
 }
 
 func pluginDiagnostics(integration plugins.Integration) []PluginDiagnostic {
