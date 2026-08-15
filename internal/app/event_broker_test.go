@@ -55,6 +55,101 @@ func TestEventBrokerKeepsTextPhasesSeparate(t *testing.T) {
 	}
 }
 
+func TestEventBrokerReplacesLiveAgentStateByStreamIdentity(t *testing.T) {
+	broker := newEventBroker(time.Hour)
+	broker.Publish(Event{
+		Kind: EventAgentState, SessionID: "session", RunID: "run", AgentID: "child",
+		State: "running", Agent: &AgentStatePayload{Activity: "step-1", ToolCalls: 1},
+	})
+	broker.Publish(Event{
+		Kind: EventAgentState, SessionID: "session", RunID: "run", AgentID: "child",
+		State: "running", Agent: &AgentStatePayload{Activity: "step-2", ToolCalls: 2},
+	})
+	broker.Publish(Event{
+		Kind: EventAgentState, SessionID: "session", RunID: "run", AgentID: "other",
+		State: "running", Agent: &AgentStatePayload{Activity: "independent"},
+	})
+	broker.Publish(Event{Kind: EventRunFinished, SessionID: "session", RunID: "run"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	first, err := broker.Next(ctx)
+	if err != nil || first.Kind != EventAgentState || first.AgentID != "child" {
+		t.Fatalf("first event=%#v error=%v", first, err)
+	}
+	// Streaming roster updates for one child collapse to the newest snapshot.
+	if first.Agent == nil || first.Agent.Activity != "step-2" || first.Agent.ToolCalls != 2 {
+		t.Fatalf("replaced agent payload=%#v", first.Agent)
+	}
+	second, err := broker.Next(ctx)
+	if err != nil || second.AgentID != "other" || second.Agent == nil || second.Agent.Activity != "independent" {
+		t.Fatalf("independent agent event=%#v error=%v", second, err)
+	}
+	finished, err := broker.Next(ctx)
+	if err != nil || finished.Kind != EventRunFinished {
+		t.Fatalf("lifecycle event=%#v error=%v", finished, err)
+	}
+}
+
+func TestEventBrokerKeepsDistinctAgentStateTransitionsOrdered(t *testing.T) {
+	broker := newEventBroker(time.Hour)
+	for _, state := range []string{"initializing", "queued", "running", "running", "running"} {
+		broker.Publish(Event{
+			Kind: EventAgentState, SessionID: "session", RunID: "run", AgentID: "child",
+			State: state, Agent: &AgentStatePayload{Activity: state},
+		})
+	}
+	broker.Publish(Event{Kind: EventRunFinished, SessionID: "session", RunID: "run"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var states []string
+	for {
+		event, err := broker.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == EventRunFinished {
+			break
+		}
+		states = append(states, event.State)
+	}
+	// Lifecycle transitions all arrive; only the repeated running snapshots
+	// collapse into the newest one.
+	want := []string{"initializing", "queued", "running"}
+	if len(states) != len(want) {
+		t.Fatalf("states = %v, want %v", states, want)
+	}
+	for index, state := range want {
+		if states[index] != state {
+			t.Fatalf("states = %v, want %v", states, want)
+		}
+	}
+}
+
+func TestEventBrokerKeepsTerminalAgentStatesOrdered(t *testing.T) {
+	broker := newEventBroker(time.Hour)
+	broker.Publish(Event{
+		Kind: EventAgentState, SessionID: "session", RunID: "run", AgentID: "child",
+		State: "running", Agent: &AgentStatePayload{Activity: "reviewing"},
+	})
+	broker.Publish(Event{
+		Kind: EventAgentState, SessionID: "session", RunID: "run", AgentID: "child",
+		State: "completed", Agent: &AgentStatePayload{Activity: "done"},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	running, err := broker.Next(ctx)
+	if err != nil || running.State != "running" {
+		t.Fatalf("running state=%#v error=%v", running, err)
+	}
+	completed, err := broker.Next(ctx)
+	if err != nil || completed.State != "completed" {
+		t.Fatalf("terminal state must not be replaced or dropped: %#v error=%v", completed, err)
+	}
+}
+
 func TestTerminalEventReleasesRunAdmissionBeforeDelivery(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
 	service.mu.Lock()
@@ -298,6 +393,24 @@ func TestEventBrokerBroadcastWakesConcurrentConsumers(t *testing.T) {
 	}
 	if !seen["first"] || !seen["second"] {
 		t.Fatalf("events=%v", seen)
+	}
+}
+
+func TestEventBrokerResyncPreservesSubagentID(t *testing.T) {
+	broker := newEventBroker(time.Hour)
+	broker.maxBytes = 32
+	if status := broker.Publish(Event{
+		Kind: EventThinkingDelta, SessionID: "session", RunID: "child-run", AgentID: "subagent_1",
+		Text: strings.Repeat("x", 64),
+	}); status != eventPublishAccepted {
+		t.Fatalf("publish status=%v", status)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	event := nextBrokerEvent(t, broker, ctx)
+	if event.Kind != EventProjectionResync || event.State != "degraded" ||
+		event.AgentID != "subagent_1" || event.RunID != "child-run" {
+		t.Fatalf("subagent resync=%#v", event)
 	}
 }
 

@@ -52,7 +52,11 @@ async function enterInput(input: HTMLInputElement, value: string) {
 }
 
 describe("SettingsDialog", () => {
-  afterEach(() => vi.clearAllMocks());
+  afterEach(() => {
+    vi.clearAllMocks();
+    document.documentElement.style.removeProperty("--chat-ui-font-size");
+    document.documentElement.style.removeProperty("--chat-code-font-size");
+  });
 
 	it("reads the current skill catalog directly when settings opens", async () => {
 		vi.mocked(listSkillCatalog).mockResolvedValueOnce({
@@ -199,7 +203,7 @@ describe("SettingsDialog", () => {
 	await act(async () => subagentsNav.click());
 	const subagentPane = container.querySelector(".subagent-settings-pane")!;
 	expect(subagentPane.querySelector(".subagent-capacity")?.textContent).toContain("容量与隔离");
-	expect(subagentPane.querySelectorAll(".subagent-capacity .setting-row")).toHaveLength(4);
+	expect(subagentPane.querySelectorAll(".subagent-capacity .setting-row")).toHaveLength(5);
 	expect(subagentPane.querySelector(".subagent-scheduling")?.textContent).toContain("调度");
 	expect(subagentPane.querySelector(".subagent-scheduling .subagent-policy")?.textContent).toContain("只读");
 	expect(subagentPane.querySelector(".subagent-scheduling .subagent-policy")?.textContent).toContain("并行");
@@ -409,9 +413,44 @@ describe("SettingsDialog", () => {
 		container.remove();
 	});
 
+	it("updates chat-surface UI and code font sizes from appearance settings", async () => {
+		useRuntimeStore.setState({
+			snapshot, approvalMode: snapshot.approvalMode, modelRoutes: [], modelsByProvider: {},
+			agentCatalog: [], skills: [], modelProviders: [], settingsOpen: true, chatFontSize: 13, chatCodeFontSize: 12,
+		});
+		const container = document.createElement("div");
+		document.body.append(container);
+		const root = createRoot(container);
+		await act(async () => root.render(<SettingsDialog />));
+		await act(async () => Promise.resolve());
+
+		const appearanceNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("外观"))!;
+		await act(async () => appearanceNav.click());
+		const chatCard = container.querySelector<HTMLElement>('[data-setting-id="appearance:chat-text"]')!;
+		expect(chatCard.textContent).toContain("聊天文本");
+		expect(chatCard.textContent).toContain("UI 文本");
+		expect(chatCard.textContent).toContain("代码字体大小");
+		const uiRow = container.querySelector<HTMLElement>('[data-setting-id="appearance:chat-font-size"]')!;
+		const codeRow = container.querySelector<HTMLElement>('[data-setting-id="appearance:chat-code-font-size"]')!;
+		expect(uiRow.querySelector("output")?.textContent).toBe("13 px");
+		expect(codeRow.querySelector("output")?.textContent).toBe("12 px");
+
+		await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="增大聊天 UI 文本"]')!.click());
+		await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="增大代码字体"]')!.click());
+
+		expect(useRuntimeStore.getState().chatFontSize).toBe(14);
+		expect(useRuntimeStore.getState().chatCodeFontSize).toBe(13);
+		expect(uiRow.querySelector("output")?.textContent).toBe("14 px");
+		expect(codeRow.querySelector("output")?.textContent).toBe("13 px");
+		expect(document.documentElement.style.getPropertyValue("--chat-ui-font-size")).toBe("14px");
+		expect(document.documentElement.style.getPropertyValue("--chat-code-font-size")).toBe("13px");
+		await act(async () => root.unmount());
+		container.remove();
+	});
+
 	it("updates the live subagent, shell, and admission timeout limits", async () => {
 		useRuntimeStore.setState({
-			snapshot: { ...snapshot, subagentConcurrency: 4, subagentMaxDepth: 2, shellConcurrency: 3, subagentAwaitSeconds: 600 },
+			snapshot: { ...snapshot, subagentConcurrency: 4, subagentMaxDepth: 2, shellConcurrency: 3, subagentAwaitSeconds: 600, subagentIdleSeconds: 0 },
 			approvalMode: snapshot.approvalMode, modelRoutes: [], modelsByProvider: {},
 			agentCatalog: [], skills: [], modelProviders: [], settingsOpen: true,
 		});
@@ -431,7 +470,8 @@ describe("SettingsDialog", () => {
 		const depth = pane.querySelector<HTMLElement>('[data-setting-id="subagents:depth"]')!;
 		const shell = pane.querySelector<HTMLElement>('[data-setting-id="subagents:shell"]')!;
 		const timeout = pane.querySelector<HTMLElement>('[data-setting-id="subagents:timeout"]')!;
-		expect(pane.querySelectorAll(".subagent-capacity .setting-row")).toHaveLength(4);
+		const idle = pane.querySelector<HTMLElement>('[data-setting-id="subagents:idle"]')!;
+		expect(pane.querySelectorAll(".subagent-capacity .setting-row")).toHaveLength(5);
 		vi.mocked(execute).mockClear();
 		await act(async () => concurrency.querySelectorAll<HTMLButtonElement>("button")[1].click());
 		await act(async () => shell.querySelectorAll<HTMLButtonElement>("button")[0].click());
@@ -467,6 +507,16 @@ describe("SettingsDialog", () => {
 		expect(pane.querySelector(".subagent-capacity [title]")).toBeNull();
 		expect(timeout.querySelector("summary")?.getAttribute("title")).toBeNull();
 		expect(timeout.querySelector(".menu-select-value")?.textContent).toBe("30 秒");
+
+		expect(idle.textContent).toContain("没有思考、输出或工具活动");
+		const idleMenu = idle.querySelector<HTMLDetailsElement>(".capacity-timeout-menu")!;
+		idleMenu.open = true;
+		await act(async () => idleMenu.dispatchEvent(new Event("toggle", { bubbles: true })));
+		const idlePortal = Array.from(container.querySelectorAll<HTMLElement>(".menu-select-options-portal")).find((portal) => portal.textContent?.includes("关闭"));
+		expect(idlePortal).not.toBeNull();
+		await act(async () => idlePortal!.querySelector<HTMLButtonElement>('[data-value="300"]')!.click());
+		expect(execute).toHaveBeenCalledWith({ kind: "set_subagent_idle_timeout", sessionId: "session-1", target: "300" });
+		expect(idle.querySelector(".menu-select-value")?.textContent).toBe("5 分钟");
 
 		// @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
 		const { readFileSync } = await import("node:fs");

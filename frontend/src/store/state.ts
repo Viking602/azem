@@ -90,4 +90,6 @@ export interface RuntimeData {
   theme: "system" | "light" | "dark";
   uiFont: UIFont;
   uiFontSize: number;
+  chatFontSize: number;
+  chatCodeFontSize: number;
 }

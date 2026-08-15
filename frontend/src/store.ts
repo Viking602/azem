@@ -14,6 +14,13 @@ import type {
   Snapshot,
   View,
 } from "./types";
+import {
+  CHAT_CODE_FONT_DEFAULT,
+  CHAT_UI_FONT_DEFAULT,
+  applyChatTypography,
+  clampChatCodeFontSize,
+  clampChatUIFontSize,
+} from "./chatTypography";
 import { emptyContextUsage, findModelOption, normalizeUIFont, type UIFont } from "./store/normalize";
 import type { RuntimeData } from "./store/state";
 import { hydrateData } from "./store/hydrate";
@@ -58,6 +65,8 @@ interface RuntimeActions {
   setTheme: (theme: RuntimeData["theme"]) => void;
   setUIFont: (uiFont: UIFont) => void;
   setUIFontSize: (uiFontSize: number) => void;
+  setChatFontSize: (chatFontSize: number) => void;
+  setChatCodeFontSize: (chatCodeFontSize: number) => void;
   setLanguage: (language: "en" | "zh-CN") => void;
   setSessionModel: (provider: string, model: string, reasoning: string) => void;
   setChatGPTFastMode: (enabled: boolean) => void;
@@ -139,6 +148,8 @@ const initialData: RuntimeData = {
   theme: "system",
   uiFont: "system",
   uiFontSize: 14,
+  chatFontSize: CHAT_UI_FONT_DEFAULT,
+  chatCodeFontSize: CHAT_CODE_FONT_DEFAULT,
 };
 
 export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
@@ -216,6 +227,16 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   setTheme: (theme) => set({ theme }),
   setUIFont: (uiFont) => set({ uiFont: normalizeUIFont(uiFont) }),
   setUIFontSize: (uiFontSize) => set({ uiFontSize: Math.min(20, Math.max(11, Math.round(uiFontSize))) }),
+  setChatFontSize: (chatFontSize) => set((state) => {
+    const next = clampChatUIFontSize(chatFontSize);
+    applyChatTypography(next, state.chatCodeFontSize);
+    return { chatFontSize: next };
+  }),
+  setChatCodeFontSize: (chatCodeFontSize) => set((state) => {
+    const next = clampChatCodeFontSize(chatCodeFontSize);
+    applyChatTypography(state.chatFontSize, next);
+    return { chatCodeFontSize: next };
+  }),
   setLanguage: (language) => set((state) => ({
     snapshot: state.snapshot ? { ...state.snapshot, language } : state.snapshot,
   })),

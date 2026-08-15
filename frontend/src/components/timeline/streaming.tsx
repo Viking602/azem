@@ -27,7 +27,7 @@ type StreamingPresentation = {
   nextID: number;
 };
 
-const MAX_LIVE_REVEAL_CHUNKS = 8;
+const MAX_LIVE_REVEAL_CHUNKS = 1;
 const MAX_REVEAL_CHUNK_GLYPHS = 96;
 
 function revealTailOffset(text: string) {
@@ -37,8 +37,12 @@ function revealTailOffset(text: string) {
     : 0;
 }
 
+function emptyStreamingPresentation(text: string): StreamingPresentation {
+  return { rendered: text, ranges: [], nextID: 0 };
+}
+
 function initialStreamingPresentation(text: string): StreamingPresentation {
-  if (!text) return { rendered: "", ranges: [], nextID: 0 };
+  if (!text) return emptyStreamingPresentation("");
   return {
     rendered: text,
     ranges: [{ id: 0, start: revealTailOffset(text), end: text.length }],
@@ -64,7 +68,27 @@ function appendStreamingPresentation(current: StreamingPresentation, text: strin
   };
 }
 
-export function StreamingText({ content, debugReplay = false }: { content: string; debugReplay?: boolean }) {
+function prefersReducedMotion() {
+  if (typeof document !== "undefined" && document.documentElement.dataset.reduceMotion === "true") return true;
+  return typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+}
+
+function nextStreamingPresentation(
+  current: StreamingPresentation | null,
+  text: string,
+  active: boolean,
+): StreamingPresentation {
+  if (prefersReducedMotion()) {
+    return current?.rendered === text ? current : emptyStreamingPresentation(text);
+  }
+  if (!current) return active ? initialStreamingPresentation(text) : emptyStreamingPresentation(text);
+  if (!active) {
+    return current.rendered === text ? current : { ...current, rendered: text };
+  }
+  return appendStreamingPresentation(current, text);
+}
+
+export function StreamingText({ content, active = true, debugReplay = false }: { content: string; active?: boolean; debugReplay?: boolean }) {
   // Production renders the provider's current buffer directly through the same
   // Markdown path as completed answers. The replay clock exists only for the
   // visual demo and advances in small batches so structural Markdown settles
@@ -93,13 +117,18 @@ export function StreamingText({ content, debugReplay = false }: { content: strin
     return () => window.clearTimeout(timer);
   }, [content, debugReplay]);
   const visibleContent = debugReplay ? replayContent : content;
-  const presentationRef = useRef<StreamingPresentation>(initialStreamingPresentation(visibleContent));
-  const presentation = appendStreamingPresentation(presentationRef.current, visibleContent);
+  const presentationRef = useRef<StreamingPresentation | null>(null);
+  const presentation = nextStreamingPresentation(presentationRef.current, visibleContent, active);
   presentationRef.current = presentation;
 
-  return <BeautifulStreamingText>
+  return <BeautifulStreamingText active={active}>
     <StreamingMarkdown ranges={presentation.ranges}>{visibleContent}</StreamingMarkdown>
   </BeautifulStreamingText>;
+}
+
+/** One Markdown tree for live and settled prose. Completion only stops reveal CSS. */
+export function TimelineProse({ content, active, debugReplay = false }: { content: string; active: boolean; debugReplay?: boolean }) {
+  return <StreamingText content={content} active={active} debugReplay={debugReplay} />;
 }
 
 export function normalizeThinkingText(content: string) {

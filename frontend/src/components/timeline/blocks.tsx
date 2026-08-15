@@ -1,25 +1,28 @@
 import {
-  Bot, Check, ChevronDown, ChevronRight, CircleAlert, CircleStop, Clock3, Command, FileCode2,
-  LoaderCircle, MessageCircleQuestion, PencilLine, Play, ShieldCheck, X,
+  Bot, Check, ChevronDown, CircleAlert, CircleStop, Command,
+  MessageCircleQuestion, Pencil, PencilLine, Play, ShieldCheck, X,
 } from "lucide-react";
 import { memo, useMemo, useState } from "react";
+import { useLiveElapsed } from "./useLiveElapsed";
 import { Markdown } from "../Markdown";
 import { execute } from "../../bridge";
 import { tFormat, toolDisplayName, translator } from "../../i18n";
 import { isSubagentActive } from "../../subagents";
 import { useRuntimeStore } from "../../store";
 import type { Block, Snapshot } from "../../types";
-import { displayedToolState, formatDuration, formatToolPresentation, isRunningTool } from "../toolTimeline";
+import { displayedToolState, formatDuration, formatThinkingDuration, formatToolPresentation, isHostFallbackCommentary, isRunningTool, thinkingStateLabel } from "../toolTimeline";
+import { toolChipBasename, toolChipModel } from "../toolChip";
 import AnsiText from "../AnsiText";
 import AttachmentPreview from "../AttachmentPreview";
 import CodeDiff from "../CodeDiff";
-import { ApprovalCard, ThinkingState, ToolRow } from "../beautiful-ui/Primitives";
+import { ApprovalCard, ThinkingState } from "../beautiful-ui/Primitives";
+import { ToolChip, ToolChipMeta, ToolChipPending, ToolChipStatus } from "../beautiful-ui/ToolChip";
 import {
   fileChangesForBlock, isActiveFileChangeBlock, isPendingFileChangeBlock, pendingFileChangeSummaryForBlock,
   pendingFileEditPaths,
   type EditedFileSummary, type FileChange,
 } from "../fileChanges";
-import { StreamingText, normalizeThinkingText, plainStreamingText } from "./streaming";
+import { TimelineProse, normalizeThinkingText, plainStreamingText } from "./streaming";
 import { ToolExecutionLog } from "./ToolExecutionLog";
 
 export type TimelineBlockProps = {
@@ -42,30 +45,31 @@ function TimelineBlockView({ block, language, compact = false, nested = false, s
     </article>;
   }
   if (block.kind === "commentary") {
+    if (isHostFallbackCommentary(block)) return null;
     const active = ["streaming", "running", "started", "progress"].includes(block.state || "");
-    const label = visibleCommentaryTitle(block.title);
     return <article
-      className={`commentary-block markdown ${active ? "active" : ""} ${compact ? "compact" : ""}`}
+      className={`commentary-block markdown timeline-prose ${active ? "active" : ""} ${compact ? "compact" : ""}`}
       data-state={active ? "active" : "completed"}
       aria-label={translator(language)("progressUpdate")}
     >
-      <span className="commentary-marker" aria-hidden="true"><i /></span>
-      <div className="commentary-content">
-        {label ? <small className="commentary-label">{label}</small> : null}
-        {active
-          ? <StreamingText content={block.content || ""} />
-          : <Markdown>{block.content || ""}</Markdown>}
-      </div>
+      <TimelineProse content={block.content || ""} active={active} />
     </article>;
   }
   if (block.kind === "assistant") {
     const active = ["streaming", "running", "started", "progress"].includes(block.state || "");
-    const phasePending = active && block.data?.textPhasePending === "true";
-    // Prose body — primary transcript content (Synara ChatMarkdown tier).
-    return <article className={`assistant-block markdown timeline-prose ${active ? "streaming" : ""} ${phasePending ? "phase-pending" : ""} ${compact ? "compact" : ""}`} aria-busy={active || undefined} data-session-sequence={block.sequence}>
-      {active
-        ? <StreamingText content={block.content || ""} debugReplay={import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "running"} />
-        : <Markdown>{block.content || ""}</Markdown>}
+    // Unphased text stays an assistant body. textPhasePending only affects
+    // section markers and later commentary promotion — not a pending chrome.
+    return <article
+      className={`assistant-block markdown timeline-prose ${active ? "streaming" : ""} ${compact ? "compact" : ""}`}
+      data-testid="timeline-prose"
+      aria-busy={active || undefined}
+      data-session-sequence={block.sequence}
+    >
+      <TimelineProse
+        content={block.content || ""}
+        active={active}
+        debugReplay={import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "running"}
+      />
     </article>;
   }
   if (block.kind === "question") return <QuestionBlock block={block} language={language} />;
@@ -181,20 +185,13 @@ function PendingFileEditRow({ block, language, nested = false }: { block: Block;
   const awaiting = block.state === "awaiting_approval";
   const status = awaiting ? "awaiting_approval" : "reviewing_approval";
   const paths = pendingFileEditPaths(block);
-  return <article
-    className={`file-change-entry work-entry pending-file-edit ${nested ? "nested" : ""}`}
-    data-state={status}
-    aria-busy="true"
-  >
-    <div className="file-change-pending-summary">
-      <span className="work-entry-icon" data-icon="shield" aria-hidden="true">
-        <ShieldCheck size={13} />
-      </span>
-      <span className="work-entry-label">{t("toolEditFile")}</span>
-      {paths.length ? <span className="pending-file-edit-path">{paths.join(" · ")}</span> : null}
-      <span className="tool-status">{toolStatusLabel(status, language)}</span>
-    </div>
-  </article>;
+  return <ToolChipPending
+    state={status}
+    label={t("toolEditFile")}
+    chip={paths.length ? paths.map(toolChipBasename).join(" · ") : undefined}
+    status={toolStatusLabel(status, language)}
+    nested={nested}
+  />;
 }
 
 function ToolDisclosure({ block, language, compact = false, nested = false, siblings }: TimelineBlockProps) {
@@ -208,31 +205,23 @@ function ToolDisclosure({ block, language, compact = false, nested = false, sibl
   const reviewing = block.state === "reviewing_approval";
   const awaitingApproval = block.state === "awaiting_approval" || reviewing;
   const pending = queued || awaitingApproval;
-  const stateIcon = reviewing || block.state === "awaiting_approval"
-    ? <ShieldCheck size={12} />
-    : running
-      ? <LoaderCircle className="spin" size={12} />
-      : queued
-        ? <Clock3 size={12} />
-        : block.state === "failed" || block.state === "cancelled"
-          ? <CircleStop size={12} />
-          : <Check size={12} />;
-  const label = block.title ? toolDisplayName(block.title, language) : t("toolGeneric");
+  const model = useMemo(() => toolChipModel(block, language), [block, language]);
   const payload = block.content || block.data?.arguments || "";
   const liveOutput = block.data?.output || "";
-  const previewPayload = payload.length > 8192 ? payload.slice(0, 8192) : payload;
-  const preview = useMemo(
-    () => formatToolPresentation(previewPayload, language).preview,
-    [previewPayload, language],
-  );
   const presentation = useMemo(
     () => opened ? formatToolPresentation(payload, language) : null,
     [opened, payload, language],
   );
   const truncated = block.data?.contentTruncated === "true";
-  return <ToolRow
-    className={`tool-block work-entry ${nested ? "nested" : ""} ${compact ? "compact" : ""}`}
+  return <ToolChip
+    className={`${nested ? "nested" : ""} ${compact ? "compact" : ""}`.trim()}
     state={state}
+    kind={model.kind}
+    label={model.label}
+    chip={model.chip}
+    status={(running || pending || block.state === "failed") ? toolStatusLabel(state, language) : undefined}
+    nested={nested}
+    compact={compact}
     onToggle={(event) => {
       const target = event.currentTarget;
       const next = target.open;
@@ -244,24 +233,15 @@ function ToolDisclosure({ block, language, compact = false, nested = false, sibl
       });
     }}
   >
-    <summary>
-      <span className="tool-leading work-entry-icon" aria-hidden="true">
-        <span className="tool-state">{stateIcon}</span>
-        <span className="tool-chevron"><ChevronRight className="closed-chevron" size={12} /><ChevronDown className="open-chevron" size={12} /></span>
-      </span>
-      <span className="tool-summary-text">
-        <strong className="work-entry-label">{label}</strong>
-        {preview ? <em className="tool-preview">{preview}</em> : null}
-      </span>
-      {(running || pending || block.state === "failed") ? <span className="tool-status">{toolStatusLabel(state, language)}</span> : null}
-    </summary>
     {opened ? (
       <div className="tool-detail">
+        <ToolChipStatus lines={model.statusLines} />
+        <ToolChipMeta lines={model.meta} />
         {presentation?.fields.length ? <dl className="tool-fields">
           {presentation.fields.map((field) => <div key={`${field.label}-${field.value}`}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}
         </dl> : null}
         {running && liveOutput
-          ? <ToolExecutionLog output={liveOutput} label={`${label} · ${t("fieldDetail")}`} />
+          ? <ToolExecutionLog output={liveOutput} label={`${model.label} · ${t("fieldDetail")}`} />
           : presentation?.result ? <pre className="tool-result"><AnsiText text={presentation.result} /></pre> : null}
         {truncated ? <p className="tool-result-truncated">{language === "zh-CN" ? "结果过大，已显示安全预览。请缩小路径或搜索范围。" : "Large result: showing a safe preview. Narrow the path or query for more detail."}</p> : null}
         {!presentation?.fields.length && !presentation?.result && !liveOutput && running
@@ -269,7 +249,7 @@ function ToolDisclosure({ block, language, compact = false, nested = false, sibl
           : null}
       </div>
     ) : null}
-  </ToolRow>;
+  </ToolChip>;
 }
 
 type PlanningQuestion = {
@@ -426,19 +406,17 @@ export function isActiveReasoning(block: Block) {
 
 
 export function ReasoningTrace({ block, language }: { block: Block; language: Snapshot["language"] }) {
-  const t = translator(language);
   const active = isActiveReasoning(block);
   const delegated = useRuntimeStore((state) => active && state.agents.some((agent) =>
     isSubagentActive(agent.state) && (!block.runId || agent.parentRunId === block.runId)));
   const [open, setOpen] = useState(false);
   const normalized = normalizeThinkingText(block.content || "");
   const steps = normalized.split(/\n{2,}/u).map(plainStreamingText).filter(Boolean);
-  const elapsedMs = Number(block.data?.elapsedMs || 0);
-  const label = active
-    ? t("thinkingActive")
-    : elapsedMs > 0
-      ? tFormat(language, "thoughtFor", { duration: formatDuration(elapsedMs) })
-      : t("thought");
+  const stampedElapsedMs = Number(block.data?.elapsedMs || 0);
+  const liveElapsedMs = useLiveElapsed(stampedElapsedMs, active, 100);
+  const elapsedMs = active ? liveElapsedMs : stampedElapsedMs;
+  const duration = formatThinkingDuration(elapsedMs);
+  const label = thinkingStateLabel(language, active);
   const panelId = `reasoning-${block.id.replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
 
   // While delegated work is visible in the conversation, an empty reasoning
@@ -446,8 +424,18 @@ export function ReasoningTrace({ block, language }: { block: Block; language: Sn
   // is the actionable source of truth; retain reasoning only once it has text.
   if (delegated && steps.length === 0) return null;
 
-  return <ThinkingState active={active} expanded={open} label={label} panelId={panelId} disabled={!steps.length} onToggle={() => setOpen((value) => !value)}>
-    {steps.map((step, index) => <p className="reasoning-step" key={index}>{step}</p>)}
+  return <ThinkingState
+    active={active}
+    expanded={open}
+    label={label}
+    meta={duration ? <time>{duration}</time> : undefined}
+    panelId={panelId}
+    disabled={!steps.length}
+    onToggle={() => setOpen((value) => !value)}
+  >
+    <div className="bui-thinking-panel" data-tab="reasoning">
+      {steps.map((step, index) => <p className="reasoning-step" key={index}>{step}</p>)}
+    </div>
   </ThinkingState>;
 }
 
@@ -459,22 +447,26 @@ export function FileChangeBlock({ changes, summary, language, nested, running = 
   running?: boolean;
 }) {
   const t = translator(language);
+  const [opened, setOpened] = useState(false);
   const additions = summary?.additions ?? changes.reduce((total, change) => total + change.additions, 0);
   const deletions = summary?.deletions ?? changes.reduce((total, change) => total + change.deletions, 0);
+  const pathChip = (summary?.files[0]?.path || changes[0]?.path) ? toolChipBasename(summary?.files[0]?.path || changes[0]?.path || "") : "";
   return <details
-    className={`file-change-entry work-entry ${nested ? "nested" : ""}`}
+    className={`file-change-entry work-entry bui-tool-chip ${nested ? "nested" : ""}`}
     data-state={running ? "running" : "completed"}
     aria-busy={running || undefined}
+    onToggle={(event) => setOpened(event.currentTarget.open)}
   >
     <summary>
-      <span className="work-entry-icon" aria-hidden="true"><FileCode2 size={13} /></span>
-      <span className="work-entry-label">{t(running ? "editingFiles" : "editedFiles")}</span>
+      <span className="work-entry-icon bui-tool-chip-icon" data-icon="pencil" aria-hidden="true"><Pencil size={13} /></span>
+      <strong className="work-entry-label bui-tool-chip-label">{t(running ? "editingFiles" : "editedFiles")}</strong>
+      {pathChip ? <span className="bui-tool-chip-detail">{pathChip}</span> : null}
       <span className="file-change-chevron" aria-hidden="true"><ChevronDown size={13} /></span>
       {additions > 0 || deletions > 0 ? <span className="file-change-totals">{additions > 0 ? <span className="plus">+{additions}</span> : null}{deletions > 0 ? <span className="minus">-{deletions}</span> : null}</span> : null}
     </summary>
     {running
       ? <div className="tool-detail-empty">{t("toolExecuting")}</div>
-      : <CodeDiff changes={changes} language={language} insetFromProcessRail />}
+      : opened ? <CodeDiff changes={changes} language={language} insetFromProcessRail /> : null}
   </details>;
 }
 

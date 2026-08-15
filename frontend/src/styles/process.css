@@ -4,49 +4,112 @@
 .timeline-feed > .subagent-wake-notice,
 .timeline-feed > .assistant-block:not(.streaming),
 .timeline-feed > .commentary-block:not(.active),
-.timeline-feed > .process-fold,
 .timeline-feed > .process-entries:not(.active),
 .timeline-feed > .edited-files-summary,
 .timeline-feed > .run-status-marker,
-.timeline-feed > .session-turn-current,
 .timeline-feed > .session-history-turn {
   content-visibility: auto;
   contain-intrinsic-size: auto 180px;
 }
+/* Live folds shrink from a tall tool trail to a count row. A 180px skipped
+ * box parks the next prose too low until the browser remeasures (UI-018). */
+.timeline-feed > .process-fold,
+.timeline-feed > .session-turn-current,
+.timeline-feed > .session-history-turn:last-of-type,
+.timeline-feed > :last-child,
+.process-fold,
+.process-entries.active {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+}
 
-/* Process fold = quiet meta disclosure (not body text). */
+/* UI-016: one step is one sparkle bar. The trail wrapper only owns spacing;
+   every bar below it belongs to the message it follows. */
 .process-fold { margin: 10px 0 7px; }
-.process-fold > summary {
-  display: inline-flex;
+.process-fold-summary {
+  display: flex;
   align-items: center;
-  gap: 7px;
-  min-height: 26px;
-  padding: 1px 4px 1px 0;
-  border-radius: 7px;
-  color: color-mix(in srgb, var(--muted) 74%, var(--faint));
-  font-size: var(--text-sm);
-  font-weight: 560;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 28px;
+  margin: 4px 0 6px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: var(--text-chat);
+  font-weight: 500;
   cursor: pointer;
-  list-style: none;
-  user-select: none;
 }
-.process-fold > summary::-webkit-details-marker { display: none; }
-.process-fold > summary:hover { color: var(--ink); }
-.process-fold[data-state="running"] > summary { color: var(--blue); cursor: default; pointer-events: none; }
-.process-fold[data-state="running"] .process-fold-chevrons { visibility: hidden; }
-.process-fold-chevrons {
-  position: relative;
-  width: 12px;
-  height: 12px;
-  flex: 0 0 12px;
-  opacity: .7;
+.process-fold-summary strong { font-weight: 500; }
+.process-fold-chevron { flex: 0 0 auto; color: var(--faint); }
+.process-fold:not([data-open]) .process-fold-chevron { transform: rotate(-90deg); }
+.process-fold-summary:hover { color: var(--ink); }
+.process-status-rule {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 100%;
+  margin: 4px 0 12px;
+  color: var(--ink-soft);
+  font-size: var(--text-chat);
+  font-weight: 500;
 }
-.process-fold-chevrons > * { position: absolute; inset: 0; }
-.process-fold[open] .closed-chevron,
-.process-fold:not([open]) .open-chevron { display: none; }
-.process-fold-label { letter-spacing: -0.005em; }
-.process-fold > summary time { color: var(--faint); font-family: var(--mono); font-size: var(--text-2xs); font-weight: 500; font-variant-numeric: tabular-nums; }
-.process-fold-body { margin: 5px 0 3px; padding: 0; }
+.session-turn-current > .process-status-rule { margin-top: 2px; }
+.process-status-rule-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 18px;
+}
+.process-status-rule-label { flex: 0 0 auto; font-weight: 500; }
+.process-status-rule .bui-thinking-meta { flex: 0 0 auto; }
+.process-status-rule::after {
+  content: "";
+  width: 100%;
+  height: 1px;
+  background: var(--line);
+}
+.process-step { margin: 6px 0 10px; }
+.process-step[data-settled] { margin: 4px 0 6px; }
+.process-step[data-settled] + .model-progress-prose { margin-top: 4px; }
+.process-step.bui-tool-chip-group > .process-step-body { margin-top: 2px; }
+/* The rows carry their own step rail, so the reasoning quote line would be a
+   second competing vertical. The body opens from under the bar: reasoning prose
+   first, then the tools it led to. */
+.process-step > .process-step-body {
+  margin: 0;
+  padding: 0;
+  border-left: 0;
+  color: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+/* clip-path on a large thinking/diff tree freezes the click that opened it. */
+.process-step:not([data-settled]) > .process-step-body {
+  animation: process-step-open .18s cubic-bezier(.22, 1, .36, 1) both;
+}
+.process-step-body > .model-progress-tools { margin: 0; padding: 0; }
+/* Reasoning sits under the sparkle label, not under the tool text, so the
+   old 36px quote-rail indent does not leave an empty gutter. */
+.process-step-body .bui-thinking-panel[data-tab="reasoning"] {
+  margin: 1px 0 0;
+  padding: 0 0 2px 22px;
+  color: color-mix(in srgb, var(--muted) 88%, var(--faint));
+  font-size: var(--text-chat);
+  line-height: 1.5;
+}
+.process-step-body .bui-thinking-panel[data-tab="reasoning"] .reasoning-step { margin: 0; }
+.process-step-body .bui-thinking-panel[data-tab="reasoning"] .reasoning-step + .reasoning-step { margin-top: .45em; }
+.process-step-body > * + *,
+.process-step-body > .model-progress-tools > * + * { margin-top: 6px; }
+@keyframes process-step-open {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.deferred-process-spacer { flex: 0 0 auto; pointer-events: none; }
 
 .process-entries { position: relative; display: flex; flex-direction: column; gap: 0; padding: 1px 0 5px; }
 /* Quiet process: no timeline spine; keep rail only for rare compact side trails. */
@@ -57,38 +120,14 @@
   min-width: 0;
   margin: 7px 0 10px;
   padding: 2px 0;
-  max-width: 62ch;
-  color: color-mix(in srgb, var(--ink) 91%, var(--muted));
-  font-size: calc(var(--text-chat) - 1px);
-  font-weight: 470;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
+  max-width: 68ch;
+  color: var(--ink);
+  font-size: var(--text-chat);
+  font-weight: 440;
+  line-height: var(--leading-chat);
+  overflow-wrap: break-word;
 }
 .commentary-block.compact { margin: 5px 0 8px; }
-/* Process notes: title + body, without rail dots. */
-.process-fold .commentary-marker,
-.session-document .commentary-marker { display: none; }
-.commentary-marker {
-  position: absolute;
-  left: 0;
-  top: .42em;
-  width: 14px;
-  height: 14px;
-  display: grid;
-  place-items: center;
-  border-radius: 50%;
-  background: var(--paper);
-}
-.commentary-marker i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: color-mix(in srgb, #0785ff 72%, var(--muted));
-  box-shadow: 0 0 0 2px color-mix(in srgb, #0785ff 12%, transparent);
-}
-.commentary-block.active .commentary-marker i {
-  animation: commentary-pulse 1.8s cubic-bezier(.4, 0, .2, 1) infinite;
-}
 /* Side-chat compact trail may still use a quiet rail. */
 .timeline-feed.compact .process-entries::before {
   content: "";
@@ -99,24 +138,20 @@
   width: 1px;
   background: linear-gradient(180deg, color-mix(in srgb, var(--blue) 20%, var(--line)) 0%, var(--line) 28%, var(--line) 86%, transparent 100%);
 }
-.timeline-feed.compact .commentary-block { padding-left: 23px; }
-.timeline-feed.compact .commentary-marker { display: grid; }
-.commentary-content > :first-child { margin-top: 0; }
-.commentary-content > :last-child { margin-bottom: 0; }
-.commentary-content p {
-  margin: 0 0 .45em;
-  color: color-mix(in srgb, var(--muted) 92%, var(--faint));
-  font-weight: 450;
+.timeline-feed.compact .commentary-block { padding-left: 0; }
+.commentary-block > :first-child { margin-top: 0; }
+.commentary-block > :last-child { margin-bottom: 0; }
+.commentary-block p {
+  margin: 0 0 .55em;
+  color: inherit;
+  font-weight: 440;
 }
-.commentary-content li { margin: .12em 0; }
-.commentary-content strong {
-  display: block;
-  margin-bottom: 2px;
-  color: color-mix(in srgb, var(--ink) 82%, var(--muted));
-  font-size: var(--text-sm);
-  font-weight: 560;
+.commentary-block li { margin: .12em 0; }
+.commentary-block strong {
+  color: inherit;
+  font-weight: 600;
 }
-.commentary-content code {
+.commentary-block code {
   padding: .08em .3em;
   border-radius: 4px;
   background: var(--paper-muted);
@@ -126,7 +161,7 @@
 .reasoning-trace {
   min-width: 0;
   margin: 4px 0 9px;
-  color: var(--muted);
+  color: var(--ink);
   font-size: var(--text-chat);
   line-height: var(--leading-chat);
 }
@@ -141,15 +176,15 @@
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--faint);
+  color: var(--thinking-ink);
   font: inherit;
   font-size: var(--text-sm);
   line-height: 1.3;
   text-align: left;
 }
 button.reasoning-summary { cursor: pointer; }
-button.reasoning-summary:hover { color: var(--muted); }
-button.reasoning-summary:disabled { cursor: default; }
+button.reasoning-summary:hover { color: var(--thinking-ink); }
+button.reasoning-summary:disabled { cursor: default; opacity: 1; color: var(--thinking-ink); }
 .azem-thinking-mark {
   position: relative;
   z-index: 1;
@@ -160,7 +195,7 @@ button.reasoning-summary:disabled { cursor: default; }
   border-radius: 50%;
   background: var(--paper);
   box-shadow: 0 0 0 2px var(--paper);
-  color: #0785ff;
+  color: var(--thinking-ink);
 }
 .azem-thinking-mark i {
   position: absolute;
@@ -182,10 +217,39 @@ button.reasoning-summary:disabled { cursor: default; }
 .azem-thinking-mark.active { animation: azem-thinking-pulse 1.8s cubic-bezier(.4, 0, .2, 1) infinite; }
 .reasoning-label {
   position: relative;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  min-height: 1.2em;
   white-space: nowrap;
 }
-.reasoning-label-base { color: currentColor; }
+.reasoning-label-roll {
+  display: grid;
+  grid-template-columns: minmax(0, max-content);
+  justify-items: start;
+  align-items: center;
+}
+.reasoning-label-out,
+.reasoning-label-base {
+  grid-area: 1 / 1;
+  line-height: 1.2;
+  color: currentColor;
+}
+/* Action labels roll like a page: outgoing up, incoming up from below. */
+.reasoning-label.rolling .reasoning-label-out {
+  animation: reasoning-label-roll-out .34s cubic-bezier(.22, 1, .36, 1) both;
+}
+.reasoning-label.rolling .reasoning-label-base {
+  animation: reasoning-label-roll-in .34s cubic-bezier(.22, 1, .36, 1) both;
+}
+@keyframes reasoning-label-roll-out {
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(-110%); opacity: 0; }
+}
+@keyframes reasoning-label-roll-in {
+  from { transform: translateY(110%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
 .reasoning-label-sweep {
   pointer-events: none;
   position: absolute;
@@ -196,20 +260,25 @@ button.reasoning-summary:disabled { cursor: default; }
   transform: translateX(-50%);
   -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 20% 30%, transparent 50% 100%);
   mask-image: linear-gradient(90deg, transparent 0%, #000 20% 30%, transparent 50% 100%);
-  animation: reasoning-shimmer-sweep 4s steps(192, end) infinite;
+  animation: reasoning-shimmer-sweep 2.2s steps(132, end) infinite;
 }
 .reasoning-label-highlight {
   width: 100%;
   display: block;
   transform: translateX(50%);
-  animation: reasoning-shimmer-highlight 4s steps(192, end) infinite;
+  animation: reasoning-shimmer-highlight 2.2s steps(132, end) infinite;
 }
 .reasoning-chevron {
   flex: 0 0 auto;
   opacity: .55;
   transition: transform .16s ease;
 }
+.reasoning-chevron[data-reserved="true"] {
+  visibility: hidden;
+  pointer-events: none;
+}
 .reasoning-trace:not(.open) .reasoning-chevron { transform: rotate(-90deg); }
+.process-activity { margin-top: 8px; }
 .reasoning-body {
   position: relative;
   margin: 3px 0 3px 6px;
@@ -240,17 +309,13 @@ button.reasoning-summary:disabled { cursor: default; }
 }
 .reasoning-step + .reasoning-step { margin-top: 10px; }
 .reasoning-placeholder { margin-top: 8px; }
-@keyframes commentary-pulse {
-  0%, 100% { opacity: .68; transform: scale(.84); }
-  50% { opacity: 1; transform: scale(1.08); }
-}
 @keyframes reasoning-step-in {
   from { opacity: 0; transform: translateY(3px); }
   to { opacity: 1; transform: none; }
 }
 @keyframes azem-thinking-pulse {
-  0%, 100% { opacity: .62; transform: translateY(1px); }
-  50% { opacity: 1; transform: none; }
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.18); }
 }
 @keyframes reasoning-shimmer-sweep {
   0% { transform: translateX(-50%); }
@@ -261,13 +326,15 @@ button.reasoning-summary:disabled { cursor: default; }
   25%, 100% { transform: translateX(-125%); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .commentary-block.active .commentary-marker i,
-  .assistant-block.phase-pending::before,
+  .process-step-body,
+  .reasoning-label,
+  .reasoning-label.rolling .reasoning-label-out,
+  .reasoning-label.rolling .reasoning-label-base,
   .azem-thinking-mark.active,
   .reasoning-label-sweep,
   .reasoning-label-highlight,
   .reasoning-step,
-  .streaming-text > :where(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre, table, hr) { animation: none; }
+  .streaming-text-reveal { animation: none; }
 }
 
 .run-status-marker {

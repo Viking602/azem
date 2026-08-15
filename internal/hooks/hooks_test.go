@@ -232,6 +232,23 @@ func TestRunnerJSONDenyOverridesExitAndBoundsOutput(t *testing.T) {
 	}
 }
 
+func TestRunnerUsesNonLoginShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell command")
+	}
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".profile"), []byte("printf profile >&2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := Runner{
+		Workspace:   t.TempDir(),
+		Environment: []string{"HOME=" + home},
+	}.Run(context.Background(), Command{Event: PreToolUse, RawCommand: "printf hook", Timeout: time.Second}, Envelope{HookEventName: PreToolUse})
+	if result.Stderr != "" || result.Stdout != "hook" {
+		t.Fatalf("hook shell sourced login profile: stdout=%q stderr=%q", result.Stdout, result.Stderr)
+	}
+}
+
 func TestContinueFalsePreventsContinuationWithoutBlockingStop(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell command")

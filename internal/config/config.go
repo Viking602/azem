@@ -18,6 +18,10 @@ var mcpServerNamePattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
 const (
 	maxConfiguredSubagentRoles         = 64
 	maxConfiguredSubagentRoleNameBytes = 64
+	// DefaultSubagentIdleTimeout cancels a running child that produces no
+	// thinking, output, or tool activity. Zero remains a valid explicit
+	// disable. Open tools, including approval waits, are not cancelled.
+	DefaultSubagentIdleTimeout = 5 * time.Minute
 )
 
 type Config struct {
@@ -214,15 +218,21 @@ type SubagentConfig struct {
 	// execution timeout. Zero waits until the foreground child completes.
 	// A positive duration only releases the parent; safe work continues
 	// in the background when it elapses.
-	AwaitTimeout  string                           `yaml:"await_timeout"`
-	AwaitDuration time.Duration                    `yaml:"-"`
-	AutoWake      bool                             `yaml:"auto_wake"`
-	Toggle        map[string]bool                  `yaml:"toggle,omitempty"`
-	Models        map[string]string                `yaml:"models,omitempty"`
-	Routes        map[string]ModelRouteConfig      `yaml:"routes,omitempty"`
-	Roles         map[string]SubagentRoleConfig    `yaml:"roles,omitempty"`
-	Personas      map[string]SubagentPersonaConfig `yaml:"personas,omitempty"`
-	Budget        SubagentBudgetConfig             `yaml:"budget"`
+	AwaitTimeout  string        `yaml:"await_timeout"`
+	AwaitDuration time.Duration `yaml:"-"`
+	// IdleTimeout cancels a running child that produces no thinking, output,
+	// or tool activity. The default is DefaultSubagentIdleTimeout. Zero
+	// disables the watchdog. Open tools, including approval waits, are not
+	// cancelled.
+	IdleTimeout  string                           `yaml:"idle_timeout"`
+	IdleDuration time.Duration                    `yaml:"-"`
+	AutoWake     bool                             `yaml:"auto_wake"`
+	Toggle       map[string]bool                  `yaml:"toggle,omitempty"`
+	Models       map[string]string                `yaml:"models,omitempty"`
+	Routes       map[string]ModelRouteConfig      `yaml:"routes,omitempty"`
+	Roles        map[string]SubagentRoleConfig    `yaml:"roles,omitempty"`
+	Personas     map[string]SubagentPersonaConfig `yaml:"personas,omitempty"`
+	Budget       SubagentBudgetConfig             `yaml:"budget"`
 }
 
 type SubagentBudgetConfig struct {
@@ -347,7 +357,7 @@ func Default() Config {
 				MaxSummaryTokens: 32768, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
 			},
 			Subagents: SubagentConfig{
-				Enabled: true, MaxDepth: 2, MaxConcurrency: 32, AwaitTimeout: "0s", AwaitDuration: 0, AutoWake: true,
+				Enabled: true, MaxDepth: 2, MaxConcurrency: 32, AwaitTimeout: "0s", AwaitDuration: 0, IdleTimeout: "5m", IdleDuration: DefaultSubagentIdleTimeout, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
@@ -746,6 +756,10 @@ func (c *Config) validateSubagents() error {
 	if err != nil {
 		return err
 	}
+	idle, err := parseSubagentIdleTimeout(subagents.IdleTimeout)
+	if err != nil {
+		return err
+	}
 	wallClock, err := time.ParseDuration(subagents.Budget.MaxWallClock)
 	if err != nil || wallClock < 0 {
 		return fmt.Errorf("agents.subagents.budget.max_wall_clock must be a non-negative duration (zero is unbounded)")
@@ -760,6 +774,7 @@ func (c *Config) validateSubagents() error {
 		return fmt.Errorf("agents.subagents.budget.soft_requests must be non-negative (zero disables the reminder)")
 	}
 	subagents.AwaitDuration = await
+	subagents.IdleDuration = idle
 	subagents.Budget.MaxWallClockDuration = wallClock
 	if subagents.Toggle == nil {
 		subagents.Toggle = map[string]bool{}
@@ -934,6 +949,8 @@ func isLoopbackHost(host string) bool {
 const (
 	minSubagentAwaitSeconds = 5
 	maxSubagentAwaitSeconds = 3600
+	minSubagentIdleSeconds  = 30
+	maxSubagentIdleSeconds  = 3600
 )
 
 // ValidSubagentAwaitSeconds reports whether a settings or YAML update may store
@@ -953,4 +970,23 @@ func parseSubagentAwaitTimeout(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("agents.subagents.await_timeout must be a non-negative duration (zero waits until the foreground child completes)")
 	}
 	return await, nil
+}
+
+// ValidSubagentIdleSeconds reports whether a settings or YAML update may store
+// this idle cancel window. Zero disables the watchdog; otherwise the value
+// must be between 30 and 3600 seconds.
+func ValidSubagentIdleSeconds(seconds int) bool {
+	return seconds == 0 || (seconds >= minSubagentIdleSeconds && seconds <= maxSubagentIdleSeconds)
+}
+
+func parseSubagentIdleTimeout(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" {
+		return 0, nil
+	}
+	idle, err := time.ParseDuration(value)
+	if err != nil || idle < 0 {
+		return 0, fmt.Errorf("agents.subagents.idle_timeout must be a non-negative duration (zero disables idle cancellation)")
+	}
+	return idle, nil
 }

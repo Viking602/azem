@@ -1,6 +1,6 @@
 # Provider Streaming
 
-Last verified: 2026-08-10
+Last verified: 2026-08-15
 
 Azem normalizes every provider into Venat's `provider.Driver` contract. The
 application runtime owns provider/model selection, retries, usage persistence,
@@ -114,7 +114,9 @@ interleaved streams therefore do not defeat coalescing.
 When the projection queue reaches its byte or event high-water mark, Azem drops
 only replaceable queued deltas and emits `projection_resync`. Desktop and TUI
 consumers reload the durable session through the read-only `refresh_session`
-action. If compaction happened during a run, the broker emits a final resync
+action. If the dropped stream belonged to a subagent, the resync carries that
+`agentId` and the desktop also re-runs `inspect_agent` for the open drawer so
+child thinking is not lost when only the parent transcript is refreshed. If compaction happened during a run, the broker emits a final resync
 after the terminal event so completed or failed persisted blocks replace any
 partial display. Approval requests, tool lifecycle transitions, and terminal
 events are not discarded. A slow or suspended renderer must never surface as a
@@ -134,16 +136,17 @@ latest eight provider ranges receive a bounded fade/blur reveal; older ranges
 settle into ordinary text without growing the timeline DOM indefinitely.
 
 Before every individual tool call or related parallel batch, the executable
-main prompt emits commentary as an explicit bold action-title line followed by
-one short target/evidence line. A related parallel batch shares one update. If
-a provider emits a tool without the required commentary, the host persists and
-projects one fallback update before the first tool event; later tools in the
-same batch do not duplicate it. The desktop recognizes only that title/detail
-contract as a progress step, combines adjacent reasoning, tools, and diffs into
-the step, and opens it while any nested work is active. Completed steps remain
-collapsible. Unformatted commentary from older sessions or a non-conforming
-provider is never guessed or truncated into a title and retains the prose
-renderer.
+main prompt emits commentary as ordinary user-visible prose: one or two short
+sentences, not a titled card or a two-line `**title**` / detail pair. A related
+parallel batch shares one update. If a provider emits a tool without the
+required commentary, the host persists and projects one fallback sentence
+before the first tool event, marked `data.synthetic=tool_announcement`; later
+tools in the same batch do not duplicate it. That canned host line is a
+grouping anchor only and is not user-visible transcript prose. Real model
+commentary still renders as ordinary Markdown. The desktop keeps adjacent
+reasoning, tools, and diffs underneath the announcement and does not wrap it
+in a duration chip. Older two-line commentary still groups the same way and
+is shown as Markdown text.
 
 Session recap generation uses its own `agents.recap` model route and usage kind.
 It no longer borrows `agents.compaction`, so choosing a cheap short-text model

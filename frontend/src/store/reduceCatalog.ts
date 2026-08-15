@@ -53,6 +53,7 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
         subagentMaxDepth: numberValue(data.subagent_max_depth, next.snapshot.subagentMaxDepth ?? 2),
         shellConcurrency: numberValue(data.shell_max_concurrency, next.snapshot.shellConcurrency ?? 2),
         subagentAwaitSeconds: numberValue(data.subagent_await_seconds, next.snapshot.subagentAwaitSeconds ?? 0),
+        subagentIdleSeconds: numberValue(data.subagent_idle_seconds, next.snapshot.subagentIdleSeconds ?? 0),
         chatgptFastMode: data.chatgpt_fast_mode === "true",
       };
       break;

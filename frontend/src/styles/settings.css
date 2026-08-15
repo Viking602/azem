@@ -431,7 +431,7 @@ dialog { border: 0; padding: 0; background: transparent; color: var(--ink); }.co
   .thread-heading-copy .thread-eyebrow { grid-row: auto; }.thread-heading-copy strong { font-size: 13px; }.thread-heading-copy small { padding-left: 9px; border-left: 1px solid var(--line); font-size: 11px; }
   .thread-stage { height: 30px; grid-template-columns: repeat(3, auto); gap: 2px; }
   .thread-stage span { min-width: 58px; height: 24px; font-size: 9px; }
-  .transcript { width: min(720px, calc(100% - 64px)); padding: 34px 0 var(--transcript-bottom-gap); }
+  .transcript { width: min(720px, calc(100% - 64px)); padding: 34px 0 0; }
   .composer-stack { width: min(690px, calc(100vw - var(--sidebar-width) - 46px)); }
   .workspace-grid[data-inspector="open"] .composer-stack { width: min(690px, calc(100% - 46px)); }
   .context-inspector { width: var(--inspector-reserve); background: var(--paper-muted); }
@@ -440,5 +440,5 @@ dialog { border: 0; padding: 0; background: transparent; color: var(--ink); }.co
 }
 .context-inspector { top: 0; right: 0; width: var(--inspector-reserve); height: 100%; max-height: none; overflow: hidden; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: var(--paper-muted); box-shadow: none; backdrop-filter: none; }
 .thread-header { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
-.thread-heading-copy { grid-column: 1; }.thread-stage { grid-column: 2; }.thread-runtime-status { grid-column: 3; grid-row: 1; justify-self: end; margin-right: 45px; }.thread-actions { grid-column: 3; grid-row: 1; justify-self: end; margin-left: 0; }
+.thread-heading-copy { grid-column: 1; }.thread-stage { grid-column: 2; }.thread-header-end { grid-column: 3; justify-self: end; margin-left: 0; }
 .sidebar-branch-row { display: none; }

@@ -165,10 +165,9 @@ export default function WorkspaceChangesPage() {
       <div className="changes-empty"><FileDiff size={30} /><h2>{t("noWorkspaceChanges")}</h2><p>{t("workingTreeClean")}</p></div> :
       <div className="changes-prototype-layout">
         <div className="change-summary">
-          <article><span>{String(isDesktopRuntime() ? changeSet.files.length : 4).padStart(2, "0")}</span><small>{snapshot.language === "zh-CN" ? "变更文件" : t("changedFiles")}</small></article>
+          <article><span>{String(changeSet.files.length).padStart(2, "0")}</span><small>{snapshot.language === "zh-CN" ? "变更文件" : t("changedFiles")}</small></article>
           <article><span className="plus">+{changeSet.additions}</span><small>{snapshot.language === "zh-CN" ? "新增" : "Added"}</small></article>
           <article><span className="minus">−{changeSet.deletions}</span><small>{snapshot.language === "zh-CN" ? "删除" : "Deleted"}</small></article>
-          <article><span>0</span><small>{snapshot.language === "zh-CN" ? "架构违规" : "Violations"}</small></article>
         </div>
         <aside className="review-file-list" aria-label={t("changedFileList")}>
           <label className="changes-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("searchChangedFiles")} /></label>

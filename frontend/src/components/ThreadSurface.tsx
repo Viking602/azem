@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { motion, useReducedMotion } from "motion/react";
 import { ArrowDown } from "lucide-react";
 import { cancelActive, execute, guide, importAttachment, importClipboardImage, startTurn } from "../bridge";
+import { chatTypographyVars } from "../chatTypography";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 import type { Attachment, DeliveryMode, QueuedPrompt, Snapshot } from "../types";
+import { useTerminalStore } from "../terminalStore";
+import { SelectActionHost } from "./SelectActionHost";
 import { TimelineFeed } from "./Timeline";
 import { Composer } from "./thread/Composer";
 import { QueuedPrompts } from "./thread/QueueBar";
@@ -13,7 +16,7 @@ import { parseSkillPrompt } from "./thread/slash";
 export { approvalPresentation } from "./Timeline";
 export { formatDuration } from "./toolTimeline";
 export { contextOccupancy } from "../contextUsage";
-export { branchMenuLayout } from "./thread/Composer";
+export { branchMenuLayout, composerPromptPlaceholder } from "./thread/Composer";
 export { ContextMeter } from "./thread/ContextMeter";
 export { filterModelControlOptions, modelControlWidth, nextModelControlView } from "./thread/ModelControls";
 export { namedClipboardImage, pastedImages, shouldReadNativeClipboard } from "./thread/clipboard";
@@ -22,8 +25,23 @@ export { parseSkillPrompt, skillTitle, slashSuggestions } from "./thread/slash";
 
 const SESSION_STAGE_EASE = [0.16, 1, 0.3, 1] as const;
 
+/** Paper between the last transcript card and the composer overlay. */
+export const COMPOSER_OVERLAY_CLEARANCE = 24;
+/** Fallback when the dock has not been measured — enough for the resting card. */
+export const COMPOSER_OVERLAY_MIN_GAP = 148;
+
 export function composerOverlayGap(dockHeight: number): number {
-  return Math.max(24, Math.ceil(dockHeight));
+  const measured = Math.max(0, Math.ceil(dockHeight));
+  if (measured <= 0) return COMPOSER_OVERLAY_MIN_GAP;
+  return Math.max(COMPOSER_OVERLAY_MIN_GAP, measured + COMPOSER_OVERLAY_CLEARANCE);
+}
+
+export function transcriptFollowBehavior(running: boolean, sessionOpen = false): ScrollBehavior {
+  return running || sessionOpen ? "instant" : "smooth";
+}
+
+export function pinTranscriptTail(viewport: HTMLElement, behavior: ScrollBehavior) {
+  viewport.scrollTo({ top: viewport.scrollHeight, behavior });
 }
 
 export function sessionStageMotion(reducedMotion: boolean) {
@@ -41,12 +59,13 @@ export function sessionStageMotion(reducedMotion: boolean) {
 
 export default function ThreadSurface() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const chatFontSize = useRuntimeStore((state) => state.chatFontSize);
+  const chatCodeFontSize = useRuntimeStore((state) => state.chatCodeFontSize);
   const blocks = useRuntimeStore((state) => state.blocks);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
   const running = useRuntimeStore((state) => state.running);
   const runId = useRuntimeStore((state) => state.runId);
   const globalRunSessionId = useRuntimeStore((state) => state.globalRunSessionId);
-  const activity = useRuntimeStore((state) => state.activity);
   const error = useRuntimeStore((state) => state.error);
   const planMode = useRuntimeStore((state) => state.planMode);
   const attachments = useRuntimeStore((state) => state.attachments);
@@ -75,15 +94,42 @@ export default function ThreadSurface() {
   const [following, setFollowing] = useState(true);
   const viewport = useRef<HTMLDivElement>(null);
   const dock = useRef<HTMLDivElement>(null);
+  const followingRef = useRef(following);
+  const sessionFollow = useRef(currentSessionId);
+  const pinInstant = useRef(false);
+  followingRef.current = following;
+  if (sessionFollow.current !== currentSessionId) {
+    sessionFollow.current = currentSessionId;
+    pinInstant.current = true;
+    if (!following) setFollowing(true);
+  }
   const reduceMotion = useReducedMotion();
   const t = translator(snapshot.language);
   const empty = blocks.length === 0 && !running;
   const runtimeBusy = running || Boolean(globalRunSessionId);
   const sessionMotion = sessionStageMotion(Boolean(reduceMotion));
 
-  useEffect(() => {
-    if (following) viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: running ? "instant" : "smooth" });
-  }, [blocks, following, queuedPrompts.length, running]);
+  useLayoutEffect(() => {
+    if (!following) return;
+    const node = viewport.current;
+    if (!node) return;
+    const pin = (behavior: ScrollBehavior) => {
+      if (!followingRef.current || viewport.current !== node) return;
+      pinTranscriptTail(node, behavior);
+    };
+    // Opening a session remounts the stage at scrollTop 0. History turns also
+    // start at a 180px content-visibility estimate, so pin instantly and again
+    // when the transcript grows to its real height.
+    pin(transcriptFollowBehavior(running, pinInstant.current));
+    const transcript = node.querySelector(".transcript");
+    if (!(transcript instanceof HTMLElement) || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      pin("instant");
+      pinInstant.current = false;
+    });
+    observer.observe(transcript);
+    return () => observer.disconnect();
+  }, [blocks, following, queuedPrompts.length, running, currentSessionId]);
 
   useEffect(() => setDeliveryMode(snapshot.queueMode ?? "queue"), [currentSessionId, snapshot.queueMode]);
   useEffect(() => {
@@ -129,11 +175,11 @@ export default function ThreadSurface() {
     queuedPrompts, runtimeBusy, queuePauseReason, editingQueuedId, beginTurn, removeQueuedPrompt, failQueuedPrompt,
   );
 
-  const resetComposer = () => {
+  const resetComposer = useCallback(() => {
     setPrompt("");
     clearAttachments();
     setEditingQueuedId(null);
-  };
+  }, [clearAttachments]);
 
   const changeDeliveryMode = (mode: DeliveryMode) => {
     const previous = snapshot.queueMode;
@@ -146,12 +192,16 @@ export default function ThreadSurface() {
     });
   };
 
-  const submit = async (modeOverride?: DeliveryMode) => {
-    const text = prompt.trim();
-    const images = [...attachments];
-    if (!text && images.length === 0) return;
-    if (editingQueuedId) {
-      updateQueuedPrompt(currentSessionId, editingQueuedId, text, images);
+  const submitTurn = useCallback(async (
+    text: string,
+    images: Attachment[] = [],
+    modeOverride?: DeliveryMode,
+    source: "composer" | "select-action" = "composer",
+  ) => {
+    const trimmed = text.trim();
+    if (!trimmed && images.length === 0) return;
+    if (source === "composer" && editingQueuedId) {
+      updateQueuedPrompt(currentSessionId, editingQueuedId, trimmed, images);
       resetComposer();
       setFollowing(true);
       return;
@@ -159,30 +209,44 @@ export default function ThreadSurface() {
     // The Go runtime admits one main run process-wide. A prompt composed in another
     // session while that run is active must remain queued until its terminal event.
     if (!runtimeBusy) {
-      resetComposer();
-      return void beginTurn(text, images);
+      if (source === "composer") resetComposer();
+      return void beginTurn(trimmed, images);
     }
     // Starting (the bridge has not returned runId yet), another session is active,
     // or Queue is selected: never attempt a concurrent turn.
     if (!running || !runId || (modeOverride ?? deliveryMode) === "queue") {
-      resetComposer();
-      enqueuePrompt(text, images);
+      if (source === "composer") resetComposer();
+      enqueuePrompt(trimmed, images);
       setFollowing(true);
       return;
     }
     const sessionId = currentSessionId;
-    resetComposer();
-    await sendGuidance(sessionId, runId, text, images, () => {
+    if (source === "composer") resetComposer();
+    await sendGuidance(sessionId, runId, trimmed, images, () => {
       if (!isCurrentSession(sessionId)) return;
-      addOptimisticUser(text, images);
+      addOptimisticUser(trimmed, images);
       setFollowing(true);
     }, (message) => {
       if (!isCurrentSession(sessionId)) return;
       setError(message);
-      setPrompt((current) => current || text);
-      if (useRuntimeStore.getState().attachments.length === 0) replaceAttachments(images);
+      if (source === "composer") {
+        setPrompt((current) => current || trimmed);
+        if (useRuntimeStore.getState().attachments.length === 0) replaceAttachments(images);
+      }
     });
+  }, [
+    addOptimisticUser, beginTurn, currentSessionId, deliveryMode, editingQueuedId,
+    enqueuePrompt, replaceAttachments, resetComposer, runId, running, runtimeBusy,
+    setError, updateQueuedPrompt,
+  ]);
+
+  const submit = async (modeOverride?: DeliveryMode) => {
+    await submitTurn(prompt.trim(), [...attachments], modeOverride, "composer");
   };
+
+  const sendSelectAction = useCallback((text: string) => {
+    void submitTurn(text, [], undefined, "select-action");
+  }, [submitTurn]);
 
   const editQueued = (item: QueuedPrompt) => {
     if (item.sessionId !== currentSessionId) return;
@@ -240,7 +304,7 @@ export default function ThreadSurface() {
 
   const cancel = async () => {
     try {
-      await cancelActive(false);
+      await cancelActive(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -257,7 +321,7 @@ export default function ThreadSurface() {
   /> : null;
 
   return (
-    <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`}>
+    <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`} style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
       <ThreadHeader empty={empty} />
       <div className="thread-session-viewport">
         <motion.div
@@ -299,10 +363,17 @@ export default function ThreadSurface() {
                       language={snapshot.language}
                       activeRunId={runId}
                       running={running}
-                      waitingForModel={running && (activity === "waiting_model" || activity === "thinking")}
+                      waitingForModel={running}
                       collapseCompletedProcess
                     />
                     {error && <div className="inline-error" role="alert">{error}</div>}
+                    <SelectActionHost
+                      rootRef={viewport}
+                      composerRef={dock}
+                      language={snapshot.language}
+                      onSubmit={sendSelectAction}
+                    />
+                    <div className="transcript-composer-clearance" aria-hidden="true" />
                   </div>
                 </div>
                 <div className="composer-dock" ref={dock}>
@@ -425,8 +496,10 @@ function ThreadHeader({ empty }: { empty: boolean }) {
       <span data-active={String(stage === "in-progress")}>{t("inProgress")}</span>
       <span data-active={String(stage === "completed")}>{t("completed")}</span>
     </div>
-    <span className="thread-runtime-status" data-running={String(running)}>{status}</span>
-    <HeaderActions empty={empty} />
+    <div className="thread-header-end">
+      <span className="thread-runtime-status" data-running={String(running)}>{status}</span>
+      <HeaderActions empty={empty} />
+    </div>
   </header>;
 }
 
@@ -440,8 +513,12 @@ function HeaderActions({ empty }: { empty: boolean }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const inspectorOpen = useRuntimeStore((state) => state.inspectorOpen);
   const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
+  const terminalOpen = useTerminalStore((state) => state.open);
   const t = translator(snapshot.language);
-  return <div className="thread-actions"><button hidden={empty} className="square-button inspector-toggle" data-open={String(inspectorOpen)} aria-label={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}>{snapshot.language === "zh-CN" ? "侧栏" : "Panel"}</button></div>;
+  return <div className="thread-actions">
+    <button hidden={empty} type="button" className="square-button terminal-toggle" data-open={String(terminalOpen)} aria-pressed={terminalOpen} title={t("toggleTerminal")} onClick={() => useTerminalStore.getState().toggle()}>{t("terminal")}</button>
+    <button hidden={empty} className="square-button inspector-toggle" data-open={String(inspectorOpen)} aria-label={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}>{snapshot.language === "zh-CN" ? "侧栏" : "Panel"}</button>
+  </div>;
 }
 
 function emptySuggestions(language: Snapshot["language"]) {

@@ -534,14 +534,32 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	if len(initialSessionID) > 0 && initialSessionID[0] != "" {
 		sessionID = initialSessionID[0]
 	}
+	approvalMode, autoReviewAvailable := approvalModeState(runtime)
 	return AppModel{
 		runtime: runtime, initialCmd: focus, theme: theme, catalog: catalog, composer: composer, modelSearch: modelSearch, settingsSearch: settingsSearch,
 		width: 80, height: 24, sessionID: sessionID, provider: provider, model: model,
-		reasoning: reasoning, agentMode: mode, workspace: workspace, branch: resolveGitBranch(workspace), status: "Ready", approvalMode: ApprovalModePrompt, subagentConcurrency: 2,
+		reasoning: reasoning, agentMode: mode, workspace: workspace, branch: resolveGitBranch(workspace), status: "Ready", approvalMode: approvalMode, autoReviewAvailable: autoReviewAvailable, subagentConcurrency: 2,
 		focus: focusComposer, transcriptCursor: -1, transcriptHover: -1, transcriptLayout: &transcriptLayoutCache{}, agentDetailLayout: &transcriptLayoutCache{}, recapLayout: &recapLayoutCache{}, paint: &paintCache{}, contextReportCache: &contextReportRenderCache{}, settingsExpanded: make(map[string]bool),
 		auth: make(map[string]AuthView), modelsByProvider: make(map[string][]ModelChoice),
 		reducedMotion: os.Getenv("AZEM_REDUCED_MOTION") == "1" || os.Getenv("REDUCED_MOTION") == "1",
 	}
+}
+
+type approvalModeStateRuntime interface {
+	ApprovalModeState() (ApprovalMode, bool)
+}
+
+func approvalModeState(runtime Runtime) (ApprovalMode, bool) {
+	if source, ok := runtime.(approvalModeStateRuntime); ok {
+		mode, autoReviewAvailable := source.ApprovalModeState()
+		if mode == ApprovalModeAutoReview && !autoReviewAvailable {
+			return ApprovalModePrompt, false
+		}
+		if mode == ApprovalModePrompt || mode == ApprovalModeAutoReview || mode == ApprovalModeYolo {
+			return mode, autoReviewAvailable
+		}
+	}
+	return ApprovalModePrompt, false
 }
 
 // SetLanguage changes only presentation strings; runtime and persisted states remain stable English values.

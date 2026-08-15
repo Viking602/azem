@@ -22,6 +22,7 @@ export interface Snapshot {
   subagentMaxDepth?: number;
   shellConcurrency?: number;
   subagentAwaitSeconds?: number;
+  subagentIdleSeconds?: number;
   chatgptFastMode: boolean;
   sequence: number;
   pullRequestMonitors?: PullRequestMonitorState[];

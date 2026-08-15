@@ -16,6 +16,7 @@ import (
 
 	azemapp "github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/desktop/termhost"
 	"github.com/Viking602/azem/internal/githubpr"
 	"github.com/Viking602/azem/internal/session"
 )
@@ -23,6 +24,7 @@ import (
 const (
 	EventName            = "azem:event"
 	PullRequestEventName = "azem:pull-request"
+	TerminalEventName    = "azem:terminal"
 
 	// EventKindBridgeError is emitted by the bridge itself when runtime
 	// delivery fails; it never originates from the app event stream.
@@ -55,6 +57,7 @@ type Snapshot struct {
 	SubagentMaxDepth     int                     `json:"subagentMaxDepth"`
 	ShellConcurrency     int                     `json:"shellConcurrency"`
 	SubagentAwaitSeconds int                     `json:"subagentAwaitSeconds"`
+	SubagentIdleSeconds  int                     `json:"subagentIdleSeconds"`
 	ChatGPTFastMode      bool                    `json:"chatgptFastMode"`
 	Sequence             uint64                  `json:"sequence"`
 	PullRequestMonitors  []githubpr.MonitorState `json:"pullRequestMonitors,omitempty"`
@@ -153,8 +156,10 @@ type Bridge struct {
 	cancel       context.CancelFunc
 	start        sync.Once
 	sequence     atomic.Uint64
+	terminalSeq  atomic.Uint64
 	pullRequests *githubpr.Client
 	prMonitor    *githubpr.Monitor
+	terminals    *termhost.Host
 }
 
 func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventEmitter, openProject func(string, string, int64) error) *Bridge {
@@ -166,6 +171,7 @@ func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventE
 	bridge.pullRequests = githubpr.NewClient(bridge.workspace)
 	statePath := pullRequestMonitorStatePath(boot.Paths.StateDir, bridge.workspace)
 	bridge.prMonitor = githubpr.NewMonitor(ctx, bridge.pullRequests, statePath, bridge.startPullRequestRepair, bridge.emitPullRequestMonitor)
+	bridge.terminals = termhost.New(bridge.workspace, bridge.emitTerminal)
 	return bridge
 }
 
@@ -203,6 +209,7 @@ func (b *Bridge) Initialise() Snapshot {
 		SubagentMaxDepth:     b.cfg.Agents.Subagents.MaxDepth,
 		ShellConcurrency:     b.cfg.Workspace.Shell.MaxConcurrency,
 		SubagentAwaitSeconds: int(b.cfg.Agents.Subagents.AwaitDuration.Seconds()),
+		SubagentIdleSeconds:  int(b.cfg.Agents.Subagents.IdleDuration.Seconds()),
 		ChatGPTFastMode:      b.cfg.Providers.ChatGPT.FastMode,
 		Sequence:             b.sequence.Load(),
 		PullRequestMonitors:  b.prMonitor.States(),
@@ -435,6 +442,9 @@ func (b *Bridge) ForkSession(sessionID string, activate bool) (string, error) {
 }
 
 func (b *Bridge) Close() {
+	if b.terminals != nil {
+		b.terminals.CloseAll()
+	}
 	b.cancel()
 	b.prMonitor.Close()
 }
@@ -508,7 +518,7 @@ func allowedAction(kind azemapp.ActionKind) bool {
 		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled,
 		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
 		azemapp.ActionResetModelRoute, azemapp.ActionSetSubagentConcurrency,
-		azemapp.ActionSetSubagentDepth, azemapp.ActionSetShellConcurrency, azemapp.ActionSetSubagentAwait,
+		azemapp.ActionSetSubagentDepth, azemapp.ActionSetShellConcurrency, azemapp.ActionSetSubagentAwait, azemapp.ActionSetSubagentIdle,
 		azemapp.ActionSetChatGPTFastMode, azemapp.ActionSetSessionPreferences, azemapp.ActionListBackground,
 		azemapp.ActionStartBackground, azemapp.ActionStopBackground, azemapp.ActionLogsBackground,
 		azemapp.ActionListGitBranches, azemapp.ActionSwitchGitBranch, azemapp.ActionCreateGitBranch:

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 /** Keep a server-reported elapsed duration moving locally while work is active. */
-export function useLiveElapsed(elapsedMs: number, active: boolean) {
+export function useLiveElapsed(elapsedMs: number, active: boolean, intervalMs = 1000) {
   const [now, setNow] = useState(() => Date.now());
   const anchor = useRef({ elapsedMs: Math.max(0, elapsedMs), observedAt: now, active });
 
@@ -18,9 +18,9 @@ export function useLiveElapsed(elapsedMs: number, active: boolean) {
     };
     setNow(observedAt);
     if (!active) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    const timer = window.setInterval(() => setNow(Date.now()), Math.max(16, intervalMs));
     return () => window.clearInterval(timer);
-  }, [active, elapsedMs]);
+  }, [active, elapsedMs, intervalMs]);
 
   const current = anchor.current;
   const projected = active && current.active

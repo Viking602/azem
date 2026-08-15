@@ -526,6 +526,7 @@ finished:
 	if len(sessionProjection.Blocks) != 3 ||
 		sessionProjection.Blocks[1].Kind != "commentary" ||
 		sessionProjection.Blocks[1].Content != fallbackToolAnnouncement ||
+		sessionProjection.Blocks[1].Data["synthetic"] != fallbackToolAnnouncementSynthetic ||
 		sessionProjection.Blocks[2].Kind != "assistant" ||
 		sessionProjection.Blocks[2].TextPhase != string(hyprovider.TextPhaseFinalAnswer) ||
 		sessionProjection.Blocks[2].Content != "Created and verified." {

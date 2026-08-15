@@ -1,6 +1,6 @@
 # Agent Runtime
 
-Last verified: 2026-08-14
+Last verified: 2026-08-15
 
 Azem executes every conversation turn through the Venat agent framework
 (`github.com/Viking602/venat` in `go.mod`). `internal/agent` wraps Venat's
@@ -92,6 +92,11 @@ Configuration lives under `agents.subagents` (`internal/config/config.go`):
   positive duration is only the parent tool-call wait window, not a child
   execution timeout (see `docs/recovery.md` for detach semantics). `-1` is
   rejected.
+- `idle_timeout` default `5m` cancels a running child that has no thinking,
+  output, or tool activity for that window. Zero disables the watchdog. Open
+  tools, including approval waits, are not cancelled. Compaction and explicit
+  wait summaries reset the clock. Empty thinking/text frames and elapsed-time
+  UI ticks do not.
 - States: `initializing → queued → running → completed/failed/cancelled/
   interrupted`, with `cancelling` as the transitional kill state.
 
@@ -99,8 +104,9 @@ Configuration lives under `agents.subagents` (`internal/config/config.go`):
 scheduler is full, a running parent (depth > 0) may admit exactly one
 re-entrant child so synchronous recursive delegation cannot deadlock
 (SUBAGENT-002). Siblings stay queued until that child ends. Children are
-cancelled only by `subagent.kill`, an explicit include-children stop, or
-application shutdown (SUBAGENT-001).
+cancelled by `subagent.kill`, an explicit include-children stop, application
+shutdown (SUBAGENT-001), or an optional configured `idle_timeout`
+(SUBAGENT-005).
 
 The main agent prompt requires review or verification that gates later work
 to stay foreground. If the model still backgrounds such a child and then

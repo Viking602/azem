@@ -1036,6 +1036,12 @@ func (s *Service) setApprovalMode(ctx context.Context, mode ApprovalMode) error 
 	return err
 }
 
+func (s *Service) ApprovalModeState() (ApprovalMode, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.approvalMode, true
+}
+
 func (s *Service) persistApprovalMode(mode ApprovalMode) error {
 	if err := s.dispatchLifecycle(s.ctx, hooks.ConfigChange, s.hookMetadata(s.currentSession, ""), func(e *hooks.Envelope) {
 		e.Source, e.FilePath = "user_settings", s.configPath

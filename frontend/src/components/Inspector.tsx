@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  Check, ChevronRight, Circle, CircleDot, ExternalLink, FileImage, Globe, Link2, ListChecks, LoaderCircle, Minus, Plus, SquareTerminal, X,
+  ChevronRight, ExternalLink, FileImage, Globe, Link2, ListChecks, LoaderCircle, Plus, SquareTerminal, X,
 } from "lucide-react";
 import { attachmentDataURL, execute, openExternalURL } from "../bridge";
 import { tFormat, translator } from "../i18n";
@@ -14,7 +14,7 @@ import {
 import { useRuntimeStore } from "../store";
 import { contextCacheMetrics, contextComposition, contextOccupancy } from "../contextUsage";
 import type { ContextCompositionGroup } from "../contextUsage";
-import type { AgentState, Attachment, ContextProfile, SessionRecap, Snapshot, TodoList, TodoStatus } from "../types";
+import type { AgentState, Attachment, ContextProfile, SessionRecap, Snapshot, TodoItem, TodoList, TodoStatus } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
 import { TaskRow } from "./beautiful-ui/Primitives";
 import { collectConversationSources, type ConversationSource } from "./inspectorSources";
@@ -243,6 +243,7 @@ function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["lang
   const items = todo.phases.flatMap((phase) => phase.items);
   const completed = items.filter((item) => item.status === "completed" || item.status === "cancelled").length;
   const percentage = items.length > 0 ? Math.round((completed / items.length) * 100) : 0;
+  const [open, setOpen] = useState<Record<string, boolean>>({});
 
   return <section className="inspector-section todo-section" aria-label={t("todoTitle")}>
     <header className="inspector-section-header">
@@ -256,32 +257,49 @@ function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["lang
       </div>
     </div>
     <div className="todo-phases">
-      {todo.phases.map((phase) => <div className="todo-phase" key={phase.id || phase.title}>
-        {phase.title && <h3>{phase.title}</h3>}
-        <div className="todo-items">
-          {phase.items.map((item) => {
-            const Icon = todoStatusIcon(item.status);
-            return <TaskRow state={item.status} key={item.id || item.content} aria-label={todoStatusLabel(item.status, language)}>
-              <Icon size={14} aria-hidden="true" />
-              <span>{item.content}</span>
-            </TaskRow>;
-          })}
-        </div>
-      </div>)}
+      {todo.phases.map((phase, phaseIndex) => {
+        const phaseKey = phase.id || phase.title || String(phaseIndex);
+        const phaseState = todoPhaseState(phase.items);
+        const counts = todoPhaseCounts(phase.items);
+        const defaultOpen = phaseState !== "completed" && phaseState !== "cancelled";
+        const expanded = open[phaseKey] ?? defaultOpen;
+        return <TaskRow
+          key={phaseKey}
+          state={phaseState}
+          title={phase.title || phase.items[0]?.content || t("todoTitle")}
+          metric={counts.total > 0 ? `${counts.done}/${counts.total}` : undefined}
+          statusLabel={todoStatusLabel(phaseState, language)}
+          index={phaseState === "in_progress" ? phaseIndex + 1 : undefined}
+          progress={phaseState === "in_progress" ? counts.ratio : undefined}
+          expanded={expanded}
+          onToggle={phase.items.length > 0 ? () => setOpen((current) => ({ ...current, [phaseKey]: !expanded })) : undefined}
+          steps={phase.items.map((item) => ({
+            key: item.id || item.content,
+            label: item.content,
+            value: todoStatusLabel(item.status, language),
+          }))}
+          aria-label={`${phase.title || t("todoTitle")}，${todoStatusLabel(phaseState, language)}`}
+        />;
+      })}
     </div>
   </section>;
 }
 
-function todoStatusIcon(status: TodoStatus) {
-  if (status === "completed") return Check;
-  if (status === "cancelled") return Minus;
-  if (status === "in_progress") return CircleDot;
-  return Circle;
+function todoPhaseState(items: TodoItem[]): TodoStatus {
+  if (items.some((item) => item.status === "in_progress")) return "in_progress";
+  if (items.some((item) => item.status === "pending")) return "pending";
+  if (items.length > 0 && items.every((item) => item.status === "cancelled")) return "cancelled";
+  return "completed";
+}
+
+function todoPhaseCounts(items: TodoItem[]) {
+  const done = items.filter((item) => item.status === "completed" || item.status === "cancelled").length;
+  return { done, total: items.length, ratio: items.length > 0 ? done / items.length : 0 };
 }
 
 function todoStatusLabel(status: TodoStatus, language: Snapshot["language"]) {
   const t = translator(language);
-  if (status === "completed") return t("completed");
+  if (status === "completed") return t("todoCompleted");
   if (status === "cancelled") return t("cancelled");
   if (status === "in_progress") return t("todoInProgress");
   return t("todoPending");

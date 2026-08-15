@@ -1,6 +1,6 @@
 # Configuration
 
-Last verified: 2026-08-14
+Last verified: 2026-08-15
 
 `internal/config.Config` and `internal/config.Default` are authoritative. Azem
 strictly decodes YAML, applies defaults, and validates the complete result
@@ -29,10 +29,11 @@ current field names and defaults. Duration values use Go duration syntax.
 The desktop Subagents settings surface groups capacity and isolation controls,
 shows parallel dispatch as a read-only product invariant, and lists
 main-session display behavior separately. It edits recursive depth, two live
-capacity limits, and one foreground wait window without restarting the
-application:
+capacity limits, one foreground wait window, and one idle-cancel window
+without restarting the application:
 `agents.subagents.max_depth`, `agents.subagents.max_concurrency`,
-`workspace.shell.max_concurrency`, and `agents.subagents.await_timeout`.
+`workspace.shell.max_concurrency`, `agents.subagents.await_timeout`, and
+`agents.subagents.idle_timeout`.
 Subagent concurrency defaults to 32 and zero means unbounded. Recursive depth
 defaults to 2; zero disables delegation and `-1` removes the recursion cap.
 `await_timeout` defaults to `0s`, which keeps the parent tool waiting until the
@@ -40,16 +41,24 @@ foreground child completes. A positive duration never limits child runtime:
 when it elapses, read-only or isolated worktree tasks continue in the background
 and the parent can inspect them with `subagent.get_output`; a shared-workspace
 writer keeps waiting in the foreground rather than racing the parent or being
-cancelled. `-1` is not a second unlimited sentinel and is rejected. Changes pass through validated application actions, update the
-active runtime, and are persisted with the same node-preserving YAML writer
-used by the other runtime settings. Existing work is allowed to finish.
+cancelled. `-1` is not a second unlimited sentinel and is rejected.
+`idle_timeout` defaults to `5m`. Zero disables the watchdog. A positive value
+cancels a *running* child that has produced no thinking, output, or tool
+activity for that duration. Empty thinking or text frames and elapsed-time UI
+ticks do not count as activity. An open tool, including an approval wait, is
+not cancelled. Compaction and explicit wait states such as a workspace-claim
+retry reset the idle clock. Settings updates must be `0` or 30–3600 seconds.
+Changes pass through validated application actions, update the active runtime,
+and are persisted with the same node-preserving YAML writer used by the other
+runtime settings. Existing work is allowed to finish. An existing config that
+already stores `idle_timeout: 0s` stays disabled.
 
 Subagent token, tool-call, turn, and wall-clock budgets default to zero, which
 means unbounded. `budget.soft_requests` defaults to 200 and injects one private
 wrap-up reminder when crossed; it is advisory and never stops the run. Set it
-to zero to disable the reminder. A child is cancelled only by explicit
-`subagent.kill`, a user
-stop that explicitly includes children, or application shutdown. Provider
+to zero to disable the reminder. A child is cancelled by explicit
+`subagent.kill`, a user stop that explicitly includes children, application
+shutdown, or an optional configured `idle_timeout`. Provider
 context windows still require semantic compaction, but that is not a cumulative
 task-size ceiling.
 
@@ -313,13 +322,17 @@ selected credential backend and never pass through that YAML writer.
 
 ## Desktop appearance preferences
 
-Theme, interface font, and interface font size are desktop-only preferences.
-The searchable font picker reads installed families and their localized names
-from macOS AppKit, Linux fontconfig, or the Windows installed font collection.
-Preferences apply immediately, persist in the WebView's local storage, and do
-not modify `config.yaml`. Interface font size is clamped to 11–20 px; the
-default is the operating-system UI font at 14 px. Code blocks and tool output
-retain their dedicated monospace stack.
+Theme, interface font, interface font size, and chat-surface text sizes are
+desktop-only preferences. The searchable font picker reads installed families
+and their localized names from macOS AppKit, Linux fontconfig, or the Windows
+installed font collection. Preferences apply immediately, persist in the
+WebView's local storage, and do not modify `config.yaml`. Interface font size
+is clamped to 11–20 px; the default is the operating-system UI font at 14 px
+and applies to chrome such as the sidebar, Settings, and Inspector shell.
+Conversation UI text (`azem:chat-font-size`, default 13 px, 12–20 px) and
+fenced code (`azem:chat-code-font-size`, default 12 px, 11–18 px) are
+independent and apply only on `.thread-surface` and the subagent side-chat
+transcript. Code blocks keep their dedicated monospace stack.
 
 ## Usage ledger
 

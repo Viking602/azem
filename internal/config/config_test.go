@@ -975,7 +975,8 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	}
 	subagents := cfg.Agents.Subagents
 	if !subagents.Enabled || subagents.MaxDepth != 2 || subagents.MaxConcurrency != 32 ||
-		subagents.AwaitTimeout != "0s" || subagents.AwaitDuration != 0 || !subagents.AutoWake {
+		subagents.AwaitTimeout != "0s" || subagents.AwaitDuration != 0 ||
+		subagents.IdleTimeout != "5m" || subagents.IdleDuration != DefaultSubagentIdleTimeout || !subagents.AutoWake {
 		t.Fatalf("subagent defaults = %#v", subagents)
 	}
 	if subagents.Budget.SoftRequests != 200 || !subagents.Budget.SoftRequestNotice ||
@@ -1026,6 +1027,29 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid.Agents.Subagents.AwaitTimeout = "-1s"
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("negative await_timeout was accepted")
+	}
+	zeroIdle := Default()
+	for _, value := range []string{"0s", "0", ""} {
+		zeroIdle.Agents.Subagents.IdleTimeout = value
+		if err := zeroIdle.Validate(); err != nil {
+			t.Fatalf("idle_timeout %q was rejected: %v", value, err)
+		}
+		if zeroIdle.Agents.Subagents.IdleDuration != 0 {
+			t.Fatalf("idle_timeout %q duration = %s", value, zeroIdle.Agents.Subagents.IdleDuration)
+		}
+	}
+	validIdle := Default()
+	validIdle.Agents.Subagents.IdleTimeout = "5m"
+	if err := validIdle.Validate(); err != nil {
+		t.Fatalf("idle_timeout 5m was rejected: %v", err)
+	}
+	if validIdle.Agents.Subagents.IdleDuration != 5*time.Minute {
+		t.Fatalf("idle_timeout 5m duration = %s", validIdle.Agents.Subagents.IdleDuration)
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.IdleTimeout = "-1s"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative idle_timeout was accepted")
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.Budget.MaxTokens = -1
@@ -1569,6 +1593,25 @@ func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
 	}
 	if err := UpdateSubagentAwaitTimeout(path, -1); err == nil {
 		t.Fatal("negative await timeout was accepted")
+	}
+	if err := UpdateSubagentIdleTimeout(path, 300); err != nil {
+		t.Fatal(err)
+	}
+	updated, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(updated), "idle_timeout: 300s") {
+		t.Fatalf("idle timeout was not persisted:\n%s", updated)
+	}
+	if err := UpdateSubagentIdleTimeout(path, 0); err != nil {
+		t.Fatalf("disabled idle timeout was rejected: %v", err)
+	}
+	if err := UpdateSubagentIdleTimeout(path, 10); err == nil {
+		t.Fatal("too-short idle timeout was accepted")
+	}
+	if err := UpdateSubagentIdleTimeout(path, -1); err == nil {
+		t.Fatal("negative idle timeout was accepted")
 	}
 	if err := UpdateSubagentMaxDepth(path, -2); err == nil {
 		t.Fatal("invalid recursive depth was accepted")

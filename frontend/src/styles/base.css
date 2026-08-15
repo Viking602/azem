@@ -2,6 +2,8 @@
   color-scheme: light;
   --ui-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif;
   --ui-font-size: 14px;
+  --chat-ui-font-size: 13px;
+  --chat-code-font-size: 12px;
   --mono: "SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", Menlo, monospace;
   font-family: var(--ui-font-family);
   font-synthesis: none;

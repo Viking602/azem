@@ -129,13 +129,14 @@ export function updateTool(blocks: Block[], event: RuntimeEvent): Block[] {
     const content = text
       ? (argumentsText ? `${argumentsText}\n${text}` : text)
       : argumentsText;
-    return [...blocks, {
+    const created: Block = {
       id, kind: "tool", runId: event.runId, agentId: event.agentId, toolCallId: id,
       title: data.name || "",
       content,
       state: nextState || "running",
-      data: argumentsText ? { ...data, arguments: argumentsText } : data,
-    }];
+      data: withToolStart(argumentsText ? { ...data, arguments: argumentsText } : { ...data }),
+    };
+    return [...blocks, settleFinishedTool(created, nextState)];
   }
 
   return blocks.map((block, current) => {
@@ -151,22 +152,35 @@ export function updateTool(blocks: Block[], event: RuntimeEvent): Block[] {
     } else if (!content && mergedArgs) {
       content = mergedArgs;
     }
-    return {
+    const next: Block = {
       ...block,
       title: data.name || block.title,
       content,
       state: nextState || block.state,
-      data: {
+      data: withToolStart({
         ...block.data,
         ...data,
         ...(mergedArgs ? { arguments: mergedArgs } : {}),
-      },
+      }),
     };
+    return settleFinishedTool(next, nextState || block.state || "");
   });
 }
 
+function withToolStart(data: Record<string, string>): Record<string, string> {
+  return data.startedAt ? data : { ...data, startedAt: String(Date.now()) };
+}
+
+function settleFinishedTool(block: Block, state: string): Block {
+  if (!["completed", "failed", "cancelled"].includes(state)) return block;
+  if (block.data?.elapsedMs) return { ...block, state };
+  return settleTimedProcessBlock(block, state);
+}
+
 export function stampProcessElapsed(block: Block, elapsedMs: number): Block {
-  if (!elapsedMs || (block.kind !== "thinking" && block.kind !== "tool")) return block;
+  // Tools keep their own start/finish clock. Copying the run duration onto
+  // every tool made five completed rows all read as the step's 1m44s.
+  if (!elapsedMs || block.kind !== "thinking") return block;
   if (block.data?.elapsedMs) return block;
   return { ...block, data: { ...block.data, elapsedMs: String(elapsedMs) } };
 }

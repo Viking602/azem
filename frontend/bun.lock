@@ -8,6 +8,8 @@
         "@iconify-icons/vscode-icons": "^1.2.29",
         "@iconify/react": "^6.0.2",
         "@wailsio/runtime": "3.0.0-alpha2.119",
+        "@xterm/addon-fit": "^0.11.0",
+        "@xterm/xterm": "^6.0.0",
         "lucide-react": "^0.468.0",
         "motion": "^13.0.0",
         "react": "^19.2.0",
@@ -145,6 +147,10 @@
     "@vitest/utils": ["@vitest/utils@4.1.10", "", { "dependencies": { "@vitest/pretty-format": "4.1.10", "convert-source-map": "^2.0.0", "tinyrainbow": "^3.1.0" } }, "sha512-fy9am/HWxbaGt/Sawrp90vt6Y6jQwf1RX77cz3uwoJwJVMli/e1IEwRPnMNJ7vKfPTwo0diXifkpPvwH9v7nGA=="],
 
     "@wailsio/runtime": ["@wailsio/runtime@3.0.0-alpha2.119", "", {}, "sha512-j8Py9HO+7gMvvYXCfGklS4cE+QUd59dYc6eH3ttpSkw28inaKUrViNe67ZDwEfzcgUZakxe/8m+l2lomzhD6gw=="],
+
+    "@xterm/addon-fit": ["@xterm/addon-fit@0.11.0", "", {}, "sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g=="],
+
+    "@xterm/xterm": ["@xterm/xterm@6.0.0", "", {}, "sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg=="],
 
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 

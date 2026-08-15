@@ -133,7 +133,7 @@ func (r Runner) Run(ctx context.Context, c Command, e Envelope) (result RunResul
 		}
 		cmd = exec.CommandContext(ctx, bash, "-lc", c.RawCommand)
 	} else {
-		cmd = exec.CommandContext(ctx, "/bin/sh", "-lc", c.RawCommand)
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", c.RawCommand)
 	}
 	configureCommand(cmd)
 	cmd.WaitDelay = time.Second

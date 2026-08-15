@@ -63,6 +63,7 @@ func AllActionKinds() []ActionKind {
 		ActionSetSubagentDepth,
 		ActionSetShellConcurrency,
 		ActionSetSubagentAwait,
+		ActionSetSubagentIdle,
 		ActionSetChatGPTFastMode,
 		ActionSetSessionPreferences,
 		ActionListBackground,

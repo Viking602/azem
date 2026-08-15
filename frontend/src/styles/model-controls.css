@@ -779,7 +779,11 @@ html.dark .effort-panel-speed.active {
 /* Overlay the composer on the timeline. The dock is a transparent hit-through
  * layer so conversation stays visible and scrollable beside the solid card.
  * Do not add a fade, mask, or scrim above the card.
- * --transcript-bottom-gap tracks the real dock height instead of a blank spacer. */
+ * --transcript-bottom-gap tracks the real dock height plus
+ * COMPOSER_OVERLAY_CLEARANCE so the last answer is not hidden under
+ * the input. A spacer in .transcript owns that gap (not padding-bottom)
+ * because content-visibility can drop parent padding from scrollHeight.
+ * The dock's 14px padding is below the card, not above it. */
 .composer-dock {
   position: absolute;
   z-index: 24;

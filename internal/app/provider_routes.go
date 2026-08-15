@@ -126,6 +126,17 @@ func (r *ProviderRuntime) UpdateSubagentAwaitTimeout(timeout time.Duration) {
 	}
 }
 
+func (r *ProviderRuntime) UpdateSubagentIdleTimeout(timeout time.Duration) {
+	r.mu.Lock()
+	r.cfg.Agents.Subagents.IdleTimeout = timeout.String()
+	r.cfg.Agents.Subagents.IdleDuration = timeout
+	subagents := r.subagents
+	r.mu.Unlock()
+	if subagents != nil {
+		subagents.updateIdleTimeout(timeout)
+	}
+}
+
 func (r *ProviderRuntime) UpdateChatGPTFastMode(enabled bool) {
 	r.mu.Lock()
 	r.cfg.Providers.ChatGPT.FastMode = enabled

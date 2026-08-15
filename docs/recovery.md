@@ -1,6 +1,6 @@
 # Recovery
 
-Last verified: 2026-08-14
+Last verified: 2026-08-15
 
 This guide covers the runtime recovery contract: which process may recover,
 what crash recovery restores, how interrupted work is represented, and which
@@ -119,14 +119,18 @@ boundary releases only the parent call — it never cancels the child
 - When the parent tool context itself ends, `detachAfterParentWait` detaches
   unconditionally; the tool result carries
   `continuing_in_background: true` and an explicit not-cancelled warning.
-- Children end only through `subagent.kill`, an explicit include-children
-  stop, or application shutdown. A process restart marks incomplete children
+- Children end through `subagent.kill`, an explicit include-children
+  stop, application shutdown, or `agents.subagents.idle_timeout` (default
+  `5m`; `0s` disables) when a running child stays silent. A process restart marks incomplete children
   `interrupted`; `subagentRuntime.recoverInterrupted` requeues restart-
   interrupted children that still have a durable child run.
 
-The desktop stop action stays asynchronous: `CancelActiveWithChildren`
-delivers the cancellation to the durable coordinator and returns immediately,
-so a slow tool cleanup cannot freeze the stop button (TOOL-002).
+The desktop stop action is an explicit include-children stop and stays
+asynchronous: `CancelActiveWithChildren(true)` cancels the parent’s
+subagents, then delivers the cancellation to the durable coordinator and
+returns immediately, so a slow tool cleanup cannot freeze the stop button
+(TOOL-002, SUBAGENT-006). A parent-wait expiry or TUI parent-only choice
+still detaches safe children instead of cancelling them (SUBAGENT-001).
 
 ## Team resume
 

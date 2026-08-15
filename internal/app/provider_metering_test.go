@@ -72,6 +72,9 @@ func TestProviderStreamSinkPersistsUnphasedToolTurnTextAsCommentary(t *testing.T
 	if len(projection.Blocks) != 1 || projection.Blocks[0].Kind != "commentary" || projection.Blocks[0].Content != "先检查代码。" {
 		t.Fatalf("blocks=%+v", projection.Blocks)
 	}
+	if projection.Blocks[0].Data["synthetic"] != "" {
+		t.Fatalf("real commentary marked synthetic: %+v", projection.Blocks[0].Data)
+	}
 }
 
 func TestProviderStreamSinkSynthesizesOneCommentaryBeforeEachToolBatch(t *testing.T) {
@@ -112,8 +115,8 @@ func TestProviderStreamSinkSynthesizesOneCommentaryBeforeEachToolBatch(t *testin
 	for _, block := range projection.Blocks {
 		if block.Kind == "commentary" {
 			commentaries = append(commentaries, block)
-			if block.Content != fallbackToolAnnouncement {
-				t.Fatalf("commentary=%q", block.Content)
+			if block.Content != fallbackToolAnnouncement || block.Data["synthetic"] != fallbackToolAnnouncementSynthetic {
+				t.Fatalf("commentary=%q data=%+v", block.Content, block.Data)
 			}
 		}
 	}
@@ -133,7 +136,7 @@ func TestProviderStreamSinkSynthesizesOneCommentaryBeforeEachToolBatch(t *testin
 		if event.Kind != want {
 			t.Fatalf("event %d kind=%q, want %q", index, event.Kind, want)
 		}
-		if event.Kind == EventTextDelta && (event.Text != fallbackToolAnnouncement || event.TextPhase != string(hyprovider.TextPhaseCommentary)) {
+		if event.Kind == EventTextDelta && (event.Text != fallbackToolAnnouncement || event.TextPhase != string(hyprovider.TextPhaseCommentary) || event.Data["synthetic"] != fallbackToolAnnouncementSynthetic) {
 			t.Fatalf("announcement event=%+v", event)
 		}
 	}

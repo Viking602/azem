@@ -211,6 +211,7 @@ type activeSubagent struct {
 	persistedActivity   string
 	lastStateEmit       time.Time
 	lastEmittedTools    int
+	lastVisibleAt       time.Time
 }
 
 type subagentRuntime struct {
@@ -227,6 +228,7 @@ type subagentRuntime struct {
 	hosts            map[string]providerHost
 	wakeInFlight     map[string]bool
 	changed          chan struct{}
+	idleCheckEvery   time.Duration
 	wg               sync.WaitGroup
 }
 
@@ -239,11 +241,14 @@ func newSubagentRuntime(parent context.Context, cfg config.SubagentConfig, store
 	}
 	cfg = cloneSubagentConfig(cfg)
 	ctx, cancel := context.WithCancel(parent)
-	return &subagentRuntime{
+	runtime := &subagentRuntime{
 		cfg: cfg, store: store, worktreeRoot: worktreeRoot, ctx: ctx, cancel: cancel,
 		active: make(map[string]*activeSubagent), terminalFallback: make(map[string]agentservice.SubagentSnapshot),
 		hosts: make(map[string]providerHost), wakeInFlight: make(map[string]bool), changed: make(chan struct{}),
-	}, nil
+	}
+	runtime.wg.Add(1)
+	go runtime.watchIdle()
+	return runtime, nil
 }
 
 func (r *subagentRuntime) Drivers(parent subagentParentRuntime) ([]tool.Driver, error) {
@@ -305,7 +310,7 @@ func (r *subagentRuntime) recoverInterrupted(parent subagentParentRuntime) error
 		childCtx, cancel := context.WithCancel(r.ctx)
 		active := &activeSubagent{
 			run: run, profile: profile, prompt: run.Description, parent: parent, ctx: childCtx, cancel: cancel,
-			done: make(chan struct{}), toolNames: make(map[string]struct{}),
+			done: make(chan struct{}), toolNames: make(map[string]struct{}), lastVisibleAt: time.Now(),
 		}
 		r.mu.Lock()
 		if _, exists := r.active[run.ID]; exists {
@@ -366,6 +371,13 @@ func (r *subagentRuntime) updateAwaitTimeout(timeout time.Duration) {
 	r.mu.Lock()
 	r.cfg.AwaitTimeout = timeout.String()
 	r.cfg.AwaitDuration = timeout
+	r.mu.Unlock()
+}
+
+func (r *subagentRuntime) updateIdleTimeout(timeout time.Duration) {
+	r.mu.Lock()
+	r.cfg.IdleTimeout = timeout.String()
+	r.cfg.IdleDuration = timeout
 	r.mu.Unlock()
 }
 
@@ -471,7 +483,7 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	childCtx, cancel := context.WithCancel(r.ctx)
 	active := &activeSubagent{
 		run: run, profile: profile, prompt: input.Prompt, parent: parent, ctx: childCtx, cancel: cancel,
-		done: make(chan struct{}), toolNames: make(map[string]struct{}),
+		done: make(chan struct{}), toolNames: make(map[string]struct{}), lastVisibleAt: time.Now(),
 	}
 	r.mu.Lock()
 	r.active[id] = active
@@ -1117,6 +1129,7 @@ func (r *subagentRuntime) execute(id string) {
 	}
 	contextManager := subagentTurnContext{
 		instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
+		noteActivity: func(activity string) { r.noteVisibleActivity(id, activity) },
 		inner: turnContext{
 			structuredSummary: true, largeToolTokens: parent.ContextConfig.LargeToolResultTokens,
 			compactTargetTokens: contextBudget.Target, minReclaimTokens: parent.ContextConfig.MinReclaimTokens,
@@ -1192,6 +1205,7 @@ func (r *subagentRuntime) execute(id string) {
 	active.run.CWD = profile.CWD
 	active.run.AccountID = profile.AccountID
 	active.run.Isolation = profile.Isolation
+	active.lastVisibleAt = time.Now()
 	running := cloneSubagentRun(active.run)
 	r.mu.Unlock()
 	if err := r.store.Save(r.ctx, running); err != nil {
@@ -1336,9 +1350,22 @@ func (r *subagentRuntime) persistActiveState(id, summary string) error {
 		r.mu.Unlock()
 		return context.Canceled
 	}
+	// A new explicit wait summary resets the idle clock once (SUBAGENT-005),
+	// but a retry loop repeating the same summary every 100ms is not fresh
+	// progress: the idle watchdog must still fire for a child that only
+	// spins on lease/workspace conflicts, and the spin must not write the
+	// store or emit state on every iteration.
+	repeated := active.run.State == agentservice.SubagentRunning &&
+		active.run.Summary == summary && active.activity == summary
+	if repeated {
+		r.mu.Unlock()
+		return nil
+	}
 	run := cloneSubagentRun(active.run)
 	run.State = agentservice.SubagentRunning
 	run.Summary = summary
+	active.activity = summary
+	active.lastVisibleAt = time.Now()
 	r.mu.Unlock()
 	if err := r.store.Save(r.ctx, run); err != nil {
 		return err

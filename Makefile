@@ -42,15 +42,19 @@ gui-windows: frontend
 	GOOS=windows GOARCH=$(WINDOWS_ARCH) CGO_ENABLED=0 go build -ldflags "-H windowsgui $(LDFLAGS)" -o dist/windows-$(WINDOWS_ARCH)/Azem.exe ./cmd/azem-gui
 
 test: contracts-check
+ifeq ($(shell uname -s),Darwin)
+	$(DARWIN_CGO_ENV) go test ./...
+else
 	go test ./...
+endif
 
 test-gui:
 	cd frontend && bun run typecheck && bun run test && bun run build
 
 ifeq ($(shell uname -s),Darwin)
-	$(DARWIN_CGO_ENV) go test ./internal/desktop ./cmd/azem-gui
+	$(DARWIN_CGO_ENV) go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui
 else
-	go test ./internal/desktop ./cmd/azem-gui
+	go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui
 endif
 
 sqlc:

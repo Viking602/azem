@@ -84,7 +84,7 @@ ModelHistory V2 + active manifest + semantic revision
 - `sources`
 - first/last sequence 与 supersedes（可选）
 
-writer 必须返回严格 JSON。宿主拒绝非 JSON、错误 version、空 objective、非法枚举、超长文本、超量 fact 和无有效来源；只允许一次定向修复重试。writer 没有 shell、编辑、MCP、Todo mutation、Memory mutation 或 subagent 工具权限。
+writer 必须返回严格 JSON。宿主在解码时把字符串或字符串数组形态的 `sources` 规范成 `EvidenceRefV1` 对象，然后拒绝非 JSON、错误 version、空 objective、非法枚举、超长文本、超量 fact、不兼容的 sources 类型和无有效来源；只允许一次定向修复重试。writer 没有 shell、编辑、MCP、Todo mutation、Memory mutation 或 subagent 工具权限。
 
 ## 5. Provenance
 
@@ -210,7 +210,7 @@ Artifact payload 与 SHA256 保持权威。preview 固定包含 version、kind�
 
 - `schemaVersion == len(migrations)`。
 - schema 20 migration 保留 canonical/Todo/Artifact，清除旧 ModelHistory/cache identity。
-- SemanticStateV1 严格 JSON 与 provenance 校验。宿主只接受裸 JSON，或一个包裹整个响应的 ` ``` ` / ` ```json ` 围栏；不从散文、嵌套围栏或其它围栏语言中提取 JSON。
+- SemanticStateV1 严格 JSON 与 provenance 校验。宿主只接受裸 JSON，或一个包裹整个响应的 ` ``` ` / ` ```json ` 围栏；不从散文、嵌套围栏或其它围栏语言中提取 JSON。`sources` 允许字符串或字符串数组，解码后规范为 `EvidenceRefV1`；数字、布尔和无法映射的对象仍失败。
 - 最近 3 个用户 turn 精确保留。
 - tool groups 不拆分。
 - map/reduce 输入有界，失败不改变 checkpoint。

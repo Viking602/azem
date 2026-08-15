@@ -213,6 +213,16 @@ func UpdateSubagentAwaitTimeout(path string, seconds int) error {
 	})
 }
 
+func UpdateSubagentIdleTimeout(path string, seconds int) error {
+	if !ValidSubagentIdleSeconds(seconds) {
+		return fmt.Errorf("agents.subagents.idle_timeout must be 0 (disabled) or between 30 and 3600 seconds")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		subagents := ensureMappingPath(root, "agents", "subagents")
+		setMappingScalar(subagents, "idle_timeout", fmt.Sprintf("%ds", seconds))
+	})
+}
+
 func UpdateChatGPTFastMode(path string, enabled bool) error {
 	return updateYAML(path, func(root *yaml.Node) {
 		chatGPT := ensureMappingPath(root, "providers", "chatgpt")

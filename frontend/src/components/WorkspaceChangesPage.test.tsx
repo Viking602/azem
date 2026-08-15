@@ -57,6 +57,8 @@ describe("WorkspaceChangesPage", () => {
     expect(container.textContent).toContain("new value");
     expect(container.textContent).toContain("+3");
     expect(container.textContent).toContain("−1");
+    expect(container.textContent).not.toContain("架构违规");
+    expect(container.querySelectorAll(".change-summary article")).toHaveLength(3);
     expect(container.textContent).not.toContain("@@");
     expect(container.querySelector(".patch-hunk-heading")).toBeNull();
 

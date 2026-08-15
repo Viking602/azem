@@ -133,4 +133,63 @@ describe("Inspector", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  it("renders todo phases as Beautiful UI Task Row capsules", async () => {
+    useRuntimeStore.setState({
+      snapshot, view: "thread", currentSessionId: "session-1", blocks: [], agents: [], backgroundProcesses: [],
+      branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, recap: null, contextProfile: null,
+      todo: {
+        goal: "核验供应商并映射库存",
+        revision: 1,
+        phases: [
+          {
+            id: "phase-1", title: "核验供应商", items: [
+              { id: "item-1", content: "匹配税号", status: "completed" },
+              { id: "item-2", content: "核对联系人", status: "completed" },
+            ],
+          },
+          {
+            id: "phase-2", title: "映射库存", items: [
+              { id: "item-3", content: "读取库存文件", status: "in_progress" },
+              { id: "item-4", content: "评估缺货", status: "pending" },
+            ],
+          },
+        ],
+      },
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const rows = Array.from(container.querySelectorAll(".todo-section .bui-task-row"));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.getAttribute("data-status")).toBe("completed");
+    expect(rows[0]!.getAttribute("data-variant")).toBe("capsules");
+    expect(rows[0]!.getAttribute("data-expanded")).toBe("false");
+    expect(rows[0]!.querySelector(".bui-task-mark")?.getAttribute("data-state")).toBe("completed");
+    expect(rows[0]!.querySelector(".bui-task-title")?.textContent).toBe("核验供应商");
+    expect(rows[0]!.querySelector(".bui-task-metric")?.textContent).toBe("2/2");
+    expect(rows[0]!.querySelector(".bui-task-badge")?.textContent).toBe("已完成");
+    expect(rows[0]!.querySelector(".bui-task-header")?.getAttribute("aria-expanded")).toBe("false");
+    expect(rows[0]!.querySelector<HTMLDivElement>(".bui-task-body")?.hidden).toBe(true);
+
+    expect(rows[1]!.getAttribute("data-status")).toBe("in_progress");
+    expect(rows[1]!.querySelector(".bui-task-mark em")?.textContent).toBe("2");
+    expect(rows[1]!.querySelector(".bui-task-title")?.textContent).toBe("映射库存");
+    expect(rows[1]!.querySelector(".bui-task-metric")?.textContent).toBe("0/2");
+    expect(rows[1]!.querySelector(".bui-task-badge")?.textContent).toBe("进行中");
+    expect(rows[1]!.querySelector(".bui-task-header")?.getAttribute("aria-expanded")).toBe("true");
+    expect(rows[1]!.querySelector<HTMLDivElement>(".bui-task-body")?.hidden).toBe(false);
+    expect(rows[1]!.textContent).toContain("读取库存文件");
+    expect(rows[1]!.textContent).toContain("评估缺货");
+
+    await act(async () => rows[0]!.querySelector<HTMLButtonElement>(".bui-task-header")!.click());
+    expect(rows[0]!.querySelector(".bui-task-header")?.getAttribute("aria-expanded")).toBe("true");
+    expect(rows[0]!.querySelector<HTMLDivElement>(".bui-task-body")?.hidden).toBe(false);
+    expect(rows[0]!.textContent).toContain("匹配税号");
+    expect(rows[0]!.textContent).toContain("2/2");
+    expect(container.querySelector(".todo-section .inspector-section-header small")?.textContent).toBe("2 / 4");
+
+    await act(async () => root.unmount());
+  });
 });

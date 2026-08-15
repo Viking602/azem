@@ -565,6 +565,65 @@ func assertStaleSemanticCheckpointRejected(t *testing.T, ctx context.Context, se
 	}
 }
 
+func TestRunCheckpointRejectsDivergentSemanticStateForSameSourceDigest(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "semantic-divergent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Semantic"}); err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "ship it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("d", 64)
+	cursor := WriterCursorV1{CanonicalSequence: sequence}
+	checkpoint := semanticCheckpointForTest(t, "run", "cache-a", "semantic-a", 0, cursor, digest, `{"version":1,"objective":{"text":"A"}}`, "model A")
+	checkpoint.ExpectedHighWater = &sequence
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+
+	divergent := semanticCheckpointForTest(t, "run", "cache-b", "semantic-b", 0, cursor, digest, `{"version":1,"objective":{"text":"B"}}`, "model B")
+	divergent.ExpectedHighWater = &sequence
+	if err := service.SaveRunCheckpoint(ctx, "session", divergent); !errors.Is(err, ErrRunCheckpointStale) {
+		t.Fatalf("divergent semantic commit error=%v", err)
+	}
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.CacheIdentityHash != "cache-a" || len(projection.ModelHistory.Messages) != 1 || projection.ModelHistory.Messages[0].Text != "model A" {
+		t.Fatalf("divergent checkpoint mutated projection: %+v", projection.ModelHistory)
+	}
+	semantic, err := service.LoadSemanticCheckpoint(ctx, "session")
+	if err != nil || !bytes.Contains(semantic.State, []byte(`"A"`)) {
+		t.Fatalf("semantic checkpoint=%+v err=%v", semantic, err)
+	}
+}
+
+func semanticCheckpointForTest(t *testing.T, runID, cacheIdentity, checkpointID string, baseRevision int64, cursor WriterCursorV1, digest, state, modelText string) RunCheckpoint {
+	t.Helper()
+	patch, err := json.Marshal(map[string]any{
+		"version": 1, "base_revision": baseRevision, "through": cursor, "source_digest": digest, "operations": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return RunCheckpoint{
+		RunID: runID, CacheIdentity: cacheIdentity,
+		ModelHistory: ModelHistory{Messages: []message.Message{message.NewText(message.RoleAssistant, modelText)}},
+		SemanticCommit: &SemanticCommit{
+			CheckpointID: checkpointID, BaseRevision: baseRevision, Cursor: cursor,
+			State: json.RawMessage(state), Patch: patch, SourceDigest: digest,
+		},
+	}
+}
+
 func TestWriterCursorRejectsBackwardTieBreakers(t *testing.T) {
 	current := WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-b", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-b"}
 	if cursorAtOrAfter(WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-a", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-b"}, current) {

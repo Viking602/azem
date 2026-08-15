@@ -4,7 +4,7 @@ import {
 } from "lucide-react";
 import { execute, openProject, selectProjectFolder } from "../../bridge";
 import { contextOccupancy } from "../../contextUsage";
-import { tFormat, translator } from "../../i18n";
+import { tFormat, translator, type Language, type MessageKey } from "../../i18n";
 import { useRuntimeStore } from "../../store";
 import type { DeliveryMode } from "../../types";
 import AttachmentPreview from "../AttachmentPreview";
@@ -14,6 +14,23 @@ import { ContextMeter } from "./ContextMeter";
 import { namedClipboardImage, pastedImages, shouldReadNativeClipboard } from "./clipboard";
 import { effectiveComposerRoute, useComposerModels } from "./composerModels";
 import { parseSkillPrompt, slashSuggestions, type SlashSuggestion } from "./slash";
+import { PromptBar } from "../beautiful-ui/Primitives";
+
+export function composerPromptPlaceholder(
+  t: (key: MessageKey) => string,
+  options: { busy: boolean; running: boolean; deliveryMode: DeliveryMode; showContextBar: boolean; language: Language },
+) {
+  if (options.busy && options.running) {
+    return options.deliveryMode === "guide" ? t("guidePlaceholder") : t("runningPlaceholder");
+  }
+  if (options.busy) return t("queuePlaceholder");
+  if (options.showContextBar) {
+    return options.language === "zh-CN"
+      ? "描述要完成的任务，@ 引用文件，/ 使用技能…"
+      : "Describe a task, @ reference files, or / use skills…";
+  }
+  return options.language === "zh-CN" ? "继续描述你想调整的界面…" : "Continue describing what you want to adjust…";
+}
 
 export function branchMenuLayout(
   trigger: { top: number; bottom: number },
@@ -133,7 +150,7 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
 
   return (
     <div className="composer-shell">
-      <div className="composer-card">
+      <PromptBar className="composer-card">
         {showContextBar ? <ComposerContextBar /> : null}
         {slashOpen && <div id="slash-menu" ref={slashMenu} className="slash-menu" role="listbox" aria-label={t("slashCommands")}>
           {commandItems.length > 0 && <section className="slash-commands">
@@ -173,7 +190,7 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
           void attachClipboard([]);
         }} onFocus={() => setSlashDismissed(false)} onBlur={() => setSlashDismissed(true)}
           aria-autocomplete="list" aria-expanded={slashOpen} aria-controls={slashOpen ? "slash-menu" : undefined} aria-activedescendant={slashOpen ? `slash-option-${slashCursor}` : undefined}
-          placeholder={busy ? running && deliveryMode === "guide" ? t("guidePlaceholder") : t("queuePlaceholder") : showContextBar ? snapshot.language === "zh-CN" ? "描述要完成的任务，@ 引用文件，/ 使用技能…" : "Describe a task, @ reference files, or / use skills…" : snapshot.language === "zh-CN" ? "继续描述你想调整的界面…" : "Continue describing what you want to adjust…"} rows={2} onKeyDown={(event) => {
+          placeholder={composerPromptPlaceholder(t, { busy, running, deliveryMode, showContextBar, language: snapshot.language })} rows={2} onKeyDown={(event) => {
           if (selectedSkill && event.key === "Backspace" && !visiblePrompt) {
             event.preventDefault();
             setPrompt("");
@@ -239,7 +256,7 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
           />
           {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} aria-label={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={() => submitOrChooseSlash()} disabled={!prompt.trim() && attachments.length === 0} aria-label={busy ? running && deliveryMode === "guide" ? t("guide") : t("queue") : t("send")}><ArrowUp size={17} strokeWidth={2.25} /></button>}
         </div>
-      </div>
+      </PromptBar>
     </div>
   );
 }

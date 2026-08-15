@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import { Bot, LoaderCircle, Square, X } from "lucide-react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { Bot, Square, X } from "lucide-react";
 import { execute } from "../bridge";
+import { chatTypographyVars } from "../chatTypography";
 import { translator } from "../i18n";
 import { isSubagentActive, subagentDisplayName, subagentStatusLabel } from "../subagents";
 import { useRuntimeStore } from "../store";
@@ -12,6 +13,8 @@ import { TimelineFeed } from "./Timeline";
 /** Focused drawer for one subagent transcript. */
 export default function AgentSideChat() {
   const language = useRuntimeStore((state) => state.snapshot?.language ?? "zh-CN");
+  const chatFontSize = useRuntimeStore((state) => state.chatFontSize);
+  const chatCodeFontSize = useRuntimeStore((state) => state.chatCodeFontSize);
   const agents = useRuntimeStore((state) => state.agents);
   const selectedAgentId = useRuntimeStore((state) => state.selectedAgentId);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
@@ -67,7 +70,7 @@ export default function AgentSideChat() {
   };
 
   return (
-    <aside className="agent-side-chat" role="dialog" aria-modal="true" aria-labelledby="subagent-detail-title">
+    <aside className="agent-side-chat" role="dialog" aria-modal="true" aria-labelledby="subagent-detail-title" style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
       <header className="agent-side-chat-header">
         <div className="agent-side-chat-heading">
           {agent ? <SubagentGlyph agent={agent} size={34} /> : <Bot size={24} aria-hidden="true" />}
@@ -123,7 +126,7 @@ export default function AgentSideChat() {
         running={running}
         selectedAgentId={selectedAgentId}
         previewRunId={agent?.previewRunId || ""}
-        emptyDescription={agent?.description || (running ? t("syncingAgentTimeline") : t("emptySideChat"))}
+        emptyDescription={agent?.description || t("emptySideChat")}
         roleLabel={role}
       />
     </aside>
@@ -176,9 +179,9 @@ function AgentSideChatTranscript({
         followTail.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
       }}
     >
-      {agentBlocks.length === 0 ? (
+      {agentBlocks.length === 0 && !running ? (
         <div className="agent-side-chat-empty">
-          {running ? <LoaderCircle className="spin" size={20} /> : <Bot size={22} />}
+          <Bot size={22} />
           <p>{emptyDescription}</p>
         </div>
       ) : (
@@ -188,6 +191,7 @@ function AgentSideChatTranscript({
             language={language}
             activeRunId={activeRunId}
             running={running}
+            waitingForModel={running}
             collapseCompletedProcess
           />
         </div>

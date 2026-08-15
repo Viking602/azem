@@ -183,7 +183,7 @@ func (s *Service) emitSyntheticToolAnnouncement(ctx context.Context, sessionID, 
 	return s.emit(ctx, Event{
 		Kind: EventTextDelta, SessionID: sessionID, RunID: runID,
 		State: "streaming", Text: text, TextPhase: string(hyprovider.TextPhaseCommentary),
-		Data: map[string]string{"synthetic": "tool_announcement"},
+		Data: map[string]string{"synthetic": fallbackToolAnnouncementSynthetic},
 	})
 }
 
@@ -215,9 +215,13 @@ type durableCommentaryCollector struct {
 	content          strings.Builder
 	startedAt        time.Time
 	batchAnnounced   bool
+	synthetic        bool
 }
 
-const fallbackToolAnnouncement = "**执行工具步骤**\n调用所需工具并根据实际结果继续。"
+const (
+	fallbackToolAnnouncement          = "正在调用所需工具，并根据实际结果继续。"
+	fallbackToolAnnouncementSynthetic = "tool_announcement"
+)
 
 func (c *durableCommentaryCollector) append(chunk string) {
 	if chunk == "" {
@@ -234,6 +238,7 @@ func (c *durableCommentaryCollector) ensureToolAnnouncement() string {
 		return ""
 	}
 	c.append(fallbackToolAnnouncement)
+	c.synthetic = true
 	return fallbackToolAnnouncement
 }
 
@@ -255,14 +260,18 @@ func (c *durableCommentaryCollector) flush(ctx context.Context) error {
 	}
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
+	data := map[string]string{
+		"startedAt":   fmt.Sprint(startedAt.UnixMilli()),
+		"completedAt": fmt.Sprint(completedAt.UnixMilli()),
+		"elapsedMs":   fmt.Sprint(completedAt.Sub(startedAt).Milliseconds()),
+	}
+	if c.synthetic {
+		data["synthetic"] = fallbackToolAnnouncementSynthetic
+	}
 	sequence, err := c.store.AppendBlock(persistCtx, c.sessionID, session.Block{
 		Kind: "commentary", RunID: c.runID, Title: "progress", Content: content,
 		TextPhase: string(hyprovider.TextPhaseCommentary), State: "completed",
-		Data: map[string]string{
-			"startedAt":   fmt.Sprint(startedAt.UnixMilli()),
-			"completedAt": fmt.Sprint(completedAt.UnixMilli()),
-			"elapsedMs":   fmt.Sprint(completedAt.Sub(startedAt).Milliseconds()),
-		},
+		Data: data,
 	})
 	if err != nil {
 		return fmt.Errorf("persist commentary: %w", err)
@@ -275,6 +284,7 @@ func (c *durableCommentaryCollector) flush(ctx context.Context) error {
 func (c *durableCommentaryCollector) discard() {
 	c.content.Reset()
 	c.startedAt = time.Time{}
+	c.synthetic = false
 }
 
 func (c *durableCommentaryCollector) endToolBatch() {

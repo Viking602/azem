@@ -55,7 +55,8 @@ runtime.
 | `cmd/azem` | CLI flags, signals, TUI startup and shutdown | Agent or persistence behavior |
 | `cmd/azem-gui` | Wails lifecycle, windows, deep links, desktop startup | Arbitrary filesystem or shell APIs |
 | `frontend/src` | React projection, interaction state, typed Bridge calls | Provider execution or authoritative durable state |
-| `internal/desktop` | Closed Bridge operation set and event forwarding | General-purpose shell or filesystem access |
+| `internal/desktop` | Closed Bridge operation set and event forwarding | Agent shell execution or a generic `sh -c` API |
+| `internal/desktop/termhost` | Human-only PTY sessions for the desktop window | Venat tools, approvals, or model-driven stdin |
 | `internal/tui` | Bubble Tea state, rendering, input routing | Duplicate runtime services |
 | `internal/app` | Composition and orchestration of turns, events, providers, approvals, subagents, and recovery | Provider-specific wire parsing or raw SQL |
 | `internal/agent` | Governed tools, Venat runs, teams, scheduling, worktrees | UI rendering |
@@ -90,6 +91,9 @@ exceptions with relative-path, resolved-symlink, entry-count, file-size,
 Git-output, timeout, and binary-content enforcement in
 `internal/desktop/workspace_files.go` and
 `internal/desktop/workspace_changes.go`; React cannot weaken those boundaries.
+The embedded terminal is a second deliberate exception: Go owns the PTY, the
+renderer only displays xterm output and forwards keystrokes through named
+Bridge methods, and the agent tool catalog cannot write to those sessions.
 
 ## Planning lifecycle
 
@@ -186,8 +190,10 @@ resync after its terminal event so the completed transcript is authoritative.
 Approvals, tool lifecycle transitions, and run terminal events remain ordered
 and lossless.
 
-Active assistant and commentary blocks render as inexpensive pre-wrapped text.
-Completed blocks switch to full Markdown, and settled timeline rows use native
+Assistant and commentary blocks parse Markdown while they stream. Completing a
+live block keeps that tree mounted and drops the caret from the box tree
+(`content: none`); history loads use
+the memoized Markdown renderer. Settled timeline rows use native
 `content-visibility` containment so offscreen history does not participate in
 every streamed frame.
 

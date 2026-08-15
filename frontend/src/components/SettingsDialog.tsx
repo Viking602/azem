@@ -4,6 +4,12 @@ import {
   RefreshCw, Search, Settings2, ShieldAlert, ShieldCheck, X,
 } from "lucide-react";
 import { execute, listHookCatalog, listSkillCatalog, listSystemFonts, type SystemFont } from "../bridge";
+import {
+  CHAT_CODE_FONT_MAX,
+  CHAT_CODE_FONT_MIN,
+  CHAT_UI_FONT_MAX,
+  CHAT_UI_FONT_MIN,
+} from "../chatTypography";
 import { reasoningLabel, sortReasoningLevels, tFormat, translator, type Language } from "../i18n";
 import { routeSearchID, settingsSectionSearchAliases } from "../settingsSearch";
 import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ModelOption } from "../store";
@@ -28,11 +34,15 @@ export default function SettingsDialog() {
   const theme = useRuntimeStore((state) => state.theme);
   const uiFont = useRuntimeStore((state) => state.uiFont);
   const uiFontSize = useRuntimeStore((state) => state.uiFontSize);
+  const chatFontSize = useRuntimeStore((state) => state.chatFontSize);
+  const chatCodeFontSize = useRuntimeStore((state) => state.chatCodeFontSize);
   const approvalMode = useRuntimeStore((state) => state.approvalMode);
   const settingsTarget = useRuntimeStore((state) => state.settingsTarget);
   const setTheme = useRuntimeStore((state) => state.setTheme);
   const setUIFont = useRuntimeStore((state) => state.setUIFont);
   const setUIFontSize = useRuntimeStore((state) => state.setUIFontSize);
+  const setChatFontSize = useRuntimeStore((state) => state.setChatFontSize);
+  const setChatCodeFontSize = useRuntimeStore((state) => state.setChatCodeFontSize);
   const setLanguage = useRuntimeStore((state) => state.setLanguage);
   const setQueueMode = useRuntimeStore((state) => state.setQueueMode);
   const setError = useRuntimeStore((state) => state.setError);
@@ -43,6 +53,7 @@ export default function SettingsDialog() {
   const [maxDepth, setMaxDepth] = useState(snapshot.subagentMaxDepth ?? 2);
   const [shellConcurrency, setShellConcurrency] = useState(snapshot.shellConcurrency ?? 2);
   const [awaitSeconds, setAwaitSeconds] = useState(snapshot.subagentAwaitSeconds ?? 0);
+  const [idleSeconds, setIdleSeconds] = useState(snapshot.subagentIdleSeconds ?? 0);
   const [addProviderRequest, setAddProviderRequest] = useState(0);
   const [systemFonts, setSystemFonts] = useState<SystemFont[]>([]);
   const [reducedMotion, setReducedMotion] = useState(() => localStorage.getItem("azem-reduced-motion") === "true");
@@ -125,6 +136,7 @@ export default function SettingsDialog() {
   useEffect(() => setMaxDepth(snapshot.subagentMaxDepth ?? 2), [snapshot.subagentMaxDepth]);
   useEffect(() => setShellConcurrency(snapshot.shellConcurrency ?? 2), [snapshot.shellConcurrency]);
   useEffect(() => setAwaitSeconds(snapshot.subagentAwaitSeconds ?? 0), [snapshot.subagentAwaitSeconds]);
+  useEffect(() => setIdleSeconds(snapshot.subagentIdleSeconds ?? 0), [snapshot.subagentIdleSeconds]);
   useEffect(() => {
     document.documentElement.dataset.reduceMotion = String(reducedMotion);
     localStorage.setItem("azem-reduced-motion", String(reducedMotion));
@@ -263,6 +275,21 @@ export default function SettingsDialog() {
                   ariaLabel={t("subagentAwaitLabel")}
                 />
               </SettingRow>
+              <SettingRow settingID="subagents:idle" label={t("subagentIdleLabel")} description={t("subagentIdleHint")}>
+                <MenuSelect
+                  className="capacity-timeout-menu"
+                  value={String(idleSeconds)}
+                  options={[
+                    { value: "0", label: t("subagentIdleOff") },
+                    ...[60, 120, 300, 600, 900, 1800].map((seconds) => ({
+                      value: String(seconds),
+                      label: tFormat(snapshot.language, "subagentMinutes", { n: seconds / 60 }),
+                    })),
+                  ]}
+                  onChange={(value) => { const seconds = Number(value); setIdleSeconds(seconds); void action("set_subagent_idle_timeout", value); }}
+                  ariaLabel={t("subagentIdleLabel")}
+                />
+              </SettingRow>
             </section>
             <section className="settings-card subagent-scheduling" data-setting-id="subagents:scheduling" aria-labelledby="subagent-scheduling-title">
               <header>
@@ -317,9 +344,23 @@ export default function SettingsDialog() {
               <SettingRow settingID="appearance:language" label={snapshot.language === "zh-CN" ? "界面语言" : "Interface language"} description={snapshot.language === "zh-CN" ? "应用菜单、按钮与系统消息" : "Application menus, buttons, and system messages"}><div className="appearance-segmented" role="radiogroup"><button type="button" className={snapshot.language === "zh-CN" ? "selected" : ""} onClick={() => { setLanguage("zh-CN"); void action("set_language", "zh-CN"); }}>{t("langZh")}</button><button type="button" className={snapshot.language === "en" ? "selected" : ""} onClick={() => { setLanguage("en"); void action("set_language", "en"); }}>English</button></div></SettingRow>
               <SettingRow settingID="appearance:theme" label={t("theme")} description={snapshot.language === "zh-CN" ? "跟随系统可自动切换明暗" : "Follow the system appearance automatically"}><div className="theme-preview-group" role="radiogroup">{(["light", "dark", "system"] as const).map((item) => <button type="button" key={item} className={theme === item ? "selected" : ""} onClick={() => setTheme(item)}><span data-theme-preview={item}><i /><b /></span><small>{item === "light" ? (snapshot.language === "zh-CN" ? "暖白" : "Warm light") : item === "dark" ? (snapshot.language === "zh-CN" ? "夜间" : "Night") : t("system")}</small></button>)}</div></SettingRow>
               <SettingRow settingID="appearance:font" label={t("interfaceFont")} description={t("interfaceFontHint")}><MenuSelect className="setting-menu font-family-menu" value={uiFont} options={fontOptions} onChange={setUIFont} ariaLabel={t("interfaceFont")} fit="full" searchable searchPlaceholder={t("searchFonts")} emptyLabel={t("noMatchingFonts")} /></SettingRow>
-              <SettingRow settingID="appearance:font-size" label={t("interfaceFontSize")} description={t("interfaceFontSizeHint")}><div className="font-size-control"><button type="button" onClick={() => setUIFontSize(uiFontSize - 1)} disabled={uiFontSize <= 11} aria-label={t("decreaseFontSize")}><span>A−</span></button><output aria-live="polite">{uiFontSize} px</output><button type="button" onClick={() => setUIFontSize(uiFontSize + 1)} disabled={uiFontSize >= 20} aria-label={t("increaseFontSize")}><span>A+</span></button></div></SettingRow>
+              <SettingRow settingID="appearance:font-size" label={t("interfaceFontSize")} description={t("interfaceFontSizeHint")}><FontSizeControl value={uiFontSize} min={11} max={20} onChange={setUIFontSize} decreaseLabel={t("decreaseFontSize")} increaseLabel={t("increaseFontSize")} /></SettingRow>
               <SettingRow settingID="appearance:motion" label={snapshot.language === "zh-CN" ? "减弱动态效果" : "Reduce motion"} description={snapshot.language === "zh-CN" ? "将场景切换与流式渐显缩短为即时更新" : "Make scene transitions and streaming reveals immediate"}><button type="button" role="switch" aria-checked={reducedMotion} className={`settings-switch ${reducedMotion ? "on" : ""}`} onClick={() => setReducedMotion((value) => !value)}><span /></button></SettingRow>
             </div>
+            <section className="settings-card appearance-card appearance-chat-card" data-setting-id="appearance:chat-text" aria-labelledby="chat-text-title">
+              <header>
+                <div>
+                  <strong id="chat-text-title">{t("chatTextControls")}</strong>
+                  <small>{t("chatTextControlsHint")}</small>
+                </div>
+              </header>
+              <SettingRow settingID="appearance:chat-font-size" label={t("chatUIFontSize")} description={t("chatUIFontSizeHint")}>
+                <FontSizeControl value={chatFontSize} min={CHAT_UI_FONT_MIN} max={CHAT_UI_FONT_MAX} onChange={setChatFontSize} decreaseLabel={t("decreaseChatUIFontSize")} increaseLabel={t("increaseChatUIFontSize")} />
+              </SettingRow>
+              <SettingRow settingID="appearance:chat-code-font-size" label={t("chatCodeFontSize")} description={t("chatCodeFontSizeHint")}>
+                <FontSizeControl value={chatCodeFontSize} min={CHAT_CODE_FONT_MIN} max={CHAT_CODE_FONT_MAX} onChange={setChatCodeFontSize} decreaseLabel={t("decreaseChatCodeFontSize")} increaseLabel={t("increaseChatCodeFontSize")} />
+              </SettingRow>
+            </section>
           </SettingsPane>}
           {activeSection === "extensions" && <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} executeAction={execute} onError={setError} targetTab={settingsTarget?.id === "extensions:skills" ? "skills" : settingsTarget?.id === "extensions:plugins" ? "plugins" : settingsTarget?.id === "extensions:hooks" ? "hooks" : "mcp"} />}
           {activeSection === "archive" && <SettingsPane settingID="section:archive" title={t("settingsArchive")} description={t("settingsArchiveHint")} className="archive-settings-pane"><ArchiveSettings language={snapshot.language} sessionId={snapshot.sessionId} onError={setError} /></SettingsPane>}
@@ -461,6 +502,20 @@ function routeModelOptions(modelsByProvider: Record<string, ModelOption[]>, mode
 }
 
 function SettingRow({ label, description, settingID, children }: { label: string; description: string; settingID?: string; children: React.ReactNode }) { return <div className="setting-row" data-setting-id={settingID}><div><strong>{label}</strong><p>{description}</p></div><div>{children}</div></div>; }
+function FontSizeControl({ value, min, max, onChange, decreaseLabel, increaseLabel }: {
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+  decreaseLabel: string;
+  increaseLabel: string;
+}) {
+  return <div className="font-size-control">
+    <button type="button" onClick={() => onChange(value - 1)} disabled={value <= min} aria-label={decreaseLabel}><span>A−</span></button>
+    <output aria-live="polite">{value} px</output>
+    <button type="button" onClick={() => onChange(value + 1)} disabled={value >= max} aria-label={increaseLabel}><span>A+</span></button>
+  </div>;
+}
 function systemFontOptions(selected: string, fonts: SystemFont[]) {
   const options = new Map(fonts.map((font) => [font.family, { value: font.family, label: font.label || font.family, caption: font.family }]));
   if (selected !== "system" && !options.has(selected)) options.set(selected, { value: selected, label: selected, caption: selected });

@@ -1333,6 +1333,492 @@ func TestSubagentUIBackpressureDoesNotCancelRun(t *testing.T) {
 	}
 }
 
+func TestIdleTimeoutCancelsSilentRunningSubagent(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.IdleTimeout = "50ms"
+	cfg.IdleDuration = 50 * time.Millisecond
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	}()
+	childCtx, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	run := agentservice.SubagentRun{
+		ID: "idle-child", SessionID: "session", ParentRunID: "parent", ChildRunID: "child-run",
+		State: agentservice.SubagentRunning, StartedAt: time.Now().UTC().Add(-time.Second),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, parent: subagentParentRuntime{}, ctx: childCtx, cancel: childCancel,
+		done: make(chan struct{}), toolNames: make(map[string]struct{}),
+		lastVisibleAt: time.Now().Add(-time.Second),
+	}
+	runtime.mu.Unlock()
+	runtime.cancelIdleChildren()
+	snapshot := runtime.snapshot(run.ID, "session")
+	if !snapshot.Found || snapshot.Run.State != agentservice.SubagentCancelled {
+		t.Fatalf("idle child state = %#v", snapshot.Run)
+	}
+	if !strings.Contains(snapshot.Run.Warning, "without thinking, output, or tool activity") {
+		t.Fatalf("idle warning = %q", snapshot.Run.Warning)
+	}
+}
+
+func TestIdleTimeoutDisabledDoesNotCancelSilentSubagent(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.IdleTimeout = "0s"
+	cfg.IdleDuration = 0
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	}()
+	childCtx, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	run := agentservice.SubagentRun{
+		ID: "live-child", SessionID: "session", ParentRunID: "parent",
+		State: agentservice.SubagentRunning, StartedAt: time.Now().UTC().Add(-time.Hour),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, ctx: childCtx, cancel: childCancel, done: make(chan struct{}),
+		toolNames: make(map[string]struct{}), lastVisibleAt: time.Now().Add(-time.Hour),
+	}
+	runtime.mu.Unlock()
+	runtime.cancelIdleChildren()
+	if _, ok := runtime.active[run.ID]; !ok {
+		t.Fatal("disabled idle timeout cancelled the child")
+	}
+	select {
+	case <-childCtx.Done():
+		t.Fatal("disabled idle timeout cancelled the child context")
+	default:
+	}
+}
+
+func TestIdleTimeoutSkipsOpenToolAndResetsOnThinking(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.IdleDuration = 50 * time.Millisecond
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	}()
+	childCtx, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	run := agentservice.SubagentRun{
+		ID: "tool-child", SessionID: "session", ParentRunID: "parent", ChildRunID: "child-run",
+		State: agentservice.SubagentRunning, StartedAt: time.Now().UTC().Add(-time.Second),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, ctx: childCtx, cancel: childCancel, done: make(chan struct{}),
+		toolNames: make(map[string]struct{}), lastVisibleAt: time.Now().Add(-time.Second),
+		blocks: []AgentTranscriptBlock{{ID: "call-1", Kind: "tool", State: "running", Title: "coding.read_file"}},
+	}
+	runtime.mu.Unlock()
+	runtime.cancelIdleChildren()
+	if runtime.active[run.ID] == nil || runtime.active[run.ID].run.State != agentservice.SubagentRunning {
+		t.Fatal("open tool was idle-cancelled")
+	}
+
+	runtime.mu.Lock()
+	if current := runtime.active[run.ID]; current != nil {
+		current.blocks = nil
+		current.lastVisibleAt = time.Now().Add(-time.Second)
+	}
+	runtime.mu.Unlock()
+	runtime.handleFrame(run.ID, stream.Frame{Kind: stream.FrameThinking, Thinking: "continue"})
+	runtime.cancelIdleChildren()
+	if runtime.active[run.ID] == nil || runtime.active[run.ID].run.State != agentservice.SubagentRunning {
+		t.Fatal("recent thinking was treated as idle")
+	}
+	runtime.emitLiveState(run.ID, true)
+	runtime.mu.Lock()
+	stale := runtime.active[run.ID]
+	if stale != nil {
+		stale.lastVisibleAt = time.Now().Add(-time.Second)
+	}
+	runtime.mu.Unlock()
+	runtime.emitLiveState(run.ID, true)
+	runtime.cancelIdleChildren()
+	snapshot := runtime.snapshot(run.ID, "session")
+	if !snapshot.Found || snapshot.Run.State != agentservice.SubagentCancelled {
+		t.Fatalf("elapsed ticks kept a silent child alive: %#v", snapshot.Run)
+	}
+}
+
+func TestIdleTimeoutResetsOnTextAndToolAndIgnoresEmptyThinking(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.IdleTimeout = "50ms"
+	cfg.IdleDuration = 50 * time.Millisecond
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	}()
+	childCtx, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	run := agentservice.SubagentRun{
+		ID: "text-child", SessionID: "session", ParentRunID: "parent", ChildRunID: "child-run",
+		State: agentservice.SubagentRunning, StartedAt: time.Now().UTC().Add(-time.Second),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, ctx: childCtx, cancel: childCancel, done: make(chan struct{}),
+		toolNames: make(map[string]struct{}), lastVisibleAt: time.Now().Add(-time.Second),
+	}
+	runtime.mu.Unlock()
+
+	runtime.handleFrame(run.ID, stream.Frame{Kind: stream.FrameThinking, Thinking: "   "})
+	runtime.cancelIdleChildren()
+	empty := runtime.snapshot(run.ID, "session")
+	if !empty.Found || empty.Run.State != agentservice.SubagentCancelled {
+		t.Fatalf("empty thinking kept a silent child alive: %#v", empty.Run)
+	}
+
+	childCtx, childCancel = context.WithCancel(ctx)
+	defer childCancel()
+	run.ID = "text-child-2"
+	run.State = agentservice.SubagentRunning
+	run.Warning = ""
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, ctx: childCtx, cancel: childCancel, done: make(chan struct{}),
+		toolNames: make(map[string]struct{}), lastVisibleAt: time.Now().Add(-time.Second),
+	}
+	runtime.mu.Unlock()
+	runtime.handleFrame(run.ID, stream.Frame{Kind: stream.FrameText, Text: "正在核对边界", TextPhase: hyprovider.TextPhaseCommentary})
+	runtime.cancelIdleChildren()
+	if runtime.active[run.ID] == nil || runtime.active[run.ID].run.State != agentservice.SubagentRunning {
+		t.Fatal("recent commentary was treated as idle")
+	}
+
+	runtime.mu.Lock()
+	if current := runtime.active[run.ID]; current != nil {
+		current.lastVisibleAt = time.Now().Add(-time.Second)
+	}
+	runtime.mu.Unlock()
+	runtime.handleFrame(run.ID, stream.Frame{
+		Kind:     stream.FrameToolCall,
+		ToolCall: &message.ToolCall{ID: "search-1", Name: "coding.search", Arguments: []byte(`{"query":"Todo"}`)},
+	})
+	runtime.cancelIdleChildren()
+	if runtime.active[run.ID] == nil || runtime.active[run.ID].run.State != agentservice.SubagentRunning {
+		t.Fatal("open tool after a call was idle-cancelled")
+	}
+
+	runtime.handleFrame(run.ID, stream.Frame{
+		Kind:       stream.FrameToolResult,
+		ToolResult: &tool.Result{ToolCallID: "search-1", Name: "coding.search", Content: "ok"},
+	})
+	runtime.mu.Lock()
+	if current := runtime.active[run.ID]; current != nil {
+		current.lastVisibleAt = time.Now().Add(-time.Second)
+	}
+	runtime.mu.Unlock()
+	runtime.emitLiveState(run.ID, true)
+	runtime.cancelIdleChildren()
+	snapshot := runtime.snapshot(run.ID, "session")
+	if !snapshot.Found || snapshot.Run.State != agentservice.SubagentCancelled {
+		t.Fatalf("completed tool plus UI ticks kept a silent child alive: %#v", snapshot.Run)
+	}
+}
+
+func TestIdleTimeoutWatchCancelsSilentRunningSubagent(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.IdleTimeout = "40ms"
+	cfg.IdleDuration = 40 * time.Millisecond
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	}()
+	childCtx, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	run := agentservice.SubagentRun{
+		ID: "watch-child", SessionID: "session", ParentRunID: "parent", ChildRunID: "child-run",
+		State: agentservice.SubagentRunning, StartedAt: time.Now().UTC().Add(-time.Second),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, ctx: childCtx, cancel: childCancel, done: make(chan struct{}),
+		toolNames: make(map[string]struct{}), lastVisibleAt: time.Now().Add(-time.Second),
+	}
+	runtime.mu.Unlock()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := runtime.snapshot(run.ID, "session")
+		if snapshot.Found && snapshot.Run.State == agentservice.SubagentCancelled {
+			if !strings.Contains(snapshot.Run.Warning, "without thinking, output, or tool activity") {
+				t.Fatalf("idle warning = %q", snapshot.Run.Warning)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("watchIdle did not cancel a silent running child")
+}
+
+func TestIdleTimeoutStillFiresDuringRepeatedWaitHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default().Agents.Subagents
+	cfg.IdleTimeout = "50ms"
+	cfg.IdleDuration = 50 * time.Millisecond
+	runtime, err := newSubagentRuntime(ctx, cfg, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	}()
+	childCtx, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	run := agentservice.SubagentRun{
+		ID: "wait-child", SessionID: "session", ParentRunID: "parent", ChildRunID: "child-run",
+		State: agentservice.SubagentRunning, StartedAt: time.Now().UTC().Add(-time.Second),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, parent: subagentParentRuntime{}, ctx: childCtx, cancel: childCancel,
+		done: make(chan struct{}), toolNames: make(map[string]struct{}), lastVisibleAt: time.Now(),
+	}
+	runtime.mu.Unlock()
+
+	// The first explicit wait summary resets the idle clock (SUBAGENT-005).
+	if err := runtime.persistActiveState(run.ID, "waiting for shared workspace"); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	if time.Since(runtime.active[run.ID].lastVisibleAt) > time.Second {
+		runtime.mu.Unlock()
+		t.Fatal("first wait summary must reset the idle clock")
+	}
+	// Backdate the clock, then repeat the identical heartbeat: a lease or
+	// workspace retry loop spinning every 100ms is not fresh progress and
+	// must not shield the child from the idle watchdog.
+	runtime.active[run.ID].lastVisibleAt = time.Now().Add(-time.Second)
+	runtime.mu.Unlock()
+	if err := runtime.persistActiveState(run.ID, "waiting for shared workspace"); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	backdated := runtime.active[run.ID].lastVisibleAt
+	runtime.mu.Unlock()
+	if time.Since(backdated) < time.Second {
+		t.Fatal("repeated wait heartbeat must not refresh the idle clock")
+	}
+
+	runtime.cancelIdleChildren()
+	snapshot := runtime.snapshot(run.ID, "session")
+	if !snapshot.Found || snapshot.Run.State != agentservice.SubagentCancelled {
+		t.Fatalf("idle child state = %#v", snapshot.Run)
+	}
+	if !strings.Contains(snapshot.Run.Warning, "without thinking, output, or tool activity") {
+		t.Fatalf("idle warning = %q", snapshot.Run.Warning)
+	}
+}
+
+func TestUserStopCancelsRunningSubagents(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := newSubagentRuntime(ctx, config.Default().Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	}()
+	host := NewService(ctx, config.Default())
+	host.providers = &ProviderRuntime{subagents: runtime}
+	parentCtx, parentCancel := context.WithCancel(ctx)
+	host.activeRun, host.activeSession, host.activeEnd = "parent", "session", parentCancel
+	childCtx, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	run := agentservice.SubagentRun{
+		ID: "child", SessionID: "session", ParentRunID: "parent",
+		State: agentservice.SubagentRunning, StartedAt: time.Now().UTC(),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, ctx: childCtx, cancel: childCancel, done: make(chan struct{}), toolNames: make(map[string]struct{}),
+	}
+	if !host.CancelActiveWithChildren(true) {
+		t.Fatal("user stop returned false")
+	}
+	snapshot := runtime.snapshot(run.ID, "session")
+	if !snapshot.Found || snapshot.Run.State != agentservice.SubagentCancelled {
+		t.Fatalf("user stop left child running: %#v", snapshot.Run)
+	}
+	select {
+	case <-childCtx.Done():
+	default:
+		t.Fatal("user stop did not cancel the child context")
+	}
+	select {
+	case <-parentCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("user stop did not cancel the parent context")
+	}
+}
+
+func TestParentOnlyStopDoesNotCancelSubagents(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := newSubagentRuntime(ctx, config.Default().Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		runtime.cancel()
+		runtime.wg.Wait()
+	}()
+	host := NewService(ctx, config.Default())
+	host.providers = &ProviderRuntime{subagents: runtime}
+	_, parentCancel := context.WithCancel(ctx)
+	host.activeRun, host.activeSession, host.activeEnd = "parent", "session", parentCancel
+	childCtx, childCancel := context.WithCancel(ctx)
+	defer childCancel()
+	run := agentservice.SubagentRun{
+		ID: "child", SessionID: "session", ParentRunID: "parent",
+		State: agentservice.SubagentRunning, StartedAt: time.Now().UTC(),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, ctx: childCtx, cancel: childCancel, done: make(chan struct{}), toolNames: make(map[string]struct{}),
+	}
+	if !host.CancelActiveWithChildren(false) {
+		t.Fatal("parent-only stop returned false")
+	}
+	if _, ok := runtime.active[run.ID]; !ok {
+		t.Fatal("parent-only stop cancelled the child")
+	}
+	select {
+	case <-childCtx.Done():
+		t.Fatal("parent-only stop cancelled the child context")
+	default:
+	}
+}
+
 func TestNormalParentCompletionKeepsBackgroundWorktreeChild(t *testing.T) {
 	ctx := context.Background()
 	host := NewService(ctx, config.Default())

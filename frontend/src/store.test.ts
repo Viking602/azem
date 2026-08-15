@@ -1,6 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
+import * as bridge from "./bridge";
 import { findModelOption, mergeSessionTranscript, modelDisplayName, providerDisplayName, reduceEvents, reorderSessionQueue, shouldMarkSessionUnread, type RuntimeData, useRuntimeStore } from "./store";
 import type { Session, Snapshot } from "./types";
 import Inspector from "./components/Inspector";
@@ -36,7 +37,7 @@ function state(): RuntimeData {
     runId: "", running: false, globalRunId: "", globalRunSessionId: "", runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
     lastSequence: 0, error: "", view: "thread", inspectorTab: "environment", inspectorOpen: true,
-    settingsOpen: false, settingsTarget: null, commandOpen: false, sessionSearchTarget: null, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system", uiFont: "system", uiFontSize: 14,
+    settingsOpen: false, settingsTarget: null, commandOpen: false, sessionSearchTarget: null, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system", uiFont: "system", uiFontSize: 14, chatFontSize: 13, chatCodeFontSize: 12,
   };
 }
 
@@ -326,6 +327,41 @@ describe("runtime event projection", () => {
     expect(finished.running).toBe(false);
   });
 
+  it("keeps a distinct elapsed clock on each tool instead of the run duration", () => {
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValue(1_000_000);
+      const started = reduceEvents(state(), [
+        { sequence: 1, kind: "run_started", runId: "r1" },
+        { sequence: 2, kind: "tool_started", runId: "r1", toolCallId: "read-1", state: "running", data: { name: "coding.read_file" } },
+        { sequence: 3, kind: "tool_started", runId: "r1", toolCallId: "list-1", state: "running", data: { name: "coding.list_files" } },
+      ]);
+      expect(started.blocks[0]?.data?.startedAt).toBe("1000000");
+      expect(started.blocks[1]?.data?.startedAt).toBe("1000000");
+
+      clock.mockReturnValue(1_002_400);
+      const firstDone = reduceEvents(started, [
+        { sequence: 4, kind: "tool_finished", runId: "r1", toolCallId: "read-1", state: "completed" },
+      ]);
+      clock.mockReturnValue(1_008_000);
+      const secondDone = reduceEvents(firstDone, [
+        { sequence: 5, kind: "tool_finished", runId: "r1", toolCallId: "list-1", state: "completed" },
+      ]);
+      clock.mockReturnValue(1_104_000);
+      const finished = reduceEvents(secondDone, [{ sequence: 6, kind: "run_finished", runId: "r1" }]);
+
+      expect(finished.blocks.find((block) => block.toolCallId === "read-1")?.data).toMatchObject({
+        startedAt: "1000000", elapsedMs: "2400",
+      });
+      expect(finished.blocks.find((block) => block.toolCallId === "list-1")?.data).toMatchObject({
+        startedAt: "1000000", elapsedMs: "8000",
+      });
+      expect(finished.blocks.every((block) => block.data?.elapsedMs !== "104000")).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("settles shell commands as soon as their finished update arrives", () => {
     const started = reduceEvents(state(), [
       { sequence: 1, kind: "tool_started", runId: "r1", toolCallId: "failed", state: "running", data: { name: "coding.shell" } },
@@ -484,6 +520,58 @@ describe("runtime event projection", () => {
     expect(projected.blocks).toEqual([]);
   });
 
+  it("does not let a stale inspect snapshot wipe live subagent thinking", () => {
+    const live = reduceEvents({ ...state(), selectedAgentId: "agent-1" }, [
+      { sequence: 1, kind: "thinking_delta", runId: "child-1", agentId: "agent-1", text: "先看 diff" },
+      { sequence: 2, kind: "thinking_delta", runId: "child-1", agentId: "agent-1", text: "再看测试" },
+    ]);
+    expect(live.agentBlocks[0]).toMatchObject({ kind: "thinking", content: "先看 diff再看测试" });
+
+    const merged = reduceEvents(live, [{
+      sequence: 3, kind: "agent_detail", agentId: "agent-1", state: "detail",
+      agentBlocks: [{ id: live.agentBlocks[0]!.id, kind: "thinking", runId: "child-1", content: "先看 diff" }],
+    }]);
+    expect(merged.agentBlocks[0]).toMatchObject({ kind: "thinking", content: "先看 diff再看测试" });
+
+    const extra = reduceEvents(live, [{
+      sequence: 4, kind: "agent_detail", agentId: "agent-1", state: "detail",
+      agentBlocks: [{ id: "msg-0-user", kind: "user", runId: "child-1", content: "审查变更" }],
+    }]);
+    expect(extra.agentBlocks.map((block) => block.content)).toEqual(["审查变更", "先看 diff再看测试"]);
+
+    const stale = reduceEvents({ ...state(), selectedAgentId: "agent-b", agentBlocks: [] }, [{
+      sequence: 5, kind: "agent_detail", agentId: "agent-1", state: "detail",
+      agentBlocks: [{ id: "old", kind: "assistant", content: "不该出现" }],
+    }]);
+    expect(stale.selectedAgentId).toBe("agent-b");
+    expect(stale.agentBlocks).toEqual([]);
+  });
+
+  it("keeps the open subagent drawer across a same-session projection refresh", () => {
+    const live = reduceEvents({ ...state(), selectedAgentId: "agent-1" }, [
+      { sequence: 1, kind: "thinking_delta", runId: "child-1", agentId: "agent-1", text: "先看 diff" },
+    ]);
+    const refreshed = reduceEvents(live, [{
+      sequence: 2, kind: "session_loaded", sessionId: "s1", state: "refreshed",
+      data: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", blocks: "[]" },
+    }]);
+    expect(refreshed.selectedAgentId).toBe("agent-1");
+    expect(refreshed.agentBlocks[0]).toMatchObject({ kind: "thinking", content: "先看 diff" });
+
+    const merged = reduceEvents(refreshed, [{
+      sequence: 3, kind: "agent_detail", agentId: "agent-1", state: "detail",
+      agentBlocks: [{ id: refreshed.agentBlocks[0]!.id, kind: "thinking", runId: "child-1", content: "先看 diff" }],
+    }]);
+    expect(merged.agentBlocks[0]).toMatchObject({ kind: "thinking", content: "先看 diff" });
+
+    const navigated = reduceEvents(refreshed, [{
+      sequence: 4, kind: "session_loaded", sessionId: "s1", state: "loaded",
+      data: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", blocks: "[]" },
+    }]);
+    expect(navigated.selectedAgentId).toBe("");
+    expect(navigated.agentBlocks).toEqual([]);
+  });
+
   it("clears stale detail blocks only when switching subagents", () => {
     const detail = [{ id: "answer-1", kind: "assistant" as const, content: "detail" }];
     useRuntimeStore.setState({ ...state(), selectedAgentId: "agent-a", agentBlocks: detail });
@@ -558,6 +646,26 @@ describe("runtime event projection", () => {
       state: "completed",
       textPhase: "final_answer",
     });
+  });
+
+  it("keeps the host fallback synthetic marker on live commentary", () => {
+    const projected = reduceEvents(state(), [
+      {
+        sequence: 1, kind: "text_delta", runId: "r1",
+        text: "正在调用所需工具，并根据实际结果继续。",
+        textPhase: "commentary",
+        data: { synthetic: "tool_announcement" },
+      },
+      { sequence: 2, kind: "tool_started", runId: "r1", toolCallId: "read-1", data: { name: "coding.read_file" } },
+    ]);
+
+    expect(projected.blocks[0]).toMatchObject({
+      kind: "commentary",
+      content: "正在调用所需工具，并根据实际结果继续。",
+      textPhase: "commentary",
+      data: expect.objectContaining({ synthetic: "tool_announcement" }),
+    });
+    expect(projected.blocks[1]).toMatchObject({ kind: "tool" });
   });
 
   it("drops an uncommitted provider attempt before projecting its retry", () => {
@@ -848,6 +956,26 @@ describe("runtime event projection", () => {
     expect(container.querySelector(".queued-icon")).not.toBeNull();
     expect(container.querySelector(".queue-menu")).not.toBeNull();
 
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("stops the parent run together with its subagents", async () => {
+    const cancelActive = vi.spyOn(bridge, "cancelActive").mockResolvedValue(true);
+    useRuntimeStore.setState({
+      ...state(),
+      blocks: [{ id: "assistant-1", kind: "assistant", content: "处理中" }],
+      running: true,
+      runId: "r1",
+      runStartedAt: Date.now(),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ThreadSurface)));
+    await act(async () => container.querySelector<HTMLButtonElement>(".cancel-button")!.click());
+    expect(cancelActive).toHaveBeenCalledWith(true);
+    cancelActive.mockRestore();
     await act(async () => root.unmount());
     container.remove();
   });

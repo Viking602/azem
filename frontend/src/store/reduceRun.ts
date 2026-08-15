@@ -56,7 +56,11 @@ export function reduceRunEvent(next: RuntimeData, event: RuntimeEvent): void {
             if (stamped.kind === "thinking" || stamped.kind === "commentary") {
               return settleTimedProcessBlock(stamped, terminalState, completedAt);
             }
-            return { ...stamped, state: stamped.kind === "tool" ? (terminalState === "cancelled" ? "cancelled" : "failed") : terminalState };
+            if (stamped.kind === "tool") {
+              const toolState = terminalState === "cancelled" ? "cancelled" : "failed";
+              return settleTimedProcessBlock(stamped, toolState, completedAt);
+            }
+            return { ...stamped, state: terminalState };
           }
           return stamped;
         });

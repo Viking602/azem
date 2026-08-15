@@ -1,6 +1,6 @@
 # Desktop application
 
-Last verified: 2026-08-14
+Last verified: 2026-08-15
 
 Azem's desktop application is a Wails window over the same Go runtime used by
 the TUI. React owns presentation state; it does not duplicate provider,
@@ -60,7 +60,9 @@ stays attached to the owning project instead of becoming a global empty page.
 The Workspace header also exposes a focused **Open terminal** action. Its Bridge
 method launches the operating-system terminal with the active workspace as the
 working directory by passing an argv-style command directly to the platform;
-it does not expose a generic shell executor to the WebView.
+it does not expose a generic shell executor to the WebView. The in-app bottom
+panel is a separate human-only PTY and does not replace that host-terminal
+action.
 
 The Workspace overview is the parent route for repository work. It combines the
 current branch, bounded working-tree summary, current Pull Request, repository
@@ -124,12 +126,16 @@ sessions that have been idle for a chosen number of days, and restores a
 conversation to that project's sidebar. The current conversation and pinned
 rows are never bulk-archived. Opening an archived conversation unarchives it. The Subagents section groups capacity and isolation controls, a read-only
 parallel scheduling note, and main-session display behavior. It updates the
-live subagent capacity, recursive depth, independent shell capacity, and
-foreground wait window, then persists those validated values to the existing
-configuration file. The wait defaults to until the foreground child completes
-(`0` / `0s`). A limited window never cancels a child: ending it only releases
-the parent call, safe work becomes background work, and shared-workspace
-writes keep waiting.
+live subagent capacity, recursive depth, independent shell capacity,
+foreground wait window, and idle-cancel window, then persists those validated
+values to the existing configuration file. The wait defaults to until the
+foreground child completes (`0` / `0s`). A limited window never cancels a
+child: ending it only releases the parent call, safe work becomes background
+work, and shared-workspace writes keep waiting. Idle cancel defaults to 5 minutes
+(`5m`); `0` / `0s` disables it. A positive window cancels a running child that
+stays silent. Opening a child drawer hydrates through `inspect_agent` and
+keeps later thinking deltas; a `projection_resync` for that child also
+re-inspects the open drawer instead of refreshing only the main session.
 Extensions contains the shared Skill loading manager used by the secondary
 Extensions page: discovered Skills stay searchable when stopped, and the
 accessible switch sends only the typed `set_skill_enabled` action. The runtime
@@ -203,6 +209,13 @@ shows the bounded summary, current goal, open items, covered run boundary, and
 revision; an empty session renders an explicit not-yet-generated state instead
 of silently omitting the capability.
 
+The Inspector task plan renders each durable Todo phase as a Beautiful UI Task
+Row capsule: status mark, title, completed/total metric from the phase items,
+status badge, and an expand rail for those items. Item status stays
+`pending` / `in_progress` / `completed` / `cancelled`. The section still shows
+the plan-level `done / total` progress bar. Commentary and thinking chrome are
+unchanged.
+
 ## Workspace file browser
 
 The Workspace tab provides a Codex-style file tree and read-only file viewer.
@@ -260,18 +273,62 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   folding, lazy patch loading, hunk parsing, and review rendering.
 - `frontend/src/components/WorkspaceOverviewPage.tsx` owns the repository
   overview and routes into Files, Changes, Pull Requests, and project sessions.
+- `frontend/src/components/TerminalPanel.tsx` owns the bottom PTY panel, tabs,
+  and one xterm instance per session. Session state lives in
+  `frontend/src/terminalStore.ts`, not the runtime transcript store.
 - `frontend/src/components/ThreadSurface.tsx` owns the session transcript and
-  the bottom composer. The dock overlays the timeline as a transparent,
+  the bottom composer. The composer stop control calls `CancelActive(true)`
+  so a user stop cancels the parent and every child of that run
+  (SUBAGENT-006). The dock overlays the timeline as a transparent,
   `pointer-events: none` layer so conversation remains visible and scrollable
   beside the solid input card; only the card, queue, and jump-latest control
   receive pointer events. There is no fade, mask, or scrim above or around
-  the card; the dock itself is never an opaque full-width mask. Inspector,
-  when open, stays a normal right-hand panel.
-- `frontend/src/components/Timeline.tsx` owns bounded streaming reveal and live
+  the card; the dock itself is never an opaque full-width mask. Transcript
+  bottom padding equals the measured dock height plus 16px so the last live
+  tool card keeps a clear gap above the input; the empty welcome composer
+  does not use that overlay gap. Inspector, when open, stays a normal
+  right-hand panel.
+-   `frontend/src/components/Timeline.tsx` owns bounded streaming reveal and live
   Markdown rendering. The production renderer keeps the latest eight provider
   deltas as short fade/blur ranges inside the parsed Markdown tree, so headings,
   lists, emphasis, and code render immediately while only newly appended text
-  animates. Full-response replay remains restricted to the development demo.
+  animates.   Completion leaves that same mounted tree in place and only stops
+  reveal/caret CSS (`content: none` on the idle caret, not an opacity-only
+  leftover); it does not swap to a second Markdown renderer. Fenced
+  code uses the Beautiful UI Code Block card (filename when
+  the info-string looks like a path, otherwise a language label, plus copy and
+  a line-number gutter) through the shared `StreamingMarkdown`
+  renderer. File-change diffs stay on the existing diff view. Full-response
+  replay remains restricted to the development demo.
+  Session progress commentary is ordinary prose in the transcript; the host
+  fallback announcement (`data.synthetic=tool_announcement`) stays as a
+  grouping anchor and is not rendered as visible prose. Tool rows stay
+  underneath that announcement as Beautiful UI Tool Chips (icon, bold
+  label, mono detail chip). Completed process folds keep the 已处理 label and
+  may show honest tool-call and commentary counts. Executed file changes
+  also render compact white `path +N -N` pills; queued and approval-bound
+  writes do not. While the current turn is in progress, one `正在处理`
+  divider sits above that turn's first message. The `正在处理` label and
+  clock sit above the rule, not on it. Wait, thinking, search, and tools then share one
+  Thinking sparkle row (`思考` / `搜索了代码` / `运行命令`) and do not print
+  a second duration. Only the label changes; the header stays mounted and
+  the clock does not reset. The chevron slot is reserved so expanding later
+  does not jump the row. This is not a separate capsule and not the
+  pixel-grid Loading icon. Empty thinking or
+  text frames and the hidden host fallback do not count as live progress.
+  While that run is active the composer placeholder says the model is thinking
+  instead of looking idle. A thinking-only trail stays that header plus
+  reasoning prose. After the current step completes with tools, it expands
+  to one chip list: thinking as the first chip (sparkle + preview capsule),
+  then tool chips, then file-change pills. The group header may show
+  `N tool calls, N messages`.
+  Elapsed time sits after `正在处理` on that turn divider,
+  appears only after the first tenth of a second (`0.1s`, `1.2s`, then
+  `1m05s`), and never shows `0s`. After the turn settles, thinking-only
+  trails keep the clock on the 思考 header and tool trails fold under 已处理.
+  `beautiful-ui.css` is imported last so its cool-gray /
+  blue tokens and the full-width subagent run card win over the prototype
+  warm palette and the old 15px commentary marker grid.
 - `frontend/src/components/AttachmentPreview.tsx` owns image thumbnails in the
   composer and user transcript plus the full-size local viewer. Preview bytes
   come from the focused `AttachmentDataURL` Bridge method after the application
@@ -282,20 +339,81 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   subscribes only to `agentBlocks`; `reduceEvents` must not replace the main
   `blocks` array on a subagent delta. Folded `已处理` trails stay unmounted
   until the user expands them, while live trails remain expanded (UI-007).
+  Expanding a large completed fold first paints collapsed chip headers and
+  does not mount every tool body at once (UI-012).
   Background completion wake blocks stay `kind=user` for model context, but
   `state=subagent_wake` renders as a left-aligned system notice instead of a
   user bubble (UI-013). Legacy wake text without that state keeps the bubble.
 
+Highlighting assistant, commentary, or user prose in the main transcript
+opens a Select Action island (`frontend/src/components/SelectActionHost.tsx`).
+Explain, Improve, and a custom describe-edit submit a normal user turn through
+ThreadSurface `submitTurn` with a Markdown-quoted selection. The island does
+not add a second agent API, does not persist a fake user notice, and does not
+open on thinking, tool dumps, or subagent-wake blocks. Selection state stays
+local to the island and is cleared on dismiss. An active run still follows the
+existing queue / steer / stop contracts.
+
 Keep direct Bridge calls narrow. Do not add a generic path reader, command
 runner, or mutation endpoint to support a presentation feature.
+
+## Embedded terminal
+
+The desktop window has a user-operated bottom terminal panel. It is not the
+agent `coding.shell` tool and is not `internal/tui`.
+
+`internal/desktop/termhost` starts a login shell (`$SHELL`, or `/bin/zsh` on
+macOS) with `cwd` equal to that window's project workspace (schema 19). The
+renderer never assembles `sh -c`. Bridge methods are desktop-only:
+
+- `ListTerminals()`
+- `CreateTerminal(cols, rows)`
+- `WriteTerminal(id, data)` — raw keystroke/paste bytes
+- `ResizeTerminal(id, cols, rows)`
+- `CloseTerminal(id)`
+
+PTY output uses the dedicated `azem:terminal` channel
+(`terminal_session`, `terminal_output`, `terminal_exit`) so it cannot occupy
+the runtime event broker. Output chunks are coalesced (16 ms / 32 KiB) and
+base64-encoded. Events never include environment maps, PTY master paths, or
+credentials.
+
+Every host wait is bounded (TERM-001). `Close`/`CloseAll` kill, then reap the
+child within a fixed budget; `CloseAll` shuts sessions down in parallel under
+one overall budget because `Bridge.Close` runs before runtime shutdown. A
+child stuck in an uninterruptible state is logged, dropped from the roster,
+and left to the OS instead of hanging the Bridge or the window exit path.
+Writes never block a Bridge goroutine indefinitely: when the shell stops
+reading and the kernel buffer fills, the write fails with an explicit
+timeout, and later writes fail fast while the stuck bytes drain. Session
+creation forks outside the host lock and re-checks the closed flag, so a
+`CloseAll` race cannot leak a fresh PTY.
+
+The renderer side is bounded too: `terminal_output` events only advance the
+per-session sequence (tab metadata never rerenders per chunk), decoded bytes
+are batched into xterm once per animation frame with a 512 KiB per-session
+backlog cap, keystrokes flow through one serialized Bridge write per session
+with a timeout surfaced in the panel error area, unchanged resize dimensions
+are skipped on both sides, and closing a tab removes the UI immediately while
+the backend close converges in the background.
+
+`frontend/src/components/TerminalPanel.tsx` renders one xterm.js instance per
+tab. `Cmd+`` / `Ctrl+`` toggles the panel; the thread header **终端** button
+and Command Palette do the same. Closing the panel leaves sessions running.
+Closing a tab or the Azem window kills and reaps those PTYs. Workspace
+overview **打开终端** still launches the operating-system Terminal app.
+Prompt themes that use Nerd Font / Powerline icons render correctly when a
+font such as MesloLGS NF is installed locally; Azem does not bundle that font.
+
+Windows ConPTY is out of scope. Split panes are out of scope.
 
 ## Verification
 
 Run the focused checks first:
 
 ```bash
-GOWORK=off go test ./internal/desktop ./cmd/azem-gui
-cd frontend && bun run typecheck && bun run test -- WorkspaceOverviewPage.test.tsx WorkspaceFilesPage.test.tsx WorkspaceChangesPage.test.tsx Inspector.test.tsx Timeline.test.tsx
+GOWORK=off go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui
+cd frontend && bun run typecheck && bun run test -- WorkspaceOverviewPage.test.tsx WorkspaceFilesPage.test.tsx WorkspaceChangesPage.test.tsx Inspector.test.tsx Timeline.test.tsx TerminalPanel.test.tsx terminal.test.ts
 ```
 
 Then run the complete desktop gate and package the app:

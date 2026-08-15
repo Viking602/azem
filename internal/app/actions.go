@@ -87,6 +87,7 @@ const (
 	ActionSetSubagentDepth        ActionKind = "set_subagent_depth"
 	ActionSetShellConcurrency     ActionKind = "set_shell_concurrency"
 	ActionSetSubagentAwait        ActionKind = "set_subagent_await_timeout"
+	ActionSetSubagentIdle         ActionKind = "set_subagent_idle_timeout"
 	ActionSetChatGPTFastMode      ActionKind = "set_chatgpt_fast_mode"
 	ActionSetSessionPreferences   ActionKind = "set_session_preferences"
 	ActionListBackground          ActionKind = "list_background"
@@ -381,11 +382,12 @@ func (s *Service) modelRoutesEvent(state string) Event {
 	maxDepth := s.cfg.Agents.Subagents.MaxDepth
 	shellConcurrency := s.cfg.Workspace.Shell.MaxConcurrency
 	awaitSeconds := int(s.cfg.Agents.Subagents.AwaitDuration.Seconds())
+	idleSeconds := int(s.cfg.Agents.Subagents.IdleDuration.Seconds())
 	fastMode := s.cfg.Providers.ChatGPT.FastMode
 	s.mu.Unlock()
 	return Event{
 		Kind: EventModelRoutes, State: state, ModelRoutes: s.modelRouteEntries(),
-		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "subagent_max_depth": strconv.Itoa(maxDepth), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
+		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "subagent_max_depth": strconv.Itoa(maxDepth), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "subagent_idle_seconds": strconv.Itoa(idleSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
 	}
 }
 
@@ -604,6 +606,36 @@ func (s *Service) updateSubagentAwaitTimeout(ctx context.Context, timeout time.D
 	s.mu.Unlock()
 	if s.providers != nil {
 		s.providers.UpdateSubagentAwaitTimeout(timeout)
+	}
+	s.emit(ctx, s.modelRoutesEvent("updated"))
+	return nil
+}
+
+func (s *Service) updateSubagentIdleTimeout(ctx context.Context, timeout time.Duration) error {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	seconds := int(timeout.Seconds())
+	s.mu.Lock()
+	currentSession := s.currentSession
+	s.mu.Unlock()
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateSubagentIdleTimeout(s.configPath, seconds)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.cfg.Agents.Subagents.IdleTimeout = timeout.String()
+	s.cfg.Agents.Subagents.IdleDuration = timeout
+	s.mu.Unlock()
+	if s.providers != nil {
+		s.providers.UpdateSubagentIdleTimeout(timeout)
 	}
 	s.emit(ctx, s.modelRoutesEvent("updated"))
 	return nil

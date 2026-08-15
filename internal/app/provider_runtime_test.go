@@ -72,7 +72,12 @@ func TestMainInstructionsContract(t *testing.T) {
 		}
 	}
 	requireInstructionFragments(t, "concurrency rule", []string{"hydaelyn_read_skill_resource", "Never mix skill-resource reads and `subagent.spawn`", "own parallel batch"})
-	requireInstructionFragments(t, "tool announcement", []string{"Before every tool call or parallel batch", "A single routine read still requires", "Never emit a tool call before this commentary"})
+	requireInstructionFragments(t, "tool announcement", []string{
+		"Before every tool call or parallel batch", "A single routine read still requires",
+		"Never emit a tool call before this commentary",
+		"yourself as model `commentary` tokens", "Do not wait for the host to invent it",
+		"「我准备…」", "「接下来…」",
+	})
 	for _, grammar := range []string{"`¶PATH#TAG`", "`replace N..M:`", "`+final content`", "Never use `@@` hunks", "`-old` rows"} {
 		if !strings.Contains(mainInstructions, grammar) {
 			t.Errorf("main instructions omit hashline grammar %q", grammar)
@@ -82,7 +87,18 @@ func TestMainInstructionsContract(t *testing.T) {
 		"exactly one mutating `todo` call", "never batch Todo mutations", "`done` automatically advances",
 		"actual lifecycle", "failed, cancelled, and stalled", "review as an approval gate", "independently inspect the changed files",
 		"must stay foreground", "`timeout_ms`", "before any gated action or ending the turn",
-		"**<concise action title>**", "<specific target or immediate evidence>", "18 CJK characters or eight English words",
+		"ordinary user-visible prose", "one or two short sentences", "Do not format it as a titled card",
+	})
+	requireInstructionFragments(t, "todo-first workflow", []string{
+		"「你是谁」", "may skip `todo` and tool commentary",
+		"Any investigation, lookup, explanation, or debug",
+		"any edit, implementation, fix, or verification",
+		"must have a durable `todo` snapshot before other tools run",
+		"Do not start `coding.search`, `coding.read_file`, `coding.shell`",
+		"the only normal transition that completes work",
+		"`start` must never replace another current item",
+		"only Todo mutations stay serial",
+		"Keep review and verification on the list",
 	})
 	for _, unsupported := range []string{"lsp", "ast_edit", "browser", "worker.run"} {
 		if strings.Contains(mainInstructions, unsupported) {
@@ -290,7 +306,7 @@ func TestPlanModeToolDriversKeepOnlyReadOnlyOperations(t *testing.T) {
 	if got, want := toolDriverNames(planModeToolDrivers(drivers)), []string{"coding.read_file", subagentSpawnTool, askToolName, submitPlanToolName}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("plan mode tools = %v, want %v", got, want)
 	}
-	for _, required := range []string{"read-only tools", "do not implement it", "submit_plan", "Execute plan", "why", "how", "Execution graph", "depends_on", "Mermaid"} {
+	for _, required := range []string{"read-only tools", "do not implement it", "submit_plan", "Execute plan", "why", "how", "Execution graph", "depends_on", "Mermaid", "Plan mode has no `todo` tool", "converts that graph into `todo`"} {
 		if !strings.Contains(planModeInstructions, required) {
 			t.Fatalf("plan mode instructions omit %q", required)
 		}

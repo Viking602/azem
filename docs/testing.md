@@ -56,7 +56,7 @@ make gui-windows
 | Go package | `go test ./internal/<package>` | `GOWORK=off go test ./...` when runtime or shared behavior changes |
 | Go formatting | `gofmt -w <changed.go>` | `git diff --check` |
 | React component/store/style | Run the matching Vitest file during iteration | `make test-gui` |
-| Desktop Bridge or Wails lifecycle | `go test ./internal/desktop ./cmd/azem-gui` | `make test-gui`, `make gui`, real app launch |
+| Desktop Bridge or Wails lifecycle | `go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui` | `make test-gui`, `make gui`, real app launch |
 | Workspace file browser | `go test ./internal/desktop -run Workspace` and `cd frontend && bun run test -- WorkspaceFilesPage.test.tsx` | `make test-gui`, `make gui`, real tree/text/image/binary smoke |
 | SQLite migration/adapter | `go test ./internal/store/sqlite` | `GOWORK=off go test ./...` plus real upgrade/reopen evidence |
 | Venat version/contract | Affected agent and adapter packages | `GOWORK=off go mod tidy`, `GOWORK=off go test ./...`, `GOWORK=off make gui` |

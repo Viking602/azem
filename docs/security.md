@@ -1,6 +1,6 @@
 # Security
 
-Last verified: 2026-08-12
+Last verified: 2026-08-14
 
 Azem is a local development agent. Its approvals, typed Bridge, credential
 stores, and durable action ledger are governance boundaries, not an operating-
@@ -14,6 +14,14 @@ matches the work you intend to authorize.
 - The Wails Bridge exposes a closed action allowlist. Its workspace viewer has
   only bounded read methods; it does not expose an arbitrary shell, write, or
   unrestricted filesystem method.
+- The embedded desktop terminal is a separate human-only Bridge surface
+  (`CreateTerminal`, `WriteTerminal`, `ResizeTerminal`, `CloseTerminal`,
+  `ListTerminals`). Those methods are not `ActionKind` values, are not on the
+  Execute allowlist, and are not agent tools. The model cannot inject
+  keystrokes into this PTY. Spawn uses a process argv for the user shell;
+  typed input is written as bytes to the PTY. The initial `cwd` is the
+  window's project workspace; the user may `cd` afterwards. Closing the
+  window reaps every PTY. This does not replace `coding.shell` approvals.
 - Global session search is a separate read-only Bridge method. It accepts at
   most 200 characters and returns at most 30 title/message matches. Message
   content remains in SQLite; the WebView receives only a short FTS snippet,
@@ -156,6 +164,22 @@ approved `plan_v1` artifact is loaded by the backend and inserted through a
 private trusted-context field, rather than copied from editable UI text. Normal
 tool approval, filesystem, shell, MCP, hook, credential, and provider policies
 still apply to that implementation turn.
+
+## Embedded desktop terminal
+
+The bottom terminal panel is an interactive login shell owned by the desktop
+process, not a second Azem-owned shell-tool executor.
+
+- Only the human in that window can write to the PTY, through the typed
+  Bridge methods above. There is no `write_terminal` tool and no Venat route
+  for these keystrokes.
+- Spawn is confined to the window workspace at start. Later `cd` is expected
+  for a real terminal and is not re-validated by Azem.
+- The renderer receives only session identity, title, spawn cwd, shell name,
+  grid size, exit code, and bounded base64 output. It does not receive the
+  environment, PTY device path, or process credentials.
+- Agent file, shell, network, MCP, hook, and approval policy still apply to
+  model-driven tools. Using the embedded terminal does not bypass TOOL-001.
 
 ## Operational guidance
 

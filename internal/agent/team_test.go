@@ -181,7 +181,7 @@ func TestCodingTeamRolePromptContracts(t *testing.T) {
 			"Plan a coding task with repository-backed acceptance criteria without modifying files.",
 			[]string{"plan", "risks", "acceptance_criteria"},
 			[]string{"plan", "risks", "acceptance_criteria"},
-			[]string{"Treat `request` as immutable.", "repository evidence", "observable acceptance criteria"},
+			[]string{"Treat `request` as immutable.", "Before investigating, view the durable todo list", "only after that snapshot exists", "repository evidence", "observable acceptance criteria"},
 			false,
 		},
 		ImplementerClass: {

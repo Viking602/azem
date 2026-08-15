@@ -22,6 +22,18 @@ describe("settingsSearch governance section", () => {
   });
 });
 
+describe("settingsSearch appearance chat text", () => {
+  it("finds the chat UI and code font controls in Chinese and English", () => {
+    const zh = settingsSearchEntries("zh-CN", [], []);
+    const en = settingsSearchEntries("en", [], []);
+    expect(filterSettings(zh, "UI 文本").some((entry) => entry.id === "appearance:chat-font-size")).toBe(true);
+    expect(filterSettings(zh, "代码字体大小").some((entry) => entry.id === "appearance:chat-code-font-size")).toBe(true);
+    expect(filterSettings(zh, "聊天文本").some((entry) => entry.id === "appearance:chat-text")).toBe(true);
+    expect(filterSettings(en, "UI text").some((entry) => entry.id === "appearance:chat-font-size")).toBe(true);
+    expect(filterSettings(en, "Code font size").some((entry) => entry.id === "appearance:chat-code-font-size")).toBe(true);
+  });
+});
+
 describe("settingsSearch usage section", () => {
   it("finds the usage page in Chinese and English", () => {
     const zh = settingsSearchEntries("zh-CN", [], []);

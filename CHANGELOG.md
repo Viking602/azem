@@ -2,6 +2,233 @@
 
 ## Unreleased
 
+- Desktop transcript: switching sessions opens at the latest message,
+  not the first line. The stage remount now follows the tail, and the
+  pin repeats after history turns grow past the 180px placeholder.
+
+- Desktop transcript: sending a follow-up no longer jumps the viewport
+  back to the first line of the session. Finished turns keep their
+  mounted node, and the tail is pinned after layout.
+
+- Desktop transcript: a live turn draws one `正在处理` divider above
+  its first message. The label and elapsed clock sit above the rule,
+  not on the same row as the line. Thinking and tool rows do not print
+  their own times. Failure, queue, and approval labels stay. After the
+  run settles, thinking-only trails keep the clock on the 思考 header
+  and tool trails fold under 已处理.
+
+- Desktop transcript: when a turn with tools finishes, the process
+  trail folds under 已处理 and only the final answer stays in the
+  reading column. The live step list is unchanged while the run is
+  in progress. Thinking-only or commentary-only turns still do not
+  use 已处理.
+
+- Desktop transcript: new commentary after a settled count row stays
+  in that same slot while it streams. Live process folds no longer
+  reserve a 180px content-visibility box that parks the first tokens
+  too low and then jumps them up.
+
+- Desktop transcript: opening a settled `N 次工具调用` row only paints
+  chip headers. The 思考 body mounts when that chip is opened, and
+  the expand animation no longer clip-paths the whole tree.
+
+- Subagent drawer: a projection resync no longer closes the open
+  child chat. Refreshing the main transcript keeps the selected
+  subagent and its live thinking so inspect can merge instead of
+  dropping the follow-up.
+
+- Desktop transcript: unphased streaming text is ordinary body prose
+  from the first token. It no longer appears as a blue-dot pending
+  card before being reclassified.
+
+- Desktop transcript: streaming a final answer no longer flickers
+  already-written lines. Only the newest provider range plays the
+  enter motion; earlier paragraphs stay settled text.
+
+- Desktop transcript: after tools finish, new model commentary is
+  ordinary prose immediately. The previous step settles to
+  `N 次工具调用` and no longer lingers as ✦「运行了 N 个工具」.
+
+- Desktop transcript: the sparkle bar hugs `思考 · 4s` instead of
+  reserving a 12em hollow gap. The clock stays in its own column
+  beside the chevron, so a label roll still does not shove the seconds.
+
+- Desktop transcript: wait, thinking, search, and tool labels on the
+  sparkle bar roll vertically when the action changes, instead of
+  snapping. Clock ticks do not restart that motion.
+
+- Desktop transcript: a completed tool step is a plain count row
+  (`N 次工具调用`), not the sparkle 「运行了 N 个工具」 bar and not a
+  gray capsule. The current live step stays on the sparkle 思考 bar
+  until a later step starts or the run ends, so it does not collapse
+  and pop back when thinking resumes.
+
+- Desktop transcript: the last answer is no longer hidden under the
+  composer. A measured spacer sits below the timeline (WebKit
+  content-visibility was dropping padding-bottom from scroll height),
+  and the overlay fallback is tall enough for the resting input card.
+
+- Desktop transcript: fenced code in answers uses the Beautiful UI
+  Code Block card — white elevated paper, filename + language, Copy,
+  and a line-number gutter. Keywords stay blue and strings stay green.
+
+- Desktop transcript: a completed tool step is one gray Tool Chip card.
+  The first row is the 思考 chip (preview capsule), then write/shell/read
+  chips, then file-change pills. Live wait/thinking stays the sparkle bar
+  plus prose and is not turned into that chip.
+
+- Desktop frontend: the production bundle no longer ships one 666 kB
+  entry chunk. xterm loads only after the terminal is first opened,
+  Inspector and the subagent drawer stay on their own async chunks, and
+  motion/xterm vendor groups are split out of the main entry.
+
+- Desktop chrome: Workspace Files/Changes, Extensions, PR, Recovery,
+  and the subagent drawer no longer use the 156–158px poster headers.
+  Page titles sit on a compact bar. Change review no longer invents an
+  architecture-violation count.
+
+- Desktop transcript: first-token wait, live reasoning, and live
+  search/tools now share one left-aligned sparkle row. Only the label
+  changes; the header does not remount or reset its clock. The old wait
+  capsule is gone. A thinking-only trail is still 「思考」 plus the
+  reasoning prose; while the run is live the elapsed clock sits after
+  正在处理, not on the thinking or tool rows. Each completed tool row keeps its own duration
+  instead of repeating the step's total. After the current step completes with tools, it expands
+  to one chip list: thinking as the first chip, then tool chips and
+  file-change pills, with an honest `N tool calls, N messages` header.
+  There is no Steps / Reasoning / Search / Coding switcher.
+
+- Embedded terminal: every PTY host wait is now bounded. Closing a tab or the
+  window kills and reaps sessions in parallel under a fixed budget, a child
+  stuck in an uninterruptible state no longer hangs the Bridge or the exit
+  path, and writes to a shell that stopped reading fail with an explicit
+  timeout instead of blocking. The panel batches output into xterm once per
+  frame with a bounded backlog, serializes keystroke writes with a timeout,
+  skips unchanged resizes, and removes a closed tab immediately while the
+  backend close converges in the background (TERM-001).
+
+- Subagents: cancelling no longer holds the runtime lock across a store
+  write, a child that only spins on lease/workspace retries can now be
+  cancelled by the idle watchdog (a new wait summary still resets the clock
+  once), and repeated same-state live roster events coalesce in the event
+  broker while lifecycle transitions stay ordered (SUBAGENT-007).
+
+- Desktop transcript: after a tool batch finishes or fails, a still-live main
+  run now keeps the sparkle 思考 wait pill in the transcript until new
+  commentary, thinking, or a final answer arrives. Empty thinking/text frames
+  and the hidden host fallback do not count as progress. The composer no
+  longer looks idle with 「输入下一轮消息」 while that run is active.
+
+- Semantic compaction: writer output that puts `Fact.sources` as a string
+  or string array, which previously failed with `cannot unmarshal string
+  into ... EvidenceRefV1`, is now normalized into `EvidenceRefV1` objects
+  on every fact. Number, bool, and unmappable object sources still fail
+  closed. The static compaction writer prompt now says `sources` must be
+  an object array; that prefix-cache reset applies only to the compaction
+  writer, not the main conversation (PROVIDER-002).
+
+- Desktop transcript: adjacent thinking spans (and hidden host fallbacks)
+  share one ✦ 思考了 header; only the model's own commentary prose is shown.
+
+- Agent workflow: investigation and modification must create or refresh a
+  durable Todo list before search, read, shell, edit, or delegation. Before
+  each tool batch the model must itself write one or two ordinary-prose
+  commentary sentences (「我准备…」 / 「接下来…」); the host does not invent
+  that text. Trivial chat with no workspace work, such as 「你是谁」, may skip
+  both Todo and tool commentary. Changing `internal/app/prompts/main.md`
+  rewrites the static instruction prefix, so provider prefix-cache hits reset
+  once and then stay stable for later turns.
+
+- Desktop transcript: expanding a large completed 已处理 fold first paints
+  collapsed tool/progress chips and only mounts that row’s diff, Markdown,
+  Thinking panel, or Subagent list when the row is opened.
+
+- Subagents: a child that stays `运行中` with no thinking, text, or tool
+  activity is now cancelled after `agents.subagents.idle_timeout` (default
+  `5m`; `0s` still disables). Open tools and approval waits are not
+  cancelled. Empty thinking/text frames and UI elapsed ticks do not reset
+  the clock. The running collaboration card and side-chat drawer show live
+  thinking or the first-token wait pill instead of a bare 运行中 body;
+  `inspect_agent` no longer wipes newer deltas, and a projection resync
+  reloads the open child transcript.
+
+- Desktop transcript: the host fallback line used when a model starts tools
+  without commentary (`正在调用所需工具，并根据实际结果继续。`) stays as an
+  internal grouping anchor and is no longer shown as chat prose. Real model
+  commentary is unchanged.
+
+- Desktop: a user-operated bottom terminal panel (xterm.js) talks to a Go
+  PTY in the current project workspace. `Cmd+`` / `Ctrl+`` or the 终端
+  control toggles it. Tabs can be created and killed; hiding the panel
+  leaves sessions running until the tab or window closes. This is not the
+  agent shell tool and does not bypass tool approval. The PTY prefers a
+  locally installed Nerd Font so Powerlevel10k/starship glyphs are not
+  tofu, and the light-theme scrollbar uses paper/ink tokens instead of a
+  black bar.
+
+- Desktop Appearance: conversation text is now two independent controls
+  under **聊天文本** — **UI 文本** (12–20 px, default 13) and **代码字体大小**
+  (11–18 px, default 12). They persist in WebView local storage
+  (`azem:chat-font-size`, `azem:chat-code-font-size`) and apply only on the
+  thread surface and subagent side-chat transcript. Sidebar, Settings chrome,
+  and Inspector chrome keep the existing global interface font size.
+
+- Desktop transcript: first-token wait uses the Thinking sparkle pill
+  (`思考` / `思考 0.3s`), not the pixel-grid Loading icon. The wait pill
+  keeps the same `--ink` charcoal as the later 「思考了 Xs」 header from
+  first paint; a disabled summary no longer inherits the global
+  `button:disabled` 45% fade. Live reasoning and process traces keep
+  expandable Thinking. Reasoning, search, and other tools stack as
+  separate sparkle rows instead of a tab switcher.
+  Completing a stream keeps the same mounted Markdown tree and only stops
+  reveal/caret motion; the idle caret uses `content: none` so it cannot
+  remain as a hairline between settled paragraphs. Elapsed time still
+  starts at `0.1s` and never shows `0s`.
+
+- Desktop transcript: tool calls use Beautiful UI Tool Chips (icon, bold
+  label, mono path/command/query chip). Process folds keep 已处理 / 处理中
+  and may append honest tool/progress counts. Executed file edits add white
+  `+N`/`-N` pills. Reasoning is unchanged. Queued and approval-bound writes
+  stay out of file-change pills until they run.
+
+- Desktop transcript: fenced Markdown code now uses the Beautiful UI Code
+  Block card (filename or language, copy, line numbers) while the agent is
+  still streaming and after the answer settles. File-change diffs are
+  unchanged.
+
+- Desktop Inspector: the task plan uses Beautiful UI Task Row capsules. Each
+  Todo phase is a white rounded card with a status mark (green check or
+  numbered progress ring), title, honest `done/total` count, status badge, and
+  an expand rail for the phase items. Commentary and thinking chrome are
+  unchanged.
+
+- Desktop transcript: highlighting assistant, commentary, or user prose opens
+  a Beautiful UI Select Action island. 解释, 改进, and a custom 描述编辑 send
+  a normal user turn through the existing composer path with the quoted
+  passage. Thinking, tool dumps, and wake notices are ignored. An active run
+  still follows queue / steer rules.
+
+- Desktop stop now cancels the active run and its subagents together. The
+  previous stop left children running in the background after the parent
+  ended. TUI still offers a parent-only choice when children are active.
+
+- Desktop session: Beautiful UI cool-gray / blue tokens stay global so the
+  chrome does not fall back to the prototype warm palette. Progress
+  commentary is ordinary prose instead of a titled duration card, and it is
+  not laid out on the old 15px marker grid. Subagent run cards keep their
+  full-width frame. The first-token wait uses the Thinking sparkle pill;
+  live reasoning uses the expandable Thinking row. Elapsed time stays in that
+  label, appears only after the first tenth of a second, and never shows
+  `0s`. Changing
+  `internal/app/prompts/main.md` rewrites the static instruction prefix, so
+  provider prefix-cache hits reset once and then stay stable for later turns.
+
+- Subagents: Settings and `agents.subagents.idle_timeout` can cancel a
+  running child that produces no thinking, output, or tool activity for a
+  chosen window. The default is now `5m` (see Unreleased). Open tools,
+  including approval waits, are not cancelled; elapsed-time UI ticks do not
+  count as activity.
+
 - Desktop Inspector: the context kernel occupancy and cache hit rate now
   count only the main agent. Subagent usage is stored separately and no
   longer replaces the main profile or cache totals.
@@ -55,7 +282,8 @@
 - Desktop composer: the bottom input dock is a transparent overlay instead of
   an opaque full-width paper bar, so the timeline stays visible and scrollable
   beside the solid input card. There is no fade or mask above the card; the
-  card itself stays opaque.
+  card itself stays opaque. The last live tool card keeps 16px of space above
+  the input; the empty welcome composer does not use that overlay gap.
 
 - Subagent foreground wait: default `agents.subagents.await_timeout` is now
   `0s`, so the parent keeps waiting while a child is still running in the

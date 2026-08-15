@@ -72,6 +72,13 @@ var modelActionHandlers = map[ActionKind]actionHandler{
 		}
 		return s.updateSubagentAwaitTimeout(ctx, time.Duration(seconds)*time.Second)
 	},
+	ActionSetSubagentIdle: func(s *Service, ctx context.Context, action Action) error {
+		seconds, err := strconv.Atoi(strings.TrimSpace(action.Target))
+		if err != nil || !config.ValidSubagentIdleSeconds(seconds) {
+			return fmt.Errorf("subagent idle timeout must be 0 (disabled) or between 30 and 3600 seconds")
+		}
+		return s.updateSubagentIdleTimeout(ctx, time.Duration(seconds)*time.Second)
+	},
 	ActionSetChatGPTFastMode: func(s *Service, ctx context.Context, action Action) error {
 		enabled, err := strconv.ParseBool(strings.TrimSpace(action.Target))
 		if err != nil {

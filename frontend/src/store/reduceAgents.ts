@@ -1,4 +1,4 @@
-import type { RuntimeEvent } from "../types";
+import type { Block, RuntimeEvent } from "../types";
 import { normalizeAgent, normalizeAgentCatalog, normalizeBackgroundProcess, normalizeBlock, upsertAgent } from "./normalize";
 import type { RuntimeData } from "./state";
 
@@ -14,9 +14,24 @@ export function reduceAgentEvent(next: RuntimeData, event: RuntimeEvent): void {
     case "agent_detail":
       if (event.state === "agent_types") next.agentCatalog = (event.agentCatalog ?? []).map(normalizeAgentCatalog);
       if (event.state === "detail") {
-        next.selectedAgentId = event.agentId ?? next.selectedAgentId;
-        next.agentBlocks = (event.agentBlocks ?? []).map(normalizeBlock);
+        if (event.agentId && event.agentId !== next.selectedAgentId) break;
+        next.agentBlocks = mergeAgentDetailBlocks(next.agentBlocks, (event.agentBlocks ?? []).map(normalizeBlock));
       }
       break;
   }
+}
+
+/** Keep live thinking/text that arrived after inspect_agent copied a stale snapshot. */
+export function mergeAgentDetailBlocks(current: Block[], incoming: Block[]): Block[] {
+  if (incoming.length === 0) return current;
+  if (current.length === 0) return incoming;
+  const incomingIds = new Set(incoming.map((block) => block.id));
+  const currentById = new Map(current.map((block) => [block.id, block]));
+  const merged = incoming.map((block) => {
+    const live = currentById.get(block.id);
+    if (!live) return block;
+    return (live.content?.length ?? 0) > (block.content?.length ?? 0) ? live : block;
+  });
+  const extras = current.filter((block) => !incomingIds.has(block.id));
+  return extras.length ? [...merged, ...extras] : merged;
 }

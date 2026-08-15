@@ -2194,18 +2194,33 @@ func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {
 	if event.Data["subagent_await_seconds"] != "30" {
 		t.Fatalf("await timeout event = %#v", event.Data)
 	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentIdle, Target: "300"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["subagent_idle_seconds"] != "300" {
+		t.Fatalf("idle timeout event = %#v", event.Data)
+	}
 	loaded, err := config.Load(path, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Workspace.Shell.MaxConcurrency != 4 || loaded.Agents.Subagents.AwaitDuration != 30*time.Second {
-		t.Fatalf("persisted limits = shell:%d await:%s", loaded.Workspace.Shell.MaxConcurrency, loaded.Agents.Subagents.AwaitDuration)
+	if loaded.Workspace.Shell.MaxConcurrency != 4 || loaded.Agents.Subagents.AwaitDuration != 30*time.Second ||
+		loaded.Agents.Subagents.IdleDuration != 5*time.Minute {
+		t.Fatalf("persisted limits = shell:%d await:%s idle:%s", loaded.Workspace.Shell.MaxConcurrency, loaded.Agents.Subagents.AwaitDuration, loaded.Agents.Subagents.IdleDuration)
 	}
 	subagents.mu.Lock()
 	liveAwait := subagents.cfg.AwaitDuration
+	liveIdle := subagents.cfg.IdleDuration
 	subagents.mu.Unlock()
 	if liveAwait != 30*time.Second {
 		t.Fatalf("live await timeout = %s", liveAwait)
+	}
+	if liveIdle != 5*time.Minute {
+		t.Fatalf("live idle timeout = %s", liveIdle)
 	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "0"}); err != nil {
 		t.Fatal(err)
@@ -2238,6 +2253,22 @@ func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {
 	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "-1"}); err == nil {
 		t.Fatal("negative await timeout was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentIdle, Target: "0"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["subagent_idle_seconds"] != "0" {
+		t.Fatalf("disabled idle timeout event = %#v", event.Data)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentIdle, Target: "10"}); err == nil {
+		t.Fatal("too-short idle timeout was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentIdle, Target: "-1"}); err == nil {
+		t.Fatal("negative idle timeout was accepted")
 	}
 }
 

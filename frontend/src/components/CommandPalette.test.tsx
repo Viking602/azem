@@ -22,7 +22,7 @@ vi.mock("../bridge", () => ({
 const snapshot: Snapshot = {
   workspace: "/workspace/azem", sessionId: "session-current", provider: "chatgpt", model: "gpt-5.6-sol",
   reasoning: "high", agentMode: "single", language: "zh-CN", approvalMode: "auto_review",
-  queueMode: "queue", subagentConcurrency: 4, shellConcurrency: 2, subagentAwaitSeconds: 600,
+  queueMode: "queue", subagentConcurrency: 4, shellConcurrency: 2, subagentAwaitSeconds: 600, subagentIdleSeconds: 0,
   chatgptFastMode: false, sequence: 0,
 };
 

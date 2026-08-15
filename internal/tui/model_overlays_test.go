@@ -485,6 +485,41 @@ func TestShiftTabIncludesAutomaticReviewOnlyWhenChatGPTCapabilityIsAvailable(t *
 	}
 }
 
+type approvalSnapshotRuntime struct {
+	recordedRuntime
+	mode                ApprovalMode
+	autoReviewAvailable bool
+}
+
+func (r approvalSnapshotRuntime) ApprovalModeState() (ApprovalMode, bool) {
+	return r.mode, r.autoReviewAvailable
+}
+
+func TestNewModelReadsApprovalModeSnapshot(t *testing.T) {
+	runtime := approvalSnapshotRuntime{mode: ApprovalModePrompt, autoReviewAvailable: true}
+	model := NewModel(&runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	if !model.autoReviewAvailable {
+		t.Fatal("initial approval snapshot did not enable automatic review")
+	}
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	model = updated.(AppModel)
+	if cmd == nil {
+		t.Fatal("Shift+Tab did not return an approval mode action")
+	}
+	result, ok := cmd().(actionResultMsg)
+	if !ok {
+		t.Fatalf("Shift+Tab command returned %T", cmd())
+	}
+	updated, _ = model.Update(result)
+	model = updated.(AppModel)
+	if len(runtime.actions) != 1 || runtime.actions[0].Target != string(ApprovalModeAutoReview) {
+		t.Fatalf("approval action = %#v", runtime.actions)
+	}
+	if status := ansi.Strip(model.renderStatus(120)); !strings.Contains(status, "⛨ SMART") {
+		t.Fatalf("automatic approval mode is not visible: %q", status)
+	}
+}
+
 func TestAutomaticApprovalEventsStayOutOfTranscript(t *testing.T) {
 	tests := []struct {
 		state      string

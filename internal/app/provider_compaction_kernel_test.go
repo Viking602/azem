@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -708,6 +709,9 @@ func (s *fakeSemanticStore) activate(_ context.Context, messages []message.Messa
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.checkpoint.Revision == commit.BaseRevision+1 && s.checkpoint.SourceDigest == commit.SourceDigest {
+		if s.checkpoint.Cursor != commit.Cursor || !bytes.Equal(s.checkpoint.State, commit.State) {
+			return fmt.Errorf("%w: %w: semantic state diverged for source digest", session.ErrRunCheckpointStale, session.ErrSemanticStateStale)
+		}
 		return nil
 	}
 	if s.checkpoint.Revision != commit.BaseRevision {

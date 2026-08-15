@@ -31,6 +31,7 @@ export function reduceSessionEvent(next: RuntimeData, event: RuntimeEvent): void
         next.projects = loadedProjects;
         next.currentTitle = next.sessions.find((item) => item.id === next.currentSessionId)?.title ?? next.currentTitle;
       } else if (event.sessionId) {
+        const sameSessionRefresh = event.state === "refreshed" && event.sessionId === next.currentSessionId;
         next.currentSessionId = event.sessionId;
         next.sessions = next.sessions.map((session) => session.id === event.sessionId ? { ...session, unread: false } : session);
         next.snapshot = {
@@ -55,8 +56,13 @@ export function reduceSessionEvent(next: RuntimeData, event: RuntimeEvent): void
         next.runStartedAt = next.running ? Date.now() : 0;
         next.activity = next.running ? "waiting_model" : "";
         next.error = "";
-        next.selectedAgentId = "";
-        next.agentBlocks = [];
+        // Projection resync reloads the main transcript. Closing the open
+        // drawer here makes the follow-up inspect_agent miss selectedAgentId
+        // and drop the child's live thinking (SUBAGENT-005).
+        if (!sameSessionRefresh) {
+          next.selectedAgentId = "";
+          next.agentBlocks = [];
+        }
         next.currentTitle = next.sessions.find((item) => item.id === event.sessionId)?.title ?? next.currentTitle;
         next.agents = (event.agentSnapshots ?? []).map(normalizeAgentSnapshot);
         next.todo = event.todo ?? null;
