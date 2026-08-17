@@ -102,27 +102,30 @@ func syncAuth(from, to string) error {
 			return err
 		}
 		var destData []byte
-		err := dest.QueryRowContext(ctx, `SELECT data FROM auth_credentials WHERE provider_id = ? AND account_id = ?`, providerID, accountID).Scan(&destData)
-		if err != nil && err != sql.ErrNoRows {
+		destErr := dest.QueryRowContext(ctx, `SELECT data FROM auth_credentials WHERE provider_id = ? AND account_id = ?`, providerID, accountID).Scan(&destData)
+		if destErr != nil && destErr != sql.ErrNoRows {
+			return destErr
+		}
+		srcAccount, err := loadSyncAccount(ctx, src, providerID, accountID)
+		if err != nil {
 			return err
 		}
-		if err == nil && !shouldReplaceAuth(data, destData) {
+		destAccount, err := loadSyncAccount(ctx, dest, providerID, accountID)
+		if err != nil {
+			return err
+		}
+		if srcAccount.found && srcAccount.status != "active" {
+			continue
+		}
+		if destErr == nil && !shouldReplaceAuth(data, destData) {
 			continue
 		}
 		if _, err := dest.ExecContext(ctx, `INSERT OR REPLACE INTO auth_credentials(provider_id, account_id, data, created_at, updated_at) VALUES(?, ?, ?, ?, ?)`,
 			providerID, accountID, data, createdAt, now); err != nil {
 			return fmt.Errorf("write %s/%s credential: %w", providerID, accountID, err)
 		}
-		var email, displayName, plan, status string
-		if err := src.QueryRowContext(ctx, `SELECT email, display_name, plan, status FROM accounts WHERE provider_id = ? AND id = ?`, providerID, accountID).Scan(&email, &displayName, &plan, &status); err != nil && err != sql.ErrNoRows {
-			return err
-		}
-		if status != "active" {
-			status = "active"
-		}
-		if _, err := dest.ExecContext(ctx, `UPDATE accounts SET email = ?, display_name = ?, plan = ?, status = ?, updated_at = ? WHERE provider_id = ? AND id = ?`,
-			email, displayName, plan, status, now, providerID, accountID); err != nil {
-			return fmt.Errorf("update %s/%s account: %w", providerID, accountID, err)
+		if err := upsertSyncAccount(ctx, dest, providerID, accountID, srcAccount, destAccount, now); err != nil {
+			return fmt.Errorf("upsert %s/%s account: %w", providerID, accountID, err)
 		}
 		copied++
 	}
@@ -131,6 +134,50 @@ func syncAuth(from, to string) error {
 	}
 	fmt.Fprintf(os.Stderr, "azem-eval: synced %d credential(s) into %s\n", copied, to)
 	return nil
+}
+
+type syncAccount struct {
+	email, displayName, plan, status string
+	found                            bool
+}
+
+func loadSyncAccount(ctx context.Context, db *sql.DB, providerID, accountID string) (syncAccount, error) {
+	var account syncAccount
+	err := db.QueryRowContext(ctx, `SELECT email, display_name, plan, status FROM accounts WHERE provider_id = ? AND id = ?`, providerID, accountID).
+		Scan(&account.email, &account.displayName, &account.plan, &account.status)
+	if err == sql.ErrNoRows {
+		return account, nil
+	}
+	if err != nil {
+		return account, err
+	}
+	account.found = true
+	return account, nil
+}
+
+func upsertSyncAccount(ctx context.Context, dest *sql.DB, providerID, accountID string, src, existing syncAccount, now int64) error {
+	if !src.found {
+		if existing.found {
+			return nil
+		}
+		_, err := dest.ExecContext(ctx, `INSERT INTO accounts(id, provider_id, email, display_name, plan, credential_ref, status, created_at, updated_at)
+			VALUES(?, ?, '', '', '', 'sqlite', 'active', ?, ?)`, accountID, providerID, now, now)
+		return err
+	}
+	status := src.status
+	if status == "" {
+		status = "active"
+	}
+	_, err := dest.ExecContext(ctx, `INSERT INTO accounts(id, provider_id, email, display_name, plan, credential_ref, status, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, 'sqlite', ?, ?, ?)
+		ON CONFLICT(provider_id, id) DO UPDATE SET
+			email = excluded.email,
+			display_name = excluded.display_name,
+			plan = excluded.plan,
+			status = CASE WHEN excluded.status = 'active' THEN 'active' ELSE accounts.status END,
+			updated_at = excluded.updated_at`,
+		accountID, providerID, src.email, src.displayName, src.plan, status, now, now)
+	return err
 }
 
 func shouldReplaceAuth(srcData, destData []byte) bool {

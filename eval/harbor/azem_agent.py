@@ -163,12 +163,6 @@ class Azem(BaseInstalledAgent):
                     )
                 if not dest.is_file():
                     return None
-                self._run_host_eval(["--refresh-auth", str(dest)], check=True)
-                if source.is_file():
-                    self._run_host_eval(
-                        ["--sync-auth-from", str(dest), "--sync-auth-to", str(source)],
-                        check=False,
-                    )
                 return dest
 
     async def _sync_remote_auth(self, environment: BaseEnvironment) -> None:
