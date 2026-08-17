@@ -225,9 +225,7 @@ describe("composer slash commands", () => {
 		expect(styles).toMatch(/\.streaming-text-reveal\s*\{[^}]*streaming-text-reveal-in/s);
 		expect(styles).not.toMatch(/\.assistant-block\.phase-pending::before/);
 		expect(styles).toMatch(/\.timeline-feed > \.process-fold,\s*\.timeline-feed > \.session-turn-current,\s*\.timeline-feed > \.session-history-turn:last-of-type[\s\S]*?contain-intrinsic-size:\s*none/s);
-		expect(styles).toMatch(/\.process-status-rule\s*\{[^}]*flex-direction:\s*column;/s);
-		expect(styles).toMatch(/\.process-status-rule-copy\s*\{[^}]*display:\s*flex;/s);
-		expect(styles).toMatch(/\.process-status-rule::after\s*\{[^}]*width:\s*100%;[^}]*height:\s*1px;[^}]*background:\s*var\(--line\);/s);
+		expect(styles).not.toMatch(/\.process-status-rule/);
 		// The running sparkle breathes on scale and brightness, never on a
 		// muted-to-ink color swap (UI-016).
 		expect(beautifulUIStyles).toMatch(/\.bui-thinking-mark\.active\s*\{[^}]*color:\s*var\(--thinking-ink\);[^}]*animation:\s*bui-thinking-pulse/s);

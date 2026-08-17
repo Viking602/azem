@@ -45,14 +45,12 @@ func durableSubagentAgentID(agentType string) string {
 }
 
 func subagentResourceClaims(profile effectiveSubagentProfile, workspaceRoot string) ([]api.ResourceClaimSpec, error) {
-	if profile.Isolation == "worktree" || !subagentMayMutateWorkspace(profile) {
-		return nil, nil
-	}
-	claim, err := workspaceWriteClaim(workspaceRoot)
-	if err != nil {
-		return nil, err
-	}
-	return []api.ResourceClaimSpec{claim}, nil
+	// Shared-workspace writers used the same exclusive key as main sessions.
+	// That lock blocked every other session in the project, so writers no
+	// longer take a workspace claim. Isolated worktrees remain unclaimed.
+	_ = profile
+	_ = workspaceRoot
+	return nil, nil
 }
 
 func (r *subagentRuntime) childWorkspaceClaims(ctx context.Context, parent subagentParentRuntime, profile effectiveSubagentProfile) ([]api.ResourceClaimSpec, error) {

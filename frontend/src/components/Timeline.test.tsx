@@ -21,10 +21,6 @@ function processRule(container: Element | null | undefined) {
   return container?.querySelector("[data-testid='process-status-rule']") ?? null;
 }
 
-function ruleClock(container: Element | null | undefined) {
-  return processRule(container)?.querySelector(".bui-thinking-meta")?.textContent ?? "";
-}
-
 function foldOpen(fold: Element | null | undefined) {
   return fold?.querySelector(".process-fold-summary, .reasoning-summary, .bui-tool-chip-group-header")?.getAttribute("aria-expanded") === "true";
 }
@@ -608,9 +604,8 @@ describe("Codex-style process timeline", () => {
     const header = container.querySelector('[data-testid="thinking-header"]');
     expect(prose?.textContent).toContain("你可以直接说想做什么");
     expect(foldLabel(header)).toBe("思考");
-    expect(foldClock(header)).toBe("");
-    expect(processRule(container)?.textContent).toContain("正在处理");
-    expect(ruleClock(container)).toBe("1.9s");
+    expect(foldClock(header)).toBe("1.9s");
+    expect(processRule(container)).toBeNull();
     expect(container.querySelector(".process-fold")?.getAttribute("data-step")).toBe("reasoning");
     expect(container.querySelector(".assistant-block")?.closest(".process-fold")).toBeNull();
 
@@ -1145,14 +1140,15 @@ describe("Codex-style process timeline", () => {
     await act(async () => root.render(createElement(TimelineFeed, {
       blocks: [user], language: "zh-CN", activeRunId: "run-bar", running: true, waitingForModel: true,
     })));
-    const header = container.querySelector('[data-testid="thinking-header"]');
-    expect(header?.textContent).toContain("思考");
-    expect(container.querySelector(".thinking-chip, .timeline-step-list")).toBeNull();
+    expect(container.querySelector('[data-testid="thinking-header"]')).toBeNull();
+    expect(container.querySelector(".process-fold")).toBeNull();
+    expect(container.textContent).not.toContain("正在处理");
 
     await act(async () => root.render(createElement(TimelineFeed, {
       blocks: [user, thinking], language: "zh-CN", activeRunId: "run-bar", running: true, waitingForModel: true,
     })));
-    expect(container.querySelector('[data-testid="thinking-header"]')).toBe(header);
+    const header = container.querySelector('[data-testid="thinking-header"]');
+    expect(header?.textContent).toContain("思考");
     expect(container.querySelector(".thinking-chip")).toBeNull();
 
     await act(async () => root.render(createElement(TimelineFeed, {
@@ -2008,19 +2004,10 @@ describe("Codex-style process timeline", () => {
     await act(async () => root.render(createElement(TimelineFeed, {
       blocks: [user], language: "zh-CN", activeRunId: "run-live", running: true, waitingForModel: true,
     })));
-    // UI-016: the wait is the step that is about to receive blocks, so the very
-    // same bar carries it through thinking and tools.
-    const wait = container.querySelector(".process-fold");
-    expect(wait?.textContent).toContain("思考");
-    expect(wait?.textContent).not.toMatch(/0s|0\.0s/u);
-    expect(wait?.querySelector(".bui-thinking-state.streaming")).not.toBeNull();
-    expect(wait?.querySelector(".bui-thinking-pill")).toBeNull();
-    expect(wait?.querySelector(".azem-thinking-mark")).not.toBeNull();
-    expect(wait?.querySelector(".bui-loading-state, .bui-loading-grid")).toBeNull();
-    expect(wait?.querySelector(".reasoning-label-sweep")).not.toBeNull();
-    expect(wait?.querySelector(".bui-thinking-tabs")).toBeNull();
-    expect(container.querySelector(".reasoning-placeholder")).toBeNull();
-    const waitHeader = wait?.querySelector('[data-testid="thinking-header"]');
+    // ChatGPT.app does not synthesize a Processing/Thinking row before work exists.
+    expect(container.querySelector(".process-fold")).toBeNull();
+    expect(container.querySelector('[data-testid="thinking-header"]')).toBeNull();
+    expect(container.textContent).not.toContain("正在处理");
 
     const live: Block = {
       id: "thinking-live", kind: "thinking", runId: "run-live",
@@ -2031,7 +2018,7 @@ describe("Codex-style process timeline", () => {
     })));
     expect(container.querySelector(".bui-loading-state, .bui-loading-grid")).toBeNull();
     expect(container.querySelector(".reasoning-placeholder")).toBeNull();
-    expect(container.querySelector('[data-testid="thinking-header"]')).toBe(waitHeader);
+    expect(container.querySelector('[data-testid="thinking-header"]')).not.toBeNull();
     expect(container.querySelector(".reasoning-label-sweep")).not.toBeNull();
     expect(container.querySelector(".azem-thinking-mark.active")?.childElementCount).toBe(2);
     expect(container.querySelector(".reasoning-spark")).toBeNull();
@@ -2080,29 +2067,11 @@ describe("Codex-style process timeline", () => {
       await act(async () => root.render(createElement(TimelineFeed, {
         blocks: [user], language: "zh-CN", activeRunId: "run-clock", running: true, waitingForModel: true,
       })));
-      const wait = container.querySelector(".process-fold");
-      const waitHeader = wait?.querySelector('[data-testid="thinking-header"]');
-      expect(foldLabel(wait)).toBe("思考");
-      expect(foldClock(waitHeader)).toBe("");
       const firstMessage = container.querySelector(".user-block");
-      expect(processRule(container)?.textContent).toContain("正在处理");
-      expect(ruleClock(container)).toBe("");
-      expect(wait?.querySelector("[data-testid='process-status-rule']")).toBeNull();
-      expect(container.querySelectorAll("[data-testid='process-status-rule']")).toHaveLength(1);
-      expect(processRule(container)!.compareDocumentPosition(firstMessage!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      expect(wait?.querySelector(".bui-thinking-state.streaming")).not.toBeNull();
-      expect(wait?.querySelector(".bui-thinking-pill")).toBeNull();
-      expect(wait?.querySelector(".azem-thinking-mark")).not.toBeNull();
-      expect(wait?.querySelector(".bui-loading-grid")).toBeNull();
-
-      await act(async () => { vi.advanceTimersByTime(100); });
-      expect(foldLabel(wait)).toBe("思考");
-      expect(foldClock(waitHeader)).toBe("");
-      expect(ruleClock(container)).toBe("0.1s");
-      await act(async () => { vi.advanceTimersByTime(200); });
-      expect(foldLabel(wait)).toBe("思考");
-      expect(foldClock(waitHeader)).toBe("");
-      expect(ruleClock(container)).toBe("0.3s");
+      expect(container.querySelector(".process-fold")).toBeNull();
+      expect(container.querySelector('[data-testid="thinking-header"]')).toBeNull();
+      expect(processRule(container)).toBeNull();
+      expect(firstMessage).not.toBeNull();
 
       const live: Block = {
         id: "thinking-live", kind: "thinking", runId: "run-clock",
@@ -2112,22 +2081,32 @@ describe("Codex-style process timeline", () => {
         blocks: [user, live], language: "zh-CN", activeRunId: "run-clock", running: true, waitingForModel: true,
       })));
       const trace = container.querySelector(".reasoning-trace.streaming");
+      const waitHeader = container.querySelector('[data-testid="thinking-header"]');
       expect(container.querySelector(".reasoning-placeholder")).toBeNull();
-      expect(container.querySelector('[data-testid="thinking-header"]')).toBe(waitHeader);
+      expect(waitHeader).not.toBeNull();
+      expect(container.querySelector(".user-block")).toBe(firstMessage);
       expect(foldLabel(trace)).toBe("思考");
       expect(foldClock(trace)).toBe("");
-      expect(ruleClock(container)).toMatch(/^0\.[3-9]s$/u);
+
+      await act(async () => { vi.advanceTimersByTime(100); });
+      expect(foldLabel(trace)).toBe("思考");
+      expect(foldClock(trace)).toBe("0.1s");
+      await act(async () => { vi.advanceTimersByTime(200); });
+      expect(foldLabel(trace)).toBe("思考");
+      expect(foldClock(trace)).toBe("0.3s");
 
       await act(async () => { vi.advanceTimersByTime(1200); });
+      expect(container.querySelector('[data-testid="thinking-header"]')).toBe(waitHeader);
       expect(foldLabel(container.querySelector(".reasoning-trace"))).toBe("思考");
-      expect(foldClock(container.querySelector(".reasoning-trace"))).toBe("");
-      expect(ruleClock(container)).toMatch(/^1\.[5-9]s$/u);
+      expect(foldClock(container.querySelector(".reasoning-trace"))).toMatch(/^1\.[5-9]s$/u);
 
       await act(async () => root.render(createElement(TimelineFeed, {
         blocks: [user, { ...live, state: "completed", data: { elapsedMs: "65000" } }],
         language: "zh-CN", activeRunId: "", running: false,
       })));
       const settled = container.querySelector(".reasoning-trace.completed");
+      expect(container.querySelector('[data-testid="thinking-header"]')).toBe(waitHeader);
+      expect(container.querySelector(".user-block")).toBe(firstMessage);
       expect(foldLabel(settled)).toBe("思考");
       expect(foldClock(settled)).toBe("1m05s");
     } finally {
@@ -2137,7 +2116,7 @@ describe("Codex-style process timeline", () => {
     }
   });
 
-  it("keeps the live clock on the 正在处理 rule and not on thinking or tool rows", async () => {
+  it("keeps the live clock on the thinking sparkle bar and not on tool rows", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-14T16:00:00Z"));
     const user: Block = { id: "user", kind: "user", runId: "run-rule", content: "继续", state: "submitted" };
@@ -2173,28 +2152,23 @@ describe("Codex-style process timeline", () => {
       })));
       await openSteps(container);
       const fold = container.querySelector(".process-fold");
-      const rule = processRule(container);
       const firstMessage = container.querySelector(".user-block");
       const prose = container.querySelector(".commentary-block");
       const header = container.querySelector('[data-testid="thinking-header"]');
-      expect(rule).not.toBeNull();
+      expect(processRule(container)).toBeNull();
       expect(firstMessage).not.toBeNull();
       expect(header).not.toBeNull();
       expect(prose).not.toBeNull();
-      expect(rule?.textContent).toContain("正在处理");
-      expect(ruleClock(container)).toMatch(/s$/u);
-      expect(container.querySelectorAll("[data-testid='process-status-rule']")).toHaveLength(1);
-      expect(fold?.querySelector("[data-testid='process-status-rule']")).toBeNull();
       expect(foldLabel(header)).toBe("运行命令");
-      expect(foldClock(header)).toBe("");
+      expect(foldClock(header)).toMatch(/s$/u);
+      expect(header?.querySelectorAll("time")).toHaveLength(1);
       expect(firstMessage?.textContent).toContain("继续");
       expect(prose?.textContent).toContain("我先读入口再跑检查。");
-      expect(rule!.compareDocumentPosition(firstMessage!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(firstMessage!.compareDocumentPosition(fold!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(firstMessage!.compareDocumentPosition(prose!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(container.querySelector('.timeline-step[data-state="completed"] .tool-status')).toBeNull();
       expect(container.querySelector('.timeline-step[data-state="running"] .tool-status')).toBeNull();
       expect(container.querySelector('.timeline-step[data-state="failed"] .tool-status')?.textContent).toBe("失败");
-      expect(rule?.querySelectorAll("time")).toHaveLength(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -2227,10 +2201,10 @@ describe("Codex-style process timeline", () => {
     expect(container.querySelector(".session-history-turn .assistant-block")).toBe(firstAnswer);
     const nextUser = container.querySelector(".session-turn-current .user-block");
     expect(nextUser?.textContent).toContain("继续核对边界");
-    expect(container.querySelectorAll("[data-testid='process-status-rule']")).toHaveLength(1);
-    expect(processRule(container)).not.toBeNull();
+    expect(processRule(container)).toBeNull();
     expect(nextUser).not.toBeNull();
-    expect(processRule(container)!.compareDocumentPosition(nextUser!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.querySelector(".session-turn-current .process-fold")).toBeNull();
+    expect(container.textContent).not.toContain("正在处理");
 
     await act(async () => root.unmount());
   });
@@ -2273,6 +2247,22 @@ describe("Codex-style process timeline", () => {
     await act(async () => root.unmount());
   });
 
+  it("does not invent a processing line or thinking bar before the model emits work", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(TimelineFeed, {
+      blocks: [{ id: "u", kind: "user", content: "你是什么模型", state: "submitted" }],
+      language: "zh-CN", activeRunId: "run", running: true, waitingForModel: true,
+    })));
+    expect(container.querySelector(".process-status-rule")).toBeNull();
+    expect(container.querySelector(".process-fold")).toBeNull();
+    expect(container.querySelector('[data-testid="thinking-header"]')).toBeNull();
+    expect(container.textContent).not.toContain("正在处理");
+    expect(container.textContent).not.toContain("思考");
+    expect(container.querySelector(".user-block")?.textContent).toContain("你是什么模型");
+    await act(async () => root.unmount());
+  });
+
   it("does not show a live processing badge after the current-turn label", async () => {
     const blocks: Block[] = [
       { id: "u1", kind: "user", content: "上一问", state: "completed" },
@@ -2291,6 +2281,8 @@ describe("Codex-style process timeline", () => {
     expect(label?.textContent).toBe("当前回合");
     expect(label?.querySelector("em")).toBeNull();
     expect(label?.textContent).not.toContain("处理中");
+    expect(processRule(container)).toBeNull();
+    expect(container.textContent).not.toContain("正在处理");
 
     await act(async () => root.unmount());
   });

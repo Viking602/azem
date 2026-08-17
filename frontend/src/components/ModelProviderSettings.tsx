@@ -53,6 +53,7 @@ export default function ModelProviderSettings({ providers, modelsByProvider, ses
 		if (waitingForCatalog) setLoading(true);
 		setLoadError("");
 		try {
+			await execute({ kind: "list_models", sessionId });
 			await execute({ kind: "list_model_providers", sessionId });
 			// Event delivery is async; clear a stuck spinner if the catalog never lands.
 			if (waitingForCatalog) window.setTimeout(() => setLoading(false), 1500);

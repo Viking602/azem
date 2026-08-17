@@ -22,6 +22,30 @@ func TestDefaultClientFollowsProxyResolver(t *testing.T) {
 	}
 }
 
+func TestRefreshSendsClientHeadersAndIncludesErrorBody(t *testing.T) {
+	var sawVersion, sawSurface bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/token" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		sawVersion = request.Header.Get("x-grok-client-version") == DefaultClientVersion
+		sawSurface = request.Header.Get("x-grok-client-surface") == deviceClientSurface
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":"invalid_grant","error_description":"refresh token reused"}`))
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.AllowInsecure = true
+	_, err := client.Refresh(context.Background(), Discovery{TokenEndpoint: server.URL + "/token"}, "stale-refresh")
+	if err == nil || err.Error() != "refresh returned HTTP 400: invalid_grant: refresh token reused" {
+		t.Fatalf("error = %v", err)
+	}
+	if !sawVersion || !sawSurface {
+		t.Fatalf("refresh headers version=%v surface=%v", sawVersion, sawSurface)
+	}
+}
+
 func TestDiscoveryAndDevicePolling(t *testing.T) {
 	var polls atomic.Int32
 	var server *httptest.Server

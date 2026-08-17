@@ -22,6 +22,7 @@ const staticSettings: Copy[] = [
   ["subagents:concurrency", "subagents", "子智能体并发", "Subagent concurrency", "设置同时运行的团队成员上限", "Set the maximum number of concurrent team members", ["agent", "并发", "capacity"]],
   ["subagents:depth", "subagents", "递归深度", "Recursion depth", "子智能体继续委派的层数", "Levels of nested delegation", ["recursion", "depth", "递归", "委派"]],
   ["subagents:shell", "subagents", "Shell 并发", "Shell concurrency", "设置本地命令的独立并发容量", "Set independent local command capacity", ["terminal", "命令", "并发"]],
+  ["subagents:shell-wall", "subagents", "单条命令墙钟", "Command wall clock", "一条本地命令的最长运行时间", "Maximum lifetime of one local command", ["wall clock", "timeout", "墙钟", "shell", "max_wall_clock"]],
   ["subagents:timeout", "subagents", "前台等待窗口", "Foreground wait window", "默认等到前台完成；有限窗口到期只释放父调用，不取消", "Wait until the foreground child finishes by default; a limited window only releases the parent", ["await", "background", "等待", "后台", "长程", "直到完成", "until", "done"]],
   ["subagents:idle", "subagents", "无响应自动取消", "Cancel when idle", "没有思考、输出或工具活动时取消子代理；默认 5 分钟", "Cancel a silent subagent with no thinking, output, or tool activity; default 5 minutes", ["idle", "stuck", "卡住", "无响应", "取消", "timeout"]],
   ["subagents:scheduling", "subagents", "调度策略", "Scheduling policy", "并行工具分发是产品不变量，不能改为串行", "Parallel tool dispatch is a product invariant and cannot be changed to sequential", ["parallel", "调度"]],

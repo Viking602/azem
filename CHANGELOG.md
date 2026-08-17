@@ -2,6 +2,85 @@
 
 ## Unreleased
 
+- Agent instructions follow the current user-message language. Settings
+  language is UI-only. Stated requirements stay in scope, verification
+  stays on the Todo list, and exact strings or hidden cases must be
+  observed before completion. Related read-only searches may share one
+  commentary update. Package-manager work must not leave apt/dpkg/yum
+  interrupted or remove tools later checks need.
+
+- Headless `azem-eval` skips session title and recap side routes so those
+  tokens stay on the coding turn.
+
+- A remaining runtime deadline is injected as private tail context, not
+  the static instruction prefix, so the model can finish a verifiable
+  subset before a hard stop.
+
+- Subagent idle cancellation now also treats a live `coding.shell` as
+  activity. Silent children with no thinking still cancel; a running
+  command does not.
+
+- `coding.shell` accepts `stdin` for scripted keystrokes or piped input.
+
+- Shell: `workspace.shell.max_wall_clock` (default `10m`) is the global
+  per-command ceiling. `coding.shell` accepts `wall_clock_seconds` so the
+  model can request how long a command may run, up to that ceiling.
+  Settings → Subagents can change the ceiling without restarting.
+
+- Eval: Harbor trials now install a CA bundle. Bare Ubuntu task images
+  have no `ca-certificates`, so Grok catalog HTTPS failed with
+  `x509: certificate signed by unknown authority` and Harbor recorded 0
+  instead of a real score.
+
+- Eval: add `azem-eval` and a Harbor installed-agent adapter so Azem can
+  run Terminal-Bench (`tbench.ai`) unattended. Trials use YOLO approvals,
+  copy only auth rows from the desktop database, and leave scoring to
+  Harbor's verifier. Harbor owns the trial wall clock. Before each Grok
+  trial the host refreshes the subscription token and writes rotated
+  credentials back after the container exits, so later trials do not
+  reuse a spent refresh token.
+
+- Grok OAuth refresh and revoke send the same client-version and
+  `x-grok-client-surface=ui` headers as device login, and refresh HTTP
+  errors include the OAuth error body.
+
+- Grok 4.6 accepts the same `low` / `medium` / `high` / `xhigh` efforts as
+  Grok 4.20. The previous ID fallback treated 4.6 as having no reasoning
+  levels, so desktop `xhigh` never reached the API.
+
+- Desktop transcript: sending a message no longer invents a `正在处理`
+  rule or an empty 思考 row. ChatGPT.app only renders a Thinking
+  placeholder in the assistant column after the model starts work, and
+  drops it once answer text exists. Azem now waits for real thinking or
+  tools before drawing that chrome, so the user bubble stays put.
+
+- Desktop transcript: live assistant answers stream as ordinary prose.
+  Unphased text no longer paints as a blue-dot pending card. Streaming
+  and completed answers keep the same renderer and list spacing, so a
+  bullet list does not snap in after the last token. Thinking-only turns
+  stay as thinking plus prose instead of switching to an 已处理 fold.
+
+- Desktop model catalog: attach the cached Grok and ChatGPT subscription
+  catalogs to `list_model_providers` so Settings no longer shows `0/0`
+  after a missed or empty `model_catalog` event. Prefer the signed-in
+  account that already has cached models when more than one Grok account
+  is active. An empty later catalog event does not wipe models that already
+  rendered.
+
+- Sessions: stop taking an exclusive workspace-write lock for main runs and
+  shared-workspace subagents. Multiple conversations in the same project run
+  in parallel. Crash recovery expires leftover exclusive claims from older
+  builds so a stuck `reconcile_required` run cannot queue later sessions.
+
+- Desktop startup: load persisted `hooks.disabled` identities instead of
+  rejecting `config.yaml` with `field disabled not found in type
+  config.HooksConfig`. Accept `agents.subagents.await_timeout: 0s` as
+  wait-until the foreground child completes.
+
+- Main agent prompt: before tools, write one or two ordinary English
+  sentences of intent. Do not use a titled card or filler such as
+  "I'm ready".
+
 - Desktop transcript: switching sessions opens at the latest message,
   not the first line. The stage remount now follows the tail, and the
   pin repeats after history turns grow past the 180px placeholder.
@@ -10,12 +89,11 @@
   back to the first line of the session. Finished turns keep their
   mounted node, and the tail is pinned after layout.
 
-- Desktop transcript: a live turn draws one `正在处理` divider above
-  its first message. The label and elapsed clock sit above the rule,
-  not on the same row as the line. Thinking and tool rows do not print
-  their own times. Failure, queue, and approval labels stay. After the
-  run settles, thinking-only trails keep the clock on the 思考 header
-  and tool trails fold under 已处理.
+- Desktop transcript: thinking and individual tool rows do not print a
+  second clock while the sparkle bar already shows elapsed time.
+  Failure, queue, and approval labels stay. After the run settles,
+  thinking-only trails keep the clock on the 思考 header and tool
+  trails fold under 已处理.
 
 - Desktop transcript: when a turn with tools finishes, the process
   trail folds under 已处理 and only the final answer stays in the
@@ -91,8 +169,8 @@
   search/tools now share one left-aligned sparkle row. Only the label
   changes; the header does not remount or reset its clock. The old wait
   capsule is gone. A thinking-only trail is still 「思考」 plus the
-  reasoning prose; while the run is live the elapsed clock sits after
-  正在处理, not on the thinking or tool rows. Each completed tool row keeps its own duration
+  reasoning prose; while the run is live the elapsed clock sits on that
+  sparkle bar, not on individual tool rows. Each completed tool row keeps its own duration
   instead of repeating the step's total. After the current step completes with tools, it expands
   to one chip list: thinking as the first chip, then tool chips and
   file-change pills, with an honest `N tool calls, N messages` header.
@@ -362,8 +440,8 @@
   follow the Appearance font size. The desktop layout pass no longer pins
   those labels to 11px / 9px.
 
-- OMP-style subagent scheduling: raise the default concurrency to 32, accept
-  zero as unbounded, and support recursive delegation with a default depth of
+- Subagent scheduling: raise the default concurrency to 32, accept zero
+  as unbounded, and support recursive delegation with a default depth of
   two (`-1` is unlimited, `0` disables delegation). A re-entrant child slot
   prevents parent/child deadlock when the configured concurrency is one while
   still queueing sibling work. The 200-request soft budget now emits one

@@ -62,6 +62,7 @@ func AllActionKinds() []ActionKind {
 		ActionSetSubagentConcurrency,
 		ActionSetSubagentDepth,
 		ActionSetShellConcurrency,
+		ActionSetShellMaxWallClock,
 		ActionSetSubagentAwait,
 		ActionSetSubagentIdle,
 		ActionSetChatGPTFastMode,

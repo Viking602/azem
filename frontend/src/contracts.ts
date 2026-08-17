@@ -56,6 +56,7 @@ export type ActionKind =
   | "set_subagent_concurrency"
   | "set_subagent_depth"
   | "set_shell_concurrency"
+  | "set_shell_max_wall_clock"
   | "set_subagent_await_timeout"
   | "set_subagent_idle_timeout"
   | "set_chatgpt_fast_mode"
@@ -171,6 +172,7 @@ export const ACTION_KINDS: readonly ActionKind[] = [
   "set_subagent_concurrency",
   "set_subagent_depth",
   "set_shell_concurrency",
+  "set_shell_max_wall_clock",
   "set_subagent_await_timeout",
   "set_subagent_idle_timeout",
   "set_chatgpt_fast_mode",

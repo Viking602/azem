@@ -77,10 +77,52 @@ func (p *Provider) PrepareRecovery(ctx context.Context, at time.Time) (expiredLe
 	if err := queries.QuarantineStartedProviderRequests(ctx); err != nil {
 		return 0, 0, fmt.Errorf("quarantine incomplete provider requests: %w", err)
 	}
+	if err := expireActiveResourceClaims(ctx, queries, at); err != nil {
+		return 0, 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("commit recovery preparation: %w", err)
 	}
 	return expiredLeases, quarantinedAttempts, nil
+}
+
+func expireActiveResourceClaims(ctx context.Context, queries *dbgen.Queries, at time.Time) error {
+	rows, err := queries.ListResourceClaimData(ctx)
+	if err != nil {
+		return fmt.Errorf("list resource claims: %w", err)
+	}
+	for _, data := range rows {
+		claim, err := decodeControlRecord[api.ResourceClaim](data, "resource claim")
+		if err != nil {
+			return err
+		}
+		if claim.State != api.ResourceClaimActive {
+			continue
+		}
+		previous := claim.Version
+		claim.State = api.ResourceClaimExpired
+		claim.Version++
+		claim.UpdatedAt = at
+		encoded, err := json.Marshal(claim)
+		if err != nil {
+			return fmt.Errorf("marshal expired resource claim %s: %w", claim.ID, err)
+		}
+		nextVersion, err := int64FromUint64(claim.Version)
+		if err != nil {
+			return err
+		}
+		expected, err := int64FromUint64(previous)
+		if err != nil {
+			return err
+		}
+		if _, err := queries.UpdateResourceClaimCAS(ctx, dbgen.UpdateResourceClaimCASParams{
+			NextState: string(claim.State), NextVersion: nextVersion, UpdatedAt: nanos(claim.UpdatedAt),
+			ExpiresAt: nanos(claim.ExpiresAt), Data: encoded, ID: claim.ID, ExpectedVersion: expected,
+		}); err != nil {
+			return fmt.Errorf("expire resource claim %s: %w", claim.ID, err)
+		}
+	}
+	return nil
 }
 
 func (p *Provider) ListReconcileAttempts(ctx context.Context) ([]api.ActionAttempt, error) {

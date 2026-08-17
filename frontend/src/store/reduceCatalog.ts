@@ -52,6 +52,7 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
         subagentConcurrency: numberValue(data.subagent_max_concurrency, next.snapshot.subagentConcurrency),
         subagentMaxDepth: numberValue(data.subagent_max_depth, next.snapshot.subagentMaxDepth ?? 2),
         shellConcurrency: numberValue(data.shell_max_concurrency, next.snapshot.shellConcurrency ?? 2),
+        shellMaxWallClockSeconds: numberValue(data.shell_max_wall_clock_seconds, next.snapshot.shellMaxWallClockSeconds ?? 600),
         subagentAwaitSeconds: numberValue(data.subagent_await_seconds, next.snapshot.subagentAwaitSeconds ?? 0),
         subagentIdleSeconds: numberValue(data.subagent_idle_seconds, next.snapshot.subagentIdleSeconds ?? 0),
         chatgptFastMode: data.chatgpt_fast_mode === "true",
@@ -68,7 +69,11 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
 	  break;
     case "model_catalog": {
       const provider = data.provider || "unknown";
-      next.modelsByProvider = { ...next.modelsByProvider, [provider]: parseArray(data.models).map(normalizeModel) };
+      const models = parseArray(data.models).map(normalizeModel);
+      if (models.length === 0 && (next.modelsByProvider[provider] ?? []).length > 0) {
+        break;
+      }
+      next.modelsByProvider = { ...next.modelsByProvider, [provider]: models };
       if (next.snapshot?.provider === provider) {
         const contextLimit = findModelOption(next.modelsByProvider[provider] ?? [], next.snapshot?.model ?? "")?.contextWindow ?? 0;
         const subscription = provider === "chatgpt" || provider === "grok";

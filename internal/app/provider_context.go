@@ -94,6 +94,7 @@ type turnContext struct {
 	visionContext             string
 	approvedPlanContext       string
 	historicalContext         string
+	deadlineAt                time.Time
 	resuming                  bool
 	history                   []session.Block
 	modelHistory              session.ModelHistory
@@ -336,6 +337,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 		value.Visibility = message.VisibilityPrivate
 		messages = append(messages, value)
 	}
+	if text := runtimeDeadlineContext(ctx, c.deadlineAt); text != "" {
+		value := message.NewText(message.RoleSystem, "[Trusted runtime deadline]\n"+text)
+		value.Visibility = message.VisibilityPrivate
+		messages = append(messages, value)
+	}
 	if text := strings.TrimSpace(c.approvedPlanContext); text != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted approved execution plan]\n"+text)
 		value.Visibility = message.VisibilityPrivate
@@ -391,6 +397,23 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 		return nil, err
 	}
 	return messages, nil
+}
+
+func runtimeDeadlineContext(ctx context.Context, configured time.Time) string {
+	deadline := configured
+	if ctx != nil {
+		if ctxDeadline, ok := ctx.Deadline(); ok && (deadline.IsZero() || ctxDeadline.Before(deadline)) {
+			deadline = ctxDeadline
+		}
+	}
+	if deadline.IsZero() {
+		return ""
+	}
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return fmt.Sprintf("Hard stop in %s (at %s UTC). Deliver a verifiable subset before the stop. Do not start work that cannot finish.", remaining.Round(time.Second), deadline.UTC().Format("2006-01-02T15:04:05Z"))
 }
 
 // validateModelVisibleDurability enforces the model-visible ⟺ durably-logged

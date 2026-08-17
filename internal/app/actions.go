@@ -86,6 +86,7 @@ const (
 	ActionSetSubagentConcurrency  ActionKind = "set_subagent_concurrency"
 	ActionSetSubagentDepth        ActionKind = "set_subagent_depth"
 	ActionSetShellConcurrency     ActionKind = "set_shell_concurrency"
+	ActionSetShellMaxWallClock    ActionKind = "set_shell_max_wall_clock"
 	ActionSetSubagentAwait        ActionKind = "set_subagent_await_timeout"
 	ActionSetSubagentIdle         ActionKind = "set_subagent_idle_timeout"
 	ActionSetChatGPTFastMode      ActionKind = "set_chatgpt_fast_mode"
@@ -381,13 +382,14 @@ func (s *Service) modelRoutesEvent(state string) Event {
 	maxConcurrency := s.cfg.Agents.Subagents.MaxConcurrency
 	maxDepth := s.cfg.Agents.Subagents.MaxDepth
 	shellConcurrency := s.cfg.Workspace.Shell.MaxConcurrency
+	shellWallSeconds := int(s.cfg.Workspace.Shell.MaxWallClockDuration.Seconds())
 	awaitSeconds := int(s.cfg.Agents.Subagents.AwaitDuration.Seconds())
 	idleSeconds := int(s.cfg.Agents.Subagents.IdleDuration.Seconds())
 	fastMode := s.cfg.Providers.ChatGPT.FastMode
 	s.mu.Unlock()
 	return Event{
 		Kind: EventModelRoutes, State: state, ModelRoutes: s.modelRouteEntries(),
-		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "subagent_max_depth": strconv.Itoa(maxDepth), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "subagent_idle_seconds": strconv.Itoa(idleSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
+		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "subagent_max_depth": strconv.Itoa(maxDepth), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "shell_max_wall_clock_seconds": strconv.Itoa(shellWallSeconds), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "subagent_idle_seconds": strconv.Itoa(idleSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
 	}
 }
 
@@ -576,6 +578,36 @@ func (s *Service) updateShellMaxConcurrency(ctx context.Context, maxConcurrency 
 	s.mu.Unlock()
 	if s.coding != nil {
 		s.coding.UpdateShellMaxConcurrency(maxConcurrency)
+	}
+	s.emit(ctx, s.modelRoutesEvent("updated"))
+	return nil
+}
+
+func (s *Service) updateShellMaxWallClock(ctx context.Context, wall time.Duration) error {
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	seconds := int(wall.Seconds())
+	s.mu.Lock()
+	currentSession := s.currentSession
+	s.mu.Unlock()
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateShellMaxWallClock(s.configPath, seconds)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.cfg.Workspace.Shell.MaxWallClock = wall.String()
+	s.cfg.Workspace.Shell.MaxWallClockDuration = wall
+	s.mu.Unlock()
+	if s.coding != nil {
+		s.coding.UpdateShellMaxWallClock(wall)
 	}
 	s.emit(ctx, s.modelRoutesEvent("updated"))
 	return nil
@@ -1094,33 +1126,27 @@ func (s *Service) emitAuthCatalog(ctx context.Context) {
 		return
 	}
 	for _, provider := range []string{"chatgpt", "grok"} {
-		accounts, err := s.authentication.Accounts(ctx, provider)
+		account, ok := s.activeSubscriptionAccount(ctx, provider)
+		if !ok {
+			continue
+		}
+		s.emit(ctx, Event{Kind: EventAuthState, State: account.Status, Data: map[string]string{
+			"provider": account.Provider, "accountID": account.ID, "email": account.Email, "displayName": account.DisplayName, "plan": account.Plan,
+		}})
+		cached, found, err := s.catalog.Cached(ctx, account.Provider, account.ID)
+		if err != nil || !found {
+			continue
+		}
+		cached.Models = s.catalogModelsWithAvailability(account.Provider, cached.Models)
+		encoded, err := json.Marshal(cached.Models)
 		if err != nil {
 			continue
 		}
-		for _, account := range accounts {
-			s.emit(ctx, Event{Kind: EventAuthState, State: account.Status, Data: map[string]string{
-				"provider": account.Provider, "accountID": account.ID, "email": account.Email, "displayName": account.DisplayName, "plan": account.Plan,
-			}})
-			if account.Status != "active" {
-				continue
-			}
-			models, err := s.catalog.List(ctx, account.Provider, account.ID, false)
-			if err != nil {
-				continue
-			}
-			models = s.catalog.EnrichWithModelsDev(ctx, models)
-			models.Models = s.catalogModelsWithAvailability(account.Provider, models.Models)
-			encoded, err := json.Marshal(models.Models)
-			if err != nil {
-				continue
-			}
-			state := "fresh"
-			if models.Stale {
-				state = "stale"
-			}
-			s.emit(ctx, Event{Kind: EventModelCatalog, State: state, Text: models.Warning, Data: map[string]string{"provider": account.Provider, "accountID": account.ID, "models": string(encoded)}})
+		state := "cached"
+		if cached.Stale {
+			state = "stale"
 		}
+		s.emit(ctx, Event{Kind: EventModelCatalog, State: state, Text: cached.Warning, Data: map[string]string{"provider": account.Provider, "accountID": account.ID, "models": string(encoded)}})
 	}
 }
 

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { stabilizeStreamingMarkdown } from "../../streamMarkdown";
 import { sameRevealRanges, StreamingMarkdown, type StreamingRevealRange } from "../Markdown";
 import { StreamingText as BeautifulStreamingText } from "../beautiful-ui/Primitives";
 
@@ -120,9 +121,11 @@ export function StreamingText({ content, active = true, debugReplay = false }: {
   const presentationRef = useRef<StreamingPresentation | null>(null);
   const presentation = nextStreamingPresentation(presentationRef.current, visibleContent, active);
   presentationRef.current = presentation;
+  const stableContent = active ? stabilizeStreamingMarkdown(visibleContent) : visibleContent;
+  const ranges = active ? presentation.ranges : [];
 
   return <BeautifulStreamingText active={active}>
-    <StreamingMarkdown ranges={presentation.ranges}>{visibleContent}</StreamingMarkdown>
+    <StreamingMarkdown ranges={ranges}>{stableContent}</StreamingMarkdown>
   </BeautifulStreamingText>;
 }
 

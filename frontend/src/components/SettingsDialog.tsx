@@ -52,6 +52,7 @@ export default function SettingsDialog() {
   const [concurrency, setConcurrency] = useState(snapshot.subagentConcurrency);
   const [maxDepth, setMaxDepth] = useState(snapshot.subagentMaxDepth ?? 2);
   const [shellConcurrency, setShellConcurrency] = useState(snapshot.shellConcurrency ?? 2);
+  const [shellMaxWallClockSeconds, setShellMaxWallClockSeconds] = useState(snapshot.shellMaxWallClockSeconds ?? 600);
   const [awaitSeconds, setAwaitSeconds] = useState(snapshot.subagentAwaitSeconds ?? 0);
   const [idleSeconds, setIdleSeconds] = useState(snapshot.subagentIdleSeconds ?? 0);
   const [addProviderRequest, setAddProviderRequest] = useState(0);
@@ -135,6 +136,7 @@ export default function SettingsDialog() {
   useEffect(() => setConcurrency(snapshot.subagentConcurrency), [snapshot.subagentConcurrency]);
   useEffect(() => setMaxDepth(snapshot.subagentMaxDepth ?? 2), [snapshot.subagentMaxDepth]);
   useEffect(() => setShellConcurrency(snapshot.shellConcurrency ?? 2), [snapshot.shellConcurrency]);
+  useEffect(() => setShellMaxWallClockSeconds(snapshot.shellMaxWallClockSeconds ?? 600), [snapshot.shellMaxWallClockSeconds]);
   useEffect(() => setAwaitSeconds(snapshot.subagentAwaitSeconds ?? 0), [snapshot.subagentAwaitSeconds]);
   useEffect(() => setIdleSeconds(snapshot.subagentIdleSeconds ?? 0), [snapshot.subagentIdleSeconds]);
   useEffect(() => {
@@ -258,6 +260,18 @@ export default function SettingsDialog() {
                   increaseLabel={t("increaseValue")}
                   decrease={() => { const value = Math.max(1, shellConcurrency - 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }}
                   increase={() => { const value = Math.min(16, shellConcurrency + 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }}
+                />
+              </SettingRow>
+              <SettingRow settingID="subagents:shell-wall" label={t("shellWallClockLabel")} description={t("shellWallClockHint")}>
+                <MenuSelect
+                  className="capacity-timeout-menu"
+                  value={String(shellMaxWallClockSeconds)}
+                  options={[60, 120, 300, 600, 900, 1800, 3600, 7200].map((seconds) => ({
+                    value: String(seconds),
+                    label: tFormat(snapshot.language, "subagentMinutes", { n: seconds / 60 }),
+                  }))}
+                  onChange={(value) => { const seconds = Number(value); setShellMaxWallClockSeconds(seconds); void action("set_shell_max_wall_clock", value); }}
+                  ariaLabel={t("shellWallClockLabel")}
                 />
               </SettingRow>
               <SettingRow settingID="subagents:timeout" label={t("subagentAwaitLabel")} description={t("subagentAwaitHint")}>

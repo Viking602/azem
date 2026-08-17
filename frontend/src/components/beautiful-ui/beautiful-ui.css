@@ -215,7 +215,7 @@
   pointer-events: none;
   animation: bui-caret 850ms ease-in-out infinite;
 }
-.bui-streaming-text .streaming-text-reveal { animation-duration: 420ms; animation-timing-function: cubic-bezier(.22, .61, .25, 1); }
+.bui-streaming-text .streaming-text-reveal { animation-duration: .1s; animation-timing-function: ease-out; }
 
 .bui-tool-row > summary { border-radius: var(--bui-radius-control); }
 .bui-tool-row > summary:hover { background: var(--hover); transform: none; }

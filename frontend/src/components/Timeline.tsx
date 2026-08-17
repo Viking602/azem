@@ -13,7 +13,7 @@ import {
   type SessionTurnItem,
 } from "./sessionDocument";
 import { TimelineBlock } from "./timeline/blocks";
-import { isSubagentSpawnBlock, ProcessEntries, ProcessFold, ProcessStatusRule } from "./timeline/process";
+import { isSubagentSpawnBlock, ProcessEntries, ProcessFold } from "./timeline/process";
 export { approvalPresentation, TimelineBlock, visibleCommentaryTitle } from "./timeline/blocks";
 
 function TimelineFeedView({
@@ -129,7 +129,6 @@ function SessionTurnView({
 }) {
   const t = translator(language);
   const fileSummary = turnEditedFiles(turn, { activeRunId, running });
-  const liveTurn = Boolean(current && (waiting || turn.items.some((item) => item.kind === "process" && item.active)));
   return <section
     className={`session-turn ${current ? `session-turn-current${multiTurn ? " has-history-context" : ""}` : "session-history-turn"}`}
     data-screen-label={current ? "current-turn" : undefined}
@@ -144,7 +143,6 @@ function SessionTurnView({
       : <div className="session-turn-label">
         <span className="session-turn-index">{tFormat(language, "turnIndex", { n: String(index + 1).padStart(2, "0") })}</span>
       </div>}
-    {liveTurn ? <ProcessStatusRule blocks={turnProcessBlocks(turn)} live language={language} /> : null}
     {turn.user ? <TimelineBlock block={turn.user} language={language} /> : null}
     <TurnItems
       turn={turn}
@@ -152,22 +150,21 @@ function SessionTurnView({
       foldActiveProcess={foldActiveProcess}
       collapseCompletedProcess={collapseCompletedProcess}
       waiting={current && waiting}
-      pendingStep={current && waiting}
+      pendingWait={!turn.user && current && waiting}
     />
     {fileSummary ? <EditedFilesSummary summary={fileSummary} language={language} /> : null}
   </section>;
 }
 
 function TurnItems({
-  turn, language, foldActiveProcess, collapseCompletedProcess, waiting = false, pendingStep = false,
+  turn, language, foldActiveProcess, collapseCompletedProcess, waiting = false, pendingWait = false,
 }: {
   turn: SessionTurn;
   language: Snapshot["language"];
   foldActiveProcess: boolean;
   collapseCompletedProcess: boolean;
   waiting?: boolean;
-  /** Render the first-token wait as the step that is about to receive blocks. */
-  pendingStep?: boolean;
+  pendingWait?: boolean;
 }) {
   const processIndexes = turn.items
     .map((item, index) => item.kind === "process" ? index : -1)
@@ -180,9 +177,11 @@ function TurnItems({
     }),
   );
 
-  // UI-016: the wait, the first thinking and the tool step are one bar. Keying a
-  // step by its ordinal instead of its first block keeps that single element
-  // alive from the empty wait through the blocks that land in it.
+  // Key process steps by ordinal so appending tools cannot remount the bar.
+  // ChatGPT.app `ma()` does not invent a Processing rule or empty Thinking
+  // row on send. A user turn therefore stays just the bubble until the
+  // model emits thinking or tools. Side-chat wait (no user bubble) still
+  // needs a live 思考 bar so an empty running drawer is not 运行中.
   const stepKeys = new Map(processIndexes.map((index, ordinal) => [index, `process-step-${ordinal}`]));
   const children = turn.items.map((item, index) => {
     const previous = turn.items[index - 1];
@@ -198,16 +197,10 @@ function TurnItems({
       />
     </Fragment>;
   });
-  // The wait joins the same keyed list, so the element it hands over to is the
-  // one already on screen rather than a replacement in another slot.
-  if (pendingStep && latestProcessIndex < 0) {
-    const pending: SessionTurnItem = {
-      kind: "process", id: "pending-step", blocks: NO_BLOCKS, elapsedMs: 0, active: true,
-    };
+  if (pendingWait && latestProcessIndex < 0) {
     children.push(<Fragment key={`process-step-${processIndexes.length}`}>
-      {null}
       <TurnItemView
-        item={pending}
+        item={{ kind: "process", id: "pending-step", blocks: [], elapsedMs: 0, active: true }}
         language={language}
         featured
         foldActiveProcess={foldActiveProcess}
@@ -217,12 +210,6 @@ function TurnItems({
     </Fragment>);
   }
   return <>{children}</>;
-}
-
-const NO_BLOCKS: Block[] = [];
-
-function turnProcessBlocks(turn: SessionTurn) {
-  return turn.items.flatMap((item) => item.kind === "process" ? item.blocks : []);
 }
 
 function itemKey(item: SessionTurnItem) {

@@ -406,26 +406,10 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantClaim, err := workspaceWriteClaim(workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var workerClaimFound bool
 	for _, task := range tasks {
-		if task.ID == durable.RootTaskID {
-			if len(task.ResourceClaims) != 0 {
-				t.Fatalf("top-level root task claims=%#v", task.ResourceClaims)
-			}
-			continue
+		if len(task.ResourceClaims) != 0 {
+			t.Fatalf("session tasks must not take exclusive workspace claims: %#v", tasks)
 		}
-		for _, taskClaim := range task.ResourceClaims {
-			if taskClaim == wantClaim {
-				workerClaimFound = true
-			}
-		}
-	}
-	if !workerClaimFound {
-		t.Fatalf("top-level worker claims=%#v, want %#v", tasks, wantClaim)
 	}
 	manifest, err := decodeSingleRunManifest(durable.Metadata["single_run_manifest"])
 	if err != nil || manifest.AccountID != "acct" {

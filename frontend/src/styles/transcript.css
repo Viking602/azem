@@ -149,7 +149,7 @@
 }
 .assistant-block > :first-child { margin-top: 0; }
 .assistant-block > :last-child { margin-bottom: 0; }
-.assistant-block p { margin: 0 0 .6875rem; }
+.assistant-block p { margin: 0 0 .85em; }
 .assistant-block p:last-child { margin-bottom: 0; }
 .assistant-block h1,
 .assistant-block h2,
@@ -168,16 +168,17 @@
 .assistant-block h5,
 .assistant-block h6 { font-size: 15px; line-height: 20px; }
 .assistant-block ul,
-.assistant-block ol { margin: 0; padding-inline-start: 1.3125rem; }
-.assistant-block > ul:not(:last-child),
-.assistant-block > ol:not(:last-child),
-.assistant-block .streaming-text > ul:not(:last-child),
-.assistant-block .streaming-text > ol:not(:last-child) { margin-bottom: .625rem; }
-.assistant-block li { margin: 0; }
+.assistant-block ol { margin: 0 0 .85em; padding-inline-start: 1.4em; }
+.assistant-block > ul:last-child,
+.assistant-block > ol:last-child,
+.assistant-block .streaming-text > ul:last-child,
+.assistant-block .streaming-text > ol:last-child { margin-bottom: 0; }
+.assistant-block li { margin: .45em 0; }
 .assistant-block li + li,
 .assistant-block li > ul,
-.assistant-block li > ol { margin-top: .5rem; }
-.assistant-block li > p { margin: 0; }
+.assistant-block li > ol { margin-top: .45em; }
+.assistant-block li > p { margin: .45em 0; }
+.assistant-block li > p:last-child { margin-bottom: 0; }
 .assistant-block code {
   padding: .12em .35em;
   border-radius: 5px;
@@ -204,17 +205,16 @@
  * .active replays fade/blur on already-written lines each time Markdown
  * reparses the growing source (UI-003). */
 .streaming-text-reveal {
-  animation: streaming-text-reveal-in .24s cubic-bezier(.16, 1, .3, 1) both;
-  will-change: opacity, filter;
+  animation: streaming-text-reveal-in .1s ease-out both;
+  will-change: opacity;
 }
 .streaming-text:not(.active) .streaming-text-reveal {
   animation: none;
-  filter: none;
   will-change: auto;
 }
 @keyframes streaming-text-reveal-in {
-  from { opacity: .06; filter: blur(3px); }
-  to { opacity: 1; filter: blur(0); }
+  from { opacity: .06; }
+  to { opacity: 1; }
 }
 
 .planning-question,

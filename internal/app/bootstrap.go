@@ -178,7 +178,8 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 	shellOptions := agentservice.ShellOptions{
 		MaxContextOutputBytes: b.cfg.Workspace.Shell.MaxContextOutputBytes, MaxArtifactOutputBytes: b.cfg.Workspace.Shell.MaxArtifactOutputBytes,
 		StopOnOutputLimit: b.cfg.Workspace.Shell.StopOnOutputLimit, MaxConcurrency: b.cfg.Workspace.Shell.MaxConcurrency,
-		ArtifactSink: newShellArtifactSink(b.sessions),
+		MaxWallClockDuration: b.cfg.Workspace.Shell.MaxWallClockDuration,
+		ArtifactSink:         newShellArtifactSink(b.sessions),
 	}
 	b.coding, err = agentservice.NewService(b.store, b.paths.Workspace,
 		agentservice.WithWorkspacePolicy(b.cfg.Workspace.AllowWrite, b.cfg.Workspace.ShellPolicy, b.cfg.Workspace.AllowNetwork),

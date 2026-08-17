@@ -387,12 +387,20 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		semanticCheckpoint = loaded
 	}
 	subagentFinishedAtNS, subagentID := latestSubagentCursor(r.ListSubagents(ctx, request.SessionID))
+	deadlineAt := time.Time{}
+	if maxWallClock > 0 {
+		deadlineAt = time.Now().Add(maxWallClock)
+	}
+	if ctxDeadline, ok := ctx.Deadline(); ok && (deadlineAt.IsZero() || ctxDeadline.Before(deadlineAt)) {
+		deadlineAt = ctxDeadline
+	}
 	contextManager := turnContext{
 		sessionID:    request.SessionID,
 		instructions: instructions, instructionFingerprint: instructionFingerprint, providerID: request.Provider, modelID: modelID, runID: run.RunID,
 		privateContext: request.privateContext, visionContext: request.visionContext, approvedPlanContext: request.approvedPlanContext, historicalContext: request.historicalContext,
-		resuming: request.resuming,
-		history:  request.History, modelHistory: request.modelHistory, toolRecords: request.toolRecords,
+		deadlineAt: deadlineAt,
+		resuming:   request.resuming,
+		history:    request.History, modelHistory: request.modelHistory, toolRecords: request.toolRecords,
 		workspaceRoot: r.cfg.Workspace.Root, checkpointBoundary: request.checkpointBoundary,
 		images: effectiveTurnImages(request), todo: request.Todo,
 		largeToolTokens:      r.cfg.Agents.Context.LargeToolResultTokens,

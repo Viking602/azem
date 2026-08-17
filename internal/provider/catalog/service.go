@@ -160,6 +160,15 @@ func joinWarnings(current, addition string) string {
 	return current + "; " + addition
 }
 
+// Cached returns the last persisted catalog without contacting the provider.
+// Expired rows are still returned so the settings UI can render immediately.
+func (s *Service) Cached(ctx context.Context, provider, accountID string) (Result, bool, error) {
+	if s == nil {
+		return Result{}, false, nil
+	}
+	return s.load(ctx, provider, accountID)
+}
+
 func (s *Service) List(ctx context.Context, provider string, accountID string, force bool) (Result, error) {
 	cached, found, err := s.load(ctx, provider, accountID)
 	if err != nil {

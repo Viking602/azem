@@ -916,6 +916,15 @@ func (s *Service) UpdateShellMaxConcurrency(maxConcurrency int) {
 	s.shellRuntime.updateMaxConcurrency(maxConcurrency)
 }
 
+// UpdateShellMaxWallClock changes the per-command ceiling for new shell calls
+// without interrupting commands that are already running.
+func (s *Service) UpdateShellMaxWallClock(wall time.Duration) {
+	if s == nil || s.shellRuntime == nil || wall < time.Second {
+		return
+	}
+	s.shellRuntime.updateMaxWallClock(wall)
+}
+
 func scopeForCall(definition tool.Definition, call tool.Call) invocationScope {
 	target := normalizedTarget(call.Arguments)
 	if target == "" {

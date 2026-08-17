@@ -59,14 +59,12 @@ export function ProcessFold({
   const [open, setOpen] = useState(false);
   const t = translator(language);
   const duration = elapsedMs > 0 ? formatDuration(elapsedMs) : "";
-  const liveClock = Boolean((active || waiting) && !foldCompleted);
   const entries = <ProcessEntries
     blocks={blocks}
     language={language}
     active={active}
     deferBodies={!active && !collapseCompleted}
     waiting={waiting}
-    hideClocks={liveClock}
   />;
   return <div
     className="process-fold"
@@ -90,24 +88,6 @@ export function ProcessFold({
       </button>
       {open ? entries : null}
     </> : entries}
-  </div>;
-}
-
-/** Isolated so a ticking clock cannot re-render the trail (UI-012). */
-export function ProcessStatusRule({ blocks, live, language }: { blocks: Block[]; live: boolean; language: Snapshot["language"] }) {
-  const observedElapsedMs = useMemo(
-    () => processElapsedMs(blocks, live ? Date.now() : 0),
-    [blocks, live],
-  );
-  const elapsedMs = useLiveElapsed(observedElapsedMs, live, 100);
-  const duration = formatThinkingDuration(elapsedMs);
-  return <div className="process-status-rule" role="status" data-testid="process-status-rule">
-    <span className="process-status-rule-copy">
-      <span className="process-status-rule-label">{translator(language)("processing")}</span>
-      <span className="bui-thinking-meta" data-empty={duration ? undefined : "true"}>
-        {duration ? <time>{duration}</time> : null}
-      </span>
-    </span>
   </div>;
 }
 
@@ -208,8 +188,8 @@ function ProcessStepBar({
   onToggle?: () => void;
 }) {
   const reasoning = useMemo(() => blocks.filter((block) => block.kind === "thinking"), [blocks]);
-  // A thinking-only step is timed by its reasoning unless the live fold
-  // already shows that clock on 正在处理. A tool step uses the trail.
+  // ChatGPT keeps the elapsed clock on this sparkle row. Individual tool
+  // chips stay untimed while the step is live.
   const reasoningRunning = reasoning.some((block) => isActiveProcessBlock(block) && Boolean(block.content?.trim()));
   const ticking = waiting || (hasTools ? active : reasoningRunning);
   const thinkingElapsedMs = useMemo(
@@ -885,7 +865,7 @@ function ProcessChipList({ blocks, language, siblings, live = false, summarized 
       || isActiveFileChangeBlock(block)
       || isPendingFileChangeBlock(block)
       ? <ToolTimelineBlock block={block} language={language} siblings={siblings} />
-      : <ToolStep block={block} language={language} siblings={siblings} hideTime={settledCard || hideClocks} />
+      : <ToolStep block={block} language={language} siblings={siblings} hideTime={settledCard || hideClocks || live} />
   );
   return <div className={`timeline-step-list${grouped ? " bui-tool-chip-group" : ""}`} data-settled={settledCard || undefined}>
     {countLabel && tools.length >= 2 ? <div className="bui-tool-chip-group-header">

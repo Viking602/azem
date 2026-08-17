@@ -127,7 +127,7 @@ describe("process activity bar", () => {
     // A search-only step keeps the search wording rather than a tool count.
     expect(activityBarLabel([done("s", "coding.search")], "zh-CN")).toBe("搜索了代码");
     expect(activityBarLabel([done("w", "web_search")], "zh-CN")).toBe("搜索了网页");
-    // Thinking-only keeps 思考; the overall clock lives on the 正在处理 rule.
+    // Thinking-only keeps 思考; the overall clock lives on that sparkle bar.
     expect(activityBarLabel([thinking], "zh-CN")).toBe("思考");
   });
 });

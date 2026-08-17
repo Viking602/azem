@@ -108,6 +108,7 @@ type Service struct {
 	historySearch      func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error)
 	recapGenerator     func(context.Context, recapGenerationRequest) (string, error)
 	titleGenerator     func(context.Context, titleGenerationRequest) (string, error)
+	desktopSurface     bool
 	runtimeFence       runtimeRecoveryFence
 }
 
@@ -124,7 +125,7 @@ func NewService(parent context.Context, cfg config.Config) *Service {
 		shutdownDone: make(chan struct{}), liveApprovals: make(map[string]*liveApproval), liveUserInputs: make(map[string]*liveUserInput),
 		teamApprovals: make(map[string]struct{}), autoReviews: make(map[string]*prefetchedAutoReview), autoReviewDenials: make(map[string]*autoReviewDenialTracker),
 		hookSessions: make(map[string]struct{}), hookInitialUsers: make(map[string]string), hookInitialContext: make(map[string]string), hookAsyncContext: make(map[string][]string), approvalMode: approvalMode,
-		sessionUsage: make(map[string]session.Usage),
+		sessionUsage: make(map[string]session.Usage), desktopSurface: true,
 	}
 }
 
@@ -167,6 +168,21 @@ func (s *Service) SetWorkspaceAnchor(anchor string) {
 	s.mu.Lock()
 	s.workspaceAnchor = strings.TrimSpace(anchor)
 	s.mu.Unlock()
+}
+
+// SetDesktopSurface records whether this process has a session UI that
+// consumes generated titles and recaps. Headless eval sets it false so those
+// side routes do not consume the turn budget.
+func (s *Service) SetDesktopSurface(enabled bool) {
+	s.mu.Lock()
+	s.desktopSurface = enabled
+	s.mu.Unlock()
+}
+
+func (s *Service) desktopSurfaceEnabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.desktopSurface
 }
 
 func (s *Service) rememberWorkspaceSession(ctx context.Context, sessionID string) error {
@@ -497,7 +513,7 @@ func (s *Service) persistRecap(ctx context.Context, request recapGenerationReque
 	if s.recap == nil {
 		return nil
 	}
-	if s.recapGenerator == nil {
+	if s.recapGenerator == nil || !s.desktopSurfaceEnabled() {
 		return nil
 	}
 	if s.sessions != nil {
@@ -633,7 +649,7 @@ func (s *Service) startSessionTitleGeneration(request titleGenerationRequest, cu
 		return
 	}
 	s.mu.Lock()
-	if s.shuttingDown {
+	if s.shuttingDown || !s.desktopSurface {
 		s.mu.Unlock()
 		return
 	}

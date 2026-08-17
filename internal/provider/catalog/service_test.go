@@ -98,6 +98,27 @@ func TestCatalogCachingETagAndAccountIsolation(t *testing.T) {
 	}
 }
 
+func TestCachedReturnsPersistedCatalogWithoutNetwork(t *testing.T) {
+	ctx := context.Background()
+	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	catalog := NewService(provider.DB(), nil)
+	now := time.Now().UTC()
+	if err := catalog.save(ctx, Result{
+		Provider: "grok", AccountID: "acct", Models: []Model{{ID: "grok-4.6", Name: "Grok 4.6", ContextWindow: 500000}},
+		FetchedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Minute),
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	cached, found, err := catalog.Cached(ctx, "grok", "acct")
+	if err != nil || !found || len(cached.Models) != 1 || cached.Models[0].ID != "grok-4.6" {
+		t.Fatalf("cached=%+v found=%v err=%v", cached, found, err)
+	}
+}
+
 func TestGrokCatalogDecode(t *testing.T) {
 	models, more, after, err := decode("grok", []byte(`{"data":[{"id":"grok-code","capabilities":["tools","reasoning"],"pricing":[{"input":3,"output":15}]}],"has_more":true,"last_id":"cursor"}`))
 	if err != nil {
@@ -210,6 +231,14 @@ func TestReasoningLevelsFollowCatalogAndProviderCapabilities(t *testing.T) {
 	}
 	if got, err := ResolveReasoningEffort("grok", multiAgent, "xhigh"); err != nil || got != "xhigh" {
 		t.Fatalf("Grok multi-agent xhigh = %q, %v", got, err)
+	}
+
+	grok46 := Model{ID: "grok-4.6"}
+	if got := strings.Join(AvailableReasoningLevels("grok", grok46), ","); got != "low,medium,high,xhigh" {
+		t.Fatalf("Grok 4.6 reasoning levels = %q", got)
+	}
+	if got, err := ResolveReasoningEffort("grok", grok46, "xhigh"); err != nil || got != "xhigh" {
+		t.Fatalf("Grok 4.6 xhigh = %q, %v", got, err)
 	}
 
 	if got, err := ResolveReasoningEffort("chatgpt", Model{ID: "plain"}, "high"); err != nil || got != "" {

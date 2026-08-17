@@ -22,6 +22,9 @@ const (
 	// thinking, output, or tool activity. Zero remains a valid explicit
 	// disable. Open tools, including approval waits, are not cancelled.
 	DefaultSubagentIdleTimeout = 5 * time.Minute
+	// DefaultShellMaxWallClock is the per-command coding.shell ceiling when
+	// workspace.shell.max_wall_clock is omitted. The model may request less.
+	DefaultShellMaxWallClock = 10 * time.Minute
 )
 
 type Config struct {
@@ -78,10 +81,12 @@ type WorkspaceConfig struct {
 }
 
 type ShellConfig struct {
-	MaxContextOutputBytes  int  `yaml:"max_context_output_bytes"`
-	MaxArtifactOutputBytes int  `yaml:"max_artifact_output_bytes"`
-	StopOnOutputLimit      bool `yaml:"stop_on_output_limit"`
-	MaxConcurrency         int  `yaml:"max_concurrency"`
+	MaxContextOutputBytes  int           `yaml:"max_context_output_bytes"`
+	MaxArtifactOutputBytes int           `yaml:"max_artifact_output_bytes"`
+	StopOnOutputLimit      bool          `yaml:"stop_on_output_limit"`
+	MaxConcurrency         int           `yaml:"max_concurrency"`
+	MaxWallClock           string        `yaml:"max_wall_clock,omitempty"`
+	MaxWallClockDuration   time.Duration `yaml:"-"`
 }
 
 type AuthConfig struct {
@@ -334,7 +339,7 @@ func Default() Config {
 		Defaults: DefaultsConfig{
 			Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single", Theme: "system", Language: "en", ApprovalMode: "prompt", QueueMode: "queue",
 		},
-		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt", Shell: ShellConfig{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2}},
+		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt", Shell: ShellConfig{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2, MaxWallClock: "10m", MaxWallClockDuration: DefaultShellMaxWallClock}},
 		Auth:      AuthConfig{Store: "sqlite", ImportCodex: true, ImportGrok: true},
 		Providers: ProvidersConfig{
 			ChatGPT: ChatGPTConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}},
@@ -468,6 +473,14 @@ func (c *Config) Validate() error {
 	if !c.Workspace.Shell.StopOnOutputLimit {
 		return fmt.Errorf("workspace.shell.stop_on_output_limit must be true")
 	}
+	if strings.TrimSpace(c.Workspace.Shell.MaxWallClock) == "" {
+		c.Workspace.Shell.MaxWallClock = DefaultShellMaxWallClock.String()
+	}
+	shellWall, err := time.ParseDuration(c.Workspace.Shell.MaxWallClock)
+	if err != nil || shellWall < time.Second {
+		return fmt.Errorf("workspace.shell.max_wall_clock must be a duration of at least 1s")
+	}
+	c.Workspace.Shell.MaxWallClockDuration = shellWall
 	for name, provider := range map[string]*ProviderConfig{"chatgpt": &c.Providers.ChatGPT.ProviderConfig, "grok": &c.Providers.Grok.ProviderConfig} {
 		ttl, err := time.ParseDuration(provider.TTL)
 		if err != nil || ttl <= 0 {
@@ -977,6 +990,12 @@ func parseSubagentAwaitTimeout(value string) (time.Duration, error) {
 // must be between 30 and 3600 seconds.
 func ValidSubagentIdleSeconds(seconds int) bool {
 	return seconds == 0 || (seconds >= minSubagentIdleSeconds && seconds <= maxSubagentIdleSeconds)
+}
+
+// ValidShellMaxWallClockSeconds reports whether a settings or YAML update may
+// store this per-command coding.shell ceiling.
+func ValidShellMaxWallClockSeconds(seconds int) bool {
+	return seconds >= 60 && seconds <= 7200
 }
 
 func parseSubagentIdleTimeout(value string) (time.Duration, error) {

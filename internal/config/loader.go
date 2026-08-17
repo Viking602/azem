@@ -203,6 +203,16 @@ func UpdateShellMaxConcurrency(path string, maxConcurrency int) error {
 	})
 }
 
+func UpdateShellMaxWallClock(path string, seconds int) error {
+	if !ValidShellMaxWallClockSeconds(seconds) {
+		return fmt.Errorf("workspace.shell.max_wall_clock must be between 60 and 7200 seconds")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		shell := ensureMappingPath(root, "workspace", "shell")
+		setMappingScalar(shell, "max_wall_clock", fmt.Sprintf("%ds", seconds))
+	})
+}
+
 func UpdateSubagentAwaitTimeout(path string, seconds int) error {
 	if !ValidSubagentAwaitSeconds(seconds) {
 		return fmt.Errorf("agents.subagents.await_timeout must be 0 (wait until complete) or between 5 and 3600 seconds")

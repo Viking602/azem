@@ -29,6 +29,7 @@ export const demoSnapshot: Snapshot = {
   subagentConcurrency: 6,
   subagentMaxDepth: 2,
   shellConcurrency: 4,
+  shellMaxWallClockSeconds: 600,
   subagentAwaitSeconds: 0,
   subagentIdleSeconds: 300,
   chatgptFastMode: false,

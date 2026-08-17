@@ -10,6 +10,7 @@ import (
 
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
+	catalogsvc "github.com/Viking602/azem/internal/provider/catalog"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -114,6 +115,57 @@ func TestSetModelEnabledUpdatesConfiguredProvider(t *testing.T) {
 	}
 	if !service.cfg.Providers.LLMux["openrouter"].Models[0].Disabled {
 		t.Fatal("disabled state was not applied to the configured provider")
+	}
+}
+
+func TestListModelProvidersAttachesCachedGrokModels(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	credentials, err := authservice.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication := authservice.NewService(store.DB(), credentials, nil, nil)
+	now := time.Now().UTC().UnixNano()
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"grok-acct", "grok", "user@example.com", "user@example.com", "SuperGrok", "file:grok:grok-acct", "active", now-2, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"grok-empty", "grok", "user@example.com", "user@example.com", "SuperGrok", "file:grok:grok-empty", "active", now-1, now-1); err != nil {
+		t.Fatal(err)
+	}
+	modelCatalog := catalogsvc.NewService(store.DB(), authentication)
+	payload := `{"id":"grok-4.6","name":"Grok 4.6","contextWindow":500000,"supportsTools":true}`
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO model_catalog(provider_id,account_id,model_id,etag,fetched_at,expires_at,data) VALUES(?,?,?,?,?,?,?)`,
+		"grok", "grok-acct", "grok-4.6", "", now, now+int64(time.Hour), []byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachAuth(authentication, modelCatalog)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionListModelProviders}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventModelProviders {
+		t.Fatalf("event kind = %q", event.Kind)
+	}
+	var grok ModelProviderEntry
+	for _, provider := range event.ModelProviders {
+		if provider.ID == "grok" {
+			grok = provider
+			break
+		}
+	}
+	if grok.AccountID != "grok-acct" || len(grok.Models) != 1 || grok.Models[0].ID != "grok-4.6" {
+		t.Fatalf("grok provider = %+v", grok)
 	}
 }
 

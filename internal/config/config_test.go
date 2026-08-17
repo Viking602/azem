@@ -11,6 +11,41 @@ import (
 	"time"
 )
 
+func TestWorkspaceShellMaxWallClockDefaultsAndValidation(t *testing.T) {
+	cfg := Default()
+	if cfg.Workspace.Shell.MaxWallClockDuration != DefaultShellMaxWallClock {
+		t.Fatalf("default shell wall clock = %s", cfg.Workspace.Shell.MaxWallClockDuration)
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workspace.Shell.MaxWallClockDuration != DefaultShellMaxWallClock {
+		t.Fatalf("omitted shell wall clock = %s", loaded.Workspace.Shell.MaxWallClockDuration)
+	}
+	if err := os.WriteFile(path, []byte("version: 1\nworkspace:\n  shell:\n    max_context_output_bytes: 65536\n    max_artifact_output_bytes: 4194304\n    stop_on_output_limit: true\n    max_concurrency: 2\n    max_wall_clock: 30m\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workspace.Shell.MaxWallClockDuration != 30*time.Minute {
+		t.Fatalf("configured shell wall clock = %s", loaded.Workspace.Shell.MaxWallClockDuration)
+	}
+	if err := os.WriteFile(path, []byte("version: 1\nworkspace:\n  shell:\n    max_context_output_bytes: 65536\n    max_artifact_output_bytes: 4194304\n    stop_on_output_limit: true\n    max_concurrency: 2\n    max_wall_clock: 0s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path, root); err == nil {
+		t.Fatal("zero shell wall clock was accepted")
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -1561,6 +1596,9 @@ func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
 	if err := UpdateShellMaxConcurrency(path, 4); err != nil {
 		t.Fatal(err)
 	}
+	if err := UpdateShellMaxWallClock(path, 1800); err != nil {
+		t.Fatal(err)
+	}
 	if err := UpdateSubagentAwaitTimeout(path, 30); err != nil {
 		t.Fatal(err)
 	}
@@ -1572,8 +1610,11 @@ func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(updated)
-	if !strings.Contains(text, "# capacity comment") || !strings.Contains(text, "max_concurrency: 4") || !strings.Contains(text, "max_depth: -1") || !strings.Contains(text, "await_timeout: 30s") {
+	if !strings.Contains(text, "# capacity comment") || !strings.Contains(text, "max_concurrency: 4") || !strings.Contains(text, "max_wall_clock: 1800s") || !strings.Contains(text, "max_depth: -1") || !strings.Contains(text, "await_timeout: 30s") {
 		t.Fatalf("updated config:\n%s", updated)
+	}
+	if err := UpdateShellMaxWallClock(path, 30); err == nil {
+		t.Fatal("too-short shell wall clock was accepted")
 	}
 	if err := UpdateShellMaxConcurrency(path, 0); err == nil {
 		t.Fatal("zero shell concurrency was accepted")

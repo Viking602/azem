@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
@@ -208,6 +209,33 @@ func TestActiveGuidanceAppearsAtEveryPendingModelBoundary(t *testing.T) {
 		}
 		if len(history) != 1 {
 			t.Fatalf("hook mutated engine history: %#v", history)
+		}
+	}
+}
+
+func TestTurnContextInjectsRuntimeDeadlineAsPrivateContext(t *testing.T) {
+	deadline := time.Now().Add(90 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	contextManager := turnContext{instructions: "system rules"}
+	messages, err := contextManager.Build(ctx, api.Task{Goal: "current request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[1].Role != message.RoleSystem || messages[1].Visibility != message.VisibilityPrivate ||
+		!strings.Contains(messages[1].Text, "[Trusted runtime deadline]") ||
+		!strings.Contains(messages[1].Text, "Hard stop in") ||
+		!strings.Contains(messages[1].Text, "verifiable subset") ||
+		messages[2].Text != "current request" {
+		t.Fatalf("deadline context = %+v", messages)
+	}
+	unbounded, err := (turnContext{instructions: "system rules"}).Build(context.Background(), api.Task{Goal: "current request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, current := range unbounded {
+		if strings.Contains(current.Text, "Trusted runtime deadline") {
+			t.Fatalf("unbounded context included a deadline: %+v", unbounded)
 		}
 	}
 }

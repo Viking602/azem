@@ -154,6 +154,89 @@ func TestShellOutputActivityExtendsTimeoutAndStreamsLogs(t *testing.T) {
 	}
 }
 
+func TestResolveShellTimeoutsLetsModelChooseWallClockWithinConfiguredMax(t *testing.T) {
+	maxWall := 20 * time.Minute
+	inactivity, wall, err := resolveShellTimeouts(shellInput{WallClockSeconds: 900}, maxWall)
+	if err != nil || wall != 15*time.Minute || inactivity != 15*time.Minute {
+		t.Fatalf("model wall clock = inactivity %s wall %s err %v", inactivity, wall, err)
+	}
+	inactivity, wall, err = resolveShellTimeouts(shellInput{TimeoutSeconds: 30}, maxWall)
+	if err != nil || inactivity != 30*time.Second || wall != maxWall {
+		t.Fatalf("legacy inactivity = inactivity %s wall %s err %v", inactivity, wall, err)
+	}
+	if _, _, err := resolveShellTimeouts(shellInput{WallClockSeconds: 21 * 60}, maxWall); err == nil {
+		t.Fatal("wall clock above configured maximum was accepted")
+	}
+	if _, _, err := resolveShellTimeouts(shellInput{TimeoutSeconds: 21 * 60}, maxWall); err == nil {
+		t.Fatal("inactivity above configured maximum was accepted")
+	}
+	inactivity, wall, err = resolveShellTimeouts(shellInput{WallClockSeconds: 20, TimeoutSeconds: 5}, 20*time.Second)
+	if err != nil || wall != 20*time.Second || inactivity != 5*time.Second {
+		t.Fatalf("explicit pair = inactivity %s wall %s err %v", inactivity, wall, err)
+	}
+}
+
+func TestShellStdinFeedsProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell command")
+	}
+	driver := newShellDriver(t.TempDir(), "allow", "deny")
+	arguments, _ := json.Marshal(shellInput{Command: "cat", Stdin: "scripted-keystroke\n"})
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "stdin", Name: ToolShell, Arguments: arguments}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError || !strings.Contains(result.Content, "scripted-keystroke") {
+		t.Fatalf("stdin shell result=%+v", result)
+	}
+	if _, ok := driver.Definition().InputSchema.Properties["stdin"]; !ok {
+		t.Fatal("shell definition omitted stdin")
+	}
+}
+
+func TestUpdateShellMaxWallClockChangesDefinition(t *testing.T) {
+	shellRuntime := newShellRuntime(context.Background(), ShellOptions{MaxWallClockDuration: 10 * time.Minute})
+	driver := newRuntimeShellDriver(t.TempDir(), "allow", "deny", shellRuntime)
+	if driver.Definition().Metadata["max_wall_clock_seconds"] != "600" {
+		t.Fatalf("initial metadata = %#v", driver.Definition().Metadata)
+	}
+	shellRuntime.updateMaxWallClock(20 * time.Minute)
+	if driver.Definition().Metadata["max_wall_clock_seconds"] != "1200" {
+		t.Fatalf("updated metadata = %#v", driver.Definition().Metadata)
+	}
+}
+
+func TestShellHonorsModelRequestedWallClock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell command")
+	}
+	shellRuntime := newShellRuntime(context.Background(), ShellOptions{MaxWallClockDuration: 10 * time.Second})
+	driver := newRuntimeShellDriver(t.TempDir(), "allow", "deny", shellRuntime)
+	arguments, _ := json.Marshal(shellInput{
+		Command:          `i=0; while [ "$i" -lt 40 ]; do i=$((i+1)); printf 'tick\n'; sleep 0.05; done`,
+		WallClockSeconds: 1,
+	})
+	started := time.Now()
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "chosen-wall", Name: ToolShell, Arguments: arguments}, nil)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(result.Content, "command stopped: wall_clock_timeout") {
+		t.Fatalf("model wall-clock shell result=%+v", result)
+	}
+	if elapsed < 800*time.Millisecond || elapsed > 3*time.Second {
+		t.Fatalf("model wall-clock shell returned after %s", elapsed)
+	}
+	definition := driver.Definition()
+	if !strings.Contains(definition.Description, "1 to 10 seconds") {
+		t.Fatalf("shell definition omitted configured wall-clock ceiling: %s", definition.Description)
+	}
+	if definition.Metadata["max_wall_clock_seconds"] != "10" {
+		t.Fatalf("shell metadata = %#v", definition.Metadata)
+	}
+}
+
 func TestShellWallClockLimitCannotBeExtendedByOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a POSIX shell command")

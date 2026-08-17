@@ -258,7 +258,7 @@ func (r *subagentRuntime) cancelIdleChildren() {
 	targets := make([]target, 0)
 	for id, active := range r.active {
 		if active == nil || active.terminalizing || active.terminalized ||
-			active.run.State != agentservice.SubagentRunning || active.hasOpenTool() {
+			active.run.State != agentservice.SubagentRunning || active.hasLiveWork() {
 			continue
 		}
 		last := active.lastVisibleAt
@@ -281,7 +281,7 @@ func (r *subagentRuntime) cancelIdle(sessionID, id string, idle time.Duration) {
 	r.mu.Lock()
 	active := r.active[id]
 	if active == nil || active.run.SessionID != sessionID || active.terminalizing ||
-		active.run.State != agentservice.SubagentRunning || active.hasOpenTool() {
+		active.run.State != agentservice.SubagentRunning || active.hasLiveWork() {
 		r.mu.Unlock()
 		return
 	}
@@ -325,6 +325,37 @@ func (active *activeSubagent) hasOpenTool() bool {
 		}
 		switch block.State {
 		case "running", "queued", "awaiting_approval", "reviewing_approval":
+			return true
+		}
+	}
+	return false
+}
+
+func (active *activeSubagent) hasLiveWork() bool {
+	if active.hasOpenTool() {
+		return true
+	}
+	if active == nil || active.parent.Coding == nil {
+		return false
+	}
+	return childMatchesLiveShell(active, active.parent.Coding.ActiveShellExecutions())
+}
+
+func childMatchesLiveShell(active *activeSubagent, shells []agentservice.ShellExecutionSnapshot) bool {
+	if active == nil {
+		return false
+	}
+	childRunID := strings.TrimSpace(active.run.ChildRunID)
+	sessionID := strings.TrimSpace(active.run.SessionID)
+	agentID := durableSubagentAgentID(active.run.Type)
+	for _, snap := range shells {
+		if snap.State != "running" {
+			continue
+		}
+		if childRunID != "" && snap.RunID == childRunID {
+			return true
+		}
+		if childRunID == "" && sessionID != "" && snap.SessionID == sessionID && snap.AgentID == agentID {
 			return true
 		}
 	}

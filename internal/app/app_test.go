@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -342,6 +343,53 @@ func TestPersistRecapGeneratesConciseSummaryAndEmitsUpdatedEvent(t *testing.T) {
 		event.Recap.Summary == fullAnswer || event.Recap.Revision != 1 ||
 		event.Recap.Goal != "Ship recap" || event.Recap.OpenItems != "in_progress: Run focused tests\npending: Open PR" {
 		t.Fatalf("recap update event = %#v", event)
+	}
+}
+
+func TestHeadlessSurfaceSkipsTitleAndRecap(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1", Title: "Initial title"}); err != nil {
+		t.Fatal(err)
+	}
+	recaps := recap.NewService(store.DB(), t.TempDir())
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	service.AttachMemory(nil, recaps)
+	service.SetDesktopSurface(false)
+	service.titleGenerator = func(context.Context, titleGenerationRequest) (string, error) {
+		t.Fatal("headless surface generated a title")
+		return "should not generate", nil
+	}
+	service.recapGenerator = func(context.Context, recapGenerationRequest) (string, error) {
+		t.Fatal("headless surface generated a recap")
+		return "should not generate", nil
+	}
+	if _, err := service.StartConfiguredTurn(TurnRequest{
+		SessionID: "session-1", Prompt: "Do not spend tokens on titles",
+		Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.persistRecap(ctx, recapGenerationRequest{SessionID: "session-1", RunID: "run-1", Answer: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := sessions.LoadSession(ctx, "session-1")
+	if err != nil || saved.Title != "Initial title" {
+		t.Fatalf("headless title changed: %#v, %v", saved, err)
+	}
+	if loaded, loadErr := recaps.Load(ctx, "session-1"); !errors.Is(loadErr, sql.ErrNoRows) {
+		t.Fatalf("headless recap = %#v, %v", loaded, loadErr)
+	}
+	shutdownCtx, cancelShutdown := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelShutdown()
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -2184,6 +2232,16 @@ func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {
 	if event.Data["shell_max_concurrency"] != "4" {
 		t.Fatalf("shell concurrency event = %#v", event.Data)
 	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellMaxWallClock, Target: "1800"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["shell_max_wall_clock_seconds"] != "1800" {
+		t.Fatalf("shell wall clock event = %#v", event.Data)
+	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "30"}); err != nil {
 		t.Fatal(err)
 	}
@@ -2208,9 +2266,10 @@ func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Workspace.Shell.MaxConcurrency != 4 || loaded.Agents.Subagents.AwaitDuration != 30*time.Second ||
+	if loaded.Workspace.Shell.MaxConcurrency != 4 || loaded.Workspace.Shell.MaxWallClockDuration != 30*time.Minute ||
+		loaded.Agents.Subagents.AwaitDuration != 30*time.Second ||
 		loaded.Agents.Subagents.IdleDuration != 5*time.Minute {
-		t.Fatalf("persisted limits = shell:%d await:%s idle:%s", loaded.Workspace.Shell.MaxConcurrency, loaded.Agents.Subagents.AwaitDuration, loaded.Agents.Subagents.IdleDuration)
+		t.Fatalf("persisted limits = shell:%d wall:%s await:%s idle:%s", loaded.Workspace.Shell.MaxConcurrency, loaded.Workspace.Shell.MaxWallClockDuration, loaded.Agents.Subagents.AwaitDuration, loaded.Agents.Subagents.IdleDuration)
 	}
 	subagents.mu.Lock()
 	liveAwait := subagents.cfg.AwaitDuration
@@ -2247,6 +2306,12 @@ func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {
 	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellConcurrency, Target: "0"}); err == nil {
 		t.Fatal("zero shell concurrency was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellMaxWallClock, Target: "30"}); err == nil {
+		t.Fatal("too-short shell wall clock was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellMaxWallClock, Target: "0"}); err == nil {
+		t.Fatal("zero shell wall clock was accepted")
 	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "4"}); err == nil {
 		t.Fatal("too-short await timeout was accepted")

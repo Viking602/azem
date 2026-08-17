@@ -198,6 +198,19 @@ describe("process trail segmentation", () => {
 
     expect(segments[0]).toMatchObject({ kind: "process", active: true, elapsedMs: 95_000 });
   });
+
+  it("only folds process trails that actually ran tools", () => {
+    expect(processTrailWorthFolding([
+      { id: "think", kind: "thinking", content: "plan", state: "completed" },
+    ])).toBe(false);
+    expect(processTrailWorthFolding([
+      { id: "note", kind: "commentary", content: "下一步读入口", state: "completed" },
+    ])).toBe(false);
+    expect(processTrailWorthFolding([
+      { id: "think", kind: "thinking", content: "plan", state: "completed" },
+      { id: "read", kind: "tool", title: "coding.read_file", state: "completed" },
+    ])).toBe(true);
+  });
 });
 
 describe("tool timeline grouping", () => {

@@ -1,6 +1,6 @@
 # Configuration
 
-Last verified: 2026-08-15
+Last verified: 2026-08-17
 
 `internal/config.Config` and `internal/config.Default` are authoritative. Azem
 strictly decodes YAML, applies defaults, and validates the complete result
@@ -12,7 +12,7 @@ operating-system user configuration directory; `-config` selects another file.
 | Section | Purpose |
 |---|---|
 | `defaults` | Provider, model, reasoning, language, agent mode, approval mode, and queue mode for new sessions |
-| `workspace` | Initial TUI root and file, shell, network, output, and shell concurrency policy |
+| `workspace` | Initial TUI root and file, shell, network, output, shell concurrency, and per-command shell wall-clock ceiling |
 | `auth` | Credential backend plus optional Codex and Grok imports |
 | `providers` | Subscription transports and llmux provider/model registry |
 | `retry` | Agent retry count and exponential backoff bounds |
@@ -26,13 +26,22 @@ operating-system user configuration directory; `-config` selects another file.
 The maintained example in [README.md](../README.md#configuration) shows the
 current field names and defaults. Duration values use Go duration syntax.
 
+`workspace.shell.max_wall_clock` is the hard ceiling for one `coding.shell`
+command (default `10m`). The model chooses a shorter deadline with
+`wall_clock_seconds`. `timeout_seconds` remains the no-output watchdog and
+cannot exceed that ceiling. Omitting `timeout_seconds` after setting
+`wall_clock_seconds` lets a silent command run until the chosen wall clock.
+`stdin` is optional UTF-8 fed to the process for scripted keystrokes or piped
+input.
+
 The desktop Subagents settings surface groups capacity and isolation controls,
 shows parallel dispatch as a read-only product invariant, and lists
 main-session display behavior separately. It edits recursive depth, two live
-capacity limits, one foreground wait window, and one idle-cancel window
-without restarting the application:
+capacity limits, one per-command shell wall clock, one foreground wait window,
+and one idle-cancel window without restarting the application:
 `agents.subagents.max_depth`, `agents.subagents.max_concurrency`,
-`workspace.shell.max_concurrency`, `agents.subagents.await_timeout`, and
+`workspace.shell.max_concurrency`, `workspace.shell.max_wall_clock`,
+`agents.subagents.await_timeout`, and
 `agents.subagents.idle_timeout`.
 Subagent concurrency defaults to 32 and zero means unbounded. Recursive depth
 defaults to 2; zero disables delegation and `-1` removes the recursion cap.
@@ -45,8 +54,8 @@ cancelled. `-1` is not a second unlimited sentinel and is rejected.
 `idle_timeout` defaults to `5m`. Zero disables the watchdog. A positive value
 cancels a *running* child that has produced no thinking, output, or tool
 activity for that duration. Empty thinking or text frames and elapsed-time UI
-ticks do not count as activity. An open tool, including an approval wait, is
-not cancelled. Compaction and explicit wait states such as a workspace-claim
+ticks do not count as activity. An open tool, including an approval wait, or a
+live `coding.shell` process is not cancelled. Compaction and explicit wait states such as a workspace-claim
 retry reset the idle clock. Settings updates must be `0` or 30–3600 seconds.
 Changes pass through validated application actions, update the active runtime,
 and are persisted with the same node-preserving YAML writer used by the other
@@ -178,7 +187,7 @@ dispatch; it does not get a second execution or approval path.
 
 An enabled plugin hook still does not run until plugin hooks are trusted.
 Closing trust unloads plugin sources immediately and leaves `hooks.disabled`
-unchanged.
+unchanged. An unknown `hooks.*` field fails closed on load.
 
 ## llmux providers and models
 

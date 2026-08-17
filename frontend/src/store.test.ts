@@ -1201,6 +1201,31 @@ describe("runtime event projection", () => {
     expect(projected.snapshot?.chatgptFastMode).toBe(true);
   });
 
+  it("projects the live shell wall-clock ceiling from model routes", () => {
+    const projected = reduceEvents(state(), [{
+      sequence: 1,
+      kind: "model_routes",
+      data: { shell_max_wall_clock_seconds: "1800" },
+    }]);
+    expect(projected.snapshot?.shellMaxWallClockSeconds).toBe(1800);
+  });
+
+  it("does not wipe a subscription catalog when a later empty catalog event arrives", () => {
+    const loaded = reduceEvents(state(), [{
+      sequence: 1,
+      kind: "model_catalog",
+      data: { provider: "grok", models: JSON.stringify([{ id: "grok-4.6", name: "Grok 4.6", contextWindow: 500_000 }]) },
+    }]);
+    const wiped = reduceEvents(loaded, [{
+      sequence: 2,
+      kind: "model_catalog",
+      data: { provider: "grok" },
+    }]);
+    expect(wiped.modelsByProvider.grok).toEqual([
+      { id: "grok-4.6", name: "Grok 4.6", aliases: [], reasoningLevels: [], defaultReasoning: "", contextWindow: 500_000 },
+    ]);
+  });
+
   it("projects the model catalog used by the composer switcher", () => {
     const projected = reduceEvents(state(), [{
       sequence: 1,

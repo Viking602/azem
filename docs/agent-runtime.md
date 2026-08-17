@@ -94,9 +94,9 @@ Configuration lives under `agents.subagents` (`internal/config/config.go`):
   rejected.
 - `idle_timeout` default `5m` cancels a running child that has no thinking,
   output, or tool activity for that window. Zero disables the watchdog. Open
-  tools, including approval waits, are not cancelled. Compaction and explicit
-  wait summaries reset the clock. Empty thinking/text frames and elapsed-time
-  UI ticks do not.
+  tools, including approval waits, and live `coding.shell` processes are not
+  cancelled. Compaction and explicit wait summaries reset the clock. Empty
+  thinking/text frames and elapsed-time UI ticks do not.
 - States: `initializing → queued → running → completed/failed/cancelled/
   interrupted`, with `cancelling` as the transitional kill state.
 

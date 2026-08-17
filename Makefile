@@ -4,10 +4,18 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X 'main.version=$(VERSION)' -X 'main.gitCommit=$(GIT_COMMIT)' -X 'main.buildTime=$(BUILD_TIME)'
 
-.PHONY: build gui gui-windows frontend test test-gui sqlc architecture-check contracts contracts-check
+.PHONY: build azem-eval azem-eval-linux gui gui-windows frontend test test-gui sqlc architecture-check contracts contracts-check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/azem
+
+azem-eval:
+	go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval ./cmd/azem-eval
+
+azem-eval-linux: azem-eval
+	mkdir -p dist/eval
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval-linux-amd64 ./cmd/azem-eval
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval-linux-arm64 ./cmd/azem-eval
 
 frontend:
 	cd frontend && bun install --frozen-lockfile && bun run build

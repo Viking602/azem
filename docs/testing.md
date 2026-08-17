@@ -30,6 +30,15 @@ Frontend typecheck, unit tests, production build, and desktop Go tests:
 make test-gui
 ```
 
+Headless Terminal-Bench runner (Harbor):
+
+```bash
+make azem-eval-linux
+cd . && PYTHONPATH="$PWD" harbor run -d terminal-bench/terminal-bench-2 -a eval.harbor.azem_agent:Azem -m chatgpt/gpt-5.6-sol -n 1 -k 1 --yes -i hello-world
+```
+
+See [eval/README.md](../eval/README.md).
+
 Architecture constraints:
 
 ```bash

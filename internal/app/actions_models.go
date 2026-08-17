@@ -65,6 +65,13 @@ var modelActionHandlers = map[ActionKind]actionHandler{
 		}
 		return s.updateShellMaxConcurrency(ctx, maxConcurrency)
 	},
+	ActionSetShellMaxWallClock: func(s *Service, ctx context.Context, action Action) error {
+		seconds, err := strconv.Atoi(strings.TrimSpace(action.Target))
+		if err != nil || !config.ValidShellMaxWallClockSeconds(seconds) {
+			return fmt.Errorf("shell max wall clock must be between 60 and 7200 seconds")
+		}
+		return s.updateShellMaxWallClock(ctx, time.Duration(seconds)*time.Second)
+	},
 	ActionSetSubagentAwait: func(s *Service, ctx context.Context, action Action) error {
 		seconds, err := strconv.Atoi(strings.TrimSpace(action.Target))
 		if err != nil || !config.ValidSubagentAwaitSeconds(seconds) {

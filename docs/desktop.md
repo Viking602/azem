@@ -1,6 +1,6 @@
 # Desktop application
 
-Last verified: 2026-08-15
+Last verified: 2026-08-17
 
 Azem's desktop application is a Wails window over the same Go runtime used by
 the TUI. React owns presentation state; it does not duplicate provider,
@@ -307,11 +307,11 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   label, mono detail chip). Completed process folds keep the 已处理 label and
   may show honest tool-call and commentary counts. Executed file changes
   also render compact white `path +N -N` pills; queued and approval-bound
-  writes do not. While the current turn is in progress, one `正在处理`
-  divider sits above that turn's first message. The `正在处理` label and
-  clock sit above the rule, not on it. Wait, thinking, search, and tools then share one
-  Thinking sparkle row (`思考` / `搜索了代码` / `运行命令`) and do not print
-  a second duration. Only the label changes; the header stays mounted and
+  writes do not. ChatGPT.app does not draw a turn-level `正在处理`
+  rule and does not invent an empty Thinking row on send. Azem waits
+  until the model emits thinking or tools, then keeps one sparkle row
+  (`思考` / `搜索了代码` / `运行命令`) under the user message.
+  Only the sparkle label changes; the header stays mounted and
   the clock does not reset. The chevron slot is reserved so expanding later
   does not jump the row. This is not a separate capsule and not the
   pixel-grid Loading icon. Empty thinking or
@@ -322,7 +322,7 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   to one chip list: thinking as the first chip (sparkle + preview capsule),
   then tool chips, then file-change pills. The group header may show
   `N tool calls, N messages`.
-  Elapsed time sits after `正在处理` on that turn divider,
+  Elapsed time sits after the sparkle label,
   appears only after the first tenth of a second (`0.1s`, `1.2s`, then
   `1m05s`), and never shows `0s`. After the turn settles, thinking-only
   trails keep the clock on the 思考 header and tool trails fold under 已处理.

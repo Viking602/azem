@@ -75,19 +75,30 @@ func TestMainInstructionsContract(t *testing.T) {
 	requireInstructionFragments(t, "tool announcement", []string{
 		"Before every tool call or parallel batch", "A single routine read still requires",
 		"Never emit a tool call before this commentary",
-		"yourself as model `commentary` tokens", "Do not wait for the host to invent it",
-		"「我准备…」", "「接下来…」",
+		"ordinary commentary sentences", "normal conversational prose",
+		"titled card", "I'm ready",
 	})
 	for _, grammar := range []string{"`¶PATH#TAG`", "`replace N..M:`", "`+final content`", "Never use `@@` hunks", "`-old` rows"} {
 		if !strings.Contains(mainInstructions, grammar) {
 			t.Errorf("main instructions omit hashline grammar %q", grammar)
 		}
 	}
+	requireInstructionFragments(t, "language and contract", []string{
+		"language of the current user message",
+		"Settings language is for the UI only",
+		"out of scope",
+		"exact string",
+		"verification phase",
+		"related read-only searches",
+		"interrupted state",
+		"`stdin`",
+		"`wall_clock_seconds`",
+	})
 	requireInstructionFragments(t, "runtime contract", []string{
 		"exactly one mutating `todo` call", "never batch Todo mutations", "`done` automatically advances",
 		"actual lifecycle", "failed, cancelled, and stalled", "review as an approval gate", "independently inspect the changed files",
 		"must stay foreground", "`timeout_ms`", "before any gated action or ending the turn",
-		"ordinary user-visible prose", "one or two short sentences", "Do not format it as a titled card",
+		"ordinary commentary sentences", "Never emit a tool call before this commentary", "I'm ready",
 	})
 	requireInstructionFragments(t, "todo-first workflow", []string{
 		"「你是谁」", "may skip `todo` and tool commentary",

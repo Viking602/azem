@@ -34,6 +34,15 @@ describe("settingsSearch appearance chat text", () => {
   });
 });
 
+describe("settingsSearch shell wall clock", () => {
+  it("finds the command wall-clock setting in Chinese and English", () => {
+    const zh = settingsSearchEntries("zh-CN", [], []);
+    const en = settingsSearchEntries("en", [], []);
+    expect(filterSettings(zh, "墙钟").some((entry) => entry.id === "subagents:shell-wall")).toBe(true);
+    expect(filterSettings(en, "wall clock").some((entry) => entry.id === "subagents:shell-wall")).toBe(true);
+  });
+});
+
 describe("settingsSearch usage section", () => {
   it("finds the usage page in Chinese and English", () => {
     const zh = settingsSearchEntries("zh-CN", [], []);

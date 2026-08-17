@@ -308,6 +308,7 @@ workspace:
     max_artifact_output_bytes: 4194304
     stop_on_output_limit: true
     max_concurrency: 2
+    max_wall_clock: 10m      # per-command ceiling; the model may request less via wall_clock_seconds
 
 auth:
   store: keyring           # sqlite | keyring | file

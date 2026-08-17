@@ -146,7 +146,7 @@
 .thread-actions .icon-button { height: 29px; width: 40px; border: 1px solid var(--line); border-radius: 7px; }
 .transcript { width: min(720px, calc(100% - 64px)); padding: 34px 0 0; }
 .user-block { margin-bottom: 25px; border-radius: 13px 13px 3px 13px; background: var(--paper-muted); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 50%, transparent); font-size: 13px; line-height: 1.65; }
-.assistant-block { color: var(--ink); font-size: 13px; line-height: 1.7; }
+.assistant-block { color: var(--ink); font-size: var(--text-chat); line-height: var(--leading-chat); }
 .composer-stack { width: min(690px, calc(100vw - var(--sidebar-width) - 46px)); }
 .workspace-grid[data-inspector="open"] .composer-stack { width: min(690px, calc(100% - 46px)); }
 .composer-card { border-radius: 15px; background: color-mix(in srgb, var(--paper-strong) 92%, transparent); box-shadow: 0 12px 40px rgb(24 24 20 / 14%); backdrop-filter: blur(18px); }

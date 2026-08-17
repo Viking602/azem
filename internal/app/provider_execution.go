@@ -559,7 +559,7 @@ func executeMainRunUntilAvailable(ctx context.Context, execute func() (hyworker.
 		if !errors.As(err, &unavailable) || ctx.Err() != nil {
 			return outcome, err
 		}
-		// Resource claims serialize writers; they are not a provider failure.
+		// Remaining resource-claim conflicts are not a provider failure.
 		// Keep the dispatched main task alive and retry it just like subagents do
 		// instead of persisting a raw "resource claims denied" terminal block.
 		timer := time.NewTimer(resourceClaimRetryDelay(time.Now().UTC(), unavailable.ResourceClaims))

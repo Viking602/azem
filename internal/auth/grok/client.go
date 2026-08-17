@@ -222,9 +222,28 @@ func (c *Client) Refresh(ctx context.Context, discovery Discovery, refreshToken 
 	}
 	data := response.Bytes()
 	if response.StatusCode()/100 != 2 {
-		return Tokens{}, fmt.Errorf("refresh returned HTTP %d", response.StatusCode())
+		return Tokens{}, refreshHTTPError(response.StatusCode(), data)
 	}
 	return decodeTokens(data)
+}
+
+func refreshHTTPError(status int, body []byte) error {
+	var failure struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+	}
+	_ = json.Unmarshal(body, &failure)
+	detail := firstNonEmpty(failure.Error, failure.Description, strings.Join(strings.Fields(string(body)), " "))
+	if detail == "" {
+		return fmt.Errorf("refresh returned HTTP %d", status)
+	}
+	if len(detail) > 240 {
+		detail = detail[:240] + "…"
+	}
+	if failure.Error != "" && failure.Description != "" && failure.Error != failure.Description {
+		return fmt.Errorf("refresh returned HTTP %d: %s: %s", status, failure.Error, failure.Description)
+	}
+	return fmt.Errorf("refresh returned HTTP %d: %s", status, detail)
 }
 
 func (c *Client) Revoke(ctx context.Context, discovery Discovery, token string) error {
@@ -613,7 +632,9 @@ func (c *Client) postForm(ctx context.Context, endpoint string, values url.Value
 	}
 	return c.httpClient().R().
 		SetContext(ctx).
-		SetResponseBodyLimit(1 << 20).
+		SetResponseBodyLimit(1<<20).
+		SetHeader("x-grok-client-version", DefaultClientVersion).
+		SetHeader("x-grok-client-surface", deviceClientSurface).
 		SetFormDataFromValues(values).
 		Post(endpoint)
 }

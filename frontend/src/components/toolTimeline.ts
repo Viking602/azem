@@ -641,7 +641,7 @@ export function formatThinkingDuration(milliseconds: number) {
   return formatDuration(ms);
 }
 
-/** Sparkle wording only. The live 正在处理 rule owns the one elapsed clock. */
+/** Sparkle wording only. The elapsed clock lives in the bar's meta slot. */
 export function thinkingStateLabel(language: Language, active = false) {
   return translator(language)(active ? "thinkingActive" : "thinking");
 }

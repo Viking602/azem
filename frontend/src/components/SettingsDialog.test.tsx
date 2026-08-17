@@ -203,7 +203,7 @@ describe("SettingsDialog", () => {
 	await act(async () => subagentsNav.click());
 	const subagentPane = container.querySelector(".subagent-settings-pane")!;
 	expect(subagentPane.querySelector(".subagent-capacity")?.textContent).toContain("容量与隔离");
-	expect(subagentPane.querySelectorAll(".subagent-capacity .setting-row")).toHaveLength(5);
+	expect(subagentPane.querySelectorAll(".subagent-capacity .setting-row")).toHaveLength(6);
 	expect(subagentPane.querySelector(".subagent-scheduling")?.textContent).toContain("调度");
 	expect(subagentPane.querySelector(".subagent-scheduling .subagent-policy")?.textContent).toContain("只读");
 	expect(subagentPane.querySelector(".subagent-scheduling .subagent-policy")?.textContent).toContain("并行");
@@ -450,7 +450,7 @@ describe("SettingsDialog", () => {
 
 	it("updates the live subagent, shell, and admission timeout limits", async () => {
 		useRuntimeStore.setState({
-			snapshot: { ...snapshot, subagentConcurrency: 4, subagentMaxDepth: 2, shellConcurrency: 3, subagentAwaitSeconds: 600, subagentIdleSeconds: 0 },
+			snapshot: { ...snapshot, subagentConcurrency: 4, subagentMaxDepth: 2, shellConcurrency: 3, shellMaxWallClockSeconds: 600, subagentAwaitSeconds: 600, subagentIdleSeconds: 0 },
 			approvalMode: snapshot.approvalMode, modelRoutes: [], modelsByProvider: {},
 			agentCatalog: [], skills: [], modelProviders: [], settingsOpen: true,
 		});
@@ -469,14 +469,22 @@ describe("SettingsDialog", () => {
 		const concurrency = pane.querySelector<HTMLElement>('[data-setting-id="subagents:concurrency"]')!;
 		const depth = pane.querySelector<HTMLElement>('[data-setting-id="subagents:depth"]')!;
 		const shell = pane.querySelector<HTMLElement>('[data-setting-id="subagents:shell"]')!;
+		const shellWall = pane.querySelector<HTMLElement>('[data-setting-id="subagents:shell-wall"]')!;
 		const timeout = pane.querySelector<HTMLElement>('[data-setting-id="subagents:timeout"]')!;
 		const idle = pane.querySelector<HTMLElement>('[data-setting-id="subagents:idle"]')!;
-		expect(pane.querySelectorAll(".subagent-capacity .setting-row")).toHaveLength(5);
+		expect(pane.querySelectorAll(".subagent-capacity .setting-row")).toHaveLength(6);
 		vi.mocked(execute).mockClear();
 		await act(async () => concurrency.querySelectorAll<HTMLButtonElement>("button")[1].click());
 		await act(async () => shell.querySelectorAll<HTMLButtonElement>("button")[0].click());
 		expect(execute).toHaveBeenCalledWith({ kind: "set_subagent_concurrency", sessionId: "session-1", target: "5" });
 		expect(execute).toHaveBeenCalledWith({ kind: "set_shell_concurrency", sessionId: "session-1", target: "2" });
+		expect(shellWall.textContent).toContain("一条 coding.shell 命令的最长运行时间");
+		const wallMenu = shellWall.querySelector<HTMLDetailsElement>(".capacity-timeout-menu")!;
+		wallMenu.open = true;
+		await act(async () => wallMenu.dispatchEvent(new Event("toggle", { bubbles: true })));
+		await act(async () => container.querySelector<HTMLButtonElement>('.menu-select-options-portal [data-value="1800"]')!.click());
+		expect(execute).toHaveBeenCalledWith({ kind: "set_shell_max_wall_clock", sessionId: "session-1", target: "1800" });
+		expect(shellWall.querySelector(".menu-select-value")?.textContent).toBe("30 分钟");
 		const depthMenu = depth.querySelector<HTMLDetailsElement>(".capacity-depth-menu")!;
 		depthMenu.open = true;
 		await act(async () => depthMenu.dispatchEvent(new Event("toggle", { bubbles: true })));

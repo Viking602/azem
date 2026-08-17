@@ -9,6 +9,11 @@
 /frontend/*.tsbuildinfo
 /.playwright-cli/
 
+# Harbor / Terminal-Bench job output
+/jobs/
+__pycache__/
+*.pyc
+
 # Test and coverage artifacts
 *.test
 *.out

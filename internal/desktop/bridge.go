@@ -43,24 +43,25 @@ type EventEmitter func(string, ...any) bool
 var readClipboardImage = azemapp.ReadClipboardImage
 
 type Snapshot struct {
-	Workspace            string                  `json:"workspace"`
-	CurrentBranch        string                  `json:"currentBranch,omitempty"`
-	SessionID            string                  `json:"sessionId"`
-	Provider             string                  `json:"provider"`
-	Model                string                  `json:"model"`
-	Reasoning            string                  `json:"reasoning"`
-	AgentMode            string                  `json:"agentMode"`
-	Language             string                  `json:"language"`
-	ApprovalMode         string                  `json:"approvalMode"`
-	QueueMode            string                  `json:"queueMode"`
-	SubagentConcurrency  int                     `json:"subagentConcurrency"`
-	SubagentMaxDepth     int                     `json:"subagentMaxDepth"`
-	ShellConcurrency     int                     `json:"shellConcurrency"`
-	SubagentAwaitSeconds int                     `json:"subagentAwaitSeconds"`
-	SubagentIdleSeconds  int                     `json:"subagentIdleSeconds"`
-	ChatGPTFastMode      bool                    `json:"chatgptFastMode"`
-	Sequence             uint64                  `json:"sequence"`
-	PullRequestMonitors  []githubpr.MonitorState `json:"pullRequestMonitors,omitempty"`
+	Workspace                string                  `json:"workspace"`
+	CurrentBranch            string                  `json:"currentBranch,omitempty"`
+	SessionID                string                  `json:"sessionId"`
+	Provider                 string                  `json:"provider"`
+	Model                    string                  `json:"model"`
+	Reasoning                string                  `json:"reasoning"`
+	AgentMode                string                  `json:"agentMode"`
+	Language                 string                  `json:"language"`
+	ApprovalMode             string                  `json:"approvalMode"`
+	QueueMode                string                  `json:"queueMode"`
+	SubagentConcurrency      int                     `json:"subagentConcurrency"`
+	SubagentMaxDepth         int                     `json:"subagentMaxDepth"`
+	ShellConcurrency         int                     `json:"shellConcurrency"`
+	ShellMaxWallClockSeconds int                     `json:"shellMaxWallClockSeconds"`
+	SubagentAwaitSeconds     int                     `json:"subagentAwaitSeconds"`
+	SubagentIdleSeconds      int                     `json:"subagentIdleSeconds"`
+	ChatGPTFastMode          bool                    `json:"chatgptFastMode"`
+	Sequence                 uint64                  `json:"sequence"`
+	PullRequestMonitors      []githubpr.MonitorState `json:"pullRequestMonitors,omitempty"`
 }
 
 type TurnRequest struct {
@@ -204,15 +205,16 @@ func (b *Bridge) Initialise() Snapshot {
 		Provider: b.cfg.Defaults.Provider, Model: b.cfg.Defaults.Model,
 		Reasoning: b.cfg.Defaults.Reasoning, AgentMode: b.cfg.Defaults.AgentMode,
 		Language: b.cfg.Defaults.Language, ApprovalMode: b.cfg.Defaults.ApprovalMode,
-		QueueMode:            b.cfg.Defaults.QueueMode,
-		SubagentConcurrency:  b.cfg.Agents.Subagents.MaxConcurrency,
-		SubagentMaxDepth:     b.cfg.Agents.Subagents.MaxDepth,
-		ShellConcurrency:     b.cfg.Workspace.Shell.MaxConcurrency,
-		SubagentAwaitSeconds: int(b.cfg.Agents.Subagents.AwaitDuration.Seconds()),
-		SubagentIdleSeconds:  int(b.cfg.Agents.Subagents.IdleDuration.Seconds()),
-		ChatGPTFastMode:      b.cfg.Providers.ChatGPT.FastMode,
-		Sequence:             b.sequence.Load(),
-		PullRequestMonitors:  b.prMonitor.States(),
+		QueueMode:                b.cfg.Defaults.QueueMode,
+		SubagentConcurrency:      b.cfg.Agents.Subagents.MaxConcurrency,
+		SubagentMaxDepth:         b.cfg.Agents.Subagents.MaxDepth,
+		ShellConcurrency:         b.cfg.Workspace.Shell.MaxConcurrency,
+		ShellMaxWallClockSeconds: int(b.cfg.Workspace.Shell.MaxWallClockDuration.Seconds()),
+		SubagentAwaitSeconds:     int(b.cfg.Agents.Subagents.AwaitDuration.Seconds()),
+		SubagentIdleSeconds:      int(b.cfg.Agents.Subagents.IdleDuration.Seconds()),
+		ChatGPTFastMode:          b.cfg.Providers.ChatGPT.FastMode,
+		Sequence:                 b.sequence.Load(),
+		PullRequestMonitors:      b.prMonitor.States(),
 	}
 }
 
@@ -518,7 +520,7 @@ func allowedAction(kind azemapp.ActionKind) bool {
 		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled,
 		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
 		azemapp.ActionResetModelRoute, azemapp.ActionSetSubagentConcurrency,
-		azemapp.ActionSetSubagentDepth, azemapp.ActionSetShellConcurrency, azemapp.ActionSetSubagentAwait, azemapp.ActionSetSubagentIdle,
+		azemapp.ActionSetSubagentDepth, azemapp.ActionSetShellConcurrency, azemapp.ActionSetShellMaxWallClock, azemapp.ActionSetSubagentAwait, azemapp.ActionSetSubagentIdle,
 		azemapp.ActionSetChatGPTFastMode, azemapp.ActionSetSessionPreferences, azemapp.ActionListBackground,
 		azemapp.ActionStartBackground, azemapp.ActionStopBackground, azemapp.ActionLogsBackground,
 		azemapp.ActionListGitBranches, azemapp.ActionSwitchGitBranch, azemapp.ActionCreateGitBranch:

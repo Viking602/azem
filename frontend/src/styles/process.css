@@ -2,7 +2,6 @@
 .timeline-feed.compact { gap: 0; }
 .timeline-feed > .user-block,
 .timeline-feed > .subagent-wake-notice,
-.timeline-feed > .assistant-block:not(.streaming),
 .timeline-feed > .commentary-block:not(.active),
 .timeline-feed > .process-entries:not(.active),
 .timeline-feed > .edited-files-summary,
@@ -46,32 +45,6 @@
 .process-fold-chevron { flex: 0 0 auto; color: var(--faint); }
 .process-fold:not([data-open]) .process-fold-chevron { transform: rotate(-90deg); }
 .process-fold-summary:hover { color: var(--ink); }
-.process-status-rule {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-  width: 100%;
-  margin: 4px 0 12px;
-  color: var(--ink-soft);
-  font-size: var(--text-chat);
-  font-weight: 500;
-}
-.session-turn-current > .process-status-rule { margin-top: 2px; }
-.process-status-rule-copy {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-height: 18px;
-}
-.process-status-rule-label { flex: 0 0 auto; font-weight: 500; }
-.process-status-rule .bui-thinking-meta { flex: 0 0 auto; }
-.process-status-rule::after {
-  content: "";
-  width: 100%;
-  height: 1px;
-  background: var(--line);
-}
 .process-step { margin: 6px 0 10px; }
 .process-step[data-settled] { margin: 4px 0 6px; }
 .process-step[data-settled] + .model-progress-prose { margin-top: 4px; }
