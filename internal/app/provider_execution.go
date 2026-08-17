@@ -14,8 +14,10 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	"github.com/Viking602/azem/internal/provider/errcode"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
+	"github.com/Viking602/azem/internal/toolview"
 	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
@@ -98,13 +100,15 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 				}
 				data["name"] = frame.ToolCall.Name
 				data["arguments"] = string(frame.ToolCall.Arguments)
-				if !s.emit(ctx, Event{Kind: EventToolStarted, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolCall.ID, State: "queued", Data: data}) {
+				s.prefetchAutoReview(ctx, sessionID, runID, frame.ToolCall.ID, frame.ToolCall.Name, frame.ToolCall.Arguments)
+				if !s.emit(ctx, Event{Kind: EventToolStarted, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolCall.ID, State: s.toolStartState(frame.ToolCall.Name), Data: data}) {
 					return eventDeliveryError(ctx)
 				}
 			}
 		case stream.FrameToolResult:
 			if frame.ToolResult != nil {
-				if err := timeline.finish(ctx, *frame.ToolResult); err != nil {
+				callArguments, resolvedName, err := timeline.finish(ctx, *frame.ToolResult)
+				if err != nil {
 					return err
 				}
 				content := boundedUTF8(frame.ToolResult.Content, maxToolRecordPreviewBytes)
@@ -119,6 +123,11 @@ func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, mode
 				data["name"] = frame.ToolResult.Name
 				if len(structured) > 0 {
 					data["structured"] = string(structured)
+				}
+				if state == "completed" {
+					if summary, ok := toolview.CompletedFileChanges(resolvedName, string(callArguments), string(structured), content); ok {
+						data["fileChange"] = toolview.EncodeSummary(summary)
+					}
 				}
 				if content != frame.ToolResult.Content || len(structured) != len(frame.ToolResult.Structured) {
 					data["projection_truncated"] = "true"
@@ -174,7 +183,7 @@ func (s *Service) emitSyntheticToolAnnouncement(ctx context.Context, sessionID, 
 	return s.emit(ctx, Event{
 		Kind: EventTextDelta, SessionID: sessionID, RunID: runID,
 		State: "streaming", Text: text, TextPhase: string(hyprovider.TextPhaseCommentary),
-		Data: map[string]string{"synthetic": "tool_announcement"},
+		Data: map[string]string{"synthetic": fallbackToolAnnouncementSynthetic},
 	})
 }
 
@@ -206,9 +215,13 @@ type durableCommentaryCollector struct {
 	content          strings.Builder
 	startedAt        time.Time
 	batchAnnounced   bool
+	synthetic        bool
 }
 
-const fallbackToolAnnouncement = "**执行工具步骤**\n调用所需工具并根据实际结果继续。"
+const (
+	fallbackToolAnnouncement          = "正在调用所需工具，并根据实际结果继续。"
+	fallbackToolAnnouncementSynthetic = "tool_announcement"
+)
 
 func (c *durableCommentaryCollector) append(chunk string) {
 	if chunk == "" {
@@ -225,6 +238,7 @@ func (c *durableCommentaryCollector) ensureToolAnnouncement() string {
 		return ""
 	}
 	c.append(fallbackToolAnnouncement)
+	c.synthetic = true
 	return fallbackToolAnnouncement
 }
 
@@ -246,14 +260,18 @@ func (c *durableCommentaryCollector) flush(ctx context.Context) error {
 	}
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
+	data := map[string]string{
+		"startedAt":   fmt.Sprint(startedAt.UnixMilli()),
+		"completedAt": fmt.Sprint(completedAt.UnixMilli()),
+		"elapsedMs":   fmt.Sprint(completedAt.Sub(startedAt).Milliseconds()),
+	}
+	if c.synthetic {
+		data["synthetic"] = fallbackToolAnnouncementSynthetic
+	}
 	sequence, err := c.store.AppendBlock(persistCtx, c.sessionID, session.Block{
 		Kind: "commentary", RunID: c.runID, Title: "progress", Content: content,
 		TextPhase: string(hyprovider.TextPhaseCommentary), State: "completed",
-		Data: map[string]string{
-			"startedAt":   fmt.Sprint(startedAt.UnixMilli()),
-			"completedAt": fmt.Sprint(completedAt.UnixMilli()),
-			"elapsedMs":   fmt.Sprint(completedAt.Sub(startedAt).Milliseconds()),
-		},
+		Data: data,
 	})
 	if err != nil {
 		return fmt.Errorf("persist commentary: %w", err)
@@ -266,6 +284,7 @@ func (c *durableCommentaryCollector) flush(ctx context.Context) error {
 func (c *durableCommentaryCollector) discard() {
 	c.content.Reset()
 	c.startedAt = time.Time{}
+	c.synthetic = false
 }
 
 func (c *durableCommentaryCollector) endToolBatch() {
@@ -324,6 +343,13 @@ func (s *Service) providerTransport(providerID string) string {
 		return "grok-cli-proxy-responses-experimental"
 	}
 	return "xai-responses"
+}
+
+// providerFailureData attaches the stable error taxonomy code (PROVIDER
+// errcode package) to a terminal run failure so UIs can present and reason
+// about the failure class without parsing prose.
+func providerFailureData(err error) map[string]string {
+	return map[string]string{errcode.DataKey: string(errcode.Classify(err))}
 }
 
 func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run *agentservice.Run, engine hyagent.Engine) {
@@ -498,7 +524,10 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	}
 	if runErr != nil {
 		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "failed", runErr)
-		s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: runErr.Error()})
+		s.emitTerminal(ctx, Event{
+			Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed",
+			Text: runErr.Error(), Data: providerFailureData(runErr),
+		})
 		return
 	}
 	if err := s.persistRecap(ctx, recapGenerationRequest{
@@ -530,7 +559,7 @@ func executeMainRunUntilAvailable(ctx context.Context, execute func() (hyworker.
 		if !errors.As(err, &unavailable) || ctx.Err() != nil {
 			return outcome, err
 		}
-		// Resource claims serialize writers; they are not a provider failure.
+		// Remaining resource-claim conflicts are not a provider failure.
 		// Keep the dispatched main task alive and retry it just like subagents do
 		// instead of persisting a raw "resource claims denied" terminal block.
 		timer := time.NewTimer(resourceClaimRetryDelay(time.Now().UTC(), unavailable.ResourceClaims))
@@ -1093,13 +1122,20 @@ func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID, goal
 	}
 	if err != nil {
 		s.observeStop(sessionID, runID, hooks.StopFailure, "failed", err)
-		s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: err.Error()})
+		s.emitTerminal(ctx, Event{
+			Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed",
+			Text: err.Error(), Data: providerFailureData(err),
+		})
 		return
 	}
 	answer := teamAnswer(execution.Result.State)
 	if strings.TrimSpace(answer) == "" {
 		s.observeStop(sessionID, runID, hooks.StopFailure, "empty_answer", errors.New("coding team completed without a reporter answer"))
-		s.emitTerminal(ctx, Event{Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed", Text: "coding team completed without a reporter answer"})
+		s.emitTerminal(ctx, Event{
+			Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed",
+			Text: "coding team completed without a reporter answer",
+			Data: map[string]string{errcode.DataKey: string(errcode.CodeEmptyResponse)},
+		})
 		return
 	}
 	if !s.emit(ctx, Event{Kind: EventTextDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: answer}) {

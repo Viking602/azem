@@ -55,13 +55,13 @@ export default function SkillCatalogManager({
       <div className="skill-filters" role="group" aria-label={t("filterSkills")}>
         {(["all", "enabled", "disabled"] as const).map((value) => <button type="button" key={value} className={filter === value ? "active" : ""} aria-pressed={filter === value} onClick={() => setFilter(value)}>{value === "all" ? t("skillFilterAll") : value === "enabled" ? t("skillFilterEnabled") : t("skillFilterDisabled")}<span>{value === "all" ? skills.length : value === "enabled" ? enabledCount : disabledCount}</span></button>)}
       </div>
-      <button type="button" className="skill-reload" onClick={() => void onReload()} aria-label={t("reloadSkills")} title={t("reloadSkills")}><RefreshCw size={14} /></button>
+      <button type="button" className="skill-reload" onClick={() => void onReload()} aria-label={t("reloadSkills")}><RefreshCw size={14} /></button>
     </div>
     {skills.length === 0 ? <div className="skill-manager-empty"><PackageOpen size={22} /><strong>{t("noSkills")}</strong><small>{t("noSkillsHint")}</small></div> : visibleSkills.length === 0 ? <div className="skill-manager-empty compact"><Search size={20} /><strong>{t("noMatchingSkills")}</strong></div> : <div className="skill-manager-list">
       {visibleSkills.map((skill) => {
         const pending = pendingNames.has(skill.name);
         return <article key={skill.name} className={skill.disabled ? "disabled" : ""}>
-          <span className="skill-manager-icon"><Box size={16} /></span>
+          <span className="skill-manager-icon">{skill.logoPath?.startsWith("data:image/") ? <img src={skill.logoPath} alt="" /> : <Box size={16} />}</span>
           <div className="skill-manager-copy"><strong>{skill.name}</strong><small>{skill.description || skill.sourcePath}</small><div className="skill-manager-meta"><span>{skill.bundled ? t("skillBuiltin") : t("skillExternal")}</span><span>{skill.disabled ? t("skillNotLoaded") : skill.eager ? t("skillEager") : t("skillOnDemand")}</span><span>{skill.resourceCount} {t("skillResources")}</span></div></div>
           <div className="skill-manager-state"><span>{skill.disabled ? t("skillDisabled") : t("skillEnabled")}</span><button type="button" role="switch" aria-checked={!skill.disabled} aria-label={tFormat(language, skill.disabled ? "enableSkill" : "disableSkill", { skill: skill.name })} className={`skill-state-switch ${!skill.disabled ? "on" : ""} ${pending ? "pending" : ""}`} disabled={pending} onClick={() => void changeAvailability(skill)}><i /></button></div>
         </article>;

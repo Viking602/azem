@@ -55,7 +55,8 @@ runtime.
 | `cmd/azem` | CLI flags, signals, TUI startup and shutdown | Agent or persistence behavior |
 | `cmd/azem-gui` | Wails lifecycle, windows, deep links, desktop startup | Arbitrary filesystem or shell APIs |
 | `frontend/src` | React projection, interaction state, typed Bridge calls | Provider execution or authoritative durable state |
-| `internal/desktop` | Closed Bridge operation set and event forwarding | General-purpose shell or filesystem access |
+| `internal/desktop` | Closed Bridge operation set and event forwarding | Agent shell execution or a generic `sh -c` API |
+| `internal/desktop/termhost` | Human-only PTY sessions for the desktop window | Venat tools, approvals, or model-driven stdin |
 | `internal/tui` | Bubble Tea state, rendering, input routing | Duplicate runtime services |
 | `internal/app` | Composition and orchestration of turns, events, providers, approvals, subagents, and recovery | Provider-specific wire parsing or raw SQL |
 | `internal/agent` | Governed tools, Venat runs, teams, scheduling, worktrees | UI rendering |
@@ -90,6 +91,9 @@ exceptions with relative-path, resolved-symlink, entry-count, file-size,
 Git-output, timeout, and binary-content enforcement in
 `internal/desktop/workspace_files.go` and
 `internal/desktop/workspace_changes.go`; React cannot weaken those boundaries.
+The embedded terminal is a second deliberate exception: Go owns the PTY, the
+renderer only displays xterm output and forwards keystrokes through named
+Bridge methods, and the agent tool catalog cannot write to those sessions.
 
 ## Planning lifecycle
 
@@ -186,8 +190,10 @@ resync after its terminal event so the completed transcript is authoritative.
 Approvals, tool lifecycle transitions, and run terminal events remain ordered
 and lossless.
 
-Active assistant and commentary blocks render as inexpensive pre-wrapped text.
-Completed blocks switch to full Markdown, and settled timeline rows use native
+Assistant and commentary blocks parse Markdown while they stream. Completing a
+live block keeps that tree mounted and drops the caret from the box tree
+(`content: none`); history loads use
+the memoized Markdown renderer. Settled timeline rows use native
 `content-visibility` containment so offscreen history does not participate in
 every streamed frame.
 
@@ -199,6 +205,16 @@ opens them. Agent tool results are also bounded before Venat checkpoints, which
 prevents broad searches and generated-file matches from multiplying into an
 oversized execution snapshot.
 
+Oversized tool results spill instead of discarding bytes: when a governed tool
+(including MCP) returns more content or structured output than the 96 KiB
+model-side bound, the full payload is durably stored as a session context
+artifact (`tool_result_spill`) and the model-visible result keeps a bounded
+prefix plus an `artifact:<id>` locator with `context.read_artifact` retrieval
+guidance. The shell tool keeps its own earlier artifact spill; if the artifact
+write fails the result falls back to the plain lossy truncation, so a storage
+problem never fails the tool call. UI previews stay on their separate bounded
+projection (UI-002) and are unaffected.
+
 ## Tool lifecycle and side effects
 
 Tool state is authoritative in the backend:
@@ -206,6 +222,29 @@ Tool state is authoritative in the backend:
 ```text
 queued -> awaiting_approval -> running -> completed | failed
 ```
+
+Calls that can start immediately emit `running` instead of `queued`. Automatic
+review of non-workspace side effects emits `reviewing_approval` rather than a
+capacity queue. `queued` remains a wait for unavailable execution capacity or
+for a later permission prompt.
+
+The pipeline stages have fixed responsibilities:
+
+1. **Pre-execute** — `hooks.WrapDriver` dispatches `PreToolUse` (deny, rewrite
+   input, or force `ask`), then the governed layer applies approval policy
+   (`PrepareDriver`) and waits for the user or automatic review.
+2. **Monotonic guard** — a settled denial is terminal. The prepared execution
+   returns a complete error result with no execute closure, so no later stage
+   can flip it back to execution: `PostToolUse` hooks may append feedback or
+   rewrite MCP output for the model, but never clear the error state or run
+   the tool (regression: `TestMonotonicGuardDenialCannotBeFlippedBackToExecution`).
+3. **Execute** — the driver runs with shell/subagent concurrency limits and
+   the run context as the around-wrapper for cancellation and timeouts.
+4. **Post-execute** — results are rewritten only through defined channels:
+   spill of oversized output to session artifacts, `PostToolUse` hook output
+   rewrites, and the model-side result bound.
+5. **Observation** — durable tool records, file observations, and UI
+   projections read the settled result; they never mutate it.
 
 File changes appear only after execution produces evidence. Non-idempotent
 actions are recorded as durable action attempts. At startup, incomplete action

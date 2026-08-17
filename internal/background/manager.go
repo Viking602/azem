@@ -55,11 +55,11 @@ type Process struct {
 
 // LogSnapshot is a bounded tail. Offset counts retained lines, not file bytes.
 type LogSnapshot struct {
-	Process    Process
-	Lines      []string
-	Offset     int
-	TotalLines int
-	Truncated  bool
+	Process    Process  `json:"process"`
+	Lines      []string `json:"lines"`
+	Offset     int      `json:"offset"`
+	TotalLines int      `json:"totalLines"`
+	Truncated  bool     `json:"truncated,omitempty"`
 }
 
 type Options struct {

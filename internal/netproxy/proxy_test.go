@@ -117,6 +117,29 @@ func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return function(request)
 }
 
+func TestGrokUserURLUsesNativeHTTPSProxyWhenEnvironmentIsEmpty(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("https_proxy", "")
+	request, err := http.NewRequest(http.MethodGet, "https://cli-chat-proxy.grok.com/v1/user?include=subscription", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := newResolver(func() (Settings, error) {
+		return Settings{HTTPS: Endpoint{Enabled: true, Host: "127.0.0.1", Port: 6152}}, nil
+	})
+	resolver.hasEnvironment = func(*http.Request) bool { return false }
+	proxyURL, err := resolver.proxy(request)
+	if err != nil || proxyURL == nil || proxyURL.String() != "http://127.0.0.1:6152" {
+		t.Fatalf("system proxy = %v, error = %v", proxyURL, err)
+	}
+
+	direct := newResolver(func() (Settings, error) { return Settings{}, nil })
+	direct.hasEnvironment = func(*http.Request) bool { return false }
+	if got, err := direct.proxy(request); err != nil || got != nil {
+		t.Fatalf("empty system settings must not invent a proxy: %v %v", got, err)
+	}
+}
+
 func TestCurrentSystemSettingsAreSelfConsistent(t *testing.T) {
 	settings, err := CurrentSystemSettings()
 	if err != nil {

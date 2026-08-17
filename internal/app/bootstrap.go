@@ -12,14 +12,12 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
-	"github.com/Viking602/azem/internal/auth/chatgpt"
-	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/netproxy"
-	"github.com/Viking602/azem/internal/provider/catalog"
+	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
 	"github.com/Viking602/azem/internal/session"
@@ -180,7 +178,8 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 	shellOptions := agentservice.ShellOptions{
 		MaxContextOutputBytes: b.cfg.Workspace.Shell.MaxContextOutputBytes, MaxArtifactOutputBytes: b.cfg.Workspace.Shell.MaxArtifactOutputBytes,
 		StopOnOutputLimit: b.cfg.Workspace.Shell.StopOnOutputLimit, MaxConcurrency: b.cfg.Workspace.Shell.MaxConcurrency,
-		ArtifactSink: newShellArtifactSink(b.sessions),
+		MaxWallClockDuration: b.cfg.Workspace.Shell.MaxWallClockDuration,
+		ArtifactSink:         newShellArtifactSink(b.sessions),
 	}
 	b.coding, err = agentservice.NewService(b.store, b.paths.Workspace,
 		agentservice.WithWorkspacePolicy(b.cfg.Workspace.AllowWrite, b.cfg.Workspace.ShellPolicy, b.cfg.Workspace.AllowNetwork),
@@ -195,25 +194,7 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 	if err != nil {
 		return err
 	}
-	fileCredentials, err := authservice.NewFileStore(filepath.Join(b.paths.StateDir, "credentials.json"))
-	if err != nil {
-		return err
-	}
-	credentials, err := authservice.NewRoutedStore(b.store.DB(), b.cfg.Auth.Store, map[string]authservice.CredentialStore{
-		"sqlite":  authservice.NewSQLiteStore(b.store.DB()),
-		"keyring": authservice.NewKeyringStore(),
-		"file":    fileCredentials,
-	})
-	if err != nil {
-		return err
-	}
-	b.authentication = authservice.NewService(b.store.DB(), credentials, chatgpt.NewClient(), grok.NewClient())
-	importConfiguredCredentials(b.ctx, b.cfg, b.authentication)
-	b.modelCatalog = catalog.NewService(b.store.DB(), b.authentication)
-	b.modelCatalog.TTL["chatgpt"] = b.cfg.Providers.ChatGPT.CatalogTTL
-	b.modelCatalog.TTL["grok"] = b.cfg.Providers.Grok.CatalogTTL
-	b.providerRuntime, err = NewProviderRuntime(b.cfg, b.authentication, b.modelCatalog, b.coding, filepath.Join(b.paths.DataDir, "subagent-worktrees"))
-	return err
+	return b.buildProviderServices()
 }
 
 func (b *bootstrapAssembly) wireService() error {
@@ -229,6 +210,10 @@ func (b *bootstrapAssembly) wireService() error {
 	b.service.AttachAuth(b.authentication, b.modelCatalog)
 	b.service.AttachSkills(b.skillCatalog)
 	b.service.AttachPlugins(pluginCatalogEntries(b.pluginCatalog), pluginDiagnostics(b.pluginCatalog))
+	b.service.AttachPluginRuntime(plugins.Options{
+		HomeDir: b.homeDir, DataDir: b.paths.DataDir,
+		ImportCodex: b.cfg.Plugins.ImportCodex, TrustHooks: b.cfg.Plugins.TrustHooks,
+	}, b.pluginCatalog)
 
 	b.manager = mcpruntime.NewManager(b.cfg.MCP.Servers, fmt.Sprintf("azem/%d", config.CurrentVersion), func(_ context.Context, reference string) (string, error) {
 		return config.ResolveReference(reference, os.LookupEnv, authservice.LookupKeyringSecret)
@@ -251,13 +236,19 @@ func (b *bootstrapAssembly) wireService() error {
 
 func (b *bootstrapAssembly) attachHooks() {
 	sources := hookSources(b.cfg.Hooks, b.configDir, b.homeDir, b.paths.Workspace)
-	for _, source := range b.pluginCatalog.HookSources {
-		if dataDir := source.Environment["PLUGIN_DATA"]; dataDir != "" {
-			_ = os.MkdirAll(dataDir, 0o700)
+	if b.cfg.Plugins.TrustHooks {
+		for _, source := range b.pluginCatalog.HookSources {
+			if dataDir := source.Environment["PLUGIN_DATA"]; dataDir != "" {
+				_ = os.MkdirAll(dataDir, 0o700)
+			}
+			sources = append(sources, hooks.Source{Path: source.Path, Trusted: true, Environment: source.Environment})
 		}
-		sources = append(sources, hooks.Source{Path: source.Path, Trusted: true, Environment: source.Environment})
 	}
-	hookOptions := hooks.Options{Sources: sources, DefaultTimeout: b.cfg.Hooks.DefaultTimeoutParsed, FailurePolicy: hooks.FailurePolicy(b.cfg.Hooks.FailurePolicy)}
+	hookOptions := hooks.Options{
+		Sources: sources, DefaultTimeout: b.cfg.Hooks.DefaultTimeoutParsed,
+		FailurePolicy: hooks.FailurePolicy(b.cfg.Hooks.FailurePolicy),
+		Disabled:      append([]string(nil), b.cfg.Hooks.Disabled...),
+	}
 	b.registry = hooks.Discover(hookOptions)
 	b.service.AttachHooks(hooks.Dispatcher{Registry: b.registry, Runner: hooks.Runner{Workspace: b.paths.Workspace}})
 	b.service.hookOptions = hookOptions
@@ -436,37 +427,4 @@ func (result BootstrapResult) Validate() error {
 		return fmt.Errorf("bootstrap service is nil")
 	}
 	return nil
-}
-
-func importConfiguredCredentials(ctx context.Context, cfg config.Config, authentication *authservice.Service) {
-	if !cfg.Auth.ImportCodex && !cfg.Auth.ImportGrok {
-		return
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	if cfg.Auth.ImportCodex {
-		hasAccount, accountErr := authentication.HasAnyAccount(ctx, "chatgpt")
-		if accountErr != nil || !hasAccount {
-			codexHome := os.Getenv("CODEX_HOME")
-			if codexHome == "" {
-				codexHome = filepath.Join(home, ".codex")
-			}
-			if _, statErr := os.Stat(filepath.Join(codexHome, "auth.json")); statErr == nil {
-				_, _ = authentication.ImportChatGPT(ctx, filepath.Join(codexHome, "auth.json"))
-			} else if os.IsNotExist(statErr) {
-				_, _ = authentication.ImportChatGPTKeyring(ctx, codexHome)
-			}
-		}
-	}
-	if cfg.Auth.ImportGrok {
-		path := filepath.Join(home, ".grok", "auth.json")
-		if _, statErr := os.Stat(path); statErr == nil {
-			hasAccount, accountErr := authentication.HasAnyAccount(ctx, "grok")
-			if accountErr != nil || !hasAccount {
-				_, _ = authentication.ImportGrok(ctx, path)
-			}
-		}
-	}
 }

@@ -74,8 +74,15 @@ and `NO_PROXY` remain explicit per-process overrides on every platform.
 
 Desktop text output is presented in frame-paced chunks. Rendering is capped independently from the display refresh rate, large backlogs catch up automatically, and reduced-motion preferences disable animation without disabling bounded rendering.
 
+Desktop **Settings → Usage** shows a project-scoped token ledger from completed
+provider requests: totals, a month-row activity calendar, main vs subagent
+breakdown, and model (and skill, when recorded) counts. Cache stays unreported
+for providers that do not report it.
+
 Desktop **Settings → Appearance** provides persistent global interface font,
-11–20 px font-size, language, and theme controls. The searchable font picker
+11–20 px chrome font-size, language, and theme controls, plus separate chat
+**UI text** (12–20 px, default 13) and **code font size** (11–18 px, default
+12) that apply only to the conversation surface. The searchable font picker
 reads families installed on the host operating system and uses localized family
 names when the font supplies them. macOS uses AppKit, Linux uses fontconfig,
 and Windows uses the installed Windows font collection; typography changes
@@ -139,6 +146,7 @@ Azem streams progress in the terminal and asks for approval when the selected po
 
 - File discovery, reading, searching, patch editing, formatting, testing, and shell execution
 - Codex-style desktop workspace browser and change-review surface with lazy file trees, bounded tabs, virtualized text viewing, image previews, directory-folded large change sets, and per-file unified diffs loaded on demand
+- Embedded desktop terminal in the current project workspace (`Cmd+`` / `Ctrl+``), with tabs and a real PTY; this is a human console, not the agent shell tool
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
 - Interactive planning mode with durable `ask` questions, versioned plan proposals, review and revision turns, and an explicit Execute Plan handoff into a new ordinary implementation turn
 - OpenAI/ChatGPT and Grok subscription login with live model catalogs, remaining weekly quota, reset time, and credit balance, plus llmux-backed OpenAI, Anthropic, Google, Mistral, Cohere, xAI, OpenRouter, DeepSeek, local inference, and other compatible providers in one searchable, progressively loaded desktop registry; enabled API providers can fetch their live model list and merge models.dev capabilities, while providers flagged for Anthropic Messages use that protocol instead of OpenAI Chat Completions
@@ -300,6 +308,7 @@ workspace:
     max_artifact_output_bytes: 4194304
     stop_on_output_limit: true
     max_concurrency: 2
+    max_wall_clock: 10m      # per-command ceiling; the model may request less via wall_clock_seconds
 
 auth:
   store: keyring           # sqlite | keyring | file
@@ -395,7 +404,8 @@ agents:
     enabled: true
     max_depth: 2             # nested delegation levels; -1 is unlimited, 0 disables delegation
     max_concurrency: 32      # running subagents; 0 is unlimited
-    await_timeout: 10m       # foreground wait window; safe work continues in the background after it elapses
+    await_timeout: 0s        # 0s waits until the foreground child completes; a positive duration only releases the parent
+    idle_timeout: 5m         # default 5m; 0s disables; cancels a silent running child with no thinking, output, or tool activity
     auto_wake: true
     routes:
       explore:
@@ -424,15 +434,21 @@ plugins:
   codex_imports: []          # exact plugin IDs selected for copying into Azem
   trust_hooks: false         # installation is not execution trust; opt in explicitly
 
+hooks:
+  enabled: true
+  disabled: []               # per-hook deny list; plugin hooks still require trust_hooks
+
 mcp:
   servers: {}
 ```
 
-The desktop **Settings → Extensions** page manages `skills.disabled` directly.
-Stopping a Skill removes it from model context, slash suggestions, eager
-activation, and the runtime registry. It remains in the catalog so it can be
-restored later. If an eager Skill is stopped, Azem removes it from `eager`;
-restoring it returns it in on-demand mode.
+The desktop **Settings → Extensions** page manages `skills.disabled` and
+`hooks.disabled` directly. Stopping a Skill removes it from model context,
+slash suggestions, eager activation, and the runtime registry. It remains in
+the catalog so it can be restored later. If an eager Skill is stopped, Azem
+removes it from `eager`; restoring it returns it in on-demand mode. Each Hook
+row can be enabled or stopped without changing the global plugin-hook trust
+decision. An untrusted plugin hook that is marked enabled still does not run.
 
 The same Extensions page projects the real MCP manager rather than inferring
 servers from installed plugins. It lists local and remote servers, live
@@ -575,6 +591,7 @@ internal/app/           Application orchestration, providers, and subagents
 internal/auth/          OAuth, credential import, and credential storage
 internal/config/        Configuration, paths, roles, and personas
 internal/desktop/       Bounded Wails bridge and desktop lifecycle
+internal/desktop/termhost/ Human-only PTY host for the embedded desktop terminal
 internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/mcp/           MCP connection and tool management
 internal/provider/      ChatGPT/Codex, Grok, llmux drivers, and model catalogs

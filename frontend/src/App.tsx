@@ -1,11 +1,16 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Command, GitBranch, Search } from "lucide-react";
+import { Check, ChevronDown, GitBranch, Search } from "lucide-react";
 import { execute, initialise, isDesktopRuntime, resumeSession, subscribe, subscribePullRequests } from "./bridge";
-import AgentSideChat from "./components/AgentSideChat";
-import Inspector from "./components/Inspector";
 import Sidebar from "./components/Sidebar";
 import ThreadSurface from "./components/ThreadSurface";
 import { tFormat, translator } from "./i18n";
+import { isTerminalToggleKey } from "./terminal";
+import { useTerminalStore } from "./terminalStore";
+import {
+  CHAT_CODE_FONT_STORAGE_KEY,
+  CHAT_UI_FONT_STORAGE_KEY,
+  applyChatTypography,
+} from "./chatTypography";
 import { normalizeUIFont, shouldMarkSessionUnread, useRuntimeStore } from "./store";
 import { refreshPullRequestDashboard } from "./pullRequests";
 import type { RuntimeEvent } from "./types";
@@ -16,6 +21,9 @@ const Pages = lazy(() => import("./components/Pages"));
 const SubagentsDrawer = lazy(() => import("./components/SubagentsPage"));
 const SettingsDialog = lazy(() => import("./components/SettingsDialog"));
 const PullRequestPanel = lazy(() => import("./components/PullRequestPanel"));
+const Inspector = lazy(() => import("./components/Inspector"));
+const AgentSideChat = lazy(() => import("./components/AgentSideChat"));
+const TerminalPanel = lazy(() => import("./components/TerminalPanel"));
 
 const STREAM_FRAME_INTERVAL_MS = 32;
 const PROJECTION_RESYNC_DELAY_MS = 32;
@@ -41,8 +49,14 @@ function refreshProjection(event: RuntimeEvent, timers: Map<string, number>, set
   window.clearTimeout(timers.get(sessionId));
   timers.set(sessionId, window.setTimeout(() => {
     timers.delete(sessionId);
+    const selectedAgentId = useRuntimeStore.getState().selectedAgentId;
+    const agentId = event.agentId || selectedAgentId;
     void execute({ kind: "refresh_session", target: sessionId, sessionId })
       .catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
+    if (agentId) {
+      void execute({ kind: "inspect_agent", target: agentId, sessionId })
+        .catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
+    }
   }, PROJECTION_RESYNC_DELAY_MS));
 }
 
@@ -119,14 +133,22 @@ export default function App() {
   const setSettingsOpen = useRuntimeStore((state) => state.setSettingsOpen);
   const commandOpen = useRuntimeStore((state) => state.commandOpen);
   const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
+  const terminalOpen = useTerminalStore((state) => state.open);
+  const [terminalMounted, setTerminalMounted] = useState(() => useTerminalStore.getState().open);
   const theme = useRuntimeStore((state) => state.theme);
   const uiFont = useRuntimeStore((state) => state.uiFont);
   const uiFontSize = useRuntimeStore((state) => state.uiFontSize);
+  const chatFontSize = useRuntimeStore((state) => state.chatFontSize);
+  const chatCodeFontSize = useRuntimeStore((state) => state.chatCodeFontSize);
   const [appearanceReady, setAppearanceReady] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(246);
   const queue = useRef<RuntimeEvent[]>([]);
   const frame = useRef(0);
   const lastFlush = useRef(-Infinity);
+
+  useEffect(() => {
+    if (terminalOpen) setTerminalMounted(true);
+  }, [terminalOpen]);
 
   useEffect(() => {
     let workspaceRefreshTimer = 0;
@@ -212,6 +234,10 @@ export default function App() {
     if (savedFont) useRuntimeStore.getState().setUIFont(savedFont);
     const savedFontSize = Number(localStorage.getItem("azem:ui-font-size"));
     if (Number.isFinite(savedFontSize) && savedFontSize >= 11 && savedFontSize <= 20) useRuntimeStore.getState().setUIFontSize(savedFontSize);
+    const savedChatFontSize = Number(localStorage.getItem(CHAT_UI_FONT_STORAGE_KEY));
+    if (Number.isFinite(savedChatFontSize)) useRuntimeStore.getState().setChatFontSize(savedChatFontSize);
+    const savedChatCodeFontSize = Number(localStorage.getItem(CHAT_CODE_FONT_STORAGE_KEY));
+    if (Number.isFinite(savedChatCodeFontSize)) useRuntimeStore.getState().setChatCodeFontSize(savedChatCodeFontSize);
     setAppearanceReady(true);
   }, []);
 
@@ -220,10 +246,13 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.setProperty("--ui-font-family", interfaceFontStack(uiFont));
     document.documentElement.style.setProperty("--ui-font-size", `${uiFontSize}px`);
+    applyChatTypography(chatFontSize, chatCodeFontSize);
     localStorage.setItem("azem:theme", theme);
     localStorage.setItem("azem:ui-font", uiFont);
     localStorage.setItem("azem:ui-font-size", String(uiFontSize));
-  }, [appearanceReady, theme, uiFont, uiFontSize]);
+    localStorage.setItem(CHAT_UI_FONT_STORAGE_KEY, String(chatFontSize));
+    localStorage.setItem(CHAT_CODE_FONT_STORAGE_KEY, String(chatCodeFontSize));
+  }, [appearanceReady, theme, uiFont, uiFontSize, chatFontSize, chatCodeFontSize]);
 
   useEffect(() => {
     const preventNativeContextMenu = (event: MouseEvent) => event.preventDefault();
@@ -235,7 +264,12 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       const primary = event.metaKey || event.ctrlKey;
-      if (primary && event.key.toLowerCase() === "k") {
+      if (isTerminalToggleKey(event)) {
+        const ui = useRuntimeStore.getState();
+        if (ui.settingsOpen || ui.commandOpen) return;
+        event.preventDefault();
+        useTerminalStore.getState().toggle();
+      } else if (primary && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setCommandOpen(true);
       } else if (primary && event.key.toLowerCase() === "n") {
@@ -254,6 +288,7 @@ export default function App() {
         event.preventDefault();
         document.querySelector<HTMLTextAreaElement>("#azem-composer")?.focus();
       } else if (event.key === "Escape" && !settingsOpen && !commandOpen) {
+        if ((event.target as HTMLElement | null)?.closest?.(".terminal-panel")) return;
         if (useRuntimeStore.getState().selectedPullRequestNumber) {
           event.preventDefault();
           useRuntimeStore.getState().selectPullRequest(null);
@@ -303,7 +338,8 @@ export default function App() {
       <div className="workspace-grid" data-inspector={layoutMode}>
         <Sidebar />
         <ResizeHandle value={sidebarWidth} setValue={setSidebarWidth} min={224} max={340} />
-        <main className="workspace-main">
+        <main className="workspace-main" data-terminal={terminalOpen ? "open" : "closed"}>
+          <div className="workspace-primary">
           {view === "thread" || view === "agents" ? (
             <ThreadSurface />
           ) : (
@@ -311,7 +347,7 @@ export default function App() {
               <Pages view={view} />
             </Suspense>
           )}
-          {showInspector && <Inspector />}
+          {showInspector && <Suspense fallback={null}><Inspector /></Suspense>}
           {showAgentDrawer && <Suspense fallback={null}>
             <div className="subagents-drawer-layer" onClick={(event) => {
               if (event.target === event.currentTarget) useRuntimeStore.getState().setView("thread");
@@ -320,12 +356,16 @@ export default function App() {
             </div>
           </Suspense>}
           {showAgentDetailDrawer && (
-            <div className="subagent-detail-drawer-layer" onClick={(event) => {
-              if (event.target === event.currentTarget) useRuntimeStore.getState().selectAgent("");
-            }}>
-              <AgentSideChat />
-            </div>
+            <Suspense fallback={null}>
+              <div className="subagent-detail-drawer-layer" onClick={(event) => {
+                if (event.target === event.currentTarget) useRuntimeStore.getState().selectAgent("");
+              }}>
+                <AgentSideChat />
+              </div>
+            </Suspense>
           )}
+          </div>
+          {terminalMounted && <Suspense fallback={null}><TerminalPanel /></Suspense>}
         </main>
         {showPullRequest && <Suspense fallback={null}><PullRequestPanel /></Suspense>}
       </div>
@@ -347,7 +387,6 @@ function AppTitleBar() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const branches = useRuntimeStore((state) => state.branches);
   const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
-  const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
   const setError = useRuntimeStore((state) => state.setError);
   const [branchOpen, setBranchOpen] = useState(false);
   const [branchSearch, setBranchSearch] = useState("");
@@ -408,7 +447,7 @@ function AppTitleBar() {
   return <header className="app-titlebar titlebar-region">
     <div className="window-controls" aria-hidden="true"><i /><i /><i /></div>
     <div className="titlebar-project-switch" ref={branchSwitch}>
-      <button type="button" className="titlebar-project" title={`${project} / ${branch}`} aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} onClick={() => setBranchOpen((open) => !open)}>
+      <button type="button" className="titlebar-project" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} onClick={() => setBranchOpen((open) => !open)}>
         <strong>{project}</strong><b aria-hidden="true">/</b><span>{branch}</span><ChevronDown size={14} />
       </button>
       {branchOpen && <section className="titlebar-project-popover" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}>
@@ -419,7 +458,7 @@ function AppTitleBar() {
             const currentDetail = workspaceChangedFiles > 0
               ? tFormat(snapshot.language, "uncommittedFiles", { count: workspaceChangedFiles })
               : t("clean");
-            return <button key={item.name} type="button" role="option" aria-selected={item.current} title={item.name} onClick={() => void switchBranch(item.name)}>
+            return <button key={item.name} type="button" role="option" aria-selected={item.current} onClick={() => void switchBranch(item.name)}>
               <span className="titlebar-project-letter"><GitBranch size={14} /></span>
               <span><strong>{item.name}</strong><small>{item.current ? currentDetail : t("local")}</small></span>
               <em>{item.current ? snapshot.language === "zh-CN" ? "当前" : "Current" : ""}</em>
@@ -431,9 +470,6 @@ function AppTitleBar() {
         <footer><span>↵ {snapshot.language === "zh-CN" ? "切换" : "Switch"}</span><span>esc {snapshot.language === "zh-CN" ? "关闭" : "Close"}</span></footer>
       </section>}
     </div>
-    <button type="button" className="titlebar-command" onClick={() => setCommandOpen(true)} aria-label={t("command")}>
-      <span>{snapshot.language === "zh-CN" ? "搜索、跳转或执行命令" : "Search, jump, or run a command"}</span><kbd><Command size={11} />K</kbd>
-    </button>
   </header>;
 }
 

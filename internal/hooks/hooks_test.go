@@ -77,6 +77,28 @@ func TestDiscoveryRegistersEveryClaudeEventAndAzemExtension(t *testing.T) {
 	}
 }
 
+func TestDisabledCommandIsNotDispatched(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell command")
+	}
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":[{"hooks":[{"name":"notify","type":"command","command":"printf ran"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := Command{Event: SessionStart, Name: "notify", Source: path}
+	registry := Discover(Options{Sources: []Source{{Path: path, Trusted: true}}, Disabled: []string{CommandIdentity(command)}})
+	if len(registry.Commands(SessionStart)) != 1 {
+		t.Fatalf("disabled hooks must remain visible in the catalog: %#v", registry.Commands(SessionStart))
+	}
+	if !registry.IsDisabled(registry.Commands(SessionStart)[0]) {
+		t.Fatal("disabled hook was not marked")
+	}
+	result := Dispatcher{Registry: registry, Runner: Runner{Workspace: t.TempDir()}}.Dispatch(context.Background(), Envelope{HookEventName: SessionStart})
+	if len(result.Runs) != 0 {
+		t.Fatalf("disabled hook executed: %#v", result.Runs)
+	}
+}
+
 func TestPluginSourceEnvironmentReachesHookProcess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell command")
@@ -207,6 +229,23 @@ func TestRunnerJSONDenyOverridesExitAndBoundsOutput(t *testing.T) {
 	result = runner.Run(context.Background(), command, Envelope{HookEventName: PreToolUse})
 	if !result.Denied || result.Output.Reason != "malformed" {
 		t.Fatalf("exit 2 with malformed JSON did not deny: %#v", result)
+	}
+}
+
+func TestRunnerUsesNonLoginShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell command")
+	}
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".profile"), []byte("printf profile >&2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := Runner{
+		Workspace:   t.TempDir(),
+		Environment: []string{"HOME=" + home},
+	}.Run(context.Background(), Command{Event: PreToolUse, RawCommand: "printf hook", Timeout: time.Second}, Envelope{HookEventName: PreToolUse})
+	if result.Stderr != "" || result.Stdout != "hook" {
+		t.Fatalf("hook shell sourced login profile: stdout=%q stderr=%q", result.Stdout, result.Stderr)
 	}
 }
 

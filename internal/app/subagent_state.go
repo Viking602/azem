@@ -9,6 +9,7 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/session"
+	"github.com/Viking602/azem/internal/toolview"
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/stream"
 	"github.com/Viking602/venat/tool"
@@ -191,22 +192,193 @@ func (r *subagentRuntime) Cancel(sessionID, id string) agentservice.SubagentCanc
 	active.run.State = agentservice.SubagentCancelling
 	active.run.Summary = "cancelling"
 	cancelling := cloneSubagentRun(active.run)
-	if err := r.store.Save(r.ctx, cancelling); err != nil {
-		r.mu.Unlock()
-		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("persist cancelling subagent: %w", err)})
-		return agentservice.SubagentCancelOutcome{Outcome: "cancel_requested", Snapshot: r.snapshot(id, sessionID)}
-	}
-	active.run = cancelling
 	snapshot := r.snapshotFromActiveLocked(active)
 	cancel := active.cancel
 	queued := !active.slot
 	r.mu.Unlock()
+	// Persist outside the runtime lock: r.mu serializes frame handling and
+	// scheduling for every subagent, so a slow store write here would stall
+	// the whole roster, and the idle watchdog can trigger many cancels.
+	if err := r.store.Save(r.ctx, cancelling); err != nil {
+		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("persist cancelling subagent: %w", err)})
+		return agentservice.SubagentCancelOutcome{Outcome: "cancel_requested", Snapshot: r.snapshot(id, sessionID)}
+	}
 	r.emitState(cancelling, "cancelling")
 	cancel()
 	if queued {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentCancelled})
 	}
 	return agentservice.SubagentCancelOutcome{Outcome: "cancel_requested", Snapshot: snapshot}
+}
+
+const (
+	subagentIdleCheckInterval = time.Second
+	subagentIdleCancelWarning = "cancelled after %s without thinking, output, or tool activity"
+)
+
+func (r *subagentRuntime) watchIdle() {
+	defer r.wg.Done()
+	ticker := time.NewTicker(r.idleCheckInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			r.cancelIdleChildren()
+		}
+	}
+}
+
+func (r *subagentRuntime) idleCheckInterval() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.idleCheckEvery > 0 {
+		return r.idleCheckEvery
+	}
+	if r.cfg.IdleDuration > 0 && r.cfg.IdleDuration < subagentIdleCheckInterval {
+		return r.cfg.IdleDuration
+	}
+	return subagentIdleCheckInterval
+}
+
+func (r *subagentRuntime) cancelIdleChildren() {
+	type target struct {
+		sessionID string
+		id        string
+		idle      time.Duration
+	}
+	now := time.Now()
+	r.mu.Lock()
+	idle := r.cfg.IdleDuration
+	if idle <= 0 {
+		r.mu.Unlock()
+		return
+	}
+	targets := make([]target, 0)
+	for id, active := range r.active {
+		if active == nil || active.terminalizing || active.terminalized ||
+			active.run.State != agentservice.SubagentRunning || active.hasLiveWork() {
+			continue
+		}
+		last := active.lastVisibleAt
+		if last.IsZero() {
+			last = active.run.StartedAt
+		}
+		if last.IsZero() || now.Sub(last) < idle {
+			continue
+		}
+		targets = append(targets, target{sessionID: active.run.SessionID, id: id, idle: idle})
+	}
+	r.mu.Unlock()
+	for _, item := range targets {
+		r.cancelIdle(item.sessionID, item.id, item.idle)
+	}
+}
+
+func (r *subagentRuntime) cancelIdle(sessionID, id string, idle time.Duration) {
+	warning := fmt.Sprintf(subagentIdleCancelWarning, idle)
+	r.mu.Lock()
+	active := r.active[id]
+	if active == nil || active.run.SessionID != sessionID || active.terminalizing ||
+		active.run.State != agentservice.SubagentRunning || active.hasLiveWork() {
+		r.mu.Unlock()
+		return
+	}
+	active.run.Warning = appendWarning(active.run.Warning, warning)
+	active.activity = warning
+	r.mu.Unlock()
+	r.Cancel(sessionID, id)
+}
+
+func (r *subagentRuntime) noteVisibleActivity(id, activity string) {
+	r.mu.Lock()
+	if active := r.active[id]; active != nil && !active.terminalizing {
+		noteVisibleActivityLocked(active, activity)
+	}
+	r.mu.Unlock()
+	r.persistActivity(id)
+}
+
+func noteVisibleActivityLocked(active *activeSubagent, activity string) {
+	active.lastVisibleAt = time.Now()
+	if text := compactActivity(activity); text != "" {
+		active.activity = text
+	}
+}
+
+func noteVisibleContentLocked(active *activeSubagent, activity string) bool {
+	if strings.TrimSpace(activity) == "" {
+		return false
+	}
+	noteVisibleActivityLocked(active, activity)
+	return true
+}
+
+func (active *activeSubagent) hasOpenTool() bool {
+	if active == nil {
+		return false
+	}
+	for _, block := range active.blocks {
+		if block.Kind != "tool" {
+			continue
+		}
+		switch block.State {
+		case "running", "queued", "awaiting_approval", "reviewing_approval":
+			return true
+		}
+	}
+	return false
+}
+
+func (active *activeSubagent) hasLiveWork() bool {
+	if active.hasOpenTool() {
+		return true
+	}
+	if active == nil || active.parent.Coding == nil {
+		return false
+	}
+	return childMatchesLiveShell(active, active.parent.Coding.ActiveShellExecutions())
+}
+
+func childMatchesLiveShell(active *activeSubagent, shells []agentservice.ShellExecutionSnapshot) bool {
+	if active == nil {
+		return false
+	}
+	childRunID := strings.TrimSpace(active.run.ChildRunID)
+	sessionID := strings.TrimSpace(active.run.SessionID)
+	agentID := durableSubagentAgentID(active.run.Type)
+	for _, snap := range shells {
+		if snap.State != "running" {
+			continue
+		}
+		if childRunID != "" && snap.RunID == childRunID {
+			return true
+		}
+		if childRunID == "" && sessionID != "" && snap.SessionID == sessionID && snap.AgentID == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *subagentRuntime) listRunningBackgroundChildren(sessionID, parentRunID string) []agentservice.SubagentRun {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	children := make([]agentservice.SubagentRun, 0)
+	for _, active := range r.active {
+		if active.run.SessionID != sessionID || active.run.ParentRunID != parentRunID || !active.run.Background {
+			continue
+		}
+		if active.run.CompletionDelivered || subagentTerminal(active.run.State) {
+			continue
+		}
+		children = append(children, active.run)
+	}
+	slices.SortFunc(children, func(left, right agentservice.SubagentRun) int {
+		return strings.Compare(left.ID, right.ID)
+	})
+	return children
 }
 
 func (r *subagentRuntime) HasActiveByParentRun(sessionID, parentRunID string) bool {
@@ -293,11 +465,17 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	providerID, modelID, reasoning := active.profile.Provider, active.profile.Model, active.profile.Reasoning
 	switch frame.Kind {
 	case stream.FrameThinking:
-		active.activity = compactActivity(frame.Thinking)
+		if !noteVisibleContentLocked(active, frame.Thinking) {
+			r.mu.Unlock()
+			return
+		}
 		// Title is a stable kind key; the GUI localizes "thinking" → 思考 / Thinking.
 		appendAgentDelta(&active.blocks, "thinking", childRunID, "thinking", frame.Thinking)
 	case stream.FrameText:
-		active.activity = compactActivity(frame.Text)
+		if !noteVisibleContentLocked(active, frame.Text) {
+			r.mu.Unlock()
+			return
+		}
 		kind := subagentTextKind(frame.TextPhase, false)
 		appendAgentDelta(&active.blocks, kind, childRunID, kind, frame.Text)
 	case stream.FrameToolCall:
@@ -306,7 +484,7 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 			active.ToolStarted = true
 			active.run.ToolCalls++
 			active.toolNames[frame.ToolCall.Name] = struct{}{}
-			active.activity = frame.ToolCall.Name
+			noteVisibleActivityLocked(active, frame.ToolCall.Name)
 			active.blocks = append(active.blocks, AgentTranscriptBlock{
 				ID: "call-" + frame.ToolCall.ID, Kind: "tool", RunID: childRunID, ToolCallID: frame.ToolCall.ID,
 				Title: frame.ToolCall.Name, Content: string(frame.ToolCall.Arguments), State: "running",
@@ -314,9 +492,11 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		}
 	case stream.FrameToolResult:
 		if frame.ToolResult != nil {
+			noteVisibleActivityLocked(active, firstNonempty(frame.ToolResult.Name, "tool"))
 			finishAgentToolBlock(active.blocks, frame.ToolResult.ToolCallID, frame.ToolResult.Content, frame.ToolResult.IsError)
 		}
 	case stream.FrameDone:
+		noteVisibleActivityLocked(active, active.activity)
 		active.run.Turns++
 		active.usage.InputTokens += frame.Usage.InputTokens
 		active.usage.OutputTokens += frame.Usage.OutputTokens
@@ -325,8 +505,12 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	}
 	r.mu.Unlock()
 	r.persistActivity(id)
-	// Push live roster stats (tool count + elapsed) on tool boundaries and turn ends.
-	if frame.Kind == stream.FrameToolCall || frame.Kind == stream.FrameToolResult || frame.Kind == stream.FrameDone {
+	// Push live roster stats on tool boundaries and turn ends. Thinking and
+	// commentary also emit a throttled agent_state so the card preview survives
+	// coalesced or dropped child deltas (UI-002). Elapsed ticks must not reset
+	// the idle clock (SUBAGENT-005).
+	if frame.Kind == stream.FrameToolCall || frame.Kind == stream.FrameToolResult || frame.Kind == stream.FrameDone ||
+		frame.Kind == stream.FrameThinking || frame.Kind == stream.FrameText {
 		r.emitLiveState(id, frame.Kind == stream.FrameToolCall || frame.Kind == stream.FrameDone)
 	}
 
@@ -366,6 +550,9 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 			event.State = "failed"
 		} else {
 			event.State = "completed"
+			if summary, ok := toolview.CompletedFileChanges(frame.ToolResult.Name, "", string(frame.ToolResult.Structured), frame.ToolResult.Content); ok {
+				event.Data["fileChange"] = toolview.EncodeSummary(summary)
+			}
 		}
 	case stream.FrameDone:
 		event.Kind = EventContextUsage
@@ -384,9 +571,9 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	}
 	if parent := r.parentHost(id); parent != nil {
 		if event.Kind == EventContextUsage {
-			event.Data["transport"] = parent.providerTransport(providerID)
+			event.Data["transport"] = parent.ProviderTransport(providerID)
 		}
-		parent.emit(parent.ctx, event)
+		parent.EmitEvent(parent.BaseContext(), event)
 	}
 }
 
@@ -425,7 +612,7 @@ func (r *subagentRuntime) handleToolUpdate(id string, update tool.Update) {
 	r.mu.Lock()
 	active := r.active[id]
 	if active != nil && !active.terminalizing {
-		active.activity = compactActivity(firstNonempty(update.Message, update.Kind))
+		noteVisibleActivityLocked(active, firstNonempty(update.Message, update.Kind))
 		for index := len(active.blocks) - 1; index >= 0; index-- {
 			if active.blocks[index].Kind == "tool" && active.blocks[index].State == "running" {
 				appendAgentBlockContent(&active.blocks[index], update.Message)
@@ -437,7 +624,7 @@ func (r *subagentRuntime) handleToolUpdate(id string, update tool.Update) {
 	r.persistActivity(id)
 }
 
-func (r *subagentRuntime) parentHost(id string) *Service {
+func (r *subagentRuntime) parentHost(id string) providerHost {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if active := r.active[id]; active != nil {
@@ -449,7 +636,7 @@ func (r *subagentRuntime) parentHost(id string) *Service {
 func (r *subagentRuntime) persistActivity(id string) {
 	r.mu.Lock()
 	active := r.active[id]
-	if active == nil || active.parent.Host == nil || active.parent.Host.sessions == nil || active.activity == "" ||
+	if active == nil || active.parent.Host == nil || active.parent.Host.Sessions() == nil || active.activity == "" ||
 		active.activity == active.persistedActivity || time.Since(active.lastActivityPersist) < 500*time.Millisecond {
 		r.mu.Unlock()
 		return
@@ -460,7 +647,7 @@ func (r *subagentRuntime) persistActivity(id string) {
 	activity := active.activity
 	parent := active.parent.Host
 	r.mu.Unlock()
-	_ = parent.sessions.UpsertAgentBlock(parent.ctx, run.SessionID, run.ID, session.Block{
+	_ = parent.Sessions().UpsertAgentBlock(parent.BaseContext(), run.SessionID, run.ID, session.Block{
 		Kind: "agent", RunID: run.ParentRunID, AgentID: run.ID, ParentToolCallID: run.ParentToolCallID,
 		Title: run.Type, Content: activity, State: string(run.State),
 	})
@@ -472,7 +659,7 @@ func (r *subagentRuntime) emitState(run agentservice.SubagentRun, activity strin
 	if active != nil && active.activity != "" {
 		activity = active.activity
 	}
-	parent := (*Service)(nil)
+	parent := providerHost(nil)
 	if active != nil {
 		parent = active.parent.Host
 		active.persistedActivity = activity
@@ -482,18 +669,18 @@ func (r *subagentRuntime) emitState(run agentservice.SubagentRun, activity strin
 	r.emitStateTo(parent, run, activity)
 }
 
-func (r *subagentRuntime) emitStateTo(parent *Service, run agentservice.SubagentRun, activity string) {
+func (r *subagentRuntime) emitStateTo(parent providerHost, run agentservice.SubagentRun, activity string) {
 	if parent == nil {
 		return
 	}
-	if parent.sessions != nil {
+	if parent.Sessions() != nil {
 		content := firstNonempty(activity, run.Summary, run.Description)
-		_ = parent.sessions.UpsertAgentBlock(parent.ctx, run.SessionID, run.ID, session.Block{
+		_ = parent.Sessions().UpsertAgentBlock(parent.BaseContext(), run.SessionID, run.ID, session.Block{
 			Kind: "agent", RunID: run.ParentRunID, AgentID: run.ID, ParentToolCallID: run.ParentToolCallID,
 			Title: run.Type, Content: content, State: string(run.State),
 		})
 	}
-	parent.emit(parent.ctx, subagentStateEvent(run, activity))
+	parent.EmitEvent(parent.BaseContext(), subagentStateEvent(run, activity))
 }
 
 func subagentStateEvent(run agentservice.SubagentRun, activity string) Event {

@@ -28,9 +28,11 @@ describe("MenuSelect", () => {
     ));
 
     const details = container.querySelector("details")!;
+    expect(details.querySelector("summary")?.getAttribute("title")).toBeNull();
     await openMenu(details);
     const options = document.body.querySelectorAll<HTMLButtonElement>(".menu-select-options-portal .menu-select-option");
     expect(options.length).toBe(2);
+    expect(Array.from(options).every((option) => option.getAttribute("title") === null)).toBe(true);
     await act(async () => options[1]!.click());
     expect(change).toHaveBeenCalledWith("team");
     expect(details.open).toBe(false);

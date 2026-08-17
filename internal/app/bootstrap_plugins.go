@@ -51,6 +51,9 @@ func (b *bootstrapAssembly) mergePlugins() {
 		}
 		if configuredServer, configured := b.cfg.MCP.Servers[name]; configured {
 			configuredServer.Managed = true
+			if server.Icon != "" {
+				configuredServer.Icon = server.Icon
+			}
 			b.cfg.MCP.Servers[name] = configuredServer
 			continue
 		}

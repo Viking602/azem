@@ -12,8 +12,10 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/codex"
+	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/api"
+	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -22,7 +24,7 @@ type governedAgentTool struct {
 	driver           tool.Driver
 	coding           *agentservice.Service
 	run              *agentservice.Run
-	host             *Service
+	host             providerHost
 	sessionID        string
 	agentID          string
 	agentType        string
@@ -80,7 +82,7 @@ func (d *governedAgentTool) Prepare(ctx context.Context, call tool.Call, sink to
 		}
 		if d.host != nil {
 			runID := firstNonempty(d.streamRunID, d.run.RunID)
-			if !d.host.emit(ctx, Event{
+			if !d.host.EmitEvent(ctx, Event{
 				Kind: EventToolUpdate, SessionID: d.sessionID, RunID: runID, AgentID: d.agentID,
 				ToolCallID: call.ID, State: update.Kind, Text: update.Message,
 				Data: childFrameData("child:"+d.agentID, d.parentToolCallID, update.Data),
@@ -110,7 +112,7 @@ func (d *governedAgentTool) Prepare(ctx context.Context, call tool.Call, sink to
 				ToolCallID: call.ID, Name: call.Name, Content: "approval UI is unavailable", IsError: true,
 			}, Complete: true}, nil
 		}
-		resolution, approvalErr := d.host.awaitApproval(ctx, d.sessionID, d.agentID, d.agentType, d.run, call, *execution.Approval)
+		resolution, approvalErr := d.host.AwaitApproval(ctx, d.sessionID, d.agentID, d.agentType, d.run, call, *execution.Approval)
 		if approvalErr != nil {
 			result := tool.Result{ToolCallID: call.ID, Name: call.Name, Content: approvalErr.Error(), IsError: true}
 			return tool.PreparedExecution{Call: call, Result: result}, errors.Join(tool.ErrNotExecuted, approvalErr)
@@ -148,9 +150,19 @@ func (d *governedAgentTool) Prepare(ctx context.Context, call tool.Call, sink to
 				}, updateErr
 			}
 			executed, executeErr := d.coding.ExecutePreparedDriver(runCtx, d.run, d.driver, call, updates)
-			return boundAgentToolResult(executed.Result), executeErr
+			return spillAgentToolResult(runCtx, d.spillStore(), d.sessionID, firstNonempty(d.streamRunID, d.run.RunID), executed.Result), executeErr
 		},
 	}, nil
+}
+
+// spillStore returns the durable artifact store used to spill oversized tool
+// results, or nil when the host is unavailable (tests, degraded runtime), in
+// which case spilling falls back to plain truncation.
+func (d *governedAgentTool) spillStore() *session.Service {
+	if d.host == nil {
+		return nil
+	}
+	return d.host.Sessions()
 }
 
 func (d *governedAgentTool) execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (agentservice.ExecutionResult, error) {
@@ -311,7 +323,7 @@ func (e *AutoReviewDenialLimitError) Error() string {
 
 type teamApprovalDriver struct {
 	inner     tool.Driver
-	host      *Service
+	host      providerHost
 	sessionID string
 	runID     string
 	goal      string
@@ -350,7 +362,7 @@ func (d *teamApprovalDriver) Prepare(ctx context.Context, call tool.Call, sink t
 		return tool.PreparedExecution{Call: call, Result: blocked, Complete: true}, nil
 	}
 	if hooks.PreToolPermissionFromContext(ctx) == "ask" || teamToolRequiresApproval(definition, call) {
-		resolution, err := d.host.awaitTeamApproval(ctx, d.sessionID, d.runID, d.goal, call, definition)
+		resolution, err := d.host.AwaitTeamApproval(ctx, d.sessionID, d.runID, d.goal, call, definition)
 		if err != nil {
 			result := tool.Result{ToolCallID: call.ID, Name: call.Name, Content: err.Error(), IsError: true}
 			return tool.PreparedExecution{Call: call, Result: result}, errors.Join(tool.ErrNotExecuted, err)
@@ -463,11 +475,8 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 	mode := s.approvalMode
 	_, granted := s.teamApprovals[fingerprint]
 	s.mu.Unlock()
-	if mode == ApprovalModeYolo {
+	if mode == ApprovalModeYolo || granted {
 		return approvalResolution{Mode: agentservice.ApprovalOnce}, nil
-	}
-	if granted {
-		return approvalResolution{Mode: agentservice.ApprovalSession}, nil
 	}
 	if mode == ApprovalModeAutoReview {
 		resolution, approvalErr := s.automaticApproval(ctx, event, request, func(decisionCtx context.Context, mode agentservice.ApprovalMode, decidedBy string) error {
@@ -672,12 +681,137 @@ func (s *Service) recordTeamApprovalDecision(
 	})
 }
 
+func toolStartsWithoutApproval(toolName string) bool {
+	switch toolName {
+	case coding.ToolReadFile, coding.ToolListFiles, coding.ToolSearch, coding.ToolGitDiff:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) toolStartState(toolName string) string {
+	if s == nil {
+		return "running"
+	}
+	s.mu.Lock()
+	mode := s.approvalMode
+	s.mu.Unlock()
+	if mode == ApprovalModeYolo || toolStartsWithoutApproval(toolName) {
+		return "running"
+	}
+	if mode == ApprovalModeAutoReview {
+		return "reviewing_approval"
+	}
+	return "queued"
+}
+
+type prefetchedAutoReview struct {
+	done       chan struct{}
+	assessment codex.ApprovalReview
+	err        error
+}
+
+func autoReviewCacheKey(runID, toolCallID string) string {
+	return runID + "\x00" + toolCallID
+}
+
+func (s *Service) prefetchAutoReview(ctx context.Context, sessionID, runID, toolCallID, toolName string, arguments json.RawMessage) {
+	if s == nil || strings.TrimSpace(toolCallID) == "" || toolStartsWithoutApproval(toolName) {
+		return
+	}
+	if len(arguments) == 0 || !json.Valid(arguments) {
+		return
+	}
+	s.mu.Lock()
+	if s.approvalMode != ApprovalModeAutoReview {
+		s.mu.Unlock()
+		return
+	}
+	if s.autoReviews == nil {
+		s.autoReviews = map[string]*prefetchedAutoReview{}
+	}
+	key := autoReviewCacheKey(runID, toolCallID)
+	if _, exists := s.autoReviews[key]; exists {
+		s.mu.Unlock()
+		return
+	}
+	pending := &prefetchedAutoReview{done: make(chan struct{})}
+	s.autoReviews[key] = pending
+	s.mu.Unlock()
+
+	reviewCtx := s.ctx
+	if ctx != nil && ctx.Err() == nil {
+		reviewCtx = ctx
+	}
+	go s.runPrefetchedAutoReview(reviewCtx, pending, sessionID, runID, toolName, arguments)
+}
+
+func (s *Service) runPrefetchedAutoReview(
+	ctx context.Context,
+	pending *prefetchedAutoReview,
+	sessionID, runID, toolName string,
+	arguments json.RawMessage,
+) {
+	defer close(pending.done)
+	request := approvalReviewRequest{ToolName: toolName, Arguments: arguments}
+	providerRequest, err := request.codexRequest()
+	if err != nil {
+		pending.err = err
+		return
+	}
+	if s.providers == nil {
+		pending.err = fmt.Errorf("provider runtime is unavailable")
+		return
+	}
+	reviewer, err := s.providers.ApprovalReviewer(ctx, sessionID, runID)
+	if err != nil {
+		pending.err = err
+		return
+	}
+	pending.assessment, pending.err = reviewer.Review(ctx, providerRequest)
+}
+
+func (s *Service) consumePrefetchedReview(ctx context.Context, runID, toolCallID string) (codex.ApprovalReview, error, bool) {
+	if s == nil || strings.TrimSpace(toolCallID) == "" {
+		return codex.ApprovalReview{}, nil, false
+	}
+	s.mu.Lock()
+	pending := s.autoReviews[autoReviewCacheKey(runID, toolCallID)]
+	s.mu.Unlock()
+	if pending == nil {
+		return codex.ApprovalReview{}, nil, false
+	}
+	select {
+	case <-ctx.Done():
+		return codex.ApprovalReview{}, ctx.Err(), true
+	case <-pending.done:
+	}
+	s.mu.Lock()
+	delete(s.autoReviews, autoReviewCacheKey(runID, toolCallID))
+	s.mu.Unlock()
+	return pending.assessment, pending.err, true
+}
+
+func (s *Service) emitToolReviewing(ctx context.Context, sessionID, runID, agentID, toolCallID string) error {
+	if !s.emit(ctx, Event{
+		Kind: EventToolUpdate, SessionID: sessionID, RunID: runID, AgentID: agentID,
+		ToolCallID: toolCallID, State: "reviewing_approval",
+	}) {
+		return eventDeliveryError(ctx)
+	}
+	return nil
+}
+
 func (s *Service) automaticApproval(
 	ctx context.Context,
 	event Event,
 	request approvalReviewRequest,
 	decide func(context.Context, agentservice.ApprovalMode, string) error,
 ) (approvalResolution, error) {
+	if err := s.emitToolReviewing(ctx, event.SessionID, event.RunID, event.AgentID, event.ToolCallID); err != nil {
+		return approvalResolution{}, err
+	}
 	event.State = "reviewing"
 	event.Data["reviewer"] = codex.ApprovalReviewerModel
 	if s.providers != nil {
@@ -691,7 +825,9 @@ func (s *Service) automaticApproval(
 	failureKind := codex.ReviewFailureInvalidRequest
 	var assessment codex.ApprovalReview
 	if err == nil {
-		if s.providers == nil {
+		if cached, cachedErr, ok := s.consumePrefetchedReview(ctx, event.RunID, event.ToolCallID); ok {
+			assessment, err = cached, cachedErr
+		} else if s.providers == nil {
 			err = fmt.Errorf("provider runtime is unavailable")
 			failureKind = codex.ReviewFailureProvider
 		} else {
@@ -700,9 +836,9 @@ func (s *Service) automaticApproval(
 			if err == nil {
 				assessment, err = reviewer.Review(ctx, providerRequest)
 			}
-			if err != nil {
-				failureKind = codex.ReviewFailure(err)
-			}
+		}
+		if err != nil {
+			failureKind = codex.ReviewFailure(err)
 		}
 	}
 
@@ -898,6 +1034,12 @@ func (s *Service) setApprovalMode(ctx context.Context, mode ApprovalMode) error 
 	}
 	s.emitApprovalMode(s.ctx)
 	return err
+}
+
+func (s *Service) ApprovalModeState() (ApprovalMode, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.approvalMode, true
 }
 
 func (s *Service) persistApprovalMode(mode ApprovalMode) error {

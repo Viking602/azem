@@ -60,6 +60,8 @@ type Service struct {
 	refresh      singleflight.Group
 	statusMu     sync.RWMutex
 	statusChange StatusChangeCallback
+	GrokUserURL  string
+	GrokQuotaURL string
 }
 
 func NewService(db *sql.DB, store CredentialStore, chatgptClient *chatgpt.Client, grokClient *grok.Client) *Service {
@@ -119,7 +121,7 @@ func (s *Service) LoginGrok(ctx context.Context, notify func(grok.DeviceAuthoriz
 	if tokens.ClientID == "" {
 		tokens.ClientID = s.grok.ClientID
 	}
-	return s.storeGrok(ctx, tokens)
+	return s.storeGrok(ctx, s.completeGrokTokens(tokens))
 }
 
 func (s *Service) ImportGrok(ctx context.Context, path string) (Account, error) {
@@ -148,9 +150,10 @@ func (s *Service) ImportGrok(ctx context.Context, path string) (Account, error) 
 		refreshed = true
 		tokens.AccountID = firstNonEmpty(tokens.AccountID, source.AccountID)
 		tokens.Email = firstNonEmpty(tokens.Email, source.Email)
+		tokens.DisplayName = firstNonEmpty(tokens.DisplayName, source.Email, source.AccountID)
 		tokens.Plan = firstNonEmpty(tokens.Plan, source.Plan)
 	}
-	account, err := s.storeGrok(ctx, tokens)
+	account, err := s.storeGrok(ctx, s.completeGrokTokens(tokens))
 	if err != nil {
 		return Account{}, err
 	}
@@ -272,6 +275,7 @@ func (s *Service) Refresh(ctx context.Context, provider string, accountID string
 			if err := grok.SyncImported(*refreshedGrok); err != nil {
 				return Credential{}, fmt.Errorf("sync refreshed Grok CLI credential: %w", err)
 			}
+			_ = s.persistAccountProfile(ctx, provider, accountID, credential.Email, credential.DisplayName, credential.Plan)
 		}
 		if err := s.markStatus(ctx, provider, accountID, "active"); err != nil {
 			return Credential{}, err
@@ -424,8 +428,80 @@ func (s *Service) storeChatGPT(ctx context.Context, tokens chatgpt.Tokens) (Acco
 }
 
 func (s *Service) storeGrok(ctx context.Context, tokens grok.Tokens) (Account, error) {
-	credential := Credential{Provider: "grok", AccountID: stableAccountID(tokens.AccountID, tokens.Email, tokens.AccessToken), AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, IDToken: tokens.IDToken, TokenType: tokens.TokenType, OAuthClientID: tokens.ClientID, SourcePath: tokens.SourcePath, SourceKey: tokens.SourceKey, ExpiresAt: tokens.ExpiresAt, Email: tokens.Email, Plan: tokens.Plan}
+	displayName := firstNonEmpty(tokens.DisplayName, tokens.Email)
+	credential := Credential{Provider: "grok", AccountID: stableAccountID(tokens.AccountID, tokens.Email, tokens.AccessToken), AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, IDToken: tokens.IDToken, TokenType: tokens.TokenType, OAuthClientID: tokens.ClientID, SourcePath: tokens.SourcePath, SourceKey: tokens.SourceKey, ExpiresAt: tokens.ExpiresAt, Email: tokens.Email, DisplayName: displayName, Plan: tokens.Plan}
 	return s.storeCredential(ctx, credential)
+}
+
+func (s *Service) completeGrokTokens(tokens grok.Tokens) grok.Tokens {
+	identity := grok.IdentityFromTokens(tokens.IDToken, tokens.AccessToken)
+	tokens.AccountID = firstNonEmpty(tokens.AccountID, identity.UserID)
+	tokens.Email = firstNonEmpty(tokens.Email, identity.Email)
+	tokens.DisplayName = firstNonEmpty(tokens.DisplayName, identity.DisplayName, tokens.Email)
+	tokens.Plan = firstNonEmpty(tokens.Plan, identity.Plan)
+	return tokens
+}
+
+func (s *Service) HydrateGrokAccount(ctx context.Context, account Account) Account {
+	if account.Provider != "grok" {
+		return account
+	}
+	if account.Email != "" && account.DisplayName != "" && !strings.HasPrefix(account.ID, "anonymous-") {
+		return account
+	}
+	identity := s.storedGrokIdentity(ctx, account.ID)
+	email := firstNonEmpty(account.Email, identity.Email)
+	displayName := firstNonEmpty(account.DisplayName, identity.DisplayName, email)
+	plan := firstNonEmpty(account.Plan, identity.Plan)
+	if email == account.Email && displayName == account.DisplayName && plan == account.Plan {
+		account.Email = email
+		account.DisplayName = displayName
+		return account
+	}
+	if err := s.persistAccountProfile(ctx, account.Provider, account.ID, email, displayName, plan); err == nil {
+		account.Email = email
+		account.DisplayName = displayName
+		account.Plan = plan
+		return account
+	}
+	account.Email = email
+	account.DisplayName = displayName
+	if plan != "" {
+		account.Plan = plan
+	}
+	return account
+}
+
+func (s *Service) persistAccountProfile(ctx context.Context, provider, accountID, email, displayName, plan string) error {
+	if s == nil || s.db == nil || (email == "" && displayName == "" && plan == "") {
+		return nil
+	}
+	account, err := s.Account(ctx, provider, accountID)
+	if err != nil {
+		return err
+	}
+	nextEmail := firstNonEmpty(email, account.Email)
+	nextName := firstNonEmpty(displayName, account.DisplayName, nextEmail)
+	nextPlan := firstNonEmpty(plan, account.Plan)
+	if nextEmail == account.Email && nextName == account.DisplayName && nextPlan == account.Plan {
+		return nil
+	}
+	now := time.Now().UTC()
+	if err := dbgen.New(s.db).UpsertAccount(ctx, dbgen.UpsertAccountParams{
+		ID: account.ID, ProviderID: account.Provider, Email: nextEmail, DisplayName: nextName, Plan: nextPlan,
+		CredentialRef: account.CredentialRef, Status: account.Status, CreatedAt: account.CreatedAt.UnixNano(), UpdatedAt: now.UnixNano(),
+	}); err != nil {
+		return err
+	}
+	credential, err := s.store.Get(ctx, provider, accountID)
+	if err != nil {
+		return nil
+	}
+	credential.Email = nextEmail
+	credential.DisplayName = nextName
+	credential.Plan = nextPlan
+	_, err = s.store.Put(ctx, credential)
+	return err
 }
 
 func (s *Service) storeCredential(ctx context.Context, credential Credential) (Account, error) {
@@ -500,6 +576,15 @@ func applyGrokTokens(credential *Credential, tokens grok.Tokens) {
 	}
 	if !tokens.ExpiresAt.IsZero() {
 		credential.ExpiresAt = tokens.ExpiresAt
+	}
+	if tokens.Email != "" {
+		credential.Email = tokens.Email
+	}
+	if tokens.DisplayName != "" {
+		credential.DisplayName = tokens.DisplayName
+	}
+	if tokens.Plan != "" {
+		credential.Plan = tokens.Plan
 	}
 }
 

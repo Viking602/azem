@@ -333,6 +333,15 @@ func terminalQueryResponse(data []byte) []byte {
 	for range bytes.Count(data, []byte("\x1b[c")) {
 		response = append(response, "\x1b[?1;2c"...)
 	}
+	for range bytes.Count(data, []byte("\x1b[?u")) {
+		response = append(response, "\x1b[?0u"...)
+	}
+	for range bytes.Count(data, []byte("\x1b[?2026$p")) {
+		response = append(response, "\x1b[?2026;0$y"...)
+	}
+	for range bytes.Count(data, []byte("\x1b[?2027$p")) {
+		response = append(response, "\x1b[?2027;0$y"...)
+	}
 	return response
 }
 

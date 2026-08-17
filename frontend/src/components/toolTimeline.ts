@@ -21,8 +21,8 @@ export function formatToolPresentation(content = "", language: Language = "zh-CN
   const plainResult = plainAnsiText(result);
   const fields = args ? humanizeToolArgs(args, language) : [];
   const preview = fields.map((field) => field.value).filter(Boolean).join(" · ")
-    || (plainResult ? shorten(plainResult.replace(/\s+/g, " ").trim(), 80) : "")
-    || shorten(stripJsonNoise(plainAnsiText(trimmed)), 72);
+    || (plainResult && !looksLikeHashline(plainResult) ? shorten(plainResult.replace(/\s+/g, " ").trim(), 80) : "")
+    || (looksLikeHashline(trimmed) ? "" : shorten(stripJsonNoise(plainAnsiText(trimmed)), 72));
 
   return {
     preview,
@@ -103,12 +103,20 @@ function humanizeToolArgs(args: Record<string, unknown>, language: Language) {
   const skill = firstString(args, "skill", "name", "skill_name");
   if (skill && !path && !command && !query) push(t("fieldSkill"), skill);
 
-  const description = firstString(args, "description", "prompt", "instruction", "message", "content");
+  const description = firstString(args, "description", "prompt", "instruction", "message");
   if (description && fields.length === 0) push(t("fieldDetail"), shorten(description, 80));
 
+  const patch = firstString(args, "input", "patch");
+  if (patch && !path) {
+    const hashlinePaths = hashlineHeaderPaths(patch);
+    if (hashlinePaths.length) push(t("fieldPath"), hashlinePaths.map(shortenPath).join(", "));
+  }
+
   // Fallback: pick a few primitive fields without dumping whole JSON.
+  // Never surface Hashline / patch bodies as a preview field.
   if (fields.length === 0) {
     for (const [key, value] of Object.entries(args)) {
+      if (key === "input" || key === "patch" || key === "content" || key === "old_string" || key === "new_string") continue;
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
         push(key, value);
       }
@@ -116,6 +124,20 @@ function humanizeToolArgs(args: Record<string, unknown>, language: Language) {
     }
   }
   return fields;
+}
+
+function hashlineHeaderPaths(input: string): string[] {
+  const paths: string[] = [];
+  for (const rawLine of input.replace(/\r\n?/gu, "\n").split("\n")) {
+    const line = rawLine.trim();
+    const marker = line.startsWith("¶") ? "¶" : line.startsWith("[") ? "[" : "";
+    if (!marker) continue;
+    const hash = line.lastIndexOf("#");
+    if (hash <= marker.length) continue;
+    const path = line.slice(marker.length, hash).trim();
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
 }
 
 function firstString(args: Record<string, unknown>, ...keys: string[]) {
@@ -165,6 +187,10 @@ function shorten(text: string, max: number) {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
+function looksLikeHashline(text: string) {
+  return /¶|[^\n]*#\w+\s+(?:replace|delete|insert)\b/u.test(text);
+}
+
 function looksLikeJson(text: string) {
   const value = text.trim();
   return (value.startsWith("{") && value.endsWith("}")) || (value.startsWith("[") && value.endsWith("]"));
@@ -189,6 +215,10 @@ export type ProcessTimelineEntry = TimelineEntry | {
   block: Block;
   blocks: Block[];
   presentation: ModelProgressPresentation;
+} | {
+  kind: "thinking-trail";
+  id: string;
+  blocks: Block[];
 };
 
 /**
@@ -241,6 +271,24 @@ function plainProgressText(content: string) {
 export function isRunningTool(block: Block) {
   return block.kind === "tool" && ["running", "started", "streaming", "progress"].includes(block.state || "");
 }
+
+export function isOccupyingTool(block: Block) {
+  return isRunningTool(block);
+}
+
+export function isCapacityQueued(block: Block, blocks: Block[]) {
+  if (block.kind !== "tool" || block.state !== "queued") return false;
+  return blocks.some((candidate) => candidate.id !== block.id
+    && candidate.runId === block.runId
+    && isOccupyingTool(candidate));
+}
+
+/** Queue is a capacity wait. Idle announcements start immediately. */
+export function displayedToolState(block: Block, blocks: Block[]) {
+  if (block.state === "queued" && !isCapacityQueued(block, blocks)) return "running";
+  return block.state || "completed";
+}
+
 function isPendingTool(block: Block) {
   return block.kind === "tool"
     && ["queued", "awaiting_approval", "reviewing_approval"].includes(block.state || "");
@@ -306,7 +354,7 @@ export function groupTimelineBlocks(blocks: Block[], language: Language): Timeli
       if (group.length >= MIN_TOOL_GROUP_SIZE) {
         entries.push({
           kind: "tool-group",
-          id: `tool-steps-${group[0]!.id}-${group.length}`,
+          id: `tool-steps-${group[0]!.id}`,
           blocks: group,
           summary: summarizeToolGroup(group, language),
           running: group.some(isRunningTool),
@@ -328,7 +376,7 @@ export function groupTimelineBlocks(blocks: Block[], language: Language): Timeli
     } else {
       entries.push({
         kind: "tool-group",
-        id: `tool-group-${group[0]!.id}-${group.length}`,
+        id: `tool-group-${group[0]!.id}`,
         blocks: group,
         summary: summarizeToolGroup(group, language),
         running: false,
@@ -340,42 +388,51 @@ export function groupTimelineBlocks(blocks: Block[], language: Language): Timeli
 }
 
 /**
- * Make model-authored progress the primary step and tuck the tool calls it
- * announces underneath. Unformatted commentary and orphaned tools keep the
- * existing timeline behavior for durable backwards compatibility.
+ * Keep each real model commentary with the thinking, tools, and diffs it
+ * introduces. Host fallback commentary is only glue: it never becomes a new
+ * visible announcement and must not stack another 思考了 header. Adjacent
+ * thinking spans without real commentary share one trail.
  */
 export function groupProcessTimelineBlocks(blocks: Block[], language: Language): ProcessTimelineEntry[] {
   const entries: ProcessTimelineEntry[] = [];
   let plainBlocks: Block[] = [];
   const flushPlain = () => {
     if (!plainBlocks.length) return;
-    entries.push(...groupTimelineBlocks(plainBlocks, language));
+    entries.push(...groupPlainProcessBlocks(plainBlocks, language));
     plainBlocks = [];
   };
 
   let index = 0;
   while (index < blocks.length) {
     const block = blocks[index]!;
-    const presentation = block.kind === "commentary" ? parseModelProgress(block.content || "") : null;
-    if (!presentation) {
+    if (block.kind !== "commentary") {
       plainBlocks.push(block);
       index += 1;
       continue;
     }
+    if (isHostFallbackCommentary(block)) {
+      index += 1;
+      continue;
+    }
 
-	const leadingThinking: Block[] = [];
-	while (plainBlocks.at(-1)?.kind === "thinking") {
-		leadingThinking.unshift(plainBlocks.pop()!);
-	}
+    const leadingThinking: Block[] = [];
+    while (plainBlocks.at(-1)?.kind === "thinking") {
+      leadingThinking.unshift(plainBlocks.pop()!);
+    }
     flushPlain();
     let end = index + 1;
     while (end < blocks.length && isModelProgressDetail(blocks[end]!)) end += 1;
+    const details: Block[] = [...leadingThinking];
+    for (const item of blocks.slice(index + 1, end)) {
+      if (isHostFallbackCommentary(item)) continue;
+      details.push(item);
+    }
     entries.push({
       kind: "model-progress",
       id: `model-progress-${block.id}`,
       block,
-      blocks: [...leadingThinking, ...blocks.slice(index + 1, end)],
-      presentation,
+      blocks: details,
+      presentation: parseModelProgress(block.content || "") ?? { title: "", detail: "" },
     });
     index = end;
   }
@@ -383,8 +440,22 @@ export function groupProcessTimelineBlocks(blocks: Block[], language: Language):
   return entries;
 }
 
+function groupPlainProcessBlocks(blocks: Block[], language: Language): ProcessTimelineEntry[] {
+  if (blocks.some((block) => block.kind === "thinking")) {
+    return [{
+      kind: "thinking-trail",
+      id: `thinking-trail-${blocks[0]!.id}`,
+      blocks,
+    }];
+  }
+  return groupTimelineBlocks(blocks, language);
+}
+
 function isModelProgressDetail(block: Block) {
-  return block.kind === "thinking" || block.kind === "tool" || block.kind === "diff";
+  return block.kind === "thinking"
+    || block.kind === "tool"
+    || block.kind === "diff"
+    || isHostFallbackCommentary(block);
 }
 
 /** Kinds that form the collapsible process trail ("经过"), not final outcomes. */
@@ -398,9 +469,69 @@ export function isProcessBlock(block: Block) {
     || block.kind === "diff";
 }
 
+/** Only real tool/diff trails fold under “已处理”. Thinking or commentary alone must not. */
+export function processTrailWorthFolding(blocks: Block[]) {
+  return blocks.some((block) => block.kind === "tool" || block.kind === "diff");
+}
+
 /** Agent / hook lifecycle noise — hide from the main transcript (Codex-style). */
 export function isHiddenTimelineBlock(block: Block) {
   return block.kind === "agent" || block.kind === "hook";
+}
+
+/** Must match fallbackToolAnnouncement in internal/app/provider_execution.go. */
+export const HOST_FALLBACK_TOOL_ANNOUNCEMENT = "正在调用所需工具，并根据实际结果继续。";
+
+/** Must match fallbackToolAnnouncementSynthetic in internal/app/provider_execution.go. */
+export const HOST_FALLBACK_SYNTHETIC = "tool_announcement";
+
+/**
+ * Host-injected UI-008 grouping anchor. Keep the block for process grouping,
+ * but never render its canned sentence as transcript prose.
+ */
+export function isHostFallbackCommentary(block: Block) {
+  if (block.kind !== "commentary") return false;
+  if (block.data?.synthetic === HOST_FALLBACK_SYNTHETIC) return true;
+  return (block.content || "").trim() === HOST_FALLBACK_TOOL_ANNOUNCEMENT;
+}
+
+function hasVisibleText(block: Block) {
+  return Boolean((block.content || "").trim());
+}
+
+/**
+ * User-visible live progress that can replace the 思考 wait row.
+ * Completed/failed tools, empty thinking/text frames, and hidden host
+ * fallback commentary do not count — the next model step still needs chrome.
+ */
+export function hasVisibleLiveProgress(block: Block) {
+  if (block.kind === "thinking") return isActiveProcessBlock(block) && hasVisibleText(block);
+  if (block.kind === "commentary") {
+    return !isHostFallbackCommentary(block) && isActiveProcessBlock(block) && hasVisibleText(block);
+  }
+  if (block.kind === "assistant") return hasVisibleText(block);
+  if (block.kind === "tool" || block.kind === "diff") return isActiveProcessBlock(block);
+  if (block.kind === "approval" || block.kind === "question") {
+    return ["pending", "proposed"].includes(block.state || "") || isActiveProcessBlock(block);
+  }
+  if (block.kind === "plan") return ["proposed", "pending"].includes(block.state || "");
+  return false;
+}
+
+export function shouldShowThinkingWait(
+  blocks: Block[],
+  options: {
+    waiting?: boolean;
+    activeRunId?: string;
+    activeDelegation?: boolean;
+    runningSpawn?: boolean;
+  } = {},
+) {
+  if (!options.waiting || options.activeDelegation || options.runningSpawn) return false;
+  return !blocks.some((block) => {
+    const sameRun = !options.activeRunId || !block.runId || block.runId === options.activeRunId;
+    return sameRun && hasVisibleLiveProgress(block);
+  });
 }
 
 export type ProcessSegment =
@@ -409,7 +540,7 @@ export type ProcessSegment =
 
 /**
  * Segment the transcript so completed process trails can fold under “已处理”.
- * Active runs stay expanded (rendered flat via active=true).
+ * Active runs stay expanded and cannot collapse to a “处理中” summary.
  */
 export function segmentProcessTrail(
   blocks: Block[],
@@ -434,7 +565,7 @@ export function segmentProcessTrail(
       || Boolean(options.running && runId && runId === options.activeRunId);
     segments.push({
       kind: "process",
-      id: `process-${processBlocks[0]!.id}-${processBlocks.length}`,
+      id: `process-${processBlocks[0]!.id}`,
       blocks: processBlocks,
       // A provider can finish the spawn/read tools for the latest progress
       // step and then wait for subagents without emitting another live block.
@@ -453,7 +584,19 @@ export function segmentProcessTrail(
 }
 
 export function isActiveProcessBlock(block: Block) {
-  return ["running", "started", "streaming", "progress"].includes(block.state || "");
+  return ["running", "started", "streaming", "progress", "queued", "awaiting_approval", "reviewing_approval"].includes(block.state || "");
+}
+
+/** Overall process clock: sum spans, or their wall-clock range. */
+export function thinkingTraceElapsedMs(blocks: Block[], activeUntil = 0) {
+  const thinking = blocks.filter((block) => block.kind === "thinking");
+  if (!thinking.length) return processElapsedMs(blocks, activeUntil);
+  let sum = 0;
+  for (const block of thinking) {
+    const value = Number(block.data?.elapsedMs || 0);
+    if (Number.isFinite(value) && value > 0) sum += value;
+  }
+  return Math.max(sum, processElapsedMs(thinking, activeUntil));
 }
 
 export function processElapsedMs(blocks: Block[], activeUntil = 0) {
@@ -488,4 +631,17 @@ export function formatDuration(milliseconds: number) {
     : minutes
       ? `${minutes}m${String(rest).padStart(2, "0")}s`
       : `${rest}s`;
+}
+
+/** Thinking clock: hide zero, tenths under a minute, then the compact minute/hour form. */
+export function formatThinkingDuration(milliseconds: number) {
+  const ms = Math.max(0, milliseconds);
+  if (ms < 100) return "";
+  if (ms < 60_000) return `${(Math.floor(ms / 100) / 10).toFixed(1)}s`;
+  return formatDuration(ms);
+}
+
+/** Sparkle wording only. The elapsed clock lives in the bar's meta slot. */
+export function thinkingStateLabel(language: Language, active = false) {
+  return translator(language)(active ? "thinkingActive" : "thinking");
 }

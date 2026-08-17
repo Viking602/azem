@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import {
-  Bot, FileCode2, FileDiff, MessageSquareText, Plus, Search, Settings2, Sparkles, UserRound,
+  Bot, FileCode2, FileDiff, MessageSquareText, Plus, Search, Settings2, Sparkles, SquareTerminal, UserRound,
 } from "lucide-react";
 import { execute, openProjectSession, resumeSession, searchSessions } from "../bridge";
 import { translator } from "../i18n";
 import { filterSettings, settingsSearchEntries } from "../settingsSearch";
 import { useRuntimeStore } from "../store";
+import { useTerminalStore } from "../terminalStore";
 import type { SessionSearchResult } from "../types";
 
 const SEARCH_DEBOUNCE_MS = 160;
@@ -52,6 +53,7 @@ export default function CommandPalette() {
     { id: "files", group: "commands", label: snapshot.language === "zh-CN" ? "查看项目文件" : "View project files", meta: "⌘2", icon: FileCode2, run: () => setView("files") },
     { id: "changes", group: "commands", label: snapshot.language === "zh-CN" ? "查看代码改动" : "Review code changes", meta: "⌘3", icon: FileDiff, run: () => setView("changes") },
     { id: "motion", group: "commands", label: snapshot.language === "zh-CN" ? "打开动效设置" : "Open motion settings", meta: "⌘,", icon: Sparkles, run: () => setSettingsOpen(true, { section: "appearance", id: "appearance:motion" }) },
+    { id: "terminal", group: "commands", label: t("toggleTerminal"), meta: "⌘`", icon: SquareTerminal, run: () => useTerminalStore.getState().toggle() },
   ], [setSettingsOpen, setView, snapshot.language, t]);
 
   const commandItems = useMemo(() => {

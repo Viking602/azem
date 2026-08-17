@@ -61,28 +61,24 @@ func TestWorkspaceWriteClaimReturnsErrorWhenWorkspaceCannotBeResolved(t *testing
 	}
 }
 
-func TestTopLevelWorkspaceWriteClaimsRespectMutationCapability(t *testing.T) {
+func TestTopLevelWorkspaceWriteClaimsDoNotSerializeSessions(t *testing.T) {
 	root := t.TempDir()
 	for _, test := range []struct {
 		name        string
 		allowWrite  bool
 		shellPolicy string
-		wantClaim   bool
 	}{
 		{name: "read only", shellPolicy: "deny"},
-		{name: "workspace writes", allowWrite: true, shellPolicy: "deny", wantClaim: true},
-		{name: "shell writes", shellPolicy: "prompt", wantClaim: true},
+		{name: "workspace writes", allowWrite: true, shellPolicy: "deny"},
+		{name: "shell writes", shellPolicy: "prompt"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			claims, err := topLevelWorkspaceWriteClaims(test.allowWrite, test.shellPolicy, root)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := len(claims) == 1; got != test.wantClaim {
-				t.Fatalf("claims=%#v, wantClaim=%v", claims, test.wantClaim)
-			}
-			if test.wantClaim && claims[0].Mode != api.ResourceClaimExclusive {
-				t.Fatalf("write-capable top-level claims=%#v", claims)
+			if len(claims) != 0 {
+				t.Fatalf("top-level sessions must not take exclusive workspace claims: %#v", claims)
 			}
 		})
 	}

@@ -70,6 +70,9 @@ func (m *AppModel) applyEvent(event app.Event) {
 		}
 	case app.EventContextUsage:
 	case app.EventContextProfile:
+		if event.AgentID != "" {
+			break
+		}
 		if event.ContextProfile != nil {
 			m.contextProfile = *event.ContextProfile
 			m.contextProfile.Contributions = append([]app.ContextContribution(nil), event.ContextProfile.Contributions...)

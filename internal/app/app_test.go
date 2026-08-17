@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +23,9 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
@@ -340,6 +343,53 @@ func TestPersistRecapGeneratesConciseSummaryAndEmitsUpdatedEvent(t *testing.T) {
 		event.Recap.Summary == fullAnswer || event.Recap.Revision != 1 ||
 		event.Recap.Goal != "Ship recap" || event.Recap.OpenItems != "in_progress: Run focused tests\npending: Open PR" {
 		t.Fatalf("recap update event = %#v", event)
+	}
+}
+
+func TestHeadlessSurfaceSkipsTitleAndRecap(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1", Title: "Initial title"}); err != nil {
+		t.Fatal(err)
+	}
+	recaps := recap.NewService(store.DB(), t.TempDir())
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	service.AttachMemory(nil, recaps)
+	service.SetDesktopSurface(false)
+	service.titleGenerator = func(context.Context, titleGenerationRequest) (string, error) {
+		t.Fatal("headless surface generated a title")
+		return "should not generate", nil
+	}
+	service.recapGenerator = func(context.Context, recapGenerationRequest) (string, error) {
+		t.Fatal("headless surface generated a recap")
+		return "should not generate", nil
+	}
+	if _, err := service.StartConfiguredTurn(TurnRequest{
+		SessionID: "session-1", Prompt: "Do not spend tokens on titles",
+		Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.persistRecap(ctx, recapGenerationRequest{SessionID: "session-1", RunID: "run-1", Answer: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := sessions.LoadSession(ctx, "session-1")
+	if err != nil || saved.Title != "Initial title" {
+		t.Fatalf("headless title changed: %#v, %v", saved, err)
+	}
+	if loaded, loadErr := recaps.Load(ctx, "session-1"); !errors.Is(loadErr, sql.ErrNoRows) {
+		t.Fatalf("headless recap = %#v, %v", loaded, loadErr)
+	}
+	shutdownCtx, cancelShutdown := context.WithTimeout(ctx, 3*time.Second)
+	defer cancelShutdown()
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -720,6 +770,105 @@ func TestNewSessionStaysEphemeralUntilFirstTurn(t *testing.T) {
 	if resumed.Kind != EventSessionLoaded || resumed.State != "loaded" || resumed.SessionID != event.SessionID || resumed.Data["blocks"] == "[]" {
 		t.Fatalf("resume event = %+v", resumed)
 	}
+}
+
+func TestArchiveInactiveSessionsAndRestoreByProject(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "archive-inactive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB())
+	cfg := config.Default()
+	cfg.Workspace.Root = t.TempDir()
+	service := NewService(ctx, cfg)
+	service.AttachDurable(sessions, nil)
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+		if err := store.Close(shutdownCtx); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+
+	alpha := t.TempDir()
+	beta := t.TempDir()
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	for _, item := range []struct {
+		id, title, workspace string
+		updatedAt            time.Time
+	}{
+		{"old-alpha", "Old Alpha", alpha, stale},
+		{"old-current", "Old Current", beta, stale},
+		{"fresh-beta", "Fresh Beta", beta, time.Now().UTC()},
+	} {
+		if _, err := sessions.Ensure(ctx, session.Session{ID: item.id, Title: item.title}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sessions.AppendBlock(ctx, item.id, session.Block{Kind: "user", Content: item.title}); err != nil {
+			t.Fatal(err)
+		}
+		if err := sessions.SetWorkspaceSession(ctx, item.workspace, item.id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, item.updatedAt.UnixNano(), item.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionArchiveInactiveSessions, Target: "30", SessionID: "old-current"}); err != nil {
+		t.Fatal(err)
+	}
+	listed := nextSessionList(t, service)
+	states := map[string]bool{}
+	workspaces := map[string]string{}
+	for _, item := range listed {
+		states[item.ID] = item.Archived
+		workspaces[item.ID] = item.Workspace
+	}
+	if !states["old-alpha"] || states["old-current"] || states["fresh-beta"] {
+		t.Fatalf("inactive archive flags=%v", states)
+	}
+	canonical := func(path string) string {
+		t.Helper()
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Clean(resolved)
+	}
+	if workspaces["old-alpha"] != canonical(alpha) || workspaces["old-current"] != canonical(beta) {
+		t.Fatalf("archived session projects=%v want alpha=%s beta=%s", workspaces, canonical(alpha), canonical(beta))
+	}
+
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionArchiveSession, Target: "old-alpha", Decision: "false"}); err != nil {
+		t.Fatal(err)
+	}
+	restored := nextSessionList(t, service)
+	for _, item := range restored {
+		if item.ID == "old-alpha" && item.Archived {
+			t.Fatalf("restored session remained archived: %#v", item)
+		}
+	}
+}
+
+func nextSessionList(t *testing.T, service *Service) []session.Session {
+	t.Helper()
+	event, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventSessionLoaded || event.State != "list" {
+		t.Fatalf("session list event=%+v", event)
+	}
+	var listed []session.Session
+	if err := json.Unmarshal([]byte(event.Data["sessions"]), &listed); err != nil {
+		t.Fatal(err)
+	}
+	return listed
 }
 
 func TestResumeSessionProjectsGlobalActiveRunOwner(t *testing.T) {
@@ -1312,34 +1461,431 @@ func TestListPluginsReemitsTheCurrentSnapshot(t *testing.T) {
 	}
 }
 
-func TestSetCodexPluginImportedPersistsExplicitSelection(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "config.yaml")
+func TestBootstrapEmitsHookSnapshotAndDirectReadback(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachPlugins([]PluginCatalogEntry{{
+		ID: "demo@local", Name: "demo", DisplayName: "Demo", Origin: "local", Enabled: true,
+		HookCount: 2, HooksTrusted: false, Warning: "Hooks 等待用户信任",
+	}}, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	snapshot := service.HookCatalogSnapshot()
+	if snapshot == nil || snapshot.TrustHooks || len(snapshot.Sources) != 1 || snapshot.Sources[0].ID != "demo@local" {
+		t.Fatalf("direct hook snapshot before bootstrap = %+v", snapshot)
+	}
+	service.Bootstrap()
+	var catalog Event
+	for {
+		event, err := service.NextEvent(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == EventHookCatalog {
+			catalog = event
+			break
+		}
+	}
+	if catalog.State != "snapshot" || catalog.HookCatalog == nil || len(catalog.HookCatalog.Sources) != 1 {
+		t.Fatalf("bootstrap hook catalog = %+v", catalog)
+	}
+}
+
+func TestListHooksIncludesUntrustedPluginSources(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachPlugins([]PluginCatalogEntry{{
+		ID: "demo@local", Name: "demo", DisplayName: "Demo", Origin: "local", Enabled: true,
+		HookCount: 2, HooksTrusted: false, Warning: "Hooks 等待用户信任",
+	}}, nil)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionListHooks}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != EventHookCatalog || event.HookCatalog == nil || event.HookCatalog.TrustHooks || len(event.HookCatalog.Sources) != 1 {
+		t.Fatalf("hook catalog = %+v", event)
+	}
+	source := event.HookCatalog.Sources[0]
+	if source.ID != "demo@local" || source.Origin != "plugin" || source.HookCount != 2 || source.Trusted {
+		t.Fatalf("hook source = %#v", source)
+	}
+}
+
+func TestSetPluginHooksTrustedPersistsAndReloads(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	path := filepath.Join(home, "config.yaml")
 	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(data, "plugin-packages", "local", "demo")
+	if err := os.MkdirAll(filepath.Join(root, ".codex-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".codex-plugin", "plugin.json"), []byte(`{"name":"demo","version":"1.0.0","description":"Demo","hooks":"./hooks.json"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "hooks.json"), []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"true"}]}]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	service := NewService(context.Background(), config.Default())
 	service.SetConfigPath(path)
-	service.AttachPlugins([]PluginCatalogEntry{{ID: "demo@market", Name: "demo", Origin: "codex_available", Status: "available"}}, nil)
-	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "demo@market", Decision: "true"}); err != nil {
+	service.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(hooks.Options{})})
+	service.AttachPluginRuntime(plugins.Options{HomeDir: home, DataDir: data}, plugins.Integration{})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginHooksTrusted, Decision: "true"}); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := config.Load(path, root)
+	loaded, err := config.Load(path, home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(loaded.Plugins.CodexImports, "demo@market") || service.pluginCatalog[0].Status != "restart_required" || service.pluginCatalog[0].Origin != "codex" {
-		t.Fatalf("plugin import selection = %#v catalog=%#v", loaded.Plugins, service.pluginCatalog)
+	if !loaded.Plugins.TrustHooks || !service.cfg.Plugins.TrustHooks {
+		t.Fatalf("trust hooks persisted=%v runtime=%v", loaded.Plugins.TrustHooks, service.cfg.Plugins.TrustHooks)
+	}
+	var catalog Event
+	for {
+		event, err := service.NextEvent(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == EventHookCatalog {
+			catalog = event
+			break
+		}
+	}
+	if catalog.HookCatalog == nil || !catalog.HookCatalog.TrustHooks {
+		t.Fatalf("trusted hook catalog = %+v", catalog)
+	}
+	if len(catalog.HookCatalog.Sources) != 1 || !catalog.HookCatalog.Sources[0].Trusted || catalog.HookCatalog.Sources[0].HookCount != 1 {
+		t.Fatalf("trusted hook sources = %#v", catalog.HookCatalog.Sources)
+	}
+	if len(catalog.HookCatalog.Commands) == 0 {
+		t.Fatalf("trusted hook commands = %#v", catalog.HookCatalog.Commands)
+	}
+	if catalog.HookCatalog.Commands[0].ID == "" || !catalog.HookCatalog.Commands[0].Enabled {
+		t.Fatalf("trusted hook command identity = %#v", catalog.HookCatalog.Commands[0])
+	}
+
+	integration := plugins.Discover(context.Background(), plugins.Options{HomeDir: home, DataDir: data, TrustHooks: loaded.Plugins.TrustHooks})
+	reopened := NewService(context.Background(), loaded)
+	reopened.SetConfigPath(path)
+	reopened.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(hooks.Options{})})
+	reopened.AttachPlugins(pluginCatalogEntries(integration), nil)
+	reopened.AttachPluginRuntime(plugins.Options{HomeDir: home, DataDir: data}, integration)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := reopened.Shutdown(ctx); err != nil {
+			t.Errorf("reopened shutdown: %v", err)
+		}
+	})
+	restored := reopened.HookCatalogSnapshot()
+	if restored == nil || !restored.TrustHooks || len(restored.Sources) != 1 || !restored.Sources[0].Trusted || len(restored.Commands) == 0 {
+		t.Fatalf("reopened trusted hook catalog = %+v", restored)
+	}
+}
+
+func TestHookCatalogListsUntrustedPluginCommandsWithoutExecuting(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	root := filepath.Join(data, "plugin-packages", "local", "demo")
+	if err := os.MkdirAll(filepath.Join(root, ".codex-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".codex-plugin", "plugin.json"), []byte(`{"name":"demo","version":"1.0.0","description":"Demo","hooks":"./hooks.json"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "hooks.json"), []byte(`{"hooks":{"SessionStart":[{"hooks":[{"name":"notify","type":"command","command":"printf ran"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	integration := plugins.Discover(context.Background(), plugins.Options{HomeDir: home, DataDir: data})
+	service := NewService(context.Background(), config.Default())
+	service.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(hooks.Options{})})
+	service.AttachPlugins(pluginCatalogEntries(integration), nil)
+	service.AttachPluginRuntime(plugins.Options{HomeDir: home, DataDir: data}, integration)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	catalog := service.HookCatalogSnapshot()
+	if catalog.TrustHooks || len(catalog.Commands) != 1 || catalog.Commands[0].Name != "notify" || !catalog.Commands[0].Enabled {
+		t.Fatalf("untrusted plugin commands = %+v", catalog)
+	}
+	result := service.hooks.Dispatch(context.Background(), hooks.Envelope{HookEventName: hooks.SessionStart})
+	if len(result.Runs) != 0 {
+		t.Fatalf("untrusted plugin hook executed: %#v", result.Runs)
+	}
+}
+
+func TestSetHookEnabledPersistsAndDoesNotExecute(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hookPath := filepath.Join(home, "hooks.json")
+	if err := os.WriteFile(hookPath, []byte(`{"hooks":{"SessionStart":[{"hooks":[{"name":"notify","type":"command","command":"printf ran"}]}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	service := NewService(context.Background(), cfg)
+	service.SetConfigPath(path)
+	options := hooks.Options{Sources: []hooks.Source{{Path: hookPath, Trusted: true}}}
+	service.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(options)})
+	service.hookOptions = options
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	listed := service.HookCatalogSnapshot()
+	if listed == nil || len(listed.Commands) != 1 || !listed.Commands[0].Enabled {
+		t.Fatalf("listed hooks = %+v", listed)
+	}
+	id := listed.Commands[0].ID
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetHookEnabled, Target: id, Decision: "false"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Hooks.Disabled) != 1 || loaded.Hooks.Disabled[0] != id || !reflect.DeepEqual(loaded.Hooks.Disabled, service.cfg.Hooks.Disabled) {
+		t.Fatalf("disabled hooks persisted=%v runtime=%v", loaded.Hooks.Disabled, service.cfg.Hooks.Disabled)
+	}
+	updated := service.HookCatalogSnapshot()
+	if updated == nil || len(updated.Commands) != 1 || updated.Commands[0].Enabled {
+		t.Fatalf("disabled hook catalog = %+v", updated)
+	}
+	result := service.hooks.Dispatch(context.Background(), hooks.Envelope{HookEventName: hooks.SessionStart})
+	if len(result.Runs) != 0 {
+		t.Fatalf("disabled hook executed: %#v", result.Runs)
+	}
+
+	reopened := NewService(context.Background(), loaded)
+	reopened.SetConfigPath(path)
+	reopenOptions := hooks.Options{Sources: []hooks.Source{{Path: hookPath, Trusted: true}}, Disabled: append([]string(nil), loaded.Hooks.Disabled...)}
+	reopened.AttachHooks(hooks.Dispatcher{Registry: hooks.Discover(reopenOptions)})
+	reopened.hookOptions = reopenOptions
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := reopened.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	restored := reopened.HookCatalogSnapshot()
+	if restored == nil || len(restored.Commands) != 1 || restored.Commands[0].Enabled || restored.Commands[0].ID != id {
+		t.Fatalf("reopened hook catalog = %+v", restored)
+	}
+	if err := reopened.ExecuteAction(context.Background(), Action{Kind: ActionSetHookEnabled, Target: "missing", Decision: "false"}); err == nil {
+		t.Fatal("missing hook was disabled")
+	}
+}
+
+func TestSetCodexPluginImportedActivatesImmediately(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	path := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := filepath.Join(home, ".codex", "plugins", "cache", "market", "demo", "1.0.0")
+	if err := os.MkdirAll(filepath.Join(sourceRoot, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceRoot, "skills", "review"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), []byte(`{"name":"demo","version":"1.0.0","description":"Demo plugin","skills":"./skills/"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "skills", "review", "SKILL.md"), []byte("---\nname: review\ndescription: Review work\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalogJSON, err := json.Marshal(map[string]any{
+		"installed": []map[string]any{{
+			"pluginId": "demo@market", "name": "demo", "marketplaceName": "market", "version": "1.0.0",
+			"installed": true, "enabled": true,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillCatalog, err := skills.Load(skills.LoadOptions{HomeDir: home, ConfigDir: home, Config: config.SkillsConfig{Enabled: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), config.Default())
+	service.SetConfigPath(path)
+	service.AttachSkills(skillCatalog)
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "demo@market", Name: "demo", Origin: "codex_available", Status: "available"}}, nil)
+	service.AttachPluginRuntime(plugins.Options{
+		HomeDir: home, DataDir: data, ImportCodex: true,
+		ListPlugins: func(context.Context) ([]byte, error) { return catalogJSON, nil },
+	}, plugins.Integration{})
+
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "demo@market", Decision: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyRoot := filepath.Join(data, "plugin-packages", "codex", "market", "demo")
+	if !slices.Contains(loaded.Plugins.CodexImports, "demo@market") {
+		t.Fatalf("plugin import selection = %#v", loaded.Plugins)
+	}
+	if len(service.pluginCatalog) != 1 || service.pluginCatalog[0].Origin != "codex" || service.pluginCatalog[0].Status != "ready" || service.pluginCatalog[0].Status == "restart_required" {
+		t.Fatalf("imported catalog = %#v", service.pluginCatalog)
+	}
+	if _, err := os.Stat(filepath.Join(copyRoot, "skills", "review", "SKILL.md")); err != nil {
+		t.Fatalf("imported copy: %v", err)
+	}
+	if !slices.ContainsFunc(service.cfg.Skills.AdditionalDirs, func(path string) bool {
+		return strings.HasSuffix(filepath.Clean(path), filepath.Join("plugin-packages", "codex", "market", "demo", "skills"))
+	}) {
+		t.Fatalf("skill dirs = %#v", service.cfg.Skills.AdditionalDirs)
 	}
 	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "demo@market", Decision: "false"}); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err = config.Load(path, root)
+	loaded, err = config.Load(path, home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(loaded.Plugins.CodexImports) != 0 || service.pluginCatalog[0].Origin != "codex_available" {
 		t.Fatalf("plugin import removal = %#v catalog=%#v", loaded.Plugins, service.pluginCatalog)
+	}
+	if slices.ContainsFunc(service.cfg.Skills.AdditionalDirs, func(path string) bool {
+		return strings.HasSuffix(filepath.Clean(path), filepath.Join("plugin-packages", "codex", "market", "demo", "skills"))
+	}) {
+		t.Fatalf("unimported skill dir still attached: %#v", service.cfg.Skills.AdditionalDirs)
+	}
+}
+
+func TestSetCodexPluginImportedRejectsEmptyID(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "kami@kami", Name: "kami", Origin: "codex_available"}}, nil)
+	err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Decision: "true"})
+	if err == nil || !strings.Contains(err.Error(), "plugin id is required") {
+		t.Fatalf("empty plugin id = %v", err)
+	}
+}
+
+func TestSetCodexPluginImportedCopiesMarketplaceSourcePath(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	path := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := filepath.Join(home, ".codex", ".tmp", "marketplaces", "kami", "plugins", "kami")
+	if err := os.MkdirAll(filepath.Join(sourceRoot, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceRoot, "skills", "kami"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), []byte(`{"name":"kami","version":"1.12.0","description":"Typeset documents","skills":"./skills/"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "skills", "kami", "SKILL.md"), []byte("---\nname: kami\ndescription: Typeset documents\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalogJSON, err := json.Marshal(map[string]any{
+		"installed": []map[string]any{{
+			"pluginId": "kami@kami", "name": "kami", "marketplaceName": "kami", "version": "1.12.0",
+			"installed": true, "enabled": true,
+			"source": map[string]any{"source": "local", "path": sourceRoot},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), config.Default())
+	service.SetConfigPath(path)
+	service.AttachPlugins([]PluginCatalogEntry{{ID: "kami@kami", Name: "kami", Marketplace: "kami", Origin: "codex_available", Status: "available"}}, nil)
+	service.AttachPluginRuntime(plugins.Options{
+		HomeDir: home, DataDir: data, ImportCodex: true,
+		ListPlugins: func(context.Context) ([]byte, error) { return catalogJSON, nil },
+	}, plugins.Integration{})
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "kami@kami", Decision: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	copyRoot := filepath.Join(data, "plugin-packages", "codex", "kami", "kami")
+	if _, err := os.Stat(filepath.Join(copyRoot, "skills", "kami", "SKILL.md")); err != nil {
+		t.Fatalf("imported marketplace copy: %v", err)
+	}
+	if len(service.pluginCatalog) != 1 || service.pluginCatalog[0].Origin != "codex" {
+		t.Fatalf("imported catalog = %#v", service.pluginCatalog)
+	}
+}
+
+func TestSetCodexPluginImportedUsesKnownCatalogWhenCodexListFails(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "azem-data")
+	path := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceRoot := filepath.Join(home, ".codex", ".tmp", "marketplaces", "kami", "plugins", "kami")
+	if err := os.MkdirAll(filepath.Join(sourceRoot, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceRoot, "skills", "kami"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), []byte(`{"name":"kami","version":"1.12.0","description":"Typeset documents","skills":"./skills/"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceRoot, "skills", "kami", "SKILL.md"), []byte("---\nname: kami\ndescription: Typeset documents\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), config.Default())
+	service.SetConfigPath(path)
+	service.AttachPlugins([]PluginCatalogEntry{{
+		ID: "kami@kami", Name: "kami", Marketplace: "kami", Version: "1.12.0",
+		Origin: "codex_available", Status: "available",
+	}}, nil)
+	service.AttachPluginRuntime(plugins.Options{
+		HomeDir: home, DataDir: data, ImportCodex: true,
+		ListPlugins: func(context.Context) ([]byte, error) { return nil, os.ErrNotExist },
+	}, plugins.Integration{})
+	if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetPluginImported, Target: "kami@kami", Decision: "true"}); err != nil {
+		t.Fatal(err)
+	}
+	copyRoot := filepath.Join(data, "plugin-packages", "codex", "kami", "kami")
+	if _, err := os.Stat(filepath.Join(copyRoot, "skills", "kami", "SKILL.md")); err != nil {
+		t.Fatalf("imported known catalog copy: %v", err)
+	}
+	if len(service.pluginCatalog) != 1 || service.pluginCatalog[0].Origin != "codex" {
+		t.Fatalf("imported catalog = %#v", service.pluginCatalog)
 	}
 }
 
@@ -1686,6 +2232,16 @@ func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {
 	if event.Data["shell_max_concurrency"] != "4" {
 		t.Fatalf("shell concurrency event = %#v", event.Data)
 	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellMaxWallClock, Target: "1800"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["shell_max_wall_clock_seconds"] != "1800" {
+		t.Fatalf("shell wall clock event = %#v", event.Data)
+	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "30"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1696,24 +2252,88 @@ func TestRuntimeCapacityActionsPersistAndUpdateLiveLimits(t *testing.T) {
 	if event.Data["subagent_await_seconds"] != "30" {
 		t.Fatalf("await timeout event = %#v", event.Data)
 	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentIdle, Target: "300"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["subagent_idle_seconds"] != "300" {
+		t.Fatalf("idle timeout event = %#v", event.Data)
+	}
 	loaded, err := config.Load(path, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Workspace.Shell.MaxConcurrency != 4 || loaded.Agents.Subagents.AwaitDuration != 30*time.Second {
-		t.Fatalf("persisted limits = shell:%d await:%s", loaded.Workspace.Shell.MaxConcurrency, loaded.Agents.Subagents.AwaitDuration)
+	if loaded.Workspace.Shell.MaxConcurrency != 4 || loaded.Workspace.Shell.MaxWallClockDuration != 30*time.Minute ||
+		loaded.Agents.Subagents.AwaitDuration != 30*time.Second ||
+		loaded.Agents.Subagents.IdleDuration != 5*time.Minute {
+		t.Fatalf("persisted limits = shell:%d wall:%s await:%s idle:%s", loaded.Workspace.Shell.MaxConcurrency, loaded.Workspace.Shell.MaxWallClockDuration, loaded.Agents.Subagents.AwaitDuration, loaded.Agents.Subagents.IdleDuration)
 	}
 	subagents.mu.Lock()
 	liveAwait := subagents.cfg.AwaitDuration
+	liveIdle := subagents.cfg.IdleDuration
 	subagents.mu.Unlock()
 	if liveAwait != 30*time.Second {
 		t.Fatalf("live await timeout = %s", liveAwait)
 	}
+	if liveIdle != 5*time.Minute {
+		t.Fatalf("live idle timeout = %s", liveIdle)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "0"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["subagent_await_seconds"] != "0" {
+		t.Fatalf("wait-until-complete event = %#v", event.Data)
+	}
+	loaded, err = config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Agents.Subagents.AwaitDuration != 0 {
+		t.Fatalf("persisted wait-until-complete await = %s", loaded.Agents.Subagents.AwaitDuration)
+	}
+	subagents.mu.Lock()
+	liveAwait = subagents.cfg.AwaitDuration
+	subagents.mu.Unlock()
+	if liveAwait != 0 {
+		t.Fatalf("live wait-until-complete await = %s", liveAwait)
+	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellConcurrency, Target: "0"}); err == nil {
 		t.Fatal("zero shell concurrency was accepted")
 	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellMaxWallClock, Target: "30"}); err == nil {
+		t.Fatal("too-short shell wall clock was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetShellMaxWallClock, Target: "0"}); err == nil {
+		t.Fatal("zero shell wall clock was accepted")
+	}
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "4"}); err == nil {
 		t.Fatal("too-short await timeout was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentAwait, Target: "-1"}); err == nil {
+		t.Fatal("negative await timeout was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentIdle, Target: "0"}); err != nil {
+		t.Fatal(err)
+	}
+	event, err = service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Data["subagent_idle_seconds"] != "0" {
+		t.Fatalf("disabled idle timeout event = %#v", event.Data)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentIdle, Target: "10"}); err == nil {
+		t.Fatal("too-short idle timeout was accepted")
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSubagentIdle, Target: "-1"}); err == nil {
+		t.Fatal("negative idle timeout was accepted")
 	}
 }
 

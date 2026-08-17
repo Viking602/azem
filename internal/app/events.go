@@ -40,6 +40,7 @@ const (
 	EventModelProviders     EventKind = "model_providers"
 	EventSkillCatalog       EventKind = "skill_catalog"
 	EventPluginCatalog      EventKind = "plugin_catalog"
+	EventHookCatalog        EventKind = "hook_catalog"
 	EventAuthState          EventKind = "auth_state"
 	EventMCPState           EventKind = "mcp_state"
 	EventRecoveryState      EventKind = "recovery_state"
@@ -55,44 +56,46 @@ const (
 	EventBackgroundState    EventKind = "background_state"
 	EventBackgroundLogs     EventKind = "background_logs"
 	EventGitBranches        EventKind = "git_branches"
+	EventUsageReport        EventKind = "usage_report"
 )
 
 type ModelRouteEntry struct {
-	Scope string
-	Role  string
-	Label string
-	Route config.ModelRouteConfig
+	Scope string                  `json:"scope"`
+	Role  string                  `json:"role"`
+	Label string                  `json:"label"`
+	Route config.ModelRouteConfig `json:"route"`
 }
 
 type ModelProviderEntry struct {
-	ID                   string
-	DisplayName          string
-	Backend              string
-	DefaultBaseURL       string
-	BaseURL              string
-	EnvKey               string
-	Enabled              bool
-	CredentialConfigured bool
-	CredentialSource     string
-	Subscription         bool
-	AccountID            string
-	AccountLabel         string
-	AccountPlan          string
-	QuotaAvailable       bool
-	QuotaUsedPercent     float64
-	QuotaResetsAt        int64
-	QuotaBalance         string
-	QuotaUnlimited       bool
-	QuotaWarning         string
-	ModelsDevID          string
-	ModelsSource         string
-	ModelsWarning        string
-	Models               []config.LLMuxModelConfig
+	ID                   string                    `json:"id"`
+	DisplayName          string                    `json:"displayName"`
+	Backend              string                    `json:"backend"`
+	DefaultBaseURL       string                    `json:"defaultBaseUrl"`
+	BaseURL              string                    `json:"baseUrl"`
+	EnvKey               string                    `json:"envKey"`
+	Enabled              bool                      `json:"enabled"`
+	CredentialConfigured bool                      `json:"credentialConfigured"`
+	CredentialSource     string                    `json:"credentialSource"`
+	Subscription         bool                      `json:"subscription,omitempty"`
+	AccountID            string                    `json:"accountId,omitempty"`
+	AccountLabel         string                    `json:"accountLabel,omitempty"`
+	AccountPlan          string                    `json:"accountPlan,omitempty"`
+	QuotaAvailable       bool                      `json:"quotaAvailable,omitempty"`
+	QuotaPeriod          string                    `json:"quotaPeriod,omitempty"`
+	QuotaUsedPercent     float64                   `json:"quotaUsedPercent,omitempty"`
+	QuotaResetsAt        int64                     `json:"quotaResetsAt,omitempty"`
+	QuotaBalance         string                    `json:"quotaBalance,omitempty"`
+	QuotaUnlimited       bool                      `json:"quotaUnlimited,omitempty"`
+	QuotaWarning         string                    `json:"quotaWarning,omitempty"`
+	ModelsDevID          string                    `json:"modelsDevId,omitempty"`
+	ModelsSource         string                    `json:"modelsSource,omitempty"`
+	ModelsWarning        string                    `json:"modelsWarning,omitempty"`
+	Models               []config.LLMuxModelConfig `json:"models"`
 }
 
 type GitBranchEntry struct {
-	Name    string
-	Current bool
+	Name    string `json:"name"`
+	Current bool   `json:"current"`
 }
 
 type AgentStatePayload struct {
@@ -117,81 +120,119 @@ type AgentStatePayload struct {
 }
 
 type AgentTranscriptBlock struct {
-	ID               string
-	Kind             string
-	RunID            string
-	ToolCallID       string
-	Title            string
-	Content          string
-	ContentBytes     int
-	ContentTruncated bool
-	State            string
+	ID               string `json:"id"`
+	Kind             string `json:"kind"`
+	RunID            string `json:"runId,omitempty"`
+	ToolCallID       string `json:"toolCallId,omitempty"`
+	Title            string `json:"title,omitempty"`
+	Content          string `json:"content,omitempty"`
+	ContentBytes     int    `json:"contentBytes,omitempty"`
+	ContentTruncated bool   `json:"contentTruncated,omitempty"`
+	State            string `json:"state,omitempty"`
 }
 
 type AgentCatalogEntry struct {
-	Name           string
-	Description    string
-	Persona        string
-	Model          string
-	Reasoning      string
-	CapabilityMode string
-	Isolation      string
-	Source         string
-	Enabled        bool
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+	Persona        string `json:"persona,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Reasoning      string `json:"reasoning,omitempty"`
+	CapabilityMode string `json:"capabilityMode,omitempty"`
+	Isolation      string `json:"isolation,omitempty"`
+	Source         string `json:"source,omitempty"`
+	Enabled        bool   `json:"enabled"`
 }
 
 type SkillCatalogEntry struct {
-	Name          string
-	Description   string
-	SourcePath    string
-	Bundled       bool
-	Eager         bool
-	Disabled      bool
-	ModelVisible  bool
-	ResourceCount int
+	Name          string `json:"name"`
+	Description   string `json:"description,omitempty"`
+	SourcePath    string `json:"sourcePath,omitempty"`
+	LogoPath      string `json:"logoPath,omitempty"`
+	Bundled       bool   `json:"bundled,omitempty"`
+	Eager         bool   `json:"eager,omitempty"`
+	Disabled      bool   `json:"disabled,omitempty"`
+	ModelVisible  bool   `json:"modelVisible,omitempty"`
+	ResourceCount int    `json:"resourceCount,omitempty"`
 }
 
 type SkillDiagnostic struct {
-	Path    string
-	Message string
+	Path    string `json:"path"`
+	Message string `json:"message"`
 }
 
 type PluginCatalogEntry struct {
-	ID                 string
-	Name               string
-	DisplayName        string
-	Version            string
-	Marketplace        string
-	Origin             string
-	Description        string
-	DeveloperName      string
-	Category           string
-	BrandColor         string
-	LogoPath           string
-	Enabled            bool
-	SkillCount         int
-	MCPServerCount     int
-	IntegratedMCPCount int
-	HookCount          int
-	HooksTrusted       bool
-	HasApp             bool
-	Capabilities       []string
-	Status             string
-	Warning            string
-	Imported           bool
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	DisplayName        string   `json:"displayName,omitempty"`
+	Version            string   `json:"version,omitempty"`
+	Marketplace        string   `json:"marketplace,omitempty"`
+	Origin             string   `json:"origin,omitempty"`
+	Description        string   `json:"description,omitempty"`
+	DeveloperName      string   `json:"developerName,omitempty"`
+	Category           string   `json:"category,omitempty"`
+	BrandColor         string   `json:"brandColor,omitempty"`
+	LogoPath           string   `json:"logoPath,omitempty"`
+	Enabled            bool     `json:"enabled"`
+	SkillCount         int      `json:"skillCount,omitempty"`
+	MCPServerCount     int      `json:"mcpServerCount,omitempty"`
+	IntegratedMCPCount int      `json:"integratedMCPCount,omitempty"`
+	HookCount          int      `json:"hookCount,omitempty"`
+	HooksTrusted       bool     `json:"hooksTrusted,omitempty"`
+	HasApp             bool     `json:"hasApp,omitempty"`
+	Capabilities       []string `json:"capabilities,omitempty"`
+	Status             string   `json:"status,omitempty"`
+	Warning            string   `json:"warning,omitempty"`
+	Imported           bool     `json:"imported,omitempty"`
 }
 
 type PluginDiagnostic struct {
-	PluginID string
-	Path     string
-	Message  string
+	PluginID string `json:"pluginId,omitempty"`
+	Path     string `json:"path"`
+	Message  string `json:"message"`
+}
+
+type HookSourceEntry struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Origin    string `json:"origin,omitempty"`
+	PluginID  string `json:"pluginId,omitempty"`
+	Source    string `json:"source,omitempty"`
+	HookCount int    `json:"hookCount,omitempty"`
+	Trusted   bool   `json:"trusted,omitempty"`
+	Warning   string `json:"warning,omitempty"`
+	LogoPath  string `json:"logoPath,omitempty"`
+}
+
+type HookCommandEntry struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Event   string `json:"event,omitempty"`
+	Matcher string `json:"matcher,omitempty"`
+	Command string `json:"command,omitempty"`
+	Source  string `json:"source,omitempty"`
+	Origin  string `json:"origin,omitempty"`
+	Enabled bool   `json:"enabled"`
+}
+
+type HookCatalogSnapshot struct {
+	Enabled     bool               `json:"enabled"`
+	TrustHooks  bool               `json:"trustHooks"`
+	Sources     []HookSourceEntry  `json:"sources,omitempty"`
+	Commands    []HookCommandEntry `json:"commands,omitempty"`
+	Diagnostics []HookDiagnostic   `json:"diagnostics,omitempty"`
+}
+
+type HookDiagnostic struct {
+	Source  string `json:"source,omitempty"`
+	Event   string `json:"event,omitempty"`
+	Message string `json:"message"`
 }
 
 type AgentSnapshotPayload struct {
-	ID      string
-	State   string
-	Summary string
-	Agent   AgentStatePayload
+	ID      string            `json:"id"`
+	State   string            `json:"state,omitempty"`
+	Summary string            `json:"summary,omitempty"`
+	Agent   AgentStatePayload `json:"agent"`
 }
 
 type ContextCategory string
@@ -267,6 +308,7 @@ type Event struct {
 	SkillDiagnostics  []SkillDiagnostic
 	PluginCatalog     []PluginCatalogEntry
 	PluginDiagnostics []PluginDiagnostic
+	HookCatalog       *HookCatalogSnapshot
 	ContextProfile    *ContextProfile
 	Todo              *session.TodoList
 	Memories          []memory.Memory
@@ -276,6 +318,7 @@ type Event struct {
 	Background        []backgroundservice.Process
 	BackgroundLogs    *backgroundservice.LogSnapshot
 	GitBranches       []GitBranchEntry
+	UsageReport       *session.UsageReport
 	WorkspaceDirty    bool
 	At                time.Time
 }
@@ -315,6 +358,13 @@ func (e Event) Clone() Event {
 	}
 	if e.PluginDiagnostics != nil {
 		cloned.PluginDiagnostics = append([]PluginDiagnostic(nil), e.PluginDiagnostics...)
+	}
+	if e.HookCatalog != nil {
+		catalog := *e.HookCatalog
+		catalog.Sources = append([]HookSourceEntry(nil), e.HookCatalog.Sources...)
+		catalog.Commands = append([]HookCommandEntry(nil), e.HookCatalog.Commands...)
+		catalog.Diagnostics = append([]HookDiagnostic(nil), e.HookCatalog.Diagnostics...)
+		cloned.HookCatalog = &catalog
 	}
 	if e.ContextProfile != nil {
 		profile := *e.ContextProfile
@@ -360,6 +410,10 @@ func (e Event) Clone() Event {
 	}
 	if e.GitBranches != nil {
 		cloned.GitBranches = append([]GitBranchEntry(nil), e.GitBranches...)
+	}
+	if e.UsageReport != nil {
+		report := e.UsageReport.Clone()
+		cloned.UsageReport = &report
 	}
 	return cloned
 }

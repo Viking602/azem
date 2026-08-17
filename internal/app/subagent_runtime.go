@@ -45,14 +45,12 @@ func durableSubagentAgentID(agentType string) string {
 }
 
 func subagentResourceClaims(profile effectiveSubagentProfile, workspaceRoot string) ([]api.ResourceClaimSpec, error) {
-	if profile.Isolation == "worktree" || !subagentMayMutateWorkspace(profile) {
-		return nil, nil
-	}
-	claim, err := workspaceWriteClaim(workspaceRoot)
-	if err != nil {
-		return nil, err
-	}
-	return []api.ResourceClaimSpec{claim}, nil
+	// Shared-workspace writers used the same exclusive key as main sessions.
+	// That lock blocked every other session in the project, so writers no
+	// longer take a workspace claim. Isolated worktrees remain unclaimed.
+	_ = profile
+	_ = workspaceRoot
+	return nil, nil
 }
 
 func (r *subagentRuntime) childWorkspaceClaims(ctx context.Context, parent subagentParentRuntime, profile effectiveSubagentProfile) ([]api.ResourceClaimSpec, error) {
@@ -168,7 +166,7 @@ type subagentParentRuntime struct {
 	CompactionRoute         config.ModelRouteConfig
 	CompactionRouteSnapshot func() config.ModelRouteConfig
 	Coding                  *agentservice.Service
-	Host                    *Service
+	Host                    providerHost
 }
 
 type effectiveSubagentProfile struct {
@@ -211,6 +209,7 @@ type activeSubagent struct {
 	persistedActivity   string
 	lastStateEmit       time.Time
 	lastEmittedTools    int
+	lastVisibleAt       time.Time
 }
 
 type subagentRuntime struct {
@@ -224,9 +223,10 @@ type subagentRuntime struct {
 	pending          []string
 	running          int
 	terminalFallback map[string]agentservice.SubagentSnapshot
-	hosts            map[string]*Service
+	hosts            map[string]providerHost
 	wakeInFlight     map[string]bool
 	changed          chan struct{}
+	idleCheckEvery   time.Duration
 	wg               sync.WaitGroup
 }
 
@@ -239,11 +239,14 @@ func newSubagentRuntime(parent context.Context, cfg config.SubagentConfig, store
 	}
 	cfg = cloneSubagentConfig(cfg)
 	ctx, cancel := context.WithCancel(parent)
-	return &subagentRuntime{
+	runtime := &subagentRuntime{
 		cfg: cfg, store: store, worktreeRoot: worktreeRoot, ctx: ctx, cancel: cancel,
 		active: make(map[string]*activeSubagent), terminalFallback: make(map[string]agentservice.SubagentSnapshot),
-		hosts: make(map[string]*Service), wakeInFlight: make(map[string]bool), changed: make(chan struct{}),
-	}, nil
+		hosts: make(map[string]providerHost), wakeInFlight: make(map[string]bool), changed: make(chan struct{}),
+	}
+	runtime.wg.Add(1)
+	go runtime.watchIdle()
+	return runtime, nil
 }
 
 func (r *subagentRuntime) Drivers(parent subagentParentRuntime) ([]tool.Driver, error) {
@@ -305,7 +308,7 @@ func (r *subagentRuntime) recoverInterrupted(parent subagentParentRuntime) error
 		childCtx, cancel := context.WithCancel(r.ctx)
 		active := &activeSubagent{
 			run: run, profile: profile, prompt: run.Description, parent: parent, ctx: childCtx, cancel: cancel,
-			done: make(chan struct{}), toolNames: make(map[string]struct{}),
+			done: make(chan struct{}), toolNames: make(map[string]struct{}), lastVisibleAt: time.Now(),
 		}
 		r.mu.Lock()
 		if _, exists := r.active[run.ID]; exists {
@@ -369,9 +372,18 @@ func (r *subagentRuntime) updateAwaitTimeout(timeout time.Duration) {
 	r.mu.Unlock()
 }
 
+func (r *subagentRuntime) updateIdleTimeout(timeout time.Duration) {
+	r.mu.Lock()
+	r.cfg.IdleTimeout = timeout.String()
+	r.cfg.IdleDuration = timeout
+	r.mu.Unlock()
+}
+
 func (r *subagentRuntime) foregroundWaitWindow() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Zero means wait until the foreground child completes. A positive
+	// duration only releases the parent tool call (SUBAGENT-001).
 	return r.cfg.AwaitDuration
 }
 
@@ -445,7 +457,7 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	}
 	if parent.Host != nil {
 		metadata := hooks.Metadata{SessionID: run.SessionID, RunID: run.ParentRunID, AgentID: run.ID, AgentType: run.Type, ParentRunID: run.ParentRunID, ParentToolCallID: run.ParentToolCallID, CWD: run.CWD}
-		if err := parent.Host.dispatchLifecycle(parent.Host.ctx, hooks.TaskCreated, metadata, func(e *hooks.Envelope) {
+		if err := parent.Host.DispatchLifecycleHook(parent.Host.BaseContext(), hooks.TaskCreated, metadata, func(e *hooks.Envelope) {
 			e.TaskID, e.TaskSubject, e.TaskDescription = run.ID, run.Description, input.Prompt
 		}); err != nil {
 			return run, err
@@ -469,7 +481,7 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	childCtx, cancel := context.WithCancel(r.ctx)
 	active := &activeSubagent{
 		run: run, profile: profile, prompt: input.Prompt, parent: parent, ctx: childCtx, cancel: cancel,
-		done: make(chan struct{}), toolNames: make(map[string]struct{}),
+		done: make(chan struct{}), toolNames: make(map[string]struct{}), lastVisibleAt: time.Now(),
 	}
 	r.mu.Lock()
 	r.active[id] = active
@@ -489,7 +501,7 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	}
 	if parent.Host != nil {
 		metadata := hooks.Metadata{SessionID: queued.SessionID, RunID: queued.ParentRunID, AgentID: queued.ID, AgentType: queued.Type, ParentRunID: queued.ParentRunID, ParentToolCallID: queued.ParentToolCallID, CWD: queued.CWD}
-		decision := parent.Host.hooks.Dispatch(parent.Host.ctx, hooks.Envelope{
+		decision := parent.Host.HookDispatcher().Dispatch(parent.Host.BaseContext(), hooks.Envelope{
 			SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID, AgentType: metadata.AgentType,
 			ParentRunID: metadata.ParentRunID, ParentToolCallID: metadata.ParentToolCallID, CWD: metadata.CWD,
 			HookEventName: hooks.SubagentStart, Trigger: string(queued.State), TaskID: queued.ID,
@@ -789,7 +801,7 @@ func (r *subagentRuntime) execute(id string) {
 	var childRun *agentservice.Run
 	defer func() {
 		if childRun != nil && parent.Host != nil {
-			parent.Host.clearAutoReviewTracker(childRun.RunID)
+			parent.Host.ClearAutoReviewTracker(childRun.RunID)
 		}
 		recovered := recover()
 		if recovered == nil {
@@ -854,7 +866,7 @@ func (r *subagentRuntime) execute(id string) {
 		r.mu.Unlock()
 		if parent.Host != nil && prepared.CWD != oldCWD {
 			metadata := hooks.Metadata{SessionID: active.run.SessionID, RunID: active.run.ParentRunID, AgentID: id, AgentType: profile.Type, ParentRunID: active.run.ParentRunID, ParentToolCallID: parentToolCallID, CWD: prepared.CWD}
-			_ = parent.Host.dispatchLifecycle(ctx, hooks.CwdChanged, metadata, func(e *hooks.Envelope) { e.OldCWD, e.NewCWD = oldCWD, prepared.CWD })
+			_ = parent.Host.DispatchLifecycleHook(ctx, hooks.CwdChanged, metadata, func(e *hooks.Envelope) { e.OldCWD, e.NewCWD = oldCWD, prepared.CWD })
 		}
 	}
 
@@ -936,11 +948,11 @@ func (r *subagentRuntime) execute(id string) {
 			}
 		}
 	}
-	if parent.Host != nil && parent.Host.cfg.Retry.Enabled {
+	if parent.Host != nil && parent.Host.RetryConfig().Enabled {
 		executionPolicy.RetryPolicy = api.RetryPolicy{
-			MaxAttempts: parent.Host.cfg.Retry.MaxRetries + 1,
-			Backoff:     parent.Host.cfg.Retry.BaseDelayDuration,
-			MaxBackoff:  parent.Host.cfg.Retry.MaxDelayDuration,
+			MaxAttempts: parent.Host.RetryConfig().MaxRetries + 1,
+			Backoff:     parent.Host.RetryConfig().BaseDelayDuration,
+			MaxBackoff:  parent.Host.RetryConfig().MaxDelayDuration,
 		}
 	}
 	if durableRunID == "" {
@@ -991,7 +1003,7 @@ func (r *subagentRuntime) execute(id string) {
 		}
 		dispatcher := hooks.Dispatcher{}
 		if parent.Host != nil {
-			dispatcher = parent.Host.hooks
+			dispatcher = parent.Host.HookDispatcher()
 		}
 		governed = append(governed, hooks.WrapDriver(dispatcher, metadata, governedDriver))
 		toolNames = append(toolNames, definition.Name)
@@ -1024,16 +1036,17 @@ func (r *subagentRuntime) execute(id string) {
 		}
 		dispatcher := hooks.Dispatcher{}
 		if parent.Host != nil {
-			dispatcher = parent.Host.hooks
+			dispatcher = parent.Host.HookDispatcher()
 		}
 		governed = append(governed, hooks.WrapDriver(dispatcher, metadata, governedDriver))
 		toolNames = append(toolNames, definition.Name)
 	}
-	if parent.Host != nil && parent.Host.sessions != nil {
-		governed = append(governed, &contextArtifactDriver{sessionID: parent.SessionID, store: parent.Host.sessions})
+	if parent.Host != nil && parent.Host.Sessions() != nil {
+		governed = append(governed, &contextArtifactDriver{sessionID: parent.SessionID, store: parent.Host.Sessions()})
 		toolNames = append(toolNames, contextReadArtifactTool)
 	}
 	skillSnapshot := parent.Coding.SkillSnapshot()
+	activeSkills := mergeSkillNames(skillSnapshot.Eager, loadSessionActivatedSkills(ctx, parent.Host, parent.SessionID, skillSnapshot.Registry))
 	instructions := renderSubagentInstructions(profile)
 	if childContextWindow > 0 {
 		contextBudget, err = calculateContextBudget(profile.Provider, childModel, childContextWindow, estimateToolDefinitionTokens(governed), parent.ContextConfig)
@@ -1045,18 +1058,18 @@ func (r *subagentRuntime) execute(id string) {
 	}
 	extraBody := map[string]any{"prompt_cache_key": childRun.RunID}
 	enableExplicitPromptCache(extraBody, profile.Provider, childModel)
-	if parent.Host != nil && strings.TrimSpace(parent.Host.attachments.Root) != "" {
-		extraBody[responses.AttachmentRootExtraKey] = parent.Host.attachments.Root
+	if parent.Host != nil && strings.TrimSpace(parent.Host.AttachmentRoot()) != "" {
+		extraBody[responses.AttachmentRootExtraKey] = parent.Host.AttachmentRoot()
 	}
 	maxOutputTokens := 0
-	if parent.Host != nil && parent.Host.providers != nil {
-		maxOutputTokens = parent.Host.providers.modelMaxOutputTokens(profile.Provider, childModel)
+	if parent.Host != nil && parent.Host.HasProviderRuntime() {
+		maxOutputTokens = parent.Host.ModelMaxOutputTokens(profile.Provider, childModel)
 		if maxOutputTokens > 0 {
 			extraBody["max_output_tokens"] = maxOutputTokens
 		}
 	}
 	spec := hyagent.Spec{
-		Skills: skillSnapshot.Eager, AvailableSkills: skillSnapshot.Available,
+		Skills: activeSkills, AvailableSkills: skillSnapshot.Available,
 		Instructions: instructions, Model: childModel, Tools: toolNames,
 		MaxTokens: maxOutputTokens,
 		LoopPolicy: hyagent.LoopPolicy{
@@ -1067,10 +1080,10 @@ func (r *subagentRuntime) execute(id string) {
 		},
 		ExtraBody: extraBody,
 	}
-	if parent.Host != nil && parent.Host.providers != nil {
-		if parent.Host.sessions != nil {
+	if parent.Host != nil && parent.Host.HasProviderRuntime() {
+		if parent.Host.Sessions() != nil {
 			childDriver = &meteredProviderDriver{
-				inner: childDriver, store: parent.Host.sessions, host: parent.Host,
+				inner: childDriver, store: parent.Host.Sessions(), host: parent.Host,
 				sessionID: parent.SessionID, runID: parent.ParentRunID, kind: "subagent", provider: profile.Provider,
 				model: childModel, transport: childDriver.Metadata().Name,
 			}
@@ -1098,13 +1111,13 @@ func (r *subagentRuntime) execute(id string) {
 		}
 	}
 	compactionReport := r.compactionReporter(parent, parent.ParentRunID)
-	if parent.Host != nil && parent.Host.sessions != nil {
+	if parent.Host != nil && parent.Host.Sessions() != nil {
 		baseResolve := compactionResolve
 		compactionResolve = func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
 			resolvedModel, window, driver, resolveErr := baseResolve(ctx, provider, model, reasoning)
 			if resolveErr == nil {
 				driver = &meteredProviderDriver{
-					inner: driver, store: parent.Host.sessions, host: parent.Host, sessionID: parent.SessionID,
+					inner: driver, store: parent.Host.Sessions(), host: parent.Host, sessionID: parent.SessionID,
 					runID: parent.ParentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name,
 				}
 			}
@@ -1114,6 +1127,7 @@ func (r *subagentRuntime) execute(id string) {
 	}
 	contextManager := subagentTurnContext{
 		instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
+		noteActivity: func(activity string) { r.noteVisibleActivity(id, activity) },
 		inner: turnContext{
 			structuredSummary: true, largeToolTokens: parent.ContextConfig.LargeToolResultTokens,
 			compactTargetTokens: contextBudget.Target, minReclaimTokens: parent.ContextConfig.MinReclaimTokens,
@@ -1121,13 +1135,13 @@ func (r *subagentRuntime) execute(id string) {
 			resolveSummarizer: lazyCompactionResolver(compactionResolve, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, compactionReport, parent.ContextConfig.MaxSummaryTokens),
 		},
 	}
-	if parent.Host != nil && parent.Host.sessions != nil {
+	if parent.Host != nil && parent.Host.Sessions() != nil {
 		contextManager.inner.putArtifact = func(ctx context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
-			return parent.Host.sessions.PutArtifact(ctx, parent.SessionID, childRun.RunID, kind, payload, preview)
+			return parent.Host.Sessions().PutArtifact(ctx, parent.SessionID, childRun.RunID, kind, payload, preview)
 		}
 	}
 	if parent.Host != nil {
-		contextManager.inner.compactHooks = parent.Host.autoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
+		contextManager.inner.compactHooks = parent.Host.AutoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
 	}
 	definitionID := childRun.HolderID
 	if definitionID == "azem-main" {
@@ -1151,7 +1165,7 @@ func (r *subagentRuntime) execute(id string) {
 	if parent.Host != nil {
 		metadata := hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD}
 		taskCompleted := hyagent.NewOutputGuardrail("claude-task-completed-hook", func(guardCtx context.Context, input hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
-			decision := parent.Host.hooks.Dispatch(guardCtx, hooks.Envelope{
+			decision := parent.Host.HookDispatcher().Dispatch(guardCtx, hooks.Envelope{
 				SessionID: parent.SessionID, AgentID: id, AgentType: profile.Type, CWD: profile.CWD,
 				HookEventName: hooks.TaskCompleted, TaskID: id, TaskSubject: active.run.Description,
 				TaskDescription: prompt, LastAssistantMessage: strings.TrimSpace(input.Output.Text),
@@ -1165,7 +1179,7 @@ func (r *subagentRuntime) execute(id string) {
 			reason := firstNonempty(strings.TrimSpace(decision.Reason), "A TaskCompleted hook requested more work before completion.")
 			return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, message.NewText(message.RoleUser, reason)), nil
 		})
-		engine.OutputGuardrails = append(engine.OutputGuardrails, parent.Host.stopHookGuardrail(metadata, hooks.SubagentStop, func(input hyagent.OutputGuardrailInput) string {
+		engine.OutputGuardrails = append(engine.OutputGuardrails, parent.Host.StopHookGuardrail(metadata, hooks.SubagentStop, func(input hyagent.OutputGuardrailInput) string {
 			messages := append(append([]message.Message(nil), input.Messages...), input.Output)
 			transcript, marshalErr := json.Marshal(messages)
 			if marshalErr != nil {
@@ -1189,6 +1203,7 @@ func (r *subagentRuntime) execute(id string) {
 	active.run.CWD = profile.CWD
 	active.run.AccountID = profile.AccountID
 	active.run.Isolation = profile.Isolation
+	active.lastVisibleAt = time.Now()
 	running := cloneSubagentRun(active.run)
 	r.mu.Unlock()
 	if err := r.store.Save(r.ctx, running); err != nil {
@@ -1213,7 +1228,7 @@ func (r *subagentRuntime) execute(id string) {
 				current.blocks = discardAgentAttemptBlocks(current.blocks, childRun.RunID)
 			}
 			r.mu.Unlock()
-			if parent.Host != nil && !parent.Host.emit(frameCtx, Event{
+			if parent.Host != nil && !parent.Host.EmitEvent(frameCtx, Event{
 				Kind: EventProviderRetry, SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id,
 				State: "restarted", Data: map[string]string{"scope": "attempt"},
 			}) {
@@ -1333,9 +1348,22 @@ func (r *subagentRuntime) persistActiveState(id, summary string) error {
 		r.mu.Unlock()
 		return context.Canceled
 	}
+	// A new explicit wait summary resets the idle clock once (SUBAGENT-005),
+	// but a retry loop repeating the same summary every 100ms is not fresh
+	// progress: the idle watchdog must still fire for a child that only
+	// spins on lease/workspace conflicts, and the spin must not write the
+	// store or emit state on every iteration.
+	repeated := active.run.State == agentservice.SubagentRunning &&
+		active.run.Summary == summary && active.activity == summary
+	if repeated {
+		r.mu.Unlock()
+		return nil
+	}
 	run := cloneSubagentRun(active.run)
 	run.State = agentservice.SubagentRunning
 	run.Summary = summary
+	active.activity = summary
+	active.lastVisibleAt = time.Now()
 	r.mu.Unlock()
 	if err := r.store.Save(r.ctx, run); err != nil {
 		return err
@@ -1471,7 +1499,7 @@ func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
 	}
 	if parentHost != nil && !request.stopHookRan {
 		metadata := hooks.Metadata{SessionID: run.SessionID, RunID: run.ChildRunID, AgentID: run.ID, AgentType: run.Type, ParentRunID: run.ParentRunID, ParentToolCallID: run.ParentToolCallID, CWD: run.CWD}
-		if err := parentHost.dispatchLifecycle(parentHost.ctx, hooks.SubagentStop, metadata, func(e *hooks.Envelope) {
+		if err := parentHost.DispatchLifecycleHook(parentHost.BaseContext(), hooks.SubagentStop, metadata, func(e *hooks.Envelope) {
 			e.Trigger, e.StopHookActive, e.LastAssistantMessage = string(run.State), false, run.Output
 			e.AgentTranscriptPath = agentTranscriptPath
 		}); err != nil && run.State == agentservice.SubagentCompleted {
@@ -1482,7 +1510,7 @@ func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
 	finalizeSubagentWorktree(&run, worktreeRepoRoot)
 	if parentHost != nil && removedWorktree != "" && run.WorktreePath == "" {
 		metadata := hooks.Metadata{SessionID: run.SessionID, RunID: run.ChildRunID, AgentID: run.ID, AgentType: run.Type, ParentRunID: run.ParentRunID, ParentToolCallID: run.ParentToolCallID, CWD: run.CWD}
-		_ = parentHost.dispatchLifecycle(parentHost.ctx, hooks.WorktreeRemove, metadata, func(e *hooks.Envelope) { e.WorktreePath = removedWorktree })
+		_ = parentHost.DispatchLifecycleHook(parentHost.BaseContext(), hooks.WorktreeRemove, metadata, func(e *hooks.Envelope) { e.WorktreePath = removedWorktree })
 	}
 	run.Summary = subagentSummary(run)
 
@@ -1551,7 +1579,7 @@ func (r *subagentRuntime) prepareWorktree(ctx context.Context, parent subagentPa
 	if parent.Host != nil {
 		metadata := hooks.Metadata{SessionID: parent.SessionID, RunID: parent.ParentRunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, CWD: profile.CWD}
 		envelope := hooks.Envelope{SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID, AgentType: metadata.AgentType, ParentRunID: metadata.ParentRunID, CWD: metadata.CWD, HookEventName: hooks.WorktreeCreate, Name: id}
-		decision := parent.Host.hooks.Dispatch(ctx, envelope)
+		decision := parent.Host.HookDispatcher().Dispatch(ctx, envelope)
 		if decision.PreventContinuation {
 			return preparedSubagentWorktree{}, fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, decision.StopReason)
 		}
@@ -1589,47 +1617,97 @@ func (r *subagentRuntime) AutoWakePending(sessionID string) {
 	if host == nil {
 		return
 	}
-	runs, err := r.store.List(r.ctx, sessionID)
-	if err != nil {
-		return
-	}
-	for _, run := range runs {
-		if run.Background && !run.CompletionDelivered && run.State != agentservice.SubagentCancelled && subagentTerminal(run.State) {
-			r.maybeAutoWake(host, run)
-			return
-		}
-	}
+	r.maybeAutoWakeSession(host, sessionID)
 }
 
-func (r *subagentRuntime) maybeAutoWake(host *Service, run agentservice.SubagentRun) {
-	if !r.cfg.AutoWake || host == nil || !run.Background || run.CompletionDelivered ||
-		run.State == agentservice.SubagentCancelled || !subagentTerminal(run.State) {
+func (r *subagentRuntime) maybeAutoWake(host providerHost, run agentservice.SubagentRun) {
+	if host == nil || strings.TrimSpace(run.SessionID) == "" {
+		return
+	}
+	r.maybeAutoWakeSession(host, run.SessionID)
+}
+
+func (r *subagentRuntime) maybeAutoWakeSession(host providerHost, sessionID string) {
+	if !r.cfg.AutoWake || host == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	pending, err := r.undeliveredBackgroundCompletions(sessionID)
+	if err != nil || len(pending) == 0 {
 		return
 	}
 	r.mu.Lock()
-	if r.ctx.Err() != nil || r.wakeInFlight[run.ID] {
+	if r.ctx.Err() != nil {
 		r.mu.Unlock()
 		return
 	}
-	r.wakeInFlight[run.ID] = true
+	claimed := make([]agentservice.SubagentRun, 0, len(pending))
+	for _, run := range pending {
+		if r.wakeInFlight[run.ID] {
+			continue
+		}
+		r.wakeInFlight[run.ID] = true
+		claimed = append(claimed, run)
+	}
+	if len(claimed) == 0 {
+		r.mu.Unlock()
+		return
+	}
 	r.wg.Add(1)
 	r.mu.Unlock()
 	go func() {
 		defer r.wg.Done()
 		defer func() {
 			r.mu.Lock()
-			delete(r.wakeInFlight, run.ID)
+			for _, run := range claimed {
+				delete(r.wakeInFlight, run.ID)
+			}
 			r.mu.Unlock()
 		}()
-		current, err := r.store.Get(r.ctx, run.ID)
-		if err != nil || current.CompletionDelivered || !host.canStartAutoWake(current.SessionID) {
+		if !host.CanStartAutoWake(sessionID) {
 			return
 		}
-		if err := host.startSubagentAutoWake(current); err != nil {
+		current := make([]agentservice.SubagentRun, 0, len(claimed))
+		for _, run := range claimed {
+			latest, getErr := r.store.Get(r.ctx, run.ID)
+			if getErr != nil || latest.CompletionDelivered || latest.State == agentservice.SubagentCancelled ||
+				!latest.Background || !subagentTerminal(latest.State) {
+				continue
+			}
+			current = append(current, latest)
+		}
+		if len(current) == 0 {
 			return
 		}
-		_ = r.store.SetCompletionDelivered(r.ctx, run.ID, true)
+		if err := host.StartSubagentAutoWake(current); err != nil {
+			return
+		}
+		for _, run := range current {
+			_ = r.store.SetCompletionDelivered(r.ctx, run.ID, true)
+		}
 	}()
+}
+
+func (r *subagentRuntime) undeliveredBackgroundCompletions(sessionID string) ([]agentservice.SubagentRun, error) {
+	runs, err := r.store.List(r.ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	pending := make([]agentservice.SubagentRun, 0, len(runs))
+	for _, run := range runs {
+		if run.Background && !run.CompletionDelivered && run.State != agentservice.SubagentCancelled && subagentTerminal(run.State) {
+			pending = append(pending, run)
+		}
+	}
+	slices.SortFunc(pending, func(left, right agentservice.SubagentRun) int {
+		if left.FinishedAt.Equal(right.FinishedAt) {
+			return strings.Compare(left.ID, right.ID)
+		}
+		if left.FinishedAt.Before(right.FinishedAt) {
+			return -1
+		}
+		return 1
+	})
+	return pending, nil
 }
 
 func (r *subagentRuntime) compactionReporter(parent subagentParentRuntime, runID string) compactionUsageReporter {
@@ -1637,7 +1715,7 @@ func (r *subagentRuntime) compactionReporter(parent subagentParentRuntime, runID
 		return nil
 	}
 	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens, cacheWriteTokens int) {
-		parent.Host.emit(parent.Host.ctx, Event{Kind: EventContextUsage, SessionID: parent.SessionID, RunID: runID, State: "reported", Data: map[string]string{
+		parent.Host.EmitEvent(parent.Host.BaseContext(), Event{Kind: EventContextUsage, SessionID: parent.SessionID, RunID: runID, State: "reported", Data: map[string]string{
 			"inputTokens": fmt.Sprint(usage.InputTokens), "cachedInputTokens": fmt.Sprint(usage.CachedInputTokens),
 			"outputTokens": fmt.Sprint(usage.OutputTokens), "totalTokens": fmt.Sprint(usage.TotalTokens),
 			"reasoningTokens":     fmt.Sprint(reasoningTokens),

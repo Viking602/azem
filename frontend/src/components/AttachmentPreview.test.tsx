@@ -40,6 +40,13 @@ describe("AttachmentPreview", () => {
     const thumbnail = container.querySelector<HTMLImageElement>(".attachment-preview-image img");
     expect(thumbnail?.src).toBe("data:image/png;base64,iVBORw==");
     expect(attachmentDataURL).toHaveBeenCalledWith("session-1", attachment);
+    Object.defineProperty(thumbnail!, "naturalWidth", { configurable: true, value: 800 });
+    Object.defineProperty(thumbnail!, "naturalHeight", { configurable: true, value: 400 });
+    await act(async () => thumbnail!.dispatchEvent(new Event("load")));
+    const preview = container.querySelector<HTMLElement>(".attachment-preview");
+    expect(preview?.getAttribute("data-sized")).toBe("true");
+    expect(preview?.style.getPropertyValue("--preview-display-w")).toBe("420px");
+    expect(preview?.style.getPropertyValue("--preview-display-h")).toBe("210px");
 
     await act(async () => container?.querySelector<HTMLButtonElement>(".attachment-preview-image")?.click());
     expect(document.querySelector('[role="dialog"] .attachment-lightbox-canvas img')?.getAttribute("src")).toBe("data:image/png;base64,iVBORw==");
@@ -60,5 +67,21 @@ describe("AttachmentPreview", () => {
     await act(async () => container?.querySelector<HTMLButtonElement>(".attachment-preview-remove")?.click());
     expect(remove).toHaveBeenCalledOnce();
     expect(document.querySelector(".attachment-lightbox")).toBeNull();
+  });
+
+  it("keeps a small conversation image at its natural size", async () => {
+    vi.mocked(attachmentDataURL).mockResolvedValue("data:image/png;base64,iVBORw==");
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root?.render(<AttachmentPreview attachment={attachment} sessionId="session-1" language="zh-CN" variant="message" />));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    const thumbnail = container.querySelector<HTMLImageElement>(".attachment-preview-image img")!;
+    Object.defineProperty(thumbnail, "naturalWidth", { configurable: true, value: 96 });
+    Object.defineProperty(thumbnail, "naturalHeight", { configurable: true, value: 64 });
+    await act(async () => thumbnail.dispatchEvent(new Event("load")));
+    const preview = container.querySelector<HTMLElement>(".attachment-preview");
+    expect(preview?.style.getPropertyValue("--preview-display-w")).toBe("96px");
+    expect(preview?.style.getPropertyValue("--preview-display-h")).toBe("64px");
   });
 });

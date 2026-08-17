@@ -5,10 +5,46 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestWorkspaceShellMaxWallClockDefaultsAndValidation(t *testing.T) {
+	cfg := Default()
+	if cfg.Workspace.Shell.MaxWallClockDuration != DefaultShellMaxWallClock {
+		t.Fatalf("default shell wall clock = %s", cfg.Workspace.Shell.MaxWallClockDuration)
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workspace.Shell.MaxWallClockDuration != DefaultShellMaxWallClock {
+		t.Fatalf("omitted shell wall clock = %s", loaded.Workspace.Shell.MaxWallClockDuration)
+	}
+	if err := os.WriteFile(path, []byte("version: 1\nworkspace:\n  shell:\n    max_context_output_bytes: 65536\n    max_artifact_output_bytes: 4194304\n    stop_on_output_limit: true\n    max_concurrency: 2\n    max_wall_clock: 30m\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workspace.Shell.MaxWallClockDuration != 30*time.Minute {
+		t.Fatalf("configured shell wall clock = %s", loaded.Workspace.Shell.MaxWallClockDuration)
+	}
+	if err := os.WriteFile(path, []byte("version: 1\nworkspace:\n  shell:\n    max_context_output_bytes: 65536\n    max_artifact_output_bytes: 4194304\n    stop_on_output_limit: true\n    max_concurrency: 2\n    max_wall_clock: 0s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path, root); err == nil {
+		t.Fatal("zero shell wall clock was accepted")
+	}
+}
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	root := t.TempDir()
@@ -40,6 +76,24 @@ func TestPluginsConfigDefaultsAndLoad(t *testing.T) {
 	}
 }
 
+func TestUpdatePluginTrustHooksPreservesOtherPluginFields(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nplugins:\n  enabled: true\n  import_codex: true\n  codex_imports: [demo@market]\n  trust_hooks: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdatePluginTrustHooks(path, true); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Plugins.TrustHooks || !loaded.Plugins.ImportCodex || !reflect.DeepEqual(loaded.Plugins.CodexImports, []string{"demo@market"}) {
+		t.Fatalf("updated plugins = %#v", loaded.Plugins)
+	}
+}
+
 func TestHooksConfigDefaultsAndLoad(t *testing.T) {
 	cfg := Default()
 	if !cfg.Hooks.Enabled || cfg.Hooks.TrustProject || cfg.Hooks.ClaudeCompatibility || cfg.Hooks.DefaultTimeoutParsed != 5*time.Second || cfg.Hooks.FailurePolicy != "open" {
@@ -60,6 +114,40 @@ func TestHooksConfigDefaultsAndLoad(t *testing.T) {
 	cfg.Hooks.FailurePolicy = "unsafe"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("invalid hook failure policy accepted")
+	}
+}
+
+func TestHooksDisabledLoadUpdateAndValidation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	id := "SessionStart\x1fnotify\x1f" + filepath.Join(root, "hooks.json") + "\x1f"
+	if err := os.WriteFile(path, []byte("version: 1\nhooks:\n  disabled:\n    - "+strconv.Quote(id)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded.Hooks.Disabled, []string{id}) {
+		t.Fatalf("loaded disabled hooks = %#v", loaded.Hooks.Disabled)
+	}
+	if err := UpdateHooksDisabled(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared.Hooks.Disabled) != 0 {
+		t.Fatalf("cleared disabled hooks = %#v", cleared.Hooks.Disabled)
+	}
+	if err := UpdateHooksDisabled(path, []string{id, id}); err == nil {
+		t.Fatal("duplicate disabled hook was accepted")
+	}
+	invalid := Default()
+	invalid.Hooks.Disabled = []string{" "}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("empty disabled hook identity was accepted")
 	}
 }
 
@@ -922,7 +1010,8 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	}
 	subagents := cfg.Agents.Subagents
 	if !subagents.Enabled || subagents.MaxDepth != 2 || subagents.MaxConcurrency != 32 ||
-		subagents.AwaitDuration != 10*time.Minute || !subagents.AutoWake {
+		subagents.AwaitTimeout != "0s" || subagents.AwaitDuration != 0 ||
+		subagents.IdleTimeout != "5m" || subagents.IdleDuration != DefaultSubagentIdleTimeout || !subagents.AutoWake {
 		t.Fatalf("subagent defaults = %#v", subagents)
 	}
 	if subagents.Budget.SoftRequests != 200 || !subagents.Budget.SoftRequestNotice ||
@@ -958,6 +1047,44 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 	invalid.Agents.Subagents.Budget.MaxWallClock = "20m"
 	if err := invalid.Validate(); err != nil {
 		t.Fatalf("foreground wait window was incorrectly treated as a task runtime limit: %v", err)
+	}
+	zeroWait := Default()
+	for _, value := range []string{"0s", "0"} {
+		zeroWait.Agents.Subagents.AwaitTimeout = value
+		if err := zeroWait.Validate(); err != nil {
+			t.Fatalf("await_timeout %q was rejected: %v", value, err)
+		}
+		if zeroWait.Agents.Subagents.AwaitDuration != 0 {
+			t.Fatalf("await_timeout %q duration = %s", value, zeroWait.Agents.Subagents.AwaitDuration)
+		}
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.AwaitTimeout = "-1s"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative await_timeout was accepted")
+	}
+	zeroIdle := Default()
+	for _, value := range []string{"0s", "0", ""} {
+		zeroIdle.Agents.Subagents.IdleTimeout = value
+		if err := zeroIdle.Validate(); err != nil {
+			t.Fatalf("idle_timeout %q was rejected: %v", value, err)
+		}
+		if zeroIdle.Agents.Subagents.IdleDuration != 0 {
+			t.Fatalf("idle_timeout %q duration = %s", value, zeroIdle.Agents.Subagents.IdleDuration)
+		}
+	}
+	validIdle := Default()
+	validIdle.Agents.Subagents.IdleTimeout = "5m"
+	if err := validIdle.Validate(); err != nil {
+		t.Fatalf("idle_timeout 5m was rejected: %v", err)
+	}
+	if validIdle.Agents.Subagents.IdleDuration != 5*time.Minute {
+		t.Fatalf("idle_timeout 5m duration = %s", validIdle.Agents.Subagents.IdleDuration)
+	}
+	invalid = Default()
+	invalid.Agents.Subagents.IdleTimeout = "-1s"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("negative idle_timeout was accepted")
 	}
 	invalid = Default()
 	invalid.Agents.Subagents.Budget.MaxTokens = -1
@@ -1469,6 +1596,9 @@ func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
 	if err := UpdateShellMaxConcurrency(path, 4); err != nil {
 		t.Fatal(err)
 	}
+	if err := UpdateShellMaxWallClock(path, 1800); err != nil {
+		t.Fatal(err)
+	}
 	if err := UpdateSubagentAwaitTimeout(path, 30); err != nil {
 		t.Fatal(err)
 	}
@@ -1480,14 +1610,49 @@ func TestUpdateRuntimeCapacitySettingsPreserveConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(updated)
-	if !strings.Contains(text, "# capacity comment") || !strings.Contains(text, "max_concurrency: 4") || !strings.Contains(text, "max_depth: -1") || !strings.Contains(text, "await_timeout: 30s") {
+	if !strings.Contains(text, "# capacity comment") || !strings.Contains(text, "max_concurrency: 4") || !strings.Contains(text, "max_wall_clock: 1800s") || !strings.Contains(text, "max_depth: -1") || !strings.Contains(text, "await_timeout: 30s") {
 		t.Fatalf("updated config:\n%s", updated)
+	}
+	if err := UpdateShellMaxWallClock(path, 30); err == nil {
+		t.Fatal("too-short shell wall clock was accepted")
 	}
 	if err := UpdateShellMaxConcurrency(path, 0); err == nil {
 		t.Fatal("zero shell concurrency was accepted")
 	}
+	if err := UpdateSubagentAwaitTimeout(path, 0); err != nil {
+		t.Fatalf("wait-until-complete await timeout was rejected: %v", err)
+	}
+	updated, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(updated), "await_timeout: 0s") {
+		t.Fatalf("zero await timeout was not persisted:\n%s", updated)
+	}
 	if err := UpdateSubagentAwaitTimeout(path, 4); err == nil {
 		t.Fatal("too-short await timeout was accepted")
+	}
+	if err := UpdateSubagentAwaitTimeout(path, -1); err == nil {
+		t.Fatal("negative await timeout was accepted")
+	}
+	if err := UpdateSubagentIdleTimeout(path, 300); err != nil {
+		t.Fatal(err)
+	}
+	updated, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(updated), "idle_timeout: 300s") {
+		t.Fatalf("idle timeout was not persisted:\n%s", updated)
+	}
+	if err := UpdateSubagentIdleTimeout(path, 0); err != nil {
+		t.Fatalf("disabled idle timeout was rejected: %v", err)
+	}
+	if err := UpdateSubagentIdleTimeout(path, 10); err == nil {
+		t.Fatal("too-short idle timeout was accepted")
+	}
+	if err := UpdateSubagentIdleTimeout(path, -1); err == nil {
+		t.Fatal("negative idle timeout was accepted")
 	}
 	if err := UpdateSubagentMaxDepth(path, -2); err == nil {
 		t.Fatal("invalid recursive depth was accepted")

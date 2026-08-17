@@ -55,15 +55,15 @@ export default function PullRequestPanel() {
   return <aside className="pull-request-panel" aria-label={t("pullRequestDetails")}>
     <header className="pull-request-panel-header titlebar-region">
       <div className="pull-request-tab"><GitPullRequest size={15} /><strong>PR #{number}</strong></div>
-      <button className="icon-button" type="button" disabled={loading} aria-label={t("refresh")} title={t("refresh")} onClick={() => void refreshPullRequestDetail(number)}><RefreshCw className={loading ? "spin" : ""} size={15} /></button>
-      <button className="icon-button" type="button" aria-label={t("closePullRequestPanel")} title={t("closePullRequestPanel")} onClick={close}><X size={16} /></button>
+      <button className="icon-button" type="button" disabled={loading} aria-label={t("refresh")} onClick={() => void refreshPullRequestDetail(number)}><RefreshCw className={loading ? "spin" : ""} size={15} /></button>
+      <button className="icon-button" type="button" aria-label={t("closePullRequestPanel")} onClick={close}><X size={16} /></button>
     </header>
 
     {error && <div className="pull-request-panel-error" role="alert"><AlertCircle size={15} /><span>{error}</span></div>}
     {loading && !pullRequest && <div className="pull-request-panel-loading"><LoaderCircle className="spin" size={21} /><span>{t("loadingPullRequests")}</span></div>}
     {pullRequest?.number === number && <div className="pull-request-panel-scroll">
       <section className="pull-request-hero">
-        <div className="pull-request-title-line"><h1>{pullRequest.title}</h1><button className="icon-button" type="button" aria-label={t("editPullRequest")} title={t("editPullRequest")} onClick={() => setDialog("edit")}><Pencil size={15} /></button><button className="icon-button" type="button" aria-label={t("openGitHub")} title={t("openGitHub")} onClick={() => void openExternalURL(pullRequest.url)}><Github size={17} /></button></div>
+        <div className="pull-request-title-line"><h1>{pullRequest.title}</h1><button className="icon-button" type="button" aria-label={t("editPullRequest")} onClick={() => setDialog("edit")}><Pencil size={15} /></button><button className="icon-button" type="button" aria-label={t("openGitHub")} onClick={() => void openExternalURL(pullRequest.url)}><Github size={17} /></button></div>
         <Metadata pullRequest={pullRequest} openReviewers={() => setDialog("reviewer")} confirm={setConfirmation} />
         <div className="pull-request-primary-actions">
           <button type="button" className={monitor?.enabled ? "monitor-button active" : "monitor-button"} disabled={mutating || pullRequest.state !== "OPEN"} onClick={() => void togglePullRequestMonitor(number, !monitor?.enabled)}>
@@ -193,13 +193,13 @@ function DescriptionSection({ pullRequest, edit }: { pullRequest: PullRequest; e
 }
 
 type MarkdownAnchorProps = ComponentProps<"a"> & { baseURL: string };
-function SafeMarkdownAnchor({ baseURL, href, children, title }: MarkdownAnchorProps) {
+function SafeMarkdownAnchor({ baseURL, href, children }: MarkdownAnchorProps) {
   const destination = resolveExternalURL(href, baseURL);
   const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     if (destination) void openExternalURL(destination);
   };
-  return <a href={destination ?? undefined} title={title} aria-disabled={destination ? undefined : true} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{children}</a>;
+  return <a href={destination ?? undefined} aria-disabled={destination ? undefined : true} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{children}</a>;
 }
 
 function InertMarkdownImage({ alt, title }: ComponentProps<"img">) {
@@ -276,7 +276,7 @@ function CommentsSection({ pullRequest, review }: { pullRequest: PullRequest; re
   return <section className="pull-request-comments" aria-labelledby="pull-request-comments-heading">
     <header><h2 id="pull-request-comments-heading">{t("comments")} · {pullRequest.comments.length}</h2><button type="button" onClick={review}><ShieldCheck size={14} />{t("review")}</button></header>
     <div className="pull-request-comment-list">{pullRequest.comments.length === 0 ? <div className="pull-request-section-empty"><MessageCircle size={16} />{t("noComments")}</div> : pullRequest.comments.map((comment) => <article key={comment.id || `${comment.author.login}-${comment.createdAt}`}><header><Actor actor={comment.author} /><time dateTime={comment.createdAt}>{dateLabel(comment.createdAt)}</time></header><div className="pull-request-markdown compact"><Markdown components={commentComponents}>{comment.body}</Markdown></div></article>)}</div>
-    {pullRequest.state === "OPEN" && <form className="pull-request-comment-composer" onSubmit={(event) => void submit(event)}><label className="sr-only" htmlFor="pull-request-comment">{t("commentPlaceholder")}</label><textarea id="pull-request-comment" value={body} onChange={(event) => setBody(event.target.value)} placeholder={t("commentPlaceholder")} /><button type="submit" aria-label={t("postComment")} title={t("postComment")} disabled={mutating || !body.trim()}><Send size={15} /></button></form>}
+    {pullRequest.state === "OPEN" && <form className="pull-request-comment-composer" onSubmit={(event) => void submit(event)}><label className="sr-only" htmlFor="pull-request-comment">{t("commentPlaceholder")}</label><textarea id="pull-request-comment" value={body} onChange={(event) => setBody(event.target.value)} placeholder={t("commentPlaceholder")} /><button type="submit" aria-label={t("postComment")} disabled={mutating || !body.trim()}><Send size={15} /></button></form>}
   </section>;
 }
 

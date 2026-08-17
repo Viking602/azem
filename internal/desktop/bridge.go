@@ -16,6 +16,7 @@ import (
 
 	azemapp "github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/desktop/termhost"
 	"github.com/Viking602/azem/internal/githubpr"
 	"github.com/Viking602/azem/internal/session"
 )
@@ -23,30 +24,44 @@ import (
 const (
 	EventName            = "azem:event"
 	PullRequestEventName = "azem:pull-request"
+	TerminalEventName    = "azem:terminal"
+
+	// EventKindBridgeError is emitted by the bridge itself when runtime
+	// delivery fails; it never originates from the app event stream.
+	EventKindBridgeError = "bridge_error"
 )
+
+// LocalEventKinds lists event kinds the desktop bridge injects locally on top
+// of the app runtime contract. cmd/gen-contracts merges them into the
+// generated TypeScript EventKind union.
+func LocalEventKinds() []string {
+	return []string{EventKindBridgeError}
+}
 
 type EventEmitter func(string, ...any) bool
 
 var readClipboardImage = azemapp.ReadClipboardImage
 
 type Snapshot struct {
-	Workspace            string                  `json:"workspace"`
-	CurrentBranch        string                  `json:"currentBranch,omitempty"`
-	SessionID            string                  `json:"sessionId"`
-	Provider             string                  `json:"provider"`
-	Model                string                  `json:"model"`
-	Reasoning            string                  `json:"reasoning"`
-	AgentMode            string                  `json:"agentMode"`
-	Language             string                  `json:"language"`
-	ApprovalMode         string                  `json:"approvalMode"`
-	QueueMode            string                  `json:"queueMode"`
-	SubagentConcurrency  int                     `json:"subagentConcurrency"`
-	SubagentMaxDepth     int                     `json:"subagentMaxDepth"`
-	ShellConcurrency     int                     `json:"shellConcurrency"`
-	SubagentAwaitSeconds int                     `json:"subagentAwaitSeconds"`
-	ChatGPTFastMode      bool                    `json:"chatgptFastMode"`
-	Sequence             uint64                  `json:"sequence"`
-	PullRequestMonitors  []githubpr.MonitorState `json:"pullRequestMonitors,omitempty"`
+	Workspace                string                  `json:"workspace"`
+	CurrentBranch            string                  `json:"currentBranch,omitempty"`
+	SessionID                string                  `json:"sessionId"`
+	Provider                 string                  `json:"provider"`
+	Model                    string                  `json:"model"`
+	Reasoning                string                  `json:"reasoning"`
+	AgentMode                string                  `json:"agentMode"`
+	Language                 string                  `json:"language"`
+	ApprovalMode             string                  `json:"approvalMode"`
+	QueueMode                string                  `json:"queueMode"`
+	SubagentConcurrency      int                     `json:"subagentConcurrency"`
+	SubagentMaxDepth         int                     `json:"subagentMaxDepth"`
+	ShellConcurrency         int                     `json:"shellConcurrency"`
+	ShellMaxWallClockSeconds int                     `json:"shellMaxWallClockSeconds"`
+	SubagentAwaitSeconds     int                     `json:"subagentAwaitSeconds"`
+	SubagentIdleSeconds      int                     `json:"subagentIdleSeconds"`
+	ChatGPTFastMode          bool                    `json:"chatgptFastMode"`
+	Sequence                 uint64                  `json:"sequence"`
+	PullRequestMonitors      []githubpr.MonitorState `json:"pullRequestMonitors,omitempty"`
 }
 
 type TurnRequest struct {
@@ -116,6 +131,7 @@ type Event struct {
 	SkillDiagnostics  []azemapp.SkillDiagnostic      `json:"skillDiagnostics,omitempty"`
 	PluginCatalog     []azemapp.PluginCatalogEntry   `json:"pluginCatalog,omitempty"`
 	PluginDiagnostics []azemapp.PluginDiagnostic     `json:"pluginDiagnostics,omitempty"`
+	HookCatalog       *azemapp.HookCatalogSnapshot   `json:"hookCatalog,omitempty"`
 	ContextProfile    *azemapp.ContextProfile        `json:"contextProfile,omitempty"`
 	Todo              any                            `json:"todo,omitempty"`
 	Memories          any                            `json:"memories,omitempty"`
@@ -125,6 +141,7 @@ type Event struct {
 	Background        any                            `json:"background,omitempty"`
 	BackgroundLogs    any                            `json:"backgroundLogs,omitempty"`
 	GitBranches       []azemapp.GitBranchEntry       `json:"gitBranches,omitempty"`
+	UsageReport       *session.UsageReport           `json:"usageReport,omitempty"`
 	WorkspaceDirty    bool                           `json:"workspaceDirty,omitempty"`
 	At                time.Time                      `json:"at"`
 }
@@ -140,8 +157,10 @@ type Bridge struct {
 	cancel       context.CancelFunc
 	start        sync.Once
 	sequence     atomic.Uint64
+	terminalSeq  atomic.Uint64
 	pullRequests *githubpr.Client
 	prMonitor    *githubpr.Monitor
+	terminals    *termhost.Host
 }
 
 func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventEmitter, openProject func(string, string, int64) error) *Bridge {
@@ -153,6 +172,7 @@ func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventE
 	bridge.pullRequests = githubpr.NewClient(bridge.workspace)
 	statePath := pullRequestMonitorStatePath(boot.Paths.StateDir, bridge.workspace)
 	bridge.prMonitor = githubpr.NewMonitor(ctx, bridge.pullRequests, statePath, bridge.startPullRequestRepair, bridge.emitPullRequestMonitor)
+	bridge.terminals = termhost.New(bridge.workspace, bridge.emitTerminal)
 	return bridge
 }
 
@@ -185,14 +205,16 @@ func (b *Bridge) Initialise() Snapshot {
 		Provider: b.cfg.Defaults.Provider, Model: b.cfg.Defaults.Model,
 		Reasoning: b.cfg.Defaults.Reasoning, AgentMode: b.cfg.Defaults.AgentMode,
 		Language: b.cfg.Defaults.Language, ApprovalMode: b.cfg.Defaults.ApprovalMode,
-		QueueMode:            b.cfg.Defaults.QueueMode,
-		SubagentConcurrency:  b.cfg.Agents.Subagents.MaxConcurrency,
-		SubagentMaxDepth:     b.cfg.Agents.Subagents.MaxDepth,
-		ShellConcurrency:     b.cfg.Workspace.Shell.MaxConcurrency,
-		SubagentAwaitSeconds: int(b.cfg.Agents.Subagents.AwaitDuration.Seconds()),
-		ChatGPTFastMode:      b.cfg.Providers.ChatGPT.FastMode,
-		Sequence:             b.sequence.Load(),
-		PullRequestMonitors:  b.prMonitor.States(),
+		QueueMode:                b.cfg.Defaults.QueueMode,
+		SubagentConcurrency:      b.cfg.Agents.Subagents.MaxConcurrency,
+		SubagentMaxDepth:         b.cfg.Agents.Subagents.MaxDepth,
+		ShellConcurrency:         b.cfg.Workspace.Shell.MaxConcurrency,
+		ShellMaxWallClockSeconds: int(b.cfg.Workspace.Shell.MaxWallClockDuration.Seconds()),
+		SubagentAwaitSeconds:     int(b.cfg.Agents.Subagents.AwaitDuration.Seconds()),
+		SubagentIdleSeconds:      int(b.cfg.Agents.Subagents.IdleDuration.Seconds()),
+		ChatGPTFastMode:          b.cfg.Providers.ChatGPT.FastMode,
+		Sequence:                 b.sequence.Load(),
+		PullRequestMonitors:      b.prMonitor.States(),
 	}
 }
 
@@ -202,6 +224,28 @@ func (b *Bridge) SkillCatalog() (SkillCatalogSnapshot, error) {
 		return SkillCatalogSnapshot{}, err
 	}
 	return SkillCatalogSnapshot{Entries: entries, Diagnostics: diagnostics}, nil
+}
+
+func (b *Bridge) HookCatalog() (*azemapp.HookCatalogSnapshot, error) {
+	if b.runtime == nil {
+		return nil, fmt.Errorf("runtime is unavailable")
+	}
+	catalog := b.runtime.HookCatalogSnapshot()
+	if catalog == nil {
+		return &azemapp.HookCatalogSnapshot{}, nil
+	}
+	return catalog, nil
+}
+
+func (b *Bridge) UsageReport(scope string) (session.UsageReport, error) {
+	if b.runtime == nil {
+		return session.UsageReport{}, fmt.Errorf("runtime is unavailable")
+	}
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return b.runtime.UsageReport(ctx, scope)
 }
 
 func currentGitBranch(ctx context.Context, workspace string) string {
@@ -384,7 +428,7 @@ func (b *Bridge) startPullRequestRepair(ctx context.Context, pullRequest githubp
 		return "", err
 	}
 	if err := b.runtime.ExecuteAction(ctx, azemapp.Action{Kind: azemapp.ActionListSessions}); err != nil && !errors.Is(err, context.Canceled) {
-		b.emitEvent(Event{Kind: "bridge_error", State: "failed", Text: err.Error(), At: time.Now().UTC()})
+		b.emitEvent(Event{Kind: EventKindBridgeError, State: "failed", Text: err.Error(), At: time.Now().UTC()})
 	}
 	return sessionID, nil
 }
@@ -400,6 +444,9 @@ func (b *Bridge) ForkSession(sessionID string, activate bool) (string, error) {
 }
 
 func (b *Bridge) Close() {
+	if b.terminals != nil {
+		b.terminals.CloseAll()
+	}
 	b.cancel()
 	b.prMonitor.Close()
 }
@@ -412,10 +459,11 @@ func (b *Bridge) prime() {
 		{Kind: azemapp.ActionListAgentTypes, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListSkills, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListPlugins, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListHooks, SessionID: b.sessionID},
 	}
 	for _, action := range actions {
 		if err := b.runtime.ExecuteAction(b.ctx, action); err != nil && !errors.Is(err, context.Canceled) {
-			b.emitEvent(Event{Kind: "bridge_error", State: "failed", Text: err.Error(), At: time.Now().UTC()})
+			b.emitEvent(Event{Kind: EventKindBridgeError, State: "failed", Text: err.Error(), At: time.Now().UTC()})
 		}
 	}
 }
@@ -425,7 +473,7 @@ func (b *Bridge) pump() {
 		event, err := b.runtime.NextEvent(b.ctx)
 		if err != nil {
 			if b.ctx.Err() == nil {
-				b.emitEvent(Event{Kind: "bridge_error", State: "failed", Text: err.Error(), At: time.Now().UTC()})
+				b.emitEvent(Event{Kind: EventKindBridgeError, State: "failed", Text: err.Error(), At: time.Now().UTC()})
 			}
 			return
 		}
@@ -449,10 +497,10 @@ func eventDTO(event azemapp.Event) Event {
 		Agent: event.Agent, AgentBlocks: event.AgentBlocks, AgentCatalog: event.AgentCatalog,
 		AgentSnapshots: event.AgentSnapshots, SkillCatalog: event.SkillCatalog,
 		SkillDiagnostics: event.SkillDiagnostics, PluginCatalog: event.PluginCatalog,
-		PluginDiagnostics: event.PluginDiagnostics, ContextProfile: event.ContextProfile,
+		PluginDiagnostics: event.PluginDiagnostics, HookCatalog: event.HookCatalog, ContextProfile: event.ContextProfile,
 		Todo: event.Todo, Memories: event.Memories, Recap: event.Recap,
 		ModelRoutes: event.ModelRoutes, ModelProviders: event.ModelProviders, Background: event.Background,
-		BackgroundLogs: event.BackgroundLogs, GitBranches: event.GitBranches,
+		BackgroundLogs: event.BackgroundLogs, GitBranches: event.GitBranches, UsageReport: event.UsageReport,
 		WorkspaceDirty: event.WorkspaceDirty, At: event.At,
 	}
 }
@@ -460,19 +508,19 @@ func eventDTO(event azemapp.Event) Event {
 func allowedAction(kind azemapp.ActionKind) bool {
 	switch kind {
 	case azemapp.ActionLogin, azemapp.ActionLogout,
-		azemapp.ActionNewSession, azemapp.ActionListSessions, azemapp.ActionResumeSession, azemapp.ActionRefreshSession,
-		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionMarkSessionUnread,
+		azemapp.ActionNewSession, azemapp.ActionListSessions, azemapp.ActionListUsage, azemapp.ActionResumeSession, azemapp.ActionRefreshSession,
+		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionArchiveInactiveSessions, azemapp.ActionMarkSessionUnread,
 		azemapp.ActionCompact, azemapp.ActionResolveApproval, azemapp.ActionResolveUserInput, azemapp.ActionResolvePlan, azemapp.ActionSetApprovalMode,
 		azemapp.ActionSetLanguage, azemapp.ActionSetQueueMode, azemapp.ActionReconcileAttempt,
 		azemapp.ActionInspectAgent, azemapp.ActionListAgentTypes, azemapp.ActionListPersonas,
 		azemapp.ActionCancelAgent, azemapp.ActionRefreshMCP, azemapp.ActionReconnectMCP,
 		azemapp.ActionSetMCPEnabled, azemapp.ActionUpsertMCPServer, azemapp.ActionDeleteMCPServer,
-		azemapp.ActionListSkills, azemapp.ActionListPlugins, azemapp.ActionSetPluginImported, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
+		azemapp.ActionListSkills, azemapp.ActionListPlugins, azemapp.ActionSetPluginImported, azemapp.ActionListHooks, azemapp.ActionSetPluginHooksTrusted, azemapp.ActionSetHookEnabled, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
 		azemapp.ActionListMemories, azemapp.ActionRemember, azemapp.ActionForgetMemory,
 		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled,
 		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
 		azemapp.ActionResetModelRoute, azemapp.ActionSetSubagentConcurrency,
-		azemapp.ActionSetShellConcurrency, azemapp.ActionSetSubagentAwait,
+		azemapp.ActionSetSubagentDepth, azemapp.ActionSetShellConcurrency, azemapp.ActionSetShellMaxWallClock, azemapp.ActionSetSubagentAwait, azemapp.ActionSetSubagentIdle,
 		azemapp.ActionSetChatGPTFastMode, azemapp.ActionSetSessionPreferences, azemapp.ActionListBackground,
 		azemapp.ActionStartBackground, azemapp.ActionStopBackground, azemapp.ActionLogsBackground,
 		azemapp.ActionListGitBranches, azemapp.ActionSwitchGitBranch, azemapp.ActionCreateGitBranch:

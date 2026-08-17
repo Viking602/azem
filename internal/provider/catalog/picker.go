@@ -64,7 +64,7 @@ func AvailableReasoningLevels(provider string, model Model) []string {
 	}
 	if provider == "grok" {
 		modelID := strings.ToLower(model.ID)
-		if strings.Contains(modelID, "multi-agent") || strings.Contains(modelID, "4.20") {
+		if strings.Contains(modelID, "multi-agent") || strings.Contains(modelID, "4.20") || strings.Contains(modelID, "4.6") {
 			return grokMultiAgentLevels
 		}
 		if strings.Contains(modelID, "grok-4.5") || model.SupportsReasoning {

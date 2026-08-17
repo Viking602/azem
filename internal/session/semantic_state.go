@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -128,6 +129,9 @@ func commitSemanticState(ctx context.Context, queries *dbgen.Queries, sessionID,
 		return 0, err
 	}
 	if base.revision == commit.BaseRevision+1 && base.digest == commit.SourceDigest {
+		if base.cursor != commit.Cursor || !bytes.Equal(base.state, commit.State) {
+			return 0, fmt.Errorf("%w: semantic state diverged for source digest", ErrSemanticStateStale)
+		}
 		return base.revision, nil
 	}
 	if base.revision != commit.BaseRevision {
@@ -150,6 +154,7 @@ func commitSemanticState(ctx context.Context, queries *dbgen.Queries, sessionID,
 type semanticCommitBase struct {
 	revision int64
 	cursor   WriterCursorV1
+	state    json.RawMessage
 	digest   string
 	exists   bool
 }
@@ -166,6 +171,7 @@ func loadSemanticCommitBase(ctx context.Context, queries *dbgen.Queries, session
 	if err := json.Unmarshal(row.Cursor, &base.cursor); err != nil {
 		return base, fmt.Errorf("decode current semantic cursor: %w", err)
 	}
+	base.state = append(json.RawMessage(nil), row.State...)
 	base.revision, base.digest, base.exists = row.Revision, row.SourceDigest, true
 	return base, nil
 }

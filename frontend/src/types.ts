@@ -1,3 +1,7 @@
+import type { ActionKind, EventKind } from "./contracts";
+
+export type { ActionKind, EventKind } from "./contracts";
+
 export type View = "thread" | "projects" | "files" | "changes" | "pullRequests" | "runs" | "agents" | "extensions" | "recovery";
 export type InspectorTab = "environment" | "changes" | "agents" | "context";
 export type DeliveryMode = "queue" | "guide";
@@ -17,7 +21,9 @@ export interface Snapshot {
   subagentConcurrency: number;
   subagentMaxDepth?: number;
   shellConcurrency?: number;
+  shellMaxWallClockSeconds?: number;
   subagentAwaitSeconds?: number;
+  subagentIdleSeconds?: number;
   chatgptFastMode: boolean;
   sequence: number;
   pullRequestMonitors?: PullRequestMonitorState[];
@@ -76,7 +82,7 @@ export interface TurnRequest {
 }
 
 export interface ActionRequest {
-  kind: string;
+  kind: ActionKind;
   target?: string;
   decision?: string;
   sessionId?: string;
@@ -186,7 +192,68 @@ export interface Block {
   attachments?: Attachment[];
 }
 
-export type SettingsSection = "catalog" | "models" | "subagents" | "governance" | "appearance" | "extensions";
+export type SettingsSection = "catalog" | "models" | "subagents" | "governance" | "appearance" | "extensions" | "archive" | "usage";
+
+export type UsageScope = "project" | "all";
+
+export interface UsageDay {
+  date: string;
+  tokens: number;
+  requests: number;
+}
+
+export interface UsageKindRow {
+  kind: string;
+  tokens: number;
+  requests: number;
+}
+
+export interface UsageModelRow {
+  provider: string;
+  model: string;
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cacheReported: boolean;
+  cacheWriteReported: boolean;
+  requests: number;
+}
+
+export interface UsageSkillRow {
+  name: string;
+  activations: number;
+}
+
+export interface UsageReport {
+  scope: UsageScope | string;
+  workspace?: string;
+  from: string;
+  to: string;
+  empty: boolean;
+  requests: number;
+  sessions: number;
+  runs: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  reportedInputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cacheReported: boolean;
+  cacheWriteReported: boolean;
+  peakDay?: string;
+  peakDayTokens: number;
+  currentStreak: number;
+  longestStreak: number;
+  longestRunMs?: number;
+  days: UsageDay[];
+  kinds: UsageKindRow[];
+  models: UsageModelRow[];
+  skills: UsageSkillRow[];
+}
 
 export interface SettingsSearchTarget {
   section: SettingsSection;
@@ -265,6 +332,7 @@ export interface SkillEntry {
   name: string;
   description: string;
   sourcePath: string;
+  logoPath?: string;
   bundled: boolean;
   eager: boolean;
   disabled: boolean;
@@ -296,6 +364,7 @@ export interface MCPServerEntry {
   toolCount: number;
   tools: MCPToolEntry[];
   error: string;
+  icon?: string;
 }
 
 export interface MCPServerMutation {
@@ -313,6 +382,43 @@ export interface MCPServerMutation {
   callTimeout?: string;
   maxConcurrency?: number;
   approval?: "always" | "never";
+}
+
+export interface HookSourceEntry {
+  id: string;
+  name: string;
+  origin: "plugin" | "user" | "project" | "additional" | string;
+  pluginId?: string;
+  source: string;
+  hookCount: number;
+  trusted: boolean;
+  warning?: string;
+  logoPath?: string;
+}
+
+export interface HookCommandEntry {
+  id: string;
+  name: string;
+  event: string;
+  matcher: string;
+  command: string;
+  source: string;
+  origin: string;
+  enabled: boolean;
+}
+
+export interface HookDiagnostic {
+  source: string;
+  event?: string;
+  message: string;
+}
+
+export interface HookCatalog {
+  enabled: boolean;
+  trustHooks: boolean;
+  sources: HookSourceEntry[];
+  commands: HookCommandEntry[];
+  diagnostics: HookDiagnostic[];
 }
 
 export interface PluginEntry {
@@ -521,10 +627,10 @@ export interface ModelRouteConfig {
 }
 
 export interface ModelRoute {
-  Scope: string;
-  Role: string;
-  Label: string;
-  Route: ModelRouteConfig;
+  scope: string;
+  role: string;
+  label: string;
+  route: ModelRouteConfig;
 }
 
 export interface LLMuxModelConfig {
@@ -543,29 +649,30 @@ export interface LLMuxModelConfig {
 }
 
 export interface ModelProvider {
-	ID: string;
-	DisplayName: string;
-	Backend: string;
-	DefaultBaseURL: string;
-	BaseURL: string;
-	EnvKey: string;
-	Enabled: boolean;
-	CredentialConfigured: boolean;
-	CredentialSource: "stored" | "environment" | "pending" | "none";
-	Subscription?: boolean;
-	AccountID?: string;
-	AccountLabel?: string;
-	AccountPlan?: string;
-	QuotaAvailable?: boolean;
-	QuotaUsedPercent?: number;
-	QuotaResetsAt?: number;
-	QuotaBalance?: string;
-	QuotaUnlimited?: boolean;
-	QuotaWarning?: string;
-	ModelsDevID?: string;
-	ModelsSource?: string;
-	ModelsWarning?: string;
-	Models: LLMuxModelConfig[];
+	id: string;
+	displayName: string;
+	backend: string;
+	defaultBaseUrl: string;
+	baseUrl: string;
+	envKey: string;
+	enabled: boolean;
+	credentialConfigured: boolean;
+	credentialSource: "stored" | "environment" | "pending" | "none";
+	subscription?: boolean;
+	accountId?: string;
+	accountLabel?: string;
+	accountPlan?: string;
+	quotaAvailable?: boolean;
+	quotaPeriod?: "weekly" | "monthly" | "credits" | string;
+	quotaUsedPercent?: number;
+	quotaResetsAt?: number;
+	quotaBalance?: string;
+	quotaUnlimited?: boolean;
+	quotaWarning?: string;
+	modelsDevId?: string;
+	modelsSource?: string;
+	modelsWarning?: string;
+	models: LLMuxModelConfig[];
 }
 
 export interface ContextContribution {
@@ -600,19 +707,19 @@ export interface ContextProfile {
 }
 
 export interface SessionRecap {
-  SessionID: string;
-  Anchor: string;
-  CoveredBoundary: string;
-  Goal: string;
-  Summary: string;
-  OpenItems: string;
-  Revision: number;
-  UpdatedAt: string;
+  sessionId: string;
+  anchor?: string;
+  coveredBoundary?: string;
+  goal?: string;
+  summary?: string;
+  openItems?: string;
+  revision: number;
+  updatedAt: string;
 }
 
 export interface RuntimeEvent {
   sequence: number;
-  kind: string;
+  kind: EventKind;
   sessionId?: string;
   runId?: string;
   agentId?: string;
@@ -630,6 +737,8 @@ export interface RuntimeEvent {
   agentSnapshots?: Array<Record<string, unknown>>;
   skillCatalog?: Array<Record<string, unknown>>;
   pluginCatalog?: Array<Record<string, unknown>>;
+  hookCatalog?: Record<string, unknown>;
+  usageReport?: UsageReport;
   contextProfile?: ContextProfile;
   todo?: TodoList;
   recap?: SessionRecap;

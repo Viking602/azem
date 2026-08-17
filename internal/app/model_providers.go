@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/catalog"
@@ -24,10 +25,18 @@ func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntr
 	type subscriptionAccount struct{ id, label string }
 	activeAccounts := make(map[string]subscriptionAccount, 2)
 	for _, account := range accounts {
+		providerID := llmuxdriver.CanonicalProviderID(account.Provider)
 		if account.Status == "active" {
-			providerID := llmuxdriver.CanonicalProviderID(account.Provider)
+			if providerID == "grok" {
+				account = s.authentication.HydrateGrokAccount(ctx, account)
+			}
 			stored[providerID] = true
+		}
+	}
+	for _, providerID := range []string{"chatgpt", "grok"} {
+		if account, ok := s.activeSubscriptionAccount(ctx, providerID); ok {
 			activeAccounts[providerID] = subscriptionAccount{account.ID, firstNonEmpty(account.DisplayName, account.Email, account.ID)}
+			stored[providerID] = true
 		}
 	}
 	s.mu.Lock()
@@ -49,11 +58,12 @@ func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntr
 		if account.id != "" {
 			source = "stored"
 		}
+		models, warning, sourceName := s.cachedSubscriptionModels(ctx, subscription.id, account.id)
 		entries = append(entries, ModelProviderEntry{
 			ID: subscription.id, DisplayName: subscription.name, Backend: "subscription", Subscription: true,
 			Enabled: account.id != "", CredentialConfigured: account.id != "", CredentialSource: source,
 			AccountID: account.id, AccountLabel: account.label,
-			ModelsDevID: subscription.logo, ModelsSource: "subscription", Models: []config.LLMuxModelConfig{},
+			ModelsDevID: subscription.logo, ModelsSource: sourceName, ModelsWarning: warning, Models: models,
 		})
 	}
 	for _, profile := range profiles {
@@ -186,6 +196,44 @@ func (s *Service) modelProviderAPIKey(ctx context.Context, profile llmuxdriver.P
 	return "", "none", fmt.Errorf("%s requires an API key before models can be fetched", profile.DisplayName)
 }
 
+func (s *Service) refreshSubscriptionCatalog(ctx context.Context, providerID string) error {
+	if s.catalog == nil || s.authentication == nil {
+		return fmt.Errorf("subscription catalog is unavailable")
+	}
+	accounts, err := s.authentication.Accounts(ctx, providerID)
+	if err != nil {
+		return err
+	}
+	accountID := ""
+	for _, account := range accounts {
+		if account.Status == "active" {
+			accountID = account.ID
+			break
+		}
+	}
+	if accountID == "" {
+		return fmt.Errorf("%s is not signed in", providerID)
+	}
+	models, err := s.catalog.List(ctx, providerID, accountID, true)
+	if err != nil {
+		return err
+	}
+	models = s.catalog.EnrichWithModelsDev(ctx, models)
+	models.Models = s.catalogModelsWithAvailability(providerID, models.Models)
+	encoded, err := json.Marshal(models.Models)
+	if err != nil {
+		return err
+	}
+	state := "fresh"
+	if models.Stale {
+		state = "stale"
+	}
+	s.emit(ctx, Event{Kind: EventModelCatalog, State: state, Text: models.Warning, Data: map[string]string{
+		"provider": providerID, "accountID": accountID, "models": string(encoded),
+	}})
+	return nil
+}
+
 func (s *Service) emitModelProviders(ctx context.Context, state string) error {
 	if s.authentication == nil {
 		return fmt.Errorf("authentication is unavailable")
@@ -199,9 +247,110 @@ func (s *Service) emitModelProviders(ctx context.Context, state string) error {
 		if entry.Enabled && !entry.Subscription {
 			s.emitConfiguredModelCatalog(ctx, entry.ID, entry.Models)
 		}
+		if entry.Subscription && entry.Enabled && len(entry.Models) > 0 {
+			s.emitConfiguredModelCatalog(ctx, entry.ID, entry.Models)
+		}
 	}
 	s.scheduleSubscriptionQuotaRefresh(entries)
+	s.scheduleSubscriptionCatalogRefresh(entries)
 	return nil
+}
+
+func (s *Service) activeSubscriptionAccount(ctx context.Context, providerID string) (authservice.Account, bool) {
+	if s.authentication == nil {
+		return authservice.Account{}, false
+	}
+	accounts, err := s.authentication.Accounts(ctx, providerID)
+	if err != nil {
+		return authservice.Account{}, false
+	}
+	active := make([]authservice.Account, 0, len(accounts))
+	for _, account := range accounts {
+		if account.Status == "active" {
+			active = append(active, account)
+		}
+	}
+	if len(active) == 0 {
+		return authservice.Account{}, false
+	}
+	sort.SliceStable(active, func(i, j int) bool { return active[i].UpdatedAt.After(active[j].UpdatedAt) })
+	if s.catalog != nil {
+		for _, account := range active {
+			cached, found, err := s.catalog.Cached(ctx, providerID, account.ID)
+			if err == nil && found && len(cached.Models) > 0 {
+				return account, true
+			}
+		}
+	}
+	return active[0], true
+}
+
+func (s *Service) cachedSubscriptionModels(ctx context.Context, providerID, accountID string) ([]config.LLMuxModelConfig, string, string) {
+	if accountID == "" || s.catalog == nil {
+		return []config.LLMuxModelConfig{}, "", "subscription"
+	}
+	cached, found, err := s.catalog.Cached(ctx, providerID, accountID)
+	if err != nil {
+		return []config.LLMuxModelConfig{}, err.Error(), "subscription"
+	}
+	if !found {
+		return []config.LLMuxModelConfig{}, "", "subscription"
+	}
+	models := subscriptionModelsFromCatalog(s.catalogModelsWithAvailability(providerID, cached.Models))
+	source := "subscription"
+	if cached.Stale {
+		source = "subscription_stale"
+	}
+	return models, cached.Warning, source
+}
+
+func (s *Service) scheduleSubscriptionCatalogRefresh(entries []ModelProviderEntry) {
+	targets := make([]ModelProviderEntry, 0, 2)
+	for _, entry := range entries {
+		if entry.Subscription && entry.AccountID != "" {
+			targets = append(targets, entry)
+		}
+	}
+	if len(targets) == 0 || s.catalog == nil || s.authentication == nil {
+		return
+	}
+	go s.refreshSubscriptionCatalogs(targets)
+}
+
+func (s *Service) refreshSubscriptionCatalogs(targets []ModelProviderEntry) {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	changed := false
+	for _, target := range targets {
+		models, err := s.catalog.List(ctx, target.ID, target.AccountID, true)
+		if err != nil {
+			continue
+		}
+		models = s.catalog.EnrichWithModelsDev(ctx, models)
+		models.Models = s.catalogModelsWithAvailability(target.ID, models.Models)
+		encoded, encodeErr := json.Marshal(models.Models)
+		if encodeErr != nil {
+			continue
+		}
+		state := "fresh"
+		if models.Stale {
+			state = "stale"
+		}
+		s.emit(ctx, Event{Kind: EventModelCatalog, State: state, Text: models.Warning, Data: map[string]string{
+			"provider": target.ID, "accountID": target.AccountID, "models": string(encoded),
+		}})
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	entries, err := s.modelProviderEntries(ctx)
+	if err != nil {
+		return
+	}
+	s.emit(ctx, Event{Kind: EventModelProviders, State: "catalog_updated", ModelProviders: entries})
 }
 
 func (s *Service) scheduleSubscriptionQuotaRefresh(entries []ModelProviderEntry) {
@@ -234,15 +383,23 @@ func (s *Service) refreshSubscriptionQuotas(targets []ModelProviderEntry) {
 				continue
 			}
 			quota, quotaErr := s.authentication.SubscriptionQuota(ctx, entries[index].ID, entries[index].AccountID)
+			if label := firstNonEmpty(quota.DisplayName, quota.Email); label != "" {
+				entries[index].AccountLabel = label
+			}
+			if quota.Plan != "" {
+				entries[index].AccountPlan = quota.Plan
+			}
 			if quotaErr != nil {
 				entries[index].QuotaWarning = quotaErr.Error()
 				entries[index].QuotaAvailable = false
+				entries[index].QuotaPeriod = ""
 				entries[index].QuotaUsedPercent = 0
 				entries[index].QuotaResetsAt = 0
 				entries[index].QuotaBalance = ""
 				entries[index].QuotaUnlimited = false
 			} else {
 				entries[index].QuotaAvailable = true
+				entries[index].QuotaPeriod = quota.Period
 				entries[index].QuotaUsedPercent = quota.UsedPercent
 				entries[index].QuotaResetsAt = quota.ResetsAt
 				entries[index].QuotaBalance = quota.Balance
@@ -422,6 +579,33 @@ func (s *Service) emitConfiguredModelCatalog(ctx context.Context, provider strin
 	if err == nil {
 		s.emit(ctx, Event{Kind: EventModelCatalog, State: "configured", Data: map[string]string{"provider": provider, "models": string(encoded)}})
 	}
+}
+
+func subscriptionModelsFromCatalog(models []catalog.Model) []config.LLMuxModelConfig {
+	result := make([]config.LLMuxModelConfig, 0, len(models))
+	for _, model := range models {
+		capabilities := make([]string, 0, 4)
+		if model.SupportsTools {
+			capabilities = append(capabilities, "tools")
+		}
+		if model.SupportsParallel {
+			capabilities = append(capabilities, "parallel-tools")
+		}
+		if model.SupportsReasoning {
+			capabilities = append(capabilities, "reasoning")
+		}
+		if model.SupportsStructured {
+			capabilities = append(capabilities, "structured-output")
+		}
+		result = append(result, config.LLMuxModelConfig{
+			ID: model.ID, Disabled: model.Disabled, Name: model.Name, Aliases: append([]string(nil), model.Aliases...),
+			Description: model.Description, ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
+			ReasoningLevels: append([]string(nil), model.ReasoningLevels...), DefaultReasoning: model.DefaultReasoning,
+			Capabilities: capabilities, InputModalities: append([]string(nil), model.InputModalities...),
+			OutputModalities: append([]string(nil), model.OutputModalities...),
+		})
+	}
+	return result
 }
 
 func configuredCatalogModels(models []config.LLMuxModelConfig) []catalog.Model {

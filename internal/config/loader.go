@@ -203,13 +203,33 @@ func UpdateShellMaxConcurrency(path string, maxConcurrency int) error {
 	})
 }
 
+func UpdateShellMaxWallClock(path string, seconds int) error {
+	if !ValidShellMaxWallClockSeconds(seconds) {
+		return fmt.Errorf("workspace.shell.max_wall_clock must be between 60 and 7200 seconds")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		shell := ensureMappingPath(root, "workspace", "shell")
+		setMappingScalar(shell, "max_wall_clock", fmt.Sprintf("%ds", seconds))
+	})
+}
+
 func UpdateSubagentAwaitTimeout(path string, seconds int) error {
-	if seconds < 5 || seconds > 3600 {
-		return fmt.Errorf("agents.subagents.await_timeout must be between 5 and 3600 seconds")
+	if !ValidSubagentAwaitSeconds(seconds) {
+		return fmt.Errorf("agents.subagents.await_timeout must be 0 (wait until complete) or between 5 and 3600 seconds")
 	}
 	return updateYAML(path, func(root *yaml.Node) {
 		subagents := ensureMappingPath(root, "agents", "subagents")
 		setMappingScalar(subagents, "await_timeout", fmt.Sprintf("%ds", seconds))
+	})
+}
+
+func UpdateSubagentIdleTimeout(path string, seconds int) error {
+	if !ValidSubagentIdleSeconds(seconds) {
+		return fmt.Errorf("agents.subagents.idle_timeout must be 0 (disabled) or between 30 and 3600 seconds")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		subagents := ensureMappingPath(root, "agents", "subagents")
+		setMappingScalar(subagents, "idle_timeout", fmt.Sprintf("%ds", seconds))
 	})
 }
 
@@ -284,8 +304,48 @@ func UpdateSkillsSelection(path string, eager, disabled []string) error {
 	})
 }
 
+// UpdateHooksDisabled atomically persists the per-hook deny list while
+// preserving every unrelated user setting and YAML comment.
+func UpdateHooksDisabled(path string, disabled []string) error {
+	candidate := Default()
+	candidate.Hooks.Disabled = append([]string(nil), disabled...)
+	if err := candidate.validateHooksDisabled(); err != nil {
+		return err
+	}
+	disabled = append([]string(nil), disabled...)
+	slices.Sort(disabled)
+	var disabledNode yaml.Node
+	if err := disabledNode.Encode(disabled); err != nil {
+		return fmt.Errorf("encode disabled hooks: %w", err)
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		hooksNode := mappingValue(root, "hooks")
+		if hooksNode == nil && len(disabled) == 0 {
+			return
+		}
+		if hooksNode == nil {
+			hooksNode = ensureMappingPath(root, "hooks")
+		}
+		deleteMappingValue(hooksNode, "disabled")
+		if len(disabled) > 0 {
+			hooksNode.Content = append(hooksNode.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "disabled"}, &disabledNode)
+		}
+		if len(hooksNode.Content) == 0 {
+			deleteMappingValue(root, "hooks")
+		}
+	})
+}
+
 // UpdateCodexPluginImports persists the explicit set of Codex plugins the user
 // chose to copy into Azem. Discovery alone never implies import.
+func UpdatePluginTrustHooks(path string, trusted bool) error {
+	return updateYAML(path, func(root *yaml.Node) {
+		pluginsNode := ensureMappingPath(root, "plugins")
+		setMappingScalar(pluginsNode, "trust_hooks", strconv.FormatBool(trusted))
+		mappingValue(pluginsNode, "trust_hooks").Tag = "!!bool"
+	})
+}
+
 func UpdateCodexPluginImports(path string, pluginIDs []string) error {
 	candidate := Default()
 	candidate.Plugins.CodexImports = append([]string(nil), pluginIDs...)

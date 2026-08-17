@@ -1,15 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AlertTriangle, AppWindow, Box, Globe2, LockKeyhole, PackageOpen,
-  Plug, Plus, RefreshCw, RotateCw, Server, Sparkles, Terminal, Trash2, Wrench, X,
+  Plug, Plus, RefreshCw, RotateCw, Search, Server, Sparkles, Terminal, Trash2, Wrench, X,
 } from "lucide-react";
 import { tFormat, translator, type Language } from "../i18n";
-import { listSkillCatalog } from "../bridge";
-import { useRuntimeStore } from "../store";
+import { listHookCatalog, listSkillCatalog } from "../bridge";
+import { pluginImportID, useRuntimeStore } from "../store";
 import type { ActionRequest, MCPServerEntry, MCPServerMutation } from "../types";
 import SkillCatalogManager from "./SkillCatalogManager";
 
-type ExtensionTab = "mcp" | "skills" | "plugins";
+type ExtensionTab = "mcp" | "skills" | "plugins" | "hooks";
+type PluginFilter = "all" | "imported" | "available";
 
 interface ExtensionsSettingsProps {
   language: Language;
@@ -46,9 +48,16 @@ export default function ExtensionsSettings({
   const mcpServers = useRuntimeStore((state) => state.mcpServers);
   const skills = useRuntimeStore((state) => state.skills);
   const plugins = useRuntimeStore((state) => state.plugins);
+  const hookCatalog = useRuntimeStore((state) => state.hookCatalog);
   const [tab, setTab] = useState<ExtensionTab>("mcp");
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [actionError, setActionError] = useState("");
   const previousAddRequest = useRef(openAddRequest);
+  const addOpener = useRef<HTMLElement | null>(null);
+  const openAdd = (event?: React.MouseEvent<HTMLButtonElement>) => {
+    addOpener.current = event?.currentTarget ?? null;
+    setAddOpen(true);
+  };
   const enabledSkills = skills.filter((skill) => !skill.disabled).length;
   const enabledPlugins = plugins.filter((plugin) => plugin.enabled && plugin.status !== "invalid").length;
   const connectedMCP = mcpServers.filter((server) => server.enabled && server.state === "ready").length;
@@ -56,7 +65,8 @@ export default function ExtensionsSettings({
   useEffect(() => {
     if (openAddRequest > previousAddRequest.current) {
       setTab("mcp");
-      setDrawerOpen(true);
+      addOpener.current = addOpener.current ?? document.querySelector<HTMLElement>(".extension-panel-actions .primary-button");
+      setAddOpen(true);
     }
     previousAddRequest.current = openAddRequest;
   }, [openAddRequest]);
@@ -67,9 +77,11 @@ export default function ExtensionsSettings({
 
   const run = async (request: ActionRequest) => {
     try {
+      setActionError("");
       await executeAction({ ...request, sessionId });
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
+      setActionError(message);
       onError(message);
       throw cause;
     }
@@ -86,61 +98,49 @@ export default function ExtensionsSettings({
   };
 
   return <section className="extension-hub" aria-label={t("extensionOverview")} data-setting-id={`extensions:${tab}`}>
-    <div className="extension-overview">
-      <div className="extension-overview-copy">
-        <span className="extension-overview-mark"><Plug size={17} /></span>
-        <div><strong>{t("extensionOverview")}</strong><small>{t("extensionMCPHint")}</small></div>
-      </div>
-      <div className="extension-stat-grid">
-        <ExtensionMetric value={`${connectedMCP} / ${mcpServers.length}`} label={t("mcpConnectedServicesMetric")} tone="green" />
-        <ExtensionMetric value={`${enabledSkills}/${skills.length}`} label={t("extensionSkillsMetric")} />
-        <ExtensionMetric value={`${enabledPlugins}/${plugins.length}`} label={t("extensionPluginsMetric")} />
-      </div>
-    </div>
-
     <div className="extension-tabbar" role="tablist" aria-label={t("extensionOverview")}>
-      <ExtensionTabButton targetID="extensions:mcp" active={tab === "mcp"} icon={Server} label={t("extensionTabMCP")} count={mcpServers.length} onClick={() => setTab("mcp")} />
-      <ExtensionTabButton targetID="extensions:skills" active={tab === "skills"} icon={Sparkles} label={t("extensionTabSkills")} count={skills.length} onClick={() => setTab("skills")} />
-      <ExtensionTabButton targetID="extensions:plugins" active={tab === "plugins"} icon={Plug} label={t("extensionTabPlugins")} count={plugins.length} onClick={() => setTab("plugins")} />
+      <ExtensionTabButton targetID="extensions:mcp" active={tab === "mcp"} icon={Server} label={t("extensionTabMCP")} count={`${connectedMCP}/${mcpServers.length}`} countLabel={t("mcpConnectedServicesMetric")} onClick={() => setTab("mcp")} />
+      <ExtensionTabButton targetID="extensions:skills" active={tab === "skills"} icon={Sparkles} label={t("extensionTabSkills")} count={`${enabledSkills}/${skills.length}`} countLabel={t("extensionSkillsMetric")} onClick={() => setTab("skills")} />
+      <ExtensionTabButton targetID="extensions:plugins" active={tab === "plugins"} icon={Plug} label={t("extensionTabPlugins")} count={`${enabledPlugins}/${plugins.length}`} countLabel={t("extensionPluginsMetric")} onClick={() => setTab("plugins")} />
+      <ExtensionTabButton targetID="extensions:hooks" active={tab === "hooks"} icon={Wrench} label={t("extensionTabHooks")} count={`${hookCatalog.sources.filter((source) => source.trusted).length}/${hookCatalog.sources.length}`} countLabel={t("extensionHooksMetric")} onClick={() => setTab("hooks")} />
     </div>
 
-    <ExtensionContent tab={tab} language={language} mcpServers={mcpServers} skills={skills} plugins={plugins} run={run} refreshSkills={refreshSkills} openDrawer={() => setDrawerOpen(true)} />
+    {actionError && <div className="extension-action-error" role="alert">{actionError}</div>}
+    <ExtensionContent tab={tab} language={language} mcpServers={mcpServers} skills={skills} plugins={plugins} hookCatalog={hookCatalog} run={run} refreshSkills={refreshSkills} openAdd={openAdd} />
 
-    {drawerOpen && <AddMCPDrawer language={language} onClose={() => setDrawerOpen(false)} onSave={async (payload) => {
+    {addOpen && <AddMCPDialog language={language} returnFocusTo={addOpener.current} onClose={() => setAddOpen(false)} onSave={async (payload) => {
       await run({ kind: "upsert_mcp_server", payload });
-      setDrawerOpen(false);
+      setAddOpen(false);
     }} />}
   </section>;
 }
 
-function ExtensionMetric({ value, label, tone = "neutral" }: { value: React.ReactNode; label: string; tone?: "neutral" | "blue" | "green" }) {
-  return <article data-tone={tone}><strong>{value}</strong><small>{label}</small></article>;
+function ExtensionTabButton({ active, icon: Icon, label, count, countLabel, onClick, targetID }: { active: boolean; icon: typeof Server; label: string; count: string; countLabel: string; onClick: () => void; targetID: string }) {
+  return <button type="button" role="tab" data-setting-id={targetID} aria-selected={active} aria-label={`${label} · ${countLabel}`} className={active ? "active" : ""} onClick={onClick}><Icon size={14} /><span>{label}</span><em>{count}</em></button>;
 }
 
-function ExtensionTabButton({ active, icon: Icon, label, count, onClick, targetID }: { active: boolean; icon: typeof Server; label: string; count: number; onClick: () => void; targetID: string }) {
-  return <button type="button" role="tab" data-setting-id={targetID} aria-selected={active} className={active ? "active" : ""} onClick={onClick}><Icon size={14} /><span>{label}</span><em>{count}</em></button>;
-}
-
-function ExtensionContent({ tab, language, mcpServers, skills, plugins, run, refreshSkills, openDrawer }: {
+function ExtensionContent({ tab, language, mcpServers, skills, plugins, hookCatalog, run, refreshSkills, openAdd }: {
   tab: ExtensionTab;
   language: Language;
   mcpServers: ReturnType<typeof useRuntimeStore.getState>["mcpServers"];
   skills: ReturnType<typeof useRuntimeStore.getState>["skills"];
   plugins: ReturnType<typeof useRuntimeStore.getState>["plugins"];
+  hookCatalog: ReturnType<typeof useRuntimeStore.getState>["hookCatalog"];
   run: (request: ActionRequest) => Promise<void>;
   refreshSkills: () => Promise<void>;
-  openDrawer: () => void;
+  openAdd: (event?: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
-  if (tab === "mcp") return <MCPServicesPanel language={language} servers={mcpServers} run={run} openDrawer={openDrawer} />;
+  if (tab === "mcp") return <MCPServicesPanel language={language} servers={mcpServers} run={run} openAdd={openAdd} />;
   if (tab === "skills") return <section className="extension-panel" role="tabpanel"><SkillCatalogManager skills={skills} language={language} onReload={refreshSkills} onSetEnabled={(name, enabled) => run({ kind: "set_skill_enabled", target: name, decision: String(enabled) })} /></section>;
+  if (tab === "hooks") return <HooksPanel language={language} catalog={hookCatalog} run={run} />;
   return <PluginsPanel language={language} plugins={plugins} run={run} />;
 }
 
-function MCPServicesPanel({ language, servers, run, openDrawer }: {
+function MCPServicesPanel({ language, servers, run, openAdd }: {
   language: Language;
   servers: MCPServerEntry[];
   run: (request: ActionRequest) => Promise<void>;
-  openDrawer: () => void;
+  openAdd: (event?: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
   const t = translator(language);
   const [pendingServers, setPendingServers] = useState<Set<string>>(new Set());
@@ -173,54 +173,298 @@ function MCPServicesPanel({ language, servers, run, openDrawer }: {
   };
   return <>
     <section className="extension-panel" role="tabpanel">
-    <header className="extension-panel-header"><div><h2>{t("extensionMCPTitle")}</h2><p>{t("mcpRuntimeHint")}</p></div><div className="extension-panel-actions"><button type="button" className="subtle-button" onClick={() => void run({ kind: "refresh_mcp" })}><RefreshCw size={13} />{t("refreshMCP")}</button><button type="button" className="primary-button" onClick={openDrawer}><Plus size={13} />{t("addMCPServer")}</button></div></header>
-    {servers.length === 0 ? <ExtensionEmpty icon={Server} title={t("noMCPServers")} hint={t("noMCPServersHint")} action={<button type="button" className="primary-button" onClick={openDrawer}><Plus size={13} />{t("addMCPServer")}</button>} /> : <div className="mcp-server-list">{servers.map((server) => <MCPServerRow key={server.name} server={server} language={language} pending={pendingServers.has(server.name)} onToggle={() => void setEnabled(server)} onReconnect={() => void run({ kind: "reconnect_mcp", target: server.name })} onDelete={() => setDeleteTarget(server)} />)}</div>}
+    <header className="extension-panel-header"><div><h2>{t("extensionMCPTitle")}</h2><p>{t("mcpRuntimeHint")}</p></div><div className="extension-panel-actions"><button type="button" className="subtle-button" onClick={() => void run({ kind: "refresh_mcp" })}><RefreshCw size={13} />{t("refreshMCP")}</button><button type="button" className="primary-button" onClick={openAdd}><Plus size={13} />{t("addMCPServer")}</button></div></header>
+    {servers.length === 0 ? <ExtensionEmpty icon={Server} title={t("noMCPServers")} hint={t("noMCPServersHint")} action={<button type="button" className="primary-button" onClick={openAdd}><Plus size={13} />{t("addMCPServer")}</button>} /> : <div className="mcp-server-list">{servers.map((server) => <MCPServerRow key={server.name} server={server} language={language} pending={pendingServers.has(server.name)} onToggle={() => void setEnabled(server)} onReconnect={() => void run({ kind: "reconnect_mcp", target: server.name })} onDelete={() => setDeleteTarget(server)} />)}</div>}
     </section>
     {deleteTarget && <DeleteMCPDialog server={deleteTarget} language={language} pending={pendingServers.has(deleteTarget.name)} onCancel={() => setDeleteTarget(null)} onConfirm={() => void remove(deleteTarget)} />}
   </>;
 }
 
-function PluginsPanel({ language, plugins, run }: { language: Language; plugins: ReturnType<typeof useRuntimeStore.getState>["plugins"]; run: (request: ActionRequest) => Promise<void> }) {
-  const t = translator(language);
-	const [pending, setPending] = useState<Set<string>>(new Set());
-	const chooseImport = async (plugin: typeof plugins[number], imported: boolean) => {
-		setPending((current) => new Set(current).add(plugin.id));
-		try {
-			await run({ kind: "set_plugin_imported", target: plugin.id, decision: String(imported) });
-		} finally {
-			setPending((current) => {
-				const next = new Set(current);
-				next.delete(plugin.id);
-				return next;
-			});
-		}
-	};
-  return <section className="extension-panel" role="tabpanel">
-    <header className="extension-panel-header"><div><h2>{t("extensionPluginsTitle")}</h2><p>{t("extensionPluginsHint")}</p></div></header>
-    {plugins.length === 0 ? <ExtensionEmpty icon={PackageOpen} title={t("noPluginsInstalled")} hint={t("noPluginsInstalledHint")} /> : <div className="plugin-grid extension-plugin-grid">{plugins.map((plugin) => <PluginCard key={plugin.id} plugin={plugin} language={language} pending={pending.has(plugin.id)} onImport={(imported) => void chooseImport(plugin, imported)} />)}</div>}
-  </section>;
+async function applyHookCatalog() {
+  const catalog = await listHookCatalog();
+  useRuntimeStore.getState().applyEvents([{
+    sequence: 0,
+    kind: "hook_catalog",
+    state: "listed",
+    hookCatalog: catalog,
+  }]);
 }
 
-function PluginCard({ plugin, language, pending, onImport }: { plugin: ReturnType<typeof useRuntimeStore.getState>["plugins"][number]; language: Language; pending: boolean; onImport: (imported: boolean) => void }) {
-  const disabled = !plugin.enabled || plugin.status === "invalid";
-	const canImport = plugin.origin === "codex_available";
-	const canStopImport = plugin.origin === "codex";
-	const icon = plugin.logoPath.startsWith("data:image/")
-		? <img className="plugin-logo" src={plugin.logoPath} alt="" />
-		: <Plug size={16} />;
-  return <article className={`plugin-card ${disabled ? "disabled" : ""}`}>
-    <div className="plugin-card-heading"><span className="plugin-mark" style={{ "--plugin-color": plugin.brandColor || "var(--muted)" } as React.CSSProperties}>{icon}</span><div><strong>{plugin.displayName || plugin.name}</strong><small>{pluginOriginLabel(plugin.origin, plugin.marketplace, plugin.version, language)}</small></div><em>{pluginStatusLabel(plugin.enabled, plugin.status, language)}</em></div>
-    <p>{plugin.description}</p>
-    <PluginCapabilities plugin={plugin} language={language} />
-    {plugin.warning && <small className="plugin-warning">{plugin.warning}</small>}
-		{(canImport || canStopImport) && <button type="button" className="subtle-button plugin-import-button" disabled={pending} onClick={() => onImport(canImport)}>{pending ? (language === "zh-CN" ? "保存中…" : "Saving…") : canImport ? (language === "zh-CN" ? "导入到 Azem" : "Import into Azem") : (language === "zh-CN" ? "停止导入" : "Stop importing")}</button>}
+function HooksPanel({ language, catalog, run }: {
+  language: Language;
+  catalog: ReturnType<typeof useRuntimeStore.getState>["hookCatalog"];
+  run: (request: ActionRequest) => Promise<void>;
+}) {
+  const t = translator(language);
+  const [pending, setPending] = useState(false);
+  const [pendingHook, setPendingHook] = useState("");
+  const [confirmTrust, setConfirmTrust] = useState(false);
+  const pluginSources = catalog.sources.filter((source) => source.origin === "plugin");
+  const localSources = catalog.sources.filter((source) => source.origin !== "plugin");
+  const setTrusted = async (trusted: boolean) => {
+    setPending(true);
+    try {
+      await run({ kind: "set_plugin_hooks_trusted", decision: String(trusted) });
+      await applyHookCatalog();
+      setConfirmTrust(false);
+    } catch {
+      // run already reports the actionable error through the settings surface.
+    } finally {
+      setPending(false);
+    }
+  };
+  const setHookEnabled = async (id: string, enabled: boolean) => {
+    setPendingHook(id);
+    try {
+      await run({ kind: "set_hook_enabled", target: id, decision: String(enabled) });
+      await applyHookCatalog();
+    } catch {
+      // run already reports the actionable error through the settings surface.
+    } finally {
+      setPendingHook("");
+    }
+  };
+  return <>
+    <section className="extension-panel" role="tabpanel">
+      <header className="extension-panel-header">
+        <div>
+          <h2>{t("extensionHooksTitle")}</h2>
+          <p>{t("extensionHooksHint")}</p>
+        </div>
+        <div className="extension-panel-actions">
+          <button type="button" className="subtle-button" onClick={() => void applyHookCatalog().catch(() => undefined)}><RefreshCw size={13} />{t("refresh")}</button>
+        </div>
+      </header>
+      <article className="hook-trust-card">
+        <div>
+          <strong>{t("trustPluginHooks")}</strong>
+          <small>{t("trustPluginHooksHint")}</small>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={catalog.trustHooks}
+          className={`settings-switch ${catalog.trustHooks ? "on" : ""}`}
+          disabled={pending}
+          aria-label={t("trustPluginHooks")}
+          onClick={() => {
+            if (catalog.trustHooks) void setTrusted(false);
+            else setConfirmTrust(true);
+          }}
+        ><span /></button>
+      </article>
+      {catalog.sources.length === 0 && catalog.commands.length === 0 ? <ExtensionEmpty icon={Wrench} title={t("noHooks")} hint={t("noHooksHint")} /> : <div className="hook-list">
+        {pluginSources.length > 0 && <div className="plugin-group-heading">{t("hookPluginGroup")}<span>{pluginSources.length}</span></div>}
+        {pluginSources.map((source) => <HookSourceRow key={source.id} source={source} language={language} />)}
+        {localSources.length > 0 && <div className="plugin-group-heading">{t("hookLocalGroup")}<span>{localSources.length}</span></div>}
+        {localSources.map((source) => <HookSourceRow key={source.id} source={source} language={language} />)}
+        {catalog.commands.length > 0 && <div className="plugin-group-heading">{t("hookLoadedGroup")}<span>{catalog.commands.length}</span></div>}
+        {catalog.commands.map((command, index) => <HookCommandRow key={command.id || `${command.event}:${command.name}:${command.source}:${index}`} command={command} language={language} pending={pendingHook === command.id} trustHooks={catalog.trustHooks} onToggle={() => void setHookEnabled(command.id, !command.enabled)} />)}
+        {catalog.diagnostics.map((item, index) => <small className="plugin-warning" key={`${item.source}:${index}`}>{item.source}: {item.message}</small>)}
+      </div>}
+    </section>
+    {confirmTrust && <TrustHooksDialog language={language} pending={pending} onCancel={() => setConfirmTrust(false)} onConfirm={() => void setTrusted(true)} />}
+  </>;
+}
+
+function hookCommandStatus(command: ReturnType<typeof useRuntimeStore.getState>["hookCatalog"]["commands"][number], trustHooks: boolean, language: Language) {
+  const t = translator(language);
+  if (!command.enabled) return { label: t("hookDisabled"), tone: "off" };
+  if (command.origin === "plugin" && !trustHooks) return { label: t("hookPendingTrust"), tone: "attention" };
+  return { label: t("hookEnabled"), tone: "ready" };
+}
+
+function HookCommandRow({ command, language, pending, trustHooks, onToggle }: {
+  command: ReturnType<typeof useRuntimeStore.getState>["hookCatalog"]["commands"][number];
+  language: Language;
+  pending: boolean;
+  trustHooks: boolean;
+  onToggle: () => void;
+}) {
+  const t = translator(language);
+  const status = hookCommandStatus(command, trustHooks, language);
+  const toggleLabel = tFormat(language, command.enabled ? "disableHook" : "enableHook", { name: command.name });
+  return <article className={`hook-command-row ${command.enabled ? "" : "disabled"}`}>
+    <span className="hook-event">{command.event}</span>
+    <div>
+      <strong>{command.name}</strong>
+      <small>{[command.matcher && `${language === "zh-CN" ? "匹配" : "match"} ${command.matcher}`, command.command, command.source].filter(Boolean).join(" · ")}</small>
+    </div>
+    <div className="hook-command-state">
+      <em className={`plugin-status ${status.tone}`}>{status.label}</em>
+      <button type="button" role="switch" aria-checked={command.enabled} aria-label={toggleLabel} className={`skill-state-switch ${command.enabled ? "on" : ""} ${pending ? "pending" : ""}`} disabled={pending || !command.id} onClick={onToggle}><i /></button>
+    </div>
+  </article>;
+}
+
+function HookSourceRow({ source, language }: { source: ReturnType<typeof useRuntimeStore.getState>["hookCatalog"]["sources"][number]; language: Language }) {
+  const t = translator(language);
+  const count = source.hookCount > 0 ? tFormat(language, "hookSourceCount", { count: source.hookCount }) : t("hookSourcePresent");
+  const origin = source.origin === "plugin" ? t("hookOriginPlugin") : source.origin === "project" ? t("hookOriginProject") : source.origin === "additional" ? t("hookOriginAdditional") : t("hookOriginUser");
+  const icon = source.logoPath?.startsWith("data:image/") ? <img className="plugin-logo" src={source.logoPath} alt="" /> : <Wrench size={16} />;
+  return <article className={`plugin-row ${source.trusted ? "" : "disabled"}`}>
+    <span className="plugin-mark">{icon}</span>
+    <div className="plugin-row-copy">
+      <div className="plugin-row-title">
+        <strong>{source.name}</strong>
+        <em className={`plugin-status ${source.trusted ? "ready" : "attention"}`}>{source.trusted ? t("hookTrusted") : t("hookPendingTrust")}</em>
+      </div>
+      <small className="plugin-row-origin">{origin} · {count}</small>
+      {source.source && <small className="plugin-row-desc">{source.source}</small>}
+      {source.warning && <small className="plugin-warning">{source.warning}</small>}
+    </div>
+  </article>;
+}
+
+function settingsOverlayHost() {
+  return document.querySelector<HTMLElement>("dialog.settings-dialog")
+    ?? document.querySelector<HTMLElement>("dialog[open]");
+}
+
+function TrustHooksDialog({ language, pending, onCancel, onConfirm }: { language: Language; pending: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const t = translator(language);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const host = settingsOverlayHost();
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !pending) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onCancel, pending]);
+  const dialog = <div className="mcp-delete-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onCancel(); }}>
+    <section className="mcp-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="trust-hooks-title" aria-describedby="trust-hooks-description">
+      <span className="mcp-delete-mark hook-trust-mark"><AlertTriangle size={17} /></span>
+      <div>
+        <h2 id="trust-hooks-title">{t("trustPluginHooksConfirmTitle")}</h2>
+        <p id="trust-hooks-description">{t("trustPluginHooksConfirmHint")}</p>
+      </div>
+      <footer>
+        <button ref={cancelRef} type="button" className="subtle-button" onClick={onCancel} disabled={pending}>{t("cancel")}</button>
+        <button type="button" className="primary-button hook-trust-confirm" disabled={pending} onClick={onConfirm}>{pending ? t("saving") : t("trustPluginHooksConfirm")}</button>
+      </footer>
+    </section>
+  </div>;
+  return host ? createPortal(dialog, host) : dialog;
+}
+
+function isAvailablePlugin(plugin: { origin: string }) {
+  return plugin.origin === "codex_available";
+}
+
+function PluginsPanel({ language, plugins, run }: { language: Language; plugins: ReturnType<typeof useRuntimeStore.getState>["plugins"]; run: (request: ActionRequest) => Promise<void> }) {
+  const t = translator(language);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<PluginFilter>("all");
+  const [pending, setPending] = useState<Set<string>>(new Set());
+  const [deleteTarget, setDeleteTarget] = useState<typeof plugins[number] | null>(null);
+  const importedCount = plugins.filter((plugin) => !isAvailablePlugin(plugin)).length;
+  const availableCount = plugins.length - importedCount;
+  const visiblePlugins = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase(language);
+    return plugins.filter((plugin) => {
+      if (filter === "imported" && isAvailablePlugin(plugin)) return false;
+      if (filter === "available" && !isAvailablePlugin(plugin)) return false;
+      if (!normalized) return true;
+      return `${plugin.displayName}\n${plugin.name}\n${plugin.description}\n${plugin.marketplace}\n${plugin.developerName}`.toLocaleLowerCase(language).includes(normalized);
+    });
+  }, [filter, language, plugins, query]);
+  const imported = visiblePlugins.filter((plugin) => !isAvailablePlugin(plugin));
+  const available = visiblePlugins.filter(isAvailablePlugin);
+  const showGroups = filter === "all" && imported.length > 0 && available.length > 0;
+  const chooseImport = async (plugin: typeof plugins[number], importedState: boolean) => {
+    const pluginID = pluginImportID(plugin);
+    if (!pluginID) {
+      try {
+        await run({ kind: "set_plugin_imported", target: "", decision: String(importedState) });
+      } catch {
+        // run already surfaces the missing-id error on the Extensions panel.
+      }
+      return;
+    }
+    setPending((current) => new Set(current).add(pluginID));
+    try {
+      await run({ kind: "set_plugin_imported", target: pluginID, decision: String(importedState) });
+      if (!importedState) setDeleteTarget(null);
+    } catch {
+      // run already reports the actionable error through the settings surface.
+    } finally {
+      setPending((current) => {
+        const next = new Set(current);
+        next.delete(pluginID);
+        return next;
+      });
+    }
+  };
+  return <>
+    <section className="extension-panel" role="tabpanel">
+    <header className="extension-panel-header"><div><h2>{t("extensionPluginsTitle")}</h2><p>{t("extensionPluginsHint")}</p></div></header>
+    {plugins.length === 0 ? <ExtensionEmpty icon={PackageOpen} title={t("noPluginsInstalled")} hint={t("noPluginsInstalledHint")} /> : <>
+      <div className="plugin-toolbar">
+        <label className="skill-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("searchPlugins")} /></label>
+        <div className="skill-filters" role="group" aria-label={t("filterPlugins")}>
+          {([
+            ["all", t("skillFilterAll"), plugins.length],
+            ["imported", t("pluginFilterImported"), importedCount],
+            ["available", t("pluginFilterAvailable"), availableCount],
+          ] as const).map(([value, label, count]) => <button type="button" key={value} className={filter === value ? "active" : ""} aria-pressed={filter === value} onClick={() => setFilter(value)}>{label}<span>{count}</span></button>)}
+        </div>
+      </div>
+      {visiblePlugins.length === 0 ? <div className="extension-empty compact"><span><Search size={18} /></span><strong>{t("noMatchingPlugins")}</strong></div> : <div className="plugin-list">
+        {imported.length > 0 && <PluginGroup heading={showGroups ? t("pluginImportedGroup") : ""} count={imported.length} plugins={imported} language={language} pending={pending} onImport={chooseImport} onDelete={setDeleteTarget} />}
+        {available.length > 0 && <PluginGroup heading={showGroups ? t("pluginAvailableGroup") : ""} count={available.length} plugins={available} language={language} pending={pending} onImport={chooseImport} onDelete={setDeleteTarget} />}
+      </div>}
+    </>}
+    </section>
+    {deleteTarget && <DeletePluginDialog plugin={deleteTarget} language={language} pending={pending.has(deleteTarget.id)} onCancel={() => setDeleteTarget(null)} onConfirm={() => void chooseImport(deleteTarget, false)} />}
+  </>;
+}
+
+function PluginGroup({ heading, count, plugins, language, pending, onImport, onDelete }: {
+  heading: string;
+  count: number;
+  plugins: ReturnType<typeof useRuntimeStore.getState>["plugins"];
+  language: Language;
+  pending: Set<string>;
+  onImport: (plugin: ReturnType<typeof useRuntimeStore.getState>["plugins"][number], imported: boolean) => Promise<void>;
+  onDelete: (plugin: ReturnType<typeof useRuntimeStore.getState>["plugins"][number]) => void;
+}) {
+  return <>
+    {heading && <div className="plugin-group-heading">{heading}<span>{count}</span></div>}
+    {plugins.map((plugin) => <PluginRow key={pluginImportID(plugin) || plugin.name} plugin={plugin} language={language} pending={pending.has(pluginImportID(plugin))} onImport={() => void onImport(plugin, true)} onDelete={() => onDelete(plugin)} />)}
+  </>;
+}
+
+function PluginRow({ plugin, language, pending, onImport, onDelete }: { plugin: ReturnType<typeof useRuntimeStore.getState>["plugins"][number]; language: Language; pending: boolean; onImport: () => void; onDelete: () => void }) {
+  const t = translator(language);
+  const available = isAvailablePlugin(plugin);
+  const faded = plugin.status === "invalid" || (!available && !plugin.enabled);
+  const canImport = available;
+  const canDelete = plugin.origin === "codex";
+  const name = plugin.displayName || plugin.name;
+  const icon = plugin.logoPath.startsWith("data:image/")
+    ? <img className="plugin-logo" src={plugin.logoPath} alt="" />
+    : <Plug size={16} />;
+  return <article className={`plugin-row ${faded ? "disabled" : ""}`}>
+    <span className="plugin-mark" style={{ "--plugin-color": plugin.brandColor || "var(--muted)" } as React.CSSProperties}>{icon}</span>
+    <div className="plugin-row-copy">
+      <div className="plugin-row-title"><strong>{name}</strong><em className={`plugin-status ${pluginStatusTone(plugin.enabled, plugin.status)}`}>{pluginStatusLabel(plugin.enabled, plugin.status, language)}</em></div>
+      <small className="plugin-row-origin">{pluginOriginLabel(plugin.origin, plugin.marketplace, plugin.version, language)}</small>
+      {plugin.description && <small className="plugin-row-desc">{plugin.description}</small>}
+      <PluginCapabilities plugin={plugin} language={language} />
+      {plugin.warning && <small className="plugin-warning">{plugin.warning}</small>}
+    </div>
+    {(canImport || canDelete) && <div className="plugin-row-actions">{canImport
+      ? <button type="button" className="primary-button plugin-import-button" disabled={pending} aria-label={tFormat(language, "importPluginNamed", { plugin: name })} onClick={(event) => { event.preventDefault(); event.stopPropagation(); onImport(); }}>{pending ? t("saving") : t("importIntoAzem")}</button>
+      : <button type="button" className="subtle-button plugin-import-button plugin-delete-button" disabled={pending} aria-label={tFormat(language, "deletePluginNamed", { plugin: name })} onClick={onDelete}>{t("deletePlugin")}</button>}</div>}
   </article>;
 }
 
 function pluginOriginLabel(origin: string, marketplace: string, version: string, language: Language) {
   const source = origin === "codex" || origin === "codex_available"
-    ? (language === "zh-CN" ? `从 Codex 导入 · ${marketplace}` : `Imported from Codex · ${marketplace}`)
-    : (language === "zh-CN" ? "Azem 目录" : "Azem directory");
+    ? `Codex · ${marketplace}`
+    : (language === "zh-CN" ? "本机安装" : "Installed locally");
   return version ? `${source} · ${version}` : source;
 }
 
@@ -230,6 +474,14 @@ function pluginStatusLabel(enabled: boolean, status: string, language: Language)
   if (!enabled) return language === "zh-CN" ? "已停用" : "Disabled";
   if (status === "ready") return language === "zh-CN" ? "已接入" : "Connected";
   return language === "zh-CN" ? "部分接入" : "Partial";
+}
+
+function pluginStatusTone(enabled: boolean, status: string) {
+  if (status === "available") return "available";
+  if (status === "restart_required") return "attention";
+  if (!enabled) return "off";
+  if (status === "ready") return "ready";
+  return "attention";
 }
 
 function PluginCapabilities({ plugin, language }: { plugin: ReturnType<typeof useRuntimeStore.getState>["plugins"][number]; language: Language }) {
@@ -247,7 +499,7 @@ function MCPServerRow({ server, language, pending, onToggle, onReconnect, onDele
   const ready = server.enabled && server.state === "ready";
   const TransportIcon = server.transport === "stdio" ? Terminal : Globe2;
   return <article className={`mcp-server-row ${!server.enabled ? "disabled" : ""}`}>
-    <span className="mcp-server-icon" data-ready={ready}><TransportIcon size={17} /></span>
+    <span className="mcp-server-icon" data-ready={ready} data-image={Boolean(server.icon?.startsWith("data:image/"))}>{server.icon?.startsWith("data:image/") ? <img src={server.icon} alt="" /> : <TransportIcon size={17} />}</span>
     <div className="mcp-server-copy">
       <div className="mcp-server-title"><strong>{server.name}</strong><span className={`mcp-state ${server.state}`}><i />{t(mcpStateKey(server.state))}</span></div>
       <small className="mcp-server-target">{server.target || (server.transport === "stdio" ? t("mcpLocalProcess") : t("mcpRemoteHTTP"))}</small>
@@ -285,8 +537,8 @@ function MCPServerActions({ server, language, pending, onToggle, onReconnect, on
   const deleteLabel = tFormat(language, "deleteMCP", { server: server.name });
   const toggleLabel = tFormat(language, server.enabled ? "disableMCP" : "enableMCP", { server: server.name });
   return <div className="mcp-server-actions">
-    {server.removable && <button type="button" className="mcp-delete" onClick={onDelete} aria-label={deleteLabel} title={deleteLabel} disabled={pending}><Trash2 size={14} /></button>}
-    {server.enabled && <button type="button" className="mcp-reconnect" onClick={onReconnect} aria-label={reconnectLabel} title={reconnectLabel} disabled={pending}><RotateCw size={14} /></button>}
+    {server.removable && <button type="button" className="mcp-delete" onClick={onDelete} aria-label={deleteLabel} disabled={pending}><Trash2 size={14} /></button>}
+    {server.enabled && <button type="button" className="mcp-reconnect" onClick={onReconnect} aria-label={reconnectLabel} disabled={pending}><RotateCw size={14} /></button>}
     <div className="mcp-server-state"><span>{server.enabled ? t("skillEnabled") : t("skillDisabled")}</span><button type="button" role="switch" aria-checked={server.enabled} aria-label={toggleLabel} className={`skill-state-switch ${server.enabled ? "on" : ""} ${pending ? "pending" : ""}`} disabled={pending} onClick={onToggle}><i /></button></div>
   </div>;
 }
@@ -311,11 +563,48 @@ function DeleteMCPDialog({ server, language, pending, onCancel, onConfirm }: { s
   </div>;
 }
 
+function DeletePluginDialog({ plugin, language, pending, onCancel, onConfirm }: { plugin: ReturnType<typeof useRuntimeStore.getState>["plugins"][number]; language: Language; pending: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const t = translator(language);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const name = plugin.displayName || plugin.name;
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !pending) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onCancel, pending]);
+  return <div className="mcp-delete-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onCancel(); }}>
+    <section className="mcp-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-plugin-title" aria-describedby="delete-plugin-description">
+      <span className="mcp-delete-mark"><Trash2 size={17} /></span>
+      <div><h2 id="delete-plugin-title">{tFormat(language, "deletePluginTitle", { plugin: name })}</h2><p id="delete-plugin-description">{t("deletePluginHint")}</p></div>
+      <footer><button ref={cancelRef} type="button" className="subtle-button" onClick={onCancel} disabled={pending}>{t("mcpCancel")}</button><button type="button" className="mcp-delete-confirm" onClick={onConfirm} disabled={pending}>{pending ? t("deletingPlugin") : t("deletePluginConfirm")}</button></footer>
+    </section>
+  </div>;
+}
+
 function ExtensionEmpty({ icon: Icon, title, hint, action }: { icon: typeof Server; title: string; hint: string; action?: React.ReactNode }) {
   return <div className="extension-empty"><span><Icon size={20} /></span><strong>{title}</strong><small>{hint}</small>{action}</div>;
 }
 
-function AddMCPDrawer({ language, onClose, onSave }: { language: Language; onClose: () => void; onSave: (payload: MCPServerMutation) => Promise<void> }) {
+const mcpAddFocusable = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+function isMCPDraftDirty(draft: MCPFormDraft) {
+  return draft.name.trim() !== ""
+    || draft.transport !== "stdio"
+    || draft.command.trim() !== ""
+    || draft.args.trim() !== ""
+    || draft.cwd.trim() !== ""
+    || !draft.inheritEnv
+    || draft.url.trim() !== ""
+    || draft.headerName.trim() !== ""
+    || draft.secretReference.trim() !== ""
+    || !draft.enabled
+    || draft.approval !== "always";
+}
+
+function AddMCPDialog({ language, onClose, onSave, returnFocusTo }: { language: Language; onClose: () => void; onSave: (payload: MCPServerMutation) => Promise<void>; returnFocusTo?: HTMLElement | null }) {
   const t = translator(language);
   const [name, setName] = useState("");
   const [transport, setTransport] = useState<MCPServerMutation["transport"]>("stdio");
@@ -331,12 +620,31 @@ function AddMCPDrawer({ language, onClose, onSave }: { language: Language; onClo
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const form = useRef<HTMLFormElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const returnFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const host = settingsOverlayHost();
+  const draft: MCPFormDraft = { name, transport, command, args, cwd, inheritEnv, url, headerName, secretReference, enabled, approval };
+  const dirty = isMCPDraftDirty(draft);
 
-  useEffect(() => form.current?.querySelector<HTMLInputElement>("input")?.focus(), []);
+  useEffect(() => {
+    form.current?.querySelector<HTMLInputElement>("input")?.focus();
+    const previous = returnFocusTo ?? returnFocus.current;
+    return () => { previous?.focus?.(); };
+  }, [returnFocusTo]);
+
+  useEffect(() => {
+    const hostNode = settingsOverlayHost();
+    const onCancel = (event: Event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!saving) onClose();
+    };
+    hostNode?.addEventListener("cancel", onCancel, true);
+    return () => hostNode?.removeEventListener("cancel", onCancel, true);
+  }, [onClose, saving]);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    const draft: MCPFormDraft = { name, transport, command, args, cwd, inheritEnv, url, headerName, secretReference, enabled, approval };
     const validation = validateMCPDraft(draft, language);
     if (validation) { setError(validation); return; }
     setSaving(true);
@@ -346,9 +654,28 @@ function AddMCPDrawer({ language, onClose, onSave }: { language: Language; onClo
     finally { setSaving(false); }
   };
 
-  return <div className="mcp-drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <aside className="mcp-drawer" role="dialog" aria-modal="true" aria-labelledby="add-mcp-title">
-      <header><div><span><Plus size={15} /></span><div><h2 id="add-mcp-title">{t("addMCPTitle")}</h2><p>{t("addMCPHint")}</p></div></div><button type="button" className="icon-button" onClick={onClose} aria-label={t("mcpCancel")}><X size={17} /></button></header>
+  const onDialogKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!saving) onClose();
+      return;
+    }
+    if (event.key !== "Tab" || !dialogRef.current) return;
+    const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(mcpAddFocusable));
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  };
+
+  const dialog = <div className="mcp-delete-backdrop" role="presentation" onMouseDown={(event) => {
+    if (event.target !== event.currentTarget || saving || dirty) return;
+    onClose();
+  }}>
+    <section ref={dialogRef} className="mcp-add-dialog" role="dialog" aria-modal="true" aria-labelledby="add-mcp-title" onKeyDown={onDialogKeyDown}>
+      <header><div><span><Plus size={15} /></span><div><h2 id="add-mcp-title">{t("addMCPTitle")}</h2><p>{t("addMCPHint")}</p></div></div><button type="button" className="icon-button" onClick={onClose} aria-label={t("mcpCancel")} disabled={saving}><X size={17} /></button></header>
       <form ref={form} onSubmit={submit}>
         <div className="mcp-form-scroll">
           <label className="mcp-field"><span>{t("mcpName")}</span><input value={name} onChange={(event) => setName(event.target.value.toLowerCase())} placeholder="local-tools" autoComplete="off" /><small>{t("mcpNameHint")}</small></label>
@@ -359,10 +686,11 @@ function AddMCPDrawer({ language, onClose, onSave }: { language: Language; onClo
           <div className="mcp-security-notice"><AlertTriangle size={14} /><span>{t("mcpConfigNotice")}</span></div>
           {error && <div className="mcp-form-error" role="alert">{error}</div>}
         </div>
-        <footer><button type="button" className="subtle-button" onClick={onClose}>{t("mcpCancel")}</button><button type="submit" className="settings-primary" disabled={saving}>{saving && <RefreshCw className="spin" size={13} />}{t("mcpSave")}</button></footer>
+        <footer><button type="button" className="subtle-button" onClick={onClose} disabled={saving}>{t("mcpCancel")}</button><button type="submit" className="settings-primary" disabled={saving}>{saving && <RefreshCw className="spin" size={13} />}{t("mcpSave")}</button></footer>
       </form>
-    </aside>
+    </section>
   </div>;
+  return host ? createPortal(dialog, host) : dialog;
 }
 
 function validateMCPDraft(draft: MCPFormDraft, language: Language) {
@@ -414,7 +742,7 @@ function MCPTransportFields({ language, transport, command, setCommand, args, se
   </>;
   return <>
     <label className="mcp-field"><span>{t("mcpURL")}</span><input type="url" value={url} onChange={(event) => setURL(event.target.value)} placeholder="https://mcp.example.com" /><small>{t("mcpURLHint")}</small></label>
-    <fieldset className="mcp-auth-fields"><legend>{t("mcpAuthHeader")}</legend><label><span>{t("mcpHeaderName")}</span><input value={headerName} onChange={(event) => setHeaderName(event.target.value)} placeholder="Authorization" /></label><label><span>{t("mcpSecretReference")}</span><input value={secretReference} onChange={(event) => setSecretReference(event.target.value)} placeholder="env:MCP_TOKEN" /></label><small>{t("mcpSecretHint")}</small></fieldset>
+    <fieldset className="mcp-field mcp-auth-fields"><legend>{t("mcpAuthHeader")}</legend><div className="mcp-auth-pair"><label className="mcp-field"><span>{t("mcpHeaderName")}</span><input value={headerName} onChange={(event) => setHeaderName(event.target.value)} placeholder="Authorization" /></label><label className="mcp-field"><span>{t("mcpSecretReference")}</span><input value={secretReference} onChange={(event) => setSecretReference(event.target.value)} placeholder="env:MCP_TOKEN" /></label></div><small>{t("mcpSecretHint")}</small></fieldset>
   </>;
 }
 

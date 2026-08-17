@@ -565,6 +565,65 @@ func assertStaleSemanticCheckpointRejected(t *testing.T, ctx context.Context, se
 	}
 }
 
+func TestRunCheckpointRejectsDivergentSemanticStateForSameSourceDigest(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "semantic-divergent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Semantic"}); err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "ship it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("d", 64)
+	cursor := WriterCursorV1{CanonicalSequence: sequence}
+	checkpoint := semanticCheckpointForTest(t, "run", "cache-a", "semantic-a", 0, cursor, digest, `{"version":1,"objective":{"text":"A"}}`, "model A")
+	checkpoint.ExpectedHighWater = &sequence
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+
+	divergent := semanticCheckpointForTest(t, "run", "cache-b", "semantic-b", 0, cursor, digest, `{"version":1,"objective":{"text":"B"}}`, "model B")
+	divergent.ExpectedHighWater = &sequence
+	if err := service.SaveRunCheckpoint(ctx, "session", divergent); !errors.Is(err, ErrRunCheckpointStale) {
+		t.Fatalf("divergent semantic commit error=%v", err)
+	}
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.CacheIdentityHash != "cache-a" || len(projection.ModelHistory.Messages) != 1 || projection.ModelHistory.Messages[0].Text != "model A" {
+		t.Fatalf("divergent checkpoint mutated projection: %+v", projection.ModelHistory)
+	}
+	semantic, err := service.LoadSemanticCheckpoint(ctx, "session")
+	if err != nil || !bytes.Contains(semantic.State, []byte(`"A"`)) {
+		t.Fatalf("semantic checkpoint=%+v err=%v", semantic, err)
+	}
+}
+
+func semanticCheckpointForTest(t *testing.T, runID, cacheIdentity, checkpointID string, baseRevision int64, cursor WriterCursorV1, digest, state, modelText string) RunCheckpoint {
+	t.Helper()
+	patch, err := json.Marshal(map[string]any{
+		"version": 1, "base_revision": baseRevision, "through": cursor, "source_digest": digest, "operations": []any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return RunCheckpoint{
+		RunID: runID, CacheIdentity: cacheIdentity,
+		ModelHistory: ModelHistory{Messages: []message.Message{message.NewText(message.RoleAssistant, modelText)}},
+		SemanticCommit: &SemanticCommit{
+			CheckpointID: checkpointID, BaseRevision: baseRevision, Cursor: cursor,
+			State: json.RawMessage(state), Patch: patch, SourceDigest: digest,
+		},
+	}
+}
+
 func TestWriterCursorRejectsBackwardTieBreakers(t *testing.T) {
 	current := WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-b", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-b"}
 	if cursorAtOrAfter(WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-a", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-b"}, current) {
@@ -1086,6 +1145,118 @@ func TestToolTimelineAndWorkspaceSessionSurviveReopen(t *testing.T) {
 	}
 }
 
+func TestArchiveInactiveSkipsPinnedRecentAndCurrentSessions(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "archive-inactive.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	alpha := t.TempDir()
+	beta := t.TempDir()
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	recent := time.Now().UTC().Add(-2 * 24 * time.Hour)
+	seedListableSession(t, ctx, service, "old-alpha", "Old Alpha", alpha, stale)
+	seedListableSession(t, ctx, service, "old-pinned", "Old Pinned", alpha, stale)
+	seedListableSession(t, ctx, service, "old-current", "Old Current", beta, stale)
+	seedListableSession(t, ctx, service, "recent-beta", "Recent Beta", beta, recent)
+	if err := service.SetUIState(ctx, "old-pinned", "pinned", true); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := service.ArchiveInactive(ctx, 30*24*time.Hour, "old-current")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("archived count=%d", count)
+	}
+	listed, err := service.List(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]bool{}
+	workspaces := map[string]string{}
+	for _, item := range listed {
+		states[item.ID] = item.Archived
+		workspaces[item.ID] = item.Workspace
+	}
+	if !states["old-alpha"] || states["old-pinned"] || states["old-current"] || states["recent-beta"] {
+		t.Fatalf("archive flags=%v", states)
+	}
+	if workspaces["old-alpha"] != canonicalTestPath(t, alpha) || workspaces["old-current"] != canonicalTestPath(t, beta) {
+		t.Fatalf("session projects=%v want alpha=%s beta=%s", workspaces, canonicalTestPath(t, alpha), canonicalTestPath(t, beta))
+	}
+
+	if err := service.SetArchived(ctx, "old-alpha", false); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := service.List(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restoredSession Session
+	for _, item := range restored {
+		if item.ID == "old-alpha" {
+			restoredSession = item
+		}
+	}
+	if restoredSession.Archived || restoredSession.UpdatedAt.Before(time.Now().UTC().Add(-time.Minute)) {
+		t.Fatalf("restored session=%#v", restoredSession)
+	}
+}
+
+func TestListKeepsArchivedSessionsOutsideTheActiveLimit(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "archive-list.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB())
+	workspace := t.TempDir()
+	now := time.Now().UTC()
+	seedListableSession(t, ctx, service, "active-new", "Active New", workspace, now)
+	seedListableSession(t, ctx, service, "active-old", "Active Old", workspace, now.Add(-time.Hour))
+	seedListableSession(t, ctx, service, "archived-old", "Archived Old", workspace, now.Add(-80*24*time.Hour))
+	if err := service.SetUIState(ctx, "archived-old", "archived", true); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.List(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 || listed[0].ID != "active-new" || listed[1].ID != "archived-old" || !listed[1].Archived {
+		t.Fatalf("limited list=%#v", listed)
+	}
+}
+
+func canonicalTestPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Clean(resolved)
+}
+
+func seedListableSession(t *testing.T, ctx context.Context, service *Service, id, title, workspace string, updatedAt time.Time) {
+	t.Helper()
+	if _, err := service.Ensure(ctx, Session{ID: id, Title: title}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, id, Block{Kind: "user", Content: title}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetWorkspaceSession(ctx, workspace, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.db.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, updatedAt.UnixNano(), id); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSessionMenuStateAndForkPersist(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "session-menu.db"))
@@ -1100,7 +1271,13 @@ func TestSessionMenuStateAndForkPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed) != 1 || listed[0].ID != "source" || listed[0].Title != "Renamed" || !listed[0].Pinned || !listed[0].Archived || !listed[0].Unread {
+	var source Session
+	for _, item := range listed {
+		if item.ID == "source" {
+			source = item
+		}
+	}
+	if source.ID != "source" || source.Title != "Renamed" || !source.Pinned || !source.Archived || !source.Unread {
 		t.Fatalf("session menu state=%#v", listed)
 	}
 	projection, err := service.LoadProjection(ctx, "forked")

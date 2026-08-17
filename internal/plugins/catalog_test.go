@@ -47,6 +47,9 @@ func TestDiscoverImportsEnabledPluginCapabilities(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(copyRoot, "skills", "review", "SKILL.md")); err != nil {
 		t.Fatalf("copied plugin content is unavailable after removing the Codex source: %v", err)
 	}
+	if result.MCPServers["demo-local"].Icon == "" || !strings.HasPrefix(result.MCPServers["demo-local"].Icon, "data:image/") {
+		t.Fatalf("plugin MCP icon = %q", result.MCPServers["demo-local"].Icon)
+	}
 	if result.MCPServers["demo-oauth"].Enabled {
 		t.Fatal("OAuth-only MCP must remain disabled until Azem has credentials")
 	}
@@ -68,7 +71,7 @@ func assertPluginEntry(t *testing.T, result Integration) {
 	if entry.HookCount != 1 || entry.HooksTrusted || !entry.HasApp {
 		t.Fatalf("extension capability counts = %#v", entry)
 	}
-	if len(result.SkillDirs) != 1 || len(result.HookSources) != 0 {
+	if len(result.SkillDirs) != 1 || len(result.HookSources) != 1 {
 		t.Fatalf("integration = %#v", result)
 	}
 }
@@ -115,12 +118,22 @@ func TestDiscoverListsCodexPluginsWithoutImportingThem(t *testing.T) {
 	home := t.TempDir()
 	data := filepath.Join(home, "data")
 	sourceRoot := filepath.Join(home, "codex-plugin")
-	mustWrite(t, filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), `{"name":"demo","version":"1","description":"Demo"}`)
+	mustWrite(t, filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), `{"name":"demo","version":"1","description":"Demo","interface":{"composerIcon":"./icon.png"}}`)
+	mustWrite(t, filepath.Join(sourceRoot, "icon.png"), string([]byte{
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+		0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+		0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+		0x42, 0x60, 0x82,
+	}))
 	catalog := installedCatalog{Installed: []installedPlugin{{PluginID: "demo@market", Name: "demo", Marketplace: "market", Version: "1", Installed: true, Enabled: true, Source: pluginSource{Path: sourceRoot}}}}
 	encoded, _ := json.Marshal(catalog)
 	result := Discover(context.Background(), Options{HomeDir: home, DataDir: data, ImportCodex: true, ListPlugins: func(context.Context) ([]byte, error) { return encoded, nil }})
 	if len(result.Entries) != 1 || result.Entries[0].Origin != "codex_available" || result.Entries[0].Status != "available" || result.Entries[0].Imported {
 		t.Fatalf("available Codex plugin = %#v", result.Entries)
+	}
+	if !strings.HasPrefix(result.Entries[0].LogoPath, "data:image/png;base64,") {
+		t.Fatalf("available plugin icon = %q", result.Entries[0].LogoPath)
 	}
 	copyRoot := filepath.Join(data, "plugin-packages", "codex", "market", "demo")
 	if _, err := os.Stat(copyRoot); !os.IsNotExist(err) {
@@ -151,6 +164,26 @@ func TestDiscoverRejectsManifestPathOutsidePlugin(t *testing.T) {
 	result := Discover(context.Background(), Options{HomeDir: home, DataDir: data})
 	if len(result.Diagnostics) == 0 || len(result.SkillDirs) != 0 {
 		t.Fatalf("expected rejected path, got %#v", result)
+	}
+}
+
+func TestDiscoverImportsFromMarketplaceCheckoutWhenCodexListFails(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, "data")
+	sourceRoot := filepath.Join(home, ".codex", ".tmp", "marketplaces", "kami", "plugins", "kami")
+	mustWrite(t, filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), `{"name":"kami","version":"1.12.0","description":"Typeset documents","skills":"./skills/"}`)
+	mustWrite(t, filepath.Join(sourceRoot, "skills", "kami", "SKILL.md"), "---\nname: kami\ndescription: Typeset documents\n---\n")
+	result := Discover(context.Background(), Options{
+		HomeDir: home, DataDir: data, ImportCodex: true,
+		CodexImports: []string{"kami@kami"},
+		ListPlugins:  func(context.Context) ([]byte, error) { return nil, os.ErrNotExist },
+	})
+	copyRoot := filepath.Join(data, "plugin-packages", "codex", "kami", "kami")
+	if _, err := os.Stat(filepath.Join(copyRoot, "skills", "kami", "SKILL.md")); err != nil {
+		t.Fatalf("marketplace fallback copy: %v diagnostics=%#v", err, result.Diagnostics)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].Origin != "codex" || result.Entries[0].ID != "kami@kami" {
+		t.Fatalf("imported catalog = %#v", result.Entries)
 	}
 }
 

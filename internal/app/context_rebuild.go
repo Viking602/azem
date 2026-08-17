@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -44,6 +45,15 @@ func (r EvidenceRefV1) String() string {
 	return value
 }
 
+func (r *EvidenceRefV1) UnmarshalJSON(data []byte) error {
+	ref, err := decodeEvidenceRef(data)
+	if err != nil {
+		return err
+	}
+	*r = ref
+	return nil
+}
+
 type StateFactV1 struct {
 	ID             string          `json:"id"`
 	Text           string          `json:"text"`
@@ -54,6 +64,33 @@ type StateFactV1 struct {
 	FirstSeenSeq   int64           `json:"first_seen_seq,omitempty"`
 	LastConfirmSeq int64           `json:"last_confirm_seq,omitempty"`
 	Supersedes     []string        `json:"supersedes,omitempty"`
+}
+
+func (f *StateFactV1) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID             string          `json:"id"`
+		Text           string          `json:"text"`
+		Status         string          `json:"status"`
+		Authority      string          `json:"authority"`
+		Confidence     string          `json:"confidence"`
+		Sources        json.RawMessage `json:"sources"`
+		FirstSeenSeq   int64           `json:"first_seen_seq,omitempty"`
+		LastConfirmSeq int64           `json:"last_confirm_seq,omitempty"`
+		Supersedes     []string        `json:"supersedes,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	refs, err := decodeEvidenceRefs(raw.Sources)
+	if err != nil {
+		return err
+	}
+	*f = StateFactV1{
+		ID: raw.ID, Text: raw.Text, Status: raw.Status, Authority: raw.Authority,
+		Confidence: raw.Confidence, Sources: refs, FirstSeenSeq: raw.FirstSeenSeq,
+		LastConfirmSeq: raw.LastConfirmSeq, Supersedes: raw.Supersedes,
+	}
+	return nil
 }
 
 type SemanticStateV1 struct {
@@ -132,7 +169,10 @@ type contextCheckpointMetadata struct {
 }
 
 func normalizeSemanticStateV1(raw string, authorities map[string]string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
+	trimmed, err := unwrapWholeJSONFence(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("semantic writer returned non-JSON output")
+	}
 	var state SemanticStateV1
 	if trimmed == "" || !json.Valid([]byte(trimmed)) {
 		return "", fmt.Errorf("semantic writer returned non-JSON output")
@@ -156,6 +196,28 @@ func normalizeSemanticStateV1(raw string, authorities map[string]string) (string
 	ensureSemanticCollections(&state)
 	encoded, err := json.Marshal(state)
 	return string(encoded), err
+}
+
+func unwrapWholeJSONFence(value string) (string, error) {
+	if !strings.HasPrefix(value, "```") {
+		return value, nil
+	}
+	lines := strings.Split(value, "\n")
+	if len(lines) < 3 {
+		return "", fmt.Errorf("semantic writer returned an incomplete JSON fence")
+	}
+	opening := strings.ToLower(strings.TrimSpace(lines[0]))
+	if opening != "```" && opening != "```json" {
+		return "", fmt.Errorf("semantic writer used unsupported fence %q", strings.TrimSpace(lines[0]))
+	}
+	if strings.TrimSpace(lines[len(lines)-1]) != "```" {
+		return "", fmt.Errorf("semantic writer returned content outside its JSON fence")
+	}
+	body := strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+	if body == "" || strings.Contains(body, "```") {
+		return "", fmt.Errorf("semantic writer JSON fence is empty or nested")
+	}
+	return body, nil
 }
 
 func normalizeSemanticFacts(state *SemanticStateV1, authorities map[string]string) (int, error) {
@@ -302,6 +364,167 @@ func parseEvidenceRef(value string) (EvidenceRefV1, bool) {
 		return EvidenceRefV1{}, false
 	}
 	return EvidenceRefV1{Kind: kind, ID: id, Range: rangePart}, true
+}
+
+func decodeEvidenceRefs(raw json.RawMessage) ([]EvidenceRefV1, error) {
+	raw = json.RawMessage(bytes.TrimSpace(raw))
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	switch raw[0] {
+	case '"':
+		ref, err := decodeEvidenceRef(raw)
+		if err != nil {
+			return nil, err
+		}
+		if ref == (EvidenceRefV1{}) {
+			return nil, nil
+		}
+		return []EvidenceRefV1{ref}, nil
+	case '[':
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil, fmt.Errorf("cannot unmarshal array into EvidenceRefV1 sources: %w", err)
+		}
+		refs := make([]EvidenceRefV1, 0, len(items))
+		for _, item := range items {
+			ref, err := decodeEvidenceRef(item)
+			if err != nil {
+				return nil, err
+			}
+			if ref == (EvidenceRefV1{}) {
+				continue
+			}
+			refs = append(refs, ref)
+		}
+		return refs, nil
+	case '{':
+		ref, err := decodeEvidenceRef(raw)
+		if err != nil {
+			return nil, err
+		}
+		if ref == (EvidenceRefV1{}) {
+			return nil, nil
+		}
+		return []EvidenceRefV1{ref}, nil
+	default:
+		return nil, fmt.Errorf("cannot unmarshal %s into Go struct field StateFactV1.sources of type app.EvidenceRefV1", jsonTokenName(raw))
+	}
+}
+
+func decodeEvidenceRef(raw json.RawMessage) (EvidenceRefV1, error) {
+	raw = json.RawMessage(bytes.TrimSpace(raw))
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return EvidenceRefV1{}, nil
+	}
+	switch raw[0] {
+	case '"':
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return EvidenceRefV1{}, err
+		}
+		return evidenceRefFromWriterString(value), nil
+	case '{':
+		return evidenceRefFromWriterObject(raw)
+	default:
+		return EvidenceRefV1{}, fmt.Errorf("cannot unmarshal %s into Go struct field StateFactV1.sources of type app.EvidenceRefV1", jsonTokenName(raw))
+	}
+}
+
+func evidenceRefFromWriterString(value string) EvidenceRefV1 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return EvidenceRefV1{}
+	}
+	if ref, ok := parseEvidenceRef(value); ok {
+		return ref
+	}
+	return EvidenceRefV1{ID: value}
+}
+
+func evidenceRefFromWriterObject(raw json.RawMessage) (EvidenceRefV1, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return EvidenceRefV1{}, err
+	}
+	kind, _, err := optionalJSONString(object, "kind")
+	if err != nil {
+		return EvidenceRefV1{}, err
+	}
+	id, _, err := optionalJSONString(object, "id")
+	if err != nil {
+		return EvidenceRefV1{}, err
+	}
+	rangePart, _, err := optionalJSONString(object, "range")
+	if err != nil {
+		return EvidenceRefV1{}, err
+	}
+	sha256sum, _, err := optionalJSONString(object, "sha256")
+	if err != nil {
+		return EvidenceRefV1{}, err
+	}
+	if strings.TrimSpace(kind) != "" && strings.TrimSpace(id) != "" {
+		return EvidenceRefV1{Kind: strings.TrimSpace(kind), ID: strings.TrimSpace(id), Range: rangePart, SHA256: sha256sum}, nil
+	}
+	for _, key := range []string{"id", "uri", "path", "quote", "ref", "source"} {
+		value, present, err := optionalJSONString(object, key)
+		if err != nil {
+			return EvidenceRefV1{}, err
+		}
+		value = strings.TrimSpace(value)
+		if !present || value == "" {
+			continue
+		}
+		if ref, ok := parseEvidenceRef(value); ok {
+			if rangePart != "" {
+				ref.Range = rangePart
+			}
+			ref.SHA256 = sha256sum
+			return ref, nil
+		}
+		return EvidenceRefV1{ID: value, Range: rangePart, SHA256: sha256sum}, nil
+	}
+	return EvidenceRefV1{}, fmt.Errorf("cannot unmarshal object into Go struct field StateFactV1.sources of type app.EvidenceRefV1")
+}
+
+func optionalJSONString(object map[string]json.RawMessage, key string) (string, bool, error) {
+	raw, ok := object[key]
+	if !ok {
+		return "", false, nil
+	}
+	raw = json.RawMessage(bytes.TrimSpace(raw))
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", false, nil
+	}
+	if raw[0] != '"' {
+		return "", false, fmt.Errorf("cannot unmarshal %s into Go struct field EvidenceRefV1.%s of type string", jsonTokenName(raw), key)
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
+func jsonTokenName(raw []byte) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return "empty value"
+	}
+	switch raw[0] {
+	case '{':
+		return "object"
+	case '[':
+		return "array"
+	case '"':
+		return "string"
+	case 't', 'f':
+		return "bool"
+	case 'n':
+		return "null"
+	default:
+		return "number"
+	}
 }
 
 func semanticStateAuthorities(raw string) map[string]string {

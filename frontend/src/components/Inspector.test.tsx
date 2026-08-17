@@ -1,14 +1,18 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { execute } from "../bridge";
+import { attachmentDataURL, execute, openExternalURL } from "../bridge";
 import { useRuntimeStore } from "../store";
 import type { Snapshot } from "../types";
 import Inspector from "./Inspector";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock("../bridge", () => ({ execute: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("../bridge", () => ({
+  execute: vi.fn().mockResolvedValue(undefined),
+  openExternalURL: vi.fn().mockResolvedValue(undefined),
+  attachmentDataURL: vi.fn().mockResolvedValue("data:image/png;base64,abc"),
+}));
 
 const snapshot: Snapshot = {
   workspace: "/workspace/azem", sessionId: "session-1", provider: "chatgpt", model: "gpt-5.6-sol",
@@ -43,8 +47,8 @@ describe("Inspector", () => {
       branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
       todo: null,
       recap: {
-        SessionID: "session-1", Anchor: "/workspace/azem", CoveredBoundary: "run-7", Revision: 3,
-        Goal: "补齐右侧栏回顾", Summary: "回顾已投影到当前会话。", OpenItems: "pending: 验证模型路由", UpdatedAt: "2026-08-12T00:00:00Z",
+        sessionId: "session-1", anchor: "/workspace/azem", coveredBoundary: "run-7", revision: 3,
+        goal: "补齐右侧栏回顾", summary: "回顾已投影到当前会话。", openItems: "pending: 验证模型路由", updatedAt: "2026-08-12T00:00:00Z",
       },
       contextUsage: {
         inputTokens: 14_000, outputTokens: 1_000, contextLimit: 128_000, reported: true,
@@ -88,6 +92,104 @@ describe("Inspector", () => {
     await act(async () => toggle.click());
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(groups.hidden).toBe(true);
+    await act(async () => root.unmount());
+  });
+
+  it("lists distinct image names with typed and web-search URLs, and opens them", async () => {
+    useRuntimeStore.setState({
+      snapshot, view: "thread", currentSessionId: "session-1", agents: [], backgroundProcesses: [],
+      branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, todo: null, recap: null, contextProfile: null,
+      blocks: [
+        {
+          id: "user-1", kind: "user", content: "看这个 https://github.com/Viking602/azem",
+          attachments: [{ id: "img-1", name: "image.png", mimeType: "image/png", path: "/tmp/image.png", size: 12 }],
+        },
+        {
+          id: "search-1", kind: "tool", title: "web_search",
+          content: JSON.stringify({ results: [{ title: "Azem 文档", url: "https://example.com/azem" }] }),
+        },
+      ],
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const rows = Array.from(container.querySelectorAll<HTMLButtonElement>(".source-row"));
+    expect(rows.map((row) => row.querySelector("strong")?.textContent)).toEqual(["图片 1", "github.com · azem", "Azem 文档"]);
+    expect(container.textContent).toContain("输入链接");
+    expect(container.textContent).toContain("网页搜索");
+
+    await act(async () => rows[1]!.click());
+    expect(openExternalURL).toHaveBeenCalledWith("https://github.com/Viking602/azem");
+
+    await act(async () => rows[0]!.click());
+    expect(attachmentDataURL).toHaveBeenCalled();
+    expect(document.querySelector(".attachment-lightbox strong")?.textContent).toBe("图片 1");
+
+    await act(async () => rows[2]!.click());
+    expect(openExternalURL).toHaveBeenCalledWith("https://example.com/azem");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("renders todo phases as Beautiful UI Task Row capsules", async () => {
+    useRuntimeStore.setState({
+      snapshot, view: "thread", currentSessionId: "session-1", blocks: [], agents: [], backgroundProcesses: [],
+      branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, recap: null, contextProfile: null,
+      todo: {
+        goal: "核验供应商并映射库存",
+        revision: 1,
+        phases: [
+          {
+            id: "phase-1", title: "核验供应商", items: [
+              { id: "item-1", content: "匹配税号", status: "completed" },
+              { id: "item-2", content: "核对联系人", status: "completed" },
+            ],
+          },
+          {
+            id: "phase-2", title: "映射库存", items: [
+              { id: "item-3", content: "读取库存文件", status: "in_progress" },
+              { id: "item-4", content: "评估缺货", status: "pending" },
+            ],
+          },
+        ],
+      },
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const rows = Array.from(container.querySelectorAll(".todo-section .bui-task-row"));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.getAttribute("data-status")).toBe("completed");
+    expect(rows[0]!.getAttribute("data-variant")).toBe("capsules");
+    expect(rows[0]!.getAttribute("data-expanded")).toBe("false");
+    expect(rows[0]!.querySelector(".bui-task-mark")?.getAttribute("data-state")).toBe("completed");
+    expect(rows[0]!.querySelector(".bui-task-title")?.textContent).toBe("核验供应商");
+    expect(rows[0]!.querySelector(".bui-task-metric")?.textContent).toBe("2/2");
+    expect(rows[0]!.querySelector(".bui-task-badge")?.textContent).toBe("已完成");
+    expect(rows[0]!.querySelector(".bui-task-header")?.getAttribute("aria-expanded")).toBe("false");
+    expect(rows[0]!.querySelector<HTMLDivElement>(".bui-task-body")?.hidden).toBe(true);
+
+    expect(rows[1]!.getAttribute("data-status")).toBe("in_progress");
+    expect(rows[1]!.querySelector(".bui-task-mark em")?.textContent).toBe("2");
+    expect(rows[1]!.querySelector(".bui-task-title")?.textContent).toBe("映射库存");
+    expect(rows[1]!.querySelector(".bui-task-metric")?.textContent).toBe("0/2");
+    expect(rows[1]!.querySelector(".bui-task-badge")?.textContent).toBe("进行中");
+    expect(rows[1]!.querySelector(".bui-task-header")?.getAttribute("aria-expanded")).toBe("true");
+    expect(rows[1]!.querySelector<HTMLDivElement>(".bui-task-body")?.hidden).toBe(false);
+    expect(rows[1]!.textContent).toContain("读取库存文件");
+    expect(rows[1]!.textContent).toContain("评估缺货");
+
+    await act(async () => rows[0]!.querySelector<HTMLButtonElement>(".bui-task-header")!.click());
+    expect(rows[0]!.querySelector(".bui-task-header")?.getAttribute("aria-expanded")).toBe("true");
+    expect(rows[0]!.querySelector<HTMLDivElement>(".bui-task-body")?.hidden).toBe(false);
+    expect(rows[0]!.textContent).toContain("匹配税号");
+    expect(rows[0]!.textContent).toContain("2/2");
+    expect(container.querySelector(".todo-section .inspector-section-header small")?.textContent).toBe("2 / 4");
+
     await act(async () => root.unmount());
   });
 });

@@ -1,6 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
+import * as bridge from "./bridge";
 import { findModelOption, mergeSessionTranscript, modelDisplayName, providerDisplayName, reduceEvents, reorderSessionQueue, shouldMarkSessionUnread, type RuntimeData, useRuntimeStore } from "./store";
 import type { Session, Snapshot } from "./types";
 import Inspector from "./components/Inspector";
@@ -29,14 +30,14 @@ const snapshot: Snapshot = {
 function state(): RuntimeData {
   return {
     snapshot, sessions: [], projects: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], backgroundProcesses: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
-    skills: [], mcpServers: [], plugins: [], branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
+    skills: [], mcpServers: [], plugins: [], hookCatalog: { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] }, usageReport: null, branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
     pullRequestMonitors: new Map(), pullRequestLoading: false, pullRequestMutating: false, pullRequestError: "",
     modelRoutes: [], modelProviders: [], modelsByProvider: {}, contextProfile: null,
     contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recap: null, recovery: [],
     runId: "", running: false, globalRunId: "", globalRunSessionId: "", runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
     lastSequence: 0, error: "", view: "thread", inspectorTab: "environment", inspectorOpen: true,
-    settingsOpen: false, settingsTarget: null, commandOpen: false, sessionSearchTarget: null, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system", uiFont: "system", uiFontSize: 14,
+    settingsOpen: false, settingsTarget: null, commandOpen: false, sessionSearchTarget: null, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system", uiFont: "system", uiFontSize: 14, chatFontSize: 13, chatCodeFontSize: 12,
   };
 }
 
@@ -82,7 +83,7 @@ describe("runtime event projection", () => {
       sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded",
       data: {
         provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single",
-        blocks: JSON.stringify([{ ID: "p1", Kind: "plan", State: "proposed", Title: "Plan", Content: "Body", Data: { planId: "artifact-1", version: "1" } }]),
+        blocks: JSON.stringify([{ id: "p1", kind: "plan", state: "proposed", title: "Plan", content: "Body", data: { planId: "artifact-1", version: "1" } }]),
         blockSequences: "[1]", toolRecords: "[]",
       },
     }]);
@@ -92,8 +93,8 @@ describe("runtime event projection", () => {
 
   it("restores and updates the current session recap without leaking foreign session events", () => {
     const persisted = {
-      SessionID: "s1", Anchor: "/tmp/azem", CoveredBoundary: "run-1", Revision: 1,
-      Goal: "补齐回顾", Summary: "已恢复持久化回顾。", OpenItems: "pending: 验证更新", UpdatedAt: "2026-08-12T00:00:00Z",
+      sessionId: "s1", anchor: "/tmp/azem", coveredBoundary: "run-1", revision: 1,
+      goal: "补齐回顾", summary: "已恢复持久化回顾。", openItems: "pending: 验证更新", updatedAt: "2026-08-12T00:00:00Z",
     };
     const restored = reduceEvents(state(), [{
       sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded", recap: persisted,
@@ -103,15 +104,15 @@ describe("runtime event projection", () => {
 
     const foreign = reduceEvents(restored, [{
       sequence: 2, kind: "recap_state", sessionId: "s2", state: "updated",
-      recap: { ...persisted, SessionID: "s2", Summary: "其他会话", Revision: 2 },
+      recap: { ...persisted, sessionId: "s2", summary: "其他会话", revision: 2 },
     }]);
     expect(foreign.recap).toEqual(persisted);
 
     const updated = reduceEvents(foreign, [{
       sequence: 3, kind: "recap_state", sessionId: "s1", state: "updated",
-      recap: { ...persisted, Summary: "当前会话已实时更新。", Revision: 2 },
+      recap: { ...persisted, summary: "当前会话已实时更新。", revision: 2 },
     }]);
-    expect(updated.recap).toMatchObject({ Summary: "当前会话已实时更新。", Revision: 2 });
+    expect(updated.recap).toMatchObject({ summary: "当前会话已实时更新。", revision: 2 });
   });
 
   it("restores persisted attachment MIME metadata after reopening a session", () => {
@@ -135,12 +136,22 @@ describe("runtime event projection", () => {
 	it("projects the plugin catalog and capability counts", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "plugin_catalog", pluginCatalog: [{
-				ID: "demo@market", Name: "demo", DisplayName: "Demo", Version: "1.0.0", Marketplace: "market", Origin: "codex",
-				Enabled: true, SkillCount: 2, MCPServerCount: 2, IntegratedMCPCount: 1,
-				HookCount: 1, HooksTrusted: false, HasApp: true, Capabilities: ["Read"], Status: "degraded",
+				id: "demo@market", name: "demo", displayName: "Demo", version: "1.0.0", marketplace: "market", origin: "codex",
+				enabled: true, skillCount: 2, mcpServerCount: 2, integratedMCPCount: 1,
+				hookCount: 1, hooksTrusted: false, hasApp: true, capabilities: ["Read"], status: "degraded",
 			}],
 		}]);
 		expect(projected.plugins[0]).toMatchObject({ id: "demo@market", displayName: "Demo", origin: "codex", skillCount: 2, integratedMCPCount: 1, hasApp: true });
+	});
+
+	it("composes a Codex plugin id from name and marketplace when the wire omits id", () => {
+		const projected = reduceEvents(state(), [{
+			sequence: 1, kind: "plugin_catalog", pluginCatalog: [{
+				name: "kami", displayName: "kami", version: "1.12.0", marketplace: "kami", origin: "codex_available",
+				enabled: false, status: "available",
+			}],
+		}]);
+		expect(projected.plugins[0]?.id).toBe("kami@kami");
 	});
 
 	it("projects MCP snapshots and live connection transitions", () => {
@@ -158,10 +169,10 @@ describe("runtime event projection", () => {
 	it("projects configured provider reasoning levels and resolves model aliases", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "model_providers", modelProviders: [{
-				ID: "deepseek", DisplayName: "DeepSeek", Backend: "anthropic",
-				DefaultBaseURL: "https://api.deepseek.com/anthropic", BaseURL: "", EnvKey: "DEEPSEEK_API_KEY",
-				Enabled: true, CredentialConfigured: true, CredentialSource: "stored",
-				Models: [{ id: "deepseek-v4-flash", aliases: ["deepseek/deepseek-v4-flash"], contextWindow: 1_000_000, reasoningLevels: ["low", "high", "max"], defaultReasoning: "max" }],
+				id: "deepseek", displayName: "DeepSeek", backend: "anthropic",
+				defaultBaseUrl: "https://api.deepseek.com/anthropic", baseUrl: "", envKey: "DEEPSEEK_API_KEY",
+				enabled: true, credentialConfigured: true, credentialSource: "stored",
+				models: [{ id: "deepseek-v4-flash", aliases: ["deepseek/deepseek-v4-flash"], contextWindow: 1_000_000, reasoningLevels: ["low", "high", "max"], defaultReasoning: "max" }],
 			}],
 		}]);
 		const models = projected.modelsByProvider.deepseek ?? [];
@@ -171,13 +182,13 @@ describe("runtime event projection", () => {
 	it("projects llmux provider settings without exposing a secret field", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "model_providers", modelProviders: [{
-				ID: "openrouter", DisplayName: "OpenRouter", Backend: "openai_compat",
-				DefaultBaseURL: "https://openrouter.ai/api/v1", BaseURL: "", EnvKey: "OPENROUTER_API_KEY",
-				Enabled: true, CredentialConfigured: true, CredentialSource: "stored",
-				Models: [{ id: "openai/gpt-test", contextWindow: 128000 }],
+				id: "openrouter", displayName: "OpenRouter", backend: "openai_compat",
+				defaultBaseUrl: "https://openrouter.ai/api/v1", baseUrl: "", envKey: "OPENROUTER_API_KEY",
+				enabled: true, credentialConfigured: true, credentialSource: "stored",
+				models: [{ id: "openai/gpt-test", contextWindow: 128000 }],
 			}],
 		}]);
-		expect(projected.modelProviders[0]).toMatchObject({ ID: "openrouter", CredentialSource: "stored" });
+		expect(projected.modelProviders[0]).toMatchObject({ id: "openrouter", credentialSource: "stored" });
 		expect(projected.modelProviders[0]).not.toHaveProperty("secret");
 	});
 
@@ -187,9 +198,47 @@ describe("runtime event projection", () => {
     useRuntimeStore.getState().applyEvents([{
       sequence: 4,
       kind: "model_routes",
-      modelRoutes: [{ Scope: "plan", Role: "", Label: "Plan", Route: {} }],
+      modelRoutes: [{ scope: "plan", role: "", label: "Plan", route: {} }],
     }]);
     expect(useRuntimeStore.getState().modelRoutes).toHaveLength(1);
+  });
+
+  it("applies a late usage report even after later sequences have been seen", () => {
+    const projected = reduceEvents(state(), [
+      { sequence: 8, kind: "plugin_catalog", pluginCatalog: [] },
+      {
+        sequence: 3, kind: "usage_report",
+        usageReport: {
+          scope: "project", from: "2025-08-14", to: "2026-08-14", empty: false,
+          requests: 2, sessions: 1, runs: 1, totalTokens: 40, inputTokens: 30, outputTokens: 10,
+          reasoningTokens: 0, reportedInputTokens: 30, cacheReadTokens: 12, cacheWriteTokens: 0,
+          cacheReported: true, cacheWriteReported: false, peakDayTokens: 40, currentStreak: 1, longestStreak: 1,
+          days: [{ date: "2026-08-14", tokens: 40, requests: 2 }],
+          kinds: [{ kind: "main", tokens: 40, requests: 2 }],
+          models: [{ provider: "chatgpt", model: "gpt-5.6", tokens: 40, inputTokens: 30, outputTokens: 10, cacheReadTokens: 12, cacheWriteTokens: 0, cacheReported: true, cacheWriteReported: false, requests: 2 }],
+          skills: [],
+        },
+      },
+    ]);
+    expect(projected.usageReport?.totalTokens).toBe(40);
+    expect(projected.usageReport?.models[0]).toMatchObject({ provider: "chatgpt", cacheReported: true });
+    expect(JSON.stringify(projected.usageReport)).not.toMatch(/secret|apiKey|api_key/i);
+  });
+
+  it("applies a late hook catalog even after later sequences have been seen", () => {
+    const projected = reduceEvents(state(), [
+      { sequence: 8, kind: "plugin_catalog", pluginCatalog: [] },
+      {
+        sequence: 3, kind: "hook_catalog",
+        hookCatalog: {
+          enabled: true, trustHooks: true,
+          sources: [{ id: "demo@local", name: "Demo", origin: "plugin", hookCount: 1, trusted: true }],
+          commands: [{ id: "hook-1", name: "notify", event: "SessionStart", enabled: true }],
+        },
+      },
+    ]);
+    expect(projected.hookCatalog.trustHooks).toBe(true);
+    expect(projected.hookCatalog.commands[0]).toMatchObject({ id: "hook-1", name: "notify", enabled: true });
   });
 
   it("shows the snapshot branch before the full git branch event arrives", () => {
@@ -278,6 +327,41 @@ describe("runtime event projection", () => {
     expect(finished.running).toBe(false);
   });
 
+  it("keeps a distinct elapsed clock on each tool instead of the run duration", () => {
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValue(1_000_000);
+      const started = reduceEvents(state(), [
+        { sequence: 1, kind: "run_started", runId: "r1" },
+        { sequence: 2, kind: "tool_started", runId: "r1", toolCallId: "read-1", state: "running", data: { name: "coding.read_file" } },
+        { sequence: 3, kind: "tool_started", runId: "r1", toolCallId: "list-1", state: "running", data: { name: "coding.list_files" } },
+      ]);
+      expect(started.blocks[0]?.data?.startedAt).toBe("1000000");
+      expect(started.blocks[1]?.data?.startedAt).toBe("1000000");
+
+      clock.mockReturnValue(1_002_400);
+      const firstDone = reduceEvents(started, [
+        { sequence: 4, kind: "tool_finished", runId: "r1", toolCallId: "read-1", state: "completed" },
+      ]);
+      clock.mockReturnValue(1_008_000);
+      const secondDone = reduceEvents(firstDone, [
+        { sequence: 5, kind: "tool_finished", runId: "r1", toolCallId: "list-1", state: "completed" },
+      ]);
+      clock.mockReturnValue(1_104_000);
+      const finished = reduceEvents(secondDone, [{ sequence: 6, kind: "run_finished", runId: "r1" }]);
+
+      expect(finished.blocks.find((block) => block.toolCallId === "read-1")?.data).toMatchObject({
+        startedAt: "1000000", elapsedMs: "2400",
+      });
+      expect(finished.blocks.find((block) => block.toolCallId === "list-1")?.data).toMatchObject({
+        startedAt: "1000000", elapsedMs: "8000",
+      });
+      expect(finished.blocks.every((block) => block.data?.elapsedMs !== "104000")).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("settles shell commands as soon as their finished update arrives", () => {
     const started = reduceEvents(state(), [
       { sequence: 1, kind: "tool_started", runId: "r1", toolCallId: "failed", state: "running", data: { name: "coding.shell" } },
@@ -299,6 +383,17 @@ describe("runtime event projection", () => {
 		expect(failed.error).toBe("");
 		expect(failed.blocks.filter((block) => block.kind === "error")).toHaveLength(1);
 		expect(failed.blocks.at(-1)?.content).toBe("provider unavailable");
+	});
+
+	it("titles a run failure from the stable provider error code", () => {
+		const failed = reduceEvents({ ...state(), running: true, runId: "r1" }, [{
+			sequence: 1, kind: "run_failed", sessionId: "s1", runId: "r1",
+			text: "HTTP 401: token expired", data: { errorCode: "auth" },
+		}]);
+		const block = failed.blocks.at(-1);
+		expect(block?.kind).toBe("error");
+		expect(block?.title).toBe("认证失败");
+		expect(block?.data?.errorCode).toBe("auth");
 	});
 
   it("preserves queued and approval states until a tool actually runs", () => {
@@ -406,12 +501,75 @@ describe("runtime event projection", () => {
     expect(finished.agents[0]).toMatchObject({ state: "completed", preview: "已检查全部变更", previewKind: "assistant" });
   });
 
+  it("keeps the main transcript array identity across subagent text deltas", () => {
+    const blocks = [{ id: "main-1", kind: "assistant" as const, content: "主会话" }];
+    const base = { ...state(), selectedAgentId: "agent-1", blocks };
+    const projected = reduceEvents(base, [
+      { sequence: 1, kind: "text_delta", runId: "child-1", agentId: "agent-1", text: "侧栏增量" },
+    ]);
+    expect(projected.blocks).toBe(blocks);
+    expect(projected.agentBlocks).not.toBe(base.agentBlocks);
+    expect(projected.agentBlocks.at(-1)).toMatchObject({ kind: "assistant", content: "侧栏增量" });
+  });
+
   it("ignores other agents' live frames while a different side chat is open", () => {
     const projected = reduceEvents({ ...state(), selectedAgentId: "agent-a" }, [
       { sequence: 1, kind: "thinking_delta", runId: "c", agentId: "agent-b", text: "不该出现" },
     ]);
     expect(projected.agentBlocks).toEqual([]);
     expect(projected.blocks).toEqual([]);
+  });
+
+  it("does not let a stale inspect snapshot wipe live subagent thinking", () => {
+    const live = reduceEvents({ ...state(), selectedAgentId: "agent-1" }, [
+      { sequence: 1, kind: "thinking_delta", runId: "child-1", agentId: "agent-1", text: "先看 diff" },
+      { sequence: 2, kind: "thinking_delta", runId: "child-1", agentId: "agent-1", text: "再看测试" },
+    ]);
+    expect(live.agentBlocks[0]).toMatchObject({ kind: "thinking", content: "先看 diff再看测试" });
+
+    const merged = reduceEvents(live, [{
+      sequence: 3, kind: "agent_detail", agentId: "agent-1", state: "detail",
+      agentBlocks: [{ id: live.agentBlocks[0]!.id, kind: "thinking", runId: "child-1", content: "先看 diff" }],
+    }]);
+    expect(merged.agentBlocks[0]).toMatchObject({ kind: "thinking", content: "先看 diff再看测试" });
+
+    const extra = reduceEvents(live, [{
+      sequence: 4, kind: "agent_detail", agentId: "agent-1", state: "detail",
+      agentBlocks: [{ id: "msg-0-user", kind: "user", runId: "child-1", content: "审查变更" }],
+    }]);
+    expect(extra.agentBlocks.map((block) => block.content)).toEqual(["审查变更", "先看 diff再看测试"]);
+
+    const stale = reduceEvents({ ...state(), selectedAgentId: "agent-b", agentBlocks: [] }, [{
+      sequence: 5, kind: "agent_detail", agentId: "agent-1", state: "detail",
+      agentBlocks: [{ id: "old", kind: "assistant", content: "不该出现" }],
+    }]);
+    expect(stale.selectedAgentId).toBe("agent-b");
+    expect(stale.agentBlocks).toEqual([]);
+  });
+
+  it("keeps the open subagent drawer across a same-session projection refresh", () => {
+    const live = reduceEvents({ ...state(), selectedAgentId: "agent-1" }, [
+      { sequence: 1, kind: "thinking_delta", runId: "child-1", agentId: "agent-1", text: "先看 diff" },
+    ]);
+    const refreshed = reduceEvents(live, [{
+      sequence: 2, kind: "session_loaded", sessionId: "s1", state: "refreshed",
+      data: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", blocks: "[]" },
+    }]);
+    expect(refreshed.selectedAgentId).toBe("agent-1");
+    expect(refreshed.agentBlocks[0]).toMatchObject({ kind: "thinking", content: "先看 diff" });
+
+    const merged = reduceEvents(refreshed, [{
+      sequence: 3, kind: "agent_detail", agentId: "agent-1", state: "detail",
+      agentBlocks: [{ id: refreshed.agentBlocks[0]!.id, kind: "thinking", runId: "child-1", content: "先看 diff" }],
+    }]);
+    expect(merged.agentBlocks[0]).toMatchObject({ kind: "thinking", content: "先看 diff" });
+
+    const navigated = reduceEvents(refreshed, [{
+      sequence: 4, kind: "session_loaded", sessionId: "s1", state: "loaded",
+      data: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", blocks: "[]" },
+    }]);
+    expect(navigated.selectedAgentId).toBe("");
+    expect(navigated.agentBlocks).toEqual([]);
   });
 
   it("clears stale detail blocks only when switching subagents", () => {
@@ -488,6 +646,26 @@ describe("runtime event projection", () => {
       state: "completed",
       textPhase: "final_answer",
     });
+  });
+
+  it("keeps the host fallback synthetic marker on live commentary", () => {
+    const projected = reduceEvents(state(), [
+      {
+        sequence: 1, kind: "text_delta", runId: "r1",
+        text: "正在调用所需工具，并根据实际结果继续。",
+        textPhase: "commentary",
+        data: { synthetic: "tool_announcement" },
+      },
+      { sequence: 2, kind: "tool_started", runId: "r1", toolCallId: "read-1", data: { name: "coding.read_file" } },
+    ]);
+
+    expect(projected.blocks[0]).toMatchObject({
+      kind: "commentary",
+      content: "正在调用所需工具，并根据实际结果继续。",
+      textPhase: "commentary",
+      data: expect.objectContaining({ synthetic: "tool_announcement" }),
+    });
+    expect(projected.blocks[1]).toMatchObject({ kind: "tool" });
   });
 
   it("drops an uncommitted provider attempt before projecting its retry", () => {
@@ -663,6 +841,18 @@ describe("runtime event projection", () => {
     expect(prompted.blocks[0]).toMatchObject({ kind: "approval", approvalId: "a1", state: "pending" });
   });
 
+  it("moves a queued tool into reviewing instead of leaving it queued during auto-review", () => {
+    const queued = reduceEvents(state(), [
+      { sequence: 1, kind: "tool_started", runId: "r1", toolCallId: "t1", state: "queued", data: { name: "coding.shell" } },
+    ]);
+    const reviewing = reduceEvents(queued, [
+      { sequence: 2, kind: "approval_requested", approvalId: "a1", toolCallId: "t1", state: "reviewing" },
+    ]);
+    expect(reviewing.blocks).toEqual([
+      expect.objectContaining({ kind: "tool", toolCallId: "t1", state: "reviewing_approval" }),
+    ]);
+  });
+
   it("builds approval UI fields without exposing the structured payload", () => {
     const details = approvalPresentation({ id: "a1", kind: "approval", content: "{\"command\":\"secret raw payload\"}", data: { tool: "coding.shell", target: "git status --short", effect: "external_side_effect", risk: "high" } }, "zh-CN");
     expect(details).toMatchObject({ tool: "运行命令", target: "git status --short", riskLabel: "高风险", description: "此操作可能影响工作区之外的系统。" });
@@ -690,6 +880,12 @@ describe("runtime event projection", () => {
     await act(async () => useRuntimeStore.setState({ attachments: [image] }));
     const send = container.querySelector<HTMLButtonElement>(".send-button")!;
     expect(send.disabled).toBe(false);
+    expect(send.getAttribute("title")).toBeNull();
+    expect(send.getAttribute("aria-label")).toBe("发送");
+    expect(container.querySelector(".approval-picker > summary")?.getAttribute("title")).toBeNull();
+    expect(container.querySelector(".plan-mode-toggle")?.getAttribute("title")).toBeNull();
+    expect(container.querySelector(".attach-button")?.getAttribute("title")).toBeNull();
+    expect(container.querySelector(".attach-button")?.getAttribute("aria-label")).toBe("添加图片");
     await act(async () => send.click());
     expect(useRuntimeStore.getState()).toMatchObject({ running: true, attachments: [] });
     expect(useRuntimeStore.getState().blocks.at(-1)).toMatchObject({ kind: "user", content: "", attachments: [image] });
@@ -760,6 +956,26 @@ describe("runtime event projection", () => {
     expect(container.querySelector(".queued-icon")).not.toBeNull();
     expect(container.querySelector(".queue-menu")).not.toBeNull();
 
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("stops the parent run together with its subagents", async () => {
+    const cancelActive = vi.spyOn(bridge, "cancelActive").mockResolvedValue(true);
+    useRuntimeStore.setState({
+      ...state(),
+      blocks: [{ id: "assistant-1", kind: "assistant", content: "处理中" }],
+      running: true,
+      runId: "r1",
+      runStartedAt: Date.now(),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(ThreadSurface)));
+    await act(async () => container.querySelector<HTMLButtonElement>(".cancel-button")!.click());
+    expect(cancelActive).toHaveBeenCalledWith(true);
+    cancelActive.mockRestore();
     await act(async () => root.unmount());
     container.remove();
   });
@@ -985,6 +1201,31 @@ describe("runtime event projection", () => {
     expect(projected.snapshot?.chatgptFastMode).toBe(true);
   });
 
+  it("projects the live shell wall-clock ceiling from model routes", () => {
+    const projected = reduceEvents(state(), [{
+      sequence: 1,
+      kind: "model_routes",
+      data: { shell_max_wall_clock_seconds: "1800" },
+    }]);
+    expect(projected.snapshot?.shellMaxWallClockSeconds).toBe(1800);
+  });
+
+  it("does not wipe a subscription catalog when a later empty catalog event arrives", () => {
+    const loaded = reduceEvents(state(), [{
+      sequence: 1,
+      kind: "model_catalog",
+      data: { provider: "grok", models: JSON.stringify([{ id: "grok-4.6", name: "Grok 4.6", contextWindow: 500_000 }]) },
+    }]);
+    const wiped = reduceEvents(loaded, [{
+      sequence: 2,
+      kind: "model_catalog",
+      data: { provider: "grok" },
+    }]);
+    expect(wiped.modelsByProvider.grok).toEqual([
+      { id: "grok-4.6", name: "Grok 4.6", aliases: [], reasoningLevels: [], defaultReasoning: "", contextWindow: 500_000 },
+    ]);
+  });
+
   it("projects the model catalog used by the composer switcher", () => {
     const projected = reduceEvents(state(), [{
       sequence: 1,
@@ -997,7 +1238,7 @@ describe("runtime event projection", () => {
     ]);
     expect(projected.contextUsage.contextLimit).toBe(272_000);
 	expect(modelDisplayName("openai/gpt-5.6-sol", "openai/gpt-5.6-sol")).toBe("GPT 5.6 Sol");
-	expect(providerDisplayName("deepseek", [{ ...state().modelProviders[0]!, ID: "deepseek", DisplayName: "DeepSeek" }])).toBe("DeepSeek");
+	expect(providerDisplayName("deepseek", [{ ...state().modelProviders[0]!, id: "deepseek", displayName: "DeepSeek" }])).toBe("DeepSeek");
   });
 
   it("uses the subscription catalog context limit regardless of startup event order", () => {
@@ -1071,6 +1312,40 @@ describe("runtime event projection", () => {
     expect(projected.contextUsage).toEqual({
       inputTokens: 100, outputTokens: 9, contextLimit: 0, reported: true,
       cacheInputTokens: 160, cachedInputTokens: 70, cacheWriteTokens: 10,
+      cacheReported: true, cacheWriteReported: true,
+    });
+  });
+
+  it("keeps the main context kernel free of subagent occupancy and cache", () => {
+    const mainProfile = {
+      source: "request", estimated: true,
+      contributions: [{ category: "core", name: "azem.core_instructions", tokens: 1_200 }],
+    };
+    const projected = reduceEvents(state(), [
+      {
+        sequence: 1, kind: "context_profile", sessionId: "s1", state: "estimated",
+        contextProfile: mainProfile,
+      },
+      {
+        sequence: 2, kind: "context_usage", sessionId: "s1", state: "reported",
+        data: { requestKind: "main", inputTokens: "100", outputTokens: "9", cachedInputTokens: "40", cacheWriteTokens: "6", cacheStatus: "reported", cacheWriteStatus: "reported" },
+      },
+      {
+        sequence: 3, kind: "context_profile", sessionId: "s1", agentId: "child-1", state: "estimated",
+        contextProfile: {
+          source: "request", estimated: true,
+          contributions: [{ category: "conversation", name: "message:user:1", tokens: 88_000 }],
+        },
+      },
+      {
+        sequence: 4, kind: "context_usage", sessionId: "s1", state: "reported",
+        data: { requestKind: "subagent", aggregateOnly: "true", inputTokens: "80", outputTokens: "12", cachedInputTokens: "70", cacheWriteTokens: "8", cacheStatus: "reported", cacheWriteStatus: "reported" },
+      },
+    ]);
+    expect(projected.contextProfile).toEqual(mainProfile);
+    expect(projected.contextUsage).toEqual({
+      inputTokens: 100, outputTokens: 9, contextLimit: 0, reported: true,
+      cacheInputTokens: 100, cachedInputTokens: 40, cacheWriteTokens: 6,
       cacheReported: true, cacheWriteReported: true,
     });
   });
@@ -1211,7 +1486,7 @@ describe("runtime event projection", () => {
     expect(container.textContent).toContain("r3");
     expect(container.textContent).toContain("automatic_hard");
     expect(container.textContent).toContain("semantic state");
-    expect(container.querySelector(".context-manifest-hash")?.textContent).toBe("abcdef012345");
+    expect(container.querySelector(".context-manifest-hash")?.textContent).toBe("abcdef0123456789");
     expect(container.querySelector('[data-state="pending"]')?.textContent).toBe("2");
     await act(async () => root.unmount());
   });

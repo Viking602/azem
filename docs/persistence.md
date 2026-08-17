@@ -135,8 +135,10 @@ process. If the exclusive owner exits before publishing a completed recovery,
 one waiter takes over recovery instead of accepting a partial boundary.
 
 Only an exclusive owner treats active leases as belonging to a prior process
-and expires them immediately. It quarantines incomplete action attempts and
-provider requests so the runtime does not replay unknown side effects blindly.
+and expires them immediately. It also expires leftover active resource claims
+so a dead workspace lock cannot queue later sessions. It quarantines
+incomplete action attempts and provider requests so the runtime does not
+replay unknown side effects blindly.
 
 Recovery then:
 

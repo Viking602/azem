@@ -28,6 +28,14 @@ export default defineConfig({
               name: "icons",
               test: /node_modules[\\/]lucide-react([\\/]|$)/,
             },
+            {
+              name: "motion",
+              test: /node_modules[\\/](motion|framer-motion)([\\/]|$)/,
+            },
+            {
+              name: "xterm",
+              test: /node_modules[\\/]@xterm[\\/]/,
+            },
           ],
         },
       },

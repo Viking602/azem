@@ -99,6 +99,7 @@ export function subagentPreviewText(agent: AgentState, displayName: string, lang
     if (!value || value === displayName || LIFECYCLE_COPY.test(value) || TOOL_ACTIVITY.test(value)) continue;
     return truncateLine(value, PREVIEW_LIMIT);
   }
+  if (isSubagentActive(agent.state)) return translator(language)("subagentWaitingModel");
   return translator(language)("subagentNoPreview");
 }
 

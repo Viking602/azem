@@ -25,16 +25,22 @@ type subagentTurnContext struct {
 	seed           []message.Message
 	compactHooks   func(context.Context, []message.Message, []message.Message, error) error
 	summarize      func(context.Context, string) (string, error)
+	noteActivity   func(string)
 	inner          turnContext
 }
 
-func (c subagentTurnContext) Build(_ context.Context, task api.Task) ([]message.Message, error) {
-	messages := make([]message.Message, 0, len(c.seed)+2)
+func (c subagentTurnContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
+	messages := make([]message.Message, 0, len(c.seed)+3)
 	if instructions := strings.TrimSpace(c.instructions); instructions != "" {
 		messages = append(messages, message.NewText(message.RoleSystem, instructions))
 	}
 	if privateContext := strings.TrimSpace(c.privateContext); privateContext != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted SubagentStart hook context]\n"+privateContext)
+		value.Visibility = message.VisibilityPrivate
+		messages = append(messages, value)
+	}
+	if text := runtimeDeadlineContext(ctx, c.inner.deadlineAt); text != "" {
+		value := message.NewText(message.RoleSystem, "[Trusted runtime deadline]\n"+text)
 		value.Visibility = message.VisibilityPrivate
 		messages = append(messages, value)
 	}
@@ -50,6 +56,9 @@ func (c subagentTurnContext) Build(_ context.Context, task api.Task) ([]message.
 }
 
 func (c subagentTurnContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	if c.noteActivity != nil {
+		c.noteActivity("compacting context")
+	}
 	inner := c.inner
 	if inner.summarize == nil {
 		inner.summarize = c.summarize
@@ -61,6 +70,9 @@ func (c subagentTurnContext) Compact(ctx context.Context, history []message.Mess
 }
 
 func (c subagentTurnContext) CompactTo(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, error) {
+	if c.noteActivity != nil {
+		c.noteActivity("compacting context")
+	}
 	inner := c.inner
 	if inner.summarize == nil {
 		inner.summarize = c.summarize

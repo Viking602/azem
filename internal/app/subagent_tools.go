@@ -44,7 +44,7 @@ type subagentSpawnDriver struct {
 
 func (d *subagentSpawnDriver) Definition() tool.Definition {
 	additional := false
-	description := "Spawn one supervised subagent task. Read-only and isolated worktree tasks may run in the background. A foreground wait window never limits task runtime: when the window ends, safe work continues in the background and can be checked with subagent.get_output; shared-workspace writes keep the foreground wait instead of being cancelled."
+	description := "Spawn one supervised subagent task. Read-only and isolated worktree tasks may run in the background. The parent waits for a foreground child until it completes unless a positive await_timeout is configured. That wait window never limits task runtime: when it ends, safe work continues in the background and can be checked with subagent.get_output; shared-workspace writes keep the foreground wait instead of being cancelled."
 	subagentType := tool.Schema{
 		Type:        "string",
 		Description: "Enabled role; omit only when enabled `worker` is desired, otherwise select an advertised role explicitly.",
@@ -158,24 +158,31 @@ func (d *subagentSpawnDriver) waitForForeground(ctx context.Context, run agentse
 	}
 	done := d.runtime.parentDone(run.ID)
 	waitWindow := d.runtime.foregroundWaitWindow()
-	timer := time.NewTimer(waitWindow)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return d.detachAfterParentWait(run)
-	case <-timer.C:
-		if result, detached := d.detachAfterWaitWindow(run, waitWindow); detached {
-			return result
-		}
-		// A shared-workspace writer cannot be detached safely while its parent
-		// may resume mutating the same files. Keep waiting without a runtime
-		// deadline; only explicit cancellation may stop the child.
-		if !waitForSubagentDone(ctx, done) {
+	if waitWindow > 0 {
+		timer := time.NewTimer(waitWindow)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
 			return d.detachAfterParentWait(run)
+		case <-timer.C:
+			if result, detached := d.detachAfterWaitWindow(run, waitWindow); detached {
+				return result
+			}
+			// A shared-workspace writer cannot be detached safely while its parent
+			// may resume mutating the same files. Keep waiting without a runtime
+			// deadline; only explicit cancellation may stop the child.
+		case <-done:
+			return d.foregroundCompletion(run)
 		}
-	case <-done:
 	}
-	snapshot = d.runtime.snapshot(run.ID, run.SessionID)
+	if !waitForSubagentDone(ctx, done) {
+		return d.detachAfterParentWait(run)
+	}
+	return d.foregroundCompletion(run)
+}
+
+func (d *subagentSpawnDriver) foregroundCompletion(run agentservice.SubagentRun) map[string]any {
+	snapshot := d.runtime.snapshot(run.ID, run.SessionID)
 	if snapshot.Found && subagentTerminal(snapshot.Run.State) {
 		_ = d.runtime.store.SetCompletionDelivered(d.runtime.ctx, run.ID, true)
 	}
@@ -222,10 +229,10 @@ func prepareSubagentTodoBinding(ctx context.Context, parent subagentParentRuntim
 	if itemID == "" {
 		return 0, nil
 	}
-	if parent.Host == nil || parent.Host.sessions == nil {
+	if parent.Host == nil || parent.Host.Sessions() == nil {
 		return 0, fmt.Errorf("todo store is unavailable")
 	}
-	todo, err := parent.Host.sessions.LoadTodo(ctx, parent.SessionID)
+	todo, err := parent.Host.Sessions().LoadTodo(ctx, parent.SessionID)
 	if err != nil {
 		return 0, err
 	}
@@ -247,7 +254,7 @@ func prepareSubagentTodoBinding(ctx context.Context, parent subagentParentRuntim
 }
 
 func commitSubagentTodoBinding(ctx context.Context, parent subagentParentRuntime, itemID, runID string, expectedRevision int64) error {
-	updated, err := parent.Host.sessions.UpdateTodo(ctx, parent.SessionID, expectedRevision, func(todo *session.TodoList) error {
+	updated, err := parent.Host.Sessions().UpdateTodo(ctx, parent.SessionID, expectedRevision, func(todo *session.TodoList) error {
 		for pi := range todo.Phases {
 			for ii := range todo.Phases[pi].Items {
 				item := &todo.Phases[pi].Items[ii]
@@ -266,7 +273,7 @@ func commitSubagentTodoBinding(ctx context.Context, parent subagentParentRuntime
 		return err
 	}
 	snapshot := updated.Clone()
-	parent.Host.emitTodoUpdated(parent.SessionID, snapshot)
+	parent.Host.EmitTodoUpdated(parent.SessionID, snapshot)
 	return nil
 }
 

@@ -134,7 +134,7 @@ export default function ComposerModelPicker(props: Props) {
       setOpen(next);
       next ? requestAnimationFrame(place) : setPosition(null);
     }}>
-      <summary aria-disabled={props.running} aria-expanded={open} title={`${props.selectedModelName} · ${props.selectedReasoningName}`}>
+      <summary aria-disabled={props.running} aria-expanded={open}>
         <ProviderIcon provider={props.selectedProvider} size={14} />
         <span>{props.selectedModelName}</span><small>{props.selectedReasoningName}</small><ChevronDown size={12} className="model-controls-chevron" />
       </summary>

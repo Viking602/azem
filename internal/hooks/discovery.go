@@ -22,11 +22,13 @@ type Options struct {
 	Sources        []Source
 	DefaultTimeout time.Duration
 	FailurePolicy  FailurePolicy
+	Disabled       []string
 }
 type Registry struct {
 	commands    map[Event][]Command
 	Diagnostics []Diagnostic
 	claimed     map[string]bool
+	disabled    map[string]bool
 	mu          sync.Mutex
 }
 
@@ -74,7 +76,7 @@ func (h *hookSpec) UnmarshalJSON(data []byte) error {
 }
 
 func Discover(options Options) *Registry {
-	r := &Registry{commands: make(map[Event][]Command), claimed: make(map[string]bool)}
+	r := &Registry{commands: make(map[Event][]Command), claimed: make(map[string]bool), disabled: disabledSet(options.Disabled)}
 	seen := map[string]bool{}
 	for _, source := range options.Sources {
 		if !source.Trusted {
@@ -243,6 +245,24 @@ func (r *Registry) Commands(event Event) []Command {
 	return append([]Command(nil), r.commands[event]...)
 }
 
+func (r *Registry) AllCommands() []Command {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var events []Event
+	for event := range r.commands {
+		events = append(events, event)
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i] < events[j] })
+	var result []Command
+	for _, event := range events {
+		result = append(result, r.commands[event]...)
+	}
+	return result
+}
+
 func (r *Registry) Replace(next *Registry) {
 	if r == nil || next == nil {
 		return
@@ -250,5 +270,25 @@ func (r *Registry) Replace(next *Registry) {
 	r.mu.Lock()
 	r.commands = next.commands
 	r.Diagnostics = append([]Diagnostic(nil), next.Diagnostics...)
+	r.disabled = next.disabled
 	r.mu.Unlock()
+}
+
+func (r *Registry) IsDisabled(command Command) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.disabled[CommandIdentity(command)]
+}
+
+func disabledSet(ids []string) map[string]bool {
+	result := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			result[id] = true
+		}
+	}
+	return result
 }

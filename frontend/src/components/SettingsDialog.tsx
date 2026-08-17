@@ -1,49 +1,61 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, Bot, Check, CornerDownRight, Database, Gauge, Hand, Languages, List, Minus, Palette, Plus,
+  Archive, ArrowLeft, BarChart3, Bot, Check, CornerDownRight, Database, Gauge, Hand, List, Minus, Palette, Plus, Puzzle,
   RefreshCw, Search, Settings2, ShieldAlert, ShieldCheck, X,
 } from "lucide-react";
-import { execute, listSkillCatalog, listSystemFonts, type SystemFont } from "../bridge";
+import { execute, listHookCatalog, listSkillCatalog, listSystemFonts, type SystemFont } from "../bridge";
+import {
+  CHAT_CODE_FONT_MAX,
+  CHAT_CODE_FONT_MIN,
+  CHAT_UI_FONT_MAX,
+  CHAT_UI_FONT_MIN,
+} from "../chatTypography";
 import { reasoningLabel, sortReasoningLevels, tFormat, translator, type Language } from "../i18n";
-import { routeSearchID } from "../settingsSearch";
+import { routeSearchID, settingsSectionSearchAliases } from "../settingsSearch";
 import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ModelOption } from "../store";
-import type { DeliveryMode, ModelProvider, ModelRoute, ModelRouteConfig, SettingsSection } from "../types";
+import type { ActionKind, DeliveryMode, ModelProvider, ModelRoute, ModelRouteConfig, SettingsSection } from "../types";
 import MenuSelect from "./MenuSelect";
 import ModelProviderSettings from "./ModelProviderSettings";
 import ProviderIcon from "./ProviderIcon";
+import ArchiveSettings from "./ArchiveSettings";
 import ExtensionsSettings from "./ExtensionsSettings";
+import UsageSettings from "./UsageSettings";
 
 export default function SettingsDialog() {
   const dialog = useRef<HTMLDialogElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const modelRoutes = useRuntimeStore((state) => state.modelRoutes);
-  const coreModelRoutes = modelRoutes.filter((route) => route.Scope !== "subagent" && route.Scope !== "main");
-	const subagentModelRoutes = modelRoutes.filter((route) => route.Scope === "subagent");
+  const coreModelRoutes = modelRoutes.filter((route) => route.scope !== "subagent" && route.scope !== "main");
+	const subagentModelRoutes = modelRoutes.filter((route) => route.scope === "subagent");
   const modelProviders = useRuntimeStore((state) => state.modelProviders);
-  const catalogModelCount = modelProviders.reduce((total, provider) => total + provider.Models.length, 0);
   const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
   const agentCatalog = useRuntimeStore((state) => state.agentCatalog);
-  const plugins = useRuntimeStore((state) => state.plugins);
   const theme = useRuntimeStore((state) => state.theme);
   const uiFont = useRuntimeStore((state) => state.uiFont);
   const uiFontSize = useRuntimeStore((state) => state.uiFontSize);
+  const chatFontSize = useRuntimeStore((state) => state.chatFontSize);
+  const chatCodeFontSize = useRuntimeStore((state) => state.chatCodeFontSize);
   const approvalMode = useRuntimeStore((state) => state.approvalMode);
   const settingsTarget = useRuntimeStore((state) => state.settingsTarget);
   const setTheme = useRuntimeStore((state) => state.setTheme);
   const setUIFont = useRuntimeStore((state) => state.setUIFont);
   const setUIFontSize = useRuntimeStore((state) => state.setUIFontSize);
+  const setChatFontSize = useRuntimeStore((state) => state.setChatFontSize);
+  const setChatCodeFontSize = useRuntimeStore((state) => state.setChatCodeFontSize);
   const setLanguage = useRuntimeStore((state) => state.setLanguage);
   const setQueueMode = useRuntimeStore((state) => state.setQueueMode);
   const setError = useRuntimeStore((state) => state.setError);
+  const error = useRuntimeStore((state) => state.error);
   const [activeSection, setActiveSection] = useState<SettingsSection>(() => settingsTarget?.section ?? "catalog");
   const [query, setQuery] = useState("");
   const [concurrency, setConcurrency] = useState(snapshot.subagentConcurrency);
   const [maxDepth, setMaxDepth] = useState(snapshot.subagentMaxDepth ?? 2);
   const [shellConcurrency, setShellConcurrency] = useState(snapshot.shellConcurrency ?? 2);
-  const [awaitSeconds, setAwaitSeconds] = useState(snapshot.subagentAwaitSeconds ?? 600);
+  const [shellMaxWallClockSeconds, setShellMaxWallClockSeconds] = useState(snapshot.shellMaxWallClockSeconds ?? 600);
+  const [awaitSeconds, setAwaitSeconds] = useState(snapshot.subagentAwaitSeconds ?? 0);
+  const [idleSeconds, setIdleSeconds] = useState(snapshot.subagentIdleSeconds ?? 0);
   const [addProviderRequest, setAddProviderRequest] = useState(0);
-  const [addMCPRequest, setAddMCPRequest] = useState(0);
   const [systemFonts, setSystemFonts] = useState<SystemFont[]>([]);
   const [reducedMotion, setReducedMotion] = useState(() => localStorage.getItem("azem-reduced-motion") === "true");
   const t = translator(snapshot.language);
@@ -58,9 +70,11 @@ export default function SettingsDialog() {
     { id: "subagents", label: t("subagentRuntime"), description: t("settingsSubagentsHint"), icon: Gauge },
     { id: "governance", label: t("settingsGovernance"), description: t("settingsGovernanceHint"), icon: Settings2 },
     { id: "appearance", label: t("appearance"), description: t("settingsAppearanceHint"), icon: Palette },
-    { id: "extensions", label: t("settingsExtensions"), description: t("settingsExtensionsHint"), icon: Languages },
+    { id: "extensions", label: t("settingsExtensions"), description: t("settingsExtensionsHint"), icon: Puzzle },
+    { id: "archive", label: t("settingsArchive"), description: t("settingsArchiveHint"), icon: Archive },
+    { id: "usage", label: t("settingsUsage"), description: t("settingsNavUsage"), icon: BarChart3 },
   ];
-  const filteredSections = sections.filter((section) => `${section.label}${section.description}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const filteredSections = sections.filter((section) => `${section.label} ${section.description} ${(settingsSectionSearchAliases[section.id] ?? []).join(" ")}`.toLowerCase().includes(query.trim().toLowerCase()));
   const current = sections.find((section) => section.id === activeSection)!;
   const descriptions = useMemo(() => new Map(agentCatalog.map((agent) => [agent.name, agent.description])), [agentCatalog]);
 	const catalogPage: Partial<Record<SettingsSection, React.ReactNode>> = {
@@ -72,8 +86,9 @@ export default function SettingsDialog() {
     if (!node) return;
     previouslyFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (!node.open) node.showModal();
+    node.focus();
     requestAnimationFrame(() => {
-      node.querySelector<HTMLElement>(".settings-back, button, input, [tabindex]:not([tabindex='-1'])")?.focus();
+      node.focus();
     });
     const onCancel = (event: Event) => {
       event.preventDefault();
@@ -88,6 +103,14 @@ export default function SettingsDialog() {
 			skillCatalog: catalog.entries as unknown as Array<Record<string, unknown>>,
 		}]);
 	});
+	const refreshHookCatalog = listHookCatalog().then((catalog) => {
+		useRuntimeStore.getState().applyEvents([{
+			sequence: 0,
+			kind: "hook_catalog",
+			state: "listed",
+			hookCatalog: catalog,
+		}]);
+	});
     void Promise.all([
       execute({ kind: "list_model_routes", sessionId: snapshot.sessionId }),
       execute({ kind: "list_agent_types", sessionId: snapshot.sessionId }),
@@ -95,7 +118,9 @@ export default function SettingsDialog() {
 	  execute({ kind: "list_model_providers", sessionId: snapshot.sessionId }),
 	  refreshSkillCatalog,
 	  execute({ kind: "list_plugins", sessionId: snapshot.sessionId }),
+	  refreshHookCatalog,
 	  execute({ kind: "refresh_mcp", sessionId: snapshot.sessionId }),
+	  execute({ kind: "list_sessions", sessionId: snapshot.sessionId }),
     ]).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
     return () => {
       node.removeEventListener("cancel", onCancel);
@@ -111,7 +136,9 @@ export default function SettingsDialog() {
   useEffect(() => setConcurrency(snapshot.subagentConcurrency), [snapshot.subagentConcurrency]);
   useEffect(() => setMaxDepth(snapshot.subagentMaxDepth ?? 2), [snapshot.subagentMaxDepth]);
   useEffect(() => setShellConcurrency(snapshot.shellConcurrency ?? 2), [snapshot.shellConcurrency]);
-  useEffect(() => setAwaitSeconds(snapshot.subagentAwaitSeconds ?? 600), [snapshot.subagentAwaitSeconds]);
+  useEffect(() => setShellMaxWallClockSeconds(snapshot.shellMaxWallClockSeconds ?? 600), [snapshot.shellMaxWallClockSeconds]);
+  useEffect(() => setAwaitSeconds(snapshot.subagentAwaitSeconds ?? 0), [snapshot.subagentAwaitSeconds]);
+  useEffect(() => setIdleSeconds(snapshot.subagentIdleSeconds ?? 0), [snapshot.subagentIdleSeconds]);
   useEffect(() => {
     document.documentElement.dataset.reduceMotion = String(reducedMotion);
     localStorage.setItem("azem-reduced-motion", String(reducedMotion));
@@ -158,7 +185,7 @@ export default function SettingsDialog() {
     };
   }, [activeSection, reducedMotion, settingsTarget]);
 
-  const action = async (kind: string, target = "", route?: ModelRoute) => {
+  const action = async (kind: ActionKind, target = "", route?: ModelRoute) => {
     try { await execute({ kind, target, route, sessionId: snapshot.sessionId }); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
   };
@@ -171,42 +198,142 @@ export default function SettingsDialog() {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
-  return <dialog ref={dialog} className="settings-dialog" aria-label={t("settings")}>
+  return <dialog ref={dialog} className="settings-dialog" tabIndex={-1} aria-label={t("settings")}>
     <div className="settings-shell">
       <aside className="settings-sidebar">
         <button className="settings-back" onClick={close}><ArrowLeft size={15} />{t("backToApp")}</button>
         <label className="settings-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("searchSettings")} /><kbd>⌘F</kbd></label>
         <div className="settings-nav-group">
           <span>{snapshot.language === "zh-CN" ? "系统" : "System"}</span>
-          {filteredSections.filter((section) => ["catalog", "models", "subagents"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span>{section.id === "catalog" && catalogModelCount > 0 ? <em>{catalogModelCount}</em> : null}</button>)}
+          {filteredSections.filter((section) => ["catalog", "models", "subagents"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span></button>)}
           <span>{snapshot.language === "zh-CN" ? "偏好" : "Preferences"}</span>
-          {filteredSections.filter((section) => ["governance", "appearance", "extensions"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span>{section.id === "extensions" && plugins.length > 0 ? <em>{plugins.length}</em> : null}</button>)}
+          {filteredSections.filter((section) => ["governance", "appearance", "extensions", "archive", "usage"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span></button>)}
         </div>
         <footer><small>{snapshot.language === "zh-CN" ? "配置自动保存到本机" : "Saved locally"}</small><small>Azem v0.8.0</small></footer>
       </aside>
       <main className="settings-main" data-section={activeSection}>
-        <header className="settings-page-header"><div><h1>{current.label}</h1><p>{current.description}</p></div>{activeSection === "catalog" && <button className="settings-primary" onClick={() => setAddProviderRequest((value) => value + 1)}><Plus size={13} />{snapshot.language === "zh-CN" ? "添加提供方" : "Add provider"}</button>}{activeSection === "models" && <span className="settings-valid"><i />{snapshot.language === "zh-CN" ? "配置有效" : "Valid configuration"}</span>}{activeSection === "extensions" && <button className="settings-primary" onClick={() => setAddMCPRequest((value) => value + 1)}><Plus size={13} />{t("addMCPServer")}</button>}<button className="icon-button settings-close" onClick={close} aria-label={t("closeSettings")}><X size={17} /></button></header>
+        <header className="settings-page-header"><div><h1>{current.label}</h1><p>{current.description}</p></div>{activeSection === "catalog" && <button className="settings-primary" onClick={() => setAddProviderRequest((value) => value + 1)}><Plus size={13} />{snapshot.language === "zh-CN" ? "添加提供方" : "Add provider"}</button>}{activeSection === "models" && <span className="settings-valid"><i />{snapshot.language === "zh-CN" ? "配置有效" : "Valid configuration"}</span>}<button className="icon-button settings-close" onClick={close} aria-label={t("closeSettings")}><X size={17} /></button></header>
         <div className="settings-content">
+          {error && <div className="settings-inline-error" role="alert">{error}</div>}
 		  {catalogPage[activeSection]}
           {activeSection === "models" && <SettingsPane settingID="section:models" title={t("settingsModels")} description={t("settingsModelsHint")} className="model-routes-pane" action={<button className="small-button" onClick={() => void action("list_model_routes")}><RefreshCw size={13} />{t("refresh")}</button>}>
             {modelRoutes.length === 0 ? <div className="settings-card settings-empty"><span className="azem-mark" />{t("loadingRoles")}</div> : <div className="route-groups">
-              <section className="settings-card route-card"><header><div><strong>{snapshot.language === "zh-CN" ? "核心工作流" : "Core workflows"}</strong><small>{snapshot.language === "zh-CN" ? "主会话与关键判断" : "Main conversation and critical decisions"}</small></div></header>{coreModelRoutes.map((route) => <RouteRow key={`${route.Scope}-${route.Role}`} route={route} description={descriptions.get(route.Role) || route.Label} modelsByProvider={modelsByProvider} modelProviders={modelProviders} action={action} language={snapshot.language} />)}</section>
-              <section className="settings-card route-card"><header><div><strong>{snapshot.language === "zh-CN" ? "子智能体默认模型" : "Subagent defaults"}</strong><small>{snapshot.language === "zh-CN" ? "角色仍可在定义中覆盖此配置" : "Roles can still override this setting"}</small></div></header>{subagentModelRoutes.map((route) => <RouteRow key={`${route.Scope}-${route.Role}`} route={route} description={descriptions.get(route.Role) || route.Label} modelsByProvider={modelsByProvider} modelProviders={modelProviders} action={action} language={snapshot.language} />)}</section>
+              <section className="settings-card route-card"><header><div><strong>{snapshot.language === "zh-CN" ? "核心工作流" : "Core workflows"}</strong><small>{snapshot.language === "zh-CN" ? "主会话与关键判断" : "Main conversation and critical decisions"}</small></div></header>{coreModelRoutes.map((route) => <RouteRow key={`${route.scope}-${route.role}`} route={route} description={descriptions.get(route.role) || route.label} modelsByProvider={modelsByProvider} modelProviders={modelProviders} action={action} language={snapshot.language} />)}</section>
+              <section className="settings-card route-card"><header><div><strong>{snapshot.language === "zh-CN" ? "子智能体默认模型" : "Subagent defaults"}</strong><small>{snapshot.language === "zh-CN" ? "角色仍可在定义中覆盖此配置" : "Roles can still override this setting"}</small></div></header>{subagentModelRoutes.map((route) => <RouteRow key={`${route.scope}-${route.role}`} route={route} description={descriptions.get(route.role) || route.label} modelsByProvider={modelsByProvider} modelProviders={modelProviders} action={action} language={snapshot.language} />)}</section>
             </div>}
           </SettingsPane>}
           {activeSection === "subagents" && <SettingsPane settingID="section:subagents" title={t("settingsSubagents")} description={t("settingsSubagentsHint")} className="subagent-settings-pane">
-            <div className="subagent-capacity-grid" aria-label={snapshot.language === "zh-CN" ? "并发、递归与等待" : "Concurrency, recursion, and wait"}>
-              <CapacityControl settingID="subagents:concurrency" label={snapshot.language === "zh-CN" ? "子智能体并发" : "Subagent concurrency"} description={snapshot.language === "zh-CN" ? "0 表示无限；默认 32" : "0 is unlimited; default 32"}><CompactStepper value={concurrency} displayValue={concurrency === 0 ? (snapshot.language === "zh-CN" ? "无限" : "∞") : undefined} min={0} max={64} decrease={() => { const value = Math.max(0, concurrency - 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }} increase={() => { const value = Math.min(64, concurrency + 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }} /></CapacityControl>
-              <CapacityControl settingID="subagents:depth" label={snapshot.language === "zh-CN" ? "递归深度" : "Recursion depth"} description={snapshot.language === "zh-CN" ? "子智能体继续委派的层数" : "Levels of nested delegation"}><MenuSelect className="capacity-depth-menu" value={String(maxDepth)} options={[{ value: "-1", label: snapshot.language === "zh-CN" ? "无限" : "Unlimited" }, { value: "0", label: snapshot.language === "zh-CN" ? "关闭" : "None" }, ...[1, 2, 3].map((depth) => ({ value: String(depth), label: String(depth) }))]} onChange={(value) => { const depth = Number(value); setMaxDepth(depth); void action("set_subagent_depth", value); }} ariaLabel={snapshot.language === "zh-CN" ? "递归深度" : "Recursion depth"} /></CapacityControl>
-              <CapacityControl settingID="subagents:shell" label={snapshot.language === "zh-CN" ? "Shell 并发" : "Shell concurrency"} description={snapshot.language === "zh-CN" ? "本地命令独立容量" : "Independent command capacity"}><CompactStepper value={shellConcurrency} min={1} max={16} decrease={() => { const value = Math.max(1, shellConcurrency - 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }} increase={() => { const value = Math.min(16, shellConcurrency + 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }} /></CapacityControl>
-              <CapacityControl settingID="subagents:timeout" label={snapshot.language === "zh-CN" ? "前台等待窗口" : "Foreground wait window"} description={snapshot.language === "zh-CN" ? "窗口结束后安全任务转为后台继续，不会被取消" : "Safe tasks continue in the background when the window ends; they are not cancelled"}><MenuSelect className="capacity-timeout-menu" value={String(awaitSeconds)} options={[30, 60, 300, 600, 1800].map((seconds) => ({ value: String(seconds), label: seconds < 60 ? `${seconds} ${snapshot.language === "zh-CN" ? "秒" : "sec"}` : `${seconds / 60} ${snapshot.language === "zh-CN" ? "分钟" : "min"}` }))} onChange={(value) => { const seconds = Number(value); setAwaitSeconds(seconds); void action("set_subagent_await_timeout", value); }} ariaLabel={snapshot.language === "zh-CN" ? "前台等待窗口" : "Foreground wait window"} /></CapacityControl>
-            </div>
-            <div className="settings-card subagent-scheduling" data-setting-id="subagents:scheduling">
-              <header><div><strong>{snapshot.language === "zh-CN" ? "调度策略" : "Scheduling policy"}</strong><small>{snapshot.language === "zh-CN" ? "当前定义使用并行工具分发" : "Definitions use parallel tool dispatch"}</small></div><em><i />Parallel</em></header>
-              <RuntimeInvariant label={snapshot.language === "zh-CN" ? "在主会话中显示子智能体进度" : "Show subagent progress in the main conversation"} hint={snapshot.language === "zh-CN" ? "状态摘要投影到当前任务，不混入最终回答" : "Project state summaries without mixing them into the final answer"} />
-              <RuntimeInvariant label={snapshot.language === "zh-CN" ? "完成后保留结果卡片" : "Keep result cards after completion"} hint={snapshot.language === "zh-CN" ? "会话重开后仍可检查任务、耗时和输出" : "Inspect tasks, duration, and output after reopening"} />
-              <RuntimeInvariant label={snapshot.language === "zh-CN" ? "资源不足时排队" : "Queue when capacity is unavailable"} hint={snapshot.language === "zh-CN" ? "保持 queued 状态，不提前显示为运行中" : "Keep queued state without presenting it as running"} />
-            </div>
+            <section className="settings-card subagent-capacity" data-setting-id="subagents:capacity" aria-labelledby="subagent-capacity-title">
+              <header>
+                <div>
+                  <strong id="subagent-capacity-title">{t("subagentCapacityTitle")}</strong>
+                  <small>{t("subagentCapacityHint")}</small>
+                </div>
+              </header>
+              <SettingRow settingID="subagents:concurrency" label={t("subagentConcurrencyLabel")} description={t("subagentConcurrencyHint")}>
+                <CompactStepper
+                  value={concurrency}
+                  displayValue={concurrency === 0 ? t("subagentUnlimited") : undefined}
+                  min={0}
+                  max={64}
+                  decreaseLabel={t("decreaseValue")}
+                  increaseLabel={t("increaseValue")}
+                  decrease={() => { const value = Math.max(0, concurrency - 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }}
+                  increase={() => { const value = Math.min(64, concurrency + 1); setConcurrency(value); void action("set_subagent_concurrency", String(value)); }}
+                />
+              </SettingRow>
+              <SettingRow settingID="subagents:depth" label={t("subagentDepthLabel")} description={t("subagentDepthHint")}>
+                <MenuSelect
+                  className="capacity-depth-menu"
+                  value={String(maxDepth)}
+                  options={[{ value: "-1", label: t("subagentUnlimited") }, { value: "0", label: t("subagentDepthNone") }, ...[1, 2, 3].map((depth) => ({ value: String(depth), label: String(depth) }))]}
+                  onChange={(value) => { const depth = Number(value); setMaxDepth(depth); void action("set_subagent_depth", value); }}
+                  ariaLabel={t("subagentDepthLabel")}
+                />
+              </SettingRow>
+              <SettingRow settingID="subagents:shell" label={t("subagentShellLabel")} description={t("subagentShellHint")}>
+                <CompactStepper
+                  value={shellConcurrency}
+                  min={1}
+                  max={16}
+                  decreaseLabel={t("decreaseValue")}
+                  increaseLabel={t("increaseValue")}
+                  decrease={() => { const value = Math.max(1, shellConcurrency - 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }}
+                  increase={() => { const value = Math.min(16, shellConcurrency + 1); setShellConcurrency(value); void action("set_shell_concurrency", String(value)); }}
+                />
+              </SettingRow>
+              <SettingRow settingID="subagents:shell-wall" label={t("shellWallClockLabel")} description={t("shellWallClockHint")}>
+                <MenuSelect
+                  className="capacity-timeout-menu"
+                  value={String(shellMaxWallClockSeconds)}
+                  options={[60, 120, 300, 600, 900, 1800, 3600, 7200].map((seconds) => ({
+                    value: String(seconds),
+                    label: tFormat(snapshot.language, "subagentMinutes", { n: seconds / 60 }),
+                  }))}
+                  onChange={(value) => { const seconds = Number(value); setShellMaxWallClockSeconds(seconds); void action("set_shell_max_wall_clock", value); }}
+                  ariaLabel={t("shellWallClockLabel")}
+                />
+              </SettingRow>
+              <SettingRow settingID="subagents:timeout" label={t("subagentAwaitLabel")} description={t("subagentAwaitHint")}>
+                <MenuSelect
+                  className="capacity-timeout-menu"
+                  value={String(awaitSeconds)}
+                  options={[
+                    { value: "0", label: t("subagentAwaitUntilDone") },
+                    ...[30, 60, 300, 600, 1800].map((seconds) => ({
+                      value: String(seconds),
+                      label: seconds < 60 ? tFormat(snapshot.language, "subagentSeconds", { n: seconds }) : tFormat(snapshot.language, "subagentMinutes", { n: seconds / 60 }),
+                    })),
+                  ]}
+                  onChange={(value) => { const seconds = Number(value); setAwaitSeconds(seconds); void action("set_subagent_await_timeout", value); }}
+                  ariaLabel={t("subagentAwaitLabel")}
+                />
+              </SettingRow>
+              <SettingRow settingID="subagents:idle" label={t("subagentIdleLabel")} description={t("subagentIdleHint")}>
+                <MenuSelect
+                  className="capacity-timeout-menu"
+                  value={String(idleSeconds)}
+                  options={[
+                    { value: "0", label: t("subagentIdleOff") },
+                    ...[60, 120, 300, 600, 900, 1800].map((seconds) => ({
+                      value: String(seconds),
+                      label: tFormat(snapshot.language, "subagentMinutes", { n: seconds / 60 }),
+                    })),
+                  ]}
+                  onChange={(value) => { const seconds = Number(value); setIdleSeconds(seconds); void action("set_subagent_idle_timeout", value); }}
+                  ariaLabel={t("subagentIdleLabel")}
+                />
+              </SettingRow>
+            </section>
+            <section className="settings-card subagent-scheduling" data-setting-id="subagents:scheduling" aria-labelledby="subagent-scheduling-title">
+              <header>
+                <div>
+                  <strong id="subagent-scheduling-title">{t("subagentSchedulingTitle")}</strong>
+                  <small>{t("subagentSchedulingHint")}</small>
+                </div>
+              </header>
+              <div className="subagent-policy" role="note">
+                <div>
+                  <strong>{t("subagentSchedulingPolicy")}</strong>
+                  <p>{t("subagentSchedulingPolicyHint")}</p>
+                </div>
+                <div className="subagent-policy-value">
+                  <b>{t("subagentSchedulingParallel")}</b>
+                  <span>{t("subagentSchedulingReadOnly")}</span>
+                </div>
+              </div>
+            </section>
+            <section className="settings-card subagent-display" data-setting-id="subagents:display" aria-labelledby="subagent-display-title">
+              <header>
+                <div>
+                  <strong id="subagent-display-title">{t("subagentDisplayTitle")}</strong>
+                  <small>{t("subagentDisplayHint")}</small>
+                </div>
+              </header>
+              <DisplayFact settingID="subagents:progress" label={t("subagentShowProgress")} hint={t("subagentShowProgressHint")} status={t("subagentAlwaysOn")} />
+              <DisplayFact settingID="subagents:cards" label={t("subagentKeepCards")} hint={t("subagentKeepCardsHint")} status={t("subagentAlwaysOn")} />
+              <DisplayFact settingID="subagents:queue" label={t("subagentQueueWhenFull")} hint={t("subagentQueueWhenFullHint")} status={t("subagentAlwaysOn")} />
+            </section>
           </SettingsPane>}
           {activeSection === "governance" && <SettingsPane settingID="section:governance" title={t("settingsGovernance")} description={t("settingsGovernanceHint")} className="governance-pane">
             <div className="settings-card governance-settings">
@@ -231,11 +358,27 @@ export default function SettingsDialog() {
               <SettingRow settingID="appearance:language" label={snapshot.language === "zh-CN" ? "界面语言" : "Interface language"} description={snapshot.language === "zh-CN" ? "应用菜单、按钮与系统消息" : "Application menus, buttons, and system messages"}><div className="appearance-segmented" role="radiogroup"><button type="button" className={snapshot.language === "zh-CN" ? "selected" : ""} onClick={() => { setLanguage("zh-CN"); void action("set_language", "zh-CN"); }}>{t("langZh")}</button><button type="button" className={snapshot.language === "en" ? "selected" : ""} onClick={() => { setLanguage("en"); void action("set_language", "en"); }}>English</button></div></SettingRow>
               <SettingRow settingID="appearance:theme" label={t("theme")} description={snapshot.language === "zh-CN" ? "跟随系统可自动切换明暗" : "Follow the system appearance automatically"}><div className="theme-preview-group" role="radiogroup">{(["light", "dark", "system"] as const).map((item) => <button type="button" key={item} className={theme === item ? "selected" : ""} onClick={() => setTheme(item)}><span data-theme-preview={item}><i /><b /></span><small>{item === "light" ? (snapshot.language === "zh-CN" ? "暖白" : "Warm light") : item === "dark" ? (snapshot.language === "zh-CN" ? "夜间" : "Night") : t("system")}</small></button>)}</div></SettingRow>
               <SettingRow settingID="appearance:font" label={t("interfaceFont")} description={t("interfaceFontHint")}><MenuSelect className="setting-menu font-family-menu" value={uiFont} options={fontOptions} onChange={setUIFont} ariaLabel={t("interfaceFont")} fit="full" searchable searchPlaceholder={t("searchFonts")} emptyLabel={t("noMatchingFonts")} /></SettingRow>
-              <SettingRow settingID="appearance:font-size" label={t("interfaceFontSize")} description={t("interfaceFontSizeHint")}><div className="font-size-control"><button type="button" onClick={() => setUIFontSize(uiFontSize - 1)} disabled={uiFontSize <= 11} aria-label={t("decreaseFontSize")}><span>A−</span></button><output aria-live="polite">{uiFontSize} px</output><button type="button" onClick={() => setUIFontSize(uiFontSize + 1)} disabled={uiFontSize >= 20} aria-label={t("increaseFontSize")}><span>A+</span></button></div></SettingRow>
+              <SettingRow settingID="appearance:font-size" label={t("interfaceFontSize")} description={t("interfaceFontSizeHint")}><FontSizeControl value={uiFontSize} min={11} max={20} onChange={setUIFontSize} decreaseLabel={t("decreaseFontSize")} increaseLabel={t("increaseFontSize")} /></SettingRow>
               <SettingRow settingID="appearance:motion" label={snapshot.language === "zh-CN" ? "减弱动态效果" : "Reduce motion"} description={snapshot.language === "zh-CN" ? "将场景切换与流式渐显缩短为即时更新" : "Make scene transitions and streaming reveals immediate"}><button type="button" role="switch" aria-checked={reducedMotion} className={`settings-switch ${reducedMotion ? "on" : ""}`} onClick={() => setReducedMotion((value) => !value)}><span /></button></SettingRow>
             </div>
+            <section className="settings-card appearance-card appearance-chat-card" data-setting-id="appearance:chat-text" aria-labelledby="chat-text-title">
+              <header>
+                <div>
+                  <strong id="chat-text-title">{t("chatTextControls")}</strong>
+                  <small>{t("chatTextControlsHint")}</small>
+                </div>
+              </header>
+              <SettingRow settingID="appearance:chat-font-size" label={t("chatUIFontSize")} description={t("chatUIFontSizeHint")}>
+                <FontSizeControl value={chatFontSize} min={CHAT_UI_FONT_MIN} max={CHAT_UI_FONT_MAX} onChange={setChatFontSize} decreaseLabel={t("decreaseChatUIFontSize")} increaseLabel={t("increaseChatUIFontSize")} />
+              </SettingRow>
+              <SettingRow settingID="appearance:chat-code-font-size" label={t("chatCodeFontSize")} description={t("chatCodeFontSizeHint")}>
+                <FontSizeControl value={chatCodeFontSize} min={CHAT_CODE_FONT_MIN} max={CHAT_CODE_FONT_MAX} onChange={setChatCodeFontSize} decreaseLabel={t("decreaseChatCodeFontSize")} increaseLabel={t("increaseChatCodeFontSize")} />
+              </SettingRow>
+            </section>
           </SettingsPane>}
-          {activeSection === "extensions" && <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} openAddRequest={addMCPRequest} executeAction={execute} onError={setError} targetTab={settingsTarget?.id === "extensions:skills" ? "skills" : settingsTarget?.id === "extensions:plugins" ? "plugins" : "mcp"} />}
+          {activeSection === "extensions" && <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} executeAction={execute} onError={setError} targetTab={settingsTarget?.id === "extensions:skills" ? "skills" : settingsTarget?.id === "extensions:plugins" ? "plugins" : settingsTarget?.id === "extensions:hooks" ? "hooks" : "mcp"} />}
+          {activeSection === "archive" && <SettingsPane settingID="section:archive" title={t("settingsArchive")} description={t("settingsArchiveHint")} className="archive-settings-pane"><ArchiveSettings language={snapshot.language} sessionId={snapshot.sessionId} onError={setError} /></SettingsPane>}
+          {activeSection === "usage" && <SettingsPane settingID="section:usage" title={t("settingsUsage")} description={t("settingsUsageHint")} className="usage-settings-pane"><UsageSettings language={snapshot.language} onError={setError} /></SettingsPane>}
         </div>
       </main>
     </div>
@@ -254,16 +397,30 @@ function GovernanceOption({ icon: Icon, label, hint, badge, selected, onClick }:
   return <button type="button" role="radio" aria-checked={selected} className={selected ? "selected" : ""} onClick={onClick}><Icon size={15} /><span><strong>{label}</strong><small>{hint}</small></span>{badge && <em>{badge}</em>}{selected && <Check className="governance-check" size={13} />}</button>;
 }
 
-function CapacityControl({ label, description, settingID, children }: { label: string; description: string; settingID?: string; children: React.ReactNode }) {
-  return <section data-setting-id={settingID}><div><strong>{label}</strong><small>{description}</small></div>{children}</section>;
+function CompactStepper({ value, displayValue, min, max, decrease, increase, decreaseLabel, increaseLabel }: {
+  value: number;
+  displayValue?: string;
+  min: number;
+  max: number;
+  decrease: () => void;
+  increase: () => void;
+  decreaseLabel: string;
+  increaseLabel: string;
+}) {
+  return <div className="compact-stepper">
+    <button type="button" aria-label={decreaseLabel} disabled={value <= min} onClick={decrease}><Minus size={13} /></button>
+    <output aria-live="polite">{displayValue ?? value}</output>
+    <button type="button" aria-label={increaseLabel} disabled={value >= max} onClick={increase}><Plus size={13} /></button>
+  </div>;
 }
 
-function CompactStepper({ value, displayValue, min, max, decrease, increase }: { value: number; displayValue?: string; min: number; max: number; decrease: () => void; increase: () => void }) {
-  return <div className="compact-stepper"><button type="button" aria-label="Decrease" disabled={value <= min} onClick={decrease}><Minus size={13} /></button><output>{displayValue ?? value}</output><button type="button" aria-label="Increase" disabled={value >= max} onClick={increase}><Plus size={13} /></button></div>;
-}
-
-function RuntimeInvariant({ label, hint }: { label: string; hint: string }) {
-  return <div className="runtime-invariant"><div><strong>{label}</strong><small>{hint}</small></div><span aria-label="Enabled"><i /></span></div>;
+function DisplayFact({ label, hint, settingID, status }: { label: string; hint: string; settingID: string; status: string }) {
+  return <div className="setting-row subagent-display-row" data-setting-id={settingID}>
+    <div><strong>{label}</strong><p>{hint}</p></div>
+    <div>
+      <span className="settings-switch on" role="switch" aria-checked="true" aria-disabled="true" aria-label={status}><span /></span>
+    </div>
+  </div>;
 }
 
 function RouteRow({ route, description, modelsByProvider, modelProviders, action, language }: {
@@ -271,15 +428,15 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
   description: string;
   modelsByProvider: Record<string, ModelOption[]>;
   modelProviders: ModelProvider[];
-  action: (kind: string, target?: string, route?: ModelRoute) => Promise<void>;
+  action: (kind: ActionKind, target?: string, route?: ModelRoute) => Promise<void>;
   language: Language;
 }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const t = translator(language);
-  const [value, setValue] = useState<ModelRouteConfig>({ ...route.Route });
-  useEffect(() => setValue({ ...route.Route }), [route.Route.model, route.Route.provider, route.Route.reasoning]);
+  const [value, setValue] = useState<ModelRouteConfig>({ ...route.route });
+  useEffect(() => setValue({ ...route.route }), [route.route.model, route.route.provider, route.route.reasoning]);
 
-  const requiresExplicitRoute = route.Scope === "vision";
+  const requiresExplicitRoute = route.scope === "vision";
   const provider = value.provider || (requiresExplicitRoute ? "" : snapshot.provider);
   const providerModels = (modelsByProvider[provider] ?? []).filter((item) => isRouteModelVisible(item, requiresExplicitRoute));
   const requestedModel = value.model || (provider === snapshot.provider ? snapshot.model : "");
@@ -301,7 +458,7 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
     if (requiresExplicitRoute && next === "::") {
       const nextValue = { provider: "", model: "", reasoning: "" };
       setValue(nextValue);
-      void action("set_model_route", "", { ...route, Route: nextValue });
+      void action("set_model_route", "", { ...route, route: nextValue });
       return;
     }
     const separator = next.indexOf("::");
@@ -311,12 +468,12 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
     const nextReasoning = nextModel?.defaultReasoning || reasoning || snapshot.reasoning;
     const nextValue = { provider: nextProvider, model: nextModelID, reasoning: nextReasoning };
     setValue(nextValue);
-    void action("set_model_route", "", { ...route, Route: nextValue });
+    void action("set_model_route", "", { ...route, route: nextValue });
   };
   const selectReasoning = (nextReasoning: string) => {
     const nextValue = { provider, model, reasoning: nextReasoning };
     setValue(nextValue);
-    void action("set_model_route", "", { ...route, Route: nextValue });
+    void action("set_model_route", "", { ...route, route: nextValue });
   };
 
   return <div className="route-row" data-setting-id={routeSearchID(route)}>
@@ -359,6 +516,20 @@ function routeModelOptions(modelsByProvider: Record<string, ModelOption[]>, mode
 }
 
 function SettingRow({ label, description, settingID, children }: { label: string; description: string; settingID?: string; children: React.ReactNode }) { return <div className="setting-row" data-setting-id={settingID}><div><strong>{label}</strong><p>{description}</p></div><div>{children}</div></div>; }
+function FontSizeControl({ value, min, max, onChange, decreaseLabel, increaseLabel }: {
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+  decreaseLabel: string;
+  increaseLabel: string;
+}) {
+  return <div className="font-size-control">
+    <button type="button" onClick={() => onChange(value - 1)} disabled={value <= min} aria-label={decreaseLabel}><span>A−</span></button>
+    <output aria-live="polite">{value} px</output>
+    <button type="button" onClick={() => onChange(value + 1)} disabled={value >= max} aria-label={increaseLabel}><span>A+</span></button>
+  </div>;
+}
 function systemFontOptions(selected: string, fonts: SystemFont[]) {
   const options = new Map(fonts.map((font) => [font.family, { value: font.family, label: font.label || font.family, caption: font.family }]));
   if (selected !== "system" && !options.has(selected)) options.set(selected, { value: selected, label: selected, caption: selected });
@@ -366,27 +537,27 @@ function systemFontOptions(selected: string, fonts: SystemFont[]) {
 }
 function routeTitle(route: ModelRoute, language: Language) {
   const t = translator(language);
-	if (route.Scope === "main") return t("routeMain");
-  if (route.Scope === "title") return t("routeTitle");
-  if (route.Scope === "plan") return t("routePlan");
-  if (route.Scope === "approval") return t("routeApproval");
-  if (route.Scope === "vision") return t("routeVision");
-  if (route.Scope === "compaction") return t("routeCompaction");
-  if (route.Scope === "recap") return t("routeRecap");
-  if (route.Role === "research") return language === "zh-CN" ? "研究与文档" : "Research and documentation";
-  if (route.Role === "review") return language === "zh-CN" ? "编码与审查" : "Coding and review";
-  return route.Role || route.Label;
+	if (route.scope === "main") return t("routeMain");
+  if (route.scope === "title") return t("routeTitle");
+  if (route.scope === "plan") return t("routePlan");
+  if (route.scope === "approval") return t("routeApproval");
+  if (route.scope === "vision") return t("routeVision");
+  if (route.scope === "compaction") return t("routeCompaction");
+  if (route.scope === "recap") return t("routeRecap");
+  if (route.role === "research") return language === "zh-CN" ? "研究与文档" : "Research and documentation";
+  if (route.role === "review") return language === "zh-CN" ? "编码与审查" : "Coding and review";
+  return route.role || route.label;
 }
 function routeDescription(route: ModelRoute, description: string, language: Language) {
   const t = translator(language);
-	if (route.Scope === "main") return t("routeMainHint");
-  if (route.Scope === "title") return t("routeTitleHint");
-  if (route.Scope === "plan") return t("routePlanHint");
-  if (route.Scope === "approval") return t("routeApprovalHint");
-  if (route.Scope === "vision") return t("routeVisionHint");
-	if (route.Scope === "compaction") return t("routeCompactionHint");
-	if (route.Scope === "recap") return t("routeRecapHint");
-	if (route.Role === "research") return language === "zh-CN" ? "检索、映射、说明文档" : "Research, mapping, and documentation";
-	if (route.Role === "review") return language === "zh-CN" ? "实现、调试、架构判断" : "Implementation, debugging, and architecture";
-  return description || tFormat(language, "routeSubagentHint", { role: route.Role || route.Label });
+	if (route.scope === "main") return t("routeMainHint");
+  if (route.scope === "title") return t("routeTitleHint");
+  if (route.scope === "plan") return t("routePlanHint");
+  if (route.scope === "approval") return t("routeApprovalHint");
+  if (route.scope === "vision") return t("routeVisionHint");
+	if (route.scope === "compaction") return t("routeCompactionHint");
+	if (route.scope === "recap") return t("routeRecapHint");
+	if (route.role === "research") return language === "zh-CN" ? "检索、映射、说明文档" : "Research, mapping, and documentation";
+	if (route.role === "review") return language === "zh-CN" ? "实现、调试、架构判断" : "Implementation, debugging, and architecture";
+  return description || tFormat(language, "routeSubagentHint", { role: route.role || route.label });
 }

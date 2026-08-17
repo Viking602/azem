@@ -2,8 +2,11 @@ package skills
 
 import (
 	"embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,6 +45,7 @@ type Entry struct {
 	Name          string
 	Description   string
 	SourcePath    string
+	LogoPath      string
 	Bundled       bool
 	Eager         bool
 	Disabled      bool
@@ -219,6 +223,7 @@ func buildCatalog(options LoadOptions) (catalogState, error) {
 			Name:          name,
 			Description:   candidate.skill.Description,
 			SourcePath:    candidate.skill.SourcePath,
+			LogoPath:      skillIconDataURL(candidate.skill.SourcePath, candidate.skill.Metadata),
 			Bundled:       candidate.bundled,
 			Eager:         isEager && !isDisabled,
 			Disabled:      isDisabled,
@@ -390,4 +395,46 @@ func cloneSkillsConfig(cfg config.SkillsConfig) config.SkillsConfig {
 	cfg.Eager = append([]string(nil), cfg.Eager...)
 	cfg.Disabled = append([]string(nil), cfg.Disabled...)
 	return cfg
+}
+
+func skillIconDataURL(sourcePath string, metadata map[string]string) string {
+	dir := filepath.Dir(strings.TrimSpace(sourcePath))
+	if dir == "." || dir == "" {
+		return ""
+	}
+	var candidates []string
+	if icon := strings.TrimSpace(metadata["icon"]); icon != "" && !strings.Contains(icon, "..") {
+		candidates = append(candidates, filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(icon, "./"))))
+	}
+	for _, name := range []string{"icon.svg", "icon.png", "icon.webp", "icon.jpg", "icon.jpeg"} {
+		candidates = append(candidates, filepath.Join(dir, name))
+	}
+	for _, path := range candidates {
+		if data := boundedImageDataURL(path); data != "" {
+			return data
+		}
+	}
+	return ""
+}
+
+func boundedImageDataURL(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil || len(data) == 0 || len(data) > 1<<20 {
+		return ""
+	}
+	contentType := http.DetectContentType(data)
+	if strings.EqualFold(filepath.Ext(path), ".svg") {
+		contentType = "image/svg+xml"
+	}
+	switch contentType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml":
+		return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data)
+	default:
+		return ""
+	}
 }

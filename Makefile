@@ -4,10 +4,18 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X 'main.version=$(VERSION)' -X 'main.gitCommit=$(GIT_COMMIT)' -X 'main.buildTime=$(BUILD_TIME)'
 
-.PHONY: build gui gui-windows frontend test test-gui sqlc architecture-check
+.PHONY: build azem-eval azem-eval-linux gui gui-windows frontend test test-gui sqlc architecture-check contracts contracts-check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/azem
+
+azem-eval:
+	go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval ./cmd/azem-eval
+
+azem-eval-linux: azem-eval
+	mkdir -p dist/eval
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval-linux-amd64 ./cmd/azem-eval
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval-linux-arm64 ./cmd/azem-eval
 
 frontend:
 	cd frontend && bun install --frozen-lockfile && bun run build
@@ -41,20 +49,30 @@ gui-windows: frontend
 	mkdir -p dist/windows-$(WINDOWS_ARCH)
 	GOOS=windows GOARCH=$(WINDOWS_ARCH) CGO_ENABLED=0 go build -ldflags "-H windowsgui $(LDFLAGS)" -o dist/windows-$(WINDOWS_ARCH)/Azem.exe ./cmd/azem-gui
 
-test:
+test: contracts-check
+ifeq ($(shell uname -s),Darwin)
+	$(DARWIN_CGO_ENV) go test ./...
+else
 	go test ./...
+endif
 
 test-gui:
 	cd frontend && bun run typecheck && bun run test && bun run build
 
 ifeq ($(shell uname -s),Darwin)
-	$(DARWIN_CGO_ENV) go test ./internal/desktop ./cmd/azem-gui
+	$(DARWIN_CGO_ENV) go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui
 else
-	go test ./internal/desktop ./cmd/azem-gui
+	go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui
 endif
 
 sqlc:
 	go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate
+
+contracts:
+	go run ./cmd/gen-contracts
+
+contracts-check:
+	go run ./cmd/gen-contracts -check
 
 architecture-check:
 	sentrux check .

@@ -1,0 +1,41 @@
+/* Subagent details are an overlay drawer. Parent conversation geometry stays fixed. */
+.subagent-detail-drawer-layer { position: absolute; z-index: 46; inset: 0; display: flex; justify-content: flex-end; background: rgb(16 24 40 / 8%); backdrop-filter: blur(1.5px); animation: subagents-drawer-backdrop-in .16s ease-out both; }
+.agent-side-chat { width: min(780px, calc(100% - 28px)); min-width: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid var(--line-strong); background: var(--paper); box-shadow: -12px 0 32px rgb(16 24 40 / 8%); animation: side-chat-in .24s cubic-bezier(.16, 1, .3, 1); }
+.agent-side-chat-header { flex: 0 0 auto; min-height: 46px; display: flex; align-items: center; gap: 10px; padding: 8px 14px 8px 16px; border-bottom: 1px solid var(--line); }
+.agent-side-chat-heading { min-width: 0; flex: 1; display: flex; align-items: center; gap: 10px; }
+.agent-side-chat-heading > svg, .agent-side-chat-heading > .subagent-glyph { flex: 0 0 auto; }
+.agent-side-chat-title { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; column-gap: 10px; }
+.agent-side-chat-title h2 { min-width: 0; margin: 0; overflow: hidden; color: var(--ink); font-size: 14px; font-weight: 650; letter-spacing: -.015em; outline: none; text-overflow: ellipsis; white-space: nowrap; }
+.agent-side-chat-title small { display: inline-flex; align-items: center; gap: 6px; color: var(--faint); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agent-side-chat-title em { font-style: normal; }
+.agent-side-chat-title em[data-state="running"], .agent-side-chat-title em[data-state="started"], .agent-side-chat-title em[data-state="initializing"] { color: var(--blue); }
+.agent-side-chat-title em[data-state="completed"] { color: var(--green); }
+.agent-side-chat-title em[data-state="failed"] { color: var(--red); }
+.agent-side-chat-actions { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+.agent-side-chat-switcher { min-height: 44px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 5px 18px; border-bottom: 1px solid var(--line); background: var(--paper); }
+.agent-side-chat-switcher > span { color: var(--muted); font-size: 10px; font-weight: 620; white-space: nowrap; }
+.agent-side-chat-switcher > em { min-width: 22px; height: 20px; display: grid; place-items: center; border-radius: 99px; background: var(--paper-muted); color: var(--faint); font-family: var(--mono); font-size: 9px; font-style: normal; }
+.agent-side-chat-tabs { min-width: 0; display: flex; align-items: center; gap: 5px; overflow-x: auto; padding: 3px; scrollbar-width: none; }
+.agent-side-chat-tabs::-webkit-scrollbar { display: none; }
+.agent-side-chat-tabs button { width: 32px; height: 32px; display: grid; place-items: center; flex: 0 0 32px; border-radius: 9px; color: var(--muted); transition: background .14s ease, box-shadow .14s ease, transform .14s ease; }
+.agent-side-chat-tabs button:hover { background: var(--paper); box-shadow: inset 0 0 0 1px var(--line); transform: translateY(-1px); }
+.agent-side-chat-tabs button.active { background: var(--paper); box-shadow: inset 0 0 0 1px var(--line-strong), 0 2px 7px rgb(20 20 17 / 7%); }
+.agent-side-chat-scroll { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; padding: 0; scrollbar-width: thin; }
+.agent-side-chat-transcript.transcript { width: min(720px, calc(100% - 64px)); max-width: none; margin: 0 auto; padding: 34px 0 84px; }
+.agent-side-chat-transcript .timeline-feed { width: 100%; max-width: none; gap: 0; }
+.agent-side-chat-transcript .work-entry { color: color-mix(in srgb, var(--muted) 80%, var(--faint)); }
+.agent-side-chat-transcript .tool-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-side-chat-transcript .tool-fields dd {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.agent-side-chat-transcript .work-entry-label { white-space: nowrap; }
+.agent-side-chat-empty { min-height: 100%; display: grid; place-content: center; justify-items: center; gap: 10px; padding: 32px; color: var(--faint); font-size: var(--text-sm); text-align: center; }
+.agent-side-chat-empty p { margin: 0; max-width: 240px; line-height: 1.5; }
+@keyframes side-chat-in { from { opacity: .2; transform: translateX(32px); } to { opacity: 1; transform: none; } }
+

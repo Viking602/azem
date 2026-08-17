@@ -80,11 +80,17 @@ func (b *eventBroker) Publish(event Event) eventPublishStatus {
 		b.signal()
 		return eventPublishAccepted
 	}
+	if isReplaceableEvent(event) {
+		b.appendReplaceable(event)
+		b.compactOverLimit()
+		b.signal()
+		return eventPublishAccepted
+	}
 	// A lifecycle event is an ordering barrier. Any delta that precedes it must
 	// be visible before the lifecycle transition, without waiting for the
 	// coalescing window to expire.
 	for index := len(b.queue) - 1; index >= b.head; index-- {
-		if !isCoalescibleEvent(b.queue[index].event.Kind) {
+		if !isDeferrableQueuedEvent(b.queue[index].event) {
 			break
 		}
 		b.queue[index].readyAt = time.Time{}
@@ -97,7 +103,7 @@ func (b *eventBroker) Publish(event Event) eventPublishStatus {
 	if terminal {
 		key := runKey(event)
 		if b.degraded[key] {
-			b.appendResync(key, "final")
+			b.appendResync(key, "final", event.AgentID)
 			delete(b.degraded, key)
 		}
 	}
@@ -120,6 +126,28 @@ func (b *eventBroker) appendCoalescible(event Event) {
 	b.queuedBytes += current.size
 }
 
+// appendReplaceable collapses same-state live agent_state snapshots per
+// stream identity: the newest snapshot wholly replaces the queued one.
+// Streaming thinking/text from many subagents must not accumulate roster
+// events the consumer can never coalesce (UI-002 spirit). Distinct state
+// transitions (initializing → queued → running → …) stay ordered and are
+// never dropped.
+func (b *eventBroker) appendReplaceable(event Event) {
+	key := streamKey(event)
+	if index, ok := b.pending[key]; ok && index >= b.head && index < len(b.queue) &&
+		b.queue[index].event.State == event.State {
+		current := &b.queue[index]
+		b.queuedBytes -= current.size
+		*current = newQueuedEvent(event, current.readyAt, false)
+		b.queuedBytes += current.size
+		return
+	}
+	current := newQueuedEvent(event, time.Now().Add(b.window), false)
+	b.queue = append(b.queue, current)
+	b.pending[key] = len(b.queue) - 1
+	b.queuedBytes += current.size
+}
+
 func eventDeliveryError(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -137,7 +165,7 @@ func (b *eventBroker) Next(ctx context.Context) (Event, error) {
 				b.queue[b.head] = queuedEvent{}
 				b.head++
 				b.queuedBytes -= current.size
-				if isCoalescibleEvent(current.event.Kind) {
+				if isDeferrableQueuedEvent(current.event) {
 					key := streamKey(current.event)
 					if b.pending[key] < b.head {
 						delete(b.pending, key)
@@ -234,6 +262,7 @@ func (b *eventBroker) compactOverLimit() {
 	b.queuedBytes = 0
 	clear(b.pending)
 	affected := make(map[eventRunKey]struct{})
+	agentIDs := make(map[eventRunKey]string)
 	for _, current := range remaining {
 		if isCoalescibleEvent(current.event.Kind) {
 			key := runKey(current.event)
@@ -242,6 +271,9 @@ func (b *eventBroker) compactOverLimit() {
 					affected[key] = struct{}{}
 				}
 				b.degraded[key] = true
+				if current.event.AgentID != "" {
+					agentIDs[key] = current.event.AgentID
+				}
 			}
 			continue
 		}
@@ -249,16 +281,16 @@ func (b *eventBroker) compactOverLimit() {
 		b.queuedBytes += current.size
 	}
 	for key := range affected {
-		b.appendResync(key, "degraded")
+		b.appendResync(key, "degraded", agentIDs[key])
 	}
 }
 
-func (b *eventBroker) appendResync(key eventRunKey, state string) {
+func (b *eventBroker) appendResync(key eventRunKey, state, agentID string) {
 	if key.sessionID == "" {
 		return
 	}
 	current := newQueuedEvent(Event{
-		Kind: EventProjectionResync, SessionID: key.sessionID, RunID: key.runID, State: state,
+		Kind: EventProjectionResync, SessionID: key.sessionID, RunID: key.runID, AgentID: agentID, State: state,
 	}, time.Time{}, false)
 	b.queue = append(b.queue, current)
 	b.queuedBytes += current.size
@@ -267,7 +299,7 @@ func (b *eventBroker) appendResync(key eventRunKey, state string) {
 func (b *eventBroker) rebuildPending() {
 	clear(b.pending)
 	for index := len(b.queue) - 1; index >= b.head; index-- {
-		if !isCoalescibleEvent(b.queue[index].event.Kind) {
+		if !isDeferrableQueuedEvent(b.queue[index].event) {
 			break
 		}
 		key := streamKey(b.queue[index].event)
@@ -284,6 +316,25 @@ func isCoalescibleEvent(kind EventKind) bool {
 	default:
 		return false
 	}
+}
+
+// isReplaceableEvent reports whether a newer event with the same stream key
+// may wholly replace this one in the queue. Only live subagent roster states
+// qualify; terminal transitions stay ordered lifecycle barriers.
+func isReplaceableEvent(event Event) bool {
+	if event.Kind != EventAgentState {
+		return false
+	}
+	switch event.State {
+	case "completed", "failed", "cancelled":
+		return false
+	default:
+		return true
+	}
+}
+
+func isDeferrableQueuedEvent(event Event) bool {
+	return isCoalescibleEvent(event.Kind) || isReplaceableEvent(event)
 }
 
 func isTerminalEvent(kind EventKind) bool {

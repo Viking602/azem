@@ -26,6 +26,27 @@ func writeTestSkill(t *testing.T, root, name, description, body string) string {
 	return path
 }
 
+func TestLoadProjectsSkillDirectoryIcon(t *testing.T) {
+	root := t.TempDir()
+	writeTestSkill(t, root, "demo", "Demo skill", "DEMO_BODY")
+	if err := os.WriteFile(filepath.Join(root, "demo", "icon.svg"), []byte("<svg xmlns=\"http://www.w3.org/2000/svg\"/>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := Load(LoadOptions{Config: config.SkillsConfig{Enabled: true, AdditionalDirs: []string{root}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logo string
+	for _, entry := range catalog.Snapshot().Entries {
+		if entry.Name == "demo" {
+			logo = entry.LogoPath
+		}
+	}
+	if !strings.HasPrefix(logo, "data:image/svg+xml;base64,") {
+		t.Fatalf("skill icon = %q", logo)
+	}
+}
+
 func TestReloadIsAtomic(t *testing.T) {
 	root := t.TempDir()
 	path := writeTestSkill(t, root, "demo", "Demo skill", "DEMO_BODY")

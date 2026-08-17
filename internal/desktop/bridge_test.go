@@ -58,6 +58,51 @@ func TestBridgeSkillCatalogDirectReadback(t *testing.T) {
 	}
 }
 
+func TestBridgeHookCatalogDirectReadback(t *testing.T) {
+	runtime := azemapp.NewService(context.Background(), config.Default())
+	runtime.AttachPlugins([]azemapp.PluginCatalogEntry{{
+		ID: "demo@local", Name: "demo", DisplayName: "Demo", Origin: "local", Enabled: true,
+		HookCount: 1, HooksTrusted: false,
+	}}, nil)
+	catalog, err := (&Bridge{runtime: runtime}).HookCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog == nil || catalog.TrustHooks || len(catalog.Sources) != 1 || catalog.Sources[0].ID != "demo@local" {
+		t.Fatalf("direct hook snapshot = %+v", catalog)
+	}
+}
+
+func TestBridgeUsageReportDirectReadback(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "usage.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-usage", Title: "Usage"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := sessions.UpsertProviderRequest(ctx, session.ProviderRequestFact{
+		RequestID: "u1", SessionID: "session-usage", RunID: "run", RequestKind: "main",
+		Provider: "chatgpt", Model: "gpt-5.6", Status: "completed",
+		StartedAt: now, CompletedAt: now, InputTokens: 11, OutputTokens: 2, TotalTokens: 13,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := azemapp.NewService(ctx, config.Default())
+	runtime.AttachDurable(sessions, nil)
+	report, err := (&Bridge{runtime: runtime, ctx: ctx}).UsageReport(session.UsageScopeAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Empty || report.Requests != 1 || report.TotalTokens != 13 {
+		t.Fatalf("direct usage snapshot = %+v", report)
+	}
+}
+
 func TestBridgeSearchSessionsReturnsBoundedReadOnlyResults(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "search.db"))
@@ -128,13 +173,27 @@ func TestBridgeInitialiseAndEventProjection(t *testing.T) {
 	if snapshot.SessionID != "session-test" || snapshot.Model != cfg.Defaults.Model || snapshot.QueueMode != "queue" {
 		t.Fatalf("unexpected snapshot: %#v", snapshot)
 	}
-	select {
-	case event := <-events:
-		if event.Kind != string(azemapp.EventBootstrapDone) || event.Sequence == 0 {
-			t.Fatalf("unexpected event: %#v", event)
+	// Initialise starts two concurrent emitters: pump forwards runtime events
+	// (bootstrap_done first) while prime emits local bridge_error events for
+	// actions that need durable stores this minimal runtime never attached.
+	// Their interleaving is not ordered, so scan for the bootstrap event
+	// instead of asserting it arrives first.
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.Kind == string(azemapp.EventBootstrapDone) {
+				if event.Sequence == 0 {
+					t.Fatalf("bootstrap event missing sequence: %#v", event)
+				}
+				return
+			}
+			if event.Kind != EventKindBridgeError {
+				t.Fatalf("unexpected event before bootstrap_done: %#v", event)
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for projected bootstrap event")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for projected event")
 	}
 }
 
@@ -223,6 +282,9 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionSetPluginImported) {
 		t.Fatal("Codex plugin import selection must be configurable from the desktop")
 	}
+	if !allowedAction(azemapp.ActionListHooks) || !allowedAction(azemapp.ActionSetPluginHooksTrusted) || !allowedAction(azemapp.ActionSetHookEnabled) {
+		t.Fatal("plugin hook trust and per-hook enablement must be configurable from the desktop")
+	}
 	if !allowedAction(azemapp.ActionSetMCPEnabled) || !allowedAction(azemapp.ActionUpsertMCPServer) || !allowedAction(azemapp.ActionDeleteMCPServer) {
 		t.Fatal("MCP services must be configurable from the desktop")
 	}
@@ -241,11 +303,28 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionRefreshSession) {
 		t.Fatal("session projection refresh must be available to the desktop")
 	}
+	if !allowedAction(azemapp.ActionArchiveSession) || !allowedAction(azemapp.ActionArchiveInactiveSessions) {
+		t.Fatal("session archive and restore must be available to the desktop")
+	}
+	if !allowedAction(azemapp.ActionListUsage) {
+		t.Fatal("usage ledger must be readable from the desktop")
+	}
 	if !allowedAction(azemapp.ActionCreateGitBranch) {
 		t.Fatal("git branch creation must be available to the desktop")
 	}
 	if allowedAction(azemapp.ActionKind("arbitrary_shell")) {
 		t.Fatal("unknown desktop actions must be rejected")
+	}
+}
+
+// TestAllowedDesktopActionsCoverEveryActionKind pins the bridge allowlist to
+// the complete runtime action contract so a newly added ActionKind cannot be
+// silently unreachable from the desktop (regression: set_subagent_depth).
+func TestAllowedDesktopActionsCoverEveryActionKind(t *testing.T) {
+	for _, kind := range azemapp.AllActionKinds() {
+		if !allowedAction(kind) {
+			t.Errorf("action kind %q is declared by the runtime but rejected by the desktop allowlist", kind)
+		}
 	}
 }
 

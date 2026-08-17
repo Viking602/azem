@@ -46,12 +46,11 @@ func workspaceWriteClaim(root string) (api.ResourceClaimSpec, error) {
 }
 
 func topLevelWorkspaceWriteClaims(allowWrite bool, shellPolicy, root string) ([]api.ResourceClaimSpec, error) {
-	if !allowWrite && shellPolicy == "deny" {
-		return nil, nil
-	}
-	claim, err := workspaceWriteClaim(root)
-	if err != nil {
-		return nil, err
-	}
-	return []api.ResourceClaimSpec{claim}, nil
+	// Sessions in the same project run in parallel. An exclusive workspace
+	// claim serialized every main run onto one lock, so a stuck or
+	// reconcile_required session made later conversations appear offline.
+	_ = allowWrite
+	_ = shellPolicy
+	_ = root
+	return nil, nil
 }

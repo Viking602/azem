@@ -139,9 +139,12 @@ func (t *durableToolTimeline) anchorAfter(sequence int64) {
 	t.hasAnchor = true
 }
 
-func (t *durableToolTimeline) finish(ctx context.Context, result message.ToolResult) error {
+// finish persists the durable tool record and returns the original call
+// arguments plus the resolved tool name so the event projection can derive
+// structured summaries (for example file changes) without re-parsing.
+func (t *durableToolTimeline) finish(ctx context.Context, result message.ToolResult) (json.RawMessage, string, error) {
 	if t == nil || t.store == nil {
-		return nil
+		return nil, result.Name, nil
 	}
 	t.mu.Lock()
 	call := t.calls[result.ToolCallID]
@@ -159,7 +162,7 @@ func (t *durableToolTimeline) finish(ctx context.Context, result message.ToolRes
 		Structured json.RawMessage `json:"structured,omitempty"`
 	}{Content: result.Content, Structured: result.Structured})
 	if marshalErr != nil {
-		return fmt.Errorf("encode durable tool result: %w", marshalErr)
+		return nil, result.Name, fmt.Errorf("encode durable tool result: %w", marshalErr)
 	}
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
@@ -167,7 +170,7 @@ func (t *durableToolTimeline) finish(ctx context.Context, result message.ToolRes
 		preview := boundedUTF8(result.Content, maxToolRecordPreviewBytes)
 		artifact, err := t.store.PutArtifact(persistCtx, t.sessionID, t.runID, "tool_result", payload, preview)
 		if err != nil {
-			return fmt.Errorf("persist tool result artifact: %w", err)
+			return nil, result.Name, fmt.Errorf("persist tool result artifact: %w", err)
 		}
 		artifactID = artifact.ID
 		content = preview
@@ -185,7 +188,7 @@ func (t *durableToolTimeline) finish(ctx context.Context, result message.ToolRes
 		Content: content, Structured: structured, ArtifactID: artifactID,
 		Observations: observations, CompletedAt: time.Now().UTC(),
 	})
-	return err
+	return call.Arguments, name, err
 }
 
 func (t *durableToolTimeline) fileObservations(name string, arguments, structured json.RawMessage, succeeded bool) []session.FileObservation {

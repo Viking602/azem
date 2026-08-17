@@ -60,7 +60,7 @@ export default function SubagentsPage() {
           <h1 id="subagents-page-title" ref={titleRef} tabIndex={-1}>{t("subagentCenter")}</h1>
           <p aria-live="polite">{subagentSummaryLabel(agents, language)}</p>
         </div>
-        <button type="button" className="subagents-close" onClick={closePage} title={t("closeSubagents")} aria-label={t("closeSubagents")}>
+        <button type="button" className="subagents-close" onClick={closePage} aria-label={t("closeSubagents")}>
           <X size={16} />
         </button>
       </header>
@@ -125,8 +125,8 @@ function SubagentRow({ agent, agents, language, now, inspect }: {
       >
         <SubagentGlyph agent={agent} size={34} />
         <span className="subagent-row-copy">
-          <strong title={name}>{name}</strong>
-          <span title={preview}>{preview}</span>
+          <strong>{name}</strong>
+          <span>{preview}</span>
         </span>
         <span className="subagent-row-meta">
           <em data-state={agent.state}>{status}</em>

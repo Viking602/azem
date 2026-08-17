@@ -74,7 +74,14 @@ type TurnRequest struct {
 	toolRecords            []session.ToolRecord
 	checkpointBoundary     *int64
 	immutableIdentity      string
+	origin                 string
+	wakeData               map[string]string
 }
+
+const (
+	turnOriginSubagentWake = "subagent_wake"
+	subagentWakeBlockState = "subagent_wake"
+)
 
 type turnContext struct {
 	sessionID                 string
@@ -87,6 +94,7 @@ type turnContext struct {
 	visionContext             string
 	approvedPlanContext       string
 	historicalContext         string
+	deadlineAt                time.Time
 	resuming                  bool
 	history                   []session.Block
 	modelHistory              session.ModelHistory
@@ -110,6 +118,7 @@ type turnContext struct {
 	staticIdentity            string
 	coordinator               *compactionCoordinator
 	activateCompaction        func(context.Context, []message.Message, string) error
+	loadSemanticCheckpoint    func(context.Context) (session.SemanticCheckpointV1, error)
 	reportCachePrefixDegraded func(reason string)
 	semanticCheckpoint        session.SemanticCheckpointV1
 	subagentFinishedAtNS      int64
@@ -167,6 +176,46 @@ func (c turnContext) recordActivatedSemanticCheckpointLocked(result []message.Me
 		State:        append(json.RawMessage(nil), commit.State...),
 		SourceDigest: commit.SourceDigest,
 	}
+}
+
+func (c turnContext) adoptDurableSemanticCheckpoint(ctx context.Context) bool {
+	if c.loadSemanticCheckpoint == nil || c.coordinator == nil {
+		return false
+	}
+	loaded, err := c.loadSemanticCheckpoint(ctx)
+	if err != nil {
+		return false
+	}
+	c.coordinator.mu.Lock()
+	defer c.coordinator.mu.Unlock()
+	return c.adoptDurableSemanticCheckpointLocked(loaded)
+}
+
+func (c turnContext) adoptDurableSemanticCheckpointLocked(loaded session.SemanticCheckpointV1) bool {
+	current := c.coordinator.semanticCheckpoint
+	if current.Revision == 0 && len(current.State) == 0 {
+		current = c.semanticCheckpoint
+	}
+	if loaded.Revision <= current.Revision {
+		return false
+	}
+	c.coordinator.semanticCheckpoint = cloneSemanticCheckpoint(loaded)
+	return true
+}
+
+func (c turnContext) invalidatePreparedCompactionLocked() {
+	if c.coordinator == nil {
+		return
+	}
+	if c.coordinator.cancel != nil {
+		c.coordinator.cancel()
+	}
+	c.coordinator.hash = ""
+	c.coordinator.source = nil
+	c.coordinator.done = nil
+	c.coordinator.cancel = nil
+	c.coordinator.result = nil
+	c.coordinator.err = nil
 }
 
 func compactionSourceHash(history []message.Message, target int, static string) string {
@@ -288,6 +337,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 		value.Visibility = message.VisibilityPrivate
 		messages = append(messages, value)
 	}
+	if text := runtimeDeadlineContext(ctx, c.deadlineAt); text != "" {
+		value := message.NewText(message.RoleSystem, "[Trusted runtime deadline]\n"+text)
+		value.Visibility = message.VisibilityPrivate
+		messages = append(messages, value)
+	}
 	if text := strings.TrimSpace(c.approvedPlanContext); text != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted approved execution plan]\n"+text)
 		value.Visibility = message.VisibilityPrivate
@@ -339,7 +393,81 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	if goal != "" || len(images) > 0 {
 		messages = append(messages, UserMessageWithAttachments(goal, images))
 	}
+	if err := c.validateModelVisibleDurability(messages, compatible, goal, images); err != nil {
+		return nil, err
+	}
 	return messages, nil
+}
+
+func runtimeDeadlineContext(ctx context.Context, configured time.Time) string {
+	deadline := configured
+	if ctx != nil {
+		if ctxDeadline, ok := ctx.Deadline(); ok && (deadline.IsZero() || ctxDeadline.Before(deadline)) {
+			deadline = ctxDeadline
+		}
+	}
+	if deadline.IsZero() {
+		return ""
+	}
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return fmt.Sprintf("Hard stop in %s (at %s UTC). Deliver a verifiable subset before the stop. Do not start work that cannot finish.", remaining.Round(time.Second), deadline.UTC().Format("2006-01-02T15:04:05Z"))
+}
+
+// validateModelVisibleDurability enforces the model-visible ⟺ durably-logged
+// invariant on the assembled turn context. Every message the provider will
+// see as regular conversation must be reconstructible from durable state: the
+// persisted ModelHistory checkpoint, durable transcript blocks, the static
+// instruction prompt, or the current goal (persisted as a user block by the
+// caller). Private messages are exempt because each private source (semantic
+// checkpoint, todo, plan artifact, tool continuity, hook/vision/historical
+// evidence) is derived from a durable store or deterministic re-execution by
+// construction. A violation fails the turn explicitly instead of silently
+// sending unlogged context to the provider.
+func (c turnContext) validateModelVisibleDurability(messages []message.Message, compatible bool, goal string, images []session.Attachment) error {
+	durable := make(map[string]struct{}, len(c.modelHistory.Messages)+len(c.history)+2)
+	admit := func(value message.Message) {
+		durable[durableMessageKey(value)] = struct{}{}
+	}
+	if compatible {
+		for _, value := range c.modelHistory.Messages {
+			admit(value)
+		}
+	}
+	for _, block := range c.history {
+		if value, ok := blockMessage(block); ok {
+			admit(value)
+		}
+	}
+	if c.instructions != "" {
+		admit(message.NewText(message.RoleSystem, c.instructions))
+	}
+	if goal != "" || len(images) > 0 {
+		admit(UserMessageWithAttachments(goal, images))
+	}
+	for _, value := range messages {
+		if value.Visibility == message.VisibilityPrivate {
+			continue
+		}
+		if _, ok := durable[durableMessageKey(value)]; !ok {
+			return fmt.Errorf(
+				"turn context: model-visible %s message (kind %q) is not reconstructible from durable state; persist it before it enters the provider request",
+				value.Role, value.Kind,
+			)
+		}
+	}
+	return nil
+}
+
+func durableMessageKey(value message.Message) string {
+	value.CreatedAt = time.Time{}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("unencodable:%s:%s:%s", value.Role, value.Kind, value.Text)
+	}
+	return string(payload)
 }
 
 func modelHistoryHasProviderState(messages []message.Message) bool {
@@ -467,11 +595,33 @@ func (c turnContext) Compact(ctx context.Context, history []message.Message) (re
 	if target <= 0 {
 		target = max(512, estimateContextTokens(history)*3/4)
 	}
-	result, resultErr = c.prepareCompactionReason(ctx, history, target, "automatic_hard")
-	if resultErr == nil && !reflect.DeepEqual(result, history) {
-		result, resultErr = c.activateCompactionResult(ctx, result)
+	return c.prepareAndActivateCompaction(ctx, history, target, "automatic_hard")
+}
+
+func (c turnContext) prepareAndActivateCompaction(ctx context.Context, history []message.Message, hardTokens int, reason string) ([]message.Message, error) {
+	result, err := c.prepareCompactionReason(ctx, history, hardTokens, reason)
+	if err != nil || reflect.DeepEqual(result, history) {
+		return result, err
 	}
-	return result, resultErr
+	return c.activateWithStaleRetry(ctx, history, result, hardTokens, reason)
+}
+
+func (c turnContext) activateWithStaleRetry(ctx context.Context, source, result []message.Message, hardTokens int, reason string) ([]message.Message, error) {
+	activated, err := c.activateCompactionResult(ctx, result)
+	if !errors.Is(err, session.ErrRunCheckpointStale) {
+		return activated, err
+	}
+	if !c.adoptDurableSemanticCheckpoint(ctx) {
+		return activated, err
+	}
+	retried, retryErr := c.prepareCompactionReason(ctx, source, hardTokens, reason)
+	if retryErr != nil {
+		return source, retryErr
+	}
+	if reflect.DeepEqual(retried, source) {
+		return retried, nil
+	}
+	return c.activateCompactionResult(ctx, retried)
 }
 
 func (c turnContext) compactRequired(ctx context.Context, history []message.Message, targetTokens int) (result []message.Message, resultErr error) {
@@ -508,6 +658,7 @@ func (c turnContext) prepareCompaction(ctx context.Context, history []message.Me
 }
 
 func (c turnContext) prepareCompactionReason(ctx context.Context, history []message.Message, hardTriggerTokens int, reason string) (result []message.Message, resultErr error) {
+	c.adoptDurableSemanticCheckpoint(ctx)
 	original := history
 	targetTokens := hardTriggerTokens
 	report := func(prepared []message.Message) []message.Message {
@@ -529,6 +680,16 @@ func (c turnContext) prepareCompactionReason(ctx context.Context, history []mess
 	}
 	if c.summarize == nil && c.resolveSummarizer == nil {
 		return original, fmt.Errorf("compact context: compaction model is unavailable")
+	}
+	history, pruned, err := c.pruneStaleToolResults(ctx, history, targetTokens)
+	if err != nil {
+		return original, err
+	}
+	if pruned && estimateContextTokens(history) <= targetTokens {
+		if validationErr := message.ValidateCompleteTurns(history); validationErr != nil {
+			return original, validationErr
+		}
+		return report(history), nil
 	}
 	previousStates := make([]string, 0, 1)
 	checkpoint := c.currentSemanticCheckpoint()
@@ -672,7 +833,7 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 	if c.softTriggerTokens <= 0 || c.coordinator == nil {
 		result, err := c.compactRequired(ctx, history, hardTokens)
 		if err == nil && !reflect.DeepEqual(result, history) {
-			result, err = c.activateCompactionResult(ctx, result)
+			result, err = c.activateWithStaleRetry(ctx, history, result, hardTokens, "automatic_hard")
 		}
 		return result, err
 	}
@@ -757,6 +918,7 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 						if activateErr := c.activateCompaction(ctx, result, activationIdentity); activateErr != nil {
 							if errors.Is(activateErr, session.ErrRunCheckpointStale) {
 								coord.mu.Unlock()
+								c.adoptDurableSemanticCheckpoint(ctx)
 								goto synchronous
 							}
 							coord.mu.Unlock()
@@ -775,13 +937,14 @@ func (c turnContext) CompactTo(ctx context.Context, history []message.Message, h
 		}
 		coord.mu.Unlock()
 	} else {
+		c.invalidatePreparedCompactionLocked()
 		coord.mu.Unlock()
 	}
 
 synchronous:
 	result, err := c.compactRequired(ctx, refreshed, hardTokens)
 	if err == nil && !reflect.DeepEqual(result, refreshed) {
-		result, err = c.activateCompactionResult(ctx, result)
+		result, err = c.activateWithStaleRetry(ctx, refreshed, result, hardTokens, "automatic_hard")
 	}
 	return result, err
 }
@@ -1018,6 +1181,72 @@ func compactionAtomicGroups(messages []message.Message) ([]compactionAtomicGroup
 		start = end
 	}
 	return groups, nil
+}
+
+// pruneToolResultMinBytes is the floor below which pruning an old tool result
+// is not worth an artifact row. Context-artifact locators produced by earlier
+// normalization or pruning stay well under this floor, so a result is never
+// re-externalized.
+const pruneToolResultMinBytes = 1 << 10
+
+// pruneStaleToolResults is the model-free pruning layer that runs before
+// semantic compaction. It rewrites large tool-result bodies that precede the
+// preserved recent user turns into durable context-artifact locators, oldest
+// first, stopping as soon as the history fits the target. Only result content
+// is replaced in place, so tool call/result pairing and message order are
+// preserved and ValidateCompleteTurns semantics cannot change. When pruning
+// alone reaches the target, the caller can skip the semantic summarize
+// entirely; otherwise the summarizer receives the smaller pruned transcript.
+func (c turnContext) pruneStaleToolResults(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, bool, error) {
+	if targetTokens <= 0 || c.putArtifact == nil || estimateContextTokens(history) <= targetTokens {
+		return history, false, nil
+	}
+	prefixEnd := 0
+	for prefixEnd < len(history) && history[prefixEnd].Role == message.RoleSystem {
+		prefixEnd++
+	}
+	recentUsers := recentUserIndexes(history, prefixEnd, contextRecentUserTurns)
+	if len(recentUsers) == 0 {
+		return history, false, nil
+	}
+	boundary := recentUsers[0]
+	result := append([]message.Message(nil), history...)
+	changed := false
+	for index := prefixEnd; index < boundary; index++ {
+		current := result[index].ToolResult
+		if current == nil {
+			continue
+		}
+		payload := []byte(current.Content)
+		if current.Content == "" {
+			payload = append([]byte(nil), current.Structured...)
+		}
+		if len(payload) <= pruneToolResultMinBytes {
+			continue
+		}
+		artifact, err := c.putArtifact(ctx, "tool_result", payload, "")
+		if err != nil {
+			return history, false, fmt.Errorf("prune stale tool result %q: %w", current.ToolCallID, err)
+		}
+		reference, _ := json.Marshal(map[string]any{
+			"kind": "context_artifact", "tool": current.Name, "tool_call_id": current.ToolCallID,
+			"sha256": artifact.SHA256, "artifact_ref": artifact.ID, "preview": artifact.Preview,
+			"original_tokens": (len(payload) + estimatedBytesPerToken - 1) / estimatedBytesPerToken,
+			"pruned":          true,
+		})
+		cloned := *current
+		cloned.Content = string(reference)
+		cloned.Structured = nil
+		result[index].ToolResult = &cloned
+		changed = true
+		if estimateContextTokens(result) <= targetTokens {
+			break
+		}
+	}
+	if !changed {
+		return history, false, nil
+	}
+	return result, true, nil
 }
 
 func (c turnContext) normalizeToolResults(ctx context.Context, history []message.Message) ([]message.Message, error) {

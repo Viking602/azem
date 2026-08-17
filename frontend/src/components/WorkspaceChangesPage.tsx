@@ -165,10 +165,9 @@ export default function WorkspaceChangesPage() {
       <div className="changes-empty"><FileDiff size={30} /><h2>{t("noWorkspaceChanges")}</h2><p>{t("workingTreeClean")}</p></div> :
       <div className="changes-prototype-layout">
         <div className="change-summary">
-          <article><span>{String(isDesktopRuntime() ? changeSet.files.length : 4).padStart(2, "0")}</span><small>{snapshot.language === "zh-CN" ? "变更文件" : t("changedFiles")}</small></article>
+          <article><span>{String(changeSet.files.length).padStart(2, "0")}</span><small>{snapshot.language === "zh-CN" ? "变更文件" : t("changedFiles")}</small></article>
           <article><span className="plus">+{changeSet.additions}</span><small>{snapshot.language === "zh-CN" ? "新增" : "Added"}</small></article>
           <article><span className="minus">−{changeSet.deletions}</span><small>{snapshot.language === "zh-CN" ? "删除" : "Deleted"}</small></article>
-          <article><span>0</span><small>{snapshot.language === "zh-CN" ? "架构违规" : "Violations"}</small></article>
         </div>
         <aside className="review-file-list" aria-label={t("changedFileList")}>
           <label className="changes-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("searchChangedFiles")} /></label>
@@ -178,7 +177,7 @@ export default function WorkspaceChangesPage() {
           {filteredFiles.length > REVIEW_FILE_LIMIT && <p className="review-file-limit">{tFormat(snapshot.language, "changedFilesFolded", { count: filteredFiles.length - REVIEW_FILE_LIMIT })}</p>}
         </aside>
         <article className="diff-preview">
-          <header><div><strong>{selectedFile ? fileBasename(selectedFile.path) : t("changeReview")}</strong><span>{!isDesktopRuntime() && selectedPath === "frontend/src/styles.css" ? "Motion system" : selectedFile ? fileDescriptions[selectedFile.path] ?? selectedFile.path : ""}</span></div><button type="button" className="icon-button" title={t("refreshChanges")} aria-label={t("refreshChanges")} onClick={() => void loadChanges()}><RefreshCw size={14} /></button></header>
+          <header><div><strong>{selectedFile ? fileBasename(selectedFile.path) : t("changeReview")}</strong><span>{!isDesktopRuntime() && selectedPath === "frontend/src/styles.css" ? "Motion system" : selectedFile ? fileDescriptions[selectedFile.path] ?? selectedFile.path : ""}</span></div><button type="button" className="icon-button" aria-label={t("refreshChanges")} onClick={() => void loadChanges()}><RefreshCw size={14} /></button></header>
           {!isDesktopRuntime() && selectedPath === "frontend/src/styles.css" ? <PrototypeStyleDiff /> : loadingPatches.has(selectedPath) && !selectedPatch ? <div className="change-patch-state"><LoaderCircle className="spin" size={17} />{t("loadingDiff")}</div> : patchErrors[selectedPath] ? <div className="change-patch-state error">{patchErrors[selectedPath]}</div> : selectedPatch ? <PatchView change={selectedPatch} language={snapshot.language} /> : null}
         </article>
       </div>}
@@ -204,7 +203,7 @@ function ChangeFileCard({ file, expanded, selected, patch, loading, error, langu
   return <article ref={setRef} className={`change-file-card${selected ? " selected" : ""}`} data-path={file.path}>
     <button type="button" className="change-file-header" aria-expanded={expanded} onClick={onToggle}>
       {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<FileTypeIcon path={file.path} />
-      <span title={file.path}>{file.path}</span><StatusMark status={file.status} />
+      <span>{file.path}</span><StatusMark status={file.status} />
       <b>+{file.additions}</b><em>−{file.deletions}</em>
     </button>
     {expanded && <div className="change-file-body">{loading && !patch ? <div className="change-patch-state"><LoaderCircle className="spin" size={17} />{t("loadingDiff")}</div> : error ?
@@ -244,7 +243,7 @@ function ChangeTree({ directory, depth, expanded, forceExpanded, selectedPath, o
       </button>
       {open && <div role="group"><ChangeTree directory={child} depth={depth + 1} expanded={expanded} forceExpanded={forceExpanded} selectedPath={selectedPath} onToggle={onToggle} onSelect={onSelect} /></div>}
     </div>;
-  })}{files.map((file) => <button type="button" role="treeitem" key={file.path} className={`changes-tree-row file${selectedPath === file.path ? " selected" : ""}`} style={{ "--change-depth": depth } as React.CSSProperties} onClick={() => onSelect(file.path)} title={file.path}>
+  })}{files.map((file) => <button type="button" role="treeitem" key={file.path} className={`changes-tree-row file${selectedPath === file.path ? " selected" : ""}`} style={{ "--change-depth": depth } as React.CSSProperties} onClick={() => onSelect(file.path)}>
     <span className="changes-tree-indent" /><FileTypeIcon path={file.path} /><span>{fileBasename(file.path)}</span><StatusMark status={file.status} compact />
   </button>)}</>;
 }

@@ -174,7 +174,6 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
           disabled={option.disabled}
           className={`menu-select-option ${option.icon ? "has-icon" : ""} ${value === option.value ? "selected" : ""}`}
           data-value={option.value}
-          title={option.label}
           key={option.value}
           onClick={() => choose(option.value)}
         ><Check size={13} />{option.icon}<span className={option.caption ? "menu-select-option-copy" : undefined}><strong>{option.label}</strong>{option.caption && <small>{option.caption}</small>}</span></button>)}
@@ -207,7 +206,6 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
     >
       <summary
         aria-label={ariaLabel}
-        title={selected?.label ?? value}
         aria-disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}

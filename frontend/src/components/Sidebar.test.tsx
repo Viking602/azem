@@ -80,6 +80,63 @@ describe("Sidebar project sessions", () => {
     await act(async () => root.unmount());
   });
 
+  it("hides archived sessions from the project sidebar", async () => {
+    const sessions: Session[] = [
+      { id: "session-1", workspace: snapshot.workspace, title: "当前会话", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString() },
+      { id: "session-archived", workspace: snapshot.workspace, title: "已归档会话", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", archived: true, updatedAt: new Date().toISOString() },
+    ];
+    useRuntimeStore.setState({
+      snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions,
+      currentSessionId: "session-1", view: "thread",
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Sidebar />));
+    const titles = Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list > button .session-copy strong")).map((node) => node.textContent);
+    expect(titles).toContain("当前会话");
+    expect(titles).not.toContain("已归档会话");
+    expect(container.querySelector(".thread-list > button[title]")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it("keeps the full session title in the row without a native tooltip", async () => {
+    const title = "调查 Azem 全栈架构与回归测试";
+    const sessions: Session[] = [{
+      id: "session-1", workspace: snapshot.workspace, title, providerId: "chatgpt",
+      modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString(),
+    }];
+    useRuntimeStore.setState({
+      snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions,
+      currentSessionId: "session-1", view: "thread",
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Sidebar />));
+    const button = container.querySelector<HTMLButtonElement>(".thread-list > button");
+    const strong = button?.querySelector(".session-copy strong");
+    expect(strong?.textContent).toBe(title);
+    expect(button?.getAttribute("title")).toBeNull();
+    expect(strong?.getAttribute("title")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  it("shows minute-level session age instead of collapsing the last hour to 刚刚", async () => {
+    const sessions: Session[] = [{
+      id: "session-1", workspace: snapshot.workspace, title: "分析当前变更内容", providerId: "chatgpt",
+      modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single",
+      updatedAt: new Date(Date.now() - 17 * 60_000).toISOString(),
+    }];
+    useRuntimeStore.setState({
+      snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions,
+      currentSessionId: "session-1", view: "thread",
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Sidebar />));
+    expect(container.querySelector(".session-copy small")?.textContent).toBe("17 分钟前");
+    await act(async () => root.unmount());
+  });
+
   it("shows a lightweight spinner only on the running session", async () => {
     const sessions: Session[] = ["session-1", "session-2"].map((id) => ({
       id, workspace: snapshot.workspace, title: id === "session-1" ? "当前会话" : "后台运行会话", providerId: "chatgpt",
@@ -95,8 +152,8 @@ describe("Sidebar project sessions", () => {
 
     await act(async () => root.render(<Sidebar />));
     const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list > button"));
-    const current = buttons.find((button) => button.title === "当前会话")!;
-    const active = buttons.find((button) => button.title === "后台运行会话")!;
+    const current = buttons.find((button) => button.querySelector(".session-copy strong")?.textContent === "当前会话")!;
+    const active = buttons.find((button) => button.querySelector(".session-copy strong")?.textContent === "后台运行会话")!;
     expect(current.querySelector(".session-running-indicator")).toBeNull();
     expect(current.getAttribute("aria-busy")).toBe("false");
     expect(active.querySelector(".session-running-indicator")).not.toBeNull();
@@ -125,10 +182,11 @@ describe("Sidebar project sessions", () => {
 
     await act(async () => root.render(<Sidebar />));
     const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list > button"));
-    expect(buttons.find((button) => button.title === "当前会话")?.querySelector(".session-unread")).toBeNull();
-    const unread = buttons.find((button) => button.title === "后台已完成")?.querySelector<HTMLElement>(".session-unread");
+    expect(buttons.find((button) => button.querySelector(".session-copy strong")?.textContent === "当前会话")?.querySelector(".session-unread")).toBeNull();
+    const unread = buttons.find((button) => button.querySelector(".session-copy strong")?.textContent === "后台已完成")?.querySelector<HTMLElement>(".session-unread");
     expect(unread).not.toBeNull();
-    expect(unread?.title).toBe("未读");
+    expect(unread?.getAttribute("title")).toBeNull();
+    expect(unread?.getAttribute("aria-label")).toBe("未读");
     await act(async () => root.unmount());
   });
 

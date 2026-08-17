@@ -2,6 +2,7 @@ package grok
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -18,6 +19,30 @@ func TestDefaultClientFollowsProxyResolver(t *testing.T) {
 	transport, ok := client.HTTP.Transport().(*http.Transport)
 	if !ok || transport.Proxy == nil {
 		t.Fatalf("Grok transport = %#v", client.HTTP.Transport())
+	}
+}
+
+func TestRefreshSendsClientHeadersAndIncludesErrorBody(t *testing.T) {
+	var sawVersion, sawSurface bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/token" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		sawVersion = request.Header.Get("x-grok-client-version") == DefaultClientVersion
+		sawSurface = request.Header.Get("x-grok-client-surface") == deviceClientSurface
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":"invalid_grant","error_description":"refresh token reused"}`))
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.AllowInsecure = true
+	_, err := client.Refresh(context.Background(), Discovery{TokenEndpoint: server.URL + "/token"}, "stale-refresh")
+	if err == nil || err.Error() != "refresh returned HTTP 400: invalid_grant: refresh token reused" {
+		t.Fatalf("error = %v", err)
+	}
+	if !sawVersion || !sawSurface {
+		t.Fatalf("refresh headers version=%v surface=%v", sawVersion, sawSurface)
 	}
 }
 
@@ -96,7 +121,10 @@ func TestDeviceDenialAndEndpointGuard(t *testing.T) {
 	if _, err := client.Discover(context.Background()); err == nil {
 		t.Fatal("insecure discovery endpoint accepted")
 	}
-	if err := client.ValidateResourceURL("https://cli-chat-proxy.grok.com/v1/billing?format=credits"); err != nil {
+	if err := client.ValidateResourceURL(DefaultUserURL); err != nil {
+		t.Fatalf("official Grok user endpoint rejected: %v", err)
+	}
+	if err := client.ValidateResourceURL(DefaultQuotaURL); err != nil {
 		t.Fatalf("official Grok CLI proxy rejected: %v", err)
 	}
 	if err := client.ValidateResourceURL("https://cli-chat-proxy.grok.com.attacker.example/v1/billing"); err == nil {
@@ -166,4 +194,73 @@ func TestImportGrokCLIOIDCCredential(t *testing.T) {
 		tokens.SourcePath != path || tokens.SourceKey != "https://auth.x.ai::client-id" {
 		t.Fatalf("tokens=%+v", tokens)
 	}
+}
+
+func TestDecodeTokensReadsIdentityFromIDToken(t *testing.T) {
+	idToken := testJWT(map[string]any{
+		"sub": "user-42", "email": "owner@example.com", "name": "Owner", "tier": "SuperGrok",
+	})
+	tokens, err := decodeTokens([]byte(`{"access_token":"access","refresh_token":"refresh","id_token":"` + idToken + `","expires_in":3600}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens.AccountID != "user-42" || tokens.Email != "owner@example.com" || tokens.DisplayName != "owner@example.com" || tokens.Plan != "SuperGrok" {
+		t.Fatalf("tokens=%+v", tokens)
+	}
+}
+
+func TestIdentityFromTokensPrefersEmailAndIgnoresRawToken(t *testing.T) {
+	identity := IdentityFromTokens(testJWT(map[string]any{
+		"sub": "opaque-sub", "preferred_username": "handle", "email": "person@x.ai",
+	}), "not-a-jwt")
+	if identity.UserID != "opaque-sub" || identity.Email != "person@x.ai" || identity.DisplayName != "person@x.ai" {
+		t.Fatalf("identity=%+v", identity)
+	}
+	if identity.DisplayName == "not-a-jwt" || identity.UserID == "not-a-jwt" {
+		t.Fatal("raw access token leaked into identity")
+	}
+}
+
+func TestUserLookupOmitsUserIDAndDecodesProfile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/user" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if request.Header.Get("Authorization") != "Bearer access" {
+			t.Errorf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		if request.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" || request.Header.Get("x-grok-client-mode") != ClientModeHeadless {
+			t.Errorf("headers = %v", request.Header)
+		}
+		if request.Header.Get("x-userid") != "" {
+			t.Errorf("user lookup sent x-userid = %q", request.Header.Get("x-userid"))
+		}
+		if request.URL.Query().Get("include") != "subscription" {
+			t.Errorf("query = %s", request.URL.RawQuery)
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"userId": "usr_live", "email": "live@example.com", "firstName": "Ada", "lastName": "Lovelace", "subscriptionTier": "SuperGrok Heavy",
+		})
+	}))
+	defer server.Close()
+	client := NewClient()
+	client.AllowInsecure = true
+	client.UserURL = server.URL + "/v1/user?include=subscription"
+	info, err := client.User(context.Background(), "access")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.UserID != "usr_live" || info.Email != "live@example.com" || info.DisplayName() != "live@example.com" || info.SubscriptionTier != "SuperGrok Heavy" {
+		t.Fatalf("info=%+v", info)
+	}
+}
+
+func testJWT(claims map[string]any) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		panic(err)
+	}
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }

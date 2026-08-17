@@ -2,12 +2,14 @@ import { Browser, Call, Dialogs, Events } from "@wailsio/runtime";
 import type {
   ActionRequest, Attachment, PullRequest, PullRequestDashboard, PullRequestDetailResponse,
   PullRequestMonitorState, PullRequestMutationRequest, RuntimeEvent, Snapshot, TurnRequest,
-  SessionSearchResult, SkillEntry, WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
+  SessionSearchResult, SkillEntry, UsageReport, UsageScope, WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
 } from "./types";
+import type { TerminalEvent, TerminalSession } from "./terminal";
 
 const EVENT_NAME = "azem:event";
 const SESSION_MENU_EVENT = "azem:session-menu";
 const PULL_REQUEST_EVENT = "azem:pull-request";
+const TERMINAL_EVENT = "azem:terminal";
 const bridgeName = "github.com/Viking602/azem/internal/desktop.Bridge";
 
 export const isDesktopRuntime = () =>
@@ -27,7 +29,9 @@ export const demoSnapshot: Snapshot = {
   subagentConcurrency: 6,
   subagentMaxDepth: 2,
   shellConcurrency: 4,
-  subagentAwaitSeconds: 30,
+  shellMaxWallClockSeconds: 600,
+  subagentAwaitSeconds: 0,
+  subagentIdleSeconds: 300,
   chatgptFastMode: false,
   sequence: 0,
   pullRequestMonitors: [],
@@ -60,6 +64,24 @@ export async function listSkillCatalog(): Promise<SkillCatalogSnapshot> {
     entries: Array.isArray(result?.entries) ? result.entries : [],
     diagnostics: Array.isArray(result?.diagnostics) ? result.diagnostics : [],
   };
+}
+
+export async function listHookCatalog(): Promise<Record<string, unknown>> {
+  if (!isDesktopRuntime()) return { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] };
+  const result = await Call.ByName(`${bridgeName}.HookCatalog`) as Record<string, unknown> | null;
+  return result ?? { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] };
+}
+
+export async function listUsageReport(scope: UsageScope = "project"): Promise<UsageReport> {
+  if (!isDesktopRuntime()) {
+    return {
+      scope, from: "", to: "", empty: true, requests: 0, sessions: 0, runs: 0,
+      totalTokens: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, reportedInputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, cacheReported: false, cacheWriteReported: false,
+      peakDayTokens: 0, currentStreak: 0, longestStreak: 0, days: [], kinds: [], models: [], skills: [],
+    };
+  }
+  return Call.ByName(`${bridgeName}.UsageReport`, scope) as Promise<UsageReport>;
 }
 
 export interface SystemFont {
@@ -138,7 +160,7 @@ export async function readWorkspaceChange(path: string): Promise<WorkspaceChange
   return Call.ByName(`${bridgeName}.WorkspaceChange`, path) as Promise<WorkspaceChange>;
 }
 
-export async function cancelActive(includeChildren = false): Promise<boolean> {
+export async function cancelActive(includeChildren = true): Promise<boolean> {
   if (!isDesktopRuntime()) return true;
   return Call.ByName(`${bridgeName}.CancelActive`, includeChildren) as Promise<boolean>;
 }
@@ -240,6 +262,104 @@ export function subscribeSessionMenu(onEvent: (event: SessionMenuEvent) => void)
     onEvent((value.data ?? payload) as SessionMenuEvent);
   });
 }
+
+export async function listTerminals(): Promise<TerminalSession[]> {
+  if (!isDesktopRuntime()) return demoTerminal.list();
+  const result = await Call.ByName(`${bridgeName}.ListTerminals`) as TerminalSession[] | null;
+  return Array.isArray(result) ? result : [];
+}
+
+export async function createTerminal(cols: number, rows: number): Promise<TerminalSession> {
+  if (!isDesktopRuntime()) return demoTerminal.create(cols, rows);
+  return Call.ByName(`${bridgeName}.CreateTerminal`, cols, rows) as Promise<TerminalSession>;
+}
+
+export async function writeTerminal(id: string, data: string): Promise<void> {
+  if (!isDesktopRuntime()) {
+    demoTerminal.write(id, data);
+    return;
+  }
+  await Call.ByName(`${bridgeName}.WriteTerminal`, id, data);
+}
+
+export async function resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
+  if (!isDesktopRuntime()) {
+    demoTerminal.resize(id, cols, rows);
+    return;
+  }
+  await Call.ByName(`${bridgeName}.ResizeTerminal`, id, cols, rows);
+}
+
+export async function closeTerminal(id: string): Promise<void> {
+  if (!isDesktopRuntime()) {
+    demoTerminal.close(id);
+    return;
+  }
+  await Call.ByName(`${bridgeName}.CloseTerminal`, id);
+}
+
+export function subscribeTerminals(onEvent: (event: TerminalEvent) => void): () => void {
+  if (!isDesktopRuntime()) {
+    demoTerminal.listeners.add(onEvent);
+    return () => demoTerminal.listeners.delete(onEvent);
+  }
+  return Events.On(TERMINAL_EVENT, (payload: unknown) => {
+    const value = payload as Record<string, unknown>;
+    onEvent((value.data ?? payload) as TerminalEvent);
+  });
+}
+
+const demoTerminal = {
+  sequence: 0,
+  sessions: new Map<string, TerminalSession>(),
+  listeners: new Set<(event: TerminalEvent) => void>(),
+  emit(kind: TerminalEvent["kind"], session: TerminalSession, extra: Partial<TerminalEvent> = {}) {
+    this.sequence += 1;
+    const event: TerminalEvent = { sequence: this.sequence, kind, session, at: new Date().toISOString(), ...extra };
+    for (const listener of this.listeners) listener(event);
+  },
+  list() {
+    return [...this.sessions.values()];
+  },
+  create(cols: number, rows: number) {
+    const index = this.sessions.size + 1;
+    const session: TerminalSession = {
+      id: `demo-term-${index}`,
+      title: index === 1 ? "zsh" : `zsh · ${index}`,
+      cwd: demoSnapshot.workspace,
+      shell: "zsh",
+      cols: cols || 80,
+      rows: rows || 24,
+      state: "running",
+    };
+    this.sessions.set(session.id, session);
+    this.emit("terminal_session", session);
+    this.emit("terminal_output", session, {
+      encoding: "base64",
+      data: btoa(`azem demo ${session.shell} · ${session.cwd}\r\n`),
+    });
+    return session;
+  },
+  write(id: string, data: string) {
+    const session = this.sessions.get(id);
+    if (!session || session.state !== "running") return;
+    this.emit("terminal_output", session, { encoding: "base64", data: btoa(data) });
+  },
+  resize(id: string, cols: number, rows: number) {
+    const session = this.sessions.get(id);
+    if (!session) return;
+    const next = { ...session, cols, rows };
+    this.sessions.set(id, next);
+    this.emit("terminal_session", next);
+  },
+  close(id: string) {
+    const session = this.sessions.get(id);
+    if (!session) return;
+    const next = { ...session, state: "exited" as const };
+    this.sessions.delete(id);
+    this.emit("terminal_exit", next, { exitCode: 0 });
+  },
+};
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {

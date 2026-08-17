@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -67,9 +68,244 @@ func TestDecodeSubscriptionQuotas(t *testing.T) {
 		"subscription_tier":"SuperGrok Heavy",
 		"config":{"creditUsagePercent":42.5,"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-03T00:00:00Z","end":"2026-08-10T00:00:00Z"},"prepaidBalance":{"val":725}}
 	}`))
-	if err != nil || grok.Plan != "SuperGrok Heavy" || grok.UsedPercent != 42.5 || grok.ResetsAt == 0 || grok.Balance != "7.25" {
+	if err != nil || grok.Plan != "SuperGrok Heavy" || grok.Period != "weekly" || grok.UsedPercent != 42.5 || grok.ResetsAt == 0 || grok.Balance != "7.25" {
 		t.Fatalf("Grok quota=%+v error=%v", grok, err)
 	}
+
+	live, err := decodeGrokQuota([]byte(`{
+		"config":{
+			"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-08-10T00:00:00Z","end":"2026-08-17T00:00:00Z"},
+			"billingPeriodStart":"2026-08-01T00:00:00Z",
+			"billingPeriodEnd":"2026-09-01T00:00:00Z",
+			"isUnifiedBillingUser":true,
+			"onDemandCap":{"val":100},
+			"onDemandUsed":{"val":0},
+			"prepaidBalance":{"val":0}
+		}
+	}`))
+	if err != nil || live.Period != "weekly" || live.UsedPercent != 0 || live.ResetsAt == 0 || live.Balance != "" {
+		t.Fatalf("live Grok credits shape=%+v error=%v", live, err)
+	}
+
+	periodOnly, err := decodeGrokQuota([]byte(`{
+		"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_MONTHLY","start":"2026-08-01T00:00:00Z","end":"2026-09-01T00:00:00Z"}}
+	}`))
+	if err != nil || periodOnly.Period != "monthly" || periodOnly.UsedPercent != 0 || periodOnly.ResetsAt == 0 {
+		t.Fatalf("period-only Grok quota=%+v error=%v", periodOnly, err)
+	}
+
+	if _, err := decodeGrokQuota([]byte(`{"config":{}}`)); err == nil || !strings.Contains(err.Error(), "no usage or billing period") {
+		t.Fatalf("empty config error = %v", err)
+	}
+}
+
+func TestGrokQuotaUsesLiveUserIDAndSurfacesHTTPReason(t *testing.T) {
+	ctx := context.Background()
+	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	store, err := NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	idToken := grokTestJWT(map[string]any{"sub": "jwt-user", "email": "owner@example.com"})
+	var seenUserID []string
+	var userHadUserID bool
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/user":
+			if request.Header.Get("x-userid") != "" {
+				userHadUserID = true
+			}
+			if request.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" || request.Header.Get("x-grok-client-mode") != grok.ClientModeHeadless {
+				t.Errorf("user headers = %v", request.Header)
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"userId": "usr_live", "email": "owner@example.com", "subscriptionTier": "SuperGrok"})
+		case "/billing":
+			seenUserID = append(seenUserID, request.Header.Get("x-userid"))
+			if request.URL.Query().Get("format") != "credits" {
+				t.Errorf("billing query = %s", request.URL.RawQuery)
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"subscription_tier": "SuperGrok",
+				"config": map[string]any{
+					"creditUsagePercent": 18.5,
+					"currentPeriod":      map[string]any{"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-08-03T00:00:00Z", "end": "2026-08-10T00:00:00Z"},
+					"prepaidBalance":     map[string]any{"val": 250},
+				},
+			})
+		case "/fail-user":
+			writer.WriteHeader(http.StatusInternalServerError)
+			_, _ = writer.Write([]byte(`{"error":"invalid user"}`))
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	grokClient := grok.NewClient()
+	grokClient.AllowInsecure = true
+	service := NewService(provider.DB(), store, chatgpt.NewClient(), grokClient)
+	service.GrokUserURL = server.URL + "/user"
+	service.GrokQuotaURL = server.URL + "/billing?format=credits"
+	if _, err := store.Put(ctx, Credential{Provider: "grok", AccountID: "anonymous-be73a171915548ed", AccessToken: "access", IDToken: idToken}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().UnixNano()
+	if _, err := provider.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"anonymous-be73a171915548ed", "grok", "", "", "", "file:grok:anonymous-be73a171915548ed", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	quota, err := service.SubscriptionQuota(ctx, "grok", "anonymous-be73a171915548ed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userHadUserID {
+		t.Fatal("user lookup included x-userid")
+	}
+	if len(seenUserID) != 1 || seenUserID[0] != "usr_live" {
+		t.Fatalf("billing x-userid = %v", seenUserID)
+	}
+	if quota.UsedPercent != 18.5 || quota.Email != "owner@example.com" || quota.DisplayName != "owner@example.com" || quota.UserID != "usr_live" || quota.Balance != "2.50" {
+		t.Fatalf("quota=%+v", quota)
+	}
+	account, err := service.Account(ctx, "grok", "anonymous-be73a171915548ed")
+	if err != nil || account.ID != "anonymous-be73a171915548ed" || account.Email != "owner@example.com" {
+		t.Fatalf("persisted account=%+v err=%v", account, err)
+	}
+	service.GrokUserURL = server.URL + "/fail-user"
+	failed, failErr := service.SubscriptionQuota(ctx, "grok", "anonymous-be73a171915548ed")
+	if failErr == nil || !strings.Contains(failErr.Error(), "HTTP 500") || !strings.Contains(failErr.Error(), "invalid user") {
+		t.Fatalf("user failure = %v", failErr)
+	}
+	if failed.Email != "owner@example.com" {
+		t.Fatalf("failed quota dropped identity: %+v", failed)
+	}
+}
+
+func TestGrokQuotaRetriesTransientUserEOF(t *testing.T) {
+	ctx := context.Background()
+	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	store, err := NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var userHits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/user":
+			if userHits.Add(1) == 1 {
+				hijacker, ok := writer.(http.Hijacker)
+				if !ok {
+					t.Fatal("response writer cannot hijack")
+				}
+				conn, _, err := hijacker.Hijack()
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = conn.Close()
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"userId": "usr_live", "email": "owner@example.com"})
+		case "/billing":
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"subscription_tier": "SuperGrok",
+				"config":            map[string]any{"creditUsagePercent": 12.0, "currentPeriod": map[string]any{"end": "2026-08-10T00:00:00Z"}},
+			})
+		case "/always-eof":
+			hijacker, ok := writer.(http.Hijacker)
+			if !ok {
+				t.Fatal("response writer cannot hijack")
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = conn.Close()
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	grokClient := grok.NewClient()
+	grokClient.AllowInsecure = true
+	service := NewService(provider.DB(), store, chatgpt.NewClient(), grokClient)
+	service.GrokUserURL = server.URL + "/user"
+	service.GrokQuotaURL = server.URL + "/billing?format=credits"
+	if _, err := store.Put(ctx, Credential{Provider: "grok", AccountID: "anonymous-be73a171915548ed", AccessToken: "access"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().UnixNano()
+	if _, err := provider.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"anonymous-be73a171915548ed", "grok", "", "", "", "file:grok:anonymous-be73a171915548ed", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	quota, err := service.SubscriptionQuota(ctx, "grok", "anonymous-be73a171915548ed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if userHits.Load() != 2 || quota.UserID != "usr_live" || quota.UsedPercent != 12 {
+		t.Fatalf("hits=%d quota=%+v", userHits.Load(), quota)
+	}
+
+	service.GrokUserURL = server.URL + "/always-eof"
+	failed, failErr := service.SubscriptionQuota(ctx, "grok", "anonymous-be73a171915548ed")
+	if failErr == nil || !strings.Contains(failErr.Error(), "EOF") {
+		t.Fatalf("persistent EOF = %v", failErr)
+	}
+	if failed.Email != "owner@example.com" {
+		t.Fatalf("failed quota dropped identity: %+v", failed)
+	}
+}
+
+func TestHydrateGrokAccountReadsJWTWithoutRenamingAccount(t *testing.T) {
+	ctx := context.Background()
+	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	store, err := NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(provider.DB(), store, chatgpt.NewClient(), grok.NewClient())
+	idToken := grokTestJWT(map[string]any{"sub": "jwt-user", "email": "owner@example.com", "preferred_username": "owner"})
+	if _, err := store.Put(ctx, Credential{Provider: "grok", AccountID: "anonymous-deadbeef", AccessToken: "access", IDToken: idToken}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().UnixNano()
+	if _, err := provider.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"anonymous-deadbeef", "grok", "", "", "", "file:grok:anonymous-deadbeef", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	account, err := service.Account(ctx, "grok", "anonymous-deadbeef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hydrated := service.HydrateGrokAccount(ctx, account)
+	if hydrated.ID != "anonymous-deadbeef" || hydrated.Email != "owner@example.com" || hydrated.DisplayName != "owner@example.com" {
+		t.Fatalf("hydrated=%+v", hydrated)
+	}
+	stored, err := service.Account(ctx, "grok", "anonymous-deadbeef")
+	if err != nil || stored.Email != "owner@example.com" || stored.ID != "anonymous-deadbeef" {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+}
+
+func grokTestJWT(claims map[string]any) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		panic(err)
+	}
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
 
 func TestHasAnyAccount(t *testing.T) {

@@ -36,6 +36,57 @@ func defaultShellOptions() ShellOptions {
 	return ShellOptions{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2, MaxWallClockDuration: 10 * time.Minute}
 }
 
+func (d *shellDriver) maxWallClock() time.Duration {
+	if d == nil || d.runtime == nil || d.runtime.opts.MaxWallClockDuration <= 0 {
+		return defaultShellOptions().MaxWallClockDuration
+	}
+	return d.runtime.opts.MaxWallClockDuration
+}
+
+func maxWallClockSeconds(maxWall time.Duration) int {
+	if maxWall <= 0 {
+		maxWall = defaultShellOptions().MaxWallClockDuration
+	}
+	sec := int((maxWall + time.Second - 1) / time.Second)
+	if sec < 1 {
+		return 1
+	}
+	return sec
+}
+
+func resolveShellTimeouts(input shellInput, maxWall time.Duration) (inactivity, wall time.Duration, err error) {
+	if maxWall <= 0 {
+		maxWall = defaultShellOptions().MaxWallClockDuration
+	}
+	maxSec := maxWallClockSeconds(maxWall)
+	wall = maxWall
+	if input.WallClockSeconds != 0 {
+		if input.WallClockSeconds < 1 || input.WallClockSeconds > maxSec {
+			return 0, 0, fmt.Errorf("wall_clock_seconds must be between 1 and %d", maxSec)
+		}
+		wall = time.Duration(input.WallClockSeconds) * time.Second
+		if wall > maxWall {
+			wall = maxWall
+		}
+	}
+	inactivity = 2 * time.Minute
+	if inactivity > wall {
+		inactivity = wall
+	}
+	if input.TimeoutSeconds != 0 {
+		if input.TimeoutSeconds < 1 || input.TimeoutSeconds > maxSec {
+			return 0, 0, fmt.Errorf("timeout_seconds must be between 1 and %d", maxSec)
+		}
+		inactivity = time.Duration(input.TimeoutSeconds) * time.Second
+		if inactivity > wall {
+			inactivity = wall
+		}
+	} else if input.WallClockSeconds != 0 {
+		inactivity = wall
+	}
+	return inactivity, wall, nil
+}
+
 type ShellExecutionSnapshot struct {
 	SessionID, RunID, AgentID, ToolCallID string
 	PID, PGID                             int
@@ -148,6 +199,16 @@ func (r *shellRuntime) updateMaxConcurrency(maxConcurrency int) {
 	r.mu.Unlock()
 }
 
+func (r *shellRuntime) updateMaxWallClock(wall time.Duration) {
+	if wall < time.Second {
+		return
+	}
+	r.mu.Lock()
+	r.opts.MaxWallClockDuration = wall
+	r.signalChangedLocked()
+	r.mu.Unlock()
+}
+
 func (r *shellRuntime) signalChangedLocked() {
 	close(r.changed)
 	r.changed = make(chan struct{})
@@ -187,9 +248,11 @@ func (s *shellSupervisor) Terminate() error { return s.owner.Terminate() }
 func (s *shellSupervisor) Close() error     { return s.owner.Close() }
 
 type shellInput struct {
-	Command        string `json:"command"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
-	Network        bool   `json:"network,omitempty"`
+	Command          string `json:"command"`
+	Stdin            string `json:"stdin,omitempty"`
+	TimeoutSeconds   int    `json:"timeout_seconds,omitempty"`
+	WallClockSeconds int    `json:"wall_clock_seconds,omitempty"`
+	Network          bool   `json:"network,omitempty"`
 }
 type shellOutput struct {
 	ExitCode    int    `json:"exitCode"`
@@ -212,7 +275,9 @@ func newRuntimeShellDriver(root, approval, allowNetwork string, runtime *shellRu
 
 func (d *shellDriver) Definition() tool.Definition {
 	additional := false
-	description := "Run a foreground command. timeout_seconds is the maximum interval without stdout/stderr output; active output extends that interval, but every command has an independent 10-minute wall-clock limit. Detached/background processes are not permitted."
+	maxWall := d.maxWallClock()
+	maxSec := maxWallClockSeconds(maxWall)
+	description := fmt.Sprintf("Run a foreground command. Set wall_clock_seconds to the hard deadline you need for this command, from 1 to %d seconds (workspace.shell.max_wall_clock). Omit it to use the configured maximum. timeout_seconds is the maximum interval without stdout/stderr; active output extends that interval up to the wall clock. If you set wall_clock_seconds and omit timeout_seconds, a silent command may run until the wall clock. stdin is optional UTF-8 fed to the process (scripted keystrokes or piped input). Detached/background processes are not permitted.", maxSec)
 	if runtime.GOOS == "windows" {
 		description += " Commands use PowerShell on Windows."
 	}
@@ -222,9 +287,11 @@ func (d *shellDriver) Definition() tool.Definition {
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{
-				"command":         {Type: "string"},
-				"timeout_seconds": {Type: "integer"},
-				"network":         {Type: "boolean"},
+				"command":            {Type: "string"},
+				"stdin":              {Type: "string"},
+				"timeout_seconds":    {Type: "integer"},
+				"wall_clock_seconds": {Type: "integer"},
+				"network":            {Type: "boolean"},
 			},
 			Required:             []string{"command"},
 			AdditionalProperties: &additional,
@@ -234,7 +301,7 @@ func (d *shellDriver) Definition() tool.Definition {
 		RequiresActionTask: true,
 		RiskLevel:          "high",
 		PolicyTags:         []string{"coding", "shell", "workspace"},
-		Metadata:           map[string]string{"approval": d.approval, "network": d.allowNetwork, "platform": runtime.GOOS},
+		Metadata:           map[string]string{"approval": d.approval, "network": d.allowNetwork, "platform": runtime.GOOS, "max_wall_clock_seconds": fmt.Sprint(maxSec)},
 	}
 }
 
@@ -330,12 +397,9 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 		return shellError(call, "service shutting down"), nil
 	}
 	defer d.runtime.wg.Done()
-	inactivityTimeout := 2 * time.Minute
-	if input.TimeoutSeconds != 0 {
-		if input.TimeoutSeconds < 1 || input.TimeoutSeconds > 600 {
-			return shellError(call, "timeout_seconds must be between 1 and 600"), nil
-		}
-		inactivityTimeout = time.Duration(input.TimeoutSeconds) * time.Second
+	inactivityTimeout, wallClock, timeoutErr := resolveShellTimeouts(input, d.maxWallClock())
+	if timeoutErr != nil {
+		return shellError(call, timeoutErr.Error()), nil
 	}
 	command := shellCommand(input.Command)
 	supervisor, ownerErr := newShellSupervisor(command)
@@ -350,6 +414,9 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	}()
 	command.Dir = d.root
 	command.WaitDelay = 100 * time.Millisecond
+	if input.Stdin != "" {
+		command.Stdin = strings.NewReader(input.Stdin)
+	}
 	limitHit := make(chan struct{}, 1)
 	output := &boundedShellBuffer{contextLimit: d.runtime.opts.MaxContextOutputBytes, artifactLimit: d.runtime.opts.MaxArtifactOutputBytes, onLimit: func() {
 		select {
@@ -369,7 +436,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	}
 	startedAt := time.Now()
 	deadline := startedAt.Add(inactivityTimeout)
-	absoluteDeadline := startedAt.Add(d.runtime.opts.MaxWallClockDuration)
+	absoluteDeadline := startedAt.Add(wallClock)
 	sum := sha256.Sum256([]byte(input.Command))
 	caller, _ := tool.CallerFromContext(ctx)
 	snap := ShellExecutionSnapshot{SessionID: caller.SessionID, RunID: caller.TeamRunID, AgentID: caller.AgentID, ToolCallID: call.ID, CommandHash: hex.EncodeToString(sum[:]), State: "running", PID: command.Process.Pid, PGID: supervisor.owner.PGID(), JobID: supervisor.owner.JobID(), StartedAt: startedAt, Deadline: deadline, ExitCode: -1}
@@ -390,7 +457,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 			}
 		}
 	}()
-	wallClockTimer := time.NewTimer(d.runtime.opts.MaxWallClockDuration)
+	wallClockTimer := time.NewTimer(wallClock)
 	defer wallClockTimer.Stop()
 	var err error
 	reason := ""
@@ -400,7 +467,8 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 		startedData := map[string]string{
 			"cwd": d.root, "pid": fmt.Sprint(command.Process.Pid), "health": "running",
 			"timeout_mode": "output_inactivity_with_wall_clock_limit", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
-			"output": "", "output_bytes": "0", "deadline": deadline.UTC().Format(time.RFC3339Nano),
+			"wall_clock_seconds": fmt.Sprint(int((wallClock + time.Second - 1) / time.Second)),
+			"output":             "", "output_bytes": "0", "deadline": deadline.UTC().Format(time.RFC3339Nano),
 			"wall_clock_deadline": absoluteDeadline.UTC().Format(time.RFC3339Nano),
 		}
 		if sinkErr := sink(tool.Update{Kind: "started", Data: startedData}); sinkErr != nil {
@@ -456,7 +524,8 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 				data := map[string]string{
 					"pid": fmt.Sprint(command.Process.Pid), "health": "running",
 					"timeout_mode": "output_inactivity_with_wall_clock_limit", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
-					"output": liveOutput, "output_bytes": fmt.Sprint(outputBytes), "deadline": deadline.UTC().Format(time.RFC3339Nano),
+					"wall_clock_seconds": fmt.Sprint(int((wallClock + time.Second - 1) / time.Second)),
+					"output":             liveOutput, "output_bytes": fmt.Sprint(outputBytes), "deadline": deadline.UTC().Format(time.RFC3339Nano),
 					"wall_clock_deadline": absoluteDeadline.UTC().Format(time.RFC3339Nano),
 				}
 				if !lastOutputAt.IsZero() {

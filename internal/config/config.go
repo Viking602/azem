@@ -18,6 +18,13 @@ var mcpServerNamePattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
 const (
 	maxConfiguredSubagentRoles         = 64
 	maxConfiguredSubagentRoleNameBytes = 64
+	// DefaultSubagentIdleTimeout cancels a running child that produces no
+	// thinking, output, or tool activity. Zero remains a valid explicit
+	// disable. Open tools, including approval waits, are not cancelled.
+	DefaultSubagentIdleTimeout = 5 * time.Minute
+	// DefaultShellMaxWallClock is the per-command coding.shell ceiling when
+	// workspace.shell.max_wall_clock is omitted. The model may request less.
+	DefaultShellMaxWallClock = 10 * time.Minute
 )
 
 type Config struct {
@@ -51,6 +58,7 @@ type HooksConfig struct {
 	DefaultTimeoutParsed time.Duration `yaml:"-"`
 	FailurePolicy        string        `yaml:"failure_policy"`
 	AdditionalPaths      []string      `yaml:"additional_paths,omitempty"`
+	Disabled             []string      `yaml:"disabled,omitempty"`
 }
 
 type DefaultsConfig struct {
@@ -73,10 +81,12 @@ type WorkspaceConfig struct {
 }
 
 type ShellConfig struct {
-	MaxContextOutputBytes  int  `yaml:"max_context_output_bytes"`
-	MaxArtifactOutputBytes int  `yaml:"max_artifact_output_bytes"`
-	StopOnOutputLimit      bool `yaml:"stop_on_output_limit"`
-	MaxConcurrency         int  `yaml:"max_concurrency"`
+	MaxContextOutputBytes  int           `yaml:"max_context_output_bytes"`
+	MaxArtifactOutputBytes int           `yaml:"max_artifact_output_bytes"`
+	StopOnOutputLimit      bool          `yaml:"stop_on_output_limit"`
+	MaxConcurrency         int           `yaml:"max_concurrency"`
+	MaxWallClock           string        `yaml:"max_wall_clock,omitempty"`
+	MaxWallClockDuration   time.Duration `yaml:"-"`
 }
 
 type AuthConfig struct {
@@ -210,16 +220,24 @@ type SubagentConfig struct {
 	MaxDepth       int  `yaml:"max_depth"`
 	MaxConcurrency int  `yaml:"max_concurrency"`
 	// AwaitTimeout is the foreground tool-call wait window, not a child
-	// execution timeout. Safe work continues in the background when it elapses.
-	AwaitTimeout  string                           `yaml:"await_timeout"`
-	AwaitDuration time.Duration                    `yaml:"-"`
-	AutoWake      bool                             `yaml:"auto_wake"`
-	Toggle        map[string]bool                  `yaml:"toggle,omitempty"`
-	Models        map[string]string                `yaml:"models,omitempty"`
-	Routes        map[string]ModelRouteConfig      `yaml:"routes,omitempty"`
-	Roles         map[string]SubagentRoleConfig    `yaml:"roles,omitempty"`
-	Personas      map[string]SubagentPersonaConfig `yaml:"personas,omitempty"`
-	Budget        SubagentBudgetConfig             `yaml:"budget"`
+	// execution timeout. Zero waits until the foreground child completes.
+	// A positive duration only releases the parent; safe work continues
+	// in the background when it elapses.
+	AwaitTimeout  string        `yaml:"await_timeout"`
+	AwaitDuration time.Duration `yaml:"-"`
+	// IdleTimeout cancels a running child that produces no thinking, output,
+	// or tool activity. The default is DefaultSubagentIdleTimeout. Zero
+	// disables the watchdog. Open tools, including approval waits, are not
+	// cancelled.
+	IdleTimeout  string                           `yaml:"idle_timeout"`
+	IdleDuration time.Duration                    `yaml:"-"`
+	AutoWake     bool                             `yaml:"auto_wake"`
+	Toggle       map[string]bool                  `yaml:"toggle,omitempty"`
+	Models       map[string]string                `yaml:"models,omitempty"`
+	Routes       map[string]ModelRouteConfig      `yaml:"routes,omitempty"`
+	Roles        map[string]SubagentRoleConfig    `yaml:"roles,omitempty"`
+	Personas     map[string]SubagentPersonaConfig `yaml:"personas,omitempty"`
+	Budget       SubagentBudgetConfig             `yaml:"budget"`
 }
 
 type SubagentBudgetConfig struct {
@@ -305,6 +323,9 @@ type MCPServerConfig struct {
 	// not restrict deletion: removed catalog entries are suppressed explicitly
 	// through MCPConfig.RemovedServers.
 	Managed bool `yaml:"managed,omitempty" json:"-"`
+	// Icon is a bounded data URL projected from a plugin asset. It is never
+	// written to configuration.
+	Icon string `yaml:"-" json:"-"`
 }
 
 type ToolOverride struct {
@@ -318,7 +339,7 @@ func Default() Config {
 		Defaults: DefaultsConfig{
 			Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single", Theme: "system", Language: "en", ApprovalMode: "prompt", QueueMode: "queue",
 		},
-		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt", Shell: ShellConfig{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2}},
+		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt", Shell: ShellConfig{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2, MaxWallClock: "10m", MaxWallClockDuration: DefaultShellMaxWallClock}},
 		Auth:      AuthConfig{Store: "sqlite", ImportCodex: true, ImportGrok: true},
 		Providers: ProvidersConfig{
 			ChatGPT: ChatGPTConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}},
@@ -341,7 +362,7 @@ func Default() Config {
 				MaxSummaryTokens: 32768, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
 			},
 			Subagents: SubagentConfig{
-				Enabled: true, MaxDepth: 2, MaxConcurrency: 32, AwaitTimeout: "10m", AwaitDuration: 10 * time.Minute, AutoWake: true,
+				Enabled: true, MaxDepth: 2, MaxConcurrency: 32, AwaitTimeout: "0s", AwaitDuration: 0, IdleTimeout: "5m", IdleDuration: DefaultSubagentIdleTimeout, AutoWake: true,
 				Toggle: map[string]bool{}, Models: map[string]string{}, Routes: map[string]ModelRouteConfig{}, Roles: builtInSubagentRoles(),
 				Personas: map[string]SubagentPersonaConfig{},
 				Budget: SubagentBudgetConfig{
@@ -422,6 +443,9 @@ func (c *Config) Validate() error {
 	if c.Hooks.FailurePolicy != "open" && c.Hooks.FailurePolicy != "closed" {
 		return fmt.Errorf("hooks.failure_policy must be open or closed")
 	}
+	if err := c.validateHooksDisabled(); err != nil {
+		return err
+	}
 	if c.Defaults.AgentMode != "single" && c.Defaults.AgentMode != "team" {
 		return fmt.Errorf("defaults.agent_mode must be single or team")
 	}
@@ -449,6 +473,14 @@ func (c *Config) Validate() error {
 	if !c.Workspace.Shell.StopOnOutputLimit {
 		return fmt.Errorf("workspace.shell.stop_on_output_limit must be true")
 	}
+	if strings.TrimSpace(c.Workspace.Shell.MaxWallClock) == "" {
+		c.Workspace.Shell.MaxWallClock = DefaultShellMaxWallClock.String()
+	}
+	shellWall, err := time.ParseDuration(c.Workspace.Shell.MaxWallClock)
+	if err != nil || shellWall < time.Second {
+		return fmt.Errorf("workspace.shell.max_wall_clock must be a duration of at least 1s")
+	}
+	c.Workspace.Shell.MaxWallClockDuration = shellWall
 	for name, provider := range map[string]*ProviderConfig{"chatgpt": &c.Providers.ChatGPT.ProviderConfig, "grok": &c.Providers.Grok.ProviderConfig} {
 		ttl, err := time.ParseDuration(provider.TTL)
 		if err != nil || ttl <= 0 {
@@ -710,6 +742,21 @@ func (c *Config) validateSkills() error {
 	return nil
 }
 
+func (c *Config) validateHooksDisabled() error {
+	seen := make(map[string]struct{}, len(c.Hooks.Disabled))
+	for _, id := range c.Hooks.Disabled {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return fmt.Errorf("hooks.disabled contains an empty hook identity")
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("hooks.disabled contains duplicate hook %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
 func (c *Config) validateSubagents() error {
 	subagents := &c.Agents.Subagents
 	if subagents.MaxDepth < -1 {
@@ -718,9 +765,13 @@ func (c *Config) validateSubagents() error {
 	if subagents.MaxConcurrency < 0 {
 		return fmt.Errorf("agents.subagents.max_concurrency must be non-negative (zero is unbounded)")
 	}
-	await, err := time.ParseDuration(subagents.AwaitTimeout)
-	if err != nil || await <= 0 {
-		return fmt.Errorf("agents.subagents.await_timeout must be a positive duration")
+	await, err := parseSubagentAwaitTimeout(subagents.AwaitTimeout)
+	if err != nil {
+		return err
+	}
+	idle, err := parseSubagentIdleTimeout(subagents.IdleTimeout)
+	if err != nil {
+		return err
 	}
 	wallClock, err := time.ParseDuration(subagents.Budget.MaxWallClock)
 	if err != nil || wallClock < 0 {
@@ -736,6 +787,7 @@ func (c *Config) validateSubagents() error {
 		return fmt.Errorf("agents.subagents.budget.soft_requests must be non-negative (zero disables the reminder)")
 	}
 	subagents.AwaitDuration = await
+	subagents.IdleDuration = idle
 	subagents.Budget.MaxWallClockDuration = wallClock
 	if subagents.Toggle == nil {
 		subagents.Toggle = map[string]bool{}
@@ -905,4 +957,55 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+const (
+	minSubagentAwaitSeconds = 5
+	maxSubagentAwaitSeconds = 3600
+	minSubagentIdleSeconds  = 30
+	maxSubagentIdleSeconds  = 3600
+)
+
+// ValidSubagentAwaitSeconds reports whether a settings or YAML update may store
+// this foreground wait. Zero waits until the foreground child completes;
+// otherwise the value must be between 5 and 3600 seconds.
+func ValidSubagentAwaitSeconds(seconds int) bool {
+	return seconds == 0 || (seconds >= minSubagentAwaitSeconds && seconds <= maxSubagentAwaitSeconds)
+}
+
+func parseSubagentAwaitTimeout(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "0" {
+		return 0, nil
+	}
+	await, err := time.ParseDuration(value)
+	if err != nil || await < 0 {
+		return 0, fmt.Errorf("agents.subagents.await_timeout must be a non-negative duration (zero waits until the foreground child completes)")
+	}
+	return await, nil
+}
+
+// ValidSubagentIdleSeconds reports whether a settings or YAML update may store
+// this idle cancel window. Zero disables the watchdog; otherwise the value
+// must be between 30 and 3600 seconds.
+func ValidSubagentIdleSeconds(seconds int) bool {
+	return seconds == 0 || (seconds >= minSubagentIdleSeconds && seconds <= maxSubagentIdleSeconds)
+}
+
+// ValidShellMaxWallClockSeconds reports whether a settings or YAML update may
+// store this per-command coding.shell ceiling.
+func ValidShellMaxWallClockSeconds(seconds int) bool {
+	return seconds >= 60 && seconds <= 7200
+}
+
+func parseSubagentIdleTimeout(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" {
+		return 0, nil
+	}
+	idle, err := time.ParseDuration(value)
+	if err != nil || idle < 0 {
+		return 0, fmt.Errorf("agents.subagents.idle_timeout must be a non-negative duration (zero disables idle cancellation)")
+	}
+	return idle, nil
 }

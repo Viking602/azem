@@ -87,6 +87,56 @@ func TestPrepareRecoveryExpiresLeasesAndQuarantinesIncompleteActions(t *testing.
 	}
 }
 
+func TestPrepareRecoveryExpiresOrphanWorkspaceClaims(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	uow, err := store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	claimStore, ok := uow.(api.ResourceClaimUnitOfWork)
+	if !ok {
+		t.Fatal("unit of work does not expose resource claims")
+	}
+	decision, err := claimStore.ResourceClaims().AcquireResourceClaims(ctx, api.ResourceClaimRequest{
+		RunID: "run-1", TaskID: "task-1", LeaseID: "lease-1", HolderID: "azem-main",
+		RequestedAt: now, ExpiresAt: now.Add(time.Minute),
+		Claims: []api.ResourceClaimSpec{{ID: "claim-1", Key: "azem:workspace-write:/tmp/azem", Mode: api.ResourceClaimExclusive}},
+	})
+	if err != nil || !decision.Acquired {
+		t.Fatalf("acquire claim=%#v error=%v", decision, err)
+	}
+	if err := uow.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.PrepareRecovery(ctx, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	uow, err = store.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimStore, ok = uow.(api.ResourceClaimUnitOfWork)
+	if !ok {
+		t.Fatal("unit of work does not expose resource claims")
+	}
+	claim, err := claimStore.ResourceClaims().LoadResourceClaim(ctx, "claim-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := uow.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if claim.State != api.ResourceClaimExpired {
+		t.Fatalf("recovered claim state = %q, want expired", claim.State)
+	}
+}
+
 func TestResolveReconcileAttemptRequiresExplicitTerminalOutcome(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, ":memory:")

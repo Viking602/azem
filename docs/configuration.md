@@ -1,6 +1,6 @@
 # Configuration
 
-Last verified: 2026-08-11
+Last verified: 2026-08-17
 
 `internal/config.Config` and `internal/config.Default` are authoritative. Azem
 strictly decodes YAML, applies defaults, and validates the complete result
@@ -12,7 +12,7 @@ operating-system user configuration directory; `-config` selects another file.
 | Section | Purpose |
 |---|---|
 | `defaults` | Provider, model, reasoning, language, agent mode, approval mode, and queue mode for new sessions |
-| `workspace` | Initial TUI root and file, shell, network, output, and shell concurrency policy |
+| `workspace` | Initial TUI root and file, shell, network, output, shell concurrency, and per-command shell wall-clock ceiling |
 | `auth` | Credential backend plus optional Codex and Grok imports |
 | `providers` | Subscription transports and llmux provider/model registry |
 | `retry` | Agent retry count and exponential backoff bounds |
@@ -26,26 +26,48 @@ operating-system user configuration directory; `-config` selects another file.
 The maintained example in [README.md](../README.md#configuration) shows the
 current field names and defaults. Duration values use Go duration syntax.
 
-The desktop Subagents settings surface edits recursive depth, two live capacity
-limits, and one foreground wait window without restarting the application:
+`workspace.shell.max_wall_clock` is the hard ceiling for one `coding.shell`
+command (default `10m`). The model chooses a shorter deadline with
+`wall_clock_seconds`. `timeout_seconds` remains the no-output watchdog and
+cannot exceed that ceiling. Omitting `timeout_seconds` after setting
+`wall_clock_seconds` lets a silent command run until the chosen wall clock.
+`stdin` is optional UTF-8 fed to the process for scripted keystrokes or piped
+input.
+
+The desktop Subagents settings surface groups capacity and isolation controls,
+shows parallel dispatch as a read-only product invariant, and lists
+main-session display behavior separately. It edits recursive depth, two live
+capacity limits, one per-command shell wall clock, one foreground wait window,
+and one idle-cancel window without restarting the application:
 `agents.subagents.max_depth`, `agents.subagents.max_concurrency`,
-`workspace.shell.max_concurrency`, and `agents.subagents.await_timeout`.
+`workspace.shell.max_concurrency`, `workspace.shell.max_wall_clock`,
+`agents.subagents.await_timeout`, and
+`agents.subagents.idle_timeout`.
 Subagent concurrency defaults to 32 and zero means unbounded. Recursive depth
 defaults to 2; zero disables delegation and `-1` removes the recursion cap.
-The await value never limits child runtime.
-When it elapses, read-only or isolated worktree tasks continue in the background
+`await_timeout` defaults to `0s`, which keeps the parent tool waiting until the
+foreground child completes. A positive duration never limits child runtime:
+when it elapses, read-only or isolated worktree tasks continue in the background
 and the parent can inspect them with `subagent.get_output`; a shared-workspace
 writer keeps waiting in the foreground rather than racing the parent or being
-cancelled. Changes pass through validated application actions, update the
-active runtime, and are persisted with the same node-preserving YAML writer
-used by the other runtime settings. Existing work is allowed to finish.
+cancelled. `-1` is not a second unlimited sentinel and is rejected.
+`idle_timeout` defaults to `5m`. Zero disables the watchdog. A positive value
+cancels a *running* child that has produced no thinking, output, or tool
+activity for that duration. Empty thinking or text frames and elapsed-time UI
+ticks do not count as activity. An open tool, including an approval wait, or a
+live `coding.shell` process is not cancelled. Compaction and explicit wait states such as a workspace-claim
+retry reset the idle clock. Settings updates must be `0` or 30–3600 seconds.
+Changes pass through validated application actions, update the active runtime,
+and are persisted with the same node-preserving YAML writer used by the other
+runtime settings. Existing work is allowed to finish. An existing config that
+already stores `idle_timeout: 0s` stays disabled.
 
 Subagent token, tool-call, turn, and wall-clock budgets default to zero, which
 means unbounded. `budget.soft_requests` defaults to 200 and injects one private
 wrap-up reminder when crossed; it is advisory and never stops the run. Set it
-to zero to disable the reminder. A child is cancelled only by explicit
-`subagent.kill`, a user
-stop that explicitly includes children, or application shutdown. Provider
+to zero to disable the reminder. A child is cancelled by explicit
+`subagent.kill`, a user stop that explicitly includes children, application
+shutdown, or an optional configured `idle_timeout`. Provider
 context windows still require semantic compaction, but that is not a cumulative
 task-size ceiling.
 
@@ -130,9 +152,42 @@ are never runtime roots, and an existing selected Azem copy remains usable if
 Codex is temporarily unavailable. Skills and eligible MCP servers from selected
 copies are merged into the in-memory runtime configuration.
 `trust_hooks` defaults to false because executable plugin hooks require an
-explicit trust decision. Plugin changes take effect in a newly started desktop
-session. The compatibility matrix and manifest rules are documented in
+explicit trust decision from the Extensions Hooks tab. Enabling it persists
+the flag and loads those hook sources in the current process. Plugin Skills
+and MCP still load without that decision. The compatibility matrix and
+manifest rules are documented in
 [plugins.md](plugins.md).
+
+## Hooks
+
+```yaml
+hooks:
+  enabled: true
+  trust_project: false
+  claude_compatibility: false
+  default_timeout: 5s
+  failure_policy: open
+  additional_paths: []
+  disabled: []
+```
+
+User and project hook files load from the existing discovery paths. Plugin
+hook files are always cataloged so Extensions can list them; they enter the
+runtime dispatcher only after `plugins.trust_hooks` is true.
+
+`hooks.disabled` is the durable deny list for individual hook identities, in
+the same shape as `skills.disabled`. Each identity is
+`event`, `name`, cleaned `source` path, and `matcher`, joined by a unit
+separator (`U+001F`). The desktop Extensions Hooks tab exposes every
+discovered command with a per-row switch. Its typed `set_hook_enabled` action
+validates the identity against the current catalog, persists the deny list
+atomically, rediscovers the in-memory registry, and then publishes a fresh
+`hook_catalog` snapshot. A disabled hook remains visible and is skipped at
+dispatch; it does not get a second execution or approval path.
+
+An enabled plugin hook still does not run until plugin hooks are trusted.
+Closing trust unloads plugin sources immediately and leaves `hooks.disabled`
+unchanged. An unknown `hooks.*` field fails closed on load.
 
 ## llmux providers and models
 
@@ -208,8 +263,18 @@ OpenAI/ChatGPT and Grok subscription entries reuse the existing OAuth/CLI
 credential service and live subscription catalogs. They do not accept an API
 base URL or API key in Model settings; login, account status, plan, live weekly
 quota, reset time, available credit balance, model availability controls, and
-logout are projected into the same provider directory. Disabled subscription
-IDs persist in `providers.chatgpt.disabled_models` or
+logout are projected into the same provider directory. Grok identity prefers
+the email or handle from the ID token or CLI-proxy `/v1/user` profile; the
+settings page never shows access tokens. Grok quota first loads `/v1/user`
+without `x-userid`, then calls `/v1/billing?format=credits` with that live
+user id. Both GETs use the shared `internal/netproxy` transport and retry
+once after a connection EOF or reset. Billing parsing follows the Grok CLI
+credits JSON: `config.creditUsagePercent`, then
+`onDemandUsed`/`onDemandCap`, then a parseable `currentPeriod` as zero
+usage. The settings card labels that window weekly, monthly, or credits
+from `currentPeriod.type`. Quota failures keep the backend error on the
+settings page. Disabled
+subscription IDs persist in `providers.chatgpt.disabled_models` or
 `providers.grok.disabled_models` and follow the same picker/runtime rules as
 llmux models.
 
@@ -266,10 +331,23 @@ selected credential backend and never pass through that YAML writer.
 
 ## Desktop appearance preferences
 
-Theme, interface font, and interface font size are desktop-only preferences.
-The searchable font picker reads installed families and their localized names
-from macOS AppKit, Linux fontconfig, or the Windows installed font collection.
-Preferences apply immediately, persist in the WebView's local storage, and do
-not modify `config.yaml`. Interface font size is clamped to 11–20 px; the
-default is the operating-system UI font at 14 px. Code blocks and tool output
-retain their dedicated monospace stack.
+Theme, interface font, interface font size, and chat-surface text sizes are
+desktop-only preferences. The searchable font picker reads installed families
+and their localized names from macOS AppKit, Linux fontconfig, or the Windows
+installed font collection. Preferences apply immediately, persist in the
+WebView's local storage, and do not modify `config.yaml`. Interface font size
+is clamped to 11–20 px; the default is the operating-system UI font at 14 px
+and applies to chrome such as the sidebar, Settings, and Inspector shell.
+Conversation UI text (`azem:chat-font-size`, default 13 px, 12–20 px) and
+fenced code (`azem:chat-code-font-size`, default 12 px, 11–18 px) are
+independent and apply only on `.thread-surface` and the subagent side-chat
+transcript. Code blocks keep their dedicated monospace stack.
+
+## Usage ledger
+
+Settings → Usage is not a configuration surface. It reads completed
+`provider_requests` (and completed `hydaelyn_activate_skill` rows when present)
+for the current project or all projects. The query window is 366 local-calendar
+days, with at most 20 models and 20 skills returned. Cache counters use only
+`cache_reported` / `cache_write_reported` facts; unknown providers stay
+unreported. There is no YAML field and no usage polling.

@@ -4,6 +4,7 @@ import {
 } from "lucide-react";
 import { execute, isDesktopRuntime, listWorkspaceChanges, openWorkspaceTerminal } from "../bridge";
 import { translator } from "../i18n";
+import { formatRelativeTime, useRelativeNow } from "../relativeTime";
 import { openPullRequest, refreshPullRequestDashboard } from "../pullRequests";
 import { useRuntimeStore } from "../store";
 import type { Session, WorkspaceChangeFile, WorkspaceChangeSet } from "../types";
@@ -21,6 +22,8 @@ export default function WorkspaceOverviewPage() {
   const [changes, setChanges] = useState<WorkspaceChangeSet | null>(null);
   const [loading, setLoading] = useState(true);
   const t = translator(snapshot.language);
+  const sessionTimes = useMemo(() => sessions.map((session) => session.updatedAt).filter(Boolean), [sessions]);
+  const now = useRelativeNow(sessionTimes);
   const projectName = fileBasename(snapshot.workspace);
   const currentPullRequest = pullRequestDashboard?.current;
 
@@ -68,7 +71,7 @@ export default function WorkspaceOverviewPage() {
       <div className="workspace-project-heading">
         <span className="workspace-eyebrow">WORKSPACE</span>
         <div><h1 id="workspace-overview-heading">{projectName}</h1><span className="workspace-current-branch"><i />{changes?.branch || pullRequestDashboard?.currentBranch || snapshot.currentBranch || t("noBranches")}</span></div>
-        <p title={snapshot.workspace}>{snapshot.workspace}</p>
+        <p>{snapshot.workspace}</p>
       </div>
       <div className="workspace-header-actions">
         <button type="button" className="workspace-open-terminal" onClick={() => void openWorkspaceTerminal().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}>{t("openTerminal")}</button>
@@ -110,7 +113,7 @@ export default function WorkspaceOverviewPage() {
           <header className="workspace-section-heading compact"><div><h2>{t("recentActivity")}</h2><p>{t("projectSessions")}</p></div></header>
           <div className="workspace-activity-list">
             {projectSessions.map((session) => <button type="button" key={session.id} onClick={() => void openSession(session)}>
-              <i data-running={String(running && session.id === currentSessionId)} /><span><strong>{session.title || t("newSession")}</strong><small>{activityLabel(session, running && session.id === currentSessionId, snapshot.language)}</small></span>
+              <i data-running={String(running && session.id === currentSessionId)} /><span><strong>{session.title || t("newSession")}</strong><small>{activityLabel(session, running && session.id === currentSessionId, snapshot.language, now)}</small></span>
             </button>)}
             {projectSessions.length === 0 && <p className="workspace-side-empty">{t("noSessions")}</p>}
           </div>
@@ -123,7 +126,7 @@ export default function WorkspaceOverviewPage() {
 
 function ChangeRow({ file, open }: { file: WorkspaceChangeFile; open: () => void }) {
   const directory = file.path.split("/").slice(0, -1).join("/") || ".";
-  return <button type="button" onClick={open} title={file.path}>
+  return <button type="button" onClick={open}>
     <span className={`workspace-file-status ${file.status}`}>{statusLabel(file.status)}</span>
     <FileTypeIcon path={file.path} />
     <span><strong>{fileBasename(file.path)}</strong><small>{directory}</small></span>
@@ -148,23 +151,12 @@ function checkSummary(passing: number, total: number, failing: number, language:
   return language === "zh-CN" ? `${passing} / ${total} 检查通过` : `${passing} / ${total} checks passed`;
 }
 
-function relativeTime(value: string, language: "en" | "zh-CN") {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return language === "zh-CN" ? "最近" : "Recently";
-  const minutes = Math.max(0, Math.round((Date.now() - timestamp) / 60_000));
-  if (minutes < 1) return language === "zh-CN" ? "刚刚" : "Just now";
-  if (minutes < 60) return language === "zh-CN" ? `${minutes} 分钟前` : `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return language === "zh-CN" ? `${hours} 小时前` : `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  return language === "zh-CN" ? `${days} 天前` : `${days}d ago`;
-}
-
-function activityLabel(session: Session, isRunning: boolean, language: "en" | "zh-CN") {
-  if (isRunning) return language === "zh-CN" ? "刚刚 · 正在运行" : "Just now · Running";
+function activityLabel(session: Session, isRunning: boolean, language: "en" | "zh-CN", now: number) {
   if (!isDesktopRuntime() && language === "zh-CN") {
     if (session.title === "插件兼容设计") return "昨天 · 已完成";
     if (session.title === "语义上下文重建") return "8 月 7 日 · 已完成";
   }
-  return `${relativeTime(session.updatedAt, language)} · ${language === "zh-CN" ? "已完成" : "Completed"}`;
+  const time = formatRelativeTime(session.updatedAt, language, now);
+  if (isRunning) return language === "zh-CN" ? `${time} · 运行中` : `${time} · Running`;
+  return `${time} · ${language === "zh-CN" ? "已完成" : "Completed"}`;
 }

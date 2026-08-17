@@ -1,16 +1,44 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 // @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import type { SkillEntry, Snapshot } from "../types";
-import { branchMenuLayout, effectiveComposerRoute, filterModelControlOptions, modelControlWidth, namedClipboardImage, nextModelControlView, parseSkillPrompt, pastedImages, sessionStageMotion, shouldReadNativeClipboard, skillTitle, slashSuggestions, supportsFastMode, threadHeaderStage } from "./ThreadSurface";
+import { branchMenuLayout, COMPOSER_OVERLAY_CLEARANCE, COMPOSER_OVERLAY_MIN_GAP, composerOverlayGap, composerPromptPlaceholder, effectiveComposerRoute, filterModelControlOptions, modelControlWidth, namedClipboardImage, nextModelControlView, parseSkillPrompt, pastedImages, pinTranscriptTail, sessionStageMotion, shouldReadNativeClipboard, skillTitle, slashSuggestions, supportsFastMode, threadHeaderStage, transcriptFollowBehavior } from "./ThreadSurface";
+import { translator } from "../i18n";
 import { visibleCommentaryTitle } from "./Timeline";
 
-const styles = readFileSync("src/styles.css", "utf8");
+// styles.css is an import hub; concatenate the imported files in cascade order.
+const styles = readFileSync("src/styles.css", "utf8")
+	.split("\n")
+	.map((line: string) => /^@import "\.\/(.+)";$/.exec(line)?.[1])
+	.filter((path: string | undefined): path is string => Boolean(path))
+	.map((path: string) => readFileSync(`src/${path}`, "utf8"))
+	.join("\n");
 const prototypeStyles = readFileSync("src/prototype.css", "utf8");
-const threadSurface = readFileSync("src/components/ThreadSurface.tsx", "utf8");
+const beautifulUIStyles = readFileSync("src/components/beautiful-ui/beautiful-ui.css", "utf8");
+// ThreadSurface.tsx is a composition root; include its thread/ submodules so
+// source-content assertions keep covering the complete composer surface.
+const threadSurface = [
+	"src/components/ThreadSurface.tsx",
+	...readdirSync("src/components/thread")
+		.slice()
+		.sort()
+		.map((name: string) => `src/components/thread/${name}`),
+]
+	.map((path: string) => readFileSync(path, "utf8"))
+	.join("\n");
 const composerModelPicker = readFileSync("src/components/ComposerModelPicker.tsx", "utf8");
 const agentSideChat = readFileSync("src/components/AgentSideChat.tsx", "utf8");
-const timeline = readFileSync("src/components/Timeline.tsx", "utf8");
+// Timeline.tsx is a composition root; include its timeline/ submodules so
+// source-content assertions keep covering the complete process rendering.
+const timeline = [
+	"src/components/Timeline.tsx",
+	...readdirSync("src/components/timeline")
+		.slice()
+		.sort()
+		.map((name: string) => `src/components/timeline/${name}`),
+]
+	.map((path: string) => readFileSync(path, "utf8"))
+	.join("\n");
 
 const skills: SkillEntry[] = [
   { name: "animation-systems", description: "Build polished motion", sourcePath: "~/.agents/skills/animation-systems", bundled: false, eager: false, disabled: false, modelVisible: true, resourceCount: 0 },
@@ -30,10 +58,25 @@ describe("composer slash commands", () => {
 			workspace: "/tmp/azem", sessionId: "session-1", provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max",
 			agentMode: "single", language: "zh-CN", approvalMode: "prompt", queueMode: "queue", subagentConcurrency: 2, chatgptFastMode: false, sequence: 0,
 		};
-		const routes = [{ Scope: "plan", Role: "", Label: "Plan", Route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } }];
+		const routes = [{ scope: "plan", role: "", label: "Plan", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } }];
 		expect(effectiveComposerRoute(snapshot, true, routes)).toEqual({ provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" });
 		expect(effectiveComposerRoute(snapshot, false, routes)).toEqual({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
-		expect(effectiveComposerRoute(snapshot, true, [{ Scope: "plan", Role: "", Label: "Plan", Route: {} }])).toEqual({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
+		expect(effectiveComposerRoute(snapshot, true, [{ scope: "plan", role: "", label: "Plan", route: {} }])).toEqual({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
+	});
+
+	it("does not look idle while a run is active", () => {
+		const t: ReturnType<typeof translator> = translator("zh-CN");
+		expect(composerPromptPlaceholder(t, {
+			busy: true, running: true, deliveryMode: "queue", showContextBar: false, language: "zh-CN",
+		})).toBe("模型正在思考，输入将排入下一轮…");
+		expect(composerPromptPlaceholder(t, {
+			busy: true, running: true, deliveryMode: "guide", showContextBar: false, language: "zh-CN",
+		})).toBe("引导当前任务…");
+		expect(composerPromptPlaceholder(t, {
+			busy: true, running: false, deliveryMode: "queue", showContextBar: false, language: "zh-CN",
+		})).toBe("输入下一轮消息…");
+		expect(threadSurface).toContain("composerPromptPlaceholder(t, { busy, running, deliveryMode, showContextBar, language: snapshot.language })");
+		expect(threadSurface).toContain("waitingForModel={running}");
 	});
 
 	it("does not start native text selection from the composer toolbar blank area", () => {
@@ -49,13 +92,50 @@ describe("composer slash commands", () => {
 	});
 
 	it("does not restart smooth scrolling for every streaming frame", () => {
-		expect(threadSurface).toContain('behavior: running ? "instant" : "smooth"');
+		expect(transcriptFollowBehavior(true)).toBe("instant");
+		expect(transcriptFollowBehavior(false)).toBe("smooth");
+		expect(transcriptFollowBehavior(false, true)).toBe("instant");
+		expect(threadSurface).toContain("transcriptFollowBehavior(running, pinInstant.current)");
 	});
 
-	it("keeps the active composer in document flow instead of reserving a viewport-sized blank", () => {
-		expect(styles).toMatch(/\.composer-dock\s*\{[^}]*position:\s*relative;[^}]*flex:\s*0 0 auto;[^}]*justify-content:\s*center;/s);
+	it("opens a switched session at the tail instead of the first line", () => {
+		expect(threadSurface).toContain("sessionFollow.current !== currentSessionId");
+		expect(threadSurface).toContain("pinInstant.current = true");
+		expect(threadSurface).toContain("querySelector(\".transcript\")");
+		expect(threadSurface).toContain("typeof ResizeObserver === \"undefined\"");
+		expect(threadSurface).toContain("observer.observe(transcript)");
+		expect(threadSurface).toContain("[blocks, following, queuedPrompts.length, running, currentSessionId]");
+		const viewport = { scrollHeight: 2400, scrollTo: vi.fn() };
+		pinTranscriptTail(viewport as unknown as HTMLElement, "instant");
+		expect(viewport.scrollTo).toHaveBeenCalledWith({ top: 2400, behavior: "instant" });
+	});
+
+	it("overlays a transparent composer dock so the timeline stays visible and scrollable", () => {
+		expect(COMPOSER_OVERLAY_CLEARANCE).toBe(24);
+		expect(COMPOSER_OVERLAY_MIN_GAP).toBe(148);
+		expect(composerOverlayGap(0)).toBe(COMPOSER_OVERLAY_MIN_GAP);
+		expect(composerOverlayGap(140)).toBe(140 + COMPOSER_OVERLAY_CLEARANCE);
+		expect(composerOverlayGap(156)).toBe(156 + COMPOSER_OVERLAY_CLEARANCE);
+		expect(threadSurface).toContain('className="transcript-composer-clearance"');
+		expect(styles).toMatch(/\.transcript-composer-clearance\s*\{[^}]*height:\s*var\(--transcript-bottom-gap\)/s);
+		expect(styles).toMatch(/\.thread-session-stage\s*\{[^}]*--transcript-bottom-gap:\s*148px/s);
+		expect(styles).toMatch(/\.transcript\s*\{[^}]*padding:\s*31px 0 0/s);
+		expect(styles).toMatch(/\.composer-dock\s*\{[^}]*position:\s*absolute;[^}]*background:\s*transparent;[^}]*pointer-events:\s*none;/s);
+		expect(styles).toMatch(/\.composer-dock \.composer-stack,\s*\.composer-dock \.jump-latest\s*\{[^}]*pointer-events:\s*auto;/s);
+		expect(styles).not.toMatch(/\.composer-dock \.composer-card::before/);
+		expect(styles).not.toMatch(/\.composer-dock \.composer-stack::before/);
+		expect(styles).not.toMatch(/\.composer-dock \.composer-card::after/);
+		expect(styles).not.toMatch(/\.composer-dock \.composer-stack::after/);
+		expect(styles).not.toMatch(/\.composer-dock\s*\{[^}]*background:\s*var\(--paper\)/s);
 		expect(styles).not.toMatch(/\.thread-surface:has\(\.queued-prompts\) \.transcript\s*\{[^}]*padding-bottom:/s);
-		expect(threadSurface).toContain("[blocks, following, queuedPrompts.length, running]");
+		expect(threadSurface).toContain("composerOverlayGap(node.offsetHeight)");
+		expect(threadSurface).toContain("COMPOSER_OVERLAY_CLEARANCE");
+		expect(threadSurface).toContain("new ResizeObserver(sync)");
+		expect(threadSurface).toContain("useLayoutEffect(() => {");
+		expect(threadSurface).toContain("[blocks, following, queuedPrompts.length, running, currentSessionId]");
+		expect(threadSurface).toContain('className="empty-composer-wrap"');
+		expect(styles).toMatch(/\.empty-composer-wrap\s*\{[^}]*padding:\s*20px 32px 80px;/s);
+		expect(styles).not.toMatch(/\.empty-composer-wrap\s*\{[^}]*--transcript-bottom-gap/s);
 	});
 
 	it("restores the approved content-stage transition when switching sessions", () => {
@@ -71,11 +151,40 @@ describe("composer slash commands", () => {
 		expect(styles).toMatch(/\.thread-session-stage\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;/s);
 	});
 
+	it("scopes chat UI and code font sizes to the thread and side-chat surfaces", () => {
+		expect(styles).toMatch(/\.thread-surface,\s*\n\.agent-side-chat\s*\{[^}]*--text-chat:\s*var\(--chat-ui-font-size/s);
+		expect(styles).toMatch(/\.thread-surface \.bui-code-block,\s*\n\.agent-side-chat \.bui-code-block\s*\{[^}]*--bui-code-size:\s*var\(--chat-code-font-size/s);
+		expect(threadSurface).toContain("chatTypographyVars(chatFontSize, chatCodeFontSize)");
+		expect(agentSideChat).toContain("chatTypographyVars(chatFontSize, chatCodeFontSize)");
+		expect(beautifulUIStyles).toMatch(/\.bui-code-block\s*\{[^}]*--bui-code-size:\s*var\(--chat-code-font-size/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-code-block\s*\{[^}]*--bui-code-radius:\s*18px/s);
+		expect(beautifulUIStyles).toMatch(/\.process-step\.bui-tool-chip-group\[data-settled\][^{]*\{[^}]*background:\s*transparent/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-code-block\s*\{[^}]*border:\s*0/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-code-header\s*\{[^}]*min-height:\s*44px/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-thinking-state \.reasoning-summary\s*\{[^}]*grid-template-columns:\s*16px max-content max-content 13px/s);
+		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-state \.reasoning-summary\s*\{[^}]*minmax\(12em/s);
+		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-meta\s*\{[^}]*min-width:\s*4\.5em/s);
+		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-state \.reasoning-label\s*\{[^}]*min-width:\s*12em/s);
+	});
+
 	it("treats thinking and tool execution as one in-progress header state", () => {
 		expect(threadHeaderStage(true)).toBe("in-progress");
 		expect(threadHeaderStage(false)).toBe("completed");
 		expect(threadSurface).toContain('{t("inProgress")}');
 		expect(styles).toMatch(/\.thread-stage\s*\{[^}]*grid-template-columns:\s*repeat\(2,/s);
+	});
+
+	it("keeps the header status chip beside the terminal control instead of stacking them", () => {
+		expect(threadSurface).toContain('className="thread-header-end"');
+		expect(threadSurface).toContain('className="square-button terminal-toggle"');
+		expect(threadSurface).toContain('{t("terminal")}');
+		expect(threadSurface).not.toContain("streaming-text");
+		expect(styles).toMatch(/\.thread-header-end\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;/s);
+		expect(styles).toMatch(/\.thread-header-end\s*\{[^}]*grid-column:\s*3;[^}]*justify-self:\s*end;/s);
+		expect(styles).not.toMatch(/\.thread-runtime-status\s*\{[^}]*grid-column:\s*3;[^}]*grid-row:\s*1;[^}]*margin-right:\s*45px;/s);
+		expect(styles).not.toMatch(/\.thread-actions\s*\{[^}]*grid-column:\s*3;[^}]*grid-row:\s*1;/s);
+		expect(styles).not.toMatch(/\.thread-header[^{]*\{[^}]*\.streaming-text/s);
+		expect(styles).not.toMatch(/\.terminal-toggle[^{]*\{[^}]*\.streaming-text/s);
 	});
 
 	it("uses an editorial process rail without repeating generic progress labels", () => {
@@ -88,10 +197,61 @@ describe("composer slash commands", () => {
 		expect(styles).toMatch(/\.tool-block summary,[\s\S]*?grid-template-columns:\s*16px minmax\(0, 1fr\) auto;/s);
 		expect(prototypeStyles).toMatch(/\.commentary-block\s*\{[^}]*line-height:\s*1\.72;[^}]*text-wrap:\s*pretty;/s);
 		expect(prototypeStyles).toMatch(/\.commentary-block\.active \.commentary-marker i\s*\{[^}]*background:\s*var\(--blue\);/s);
-		expect(prototypeStyles).toMatch(/\.reasoning-summary\s*\{[^}]*grid-template-columns:\s*15px minmax\(0, 1fr\) auto;/s);
+		// The trailing auto column keeps the duration on the bar itself (UI-016).
+		expect(prototypeStyles).toMatch(/\.reasoning-summary\s*\{[^}]*grid-template-columns:\s*15px minmax\(0, 1fr\) auto auto;[^}]*color:\s*var\(--thinking-ink\);/s);
 		expect(prototypeStyles).toMatch(/button\.reasoning-summary:hover \.azem-thinking-mark,[\s\S]*?\.timeline-step > summary:hover \.timeline-step-mark,[\s\S]*?\.tool-block summary:hover \.tool-leading,[\s\S]*?\.tool-group summary:hover \.tool-leading\s*\{[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/s);
 		expect(prototypeStyles).toMatch(/\.reasoning-body\s*\{[^}]*margin:\s*-1px 0 5px 7px;[^}]*line-height:\s*1\.68;/s);
 		expect(prototypeStyles).toMatch(/\.reasoning-step::before\s*\{[^}]*display:\s*none;/s);
+	});
+
+	it("keeps Beautiful UI blue tokens global and does not wrap commentary on the marker grid", () => {
+		expect(beautifulUIStyles).toMatch(/:root\s*\{[^}]*--accent:\s*#0285ff;/s);
+		// One muted token for every thinking state, light and dark. The regression
+		// is a per-state colour, not the shade itself (UI-016).
+		expect(beautifulUIStyles.match(/--thinking-ink:\s*var\(--muted\);/gu)).toHaveLength(2);
+		expect(beautifulUIStyles).toMatch(/\.bui-thinking-mark\s*\{[^}]*color:\s*var\(--thinking-ink\);/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-thinking-mark\.active\s*\{[^}]*color:\s*var\(--thinking-ink\);/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-thinking-state \.reasoning-summary:disabled\s*\{[^}]*opacity:\s*1;[^}]*color:\s*var\(--thinking-ink\);/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-thinking-state \.reasoning-label,\s*\.bui-thinking-state \.reasoning-label-base\s*\{[^}]*color:\s*var\(--thinking-ink\);[^}]*opacity:\s*1;/s);
+		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-pill/);
+		expect(styles).toMatch(/button\.reasoning-summary:disabled\s*\{[^}]*opacity:\s*1;[^}]*color:\s*var\(--thinking-ink\);/s);
+		expect(prototypeStyles).toMatch(/\.azem-thinking-mark\.active i:first-child\s*\{[^}]*animation:\s*none;/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-streaming-text > :last-child::after\s*\{[^}]*content:\s*none;[^}]*display:\s*none;/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-streaming-text.active > :last-child::after\s*\{[^}]*display:\s*inline-block;/s);
+		expect(beautifulUIStyles).not.toMatch(/\.bui-streaming-text > :last-child::after\s*\{[^}]*position:\s*absolute;/s);
+		// Settled block children must not replay enter motion while the tail streams (UI-003).
+		expect(styles).not.toMatch(/\.streaming-text\.active\s*>\s*:where\([^)]*\)\s*\{[^}]*streaming-block-in/s);
+		expect(beautifulUIStyles).not.toMatch(/\.streaming-text\.active\s*>\s*\.bui-code-block\s*\{[^}]*streaming-block-in/s);
+		expect(styles).toMatch(/\.streaming-text-reveal\s*\{[^}]*streaming-text-reveal-in/s);
+		expect(styles).not.toMatch(/\.assistant-block\.phase-pending::before/);
+		expect(styles).toMatch(/\.timeline-feed > \.process-fold,\s*\.timeline-feed > \.session-turn-current,\s*\.timeline-feed > \.session-history-turn:last-of-type[\s\S]*?contain-intrinsic-size:\s*none/s);
+		expect(styles).not.toMatch(/\.process-status-rule/);
+		// The running sparkle breathes on scale and brightness, never on a
+		// muted-to-ink color swap (UI-016).
+		expect(beautifulUIStyles).toMatch(/\.bui-thinking-mark\.active\s*\{[^}]*color:\s*var\(--thinking-ink\);[^}]*animation:\s*bui-thinking-pulse/s);
+		expect(beautifulUIStyles).toMatch(/@keyframes bui-thinking-pulse\s*\{[\s\S]*?transform:\s*scale\(1\.16\);/);
+		expect(beautifulUIStyles).toMatch(/\.commentary-block\s*\{[^}]*display:\s*block;[^}]*grid-template-columns:\s*none;/s);
+		expect(beautifulUIStyles).toMatch(/\.subagent-run-card\s*\{[^}]*width:\s*100%;/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-task-row\s*\{[^}]*border-radius:\s*var\(--bui-radius-task\);[^}]*background:\s*var\(--paper\);/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-task-mark\[data-state="completed"\]\s*\{[^}]*background:\s*var\(--green\);/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-tool-chip-detail\s*\{[^}]*border-radius:\s*999px;[^}]*font-family:\s*var\(--mono\);/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-file-change-pill\s*\{[^}]*border-radius:\s*999px;[^}]*background:\s*var\(--paper\);/s);
+	});
+
+	it("draws the step rail as per-row segments so an expanded body cannot break the thread", () => {
+		expect(beautifulUIStyles).toMatch(/\.timeline-step-row::before\s*\{[^}]*top:\s*0;[^}]*bottom:\s*0;[^}]*width:\s*1px;/s);
+		expect(beautifulUIStyles).toMatch(/\[data-step-edge="first"\]::before\s*\{\s*top:\s*var\(--step-rail-lead\);/);
+		expect(beautifulUIStyles).toMatch(/\[data-step-edge="last"\]::before\s*\{\s*bottom:\s*calc\(100% - var\(--step-rail-lead\)\);/);
+		expect(beautifulUIStyles).toMatch(/\[data-step-edge="only"\]::before\s*\{\s*content:\s*none;/);
+		// The virtualized window scrolls past spacers; the rail must survive them.
+		expect(beautifulUIStyles).toMatch(/\.deferred-process-spacer::before\s*\{[^}]*width:\s*1px;/s);
+		// UI-010: the thread runs in its own gutter, so no node needs a paper mask
+		// that could survive as a detached disc on a lit row.
+		expect(beautifulUIStyles).toMatch(/\.timeline-step-row\s*\{[^}]*padding-left:\s*var\(--step-rail-gutter\);/s);
+		expect(beautifulUIStyles).not.toMatch(/\.bui-step-mark-glyph\s*\{[^}]*box-shadow:/s);
+		expect(beautifulUIStyles).toMatch(
+			/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.bui-step-spinner\s*\{\s*animation:\s*none;[^}]*\}\s*\.timeline-step-row\[data-step-enter="true"\]\s*\{\s*animation:\s*none;/s,
+		);
 	});
 
 	it("gives the subagent collaboration card a restrained four-sided frame", () => {
@@ -202,6 +362,14 @@ describe("composer slash commands", () => {
     expect(items.some((item) => item.value === "/fast")).toBe(true);
     expect(items.some((item) => item.value === "/skill:animation-systems")).toBe(true);
     expect(items.some((item) => item.value === "/skill:disabled-skill")).toBe(false);
+    expect(items.some((item) => item.action === "skills" || item.value === "/skills" || item.label === "技能")).toBe(false);
+    expect(items.some((item) => item.action === "inspector" || item.value === "/inspector" || item.label === "环境信息")).toBe(false);
+  });
+
+  it("does not surface the skills catalog or inspector commands when those queries are typed", () => {
+    expect(slashSuggestions("/skills", skills, "zh-CN").some((item) => item.action === "skills" || item.label === "技能")).toBe(false);
+    expect(slashSuggestions("/inspector", skills, "zh-CN").some((item) => item.action === "inspector" || item.label === "环境信息")).toBe(false);
+    expect(slashSuggestions("/环境", skills, "zh-CN").some((item) => item.action === "inspector" || item.label === "环境信息")).toBe(false);
   });
 
   it("matches skills by name or description and shows source badges", () => {
@@ -254,5 +422,16 @@ describe("composer slash commands", () => {
     const textClipboard = { files: [], items: [], types: ["text/plain"] } as unknown as DataTransfer;
     expect(shouldReadNativeClipboard(emptyClipboard)).toBe(true);
     expect(shouldReadNativeClipboard(textClipboard)).toBe(false);
+  });
+
+  it("sends Select Action through the existing composer submitTurn path", () => {
+    expect(threadSurface).toContain("<SelectActionHost");
+    expect(threadSurface).toContain("onSubmit={sendSelectAction}");
+    expect(threadSurface).toContain('source: "composer" | "select-action"');
+    expect(threadSurface).toContain('void submitTurn(text, [], undefined, "select-action")');
+    expect(threadSurface).toContain('source === "composer" && editingQueuedId');
+    expect(threadSurface).not.toContain("kind: \"select_action\"");
+    expect(beautifulUIStyles).toMatch(/\.bui-action-island\s*\{[^}]*border-radius:\s*999px;/s);
+    expect(beautifulUIStyles).toMatch(/\.assistant-block ::selection,\s*\.commentary-block ::selection,\s*\.user-block ::selection/);
   });
 });

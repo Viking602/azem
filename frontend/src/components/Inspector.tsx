@@ -1,8 +1,9 @@
 import { useEffect, useId, useState } from "react";
+import { createPortal } from "react-dom";
 import {
-  Check, ChevronRight, Circle, CircleDot, FileImage, ListChecks, Minus, Plus, SquareTerminal, X,
+  ChevronRight, ExternalLink, FileImage, Globe, Link2, ListChecks, LoaderCircle, Plus, SquareTerminal, X,
 } from "lucide-react";
-import { execute } from "../bridge";
+import { attachmentDataURL, execute, openExternalURL } from "../bridge";
 import { tFormat, translator } from "../i18n";
 import {
   subagentDisplayName,
@@ -13,9 +14,10 @@ import {
 import { useRuntimeStore } from "../store";
 import { contextCacheMetrics, contextComposition, contextOccupancy } from "../contextUsage";
 import type { ContextCompositionGroup } from "../contextUsage";
-import type { AgentState, ContextProfile, SessionRecap, Snapshot, TodoList, TodoStatus } from "../types";
+import type { AgentState, Attachment, ContextProfile, SessionRecap, Snapshot, TodoItem, TodoList, TodoStatus } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
 import { TaskRow } from "./beautiful-ui/Primitives";
+import { collectConversationSources, type ConversationSource } from "./inspectorSources";
 
 
 export default function Inspector() {
@@ -37,7 +39,8 @@ export default function Inspector() {
   const setView = useRuntimeStore((state) => state.setView);
   const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const t = translator(snapshot.language);
-  const sources = Array.from(new Map(blocks.flatMap((block) => block.attachments ?? []).map((item) => [item.id || item.path, item])).values());
+  const sources = collectConversationSources(blocks, snapshot.language);
+  const [preview, setPreview] = useState<ConversationSource | null>(null);
   const currentBranch = branches.find((branch) => branch.current)?.name || "";
   const occupancy = contextOccupancy(contextUsage, contextProfile);
   const cache = contextCacheMetrics(contextUsage);
@@ -79,15 +82,39 @@ export default function Inspector() {
             openAgent={selectAgent}
           />
         )}
-        {backgroundProcesses.length > 0 && <section className="inspector-section"><header className="inspector-section-header"><h2>{t("backgroundProcesses")}</h2></header>{backgroundProcesses.map((process) => <div className="process-row" key={process.id}><SquareTerminal size={14} /><span><strong>{process.name || t("backgroundTerminal")}</strong><small title={process.command}>{process.command}</small></span><em data-state={process.state}>{process.state === "running" ? t("running") : process.state}</em></div>)}</section>}
+        {backgroundProcesses.length > 0 && <section className="inspector-section"><header className="inspector-section-header"><h2>{t("backgroundProcesses")}</h2></header>{backgroundProcesses.map((process) => <div className="process-row" key={process.id}><SquareTerminal size={14} /><span><strong>{process.name || t("backgroundTerminal")}</strong><small>{process.command}</small></span><em data-state={process.state}>{process.state === "running" ? t("running") : process.state}</em></div>)}</section>}
         {sources.length > 0 && <section className="inspector-section">
-          <header className="inspector-section-header"><h2>{t("sources")}</h2><button className="icon-button" title={t("attach")} aria-label={t("attach")} onClick={() => document.querySelector<HTMLInputElement>(".attach-button input")?.click()}><Plus size={15} /></button></header>
-          {sources.map((source) => <div className="source-row" key={source.id || source.path}><FileImage size={14} /><span title={source.name}>{source.name}</span></div>)}
+          <header className="inspector-section-header"><h2>{t("sources")}</h2><button className="icon-button" aria-label={t("attach")} onClick={() => document.querySelector<HTMLInputElement>(".attach-button input")?.click()}><Plus size={15} /></button></header>
+          {sources.map((source) => {
+            const Icon = source.kind === "image" ? FileImage : source.kind === "search-url" ? Globe : Link2;
+            const kindLabel = source.kind === "image" ? t("sourceImage") : source.kind === "search-url" ? t("sourceSearchURL") : t("sourceInputURL");
+            return <button
+              type="button"
+              className="source-row"
+              key={source.id}
+              aria-label={`${t("openSource")}：${source.title}`}
+              onClick={() => {
+                if (source.kind === "image") {
+                  setPreview(source);
+                  return;
+                }
+                if (source.href) void openExternalURL(source.href).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+              }}
+            >
+              <Icon size={14} />
+              <span>
+                <strong>{source.title}</strong>
+                <small>{kindLabel}{source.detail && source.detail !== source.title ? ` · ${source.detail}` : ""}</small>
+              </span>
+              <ExternalLink size={12} aria-hidden="true" />
+            </button>;
+          })}
         </section>}
+        {preview?.attachment ? <SourceImageLightbox source={preview} sessionId={currentSessionId} language={snapshot.language} onClose={() => setPreview(null)} /> : null}
         <section className="inspector-section inspector-workspace-section">
           <header className="inspector-section-header"><h2>{t("workspace")}</h2><button type="button" aria-label={t("reviewChanges")} onClick={() => setView("changes")}>{t("reviewChanges")}</button></header>
           <div className="inspector-workspace-facts">
-            <div><span>{t("branch")}</span><strong className="inspector-branch-value" title={currentBranch}>{currentBranch || t("noBranches")}</strong></div>
+            <div><span>{t("branch")}</span><strong className="inspector-branch-value">{currentBranch || t("noBranches")}</strong></div>
             <div><span>{snapshot.language === "zh-CN" ? "文件" : "Files"}</span><strong>{workspaceChangedFiles > 0 ? `+${workspaceChangedFiles}` : "0"}</strong></div>
             {prototypeDemo
               ? <div><span>{snapshot.language === "zh-CN" ? "质量" : "Quality"}</span><strong>6242</strong></div>
@@ -104,16 +131,12 @@ function RecapSummary({ recap, language }: { recap: SessionRecap | null; languag
   return <section className="inspector-section recap-section" aria-label={t("recapTitle")}>
     <header className="inspector-section-header">
       <h2>{t("recapTitle")}</h2>
-      {recap && <small>r{recap.Revision}</small>}
+      {recap && <small>r{recap.revision}</small>}
     </header>
     {!recap ? <p className="recap-empty">{t("recapEmpty")}</p> : <div className="recap-content">
-      {recap.Summary && <p className="recap-summary">{recap.Summary}</p>}
-      {recap.Goal && <div><span>{t("recapGoal")}</span><p>{recap.Goal}</p></div>}
-      {recap.OpenItems && <div><span>{t("recapOpenItems")}</span><p className="recap-open-items">{recap.OpenItems}</p></div>}
-      <footer>
-        <span>{t("recapBoundary")}</span>
-        <code title={recap.CoveredBoundary}>{recap.CoveredBoundary || "—"}</code>
-      </footer>
+      {recap.summary && <p className="recap-summary">{recap.summary}</p>}
+      {recap.goal && <div><span>{t("recapGoal")}</span><p>{recap.goal}</p></div>}
+      {recap.openItems && <div><span>{t("recapOpenItems")}</span><p className="recap-open-items">{recap.openItems}</p></div>}
     </div>}
   </section>;
 }
@@ -139,7 +162,6 @@ function ContextComposition({ groups, totalTokens, estimated, language }: {
         aria-controls={compositionGroupsId}
         aria-expanded={expanded}
         aria-label={language === "zh-CN" ? `${expanded ? "收起" : "展开"}上下文构成明细` : `${expanded ? "Collapse" : "Expand"} context composition details`}
-        title={language === "zh-CN" ? `点击${expanded ? "收起" : "展开"}上下文构成明细` : `Click to ${expanded ? "collapse" : "expand"} context composition details`}
         onClick={() => setExpanded((current) => !current)}
       >
         {groups.map((group) => <span key={group.category} data-category={group.category} style={{ width: `${group.percentage}%` }} />)}
@@ -154,7 +176,7 @@ function ContextComposition({ groups, totalTokens, estimated, language }: {
           </summary>
           <div className="context-composition-items">
             {group.items.map((item, index) => <div key={`${item.name}-${index}`}>
-              <span title={item.name}>{contextContributionLabel(item.name, language)}</span>
+              <span>{contextContributionLabel(item.name, language)}</span>
               <em>{formatCompactTokens(item.tokens)}</em>
             </div>)}
           </div>
@@ -204,7 +226,7 @@ function ContextDiagnostics({ profile, language }: { profile?: ContextProfile | 
       <span>{t("writerLag")}</span><strong data-state={(profile.writerLag ?? 0) > 0 ? "pending" : "current"}>{profile.writerLag ?? 0}</strong>
       <span>{t("contextSegments")}</span><strong>{segments.length}</strong>
     </div>
-    {profile.manifestHash && <code className="context-manifest-hash" title={profile.manifestHash}>{profile.manifestHash.slice(0, 12)}</code>}
+    {profile.manifestHash && <code className="context-manifest-hash">{profile.manifestHash}</code>}
     {segments.length > 0 && <div className="context-segment-list" aria-label={t("contextSegments")}>
       {segments.map((segment, index) => <div key={`${segment.kind}-${segment.content_hash}-${index}`}><span>{segment.kind.replaceAll("_", " ")}</span><em>~{formatCompactTokens(segment.token_estimate)}</em></div>)}
     </div>}
@@ -221,6 +243,7 @@ function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["lang
   const items = todo.phases.flatMap((phase) => phase.items);
   const completed = items.filter((item) => item.status === "completed" || item.status === "cancelled").length;
   const percentage = items.length > 0 ? Math.round((completed / items.length) * 100) : 0;
+  const [open, setOpen] = useState<Record<string, boolean>>({});
 
   return <section className="inspector-section todo-section" aria-label={t("todoTitle")}>
     <header className="inspector-section-header">
@@ -234,35 +257,94 @@ function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["lang
       </div>
     </div>
     <div className="todo-phases">
-      {todo.phases.map((phase) => <div className="todo-phase" key={phase.id || phase.title}>
-        {phase.title && <h3>{phase.title}</h3>}
-        <div className="todo-items">
-          {phase.items.map((item) => {
-            const Icon = todoStatusIcon(item.status);
-            return <TaskRow state={item.status} key={item.id || item.content} title={todoStatusLabel(item.status, language)}>
-              <Icon size={14} aria-hidden="true" />
-              <span>{item.content}</span>
-            </TaskRow>;
-          })}
-        </div>
-      </div>)}
+      {todo.phases.map((phase, phaseIndex) => {
+        const phaseKey = phase.id || phase.title || String(phaseIndex);
+        const phaseState = todoPhaseState(phase.items);
+        const counts = todoPhaseCounts(phase.items);
+        const defaultOpen = phaseState !== "completed" && phaseState !== "cancelled";
+        const expanded = open[phaseKey] ?? defaultOpen;
+        return <TaskRow
+          key={phaseKey}
+          state={phaseState}
+          title={phase.title || phase.items[0]?.content || t("todoTitle")}
+          metric={counts.total > 0 ? `${counts.done}/${counts.total}` : undefined}
+          statusLabel={todoStatusLabel(phaseState, language)}
+          index={phaseState === "in_progress" ? phaseIndex + 1 : undefined}
+          progress={phaseState === "in_progress" ? counts.ratio : undefined}
+          expanded={expanded}
+          onToggle={phase.items.length > 0 ? () => setOpen((current) => ({ ...current, [phaseKey]: !expanded })) : undefined}
+          steps={phase.items.map((item) => ({
+            key: item.id || item.content,
+            label: item.content,
+            value: todoStatusLabel(item.status, language),
+          }))}
+          aria-label={`${phase.title || t("todoTitle")}，${todoStatusLabel(phaseState, language)}`}
+        />;
+      })}
     </div>
   </section>;
 }
 
-function todoStatusIcon(status: TodoStatus) {
-  if (status === "completed") return Check;
-  if (status === "cancelled") return Minus;
-  if (status === "in_progress") return CircleDot;
-  return Circle;
+function todoPhaseState(items: TodoItem[]): TodoStatus {
+  if (items.some((item) => item.status === "in_progress")) return "in_progress";
+  if (items.some((item) => item.status === "pending")) return "pending";
+  if (items.length > 0 && items.every((item) => item.status === "cancelled")) return "cancelled";
+  return "completed";
+}
+
+function todoPhaseCounts(items: TodoItem[]) {
+  const done = items.filter((item) => item.status === "completed" || item.status === "cancelled").length;
+  return { done, total: items.length, ratio: items.length > 0 ? done / items.length : 0 };
 }
 
 function todoStatusLabel(status: TodoStatus, language: Snapshot["language"]) {
   const t = translator(language);
-  if (status === "completed") return t("completed");
+  if (status === "completed") return t("todoCompleted");
   if (status === "cancelled") return t("cancelled");
   if (status === "in_progress") return t("todoInProgress");
   return t("todoPending");
+}
+
+function SourceImageLightbox({ source, sessionId, language, onClose }: {
+  source: ConversationSource;
+  sessionId: string;
+  language: Snapshot["language"];
+  onClose: () => void;
+}) {
+  const attachment = source.attachment as Attachment;
+  const [image, setImage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const t = translator(language);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    void attachmentDataURL(sessionId, attachment)
+      .then((value) => { if (active) setImage(value); })
+      .catch(() => { if (active) setImage(""); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [attachment, sessionId]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label={source.title} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section>
+        <header><strong>{source.title}</strong><button type="button" aria-label={t("closeSourceImage")} onClick={onClose}><X size={17} /></button></header>
+        <div className="attachment-lightbox-canvas">
+          {image ? <img src={image} alt={source.title} /> : <span className="attachment-preview-placeholder" aria-hidden="true">{loading ? <LoaderCircle className="spin" size={16} /> : <FileImage size={16} />}</span>}
+        </div>
+      </section>
+    </div>,
+    document.body,
+  );
 }
 
 function SubagentSummary({ agents, language, openAgent }: {
@@ -308,8 +390,8 @@ function SubagentSummary({ agents, language, openAgent }: {
           >
             <SubagentGlyph agent={agent} size={24} />
             <span>
-              <strong title={name}>{name}</strong>
-              <small title={preview}>{preview}</small>
+              <strong>{name}</strong>
+              <small>{preview}</small>
             </span>
             <em>{status}</em>
           </button>;

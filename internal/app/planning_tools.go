@@ -55,7 +55,7 @@ type liveUserInput struct {
 type askDriver struct {
 	sessionID string
 	runID     string
-	host      *Service
+	host      providerHost
 }
 
 func (d *askDriver) Definition() tool.Definition {
@@ -80,7 +80,7 @@ func (d *askDriver) Definition() tool.Definition {
 }
 
 func (d *askDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
-	if d.host == nil || d.host.sessions == nil {
+	if d.host == nil || d.host.Sessions() == nil {
 		return planningToolError(call, "interactive planning is unavailable"), nil
 	}
 	questions, err := decodeAskQuestions(call.Arguments)
@@ -93,26 +93,22 @@ func (d *askDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSi
 	}
 	encoded, _ := json.Marshal(questions)
 	live := &liveUserInput{id: requestID, sessionID: d.sessionID, runID: d.runID, callID: call.ID, questions: questions, response: make(chan askResponse, 1)}
-	d.host.mu.Lock()
-	if _, exists := d.host.liveUserInputs[requestID]; exists {
-		d.host.mu.Unlock()
+	if !d.host.RegisterUserInput(requestID, live) {
 		return planningToolError(call, "interactive question ID collision"), nil
 	}
-	d.host.liveUserInputs[requestID] = live
-	d.host.mu.Unlock()
-	defer d.host.finishUserInput(live)
-	if _, err := d.host.sessions.AppendBlock(ctx, d.sessionID, session.Block{
+	defer d.host.FinishUserInput(live)
+	if _, err := d.host.Sessions().AppendBlock(ctx, d.sessionID, session.Block{
 		Kind: "question", RunID: d.runID, Title: "User input", State: "pending",
 		Data: map[string]string{"userInputId": requestID, "questions": string(encoded)},
 	}); err != nil {
 		return planningToolError(call, "persist question: "+err.Error()), nil
 	}
-	if !d.host.emit(ctx, Event{Kind: EventUserInputRequested, SessionID: d.sessionID, RunID: d.runID, ToolCallID: call.ID, UserInputID: requestID, State: "pending", Data: map[string]string{"questions": string(encoded)}}) {
+	if !d.host.EmitEvent(ctx, Event{Kind: EventUserInputRequested, SessionID: d.sessionID, RunID: d.runID, ToolCallID: call.ID, UserInputID: requestID, State: "pending", Data: map[string]string{"questions": string(encoded)}}) {
 		return planningToolError(call, eventDeliveryError(ctx).Error()), nil
 	}
 	select {
 	case <-ctx.Done():
-		_, _ = d.host.sessions.UpdateLatestBlockState(context.WithoutCancel(ctx), d.sessionID, "question", "userInputId", requestID, "pending", "interrupted", nil)
+		_, _ = d.host.Sessions().UpdateLatestBlockState(context.WithoutCancel(ctx), d.sessionID, "question", "userInputId", requestID, "pending", "interrupted", nil)
 		return planningToolError(call, ctx.Err().Error()), nil
 	case response := <-live.response:
 		payload, _ := json.Marshal(response)
@@ -350,7 +346,7 @@ type submitPlanInput struct {
 type submitPlanDriver struct {
 	sessionID string
 	runID     string
-	host      *Service
+	host      providerHost
 }
 
 func (d *submitPlanDriver) Definition() tool.Definition {
@@ -368,29 +364,29 @@ func (d *submitPlanDriver) Definition() tool.Definition {
 }
 
 func (d *submitPlanDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
-	if d.host == nil || d.host.sessions == nil {
+	if d.host == nil || d.host.Sessions() == nil {
 		return planningToolError(call, "plan persistence is unavailable"), nil
 	}
 	input, err := decodeSubmittedPlan(call.Arguments)
 	if err != nil {
 		return planningToolError(call, err.Error()), nil
 	}
-	projection, err := d.host.sessions.LoadProjection(ctx, d.sessionID)
+	projection, err := d.host.Sessions().LoadProjection(ctx, d.sessionID)
 	if err != nil {
 		return planningToolError(call, err.Error()), nil
 	}
 	version := nextPlanVersion(projection.Blocks)
-	_, _ = d.host.sessions.UpdateLatestBlockState(ctx, d.sessionID, "plan", "", "", "proposed", "superseded", nil)
+	_, _ = d.host.Sessions().UpdateLatestBlockState(ctx, d.sessionID, "plan", "", "", "proposed", "superseded", nil)
 	payload, _ := json.Marshal(planArtifactV1{Version: version, Title: input.Title, Body: input.Plan})
-	artifact, err := d.host.sessions.PutArtifact(ctx, d.sessionID, d.runID, "plan_v1", payload, input.Title)
+	artifact, err := d.host.Sessions().PutArtifact(ctx, d.sessionID, d.runID, "plan_v1", payload, input.Title)
 	if err != nil {
 		return planningToolError(call, err.Error()), nil
 	}
 	data := map[string]string{"planId": artifact.ID, "version": fmt.Sprint(version)}
-	if _, err := d.host.sessions.AppendBlock(ctx, d.sessionID, session.Block{Kind: "plan", RunID: d.runID, Title: input.Title, Content: input.Plan, State: "proposed", Data: data}); err != nil {
+	if _, err := d.host.Sessions().AppendBlock(ctx, d.sessionID, session.Block{Kind: "plan", RunID: d.runID, Title: input.Title, Content: input.Plan, State: "proposed", Data: data}); err != nil {
 		return planningToolError(call, err.Error()), nil
 	}
-	if !d.host.emit(ctx, Event{Kind: EventPlanProposed, SessionID: d.sessionID, RunID: d.runID, ToolCallID: call.ID, PlanID: artifact.ID, Text: input.Plan, State: "proposed", Data: map[string]string{"title": input.Title, "version": fmt.Sprint(version)}}) {
+	if !d.host.EmitEvent(ctx, Event{Kind: EventPlanProposed, SessionID: d.sessionID, RunID: d.runID, ToolCallID: call.ID, PlanID: artifact.ID, Text: input.Plan, State: "proposed", Data: map[string]string{"title": input.Title, "version": fmt.Sprint(version)}}) {
 		return planningToolError(call, eventDeliveryError(ctx).Error()), nil
 	}
 	structured, _ := json.Marshal(map[string]any{"plan_id": artifact.ID, "version": version, "state": "proposed"})

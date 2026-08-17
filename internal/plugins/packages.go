@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -47,29 +48,109 @@ func syncSelectedCodexPlugins(ctx context.Context, options Options, packageDir s
 		list = listWithCodex
 	}
 	encoded, err := list(ctx)
+	if err != nil || len(bytes.TrimSpace(encoded)) == 0 {
+		if len(options.FallbackCatalog) > 0 {
+			encoded = options.FallbackCatalog
+			err = nil
+		}
+	}
 	if err != nil {
-		return nil, []Diagnostic{{Message: fmt.Sprintf("Codex plugin catalog unavailable: %v", err)}}
+		return importSelectedCodexPlugins(options, packageDir, nil, []Diagnostic{{
+			Message: fmt.Sprintf("Codex plugin catalog unavailable: %v", err),
+		}})
 	}
 	var catalog installedCatalog
 	if err := json.Unmarshal(encoded, &catalog); err != nil {
-		return nil, []Diagnostic{{Message: fmt.Sprintf("decode Codex plugin catalog: %v", err)}}
+		if len(options.FallbackCatalog) > 0 && !bytes.Equal(encoded, options.FallbackCatalog) {
+			if fallbackErr := json.Unmarshal(options.FallbackCatalog, &catalog); fallbackErr == nil {
+				return importSelectedCodexPlugins(options, packageDir, catalog.Installed, nil)
+			}
+		}
+		return importSelectedCodexPlugins(options, packageDir, nil, []Diagnostic{{
+			Message: fmt.Sprintf("decode Codex plugin catalog: %v", err),
+		}})
 	}
+	return importSelectedCodexPlugins(options, packageDir, catalog.Installed, nil)
+}
+
+func importSelectedCodexPlugins(options Options, packageDir string, catalog []installedPlugin, diagnostics []Diagnostic) ([]installedPlugin, []Diagnostic) {
 	selected := stringSet(options.CodexImports)
-	available := make([]installedPlugin, 0, len(catalog.Installed))
-	var diagnostics []Diagnostic
-	for _, installed := range catalog.Installed {
+	available := make([]installedPlugin, 0, len(catalog)+len(options.CodexImports))
+	seen := make(map[string]struct{}, len(catalog)+len(options.CodexImports))
+	remember := func(installed installedPlugin) {
+		id := firstNonEmpty(installed.PluginID, pluginImportIdentity(installed.Name, installed.Marketplace))
+		if id == "" {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		if installed.PluginID == "" {
+			installed.PluginID = id
+		}
+		available = append(available, installed)
+	}
+	for _, installed := range catalog {
 		if !installed.Installed {
 			continue
 		}
-		available = append(available, installed)
-		if _, chosen := selected[installed.PluginID]; !chosen {
+		remember(installed)
+		if !codexPluginSelected(selected, installed) {
 			continue
 		}
 		if err := importCodexPlugin(options.HomeDir, packageDir, installed); err != nil {
-			diagnostics = append(diagnostics, Diagnostic{PluginID: installed.PluginID, Message: err.Error()})
+			diagnostics = append(diagnostics, Diagnostic{PluginID: firstNonEmpty(installed.PluginID, installed.Name), Message: err.Error()})
+		}
+	}
+	for _, pluginID := range options.CodexImports {
+		pluginID = strings.TrimSpace(pluginID)
+		if pluginID == "" {
+			continue
+		}
+		if _, exists := seen[pluginID]; exists {
+			continue
+		}
+		installed := installedPluginFromImportID(pluginID)
+		remember(installed)
+		if err := importCodexPlugin(options.HomeDir, packageDir, installed); err != nil {
+			diagnostics = append(diagnostics, Diagnostic{PluginID: pluginID, Message: err.Error()})
 		}
 	}
 	return available, diagnostics
+}
+
+func codexPluginSelected(selected map[string]struct{}, installed installedPlugin) bool {
+	if _, ok := selected[strings.TrimSpace(installed.PluginID)]; ok {
+		return true
+	}
+	identity := pluginImportIdentity(installed.Name, installed.Marketplace)
+	if identity == "" {
+		return false
+	}
+	_, ok := selected[identity]
+	return ok
+}
+
+func pluginImportIdentity(name, marketplace string) string {
+	name = strings.TrimSpace(name)
+	marketplace = strings.TrimSpace(marketplace)
+	if name != "" && marketplace != "" {
+		return name + "@" + marketplace
+	}
+	return name
+}
+
+func installedPluginFromImportID(pluginID string) installedPlugin {
+	name, marketplace, found := strings.Cut(pluginID, "@")
+	if !found {
+		name = pluginID
+		marketplace = ""
+	}
+	return installedPlugin{
+		PluginID: pluginID, Name: name, Marketplace: marketplace,
+		Installed: true, Enabled: true,
+	}
 }
 
 func importCodexPlugin(homeDir, packageDir string, installed installedPlugin) error {
@@ -91,15 +172,7 @@ func importCodexPlugin(homeDir, packageDir string, installed installedPlugin) er
 }
 
 func codexPluginRoot(home string, installed installedPlugin) (string, error) {
-	candidates := []string{installed.Source.Path}
-	if installed.Marketplace != "" && installed.Name != "" && installed.Version != "" {
-		candidates = append(candidates, filepath.Join(home, ".codex", "plugins", "cache", installed.Marketplace, installed.Name, installed.Version))
-	}
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			continue
-		}
+	for _, candidate := range codexSourceCandidates(home, installed) {
 		absolute, err := filepath.Abs(candidate)
 		if err != nil {
 			continue
@@ -112,7 +185,57 @@ func codexPluginRoot(home string, installed installedPlugin) (string, error) {
 			return resolved, nil
 		}
 	}
-	return "", fmt.Errorf("Codex plugin source is unavailable for %s", installed.PluginID)
+	return "", fmt.Errorf("Codex plugin source is unavailable for %s", firstNonEmpty(installed.PluginID, installed.Name))
+}
+
+func codexSourceCandidates(home string, installed installedPlugin) []string {
+	candidates := uniqueNonEmpty(installed.Source.Path)
+	marketplace := strings.TrimSpace(installed.Marketplace)
+	name := strings.TrimSpace(installed.Name)
+	version := strings.TrimSpace(installed.Version)
+	for _, market := range uniqueNonEmpty(marketplace, sanitizeName(marketplace)) {
+		for _, pluginName := range uniqueNonEmpty(name, sanitizeName(name)) {
+			if version != "" {
+				candidates = append(candidates, filepath.Join(home, ".codex", "plugins", "cache", market, pluginName, version))
+			}
+			candidates = append(candidates, filepath.Join(home, ".codex", ".tmp", "marketplaces", market, "plugins", pluginName))
+			candidates = append(candidates, listCodexCacheVersions(home, market, pluginName)...)
+		}
+	}
+	return uniqueNonEmpty(candidates...)
+}
+
+func listCodexCacheVersions(home, marketplace, name string) []string {
+	root := filepath.Join(home, ".codex", "plugins", "cache", marketplace, name)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+			paths = append(paths, filepath.Join(root, entry.Name()))
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(paths)))
+	return paths
+}
+
+func uniqueNonEmpty(values ...string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func packageMatchesVersion(root, version string) bool {

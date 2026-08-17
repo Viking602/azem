@@ -98,6 +98,27 @@ func TestCatalogCachingETagAndAccountIsolation(t *testing.T) {
 	}
 }
 
+func TestCachedReturnsPersistedCatalogWithoutNetwork(t *testing.T) {
+	ctx := context.Background()
+	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	catalog := NewService(provider.DB(), nil)
+	now := time.Now().UTC()
+	if err := catalog.save(ctx, Result{
+		Provider: "grok", AccountID: "acct", Models: []Model{{ID: "grok-4.6", Name: "Grok 4.6", ContextWindow: 500000}},
+		FetchedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Minute),
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	cached, found, err := catalog.Cached(ctx, "grok", "acct")
+	if err != nil || !found || len(cached.Models) != 1 || cached.Models[0].ID != "grok-4.6" {
+		t.Fatalf("cached=%+v found=%v err=%v", cached, found, err)
+	}
+}
+
 func TestGrokCatalogDecode(t *testing.T) {
 	models, more, after, err := decode("grok", []byte(`{"data":[{"id":"grok-code","capabilities":["tools","reasoning"],"pricing":[{"input":3,"output":15}]}],"has_more":true,"last_id":"cursor"}`))
 	if err != nil {
@@ -108,6 +129,55 @@ func TestGrokCatalogDecode(t *testing.T) {
 	}
 	if tiers, ok := models[0].Pricing["tiers"].([]any); !ok || len(tiers) != 1 {
 		t.Fatalf("array pricing was not preserved: %#v", models[0].Pricing)
+	}
+}
+
+func TestGrokCatalogUsesCLIProxyHeadersAndIgnoresOptionalSourceFailure(t *testing.T) {
+	ctx := context.Background()
+	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	secrets, err := auth.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secrets.Put(ctx, auth.Credential{Provider: "grok", AccountID: "acct-1", AccessToken: "grok-token"}); err != nil {
+		t.Fatal(err)
+	}
+	grokClient := grok.NewClient()
+	grokClient.AllowInsecure = true
+	authentication := auth.NewService(provider.DB(), secrets, chatgpt.NewClient(), grokClient)
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		paths = append(paths, request.URL.Path)
+		if request.Header.Get("Authorization") != "Bearer grok-token" {
+			t.Errorf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		if request.Header.Get("X-XAI-Token-Auth") != "xai-grok-cli" || request.Header.Get("x-userid") != "acct-1" || request.Header.Get("x-grok-client-version") == "" {
+			t.Errorf("grok catalog headers=%v", request.Header)
+		}
+		if request.URL.Path == "/language-models" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"data":[{"id":"grok-4","name":"Grok 4","capabilities":["tools","reasoning"]}]}`))
+	}))
+	t.Cleanup(server.Close)
+	catalog := NewService(provider.DB(), authentication)
+	catalog.Endpoints["grok"] = server.URL + "/models"
+	catalog.AdditionalEndpoints["grok"] = []string{server.URL + "/language-models"}
+	result, err := catalog.List(ctx, "grok", "acct-1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Models) != 1 || result.Models[0].ID != "grok-4" || !result.Models[0].SupportsTools {
+		t.Fatalf("grok catalog=%+v", result)
+	}
+	if strings.Join(paths, ",") != "/models,/language-models" {
+		t.Fatalf("requested paths=%v", paths)
 	}
 }
 
@@ -161,6 +231,14 @@ func TestReasoningLevelsFollowCatalogAndProviderCapabilities(t *testing.T) {
 	}
 	if got, err := ResolveReasoningEffort("grok", multiAgent, "xhigh"); err != nil || got != "xhigh" {
 		t.Fatalf("Grok multi-agent xhigh = %q, %v", got, err)
+	}
+
+	grok46 := Model{ID: "grok-4.6"}
+	if got := strings.Join(AvailableReasoningLevels("grok", grok46), ","); got != "low,medium,high,xhigh" {
+		t.Fatalf("Grok 4.6 reasoning levels = %q", got)
+	}
+	if got, err := ResolveReasoningEffort("grok", grok46, "xhigh"); err != nil || got != "xhigh" {
+		t.Fatalf("Grok 4.6 xhigh = %q, %v", got, err)
 	}
 
 	if got, err := ResolveReasoningEffort("chatgpt", Model{ID: "plain"}, "high"); err != nil || got != "" {

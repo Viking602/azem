@@ -1,6 +1,6 @@
 # Plugin compatibility
 
-Last verified: 2026-08-12
+Last verified: 2026-08-14
 
 Azem supports the OpenAI plugin package format, but owns its plugin storage.
 The current authoritative package specification is the OpenAI
@@ -25,8 +25,10 @@ plugin root, and must remain inside that root after symlink resolution.
 The manifest supports identity and discovery fields (`name`, `version`,
 `description`, `author`, `homepage`, `repository`, `license`, `keywords`) and
 an `interface` object for display name, developer, category, capabilities,
-URLs, prompts, color, icons, logos, and screenshots. Azem currently consumes
-only the fields needed for runtime integration and the Extensions catalog.
+URLs, prompts, color, icons, logos, and screenshots. Azem projects
+`composerIcon` or `logo` as bounded image data in the Extensions catalog, and
+reuses that mark on plugin-owned MCP rows. Skill directories may also supply
+`icon.svg` / `icon.png` (or a relative `metadata.icon`) for the Skills list.
 
 ## Azem plugin directory
 
@@ -65,15 +67,19 @@ value still point at Azem storage.
 | Local stdio MCP | Integrated with plugin-root working directory and `PLUGIN_ROOT` / `PLUGIN_DATA` environment |
 | HTTP MCP with bearer env | Integrated; the token stays an environment reference |
 | OAuth-only HTTP MCP | Cataloged but disabled until Azem has an authenticated connection |
-| Hooks | Cataloged; executed only when `plugins.trust_hooks: true` |
+| Hooks | Cataloged in the Extensions Hooks tab even before trust; executed only when `plugins.trust_hooks: true` and the command is not listed in `hooks.disabled` |
 | `.app.json` | Cataloged as an App requirement; requires separate connector authorization |
 | Interface assets | Validated and cataloged; supported icons up to 1 MiB render from bounded image data |
 
 Directly installed plugins are loaded at desktop startup. Codex plugins first
 appear as available choices; selecting one persists its ID in
-`plugins.codex_imports`, and the next desktop startup copies and loads only that
-selection. Removing the selection stops loading it after restart while leaving
-the dormant copy recoverable.
+`plugins.codex_imports`, then copies the package into Azem and loads its Skills
+and MCP servers immediately. Import prefers the live `codex plugin list`
+source path, then the last listed catalog, then the local Codex cache and
+`.tmp/marketplaces/<marketplace>/plugins/<name>` checkout. A later Codex CLI
+outage must not block copying a package that is already visible in Extensions.
+Removing the selection unloads those capabilities in the current process while
+leaving the dormant copy recoverable.
 
 ## Security boundary
 
@@ -102,3 +108,9 @@ configured, and bundled Skills. Stopping one records its Skill name in
 Skill is removed from model context, slash suggestions, eager activation, and
 the runtime registry. The stopped entry remains visible in Extensions for
 restoration.
+
+Plugin hook files are always copied into the catalog so the Hooks tab can
+show name, source, and event before trust. Execution still requires
+`plugins.trust_hooks`. After that global decision, each command can be stopped
+independently through `hooks.disabled` / `set_hook_enabled`. An untrusted
+plugin hook that is marked enabled still does not run.

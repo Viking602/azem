@@ -66,7 +66,7 @@ func (d Dispatcher) Dispatch(ctx context.Context, e Envelope) DispatchResult {
 	gate := blockingEvent(e)
 	query := matcherQuery(e)
 	for _, command := range d.Registry.Commands(e.HookEventName) {
-		if (query != "" && !command.Matches(query)) || !command.MatchesCondition(e) || !d.Registry.Claim(command) {
+		if d.Registry.IsDisabled(command) || (query != "" && !command.Matches(query)) || !command.MatchesCondition(e) || !d.Registry.Claim(command) {
 			continue
 		}
 		if d.OnStart != nil {
