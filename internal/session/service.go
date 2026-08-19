@@ -374,22 +374,35 @@ func truncateUTF8Bytes(value string, limit int) string {
 
 // PutArtifact durably stores a payload and returns the existing row when the
 // same session, kind, and content are seen again.
-func (s *Service) PutArtifact(ctx context.Context, sessionID, runID, kind string, payload []byte, preview string) (ContextArtifact, error) {
+func (s *Service) PutArtifact(ctx context.Context, sessionID, runID, kind string, payload []byte, preview string) (artifact ContextArtifact, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(kind) == "" {
 		return ContextArtifact{}, fmt.Errorf("artifact session and kind are required")
 	}
 	if len(payload) > maxContextArtifactPayloadBytes {
 		return ContextArtifact{}, fmt.Errorf("context artifact exceeds %d-byte limit", maxContextArtifactPayloadBytes)
 	}
-	hash, err := s.blobs.Put(ctx, payload)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ContextArtifact{}, err
+	}
+	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return ContextArtifact{}, fmt.Errorf("lock context artifact catalog: %w", err)
+	}
+	hash, err := s.installTrackedBlob(ctx, payload)
 	if err != nil {
 		return ContextArtifact{}, fmt.Errorf("put context artifact blob: %w", err)
 	}
 	preview = BuildArtifactPreviewV2(kind, payload, hash, preview)
 	id := contextArtifactID(sessionID, kind, hash)
 	now := time.Now().UTC()
-	if err := dbgen.New(s.db).InsertContextArtifact(ctx, dbgen.InsertContextArtifactParams{ID: id, SessionID: sessionID, RunID: runID, Kind: kind, Sha256: hash, Preview: preview, CreatedAt: now.UnixNano()}); err != nil {
+	if err := dbgen.New(tx).InsertContextArtifact(ctx, dbgen.InsertContextArtifactParams{ID: id, SessionID: sessionID, RunID: runID, Kind: kind, Sha256: hash, Preview: preview, CreatedAt: now.UnixNano()}); err != nil {
 		return ContextArtifact{}, fmt.Errorf("put context artifact: %w", err)
+	}
+	if err := s.commitBlobTransaction(ctx, tx, tracker, trackerOwner); err != nil {
+		return ContextArtifact{}, fmt.Errorf("commit context artifact: %w", err)
 	}
 	return s.LoadArtifact(ctx, sessionID, id)
 }
@@ -471,12 +484,17 @@ func (s *Service) loadArtifactRow(ctx context.Context, row dbgen.ContextArtifact
 // appending a second transcript entry. It is used for interactive lifecycle
 // records such as questions and plan proposals, whose content is immutable but
 // whose review state must survive an application restart.
-func (s *Service) UpdateLatestBlockState(ctx context.Context, sessionID, kind, dataKey, dataValue, expectedState, nextState string, data map[string]string) (Block, error) {
+func (s *Service) UpdateLatestBlockState(ctx context.Context, sessionID, kind, dataKey, dataValue, expectedState, nextState string, data map[string]string) (blockResult Block, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Block{}, err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return Block{}, err
+	}
 	rows, err := dbgen.New(tx).ListSessionBlocks(ctx, sessionID)
 	if err != nil {
 		return Block{}, err
@@ -514,7 +532,7 @@ func (s *Service) UpdateLatestBlockState(ctx context.Context, sessionID, kind, d
 			return Block{}, err
 		}
 		block.Sequence = rows[index].Sequence
-		return block, tx.Commit()
+		return block, s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 	}
 	return Block{}, fmt.Errorf("matching %s block was not found", kind)
 }
@@ -726,7 +744,9 @@ func (s *Service) ArchiveInactive(ctx context.Context, olderThan time.Duration, 
 	return archived, nil
 }
 
-func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
+func (s *Service) Fork(ctx context.Context, sourceID, targetID string) (err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if err := validateSessionForkIDs(sourceID, targetID); err != nil {
 		return err
 	}
@@ -735,6 +755,9 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return err
+	}
 	now := time.Now().UTC().UnixNano()
 	result, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at)
 		SELECT ?,title,provider_id,model_id,reasoning,agent_mode,?,? FROM sessions WHERE id=?`, targetID, now, now, sourceID)
@@ -775,7 +798,7 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
 	if err := s.remapForkArtifactReferences(ctx, tx, targetID, artifactIDs); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
 type forkArtifact struct {
@@ -1012,12 +1035,17 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	}, nil
 }
 
-func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block) (int64, error) {
+func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block) (sequenceResult int64, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return 0, err
+	}
 	sequence, mutated, err := s.appendSessionBlock(ctx, tx, sessionID, block)
 	if err != nil {
 		return 0, err
@@ -1036,15 +1064,20 @@ func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return 0, err
 	}
-	return sequence, tx.Commit()
+	return sequence, s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
-func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Block, history ModelHistory) error {
+func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Block, history ModelHistory) (err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return err
+	}
 	queries := dbgen.New(tx)
 	checkpoint, err := queries.GetProjectionCheckpoint(ctx, sessionID)
 	if err != nil {
@@ -1108,7 +1141,7 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
 func sameSequence(left, right *int64) bool {
@@ -1122,7 +1155,9 @@ func sameSequence(left, right *int64) bool {
 // history while leaving the canonical transcript unchanged. It is safe to call
 // repeatedly with the same checkpoint identity and rejects a stale run after a
 // newer user turn has taken ownership of the session.
-func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, checkpoint RunCheckpoint) error {
+func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, checkpoint RunCheckpoint) (err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if strings.TrimSpace(checkpoint.RunID) == "" || len(checkpoint.ModelHistory.Messages) == 0 || strings.TrimSpace(checkpoint.CacheIdentity) == "" {
 		return fmt.Errorf("save run checkpoint: run, history, and cache identity are required")
 	}
@@ -1131,6 +1166,9 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return err
+	}
 	queries := dbgen.New(tx)
 	state, err := queries.GetRunCheckpointState(ctx, sessionID)
 	if err != nil {
@@ -1170,7 +1208,7 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 		}
 		current, decodeErr := s.decodeModelHistory(ctx, encoded)
 		if decodeErr == nil && reflect.DeepEqual(normalizeMessageTimes(current.Messages), normalizeMessageTimes(history.Messages)) {
-			return tx.Commit()
+			return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 		}
 	}
 	history.CoveredThroughSequence = checkpoint.ExpectedHighWater
@@ -1200,7 +1238,7 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
 func normalizeMessageTimes(messages []message.Message) []message.Message {
@@ -1211,7 +1249,9 @@ func normalizeMessageTimes(messages []message.Message) []message.Message {
 	return result
 }
 
-func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID string, block Block) error {
+func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID string, block Block) (err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if strings.TrimSpace(agentID) == "" {
 		return fmt.Errorf("agent ID is required")
 	}
@@ -1222,6 +1262,9 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return err
+	}
 	encoded, err := json.Marshal(block)
 	if err != nil {
 		return err
@@ -1251,12 +1294,14 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
 // ActivateArchiveCheckpoint installs a manually prepared archive checkpoint
 // without changing the canonical transcript.
-func (s *Service) ActivateArchiveCheckpoint(ctx context.Context, sessionID string, plan ArchivePlan) (Projection, error) {
+func (s *Service) ActivateArchiveCheckpoint(ctx context.Context, sessionID string, plan ArchivePlan) (projectionResult Projection, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if len(plan.ModelHistory.Messages) == 0 || plan.Manifest == nil {
 		return Projection{}, fmt.Errorf("activate archive checkpoint: history and manifest are required")
 	}
@@ -1269,6 +1314,9 @@ func (s *Service) ActivateArchiveCheckpoint(ctx context.Context, sessionID strin
 		return Projection{}, err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return Projection{}, err
+	}
 	queries := dbgen.New(tx)
 	state, err := queries.GetCompactionState(ctx, sessionID)
 	if err != nil {
@@ -1310,7 +1358,7 @@ func (s *Service) ActivateArchiveCheckpoint(ctx context.Context, sessionID strin
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return Projection{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitBlobTransaction(ctx, tx, tracker, trackerOwner); err != nil {
 		return Projection{}, err
 	}
 	projection.ModelHistory = plan.ModelHistory

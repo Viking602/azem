@@ -56,6 +56,13 @@ are reset; the target session rebuilds from its copied canonical transcript.
 After schema 21 extracts legacy inline payloads it `VACUUM`s the database so
 the old pages are not left behind.
 
+Blob installation uses an atomic no-replace operation to identify the one
+writer that created a digest path. Runtime catalog writers hold SQLite's
+writer lock before installing bytes. After a failed, conflicted, or ignored
+write, a `BEGIN IMMEDIATE` reference check deletes only creator-owned files
+that no catalog row adopted. The writer lock prevents another process from
+committing a reference between the check and deletion.
+
 ## Schema definitions
 
 The schema intentionally has two synchronized representations:

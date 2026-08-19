@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/blobstore"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/venat/message"
 )
@@ -90,6 +91,38 @@ func TestPhase3ArtifactRoundTripAfterReopenAndDeduplicates(t *testing.T) {
 	var count int
 	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM context_artifacts`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+func TestFailedSessionWritesRemoveUnreferencedBlobs(t *testing.T) {
+	ctx := t.Context()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "failed-writes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB(), store.Blobs())
+
+	artifactPayload := bytes.Repeat([]byte("missing-artifact"), 1_000)
+	artifactDigest := blobstore.Sum(artifactPayload)
+	if _, err := service.PutArtifact(ctx, "missing", "run", "tool_result", artifactPayload, "preview"); err == nil {
+		t.Fatal("missing-session artifact write succeeded")
+	}
+	if exists, err := store.Blobs().Exists(ctx, artifactDigest); err != nil || exists {
+		t.Fatalf("failed artifact blob exists=%v err=%v", exists, err)
+	}
+
+	block := Block{Kind: "tool", RunID: "run", Content: strings.Repeat("missing-block ", 1_000)}
+	encoded, err := json.Marshal(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockDigest := blobstore.Sum(encoded)
+	if _, err := service.AppendBlock(ctx, "missing", block); err == nil {
+		t.Fatal("missing-session block write succeeded")
+	}
+	if exists, err := store.Blobs().Exists(ctx, blockDigest); err != nil || exists {
+		t.Fatalf("failed block blob exists=%v err=%v", exists, err)
 	}
 }
 
@@ -1311,6 +1344,36 @@ func TestLargePayloadsSpillToBlobsAndReload(t *testing.T) {
 	}
 	if len(projection.ToolRecords) != 1 || projection.ToolRecords[0].Content != large {
 		t.Fatalf("reloaded tool=%#v", projection.ToolRecords)
+	}
+}
+
+func TestDuplicateToolStartRemovesUnreferencedBlobs(t *testing.T) {
+	ctx := t.Context()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "duplicate-tool-blob.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB(), store.Blobs())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Duplicate tool"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "session", ToolRecord{
+		RunID: "run", ToolCallID: "call", Name: "coding.shell",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("ignored duplicate content ", 400)
+	structured := json.RawMessage(`["` + strings.Repeat("ignored duplicate structured ", 400) + `"]`)
+	if _, err := service.StartToolRecord(ctx, "session", ToolRecord{
+		RunID: "run", ToolCallID: "call", Name: "coding.shell", Content: content, Structured: structured,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, digest := range []string{blobstore.Sum([]byte(content)), blobstore.Sum(structured)} {
+		if exists, err := store.Blobs().Exists(ctx, digest); err != nil || exists {
+			t.Fatalf("ignored duplicate blob %s exists=%v err=%v", digest, exists, err)
+		}
 	}
 }
 

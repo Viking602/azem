@@ -42,6 +42,8 @@
   conversation search keeps working. Upgrading extracts existing inline bytes
   and vacuums the database. A 2.5 GiB developer `azem.db` was almost entirely
   Venat `events`; those rows now keep only a hash.
+  Blob writes now track the atomic file creator and clean up unreferenced files
+  under a SQLite writer lock after failed or ignored catalog writes.
 
 - Home directory: configuration, SQLite, blobs, plugins, attachments, logs,
   and hook transcripts now live in `~/.azem` (or `$AZEM_HOME`). The first

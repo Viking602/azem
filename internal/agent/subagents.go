@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -97,7 +98,9 @@ func NewSQLSubagentRunStore(db *sql.DB, blobs blobstore.Store) (*SQLSubagentRunS
 	return &SQLSubagentRunStore{db: db, blobs: blobs}, nil
 }
 
-func (s *SQLSubagentRunStore) Create(ctx context.Context, run SubagentRun) error {
+func (s *SQLSubagentRunStore) Create(ctx context.Context, run SubagentRun) (err error) {
+	created := make(map[string]struct{})
+	defer s.finishBlobInstalls(created, &err)
 	if run.ToolsUsed == nil {
 		run.ToolsUsed = []string{}
 	}
@@ -105,14 +108,27 @@ func (s *SQLSubagentRunStore) Create(ctx context.Context, run SubagentRun) error
 	if err != nil {
 		return fmt.Errorf("encode subagent tools: %w", err)
 	}
-	params, err := s.encodeRun(ctx, run, toolsUsed)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	return dbgen.New(s.db).CreateSubagentRun(ctx, params)
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE subagent_runs SET id = id WHERE id = ''`); err != nil {
+		return err
+	}
+	params, err := s.encodeRun(ctx, run, toolsUsed, created)
+	if err != nil {
+		return err
+	}
+	if err := dbgen.New(tx).CreateSubagentRun(ctx, params); err != nil {
+		return err
+	}
+	return s.commitBlobInstalls(ctx, tx, created)
 }
 
-func (s *SQLSubagentRunStore) Save(ctx context.Context, run SubagentRun) error {
+func (s *SQLSubagentRunStore) Save(ctx context.Context, run SubagentRun) (err error) {
+	created := make(map[string]struct{})
+	defer s.finishBlobInstalls(created, &err)
 	if run.ToolsUsed == nil {
 		run.ToolsUsed = []string{}
 	}
@@ -120,15 +136,26 @@ func (s *SQLSubagentRunStore) Save(ctx context.Context, run SubagentRun) error {
 	if err != nil {
 		return fmt.Errorf("encode subagent tools: %w", err)
 	}
-	params, err := s.encodeRun(ctx, run, toolsUsed)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	result, err := dbgen.New(s.db).SaveSubagentRun(ctx, saveSubagentParams(params))
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE subagent_runs SET id = id WHERE id = ''`); err != nil {
+		return err
+	}
+	params, err := s.encodeRun(ctx, run, toolsUsed, created)
 	if err != nil {
 		return err
 	}
-	return requireOneSubagentRow(result)
+	result, err := dbgen.New(tx).SaveSubagentRun(ctx, saveSubagentParams(params))
+	if err != nil {
+		return err
+	}
+	if err := requireOneSubagentRow(result); err != nil {
+		return err
+	}
+	return s.commitBlobInstalls(ctx, tx, created)
 }
 
 func (s *SQLSubagentRunStore) Get(ctx context.Context, id string) (SubagentRun, error) {
@@ -181,16 +208,16 @@ func (s *SQLSubagentRunStore) InterruptIncomplete(ctx context.Context, at time.T
 	return result.RowsAffected()
 }
 
-func (s *SQLSubagentRunStore) encodeRun(ctx context.Context, run SubagentRun, toolsUsed []byte) (dbgen.CreateSubagentRunParams, error) {
+func (s *SQLSubagentRunStore) encodeRun(ctx context.Context, run SubagentRun, toolsUsed []byte, created map[string]struct{}) (dbgen.CreateSubagentRunParams, error) {
 	transcript := []byte(run.Transcript)
 	if len(transcript) == 0 {
 		transcript = []byte("[]")
 	}
-	output, outputDigest, err := spillText(ctx, s.blobs, run.Output)
+	output, outputDigest, err := spillText(ctx, s.blobs, run.Output, created)
 	if err != nil {
 		return dbgen.CreateSubagentRunParams{}, err
 	}
-	storedTranscript, transcriptDigest, err := spillBytes(ctx, s.blobs, transcript)
+	storedTranscript, transcriptDigest, err := spillBytes(ctx, s.blobs, transcript, created)
 	if err != nil {
 		return dbgen.CreateSubagentRunParams{}, err
 	}
@@ -222,26 +249,98 @@ func (s *SQLSubagentRunStore) decodeRun(ctx context.Context, row dbgen.SubagentR
 	return run, nil
 }
 
-func spillText(ctx context.Context, blobs blobstore.Store, text string) (string, string, error) {
+func spillText(ctx context.Context, blobs blobstore.Store, text string, created map[string]struct{}) (string, string, error) {
 	if len(text) <= inlinePayloadLimit {
 		return text, "", nil
 	}
-	digest, err := blobs.Put(ctx, []byte(text))
+	digest := blobstore.Sum([]byte(text))
+	installed, err := blobs.InstallAt(ctx, digest, []byte(text))
 	if err != nil {
 		return "", "", err
+	}
+	if installed {
+		created[digest] = struct{}{}
 	}
 	return "", digest, nil
 }
 
-func spillBytes(ctx context.Context, blobs blobstore.Store, payload []byte) ([]byte, string, error) {
+func spillBytes(ctx context.Context, blobs blobstore.Store, payload []byte, created map[string]struct{}) ([]byte, string, error) {
 	if len(payload) <= inlinePayloadLimit {
 		return payload, "", nil
 	}
-	digest, err := blobs.Put(ctx, payload)
+	digest := blobstore.Sum(payload)
+	installed, err := blobs.InstallAt(ctx, digest, payload)
 	if err != nil {
 		return nil, "", err
 	}
+	if installed {
+		created[digest] = struct{}{}
+	}
 	return []byte{}, digest, nil
+}
+
+func (s *SQLSubagentRunStore) finishBlobInstalls(created map[string]struct{}, operationErr *error) {
+	if operationErr == nil || *operationErr == nil || len(created) == 0 {
+		return
+	}
+	*operationErr = errors.Join(*operationErr, s.cleanupBlobInstalls(created))
+}
+
+func (s *SQLSubagentRunStore) commitBlobInstalls(ctx context.Context, tx *sql.Tx, created map[string]struct{}) error {
+	for digest := range created {
+		if err := s.cleanupBlobInstall(ctx, tx, digest); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *SQLSubagentRunStore) cleanupBlobInstalls(created map[string]struct{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open subagent blob cleanup connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin immediate subagent blob cleanup: %w", err)
+	}
+	defer conn.ExecContext(context.Background(), "ROLLBACK")
+	var cleanupErrors []error
+	for digest := range created {
+		if err := s.cleanupBlobInstall(ctx, conn, digest); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("commit subagent blob cleanup: %w", err))
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func (s *SQLSubagentRunStore) cleanupBlobInstall(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, digest string,
+) error {
+	var referenced bool
+	err := queryer.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM context_artifacts WHERE sha256 = ?
+		UNION ALL SELECT 1 FROM session_blocks WHERE data_sha256 = ?
+		UNION ALL SELECT 1 FROM session_tool_records WHERE content_sha256 = ? OR structured_sha256 = ?
+		UNION ALL SELECT 1 FROM session_projections
+			WHERE model_history_sha256 = ? OR json_extract(CAST(model_history AS TEXT), '$.blob') = ?
+		UNION ALL SELECT 1 FROM subagent_runs WHERE transcript_sha256 = ? OR output_sha256 = ?
+		UNION ALL SELECT 1 FROM events WHERE data_sha256 = ?
+		UNION ALL SELECT 1 FROM records WHERE data_sha256 = ?
+	)`, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest).Scan(&referenced)
+	if err != nil {
+		return fmt.Errorf("check subagent blob %s: %w", digest, err)
+	}
+	if referenced {
+		return nil
+	}
+	return s.blobs.Delete(ctx, digest)
 }
 
 func loadText(ctx context.Context, blobs blobstore.Store, inline, digest string) (string, error) {
