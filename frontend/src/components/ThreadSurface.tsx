@@ -13,15 +13,6 @@ import { Composer } from "./thread/Composer";
 import { QueuedPrompts } from "./thread/QueueBar";
 import { namedClipboardImage } from "./thread/clipboard";
 import { parseSkillPrompt } from "./thread/slash";
-export { approvalPresentation } from "./Timeline";
-export { formatDuration } from "./toolTimeline";
-export { contextOccupancy } from "../contextUsage";
-export { branchMenuLayout, composerPromptPlaceholder } from "./thread/Composer";
-export { ContextMeter } from "./thread/ContextMeter";
-export { filterModelControlOptions, modelControlWidth, nextModelControlView } from "./thread/ModelControls";
-export { namedClipboardImage, pastedImages, shouldReadNativeClipboard } from "./thread/clipboard";
-export { effectiveComposerRoute, supportsFastMode } from "./thread/composerModels";
-export { parseSkillPrompt, skillTitle, slashSuggestions } from "./thread/slash";
 
 const SESSION_STAGE_EASE = [0.16, 1, 0.3, 1] as const;
 

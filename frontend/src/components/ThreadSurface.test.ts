@@ -2,17 +2,25 @@ import { describe, expect, it, vi } from "vitest";
 // @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
 import { readFileSync, readdirSync } from "node:fs";
 import type { SkillEntry, Snapshot } from "../types";
-import { branchMenuLayout, COMPOSER_OVERLAY_CLEARANCE, COMPOSER_OVERLAY_MIN_GAP, composerOverlayGap, composerPromptPlaceholder, effectiveComposerRoute, filterModelControlOptions, modelControlWidth, namedClipboardImage, nextModelControlView, parseSkillPrompt, pastedImages, pinTranscriptTail, sessionStageMotion, shouldReadNativeClipboard, skillTitle, slashSuggestions, supportsFastMode, threadHeaderStage, transcriptFollowBehavior } from "./ThreadSurface";
+import {
+  COMPOSER_OVERLAY_CLEARANCE,
+  COMPOSER_OVERLAY_MIN_GAP,
+  composerOverlayGap,
+  pinTranscriptTail,
+  sessionStageMotion,
+  threadHeaderStage,
+  transcriptFollowBehavior,
+} from "./ThreadSurface";
+import { branchMenuLayout, composerPromptPlaceholder } from "./thread/Composer";
+import { effectiveComposerRoute, supportsFastMode } from "./thread/composerModels";
+import { filterModelControlOptions, modelControlWidth, nextModelControlView } from "./thread/ModelControls";
+import { namedClipboardImage, pastedImages, shouldReadNativeClipboard } from "./thread/clipboard";
+import { parseSkillPrompt, skillTitle, slashSuggestions } from "./thread/slash";
 import { translator } from "../i18n";
 import { visibleCommentaryTitle } from "./Timeline";
+import { readStylesheetTree } from "../testStyles";
 
-// styles.css is an import hub; concatenate the imported files in cascade order.
-const styles = readFileSync("src/styles.css", "utf8")
-	.split("\n")
-	.map((line: string) => /^@import "\.\/(.+)";$/.exec(line)?.[1])
-	.filter((path: string | undefined): path is string => Boolean(path))
-	.map((path: string) => readFileSync(`src/${path}`, "utf8"))
-	.join("\n");
+const styles = readStylesheetTree("src/styles.css");
 const prototypeStyles = readFileSync("src/prototype.css", "utf8");
 const beautifulUIStyles = readFileSync("src/components/beautiful-ui/beautiful-ui.css", "utf8");
 // ThreadSurface.tsx is a composition root; include its thread/ submodules so

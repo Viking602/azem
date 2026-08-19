@@ -1,27 +1,21 @@
-import { ChevronDown, ChevronRight, Command } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { startTransition, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { tFormat, translator } from "../../i18n";
-import {
-  isSubagentActive, isSubagentTerminal, subagentDisplayName, subagentPreviewText,
-  subagentStatusLabel, subagentSummaryLabel,
-} from "../../subagents";
 import { useRuntimeStore } from "../../store";
-import type { AgentState, Block, Snapshot } from "../../types";
+import type { Block, Snapshot } from "../../types";
 import {
-  displayedToolState, formatDuration, formatToolPresentation, formatWorkedDuration, groupProcessTimelineBlocks,
-  isActiveProcessBlock, isHostFallbackCommentary, isRunningTool, processElapsedMs, summarizeToolGroup, thinkingStateLabel, thinkingTraceElapsedMs,
+  displayedToolState, formatWorkedDuration, groupProcessTimelineBlocks,
+  isActiveProcessBlock, isHostFallbackCommentary, isRunningTool, summarizeToolGroup,
   type ModelProgressPresentation, type ProcessTimelineEntry,
 } from "../toolTimeline";
-import { fileChangePillsForBlocks, formatProcessGroupCount, processGroupCountLabel, processGroupCounts, thinkingChipPreview, toolChipModel } from "../toolChip";
-import AnsiText from "../AnsiText";
-import SubagentGlyph from "../SubagentGlyph";
+import { fileChangePillsForBlocks, formatProcessGroupCount, processGroupCounts } from "../toolChip";
 import { ThinkingState } from "../beautiful-ui/Primitives";
 import { StepRow } from "../beautiful-ui/StepRow";
-import { FileChangePills, ToolChip, ToolChipMeta, ToolChipStatus } from "../beautiful-ui/ToolChip";
+import { FileChangePills, ToolChip } from "../beautiful-ui/ToolChip";
 import {
   isActiveFileChangeBlock, isFileChangeTool, isPendingFileChangeBlock,
 } from "../fileChanges";
-import { TimelineBlock, ToolTimelineBlock, toolStatusLabel } from "./blocks";
+import { TimelineBlock, ToolTimelineBlock } from "./blocks";
 import {
   DEFERRED_PROCESS_MIN_ROWS,
   DEFERRED_PROCESS_ROW_PX,
@@ -31,11 +25,12 @@ import {
   flattenDeferredProcessRows,
   type DeferredProcessRow,
 } from "./processDefer";
-import { blocksMarkState, stepEdge, stepEntranceDelays, stepMarkState, type StepEdge } from "./stepRail";
+import { blocksMarkState, stepEdge, stepMarkState, type StepEdge } from "./stepRail";
 import { activityBarLabel, processActivityVisibility } from "./thinkingTabs";
 import { ReasoningPanel, ThinkingTrace } from "./ThinkingTrace";
-import { ToolExecutionLog } from "./ToolExecutionLog";
-import { useLiveElapsed } from "./useLiveElapsed";
+import { ProcessChipList, ThinkingChip } from "./processChips";
+import { isSubagentSpawnBlock, SubagentRunCard } from "./subagentRunCard";
+export { isSubagentSpawnBlock } from "./subagentRunCard";
 
 /**
  * Codex: after the turn finishes, 耗时 hides the process. Opening it shows
@@ -557,122 +552,6 @@ function stepBarVisible(blocks: Block[], waiting: boolean, active: boolean) {
   return work.some((block) => block.kind === "thinking" && Boolean(block.content?.trim()));
 }
 
-export function isSubagentSpawnBlock(block: Block) {
-  return block.kind === "tool" && block.title?.replaceAll("_", ".") === "subagent.spawn";
-}
-
-function SubagentRunCard({ blocks, language }: { blocks: Block[]; language: Snapshot["language"] }) {
-  const agents = useRuntimeStore((state) => state.agents);
-  const selectAgent = useRuntimeStore((state) => state.selectAgent);
-  const runId = blocks.find((block) => block.runId)?.runId || "";
-  const callIds = new Set(blocks.map((block) => block.toolCallId).filter(Boolean));
-  const descriptions = blocks.map(subagentSpawnDescription).filter(Boolean);
-  const runAgents = agents.filter((agent) => !runId || agent.parentRunId === runId);
-  const exactAgents = runAgents.filter((agent) => agent.parentToolCallId && callIds.has(agent.parentToolCallId));
-  const describedAgents = runAgents.filter((agent) => descriptions.includes(agent.description));
-  const cardAgents = exactAgents.length
-    ? exactAgents
-    : describedAgents.length
-      ? describedAgents
-      : runAgents.length === blocks.length ? runAgents : [];
-  const count = Math.max(blocks.length, cardAgents.length);
-  const activeCount = cardAgents.filter((agent) => isSubagentActive(agent.state)).length;
-  const queuedCount = cardAgents.filter((agent) => agent.state === "queued").length;
-  const terminalCount = cardAgents.filter((agent) => isSubagentTerminal(agent.state)).length;
-  const failedCount = cardAgents.filter((agent) => agent.state === "failed").length;
-  const toolRunning = blocks.some(isRunningTool);
-  const active = activeCount > 0 || toolRunning;
-  const [expanded, setExpanded] = useState(active);
-  useEffect(() => {
-    if (active) setExpanded(true);
-  }, [active]);
-  const state = active ? "running" : queuedCount > 0 ? "queued" : failedCount > 0 ? "failed" : "completed";
-  const status = cardAgents.length
-    ? subagentSummaryLabel(cardAgents, language)
-    : toolRunning
-      ? tFormat(language, "subagentsRunning", { count })
-      : tFormat(language, "subagentsStarted", { count });
-  const progress = count > 0 ? Math.min(100, Math.round((terminalCount / count) * 100)) : 0;
-  const listId = `subagent-run-${blocks[0]?.id.replace(/[^a-zA-Z0-9_-]/gu, "-") || "group"}`;
-  const t = translator(language);
-  const headline = cardAgents.find((agent) => isSubagentActive(agent.state)) ?? cardAgents[0];
-  const livePreview = headline
-    ? subagentPreviewText(headline, subagentDisplayName(headline, cardAgents, language), language)
-    : "";
-
-  return <section className="subagent-run-card" data-state={state} aria-label={tFormat(language, "subagentRunTitle", { count })}>
-    <button
-      type="button"
-      className="subagent-run-card-summary"
-      aria-expanded={expanded}
-      aria-controls={listId}
-      aria-label={`${expanded ? t("subagentRunCollapse") : t("subagentRunExpand")}，${status}`}
-      onClick={() => setExpanded((value) => !value)}
-    >
-      <span className="subagent-run-mark" aria-hidden="true">
-        <Command size={18} />
-        <i>{count}</i>
-      </span>
-      <span className="subagent-run-copy">
-        <span>{t("subagentCenterEyebrow")}</span>
-        <strong>{tFormat(language, "subagentRunTitle", { count })}</strong>
-        <small>{status}</small>
-        {active && livePreview ? <small className="subagent-run-live-preview">{livePreview}</small> : null}
-      </span>
-      <span className="subagent-run-status" data-state={state}>
-        <strong>{failedCount > 0 && !active ? tFormat(language, "subagentRunFailed", { count: failedCount }) : active ? t("running") : t("completed")}</strong>
-        <small>{tFormat(language, "subagentRunProgress", { completed: terminalCount, count })}</small>
-        <span className="subagent-run-progress" aria-hidden="true">
-          <i style={{ width: `${progress}%` }} data-indeterminate={active && progress === 0 || undefined} />
-        </span>
-      </span>
-      <ChevronRight className="subagent-run-chevron" size={17} aria-hidden="true" />
-    </button>
-    {expanded ? <div className="subagent-run-list" id={listId}>
-      {cardAgents.length ? cardAgents.map((agent) => <SubagentRunRow
-        key={agent.id}
-        agent={agent}
-        agents={cardAgents}
-        language={language}
-        open={() => selectAgent(agent.id)}
-      />) : descriptions.map((description, index) => <div className="subagent-run-pending-row" key={`${description}-${index}`}>
-        <span className="subagent-run-pending-mark" aria-hidden="true" />
-        <strong>{description}</strong>
-        <em>{toolRunning ? t("agentInitializing") : t("agentQueued")}</em>
-      </div>)}
-    </div> : null}
-  </section>;
-}
-
-function SubagentRunRow({ agent, agents, language, open }: {
-  agent: AgentState;
-  agents: AgentState[];
-  language: Snapshot["language"];
-  open: () => void;
-}) {
-  const name = subagentDisplayName(agent, agents, language);
-  const preview = subagentPreviewText(agent, name, language);
-  return <button type="button" className="subagent-run-row" data-state={agent.state} onClick={open}>
-    <SubagentGlyph agent={agent} size={26} />
-    <span><strong>{name}</strong><small>{preview}</small></span>
-    <em>{subagentStatusLabel(agent.state, language)}</em>
-    <ChevronRight size={14} aria-hidden="true" />
-  </button>;
-}
-
-function subagentSpawnDescription(block: Block) {
-  const raw = block.data?.arguments || block.content || "";
-  for (const candidate of [raw, raw.split("\n")[0] || ""]) {
-    try {
-      const parsed = JSON.parse(candidate) as Record<string, unknown>;
-      const value = String(parsed.description || parsed.prompt || "").trim();
-      if (value) return value;
-    } catch { /* durable tool content may append a result after the JSON arguments */ }
-  }
-  const match = raw.match(/"(?:description|prompt)"\s*:\s*"((?:\\.|[^"\\])*)"/u);
-  if (!match?.[1]) return "";
-  try { return JSON.parse(`"${match[1]}"`) as string; } catch { return match[1]; }
-}
 
 
 function hasProcessTools(blocks: Block[]) {
@@ -804,149 +683,4 @@ function SummarizedReasoning({ blocks }: { blocks: Block[] }) {
   return <div className="bui-thinking-panel" data-tab="reasoning">
     <ReasoningPanel blocks={reasoning} />
   </div>;
-}
-
-function ProcessChipList({ blocks, language, siblings, live = false, summarized = false, hideClocks = false }: {
-  blocks: Block[];
-  language: Snapshot["language"];
-  siblings: Block[];
-  live?: boolean;
-  summarized?: boolean;
-  hideClocks?: boolean;
-}) {
-  const peers = siblings.length ? siblings : blocks;
-  // An empty thinking frame is a heartbeat, not a step (UI-016).
-  const thinking = blocks.filter((block) => block.kind === "thinking" && Boolean(block.content?.trim()));
-  const tools = blocks.filter((block) => block.kind === "tool" || block.kind === "diff");
-  // Report only this group's own rows. Reusing the whole trail's totals printed
-  // the same count above every group, and an enclosing bar already says it once.
-  const countLabel = summarized ? "" : processGroupCountLabel(blocks, language);
-  const settledCard = summarized && !live && tools.length > 0;
-  // Settled cards keep the group class so opened count-rows match the chip
-  // list. Unsummarized trails still grow their own headered group.
-  const grouped = settledCard || (!summarized && thinking.length + tools.length >= 1);
-  const rowIds = [
-    ...(thinking.length ? [`thinking-${thinking[0]!.id}`] : []),
-    ...tools.map((block) => block.id),
-  ];
-  const delays = useStepEntrance(rowIds, live);
-  const count = rowIds.length;
-
-  const pills = settledCard ? fileChangePillsForBlocks(tools) : { files: [] };
-  let index = 0;
-  const toolRow = (block: Block) => (
-    block.kind === "diff"
-      || isFileChangeTool(block.title || block.data?.name || "")
-      || isActiveFileChangeBlock(block)
-      || isPendingFileChangeBlock(block)
-      ? <ToolTimelineBlock block={block} language={language} siblings={siblings} />
-      : <ToolStep block={block} language={language} siblings={siblings} hideTime={settledCard || hideClocks || live} />
-  );
-  return <div className={`timeline-step-list${grouped ? " bui-tool-chip-group" : ""}`} data-settled={settledCard || undefined}>
-    {countLabel && tools.length >= 2 ? <div className="bui-tool-chip-group-header">
-      <ChevronDown className="bui-tool-chip-chevron" size={14} aria-hidden="true" />
-      <strong>{countLabel}</strong>
-    </div> : null}
-    <div className="timeline-step-rows" role="list">
-      {thinking.length ? <StepRow
-        key={rowIds[0]}
-        mark={blocksMarkState(thinking)}
-        edge={stepEdge(index++, count)}
-        delayMs={delays.get(rowIds[0]!)}
-      >
-        <ThinkingChip blocks={thinking} language={language} />
-      </StepRow> : null}
-      {tools.map((block) => <StepRow
-        key={block.id}
-        mark={stepMarkState(displayedToolState(block, peers))}
-        edge={stepEdge(index++, count)}
-        delayMs={delays.get(block.id)}
-      >
-        {toolRow(block)}
-      </StepRow>)}
-    </div>
-    {pills.files.length ? <FileChangePills files={pills.files} language={language} /> : null}
-  </div>;
-}
-
-/** Rows already committed to the DOM must not replay their entrance on rerender. */
-function useStepEntrance(ids: string[], enabled: boolean) {
-  const seenRef = useRef<ReadonlySet<string> | null>(null);
-  const delays = enabled ? stepEntranceDelays(ids, seenRef.current) : EMPTY_DELAYS;
-  useEffect(() => {
-    seenRef.current = new Set(ids);
-  });
-  return delays;
-}
-
-const EMPTY_DELAYS: ReadonlyMap<string, number> = new Map();
-
-function ThinkingChip({ blocks, language }: { blocks: Block[]; language: Snapshot["language"] }) {
-  const [opened, setOpened] = useState(false);
-  const running = blocks.some((block) => isActiveProcessBlock(block) && Boolean(block.content?.trim()));
-  const preview = thinkingChipPreview(blocks);
-  return <ToolChip
-    className="timeline-step thinking-chip"
-    state={running ? "running" : "completed"}
-    kind="thinking"
-    label={thinkingStateLabel(language, running, running ? 0 : thinkingTraceElapsedMs(blocks))}
-    chip={preview || undefined}
-    onToggle={(event) => setOpened(event.currentTarget.open)}
-  >
-    {opened ? <div className="timeline-step-detail bui-thinking-panel" data-tab="reasoning">
-      <ReasoningPanel blocks={blocks} />
-    </div> : null}
-  </ToolChip>;
-}
-
-function ToolStep({ block, language, siblings, hideTime = false }: {
-  block: Block;
-  language: Snapshot["language"];
-  siblings: Block[];
-  hideTime?: boolean;
-}) {
-  const [opened, setOpened] = useState(false);
-  const storeBlocks = useRuntimeStore((state) => state.blocks);
-  const peers = siblings.length ? siblings : storeBlocks;
-  const state = displayedToolState(block, peers);
-  const running = state === "running" || isRunningTool(block);
-  const completed = ["completed", "ready", "success"].includes(block.state || "");
-  const payload = block.content || block.data?.arguments || "";
-  const liveOutput = block.data?.output || "";
-  const model = useMemo(() => toolChipModel(block, language), [block, language]);
-  const presentation = useMemo(
-    () => opened ? formatToolPresentation(payload, language) : null,
-    [opened, payload, language],
-  );
-  const observedElapsedMs = useMemo(
-    () => hideTime ? 0 : processElapsedMs([block], running ? Date.now() : 0),
-    [block, hideTime, running],
-  );
-  const elapsedMs = useLiveElapsed(observedElapsedMs, !hideTime && running);
-  const time = hideTime
-    ? (running || completed ? "" : toolStatusLabel(state, language))
-    : elapsedMs > 0
-      ? formatDuration(elapsedMs)
-      : running ? translator(language)("running") : completed ? "" : toolStatusLabel(state, language);
-  return <ToolChip
-    className="timeline-step"
-    state={state}
-    kind={model.kind}
-    label={model.label}
-    chip={model.chip}
-    status={time || undefined}
-    aria-current={running ? "step" : undefined}
-    onToggle={(event) => setOpened(event.currentTarget.open)}
-  >
-    {opened ? <div className="timeline-step-detail">
-      <ToolChipStatus lines={model.statusLines} />
-      <ToolChipMeta lines={model.meta} />
-      {presentation?.fields.length ? <dl className="tool-fields">
-        {presentation.fields.map((field) => <div key={`${field.label}-${field.value}`}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}
-      </dl> : null}
-      {running && liveOutput
-        ? <ToolExecutionLog output={liveOutput} label={`${model.label} · ${translator(language)("fieldDetail")}`} />
-        : presentation?.result ? <pre className="tool-result"><AnsiText text={presentation.result} /></pre> : null}
-    </div> : null}
-  </ToolChip>;
 }

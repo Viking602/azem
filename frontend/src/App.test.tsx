@@ -8,18 +8,13 @@ import { execute } from "./bridge";
 import { useRuntimeStore } from "./store";
 import { useTerminalStore } from "./terminalStore";
 import type { RuntimeEvent, Session, Snapshot } from "./types";
+import { readStylesheetTree } from "./testStyles";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => undefined });
 
 const prototypeStyles = readFileSync("src/prototype.css", "utf8");
-// styles.css is an import hub; concatenate the imported files in cascade order.
-const applicationStyles = readFileSync("src/styles.css", "utf8")
-  .split("\n")
-  .map((line: string) => /^@import "\.\/(.+)";$/.exec(line)?.[1])
-  .filter((path: string | undefined): path is string => Boolean(path))
-  .map((path: string) => readFileSync(`src/${path}`, "utf8"))
-  .join("\n");
+const applicationStyles = readStylesheetTree("src/styles.css");
 const conceptStyles = readFileSync("../designs/azem-ui-motion-concept/styles.css", "utf8");
 const bridgeRuntime = vi.hoisted(() => ({ listener: null as ((event: RuntimeEvent) => void) | null }));
 

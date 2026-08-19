@@ -5,8 +5,11 @@ import * as bridge from "./bridge";
 import { findModelOption, mergeSessionTranscript, modelDisplayName, providerDisplayName, reduceEvents, reorderSessionQueue, shouldMarkSessionUnread, type RuntimeData, useRuntimeStore } from "./store";
 import type { Session, Snapshot } from "./types";
 import Inspector from "./components/Inspector";
-import ThreadSurface, { approvalPresentation, ContextMeter, contextOccupancy, formatDuration } from "./components/ThreadSurface";
-import { TimelineBlock } from "./components/Timeline";
+import ThreadSurface from "./components/ThreadSurface";
+import { ContextMeter } from "./components/thread/ContextMeter";
+import { approvalPresentation, TimelineBlock } from "./components/Timeline";
+import { formatDuration } from "./components/toolTimeline";
+import { contextOccupancy } from "./contextUsage";
 import { toolDisplayName } from "./i18n";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

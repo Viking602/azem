@@ -7,7 +7,7 @@ import { isSubagentActive, subagentDisplayName, subagentEvidenceStatusLabel, sub
 import { useRuntimeStore } from "../store";
 import type { AgentState, Block, Snapshot } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
-import { formatDuration } from "./ThreadSurface";
+import { formatDuration } from "./toolTimeline";
 import { TimelineFeed } from "./Timeline";
 
 /** Focused drawer for one subagent transcript. */

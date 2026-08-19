@@ -6,14 +6,7 @@
 @import "./styles/base.css";
 @import "./styles/side-chat.css";
 @import "./styles/sidebar.css";
-@import "./styles/thread.css";
-@import "./styles/composer.css";
-@import "./styles/model-controls.css";
-@import "./styles/transcript.css";
-@import "./styles/fidelity.css";
-@import "./styles/process.css";
-@import "./styles/tools.css";
-@import "./styles/inspector.css";
+@import "./styles/conversation.css";
 @import "./styles/workspace.css";
 @import "./styles/extensions.css";
 @import "./styles/pull-requests.css";
