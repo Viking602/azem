@@ -5,6 +5,7 @@ import {
   formatSubagentElapsed,
   isSubagentActive,
   subagentDisplayName,
+  subagentEvidenceStatusLabel,
   subagentElapsedMs,
   subagentPreviewText,
   subagentSummaryLabel,
@@ -111,6 +112,7 @@ function SubagentRow({ agent, agents, language, now, inspect }: {
   const name = subagentDisplayName(agent, agents, language);
   const preview = subagentPreviewText(agent, name, language);
   const status = subagentStatusLabel(agent.state, language);
+  const evidenceStatus = subagentEvidenceStatusLabel(agent.evidenceStatus, language);
   const elapsed = subagentElapsedMs(agent, now);
   const elapsedLabel = formatSubagentElapsed(elapsed);
   const active = isSubagentActive(agent.state);
@@ -121,7 +123,7 @@ function SubagentRow({ agent, agents, language, now, inspect }: {
       <button
         type="button"
         onClick={() => inspect(agent.id)}
-        aria-label={`${name}，${status}${showElapsed ? `，${elapsedLabel}` : ""}`}
+        aria-label={`${name}，${status}${evidenceStatus ? `，${evidenceStatus}` : ""}${showElapsed ? `，${elapsedLabel}` : ""}`}
       >
         <SubagentGlyph agent={agent} size={34} />
         <span className="subagent-row-copy">
@@ -130,6 +132,7 @@ function SubagentRow({ agent, agents, language, now, inspect }: {
         </span>
         <span className="subagent-row-meta">
           <em data-state={agent.state}>{status}</em>
+          {evidenceStatus ? <span className="subagent-evidence-status" data-evidence-status={agent.evidenceStatus}>{evidenceStatus}</span> : null}
           {showElapsed ? <time aria-label={`${status} ${elapsedLabel}`}>{elapsedLabel}</time> : null}
         </span>
       </button>

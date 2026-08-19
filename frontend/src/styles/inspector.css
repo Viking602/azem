@@ -271,6 +271,9 @@
 .subagent-row-meta time { color: var(--faint); font-family: var(--mono); font-size: 8px; }
 .subagent-row-meta em[data-state="running"], .subagent-row-meta em[data-state="started"], .subagent-row-meta em[data-state="initializing"] { color: var(--blue); }
 .subagent-row-meta em[data-state="failed"] { color: var(--red); }
+.subagent-evidence-status { color: var(--faint); font-size: 8px; font-style: normal; letter-spacing: .01em; }
+.subagent-evidence-status[data-evidence-status="verified"] { color: var(--green); }
+.subagent-evidence-status[data-evidence-status="stale"] { color: var(--red); }
 .subagents-empty { min-height: 240px; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--faint); text-align: center; }
 .subagents-empty p { margin: 0; color: var(--muted); font-size: var(--text-base); }
 @keyframes subagents-drawer-backdrop-in { from { opacity: 0; } }

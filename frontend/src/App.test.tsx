@@ -8,18 +8,13 @@ import { execute } from "./bridge";
 import { useRuntimeStore } from "./store";
 import { useTerminalStore } from "./terminalStore";
 import type { RuntimeEvent, Session, Snapshot } from "./types";
+import { readStylesheetTree } from "./testStyles";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: () => undefined });
 
 const prototypeStyles = readFileSync("src/prototype.css", "utf8");
-// styles.css is an import hub; concatenate the imported files in cascade order.
-const applicationStyles = readFileSync("src/styles.css", "utf8")
-  .split("\n")
-  .map((line: string) => /^@import "\.\/(.+)";$/.exec(line)?.[1])
-  .filter((path: string | undefined): path is string => Boolean(path))
-  .map((path: string) => readFileSync(`src/${path}`, "utf8"))
-  .join("\n");
+const applicationStyles = readStylesheetTree("src/styles.css");
 const conceptStyles = readFileSync("../designs/azem-ui-motion-concept/styles.css", "utf8");
 const bridgeRuntime = vi.hoisted(() => ({ listener: null as ((event: RuntimeEvent) => void) | null }));
 
@@ -359,7 +354,7 @@ describe("application interactions", () => {
     const agent = {
         id: "agent-1", type: "worker", description: "检查界面", model: "gpt-5.6-sol",
         background: true, capabilityMode: "read-only", isolation: "none", cwd: "/tmp/azem",
-        activity: "", warning: "", worktreePath: "", toolCalls: 1, turns: 1, tokensUsed: 20,
+        activity: "", warning: "", evidenceStatus: "verified", worktreePath: "", toolCalls: 1, turns: 1, tokensUsed: 20,
         elapsedMs: 1000, state: "completed", summary: "已完成", preview: "已完成",
         previewKind: "assistant", previewRunId: "child-1", elapsedObservedAt: Date.now(),
       } as const;
@@ -406,11 +401,13 @@ describe("application interactions", () => {
     expect(container.textContent).toContain("运行中");
     expect(container.textContent).toContain("排队中");
     expect(container.textContent).toContain("已结束");
+    expect(container.querySelector(".subagent-evidence-status")?.textContent).toBe("证据已验证");
     await act(async () => container?.querySelector<HTMLButtonElement>(".subagent-row > button")?.click());
     await vi.waitFor(() => expect(container?.querySelector(".subagents-drawer-layer")).toBeNull());
     await vi.waitFor(() => expect(container?.querySelector(".subagent-detail-drawer-layer")).not.toBeNull());
     await vi.waitFor(() => expect(container?.querySelector(".agent-side-chat")).not.toBeNull());
     expect(container.querySelector(".workspace-grid")?.getAttribute("data-inspector")).not.toBe("agent");
+    expect(container.querySelector(".agent-side-chat .subagent-evidence-status")?.textContent).toBe("证据已验证");
     const agentTabs = [...container.querySelectorAll<HTMLButtonElement>(".agent-side-chat-tabs button")];
     expect(agentTabs).toHaveLength(3);
     expect(agentTabs.every((button) => button.textContent === "" && !button.title && Boolean(button.getAttribute("aria-label")))).toBe(true);
@@ -527,15 +524,20 @@ describe("application interactions", () => {
     const bar = process?.querySelector<HTMLButtonElement>(".process-fold-summary");
     expect(bar?.getAttribute("aria-expanded")).toBe("false");
     expect(bar?.textContent).toContain("已处理");
-    expect(process?.querySelector(".reasoning-summary")).toBeNull();
-    expect(process?.querySelector(".bui-tool-chip-group-header")).toBeNull();
+    expect(process?.querySelector(".commentary-block")).toBeNull();
 
     await act(async () => bar?.click());
     expect(bar?.getAttribute("aria-expanded")).toBe("true");
     expect(process?.textContent).toContain("核对安全边界");
+    expect(process?.querySelector(".process-step-count")?.getAttribute("aria-expanded")).toBe("false");
+    expect(process?.querySelector(".timeline-step")).toBeNull();
+
+
+
   });
 
   it("shows live thinking in a running subagent drawer instead of a bare 运行中 body", async () => {
+
     const snapshot: Snapshot = {
       workspace: "/tmp/azem", sessionId: "s1", provider: "chatgpt", model: "gpt-5.6-sol",
       reasoning: "high", agentMode: "single", language: "zh-CN", approvalMode: "prompt",
@@ -610,7 +612,7 @@ describe("application interactions", () => {
     expect(drawer.querySelector(".agent-side-chat-empty")).toBeNull();
     // SUBAGENT-005: the wait is the running step's own bar, not a bare 运行中.
     expect(drawer.querySelector(".process-fold .bui-thinking-state.streaming")).not.toBeNull();
-    expect(drawer.textContent).toContain("思考");
+    expect(drawer.textContent).toContain("正在思考");
   });
 
   it("reloads the open subagent drawer after a projection resync", async () => {

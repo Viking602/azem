@@ -752,7 +752,11 @@ func TestExecuteRunUsesCoordinatorLifecycle(t *testing.T) {
 	if projection.Run.Status != api.RunStatusCompleted {
 		t.Fatalf("run status=%s", projection.Run.Status)
 	}
-	if active := service.runner.ActiveLeaseCountContext(ctx, run.RunID, run.TaskID); active != 0 {
+	active, err := service.runner.ActiveLeaseCountContext(ctx, run.RunID, run.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
 		t.Fatalf("active lease count=%d, want 0", active)
 	}
 	claims, err := service.Runner().ListResourceClaims(ctx, api.ResourceClaimSelector{RunIDs: []string{run.RunID}})

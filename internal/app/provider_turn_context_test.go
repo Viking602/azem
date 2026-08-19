@@ -17,6 +17,7 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/contextarchive"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -106,7 +107,7 @@ func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	inner := turnContext{instructions: "rules", summarize: func(context.Context, string) (string, error) { return semanticStateForTest("guidance summary"), nil }}
+	inner := guidanceContextStub{compactTo: func(history []message.Message, _ int) ([]message.Message, error) { return history, nil }}
 	manager := activeGuidanceContext{
 		inner: inner,
 		peek:  func() activeGuidanceSnapshot { return service.peekActiveGuidance("session-guided", "run-guided") },
@@ -288,9 +289,7 @@ func TestTeamRequestPreparerKeepsPlannerImagesAndHistoryStructured(t *testing.T)
 	image := session.Attachment{ID: "image-1", Name: "reference.png", MIME: "image/png", Path: "/tmp/reference.png"}
 	preparer := teamRequestPreparer{context: teamHookContext{
 		history: []session.Block{{Kind: "assistant", Content: "prior answer"}},
-	}, images: []session.Attachment{image}, target: 100_000, compactor: &turnContext{summarize: func(context.Context, string) (string, error) {
-		return semanticStateForTest("summary"), nil
-	}}}
+	}, images: []session.Attachment{image}, target: 100_000, compactor: &turnContext{}}
 	prepared, err := preparer.prepare(context.Background(), hyprovider.Request{
 		Messages: []message.Message{message.NewText(message.RoleUser, "current task")},
 	})
@@ -342,7 +341,7 @@ func TestTeamRequestPreparerAppendsTodoUpdatesWithoutChangingWirePrefix(t *testi
 	}
 }
 
-func TestTeamRequestPreparerUsesModelCompactionAtContextTarget(t *testing.T) {
+func TestTeamRequestPreparerUsesDeterministicArchiveAtContextTarget(t *testing.T) {
 	messages := make([]message.Message, 0, 21)
 	for index := 0; index < 10; index++ {
 		messages = append(messages,
@@ -351,40 +350,27 @@ func TestTeamRequestPreparerUsesModelCompactionAtContextTarget(t *testing.T) {
 		)
 	}
 	messages = append(messages, message.NewText(message.RoleUser, "latest request"))
-	summaryCalls := 0
-	preparer := teamRequestPreparer{target: 600, compactor: &turnContext{summarize: func(context.Context, string) (string, error) {
-		summaryCalls++
-		return semanticStateForTest("model-generated team summary"), nil
-	}}}
+	var archivedSource []byte
+	compactor := &turnContext{archiveEnabled: true, keepRecentTokens: 100}
+	compactor.storeArchive = func(_ context.Context, result contextarchive.Result) (contextarchive.Manifest, []session.Attachment, error) {
+		archivedSource = append([]byte(nil), result.Source...)
+		manifest := result.Manifest
+		manifest.SourceArtifactID = "team-archive"
+		return manifest, nil, nil
+	}
+	compactor.loadArchiveSource = func(context.Context, string) ([]byte, error) {
+		return append([]byte(nil), archivedSource...), nil
+	}
+	preparer := teamRequestPreparer{target: 1_200, compactor: compactor}
 	prepared, err := preparer.prepare(context.Background(), hyprovider.Request{Messages: messages})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summaryCalls != 1 || len(prepared.Messages) >= len(messages) {
-		t.Fatalf("team compaction calls=%d messages=%d want fewer than %d", summaryCalls, len(prepared.Messages), len(messages))
+	if len(prepared.Messages) >= len(messages) {
+		t.Fatalf("team archive messages=%d want fewer than %d", len(prepared.Messages), len(messages))
 	}
-	foundSummary := false
-	for _, current := range prepared.Messages {
-		foundSummary = foundSummary || current.Kind == message.KindCompactionSummary
-	}
-	if !foundSummary {
-		t.Fatalf("team compaction omitted model summary: %+v", prepared.Messages)
-	}
-	continuedMessages := append(append([]message.Message(nil), messages...), message.NewText(message.RoleAssistant, "short continuation"))
-	continued, err := preparer.prepare(context.Background(), hyprovider.Request{Messages: continuedMessages})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summaryCalls != 1 {
-		t.Fatalf("unchanged compacted prefix was summarized again: calls=%d", summaryCalls)
-	}
-	if len(continued.Messages) <= len(prepared.Messages) {
-		t.Fatalf("compacted continuation did not grow: first=%d second=%d", len(prepared.Messages), len(continued.Messages))
-	}
-	for index := range prepared.Messages {
-		if !reflect.DeepEqual(prepared.Messages[index], continued.Messages[index]) {
-			t.Fatalf("compacted continuation changed provider prefix at message %d", index)
-		}
+	if archiveCarrierIndex(prepared.Messages) < 0 || len(archivedSource) == 0 {
+		t.Fatalf("team archive carrier/source missing: %+v", prepared.Messages)
 	}
 }
 
@@ -397,8 +383,7 @@ func TestTurnContextRefreshesTodoReminderAfterMutation(t *testing.T) {
 		}}},
 	}
 	manager := turnContext{
-		loadTodo:  func(context.Context) (session.TodoList, error) { return latest, nil },
-		summarize: func(context.Context, string) (string, error) { return semanticStateForTest("todo summary"), nil },
+		loadTodo: func(context.Context) (session.TodoList, error) { return latest, nil },
 	}
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "system rules"),
@@ -465,7 +450,10 @@ func TestRecentUserSelectionIgnoresAgentBlocks(t *testing.T) {
 			messages = append(messages, current)
 		}
 	}
-	if indexes := recentUserIndexes(messages, 0, contextRecentUserTurns); !reflect.DeepEqual(indexes, []int{0, 2}) {
+	privateEvidence := message.NewText(message.RoleUser, "<historical-evidence-json>")
+	privateEvidence.Visibility = message.VisibilityPrivate
+	messages = append(messages, privateEvidence)
+	if indexes := recentUserIndexes(messages, 0, 3); !reflect.DeepEqual(indexes, []int{0, 2}) {
 		t.Fatalf("recent user indexes = %v", indexes)
 	}
 }

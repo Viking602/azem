@@ -1,6 +1,6 @@
 # Security
 
-Last verified: 2026-08-14
+Last verified: 2026-08-17
 
 Azem is a local development agent. Its approvals, typed Bridge, credential
 stores, and durable action ledger are governance boundaries, not an operating-
@@ -90,7 +90,9 @@ the workspace, shell fragment, staging operation, restore, commit, or push.
 OAuth tokens and API keys use the configured `internal/auth` credential store:
 system keyring, SQLite, or a permission-restricted file. SQLite and file stores
 do not add application-level encryption; prefer the keyring for stronger local
-protection.
+protection. Large conversation payloads live beside that store as
+mode-`0600` files under `~/.azem/blobs`; they are content-addressed
+bytes, not a second credential store.
 
 llmux API keys are write-only in Model settings. The UI submits a new key in a
 single typed action; `config.yaml`, runtime events, logs, model metadata, and
@@ -143,6 +145,33 @@ descriptors without an explicit bearer-token environment variable remain
 disabled until Azem has an authenticated connection, and `.app.json` metadata
 does not grant access to a ChatGPT connector by itself.
 
+## Offline learning, generated tools, and adapters
+
+Trajectory export and all replay, noise, synthesis, training, and route
+evaluation packages are offline consumers. Their records carry evidence and
+digests but grant no tool, admission, retry, approval, or mutation authority.
+Training targets are admitted only when validator-backed at the same authority
+and work revision; held-out release reports fail on task/project/content
+contamination, synthetic-only gains, safety or retention regression, false-pass
+increase, or incomplete cost accounting.
+
+Generated coding tools remain outside the production registry.
+`internal/toollab` accepts only a closed JSON input schema and historical-gap
+evidence, rejects network and process permissions, and runs fuzz, static
+analysis, permission audit, and behavior checks in a pinned Docker image with
+no network, read-only mounts, dropped capabilities, `no-new-privileges`, and
+bounded CPU, memory, PIDs, output, and time. A passing report is still marked
+non-installable. Promotion requires a separate, evidence-bearing human review;
+candidate and report digests make later mutation fail closed.
+
+Adapter deployment accepts only a digest-bound passing held-out report, exact
+base-model and tokenizer identities, train-data lineage, a same-provider
+serving model, and a rollback target. The target is validated by the existing
+provider route resolver. The registry performs one exact base-route
+substitution; it does not bypass account, model-catalog, credential, or
+approval checks and does not add a second router. The kill switch restores the
+named prior artifact or the base route.
+
 ## GitHub operations and repair sessions
 
 GitHub operations run `git` and `gh` with argv rather than assembled shell
@@ -188,9 +217,13 @@ process, not a second Azem-owned shell-tool executor.
 - Configure the auto-review route with a model you trust. The reviewer receives
   only bounded approval evidence, has no tools, must return the strict decision
   schema, and fails closed when its provider is unavailable or its output is invalid.
-  For protocols without native JSON-schema enforcement, Azem accepts only raw
-  JSON or one whole-response JSON fence; it never extracts a decision from
-  surrounding prose.
+  The host then applies the Codex guardian matrix: `low` and `medium` risk
+  allow without a person, `high` allows when the current user turn authorizes
+  the action (for example “帮我提交并推送” for `git push`), and `critical` denies.
+  Routine `coding.shell` commands such as `go test` are classified low and skip
+  the model. For protocols without native JSON-schema enforcement, Azem accepts
+  only raw JSON or one whole-response JSON fence; it never extracts a decision
+  from surrounding prose.
 - Use separate least-privilege provider and GitHub credentials where possible.
 - Do not place secrets in prompts, repository files, MCP configuration values,
   hook output, or `config.yaml`.

@@ -70,6 +70,13 @@ export function subagentStatusLabel(state: string | undefined, language: Languag
   if (state === "queued") return t("agentQueued");
   return state || t("agentIdle");
 }
+export function subagentEvidenceStatusLabel(status: AgentState["evidenceStatus"], language: Language) {
+  if (status === "verified") return language === "zh-CN" ? "证据已验证" : "Verified evidence";
+  if (status === "stale") return language === "zh-CN" ? "证据已过期" : "Stale evidence";
+  if (status === "provisional") return language === "zh-CN" ? "证据待验证" : "Provisional evidence";
+  return "";
+}
+
 
 export function subagentSummaryLabel(agents: AgentState[], language: Language) {
   const active = agents.filter((agent) => isSubagentActive(agent.state)).length;

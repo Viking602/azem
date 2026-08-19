@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/Viking602/azem/internal/blobstore"
 )
 
-const schemaVersion = 20
+const schemaVersion = 21
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -426,9 +428,16 @@ var migrations = []string{
 	UPDATE session_projections
 		SET model_history='{}', checkpoint_generation=checkpoint_generation+1,
 			cache_epoch=cache_epoch+1, cache_identity_hash='';`,
+	`ALTER TABLE session_tool_records ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT '';
+	ALTER TABLE session_tool_records ADD COLUMN structured_sha256 TEXT NOT NULL DEFAULT '';
+	ALTER TABLE subagent_runs ADD COLUMN transcript_sha256 TEXT NOT NULL DEFAULT '';
+	ALTER TABLE subagent_runs ADD COLUMN output_sha256 TEXT NOT NULL DEFAULT '';
+	ALTER TABLE session_projections ADD COLUMN model_history_sha256 TEXT NOT NULL DEFAULT '';
+	ALTER TABLE session_blocks ADD COLUMN data_sha256 TEXT NOT NULL DEFAULT '';`,
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
+func migrate(ctx context.Context, db *sql.DB, blobs blobstore.Store) error {
+	reclaimPages := false
 	for {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
@@ -444,7 +453,15 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("database schema %d is newer than supported schema %d", version, schemaVersion)
 		}
 		if version == schemaVersion {
-			return tx.Rollback()
+			if err := tx.Rollback(); err != nil {
+				return err
+			}
+			if reclaimPages {
+				if _, err := db.ExecContext(ctx, `VACUUM`); err != nil {
+					return fmt.Errorf("reclaim extracted payload pages: %w", err)
+				}
+			}
+			return nil
 		}
 		next := version + 1
 		if _, err := tx.ExecContext(ctx, migrations[next-1]); err != nil {
@@ -458,6 +475,30 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, next)); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("set schema version %d: %w", next, err)
+		}
+		if next == 21 {
+			for _, statement := range []string{
+				`ALTER TABLE events ADD COLUMN data_sha256 TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE records ADD COLUMN data_sha256 TEXT NOT NULL DEFAULT ''`,
+			} {
+				if _, err := tx.ExecContext(ctx, statement); err != nil && !isMissingRelation(err) {
+					_ = tx.Rollback()
+					return fmt.Errorf("apply migration %d: %w", next, err)
+				}
+			}
+			if err := extractLargePayloads(ctx, tx, blobs); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("extract large payloads: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE context_artifacts DROP COLUMN payload`); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("drop artifact payload column: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE session_projections DROP COLUMN blocks`); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("drop leftover projection blocks column: %w", err)
+			}
+			reclaimPages = true
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit migration %d: %w", next, err)

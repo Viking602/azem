@@ -183,7 +183,7 @@ func testConfiguredTurnMCP(t *testing.T, callErr error, expectedAnswer, expected
 	if err := manager.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "default", Title: "Test", ProviderID: "chatgpt", ModelID: "gpt-mcp", Reasoning: "minimal", AgentMode: "single"}); err != nil {
 		t.Fatal(err)
 	}

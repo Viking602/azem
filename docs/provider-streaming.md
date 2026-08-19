@@ -149,10 +149,10 @@ in a duration chip. Older two-line commentary still groups the same way and
 is shown as Markdown text.
 
 Session recap generation uses its own `agents.recap` model route and usage kind.
-It no longer borrows `agents.compaction`, so choosing a cheap short-text model
-for the Inspector summary cannot change the semantic context writer. The
-result remains bounded and durable, and `recap_state` projects the saved
-revision without mixing this private continuity data into assistant output.
+Choosing a cheap short-text recap model cannot change the current conversation
+or deterministic context archive. The result remains bounded and durable, and
+`recap_state` projects the saved revision without mixing this private
+continuity data into assistant output.
 
 Unlike OpenAI Responses, Anthropic Messages and the other llmux transports do
 not label streamed text as commentary or final output. Azem keeps that text
@@ -175,6 +175,10 @@ provider failures. A response-header timeout or transport cancellation while
 the caller context is still healthy is a retryable stream-open failure; this
 distinction prevents one transient 30-second connection stall from terminating
 a long-running main or subagent run.
+
+Context archiving does not open a provider stream and therefore has no retry,
+inactivity-watchdog, or model-usage path. Automatic, manual, rebuild, main,
+Team, and subagent maintenance all call the same host archive kernel.
 
 ## Stable error taxonomy
 

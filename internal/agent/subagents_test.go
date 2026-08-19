@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/blobstore"
 	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 
@@ -28,7 +29,7 @@ func TestSQLSubagentRunStoreRoundTrip(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	store, err := NewSQLSubagentRunStore(providerStore.DB())
+	store, err := NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +87,33 @@ func TestSQLSubagentRunStoreRoundTrip(t *testing.T) {
 	completed, err := store.Get(ctx, run.ID)
 	if err != nil || completed.State != SubagentCompleted {
 		t.Fatalf("completed run changed during recovery: %#v, %v", completed, err)
+	}
+}
+
+func TestSQLSubagentRunStoreFailedSaveRemovesBlobs(t *testing.T) {
+	ctx := t.Context()
+	providerStore, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "failed-subagent-save.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := strings.Repeat("missing-output ", 1_000)
+	transcript := json.RawMessage(`["` + strings.Repeat("missing-transcript ", 1_000) + `"]`)
+	run := SubagentRun{
+		ID: "missing", SessionID: "session", ParentRunID: "parent", Type: "verify",
+		State: SubagentRunning, Output: output, Transcript: transcript, StartedAt: time.Now().UTC(),
+	}
+	if err := store.Save(ctx, run); err == nil {
+		t.Fatal("missing subagent save succeeded")
+	}
+	for _, digest := range []string{blobstore.Sum([]byte(output)), blobstore.Sum(transcript)} {
+		if exists, err := providerStore.Blobs().Exists(ctx, digest); err != nil || exists {
+			t.Fatalf("failed subagent blob %s exists=%v err=%v", digest, exists, err)
+		}
 	}
 }
 

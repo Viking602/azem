@@ -104,7 +104,7 @@ func TestConfiguredTeamTurnRunsAllRolesAndPersistsReporterAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerRuntime.ChatGPTEndpoint = server.URL + "/responses"
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "default", Title: "Test", ProviderID: "chatgpt", ModelID: "gpt-team", Reasoning: "minimal", AgentMode: "team"}); err != nil {
 		t.Fatal(err)
 	}

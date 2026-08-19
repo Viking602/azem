@@ -16,7 +16,7 @@ func TestUsageApplyAndPersistAcrossReload(t *testing.T) {
 	}
 	defer store.Close(ctx)
 
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Usage", ProviderID: "chatgpt", ModelID: "gpt-main"}); err != nil {
 		t.Fatal(err)
 	}

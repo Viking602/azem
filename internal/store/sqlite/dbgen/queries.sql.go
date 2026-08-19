@@ -354,20 +354,22 @@ func (q *Queries) CompleteProjectionCAS(ctx context.Context, arg CompleteProject
 }
 
 const completeSessionToolRecordCAS = `-- name: CompleteSessionToolRecordCAS :execresult
-UPDATE session_tool_records SET name=?,state=?,content=?,structured=?,artifact_id=?,observations=?,completed_at=? WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='running'
+UPDATE session_tool_records SET name=?,state=?,content=?,structured=?,artifact_id=?,observations=?,completed_at=?,content_sha256=?,structured_sha256=? WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='running'
 `
 
 type CompleteSessionToolRecordCASParams struct {
-	Name         string `db:"name"`
-	State        string `db:"state"`
-	Content      string `db:"content"`
-	Structured   []byte `db:"structured"`
-	ArtifactID   string `db:"artifact_id"`
-	Observations []byte `db:"observations"`
-	CompletedAt  int64  `db:"completed_at"`
-	SessionID    string `db:"session_id"`
-	RunID        string `db:"run_id"`
-	ToolCallID   string `db:"tool_call_id"`
+	Name             string `db:"name"`
+	State            string `db:"state"`
+	Content          string `db:"content"`
+	Structured       []byte `db:"structured"`
+	ArtifactID       string `db:"artifact_id"`
+	Observations     []byte `db:"observations"`
+	CompletedAt      int64  `db:"completed_at"`
+	ContentSha256    string `db:"content_sha256"`
+	StructuredSha256 string `db:"structured_sha256"`
+	SessionID        string `db:"session_id"`
+	RunID            string `db:"run_id"`
+	ToolCallID       string `db:"tool_call_id"`
 }
 
 func (q *Queries) CompleteSessionToolRecordCAS(ctx context.Context, arg CompleteSessionToolRecordCASParams) (sql.Result, error) {
@@ -379,6 +381,8 @@ func (q *Queries) CompleteSessionToolRecordCAS(ctx context.Context, arg Complete
 		arg.ArtifactID,
 		arg.Observations,
 		arg.CompletedAt,
+		arg.ContentSha256,
+		arg.StructuredSha256,
 		arg.SessionID,
 		arg.RunID,
 		arg.ToolCallID,
@@ -435,7 +439,7 @@ func (q *Queries) CountUnknownProviderRequests(ctx context.Context, arg CountUnk
 }
 
 const createSubagentRun = `-- name: CreateSubagentRun :exec
-INSERT INTO subagent_runs(id,session_id,parent_run_id,parent_agent_id,tool_call_id,child_run_id,description,subagent_type,state,summary,provider,model,reasoning,capability_mode,requested_isolation,isolation,cwd,background,output,error,warning,transcript,tool_calls,turns,tokens_used,tools_used,worktree_path,completion_delivered,started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO subagent_runs(id,session_id,parent_run_id,parent_agent_id,tool_call_id,child_run_id,description,subagent_type,state,summary,provider,model,reasoning,capability_mode,requested_isolation,isolation,cwd,background,output,error,warning,transcript,tool_calls,turns,tokens_used,tools_used,worktree_path,completion_delivered,started_at,finished_at,transcript_sha256,output_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `
 
 type CreateSubagentRunParams struct {
@@ -469,6 +473,8 @@ type CreateSubagentRunParams struct {
 	CompletionDelivered int64  `db:"completion_delivered"`
 	StartedAt           int64  `db:"started_at"`
 	FinishedAt          int64  `db:"finished_at"`
+	TranscriptSha256    string `db:"transcript_sha256"`
+	OutputSha256        string `db:"output_sha256"`
 }
 
 func (q *Queries) CreateSubagentRun(ctx context.Context, arg CreateSubagentRunParams) error {
@@ -503,6 +509,8 @@ func (q *Queries) CreateSubagentRun(ctx context.Context, arg CreateSubagentRunPa
 		arg.CompletionDelivered,
 		arg.StartedAt,
 		arg.FinishedAt,
+		arg.TranscriptSha256,
+		arg.OutputSha256,
 	)
 	return err
 }
@@ -711,7 +719,7 @@ func (q *Queries) GetAccount(ctx context.Context, arg GetAccountParams) (Account
 }
 
 const getActionAttemptByIdempotency = `-- name: GetActionAttemptByIdempotency :one
-SELECT data FROM records WHERE kind=? AND run_id=? AND task_id=? AND tool_name=? AND idempotency_key=?
+SELECT data,data_sha256 FROM records WHERE kind=? AND run_id=? AND task_id=? AND tool_name=? AND idempotency_key=?
 `
 
 type GetActionAttemptByIdempotencyParams struct {
@@ -722,7 +730,12 @@ type GetActionAttemptByIdempotencyParams struct {
 	IdempotencyKey string `db:"idempotency_key"`
 }
 
-func (q *Queries) GetActionAttemptByIdempotency(ctx context.Context, arg GetActionAttemptByIdempotencyParams) ([]byte, error) {
+type GetActionAttemptByIdempotencyRow struct {
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
+}
+
+func (q *Queries) GetActionAttemptByIdempotency(ctx context.Context, arg GetActionAttemptByIdempotencyParams) (GetActionAttemptByIdempotencyRow, error) {
 	row := q.db.QueryRowContext(ctx, getActionAttemptByIdempotency,
 		arg.Kind,
 		arg.RunID,
@@ -730,9 +743,9 @@ func (q *Queries) GetActionAttemptByIdempotency(ctx context.Context, arg GetActi
 		arg.ToolName,
 		arg.IdempotencyKey,
 	)
-	var data []byte
-	err := row.Scan(&data)
-	return data, err
+	var i GetActionAttemptByIdempotencyRow
+	err := row.Scan(&i.Data, &i.DataSha256)
+	return i, err
 }
 
 const getActiveContextManifest = `-- name: GetActiveContextManifest :one
@@ -877,7 +890,7 @@ func (q *Queries) GetCompactionState(ctx context.Context, sessionID string) (Get
 }
 
 const getContextArtifact = `-- name: GetContextArtifact :one
-SELECT id,session_id,run_id,kind,sha256,payload,preview,created_at FROM context_artifacts WHERE id=? AND session_id=?
+SELECT id,session_id,run_id,kind,sha256,preview,created_at FROM context_artifacts WHERE id=? AND session_id=?
 `
 
 type GetContextArtifactParams struct {
@@ -894,7 +907,6 @@ func (q *Queries) GetContextArtifact(ctx context.Context, arg GetContextArtifact
 		&i.RunID,
 		&i.Kind,
 		&i.Sha256,
-		&i.Payload,
 		&i.Preview,
 		&i.CreatedAt,
 	)
@@ -931,6 +943,62 @@ func (q *Queries) GetCredentialRef(ctx context.Context, arg GetCredentialRefPara
 	var credential_ref string
 	err := row.Scan(&credential_ref)
 	return credential_ref, err
+}
+
+const getLatestContextArtifactByKind = `-- name: GetLatestContextArtifactByKind :one
+SELECT id,session_id,run_id,kind,sha256,preview,created_at
+FROM context_artifacts
+WHERE session_id=? AND kind=?
+ORDER BY created_at DESC,id DESC
+LIMIT 1
+`
+
+type GetLatestContextArtifactByKindParams struct {
+	SessionID string `db:"session_id"`
+	Kind      string `db:"kind"`
+}
+
+func (q *Queries) GetLatestContextArtifactByKind(ctx context.Context, arg GetLatestContextArtifactByKindParams) (ContextArtifact, error) {
+	row := q.db.QueryRowContext(ctx, getLatestContextArtifactByKind, arg.SessionID, arg.Kind)
+	var i ContextArtifact
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.RunID,
+		&i.Kind,
+		&i.Sha256,
+		&i.Preview,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getLatestContextArtifactByKindPrefix = `-- name: GetLatestContextArtifactByKindPrefix :one
+SELECT id,session_id,run_id,kind,sha256,preview,created_at
+FROM context_artifacts
+WHERE session_id=?1 AND kind LIKE ?2 || '%'
+ORDER BY created_at DESC,id DESC
+LIMIT 1
+`
+
+type GetLatestContextArtifactByKindPrefixParams struct {
+	SessionID  string         `db:"session_id"`
+	KindPrefix sql.NullString `db:"kind_prefix"`
+}
+
+func (q *Queries) GetLatestContextArtifactByKindPrefix(ctx context.Context, arg GetLatestContextArtifactByKindPrefixParams) (ContextArtifact, error) {
+	row := q.db.QueryRowContext(ctx, getLatestContextArtifactByKindPrefix, arg.SessionID, arg.KindPrefix)
+	var i ContextArtifact
+	err := row.Scan(
+		&i.ID,
+		&i.SessionID,
+		&i.RunID,
+		&i.Kind,
+		&i.Sha256,
+		&i.Preview,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const getLatestLease = `-- name: GetLatestLease :one
@@ -971,18 +1039,19 @@ func (q *Queries) GetLatestLeaseData(ctx context.Context, arg GetLatestLeaseData
 }
 
 const getLatestSessionBlock = `-- name: GetLatestSessionBlock :one
-SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence DESC LIMIT 1
+SELECT sequence,data,data_sha256 FROM session_blocks WHERE session_id=? ORDER BY sequence DESC LIMIT 1
 `
 
 type GetLatestSessionBlockRow struct {
-	Sequence int64  `db:"sequence"`
-	Data     []byte `db:"data"`
+	Sequence   int64  `db:"sequence"`
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
 }
 
 func (q *Queries) GetLatestSessionBlock(ctx context.Context, sessionID string) (GetLatestSessionBlockRow, error) {
 	row := q.db.QueryRowContext(ctx, getLatestSessionBlock, sessionID)
 	var i GetLatestSessionBlockRow
-	err := row.Scan(&i.Sequence, &i.Data)
+	err := row.Scan(&i.Sequence, &i.Data, &i.DataSha256)
 	return i, err
 }
 
@@ -1067,7 +1136,7 @@ func (q *Queries) GetReconcileAttemptData(ctx context.Context, arg GetReconcileA
 }
 
 const getRecordData = `-- name: GetRecordData :one
-SELECT data FROM records WHERE kind=? AND key1=? AND key2=?
+SELECT data,data_sha256 FROM records WHERE kind=? AND key1=? AND key2=?
 `
 
 type GetRecordDataParams struct {
@@ -1076,11 +1145,16 @@ type GetRecordDataParams struct {
 	Key2 string `db:"key2"`
 }
 
-func (q *Queries) GetRecordData(ctx context.Context, arg GetRecordDataParams) ([]byte, error) {
+type GetRecordDataRow struct {
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
+}
+
+func (q *Queries) GetRecordData(ctx context.Context, arg GetRecordDataParams) (GetRecordDataRow, error) {
 	row := q.db.QueryRowContext(ctx, getRecordData, arg.Kind, arg.Key1, arg.Key2)
-	var data []byte
-	err := row.Scan(&data)
-	return data, err
+	var i GetRecordDataRow
+	err := row.Scan(&i.Data, &i.DataSha256)
+	return i, err
 }
 
 const getResourceClaimData = `-- name: GetResourceClaimData :one
@@ -1165,12 +1239,11 @@ func (q *Queries) GetSession(ctx context.Context, id string) (Session, error) {
 }
 
 const getSessionProjection = `-- name: GetSessionProjection :one
-SELECT last_run_id,blocks,model_history,usage,updated_at,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?
+SELECT last_run_id,model_history,usage,updated_at,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?
 `
 
 type GetSessionProjectionRow struct {
 	LastRunID            string `db:"last_run_id"`
-	Blocks               []byte `db:"blocks"`
 	ModelHistory         []byte `db:"model_history"`
 	Usage                []byte `db:"usage"`
 	UpdatedAt            int64  `db:"updated_at"`
@@ -1184,7 +1257,6 @@ func (q *Queries) GetSessionProjection(ctx context.Context, sessionID string) (G
 	var i GetSessionProjectionRow
 	err := row.Scan(
 		&i.LastRunID,
-		&i.Blocks,
 		&i.ModelHistory,
 		&i.Usage,
 		&i.UpdatedAt,
@@ -1196,7 +1268,7 @@ func (q *Queries) GetSessionProjection(ctx context.Context, sessionID string) (G
 }
 
 const getSessionToolRecord = `-- name: GetSessionToolRecord :one
-SELECT anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at FROM session_tool_records WHERE session_id=? AND run_id=? AND tool_call_id=?
+SELECT anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256 FROM session_tool_records WHERE session_id=? AND run_id=? AND tool_call_id=?
 `
 
 type GetSessionToolRecordParams struct {
@@ -1206,16 +1278,18 @@ type GetSessionToolRecordParams struct {
 }
 
 type GetSessionToolRecordRow struct {
-	AnchorSequence int64  `db:"anchor_sequence"`
-	Name           string `db:"name"`
-	Arguments      []byte `db:"arguments"`
-	State          string `db:"state"`
-	Content        string `db:"content"`
-	Structured     []byte `db:"structured"`
-	ArtifactID     string `db:"artifact_id"`
-	Observations   []byte `db:"observations"`
-	StartedAt      int64  `db:"started_at"`
-	CompletedAt    int64  `db:"completed_at"`
+	AnchorSequence   int64  `db:"anchor_sequence"`
+	Name             string `db:"name"`
+	Arguments        []byte `db:"arguments"`
+	State            string `db:"state"`
+	Content          string `db:"content"`
+	Structured       []byte `db:"structured"`
+	ArtifactID       string `db:"artifact_id"`
+	Observations     []byte `db:"observations"`
+	StartedAt        int64  `db:"started_at"`
+	CompletedAt      int64  `db:"completed_at"`
+	ContentSha256    string `db:"content_sha256"`
+	StructuredSha256 string `db:"structured_sha256"`
 }
 
 func (q *Queries) GetSessionToolRecord(ctx context.Context, arg GetSessionToolRecordParams) (GetSessionToolRecordRow, error) {
@@ -1232,12 +1306,14 @@ func (q *Queries) GetSessionToolRecord(ctx context.Context, arg GetSessionToolRe
 		&i.Observations,
 		&i.StartedAt,
 		&i.CompletedAt,
+		&i.ContentSha256,
+		&i.StructuredSha256,
 	)
 	return i, err
 }
 
 const getSubagentRun = `-- name: GetSubagentRun :one
-SELECT id, session_id, parent_run_id, parent_agent_id, tool_call_id, child_run_id, description, subagent_type, state, summary, provider, model, reasoning, capability_mode, requested_isolation, isolation, cwd, background, output, error, warning, transcript, tool_calls, turns, tokens_used, tools_used, worktree_path, completion_delivered, started_at, finished_at FROM subagent_runs WHERE id=?
+SELECT id, session_id, parent_run_id, parent_agent_id, tool_call_id, child_run_id, description, subagent_type, state, summary, provider, model, reasoning, capability_mode, requested_isolation, isolation, cwd, background, output, error, warning, transcript, tool_calls, turns, tokens_used, tools_used, worktree_path, completion_delivered, started_at, finished_at, transcript_sha256, output_sha256 FROM subagent_runs WHERE id=?
 `
 
 func (q *Queries) GetSubagentRun(ctx context.Context, id string) (SubagentRun, error) {
@@ -1274,6 +1350,8 @@ func (q *Queries) GetSubagentRun(ctx context.Context, id string) (SubagentRun, e
 		&i.CompletionDelivered,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.TranscriptSha256,
+		&i.OutputSha256,
 	)
 	return i, err
 }
@@ -1448,7 +1526,7 @@ func (q *Queries) InsertCatalogModel(ctx context.Context, arg InsertCatalogModel
 }
 
 const insertContextArtifact = `-- name: InsertContextArtifact :exec
-INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,payload,preview,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(session_id,kind,sha256) DO NOTHING
+INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,preview,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(session_id,kind,sha256) DO NOTHING
 `
 
 type InsertContextArtifactParams struct {
@@ -1457,7 +1535,6 @@ type InsertContextArtifactParams struct {
 	RunID     string `db:"run_id"`
 	Kind      string `db:"kind"`
 	Sha256    string `db:"sha256"`
-	Payload   []byte `db:"payload"`
 	Preview   string `db:"preview"`
 	CreatedAt int64  `db:"created_at"`
 }
@@ -1469,7 +1546,6 @@ func (q *Queries) InsertContextArtifact(ctx context.Context, arg InsertContextAr
 		arg.RunID,
 		arg.Kind,
 		arg.Sha256,
-		arg.Payload,
 		arg.Preview,
 		arg.CreatedAt,
 	)
@@ -1477,7 +1553,7 @@ func (q *Queries) InsertContextArtifact(ctx context.Context, arg InsertContextAr
 }
 
 const insertEvent = `-- name: InsertEvent :exec
-INSERT INTO events(run_id,sequence,recorded_at,data) VALUES(?,?,?,?)
+INSERT INTO events(run_id,sequence,recorded_at,data,data_sha256) VALUES(?,?,?,?,?)
 `
 
 type InsertEventParams struct {
@@ -1485,6 +1561,7 @@ type InsertEventParams struct {
 	Sequence   int64  `db:"sequence"`
 	RecordedAt int64  `db:"recorded_at"`
 	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
 }
 
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error {
@@ -1493,6 +1570,7 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 		arg.Sequence,
 		arg.RecordedAt,
 		arg.Data,
+		arg.DataSha256,
 	)
 	return err
 }
@@ -1558,7 +1636,7 @@ func (q *Queries) InsertMemory(ctx context.Context, arg InsertMemoryParams) erro
 }
 
 const insertRecord = `-- name: InsertRecord :exec
-INSERT INTO records(kind,key1,key2,run_id,task_id,status,created_at,tool_name,idempotency_key,data) VALUES(?,?,?,?,?,?,?,?,?,?)
+INSERT INTO records(kind,key1,key2,run_id,task_id,status,created_at,tool_name,idempotency_key,data,data_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)
 `
 
 type InsertRecordParams struct {
@@ -1572,6 +1650,7 @@ type InsertRecordParams struct {
 	ToolName       string `db:"tool_name"`
 	IdempotencyKey string `db:"idempotency_key"`
 	Data           []byte `db:"data"`
+	DataSha256     string `db:"data_sha256"`
 }
 
 func (q *Queries) InsertRecord(ctx context.Context, arg InsertRecordParams) error {
@@ -1586,6 +1665,7 @@ func (q *Queries) InsertRecord(ctx context.Context, arg InsertRecordParams) erro
 		arg.ToolName,
 		arg.IdempotencyKey,
 		arg.Data,
+		arg.DataSha256,
 	)
 	return err
 }
@@ -1685,7 +1765,7 @@ func (q *Queries) InsertSemanticStateEvent(ctx context.Context, arg InsertSemant
 }
 
 const insertSessionBlock = `-- name: InsertSessionBlock :exec
-INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data) SELECT ?,COALESCE(MAX(b.sequence)+1,0),?,?,?,? FROM session_blocks b WHERE b.session_id=?
+INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data,data_sha256) SELECT ?,COALESCE(MAX(b.sequence)+1,0),?,?,?,?,? FROM session_blocks b WHERE b.session_id=?
 `
 
 type InsertSessionBlockParams struct {
@@ -1694,6 +1774,7 @@ type InsertSessionBlockParams struct {
 	RunID       string `db:"run_id"`
 	AgentID     string `db:"agent_id"`
 	Data        []byte `db:"data"`
+	DataSha256  string `db:"data_sha256"`
 	SessionID_2 string `db:"session_id_2"`
 }
 
@@ -1704,29 +1785,32 @@ func (q *Queries) InsertSessionBlock(ctx context.Context, arg InsertSessionBlock
 		arg.RunID,
 		arg.AgentID,
 		arg.Data,
+		arg.DataSha256,
 		arg.SessionID_2,
 	)
 	return err
 }
 
 const insertSessionToolRecord = `-- name: InsertSessionToolRecord :execresult
-INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id,run_id,tool_call_id) DO NOTHING
+INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id,run_id,tool_call_id) DO NOTHING
 `
 
 type InsertSessionToolRecordParams struct {
-	SessionID      string `db:"session_id"`
-	RunID          string `db:"run_id"`
-	ToolCallID     string `db:"tool_call_id"`
-	AnchorSequence int64  `db:"anchor_sequence"`
-	Name           string `db:"name"`
-	Arguments      []byte `db:"arguments"`
-	State          string `db:"state"`
-	Content        string `db:"content"`
-	Structured     []byte `db:"structured"`
-	ArtifactID     string `db:"artifact_id"`
-	Observations   []byte `db:"observations"`
-	StartedAt      int64  `db:"started_at"`
-	CompletedAt    int64  `db:"completed_at"`
+	SessionID        string `db:"session_id"`
+	RunID            string `db:"run_id"`
+	ToolCallID       string `db:"tool_call_id"`
+	AnchorSequence   int64  `db:"anchor_sequence"`
+	Name             string `db:"name"`
+	Arguments        []byte `db:"arguments"`
+	State            string `db:"state"`
+	Content          string `db:"content"`
+	Structured       []byte `db:"structured"`
+	ArtifactID       string `db:"artifact_id"`
+	Observations     []byte `db:"observations"`
+	StartedAt        int64  `db:"started_at"`
+	CompletedAt      int64  `db:"completed_at"`
+	ContentSha256    string `db:"content_sha256"`
+	StructuredSha256 string `db:"structured_sha256"`
 }
 
 func (q *Queries) InsertSessionToolRecord(ctx context.Context, arg InsertSessionToolRecordParams) (sql.Result, error) {
@@ -1744,6 +1828,8 @@ func (q *Queries) InsertSessionToolRecord(ctx context.Context, arg InsertSession
 		arg.Observations,
 		arg.StartedAt,
 		arg.CompletedAt,
+		arg.ContentSha256,
+		arg.StructuredSha256,
 	)
 }
 
@@ -2115,22 +2201,27 @@ func (q *Queries) ListCatalog(ctx context.Context, arg ListCatalogParams) ([]Lis
 }
 
 const listEventData = `-- name: ListEventData :many
-SELECT data FROM events WHERE run_id=? ORDER BY sequence
+SELECT data,data_sha256 FROM events WHERE run_id=? ORDER BY sequence
 `
 
-func (q *Queries) ListEventData(ctx context.Context, runID string) ([][]byte, error) {
+type ListEventDataRow struct {
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
+}
+
+func (q *Queries) ListEventData(ctx context.Context, runID string) ([]ListEventDataRow, error) {
 	rows, err := q.db.QueryContext(ctx, listEventData, runID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items [][]byte
+	var items []ListEventDataRow
 	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
+		var i ListEventDataRow
+		if err := rows.Scan(&i.Data, &i.DataSha256); err != nil {
 			return nil, err
 		}
-		items = append(items, data)
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -2142,7 +2233,7 @@ func (q *Queries) ListEventData(ctx context.Context, runID string) ([][]byte, er
 }
 
 const listEventDataAfter = `-- name: ListEventDataAfter :many
-SELECT data FROM events WHERE run_id=? AND sequence>? ORDER BY sequence
+SELECT data,data_sha256 FROM events WHERE run_id=? AND sequence>? ORDER BY sequence
 `
 
 type ListEventDataAfterParams struct {
@@ -2150,19 +2241,24 @@ type ListEventDataAfterParams struct {
 	Sequence int64  `db:"sequence"`
 }
 
-func (q *Queries) ListEventDataAfter(ctx context.Context, arg ListEventDataAfterParams) ([][]byte, error) {
+type ListEventDataAfterRow struct {
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
+}
+
+func (q *Queries) ListEventDataAfter(ctx context.Context, arg ListEventDataAfterParams) ([]ListEventDataAfterRow, error) {
 	rows, err := q.db.QueryContext(ctx, listEventDataAfter, arg.RunID, arg.Sequence)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items [][]byte
+	var items []ListEventDataAfterRow
 	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
+		var i ListEventDataAfterRow
+		if err := rows.Scan(&i.Data, &i.DataSha256); err != nil {
 			return nil, err
 		}
-		items = append(items, data)
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -2353,22 +2449,27 @@ func (q *Queries) ListReconcileAttemptData(ctx context.Context, arg ListReconcil
 }
 
 const listRecordData = `-- name: ListRecordData :many
-SELECT data FROM records WHERE kind=? ORDER BY created_at,key1,key2
+SELECT data,data_sha256 FROM records WHERE kind=? ORDER BY created_at,key1,key2
 `
 
-func (q *Queries) ListRecordData(ctx context.Context, kind string) ([][]byte, error) {
+type ListRecordDataRow struct {
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
+}
+
+func (q *Queries) ListRecordData(ctx context.Context, kind string) ([]ListRecordDataRow, error) {
 	rows, err := q.db.QueryContext(ctx, listRecordData, kind)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items [][]byte
+	var items []ListRecordDataRow
 	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
+		var i ListRecordDataRow
+		if err := rows.Scan(&i.Data, &i.DataSha256); err != nil {
 			return nil, err
 		}
-		items = append(items, data)
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -2380,7 +2481,7 @@ func (q *Queries) ListRecordData(ctx context.Context, kind string) ([][]byte, er
 }
 
 const listRecordDataByRun = `-- name: ListRecordDataByRun :many
-SELECT data FROM records WHERE kind=? AND run_id=? ORDER BY created_at,key1,key2
+SELECT data,data_sha256 FROM records WHERE kind=? AND run_id=? ORDER BY created_at,key1,key2
 `
 
 type ListRecordDataByRunParams struct {
@@ -2388,19 +2489,24 @@ type ListRecordDataByRunParams struct {
 	RunID string `db:"run_id"`
 }
 
-func (q *Queries) ListRecordDataByRun(ctx context.Context, arg ListRecordDataByRunParams) ([][]byte, error) {
+type ListRecordDataByRunRow struct {
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
+}
+
+func (q *Queries) ListRecordDataByRun(ctx context.Context, arg ListRecordDataByRunParams) ([]ListRecordDataByRunRow, error) {
 	rows, err := q.db.QueryContext(ctx, listRecordDataByRun, arg.Kind, arg.RunID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items [][]byte
+	var items []ListRecordDataByRunRow
 	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
+		var i ListRecordDataByRunRow
+		if err := rows.Scan(&i.Data, &i.DataSha256); err != nil {
 			return nil, err
 		}
-		items = append(items, data)
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -2486,12 +2592,13 @@ func (q *Queries) ListSemanticStateEvents(ctx context.Context, sessionID string)
 }
 
 const listSessionBlocks = `-- name: ListSessionBlocks :many
-SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence
+SELECT sequence,data,data_sha256 FROM session_blocks WHERE session_id=? ORDER BY sequence
 `
 
 type ListSessionBlocksRow struct {
-	Sequence int64  `db:"sequence"`
-	Data     []byte `db:"data"`
+	Sequence   int64  `db:"sequence"`
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
 }
 
 func (q *Queries) ListSessionBlocks(ctx context.Context, sessionID string) ([]ListSessionBlocksRow, error) {
@@ -2503,7 +2610,7 @@ func (q *Queries) ListSessionBlocks(ctx context.Context, sessionID string) ([]Li
 	var items []ListSessionBlocksRow
 	for rows.Next() {
 		var i ListSessionBlocksRow
-		if err := rows.Scan(&i.Sequence, &i.Data); err != nil {
+		if err := rows.Scan(&i.Sequence, &i.Data, &i.DataSha256); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -2518,22 +2625,24 @@ func (q *Queries) ListSessionBlocks(ctx context.Context, sessionID string) ([]Li
 }
 
 const listSessionToolRecords = `-- name: ListSessionToolRecords :many
-SELECT run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at FROM session_tool_records WHERE session_id=? ORDER BY started_at,run_id,tool_call_id
+SELECT run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256 FROM session_tool_records WHERE session_id=? ORDER BY started_at,run_id,tool_call_id
 `
 
 type ListSessionToolRecordsRow struct {
-	RunID          string `db:"run_id"`
-	ToolCallID     string `db:"tool_call_id"`
-	AnchorSequence int64  `db:"anchor_sequence"`
-	Name           string `db:"name"`
-	Arguments      []byte `db:"arguments"`
-	State          string `db:"state"`
-	Content        string `db:"content"`
-	Structured     []byte `db:"structured"`
-	ArtifactID     string `db:"artifact_id"`
-	Observations   []byte `db:"observations"`
-	StartedAt      int64  `db:"started_at"`
-	CompletedAt    int64  `db:"completed_at"`
+	RunID            string `db:"run_id"`
+	ToolCallID       string `db:"tool_call_id"`
+	AnchorSequence   int64  `db:"anchor_sequence"`
+	Name             string `db:"name"`
+	Arguments        []byte `db:"arguments"`
+	State            string `db:"state"`
+	Content          string `db:"content"`
+	Structured       []byte `db:"structured"`
+	ArtifactID       string `db:"artifact_id"`
+	Observations     []byte `db:"observations"`
+	StartedAt        int64  `db:"started_at"`
+	CompletedAt      int64  `db:"completed_at"`
+	ContentSha256    string `db:"content_sha256"`
+	StructuredSha256 string `db:"structured_sha256"`
 }
 
 func (q *Queries) ListSessionToolRecords(ctx context.Context, sessionID string) ([]ListSessionToolRecordsRow, error) {
@@ -2558,6 +2667,8 @@ func (q *Queries) ListSessionToolRecords(ctx context.Context, sessionID string) 
 			&i.Observations,
 			&i.StartedAt,
 			&i.CompletedAt,
+			&i.ContentSha256,
+			&i.StructuredSha256,
 		); err != nil {
 			return nil, err
 		}
@@ -2573,7 +2684,7 @@ func (q *Queries) ListSessionToolRecords(ctx context.Context, sessionID string) 
 }
 
 const listSessions = `-- name: ListSessions :many
-SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) OR CAST(p.blocks AS TEXT)<>'[]' ORDER BY s.updated_at DESC
+SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) ORDER BY s.updated_at DESC
 `
 
 func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
@@ -2609,7 +2720,7 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 }
 
 const listSessionsLimited = `-- name: ListSessionsLimited :many
-SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) OR CAST(p.blocks AS TEXT)<>'[]' ORDER BY s.updated_at DESC LIMIT ?
+SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) ORDER BY s.updated_at DESC LIMIT ?
 `
 
 func (q *Queries) ListSessionsLimited(ctx context.Context, limit int64) ([]Session, error) {
@@ -2645,7 +2756,7 @@ func (q *Queries) ListSessionsLimited(ctx context.Context, limit int64) ([]Sessi
 }
 
 const listSubagentRuns = `-- name: ListSubagentRuns :many
-SELECT id, session_id, parent_run_id, parent_agent_id, tool_call_id, child_run_id, description, subagent_type, state, summary, provider, model, reasoning, capability_mode, requested_isolation, isolation, cwd, background, output, error, warning, transcript, tool_calls, turns, tokens_used, tools_used, worktree_path, completion_delivered, started_at, finished_at FROM subagent_runs ORDER BY started_at,id
+SELECT id, session_id, parent_run_id, parent_agent_id, tool_call_id, child_run_id, description, subagent_type, state, summary, provider, model, reasoning, capability_mode, requested_isolation, isolation, cwd, background, output, error, warning, transcript, tool_calls, turns, tokens_used, tools_used, worktree_path, completion_delivered, started_at, finished_at, transcript_sha256, output_sha256 FROM subagent_runs ORDER BY started_at,id
 `
 
 func (q *Queries) ListSubagentRuns(ctx context.Context) ([]SubagentRun, error) {
@@ -2688,6 +2799,8 @@ func (q *Queries) ListSubagentRuns(ctx context.Context) ([]SubagentRun, error) {
 			&i.CompletionDelivered,
 			&i.StartedAt,
 			&i.FinishedAt,
+			&i.TranscriptSha256,
+			&i.OutputSha256,
 		); err != nil {
 			return nil, err
 		}
@@ -2703,7 +2816,7 @@ func (q *Queries) ListSubagentRuns(ctx context.Context) ([]SubagentRun, error) {
 }
 
 const listSubagentRunsBySession = `-- name: ListSubagentRunsBySession :many
-SELECT id, session_id, parent_run_id, parent_agent_id, tool_call_id, child_run_id, description, subagent_type, state, summary, provider, model, reasoning, capability_mode, requested_isolation, isolation, cwd, background, output, error, warning, transcript, tool_calls, turns, tokens_used, tools_used, worktree_path, completion_delivered, started_at, finished_at FROM subagent_runs WHERE session_id=? ORDER BY started_at,id
+SELECT id, session_id, parent_run_id, parent_agent_id, tool_call_id, child_run_id, description, subagent_type, state, summary, provider, model, reasoning, capability_mode, requested_isolation, isolation, cwd, background, output, error, warning, transcript, tool_calls, turns, tokens_used, tools_used, worktree_path, completion_delivered, started_at, finished_at, transcript_sha256, output_sha256 FROM subagent_runs WHERE session_id=? ORDER BY started_at,id
 `
 
 func (q *Queries) ListSubagentRunsBySession(ctx context.Context, sessionID string) ([]SubagentRun, error) {
@@ -2746,6 +2859,8 @@ func (q *Queries) ListSubagentRunsBySession(ctx context.Context, sessionID strin
 			&i.CompletionDelivered,
 			&i.StartedAt,
 			&i.FinishedAt,
+			&i.TranscriptSha256,
+			&i.OutputSha256,
 		); err != nil {
 			return nil, err
 		}
@@ -2923,7 +3038,7 @@ func (q *Queries) ResolveReconcileAttemptCAS(ctx context.Context, arg ResolveRec
 }
 
 const restartInterruptedSessionToolRecordCAS = `-- name: RestartInterruptedSessionToolRecordCAS :execresult
-UPDATE session_tool_records SET name=?,arguments=?,state='running',content='',structured='null',artifact_id='',observations='[]',started_at=?,completed_at=0 WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='interrupted'
+UPDATE session_tool_records SET name=?,arguments=?,state='running',content='',structured='null',artifact_id='',observations='[]',started_at=?,completed_at=0,content_sha256='',structured_sha256='' WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='interrupted'
 `
 
 type RestartInterruptedSessionToolRecordCASParams struct {
@@ -2998,7 +3113,7 @@ func (q *Queries) SaveRunCheckpointCAS(ctx context.Context, arg SaveRunCheckpoin
 }
 
 const saveSubagentRun = `-- name: SaveSubagentRun :execresult
-UPDATE subagent_runs SET session_id=?,parent_run_id=?,parent_agent_id=?,tool_call_id=?,child_run_id=?,description=?,subagent_type=?,state=?,summary=?,provider=?,model=?,reasoning=?,capability_mode=?,requested_isolation=?,isolation=?,cwd=?,background=?,output=?,error=?,warning=?,transcript=?,tool_calls=?,turns=?,tokens_used=?,tools_used=?,worktree_path=?,completion_delivered=?,started_at=?,finished_at=? WHERE id=?
+UPDATE subagent_runs SET session_id=?,parent_run_id=?,parent_agent_id=?,tool_call_id=?,child_run_id=?,description=?,subagent_type=?,state=?,summary=?,provider=?,model=?,reasoning=?,capability_mode=?,requested_isolation=?,isolation=?,cwd=?,background=?,output=?,error=?,warning=?,transcript=?,tool_calls=?,turns=?,tokens_used=?,tools_used=?,worktree_path=?,completion_delivered=?,started_at=?,finished_at=?,transcript_sha256=?,output_sha256=? WHERE id=?
 `
 
 type SaveSubagentRunParams struct {
@@ -3031,6 +3146,8 @@ type SaveSubagentRunParams struct {
 	CompletionDelivered int64  `db:"completion_delivered"`
 	StartedAt           int64  `db:"started_at"`
 	FinishedAt          int64  `db:"finished_at"`
+	TranscriptSha256    string `db:"transcript_sha256"`
+	OutputSha256        string `db:"output_sha256"`
 	ID                  string `db:"id"`
 }
 
@@ -3065,6 +3182,8 @@ func (q *Queries) SaveSubagentRun(ctx context.Context, arg SaveSubagentRunParams
 		arg.CompletionDelivered,
 		arg.StartedAt,
 		arg.FinishedAt,
+		arg.TranscriptSha256,
+		arg.OutputSha256,
 		arg.ID,
 	)
 }
@@ -3145,20 +3264,22 @@ func (q *Queries) UpdateAdmissionReservationCAS(ctx context.Context, arg UpdateA
 }
 
 const updateAgentBlock = `-- name: UpdateAgentBlock :execresult
-UPDATE session_blocks SET run_id=?,data=? WHERE session_id=? AND kind='agent' AND agent_id=?
+UPDATE session_blocks SET run_id=?,data=?,data_sha256=? WHERE session_id=? AND kind='agent' AND agent_id=?
 `
 
 type UpdateAgentBlockParams struct {
-	RunID     string `db:"run_id"`
-	Data      []byte `db:"data"`
-	SessionID string `db:"session_id"`
-	AgentID   string `db:"agent_id"`
+	RunID      string `db:"run_id"`
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
+	SessionID  string `db:"session_id"`
+	AgentID    string `db:"agent_id"`
 }
 
 func (q *Queries) UpdateAgentBlock(ctx context.Context, arg UpdateAgentBlockParams) (sql.Result, error) {
 	return q.db.ExecContext(ctx, updateAgentBlock,
 		arg.RunID,
 		arg.Data,
+		arg.DataSha256,
 		arg.SessionID,
 		arg.AgentID,
 	)
@@ -3259,17 +3380,23 @@ func (q *Queries) UpdateSemanticStateCAS(ctx context.Context, arg UpdateSemantic
 }
 
 const updateSessionBlockData = `-- name: UpdateSessionBlockData :exec
-UPDATE session_blocks SET data=? WHERE session_id=? AND sequence=?
+UPDATE session_blocks SET data=?,data_sha256=? WHERE session_id=? AND sequence=?
 `
 
 type UpdateSessionBlockDataParams struct {
-	Data      []byte `db:"data"`
-	SessionID string `db:"session_id"`
-	Sequence  int64  `db:"sequence"`
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
+	SessionID  string `db:"session_id"`
+	Sequence   int64  `db:"sequence"`
 }
 
 func (q *Queries) UpdateSessionBlockData(ctx context.Context, arg UpdateSessionBlockDataParams) error {
-	_, err := q.db.ExecContext(ctx, updateSessionBlockData, arg.Data, arg.SessionID, arg.Sequence)
+	_, err := q.db.ExecContext(ctx, updateSessionBlockData,
+		arg.Data,
+		arg.DataSha256,
+		arg.SessionID,
+		arg.Sequence,
+	)
 	return err
 }
 
@@ -3550,7 +3677,7 @@ func (q *Queries) UpsertRecap(ctx context.Context, arg UpsertRecapParams) (int64
 }
 
 const upsertRecord = `-- name: UpsertRecord :exec
-INSERT INTO records(kind,key1,key2,run_id,task_id,status,created_at,tool_name,idempotency_key,data) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,key1,key2) DO UPDATE SET run_id=excluded.run_id,task_id=excluded.task_id,status=excluded.status,created_at=excluded.created_at,tool_name=excluded.tool_name,idempotency_key=excluded.idempotency_key,data=excluded.data
+INSERT INTO records(kind,key1,key2,run_id,task_id,status,created_at,tool_name,idempotency_key,data,data_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,key1,key2) DO UPDATE SET run_id=excluded.run_id,task_id=excluded.task_id,status=excluded.status,created_at=excluded.created_at,tool_name=excluded.tool_name,idempotency_key=excluded.idempotency_key,data=excluded.data,data_sha256=excluded.data_sha256
 `
 
 type UpsertRecordParams struct {
@@ -3564,6 +3691,7 @@ type UpsertRecordParams struct {
 	ToolName       string `db:"tool_name"`
 	IdempotencyKey string `db:"idempotency_key"`
 	Data           []byte `db:"data"`
+	DataSha256     string `db:"data_sha256"`
 }
 
 func (q *Queries) UpsertRecord(ctx context.Context, arg UpsertRecordParams) error {
@@ -3578,6 +3706,7 @@ func (q *Queries) UpsertRecord(ctx context.Context, arg UpsertRecordParams) erro
 		arg.ToolName,
 		arg.IdempotencyKey,
 		arg.Data,
+		arg.DataSha256,
 	)
 	return err
 }

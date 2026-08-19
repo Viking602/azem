@@ -99,6 +99,12 @@ Configuration lives under `agents.subagents` (`internal/config/config.go`):
   thinking/text frames and elapsed-time UI ticks do not.
 - States: `initializing → queued → running → completed/failed/cancelled/
   interrupted`, with `cancelling` as the transitional kill state.
+- `evidenceStatus` is a projection, not a lifecycle transition.
+  `provisional` means durable work exists without same-revision passing
+  verification; `verified` requires an accepted disposition plus that passing
+  result; `stale` means a newer work revision invalidated the terminal result.
+  `subagentStateEvent` includes the value in the existing `agent_state`
+  payload, and both desktop and TUI treat unknown/legacy values as absent.
 
 `canStartLocked` enforces the concurrency limit with one exception: when the
 scheduler is full, a running parent (depth > 0) may admit exactly one

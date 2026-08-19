@@ -93,39 +93,53 @@ func workspaceLimitOrCaptureCode(err error) string {
 	return "capture_failed"
 }
 
+type durableToolCall struct {
+	call   message.ToolCall
+	intent session.ActionIntentV1
+}
+
 type durableToolTimeline struct {
 	store            *session.Service
 	workspace        string
 	sessionID, runID string
 	mu               sync.Mutex
-	calls            map[string]message.ToolCall
+	calls            map[string]durableToolCall
 	anchorSequence   int64
 	hasAnchor        bool
 }
 
 func newDurableToolTimeline(store *session.Service, workspace, sessionID, runID string) *durableToolTimeline {
-	return &durableToolTimeline{store: store, workspace: workspace, sessionID: sessionID, runID: runID, calls: map[string]message.ToolCall{}}
+	return &durableToolTimeline{store: store, workspace: workspace, sessionID: sessionID, runID: runID, calls: map[string]durableToolCall{}}
 }
 
 func (t *durableToolTimeline) start(ctx context.Context, call message.ToolCall) error {
 	if t == nil || t.store == nil {
 		return nil
 	}
-	t.mu.Lock()
-	t.calls[call.ID] = call
-	anchor, hasAnchor := t.anchorSequence, t.hasAnchor
-	t.mu.Unlock()
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
+	intent, err := persistToolIntent(persistCtx, t.store, t.workspace, t.sessionID, t.runID, call)
+	if err != nil {
+		return fmt.Errorf("persist tool intent: %w", err)
+	}
+	t.mu.Lock()
+	t.calls[call.ID] = durableToolCall{call: call, intent: intent}
+	anchor, hasAnchor := t.anchorSequence, t.hasAnchor
+	t.mu.Unlock()
 	record := session.ToolRecord{
 		RunID: t.runID, ToolCallID: call.ID, Name: call.Name,
 		Arguments: append(json.RawMessage(nil), call.Arguments...), StartedAt: time.Now().UTC(),
 	}
 	if hasAnchor {
-		_, err := t.store.StartToolRecordAt(persistCtx, t.sessionID, record, anchor)
-		return err
+		_, err = t.store.StartToolRecordAt(persistCtx, t.sessionID, record, anchor)
+	} else {
+		_, err = t.store.StartToolRecord(persistCtx, t.sessionID, record)
 	}
-	_, err := t.store.StartToolRecord(persistCtx, t.sessionID, record)
+	if err != nil {
+		t.mu.Lock()
+		delete(t.calls, call.ID)
+		t.mu.Unlock()
+	}
 	return err
 }
 
@@ -147,9 +161,10 @@ func (t *durableToolTimeline) finish(ctx context.Context, result message.ToolRes
 		return nil, result.Name, nil
 	}
 	t.mu.Lock()
-	call := t.calls[result.ToolCallID]
+	pending := t.calls[result.ToolCallID]
 	delete(t.calls, result.ToolCallID)
 	t.mu.Unlock()
+	call := pending.call
 	state := session.ToolCompleted
 	if result.IsError {
 		state = session.ToolFailed
@@ -183,11 +198,14 @@ func (t *durableToolTimeline) finish(ctx context.Context, result message.ToolRes
 		name = call.Name
 	}
 	observations := t.fileObservations(name, call.Arguments, result.Structured, !result.IsError)
-	_, err := t.store.FinishToolRecord(persistCtx, t.sessionID, session.ToolRecord{
+	record, err := t.store.FinishToolRecord(persistCtx, t.sessionID, session.ToolRecord{
 		RunID: t.runID, ToolCallID: result.ToolCallID, Name: name, State: state,
 		Content: content, Structured: structured, ArtifactID: artifactID,
 		Observations: observations, CompletedAt: time.Now().UTC(),
 	})
+	if err == nil {
+		err = persistToolObservation(persistCtx, t.store, t.workspace, t.sessionID, t.runID, pending.intent, record)
+	}
 	return call.Arguments, name, err
 }
 

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -321,6 +322,12 @@ func TestSkillAllowedToolsDoNotBypassApproval(t *testing.T) {
 					t.Errorf("approved file output missing from second request: %s", body)
 				}
 				writeProviderText(writer, "approval-2", "approved")
+			case 3:
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"approval-read-item\",\"call_id\":\"approval-read\",\"name\":\"coding.read_file\",\"arguments\":\"{\\\"path\\\":\\\"approval-marker.txt\\\"}\"}}\n\n")
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"approval-diff-item\",\"call_id\":\"approval-diff\",\"name\":\"coding.shell\",\"arguments\":\"{\\\"command\\\":\\\"git diff --check -- approval-marker.txt\\\",\\\"wall_clock_seconds\\\":60}\"}}\n\n")
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"approval-3\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14}}}\n\n")
+			case 4:
+				writeProviderText(writer, "approval-4", "approved")
 			default:
 				t.Errorf("unexpected provider call %d", call)
 				writeProviderText(writer, "approval-extra", "unexpected")
@@ -348,18 +355,27 @@ func TestSkillAllowedToolsDoNotBypassApproval(t *testing.T) {
 		}
 		switch event.Kind {
 		case EventApprovalRequested:
-			if event.ToolCallID != "write-approval" || event.Data["tool"] != "coding.write_file" {
-				t.Fatalf("approval event = %+v", event)
-			}
-			if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
-				t.Fatalf("file was created before approval, stat error = %v", err)
+			switch event.ToolCallID {
+			case "write-approval":
+				if event.Data["tool"] != "coding.write_file" {
+					t.Fatalf("approval event = %+v", event)
+				}
+				if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+					t.Fatalf("file was created before approval, stat error = %v", err)
+				}
+				approved = true
+			case "approval-diff":
+				if !approved || event.Data["tool"] != "coding.shell" {
+					t.Fatalf("verification approval event = %+v", event)
+				}
+			default:
+				t.Fatalf("unexpected approval event = %+v", event)
 			}
 			if err := harness.service.ExecuteAction(context.Background(), Action{
 				Kind: ActionResolveApproval, Target: event.ApprovalID, Decision: "once",
 			}); err != nil {
 				t.Fatal(err)
 			}
-			approved = true
 		case EventRunFailed:
 			t.Fatalf("run failed: %s", event.Text)
 		case EventRunCancelled:
@@ -375,8 +391,8 @@ func TestSkillAllowedToolsDoNotBypassApproval(t *testing.T) {
 			if string(content) != "skill-approval" {
 				t.Fatalf("approved marker = %q", content)
 			}
-			if harness.calls.Load() != 2 {
-				t.Fatalf("provider calls = %d, want 2", harness.calls.Load())
+			if harness.calls.Load() != 4 {
+				t.Fatalf("provider calls = %d, want 4", harness.calls.Load())
 			}
 			return
 		}

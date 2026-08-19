@@ -1,8 +1,8 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, GitBranch, Search } from "lucide-react";
 import { execute, initialise, isDesktopRuntime, resumeSession, subscribe, subscribePullRequests } from "./bridge";
 import Sidebar from "./components/Sidebar";
-import ThreadSurface from "./components/ThreadSurface";
+import { AppOverlays, AppWorkspace } from "./components/AppSurfaces";
 import { tFormat, translator } from "./i18n";
 import { isTerminalToggleKey } from "./terminal";
 import { useTerminalStore } from "./terminalStore";
@@ -14,16 +14,6 @@ import {
 import { normalizeUIFont, shouldMarkSessionUnread, useRuntimeStore } from "./store";
 import { refreshPullRequestDashboard } from "./pullRequests";
 import type { RuntimeEvent } from "./types";
-
-// Secondary surfaces — split out of the main entry so the first paint stays lean.
-const CommandPalette = lazy(() => import("./components/CommandPalette"));
-const Pages = lazy(() => import("./components/Pages"));
-const SubagentsDrawer = lazy(() => import("./components/SubagentsPage"));
-const SettingsDialog = lazy(() => import("./components/SettingsDialog"));
-const PullRequestPanel = lazy(() => import("./components/PullRequestPanel"));
-const Inspector = lazy(() => import("./components/Inspector"));
-const AgentSideChat = lazy(() => import("./components/AgentSideChat"));
-const TerminalPanel = lazy(() => import("./components/TerminalPanel"));
 
 const STREAM_FRAME_INTERVAL_MS = 32;
 const PROJECTION_RESYNC_DELAY_MS = 32;
@@ -338,47 +328,18 @@ export default function App() {
       <div className="workspace-grid" data-inspector={layoutMode}>
         <Sidebar />
         <ResizeHandle value={sidebarWidth} setValue={setSidebarWidth} min={224} max={340} />
-        <main className="workspace-main" data-terminal={terminalOpen ? "open" : "closed"}>
-          <div className="workspace-primary">
-          {view === "thread" || view === "agents" ? (
-            <ThreadSurface />
-          ) : (
-            <Suspense fallback={lazyFallback}>
-              <Pages view={view} />
-            </Suspense>
-          )}
-          {showInspector && <Suspense fallback={null}><Inspector /></Suspense>}
-          {showAgentDrawer && <Suspense fallback={null}>
-            <div className="subagents-drawer-layer" onClick={(event) => {
-              if (event.target === event.currentTarget) useRuntimeStore.getState().setView("thread");
-            }}>
-              <SubagentsDrawer />
-            </div>
-          </Suspense>}
-          {showAgentDetailDrawer && (
-            <Suspense fallback={null}>
-              <div className="subagent-detail-drawer-layer" onClick={(event) => {
-                if (event.target === event.currentTarget) useRuntimeStore.getState().selectAgent("");
-              }}>
-                <AgentSideChat />
-              </div>
-            </Suspense>
-          )}
-          </div>
-          {terminalMounted && <Suspense fallback={null}><TerminalPanel /></Suspense>}
-        </main>
-        {showPullRequest && <Suspense fallback={null}><PullRequestPanel /></Suspense>}
+        <AppWorkspace
+          view={view}
+          fallback={lazyFallback}
+          terminalOpen={terminalOpen}
+          terminalMounted={terminalMounted}
+          showInspector={showInspector}
+          showAgentDrawer={showAgentDrawer}
+          showAgentDetailDrawer={showAgentDetailDrawer}
+          showPullRequest={showPullRequest}
+        />
       </div>
-      {settingsOpen && (
-        <Suspense fallback={null}>
-          <SettingsDialog />
-        </Suspense>
-      )}
-      {commandOpen && (
-        <Suspense fallback={null}>
-          <CommandPalette />
-        </Suspense>
-      )}
+      <AppOverlays settingsOpen={settingsOpen} commandOpen={commandOpen} />
     </div>
   );
 }

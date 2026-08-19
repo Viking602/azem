@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -19,7 +20,7 @@ func TestPhase4ProviderFactsAreIdempotentIsolatedAndDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(store.DB())
+	svc := NewService(store.DB(), store.Blobs())
 	if _, err = svc.Ensure(ctx, Session{ID: "s", Title: "facts"}); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +89,7 @@ func TestPhase4ProviderFactsAreIdempotentIsolatedAndDurable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	reopened, err := NewService(store.DB()).ProviderUsageSnapshot(ctx, "s", "run")
+	reopened, err := NewService(store.DB(), store.Blobs()).ProviderUsageSnapshot(ctx, "s", "run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +105,7 @@ func TestProviderUsageSnapshotUsesLatestMainRequestForContextOccupancy(t *testin
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := NewService(store.DB())
+	svc := NewService(store.DB(), store.Blobs())
 	if _, err = svc.Ensure(ctx, Session{ID: "s", Title: "latest context"}); err != nil {
 		t.Fatal(err)
 	}
@@ -129,14 +130,14 @@ func TestProviderUsageSnapshotUsesLatestMainRequestForContextOccupancy(t *testin
 	}
 }
 
-func TestPhase4EpochIsolationMutationAndManualActivationBinding(t *testing.T) {
+func TestCacheEpochIsolationMutationAndManualArchiveBinding(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "epoch.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := NewService(store.DB())
+	svc := NewService(store.DB(), store.Blobs())
 	if _, err = svc.Ensure(ctx, Session{ID: "s", Title: "epoch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +159,14 @@ func TestPhase4EpochIsolationMutationAndManualActivationBinding(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	p, err = svc.CompactWithSummary(ctx, "s", CompactionPlan{Summary: "summary", ModelHistory: ModelHistory{StaticPrefixHash: "partial"}, ExpectedUpdatedAt: p.UpdatedAt})
+	manifest := &ContextManifestRecord{
+		ID: "manual-archive", PolicyVersion: 3, ManifestHash: "archive-hash",
+		Data: json.RawMessage(`{"id":"manual-archive","policy_version":3,"manifest_hash":"archive-hash"}`),
+	}
+	p, err = svc.ActivateArchiveCheckpoint(ctx, "s", ArchivePlan{
+		ModelHistory:      ModelHistory{StaticPrefixHash: "partial", Messages: []message.Message{message.NewText(message.RoleUser, "archive")}},
+		ExpectedUpdatedAt: p.UpdatedAt, Manifest: manifest,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +205,7 @@ func TestPhase5AdvanceCacheEpochCAS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := NewService(store.DB())
+	svc := NewService(store.DB(), store.Blobs())
 	if _, err = svc.Ensure(ctx, Session{ID: "s", Title: "cas"}); err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +246,7 @@ func TestAutomaticCompactionCrashSeparatesRestoredPrefixEpoch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := NewService(store.DB())
+	svc := NewService(store.DB(), store.Blobs())
 	if _, err := svc.Ensure(ctx, Session{ID: "s"}); err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +268,7 @@ func TestPhase5CompleteTurnPersistsAutomaticSummaryHash(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := NewService(store.DB())
+	svc := NewService(store.DB(), store.Blobs())
 	if _, err = svc.Ensure(ctx, Session{ID: "s", Title: "summary"}); err != nil {
 		t.Fatal(err)
 	}

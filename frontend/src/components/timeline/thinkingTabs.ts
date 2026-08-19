@@ -6,6 +6,7 @@ import {
   formatToolPresentation,
   isActiveProcessBlock,
   thinkingStateLabel,
+  thinkingTraceElapsedMs,
 } from "../toolTimeline";
 import { isFileChangeTool } from "../fileChanges";
 import { toolChipModel } from "../toolChip";
@@ -149,14 +150,10 @@ export function activityBarLabel(
   const live = Boolean(options.live) || waiting;
   const t = translator(language);
   const running = parts.steps.filter(isSparkleRunning);
-  if (running.length > 1) {
-    return tFormat(language, "thinkingRunningTools", { count: running.length });
-  }
-  if (running.length === 1) {
-    // Web search has no tool display name of its own, so keep the search wording.
-    if (parts.search.includes(running[0]!) && thinkingSearchIsWeb(parts)) return t("thinkingSearchedWeb");
-    // Otherwise mirror the executing row's own wording: the bar names the action.
-    return toolChipModel(running[0]!, language).label;
+  if (running.length) {
+    const current = running[running.length - 1]!;
+    if (parts.search.includes(current) && thinkingSearchIsWeb(parts)) return t("thinkingSearchedWeb");
+    return toolChipModel(current, language).label;
   }
   if (!live && parts.steps.length) {
     if (!thinkingWorkBlocks(parts).length) {
@@ -166,7 +163,7 @@ export function activityBarLabel(
       ? t("thinkingRanOneTool")
       : tFormat(language, "thinkingRanTools", { count: parts.steps.length });
   }
-  return thinkingStateLabel(language, live);
+  return thinkingStateLabel(language, live, live ? 0 : thinkingTraceElapsedMs(parts.reasoning));
 }
 
 export function defaultThinkingTab(parts: ThinkingTraceParts): ThinkingTabId {

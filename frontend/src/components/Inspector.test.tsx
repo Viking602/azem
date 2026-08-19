@@ -67,9 +67,9 @@ describe("Inspector", () => {
     const root = createRoot(container);
 
     await act(async () => root.render(<Inspector />));
-    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("缓存命中率80%");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("最近请求命中率80%");
     expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("命中缓存11k");
-    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("总缓存14k");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("请求输入14k");
     expect(container.querySelector(".context-composition")?.textContent).toContain("上下文构成");
     expect(container.querySelector(".recap-section")?.textContent).toContain("会话回顾r3");
     expect(container.querySelector(".recap-section")?.textContent).toContain("回顾已投影到当前会话。");
@@ -93,6 +93,27 @@ describe("Inspector", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(groups.hidden).toBe(true);
     await act(async () => root.unmount());
+  });
+
+  it("labels a new running request as pending instead of showing aggregate history", async () => {
+    useRuntimeStore.setState({
+      snapshot, view: "thread", currentSessionId: "session-1", blocks: [], agents: [], backgroundProcesses: [],
+      branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
+      todo: null, recap: null, contextProfile: null, running: true,
+      contextUsage: {
+        inputTokens: 58_000, outputTokens: 0, contextLimit: 128_000, reported: false,
+        cacheInputTokens: 100_000, cachedInputTokens: 88_000, cacheReported: true,
+      },
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(<Inspector />));
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("最近请求命中率等待上报");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).not.toContain("88%");
+
+    await act(async () => root.unmount());
+    useRuntimeStore.setState({ running: false });
   });
 
   it("lists distinct image names with typed and web-search URLs, and opens them", async () => {

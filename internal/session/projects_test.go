@@ -15,7 +15,7 @@ func TestProjectCatalogOwnsSessionsAndRestoresMostRecentWorkspace(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	projectA, projectB := t.TempDir(), t.TempDir()
 	projectA, _ = filepath.EvalSymlinks(projectA)
 	projectB, _ = filepath.EvalSymlinks(projectB)

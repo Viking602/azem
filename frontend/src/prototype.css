@@ -311,8 +311,9 @@ html[data-reduce-motion="true"] *::after { animation-duration: .01ms !important;
 .route-model-options { padding: 0; border-radius: 12px; }
 .route-model-options .menu-select-search { height: 42px; margin: 0; padding: 0 11px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; }
 .route-model-options .menu-select-list { max-height: 260px; display: grid; gap: 2px; overflow: auto; padding: 5px; }
-.route-model-options .menu-select-option { min-height: 47px; grid-template-columns: 16px 25px minmax(0, 1fr); gap: 8px; padding: 5px 7px; border-radius: 8px; }
-.route-model-options .menu-select-option > :nth-child(2) { width: 20px; height: 20px; justify-self: center; }
+.route-model-options .menu-select-option { min-height: 47px; grid-template-columns: minmax(0, 1fr) 16px; gap: 8px; padding: 5px 7px; border-radius: 8px; }
+.route-model-options .menu-select-option.has-icon { grid-template-columns: 25px minmax(0, 1fr) 16px; }
+.route-model-options .menu-select-option.has-icon > :first-child { width: 20px; height: 20px; justify-self: center; }
 .route-model-options .menu-select-option-copy strong { font-size: 10px; }
 .route-model-options .menu-select-option-copy small { margin-top: 1px; font-size: 8px; }
 .menu-select-option-copy strong, .menu-select-option-copy small { display: block; }

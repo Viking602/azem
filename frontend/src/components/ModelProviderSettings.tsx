@@ -190,11 +190,11 @@ function ProviderModelCatalog({ provider, models, enabledCount, description, war
 function modelUseLabel(providerID: string, modelID: string, routes: ModelRoute[], activeProvider: string | undefined, activeModel: string | undefined, language: Language) {
 	if (providerID === activeProvider && modelID === activeModel) return language === "zh-CN" ? "当前主模型" : "Current";
 	const matchingRoutes = routes.filter((route) => route.route.provider === providerID && route.route.model === modelID);
-	const scope = ["main", "approval", "plan", "title", "vision", "compaction", "subagent"].find((candidate) => matchingRoutes.some((route) => route.scope === candidate));
+	const scope = ["main", "approval", "plan", "title", "vision", "recap", "subagent"].find((candidate) => matchingRoutes.some((route) => route.scope === candidate));
 	if (!scope) return "";
 	const labels = language === "zh-CN"
-		? { main: "主模型", approval: "审批", plan: "规划", title: "标题", vision: "视觉", compaction: "压缩", subagent: "子智能体" }
-		: { main: "Main", approval: "Approval", plan: "Plan", title: "Titles", vision: "Vision", compaction: "Compaction", subagent: "Subagent" };
+		? { main: "主模型", approval: "审批", plan: "规划", title: "标题", vision: "视觉", recap: "回顾", subagent: "子智能体" }
+		: { main: "Main", approval: "Approval", plan: "Plan", title: "Titles", vision: "Vision", recap: "Recap", subagent: "Subagent" };
 	return labels[scope as keyof typeof labels];
 }
 

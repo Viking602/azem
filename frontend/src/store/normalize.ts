@@ -236,14 +236,19 @@ export function normalizeBackgroundProcess(raw: Record<string, unknown>): Backgr
   };
 }
 
+
 export function normalizeAgent(id: string, raw: Record<string, unknown>, state = "", summary = ""): AgentState {
+  const evidenceStatus = raw.evidenceStatus === "provisional" || raw.evidenceStatus === "verified" || raw.evidenceStatus === "stale"
+    ? raw.evidenceStatus
+    : "";
   return {
     id, type: stringValue(raw, "type"), description: stringValue(raw, "description"),
     parentRunId: stringValue(raw, "parentRunId"), parentToolCallId: stringValue(raw, "parentToolCallId"),
     model: stringValue(raw, "model"), background: Boolean(raw.background),
     capabilityMode: stringValue(raw, "capabilityMode"), isolation: stringValue(raw, "isolation"),
     cwd: stringValue(raw, "cwd"), activity: stringValue(raw, "activity"),
-    warning: stringValue(raw, "warning"), worktreePath: stringValue(raw, "worktreePath"),
+    warning: stringValue(raw, "warning"), evidenceStatus,
+    worktreePath: stringValue(raw, "worktreePath"),
     toolCalls: numberValue(raw.toolCalls), turns: numberValue(raw.turns),
     tokensUsed: numberValue(raw.tokensUsed), elapsedMs: numberValue(raw.elapsedMs),
     state, summary, preview: "", previewKind: "", previewRunId: "", elapsedObservedAt: Date.now(),
@@ -578,6 +583,7 @@ export function upsertAgent(agents: AgentState[], agent: AgentState): AgentState
       cwd: agent.cwd || current.cwd,
       activity: agent.activity || current.activity,
       warning: agent.warning || current.warning,
+      evidenceStatus: agent.evidenceStatus || current.evidenceStatus,
       worktreePath: agent.worktreePath || current.worktreePath,
       summary: agent.summary || current.summary,
       state: agent.state || current.state,

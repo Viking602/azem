@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -97,7 +99,10 @@ func (s AttachmentStore) Import(sessionID, sourcePath string) (session.Attachmen
 	if err != nil {
 		return session.Attachment{}, err
 	}
-	dir := filepath.Join(s.Root, sanitizePathComponent(sessionID))
+	dir, err := sessionAttachmentDirectory(s.Root, sessionID)
+	if err != nil {
+		return session.Attachment{}, err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return session.Attachment{}, fmt.Errorf("create attachment dir: %w", err)
 	}
@@ -158,7 +163,10 @@ func (s AttachmentStore) ImportBytes(sessionID, name, mimeType string, data []by
 	if err != nil {
 		return session.Attachment{}, err
 	}
-	dir := filepath.Join(s.Root, sanitizePathComponent(sessionID))
+	dir, err := sessionAttachmentDirectory(s.Root, sessionID)
+	if err != nil {
+		return session.Attachment{}, err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return session.Attachment{}, fmt.Errorf("create attachment dir: %w", err)
 	}
@@ -180,6 +188,95 @@ func (s AttachmentStore) ImportBytes(sessionID, name, mimeType string, data []by
 	}, nil
 }
 
+func generatedAttachmentMatches(dest string, data []byte, digest [sha256.Size]byte) bool {
+	info, err := os.Stat(dest)
+	if err != nil || info.Size() != int64(len(data)) {
+		return false
+	}
+	existing, err := os.ReadFile(dest)
+	if err != nil {
+		return false
+	}
+	return sha256.Sum256(existing) == digest
+}
+
+func installGeneratedAttachment(dir, id, dest string, data []byte) error {
+	temp, err := os.CreateTemp(dir, id+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create generated attachment: %w", err)
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("secure generated attachment: %w", err)
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("write generated attachment: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close generated attachment: %w", err)
+	}
+	if err := os.Rename(tempPath, dest); err != nil {
+		return fmt.Errorf("install generated attachment: %w", err)
+	}
+	return nil
+}
+
+// ImportGeneratedImageBytes stores a host-generated image under a content-derived
+// ID. Re-importing repairs a missing or corrupted file without changing the
+// attachment metadata persisted in a model-history checkpoint.
+func (s AttachmentStore) ImportGeneratedImageBytes(sessionID, name, mimeType string, data []byte) (session.Attachment, error) {
+	if strings.TrimSpace(s.Root) == "" {
+		return session.Attachment{}, fmt.Errorf("attachment store is unavailable")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return session.Attachment{}, fmt.Errorf("session id is required")
+	}
+	if len(data) == 0 {
+		return session.Attachment{}, fmt.Errorf("image is empty")
+	}
+	mimeType = normalizeImageMIME(mimeType)
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		probe := data
+		if len(probe) > maxImageReadProbe {
+			probe = probe[:maxImageReadProbe]
+		}
+		mimeType = normalizeImageMIME(http.DetectContentType(probe))
+	}
+	if _, ok := allowedImageMIME[mimeType]; !ok {
+		return session.Attachment{}, fmt.Errorf("unsupported image type %q (png, jpeg, gif, webp)", mimeType)
+	}
+	digest := sha256.Sum256(data)
+	id := "archive_" + hex.EncodeToString(digest[:12])
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = id + allowedImageMIME[mimeType]
+	}
+	ext := filepath.Ext(name)
+	if ext == "" {
+		ext = allowedImageMIME[mimeType]
+		name += ext
+	}
+	dir, err := sessionAttachmentDirectory(s.Root, sessionID)
+	if err != nil {
+		return session.Attachment{}, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return session.Attachment{}, fmt.Errorf("create attachment dir: %w", err)
+	}
+	dest := filepath.Join(dir, id+ext)
+	if generatedAttachmentMatches(dest, data, digest) {
+		return session.Attachment{ID: id, Name: filepath.Base(name), MIME: mimeType, Path: dest, Size: int64(len(data))}, nil
+	}
+	if err := installGeneratedAttachment(dir, id, dest, data); err != nil {
+		return session.Attachment{}, err
+	}
+	return session.Attachment{ID: id, Name: filepath.Base(name), MIME: mimeType, Path: dest, Size: int64(len(data))}, nil
+}
+
 func normalizeImageMIME(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "image/jpg" {
@@ -191,10 +288,42 @@ func normalizeImageMIME(value string) string {
 	return value
 }
 
-func sanitizePathComponent(value string) string {
-	value = strings.TrimSpace(value)
-	replacer := strings.NewReplacer("/", "_", "\\", "_", "..", "_", ":", "_")
-	return replacer.Replace(value)
+func sessionAttachmentDirectory(root, sessionID string) (string, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", fmt.Errorf("session id is required")
+	}
+	if sessionID == "." || sessionID == ".." || filepath.Base(sessionID) != sessionID ||
+		strings.ContainsAny(sessionID, `/\:`) {
+		return "", fmt.Errorf("session id %q is not safe for attachment storage", sessionID)
+	}
+	return filepath.Join(root, sessionID), nil
+}
+
+func validateSessionAttachmentPath(sessionRoot, sessionID string, att session.Attachment) error {
+	path, err := filepath.Abs(filepath.Clean(att.Path))
+	if err != nil {
+		return fmt.Errorf("resolve attachment %q: %w", att.Name, err)
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve attachment %q: %w", att.Name, err)
+	}
+	relative, err := filepath.Rel(sessionRoot, path)
+	if err != nil || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("attachment %q does not belong to session %q", att.Name, sessionID)
+	}
+	if att.Size <= 0 {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat attachment %q: %w", att.Name, err)
+	}
+	if info.Size() != att.Size {
+		return fmt.Errorf("attachment %q size changed: got %d, want %d", att.Name, info.Size(), att.Size)
+	}
+	return nil
 }
 
 // ValidateSessionAttachments accepts only files imported into the submitted
@@ -214,7 +343,11 @@ func (s AttachmentStore) ValidateSessionAttachments(sessionID string, atts []ses
 	if strings.TrimSpace(s.Root) == "" {
 		return fmt.Errorf("attachment store is unavailable")
 	}
-	sessionRoot, err := filepath.Abs(filepath.Join(s.Root, sanitizePathComponent(sessionID)))
+	sessionRoot, err := sessionAttachmentDirectory(s.Root, sessionID)
+	if err != nil {
+		return err
+	}
+	sessionRoot, err = filepath.Abs(sessionRoot)
 	if err != nil {
 		return fmt.Errorf("resolve session attachment directory: %w", err)
 	}
@@ -226,17 +359,8 @@ func (s AttachmentStore) ValidateSessionAttachments(sessionID string, atts []ses
 		return fmt.Errorf("resolve session attachment directory: %w", err)
 	}
 	for _, att := range atts {
-		path, resolveErr := filepath.Abs(filepath.Clean(att.Path))
-		if resolveErr != nil {
-			return fmt.Errorf("resolve attachment %q: %w", att.Name, resolveErr)
-		}
-		path, resolveErr = filepath.EvalSymlinks(path)
-		if resolveErr != nil {
-			return fmt.Errorf("resolve attachment %q: %w", att.Name, resolveErr)
-		}
-		relative, relativeErr := filepath.Rel(sessionRoot, path)
-		if relativeErr != nil || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("attachment %q does not belong to session %q", att.Name, sessionID)
+		if err := validateSessionAttachmentPath(sessionRoot, sessionID, att); err != nil {
+			return err
 		}
 	}
 	return nil

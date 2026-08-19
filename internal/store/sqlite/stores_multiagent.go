@@ -12,11 +12,11 @@ func (u *unitOfWork) SaveHandoff(ctx context.Context, value api.HandoffRecord) e
 }
 
 func (u *unitOfWork) LoadHandoff(ctx context.Context, runID string, handoffID string) (api.HandoffRecord, error) {
-	return loadRecord[api.HandoffRecord](ctx, u.tx, kindHandoff, handoffID, runID)
+	return loadRecord[api.HandoffRecord](ctx, u, kindHandoff, handoffID, runID)
 }
 
 func (u *unitOfWork) ListHandoffs(ctx context.Context, selector api.HandoffSelector) ([]api.HandoffRecord, error) {
-	values, err := listRecords[api.HandoffRecord](ctx, u.tx, kindHandoff, selector.RunID)
+	values, err := listRecords[api.HandoffRecord](ctx, u, kindHandoff, selector.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +36,7 @@ func (u *unitOfWork) SaveTeamState(ctx context.Context, value api.TeamStateRecor
 }
 
 func (u *unitOfWork) LoadTeamState(ctx context.Context, runID string) (api.TeamStateRecord, error) {
-	return loadRecord[api.TeamStateRecord](ctx, u.tx, kindTeamState, runID, "")
+	return loadRecord[api.TeamStateRecord](ctx, u, kindTeamState, runID, "")
 }
 
 func (u *unitOfWork) SaveAgentInstance(ctx context.Context, value api.AgentInstanceRecord) error {
@@ -44,11 +44,11 @@ func (u *unitOfWork) SaveAgentInstance(ctx context.Context, value api.AgentInsta
 }
 
 func (u *unitOfWork) LoadAgentInstance(ctx context.Context, id string) (api.AgentInstanceRecord, error) {
-	return loadRecord[api.AgentInstanceRecord](ctx, u.tx, kindInstance, id, "")
+	return loadRecord[api.AgentInstanceRecord](ctx, u, kindInstance, id, "")
 }
 
 func (u *unitOfWork) ListAgentInstances(ctx context.Context, selector api.AgentInstanceSelector) ([]api.AgentInstanceRecord, error) {
-	values, err := listRecords[api.AgentInstanceRecord](ctx, u.tx, kindInstance, selector.RunID)
+	values, err := listRecords[api.AgentInstanceRecord](ctx, u, kindInstance, selector.RunID)
 	if err != nil {
 		return nil, err
 	}

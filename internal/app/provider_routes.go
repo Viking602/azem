@@ -6,6 +6,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/Viking602/azem/internal/adapterdeployment"
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/provider/catalog"
@@ -13,12 +14,6 @@ import (
 	"github.com/Viking602/azem/internal/provider/xai"
 	hyprovider "github.com/Viking602/venat/provider"
 )
-
-func (r *ProviderRuntime) modelRouteSnapshot() (config.ModelRouteConfig, *subagentRuntime) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.cfg.Agents.Compaction, r.subagents
-}
 
 func (r *ProviderRuntime) titleModelRouteSnapshot() config.ModelRouteConfig {
 	r.mu.RLock()
@@ -57,12 +52,11 @@ func (r *ProviderRuntime) UpdateModelRoute(scope, role string, route config.Mode
 		r.cfg.Defaults.Provider, r.cfg.Defaults.Model, r.cfg.Defaults.Reasoning = route.Provider, route.Model, route.Reasoning
 	}
 	routeTargets := map[string]*config.ModelRouteConfig{
-		"title":      &r.cfg.Agents.Title,
-		"plan":       &r.cfg.Agents.Plan,
-		"approval":   &r.cfg.Agents.Approval,
-		"vision":     &r.cfg.Agents.Vision,
-		"compaction": &r.cfg.Agents.Compaction,
-		"recap":      &r.cfg.Agents.Recap,
+		"title":    &r.cfg.Agents.Title,
+		"plan":     &r.cfg.Agents.Plan,
+		"approval": &r.cfg.Agents.Approval,
+		"vision":   &r.cfg.Agents.Vision,
+		"recap":    &r.cfg.Agents.Recap,
 	}
 	if target := routeTargets[scope]; target != nil {
 		*target = route
@@ -153,11 +147,46 @@ func (r *ProviderRuntime) UpdateSubscriptionDisabledModels(provider string, mode
 	}
 }
 
+// AttachAdapterRegistry adds an exact adapter substitution to the existing
+// provider route boundary. It does not create a second provider router.
+func (r *ProviderRuntime) AttachAdapterRegistry(registry *adapterdeployment.Registry) {
+	r.mu.Lock()
+	r.adapters = registry
+	r.mu.Unlock()
+}
+
+func (r *ProviderRuntime) resolveAdapterRoute(providerID, modelID, reasoning string) (string, string, string) {
+	r.mu.RLock()
+	registry := r.adapters
+	r.mu.RUnlock()
+	if registry == nil {
+		return providerID, modelID, reasoning
+	}
+	resolution := registry.Resolve(config.ModelRouteConfig{Provider: providerID, Model: modelID, Reasoning: reasoning})
+	return resolution.Route.Provider, resolution.Route.Model, resolution.Route.Reasoning
+}
+
 func (r *ProviderRuntime) resolveDriver(ctx context.Context, providerID, modelID, requestedReasoning string) (auth.Account, string, int, hyprovider.Driver, error) {
 	return r.resolveDriverForAccount(ctx, providerID, modelID, requestedReasoning, "")
 }
 
 func (r *ProviderRuntime) resolveDriverForAccount(ctx context.Context, providerID, modelID, requestedReasoning, accountID string) (auth.Account, string, int, hyprovider.Driver, error) {
+	baseAccount, baseResolvedModel, baseContextWindow, baseDriver, err := r.resolveDriverForAccountRoute(ctx, providerID, modelID, requestedReasoning, accountID)
+	if err != nil {
+		return auth.Account{}, "", 0, nil, err
+	}
+	adaptedProvider, adaptedModel, adaptedReasoning := r.resolveAdapterRoute(providerID, modelID, requestedReasoning)
+	if providerID == adaptedProvider && modelID == adaptedModel && requestedReasoning == adaptedReasoning {
+		return baseAccount, baseResolvedModel, baseContextWindow, baseDriver, nil
+	}
+
+	// Adapter substitution happens only after the requested base route has
+	// passed the existing provider/model/account checks. Revalidate the
+	// adapted route through that same boundary before admitting it.
+	return r.resolveDriverForAccountRoute(ctx, adaptedProvider, adaptedModel, adaptedReasoning, accountID)
+}
+
+func (r *ProviderRuntime) resolveDriverForAccountRoute(ctx context.Context, providerID, modelID, requestedReasoning, accountID string) (auth.Account, string, int, hyprovider.Driver, error) {
 	if providerID != "chatgpt" && providerID != "grok" {
 		return r.resolveLLMuxDriverForAccount(ctx, providerID, modelID, requestedReasoning, accountID)
 	}

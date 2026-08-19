@@ -232,7 +232,7 @@ func TestPhase3ArtifactToolRoundTripsBinaryPayloadAsBase64(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "s"}); err != nil {
 		t.Fatal(err)
 	}
@@ -381,10 +381,10 @@ func TestObserveProviderRetriesBindsConfiguredDelayCap(t *testing.T) {
 	}
 }
 
-func TestTitleModelRouteIsIndependentFromPlanAndCompaction(t *testing.T) {
+func TestTitleModelRouteIsIndependentFromPlanAndRecap(t *testing.T) {
 	cfg := config.Default()
 	cfg.Agents.Plan = config.ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
-	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-summary", Reasoning: "low"}
+	cfg.Agents.Recap = config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-recap", Reasoning: "low"}
 	runtime := &ProviderRuntime{cfg: cfg}
 	if initial := runtime.titleModelRouteSnapshot(); initial != (config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"}) {
 		t.Fatalf("default title route = %#v", initial)
@@ -394,14 +394,14 @@ func TestTitleModelRouteIsIndependentFromPlanAndCompaction(t *testing.T) {
 	if got := runtime.titleModelRouteSnapshot(); got != title {
 		t.Fatalf("title route = %#v", got)
 	}
-	if runtime.cfg.Agents.Plan != cfg.Agents.Plan || runtime.cfg.Agents.Compaction != cfg.Agents.Compaction {
-		t.Fatalf("title route changed other routes: plan=%#v compaction=%#v", runtime.cfg.Agents.Plan, runtime.cfg.Agents.Compaction)
+	if runtime.cfg.Agents.Plan != cfg.Agents.Plan || runtime.cfg.Agents.Recap != cfg.Agents.Recap {
+		t.Fatalf("title route changed other routes: plan=%#v recap=%#v", runtime.cfg.Agents.Plan, runtime.cfg.Agents.Recap)
 	}
 }
 
-func TestRecapModelRouteIsIndependentFromCompaction(t *testing.T) {
+func TestRecapModelRouteIsIndependentFromPlan(t *testing.T) {
 	cfg := config.Default()
-	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-summary", Reasoning: "minimal"}
+	cfg.Agents.Plan = config.ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
 	runtime := &ProviderRuntime{cfg: cfg}
 	if initial := runtime.recapModelRouteSnapshot(); initial != (config.ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"}) {
 		t.Fatalf("default recap route = %#v", initial)
@@ -411,8 +411,8 @@ func TestRecapModelRouteIsIndependentFromCompaction(t *testing.T) {
 	if got := runtime.recapModelRouteSnapshot(); got != recapRoute {
 		t.Fatalf("recap route = %#v", got)
 	}
-	if runtime.cfg.Agents.Compaction != cfg.Agents.Compaction {
-		t.Fatalf("recap route changed compaction route: %#v", runtime.cfg.Agents.Compaction)
+	if runtime.cfg.Agents.Plan != cfg.Agents.Plan {
+		t.Fatalf("recap route changed plan route: %#v", runtime.cfg.Agents.Plan)
 	}
 }
 

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,7 +17,9 @@ import (
 	"time"
 
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/blobstore"
 	"github.com/Viking602/azem/internal/config"
+	evalpkg "github.com/Viking602/azem/internal/eval"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	_ "modernc.org/sqlite"
 )
@@ -37,21 +41,26 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("azem-eval", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var (
-		workspace      string
-		configFile     string
-		prompt         string
-		promptFile     string
-		provider       string
-		model          string
-		reasoning      string
-		timeout        time.Duration
-		printEvents    bool
-		showVersion    bool
-		exportAuthFrom string
-		exportAuthTo   string
-		refreshAuthDB  string
-		syncAuthFrom   string
-		syncAuthTo     string
+		workspace         string
+		configFile        string
+		prompt            string
+		promptFile        string
+		provider          string
+		model             string
+		reasoning         string
+		timeout           time.Duration
+		printEvents       bool
+		showVersion       bool
+		exportAuthFrom    string
+		exportAuthTo      string
+		refreshAuthDB     string
+		syncAuthFrom      string
+		syncAuthTo        string
+		trajectoryDB      string
+		trajectoryBlobs   string
+		trajectorySession string
+		trajectoryOut     string
+		baselineOut       string
 	)
 	fs.StringVar(&workspace, "workspace", "", "workspace root (default: current directory)")
 	fs.StringVar(&configFile, "config", "", "eval config.yaml (written with YOLO defaults if missing)")
@@ -68,6 +77,11 @@ func run(args []string) error {
 	fs.StringVar(&refreshAuthDB, "refresh-auth", "", "refresh active Grok/ChatGPT tokens in this database")
 	fs.StringVar(&syncAuthFrom, "sync-auth-from", "", "copy newer Grok/ChatGPT credentials from this database")
 	fs.StringVar(&syncAuthTo, "sync-auth-to", "", "write newer Grok/ChatGPT credentials into this database")
+	fs.StringVar(&trajectoryDB, "export-trajectory-db", "", "read durable session records from this database")
+	fs.StringVar(&trajectoryBlobs, "export-trajectory-blobs", "", "blob directory (default: <database-dir>/blobs)")
+	fs.StringVar(&trajectorySession, "export-trajectory-session", "", "session id to export")
+	fs.StringVar(&trajectoryOut, "export-trajectory-out", "-", "trajectory JSON path or - for stdout")
+	fs.StringVar(&baselineOut, "baseline-out", "", "write reproducible run baseline JSON before execution")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fs.SetOutput(os.Stdout)
@@ -80,6 +94,12 @@ func run(args []string) error {
 	if showVersion {
 		fmt.Fprintf(os.Stdout, "azem-eval %s (%s %s)\n", version, gitCommit, buildTime)
 		return nil
+	}
+	if trajectoryDB != "" || trajectorySession != "" || trajectoryBlobs != "" {
+		if trajectoryDB == "" || trajectorySession == "" {
+			return fmt.Errorf("export-trajectory-db and export-trajectory-session must be set together")
+		}
+		return exportTrajectory(trajectoryDB, trajectoryBlobs, trajectorySession, trajectoryOut)
 	}
 	if exportAuthFrom != "" || exportAuthTo != "" {
 		if exportAuthFrom == "" || exportAuthTo == "" {
@@ -136,6 +156,20 @@ func run(args []string) error {
 		defer shutdownCancel()
 		_ = boot.Service.Shutdown(shutdownCtx)
 	}()
+	if baselineOut != "" {
+		identity, captureErr := evalpkg.CaptureBaseline(ctx, evalpkg.BaselineOptions{
+			Workspace: workspace, AzemVersion: version, AzemCommit: gitCommit, BuildTime: buildTime,
+			Provider: provider, Model: model, Reasoning: reasoning,
+			InstructionFingerprint: app.InstructionFingerprint(false), TaskPrompt: text,
+			Tools: boot.Service.ToolDefinitionsSnapshot(),
+		})
+		if captureErr != nil {
+			return captureErr
+		}
+		if err := writeBaselineOutput(baselineOut, identity); err != nil {
+			return err
+		}
+	}
 	runID, err := boot.Service.StartConfiguredTurn(app.TurnRequest{
 		Prompt:    text,
 		Provider:  provider,
@@ -211,6 +245,7 @@ func drainTurn(ctx context.Context, service *app.Service, runID string, printEve
 		event, err := service.NextEvent(ctx)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				service.CancelActiveWithChildren(true)
 				return fmt.Errorf("turn timed out")
 			}
 			return err
@@ -240,6 +275,207 @@ func drainTurn(ctx context.Context, service *app.Service, runID string, printEve
 			return nil
 		}
 	}
+}
+
+func writeBaselineOutput(outputPath string, identity evalpkg.BaselineIdentityV1) error {
+	if outputPath == "-" {
+		return evalpkg.WriteBaseline(os.Stdout, identity)
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
+		return fmt.Errorf("create baseline output directory: %w", err)
+	}
+	file, err := os.CreateTemp(filepath.Dir(outputPath), ".azem-baseline-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create baseline output: %w", err)
+	}
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write baseline output: chmod: %w", err)
+	}
+	if err := evalpkg.WriteBaseline(file, identity); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write baseline output: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write baseline output: sync: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("write baseline output: close: %w", err)
+	}
+	info, err := os.Stat(tempPath)
+	if err != nil {
+		return fmt.Errorf("write baseline output: stat: %w", err)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("write baseline output: empty temporary file")
+	}
+	encoded, err := os.ReadFile(tempPath)
+	if err != nil {
+		return fmt.Errorf("write baseline output: verify: %w", err)
+	}
+	if _, err := evalpkg.ReadBaseline(strings.NewReader(string(encoded))); err != nil {
+		return fmt.Errorf("write baseline output: verify: %w", err)
+	}
+	if err := os.Rename(tempPath, outputPath); err != nil {
+		return fmt.Errorf("install baseline output: %w", err)
+	}
+	if err := syncOutputDirectory(filepath.Dir(outputPath)); err != nil {
+		return fmt.Errorf("install baseline output: sync directory: %w", err)
+	}
+	return nil
+}
+
+func syncOutputDirectory(directory string) error {
+	dir, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+		return err
+	}
+	return dir.Close()
+}
+
+func readOnlySQLiteDSN(databasePath string) (string, error) {
+	absolute, err := filepath.Abs(databasePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve trajectory database path: %w", err)
+	}
+	path := filepath.ToSlash(absolute)
+	if filepath.VolumeName(absolute) != "" && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	uri := url.URL{Scheme: "file", Path: path}
+	query := uri.Query()
+	query.Set("mode", "ro")
+	query.Set("_pragma", "query_only(1)")
+	uri.RawQuery = query.Encode()
+	return uri.String(), nil
+}
+
+func exportTrajectory(databasePath, blobRoot, sessionID, outputPath string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	source, err := openTrajectoryDatabase(ctx, databasePath)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	blobs, err := openTrajectoryBlobs(databasePath, blobRoot)
+	if err != nil {
+		return err
+	}
+	trajectory, err := evalpkg.ExportTrajectory(ctx, source, blobs, sessionID)
+	if err != nil {
+		return err
+	}
+	return writeTrajectoryOutput(outputPath, trajectory)
+}
+
+func openTrajectoryDatabase(ctx context.Context, databasePath string) (*sql.DB, error) {
+	dsn, err := readOnlySQLiteDSN(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	source, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open trajectory database: %w", err)
+	}
+	if err := source.PingContext(ctx); err != nil {
+		source.Close()
+		return nil, fmt.Errorf("read trajectory database: %w", err)
+	}
+	return source, nil
+}
+
+func openTrajectoryBlobs(databasePath, blobRoot string) (blobstore.Store, error) {
+	if blobRoot == "" {
+		blobRoot = filepath.Join(filepath.Dir(databasePath), "blobs")
+	}
+	if _, err := os.Stat(blobRoot); os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("inspect trajectory blob directory: %w", err)
+	}
+	return blobstore.NewDirectory(blobRoot)
+}
+
+func writeTrajectoryOutput(outputPath string, trajectory evalpkg.TrajectoryV1) error {
+	if outputPath == "" || outputPath == "-" {
+		return evalpkg.WriteTrajectory(os.Stdout, trajectory)
+	}
+	return writeTrajectoryFile(outputPath, trajectory)
+}
+
+func writeTrajectoryFile(outputPath string, trajectory evalpkg.TrajectoryV1) error {
+	directory := filepath.Dir(outputPath)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("create trajectory output directory: %w", err)
+	}
+	file, err := os.CreateTemp(directory, ".azem-trajectory-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create trajectory output: %w", err)
+	}
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	if err := writeTrajectoryTemp(file, trajectory); err != nil {
+		return err
+	}
+	if err := verifyTrajectoryTemp(tempPath); err != nil {
+		return err
+	}
+	return installTrajectoryOutput(tempPath, outputPath)
+}
+
+func writeTrajectoryTemp(file *os.File, trajectory evalpkg.TrajectoryV1) error {
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return fmt.Errorf("write trajectory output: chmod: %w", err)
+	}
+	if err := evalpkg.WriteTrajectory(file, trajectory); err != nil {
+		file.Close()
+		return fmt.Errorf("write trajectory output: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return fmt.Errorf("write trajectory output: sync: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("write trajectory output: close: %w", err)
+	}
+	return nil
+}
+
+func verifyTrajectoryTemp(tempPath string) error {
+	info, err := os.Stat(tempPath)
+	if err != nil {
+		return fmt.Errorf("write trajectory output: stat: %w", err)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("write trajectory output: empty temporary file")
+	}
+	encoded, err := os.ReadFile(tempPath)
+	if err != nil {
+		return fmt.Errorf("write trajectory output: verify: %w", err)
+	}
+	if _, err := evalpkg.ReadTrajectory(bytes.NewReader(encoded)); err != nil {
+		return fmt.Errorf("write trajectory output: verify: %w", err)
+	}
+	return nil
+}
+
+func installTrajectoryOutput(tempPath, outputPath string) error {
+	if err := os.Rename(tempPath, outputPath); err != nil {
+		return fmt.Errorf("install trajectory output: %w", err)
+	}
+	if err := syncOutputDirectory(filepath.Dir(outputPath)); err != nil {
+		return fmt.Errorf("install trajectory output: sync directory: %w", err)
+	}
+	return nil
 }
 
 func exportAuth(from, to string) error {

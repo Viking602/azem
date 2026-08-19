@@ -59,7 +59,9 @@ func (s *Service) StartToolRecordAt(ctx context.Context, sessionID string, recor
 	return s.startToolRecord(ctx, sessionID, record, &anchorSequence)
 }
 
-func (s *Service) startToolRecord(ctx context.Context, sessionID string, record ToolRecord, anchorOverride *int64) (ToolRecord, error) {
+func (s *Service) startToolRecord(ctx context.Context, sessionID string, record ToolRecord, anchorOverride *int64) (recordResult ToolRecord, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	sessionID = strings.TrimSpace(sessionID)
 	record.SessionID = sessionID
 	if sessionID == "" || strings.TrimSpace(record.RunID) == "" || strings.TrimSpace(record.ToolCallID) == "" || strings.TrimSpace(record.Name) == "" {
@@ -76,12 +78,20 @@ func (s *Service) startToolRecord(ctx context.Context, sessionID string, record 
 	if len(record.Structured) == 0 {
 		record.Structured = json.RawMessage(`null`)
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ToolRecord{}, err
+	}
+	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return ToolRecord{}, err
+	}
+	queries := dbgen.New(tx)
 	anchor := int64(-1)
 	if anchorOverride != nil {
 		anchor = *anchorOverride
 	} else {
-		var err error
-		anchor, err = dbgen.New(s.db).CanonicalHighWater(ctx, sessionID)
+		anchor, err = queries.CanonicalHighWater(ctx, sessionID)
 		if errors.Is(err, sql.ErrNoRows) {
 			anchor = -1
 		} else if err != nil {
@@ -93,11 +103,23 @@ func (s *Service) startToolRecord(ctx context.Context, sessionID string, record 
 	if err != nil {
 		return ToolRecord{}, fmt.Errorf("encode tool observations: %w", err)
 	}
-	result, err := dbgen.New(s.db).InsertSessionToolRecord(ctx, dbgen.InsertSessionToolRecordParams{
+	content, contentDigest, err := s.spillText(ctx, record.Content)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("store tool content: %w", err)
+	}
+	structured, structuredDigest, err := s.spillBytes(ctx, record.Structured)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("store tool structured: %w", err)
+	}
+	if structured == nil {
+		structured = []byte("null")
+	}
+	result, err := queries.InsertSessionToolRecord(ctx, dbgen.InsertSessionToolRecordParams{
 		SessionID: sessionID, RunID: record.RunID, ToolCallID: record.ToolCallID,
 		AnchorSequence: anchor, Name: record.Name, Arguments: record.Arguments, State: record.State,
-		Content: record.Content, Structured: record.Structured, ArtifactID: record.ArtifactID,
-		Observations: observations, StartedAt: record.StartedAt.UnixNano(),
+		Content: content, Structured: structured, ArtifactID: record.ArtifactID,
+		Observations: observations, StartedAt: record.StartedAt.UnixNano(), ContentSha256: contentDigest,
+		StructuredSha256: structuredDigest,
 	})
 	if err != nil {
 		return ToolRecord{}, fmt.Errorf("insert tool record: %w", err)
@@ -107,15 +129,15 @@ func (s *Service) startToolRecord(ctx context.Context, sessionID string, record 
 		return ToolRecord{}, err
 	}
 	if changed == 0 {
-		current, loadErr := s.loadToolRecord(ctx, sessionID, record.RunID, record.ToolCallID)
+		current, loadErr := s.loadToolRecordFrom(ctx, tx, sessionID, record.RunID, record.ToolCallID)
 		if loadErr != nil {
 			return ToolRecord{}, loadErr
 		}
 		if current.State != ToolInterrupted {
-			return current, nil
+			return s.commitToolRecord(ctx, tx, tracker, trackerOwner, current)
 		}
 		record.AnchorSequence = current.AnchorSequence
-		restarted, restartErr := dbgen.New(s.db).RestartInterruptedSessionToolRecordCAS(ctx, dbgen.RestartInterruptedSessionToolRecordCASParams{
+		restarted, restartErr := queries.RestartInterruptedSessionToolRecordCAS(ctx, dbgen.RestartInterruptedSessionToolRecordCASParams{
 			Name: record.Name, Arguments: record.Arguments, StartedAt: record.StartedAt.UnixNano(),
 			SessionID: sessionID, RunID: record.RunID, ToolCallID: record.ToolCallID,
 		})
@@ -127,14 +149,20 @@ func (s *Service) startToolRecord(ctx context.Context, sessionID string, record 
 			return ToolRecord{}, rowsErr
 		}
 		if restartedRows == 1 {
-			return record, nil
+			return s.commitToolRecord(ctx, tx, tracker, trackerOwner, record)
 		}
-		return s.loadToolRecord(ctx, sessionID, record.RunID, record.ToolCallID)
+		latest, err := s.loadToolRecordFrom(ctx, tx, sessionID, record.RunID, record.ToolCallID)
+		if err != nil {
+			return ToolRecord{}, err
+		}
+		return s.commitToolRecord(ctx, tx, tracker, trackerOwner, latest)
 	}
-	return record, nil
+	return s.commitToolRecord(ctx, tx, tracker, trackerOwner, record)
 }
 
-func (s *Service) FinishToolRecord(ctx context.Context, sessionID string, record ToolRecord) (ToolRecord, error) {
+func (s *Service) FinishToolRecord(ctx context.Context, sessionID string, record ToolRecord) (recordResult ToolRecord, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	sessionID = strings.TrimSpace(sessionID)
 	record.SessionID = sessionID
 	if sessionID == "" || strings.TrimSpace(record.RunID) == "" || strings.TrimSpace(record.ToolCallID) == "" {
@@ -181,10 +209,29 @@ func (s *Service) FinishToolRecord(ctx context.Context, sessionID string, record
 	if err != nil {
 		return ToolRecord{}, fmt.Errorf("encode tool observations: %w", err)
 	}
-	result, err := dbgen.New(s.db).CompleteSessionToolRecordCAS(ctx, dbgen.CompleteSessionToolRecordCASParams{
-		Name: record.Name, State: record.State, Content: record.Content, Structured: record.Structured,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ToolRecord{}, err
+	}
+	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return ToolRecord{}, err
+	}
+	content, contentDigest, err := s.spillText(ctx, record.Content)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("store tool content: %w", err)
+	}
+	structured, structuredDigest, err := s.spillBytes(ctx, record.Structured)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("store tool structured: %w", err)
+	}
+	if structured == nil {
+		structured = []byte("null")
+	}
+	result, err := dbgen.New(tx).CompleteSessionToolRecordCAS(ctx, dbgen.CompleteSessionToolRecordCASParams{
+		Name: record.Name, State: record.State, Content: content, Structured: structured,
 		ArtifactID: record.ArtifactID, Observations: observations, CompletedAt: record.CompletedAt.UnixNano(),
-		SessionID: sessionID, RunID: record.RunID, ToolCallID: record.ToolCallID,
+		ContentSha256: contentDigest, StructuredSha256: structuredDigest, SessionID: sessionID, RunID: record.RunID, ToolCallID: record.ToolCallID,
 	})
 	if err != nil {
 		return ToolRecord{}, fmt.Errorf("complete tool record: %w", err)
@@ -194,13 +241,13 @@ func (s *Service) FinishToolRecord(ctx context.Context, sessionID string, record
 		return ToolRecord{}, err
 	}
 	if changed != 1 {
-		latest, loadErr := s.loadToolRecord(ctx, sessionID, record.RunID, record.ToolCallID)
+		latest, loadErr := s.loadToolRecordFrom(ctx, tx, sessionID, record.RunID, record.ToolCallID)
 		if loadErr == nil && sameTerminalToolRecord(latest, record) {
-			return latest, nil
+			return s.commitToolRecord(ctx, tx, tracker, trackerOwner, latest)
 		}
 		return ToolRecord{}, fmt.Errorf("complete tool record: call state changed concurrently")
 	}
-	return record, nil
+	return s.commitToolRecord(ctx, tx, tracker, trackerOwner, record)
 }
 
 func (s *Service) ListToolRecords(ctx context.Context, sessionID string) ([]ToolRecord, error) {
@@ -210,13 +257,32 @@ func (s *Service) ListToolRecords(ctx context.Context, sessionID string) ([]Tool
 	}
 	result := make([]ToolRecord, 0, len(rows))
 	for _, row := range rows {
-		record, decodeErr := toolRecordFromRow(sessionID, row.RunID, row.ToolCallID, row.AnchorSequence, row.Name, row.Arguments, row.State, row.Content, row.Structured, row.ArtifactID, row.Observations, row.StartedAt, row.CompletedAt)
+		record, decodeErr := s.toolRecordFromRow(ctx, sessionID, row.RunID, row.ToolCallID, row.AnchorSequence, row.Name, row.Arguments, row.State, row.Content, row.ContentSha256, row.Structured, row.StructuredSha256, row.ArtifactID, row.Observations, row.StartedAt, row.CompletedAt)
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
 		result = append(result, record)
 	}
 	return result, nil
+}
+
+func (s *Service) commitToolRecord(ctx context.Context, tx *sql.Tx, tracker *blobInstallTracker, trackerOwner bool, record ToolRecord) (ToolRecord, error) {
+	if err := s.commitBlobTransaction(ctx, tx, tracker, trackerOwner); err != nil {
+		return ToolRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *Service) loadToolRecord(ctx context.Context, sessionID, runID, toolCallID string) (ToolRecord, error) {
+	return s.loadToolRecordFrom(ctx, s.db, sessionID, runID, toolCallID)
+}
+
+func (s *Service) loadToolRecordFrom(ctx context.Context, queryer dbgen.DBTX, sessionID, runID, toolCallID string) (ToolRecord, error) {
+	row, err := dbgen.New(queryer).GetSessionToolRecord(ctx, dbgen.GetSessionToolRecordParams{SessionID: sessionID, RunID: runID, ToolCallID: toolCallID})
+	if err != nil {
+		return ToolRecord{}, err
+	}
+	return s.toolRecordFromRow(ctx, sessionID, runID, toolCallID, row.AnchorSequence, row.Name, row.Arguments, row.State, row.Content, row.ContentSha256, row.Structured, row.StructuredSha256, row.ArtifactID, row.Observations, row.StartedAt, row.CompletedAt)
 }
 
 func (s *Service) InterruptRunningToolRecordsForRun(ctx context.Context, runID string, at time.Time) error {
@@ -243,22 +309,22 @@ func (s *Service) WorkspaceSession(ctx context.Context, anchor string) (string, 
 	return id, nil
 }
 
-func (s *Service) loadToolRecord(ctx context.Context, sessionID, runID, toolCallID string) (ToolRecord, error) {
-	row, err := dbgen.New(s.db).GetSessionToolRecord(ctx, dbgen.GetSessionToolRecordParams{SessionID: sessionID, RunID: runID, ToolCallID: toolCallID})
-	if err != nil {
-		return ToolRecord{}, err
-	}
-	return toolRecordFromRow(sessionID, runID, toolCallID, row.AnchorSequence, row.Name, row.Arguments, row.State, row.Content, row.Structured, row.ArtifactID, row.Observations, row.StartedAt, row.CompletedAt)
-}
-
-func toolRecordFromRow(sessionID, runID, toolCallID string, anchor int64, name string, arguments []byte, state, content string, structured []byte, artifactID string, rawObservations []byte, startedAt, completedAt int64) (ToolRecord, error) {
+func (s *Service) toolRecordFromRow(ctx context.Context, sessionID, runID, toolCallID string, anchor int64, name string, arguments []byte, state, content, contentDigest string, structured []byte, structuredDigest, artifactID string, rawObservations []byte, startedAt, completedAt int64) (ToolRecord, error) {
 	var observations []FileObservation
 	if len(rawObservations) > 0 && json.Unmarshal(rawObservations, &observations) != nil {
 		return ToolRecord{}, fmt.Errorf("decode tool observations for %s", toolCallID)
 	}
+	text, err := s.loadText(ctx, content, contentDigest)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("load tool content for %s: %w", toolCallID, err)
+	}
+	structured, err = s.loadBytes(ctx, structured, structuredDigest)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("load tool structured for %s: %w", toolCallID, err)
+	}
 	record := ToolRecord{
 		SessionID: sessionID, RunID: runID, ToolCallID: toolCallID, AnchorSequence: anchor,
-		Name: name, Arguments: append(json.RawMessage(nil), arguments...), State: state, Content: content,
+		Name: name, Arguments: append(json.RawMessage(nil), arguments...), State: state, Content: text,
 		Structured: append(json.RawMessage(nil), structured...), ArtifactID: artifactID, Observations: observations,
 		StartedAt: time.Unix(0, startedAt).UTC(),
 	}

@@ -52,7 +52,7 @@ func TestProviderStreamSinkPersistsUnphasedToolTurnTextAsCommentary(t *testing.T
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err = sessions.Ensure(ctx, session.Session{ID: "s", Title: "stream phases"}); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestProviderStreamSinkSynthesizesOneCommentaryBeforeEachToolBatch(t *testin
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err = sessions.Ensure(ctx, session.Session{ID: "s", Title: "tool announcements"}); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestMeteredProviderDriverPersistsTerminalFactsAndUsesDistinctRequestIDs(t *
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := session.NewService(store.DB())
+	svc := session.NewService(store.DB(), store.Blobs())
 	if _, err = svc.Ensure(ctx, session.Session{ID: "s", Title: "meter"}); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestMeteredProviderDriverMarksLengthStopAsLength(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := session.NewService(store.DB())
+	svc := session.NewService(store.DB(), store.Blobs())
 	if _, err = svc.Ensure(ctx, session.Session{ID: "s", Title: "length"}); err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestMeteredProviderDriverMarksPrematureEOFUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := session.NewService(store.DB())
+	svc := session.NewService(store.DB(), store.Blobs())
 	if _, err = svc.Ensure(ctx, session.Session{ID: "s", Title: "eof"}); err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestMeteredProviderDriverZerosAutomaticCacheWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := session.NewService(store.DB())
+	svc := session.NewService(store.DB(), store.Blobs())
 	if _, err = svc.Ensure(ctx, session.Session{ID: "s", Title: "auto"}); err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ func TestMeteredProviderDriverDoesNotInferMissingCacheFieldAsZero(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := session.NewService(store.DB())
+	svc := session.NewService(store.DB(), store.Blobs())
 	if _, err := svc.Ensure(ctx, session.Session{ID: "s"}); err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestMeteredProviderRetryPreservesFirstTerminalFact(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	svc := session.NewService(store.DB())
+	svc := session.NewService(store.DB(), store.Blobs())
 	if _, err := svc.Ensure(ctx, session.Session{ID: "s"}); err != nil {
 		t.Fatal(err)
 	}

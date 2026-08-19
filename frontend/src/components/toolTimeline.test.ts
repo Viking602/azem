@@ -5,6 +5,7 @@ import {
   displayedToolState,
   formatThinkingDuration,
   formatToolPresentation,
+  formatWorkedDuration,
   thinkingStateLabel,
   groupProcessTimelineBlocks,
   groupTimelineBlocks,
@@ -20,6 +21,7 @@ import {
   summarizeToolGroup,
   thinkingTraceElapsedMs,
 } from "./toolTimeline";
+
 import { fileChangePillsForBlocks, processGroupCounts } from "./toolChip";
 
 function tool(id: string, title: string, state = "completed"): Block {
@@ -526,11 +528,21 @@ describe("tool timeline grouping", () => {
     expect(formatThinkingDuration(1_200)).toBe("1.2s");
     expect(formatThinkingDuration(12_400)).toBe("12.4s");
     expect(formatThinkingDuration(65_000)).toBe("1m05s");
-    expect(thinkingStateLabel("zh-CN", true)).toBe("思考");
-    expect(thinkingStateLabel("zh-CN", false)).toBe("思考");
+    expect(thinkingStateLabel("zh-CN", true)).toBe("正在思考");
+    expect(thinkingStateLabel("zh-CN", false)).toBe("已完成思考");
+    expect(thinkingStateLabel("zh-CN", false, 1900)).toBe("已思考 1.9s");
     expect(thinkingStateLabel("en", true)).toBe("Thinking");
-    expect(thinkingStateLabel("en", false)).toBe("Thinking");
+    expect(thinkingStateLabel("en", false)).toBe("Thought");
+    expect(thinkingStateLabel("en", false, 1900)).toBe("Thought for 1.9s");
   });
+
+  it("formats Codex worked-for duration in spoken units", () => {
+    expect(formatWorkedDuration(0, "zh-CN")).toBe("");
+    expect(formatWorkedDuration(5_000, "zh-CN")).toBe("5秒");
+    expect(formatWorkedDuration(305_000, "zh-CN")).toBe("5分钟 5秒");
+    expect(formatWorkedDuration(305_000, "en")).toBe("5 minutes 5 seconds");
+  });
+
 
   it("sums thinking spans for one trail clock and ignores tool duration", () => {
     expect(thinkingTraceElapsedMs([

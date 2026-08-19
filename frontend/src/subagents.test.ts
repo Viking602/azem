@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentState } from "./types";
-import { subagentPreviewText } from "./subagents";
+import { subagentEvidenceStatusLabel, subagentPreviewText } from "./subagents";
 
 function agent(overrides: Partial<AgentState> = {}): AgentState {
   return {
@@ -30,5 +30,14 @@ describe("subagentPreviewText", () => {
   it("keeps the finished empty-state copy after completion", () => {
     expect(subagentPreviewText(agent({ state: "completed", preview: "" }), "审查架构边界", "zh-CN"))
       .toBe("等待进度更新");
+  });
+});
+
+describe("subagentEvidenceStatusLabel", () => {
+  it("localizes the three durable evidence states and omits unknown status", () => {
+    expect(subagentEvidenceStatusLabel("provisional", "en")).toBe("Provisional evidence");
+    expect(subagentEvidenceStatusLabel("verified", "zh-CN")).toBe("证据已验证");
+    expect(subagentEvidenceStatusLabel("stale", "en")).toBe("Stale evidence");
+    expect(subagentEvidenceStatusLabel("", "en")).toBe("");
   });
 });

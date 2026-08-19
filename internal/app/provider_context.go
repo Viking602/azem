@@ -6,14 +6,12 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"reflect"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Viking602/azem/internal/contextarchive"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
@@ -26,7 +24,8 @@ var mainInstructions string
 var planModeInstructions string
 
 const (
-	failedAssistantLabel = "[Incomplete assistant output from a failed attempt; treat it as uncommitted work.]\n"
+	failedAssistantLabel   = "[Incomplete assistant output from a failed attempt; treat it as uncommitted work.]\n"
+	archiveRecentUserTurns = 3
 )
 
 var mainInstructionFingerprint = func() string {
@@ -41,6 +40,13 @@ func turnInstructions(planMode bool) (string, string) {
 	}
 	sum := sha256.Sum256([]byte(instructions))
 	return instructions, hex.EncodeToString(sum[:])
+}
+
+// InstructionFingerprint returns the stable identity of the executable prompt
+// selected for a turn without exposing or duplicating its contents.
+func InstructionFingerprint(planMode bool) string {
+	_, fingerprint := turnInstructions(planMode)
+	return fingerprint
 }
 
 type TurnRequest struct {
@@ -104,133 +110,26 @@ type turnContext struct {
 	checkpointBoundary        *int64
 	reportContextTokens       func(context.Context, int)
 	compactHooks              func(context.Context, []message.Message, []message.Message, error) error
-	summarize                 func(context.Context, string) (string, error)
 	putArtifact               func(context.Context, string, []byte, string) (session.ContextArtifact, error)
+	archiveEnabled            bool
+	archiveVisual             bool
+	storeArchive              func(context.Context, contextarchive.Result) (contextarchive.Manifest, []session.Attachment, error)
+	loadArchiveSource         func(context.Context, string) ([]byte, error)
+	readArchiveAttachment     func(context.Context, session.Attachment) ([]byte, error)
 	largeToolTokens           int
-	compactTargetTokens       int
-	minReclaimTokens          int
-	resolveSummarizer         func(context.Context) (func(context.Context, string) (string, error), int, error)
-	structuredSummary         bool
+	keepRecentTokens          int
 	todo                      session.TodoList
 	loadTodo                  func(context.Context) (session.TodoList, error)
-	softTriggerTokens         int
-	backgroundPrepare         bool
 	staticIdentity            string
 	coordinator               *compactionCoordinator
 	activateCompaction        func(context.Context, []message.Message, string) error
-	loadSemanticCheckpoint    func(context.Context) (session.SemanticCheckpointV1, error)
 	reportCachePrefixDegraded func(reason string)
-	semanticCheckpoint        session.SemanticCheckpointV1
-	subagentFinishedAtNS      int64
-	subagentID                string
 }
 
-// compactionCoordinator is deliberately in-memory: a prepared summary is only
-// an optimization. After a crash the durable active checkpoint and canonical
-// tail remain authoritative and the next hard trigger compacts synchronously.
+// compactionCoordinator serializes durable activation for one live run.
 type compactionCoordinator struct {
-	mu                 sync.Mutex
-	hash               string
-	source             []message.Message
-	done               chan struct{}
-	cancel             context.CancelFunc
-	result             []message.Message
-	err                error
-	activated          string
-	semanticCheckpoint session.SemanticCheckpointV1
-}
-
-func cloneSemanticCheckpoint(checkpoint session.SemanticCheckpointV1) session.SemanticCheckpointV1 {
-	checkpoint.State = append(json.RawMessage(nil), checkpoint.State...)
-	return checkpoint
-}
-
-func (c turnContext) currentSemanticCheckpoint() session.SemanticCheckpointV1 {
-	if c.coordinator == nil {
-		return cloneSemanticCheckpoint(c.semanticCheckpoint)
-	}
-	c.coordinator.mu.Lock()
-	defer c.coordinator.mu.Unlock()
-	if c.coordinator.semanticCheckpoint.Revision > 0 || len(c.coordinator.semanticCheckpoint.State) > 0 {
-		return cloneSemanticCheckpoint(c.coordinator.semanticCheckpoint)
-	}
-	return cloneSemanticCheckpoint(c.semanticCheckpoint)
-}
-
-// recordActivatedSemanticCheckpointLocked advances the in-memory source of
-// truth only after the durable activation transaction succeeds. The shared
-// coordinator outlives turnContext value copies used by background workers.
-func (c turnContext) recordActivatedSemanticCheckpointLocked(result []message.Message) {
-	if c.coordinator == nil {
-		return
-	}
-	commit, _ := extractContextCheckpoint(result)
-	if commit == nil {
-		return
-	}
-	c.coordinator.semanticCheckpoint = session.SemanticCheckpointV1{
-		ID:           commit.CheckpointID,
-		SessionID:    c.sessionID,
-		Revision:     commit.BaseRevision + 1,
-		Cursor:       commit.Cursor,
-		State:        append(json.RawMessage(nil), commit.State...),
-		SourceDigest: commit.SourceDigest,
-	}
-}
-
-func (c turnContext) adoptDurableSemanticCheckpoint(ctx context.Context) bool {
-	if c.loadSemanticCheckpoint == nil || c.coordinator == nil {
-		return false
-	}
-	loaded, err := c.loadSemanticCheckpoint(ctx)
-	if err != nil {
-		return false
-	}
-	c.coordinator.mu.Lock()
-	defer c.coordinator.mu.Unlock()
-	return c.adoptDurableSemanticCheckpointLocked(loaded)
-}
-
-func (c turnContext) adoptDurableSemanticCheckpointLocked(loaded session.SemanticCheckpointV1) bool {
-	current := c.coordinator.semanticCheckpoint
-	if current.Revision == 0 && len(current.State) == 0 {
-		current = c.semanticCheckpoint
-	}
-	if loaded.Revision <= current.Revision {
-		return false
-	}
-	c.coordinator.semanticCheckpoint = cloneSemanticCheckpoint(loaded)
-	return true
-}
-
-func (c turnContext) invalidatePreparedCompactionLocked() {
-	if c.coordinator == nil {
-		return
-	}
-	if c.coordinator.cancel != nil {
-		c.coordinator.cancel()
-	}
-	c.coordinator.hash = ""
-	c.coordinator.source = nil
-	c.coordinator.done = nil
-	c.coordinator.cancel = nil
-	c.coordinator.result = nil
-	c.coordinator.err = nil
-}
-
-func compactionSourceHash(history []message.Message, target int, static string) string {
-	normalized := append([]message.Message(nil), history...)
-	for i := range normalized {
-		normalized[i].CreatedAt = time.Time{}
-	}
-	payload, _ := json.Marshal(struct {
-		Messages []message.Message `json:"messages"`
-		Target   int               `json:"target"`
-		Static   string            `json:"static"`
-		Wire     int               `json:"wire"`
-	}{normalized, target, static, session.CurrentWireVersion})
-	digest := sha256.Sum256(payload)
-	return hex.EncodeToString(digest[:])
+	mu        sync.Mutex
+	activated string
 }
 
 func compactionSummaryHash(history []message.Message) string {
@@ -246,7 +145,7 @@ func (c turnContext) activateCompactionResult(ctx context.Context, result []mess
 	if c.activateCompaction == nil {
 		return result, nil
 	}
-	_, manifest := extractContextCheckpoint(result)
+	manifest := extractArchiveContextManifest(result)
 	manifestHash := ""
 	if manifest != nil {
 		manifestHash = manifest.ManifestHash
@@ -263,40 +162,11 @@ func (c turnContext) activateCompactionResult(ctx context.Context, result []mess
 	if err := c.activateCompaction(ctx, result, identity); err != nil {
 		return result, err
 	}
-	c.recordActivatedSemanticCheckpointLocked(result)
 	c.coordinator.activated = identity
 	return result, nil
 }
 
-func compactionSourcePrefix(source, current []message.Message) bool {
-	if len(source) > len(current) {
-		return false
-	}
-	for index := range source {
-		left, right := source[index], current[index]
-		left.CreatedAt, right.CreatedAt = time.Time{}, time.Time{}
-		if !reflect.DeepEqual(left, right) {
-			return false
-		}
-	}
-	return true
-}
-
-func preparedWithUncoveredTail(prepared, source, current []message.Message, target int) ([]message.Message, bool) {
-	if len(prepared) == 0 || !compactionSourcePrefix(source, current) {
-		return nil, false
-	}
-	result := append(append([]message.Message(nil), prepared...), current[len(source):]...)
-	if reflect.DeepEqual(result, current) || (target > 0 && estimateContextTokens(result) > target) {
-		return nil, false
-	}
-	if err := message.ValidateCompleteTurns(result); err != nil {
-		return nil, false
-	}
-	return result, true
-}
-
-func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
+func (c turnContext) savedModelHistoryCompatible() bool {
 	saved := c.modelHistory
 	fingerprint := c.instructionFingerprint
 	if fingerprint == "" {
@@ -304,7 +174,7 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	}
 	staticPrefixCompatible := saved.StaticPrefixHash == fingerprint ||
 		(c.staticIdentity != "" && saved.StaticPrefixHash == c.staticIdentity)
-	compatible := len(saved.Messages) > 0 &&
+	return len(saved.Messages) > 0 &&
 		saved.ProviderID == c.providerID &&
 		saved.ModelID == c.modelID &&
 		saved.InstructionFingerprint == fingerprint &&
@@ -312,6 +182,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 		saved.WireVersion == session.CurrentWireVersion &&
 		saved.CoveredThroughSequence != nil && c.checkpointBoundary != nil &&
 		*saved.CoveredThroughSequence == *c.checkpointBoundary
+}
+
+func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
+	saved := c.modelHistory
+	compatible := c.savedModelHistoryCompatible()
 	messages := make([]message.Message, 0, len(saved.Messages)+len(c.history)+6)
 	if compatible {
 		messages = append(messages, saved.Messages...)
@@ -392,6 +267,10 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	}
 	if goal != "" || len(images) > 0 {
 		messages = append(messages, UserMessageWithAttachments(goal, images))
+	}
+	messages, err = c.repairArchiveMessages(ctx, messages)
+	if err != nil {
+		return nil, err
 	}
 	if err := c.validateModelVisibleDurability(messages, compatible, goal, images); err != nil {
 		return nil, err
@@ -590,575 +469,17 @@ func (c turnContext) refreshTodoReminder(ctx context.Context, history []message.
 	return append(append([]message.Message(nil), history...), c.todoReminderMessage(reminder)), nil
 }
 
-func (c turnContext) Compact(ctx context.Context, history []message.Message) (result []message.Message, resultErr error) {
-	target := c.compactTargetTokens
-	if target <= 0 {
-		target = max(512, estimateContextTokens(history)*3/4)
-	}
-	return c.prepareAndActivateCompaction(ctx, history, target, "automatic_hard")
+func (c turnContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
+	target := max(512, estimateContextTokens(history)*3/4)
+	return c.CompactTo(ctx, history, target)
 }
 
-func (c turnContext) prepareAndActivateCompaction(ctx context.Context, history []message.Message, hardTokens int, reason string) ([]message.Message, error) {
-	result, err := c.prepareCompactionReason(ctx, history, hardTokens, reason)
-	if err != nil || reflect.DeepEqual(result, history) {
-		return result, err
-	}
-	return c.activateWithStaleRetry(ctx, history, result, hardTokens, reason)
-}
+// CompactTo deterministically archives complete old turns toward an absolute
+// token target. The target is also the hard bound used to validate the
+// mandatory latest-three-turn suffix.
 
-func (c turnContext) activateWithStaleRetry(ctx context.Context, source, result []message.Message, hardTokens int, reason string) ([]message.Message, error) {
-	activated, err := c.activateCompactionResult(ctx, result)
-	if !errors.Is(err, session.ErrRunCheckpointStale) {
-		return activated, err
-	}
-	if !c.adoptDurableSemanticCheckpoint(ctx) {
-		return activated, err
-	}
-	retried, retryErr := c.prepareCompactionReason(ctx, source, hardTokens, reason)
-	if retryErr != nil {
-		return source, retryErr
-	}
-	if reflect.DeepEqual(retried, source) {
-		return retried, nil
-	}
-	return c.activateCompactionResult(ctx, retried)
-}
-
-func (c turnContext) compactRequired(ctx context.Context, history []message.Message, targetTokens int) (result []message.Message, resultErr error) {
-	original := history
-	history, err := c.refreshTodoReminder(ctx, history)
-	if err != nil {
-		return original, err
-	}
-	beforeTokens := estimateContextTokens(history)
-	report := func(prepared []message.Message) []message.Message {
-		if c.reportContextTokens != nil {
-			c.reportContextTokens(ctx, estimateContextTokens(prepared))
-		}
-		return prepared
-	}
-	if targetTokens <= 0 {
-		return report(history), nil
-	}
-	if err := message.ValidateCompleteTurns(history); err != nil {
-		return history, err
-	}
-	if beforeTokens <= targetTokens {
-		return report(history), nil
-	}
-	return c.prepareCompaction(ctx, history, targetTokens)
-}
-
-// prepareCompaction prepares a checkpoint toward the absolute configured
-// target. Unlike compactRequired it is intentionally forced: soft-triggered
-// background work calls it while the source still fits below the hard limit.
-// hardTriggerTokens is retained separately for mandatory-tail validation.
-func (c turnContext) prepareCompaction(ctx context.Context, history []message.Message, hardTriggerTokens int) (result []message.Message, resultErr error) {
-	return c.prepareCompactionReason(ctx, history, hardTriggerTokens, "automatic_hard")
-}
-
-func (c turnContext) prepareCompactionReason(ctx context.Context, history []message.Message, hardTriggerTokens int, reason string) (result []message.Message, resultErr error) {
-	c.adoptDurableSemanticCheckpoint(ctx)
-	original := history
-	targetTokens := hardTriggerTokens
-	report := func(prepared []message.Message) []message.Message {
-		if c.reportContextTokens != nil {
-			c.reportContextTokens(ctx, estimateContextTokens(prepared))
-		}
-		return prepared
-	}
-	history, err := c.normalizeToolResults(ctx, history)
-	if err != nil {
-		return original, err
-	}
-	beforeTokens := estimateContextTokens(history)
-	if c.compactTargetTokens > 0 {
-		targetTokens = c.compactTargetTokens
-	}
-	if c.minReclaimTokens > 0 && beforeTokens > c.minReclaimTokens && beforeTokens-targetTokens < c.minReclaimTokens {
-		targetTokens = beforeTokens - c.minReclaimTokens
-	}
-	if c.summarize == nil && c.resolveSummarizer == nil {
-		return original, fmt.Errorf("compact context: compaction model is unavailable")
-	}
-	history, pruned, err := c.pruneStaleToolResults(ctx, history, targetTokens)
-	if err != nil {
-		return original, err
-	}
-	if pruned && estimateContextTokens(history) <= targetTokens {
-		if validationErr := message.ValidateCompleteTurns(history); validationErr != nil {
-			return original, validationErr
-		}
-		return report(history), nil
-	}
-	previousStates := make([]string, 0, 1)
-	checkpoint := c.currentSemanticCheckpoint()
-	if checkpoint.Revision > 0 && len(checkpoint.State) > 0 {
-		previousStates = append(previousStates, string(checkpoint.State))
-	}
-	withoutSummaries := make([]message.Message, 0, len(history))
-	for _, current := range history {
-		if current.Kind == message.KindCompactionSummary {
-			if len(previousStates) == 0 {
-				previousStates = append(previousStates, strings.TrimSpace(strings.TrimPrefix(current.Text, semanticStateSafetyLabel)))
-			}
-			continue
-		}
-		withoutSummaries = append(withoutSummaries, current)
-	}
-	history = withoutSummaries
-	prefixEnd := 0
-	for prefixEnd < len(history) && history[prefixEnd].Role == message.RoleSystem {
-		prefixEnd++
-	}
-	recentUsers := recentUserIndexes(history, prefixEnd, contextRecentUserTurns)
-	if len(recentUsers) == 0 {
-		return original, fmt.Errorf("compact context: no user turn can be preserved")
-	}
-	selectedUsers := make(map[int]struct{}, len(recentUsers))
-	mandatory := append([]message.Message(nil), history[:prefixEnd]...)
-	for _, index := range recentUsers {
-		selectedUsers[index] = struct{}{}
-		mandatory = append(mandatory, history[index])
-	}
-	mandatoryTokens := estimateContextTokens(mandatory)
-	if hardTriggerTokens > 0 && mandatoryTokens > hardTriggerTokens {
-		return original, fmt.Errorf("compact context: mandatory recent user evidence requires %d tokens but hard limit allows %d", mandatoryTokens, hardTriggerTokens)
-	}
-	latestUser := recentUsers[len(recentUsers)-1]
-	tailGroups, groupErr := compactionAtomicGroups(history[latestUser+1:])
-	if groupErr != nil {
-		return original, groupErr
-	}
-	tailStarts := make([]int, 1, len(tailGroups)+1)
-	tailStarts[0] = latestUser + 1
-	for _, group := range tailGroups {
-		tailStarts = append(tailStarts, latestUser+1+group.end)
-	}
-	hooksStarted := false
-	rollingToolTurn := false
-	for _, current := range history[latestUser+1:] {
-		if len(current.ToolCalls) > 0 {
-			rollingToolTurn = true
-			break
-		}
-	}
-	for _, hotStart := range tailStarts {
-		omitted := make([]message.Message, 0, hotStart-prefixEnd)
-		for index := prefixEnd; index < hotStart; index++ {
-			if _, preserved := selectedUsers[index]; !preserved {
-				omitted = append(omitted, history[index])
-			}
-		}
-		if len(omitted) == 0 && len(previousStates) == 0 {
-			continue
-		}
-		base := make([]message.Message, 0, prefixEnd+len(recentUsers)+len(history)-hotStart)
-		base = append(base, history[:prefixEnd]...)
-		for _, index := range recentUsers {
-			base = append(base, history[index])
-		}
-		base = append(base, history[hotStart:]...)
-		if estimateContextTokens(base) > targetTokens {
-			continue
-		}
-		if !hooksStarted && c.compactHooks != nil {
-			if hookErr := c.compactHooks(ctx, history, nil, nil); hookErr != nil {
-				return original, hookErr
-			}
-			hooksStarted = true
-			defer func() { _ = c.compactHooks(ctx, original, result, resultErr) }()
-		}
-		envelope, summaryErr := c.summarizeStateBounded(ctx, previousStates, omitted)
-		if summaryErr != nil {
-			return original, fmt.Errorf("rebuild semantic state: %w", summaryErr)
-		}
-		generated := strings.TrimSpace(envelope.Body)
-		if generated == "" {
-			return original, fmt.Errorf("rebuild semantic state: empty state")
-		}
-		summary := message.NewText(message.RoleAssistant, semanticStateSafetyLabel+generated)
-		summary.Kind = message.KindCompactionSummary
-		summary.Visibility = message.VisibilityPrivate
-		summary.CreatedAt = time.Time{}
-		compacted := make([]message.Message, 0, len(base)+1)
-		compacted = append(compacted, history[:prefixEnd]...)
-		if rollingToolTurn {
-			for _, index := range recentUsers {
-				compacted = append(compacted, history[index])
-			}
-			compacted = append(compacted, summary)
-		} else {
-			compacted = append(compacted, summary)
-			for _, index := range recentUsers {
-				compacted = append(compacted, history[index])
-			}
-		}
-		compacted = append(compacted, history[hotStart:]...)
-		compacted, summaryErr = c.refreshTodoReminder(ctx, compacted)
-		if summaryErr != nil {
-			return original, summaryErr
-		}
-		if estimateContextTokens(compacted) <= targetTokens {
-			if validationErr := message.ValidateCompleteTurns(compacted); validationErr != nil {
-				return original, validationErr
-			}
-			metadata, metadataErr := buildContextCheckpointMetadata(c, reason, history, compacted, generated, envelope.Authorities, targetTokens)
-			if metadataErr != nil {
-				return original, metadataErr
-			}
-			for index := range compacted {
-				if compacted[index].Kind == message.KindCompactionSummary {
-					compacted[index], metadataErr = attachContextCheckpoint(compacted[index], metadata)
-					break
-				}
-			}
-			if metadataErr != nil {
-				return original, metadataErr
-			}
-			return report(compacted), nil
-		}
-	}
-	return original, fmt.Errorf("compact context: required messages exceed %d-token target", targetTokens)
-}
-
-func (c turnContext) CompactTo(ctx context.Context, history []message.Message, hardTokens int) ([]message.Message, error) {
-	normalized, err := c.normalizeToolResults(ctx, history)
-	if err != nil {
-		return history, err
-	}
-	history = normalized
-	// Contexts without a background coordinator still use the same rebuild
-	// kernel, synchronously.
-	if c.softTriggerTokens <= 0 || c.coordinator == nil {
-		result, err := c.compactRequired(ctx, history, hardTokens)
-		if err == nil && !reflect.DeepEqual(result, history) {
-			result, err = c.activateWithStaleRetry(ctx, history, result, hardTokens, "automatic_hard")
-		}
-		return result, err
-	}
-	refreshed, err := c.refreshTodoReminder(ctx, history)
-	if err != nil {
-		return history, err
-	}
-	tokens := estimateContextTokens(refreshed)
-	report := func(result []message.Message) []message.Message {
-		if c.reportContextTokens != nil {
-			c.reportContextTokens(ctx, estimateContextTokens(result))
-		}
-		return result
-	}
-	if tokens < c.softTriggerTokens {
-		return report(refreshed), nil
-	}
-	hash := compactionSourceHash(refreshed, c.compactTargetTokens, c.staticIdentity)
-	coord := c.coordinator
-	coord.mu.Lock()
-	compatiblePreparation := coord.done != nil && compactionSourcePrefix(coord.source, refreshed)
-	preparedReady := false
-	if compatiblePreparation {
-		select {
-		case <-coord.done:
-			preparedReady = true
-		default:
-		}
-	}
-	if coord.hash != hash && !compatiblePreparation && coord.cancel != nil {
-		coord.cancel()
-	}
-	if tokens < hardTokens && !preparedReady {
-		if !c.backgroundPrepare {
-			coord.mu.Unlock()
-			return report(refreshed), nil
-		}
-		if coord.hash != hash && !compatiblePreparation {
-			prepareCtx, cancel := context.WithCancel(ctx)
-			coord.hash, coord.source, coord.done, coord.cancel, coord.result, coord.err = hash, append([]message.Message(nil), refreshed...), make(chan struct{}), cancel, nil, nil
-			done := coord.done
-			worker := c
-			worker.compactHooks = nil // lifecycle hooks run only for a result that is activated.
-			go func() {
-				result, prepareErr := worker.prepareCompactionReason(prepareCtx, append([]message.Message(nil), refreshed...), hardTokens, "automatic_soft")
-				coord.mu.Lock()
-				if coord.hash == hash && coord.done == done {
-					coord.result, coord.err, coord.cancel = result, prepareErr, nil
-				}
-				close(done)
-				coord.mu.Unlock()
-			}()
-		}
-		coord.mu.Unlock()
-		return report(refreshed), nil
-	}
-	if coord.done != nil && compactionSourcePrefix(coord.source, refreshed) {
-		done := coord.done
-		coord.mu.Unlock()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return history, ctx.Err()
-		}
-		coord.mu.Lock()
-		if coord.err == nil {
-			if result, usable := preparedWithUncoveredTail(coord.result, coord.source, refreshed, c.compactTargetTokens); usable {
-				_, manifest := extractContextCheckpoint(result)
-				manifestHash := ""
-				if manifest != nil {
-					manifestHash = manifest.ManifestHash
-				}
-				activationIdentity := activeCacheIdentity(c.staticIdentity, manifestHash, compactionSummaryHash(result))
-				if coord.activated != activationIdentity {
-					if c.compactHooks != nil {
-						if hookErr := c.compactHooks(ctx, refreshed, nil, nil); hookErr != nil {
-							coord.mu.Unlock()
-							return history, hookErr
-						}
-					}
-					if c.activateCompaction != nil {
-						if activateErr := c.activateCompaction(ctx, result, activationIdentity); activateErr != nil {
-							if errors.Is(activateErr, session.ErrRunCheckpointStale) {
-								coord.mu.Unlock()
-								c.adoptDurableSemanticCheckpoint(ctx)
-								goto synchronous
-							}
-							coord.mu.Unlock()
-							return history, activateErr
-						}
-						c.recordActivatedSemanticCheckpointLocked(result)
-					}
-					coord.activated = activationIdentity
-					if c.compactHooks != nil {
-						_ = c.compactHooks(ctx, refreshed, result, nil)
-					}
-				}
-				coord.mu.Unlock()
-				return result, nil
-			}
-		}
-		coord.mu.Unlock()
-	} else {
-		c.invalidatePreparedCompactionLocked()
-		coord.mu.Unlock()
-	}
-
-synchronous:
-	result, err := c.compactRequired(ctx, refreshed, hardTokens)
-	if err == nil && !reflect.DeepEqual(result, refreshed) {
-		result, err = c.activateWithStaleRetry(ctx, refreshed, result, hardTokens, "automatic_hard")
-	}
-	return result, err
-}
-
-func (c turnContext) summarizeBounded(ctx context.Context, previous []string, omitted []message.Message) (string, error) {
-	envelope, err := c.summarizeStateBounded(ctx, previous, omitted)
-	return envelope.Body, err
-}
-
-func (c turnContext) summarizeStateBounded(ctx context.Context, previous []string, omitted []message.Message) (summaryEnvelope, error) {
-	summarize := c.summarize
-	budget := 0
-	if c.resolveSummarizer != nil {
-		var err error
-		summarize, budget, err = c.resolveSummarizer(ctx)
-		if err != nil {
-			return summaryEnvelope{}, err
-		}
-	}
-	if summarize == nil {
-		return summaryEnvelope{}, fmt.Errorf("compaction model is unavailable")
-	}
-	if budget <= 0 {
-		budget = 32000
-	}
-	maxBytes := contextTokenBytes(budget)
-	var chunks [][]message.Message
-	groups, err := compactionAtomicGroups(omitted)
-	if err != nil {
-		return summaryEnvelope{}, err
-	}
-	for _, group := range groups {
-		atom := omitted[group.start:group.end]
-		authorities := messageAuthorities(atom, c.runID)
-		if len(serializeSemanticHistory(nil, atom, authorities)) > maxBytes {
-			return summaryEnvelope{}, fmt.Errorf("compaction input: atomic group at message %d exceeds %d-token compactor budget", group.start, budget)
-		}
-		candidate := append([]message.Message(nil), atom...)
-		if len(chunks) > 0 {
-			candidate = append(append([]message.Message(nil), chunks[len(chunks)-1]...), atom...)
-		}
-		if len(chunks) == 0 || len(serializeSemanticHistory(nil, candidate, messageAuthorities(candidate, c.runID))) > maxBytes {
-			chunks = append(chunks, append([]message.Message(nil), atom...))
-		} else {
-			chunks[len(chunks)-1] = append(chunks[len(chunks)-1], atom...)
-		}
-	}
-	summaries := make([]summaryEnvelope, 0, len(previous)+len(chunks))
-	for _, value := range previous {
-		body := strings.TrimSpace(strings.TrimPrefix(value, semanticStateSafetyLabel))
-		authorities := semanticStateAuthorities(body)
-		if len(authorities) == 0 {
-			return summaryEnvelope{}, fmt.Errorf("previous semantic state has no valid provenance")
-		}
-		normalized, err := normalizeSemanticStateV1(body, authorities)
-		if err != nil {
-			return summaryEnvelope{}, err
-		}
-		normalizedAuthorities := semanticStateAuthorities(normalized)
-		summaries = append(summaries, summaryEnvelope{Body: normalized, Authorities: normalizedAuthorities, Digest: semanticSourceDigest(nil, normalizedAuthorities)})
-	}
-	for _, chunk := range chunks {
-		authorities := messageAuthorities(chunk, c.runID)
-		input := serializeSemanticHistory(nil, chunk, authorities)
-		raw, err := summarize(ctx, input)
-		if err != nil {
-			return summaryEnvelope{}, err
-		}
-		normalized, normalizeErr := normalizeSemanticStateV1(raw, authorities)
-		if normalizeErr != nil {
-			repair := input + "\n\nThe prior output failed host validation: " + normalizeErr.Error() + ". Return one corrected SemanticStateV1 JSON object only."
-			raw, err = summarize(ctx, repair)
-			if err != nil {
-				return summaryEnvelope{}, err
-			}
-			normalized, normalizeErr = normalizeSemanticStateV1(raw, authorities)
-		}
-		if normalizeErr != nil {
-			return summaryEnvelope{}, normalizeErr
-		}
-		normalizedAuthorities := semanticStateAuthorities(normalized)
-		summaries = append(summaries, summaryEnvelope{Body: normalized, Authorities: normalizedAuthorities, Digest: semanticSourceDigest(chunk, normalizedAuthorities)})
-	}
-	for len(summaries) > 1 {
-		var next []summaryEnvelope
-		for start := 0; start < len(summaries); {
-			end := start + 1
-			for end < len(summaries) && len(serializeSummaryEnvelopes(summaries[start:end+1])) <= maxBytes {
-				end++
-			}
-			if end == start+1 && len(serializeSummaryEnvelopes(summaries[start:end])) > maxBytes {
-				return summaryEnvelope{}, fmt.Errorf("compaction reduce input exceeds %d-token compactor budget", budget)
-			}
-			authorities := make(map[string]string)
-			bodies := make([]string, 0, end-start)
-			for _, item := range summaries[start:end] {
-				bodies = append(bodies, item.Body)
-				authorities = mergeAuthorities(authorities, item.Authorities)
-			}
-			input := serializeSemanticHistory(bodies, nil, authorities)
-			raw, err := summarize(ctx, input)
-			if err != nil {
-				return summaryEnvelope{}, err
-			}
-			normalized, normalizeErr := normalizeSemanticStateV1(raw, authorities)
-			if normalizeErr != nil {
-				repair := input + "\n\nThe prior output failed host validation: " + normalizeErr.Error() + ". Return one corrected SemanticStateV1 JSON object only."
-				raw, err = summarize(ctx, repair)
-				if err != nil {
-					return summaryEnvelope{}, err
-				}
-				normalized, normalizeErr = normalizeSemanticStateV1(raw, authorities)
-			}
-			if normalizeErr != nil {
-				return summaryEnvelope{}, normalizeErr
-			}
-			normalizedAuthorities := semanticStateAuthorities(normalized)
-			next = append(next, summaryEnvelope{Body: normalized, Authorities: normalizedAuthorities, Digest: semanticSourceDigest(nil, normalizedAuthorities)})
-			start = end
-		}
-		if len(next) >= len(summaries) {
-			return mergeSummaryEnvelopes(summaries)
-		}
-		summaries = next
-	}
-	if len(summaries) == 0 {
-		return summaryEnvelope{}, fmt.Errorf("compaction produced no semantic state")
-	}
-	return summaries[0], nil
-}
-
-func serializeSummaryEnvelopes(envelopes []summaryEnvelope) string {
-	bodies := make([]string, 0, len(envelopes))
-	authorities := make(map[string]string)
-	for _, envelope := range envelopes {
-		bodies = append(bodies, envelope.Body)
-		authorities = mergeAuthorities(authorities, envelope.Authorities)
-	}
-	return serializeSemanticHistory(bodies, nil, authorities)
-}
-
-func mergeSummaryEnvelopes(envelopes []summaryEnvelope) (summaryEnvelope, error) {
-	if len(envelopes) == 0 {
-		return summaryEnvelope{}, fmt.Errorf("compaction produced no semantic state")
-	}
-	var merged SemanticStateV1
-	merged.Version = 1
-	authorities := make(map[string]string)
-	collections := map[string]map[string]StateFactV1{
-		"acceptance": {}, "constraints": {}, "decisions": {}, "workset": {},
-		"findings": {}, "failures": {}, "blockers": {}, "next": {},
-	}
-	for _, envelope := range envelopes {
-		var current SemanticStateV1
-		if err := json.Unmarshal([]byte(envelope.Body), &current); err != nil {
-			return summaryEnvelope{}, err
-		}
-		merged.Objective = current.Objective
-		if current.CurrentAction != nil {
-			value := *current.CurrentAction
-			merged.CurrentAction = &value
-		}
-		if current.ActiveTodoItemID != "" {
-			merged.ActiveTodoItemID = current.ActiveTodoItemID
-		}
-		merged.RetrievalHints = boundedUniqueStrings(append(merged.RetrievalHints, current.RetrievalHints...), 32, 1024)
-		for name, facts := range map[string][]StateFactV1{
-			"acceptance": current.AcceptanceCriteria, "constraints": current.Constraints,
-			"decisions": current.Decisions, "workset": current.Workset, "findings": current.Findings,
-			"failures": current.Failures, "blockers": current.Blockers, "next": current.NextActions,
-		} {
-			for _, fact := range facts {
-				collections[name][fact.ID] = fact
-			}
-		}
-		authorities = mergeAuthorities(authorities, envelope.Authorities)
-	}
-	superseded := make(map[string]struct{})
-	for _, facts := range collections {
-		for _, fact := range facts {
-			for _, id := range fact.Supersedes {
-				superseded[id] = struct{}{}
-			}
-		}
-	}
-	ordered := func(name string) []StateFactV1 {
-		ids := make([]string, 0, len(collections[name]))
-		for id, fact := range collections[name] {
-			if _, removed := superseded[id]; !removed && fact.Status != "superseded" && fact.Status != "invalidated" {
-				ids = append(ids, id)
-			}
-		}
-		sort.Strings(ids)
-		result := make([]StateFactV1, 0, len(ids))
-		for _, id := range ids {
-			result = append(result, collections[name][id])
-		}
-		return result
-	}
-	merged.AcceptanceCriteria = ordered("acceptance")
-	merged.Constraints = ordered("constraints")
-	merged.Decisions = ordered("decisions")
-	merged.Workset = ordered("workset")
-	merged.Findings = ordered("findings")
-	merged.Failures = ordered("failures")
-	merged.Blockers = ordered("blockers")
-	merged.NextActions = ordered("next")
-	encoded, _ := json.Marshal(merged)
-	normalized, err := normalizeSemanticStateV1(string(encoded), authorities)
-	if err != nil {
-		return summaryEnvelope{}, err
-	}
-	normalizedAuthorities := semanticStateAuthorities(normalized)
-	return summaryEnvelope{Body: normalized, Authorities: normalizedAuthorities, Digest: semanticSourceDigest(nil, normalizedAuthorities)}, nil
+func (c turnContext) CompactTo(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, error) {
+	return c.archiveCompactTo(ctx, history, targetTokens)
 }
 
 type compactionAtomicGroup struct{ start, end int }
@@ -1180,7 +501,21 @@ func compactionAtomicGroups(messages []message.Message) ([]compactionAtomicGroup
 		groups = append(groups, compactionAtomicGroup{start: start, end: end})
 		start = end
 	}
+
 	return groups, nil
+}
+
+func recentUserIndexes(history []message.Message, prefixEnd, count int) []int {
+	indexes := make([]int, 0, count)
+	for index := len(history) - 1; index >= prefixEnd && len(indexes) < count; index-- {
+		if history[index].Role == message.RoleUser && history[index].Visibility != message.VisibilityPrivate {
+			indexes = append(indexes, index)
+		}
+	}
+	for left, right := 0, len(indexes)-1; left < right; left, right = left+1, right-1 {
+		indexes[left], indexes[right] = indexes[right], indexes[left]
+	}
+	return indexes
 }
 
 // pruneToolResultMinBytes is the floor below which pruning an old tool result
@@ -1190,13 +525,11 @@ func compactionAtomicGroups(messages []message.Message) ([]compactionAtomicGroup
 const pruneToolResultMinBytes = 1 << 10
 
 // pruneStaleToolResults is the model-free pruning layer that runs before
-// semantic compaction. It rewrites large tool-result bodies that precede the
+// archival compaction. It rewrites large tool-result bodies that precede the
 // preserved recent user turns into durable context-artifact locators, oldest
 // first, stopping as soon as the history fits the target. Only result content
 // is replaced in place, so tool call/result pairing and message order are
-// preserved and ValidateCompleteTurns semantics cannot change. When pruning
-// alone reaches the target, the caller can skip the semantic summarize
-// entirely; otherwise the summarizer receives the smaller pruned transcript.
+// preserved and ValidateCompleteTurns semantics cannot change.
 func (c turnContext) pruneStaleToolResults(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, bool, error) {
 	if targetTokens <= 0 || c.putArtifact == nil || estimateContextTokens(history) <= targetTokens {
 		return history, false, nil
@@ -1205,7 +538,7 @@ func (c turnContext) pruneStaleToolResults(ctx context.Context, history []messag
 	for prefixEnd < len(history) && history[prefixEnd].Role == message.RoleSystem {
 		prefixEnd++
 	}
-	recentUsers := recentUserIndexes(history, prefixEnd, contextRecentUserTurns)
+	recentUsers := recentUserIndexes(history, prefixEnd, archiveRecentUserTurns)
 	if len(recentUsers) == 0 {
 		return history, false, nil
 	}
@@ -1334,6 +667,18 @@ func estimateContextTokens(messages []message.Message) int {
 				addBytes(len(result.Content))
 			} else {
 				addBytes(len(result.Structured))
+			}
+		}
+		if archive, ok := archiveManifestFromMessage(current); ok && archive.FrameCount > 0 {
+			if archive.FrameCount > maxInt/archiveImageTokenEstimate {
+				tokens, remainder = maxInt, 0
+				continue
+			}
+			frameTokens := archive.FrameCount * archiveImageTokenEstimate
+			if frameTokens > maxInt-tokens {
+				tokens, remainder = maxInt, 0
+			} else {
+				tokens += frameTokens
 			}
 		}
 	}

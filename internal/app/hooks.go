@@ -52,11 +52,13 @@ func (s *Service) AttachHooks(dispatcher hooks.Dispatcher) {
 	dispatcher.AsyncContext = s.ctx
 	dispatcher.AsyncAdd = s.hookWG.Add
 	dispatcher.OnStart = func(info hooks.RunInfo) {
-		s.emitHookEvent(Event{Kind: EventHookStarted, SessionID: info.SessionID, RunID: info.RunID,
+		s.emitHookEvent(Event{
+			Kind: EventHookStarted, SessionID: info.SessionID, RunID: info.RunID,
 			AgentID: info.AgentID, ToolCallID: info.ToolCallID, State: "running", Data: map[string]string{
 				"event": string(info.Event), "name": info.Name, "source": info.Source, "tool": info.ToolName,
 				"statusMessage": info.StatusMessage,
-			}})
+			},
+		})
 	}
 	dispatcher.OnRun = func(run hooks.RunResult) {
 		state := "completed"
@@ -76,13 +78,15 @@ func (s *Service) AttachHooks(dispatcher hooks.Dispatcher) {
 		if run.Output.SuppressOutput {
 			stdout, stderr = "", ""
 		}
-		s.emitHookEvent(Event{Kind: EventHookFinished, SessionID: run.SessionID, RunID: run.RunID,
+		s.emitHookEvent(Event{
+			Kind: EventHookFinished, SessionID: run.SessionID, RunID: run.RunID,
 			AgentID: run.AgentID, ToolCallID: run.ToolCallID, State: state, Data: map[string]string{
 				"event": string(run.Event), "name": run.Name, "source": run.Source, "tool": run.ToolName,
 				"exitCode": strconv.Itoa(run.ExitCode), "durationMS": strconv.FormatInt(run.Duration.Milliseconds(), 10),
 				"reason": reason, "stdout": stdout, "stderr": stderr, "systemMessage": run.Output.SystemMessage,
 				"stdoutTruncated": strconv.FormatBool(run.StdoutTruncated), "stderrTruncated": strconv.FormatBool(run.StderrTruncated),
-			}})
+			},
+		})
 		if len(run.Output.HookSpecificOutput.WatchPaths) > 0 {
 			s.ensureHookWatcher().watchFiles(run.SessionID, run.Output.HookSpecificOutput.WatchPaths)
 		}
@@ -115,9 +119,11 @@ func (s *Service) emitHookEvent(event Event) {
 }
 
 func (s *Service) dispatchLifecycle(ctx context.Context, event hooks.Event, metadata hooks.Metadata, add func(*hooks.Envelope)) error {
-	envelope := hooks.Envelope{SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID,
+	envelope := hooks.Envelope{
+		SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID,
 		AgentType: metadata.AgentType, ParentRunID: metadata.ParentRunID, ParentToolCallID: metadata.ParentToolCallID,
-		TranscriptPath: metadata.TranscriptPath, CWD: metadata.CWD, HookEventName: event}
+		TranscriptPath: metadata.TranscriptPath, CWD: metadata.CWD, HookEventName: event,
+	}
 	if add != nil {
 		add(&envelope)
 	}
@@ -132,8 +138,10 @@ func (s *Service) dispatchLifecycle(ctx context.Context, event hooks.Event, meta
 }
 
 func (s *Service) promptHookContext(ctx context.Context, metadata hooks.Metadata, prompt string) (string, string, error) {
-	e := hooks.Envelope{SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID,
-		AgentType: metadata.AgentType, TranscriptPath: metadata.TranscriptPath, CWD: metadata.CWD, HookEventName: hooks.UserPromptSubmit, Prompt: prompt}
+	e := hooks.Envelope{
+		SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID,
+		AgentType: metadata.AgentType, TranscriptPath: metadata.TranscriptPath, CWD: metadata.CWD, HookEventName: hooks.UserPromptSubmit, Prompt: prompt,
+	}
 	result := s.hooks.Dispatch(ctx, e)
 	if result.PreventContinuation {
 		return "", "", fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, result.StopReason)
@@ -174,11 +182,11 @@ func ensureHookTranscript(id string) string {
 	if id == "" {
 		id = "bootstrap"
 	}
-	cache, err := os.UserCacheDir()
+	home, err := config.Home()
 	if err != nil {
 		return ""
 	}
-	directory := filepath.Join(cache, "azem", "hook-transcripts")
+	directory := filepath.Join(home, "hook-transcripts")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return ""
 	}
@@ -262,9 +270,11 @@ func (s *Service) startSessionHooks(ctx context.Context, sessionID, runID, sourc
 		model = models[0]
 	}
 	metadata := s.hookMetadata(sessionID, runID)
-	result := s.hooks.Dispatch(ctx, hooks.Envelope{SessionID: sessionID, TranscriptPath: metadata.TranscriptPath,
+	result := s.hooks.Dispatch(ctx, hooks.Envelope{
+		SessionID: sessionID, TranscriptPath: metadata.TranscriptPath,
 		RunID: runID, AgentID: metadata.AgentID, AgentType: metadata.AgentType, CWD: metadata.CWD,
-		HookEventName: hooks.SessionStart, Source: source, Model: model})
+		HookEventName: hooks.SessionStart, Source: source, Model: model,
+	})
 	if result.PreventContinuation {
 		s.mu.Lock()
 		delete(s.hookSessions, sessionID)

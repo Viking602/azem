@@ -23,12 +23,15 @@ type providerHost interface {
 	Sessions() *session.Service
 	EmitEvent(ctx context.Context, event Event) bool
 	AttachmentRoot() string
+	ImportGeneratedImageBytes(sessionID, name, mimeType string, data []byte) (session.Attachment, error)
+	ReadImageAttachment(sessionID string, attachment session.Attachment) ([]byte, error)
 	RetryConfig() config.RetryConfig
 
 	// Provider runtime lookups used by child (subagent) execution.
 	HasProviderRuntime() bool
 	ModelMaxOutputTokens(providerID, modelID string) int
 	ProviderTransport(providerID string) string
+	ModelImageInputSupport(ctx context.Context, providerID, accountID, modelID string) (known, supported bool, err error)
 
 	// Hook integration.
 	HookMetadata(sessionID, runID string) hooks.Metadata
@@ -76,6 +79,17 @@ func (s *Service) Sessions() *session.Service { return s.sessions }
 func (s *Service) EmitEvent(ctx context.Context, event Event) bool { return s.emit(ctx, event) }
 
 func (s *Service) AttachmentRoot() string { return s.attachments.Root }
+
+func (s *Service) ImportGeneratedImageBytes(sessionID, name, mimeType string, data []byte) (session.Attachment, error) {
+	return s.attachments.ImportGeneratedImageBytes(sessionID, name, mimeType, data)
+}
+
+func (s *Service) ModelImageInputSupport(ctx context.Context, providerID, accountID, modelID string) (known, supported bool, err error) {
+	if s.providers == nil {
+		return false, false, nil
+	}
+	return s.providers.modelImageInputSupport(ctx, providerID, accountID, modelID)
+}
 
 func (s *Service) RetryConfig() config.RetryConfig { return s.cfg.Retry }
 

@@ -72,7 +72,7 @@ func UpdateDefault(path, key, value string) error {
 
 // UpdateModelRoute atomically updates a nested model route while preserving
 // unrelated YAML fields and comments. Supported scopes are "title", "plan",
-// "approval", "vision", "compaction", "recap", and "subagent"; role is required only for the latter.
+// "approval", "vision", "recap", and "subagent"; role is required only for the latter.
 func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	keys := []string{"agents"}
 	switch scope {
@@ -96,11 +96,6 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 			return fmt.Errorf("role is not valid for vision route")
 		}
 		keys = append(keys, "vision")
-	case "compaction":
-		if role != "" {
-			return fmt.Errorf("role is not valid for compaction route")
-		}
-		keys = append(keys, "compaction")
 	case "recap":
 		if role != "" {
 			return fmt.Errorf("role is not valid for recap route")
@@ -550,6 +545,9 @@ func ensureMappingPath(root *yaml.Node, keys ...string) *yaml.Node {
 }
 
 func deleteMappingValue(mapping *yaml.Node, key string) {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return
+	}
 	for index := 0; index+1 < len(mapping.Content); index += 2 {
 		if mapping.Content[index].Value == key {
 			mapping.Content = append(mapping.Content[:index], mapping.Content[index+2:]...)
@@ -616,24 +614,43 @@ func load(path string, startupWorkspace string, forceWorkspace bool) (Config, er
 		}
 	} else {
 		defer f.Close()
-		decoder := yaml.NewDecoder(io.LimitReader(f, 1<<20))
-		decoder.KnownFields(true)
-		if err := decoder.Decode(&cfg); err != nil {
+		payload, readErr := io.ReadAll(io.LimitReader(f, 1<<20))
+		if readErr != nil {
+			return Config{}, fmt.Errorf("read config %q: %w", path, readErr)
+		}
+		var document yaml.Node
+		documentDecoder := yaml.NewDecoder(bytes.NewReader(payload))
+		if err := documentDecoder.Decode(&document); err != nil {
 			return Config{}, fmt.Errorf("decode config %q: %w", path, err)
 		}
 		var extra any
-		if err := decoder.Decode(&extra); err != io.EOF {
+		if err := documentDecoder.Decode(&extra); err != io.EOF {
 			if err == nil {
 				return Config{}, fmt.Errorf("decode config %q: multiple YAML documents are not allowed", path)
 			}
 			return Config{}, fmt.Errorf("decode config %q: %w", path, err)
 		}
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return Config{}, fmt.Errorf("rewind config %q: %w", path, err)
+		if len(document.Content) > 0 {
+			agents := mappingValue(document.Content[0], "agents")
+			deleteMappingValue(agents, "compaction")
+			contextConfig := mappingValue(agents, "context")
+			for _, key := range []string{
+				"soft_trigger_ratio", "hard_trigger_ratio", "target_ratio",
+				"background_prepare", "safety_margin_ratio",
+				"reserve_output_tokens", "reserve_reasoning_tokens",
+				"min_reclaim_tokens", "max_summary_tokens",
+			} {
+				deleteMappingValue(contextConfig, key)
+			}
 		}
-		var document yaml.Node
-		if err := yaml.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&document); err != nil {
-			return Config{}, fmt.Errorf("decode config %q for built-in MCP merge: %w", path, err)
+		sanitized, err := yaml.Marshal(&document)
+		if err != nil {
+			return Config{}, fmt.Errorf("normalize config %q: %w", path, err)
+		}
+		decoder := yaml.NewDecoder(bytes.NewReader(sanitized))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&cfg); err != nil {
+			return Config{}, fmt.Errorf("decode config %q: %w", path, err)
 		}
 		if len(document.Content) > 0 {
 			if err := mergeBuiltInMCPServers(&cfg, document.Content[0]); err != nil {

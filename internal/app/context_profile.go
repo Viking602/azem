@@ -36,7 +36,7 @@ func (d *contextProfileProviderDriver) Stream(ctx context.Context, request hypro
 
 func contextProfileFromRequest(request hyprovider.Request) ContextProfile {
 	profile := ContextProfile{Source: "request", Estimated: true}
-	if manifest, _ := extractContextCheckpointMetadata(request.Messages); manifest != nil {
+	if manifest := extractArchiveContextManifest(request.Messages); manifest != nil {
 		applyContextManifestProfile(&profile, *manifest)
 	}
 	systemIndex := 0
@@ -137,18 +137,9 @@ func (r *ProviderRuntime) EstimateContextProfile(ctx context.Context, sessionID 
 		if loadErr == nil {
 			profile.Contributions = append(profile.Contributions, conversationContributions(projectionContextMessages(projection))...)
 			if record, manifestErr := host.Sessions().LoadActiveContextManifest(ctx, sessionID); manifestErr == nil {
-				var manifest ContextManifestV1
+				var manifest ArchiveContextManifestV1
 				if json.Unmarshal(record.Data, &manifest) == nil {
 					applyContextManifestProfile(&profile, manifest)
-				}
-			}
-			if checkpoint, semanticErr := host.Sessions().LoadSemanticCheckpoint(ctx, sessionID); semanticErr == nil {
-				profile.SemanticRevision = checkpoint.Revision
-				profile.SemanticCursor = checkpoint.Cursor
-				highWater := canonicalProjectionHighWater(projection.Blocks)
-				if highWater != nil {
-					profile.CanonicalHighWater = *highWater
-					profile.WriterLag = max(0, *highWater-checkpoint.Cursor.CanonicalSequence)
 				}
 			}
 		}
@@ -156,16 +147,22 @@ func (r *ProviderRuntime) EstimateContextProfile(ctx context.Context, sessionID 
 	return profile, nil
 }
 
-func applyContextManifestProfile(profile *ContextProfile, manifest ContextManifestV1) {
+func applyContextManifestProfile(profile *ContextProfile, manifest ArchiveContextManifestV1) {
 	profile.ManifestHash = manifest.ManifestHash
-	profile.SemanticRevision = manifest.SemanticRevision
-	profile.SemanticCursor = manifest.SemanticCursor
 	profile.CanonicalHighWater = manifest.CanonicalHighWater
 	profile.PolicyVersion = manifest.PolicyVersion
 	profile.RebuildReason = manifest.Reason
-	profile.WriterLag = max(0, manifest.CanonicalHighWater-manifest.SemanticCursor.CanonicalSequence)
 	profile.Segments = append([]ContextSegmentV1(nil), manifest.Segments...)
 	profile.Exclusions = append([]ContextExclusionV1(nil), manifest.Exclusions...)
+	if manifest.Archive != nil {
+		profile.Archive = &ContextArchiveProfile{
+			Carrier: manifest.Archive.Carrier, SourceArtifactID: manifest.Archive.SourceArtifactID,
+			SourceSHA256: manifest.Archive.SourceSHA256, SourceCharacters: manifest.Archive.SourceCharacters,
+			FrameCount: manifest.Archive.FrameCount, FrameBytes: manifest.Archive.FrameBytes,
+			TotalPages: manifest.Archive.TotalPages, TruncatedCharacters: manifest.Archive.TruncatedChars,
+			DeterministicHash: manifest.Archive.DeterministicHash,
+		}
+	}
 }
 
 func projectionContextMessages(projection session.Projection) []message.Message {

@@ -14,6 +14,17 @@ import (
 	"github.com/Viking602/venat/tool"
 )
 
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "azem-hooks-")
+	if err != nil {
+		os.Exit(1)
+	}
+	_ = os.Setenv("AZEM_HOME", dir)
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 func TestDiscoveryTrustOrderingDiagnosticsAndDedup(t *testing.T) {
 	dir := t.TempDir()
 	first := `{"hooks":{"PreToolUse":[{"matcher":"Bash|Read","hooks":[{"type":"command","command":"echo first"},{"type":"prompt","command":"must-not-run"}]}]}}`
@@ -48,11 +59,13 @@ func TestDiscoveryTrustOrderingDiagnosticsAndDedup(t *testing.T) {
 
 func TestDiscoveryRegistersEveryClaudeEventAndAzemExtension(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	events := []Event{PreToolUse, PostToolUse, PostToolUseFailure, Notification, UserPromptSubmit,
+	events := []Event{
+		PreToolUse, PostToolUse, PostToolUseFailure, Notification, UserPromptSubmit,
 		SessionStart, SessionEnd, Stop, StopFailure, SubagentStart, SubagentStop, PreCompact,
 		PostCompact, PermissionRequest, PermissionDenied, Setup, TeammateIdle, TaskCreated,
 		TaskCompleted, Elicitation, ElicitationResult, ConfigChange, WorktreeCreate, WorktreeRemove,
-		InstructionsLoaded, CwdChanged, FileChanged, TodoUpdated}
+		InstructionsLoaded, CwdChanged, FileChanged, TodoUpdated,
+	}
 	configured := fileConfig{Hooks: make(map[Event][]group)}
 	for _, event := range events {
 		configured.Hooks[event] = []group{{Hooks: []hookSpec{{Type: "command", Command: "true"}}}}

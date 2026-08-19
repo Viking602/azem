@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,56 +27,13 @@ import (
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/contextarchive"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	azresponses "github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
-
-func TestNewSubagentCapturesLatestCompactionRoute(t *testing.T) {
-	ctx := context.Background()
-	providerStore, err := sqlitestore.Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = providerStore.Close(context.Background()) })
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := newSubagentRuntime(ctx, config.Default().Agents.Subagents, store, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		runtime.cancel()
-		runtime.wg.Wait()
-	})
-	want := config.ModelRouteConfig{Provider: "grok", Model: "summary-new", Reasoning: "low"}
-	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent", ProviderID: "chatgpt", ModelID: "main",
-		WorkspaceRoot: t.TempDir(), CompactionRoute: config.ModelRouteConfig{Provider: "chatgpt", Model: "summary-old"},
-		CompactionRouteSnapshot: func() config.ModelRouteConfig { return want },
-		ResolveDriver: func(context.Context, string, string, string) (string, int, hyprovider.Driver, error) {
-			return "", 0, nil, errors.New("stop before execution")
-		},
-	}
-	run, err := runtime.Spawn(ctx, subagentSpawnInput{SubagentType: "explore", Prompt: "inspect"}, parent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime.mu.Lock()
-	active := runtime.active[run.ID]
-	got := config.ModelRouteConfig{}
-	if active != nil {
-		got = active.parent.CompactionRoute
-	}
-	runtime.mu.Unlock()
-	if active == nil || got != want {
-		t.Fatalf("spawned child compaction route = %+v, want %+v", got, want)
-	}
-}
 
 func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 	var calls atomic.Int32
@@ -179,7 +135,7 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	subagentStore, err := agentservice.NewSQLSubagentRunStore(store.DB())
+	subagentStore, err := agentservice.NewSQLSubagentRunStore(store.DB(), store.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +146,7 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerRuntime.ChatGPTEndpoint = server.URL + "/responses"
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "default", Title: "Test", ProviderID: "chatgpt", ModelID: "gpt-subagent", Reasoning: "minimal", AgentMode: "single"}); err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +273,7 @@ func TestSubagentQueryUsesActiveSnapshotAndPreservesOrder(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +337,7 @@ func TestConcurrentSubagentCancelIsDurableAndIdempotent(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +555,7 @@ func TestSubagentTodoBindingPreservesStatusAndEmitsSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	sessions := session.NewService(providerStore.DB())
+	sessions := session.NewService(providerStore.DB(), providerStore.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Todo"}); err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +599,7 @@ func TestSubagentGetOutputReturnsOrderedSnapshotsAndMarksDelivery(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -695,7 +651,7 @@ func TestRecoverInterruptedSubagentRequeuesExistingDurableChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = providerStore.Close(context.Background()) })
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +740,7 @@ func TestRecoveredSubagentExecutesExistingDurableChildToCompletion(t *testing.T)
 	if _, err := coding.Runner().Recover(ctx, child.RunID); err != nil {
 		t.Fatal(err)
 	}
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -846,7 +802,7 @@ func TestSubagentKillReturnsTypedOrdinaryResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1144,7 +1100,7 @@ func TestForegroundWaitStartsAfterQueuedTaskRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1208,7 +1164,7 @@ func TestParentWaitCancellationDetachesReadOnlyChildWithoutCancellingIt(t *testi
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1290,7 +1246,7 @@ func TestSubagentUIBackpressureDoesNotCancelRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1326,7 +1282,7 @@ func TestIdleTimeoutCancelsSilentRunningSubagent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1374,7 +1330,7 @@ func TestIdleTimeoutDisabledDoesNotCancelSilentSubagent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1422,7 +1378,7 @@ func TestIdleTimeoutSkipsLiveShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1481,7 +1437,7 @@ func TestIdleTimeoutSkipsOpenToolAndResetsOnThinking(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1549,7 +1505,7 @@ func TestIdleTimeoutResetsOnTextAndToolAndIgnoresEmptyThinking(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1645,7 +1601,7 @@ func TestIdleTimeoutWatchCancelsSilentRunningSubagent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1697,7 +1653,7 @@ func TestIdleTimeoutStillFiresDuringRepeatedWaitHeartbeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1769,7 +1725,7 @@ func TestUserStopCancelsRunningSubagents(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1823,7 +1779,7 @@ func TestParentOnlyStopDoesNotCancelSubagents(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1902,7 +1858,7 @@ func TestCancelByParentRunIsSessionScopedAndIncludesBackgroundOnRequest(t *testi
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1981,7 +1937,7 @@ func TestTerminalizerFallsBackWithoutLeakingSlotOrDoneWaiter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	sqlStore, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	sqlStore, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2034,7 +1990,7 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2048,7 +2004,7 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 		{ID: "old-user", Role: message.RoleUser, Text: "original request", RunID: "old-run", Metadata: map[string]string{"task_id": "source"}},
 		{ID: "old-tool-call", Role: message.RoleAssistant, Text: "checking", ToolCalls: []message.ToolCall{{ID: "call", Name: "coding.read_file"}}},
 		message.NewToolResult(message.ToolResult{ToolCallID: "call", Name: "coding.read_file", Content: "secret"}),
-		{Role: message.RoleAssistant, Text: semanticStateSafetyLabel + `{"version":1}`, Kind: message.KindCompactionSummary, Visibility: message.VisibilityPrivate},
+		{Role: message.RoleUser, Text: "archive carrier", Kind: message.KindCompactionSummary, Visibility: message.VisibilityPrivate},
 		{Role: message.RoleAssistant, Text: "private runtime context", Visibility: message.VisibilityPrivate},
 		{ID: "old-answer", Role: message.RoleAssistant, Text: "source answer", RunID: "old-run"},
 	})
@@ -2147,12 +2103,12 @@ func TestBackgroundCompletionAutoWakesIdleSessionOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
-	sessions := session.NewService(providerStore.DB())
+	sessions := session.NewService(providerStore.DB(), providerStore.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{
 		ID: "session", Title: "Auto wake", ProviderID: "chatgpt", ModelID: "model", Reasoning: "high", AgentMode: "single",
 	}); err != nil {
@@ -2231,12 +2187,12 @@ func TestBackgroundCompletionsBatchIntoOneWake(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
-	sessions := session.NewService(providerStore.DB())
+	sessions := session.NewService(providerStore.DB(), providerStore.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{
 		ID: "session", Title: "Batch wake", ProviderID: "chatgpt", ModelID: "model", Reasoning: "high", AgentMode: "single",
 	}); err != nil {
@@ -2682,7 +2638,7 @@ func TestForegroundWaitWindowDetachesLongReadOnlyTaskWithoutCancellingIt(t *test
 		t.Fatal(err)
 	}
 	defer coding.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2840,7 +2796,7 @@ func newGatedForegroundHarness(t *testing.T, ctx context.Context, await time.Dur
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2920,7 +2876,7 @@ func TestSubagentCoordinatorEnforcesConcurrencyAndFIFOQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer coding.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3000,7 +2956,7 @@ func TestSubagentCoordinatorAppliesConcurrencyUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer coding.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3088,7 +3044,7 @@ func newRecursiveTestRuntime(t *testing.T, ctx context.Context) (*subagentRuntim
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = coding.Close(context.Background()) })
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3149,7 +3105,7 @@ func TestSubagentDriversHonorRecursionDepth(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer providerStore.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3262,7 +3218,7 @@ func TestSubagentSessionRetryRecoversWithoutPartialReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer coding.Close(ctx)
-	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3340,7 +3296,7 @@ func TestSubagentCoordinatorTerminalizesProviderFailureAndPanic(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer coding.Close(ctx)
-			store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+			store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -3375,29 +3331,40 @@ func TestSubagentCoordinatorTerminalizesProviderFailureAndPanic(t *testing.T) {
 	}
 }
 
-func TestSubagentTurnContextCompactsToModelTarget(t *testing.T) {
-	contextManager := subagentTurnContext{summarize: func(context.Context, string) (string, error) { return semanticStateForTest("subagent summary"), nil }}
+func TestSubagentTurnContextCompactsToDeterministicArchive(t *testing.T) {
+	var archivedSource []byte
+	inner := turnContext{archiveEnabled: true, keepRecentTokens: 100}
+	inner.storeArchive = func(_ context.Context, result contextarchive.Result) (contextarchive.Manifest, []session.Attachment, error) {
+		archivedSource = append([]byte(nil), result.Source...)
+		manifest := result.Manifest
+		manifest.SourceArtifactID = "subagent-archive"
+		return manifest, nil, nil
+	}
+	inner.loadArchiveSource = func(context.Context, string) ([]byte, error) {
+		return append([]byte(nil), archivedSource...), nil
+	}
+	contextManager := subagentTurnContext{inner: inner}
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "stable rules"),
 		message.NewText(message.RoleUser, "old request"),
 		message.NewText(message.RoleAssistant, strings.Repeat("old evidence ", 2_000)),
+		message.NewText(message.RoleUser, "recent request one"),
+		message.NewText(message.RoleAssistant, "recent answer one"),
+		message.NewText(message.RoleUser, "recent request two"),
+		message.NewText(message.RoleAssistant, "recent answer two"),
 		message.NewText(message.RoleUser, "latest request"),
 	}
-	compacted, err := contextManager.CompactTo(context.Background(), history, 300)
+	compacted, err := contextManager.CompactTo(context.Background(), history, 1_000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tokens := estimateContextTokens(compacted); tokens > 300 {
-		t.Fatalf("compacted context estimate = %d, want <= 300", tokens)
+	if tokens := estimateContextTokens(compacted); tokens > 1_000 {
+		t.Fatalf("archived context estimate = %d, want <= 1000", tokens)
 	}
 	if compacted[len(compacted)-1].Role != message.RoleUser || compacted[len(compacted)-1].Text != "latest request" {
-		t.Fatalf("compacted context lost latest request: %#v", compacted)
+		t.Fatalf("archived context lost latest request: %#v", compacted)
 	}
-	foundSummary := false
-	for _, current := range compacted {
-		foundSummary = foundSummary || current.Kind == message.KindCompactionSummary
-	}
-	if !foundSummary {
-		t.Fatalf("compacted context omitted the compaction marker: %#v", compacted)
+	if archiveCarrierIndex(compacted) < 0 || len(archivedSource) == 0 {
+		t.Fatalf("archived context omitted carrier/source: %#v", compacted)
 	}
 }

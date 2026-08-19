@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/blobstore"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 	"github.com/Viking602/venat/message"
 )
@@ -49,8 +51,8 @@ type Block struct {
 
 // ModelHistory is a replaceable provider-resume checkpoint, not the durable
 // conversation record. CompleteTurn installs it atomically; independent
-// transcript mutations invalidate it, while provider-generated compaction
-// replaces the transcript and checkpoint in one transaction.
+// transcript mutations invalidate it, while deterministic context archiving
+// replaces the transcript-derived checkpoint in one transaction.
 type ModelHistory struct {
 	ProviderID             string            `json:"providerId,omitempty"`
 	ModelID                string            `json:"modelId,omitempty"`
@@ -62,11 +64,10 @@ type ModelHistory struct {
 	StaticPrefixHash       string            `json:"staticPrefixHash,omitempty"`
 	WireVersion            int               `json:"wireVersion,omitempty"`
 	ContextManifestHash    string            `json:"contextManifestHash,omitempty"`
-	SemanticRevision       int64             `json:"semanticRevision,omitempty"`
 	PolicyVersion          int               `json:"policyVersion,omitempty"`
 }
 
-const CurrentWireVersion = 2
+const CurrentWireVersion = 3
 
 var ErrRunCheckpointStale = errors.New("session: run checkpoint source is stale")
 
@@ -104,13 +105,10 @@ type Projection struct {
 	CacheIdentityHash    string
 }
 
-type CompactionPlan struct {
-	Summary           string
+type ArchivePlan struct {
 	ModelHistory      ModelHistory
 	ExpectedUpdatedAt time.Time
-	TailStart         int
 	ExpectedHighWater *int64
-	SemanticCommit    *SemanticCommit
 	Manifest          *ContextManifestRecord
 }
 
@@ -123,12 +121,12 @@ type RunCheckpoint struct {
 	ModelHistory      ModelHistory
 	CacheIdentity     string
 	ExpectedHighWater *int64
-	SemanticCommit    *SemanticCommit
 	Manifest          *ContextManifestRecord
 }
 
 type Service struct {
-	db *sql.DB
+	db    *sql.DB
+	blobs blobstore.Store
 }
 
 type ContextArtifact struct {
@@ -140,6 +138,19 @@ type ContextArtifact struct {
 	Payload   []byte
 	Preview   string
 	CreatedAt time.Time
+}
+
+const (
+	maxContextArtifactPayloadBytes = 64 << 20
+	// InternalArtifactKindPrefix marks durable control-plane artifacts that
+	// must never enter ordinary conversation-history recall.
+	InternalArtifactKindPrefix = "azem-internal/"
+)
+
+var ErrContextArtifactNotFound = errors.New("session: context artifact not found")
+
+type limitedBlobStore interface {
+	GetLimited(context.Context, string, int64) ([]byte, error)
 }
 
 type HistoryRecord struct {
@@ -292,8 +303,9 @@ func (s *Service) SearchHistory(ctx context.Context, sessionID, query string, li
 			(f.source_type='sequence' AND EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=f.session_id
 				AND (b.kind='user' OR (b.kind='assistant' AND COALESCE(json_extract(b.data,'$.state'),'') IN ('','completed')))
 				AND 'sequence:'||b.sequence=f.source_id)) OR
-			(f.source_type='artifact' AND EXISTS(SELECT 1 FROM context_artifacts a WHERE a.session_id=f.session_id AND 'artifact:'||a.id=f.source_id)))
-		ORDER BY bm25(history_fts) LIMIT ?`, match, sessionID, limit)
+			(f.source_type='artifact' AND EXISTS(SELECT 1 FROM context_artifacts a WHERE a.session_id=f.session_id
+				AND a.kind NOT LIKE ? AND 'artifact:'||a.id=f.source_id)))
+		ORDER BY bm25(history_fts) LIMIT ?`, match, sessionID, InternalArtifactKindPrefix+"%", limit)
 	if err != nil {
 		return nil, fmt.Errorf("search session history: %w", err)
 	}
@@ -362,17 +374,35 @@ func truncateUTF8Bytes(value string, limit int) string {
 
 // PutArtifact durably stores a payload and returns the existing row when the
 // same session, kind, and content are seen again.
-func (s *Service) PutArtifact(ctx context.Context, sessionID, runID, kind string, payload []byte, preview string) (ContextArtifact, error) {
+func (s *Service) PutArtifact(ctx context.Context, sessionID, runID, kind string, payload []byte, preview string) (artifact ContextArtifact, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(kind) == "" {
 		return ContextArtifact{}, fmt.Errorf("artifact session and kind are required")
 	}
-	digest := sha256.Sum256(payload)
-	hash := fmt.Sprintf("%x", digest[:])
+	if len(payload) > maxContextArtifactPayloadBytes {
+		return ContextArtifact{}, fmt.Errorf("context artifact exceeds %d-byte limit", maxContextArtifactPayloadBytes)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ContextArtifact{}, err
+	}
+	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return ContextArtifact{}, fmt.Errorf("lock context artifact catalog: %w", err)
+	}
+	hash, err := s.installTrackedBlob(ctx, payload)
+	if err != nil {
+		return ContextArtifact{}, fmt.Errorf("put context artifact blob: %w", err)
+	}
 	preview = BuildArtifactPreviewV2(kind, payload, hash, preview)
 	id := contextArtifactID(sessionID, kind, hash)
 	now := time.Now().UTC()
-	if err := dbgen.New(s.db).InsertContextArtifact(ctx, dbgen.InsertContextArtifactParams{ID: id, SessionID: sessionID, RunID: runID, Kind: kind, Sha256: hash, Payload: payload, Preview: preview, CreatedAt: now.UnixNano()}); err != nil {
+	if err := dbgen.New(tx).InsertContextArtifact(ctx, dbgen.InsertContextArtifactParams{ID: id, SessionID: sessionID, RunID: runID, Kind: kind, Sha256: hash, Preview: preview, CreatedAt: now.UnixNano()}); err != nil {
 		return ContextArtifact{}, fmt.Errorf("put context artifact: %w", err)
+	}
+	if err := s.commitBlobTransaction(ctx, tx, tracker, trackerOwner); err != nil {
+		return ContextArtifact{}, fmt.Errorf("commit context artifact: %w", err)
 	}
 	return s.LoadArtifact(ctx, sessionID, id)
 }
@@ -385,31 +415,96 @@ func contextArtifactID(sessionID, kind, hash string) string {
 func (s *Service) LoadArtifact(ctx context.Context, sessionID, id string) (ContextArtifact, error) {
 	row, err := dbgen.New(s.db).GetContextArtifact(ctx, dbgen.GetContextArtifactParams{ID: id, SessionID: sessionID})
 	if errors.Is(err, sql.ErrNoRows) {
-		return ContextArtifact{}, fmt.Errorf("context artifact %q not found in session %q", id, sessionID)
+		return ContextArtifact{}, fmt.Errorf("%w: %q in session %q", ErrContextArtifactNotFound, id, sessionID)
 	}
 	if err != nil {
 		return ContextArtifact{}, fmt.Errorf("load context artifact: %w", err)
 	}
-	value := ContextArtifact{ID: row.ID, SessionID: row.SessionID, RunID: row.RunID, Kind: row.Kind, SHA256: row.Sha256, Payload: append([]byte(nil), row.Payload...), Preview: row.Preview, CreatedAt: time.Unix(0, row.CreatedAt).UTC()}
-	return value, nil
+	return s.loadArtifactRow(ctx, row)
+}
+
+func (s *Service) LoadLatestArtifactByKind(ctx context.Context, sessionID, kind string) (ContextArtifact, error) {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(kind) == "" {
+		return ContextArtifact{}, errors.New("session id and artifact kind are required")
+	}
+	row, err := dbgen.New(s.db).GetLatestContextArtifactByKind(ctx, dbgen.GetLatestContextArtifactByKindParams{SessionID: sessionID, Kind: kind})
+	if errors.Is(err, sql.ErrNoRows) {
+		return ContextArtifact{}, fmt.Errorf("%w: kind %q in session %q", ErrContextArtifactNotFound, kind, sessionID)
+	}
+	if err != nil {
+		return ContextArtifact{}, fmt.Errorf("load latest context artifact: %w", err)
+	}
+	return s.loadArtifactRow(ctx, row)
+}
+
+func (s *Service) LoadLatestArtifactByKindPrefix(ctx context.Context, sessionID, kindPrefix string) (ContextArtifact, error) {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(kindPrefix) == "" {
+		return ContextArtifact{}, errors.New("session id and artifact kind prefix are required")
+	}
+	row, err := dbgen.New(s.db).GetLatestContextArtifactByKindPrefix(ctx, dbgen.GetLatestContextArtifactByKindPrefixParams{
+		SessionID: sessionID, KindPrefix: sql.NullString{String: kindPrefix, Valid: true},
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return ContextArtifact{}, fmt.Errorf("%w: kind prefix %q in session %q", ErrContextArtifactNotFound, kindPrefix, sessionID)
+	}
+	if err != nil {
+		return ContextArtifact{}, fmt.Errorf("load latest context artifact by kind prefix: %w", err)
+	}
+	return s.loadArtifactRow(ctx, row)
+}
+
+func (s *Service) loadArtifactRow(ctx context.Context, row dbgen.ContextArtifact) (ContextArtifact, error) {
+	if strings.HasPrefix(row.ID, "artifact_") {
+		if expectedID := contextArtifactID(row.SessionID, row.Kind, row.Sha256); row.ID != expectedID {
+			return ContextArtifact{}, fmt.Errorf("context artifact %q failed identity check", row.ID)
+		}
+	}
+	var (
+		payload []byte
+		err     error
+	)
+	if limited, ok := s.blobs.(limitedBlobStore); ok {
+		payload, err = limited.GetLimited(ctx, row.Sha256, maxContextArtifactPayloadBytes)
+	} else {
+		payload, err = s.blobs.Get(ctx, row.Sha256)
+	}
+	if err != nil {
+		return ContextArtifact{}, fmt.Errorf("load context artifact payload: %w", err)
+	}
+	if actual := blobstore.Sum(payload); actual != row.Sha256 {
+		return ContextArtifact{}, fmt.Errorf("context artifact %q failed integrity check: got sha256 %s", row.ID, actual)
+	}
+	return ContextArtifact{
+		ID: row.ID, SessionID: row.SessionID, RunID: row.RunID, Kind: row.Kind, SHA256: row.Sha256,
+		Payload: payload, Preview: row.Preview, CreatedAt: time.Unix(0, row.CreatedAt).UTC(),
+	}, nil
 }
 
 // UpdateLatestBlockState updates the newest matching durable UI block without
 // appending a second transcript entry. It is used for interactive lifecycle
 // records such as questions and plan proposals, whose content is immutable but
 // whose review state must survive an application restart.
-func (s *Service) UpdateLatestBlockState(ctx context.Context, sessionID, kind, dataKey, dataValue, expectedState, nextState string, data map[string]string) (Block, error) {
+func (s *Service) UpdateLatestBlockState(ctx context.Context, sessionID, kind, dataKey, dataValue, expectedState, nextState string, data map[string]string) (blockResult Block, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Block{}, err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return Block{}, err
+	}
 	rows, err := dbgen.New(tx).ListSessionBlocks(ctx, sessionID)
 	if err != nil {
 		return Block{}, err
 	}
 	for index := len(rows) - 1; index >= 0; index-- {
-		block, matches, err := matchingLifecycleBlock(rows[index].Data, kind, dataKey, dataValue, expectedState)
+		encoded, err := s.decodeBlockJSON(ctx, rows[index].Data, rows[index].DataSha256)
+		if err != nil {
+			return Block{}, err
+		}
+		block, matches, err := matchingLifecycleBlock(encoded, kind, dataKey, dataValue, expectedState)
 		if err != nil {
 			return Block{}, err
 		}
@@ -417,12 +512,16 @@ func (s *Service) UpdateLatestBlockState(ctx context.Context, sessionID, kind, d
 			continue
 		}
 		setLifecycleBlockState(&block, nextState, data)
-		encoded, err := json.Marshal(block)
+		encoded, err = json.Marshal(block)
+		if err != nil {
+			return Block{}, err
+		}
+		inline, digest, err := s.encodeBlockData(ctx, block, encoded)
 		if err != nil {
 			return Block{}, err
 		}
 		queries := dbgen.New(tx)
-		if err := queries.UpdateSessionBlockData(ctx, dbgen.UpdateSessionBlockDataParams{Data: encoded, SessionID: sessionID, Sequence: rows[index].Sequence}); err != nil {
+		if err := queries.UpdateSessionBlockData(ctx, dbgen.UpdateSessionBlockDataParams{Data: inline, DataSha256: digest, SessionID: sessionID, Sequence: rows[index].Sequence}); err != nil {
 			return Block{}, err
 		}
 		now := time.Now().UTC().UnixNano()
@@ -433,7 +532,7 @@ func (s *Service) UpdateLatestBlockState(ctx context.Context, sessionID, kind, d
 			return Block{}, err
 		}
 		block.Sequence = rows[index].Sequence
-		return block, tx.Commit()
+		return block, s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 	}
 	return Block{}, fmt.Errorf("matching %s block was not found", kind)
 }
@@ -462,7 +561,12 @@ func setLifecycleBlockState(block *Block, state string, data map[string]string) 
 	}
 }
 
-func NewService(db *sql.DB) *Service { return &Service{db: db} }
+func NewService(db *sql.DB, blobs blobstore.Store) *Service {
+	if blobs == nil {
+		blobs = blobstore.NewMemory()
+	}
+	return &Service{db: db, blobs: blobs}
+}
 
 func sessionFromDB(row dbgen.Session) Session {
 	return Session{ID: row.ID, Title: row.Title, ProviderID: row.ProviderID, ModelID: row.ModelID, Reasoning: row.Reasoning, AgentMode: row.AgentMode, CreatedAt: time.Unix(0, row.CreatedAt).UTC(), UpdatedAt: time.Unix(0, row.UpdatedAt).UTC()}
@@ -640,7 +744,9 @@ func (s *Service) ArchiveInactive(ctx context.Context, olderThan time.Duration, 
 	return archived, nil
 }
 
-func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
+func (s *Service) Fork(ctx context.Context, sourceID, targetID string) (err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if err := validateSessionForkIDs(sourceID, targetID); err != nil {
 		return err
 	}
@@ -649,6 +755,9 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return err
+	}
 	now := time.Now().UTC().UnixNano()
 	result, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at)
 		SELECT ?,title,provider_id,model_id,reasoning,agent_mode,?,? FROM sessions WHERE id=?`, targetID, now, now, sourceID)
@@ -663,16 +772,16 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
 		query string
 		args  []any
 	}{
-		{"projection", `INSERT INTO session_projections(session_id,last_run_id,blocks,updated_at,model_history,usage,checkpoint_generation,cache_epoch,cache_identity_hash)
-			SELECT ?,'',blocks,?,model_history,'{}',checkpoint_generation,0,'' FROM session_projections WHERE session_id=?`, []any{targetID, now, sourceID}},
-		{"blocks", `INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data)
-			SELECT ?,sequence,kind,run_id,agent_id,data FROM session_blocks WHERE session_id=?`, []any{targetID, sourceID}},
+		{"projection", `INSERT INTO session_projections(session_id,last_run_id,updated_at,model_history,usage,checkpoint_generation,cache_epoch,cache_identity_hash,model_history_sha256)
+			SELECT ?,'',?,'{}','{}',0,0,'','' FROM session_projections WHERE session_id=?`, []any{targetID, now, sourceID}},
+		{"blocks", `INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data,data_sha256)
+			SELECT ?,sequence,kind,run_id,agent_id,data,data_sha256 FROM session_blocks WHERE session_id=?`, []any{targetID, sourceID}},
 		{"todo", `INSERT INTO session_todos(session_id,goal,revision,phases,updated_at)
 			SELECT ?,goal,revision,phases,? FROM session_todos WHERE session_id=?`, []any{targetID, now, sourceID}},
 		{"recap", `INSERT INTO recaps(session_id,anchor,covered_boundary,revision,goal,summary,open_items,updated_at)
 			SELECT ?,anchor,covered_boundary,revision,goal,summary,open_items,? FROM recaps WHERE session_id=?`, []any{targetID, now, sourceID}},
-		{"tools", `INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at)
-			SELECT ?,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at
+		{"tools", `INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256)
+			SELECT ?,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256
 			FROM session_tool_records WHERE session_id=? AND state<>'running'`, []any{targetID, sourceID}},
 		{"project", `INSERT INTO session_workspaces(session_id,workspace,assigned_at)
 			SELECT ?,workspace,? FROM session_workspaces WHERE session_id=?`, []any{targetID, now, sourceID}},
@@ -682,36 +791,34 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
 			return fmt.Errorf("fork session %s: %w", copy.name, err)
 		}
 	}
-	artifactIDs, err := cloneForkArtifacts(ctx, tx, sourceID, targetID)
+	artifactIDs, err := s.cloneForkArtifacts(ctx, tx, sourceID, targetID)
 	if err != nil {
 		return err
 	}
-	if err := remapForkArtifactReferences(ctx, tx, targetID, artifactIDs); err != nil {
+	if err := s.remapForkArtifactReferences(ctx, tx, targetID, artifactIDs); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
 type forkArtifact struct {
 	id, runID, kind, hash, preview string
-	payload                        []byte
 	createdAt                      int64
 }
 
-func cloneForkArtifacts(ctx context.Context, tx *sql.Tx, sourceID, targetID string) (map[string]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,run_id,kind,sha256,payload,preview,created_at
-		FROM context_artifacts WHERE session_id=? ORDER BY created_at,id`, sourceID)
+func (s *Service) cloneForkArtifacts(ctx context.Context, tx *sql.Tx, sourceID, targetID string) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,run_id,kind,sha256,preview,created_at
+		FROM context_artifacts WHERE session_id=? AND kind<>'context_archive' ORDER BY created_at,id`, sourceID)
 	if err != nil {
 		return nil, fmt.Errorf("fork session artifacts: %w", err)
 	}
 	artifacts := []forkArtifact{}
 	for rows.Next() {
 		var artifact forkArtifact
-		if err := rows.Scan(&artifact.id, &artifact.runID, &artifact.kind, &artifact.hash, &artifact.payload, &artifact.preview, &artifact.createdAt); err != nil {
+		if err := rows.Scan(&artifact.id, &artifact.runID, &artifact.kind, &artifact.hash, &artifact.preview, &artifact.createdAt); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("read fork session artifact: %w", err)
 		}
-		artifact.payload = append([]byte(nil), artifact.payload...)
 		artifacts = append(artifacts, artifact)
 	}
 	if err := rows.Close(); err != nil {
@@ -723,8 +830,8 @@ func cloneForkArtifacts(ctx context.Context, tx *sql.Tx, sourceID, targetID stri
 	ids := make(map[string]string, len(artifacts))
 	for _, artifact := range artifacts {
 		targetArtifactID := contextArtifactID(targetID, artifact.kind, artifact.hash)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,payload,preview,created_at)
-			VALUES(?,?,?,?,?,?,?,?)`, targetArtifactID, targetID, artifact.runID, artifact.kind, artifact.hash, artifact.payload, artifact.preview, artifact.createdAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,preview,created_at)
+			VALUES(?,?,?,?,?,?,?)`, targetArtifactID, targetID, artifact.runID, artifact.kind, artifact.hash, artifact.preview, artifact.createdAt); err != nil {
 			return nil, fmt.Errorf("clone fork session artifact %s: %w", artifact.id, err)
 		}
 		ids[artifact.id] = targetArtifactID
@@ -732,17 +839,29 @@ func cloneForkArtifacts(ctx context.Context, tx *sql.Tx, sourceID, targetID stri
 	return ids, nil
 }
 
-func remapForkArtifactReferences(ctx context.Context, tx *sql.Tx, targetID string, ids map[string]string) error {
+func (s *Service) remapForkArtifactReferences(ctx context.Context, tx *sql.Tx, targetID string, ids map[string]string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := remapForkInlineArtifactReferences(ctx, tx, targetID, ids); err != nil {
+		return err
+	}
+	if err := s.remapForkBlockPayloads(ctx, tx, targetID, ids); err != nil {
+		return err
+	}
+	if err := s.remapForkToolContents(ctx, tx, targetID, ids); err != nil {
+		return err
+	}
+	return nil
+}
+
+func remapForkInlineArtifactReferences(ctx context.Context, tx *sql.Tx, targetID string, ids map[string]string) error {
 	for sourceArtifactID, targetArtifactID := range ids {
 		updates := []struct {
 			name  string
 			query string
 			args  []any
 		}{
-			{"projection", `UPDATE session_projections
-				SET blocks=replace(CAST(blocks AS TEXT),?,?),model_history=replace(CAST(model_history AS TEXT),?,?)
-				WHERE session_id=?`, []any{sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, targetID}},
-			{"blocks", `UPDATE session_blocks SET data=replace(CAST(data AS TEXT),?,?) WHERE session_id=?`, []any{sourceArtifactID, targetArtifactID, targetID}},
 			{"todo", `UPDATE session_todos SET goal=replace(goal,?,?),phases=replace(CAST(phases AS TEXT),?,?) WHERE session_id=?`, []any{sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, targetID}},
 			{"recap", `UPDATE recaps SET goal=replace(goal,?,?),summary=replace(summary,?,?),open_items=replace(open_items,?,?) WHERE session_id=?`, []any{sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, sourceArtifactID, targetArtifactID, targetID}},
 			{"tools", `UPDATE session_tool_records
@@ -754,6 +873,113 @@ func remapForkArtifactReferences(ctx context.Context, tx *sql.Tx, targetID strin
 			if _, err := tx.ExecContext(ctx, update.query, update.args...); err != nil {
 				return fmt.Errorf("remap fork session %s artifact: %w", update.name, err)
 			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) remapForkBlockPayloads(ctx context.Context, tx *sql.Tx, targetID string, ids map[string]string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT sequence,data,data_sha256 FROM session_blocks WHERE session_id=?`, targetID)
+	if err != nil {
+		return fmt.Errorf("list fork session blocks: %w", err)
+	}
+	type row struct {
+		sequence int64
+		data     []byte
+		digest   string
+	}
+	var items []row
+	for rows.Next() {
+		var item row
+		if err := rows.Scan(&item.sequence, &item.data, &item.digest); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		payload, err := s.decodeBlockJSON(ctx, item.data, item.digest)
+		if err != nil {
+			return fmt.Errorf("load fork session block %d: %w", item.sequence, err)
+		}
+		next := replaceArtifactIDs(payload, ids)
+		if string(next) == string(payload) {
+			continue
+		}
+		var block Block
+		if err := json.Unmarshal(next, &block); err != nil {
+			return fmt.Errorf("decode remapped session block %d: %w", item.sequence, err)
+		}
+		inline, digest, err := s.encodeBlockData(ctx, block, next)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE session_blocks SET data=?, data_sha256=? WHERE session_id=? AND sequence=?`,
+			inline, digest, targetID, item.sequence); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) remapForkToolContents(ctx context.Context, tx *sql.Tx, targetID string, ids map[string]string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT run_id,tool_call_id,content,content_sha256,structured,structured_sha256
+		FROM session_tool_records WHERE session_id=? AND (content_sha256<>'' OR structured_sha256<>'')`, targetID)
+	if err != nil {
+		return fmt.Errorf("list fork spilled tool payloads: %w", err)
+	}
+	type row struct {
+		runID, callID, content, contentDigest, structuredDigest string
+		structured                                              []byte
+	}
+	var items []row
+	for rows.Next() {
+		var item row
+		if err := rows.Scan(&item.runID, &item.callID, &item.content, &item.contentDigest, &item.structured, &item.structuredDigest); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		content, err := s.loadText(ctx, item.content, item.contentDigest)
+		if err != nil {
+			return fmt.Errorf("load fork tool content %s: %w", item.callID, err)
+		}
+		structured, err := s.loadBytes(ctx, item.structured, item.structuredDigest)
+		if err != nil {
+			return fmt.Errorf("load fork tool structured payload %s: %w", item.callID, err)
+		}
+		nextContent := string(replaceArtifactIDs([]byte(content), ids))
+		nextStructured := replaceArtifactIDs(structured, ids)
+		if nextContent == content && bytes.Equal(nextStructured, structured) {
+			continue
+		}
+		contentInline, contentDigest, err := s.spillText(ctx, nextContent)
+		if err != nil {
+			return err
+		}
+		structuredInline, structuredDigest, err := s.spillBytes(ctx, nextStructured)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE session_tool_records
+			SET content=?,content_sha256=?,structured=?,structured_sha256=?
+			WHERE session_id=? AND run_id=? AND tool_call_id=?`,
+			contentInline, contentDigest, structuredInline, structuredDigest, targetID, item.runID, item.callID); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -786,26 +1012,17 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	if err != nil {
 		return Projection{}, fmt.Errorf("load projection: %w", err)
 	}
-	var blocks []Block
-	if err := json.Unmarshal(row.Blocks, &blocks); err != nil {
-		return Projection{}, fmt.Errorf("decode projection: %w", err)
-	}
-	var history ModelHistory
-	if err := json.Unmarshal(row.ModelHistory, &history); err != nil {
+	history, err := s.decodeModelHistory(ctx, row.ModelHistory)
+	if err != nil {
 		return Projection{}, fmt.Errorf("decode model history: %w", err)
 	}
 	usage, err := DecodeUsage(row.Usage)
 	if err != nil {
 		return Projection{}, err
 	}
-	blocks, err = loadSessionBlocks(ctx, s.db, id)
+	blocks, err := s.loadSessionBlocks(ctx, s.db, id)
 	if err != nil {
 		return Projection{}, err
-	}
-	if len(blocks) == 0 && string(row.Blocks) != "[]" {
-		if err := json.Unmarshal(row.Blocks, &blocks); err != nil {
-			return Projection{}, fmt.Errorf("decode legacy projection: %w", err)
-		}
 	}
 	tools, err := s.ListToolRecords(ctx, id)
 	if err != nil {
@@ -818,13 +1035,18 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	}, nil
 }
 
-func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block) (int64, error) {
+func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block) (sequenceResult int64, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	sequence, mutated, err := appendSessionBlock(ctx, tx, sessionID, block)
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return 0, err
+	}
+	sequence, mutated, err := s.appendSessionBlock(ctx, tx, sessionID, block)
 	if err != nil {
 		return 0, err
 	}
@@ -842,15 +1064,20 @@ func (s *Service) AppendBlock(ctx context.Context, sessionID string, block Block
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return 0, err
 	}
-	return sequence, tx.Commit()
+	return sequence, s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
-func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Block, history ModelHistory) error {
+func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Block, history ModelHistory) (err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return err
+	}
 	queries := dbgen.New(tx)
 	checkpoint, err := queries.GetProjectionCheckpoint(ctx, sessionID)
 	if err != nil {
@@ -870,12 +1097,12 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 		if thought.State == "" {
 			thought.State = "completed"
 		}
-		if _, _, err := appendSessionBlock(ctx, tx, sessionID, thought); err != nil {
+		if _, _, err := s.appendSessionBlock(ctx, tx, sessionID, thought); err != nil {
 			return err
 		}
 	}
 	if strings.TrimSpace(block.Content) != "" {
-		if _, _, err := appendSessionBlock(ctx, tx, sessionID, block); err != nil {
+		if _, _, err := s.appendSessionBlock(ctx, tx, sessionID, block); err != nil {
 			return err
 		}
 	}
@@ -888,10 +1115,6 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 			history.StaticPrefixHash = history.InstructionFingerprint
 		}
 	}
-	encodedHistory, err := json.Marshal(history)
-	if err != nil {
-		return fmt.Errorf("encode model history: %w", err)
-	}
 	boundary, err := canonicalHighWater(ctx, tx, sessionID)
 	if err != nil {
 		return err
@@ -899,7 +1122,7 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 	history.CoveredThroughSequence = boundary
 	generation := currentGeneration + 1
 	history.Generation = generation
-	encodedHistory, err = json.Marshal(history)
+	encodedHistory, err := s.encodeModelHistory(ctx, history)
 	if err != nil {
 		return fmt.Errorf("encode model history: %w", err)
 	}
@@ -918,7 +1141,7 @@ func (s *Service) CompleteTurn(ctx context.Context, sessionID string, block Bloc
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
 func sameSequence(left, right *int64) bool {
@@ -932,7 +1155,9 @@ func sameSequence(left, right *int64) bool {
 // history while leaving the canonical transcript unchanged. It is safe to call
 // repeatedly with the same checkpoint identity and rejects a stale run after a
 // newer user turn has taken ownership of the session.
-func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, checkpoint RunCheckpoint) error {
+func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, checkpoint RunCheckpoint) (err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if strings.TrimSpace(checkpoint.RunID) == "" || len(checkpoint.ModelHistory.Messages) == 0 || strings.TrimSpace(checkpoint.CacheIdentity) == "" {
 		return fmt.Errorf("save run checkpoint: run, history, and cache identity are required")
 	}
@@ -941,6 +1166,9 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return err
+	}
 	queries := dbgen.New(tx)
 	state, err := queries.GetRunCheckpointState(ctx, sessionID)
 	if err != nil {
@@ -951,7 +1179,7 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 		return fmt.Errorf("save run checkpoint: active run changed from %q to %q", checkpoint.RunID, lastRunID)
 	}
 	history := checkpoint.ModelHistory
-	if checkpoint.SemanticCommit != nil || checkpoint.Manifest != nil {
+	if checkpoint.Manifest != nil {
 		history.WireVersion = CurrentWireVersion
 	}
 	if hash := ModelCheckpointHash(history.Messages); hash != "" {
@@ -965,34 +1193,27 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 	if err != nil {
 		return err
 	}
-	if checkpoint.ExpectedHighWater != nil && (boundary == nil || *boundary < *checkpoint.ExpectedHighWater) {
+	if checkpoint.ExpectedHighWater != nil && !sameSequence(boundary, checkpoint.ExpectedHighWater) {
 		return fmt.Errorf("%w: canonical transcript changed while checkpoint was prepared", ErrRunCheckpointStale)
 	}
 	now := time.Now().UTC().UnixNano()
-	semanticRevision, err := commitSemanticState(ctx, queries, sessionID, checkpoint.RunID, checkpoint.SemanticCommit, now)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrRunCheckpointStale, err)
-	}
-	if semanticRevision > 0 {
-		history.SemanticRevision = semanticRevision
-	}
 	if checkpoint.Manifest != nil {
 		history.ContextManifestHash = checkpoint.Manifest.ManifestHash
 		history.PolicyVersion = checkpoint.Manifest.PolicyVersion
 	}
-	if currentIdentity == checkpoint.CacheIdentity && checkpoint.SemanticCommit == nil && checkpoint.Manifest == nil {
-		var current ModelHistory
+	if currentIdentity == checkpoint.CacheIdentity && checkpoint.Manifest == nil {
 		encoded, err := queries.GetProjectionHistory(ctx, sessionID)
 		if err != nil {
 			return err
 		}
-		if json.Unmarshal(encoded, &current) == nil && reflect.DeepEqual(normalizeMessageTimes(current.Messages), normalizeMessageTimes(history.Messages)) {
-			return tx.Commit()
+		current, decodeErr := s.decodeModelHistory(ctx, encoded)
+		if decodeErr == nil && reflect.DeepEqual(normalizeMessageTimes(current.Messages), normalizeMessageTimes(history.Messages)) {
+			return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 		}
 	}
 	history.CoveredThroughSequence = checkpoint.ExpectedHighWater
 	history.Generation = generation + 1
-	encoded, err := json.Marshal(history)
+	encoded, err := s.encodeModelHistory(ctx, history)
 	if err != nil {
 		return fmt.Errorf("encode run checkpoint: %w", err)
 	}
@@ -1011,13 +1232,13 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 	if changed != 1 {
 		return fmt.Errorf("save run checkpoint: projection changed while checkpoint was prepared")
 	}
-	if err := persistContextManifest(ctx, queries, sessionID, checkpoint.Manifest, semanticRevision, now); err != nil {
+	if err := persistContextManifest(ctx, queries, sessionID, checkpoint.Manifest, now); err != nil {
 		return err
 	}
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
 func normalizeMessageTimes(messages []message.Message) []message.Message {
@@ -1028,7 +1249,9 @@ func normalizeMessageTimes(messages []message.Message) []message.Message {
 	return result
 }
 
-func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID string, block Block) error {
+func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID string, block Block) (err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if strings.TrimSpace(agentID) == "" {
 		return fmt.Errorf("agent ID is required")
 	}
@@ -1039,12 +1262,19 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 		return err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return err
+	}
 	encoded, err := json.Marshal(block)
 	if err != nil {
 		return err
 	}
+	inline, digest, err := s.encodeBlockData(ctx, block, encoded)
+	if err != nil {
+		return err
+	}
 	queries := dbgen.New(tx)
-	result, err := queries.UpdateAgentBlock(ctx, dbgen.UpdateAgentBlockParams{RunID: block.RunID, Data: encoded, SessionID: sessionID, AgentID: agentID})
+	result, err := queries.UpdateAgentBlock(ctx, dbgen.UpdateAgentBlockParams{RunID: block.RunID, Data: inline, DataSha256: digest, SessionID: sessionID, AgentID: agentID})
 	if err != nil {
 		return err
 	}
@@ -1053,7 +1283,7 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 		return err
 	}
 	if changed == 0 {
-		if err := insertSessionBlock(ctx, tx, sessionID, block, encoded); err != nil {
+		if err := s.insertSessionBlock(ctx, tx, sessionID, block, inline, digest); err != nil {
 			return err
 		}
 	}
@@ -1064,14 +1294,16 @@ func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID strin
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commitBlobTransaction(ctx, tx, tracker, trackerOwner)
 }
 
-// CompactWithSummary activates a provider checkpoint without changing the
-// canonical transcript. The name is retained for API compatibility.
-func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan CompactionPlan) (Projection, error) {
-	if strings.TrimSpace(plan.Summary) == "" {
-		return Projection{}, fmt.Errorf("compact session: summary is empty")
+// ActivateArchiveCheckpoint installs a manually prepared archive checkpoint
+// without changing the canonical transcript.
+func (s *Service) ActivateArchiveCheckpoint(ctx context.Context, sessionID string, plan ArchivePlan) (projectionResult Projection, err error) {
+	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
+	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
+	if len(plan.ModelHistory.Messages) == 0 || plan.Manifest == nil {
+		return Projection{}, fmt.Errorf("activate archive checkpoint: history and manifest are required")
 	}
 	projection, err := s.LoadProjection(ctx, sessionID)
 	if err != nil {
@@ -1082,6 +1314,9 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 		return Projection{}, err
 	}
 	defer tx.Rollback()
+	if err := lockBlobCatalog(ctx, tx); err != nil {
+		return Projection{}, err
+	}
 	queries := dbgen.New(tx)
 	state, err := queries.GetCompactionState(ctx, sessionID)
 	if err != nil {
@@ -1091,9 +1326,11 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 	if !plan.ExpectedUpdatedAt.IsZero() && projectionUpdated != plan.ExpectedUpdatedAt.UnixNano() {
 		return Projection{}, fmt.Errorf("compact session: projection changed while summary was generated")
 	}
-	if err := json.Unmarshal(historyData, &projection.ModelHistory); err != nil {
+	decodedHistory, err := s.decodeModelHistory(ctx, historyData)
+	if err != nil {
 		return Projection{}, fmt.Errorf("decode model history for compaction: %w", err)
 	}
+	projection.ModelHistory = decodedHistory
 	boundary, err := canonicalHighWater(ctx, tx, sessionID)
 	if err != nil {
 		return Projection{}, err
@@ -1104,31 +1341,24 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 	plan.ModelHistory.CoveredThroughSequence = boundary
 	plan.ModelHistory.Generation = generation + 1
 	now := time.Now().UTC().UnixNano()
-	semanticRevision, err := commitSemanticState(ctx, queries, sessionID, "manual-compaction", plan.SemanticCommit, now)
-	if err != nil {
-		return Projection{}, fmt.Errorf("compact session: %w", err)
-	}
-	if semanticRevision > 0 {
-		plan.ModelHistory.SemanticRevision = semanticRevision
-	}
 	if plan.Manifest != nil {
 		plan.ModelHistory.ContextManifestHash = plan.Manifest.ManifestHash
 		plan.ModelHistory.PolicyVersion = plan.Manifest.PolicyVersion
 	}
-	encodedHistory, err := json.Marshal(plan.ModelHistory)
+	encodedHistory, err := s.encodeModelHistory(ctx, plan.ModelHistory)
 	if err != nil {
 		return Projection{}, fmt.Errorf("encode compacted model history: %w", err)
 	}
 	if err := queries.SaveCompaction(ctx, dbgen.SaveCompactionParams{ModelHistory: encodedHistory, CheckpointGeneration: generation + 1, CacheEpoch: cacheEpoch + 1, UpdatedAt: now, SessionID: sessionID}); err != nil {
 		return Projection{}, err
 	}
-	if err := persistContextManifest(ctx, queries, sessionID, plan.Manifest, semanticRevision, now); err != nil {
+	if err := persistContextManifest(ctx, queries, sessionID, plan.Manifest, now); err != nil {
 		return Projection{}, err
 	}
 	if err := queries.UpdateSessionTimestamp(ctx, dbgen.UpdateSessionTimestampParams{UpdatedAt: now, ID: sessionID}); err != nil {
 		return Projection{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitBlobTransaction(ctx, tx, tracker, trackerOwner); err != nil {
 		return Projection{}, err
 	}
 	projection.ModelHistory = plan.ModelHistory
@@ -1139,15 +1369,19 @@ func (s *Service) CompactWithSummary(ctx context.Context, sessionID string, plan
 	return projection, nil
 }
 
-func loadSessionBlocks(ctx context.Context, queryer dbgen.DBTX, sessionID string) ([]Block, error) {
+func (s *Service) loadSessionBlocks(ctx context.Context, queryer dbgen.DBTX, sessionID string) ([]Block, error) {
 	rows, err := dbgen.New(queryer).ListSessionBlocks(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load session blocks: %w", err)
 	}
 	blocks := make([]Block, 0, len(rows))
 	for _, row := range rows {
+		payload, err := s.decodeBlockJSON(ctx, row.Data, row.DataSha256)
+		if err != nil {
+			return nil, fmt.Errorf("load session block %d: %w", row.Sequence, err)
+		}
 		var block Block
-		if err := json.Unmarshal(row.Data, &block); err != nil {
+		if err := json.Unmarshal(payload, &block); err != nil {
 			return nil, fmt.Errorf("decode session block: %w", err)
 		}
 		block.Sequence = row.Sequence
@@ -1156,16 +1390,20 @@ func loadSessionBlocks(ctx context.Context, queryer dbgen.DBTX, sessionID string
 	return blocks, nil
 }
 
-func appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block) (int64, bool, error) {
+func (s *Service) appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block) (int64, bool, error) {
 	row, err := dbgen.New(tx).GetLatestSessionBlock(ctx, sessionID)
-	sequence, data := row.Sequence, row.Data
+	sequence := row.Sequence
 	empty := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, false, fmt.Errorf("load latest session block: %w", err)
 	}
 	if err == nil && block.Kind == "assistant" {
+		payload, loadErr := s.decodeBlockJSON(ctx, row.Data, row.DataSha256)
+		if loadErr != nil {
+			return 0, false, fmt.Errorf("load latest session block: %w", loadErr)
+		}
 		var previous Block
-		if err := json.Unmarshal(data, &previous); err != nil {
+		if err := json.Unmarshal(payload, &previous); err != nil {
 			return 0, false, fmt.Errorf("decode latest session block: %w", err)
 		}
 		if previous.Kind == block.Kind && previous.RunID == block.RunID {
@@ -1174,7 +1412,11 @@ func appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block
 			if err != nil {
 				return 0, false, err
 			}
-			err = dbgen.New(tx).UpdateSessionBlockData(ctx, dbgen.UpdateSessionBlockDataParams{Data: encoded, SessionID: sessionID, Sequence: sequence})
+			inline, digest, err := s.encodeBlockData(ctx, previous, encoded)
+			if err != nil {
+				return 0, false, err
+			}
+			err = dbgen.New(tx).UpdateSessionBlockData(ctx, dbgen.UpdateSessionBlockDataParams{Data: inline, DataSha256: digest, SessionID: sessionID, Sequence: sequence})
 			return sequence, true, err
 		}
 	}
@@ -1182,11 +1424,15 @@ func appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block
 	if err != nil {
 		return 0, false, err
 	}
+	inline, digest, err := s.encodeBlockData(ctx, block, encoded)
+	if err != nil {
+		return 0, false, err
+	}
 	sequence++
 	if empty {
 		sequence = 0
 	}
-	return sequence, false, insertSessionBlock(ctx, tx, sessionID, block, encoded)
+	return sequence, false, s.insertSessionBlock(ctx, tx, sessionID, block, inline, digest)
 }
 
 func canonicalHighWater(ctx context.Context, queryer dbgen.DBTX, sessionID string) (*int64, error) {
@@ -1200,8 +1446,8 @@ func canonicalHighWater(ctx context.Context, queryer dbgen.DBTX, sessionID strin
 	return &value, nil
 }
 
-func insertSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block, encoded []byte) error {
-	return dbgen.New(tx).InsertSessionBlock(ctx, dbgen.InsertSessionBlockParams{SessionID: sessionID, Kind: block.Kind, RunID: block.RunID, AgentID: block.AgentID, Data: encoded, SessionID_2: sessionID})
+func (s *Service) insertSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block, encoded []byte, digest string) error {
+	return dbgen.New(tx).InsertSessionBlock(ctx, dbgen.InsertSessionBlockParams{SessionID: sessionID, Kind: block.Kind, RunID: block.RunID, AgentID: block.AgentID, Data: encoded, DataSha256: digest, SessionID_2: sessionID})
 }
 
 func firstSessionValue(values ...string) string {

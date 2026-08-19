@@ -110,7 +110,7 @@ func newSkillRuntimeHarness(t *testing.T, definition string, resources map[strin
 	}
 	providerRuntime.ChatGPTEndpoint = server.URL + "/responses"
 	service := NewService(ctx, cfg)
-	service.AttachDurable(session.NewService(store.DB()), coding)
+	service.AttachDurable(session.NewService(store.DB(), store.Blobs()), coding)
 	service.AttachAuth(authentication, modelCatalog)
 	service.AttachProviderRuntime(providerRuntime)
 	t.Cleanup(func() {

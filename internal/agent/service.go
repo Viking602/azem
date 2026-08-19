@@ -937,6 +937,9 @@ func scopeForCall(definition tool.Definition, call tool.Call) invocationScope {
 	if risk == "" {
 		risk = "medium"
 	}
+	if definition.Name == ToolShell {
+		risk = ClassifyShellRisk(shellCallCommand(call.Arguments), toolCallRequestsNetwork(call.Arguments))
+	}
 	digest := sha256.Sum256([]byte(call.Name + "\x00" + target + "\x00" + risk))
 	return invocationScope{Fingerprint: hex.EncodeToString(digest[:]), Target: target, Risk: risk}
 }

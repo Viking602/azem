@@ -17,7 +17,7 @@ type Copy = [id: string, section: SettingsSection, zhTitle: string, enTitle: str
 
 const staticSettings: Copy[] = [
   ["section:catalog", "catalog", "模型目录", "Model catalog", "管理订阅与 API 模型提供方", "Manage subscription and API model providers", ["provider", "供应商", "登录", "login", "api"]],
-  ["section:models", "models", "模型路由", "Model routing", "为标题、规划、审批、视觉、压缩、回顾和子智能体分配模型", "Assign models for titles, planning, approval, vision, compaction, recap, and subagents", ["route", "reasoning", "思考深度", "recap"]],
+  ["section:models", "models", "模型路由", "Model routing", "为标题、规划、审批、视觉、回顾和子智能体分配模型", "Assign models for titles, planning, approval, vision, recap, and subagents", ["route", "reasoning", "思考深度", "recap"]],
   ["section:subagents", "subagents", "子智能体", "Subagents", "并发容量、调度与主会话展示", "Capacity, scheduling, and main-session display", ["subagent", "团队"]],
   ["subagents:concurrency", "subagents", "子智能体并发", "Subagent concurrency", "设置同时运行的团队成员上限", "Set the maximum number of concurrent team members", ["agent", "并发", "capacity"]],
   ["subagents:depth", "subagents", "递归深度", "Recursion depth", "子智能体继续委派的层数", "Levels of nested delegation", ["recursion", "depth", "递归", "委派"]],
@@ -128,7 +128,6 @@ function routeSearchTitle(route: ModelRoute, language: "zh-CN" | "en") {
     plan: ["规划模型", "Planning model"],
     approval: ["审批模型", "Approval model"],
     vision: ["视觉模型", "Vision model"],
-    compaction: ["上下文压缩模型", "Context compaction model"],
     recap: ["回顾模型", "Recap model"],
   };
   const pair = names[route.scope];

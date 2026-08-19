@@ -22,7 +22,7 @@ func newPlanningToolHarness(t *testing.T) (*Service, *session.Service, context.C
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close(ctx) })
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "planning-session", Title: "Planning"}); err != nil {
 		t.Fatal(err)
 	}

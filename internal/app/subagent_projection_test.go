@@ -62,12 +62,12 @@ func TestLargeSubagentTranscriptProducesBoundedDesktopProjection(t *testing.T) {
 }
 
 func TestTranscriptToAgentBlocksHidesInternalContext(t *testing.T) {
-	checkpoint := message.NewText(message.RoleAssistant, semanticStateSafetyLabel+`{"version":1}`)
+	checkpoint := message.NewText(message.RoleUser, "archive carrier")
 	checkpoint.Kind = message.KindCompactionSummary
 	checkpoint.Visibility = message.VisibilityPrivate
 	private := message.NewText(message.RoleAssistant, "trusted private context")
 	private.Visibility = message.VisibilityPrivate
-	legacyCheckpoint := message.NewText(message.RoleAssistant, semanticStateSafetyLabel+`{"version":1}`)
+	legacyCheckpoint := message.NewText(message.RoleUser, "legacy archive carrier")
 	legacyCheckpoint.Kind = message.KindCompactionSummary
 	encoded, err := json.Marshal([]message.Message{
 		checkpoint,

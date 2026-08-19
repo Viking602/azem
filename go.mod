@@ -21,6 +21,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0-pre.3
 	github.com/wailsapp/wails/v3 v3.0.0-alpha2.121
 	github.com/zalando/go-keyring v0.2.8
+	golang.org/x/image v0.40.0
 	modernc.org/sqlite v1.54.0
 	resty.dev/v3 v3.0.0-rc.3
 )
@@ -58,7 +59,7 @@ require (
 )
 
 require (
-	github.com/Viking602/venat v0.14.0
+	github.com/Viking602/venat v0.14.2-0.20260819024942-459643d22ae8
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260703014108-f5a850f9c2b7 // indirect
 	github.com/charmbracelet/x/ansi v0.11.7

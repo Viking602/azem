@@ -33,6 +33,7 @@ export default function Inspector() {
   const backgroundProcesses = useRuntimeStore((state) => state.backgroundProcesses);
   const contextProfile = useRuntimeStore((state) => state.contextProfile);
   const contextUsage = useRuntimeStore((state) => state.contextUsage);
+  const running = useRuntimeStore((state) => state.running);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
   const selectAgent = useRuntimeStore((state) => state.selectAgent);
   const setError = useRuntimeStore((state) => state.setError);
@@ -65,9 +66,9 @@ export default function Inspector() {
             <div><strong>{occupancy.limit > 0 ? `${occupancy.percentage}%` : "—"}</strong><small>{occupancy.limit > 0 ? `${formatCompactTokens(occupancy.used)} / ${formatCompactTokens(occupancy.limit)}` : t("contextUnavailable")}</small></div>
           </div>
           <div className="inspector-cache-summary" aria-label={t("cacheHitRate")}>
-            <div><span>{t("cacheHitRate")}</span><strong>{cache.reported ? (cache.hitRate === null ? "—" : `${cache.hitRate}%`) : t("cacheUnreported")}</strong></div>
+            <div><span>{t("cacheHitRate")}</span><strong aria-live="polite">{cache.reported ? (cache.hitRate === null ? "—" : `${cache.hitRate}%`) : running ? t("cachePending") : t("cacheUnreported")}</strong></div>
             <div><span>{t("cacheHits")}</span><strong>{cache.reported ? formatCompactTokens(cache.cachedTokens) : "—"}</strong></div>
-            <div><span>{t("totalCache")}</span><strong>{cache.reported ? formatCompactTokens(cache.totalCacheTokens) : "—"}</strong></div>
+            <div><span>{t("cacheRequestInput")}</span><strong>{cache.reported ? formatCompactTokens(cache.totalCacheTokens) : "—"}</strong></div>
           </div>
           <ContextComposition groups={composition.groups} totalTokens={composition.totalTokens} estimated={composition.estimated} language={snapshot.language} />
           <ContextDiagnostics profile={contextProfile} language={snapshot.language} />
@@ -221,12 +222,19 @@ function ContextDiagnostics({ profile, language }: { profile?: ContextProfile | 
   return <details className="context-diagnostics">
     <summary>{language === "zh-CN" ? "上下文详情" : "Context details"}</summary>
     <div className="context-kernel-grid">
-      <span>{t("semanticRevision")}</span><strong>r{profile.semanticRevision ?? 0}</strong>
+      <span>{t("archivePolicy")}</span><strong>v{profile.policyVersion ?? 0}</strong>
       <span>{t("rebuildReason")}</span><strong>{profile.rebuildReason || "—"}</strong>
-      <span>{t("writerLag")}</span><strong data-state={(profile.writerLag ?? 0) > 0 ? "pending" : "current"}>{profile.writerLag ?? 0}</strong>
+      <span>{t("canonicalHighWater")}</span><strong>{profile.canonicalHighWater ?? "—"}</strong>
       <span>{t("contextSegments")}</span><strong>{segments.length}</strong>
+      {profile.archive && <>
+        <span>{language === "zh-CN" ? "归档载体" : "Archive carrier"}</span><strong>{profile.archive.carrier}</strong>
+        <span>{language === "zh-CN" ? "归档帧" : "Archive frames"}</span><strong>{profile.archive.frameCount ?? 0} / {profile.archive.totalPages ?? 0}</strong>
+        <span>{language === "zh-CN" ? "帧数据" : "Frame payload"}</span><strong>{formatArchiveBytes(profile.archive.frameBytes ?? 0)}</strong>
+        <span>{language === "zh-CN" ? "未成像字符" : "Unimaged characters"}</span><strong>{(profile.archive.truncatedCharacters ?? 0).toLocaleString()}</strong>
+      </>}
     </div>
     {profile.manifestHash && <code className="context-manifest-hash">{profile.manifestHash}</code>}
+    {profile.archive?.sourceArtifactId && <code className="context-manifest-hash">{profile.archive.sourceArtifactId}</code>}
     {segments.length > 0 && <div className="context-segment-list" aria-label={t("contextSegments")}>
       {segments.map((segment, index) => <div key={`${segment.kind}-${segment.content_hash}-${index}`}><span>{segment.kind.replaceAll("_", " ")}</span><em>~{formatCompactTokens(segment.token_estimate)}</em></div>)}
     </div>}
@@ -236,6 +244,12 @@ function ContextDiagnostics({ profile, language }: { profile?: ContextProfile | 
 function formatCompactTokens(tokens: number) {
   if (tokens >= 1000) return `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k`;
   return String(tokens);
+}
+
+function formatArchiveBytes(bytes: number) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`;
+  return `${bytes} B`;
 }
 
 function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["language"] }) {

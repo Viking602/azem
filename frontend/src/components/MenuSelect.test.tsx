@@ -33,6 +33,8 @@ describe("MenuSelect", () => {
     const options = document.body.querySelectorAll<HTMLButtonElement>(".menu-select-options-portal .menu-select-option");
     expect(options.length).toBe(2);
     expect(Array.from(options).every((option) => option.getAttribute("title") === null)).toBe(true);
+    expect(options[0]!.querySelector(".menu-select-check")).toBe(options[0]!.lastElementChild);
+    expect(options[0]!.classList.contains("selected")).toBe(true);
     await act(async () => options[1]!.click());
     expect(change).toHaveBeenCalledWith("team");
     expect(details.open).toBe(false);

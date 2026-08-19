@@ -8,10 +8,12 @@
 .timeline-feed > .run-status-marker,
 .timeline-feed > .session-history-turn {
   content-visibility: auto;
-  contain-intrinsic-size: auto 180px;
+  contain-intrinsic-size: 180px;
 }
-/* Live folds shrink from a tall tool trail to a count row. A 180px skipped
- * box parks the next prose too low until the browser remeasures (UI-018). */
+/* `auto` remembers the last laid-out size. A live tool trail that later
+ * folds into 耗时 would lock that tall height and park the next turn
+ * hundreds of pixels down (multi-turn screenshot). UI-018 already dropped
+ * auto on process-fold and the current turn for the same reason. */
 .timeline-feed > .process-fold,
 .timeline-feed > .session-turn-current,
 .timeline-feed > .session-history-turn:last-of-type,
@@ -22,30 +24,49 @@
   contain-intrinsic-size: none;
 }
 
+
 /* UI-016: one step is one sparkle bar. The trail wrapper only owns spacing;
    every bar below it belongs to the message it follows. */
-.process-fold { margin: 10px 0 7px; }
+  .process-fold { margin: 4px 0; }
 .process-fold-summary {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: fit-content;
+  gap: 6px;
+  width: 100%;
   max-width: 100%;
-  min-height: 28px;
-  margin: 4px 0 6px;
-  padding: 2px 0;
+  min-height: 0;
+    margin: 4px 0 8px;
+  padding: 0;
   border: 0;
   background: transparent;
-  color: var(--ink-soft);
+  color: var(--faint);
   font-size: var(--text-chat);
-  font-weight: 500;
+  font-weight: 400;
+  line-height: var(--leading-chat);
   cursor: pointer;
 }
-.process-fold-summary strong { font-weight: 500; }
-.process-fold-chevron { flex: 0 0 auto; color: var(--faint); }
-.process-fold:not([data-open]) .process-fold-chevron { transform: rotate(-90deg); }
-.process-fold-summary:hover { color: var(--ink); }
-.process-step { margin: 6px 0 10px; }
+.process-fold-label { font-weight: 400; }
+.process-fold-chevron { flex: 0 0 auto; color: var(--faint); opacity: .7; }
+.process-fold:not([data-open]) > .process-fold-summary .process-fold-chevron { transform: rotate(-90deg); }
+.process-fold[data-folded] .process-fold-summary::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  margin-left: 8px;
+  background: var(--line);
+}
+.process-fold-thinking { margin: 2px 0 12px; color: color-mix(in srgb, var(--muted) 82%, var(--faint)); font-size: var(--text-chat); line-height: var(--leading-chat); }
+.process-fold-thinking .reasoning-step { margin: 0 0 .68em; }
+.process-fold-thinking .reasoning-step:last-child { margin-bottom: 0; }
+.process-fold-summary:hover,
+.process-fold-summary:hover .process-fold-chevron { color: var(--muted); opacity: 1; }
+
+
+  .process-step { margin: 2px 0 4px; }
+.process-fold > .process-fold-summary:not(button) { cursor: default; }
+.process-step-count { margin: 2px 0 6px; }
+.process-step:not([data-open]) > .process-step-count .process-fold-chevron { transform: rotate(-90deg); }
+
 .process-step[data-settled] { margin: 4px 0 6px; }
 .process-step[data-settled] + .model-progress-prose { margin-top: 4px; }
 .process-step.bui-tool-chip-group > .process-step-body { margin-top: 2px; }
@@ -67,9 +88,9 @@
 .process-step-body > .model-progress-tools { margin: 0; padding: 0; }
 /* Reasoning sits under the sparkle label, not under the tool text, so the
    old 36px quote-rail indent does not leave an empty gutter. */
-.process-step-body .bui-thinking-panel[data-tab="reasoning"] {
-  margin: 1px 0 0;
-  padding: 0 0 2px 22px;
+  .process-step-body .bui-thinking-panel[data-tab="reasoning"] {
+    margin: 1px 0 0;
+    padding: 0 0 2px;
   color: color-mix(in srgb, var(--muted) 88%, var(--faint));
   font-size: var(--text-chat);
   line-height: 1.5;
@@ -84,7 +105,7 @@
 }
 .deferred-process-spacer { flex: 0 0 auto; pointer-events: none; }
 
-.process-entries { position: relative; display: flex; flex-direction: column; gap: 0; padding: 1px 0 5px; }
+  .process-entries { position: relative; display: flex; flex-direction: column; gap: 0; padding: 0; }
 /* Quiet process: no timeline spine; keep rail only for rare compact side trails. */
 .process-fold .process-entries::before,
 .session-document .process-entries::before { display: none; }
@@ -133,7 +154,7 @@
 
 .reasoning-trace {
   min-width: 0;
-  margin: 4px 0 9px;
+    margin: 0 0 4px;
   color: var(--ink);
   font-size: var(--text-chat);
   line-height: var(--leading-chat);
@@ -251,7 +272,7 @@ button.reasoning-summary:disabled { cursor: default; opacity: 1; color: var(--th
   pointer-events: none;
 }
 .reasoning-trace:not(.open) .reasoning-chevron { transform: rotate(-90deg); }
-.process-activity { margin-top: 8px; }
+  .process-activity { margin-top: 4px; }
 .reasoning-body {
   position: relative;
   margin: 3px 0 3px 6px;
@@ -281,7 +302,7 @@ button.reasoning-summary:disabled { cursor: default; opacity: 1; color: var(--th
   background: var(--paper);
 }
 .reasoning-step + .reasoning-step { margin-top: 10px; }
-.reasoning-placeholder { margin-top: 8px; }
+  .reasoning-placeholder { margin-top: 4px; }
 @keyframes reasoning-step-in {
   from { opacity: 0; transform: translateY(3px); }
   to { opacity: 1; transform: none; }

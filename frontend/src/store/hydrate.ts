@@ -82,7 +82,6 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
       { scope: "plan", role: "", label: "规划", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
       { scope: "approval", role: "", label: "审批", route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
       { scope: "vision", role: "", label: "视觉", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
-      { scope: "compaction", role: "", label: "上下文压缩", route: { provider: "chatgpt", model: "gpt-5.3-spark", reasoning: "low" } },
       { scope: "recap", role: "", label: "会话回顾", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
       { scope: "subagent", role: "research", label: "Research", route: { provider: "chatgpt", model: "gpt-5.3-spark", reasoning: "medium" } },
       { scope: "subagent", role: "review", label: "Review", route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
@@ -109,12 +108,13 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
     workspaceDeletions: 32,
     contextProfile: {
       source: "estimated", estimated: true,
-      semanticRevision: 12,
-      writerLag: 0,
-      segments: Array.from({ length: 8 }, (_, index) => ({
-        kind: index < 3 ? "canonical_turn" : "semantic_state",
-        mandatory: index < 3,
-        token_estimate: index < 3 ? 4200 : 2100,
+      policyVersion: 3,
+      canonicalHighWater: 128,
+      rebuildReason: "automatic",
+      segments: Array.from({ length: 4 }, (_, index) => ({
+        kind: index === 0 ? "archive_carrier" : "hot_tail",
+        mandatory: true,
+        token_estimate: index === 0 ? 3400 : 2100,
         content_hash: `demo-segment-${index + 1}`,
       })),
       contributions: [
@@ -125,8 +125,8 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
     },
     contextUsage: {
       inputTokens: 58_000, outputTokens: 4_000, contextLimit: 164_000, reported: true,
-      cacheInputTokens: 96_000, cachedInputTokens: 62_000, cacheWriteTokens: 9_400,
-      cacheReported: true, cacheWriteReported: true,
+      cacheInputTokens: 96_000, cachedInputTokens: 62_000, cacheWriteTokens: 9_400, uncachedInputTokens: 6_960,
+      cacheReported: true, mainCacheReported: true, cacheWriteReported: true,
     },
     todo: {
       goal: "完成 Azem 交互原型并验证动效边界",

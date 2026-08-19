@@ -20,7 +20,7 @@ func TestListUsageEmitsSecretFreeProjectSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close(ctx) })
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	project := t.TempDir()
 	other := t.TempDir()
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "owned", Title: "owned"}); err != nil {

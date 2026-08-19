@@ -4,8 +4,8 @@ Last verified: 2026-08-17
 
 `internal/config.Config` and `internal/config.Default` are authoritative. Azem
 strictly decodes YAML, applies defaults, and validates the complete result
-before runtime construction. The default file is `azem/config.yaml` under the
-operating-system user configuration directory; `-config` selects another file.
+before runtime construction. The default file is `~/.azem/config.yaml`;
+`AZEM_HOME` selects another home, and `-config` selects another file.
 
 ## Main sections
 
@@ -16,7 +16,7 @@ operating-system user configuration directory; `-config` selects another file.
 | `auth` | Credential backend plus optional Codex and Grok imports |
 | `providers` | Subscription transports and llmux provider/model registry |
 | `retry` | Agent retry count and exponential backoff bounds |
-| `agents` | Main, Team, title, plan, compaction, context, and subagent routes/budgets |
+| `agents` | Main, Team, title, plan, approval, vision, recap, context, and subagent routes/budgets |
 | `skills` | Discovery, trust, eager activation, and disabled entries |
 | `plugins` | Azem-owned plugin packages, optional Codex copy import, and explicit hook trust |
 | `mcp` | Stdio or HTTP servers, environment, headers, timeouts, and tool policies |
@@ -67,9 +67,9 @@ means unbounded. `budget.soft_requests` defaults to 200 and injects one private
 wrap-up reminder when crossed; it is advisory and never stops the run. Set it
 to zero to disable the reminder. A child is cancelled by explicit
 `subagent.kill`, a user stop that explicitly includes children, application
-shutdown, or an optional configured `idle_timeout`. Provider
-context windows still require semantic compaction, but that is not a cumulative
-task-size ceiling.
+shutdown, or an optional configured `idle_timeout`. Provider context windows
+still require deterministic archive compaction, but that is not a cumulative
+task-size ceiling and does not depend on the semantic-index model.
 
 ## Skills
 
@@ -283,7 +283,7 @@ llmux models.
 Desktop Role models configures these independent routes:
 
 - `main`: `defaults.provider`, `defaults.model`, and `defaults.reasoning`.
-- `title`, `plan`, `approval`, `vision`, `compaction`, and `recap`: matching entries under `agents`.
+- `title`, `plan`, `approval`, `vision`, and `recap`: matching entries under `agents`.
 - `subagent`: the named role under `agents.subagents.routes`.
 
 Non-main empty routes inherit from the active session except `vision`, which is
@@ -311,7 +311,40 @@ fails closed.
 bounded continuity summary shown in the desktop Inspector after a successful
 turn. It defaults to ChatGPT Luna at low reasoning. Clearing the route restores
 normal non-main inheritance from the active session; changing it never changes
-the semantic compaction route or the current conversation model.
+the current conversation model or context archive.
+
+Context archiving has no model route. Automatic, manual `/compact`, and
+`/rebuild` paths all use the same deterministic host kernel. The kernel reads
+the selected model's configured or persisted context-window and modality
+metadata, but it does not resolve credentials, refresh the catalog, open a
+provider connection, or request model-generated JSON. Missing local context
+metadata fails explicitly.
+
+`agents.context` controls this archive lifecycle:
+
+|Field|Default|Behavior|
+|---|---:|---|
+|`enabled`|`true`|Enable automatic and explicit context archiving.|
+|`reserve_tokens`|`16384`|Headroom removed from the model context window before computing the archive trigger. Tool-definition tokens are removed separately.|
+|`keep_recent_tokens`|`20000`|Preferred verbatim hot-tail floor. If that optional floor prevents the carrier from fitting, Azem relaxes it but still preserves the latest three complete shared user turns.|
+|`large_tool_result_tokens`|`12000`|Artifact-offload threshold for large tool results.|
+|`history_retrieval_tokens`|`4096`|Private session-history FTS evidence budget.|
+
+Automatic archiving runs when the estimated provider-visible history exceeds
+`context_window - tool_definition_tokens - reserve_tokens`. Before building an
+archive, Azem offloads eligible stale tool results to exact durable artifacts.
+It then preserves system messages, the latest three complete shared user turns,
+assistant/tool-call/result atomicity, and current Todo guidance. Older history
+is serialized losslessly to a session-scoped `context_archive` artifact.
+Repeated archiving expands the previous artifact first, so archives never nest
+or progressively summarize one another.
+
+The archive carrier follows the active model's catalog modality. Explicit
+image support enables bounded PNG bitmap frames backed by an exact source
+artifact. Explicit text-only support, unknown metadata, an oversized frame, or
+an unavailable renderer uses a bounded text/artifact carrier. This path does
+not call `agents.vision`: the archive source remains recoverable independently
+of image understanding.
 
 When the selected main model advertises text input but no image input, Azem
 sends the current turn's validated images to `agents.vision`. The helper returns

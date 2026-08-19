@@ -24,7 +24,6 @@ type subagentTurnContext struct {
 	privateContext string
 	seed           []message.Message
 	compactHooks   func(context.Context, []message.Message, []message.Message, error) error
-	summarize      func(context.Context, string) (string, error)
 	noteActivity   func(string)
 	inner          turnContext
 }
@@ -60,9 +59,6 @@ func (c subagentTurnContext) Compact(ctx context.Context, history []message.Mess
 		c.noteActivity("compacting context")
 	}
 	inner := c.inner
-	if inner.summarize == nil {
-		inner.summarize = c.summarize
-	}
 	if inner.compactHooks == nil {
 		inner.compactHooks = c.compactHooks
 	}
@@ -74,9 +70,6 @@ func (c subagentTurnContext) CompactTo(ctx context.Context, history []message.Me
 		c.noteActivity("compacting context")
 	}
 	inner := c.inner
-	if inner.summarize == nil {
-		inner.summarize = c.summarize
-	}
 	if inner.compactHooks == nil {
 		inner.compactHooks = c.compactHooks
 	}

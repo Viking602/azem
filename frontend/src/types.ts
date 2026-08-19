@@ -291,6 +291,7 @@ export interface AgentState {
   cwd: string;
   activity: string;
   warning: string;
+  evidenceStatus?: "" | "provisional" | "verified" | "stale";
   worktreePath: string;
   toolCalls: number;
   turns: number;
@@ -681,6 +682,18 @@ export interface ContextContribution {
   tokens: number;
 }
 
+export interface ContextArchiveProfile {
+  carrier: string;
+  sourceArtifactId?: string;
+  sourceSHA256?: string;
+  sourceCharacters?: number;
+  frameCount?: number;
+  frameBytes?: number;
+  totalPages?: number;
+  truncatedCharacters?: number;
+  deterministicHash?: string;
+}
+
 export interface ContextProfile {
   source: string;
   estimated: boolean;
@@ -688,22 +701,12 @@ export interface ContextProfile {
   reportedInputTokens?: number;
   reportedOutputTokens?: number;
   manifestHash?: string;
-  semanticRevision?: number;
-  semanticCursor?: {
-    canonical_sequence: number;
-    todo_revision: number;
-    tool_completed_at_ns: number;
-    tool_run_id?: string;
-    tool_call_id?: string;
-    subagent_finished_at_ns: number;
-    subagent_id?: string;
-  };
   canonicalHighWater?: number;
   policyVersion?: number;
   rebuildReason?: string;
-  writerLag?: number;
   segments?: Array<{ kind: string; mandatory: boolean; token_estimate: number; content_hash: string; source_refs?: string[] }>;
   exclusions?: Array<{ source_ref: string; reason: string }>;
+  archive?: ContextArchiveProfile;
 }
 
 export interface SessionRecap {

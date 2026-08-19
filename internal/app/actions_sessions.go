@@ -89,6 +89,9 @@ func (s *Service) executeManualCompaction(ctx context.Context, sessionID string)
 	if s.sessions == nil {
 		return fmt.Errorf("session store is unavailable")
 	}
+	if !s.cfg.Agents.Context.Enabled {
+		return ErrContextArchivingDisabled
+	}
 	const compactReservation = "maintenance:compact"
 	s.mu.Lock()
 	if s.shuttingDown {
@@ -111,7 +114,7 @@ func (s *Service) executeManualCompaction(ctx context.Context, sessionID string)
 		return ErrNothingToCompact
 	}
 	if s.providers == nil {
-		return fmt.Errorf("compaction model runtime is unavailable")
+		return fmt.Errorf("context maintenance runtime is unavailable")
 	}
 	if err := s.dispatchLifecycle(ctx, hooks.PreCompact, s.hookMetadata(sessionID, ""), func(e *hooks.Envelope) { e.Trigger = "manual" }); err != nil {
 		return err
@@ -123,7 +126,7 @@ func (s *Service) executeManualCompaction(ctx context.Context, sessionID string)
 	if !changed {
 		return ErrNothingToCompact
 	}
-	projection, err = s.sessions.CompactWithSummary(ctx, sessionID, plan)
+	projection, err = s.sessions.ActivateArchiveCheckpoint(ctx, sessionID, plan)
 	if err != nil {
 		return err
 	}

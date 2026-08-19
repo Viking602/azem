@@ -107,6 +107,15 @@ reflow or narrow the parent conversation. The member switcher stays icon-only
 but exposes each complete name and state through its accessible label, title,
 and keyboard tab behavior.
 
+`agent_state.agent.evidenceStatus` carries only `provisional`, `verified`, or
+`stale`. The backend derives it from the latest durable work disposition and a
+passing verification result at the same revision; the event does not create a
+second status store. `frontend/src/store/normalize.ts` preserves the value
+across sparse live updates. The Subagents page and conversation drawer render
+the localized evidence badge when the value is known, and omit it for legacy
+or unrelated runs. `internal/tui` projects the same field in its agent detail
+line, so GUI and TUI cannot disagree about stale work.
+
 Settings use one Codex-style full-window layout with a searchable left
 navigation and a consistent content column. Opening Settings focuses the dialog
 surface rather than 返回工作台, so the WebView does not draw a default focus

@@ -1,6 +1,6 @@
 # Architecture
 
-Last verified: 2026-08-08
+Last verified: 2026-08-17
 
 Azem is a local-first coding agent with two user interfaces over one Go
 runtime. The terminal and desktop applications share configuration, agent
@@ -61,8 +61,14 @@ runtime.
 | `internal/app` | Composition and orchestration of turns, events, providers, approvals, subagents, and recovery | Provider-specific wire parsing or raw SQL |
 | `internal/agent` | Governed tools, Venat runs, teams, scheduling, worktrees | UI rendering |
 | `internal/provider` | Provider transports, request/stream normalization, model catalog | Product-level session state |
-| `internal/session` | Sessions, projections, timeline records, attachments, usage | Schema migrations |
-| `internal/store/sqlite` | Runtime migrations, SQLC adapters, Venat store contracts | UI or provider transport behavior |
+| `internal/session` | Sessions, projections, timeline records, attachments, usage, blob hydration | Schema migrations |
+| `internal/blobstore` | Content-addressed SHA-256 files for large payloads | Session catalog or Venat control plane |
+| `internal/store/sqlite` | Runtime migrations, SQLC adapters, Venat store contracts, blob-store open | UI or provider transport behavior |
+| `internal/workrevision` | Revision-bound intents, observations, guidance, dispositions, and verification records | UI status as an independent source of truth |
+| `internal/evidence` / `internal/codingmemory` | Structural retrieval lineage and opt-in typed memory | Provider routing or automatic promotion |
+| `internal/eval` / `internal/routeeval` / `internal/training` | Offline trajectory, replay, calibration, synthesis, and release evaluation | Live admission or mutation authority |
+| `internal/toollab` | Non-installable generated-tool sandbox and human promotion records | Production tool registration |
+| `internal/adapterdeployment` | Exact validated adapter substitution, rollback, and kill state | A second provider router |
 | `internal/githubpr` | Safe `git`/`gh` argv execution, PR projection, mutations, monitor state | Shell command composition from user text |
 
 Dependencies flow from entry points and presentation into orchestration, then
@@ -81,7 +87,20 @@ TUI command or desktop TurnRequest
   -> eventBroker emits ordered runtime events
   -> TUI update loop or desktop Bridge receives the projection
   -> React store reducer updates timeline, approvals, Todos, and subagents
+  -> subagent evidence status is derived from durable disposition/verification records
+  -> the same `agent_state` payload projects that status to TUI and React
+
 ```
+
+Work revision, evidence retrieval, memory, route calibration, task synthesis,
+adapter comparison, and release evaluation use versioned records. The
+`internal/eval`, `internal/routeeval`, and `internal/training` packages are
+offline-only: they cannot admit work, execute tools, or alter the live route.
+`internal/toollab` runs generated source in pinned, networkless containers and
+does not register a tool. A separately approved adapter may be attached through
+`internal/adapterdeployment`; it rewrites one exact base model to a validated
+model before `ProviderRuntime.resolveDriverForAccount` continues through the
+existing account, catalog, and provider checks.
 
 The desktop Bridge exposes named methods and a bounded runtime projection. Add
 a Bridge method only when a desktop feature needs a real application operation;
@@ -214,6 +233,35 @@ guidance. The shell tool keeps its own earlier artifact spill; if the artifact
 write fails the result falls back to the plain lossy truncation, so a storage
 problem never fails the tool call. UI previews stay on their separate bounded
 projection (UI-002) and are unaffected.
+
+## Archive-first context maintenance
+
+`internal/app` treats long-history maintenance as a durable archive operation,
+not an LLM summary transaction. The synchronous path selects a complete-turn
+boundary, serializes the omitted messages into `ArchiveSourceV1`, writes a
+session-scoped `context_archive` artifact through `internal/session`, and
+activates `ArchiveContextManifestV1` plus `ModelHistoryV3` in the existing checkpoint
+transaction. The latest three complete user turns remain verbatim.
+
+For a model catalog entry that explicitly supports images,
+`internal/contextarchive` renders a bounded set of Silver-font PNG frames and
+persists them as generated session attachments. A text-only or unknown model
+receives a bounded preview and the same exact artifact reference. Every PNG is
+an optimization: restart recovery validates its source SHA and regenerates a
+missing frame from the artifact. Repeated compaction expands the old archive
+before selecting a new boundary, so the wire history never nests carriers.
+
+The archive trigger is computed directly from catalog capacity:
+`context_window - tool_definition_tokens - reserve_tokens`. Before archiving,
+the host replaces eligible stale oversized tool results with exact durable
+artifact locators. `keep_recent_tokens` is a preferred hot-tail floor; if that
+floor would prevent every carrier from fitting, the reducer drops only the
+optional floor and still preserves the latest three complete shared user
+turns. If those mandatory turns themselves exceed the hard limit, activation
+fails explicitly without mutating live history or persisting a partial
+checkpoint. No provider request, background summary, semantic JSON, or
+compaction model route exists in this path. The Inspector projects archive
+carrier, source, frame, truncation, policy, and canonical high-water metadata.
 
 ## Tool lifecycle and side effects
 

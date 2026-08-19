@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Viking602/azem/internal/blobstore"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
 	"github.com/Viking602/venat/api"
 )
@@ -35,8 +36,11 @@ const (
 )
 
 type unitOfWork struct {
-	tx     *sql.Tx
-	closed bool
+	db      *sql.DB
+	tx      *sql.Tx
+	blobs   blobstore.Store
+	pending map[string][]byte
+	closed  bool
 }
 
 func (u *unitOfWork) Runs() api.RunStore                     { return u }
@@ -63,11 +67,121 @@ func (u *unitOfWork) Commit(ctx context.Context) error {
 		return sql.ErrTxDone
 	}
 	u.closed = true
-	if err := ctx.Err(); err != nil {
+	installed, err := u.installPending(ctx)
+	u.pending = nil
+	if err != nil {
 		_ = u.tx.Rollback()
+		return errors.Join(err, u.cleanupInstalled(installed))
+	}
+	if err := u.tx.Commit(); err != nil {
+		return errors.Join(err, u.cleanupInstalled(installed))
+	}
+	return nil
+}
+
+func (u *unitOfWork) installPending(ctx context.Context) ([]string, error) {
+	digests := make([]string, 0, len(u.pending))
+	for digest := range u.pending {
+		digests = append(digests, digest)
+	}
+	sort.Strings(digests)
+	installed := make([]string, 0, len(digests))
+	for _, digest := range digests {
+		created, err := u.installPendingPayload(ctx, digest)
+		if err != nil {
+			return installed, err
+		}
+		if created {
+			installed = append(installed, digest)
+		}
+	}
+	return installed, nil
+}
+
+func (u *unitOfWork) installPendingPayload(ctx context.Context, digest string) (bool, error) {
+	referenced, err := payloadReferenced(ctx, u.tx, digest)
+	if err != nil {
+		return false, fmt.Errorf("resolve blob payload %s: %w", digest, err)
+	}
+	if !referenced {
+		return false, nil
+	}
+	created, err := u.blobs.InstallAt(ctx, digest, u.pending[digest])
+	if err != nil {
+		return false, fmt.Errorf("commit blob payload %s: %w", digest, err)
+	}
+	return created, nil
+}
+
+func (u *unitOfWork) cleanupInstalled(digests []string) error {
+	if len(digests) == 0 || u.db == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := beginImmediate(ctx, u.db)
+	if err != nil {
 		return err
 	}
-	return u.tx.Commit()
+	defer conn.Close()
+	defer conn.ExecContext(context.Background(), "ROLLBACK")
+	cleanupErr := u.cleanupInstalledDigests(ctx, conn, digests)
+	commitErr := commitImmediate(ctx, conn)
+	return errors.Join(cleanupErr, commitErr)
+}
+
+func beginImmediate(ctx context.Context, db *sql.DB) (*sql.Conn, error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("open orphaned blob cleanup connection: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("begin immediate orphaned blob cleanup: %w", err)
+	}
+	return conn, nil
+}
+
+func commitImmediate(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit orphaned blob cleanup: %w", err)
+	}
+	return nil
+}
+
+func (u *unitOfWork) cleanupInstalledDigests(ctx context.Context, queryer rowQueryer, digests []string) error {
+	var cleanupErrors []error
+	for _, digest := range digests {
+		if err := u.cleanupInstalledDigest(ctx, queryer, digest); err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func (u *unitOfWork) cleanupInstalledDigest(ctx context.Context, queryer rowQueryer, digest string) error {
+	referenced, err := payloadReferenced(ctx, queryer, digest)
+	if err != nil {
+		return fmt.Errorf("check orphaned blob %s: %w", digest, err)
+	}
+	if referenced {
+		return nil
+	}
+	return u.blobs.Delete(ctx, digest)
+}
+
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func payloadReferenced(ctx context.Context, queryer rowQueryer, digest string) (bool, error) {
+	var referenced bool
+	err := queryer.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM events WHERE data_sha256 = ?
+		UNION ALL
+		SELECT 1 FROM records WHERE data_sha256 = ?
+	)`, digest, digest).Scan(&referenced)
+	return referenced, err
 }
 
 func (u *unitOfWork) Rollback(context.Context) error {
@@ -75,7 +189,27 @@ func (u *unitOfWork) Rollback(context.Context) error {
 		return sql.ErrTxDone
 	}
 	u.closed = true
+	u.pending = nil
 	return u.tx.Rollback()
+}
+
+func (u *unitOfWork) stagePayload(digest string, payload []byte) {
+	if digest == "" {
+		return
+	}
+	if u.pending == nil {
+		u.pending = make(map[string][]byte)
+	}
+	u.pending[digest] = append([]byte(nil), payload...)
+}
+
+func (u *unitOfWork) loadPayload(ctx context.Context, inline []byte, digest string) ([]byte, error) {
+	if digest != "" {
+		if payload, ok := u.pending[digest]; ok {
+			return append([]byte(nil), payload...), nil
+		}
+	}
+	return loadPayload(ctx, u.blobs, inline, digest)
 }
 
 func (u *unitOfWork) SaveRun(ctx context.Context, value api.Run) error {
@@ -83,11 +217,11 @@ func (u *unitOfWork) SaveRun(ctx context.Context, value api.Run) error {
 }
 
 func (u *unitOfWork) LoadRun(ctx context.Context, id string) (api.Run, error) {
-	return loadRecord[api.Run](ctx, u.tx, kindRun, id, "")
+	return loadRecord[api.Run](ctx, u, kindRun, id, "")
 }
 
 func (u *unitOfWork) ListRuns(ctx context.Context, selector api.RunSelector) ([]api.Run, error) {
-	values, err := listRecords[api.Run](ctx, u.tx, kindRun, "")
+	values, err := listRecords[api.Run](ctx, u, kindRun, "")
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +230,11 @@ func (u *unitOfWork) ListRuns(ctx context.Context, selector api.RunSelector) ([]
 		if len(selector.IDs) > 0 && !contains(selector.IDs, value.ID) || len(selector.Statuses) > 0 && !contains(selector.Statuses, value.Status) || !within(value.CreatedAt, selector.Since, selector.Until) {
 			continue
 		}
-		if selector.AgentID != "" && value.Metadata["agent_id"] != selector.AgentID || selector.AgentVersion != "" && value.Metadata["agent_version"] != selector.AgentVersion {
+		agentVersion := value.AgentVersion
+		if agentVersion == "" {
+			agentVersion = value.Metadata["agent_version"]
+		}
+		if selector.AgentID != "" && value.Metadata["agent_id"] != selector.AgentID || selector.AgentVersion != "" && agentVersion != selector.AgentVersion {
 			continue
 		}
 		filtered = append(filtered, value)
@@ -109,11 +247,11 @@ func (u *unitOfWork) SaveTask(ctx context.Context, value api.Task) error {
 }
 
 func (u *unitOfWork) LoadTask(ctx context.Context, runID string, taskID string) (api.Task, error) {
-	return loadRecord[api.Task](ctx, u.tx, kindTask, taskID, runID)
+	return loadRecord[api.Task](ctx, u, kindTask, taskID, runID)
 }
 
 func (u *unitOfWork) ListTasks(ctx context.Context, runID string) ([]api.Task, error) {
-	return listRecords[api.Task](ctx, u.tx, kindTask, runID)
+	return listRecords[api.Task](ctx, u, kindTask, runID)
 }
 
 func (u *unitOfWork) AppendEvent(ctx context.Context, value api.Event) error {
@@ -138,10 +276,12 @@ func (u *unitOfWork) AppendEvent(ctx context.Context, value api.Event) error {
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
-	err = queries.InsertEvent(ctx, dbgen.InsertEventParams{RunID: value.RunID, Sequence: int64(value.Sequence), RecordedAt: nanos(value.RecordedAt), Data: data})
+	inline, digest := preparePayload(data)
+	err = queries.InsertEvent(ctx, dbgen.InsertEventParams{RunID: value.RunID, Sequence: int64(value.Sequence), RecordedAt: nanos(value.RecordedAt), Data: inline, DataSha256: digest})
 	if err != nil {
 		return fmt.Errorf("append event: %w", err)
 	}
+	u.stagePayload(digest, data)
 	return nil
 }
 
@@ -155,21 +295,29 @@ func (u *unitOfWork) ListAfter(ctx context.Context, runID string, afterSeq uint6
 
 func (u *unitOfWork) listEventsAfter(ctx context.Context, runID string, afterSeq uint64, strict bool) ([]api.Event, error) {
 	queries := dbgen.New(u.tx)
-	var data [][]byte
-	var err error
+	var payloads []payloadRow
 	if strict {
-		sequence, conversionErr := int64FromUint64(afterSeq)
-		if conversionErr != nil {
-			return nil, fmt.Errorf("list events: %w", conversionErr)
+		sequence, err := int64FromUint64(afterSeq)
+		if err != nil {
+			return nil, fmt.Errorf("list events: %w", err)
 		}
-		data, err = queries.ListEventDataAfter(ctx, dbgen.ListEventDataAfterParams{RunID: runID, Sequence: sequence})
+		rows, err := queries.ListEventDataAfter(ctx, dbgen.ListEventDataAfterParams{RunID: runID, Sequence: sequence})
+		if err != nil {
+			return nil, fmt.Errorf("list events: %w", err)
+		}
+		for _, row := range rows {
+			payloads = append(payloads, payloadRow{Data: row.Data, Digest: row.DataSha256})
+		}
 	} else {
-		data, err = queries.ListEventData(ctx, runID)
+		rows, err := queries.ListEventData(ctx, runID)
+		if err != nil {
+			return nil, fmt.Errorf("list events: %w", err)
+		}
+		for _, row := range rows {
+			payloads = append(payloads, payloadRow{Data: row.Data, Digest: row.DataSha256})
+		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("list events: %w", err)
-	}
-	return decodeRows[api.Event](data)
+	return decodePayloadRows[api.Event](ctx, u, payloads)
 }
 
 func (u *unitOfWork) SaveTraceSpan(ctx context.Context, value api.TraceSpan) error {
@@ -177,7 +325,7 @@ func (u *unitOfWork) SaveTraceSpan(ctx context.Context, value api.TraceSpan) err
 }
 
 func (u *unitOfWork) ListTraceSpans(ctx context.Context, runID string) ([]api.TraceSpan, error) {
-	return listRecords[api.TraceSpan](ctx, u.tx, kindTrace, runID)
+	return listRecords[api.TraceSpan](ctx, u, kindTrace, runID)
 }
 
 func (u *unitOfWork) WriteItem(ctx context.Context, value api.BlackboardItem) error {
@@ -185,18 +333,41 @@ func (u *unitOfWork) WriteItem(ctx context.Context, value api.BlackboardItem) er
 }
 
 func (u *unitOfWork) SelectItems(ctx context.Context, runID string, selector api.BlackboardSelector) ([]api.BlackboardItem, error) {
-	values, err := listRecords[api.BlackboardItem](ctx, u.tx, kindBlackboard, runID)
+	values, err := listRecords[api.BlackboardItem](ctx, u, kindBlackboard, runID)
 	if err != nil {
 		return nil, err
 	}
 	filtered := values[:0]
 	for _, value := range values {
-		if selector.RunID != "" && value.RunID != selector.RunID || selector.TaskID != "" && value.TaskID != selector.TaskID || len(selector.ItemTypes) > 0 && !contains(selector.ItemTypes, value.Type) || len(selector.SourceTypes) > 0 && !contains(selector.SourceTypes, value.Source.Type) || len(selector.SourceIDs) > 0 && !contains(selector.SourceIDs, value.Source.ID) || len(selector.SourceAgentIDs) > 0 && !contains(selector.SourceAgentIDs, value.Source.ID) || selector.Visibility != "" && value.Visibility != selector.Visibility || selector.SinceVersion > 0 && value.Version <= selector.SinceVersion || len(selector.Keys) > 0 && !contains(selector.Keys, value.Key) {
-			continue
+		if blackboardItemMatches(value, selector) {
+			filtered = append(filtered, value)
 		}
-		filtered = append(filtered, value)
 	}
 	return limit(filtered, selector.Limit), nil
+}
+
+func blackboardItemMatches(value api.BlackboardItem, selector api.BlackboardSelector) bool {
+	return blackboardOwnerMatches(value, selector) &&
+		blackboardSourceMatches(value, selector) &&
+		blackboardVersionMatches(value, selector)
+}
+
+func blackboardOwnerMatches(value api.BlackboardItem, selector api.BlackboardSelector) bool {
+	return (selector.RunID == "" || value.RunID == selector.RunID) &&
+		(selector.TaskID == "" || value.TaskID == selector.TaskID) &&
+		(len(selector.ItemTypes) == 0 || contains(selector.ItemTypes, value.Type))
+}
+
+func blackboardSourceMatches(value api.BlackboardItem, selector api.BlackboardSelector) bool {
+	return (len(selector.SourceTypes) == 0 || contains(selector.SourceTypes, value.Source.Type)) &&
+		(len(selector.SourceIDs) == 0 || contains(selector.SourceIDs, value.Source.ID)) &&
+		(len(selector.SourceAgentIDs) == 0 || contains(selector.SourceAgentIDs, value.Source.ID))
+}
+
+func blackboardVersionMatches(value api.BlackboardItem, selector api.BlackboardSelector) bool {
+	return (selector.Visibility == "" || value.Visibility == selector.Visibility) &&
+		(selector.SinceVersion == 0 || value.Version > selector.SinceVersion) &&
+		(len(selector.Keys) == 0 || contains(selector.Keys, value.Key))
 }
 
 func (u *unitOfWork) QueueMessage(ctx context.Context, value api.UserMessage) error {
@@ -204,7 +375,7 @@ func (u *unitOfWork) QueueMessage(ctx context.Context, value api.UserMessage) er
 }
 
 func (u *unitOfWork) LoadMessage(ctx context.Context, runID string, messageID string) (api.UserMessage, error) {
-	return loadRecord[api.UserMessage](ctx, u.tx, kindUserMessage, messageID, runID)
+	return loadRecord[api.UserMessage](ctx, u, kindUserMessage, messageID, runID)
 }
 
 func (u *unitOfWork) UpdateMessage(ctx context.Context, value api.UserMessage) error {
@@ -212,11 +383,11 @@ func (u *unitOfWork) UpdateMessage(ctx context.Context, value api.UserMessage) e
 }
 
 func (u *unitOfWork) ListMessages(ctx context.Context, runID string) ([]api.UserMessage, error) {
-	return listRecords[api.UserMessage](ctx, u.tx, kindUserMessage, runID)
+	return listRecords[api.UserMessage](ctx, u, kindUserMessage, runID)
 }
 
 func (u *unitOfWork) ListPendingFor(ctx context.Context, selector api.UserMessageSelector) ([]api.UserMessage, error) {
-	values, err := listRecords[api.UserMessage](ctx, u.tx, kindUserMessage, selector.RunID)
+	values, err := listRecords[api.UserMessage](ctx, u, kindUserMessage, selector.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +415,7 @@ func (u *unitOfWork) QueueEnvelope(ctx context.Context, value api.TaskEnvelope) 
 }
 
 func (u *unitOfWork) LoadEnvelope(ctx context.Context, id string) (api.TaskEnvelope, error) {
-	return loadRecord[api.TaskEnvelope](ctx, u.tx, kindEnvelope, id, "")
+	return loadRecord[api.TaskEnvelope](ctx, u, kindEnvelope, id, "")
 }
 
 func (u *unitOfWork) UpdateEnvelope(ctx context.Context, value api.TaskEnvelope) error {
@@ -252,7 +423,7 @@ func (u *unitOfWork) UpdateEnvelope(ctx context.Context, value api.TaskEnvelope)
 }
 
 func (u *unitOfWork) ListEnvelopes(ctx context.Context, runID string) ([]api.TaskEnvelope, error) {
-	return listRecords[api.TaskEnvelope](ctx, u.tx, kindEnvelope, runID)
+	return listRecords[api.TaskEnvelope](ctx, u, kindEnvelope, runID)
 }
 
 func (u *unitOfWork) SaveApproval(ctx context.Context, value api.ApprovalRequest) error {
@@ -260,7 +431,7 @@ func (u *unitOfWork) SaveApproval(ctx context.Context, value api.ApprovalRequest
 }
 
 func (u *unitOfWork) LoadApproval(ctx context.Context, id string) (api.ApprovalRequest, error) {
-	return loadRecord[api.ApprovalRequest](ctx, u.tx, kindApproval, id, "")
+	return loadRecord[api.ApprovalRequest](ctx, u, kindApproval, id, "")
 }
 
 func (u *unitOfWork) SaveResumeToken(ctx context.Context, value api.ResumeToken) error {
@@ -272,11 +443,11 @@ func (u *unitOfWork) SaveResumeToken(ctx context.Context, value api.ResumeToken)
 }
 
 func (u *unitOfWork) LoadResumeToken(ctx context.Context, id string) (api.ResumeToken, error) {
-	return loadRecord[api.ResumeToken](ctx, u.tx, kindResume, id, "")
+	return loadRecord[api.ResumeToken](ctx, u, kindResume, id, "")
 }
 
 func (u *unitOfWork) ListPending(ctx context.Context, selector api.ResumeTokenSelector) ([]api.ResumeToken, error) {
-	values, err := listRecords[api.ResumeToken](ctx, u.tx, kindResume, selector.RunID)
+	values, err := listRecords[api.ResumeToken](ctx, u, kindResume, selector.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -307,8 +478,9 @@ func (u *unitOfWork) save(ctx context.Context, kind, key1, key2, runID, taskID, 
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", kind, err)
 	}
+	inline, digest := preparePayload(data)
 	queries := dbgen.New(u.tx)
-	params := dbgen.InsertRecordParams{Kind: kind, Key1: key1, Key2: key2, RunID: runID, TaskID: taskID, Status: status, CreatedAt: nanos(createdAt), ToolName: toolName, IdempotencyKey: idempotencyKey, Data: data}
+	params := dbgen.InsertRecordParams{Kind: kind, Key1: key1, Key2: key2, RunID: runID, TaskID: taskID, Status: status, CreatedAt: nanos(createdAt), ToolName: toolName, IdempotencyKey: idempotencyKey, Data: inline, DataSha256: digest}
 	if upsert {
 		err = queries.UpsertRecord(ctx, dbgen.UpsertRecordParams(params))
 	} else {
@@ -320,16 +492,21 @@ func (u *unitOfWork) save(ctx context.Context, kind, key1, key2, runID, taskID, 
 		}
 		return fmt.Errorf("save %s: %w", kind, err)
 	}
+	u.stagePayload(digest, data)
 	return nil
 }
 
-func loadRecord[T any](ctx context.Context, tx *sql.Tx, kind string, key1 string, key2 string) (T, error) {
+func loadRecord[T any](ctx context.Context, u *unitOfWork, kind string, key1 string, key2 string) (T, error) {
 	var zero T
-	data, err := dbgen.New(tx).GetRecordData(ctx, dbgen.GetRecordDataParams{Kind: kind, Key1: key1, Key2: key2})
+	row, err := dbgen.New(u.tx).GetRecordData(ctx, dbgen.GetRecordDataParams{Kind: kind, Key1: key1, Key2: key2})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return zero, api.ErrNotFound
 		}
+		return zero, fmt.Errorf("load %s: %w", kind, err)
+	}
+	data, err := u.loadPayload(ctx, row.Data, row.DataSha256)
+	if err != nil {
 		return zero, fmt.Errorf("load %s: %w", kind, err)
 	}
 	if err := json.Unmarshal(data, &zero); err != nil {
@@ -338,24 +515,47 @@ func loadRecord[T any](ctx context.Context, tx *sql.Tx, kind string, key1 string
 	return zero, nil
 }
 
-func listRecords[T any](ctx context.Context, tx *sql.Tx, kind string, runID string) ([]T, error) {
-	queries := dbgen.New(tx)
-	var data [][]byte
+func listRecords[T any](ctx context.Context, u *unitOfWork, kind string, runID string) ([]T, error) {
+	queries := dbgen.New(u.tx)
+	var rows []payloadRow
 	var err error
 	if runID != "" {
-		data, err = queries.ListRecordDataByRun(ctx, dbgen.ListRecordDataByRunParams{Kind: kind, RunID: runID})
+		listed, listErr := queries.ListRecordDataByRun(ctx, dbgen.ListRecordDataByRunParams{Kind: kind, RunID: runID})
+		if listErr != nil {
+			err = listErr
+		} else {
+			for _, row := range listed {
+				rows = append(rows, payloadRow{Data: row.Data, Digest: row.DataSha256})
+			}
+		}
 	} else {
-		data, err = queries.ListRecordData(ctx, kind)
+		listed, listErr := queries.ListRecordData(ctx, kind)
+		if listErr != nil {
+			err = listErr
+		} else {
+			for _, row := range listed {
+				rows = append(rows, payloadRow{Data: row.Data, Digest: row.DataSha256})
+			}
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", kind, err)
 	}
-	return decodeRows[T](data)
+	return decodePayloadRows[T](ctx, u, rows)
 }
 
-func decodeRows[T any](rows [][]byte) ([]T, error) {
-	var values []T
-	for _, data := range rows {
+type payloadRow struct {
+	Data   []byte
+	Digest string
+}
+
+func decodePayloadRows[T any](ctx context.Context, u *unitOfWork, rows []payloadRow) ([]T, error) {
+	values := make([]T, 0, len(rows))
+	for _, row := range rows {
+		data, err := u.loadPayload(ctx, row.Data, row.Digest)
+		if err != nil {
+			return nil, err
+		}
 		var value T
 		if err := json.Unmarshal(data, &value); err != nil {
 			return nil, err
@@ -364,6 +564,7 @@ func decodeRows[T any](rows [][]byte) ([]T, error) {
 	}
 	return values, nil
 }
+
 func marshalJSON(value any) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
@@ -423,5 +624,7 @@ func limit[T any](values []T, count int) []T {
 	return values
 }
 
-var _ api.UnitOfWork = (*unitOfWork)(nil)
-var _ api.UserMessageOutboxScanner = (*unitOfWork)(nil)
+var (
+	_ api.UnitOfWork               = (*unitOfWork)(nil)
+	_ api.UserMessageOutboxScanner = (*unitOfWork)(nil)
+)

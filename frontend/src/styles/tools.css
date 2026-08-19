@@ -17,9 +17,9 @@
 .tool-group summary::-webkit-details-marker { display: none; }
 .tool-block summary:hover,
 .tool-group summary:hover {
-  color: color-mix(in srgb, var(--muted) 92%, var(--ink));
-  background: color-mix(in srgb, var(--paper-muted) 72%, transparent);
-  transform: translateX(2px);
+  color: color-mix(in srgb, var(--ink) 78%, var(--muted));
+  background: transparent;
+  transform: none;
 }
 .work-entry-icon {
   position: relative;
@@ -86,10 +86,10 @@
 .tool-group summary > .tool-count {
   flex: 0 0 auto;
   margin-left: auto;
-  color: var(--faint);
-  font-family: var(--mono);
-  font-size: var(--text-2xs);
-  font-weight: 450;
+  color: color-mix(in srgb, var(--ink) 35%, transparent);
+  font-size: var(--text-chat);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 .tool-block[data-state="failed"] > summary,

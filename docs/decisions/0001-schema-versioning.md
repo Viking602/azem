@@ -7,7 +7,9 @@ Date: 2026-08-06
 
 Azem stores sessions, governed execution, recovery state, and desktop project
 ownership in one local SQLite database. Schema 20 also stores semantic context
-snapshots, append-only semantic events, and context manifests. Runtime migrations and SQLC require
+snapshots, append-only semantic events, and context manifests. Schema 21 keeps
+those catalog and control-plane rows in SQLite and stores large opaque payloads
+as content-addressed files. Runtime migrations and SQLC require
 separate schema representations. Older binaries cannot safely interpret state
 written by newer schemas.
 

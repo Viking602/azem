@@ -466,14 +466,13 @@ func TestModelRoutingCommandRendersConfiguredAndInheritedRoutes(t *testing.T) {
 	model.applyEvent(app.Event{Kind: app.EventModelRoutes, Data: map[string]string{"subagent_max_concurrency": "2"}, ModelRoutes: []app.ModelRouteEntry{
 		{Scope: "title", Label: "Title"},
 		{Scope: "plan", Label: "Plan"},
-		{Scope: "compaction", Label: "Compaction"},
 		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("grok", "grok-4.5", "low")},
 	}})
-	if model.overlay != OverlayModelRoutes || len(model.overlayOptions()) != 4 {
+	if model.overlay != OverlayModelRoutes || len(model.overlayOptions()) != 3 {
 		t.Fatalf("model routes overlay = %q options=%#v", model.overlay, model.overlayOptions())
 	}
 	rendered := ansi.Strip(model.renderOverlay(100, 24))
-	for _, wanted := range []string{"MODEL ROUTING", "Session title", "Plan model", "Compaction", "Inherit from active agent", "explore", "grok/grok-4.5/low"} {
+	for _, wanted := range []string{"MODEL ROUTING", "Session title", "Plan model", "Inherit from active agent", "explore", "grok/grok-4.5/low"} {
 		if !strings.Contains(rendered, wanted) {
 			t.Fatalf("model routes missing %q:\n%s", wanted, rendered)
 		}
@@ -514,7 +513,6 @@ func settingsMenuModel(t *testing.T) (AppModel, *recordedRuntime) {
 	}
 	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
 		{Scope: "plan", Label: "Plan"},
-		{Scope: "compaction", Label: "Compaction"},
 		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("chatgpt", "old-worker", "high")},
 	}})
 	return model, runtime
@@ -547,7 +545,6 @@ func TestSettingsMenuRendersFunctionalCategoriesAndRoleModels(t *testing.T) {
 	model, _ := settingsMenuModel(t)
 	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
 		{Scope: "plan", Label: "Plan"},
-		{Scope: "compaction", Label: "Compaction"},
 		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("chatgpt", "old-worker", "high")},
 		{Scope: "subagent", Role: "plan", Label: "Produce a decision-complete implementation plan without changing the workspace."},
 		{Scope: "subagent", Role: "review", Label: "Review a delegated change for requirement, correctness, and regression risks without editing."},
@@ -680,7 +677,6 @@ func TestSettingsMenuUpdatesPlanModelAndReturns(t *testing.T) {
 	}
 	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
 		{Scope: "plan", Label: "Plan", Route: appModelRoute("grok", "grok-fast", "")},
-		{Scope: "compaction", Label: "Compaction"},
 		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace", Route: appModelRoute("chatgpt", "old-worker", "high")},
 	}})
 	if model.overlay != OverlaySettings {
@@ -752,7 +748,6 @@ func TestSettingsMenuUpdatesSubagentConcurrencyAndReturns(t *testing.T) {
 	}
 	model.applyEvent(app.Event{Kind: app.EventModelRoutes, Data: map[string]string{"subagent_max_concurrency": "6"}, ModelRoutes: []app.ModelRouteEntry{
 		{Scope: "plan", Label: "Plan"},
-		{Scope: "compaction", Label: "Compaction"},
 		{Scope: "subagent", Role: "explore", Label: "Inspect the workspace"},
 	}})
 	if model.overlay != OverlaySettings || model.subagentConcurrency != 6 || model.overlayCursor != settingsCursor {
@@ -801,7 +796,7 @@ func TestModelRoutingSelectionDoesNotMutateMainModel(t *testing.T) {
 	model.selectModels(model.modelsByProvider["chatgpt"])
 	model.updateUsage(map[string]string{"inputTokens": "120", "outputTokens": "30"})
 	model.applyEvent(app.Event{Kind: app.EventModelRoutes, ModelRoutes: []app.ModelRouteEntry{
-		{Scope: "compaction", Label: "Compaction"},
+		{Scope: "plan", Label: "Plan"},
 	}})
 
 	updated, _ := model.activateOverlayOption()
@@ -835,7 +830,7 @@ func TestModelRoutingSelectionDoesNotMutateMainModel(t *testing.T) {
 		t.Fatalf("route save action = %#v", runtime.actions)
 	}
 	route := runtime.actions[0].Route
-	if route.Scope != "compaction" || route.Route.Provider != "grok" || route.Route.Model != "grok-worker" || route.Route.Reasoning != "medium" {
+	if route.Scope != "plan" || route.Route.Provider != "grok" || route.Route.Model != "grok-worker" || route.Route.Reasoning != "medium" {
 		t.Fatalf("saved route = %#v", route)
 	}
 	if model.provider != "chatgpt" || model.model != "gpt-main" || model.reasoning != "high" || model.usage.InputTokens != 120 || model.usage.OutputTokens != 30 {

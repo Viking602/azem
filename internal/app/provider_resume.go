@@ -98,7 +98,7 @@ func (r *ProviderRuntime) ResumeRun(_ context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := modelContextTokenTarget(request.Provider, modelID, contextWindow, 0); err != nil {
+	if _, err := calculateContextBudget(modelID, contextWindow, 0, r.cfg.Agents.Context); err != nil {
 		return err
 	}
 	runCtx, cancel := context.WithCancel(host.BaseContext())

@@ -17,7 +17,7 @@ import (
 )
 
 func (u *unitOfWork) LoadTraceSpan(ctx context.Context, id string) (api.TraceSpan, error) {
-	return loadRecord[api.TraceSpan](ctx, u.tx, kindTrace, id, "")
+	return loadRecord[api.TraceSpan](ctx, u, kindTrace, id, "")
 }
 
 func (u *unitOfWork) UpdateTraceSpan(ctx context.Context, value api.TraceSpan) error {
@@ -245,15 +245,19 @@ func (u *unitOfWork) SaveActionAttempt(ctx context.Context, value api.ActionAtte
 }
 
 func (u *unitOfWork) LoadActionAttempt(ctx context.Context, id string) (api.ActionAttempt, error) {
-	return loadRecord[api.ActionAttempt](ctx, u.tx, kindAction, id, "")
+	return loadRecord[api.ActionAttempt](ctx, u, kindAction, id, "")
 }
 
 func (u *unitOfWork) LoadActionAttemptByIdempotencyKey(ctx context.Context, runID string, taskID string, toolName string, key string) (api.ActionAttempt, error) {
 	var value api.ActionAttempt
-	data, err := dbgen.New(u.tx).GetActionAttemptByIdempotency(ctx, dbgen.GetActionAttemptByIdempotencyParams{Kind: kindAction, RunID: runID, TaskID: taskID, ToolName: toolName, IdempotencyKey: key})
+	row, err := dbgen.New(u.tx).GetActionAttemptByIdempotency(ctx, dbgen.GetActionAttemptByIdempotencyParams{Kind: kindAction, RunID: runID, TaskID: taskID, ToolName: toolName, IdempotencyKey: key})
 	if errors.Is(err, sql.ErrNoRows) {
 		return value, api.ErrNotFound
 	}
+	if err != nil {
+		return value, err
+	}
+	data, err := loadPayload(ctx, u.blobs, row.Data, row.DataSha256)
 	if err != nil {
 		return value, err
 	}
@@ -264,7 +268,7 @@ func (u *unitOfWork) LoadActionAttemptByIdempotencyKey(ctx context.Context, runI
 }
 
 func (u *unitOfWork) ListActionAttempts(ctx context.Context, selector api.ActionAttemptSelector) ([]api.ActionAttempt, error) {
-	values, err := listRecords[api.ActionAttempt](ctx, u.tx, kindAction, selector.RunID)
+	values, err := listRecords[api.ActionAttempt](ctx, u, kindAction, selector.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -337,11 +341,11 @@ func (u *unitOfWork) SaveAgentProfile(ctx context.Context, value api.AgentProfil
 }
 
 func (u *unitOfWork) LoadAgentProfile(ctx context.Context, id string) (api.AgentProfile, error) {
-	return loadRecord[api.AgentProfile](ctx, u.tx, kindAgentProfile, id, "")
+	return loadRecord[api.AgentProfile](ctx, u, kindAgentProfile, id, "")
 }
 
 func (u *unitOfWork) ListAgentProfiles(ctx context.Context, selector api.AgentSelector) ([]api.AgentProfile, error) {
-	values, err := listRecords[api.AgentProfile](ctx, u.tx, kindAgentProfile, "")
+	values, err := listRecords[api.AgentProfile](ctx, u, kindAgentProfile, "")
 	if err != nil {
 		return nil, err
 	}
@@ -356,15 +360,18 @@ func (u *unitOfWork) ListAgentProfiles(ctx context.Context, selector api.AgentSe
 }
 
 func (u *unitOfWork) SaveCapability(ctx context.Context, value api.Capability) error {
+	if err := api.ValidateCapabilityName(value.Name); err != nil {
+		return err
+	}
 	return u.save(ctx, kindCapability, value.Name, value.AgentID, "", "", "", time.Time{}, "", "", value, true)
 }
 
 func (u *unitOfWork) LoadCapability(ctx context.Context, name string, agentID string) (api.Capability, error) {
-	return loadRecord[api.Capability](ctx, u.tx, kindCapability, name, agentID)
+	return loadRecord[api.Capability](ctx, u, kindCapability, name, agentID)
 }
 
 func (u *unitOfWork) ListCapabilities(ctx context.Context, selector api.CapabilitySelector) ([]api.Capability, error) {
-	values, err := listRecords[api.Capability](ctx, u.tx, kindCapability, "")
+	values, err := listRecords[api.Capability](ctx, u, kindCapability, "")
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +397,7 @@ func (u *unitOfWork) AppendUsage(ctx context.Context, value api.UsageRecord) err
 		value.ID = uuid.NewString()
 	}
 	value = normalizeUsageRecord(value)
-	existing, err := loadRecord[api.UsageRecord](ctx, u.tx, kindUsage, value.ID, "")
+	existing, err := loadRecord[api.UsageRecord](ctx, u, kindUsage, value.ID, "")
 	if err == nil {
 		existing = normalizeUsageRecord(existing)
 		if value.CreatedAt.IsZero() {
@@ -411,7 +418,7 @@ func (u *unitOfWork) AppendUsage(ctx context.Context, value api.UsageRecord) err
 }
 
 func (u *unitOfWork) QueryUsage(ctx context.Context, selector api.UsageSelector) ([]api.UsageRecord, error) {
-	values, err := listRecords[api.UsageRecord](ctx, u.tx, kindUsage, selector.RunID)
+	values, err := listRecords[api.UsageRecord](ctx, u, kindUsage, selector.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -449,7 +456,7 @@ func (u *unitOfWork) AppendDeadLetter(ctx context.Context, value api.DeadLetterE
 }
 
 func (u *unitOfWork) ListDeadLetters(ctx context.Context, selector api.DeadLetterSelector) ([]api.DeadLetterEntry, error) {
-	values, err := listRecords[api.DeadLetterEntry](ctx, u.tx, kindDeadLetter, selector.RunID)
+	values, err := listRecords[api.DeadLetterEntry](ctx, u, kindDeadLetter, selector.RunID)
 	if err != nil {
 		return nil, err
 	}

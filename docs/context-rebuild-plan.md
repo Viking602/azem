@@ -1,234 +1,158 @@
-# Azem 新上下文压缩内核
+# Azem 确定性上下文归档
 
-- 日期：2026-08-06
+- 日期：2026-08-18
 - 状态：已实施
-- 数据库：schema 20
-- 适用范围：主 Agent、Team、subagent、自动压缩、手动 `/compact`、显式 `/rebuild`、恢复
+- 适用范围：Main、Team、subagent、自动维护、手动 `/compact`、显式 `/rebuild`、恢复
 
-## 1. 最终决策
+## 1. 决策
 
-Azem 只保留一套新压缩内核。旧滚动摘要、固定 block 切割、宽松非 JSON 包装、Gate、shadow 和 legacy fallback 均不再存在。
+Azem 只有一条上下文压缩路径：宿主确定性归档。
 
-schema 20 升级会清空可替换的 `session_projections.model_history` 和 Prompt Cache identity，迫使下一次运行从 canonical evidence 进入新内核。以下权威数据不删除：
+压缩成功不再依赖模型生成摘要、JSON schema、后台 prepare、provider 重试、输出预算或 semantic revision。被移出热上下文的完整消息先编码为 `contextarchive.SourceV1`，再作为 session-scoped `context_archive` artifact 持久化。模型只接收一个有界 carrier 和最近的原始消息；artifact 才是归档事实来源。
 
-- canonical `session_blocks`
-- Todo
-- tool records 与 side-effect recovery
-- Context Artifact
-- Memory、Recap、History FTS
-- session、project ownership、usage、agent control-plane state
+旧 `SemanticStateV1` writer、`agents.compaction` 路由、soft/hard ratio 状态机和 semantic activation 已从活动运行时删除。schema 20 的历史 semantic 表仍保留在 SQLite schema 中以保证既有数据库可直接打开，但没有活动代码读取或写入这些表；`context_manifests.semantic_revision` 固定写入 `0`。
 
-## 2. 目标
+## 2. 为什么替换旧路径
 
-1. 自动、手动和恢复路径使用完全相同的预算、选择、语义写入和激活规则。
-2. 压缩不再反复改写自由文本摘要，而是生成宿主验证的 `SemanticStateV1`。
-3. 最近 3 个用户 turn 原文必须精确保留。
-4. tool call/result 必须按完整原子组保留或整体进入语义状态。
-5. 每个事实必须带可持久回查的 provenance。
-6. semantic state、append-only event、manifest 与 Provider checkpoint 在同一事务/CAS 边界提交。
-7. mandatory 内容无法满足预算时明确失败，禁止静默截断。
+旧路径把“模型及时返回满足宿主 schema 的完整 JSON”放在主 run 的必经路径。真实数据库中 compaction provider 请求多于 semantic commit，失败包含：
+
+- 输出被截断或预算不足；
+- stream open/`Recv` 长时间无输出；
+- Markdown fence、字段形状和 evidence 引用漂移；
+- stale semantic revision/CAS 冲突；
+- 重试后仍无法生成合法状态。
+
+继续增加 token 上限、normalization 或重试只能缓解单个症状，无法消除 provider 可靠性对主 run 的控制。新路径的正确性只依赖本地确定性代码、artifact/blob 持久化和现有 checkpoint CAS。
 
 ## 3. 数据流
 
 ```text
-Canonical Evidence
-  session_blocks / tool_records / artifacts / todo / memory / recap
-                         |
-                         v
-Bounded Semantic Writer
-  strict JSON + host validation + stable provenance
-                         |
-                         v
-SemanticStateV1 + SemanticPatchV1 + WriterCursorV1
-                         |
-                         v
-Unified Context Planner
-  system prefix + semantic state + recent 3 users + exact tool tail
-                         |
-                         v
-ContextManifestV1
-                         |
-                         v
-SaveRunCheckpoint / CompactWithSummary transaction
-                         |
-                         v
-ModelHistory V2 + active manifest + semantic revision
+canonical transcript + live model history
+                 |
+                 v
+normalize oversized tool results
+                 |
+                 v
+compute OMP-style safe cut
+  - keep system prefix
+  - keep latest 3 complete shared user turns
+  - keep assistant tool call + results atomic
+  - prefer keep_recent_tokens hot tail
+                 |
+                 v
+contextarchive.SourceV1 canonical JSON
+                 |
+                 +--> context_archive artifact + SHA-256
+                 |
+                 +--> bitmap carrier when model explicitly supports images
+                 |    or bounded text/artifact carrier otherwise
+                 v
+ArchiveContextManifestV1 (policy v3)
+                 |
+                 v
+one SaveRunCheckpoint activation
 ```
 
-`internal/app` 负责编排和验证，`internal/session` 提供事务状态 API，`internal/store/sqlite` 负责 schema/query。UI 只投影诊断信息，不成为状态权威。
+Automatic, manual, rebuild, Main, Team 和 subagent 都调用这条路径，没有第二个摘要或 fallback 内核。
 
-## 4. SemanticStateV1
+## 4. 触发与预算
 
-状态集合：
+自动归档阈值为：
 
-- objective
-- acceptance criteria
-- constraints
-- decisions
-- current action
-- active Todo item ID
-- workset
-- findings
-- failures
-- blockers
-- next actions
-- retrieval hints
+```text
+trigger = model_context_window - tool_definition_tokens - reserve_tokens
+```
 
-每个 `StateFactV1` 包含：
+当前默认值：
 
-- `id`：宿主基于 collection 与规范化正文稳定派生
-- `text`
-- `status`：`active`、`resolved`、`superseded`、`invalidated`
-- `authority`：`user`、`tool`、`workspace`、`agent`
-- `confidence`：`verified`、`reported`、`inferred`
-- `sources`
-- first/last sequence 与 supersedes（可选）
+|字段|默认值|含义|
+|---|---:|---|
+|`enabled`|`true`|启用自动和显式归档|
+|`reserve_tokens`|`16384`|为下一次模型输出保留的固定 headroom|
+|`keep_recent_tokens`|`20000`|优先保留的原始 hot-tail token 下限|
+|`large_tool_result_tokens`|`12000`|大工具结果 artifact offload 阈值|
+|`history_retrieval_tokens`|`4096`|私有 session history FTS 证据预算|
 
-writer 必须返回严格 JSON。宿主在解码时把字符串或字符串数组形态的 `sources` 规范成 `EvidenceRefV1` 对象，然后拒绝非 JSON、错误 version、空 objective、非法枚举、超长文本、超量 fact、不兼容的 sources 类型和无有效来源；只允许一次定向修复重试。writer 没有 shell、编辑、MCP、Todo mutation、Memory mutation 或 subagent 工具权限。
+`keep_recent_tokens` 是优化偏好，不是高于硬窗口的强制条件。如果它因为一个超大旧消息导致所有 carrier 都无法放入目标，reducer 会放弃这个可选 token floor，再按“最近 3 个完整 shared user turn”重切一次。最近三轮本身仍是强制边界；如果它们加 carrier 仍超过硬限制，归档明确失败，并且不写 artifact、不改 live history、不提交部分 checkpoint。
 
-## 5. Provenance
+## 5. 切分不变量
 
-持久来源只允许：
+- system prefix 保持原顺序；
+- 最近 3 个完整、非 private 的 user turn 原样保留；
+- private history/vision evidence 不参与“最近 user turn”计数；
+- assistant tool-call message 与其连续 tool results 不可拆分；
+- Todo reminder 在构建前刷新，在 carrier 组装后再次校正；
+- 旧 carrier 必须先按 `source_artifact_id` 展开，禁止 carrier 嵌套；
+- 同一个输入和选项生成相同 source SHA、页选择、frame hash 和 manifest hash；
+- 任何持久化或 checkpoint 错误都返回原 history，不用半成品继续运行。
 
-- `sequence:<number>`
-- `tool:<run-id>:<tool-call-id>`
-- `artifact:<artifact-id>`
-- `todo:<revision>:<item-id>`
-- `memory:<memory-id>`
-- `recap:<session-id>:<revision>`
-- `checkpoint:<stable-id>`
+## 6. 模型无关的第一层 reducer
 
-`summary:<index>` 和请求内临时 ID 禁止进入最终 semantic state 或 manifest。map/reduce 由宿主维护 authority/source 并集；模型返回的伪造或不可解析来源会被丢弃，并由宿主选择确定性的有效来源。
+归档前先处理旧的大工具结果：
 
-## 6. WriterCursorV1 与 Patch
+1. 只考虑最近三轮之前、超过 1 KiB 且能显著回收空间的结果；
+2. 完整 payload 写入 `context_artifact`；
+3. 原位置替换为带 artifact ID、SHA-256、preview 和原 token 数的 locator；
+4. 每替换一个就重新估算；一旦低于目标立即停止；
+5. 不改变消息顺序或 tool call/result 配对。
 
-cursor 由 canonical sequence、Todo revision、最后完成 tool、最后完成 subagent 组成。`SemanticPatchV1` 保存 base revision、through cursor、source digest 和 append-only operations。
+常规 `normalizeToolResults` 仍负责超过 `large_tool_result_tokens` 的 provider-visible 结果。两层都保留完整 artifact，不把静默截断当作压缩。
 
-事务保证：
+## 7. Carrier 选择
 
-- revision 使用 CAS。
-- `(session_id, base_revision, source_digest)` 幂等。
-- cursor 只能单调前进。
-- writer 失败、输出非法、事务失败或 stale activation 时不推进 revision/cursor。
-- durable activation 成功后，同一 run 的共享 coordinator 立即推进内存 checkpoint；后续 soft/hard writer 必须使用新 revision、state 与 cursor。
-- stale activation 先加载 durable checkpoint，再以当前 revision 重试一次；不得用旧 revision 覆盖。
-- 进入同步压缩且 prepared source 不再是当前 history 前缀时，取消后台 prepare。
-- stale checkpoint 不得覆盖新用户 turn。
+### Bitmap
 
-## 7. 统一 Planner
+当模型目录明确声明支持图片时，`internal/contextarchive` 使用内置 Silver CJK/Unicode 像素字体渲染 1568×1568 PNG：
 
-Planner 的 mandatory 顺序：
+- 最多 8 帧；
+- 总 PNG payload 最多 4 MiB；
+- 页选择、hash 和 attachment ID 稳定；
+- 候选按 8 帧、4 帧、2 帧依次尝试；
+- 每帧按 3400 token 计入 host 预算。
 
-1. 完整 system prefix。
-2. 宿主安全标签和当前 SemanticStateV1。
-3. 当前 Todo reminder。
-4. 最近 3 个用户 turn 原文。
-5. 最新用户 turn 后可容纳的完整 tool 原子组。
+### Text/artifact
 
-其余历史进入 semantic writer。若最新 turn 是 rolling tool turn，语义 checkpoint 紧跟最新用户消息，后面只出现完整 tool call/result group。
+模型明确不支持图片、能力未知、视觉候选过大或 renderer 不可用时，carrier 只包含有界 head/tail preview、source artifact locator 和 manifest。完整 source 不嵌入模型消息。
 
-自动 soft prepare 在后台只启动一个 writer；相同 source 不重复工作。hard threshold、手动 `/compact` 和 `/rebuild` 同步执行同一 planner。prepared source 仅在仍是当前 history 前缀时激活，append-only tail 通过完整性校验后合并。
+Bitmap 只是便宜的模型输入载体，不是恢复副本。任何缺失或损坏帧都从 source artifact 重新生成；source SHA 不匹配则失败，不猜测修复。
 
-预算统一来自现有 `ContextConfig` 和模型 context window：soft/hard/target、安全余量、输出/推理 reserve、最小回收、最大 summary、large tool 和 history retrieval。不存在第二套手动切割参数。
+## 8. 持久化与恢复
 
-semantic writer 首次请求保留所配置的 reasoning effort，并将模型生成预算与最终 semantic state 上限分离。默认 durable state 预算为 32,768 tokens，并允许配置到 writer 上下文窗口的四分之一；以 272k writer 为例，高思考生成最多获得 131,072 tokens、低思考重试获得 65,536 tokens，最终状态仍按配置预算持久化。任何以 `length` / `max_turns` 结束的结果都视为截断，即使已经产生半截 JSON；writer 丢弃它并仅以 `low` reasoning 重试一次。正常完成但正文为空、鉴权错误和其他流错误仍明确失败，不会激活空 checkpoint；超出配置预算的结果仍保留两次低思考收敛修复，但不再被固定的 8,192-token ceiling 卡住。
+每次成功激活同时更新：
 
-## 8. ContextManifestV1
+- `ModelHistory` wire version 3；
+- `ArchiveContextManifestV1`，policy version 3；
+- active `context_manifests` 行；
+- archive carrier message；
+- canonical high-water、Todo revision、source/exclusion refs 和 manifest hash。
 
-manifest 记录：
+`SaveRunCheckpoint` 保持现有事务和 source high-water CAS。若 canonical transcript 在准备后变化，旧结果不能覆盖新 user turn。恢复时校验 wire version、static identity、manifest hash、source SHA 和 frame attachment；不兼容的 derived checkpoint 被丢弃并从 canonical transcript 重建。
 
-- session/run/reason/policy version
-- static identity 与 model route hash
-- canonical high-water
-- semantic revision/cursor
-- Todo revision
-- target/estimated tokens
-- ordered segments（kind、mandatory、token estimate、content hash、source refs）
-- exclusions 与原因
-- manifest hash
+Fork 只复制 canonical transcript、终态 tool records、Todo/Recap 与普通 artifact。`ModelHistory`、provider cache、context manifest 和 `context_archive` 都是 session-scoped derived state，在目标 session 中清零，避免跨 session 复用 archive ID 或 provider state。
 
-manifest 采用稳定序列化，ID 从 hash 派生。创建时间和随机值不参与 hash。Prompt Cache identity 包含 static identity、manifest hash 与 Model checkpoint hash；route、policy、语义 revision 或 segment 内容变化会自然失效。
+## 9. 失败语义
 
-## 9. Artifact V2
+|失败|行为|
+|---|---|
+|缺少模型 context-window 元数据|显式失败，不连接 provider|
+|artifact store 不可用|显式失败，保留原 history|
+|source 超过 32 MiB|显式失败，不生成不完整 archive|
+|bitmap renderer/图片能力不可用|尝试更小 bitmap，最后降为 text/artifact carrier|
+|carrier 在可选 token floor 下过大|放弃 token floor，仍保留最近 3 个完整 turn 后重试|
+|最近 3 个完整 turn 仍超过硬限制|显式失败，不持久化|
+|frame 丢失或损坏|从匹配 SHA 的 source 确定性修复|
+|source SHA 不匹配|显式失败，不接受损坏 source|
+|checkpoint source stale|采用现有 run 的 durable high-water 重新构建；禁止覆盖新 transcript|
 
-Artifact payload 与 SHA256 保持权威。preview 固定包含 version、kind、bytes、lines、sha256、encoding、head、tail、最多 8 条 error/warning、hint 和 truncated。
+不存在“provider 压缩失败但继续等后台摘要”的状态。
 
-`context.read_artifact` 仅允许当前 session，支持：
+## 10. Prefix cache
 
-- `preview`（默认）
-- `range`
-- `line_range`
-- `tail`
-- `grep`
-- `full`（payload 不超过 64 KiB）
+wire version 3、policy version 3 和 archive carrier 会让旧 derived cache identity 在首次切换时失效。之后 system prefix、消息顺序和 carrier 位置稳定；重复归档只替换一个 carrier 并继续追加热尾。删除 `agents.compaction` 也删除了每轮额外 provider 请求，不向主模型 static prefix 注入任何新 prompt。
 
-单次返回最多 64 KiB；binary 使用 base64 且原始读取最多 48 KiB；regex、offset、行号、模式和 limit 在工具边界验证。
+## 11. 参考来源
 
-### 9.1 语义压缩前置无模型剪枝
+- Oh My Pi compaction design: <https://github.com/can1357/oh-my-pi/blob/main/docs/compaction.md>
+- Can Bölük, “Snapcompact: SotA compaction - instant, local, free. Pick 3”: <https://blog.can.ac/2026/06/10/snapcompact/>
 
-在语义 summarize 之前，`pruneStaleToolResults` 先做一层廉价剪枝：位于「保留的最近
-三个用户轮」边界之前、超过 1 KiB 的工具结果按由旧到新的顺序改写为
-`context_artifact` 定位符（payload 落 Artifact，引用 JSON 带 `"pruned":true`），
-一旦估算 token 降到目标以下立即停止。只有结果内容被原位替换，call/result 配对与
-消息顺序不变，`ValidateCompleteTurns` 语义不受影响。若仅靠剪枝已达标，则跳过
-模型 summarize，剪枝结果沿既有 activation 路径持久化；否则 summarizer 收到的
-是更小的剪枝后 transcript。既有 12k-token 的超大结果外置（normalize）先于
-剪枝执行，两者互不替代。
-
-## 10. SQLite schema 20
-
-### session_semantic_state
-
-每个 session 一行：revision、checkpoint ID、cursor、state、source digest、updated time。
-
-### session_semantic_state_events
-
-每个成功 revision 一行：checkpoint/base revision、cursor、patch、source digest、writer run 和 created time。事件 append-only。
-
-### context_manifests
-
-保存派生 ID、session/run、high-water、semantic revision、policy、hash、active 状态和完整 manifest JSON。同一 session 最多一个 active manifest。
-
-`SaveRunCheckpoint` 与 `CompactWithSummary` 在同一事务内提交 semantic state/event、active manifest 和 ModelHistory。任何一步失败，全部回滚。
-
-## 11. ModelHistory V2 与恢复
-
-`ModelHistory` wire version 为 2，新增 manifest hash、semantic revision 和 policy version。wire 不匹配、static identity 不匹配或 schema 20 升级后的旧 history 不会被复用，而是从 canonical blocks 重建。
-
-恢复时加载当前 semantic checkpoint 和 active manifest；cache identity 同时校验 static prefix、manifest、checkpoint。canonical transcript 始终是最终事实来源。
-
-## 12. 诊断与入口
-
-- `/compact`：运行新内核。
-- `/rebuild`：显式别名，立即运行同一内核。
-- `/context`：显示上下文占用和贡献项。
-- Desktop Inspector：显示 policy、semantic revision、writer lag、rebuild reason、manifest hash 和 ordered segments。
-
-内部 reason：`automatic_soft`、`automatic_hard`、`manual`、`resume`、`route_change`。当前激活路径使用 `automatic_hard` 与 `manual`，其余值为同一 manifest 合约预留，不形成第二套算法。
-
-## 13. 不变量与验证
-
-- `schemaVersion == len(migrations)`。
-- schema 20 migration 保留 canonical/Todo/Artifact，清除旧 ModelHistory/cache identity。
-- SemanticStateV1 严格 JSON 与 provenance 校验。宿主只接受裸 JSON，或一个包裹整个响应的 ` ``` ` / ` ```json ` 围栏；不从散文、嵌套围栏或其它围栏语言中提取 JSON。`sources` 允许字符串或字符串数组，解码后规范为 `EvidenceRefV1`；数字、布尔和无法映射的对象仍失败。
-- 最近 3 个用户 turn 精确保留。
-- tool groups 不拆分。
-- map/reduce 输入有界，失败不改变 checkpoint。
-- semantic commit/manifest/ModelHistory 原子提交，stale CAS 明确失败。
-- Artifact 所有模式有界，oversized full 明确失败。
-- 自动、手动、Team、subagent 使用同一 summary limit resolver。
-- 模型可见 ⟺ 已落库：`turnContext.Build` 末尾断言每条公开可见消息可由
-  durable ModelHistory 检查点、durable 块、静态指令或当前 goal 重建；私有
-  消息（语义检查点、todo、plan artifact、tool continuity、hook/vision/历史
-  证据）按构造来自 durable 存储或确定性重执行。违反即显式失败该 turn。
-- 前端 typecheck/test/build 与 Inspector 投影通过。
-- `GOWORK=off go test ./...` 与 Sentrux rules 通过。
-
-## 14. 明确不做
-
-- 不删除或重写 canonical transcript。
-- 不保留旧摘要算法或兼容回退。
-- 不增加 Gate、shadow、双写或 rollout mode。
-- 不复制 Todo 状态机。
-- 不自动写 Project/Global Memory。
-- 不引入 tokenizer、外部数据库、额外服务或新依赖。
+Azem 采用 OMP 的关键结构：安全切点、原始历史持久化、机械 reducer、文本/视觉 carrier 分离和重复压缩先展开旧 source。Azem 额外保留 SQLite checkpoint CAS、session ownership、artifact/blob 生命周期和明确的 text-only provider 支持。

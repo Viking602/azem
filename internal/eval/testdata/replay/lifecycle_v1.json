@@ -1,0 +1,123 @@
+[
+  {
+    "version": 1,
+    "name": "cancellation",
+    "scenario": "a running tool and its parent terminate as cancelled",
+    "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+    "steps": [
+      {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+      {"sequence": 2, "id": "tool-start", "kind": "tool", "target_id": "call-1", "state": "running"},
+      {"sequence": 3, "id": "tool-cancel", "kind": "tool", "target_id": "call-1", "state": "cancelled"},
+      {"sequence": 4, "id": "run-cancel", "kind": "run", "state": "cancelled"}
+    ],
+    "expected": {"ordered_step_ids": ["run-start", "tool-start", "tool-cancel", "run-cancel"], "text_phases": [], "run_state": "cancelled", "tool_states": {"call-1": "cancelled"}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []}
+  },
+  {
+    "version": 1,
+    "name": "retry",
+    "scenario": "a failed attempt remains terminal while a new attempt succeeds",
+    "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+    "steps": [
+      {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+      {"sequence": 2, "id": "attempt-1-start", "kind": "tool", "target_id": "call-1", "state": "running"},
+      {"sequence": 3, "id": "attempt-1-fail", "kind": "tool", "target_id": "call-1", "state": "failed"},
+      {"sequence": 4, "id": "run-retry", "kind": "run", "state": "retrying"},
+      {"sequence": 5, "id": "run-resume", "kind": "run", "state": "running"},
+      {"sequence": 6, "id": "attempt-2-start", "kind": "tool", "target_id": "call-2", "state": "running"},
+      {"sequence": 7, "id": "attempt-2-complete", "kind": "tool", "target_id": "call-2", "state": "completed"},
+      {"sequence": 8, "id": "retry-evidence", "kind": "evidence", "evidence": {"kind": "tool", "id": "call-2"}},
+      {"sequence": 9, "id": "run-complete", "kind": "run", "state": "completed"}
+    ],
+    "expected": {"ordered_step_ids": ["run-start", "attempt-1-start", "attempt-1-fail", "run-retry", "run-resume", "attempt-2-start", "attempt-2-complete", "retry-evidence", "run-complete"], "text_phases": [], "run_state": "completed", "tool_states": {"call-1": "failed", "call-2": "completed"}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": [{"kind": "tool", "id": "call-2"}]}
+  },
+  {
+    "version": 1,
+    "name": "approval",
+    "scenario": "approval wait is distinct from execution",
+    "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+    "steps": [
+      {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+      {"sequence": 2, "id": "tool-queue", "kind": "tool", "target_id": "call-1", "state": "queued"},
+      {"sequence": 3, "id": "approval-request", "kind": "approval", "target_id": "approval-1", "state": "requested"},
+      {"sequence": 4, "id": "tool-wait", "kind": "tool", "target_id": "call-1", "state": "awaiting_approval"},
+      {"sequence": 5, "id": "approval-grant", "kind": "approval", "target_id": "approval-1", "state": "approved"},
+      {"sequence": 6, "id": "tool-start", "kind": "tool", "target_id": "call-1", "state": "running"},
+      {"sequence": 7, "id": "tool-complete", "kind": "tool", "target_id": "call-1", "state": "completed"},
+      {"sequence": 8, "id": "run-complete", "kind": "run", "state": "completed"}
+    ],
+    "expected": {"ordered_step_ids": ["run-start", "tool-queue", "approval-request", "tool-wait", "approval-grant", "tool-start", "tool-complete", "run-complete"], "text_phases": [], "run_state": "completed", "tool_states": {"call-1": "completed"}, "approval_states": {"approval-1": "approved"}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []}
+  },
+  {
+    "version": 1,
+    "name": "tool-spill",
+    "scenario": "spilled raw tool bytes retain artifact identity and evidence",
+    "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+    "steps": [
+      {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+      {"sequence": 2, "id": "tool-start", "kind": "tool", "target_id": "call-1", "state": "running"},
+      {"sequence": 3, "id": "tool-complete", "kind": "tool", "target_id": "call-1", "state": "completed"},
+      {"sequence": 4, "id": "artifact-store", "kind": "artifact", "target_id": "artifact-1", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+      {"sequence": 5, "id": "artifact-evidence", "kind": "evidence", "evidence": {"kind": "artifact", "id": "artifact-1", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+      {"sequence": 6, "id": "answer", "kind": "text", "target_id": "message-1", "phase": "final_answer"},
+      {"sequence": 7, "id": "run-complete", "kind": "run", "state": "completed"}
+    ],
+    "expected": {"ordered_step_ids": ["run-start", "tool-start", "tool-complete", "artifact-store", "artifact-evidence", "answer", "run-complete"], "text_phases": ["message-1:final_answer"], "run_state": "completed", "tool_states": {"call-1": "completed"}, "approval_states": {}, "artifact_hashes": {"artifact-1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": [{"kind": "artifact", "id": "artifact-1", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+  },
+  {
+    "version": 1,
+    "name": "compaction",
+    "scenario": "semantic compaction preserves text phase order",
+    "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+    "steps": [
+      {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+      {"sequence": 2, "id": "commentary", "kind": "text", "target_id": "message-1", "phase": "commentary"},
+      {"sequence": 3, "id": "compact", "kind": "compaction", "revision": 1},
+      {"sequence": 4, "id": "answer", "kind": "text", "target_id": "message-2", "phase": "final_answer"},
+      {"sequence": 5, "id": "run-complete", "kind": "run", "state": "completed"}
+    ],
+    "expected": {"ordered_step_ids": ["run-start", "commentary", "compact", "answer", "run-complete"], "text_phases": ["message-1:commentary", "message-2:final_answer"], "run_state": "completed", "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 1, "guidance_revision": 0, "stale_guidance": [], "evidence": []}
+  },
+  {
+    "version": 1,
+    "name": "recovery",
+    "scenario": "a recovered run converges without replacing prior evidence",
+    "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": [{"kind": "record", "id": "pre-crash"}]},
+    "steps": [
+      {"sequence": 1, "id": "run-recovered", "kind": "run", "state": "recovered"},
+      {"sequence": 2, "id": "tool-resume", "kind": "tool", "target_id": "call-1", "state": "running"},
+      {"sequence": 3, "id": "tool-complete", "kind": "tool", "target_id": "call-1", "state": "completed"},
+      {"sequence": 4, "id": "recovery-evidence", "kind": "evidence", "evidence": {"kind": "record", "id": "post-crash"}},
+      {"sequence": 5, "id": "run-complete", "kind": "run", "state": "completed"}
+    ],
+    "expected": {"ordered_step_ids": ["run-recovered", "tool-resume", "tool-complete", "recovery-evidence", "run-complete"], "text_phases": [], "run_state": "completed", "tool_states": {"call-1": "completed"}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": [{"kind": "record", "id": "pre-crash"}, {"kind": "record", "id": "post-crash"}]}
+  },
+  {
+    "version": 1,
+    "name": "background-child-completion",
+    "scenario": "background completion is delivered before parent completion",
+    "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+    "steps": [
+      {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+      {"sequence": 2, "id": "child-start", "kind": "subagent", "target_id": "child-1", "state": "running"},
+      {"sequence": 3, "id": "child-complete", "kind": "subagent", "target_id": "child-1", "state": "completed"},
+      {"sequence": 4, "id": "child-evidence", "kind": "evidence", "evidence": {"kind": "subagent", "id": "child-1"}},
+      {"sequence": 5, "id": "answer", "kind": "text", "target_id": "message-1", "phase": "final_answer"},
+      {"sequence": 6, "id": "run-complete", "kind": "run", "state": "completed"}
+    ],
+    "expected": {"ordered_step_ids": ["run-start", "child-start", "child-complete", "child-evidence", "answer", "run-complete"], "text_phases": ["message-1:final_answer"], "run_state": "completed", "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {"child-1": "completed"}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": [{"kind": "subagent", "id": "child-1"}]}
+  },
+  {
+    "version": 1,
+    "name": "stale-user-guidance",
+    "scenario": "older guidance remains inspectable but cannot replace active guidance",
+    "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+    "steps": [
+      {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+      {"sequence": 2, "id": "guidance-current", "kind": "guidance", "target_id": "guidance-2", "state": "active", "revision": 2},
+      {"sequence": 3, "id": "guidance-stale", "kind": "guidance", "target_id": "guidance-1", "state": "stale", "revision": 1},
+      {"sequence": 4, "id": "answer", "kind": "text", "target_id": "message-1", "phase": "final_answer"},
+      {"sequence": 5, "id": "run-complete", "kind": "run", "state": "completed"}
+    ],
+    "expected": {"ordered_step_ids": ["run-start", "guidance-current", "guidance-stale", "answer", "run-complete"], "text_phases": ["message-1:final_answer"], "run_state": "completed", "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 2, "stale_guidance": ["guidance-1"], "evidence": []}
+  }
+]

@@ -204,6 +204,24 @@ func recapInput(input recapGenerationRequest, maxBytes int) (string, error) {
 	}
 }
 
+type providerOutputExhaustedError struct {
+	operation  string
+	stopReason hyprovider.StopReason
+}
+
+func (e *providerOutputExhaustedError) Error() string {
+	return fmt.Sprintf("%s provider exhausted output with %s", e.operation, e.stopReason)
+}
+
+func canLowerInternalReasoning(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "medium", "high", "xhigh", "max":
+		return true
+	default:
+		return false
+	}
+}
+
 func collectProviderText(ctx context.Context, driver hyprovider.Driver, request hyprovider.Request, operation string) (string, error) {
 	stream, err := driver.Stream(ctx, request)
 	if err != nil {

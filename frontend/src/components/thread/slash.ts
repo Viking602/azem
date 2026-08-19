@@ -55,7 +55,7 @@ const slashCommands: Array<{
   },
   {
     action: "compact", value: "/rebuild", aliases: ["rebuild", "重建"], zh: "重建上下文", en: "Rebuild context",
-    zhDetail: "立即运行新的语义压缩内核", enDetail: "Run the semantic context kernel now", icon: RotateCcw,
+    zhDetail: "立即用同一确定性归档内核重建上下文", enDetail: "Rebuild context now with the same deterministic archive kernel", icon: RotateCcw,
   },
   {
     action: "settings", aliases: ["settings", "config", "设置"], zh: "设置", en: "Settings",

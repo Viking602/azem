@@ -6,13 +6,67 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/blobstore"
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/contract"
 )
+
+func TestLargeEventsAndRecordsSpillOutOfSQLite(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "events.db")
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	work, err := provider.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := strings.Repeat("event-body ", 2000)
+	event := api.Event{RunID: "run-large", Sequence: 1, Type: api.EventTaskCompleted, RecordedAt: time.Now().UTC(), Payload: map[string]any{"text": payload}}
+	if err := work.Events().AppendEvent(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := work.Runs().SaveRun(ctx, api.Run{ID: "run-large", Status: api.RunStatusCompleted, CreatedAt: time.Now().UTC(), Metadata: map[string]string{"note": payload}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := work.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var eventInline, recordInline int
+	if err := provider.DB().QueryRowContext(ctx, `SELECT
+		(SELECT length(data) FROM events WHERE run_id='run-large'),
+		(SELECT length(data) FROM records WHERE kind='run' AND key1='run-large')`).Scan(&eventInline, &recordInline); err != nil {
+		t.Fatal(err)
+	}
+	if eventInline > 8 || recordInline > 8 {
+		t.Fatalf("large control-plane payloads stayed inline event=%d record=%d", eventInline, recordInline)
+	}
+	listed, err := provider.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := listed.Events().ListEvents(ctx, "run-large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := listed.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("listed events=%d", len(events))
+	}
+	text, _ := events[0].Payload["text"].(string)
+	if text != payload {
+		t.Fatalf("hydrated event payload len=%d", len(text))
+	}
+}
 
 func TestStoreProviderContract(t *testing.T) {
 	contract.RunStoreProviderContractTests(t, func(t *testing.T) (api.StoreProvider, func()) {
@@ -59,10 +113,211 @@ func TestDuplicateEnvelopeReturnsIdempotencyConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Rollback(ctx)
-	err = second.MailboxOutbox().QueueEnvelope(ctx, envelope)
+	duplicate := envelope
+	duplicate.Payload = map[string]any{"body": strings.Repeat("duplicate-payload ", 1_000)}
+	duplicateData, err := marshalJSON(duplicate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateDigest := blobstore.Sum(duplicateData)
+	err = second.MailboxOutbox().QueueEnvelope(ctx, duplicate)
 	if !errors.Is(err, api.ErrIdempotencyConflict) {
 		t.Fatalf("duplicate envelope error = %v, want ErrIdempotencyConflict", err)
+	}
+	if _, err := provider.Blobs().Get(ctx, duplicateDigest); err == nil {
+		t.Fatal("failed duplicate envelope installed an unreferenced blob")
+	}
+	if err := second.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	rolledBack := api.TaskEnvelope{
+		ID: "env-rollback", RunID: "run-1", TaskID: "task-1", Status: "pending", CreatedAt: time.Now().UTC(),
+		Payload: map[string]any{"body": strings.Repeat("rollback-payload ", 1_000)},
+	}
+	rolledBackData, err := marshalJSON(rolledBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolledBackDigest := blobstore.Sum(rolledBackData)
+	third, err := provider.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := third.MailboxOutbox().QueueEnvelope(ctx, rolledBack); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := third.MailboxOutbox().LoadEnvelope(ctx, rolledBack.ID)
+	if err != nil || loaded.Payload["body"] != rolledBack.Payload["body"] {
+		t.Fatalf("staged envelope = %#v, error=%v", loaded, err)
+	}
+	if _, err := provider.Blobs().Get(ctx, rolledBackDigest); err == nil {
+		t.Fatal("uncommitted envelope installed its blob before commit")
+	}
+	if err := third.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Blobs().Get(ctx, rolledBackDigest); err == nil {
+		t.Fatal("rolled-back envelope left an unreferenced blob")
+	}
+}
+
+func TestUnitOfWorkDoesNotInstallSupersededLargePayload(t *testing.T) {
+	ctx := t.Context()
+	provider, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	work, err := provider.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	large := api.Run{
+		ID: "superseded", Status: api.RunStatusRunning, CreatedAt: time.Now().UTC(),
+		Metadata: map[string]string{"body": strings.Repeat("superseded-payload ", 1_000)},
+	}
+	largeData, err := marshalJSON(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := blobstore.Sum(largeData)
+	if err := work.Runs().SaveRun(ctx, large); err != nil {
+		t.Fatal(err)
+	}
+	large.Metadata = map[string]string{"body": "current"}
+	if err := work.Runs().SaveRun(ctx, large); err != nil {
+		t.Fatal(err)
+	}
+	if err := work.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Blobs().Get(ctx, digest); err == nil {
+		t.Fatal("superseded payload installed an unreferenced blob")
+	}
+}
+
+type failSecondPutBlobStore struct {
+	blobstore.Store
+	puts int
+}
+
+func (s *failSecondPutBlobStore) InstallAt(ctx context.Context, digest string, payload []byte) (bool, error) {
+	s.puts++
+	if s.puts == 2 {
+		return false, errors.New("injected blob write failure")
+	}
+	return s.Store.InstallAt(ctx, digest, payload)
+}
+
+func TestUnitOfWorkRemovesInstalledBlobsWhenLaterPutFails(t *testing.T) {
+	ctx := t.Context()
+	provider := openMemoryTestProvider(t)
+	memory := blobstore.NewMemory()
+	provider.blobs = &failSecondPutBlobStore{Store: memory}
+	work := beginTestUnitOfWork(t, provider)
+	payload := strings.Repeat("partial-commit ", 1_000)
+	run := api.Run{
+		ID: "partial-run", Status: api.RunStatusRunning, CreatedAt: time.Now().UTC(),
+		Metadata: map[string]string{"body": payload},
+	}
+	event := api.Event{
+		RunID: "partial-run", Sequence: 1, Type: api.EventTaskCompleted, RecordedAt: time.Now().UTC(),
+		Payload: map[string]any{"body": payload + "event"},
+	}
+	mustSaveRun(t, ctx, work, run)
+	mustAppendEvent(t, ctx, work, event)
+	assertCommitFailsWith(t, ctx, work, "injected blob write failure")
+	assertBlobsMissing(t, ctx, memory, digestOf(t, run), digestOf(t, event))
+}
+
+func TestUnitOfWorkRemovesInstalledBlobWhenSQLCommitFails(t *testing.T) {
+	ctx := t.Context()
+	provider := openMemoryTestProvider(t)
+	work := beginTestUnitOfWork(t, provider).(*unitOfWork)
+	deferForeignKeyCommitFailure(t, ctx, work)
+	run := api.Run{
+		ID: "failed-sql-commit", Status: api.RunStatusRunning, CreatedAt: time.Now().UTC(),
+		Metadata: map[string]string{"body": strings.Repeat("failed-sql-commit ", 1_000)},
+	}
+	mustSaveRun(t, ctx, work, run)
+	assertCommitFailsWith(t, ctx, work, "FOREIGN KEY constraint failed")
+	assertBlobsMissing(t, ctx, provider.Blobs(), digestOf(t, run))
+}
+
+func openMemoryTestProvider(t *testing.T) *Provider {
+	t.Helper()
+	provider, err := Open(t.Context(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := provider.Close(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	return provider
+}
+
+func beginTestUnitOfWork(t *testing.T, provider *Provider) api.UnitOfWork {
+	t.Helper()
+	work, err := provider.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return work
+}
+
+func digestOf(t *testing.T, value any) string {
+	t.Helper()
+	data, err := marshalJSON(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return blobstore.Sum(data)
+}
+
+func mustSaveRun(t *testing.T, ctx context.Context, work api.UnitOfWork, run api.Run) {
+	t.Helper()
+	if err := work.Runs().SaveRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustAppendEvent(t *testing.T, ctx context.Context, work api.UnitOfWork, event api.Event) {
+	t.Helper()
+	if err := work.Events().AppendEvent(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertCommitFailsWith(t *testing.T, ctx context.Context, work api.UnitOfWork, expected string) {
+	t.Helper()
+	if err := work.Commit(ctx); err == nil || !strings.Contains(err.Error(), expected) {
+		t.Fatalf("commit error = %v", err)
+	}
+}
+
+func assertBlobsMissing(t *testing.T, ctx context.Context, store blobstore.Store, digests ...string) {
+	t.Helper()
+	for _, digest := range digests {
+		if exists, err := store.Exists(ctx, digest); err != nil {
+			t.Fatal(err)
+		} else if exists {
+			t.Fatalf("failed commit left blob %s", digest)
+		}
+	}
+}
+
+func deferForeignKeyCommitFailure(t *testing.T, ctx context.Context, work *unitOfWork) {
+	t.Helper()
+	if _, err := work.tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := work.tx.ExecContext(ctx, `INSERT INTO session_blocks (
+		session_id, sequence, kind, data
+	) VALUES ('missing-session', 1, 'user', '{}')`); err != nil {
+		t.Fatal(err)
 	}
 }
 
