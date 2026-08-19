@@ -29,7 +29,7 @@ func TestSessionReplayProjectsConsistentAssemblyAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err = sessions.Ensure(ctx, session.Session{ID: "replay", Title: "replay session"}); err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestSessionReplayProjectsConsistentAssemblyAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close(ctx)
-	replayed := session.NewService(reopened.DB())
+	replayed := session.NewService(reopened.DB(), reopened.Blobs())
 	projection, err := replayed.LoadProjection(ctx, "replay")
 	if err != nil {
 		t.Fatal(err)

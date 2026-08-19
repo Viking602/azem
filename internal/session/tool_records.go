@@ -93,11 +93,23 @@ func (s *Service) startToolRecord(ctx context.Context, sessionID string, record 
 	if err != nil {
 		return ToolRecord{}, fmt.Errorf("encode tool observations: %w", err)
 	}
+	content, contentDigest, err := s.spillText(ctx, record.Content)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("store tool content: %w", err)
+	}
+	structured, structuredDigest, err := s.spillBytes(ctx, record.Structured)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("store tool structured: %w", err)
+	}
+	if structured == nil {
+		structured = []byte("null")
+	}
 	result, err := dbgen.New(s.db).InsertSessionToolRecord(ctx, dbgen.InsertSessionToolRecordParams{
 		SessionID: sessionID, RunID: record.RunID, ToolCallID: record.ToolCallID,
 		AnchorSequence: anchor, Name: record.Name, Arguments: record.Arguments, State: record.State,
-		Content: record.Content, Structured: record.Structured, ArtifactID: record.ArtifactID,
-		Observations: observations, StartedAt: record.StartedAt.UnixNano(),
+		Content: content, Structured: structured, ArtifactID: record.ArtifactID,
+		Observations: observations, StartedAt: record.StartedAt.UnixNano(), ContentSha256: contentDigest,
+		StructuredSha256: structuredDigest,
 	})
 	if err != nil {
 		return ToolRecord{}, fmt.Errorf("insert tool record: %w", err)
@@ -181,10 +193,21 @@ func (s *Service) FinishToolRecord(ctx context.Context, sessionID string, record
 	if err != nil {
 		return ToolRecord{}, fmt.Errorf("encode tool observations: %w", err)
 	}
+	content, contentDigest, err := s.spillText(ctx, record.Content)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("store tool content: %w", err)
+	}
+	structured, structuredDigest, err := s.spillBytes(ctx, record.Structured)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("store tool structured: %w", err)
+	}
+	if structured == nil {
+		structured = []byte("null")
+	}
 	result, err := dbgen.New(s.db).CompleteSessionToolRecordCAS(ctx, dbgen.CompleteSessionToolRecordCASParams{
-		Name: record.Name, State: record.State, Content: record.Content, Structured: record.Structured,
+		Name: record.Name, State: record.State, Content: content, Structured: structured,
 		ArtifactID: record.ArtifactID, Observations: observations, CompletedAt: record.CompletedAt.UnixNano(),
-		SessionID: sessionID, RunID: record.RunID, ToolCallID: record.ToolCallID,
+		ContentSha256: contentDigest, StructuredSha256: structuredDigest, SessionID: sessionID, RunID: record.RunID, ToolCallID: record.ToolCallID,
 	})
 	if err != nil {
 		return ToolRecord{}, fmt.Errorf("complete tool record: %w", err)
@@ -210,7 +233,7 @@ func (s *Service) ListToolRecords(ctx context.Context, sessionID string) ([]Tool
 	}
 	result := make([]ToolRecord, 0, len(rows))
 	for _, row := range rows {
-		record, decodeErr := toolRecordFromRow(sessionID, row.RunID, row.ToolCallID, row.AnchorSequence, row.Name, row.Arguments, row.State, row.Content, row.Structured, row.ArtifactID, row.Observations, row.StartedAt, row.CompletedAt)
+		record, decodeErr := s.toolRecordFromRow(ctx, sessionID, row.RunID, row.ToolCallID, row.AnchorSequence, row.Name, row.Arguments, row.State, row.Content, row.ContentSha256, row.Structured, row.StructuredSha256, row.ArtifactID, row.Observations, row.StartedAt, row.CompletedAt)
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
@@ -248,17 +271,25 @@ func (s *Service) loadToolRecord(ctx context.Context, sessionID, runID, toolCall
 	if err != nil {
 		return ToolRecord{}, err
 	}
-	return toolRecordFromRow(sessionID, runID, toolCallID, row.AnchorSequence, row.Name, row.Arguments, row.State, row.Content, row.Structured, row.ArtifactID, row.Observations, row.StartedAt, row.CompletedAt)
+	return s.toolRecordFromRow(ctx, sessionID, runID, toolCallID, row.AnchorSequence, row.Name, row.Arguments, row.State, row.Content, row.ContentSha256, row.Structured, row.StructuredSha256, row.ArtifactID, row.Observations, row.StartedAt, row.CompletedAt)
 }
 
-func toolRecordFromRow(sessionID, runID, toolCallID string, anchor int64, name string, arguments []byte, state, content string, structured []byte, artifactID string, rawObservations []byte, startedAt, completedAt int64) (ToolRecord, error) {
+func (s *Service) toolRecordFromRow(ctx context.Context, sessionID, runID, toolCallID string, anchor int64, name string, arguments []byte, state, content, contentDigest string, structured []byte, structuredDigest, artifactID string, rawObservations []byte, startedAt, completedAt int64) (ToolRecord, error) {
 	var observations []FileObservation
 	if len(rawObservations) > 0 && json.Unmarshal(rawObservations, &observations) != nil {
 		return ToolRecord{}, fmt.Errorf("decode tool observations for %s", toolCallID)
 	}
+	text, err := s.loadText(ctx, content, contentDigest)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("load tool content for %s: %w", toolCallID, err)
+	}
+	structured, err = s.loadBytes(ctx, structured, structuredDigest)
+	if err != nil {
+		return ToolRecord{}, fmt.Errorf("load tool structured for %s: %w", toolCallID, err)
+	}
 	record := ToolRecord{
 		SessionID: sessionID, RunID: runID, ToolCallID: toolCallID, AnchorSequence: anchor,
-		Name: name, Arguments: append(json.RawMessage(nil), arguments...), State: state, Content: content,
+		Name: name, Arguments: append(json.RawMessage(nil), arguments...), State: state, Content: text,
 		Structured: append(json.RawMessage(nil), structured...), ArtifactID: artifactID, Observations: observations,
 		StartedAt: time.Unix(0, startedAt).UTC(),
 	}

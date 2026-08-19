@@ -491,11 +491,9 @@ func liveBootstrap(t *testing.T) (context.Context, BootstrapResult, string) {
 	t.Helper()
 	workspace := t.TempDir()
 	root := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("AZEM_HOME", root)
 	t.Setenv("CODEX_HOME", filepath.Join(mustUserHome(t), ".codex"))
-	configPath := filepath.Join(root, "config", "azem", "config.yaml")
+	configPath := filepath.Join(root, "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		t.Fatal(err)
 	}

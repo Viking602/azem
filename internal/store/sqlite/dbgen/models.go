@@ -49,7 +49,6 @@ type ContextArtifact struct {
 	RunID     string `db:"run_id"`
 	Kind      string `db:"kind"`
 	Sha256    string `db:"sha256"`
-	Payload   []byte `db:"payload"`
 	Preview   string `db:"preview"`
 	CreatedAt int64  `db:"created_at"`
 }
@@ -77,6 +76,7 @@ type Event struct {
 	Sequence   int64  `db:"sequence"`
 	RecordedAt int64  `db:"recorded_at"`
 	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
 }
 
 type HistoryFt struct {
@@ -170,6 +170,7 @@ type Record struct {
 	ToolName       string `db:"tool_name"`
 	IdempotencyKey string `db:"idempotency_key"`
 	Data           []byte `db:"data"`
+	DataSha256     string `db:"data_sha256"`
 }
 
 type ResourceClaim struct {
@@ -200,24 +201,25 @@ type Session struct {
 }
 
 type SessionBlock struct {
-	SessionID string `db:"session_id"`
-	Sequence  int64  `db:"sequence"`
-	Kind      string `db:"kind"`
-	RunID     string `db:"run_id"`
-	AgentID   string `db:"agent_id"`
-	Data      []byte `db:"data"`
+	SessionID  string `db:"session_id"`
+	Sequence   int64  `db:"sequence"`
+	Kind       string `db:"kind"`
+	RunID      string `db:"run_id"`
+	AgentID    string `db:"agent_id"`
+	Data       []byte `db:"data"`
+	DataSha256 string `db:"data_sha256"`
 }
 
 type SessionProjection struct {
 	SessionID            string `db:"session_id"`
 	LastRunID            string `db:"last_run_id"`
-	Blocks               []byte `db:"blocks"`
 	UpdatedAt            int64  `db:"updated_at"`
 	ModelHistory         []byte `db:"model_history"`
 	Usage                []byte `db:"usage"`
 	CheckpointGeneration int64  `db:"checkpoint_generation"`
 	CacheEpoch           int64  `db:"cache_epoch"`
 	CacheIdentityHash    string `db:"cache_identity_hash"`
+	ModelHistorySha256   string `db:"model_history_sha256"`
 }
 
 type SessionSemanticState struct {
@@ -251,19 +253,21 @@ type SessionTodo struct {
 }
 
 type SessionToolRecord struct {
-	SessionID      string `db:"session_id"`
-	RunID          string `db:"run_id"`
-	ToolCallID     string `db:"tool_call_id"`
-	AnchorSequence int64  `db:"anchor_sequence"`
-	Name           string `db:"name"`
-	Arguments      []byte `db:"arguments"`
-	State          string `db:"state"`
-	Content        string `db:"content"`
-	Structured     []byte `db:"structured"`
-	ArtifactID     string `db:"artifact_id"`
-	Observations   []byte `db:"observations"`
-	StartedAt      int64  `db:"started_at"`
-	CompletedAt    int64  `db:"completed_at"`
+	SessionID        string `db:"session_id"`
+	RunID            string `db:"run_id"`
+	ToolCallID       string `db:"tool_call_id"`
+	AnchorSequence   int64  `db:"anchor_sequence"`
+	Name             string `db:"name"`
+	Arguments        []byte `db:"arguments"`
+	State            string `db:"state"`
+	Content          string `db:"content"`
+	Structured       []byte `db:"structured"`
+	ArtifactID       string `db:"artifact_id"`
+	Observations     []byte `db:"observations"`
+	StartedAt        int64  `db:"started_at"`
+	CompletedAt      int64  `db:"completed_at"`
+	ContentSha256    string `db:"content_sha256"`
+	StructuredSha256 string `db:"structured_sha256"`
 }
 
 type SessionUiState struct {
@@ -310,6 +314,8 @@ type SubagentRun struct {
 	CompletionDelivered int64  `db:"completion_delivered"`
 	StartedAt           int64  `db:"started_at"`
 	FinishedAt          int64  `db:"finished_at"`
+	TranscriptSha256    string `db:"transcript_sha256"`
+	OutputSha256        string `db:"output_sha256"`
 }
 
 type ToolCallCharge struct {

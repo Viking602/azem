@@ -1,6 +1,6 @@
 # Testing
 
-Last verified: 2026-08-08
+Last verified: 2026-08-17
 
 Azem spans a Go runtime, SQLite, Bubble Tea, Wails, and a React frontend. Passing
 one package is not enough when a change crosses those boundaries. Start with
@@ -34,6 +34,7 @@ Headless Terminal-Bench runner (Harbor):
 
 ```bash
 make azem-eval-linux
+PYTHONPATH="$PWD" python3 -m unittest eval.harbor.timeout_test
 cd . && PYTHONPATH="$PWD" harbor run -d terminal-bench/terminal-bench-2 -a eval.harbor.azem_agent:Azem -m chatgpt/gpt-5.6-sol -n 1 -k 1 --yes -i hello-world
 ```
 
@@ -72,6 +73,8 @@ make gui-windows
 | Provider streaming | Provider parser and driver tests | App runtime, session persistence, frontend reducer/timeline tests |
 | GitHub PR backend | `go test ./internal/githubpr ./internal/desktop ./cmd/azem-gui` | Success and failure paths with authenticated `gh` when mutations change |
 | Prompt or bundled Skill | Matching app/agent/config/Skills tests | Real conversation path |
+| Harbor eval adapter | `PYTHONPATH="$PWD" python3 -m unittest eval.harbor.timeout_test` | `make azem-eval-linux` and a real `harbor run` when the adapter command or timeout wiring changes |
+| Adaptive eval / learning | `GOWORK=off go test ./internal/eval ./internal/workrevision ./internal/evidence ./internal/codingmemory ./internal/assets ./internal/routeeval ./internal/training ./internal/toollab ./internal/adapterdeployment` | Add `./internal/app ./internal/tui` when adapter routing or evidence-status projection changes; production routing must remain unchanged unless a validated registry is explicitly attached |
 | Documentation/build command | Link/path check and run every documented command | `git diff --check` |
 
 ## SQLite checks

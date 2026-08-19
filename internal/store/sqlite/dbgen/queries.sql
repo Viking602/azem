@@ -38,26 +38,26 @@ UPDATE session_todos SET goal=?,revision=?,phases=?,updated_at=? WHERE session_i
 UPDATE session_projections SET usage=? WHERE session_id=?;
 
 -- name: InsertRecord :exec
-INSERT INTO records(kind,key1,key2,run_id,task_id,status,created_at,tool_name,idempotency_key,data) VALUES(?,?,?,?,?,?,?,?,?,?);
+INSERT INTO records(kind,key1,key2,run_id,task_id,status,created_at,tool_name,idempotency_key,data,data_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?);
 -- name: UpsertRecord :exec
-INSERT INTO records(kind,key1,key2,run_id,task_id,status,created_at,tool_name,idempotency_key,data) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,key1,key2) DO UPDATE SET run_id=excluded.run_id,task_id=excluded.task_id,status=excluded.status,created_at=excluded.created_at,tool_name=excluded.tool_name,idempotency_key=excluded.idempotency_key,data=excluded.data;
+INSERT INTO records(kind,key1,key2,run_id,task_id,status,created_at,tool_name,idempotency_key,data,data_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,key1,key2) DO UPDATE SET run_id=excluded.run_id,task_id=excluded.task_id,status=excluded.status,created_at=excluded.created_at,tool_name=excluded.tool_name,idempotency_key=excluded.idempotency_key,data=excluded.data,data_sha256=excluded.data_sha256;
 -- name: GetRecordData :one
-SELECT data FROM records WHERE kind=? AND key1=? AND key2=?;
+SELECT data,data_sha256 FROM records WHERE kind=? AND key1=? AND key2=?;
 -- name: ListRecordData :many
-SELECT data FROM records WHERE kind=? ORDER BY created_at,key1,key2;
+SELECT data,data_sha256 FROM records WHERE kind=? ORDER BY created_at,key1,key2;
 -- name: ListRecordDataByRun :many
-SELECT data FROM records WHERE kind=? AND run_id=? ORDER BY created_at,key1,key2;
+SELECT data,data_sha256 FROM records WHERE kind=? AND run_id=? ORDER BY created_at,key1,key2;
 -- name: GetActionAttemptByIdempotency :one
-SELECT data FROM records WHERE kind=? AND run_id=? AND task_id=? AND tool_name=? AND idempotency_key=?;
+SELECT data,data_sha256 FROM records WHERE kind=? AND run_id=? AND task_id=? AND tool_name=? AND idempotency_key=?;
 
 -- name: LatestEventSequence :one
 SELECT sequence FROM events WHERE run_id=? ORDER BY sequence DESC LIMIT 1;
 -- name: InsertEvent :exec
-INSERT INTO events(run_id,sequence,recorded_at,data) VALUES(?,?,?,?);
+INSERT INTO events(run_id,sequence,recorded_at,data,data_sha256) VALUES(?,?,?,?,?);
 -- name: ListEventData :many
-SELECT data FROM events WHERE run_id=? ORDER BY sequence;
+SELECT data,data_sha256 FROM events WHERE run_id=? ORDER BY sequence;
 -- name: ListEventDataAfter :many
-SELECT data FROM events WHERE run_id=? AND sequence>? ORDER BY sequence;
+SELECT data,data_sha256 FROM events WHERE run_id=? AND sequence>? ORDER BY sequence;
 
 -- name: MaxLeaseVersion :one
 SELECT CAST(COALESCE(MAX(version),0) AS INTEGER) FROM leases WHERE run_id=? AND task_id=?;
@@ -149,9 +149,21 @@ SET state=sqlc.arg(next_state),version=sqlc.arg(next_version),updated_at=sqlc.ar
 WHERE id=sqlc.arg(id) AND version=sqlc.arg(expected_version);
 
 -- name: InsertContextArtifact :exec
-INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,payload,preview,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(session_id,kind,sha256) DO NOTHING;
+INSERT INTO context_artifacts(id,session_id,run_id,kind,sha256,preview,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(session_id,kind,sha256) DO NOTHING;
 -- name: GetContextArtifact :one
-SELECT id,session_id,run_id,kind,sha256,payload,preview,created_at FROM context_artifacts WHERE id=? AND session_id=?;
+SELECT id,session_id,run_id,kind,sha256,preview,created_at FROM context_artifacts WHERE id=? AND session_id=?;
+-- name: GetLatestContextArtifactByKind :one
+SELECT id,session_id,run_id,kind,sha256,preview,created_at
+FROM context_artifacts
+WHERE session_id=? AND kind=?
+ORDER BY created_at DESC,id DESC
+LIMIT 1;
+-- name: GetLatestContextArtifactByKindPrefix :one
+SELECT id,session_id,run_id,kind,sha256,preview,created_at
+FROM context_artifacts
+WHERE session_id=sqlc.arg(session_id) AND kind LIKE sqlc.arg(kind_prefix) || '%'
+ORDER BY created_at DESC,id DESC
+LIMIT 1;
 -- name: GetSemanticState :one
 SELECT revision,checkpoint_id,cursor,state,source_digest,updated_at FROM session_semantic_state WHERE session_id=?;
 -- name: InsertSemanticStateEvent :execresult
@@ -178,7 +190,7 @@ SELECT id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at 
 -- name: UpdateSessionPreferences :execresult
 UPDATE sessions SET provider_id=?,model_id=?,reasoning=?,agent_mode=?,updated_at=? WHERE id=?;
 -- name: GetSessionProjection :one
-SELECT last_run_id,blocks,model_history,usage,updated_at,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?;
+SELECT last_run_id,model_history,usage,updated_at,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?;
 -- name: UpdateProjectionRun :exec
 UPDATE session_projections SET last_run_id=?,updated_at=? WHERE session_id=?;
 -- name: UpdateProjectionRunAfterAssistantMutation :exec
@@ -196,7 +208,7 @@ SELECT model_history FROM session_projections WHERE session_id=?;
 -- name: SaveRunCheckpointCAS :execresult
 UPDATE session_projections SET model_history=?,checkpoint_generation=?,cache_epoch=?,cache_identity_hash=?,updated_at=? WHERE session_id=? AND last_run_id=? AND checkpoint_generation=?;
 -- name: UpdateAgentBlock :execresult
-UPDATE session_blocks SET run_id=?,data=? WHERE session_id=? AND kind='agent' AND agent_id=?;
+UPDATE session_blocks SET run_id=?,data=?,data_sha256=? WHERE session_id=? AND kind='agent' AND agent_id=?;
 -- name: TouchProjection :exec
 UPDATE session_projections SET updated_at=? WHERE session_id=?;
 -- name: GetCompactionState :one
@@ -204,29 +216,29 @@ SELECT model_history,updated_at,checkpoint_generation,cache_epoch FROM session_p
 -- name: SaveCompaction :exec
 UPDATE session_projections SET model_history=?,checkpoint_generation=?,cache_epoch=?,cache_identity_hash='',updated_at=? WHERE session_id=?;
 -- name: ListSessionBlocks :many
-SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence;
+SELECT sequence,data,data_sha256 FROM session_blocks WHERE session_id=? ORDER BY sequence;
 -- name: GetLatestSessionBlock :one
-SELECT sequence,data FROM session_blocks WHERE session_id=? ORDER BY sequence DESC LIMIT 1;
+SELECT sequence,data,data_sha256 FROM session_blocks WHERE session_id=? ORDER BY sequence DESC LIMIT 1;
 -- name: UpdateSessionBlockData :exec
-UPDATE session_blocks SET data=? WHERE session_id=? AND sequence=?;
+UPDATE session_blocks SET data=?,data_sha256=? WHERE session_id=? AND sequence=?;
 -- name: CanonicalHighWater :one
 SELECT sequence FROM session_blocks WHERE session_id=? AND kind IN ('user','assistant') ORDER BY sequence DESC LIMIT 1;
 -- name: InsertSessionBlock :exec
-INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data) SELECT ?,COALESCE(MAX(b.sequence)+1,0),?,?,?,? FROM session_blocks b WHERE b.session_id=?;
+INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data,data_sha256) SELECT ?,COALESCE(MAX(b.sequence)+1,0),?,?,?,?,? FROM session_blocks b WHERE b.session_id=?;
 -- name: ListSessions :many
-SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) OR CAST(p.blocks AS TEXT)<>'[]' ORDER BY s.updated_at DESC;
+SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) ORDER BY s.updated_at DESC;
 -- name: ListSessionsLimited :many
-SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) OR CAST(p.blocks AS TEXT)<>'[]' ORDER BY s.updated_at DESC LIMIT ?;
+SELECT s.id,s.title,s.provider_id,s.model_id,s.reasoning,s.agent_mode,s.created_at,s.updated_at FROM sessions s JOIN session_projections p ON p.session_id=s.id WHERE p.last_run_id<>'' OR EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=s.id) ORDER BY s.updated_at DESC LIMIT ?;
 -- name: InsertSessionToolRecord :execresult
-INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id,run_id,tool_call_id) DO NOTHING;
+INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id,run_id,tool_call_id) DO NOTHING;
 -- name: GetSessionToolRecord :one
-SELECT anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at FROM session_tool_records WHERE session_id=? AND run_id=? AND tool_call_id=?;
+SELECT anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256 FROM session_tool_records WHERE session_id=? AND run_id=? AND tool_call_id=?;
 -- name: CompleteSessionToolRecordCAS :execresult
-UPDATE session_tool_records SET name=?,state=?,content=?,structured=?,artifact_id=?,observations=?,completed_at=? WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='running';
+UPDATE session_tool_records SET name=?,state=?,content=?,structured=?,artifact_id=?,observations=?,completed_at=?,content_sha256=?,structured_sha256=? WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='running';
 -- name: RestartInterruptedSessionToolRecordCAS :execresult
-UPDATE session_tool_records SET name=?,arguments=?,state='running',content='',structured='null',artifact_id='',observations='[]',started_at=?,completed_at=0 WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='interrupted';
+UPDATE session_tool_records SET name=?,arguments=?,state='running',content='',structured='null',artifact_id='',observations='[]',started_at=?,completed_at=0,content_sha256='',structured_sha256='' WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='interrupted';
 -- name: ListSessionToolRecords :many
-SELECT run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at FROM session_tool_records WHERE session_id=? ORDER BY started_at,run_id,tool_call_id;
+SELECT run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256 FROM session_tool_records WHERE session_id=? ORDER BY started_at,run_id,tool_call_id;
 -- name: InterruptRunningSessionToolRecordsByRun :exec
 UPDATE session_tool_records SET state='interrupted',completed_at=? WHERE run_id=? AND state='running';
 -- name: UpsertWorkspaceSession :exec
@@ -284,9 +296,9 @@ UPDATE session_projections SET cache_epoch=cache_epoch+1,cache_identity_hash=? W
 SELECT cache_epoch FROM session_projections WHERE session_id=?;
 
 -- name: CreateSubagentRun :exec
-INSERT INTO subagent_runs(id,session_id,parent_run_id,parent_agent_id,tool_call_id,child_run_id,description,subagent_type,state,summary,provider,model,reasoning,capability_mode,requested_isolation,isolation,cwd,background,output,error,warning,transcript,tool_calls,turns,tokens_used,tools_used,worktree_path,completion_delivered,started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+INSERT INTO subagent_runs(id,session_id,parent_run_id,parent_agent_id,tool_call_id,child_run_id,description,subagent_type,state,summary,provider,model,reasoning,capability_mode,requested_isolation,isolation,cwd,background,output,error,warning,transcript,tool_calls,turns,tokens_used,tools_used,worktree_path,completion_delivered,started_at,finished_at,transcript_sha256,output_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
 -- name: SaveSubagentRun :execresult
-UPDATE subagent_runs SET session_id=?,parent_run_id=?,parent_agent_id=?,tool_call_id=?,child_run_id=?,description=?,subagent_type=?,state=?,summary=?,provider=?,model=?,reasoning=?,capability_mode=?,requested_isolation=?,isolation=?,cwd=?,background=?,output=?,error=?,warning=?,transcript=?,tool_calls=?,turns=?,tokens_used=?,tools_used=?,worktree_path=?,completion_delivered=?,started_at=?,finished_at=? WHERE id=?;
+UPDATE subagent_runs SET session_id=?,parent_run_id=?,parent_agent_id=?,tool_call_id=?,child_run_id=?,description=?,subagent_type=?,state=?,summary=?,provider=?,model=?,reasoning=?,capability_mode=?,requested_isolation=?,isolation=?,cwd=?,background=?,output=?,error=?,warning=?,transcript=?,tool_calls=?,turns=?,tokens_used=?,tools_used=?,worktree_path=?,completion_delivered=?,started_at=?,finished_at=?,transcript_sha256=?,output_sha256=? WHERE id=?;
 -- name: GetSubagentRun :one
 SELECT * FROM subagent_runs WHERE id=?;
 -- name: ListSubagentRuns :many

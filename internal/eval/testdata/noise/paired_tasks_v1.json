@@ -1,0 +1,107 @@
+[
+  {
+    "version": 1,
+    "id": "go-sum-repair",
+    "task_prompt": "Fix Add so it returns the arithmetic sum without changing the public API.",
+    "container_image": "docker.io/library/golang:1.25.6@sha256:06d1251c59a75761ce4ebc8b299030576233d7437c886a68b43464bad62d4bb1",
+    "repository_files": {
+      "go.mod": "module fixture.local/sum\n\ngo 1.25\n",
+      "sum.go": "package sum\n\nfunc Add(a, b int) int { return a - b }\n",
+      "sum_test.go": "package sum\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) { if got := Add(2, 3); got != 5 { t.Fatalf(\"Add = %d\", got) } }\n"
+    },
+    "solution_files": {
+      "sum.go": "package sum\n\nfunc Add(a, b int) int { return a + b }\n"
+    },
+    "validator": ["go", "test", "./..."],
+    "known_valid_path": ["read sum.go and sum_test.go", "replace subtraction with addition", "run go test ./..."],
+    "clean": {
+      "version": 1,
+      "name": "go-sum-repair-clean",
+      "scenario": "known valid repair without perturbation",
+      "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+      "steps": [
+        {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+        {"sequence": 2, "id": "edit-start", "kind": "tool", "target_id": "edit-1", "state": "running"},
+        {"sequence": 3, "id": "edit-complete", "kind": "tool", "target_id": "edit-1", "state": "completed"},
+        {"sequence": 4, "id": "validator", "kind": "evidence", "evidence": {"kind": "validator", "id": "go-test"}},
+        {"sequence": 5, "id": "answer", "kind": "text", "target_id": "answer-1", "phase": "final_answer"},
+        {"sequence": 6, "id": "run-complete", "kind": "run", "state": "completed"}
+      ],
+      "expected": {"ordered_step_ids": ["run-start", "edit-start", "edit-complete", "validator", "answer", "run-complete"], "text_phases": ["answer-1:final_answer"], "run_state": "completed", "tool_states": {"edit-1": "completed"}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": [{"kind": "validator", "id": "go-test"}]}
+    },
+    "noisy": {
+      "version": 1,
+      "name": "go-sum-repair-noisy",
+      "scenario": "a recoverable failed edit precedes the known valid repair",
+      "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+      "steps": [
+        {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+        {"sequence": 2, "id": "bad-edit-start", "kind": "tool", "target_id": "edit-bad", "state": "running"},
+        {"sequence": 3, "id": "bad-edit-fail", "kind": "tool", "target_id": "edit-bad", "state": "failed"},
+        {"sequence": 4, "id": "retry", "kind": "run", "state": "retrying"},
+        {"sequence": 5, "id": "resume", "kind": "run", "state": "running"},
+        {"sequence": 6, "id": "good-edit-start", "kind": "tool", "target_id": "edit-good", "state": "running"},
+        {"sequence": 7, "id": "good-edit-complete", "kind": "tool", "target_id": "edit-good", "state": "completed"},
+        {"sequence": 8, "id": "validator", "kind": "evidence", "evidence": {"kind": "validator", "id": "go-test"}},
+        {"sequence": 9, "id": "answer", "kind": "text", "target_id": "answer-1", "phase": "final_answer"},
+        {"sequence": 10, "id": "run-complete", "kind": "run", "state": "completed"}
+      ],
+      "expected": {"ordered_step_ids": ["run-start", "bad-edit-start", "bad-edit-fail", "retry", "resume", "good-edit-start", "good-edit-complete", "validator", "answer", "run-complete"], "text_phases": ["answer-1:final_answer"], "run_state": "completed", "tool_states": {"edit-bad": "failed", "edit-good": "completed"}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": [{"kind": "validator", "id": "go-test"}]}
+    },
+    "noise_labels": [
+      {"version": 1, "id": "tool_execution_failure:edit-bad", "category": "tool_execution_failure", "actor": "tool", "subject_id": "edit-bad", "reason": "fixture injects one recoverable failed edit", "evidence": [{"kind": "fixture_step", "id": "bad-edit-fail"}]}
+    ]
+  },
+  {
+    "version": 1,
+    "id": "go-slug-normalization",
+    "task_prompt": "Normalize a title to a lower-case hyphenated slug while preserving the exported function name.",
+    "container_image": "docker.io/library/golang:1.25.6@sha256:06d1251c59a75761ce4ebc8b299030576233d7437c886a68b43464bad62d4bb1",
+    "repository_files": {
+      "go.mod": "module fixture.local/slug\n\ngo 1.25\n",
+      "slug.go": "package slug\n\nimport \"strings\"\n\nfunc Normalize(value string) string { return strings.ToLower(value) }\n",
+      "slug_test.go": "package slug\n\nimport \"testing\"\n\nfunc TestNormalize(t *testing.T) { if got := Normalize(\"Hello   World\"); got != \"hello-world\" { t.Fatalf(\"Normalize = %q\", got) } }\n"
+    },
+    "solution_files": {
+      "slug.go": "package slug\n\nimport \"strings\"\n\nfunc Normalize(value string) string { return strings.Join(strings.Fields(strings.ToLower(value)), \"-\") }\n"
+    },
+    "validator": ["go", "test", "./..."],
+    "known_valid_path": ["read slug.go and slug_test.go", "lowercase then join Fields with hyphens", "run go test ./..."],
+    "clean": {
+      "version": 1,
+      "name": "go-slug-normalization-clean",
+      "scenario": "known valid normalization repair",
+      "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+      "steps": [
+        {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+        {"sequence": 2, "id": "edit-start", "kind": "tool", "target_id": "edit-1", "state": "running"},
+        {"sequence": 3, "id": "edit-complete", "kind": "tool", "target_id": "edit-1", "state": "completed"},
+        {"sequence": 4, "id": "validator", "kind": "evidence", "evidence": {"kind": "validator", "id": "go-test"}},
+        {"sequence": 5, "id": "answer", "kind": "text", "target_id": "answer-1", "phase": "final_answer"},
+        {"sequence": 6, "id": "run-complete", "kind": "run", "state": "completed"}
+      ],
+      "expected": {"ordered_step_ids": ["run-start", "edit-start", "edit-complete", "validator", "answer", "run-complete"], "text_phases": ["answer-1:final_answer"], "run_state": "completed", "tool_states": {"edit-1": "completed"}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": [{"kind": "validator", "id": "go-test"}]}
+    },
+    "noisy": {
+      "version": 1,
+      "name": "go-slug-normalization-noisy",
+      "scenario": "ambiguous redundant guidance is ignored while the valid path remains available",
+      "initial": {"ordered_step_ids": [], "text_phases": [], "tool_states": {}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 0, "stale_guidance": [], "evidence": []},
+      "steps": [
+        {"sequence": 1, "id": "run-start", "kind": "run", "state": "running"},
+        {"sequence": 2, "id": "guidance-current", "kind": "guidance", "target_id": "guidance-2", "state": "active", "revision": 2},
+        {"sequence": 3, "id": "guidance-stale", "kind": "guidance", "target_id": "guidance-1", "state": "stale", "revision": 1},
+        {"sequence": 4, "id": "edit-start", "kind": "tool", "target_id": "edit-1", "state": "running"},
+        {"sequence": 5, "id": "edit-complete", "kind": "tool", "target_id": "edit-1", "state": "completed"},
+        {"sequence": 6, "id": "validator", "kind": "evidence", "evidence": {"kind": "validator", "id": "go-test"}},
+        {"sequence": 7, "id": "answer", "kind": "text", "target_id": "answer-1", "phase": "final_answer"},
+        {"sequence": 8, "id": "run-complete", "kind": "run", "state": "completed"}
+      ],
+      "expected": {"ordered_step_ids": ["run-start", "guidance-current", "guidance-stale", "edit-start", "edit-complete", "validator", "answer", "run-complete"], "text_phases": ["answer-1:final_answer"], "run_state": "completed", "tool_states": {"edit-1": "completed"}, "approval_states": {}, "artifact_hashes": {}, "subagent_states": {}, "semantic_revision": 0, "guidance_revision": 2, "stale_guidance": ["guidance-1"], "evidence": [{"kind": "validator", "id": "go-test"}]}
+    },
+    "noise_labels": [
+      {"version": 1, "id": "user_ambiguity:guidance-1", "category": "user_ambiguity", "actor": "user", "subject_id": "guidance-1", "reason": "fixture provides multiple interpretations", "evidence": [{"kind": "fixture_step", "id": "guidance-stale"}]},
+      {"version": 1, "id": "user_redundancy:guidance-1", "category": "user_redundancy", "actor": "user", "subject_id": "guidance-1", "reason": "fixture repeats obsolete guidance", "evidence": [{"kind": "fixture_step", "id": "guidance-stale"}]}
+    ]
+  }
+]

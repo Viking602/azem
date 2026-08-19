@@ -28,7 +28,7 @@ func TestSQLSubagentRunStoreRoundTrip(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	store, err := NewSQLSubagentRunStore(providerStore.DB())
+	store, err := NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -41,9 +41,8 @@ plugin-packages/
   codex/<marketplace>/<plugin>/      # Azem-owned copy imported from Codex
 ```
 
-On macOS and Windows, `<Azem data>` is the operating-system user configuration
-directory plus `azem`; on Linux it is `${XDG_DATA_HOME:-~/.local/share}/azem`.
-`XDG_DATA_HOME` overrides the data root on every platform.
+`<Azem data>` is `~/.azem`, or `$AZEM_HOME`. Plugins therefore live at
+`~/.azem/plugin-packages` unless `AZEM_HOME` points elsewhere.
 
 To install directly, copy a complete plugin directory under
 `plugin-packages/local/`. To import from Codex, enable `plugins.import_codex`.

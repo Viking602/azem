@@ -1,3 +1,5 @@
+// @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
+import { readFileSync } from "node:fs";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -170,10 +172,13 @@ describe("SettingsDialog", () => {
 	const visionModelMenu = visionRoute.querySelector<HTMLDetailsElement>(".route-model-menu")!;
 	visionModelMenu.open = true;
 	await act(async () => visionModelMenu.dispatchEvent(new Event("toggle", { bubbles: true })));
-	expect(container.querySelector('.menu-select-options-portal [data-value="chatgpt::gpt-text-only"]')).toBeNull();
+	const unsupportedVisionModel = container.querySelector<HTMLButtonElement>('.menu-select-options-portal [data-value="chatgpt::gpt-text-only"]');
+	expect(unsupportedVisionModel).not.toBeNull();
+	expect(unsupportedVisionModel?.disabled).toBe(true);
+	expect(unsupportedVisionModel?.textContent).toContain("不支持图片输入");
+	expect(container.querySelector<HTMLButtonElement>('.menu-select-options-portal [data-value="chatgpt::gpt-5.6-luna"]')?.disabled).toBe(false);
 	visionModelMenu.open = false;
 	await act(async () => visionModelMenu.dispatchEvent(new Event("toggle", { bubbles: true })));
-
     vi.mocked(execute).mockClear();
     const explore = Array.from(container.querySelectorAll<HTMLElement>(".route-row")).find((row) => row.textContent?.includes("explore"))!;
     const modelMenu = explore.querySelector<HTMLDetailsElement>(".route-model-menu")!;
@@ -199,7 +204,7 @@ describe("SettingsDialog", () => {
       kind: "set_model_route", target: "", sessionId: "session-1",
       route: { scope: "subagent", role: "explore", label: "Explore", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
     });
-	const subagentsNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("子智能体"))!;
+	const subagentsNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.querySelector("strong")?.textContent === "子智能体")!;
 	await act(async () => subagentsNav.click());
 	const subagentPane = container.querySelector(".subagent-settings-pane")!;
 	expect(subagentPane.querySelector(".subagent-capacity")?.textContent).toContain("容量与隔离");
@@ -766,6 +771,14 @@ describe("SettingsDialog", () => {
 		expect(extensionsNav.textContent).not.toContain("13");
 		await act(async () => root.unmount());
 		container.remove();
+	});
+
+	it("keeps iconless route options in the text column", async () => {
+		const prototypeStyles = readFileSync("src/prototype.css", "utf8");
+		expect(prototypeStyles).toMatch(/\.route-model-options \.menu-select-option\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) 16px;/s);
+		expect(prototypeStyles).toMatch(/\.route-model-options \.menu-select-option\.has-icon\s*\{[^}]*grid-template-columns:\s*25px minmax\(0,\s*1fr\) 16px;/s);
+		expect(prototypeStyles).toMatch(/\.route-model-options \.menu-select-option\.has-icon > :first-child\s*\{[^}]*width:\s*20px;/s);
+		expect(prototypeStyles).not.toMatch(/\.route-model-options \.menu-select-option > :first-child\s*\{/);
 	});
 
 	it("keeps subscription model enable toggles aligned when a use badge is present", async () => {

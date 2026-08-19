@@ -3,14 +3,13 @@ import {
   MessageCircleQuestion, Pencil, PencilLine, Play, ShieldCheck, X,
 } from "lucide-react";
 import { memo, useMemo, useState } from "react";
-import { useLiveElapsed } from "./useLiveElapsed";
 import { Markdown } from "../Markdown";
 import { execute } from "../../bridge";
 import { tFormat, toolDisplayName, translator } from "../../i18n";
 import { isSubagentActive } from "../../subagents";
 import { useRuntimeStore } from "../../store";
 import type { Block, Snapshot } from "../../types";
-import { displayedToolState, formatDuration, formatThinkingDuration, formatToolPresentation, isHostFallbackCommentary, isRunningTool, thinkingStateLabel } from "../toolTimeline";
+import { displayedToolState, formatDuration, formatToolPresentation, isHostFallbackCommentary, isRunningTool, thinkingStateLabel } from "../toolTimeline";
 import { toolChipBasename, toolChipModel } from "../toolChip";
 import AnsiText from "../AnsiText";
 import AttachmentPreview from "../AttachmentPreview";
@@ -412,11 +411,7 @@ export function ReasoningTrace({ block, language }: { block: Block; language: Sn
   const [open, setOpen] = useState(false);
   const normalized = normalizeThinkingText(block.content || "");
   const steps = normalized.split(/\n{2,}/u).map(plainStreamingText).filter(Boolean);
-  const stampedElapsedMs = Number(block.data?.elapsedMs || 0);
-  const liveElapsedMs = useLiveElapsed(stampedElapsedMs, active, 100);
-  const elapsedMs = active ? liveElapsedMs : stampedElapsedMs;
-  const duration = formatThinkingDuration(elapsedMs);
-  const label = thinkingStateLabel(language, active);
+  const label = thinkingStateLabel(language, active, Number(block.data?.elapsedMs || 0));
   const panelId = `reasoning-${block.id.replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
 
   // While delegated work is visible in the conversation, an empty reasoning
@@ -428,7 +423,7 @@ export function ReasoningTrace({ block, language }: { block: Block; language: Sn
     active={active}
     expanded={open}
     label={label}
-    meta={duration ? <time>{duration}</time> : undefined}
+    quiet
     panelId={panelId}
     disabled={!steps.length}
     onToggle={() => setOpen((value) => !value)}

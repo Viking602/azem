@@ -219,6 +219,7 @@ type AgentView struct {
 	ChildRunID         string
 	Activity           string
 	Warning            string
+	EvidenceStatus     string
 	WorktreePath       string
 	ToolCalls          int
 	Turns              int
@@ -604,6 +605,19 @@ func (m AppModel) displayState(state string) string {
 		return m.tr(key)
 	}
 	return state
+}
+
+func (m AppModel) evidenceStatusLabel(status string) string {
+	switch status {
+	case "provisional":
+		return m.tr("evidence.status.provisional")
+	case "verified":
+		return m.tr("evidence.status.verified")
+	case "stale":
+		return m.tr("evidence.status.stale")
+	default:
+		return ""
+	}
 }
 
 func (m AppModel) Init() tea.Cmd {

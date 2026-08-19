@@ -148,25 +148,23 @@ func clearRecoveredSharedWorkspaceClaim(ctx context.Context, parent subagentPare
 type subagentParentRuntime struct {
 	// Depth is the task depth of the current parent. The main agent is depth 0;
 	// each spawned subagent increments it before exposing another spawn tool.
-	Depth                   int
-	SessionID               string
-	ParentRunID             string
-	ParentAgentID           string
-	ProviderID              string
-	AccountID               string
-	ModelID                 string
-	Reasoning               string
-	PlanMode                bool
-	ContextTokenTarget      int
-	ContextConfig           config.ContextConfig
-	WorkspaceRoot           string
-	Driver                  hyprovider.Driver
-	ResolveDriver           func(context.Context, string, string, string) (string, int, hyprovider.Driver, error)
-	ResolveAccountDriver    func(context.Context, string, string, string, string) (string, string, int, hyprovider.Driver, error)
-	CompactionRoute         config.ModelRouteConfig
-	CompactionRouteSnapshot func() config.ModelRouteConfig
-	Coding                  *agentservice.Service
-	Host                    providerHost
+	Depth                int
+	SessionID            string
+	ParentRunID          string
+	ParentAgentID        string
+	ProviderID           string
+	AccountID            string
+	ModelID              string
+	Reasoning            string
+	PlanMode             bool
+	ContextTokenTarget   int
+	ContextConfig        config.ContextConfig
+	WorkspaceRoot        string
+	Driver               hyprovider.Driver
+	ResolveDriver        func(context.Context, string, string, string) (string, int, hyprovider.Driver, error)
+	ResolveAccountDriver func(context.Context, string, string, string, string) (string, string, int, hyprovider.Driver, error)
+	Coding               *agentservice.Service
+	Host                 providerHost
 }
 
 type effectiveSubagentProfile struct {
@@ -224,6 +222,8 @@ type subagentRuntime struct {
 	running          int
 	terminalFallback map[string]agentservice.SubagentSnapshot
 	hosts            map[string]providerHost
+	host             providerHost
+	evidenceStatus   map[string]string
 	wakeInFlight     map[string]bool
 	changed          chan struct{}
 	idleCheckEvery   time.Duration
@@ -242,7 +242,8 @@ func newSubagentRuntime(parent context.Context, cfg config.SubagentConfig, store
 	runtime := &subagentRuntime{
 		cfg: cfg, store: store, worktreeRoot: worktreeRoot, ctx: ctx, cancel: cancel,
 		active: make(map[string]*activeSubagent), terminalFallback: make(map[string]agentservice.SubagentSnapshot),
-		hosts: make(map[string]providerHost), wakeInFlight: make(map[string]bool), changed: make(chan struct{}),
+		hosts: make(map[string]providerHost), evidenceStatus: make(map[string]string),
+		wakeInFlight: make(map[string]bool), changed: make(chan struct{}),
 	}
 	runtime.wg.Add(1)
 	go runtime.watchIdle()
@@ -438,9 +439,6 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	}
 	if err != nil {
 		return agentservice.SubagentRun{}, err
-	}
-	if parent.CompactionRouteSnapshot != nil {
-		parent.CompactionRoute = parent.CompactionRouteSnapshot()
 	}
 	id, err := newSubagentID()
 	if err != nil {
@@ -873,7 +871,7 @@ func (r *subagentRuntime) execute(id string) {
 	var err error
 	childModel := profile.Model
 	contextTarget := parent.ContextTokenTarget
-	contextBudget := ContextBudget{HardTrigger: contextTarget, Target: contextTarget}
+	contextBudget := ContextBudget{Trigger: contextTarget, KeepRecent: parent.ContextConfig.KeepRecentTokens}
 	childContextWindow := 0
 	childDriver := parent.Driver
 	usageBudget := &providerUsageBudget{maxTokens: int64(r.cfg.Budget.MaxTokens)}
@@ -887,8 +885,8 @@ func (r *subagentRuntime) execute(id string) {
 		childModel = resolvedModel
 		childDriver = resolvedDriver
 		childContextWindow = contextWindow
-		contextBudget, err = calculateContextBudget(profile.Provider, childModel, contextWindow, 0, parent.ContextConfig)
-		contextTarget = contextBudget.HardTrigger
+		contextBudget, err = calculateContextBudget(childModel, contextWindow, 0, parent.ContextConfig)
+		contextTarget = contextBudget.Trigger
 		if err != nil {
 			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
 			return
@@ -901,8 +899,8 @@ func (r *subagentRuntime) execute(id string) {
 		}
 		childDriver = resolvedDriver
 		childContextWindow = contextWindow
-		contextBudget, err = calculateContextBudget(profile.Provider, childModel, contextWindow, 0, parent.ContextConfig)
-		contextTarget = contextBudget.HardTrigger
+		contextBudget, err = calculateContextBudget(childModel, contextWindow, 0, parent.ContextConfig)
+		contextTarget = contextBudget.Trigger
 		if err != nil {
 			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
 			return
@@ -1015,7 +1013,6 @@ func (r *subagentRuntime) execute(id string) {
 		PlanMode: parent.PlanMode, ContextTokenTarget: contextTarget, ContextConfig: parent.ContextConfig,
 		WorkspaceRoot: profile.CWD, Driver: nestedParentDriver,
 		ResolveDriver: parent.ResolveDriver, ResolveAccountDriver: parent.ResolveAccountDriver,
-		CompactionRoute: parent.CompactionRoute, CompactionRouteSnapshot: parent.CompactionRouteSnapshot,
 		Coding: parent.Coding, Host: parent.Host,
 	})
 	if err != nil {
@@ -1049,12 +1046,15 @@ func (r *subagentRuntime) execute(id string) {
 	activeSkills := mergeSkillNames(skillSnapshot.Eager, loadSessionActivatedSkills(ctx, parent.Host, parent.SessionID, skillSnapshot.Registry))
 	instructions := renderSubagentInstructions(profile)
 	if childContextWindow > 0 {
-		contextBudget, err = calculateContextBudget(profile.Provider, childModel, childContextWindow, estimateToolDefinitionTokens(governed), parent.ContextConfig)
-		contextTarget = contextBudget.HardTrigger
+		contextBudget, err = calculateContextBudget(childModel, childContextWindow, estimateToolDefinitionTokens(governed), parent.ContextConfig)
+		contextTarget = contextBudget.Trigger
 		if err != nil {
 			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
 			return
 		}
+	}
+	if !parent.ContextConfig.Enabled {
+		contextTarget = 0
 	}
 	extraBody := map[string]any{"prompt_cache_key": childRun.RunID}
 	enableExplicitPromptCache(extraBody, profile.Provider, childModel)
@@ -1089,52 +1089,17 @@ func (r *subagentRuntime) execute(id string) {
 			}
 		}
 	}
-	compactionResolve := parent.ResolveDriver
-	if parent.ResolveAccountDriver != nil {
-		compactionResolve = func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
-			boundAccountID := ""
-			if provider == profile.Provider {
-				boundAccountID = profile.AccountID
-			}
-			_, resolvedModel, window, driver, resolveErr := parent.ResolveAccountDriver(ctx, provider, model, reasoning, boundAccountID)
-			return resolvedModel, window, driver, resolveErr
-		}
-	}
-	if compactionResolve != nil {
-		baseResolve := compactionResolve
-		compactionResolve = func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
-			resolvedModel, window, driver, resolveErr := baseResolve(ctx, provider, model, reasoning)
-			if resolveErr == nil {
-				observeProviderRetries(ctx, parent.Host, parent.SessionID, childRun.RunID, provider, driver)
-			}
-			return resolvedModel, window, driver, resolveErr
-		}
-	}
-	compactionReport := r.compactionReporter(parent, parent.ParentRunID)
-	if parent.Host != nil && parent.Host.Sessions() != nil {
-		baseResolve := compactionResolve
-		compactionResolve = func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
-			resolvedModel, window, driver, resolveErr := baseResolve(ctx, provider, model, reasoning)
-			if resolveErr == nil {
-				driver = &meteredProviderDriver{
-					inner: driver, store: parent.Host.Sessions(), host: parent.Host, sessionID: parent.SessionID,
-					runID: parent.ParentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name,
-				}
-			}
-			return resolvedModel, window, driver, resolveErr
-		}
-		compactionReport = nil
-	}
 	contextManager := subagentTurnContext{
 		instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
 		noteActivity: func(activity string) { r.noteVisibleActivity(id, activity) },
 		inner: turnContext{
-			structuredSummary: true, largeToolTokens: parent.ContextConfig.LargeToolResultTokens,
-			compactTargetTokens: contextBudget.Target, minReclaimTokens: parent.ContextConfig.MinReclaimTokens,
-			softTriggerTokens: contextBudget.SoftTrigger, backgroundPrepare: parent.ContextConfig.BackgroundPrepare, coordinator: &compactionCoordinator{},
-			resolveSummarizer: lazyCompactionResolver(compactionResolve, parent.CompactionRoute, profile.Provider, childModel, profile.Reasoning, childRun.RunID+":compaction", usageBudget, compactionReport, parent.ContextConfig.MaxSummaryTokens),
+			sessionID: parent.SessionID, runID: childRun.RunID, providerID: profile.Provider, modelID: childModel,
+			largeToolTokens:  parent.ContextConfig.LargeToolResultTokens,
+			keepRecentTokens: contextBudget.KeepRecent,
+			coordinator:      &compactionCoordinator{},
 		},
 	}
+	configureArchiveContext(ctx, &contextManager.inner, parent.Host, parent.SessionID, childRun.RunID, profile.Provider, profile.AccountID, childModel)
 	if parent.Host != nil && parent.Host.Sessions() != nil {
 		contextManager.inner.putArtifact = func(ctx context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
 			return parent.Host.Sessions().PutArtifact(ctx, parent.SessionID, childRun.RunID, kind, payload, preview)
@@ -1189,6 +1154,13 @@ func (r *subagentRuntime) execute(id string) {
 			return path
 		}), taskCompleted)
 	}
+	if parent.Host != nil {
+		sessionID, childRunID := parent.SessionID, childRun.RunID
+		engine.OutputGuardrails = append(engine.OutputGuardrails, newMutatingVerificationGuardrail(
+			parent.Host.Sessions(), profile.CWD, sessionID, childRunID,
+			func() []string { return r.relatedRunIDs(sessionID, childRunID) },
+		))
+	}
 
 	r.mu.Lock()
 	active = r.active[id]
@@ -1221,23 +1193,38 @@ func (r *subagentRuntime) execute(id string) {
 	r.emitState(running, "running")
 
 	restartingAttempt := false
+	guardRetryPending := false
+	turnUsedTool := false
 	sink := stream.SinkFunc(func(frameCtx context.Context, frame stream.Frame) error {
-		if restartingAttempt && frame.Kind != stream.FrameError {
+		if (restartingAttempt || guardRetryPending) && frame.Kind != stream.FrameError {
 			r.mu.Lock()
 			if current := r.active[id]; current != nil && !current.terminalizing {
 				current.blocks = discardAgentAttemptBlocks(current.blocks, childRun.RunID)
 			}
 			r.mu.Unlock()
+			scope := "attempt"
+			if guardRetryPending && !restartingAttempt {
+				scope = "output_guard"
+			}
 			if parent.Host != nil && !parent.Host.EmitEvent(frameCtx, Event{
 				Kind: EventProviderRetry, SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id,
-				State: "restarted", Data: map[string]string{"scope": "attempt"},
+				State: "restarted", Data: map[string]string{"scope": scope},
 			}) {
 				return eventDeliveryError(frameCtx)
 			}
 			restartingAttempt = false
+			guardRetryPending = false
 		}
-		if frame.Kind == stream.FrameError {
+		switch frame.Kind {
+		case stream.FrameToolCall:
+			turnUsedTool = true
+		case stream.FrameDone:
+			guardRetryPending = !turnUsedTool
+			turnUsedTool = false
+		case stream.FrameError:
 			restartingAttempt = true
+			guardRetryPending = false
+			turnUsedTool = false
 		}
 		frame.Source = "child:" + id
 		r.handleFrame(id, frame)
@@ -1506,6 +1493,17 @@ func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
 			run.State, run.Error = agentservice.SubagentFailed, fmt.Sprintf("subagent stop blocked: %v", err)
 		}
 	}
+	if run.State == agentservice.SubagentCompleted && parentHost != nil && run.ChildRunID != "" {
+		evidenceCtx, evidenceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		run.EvidenceStatus = runtimeEvidenceStatus(
+			evidenceCtx, parentHost.Sessions(), run.CWD, run.SessionID, run.ChildRunID,
+			r.relatedRunIDs(run.SessionID, run.ChildRunID),
+		)
+		if err := persistRunEvidenceStatus(evidenceCtx, parentHost.Sessions(), run.SessionID, run.ChildRunID, run.EvidenceStatus); err != nil {
+			run.Warning = appendWarning(run.Warning, "persist evidence status: "+err.Error())
+		}
+		evidenceCancel()
+	}
 	removedWorktree := run.WorktreePath
 	finalizeSubagentWorktree(&run, worktreeRepoRoot)
 	if parentHost != nil && removedWorktree != "" && run.WorktreePath == "" {
@@ -1708,21 +1706,4 @@ func (r *subagentRuntime) undeliveredBackgroundCompletions(sessionID string) ([]
 		return 1
 	})
 	return pending, nil
-}
-
-func (r *subagentRuntime) compactionReporter(parent subagentParentRuntime, runID string) compactionUsageReporter {
-	if parent.Host == nil || strings.TrimSpace(parent.SessionID) == "" {
-		return nil
-	}
-	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens, cacheWriteTokens int) {
-		parent.Host.EmitEvent(parent.Host.BaseContext(), Event{Kind: EventContextUsage, SessionID: parent.SessionID, RunID: runID, State: "reported", Data: map[string]string{
-			"inputTokens": fmt.Sprint(usage.InputTokens), "cachedInputTokens": fmt.Sprint(usage.CachedInputTokens),
-			"outputTokens": fmt.Sprint(usage.OutputTokens), "totalTokens": fmt.Sprint(usage.TotalTokens),
-			"reasoningTokens":     fmt.Sprint(reasoningTokens),
-			"cacheWriteTokens":    fmt.Sprint(cacheWriteTokens),
-			"uncachedInputTokens": fmt.Sprint(max(0, usage.InputTokens-usage.CachedInputTokens)),
-			"cacheStatus":         "reported", "aggregateOnly": "true", "requestKind": "compaction",
-			"provider": providerID, "model": modelID, "reasoning": reasoning, "transport": transport,
-		}})
-	}
 }

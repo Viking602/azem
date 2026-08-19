@@ -80,7 +80,7 @@ func TestBridgeUsageReportDirectReadback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-usage", Title: "Usage"}); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestBridgeSearchSessionsReturnsBoundedReadOnlyResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-search", Title: "Indexed task"}); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestBridgeResumeSessionReturnsDurableProjectionDirectly(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-resume", Title: "Resume target"}); err != nil {
 		t.Fatal(err)
 	}

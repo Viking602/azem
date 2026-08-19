@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+- Context compaction now has one deterministic host path across automatic,
+  `/compact`, `/rebuild`, Main, Team, and subagent runs. It serializes omitted
+  history into an exact SHA-verified session artifact, preserves the latest
+  three complete shared user turns and atomic tool groups, and makes no
+  compaction-provider request. Image-capable models receive bounded Silver-font
+  bitmap frames; text-only, unknown, or over-budget routes receive a bounded
+  preview plus `context.read_artifact` reference. Repeated compaction expands
+  the old source, and restart recovery repairs missing frames from that source.
+  `keep_recent_tokens` is now an optional hot-tail floor: Azem relaxes it when
+  necessary but never drops the latest three complete turns. `agents.compaction`,
+  model-written `SemanticStateV1`, background preparation, semantic revision
+  activation, and their output-budget/retry settings were removed. ModelHistory
+  wire version 3 and archive policy version 3 reset old derived cache identity
+  once; later archives retain the stable system prefix and message ordering.
+
+- Evaluation and adaptation now use a versioned, evidence-bound offline
+  pipeline. `azem-eval` exports deterministic durable trajectories and baseline
+  identities; replay/noise fixtures, verification plans, structural retrieval,
+  opt-in coding memory, shadow route calibration, isolated task synthesis,
+  adapter comparison, generated-tool sandboxing, and held-out release gates
+  remain outside live admission. Subagent cards expose whether work is
+  provisional, verified, or stale. A validated adapter can replace one exact
+  base model through the existing provider route and can be rolled back or
+  killed without a second router.
+  No executable prompt, static prefix, or injected-message ordering changed;
+  existing provider prefix-cache identity is preserved.
+
+- Settings usage now has a Lody-style skyline: a model donut beside the year
+  heatmap, a stacked by-model bar, and a click-to-open day panel. Totals snap
+  on first paint and ease on later refreshes. No invented cost figures.
+
+- Persistence: schema 21 keeps SQLite as the catalog, FTS index, and Venat
+  control plane, and stores large payloads as content-addressed files under
+  `~/.azem/blobs`. Artifact bytes always live on disk. Tool
+  content and structured results, subagent output/transcript, thinking/agent
+  blocks, provider model history, and Venat event/record bodies spill when
+  they exceed 4 KiB. User and completed assistant blocks stay inline so
+  conversation search keeps working. Upgrading extracts existing inline bytes
+  and vacuums the database. A 2.5 GiB developer `azem.db` was almost entirely
+  Venat `events`; those rows now keep only a hash.
+
+- Home directory: configuration, SQLite, blobs, plugins, attachments, logs,
+  and hook transcripts now live in `~/.azem` (or `$AZEM_HOME`). The first
+  default-home launch moves `~/.config/azem`, the previous platform data
+  directory, and the cache directory into that home. It fails if the old
+  database is still locked. Project-local `{workspace}/.azem` is unchanged.
+
+- Auto-review follows the Codex guardian matrix on the host: `low`/`medium`
+  denials no longer fall back to a person unless the rationale is an explicit
+  injection or tenant deny. `coding.shell` is classified per command, so
+  `go test` and `git status` auto-allow without a model call. User-requested
+  `git push` / `git commit` score high authorization from the turn goal, matching
+  Codex, instead of falling back to a person just because the command is high-risk.
+  Parse failures remain fail-closed.
+
+
 - Agent instructions follow the current user-message language. Settings
   language is UI-only. Stated requirements stay in scope, verification
   stays on the Todo list, and exact strings or hidden cases must be
@@ -35,10 +91,12 @@
 - Eval: add `azem-eval` and a Harbor installed-agent adapter so Azem can
   run Terminal-Bench (`tbench.ai`) unattended. Trials use YOLO approvals,
   copy only auth rows from the desktop database, and leave scoring to
-  Harbor's verifier. Harbor owns the trial wall clock. Before each Grok
-  trial the host refreshes the subscription token and writes rotated
-  credentials back after the container exits, so later trials do not
-  reuse a spent refresh token.
+  Harbor's verifier. The adapter reads Harbor's computed agent timeout
+  (task.toml / override / multiplier) and stops `azem-eval` before
+  Harbor's `wait_for`, so a still-running turn is not recorded as
+  `AgentTimeoutError`. Before each Grok trial the host refreshes the
+  subscription token and writes rotated credentials back after the
+  container exits, so later trials do not reuse a spent refresh token.
 
 - Grok OAuth refresh and revoke send the same client-version and
   `x-grok-client-surface=ui` headers as device login, and refresh HTTP

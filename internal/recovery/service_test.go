@@ -68,7 +68,7 @@ func TestRecoverProjectsPendingApprovalAndInterruptsSubagents(t *testing.T) {
 		t.Fatal("write tool did not pause for approval")
 	}
 
-	subagents, err := agentservice.NewSQLSubagentRunStore(store.DB())
+	subagents, err := agentservice.NewSQLSubagentRunStore(store.DB(), store.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}

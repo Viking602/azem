@@ -84,10 +84,9 @@ describe("process activity bar", () => {
     const web = tool("w", "web_search", JSON.stringify({ query: "azem" }), "running");
     const write = tool("e", "coding.write_file", JSON.stringify({ path: "src/a.tsx" }), "running");
 
-    expect(activityBarLabel([], "zh-CN", { waiting: true })).toBe("思考");
-    expect(activityBarLabel([thinking], "zh-CN", { live: true })).toBe("思考");
-    // Live, the bar names the row that is executing, so it keeps moving instead
-    // of freezing on one count for minutes.
+    expect(activityBarLabel([], "zh-CN", { waiting: true })).toBe("正在思考");
+    expect(activityBarLabel([thinking], "zh-CN", { live: true })).toBe("正在思考");
+    // Live, the thinking row names the executing tool and rolls to the latest one.
     expect(activityBarLabel([thinking, search], "zh-CN", { live: true })).toBe("搜索代码");
     expect(activityBarLabel([thinking, web], "zh-CN", { live: true })).toBe("搜索了网页");
     expect(activityBarLabel([thinking, write], "zh-CN", { live: true })).toBe("写入文件");
@@ -95,7 +94,7 @@ describe("process activity bar", () => {
       [thinking, write, tool("s2", "coding.shell", "", "running"), tool("done", "coding.read_file")],
       "zh-CN",
       { live: true },
-    )).toBe("正在运行 2 个工具");
+    )).toBe("运行命令");
     // Settled, it summarizes the whole step.
     expect(activityBarLabel(
       [thinking, tool("done", "coding.read_file"), tool("done2", "coding.shell")],
@@ -127,7 +126,7 @@ describe("process activity bar", () => {
     // A search-only step keeps the search wording rather than a tool count.
     expect(activityBarLabel([done("s", "coding.search")], "zh-CN")).toBe("搜索了代码");
     expect(activityBarLabel([done("w", "web_search")], "zh-CN")).toBe("搜索了网页");
-    // Thinking-only keeps 思考; the overall clock lives on that sparkle bar.
-    expect(activityBarLabel([thinking], "zh-CN")).toBe("思考");
+    // Thinking-only settles to Codex 已完成思考, not the live wait label.
+    expect(activityBarLabel([thinking], "zh-CN")).toBe("已完成思考");
   });
 });

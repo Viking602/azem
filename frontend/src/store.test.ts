@@ -454,12 +454,12 @@ describe("runtime event projection", () => {
     const projected = reduceEvents(state(), [
       {
         sequence: 1, kind: "agent_state", agentId: "a1", state: "running", text: "",
-        agent: { type: "explore", parentRunId: "parent-run", parentToolCallId: "spawn-call", model: "gpt-5.6-luna", capabilityMode: "read-only", toolCalls: 2, turns: 1, tokensUsed: 100, elapsedMs: 5000, activity: "coding.read_file" },
+        agent: { type: "explore", parentRunId: "parent-run", parentToolCallId: "spawn-call", model: "gpt-5.6-luna", capabilityMode: "read-only", evidenceStatus: "provisional", toolCalls: 2, turns: 1, tokensUsed: 100, elapsedMs: 5000, activity: "coding.read_file" },
       },
       // Sparse lifecycle event without counters must not reset stats to zero.
       {
         sequence: 2, kind: "agent_state", agentId: "a1", state: "running", text: "",
-        agent: { type: "explore", activity: "coding.search" },
+        agent: { type: "explore", activity: "coding.search", evidenceStatus: "stale" },
       },
       {
         sequence: 3, kind: "agent_state", agentId: "a1", state: "running", text: "",
@@ -468,7 +468,7 @@ describe("runtime event projection", () => {
     ]);
     expect(projected.agents[0]).toMatchObject({
       id: "a1", state: "running", parentRunId: "parent-run", parentToolCallId: "spawn-call",
-      toolCalls: 5, elapsedMs: 12000, activity: "coding.git_diff", model: "gpt-5.6-luna",
+      toolCalls: 5, elapsedMs: 12000, activity: "coding.git_diff", model: "gpt-5.6-luna", evidenceStatus: "stale",
     });
   });
 
@@ -489,7 +489,7 @@ describe("runtime event projection", () => {
     expect(projected.blocks).toHaveLength(1);
     expect(projected.blocks[0]).toMatchObject({ kind: "thinking", content: "主会话思考" });
     expect(projected.agentBlocks.map((block) => block.kind)).toEqual(["thinking", "tool", "assistant"]);
-    expect(projected.agentBlocks[0]).toMatchObject({ kind: "thinking", title: "思考", content: "先看 diff" });
+    expect(projected.agentBlocks[0]).toMatchObject({ kind: "thinking", title: "正在思考", content: "先看 diff" });
     expect(projected.agentBlocks[1]).toMatchObject({ kind: "tool", title: "coding.git_diff", state: "completed" });
     expect(projected.agentBlocks[2]).toMatchObject({ kind: "assistant", content: "结论" });
     expect(projected.agents[0]).toMatchObject({ preview: "结论", previewKind: "assistant", previewRunId: "child-1" });
@@ -1467,27 +1467,29 @@ describe("runtime event projection", () => {
     await act(async () => root.unmount());
   });
 
-  it("renders semantic context kernel diagnostics", async () => {
+  it("renders archive-first context kernel diagnostics", async () => {
     useRuntimeStore.setState({
       ...state(),
       contextProfile: {
         source: "request", estimated: true, contributions: [],
-        manifestHash: "abcdef0123456789", semanticRevision: 3,
-        semanticCursor: { canonical_sequence: 42, todo_revision: 1, tool_completed_at_ns: 0, subagent_finished_at_ns: 0 },
-        canonicalHighWater: 44, policyVersion: 1, rebuildReason: "automatic_hard", writerLag: 2,
-        segments: [{ kind: "semantic_state", mandatory: true, token_estimate: 240, content_hash: "segment-hash", source_refs: ["sequence:42"] }],
-        exclusions: [{ source_ref: "sequence:1", reason: "represented_by_semantic_state" }],
+        manifestHash: "abcdef0123456789", canonicalHighWater: 44,
+        policyVersion: 3, rebuildReason: "automatic_hard",
+        segments: [{ kind: "archive_carrier", mandatory: true, token_estimate: 3240, content_hash: "segment-hash", source_refs: ["artifact:archive-1"] }],
+        exclusions: [{ source_ref: "sequence:1", reason: "represented_by_archive" }],
+        archive: { carrier: "bitmap", sourceArtifactId: "archive-1", sourceCharacters: 120000, frameCount: 4, frameBytes: 524288, totalPages: 9, truncatedCharacters: 16000 },
       },
     });
     const container = document.createElement("div");
     const root = createRoot(container);
     await act(async () => root.render(createElement(Inspector)));
-    expect(container.textContent).toContain("上下文内核");
-    expect(container.textContent).toContain("r3");
+    expect(container.textContent).toContain("上下文归档");
     expect(container.textContent).toContain("automatic_hard");
-    expect(container.textContent).toContain("semantic state");
-    expect(container.querySelector(".context-manifest-hash")?.textContent).toBe("abcdef0123456789");
-    expect(container.querySelector('[data-state="pending"]')?.textContent).toBe("2");
+    expect(container.textContent).toContain("archive carrier");
+    expect(container.textContent).toContain("bitmap");
+    expect(container.textContent).toContain("4 / 9");
+    expect(container.textContent).toContain("512 KiB");
+    expect(container.textContent).toContain("16,000");
+    expect(Array.from(container.querySelectorAll(".context-manifest-hash")).map((node) => node.textContent)).toEqual(["abcdef0123456789", "archive-1"]);
     await act(async () => root.unmount());
   });
 

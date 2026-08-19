@@ -32,14 +32,16 @@ import (
 )
 
 var (
-	ErrRunActive        = errors.New("a run is already active")
-	ErrNothingToCompact = errors.New("session does not have enough new history to compact")
-	ErrDirtyWorkspace   = errors.New("workspace has uncommitted changes")
+	ErrRunActive                = errors.New("a run is already active")
+	ErrNothingToCompact         = errors.New("session does not have enough new history to compact")
+	ErrContextArchivingDisabled = errors.New("context archiving is disabled")
+	ErrDirtyWorkspace           = errors.New("workspace has uncommitted changes")
 )
 
 type activeGuidanceMessage struct {
 	Text        string
 	Attachments []session.Attachment
+	Sequence    int64
 }
 
 type runtimeRecoveryFence interface {
@@ -177,6 +179,25 @@ func (s *Service) SetDesktopSurface(enabled bool) {
 	s.mu.Lock()
 	s.desktopSurface = enabled
 	s.mu.Unlock()
+}
+
+// ToolDefinitionsSnapshot returns a detached copy of the tools currently
+// registered for provider execution. Offline evaluation uses it to bind an
+// outcome to the exact catalog it observed.
+func (s *Service) ToolDefinitionsSnapshot() []message.ToolDefinition {
+	if s == nil || s.coding == nil {
+		return nil
+	}
+	definitions := s.coding.ToolDefinitions()
+	encoded, err := json.Marshal(definitions)
+	if err != nil {
+		return nil
+	}
+	var snapshot []message.ToolDefinition
+	if json.Unmarshal(encoded, &snapshot) != nil {
+		return nil
+	}
+	return snapshot
 }
 
 func (s *Service) desktopSurfaceEnabled() bool {
@@ -943,15 +964,18 @@ func (s *Service) GuideActiveTurnWithAttachments(sessionID, runID, text string, 
 	if !s.guidanceOpen {
 		return fmt.Errorf("the active run is finishing and cannot accept guidance")
 	}
+	var sequence int64
 	if s.sessions != nil {
-		if _, err := s.sessions.AppendBlock(s.ctx, sessionID, session.Block{
+		var err error
+		sequence, err = s.sessions.AppendBlock(s.ctx, sessionID, session.Block{
 			Kind: "user", RunID: s.activeRun, Title: "Guidance", Content: text, State: "guidance",
 			Attachments: CloneAttachments(attachments),
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("persist guidance message: %w", err)
 		}
 	}
-	s.activeGuidance = append(s.activeGuidance, activeGuidanceMessage{Text: text, Attachments: attachments})
+	s.activeGuidance = append(s.activeGuidance, activeGuidanceMessage{Text: text, Attachments: attachments, Sequence: sequence})
 	return nil
 }
 
@@ -1012,7 +1036,9 @@ func (s *Service) finishActiveGuidance(sessionID, runID string) []activeGuidance
 func cloneActiveGuidance(values []activeGuidanceMessage) []activeGuidanceMessage {
 	cloned := make([]activeGuidanceMessage, len(values))
 	for index, value := range values {
-		cloned[index] = activeGuidanceMessage{Text: value.Text, Attachments: CloneAttachments(value.Attachments)}
+		cloned[index] = activeGuidanceMessage{
+			Text: value.Text, Attachments: CloneAttachments(value.Attachments), Sequence: value.Sequence,
+		}
 	}
 	return cloned
 }

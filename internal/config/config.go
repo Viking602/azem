@@ -141,31 +141,23 @@ type GrokConfig struct {
 }
 
 type AgentsConfig struct {
-	Main       MainAgentConfig  `yaml:"main"`
-	Team       TeamConfig       `yaml:"team"`
-	Title      ModelRouteConfig `yaml:"title" json:"title"`
-	Plan       ModelRouteConfig `yaml:"plan" json:"plan"`
-	Approval   ModelRouteConfig `yaml:"approval" json:"approval"`
-	Vision     ModelRouteConfig `yaml:"vision" json:"vision"`
-	Compaction ModelRouteConfig `yaml:"compaction" json:"compaction"`
-	Recap      ModelRouteConfig `yaml:"recap" json:"recap"`
-	Context    ContextConfig    `yaml:"context"`
-	Subagents  SubagentConfig   `yaml:"subagents"`
+	Main      MainAgentConfig  `yaml:"main"`
+	Team      TeamConfig       `yaml:"team"`
+	Title     ModelRouteConfig `yaml:"title" json:"title"`
+	Plan      ModelRouteConfig `yaml:"plan" json:"plan"`
+	Approval  ModelRouteConfig `yaml:"approval" json:"approval"`
+	Vision    ModelRouteConfig `yaml:"vision" json:"vision"`
+	Recap     ModelRouteConfig `yaml:"recap" json:"recap"`
+	Context   ContextConfig    `yaml:"context"`
+	Subagents SubagentConfig   `yaml:"subagents"`
 }
 
 type ContextConfig struct {
-	Enabled                bool    `yaml:"enabled"`
-	SoftTriggerRatio       float64 `yaml:"soft_trigger_ratio"`
-	HardTriggerRatio       float64 `yaml:"hard_trigger_ratio"`
-	TargetRatio            float64 `yaml:"target_ratio"`
-	BackgroundPrepare      bool    `yaml:"background_prepare"`
-	SafetyMarginRatio      float64 `yaml:"safety_margin_ratio"`
-	ReserveOutputTokens    int     `yaml:"reserve_output_tokens"`
-	ReserveReasoningTokens int     `yaml:"reserve_reasoning_tokens"`
-	MinReclaimTokens       int     `yaml:"min_reclaim_tokens"`
-	MaxSummaryTokens       int     `yaml:"max_summary_tokens"`
-	LargeToolResultTokens  int     `yaml:"large_tool_result_tokens"`
-	HistoryRetrievalTokens int     `yaml:"history_retrieval_tokens"`
+	Enabled                bool `yaml:"enabled"`
+	ReserveTokens          int  `yaml:"reserve_tokens"`
+	KeepRecentTokens       int  `yaml:"keep_recent_tokens"`
+	LargeToolResultTokens  int  `yaml:"large_tool_result_tokens"`
+	HistoryRetrievalTokens int  `yaml:"history_retrieval_tokens"`
 }
 
 // ModelRouteConfig selects a provider model for a specific agent operation.
@@ -178,9 +170,9 @@ type ModelRouteConfig struct {
 
 type MainAgentConfig struct {
 	// MaxTokens optionally limits cumulative provider-reported usage for one
-	// user turn. Coding runs default to zero so context compaction, rather than
-	// cumulative token usage, governs long tasks. A positive value is checked
-	// between requests, so the final provider request can exceed it.
+	// user turn. Coding runs default to zero so deterministic context archiving,
+	// rather than cumulative token usage, governs long tasks. A positive value
+	// is checked between requests, so the final provider request can exceed it.
 	MaxTokens int64 `yaml:"max_tokens"`
 	// MaxToolCalls optionally limits tool calls in one user turn. Coding runs
 	// default to zero so they can continue until the task is complete.
@@ -357,9 +349,8 @@ func Default() Config {
 			Approval: ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
 			Recap:    ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
 			Context: ContextConfig{
-				Enabled: true, SoftTriggerRatio: .68, HardTriggerRatio: .82, TargetRatio: .45, BackgroundPrepare: true, SafetyMarginRatio: .08,
-				ReserveOutputTokens: 16384, ReserveReasoningTokens: 8192, MinReclaimTokens: 16000,
-				MaxSummaryTokens: 32768, LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
+				Enabled: true, ReserveTokens: 16384, KeepRecentTokens: 20000,
+				LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
 			},
 			Subagents: SubagentConfig{
 				Enabled: true, MaxDepth: 2, MaxConcurrency: 32, AwaitTimeout: "0s", AwaitDuration: 0, IdleTimeout: "5m", IdleDuration: DefaultSubagentIdleTimeout, AutoWake: true,
@@ -536,18 +527,12 @@ func (c *Config) Validate() error {
 	if err := validateModelRoute("agents.vision", c.Agents.Vision); err != nil {
 		return err
 	}
-	if err := validateModelRoute("agents.compaction", c.Agents.Compaction); err != nil {
-		return err
-	}
 	if err := validateModelRoute("agents.recap", c.Agents.Recap); err != nil {
 		return err
 	}
 	contextConfig := c.Agents.Context
-	if contextConfig.TargetRatio <= 0 || contextConfig.SoftTriggerRatio <= contextConfig.TargetRatio || contextConfig.HardTriggerRatio <= contextConfig.SoftTriggerRatio || contextConfig.HardTriggerRatio >= 1 || contextConfig.SafetyMarginRatio < 0 || contextConfig.SafetyMarginRatio >= 1 || contextConfig.HardTriggerRatio+contextConfig.SafetyMarginRatio > 1 {
-		return fmt.Errorf("agents.context ratios must satisfy 0 < target_ratio < soft_trigger_ratio < hard_trigger_ratio < 1 and hard_trigger_ratio+safety_margin_ratio <= 1")
-	}
-	if contextConfig.ReserveOutputTokens < 0 || contextConfig.ReserveReasoningTokens < 0 || contextConfig.MinReclaimTokens < 0 || contextConfig.MaxSummaryTokens <= 0 || contextConfig.LargeToolResultTokens <= 0 || contextConfig.HistoryRetrievalTokens <= 0 {
-		return fmt.Errorf("agents.context token limits must be non-negative and summary/tool limits positive")
+	if contextConfig.ReserveTokens <= 0 || contextConfig.KeepRecentTokens <= 0 || contextConfig.LargeToolResultTokens <= 0 || contextConfig.HistoryRetrievalTokens <= 0 {
+		return fmt.Errorf("agents.context token limits must be positive")
 	}
 	if err := c.validateSubagents(); err != nil {
 		return err

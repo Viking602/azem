@@ -26,6 +26,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 | **Multiple providers** | ChatGPT through Codex-compatible OAuth and Grok through API or CLI-proxy transport |
 | **Extensible tools** | Codex-compatible plugins, MCP servers over stdio or Streamable HTTP, plus dynamically loaded Agent Skills |
 | **Multi-agent work** | Structured team mode and resumable subagents with optional Git worktree isolation |
+| **Evidence-bound evaluation** | Deterministic durable trajectory export, revision-compatible verification records, offline route/training evaluation, and validated exact-model adapter experiments without a second live router |
 
 ## Quick Start
 
@@ -172,7 +173,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 - **Compact tool activity** summarizes file reads, searches, tests, shell commands, edits, and failures. Large patch bodies and complete file contents stay out of routine status messages.
 - **Subagent visibility** applies the same summaries and file-diff presentation when inspecting child-agent activity.
 - **Context visibility** shows startup occupancy before the first model call, then calibrates the total from provider usage. The segmented meter and `/context` breakdown separate core instructions, Skills, built-in tools, MCP tools, conversation history, and provider framing.
-- **Semantic context rebuilding** keeps a provenance-backed task state, the three most recent user turns verbatim, current Todo state, and complete tool-call groups. `/compact` and `/rebuild` use the same kernel; the Inspector shows its manifest, semantic revision, writer lag, reason, and segments.
+- **Deterministic context archiving** keeps the three most recent complete user turns verbatim, archives older complete turns as a durable source artifact, and exposes policy, canonical high-water, reason, segments, and archive metadata in the Inspector. `/compact` and `/rebuild` use the same host kernel.
 
 ## How It Works
 
@@ -212,7 +213,7 @@ azem --version
 | `-config` | Load a specific YAML configuration file |
 | `--version` | Print the version, current Git short hash, and UTC build time |
 
-Without `-config`, Azem reads `azem/config.yaml` from the operating system's user configuration directory. If the file does not exist, built-in defaults are used.
+Without `-config`, Azem reads `~/.azem/config.yaml`. If the file does not exist, built-in defaults are used. `AZEM_HOME` overrides that directory.
 
 ### Keyboard shortcuts
 
@@ -237,7 +238,7 @@ Without `-config`, Azem reads `azem/config.yaml` from the operating system's use
 |---|---|
 | `/settings` | Configure the plan model, Codex Fast mode, subagent models, concurrency, and interface preferences |
 | `/models` | Search for and select a model |
-| `/model-routing` | Configure models for plan mode, compaction, and each subagent role |
+| `/model-routing` | Configure models for titles, plan mode, approvals, vision fallback, recaps, and each subagent role |
 | `/provider [chatgpt\|grok]` | Switch providers |
 | `/reasoning [level]` | Set reasoning effort |
 | `/login [provider]` | Sign in or import provider credentials |
@@ -252,8 +253,8 @@ Without `-config`, Azem reads `azem/config.yaml` from the operating system's use
 | `/new` | Create a new session |
 | `/sessions` | List saved sessions |
 | `/resume` | Resume a saved session |
-| `/compact` | Compact the current session context |
-| `/rebuild` | Immediately rebuild context with the semantic compaction kernel |
+| `/compact` | Archive older context with the deterministic host kernel |
+| `/rebuild` | Immediately rebuild context with the same deterministic archive path |
 | `/memory [query]` | Search workspace-native memory |
 | `/remember <text>` | Save explicit evidence to workspace memory |
 | `/forget <memory-id>` | Remove one workspace memory |
@@ -377,11 +378,6 @@ agents:
     provider: ""
     model: ""
     reasoning: ""
-  compaction:
-    # Empty provider/model inherit the active model; empty reasoning uses low.
-    provider: ""
-    model: ""
-    reasoning: ""
   recap:
     # Lightweight model used after each successful turn for the right-sidebar recap.
     provider: chatgpt
@@ -389,15 +385,8 @@ agents:
     reasoning: low
   context:
     enabled: true
-    background_prepare: true
-    soft_trigger_ratio: 0.68
-    hard_trigger_ratio: 0.82
-    target_ratio: 0.45
-    safety_margin_ratio: 0.08
-    reserve_output_tokens: 16384
-    reserve_reasoning_tokens: 8192
-    min_reclaim_tokens: 16000
-    max_summary_tokens: 32768
+    reserve_tokens: 16384       # fixed headroom kept for the next model output
+    keep_recent_tokens: 20000   # preferred hot-tail floor; latest 3 user turns are always preserved
     large_tool_result_tokens: 12000
     history_retrieval_tokens: 4096 # private, session-scoped SQLite FTS evidence budget
   subagents:
@@ -539,18 +528,22 @@ Remote MCP URLs must use HTTPS. Plain HTTP is accepted only for localhost or loo
 
 ## Data and Credentials
 
-Azem follows operating-system user-directory conventions and creates an `azem` subdirectory:
+Azem keeps configuration, the database, plugins, blobs, and runtime state in
+one home directory:
 
 | Data | Location |
 |---|---|
-| Configuration | `azem/config.yaml` under the user configuration directory |
-| Database | `azem/azem.db` under the user configuration directory |
-| Runtime state | `azem/` under the user cache or state directory |
-| Plugin packages | `azem/plugin-packages/` under the user data directory |
+| Home | `~/.azem`, or `$AZEM_HOME` |
+| Configuration | `config.yaml` in that home |
+| Database | `azem.db` in that home |
+| Large payloads | `blobs/` in that home |
+| Plugin packages | `plugin-packages/` in that home |
+| Runtime state | `azem.log`, window state, and hook transcripts in that home |
 
-On Linux, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` override the corresponding base directories.
-On Windows, configuration and the database live under `%AppData%\azem`, while
-runtime state and logs use the operating-system cache directory.
+Existing files in `~/.config/azem`, the platform Application Support or
+`~/.local/share/azem` data directory, and the platform cache directory are
+moved into `~/.azem` on the first launch that uses the default home. Quit
+every Azem process before that migration. `AZEM_HOME` skips it.
 
 Credentials can be stored in SQLite, the system keyring, or a permission-restricted JSON file. SQLite and file storage rely on filesystem permissions and do not provide application-level encryption at rest. Use the system keyring when stronger local credential protection is required.
 
@@ -596,6 +589,7 @@ internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/mcp/           MCP connection and tool management
 internal/provider/      ChatGPT/Codex, Grok, llmux drivers, and model catalogs
 internal/recovery/      Crash recovery and side-effect reconciliation
+internal/blobstore/     Content-addressed files for large payloads
 internal/session/       Session persistence and compaction
 internal/skills/        Agent Skills discovery and activation
 internal/store/sqlite/  SQLite schema and storage implementation

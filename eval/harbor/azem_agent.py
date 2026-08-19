@@ -1,6 +1,7 @@
 """Harbor installed-agent adapter for Azem Terminal-Bench runs."""
 
 from __future__ import annotations
+import asyncio
 
 import fcntl
 import os
@@ -15,12 +16,21 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from eval.harbor.timeouts import (
+    azem_eval_command,
+    cleanup_timeout_sec,
+    is_eval_timeout_error,
+    resolve_agent_timeout_sec,
+    split_timeouts,
+    work_timeout_sec,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOST_EVAL = REPO_ROOT / "dist" / "eval" / "azem-eval"
 REMOTE_BIN = "/installed-agent/azem-eval"
-REMOTE_XDG = "/installed-agent/xdg"
-REMOTE_AUTH = f"{REMOTE_XDG}/azem/azem.db"
-REMOTE_CONFIG = f"{REMOTE_XDG}/azem/config.yaml"
+REMOTE_HOME = "/installed-agent/.azem"
+REMOTE_AUTH = f"{REMOTE_HOME}/azem.db"
+REMOTE_CONFIG = f"{REMOTE_HOME}/config.yaml"
 REMOTE_PROMPT = "/installed-agent/instruction.md"
 REMOTE_CA = "/installed-agent/cacert.pem"
 HOST_CA_CANDIDATES = (
@@ -39,6 +49,21 @@ _AUTH_LOCK = threading.Lock()
 
 class Azem(BaseInstalledAgent):
     """Installs a Linux azem-eval binary and runs one YOLO turn."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._explicit_timeout_sec = next(
+            (
+                value
+                for value in (
+                    kwargs.pop("timeout_sec", None),
+                    kwargs.pop("agent_timeout_sec", None),
+                    kwargs.pop("timeout", None),
+                )
+                if value is not None
+            ),
+            None,
+        )
+        super().__init__(*args, **kwargs)
 
     @staticmethod
     def name() -> str:
@@ -59,7 +84,7 @@ class Azem(BaseInstalledAgent):
         await self.exec_as_root(environment, command=f"chmod 755 {shlex.quote(REMOTE_BIN)}")
         await self.exec_as_root(
             environment,
-            command=f"mkdir -p {shlex.quote(REMOTE_XDG + '/azem')}",
+            command=f"mkdir -p {shlex.quote(REMOTE_HOME)}",
         )
         await self._install_ca_bundle(environment)
         auth = self._prepare_host_auth()
@@ -79,46 +104,106 @@ class Azem(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        budget_sec = resolve_agent_timeout_sec(
+            logs_dir=self.logs_dir,
+            explicit=self._explicit_timeout_sec,
+            environ=os.environ,
+        )
         provider, model = self._provider_and_model()
-        await self._upload_config_text(
-            environment,
-            content=instruction,
-            remote_path=REMOTE_PROMPT,
-            filename="instruction.md",
-        )
-        env = {
-            "XDG_CONFIG_HOME": REMOTE_XDG,
-            "XDG_DATA_HOME": REMOTE_XDG,
-            "XDG_STATE_HOME": REMOTE_XDG,
-            "HOME": "/installed-agent",
-            "SSL_CERT_FILE": REMOTE_CA,
-            "SSL_CERT_DIR": "/etc/ssl/certs",
-            "CURL_CA_BUNDLE": REMOTE_CA,
-            "REQUESTS_CA_BUNDLE": REMOTE_CA,
-            "GIT_SSL_CAINFO": REMOTE_CA,
+        eval_timeout_sec = None
+        exec_timeout_sec = None
+        metadata = {
+            "agent": "azem",
+            "provider": provider,
+            "model": model,
+            "timeout_sec": budget_sec,
+            "eval_timeout_sec": eval_timeout_sec,
         }
-        command = (
-            f"{shlex.quote(REMOTE_BIN)} "
-            f"--workspace . "
-            f"--config {shlex.quote(REMOTE_CONFIG)} "
-            f"--prompt-file {shlex.quote(REMOTE_PROMPT)} "
-            f"--provider {shlex.quote(provider)} "
-            f"--model {shlex.quote(model)} "
-            f"--reasoning {shlex.quote(os.environ.get('AZEM_EVAL_REASONING', 'high'))} "
-            f"--timeout 0 "
-            f"--print-events"
-        )
+
+        async def execute_turn():
+            nonlocal eval_timeout_sec, exec_timeout_sec, metadata
+            await self._upload_config_text(
+                environment,
+                content=instruction,
+                remote_path=REMOTE_PROMPT,
+                filename="instruction.md",
+            )
+            if budget_sec is not None:
+                remaining_sec = budget_sec - (loop.time() - started_at)
+                eval_timeout_sec, exec_timeout_sec = split_timeouts(remaining_sec)
+            command = azem_eval_command(
+                binary=REMOTE_BIN,
+                config=REMOTE_CONFIG,
+                prompt=REMOTE_PROMPT,
+                provider=provider,
+                model=model,
+                reasoning=os.environ.get("AZEM_EVAL_REASONING", "high"),
+                timeout_sec=eval_timeout_sec,
+            )
+            metadata = {
+                **metadata,
+                "eval_timeout_sec": eval_timeout_sec,
+            }
+            return await self.exec_as_agent(
+                environment,
+                command=command,
+                env={
+                    "HOME": "/installed-agent",
+                    "AZEM_HOME": REMOTE_HOME,
+                    "SSL_CERT_FILE": REMOTE_CA,
+                    "SSL_CERT_DIR": "/etc/ssl/certs",
+                    "CURL_CA_BUNDLE": REMOTE_CA,
+                    "REQUESTS_CA_BUNDLE": REMOTE_CA,
+                    "GIT_SSL_CAINFO": REMOTE_CA,
+                },
+                timeout_sec=exec_timeout_sec,
+            )
+
         try:
-            result = await self.exec_as_agent(environment, command=command, env=env)
+            if budget_sec is None:
+                result = await execute_turn()
+            else:
+                result = await asyncio.wait_for(
+                    execute_turn(),
+                    timeout=work_timeout_sec(budget_sec),
+                )
             context.metadata = {
-                "agent": "azem",
-                "provider": provider,
-                "model": model,
+                **metadata,
+                "status": "ok",
                 "stdout_tail": (result.stdout or "")[-2000:],
             }
+        except asyncio.TimeoutError:
+            context.metadata = {
+                **metadata,
+                "status": "timeout",
+                "error": "agent execution timed out before Harbor deadline",
+            }
+        except Exception as exc:
+            if not is_eval_timeout_error(exc):
+                raise
+            context.metadata = {
+                **metadata,
+                "status": "timeout",
+                "error": str(exc)[-2000:],
+            }
         finally:
-            await self._sync_remote_auth(environment)
-
+            if budget_sec is None:
+                await self._sync_remote_auth(environment)
+            else:
+                sync_timeout = cleanup_timeout_sec(
+                    budget_sec,
+                    loop.time() - started_at,
+                )
+                if sync_timeout > 0:
+                    try:
+                        await asyncio.wait_for(
+                            self._sync_remote_auth(environment),
+                            timeout=sync_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
     async def _install_ca_bundle(self, environment: BaseEnvironment) -> None:
         host = host_ca_bundle()
         if host is None:
@@ -150,7 +235,7 @@ class Azem(BaseInstalledAgent):
             if dest is None:
                 return None
             with self._auth_file_lock(dest):
-                source = Path.home() / ".config" / "azem" / "azem.db"
+                source = host_desktop_db()
                 if source.is_file() and dest.is_file():
                     self._run_host_eval(
                         ["--sync-auth-from", str(source), "--sync-auth-to", str(dest)],
@@ -189,7 +274,7 @@ class Azem(BaseInstalledAgent):
                         ["--sync-auth-from", str(local), "--sync-auth-to", str(dest)],
                         check=False,
                     )
-                    source = Path.home() / ".config" / "azem" / "azem.db"
+                    source = host_desktop_db()
                     if source.is_file():
                         self._run_host_eval(
                             ["--sync-auth-from", str(local), "--sync-auth-to", str(source)],
@@ -221,6 +306,14 @@ class Azem(BaseInstalledAgent):
         handle = open(lock_path, "a+")
         fcntl.flock(handle, fcntl.LOCK_EX)
         return _close_lock(handle)
+
+
+def host_desktop_db() -> Path:
+    home = Path.home()
+    for candidate in (home / ".azem" / "azem.db", home / ".config" / "azem" / "azem.db"):
+        if candidate.is_file():
+            return candidate
+    return home / ".azem" / "azem.db"
 
 
 def host_ca_bundle() -> Path | None:

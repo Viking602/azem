@@ -71,7 +71,7 @@ func TestDurableToolTimelineCapturesCompletedReadObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Timeline"}); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestShellArtifactSinkPersistsAfterExecutionCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Shell artifact"}); err != nil {
 		t.Fatal(err)
 	}
@@ -650,6 +650,72 @@ func TestAutoReviewDenyFallsBackToUserWhileMalformedFailureStaysClosed(t *testin
 	}
 }
 
+func TestAutoReviewAppliesCodexMatrixToMediumDenials(t *testing.T) {
+	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writeAutomaticReview(writer, `{"risk_level":"medium","user_authorization":"unknown","outcome":"deny","rationale":"user did not name this exact file"}`, true)
+	})
+	call := tool.Call{ID: "medium-1", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"notes.txt"}`)}
+	pending := prepareAutomaticApproval(t, harness, call)
+	resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+	if err != nil || resolution.Mode != agentservice.ApprovalOnce || resolution.NeedsUserApproval {
+		t.Fatalf("medium denial should auto-allow: %+v error=%v", resolution, err)
+	}
+	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved)
+	if resolved.State != "auto_approved" || resolved.Data["risk"] != "medium" {
+		t.Fatalf("resolved event=%+v", resolved)
+	}
+}
+
+func TestAutoReviewAllowsLowRiskShellWithoutModel(t *testing.T) {
+	var reviews atomic.Int32
+	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, _ *http.Request) {
+		reviews.Add(1)
+		t.Error("low-risk shell must not call the approval model")
+		writeAutomaticReview(writer, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"should not run"}`, true)
+	})
+	writeCall := tool.Call{ID: "shell-low", Name: "test.auto_write", Arguments: json.RawMessage(`{"command":"go test ./internal/agent"}`)}
+	pending := prepareAutomaticApproval(t, harness, writeCall)
+	call := writeCall
+	call.Name = agentservice.ToolShell
+	resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+	if err != nil || resolution.Mode != agentservice.ApprovalOnce || resolution.NeedsUserApproval {
+		t.Fatalf("low-risk shell resolution=%+v error=%v", resolution, err)
+	}
+	if reviews.Load() != 0 {
+		t.Fatalf("approval model calls=%d, want 0", reviews.Load())
+	}
+	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved)
+	if resolved.State != "auto_approved" || resolved.Data["risk"] != "low" || resolved.Data["reviewer"] != "host:guardian-policy" {
+		t.Fatalf("resolved event=%+v", resolved)
+	}
+}
+
+func TestAutoReviewAllowsRequestedGitPush(t *testing.T) {
+	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, _ *http.Request) {
+		writeAutomaticReview(writer, `{"risk_level":"high","user_authorization":"unknown","outcome":"deny","rationale":"network command needs confirmation"}`, true)
+	})
+	run, err := harness.coding.StartRun(context.Background(), "帮我提交代码并推送")
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.run = run
+	writeCall := tool.Call{ID: "push-1", Name: "test.auto_write", Arguments: json.RawMessage(`{"command":"git push origin HEAD"}`)}
+	pending := prepareAutomaticApproval(t, harness, writeCall)
+	call := writeCall
+	call.Name = agentservice.ToolShell
+	resolution, err := harness.host.awaitApproval(context.Background(), "session", "agent-1", "main", harness.run, call, pending)
+	if err != nil || resolution.Mode != agentservice.ApprovalOnce || resolution.NeedsUserApproval {
+		t.Fatalf("requested git push should auto-allow: %+v error=%v", resolution, err)
+	}
+	_ = nextApprovalEvent(t, harness.host, EventApprovalRequested)
+	resolved := nextApprovalEvent(t, harness.host, EventApprovalResolved)
+	if resolved.State != "auto_approved" || resolved.Data["user_authorization"] != "high" {
+		t.Fatalf("resolved event=%+v", resolved)
+	}
+}
+
 func TestAutoReviewTimeoutFallsBackToUserApproval(t *testing.T) {
 	var modelsMu sync.Mutex
 	var models []string
@@ -1028,7 +1094,7 @@ func newAutoReviewHarness(t *testing.T, handler http.HandlerFunc) autoReviewHarn
 	}
 	runtime.ChatGPTEndpoint = server.URL
 	host := NewService(ctx, cfg)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session"}); err != nil {
 		t.Fatal(err)
 	}

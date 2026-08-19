@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +24,7 @@ func TestUpdateLatestBlockStateTargetsNewestMatchingProposal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +56,7 @@ func TestPhase3ArtifactRoundTripAfterReopenAndDeduplicates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +80,7 @@ func TestPhase3ArtifactRoundTripAfterReopenAndDeduplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	loaded, err := NewService(store.DB()).LoadArtifact(ctx, "session", first.ID)
+	loaded, err := NewService(store.DB(), store.Blobs()).LoadArtifact(ctx, "session", first.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +93,33 @@ func TestPhase3ArtifactRoundTripAfterReopenAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestLoadArtifactRejectsTamperedCatalogIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB(), store.Blobs())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := service.PutArtifact(ctx, "session", "run", "context_archive_source_v1", []byte("source"), "preview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDigest, err := store.Blobs().Put(ctx, []byte("tampered"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE context_artifacts SET sha256=? WHERE id=?`, otherDigest, artifact.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.LoadArtifact(ctx, "session", artifact.ID); err == nil || !strings.Contains(err.Error(), "failed identity check") {
+		t.Fatalf("tampered artifact load error = %v", err)
+	}
+}
+
 func TestPhase6SearchHistoryIsolationSafetyBudgetsAndProvenance(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "history.db")
@@ -99,7 +127,7 @@ func TestPhase6SearchHistoryIsolationSafetyBudgetsAndProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	for _, id := range []string{"one", "two"} {
 		if _, err := service.Ensure(ctx, Session{ID: id, Title: id}); err != nil {
 			t.Fatal(err)
@@ -120,6 +148,9 @@ func TestPhase6SearchHistoryIsolationSafetyBudgetsAndProvenance(t *testing.T) {
 	}
 	artifact, err := service.PutArtifact(ctx, "one", "run", "tool_result", bytes.Repeat([]byte("SECRET"), 1000), "needle artifact preview")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PutArtifact(ctx, "one", "run", InternalArtifactKindPrefix+"work_spec_v1:test", []byte(`{"goal":"needle private control"}`), "needle private control"); err != nil {
 		t.Fatal(err)
 	}
 	items, err := service.SearchHistory(ctx, "one", `needle " OR ( ) : * -`, 1000, 4096, 4096)
@@ -169,7 +200,7 @@ func TestPhase6SearchHistoryIsolationSafetyBudgetsAndProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	if reopened, err := NewService(store.DB()).SearchHistory(ctx, "one", "needle", 8, 4096, 4096); err != nil || len(reopened) != 2 {
+	if reopened, err := NewService(store.DB(), store.Blobs()).SearchHistory(ctx, "one", "needle", 8, 4096, 4096); err != nil || len(reopened) != 2 {
 		t.Fatalf("reopened search=%+v err=%v", reopened, err)
 	}
 }
@@ -181,7 +212,7 @@ func TestSearchSessionsFindsTitlesAndBoundedCanonicalMessageSnippets(t *testing.
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	workspace := t.TempDir()
 	workspace, err = filepath.EvalSymlinks(workspace)
 	if err != nil {
@@ -239,7 +270,7 @@ func BenchmarkSearchSessionsFTS(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Cleanup(func() { _ = store.Close(ctx) })
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	now := time.Now().UTC().UnixNano()
 	tx, err := store.DB().BeginTx(ctx, nil)
 	if err != nil {
@@ -274,7 +305,7 @@ func TestPhase6HistoryTriggersUpdateDeleteAndSessionCascade(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "s"}); err != nil {
 		t.Fatal(err)
 	}
@@ -309,14 +340,14 @@ func TestPhase6HistoryTriggersUpdateDeleteAndSessionCascade(t *testing.T) {
 	}
 }
 
-func TestCompactWithSummaryPersistsMatchingModelHistory(t *testing.T) {
+func TestActivateArchiveCheckpointPersistsHistoryWithoutRewritingTranscript(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "summary.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model"}); err != nil {
 		t.Fatal(err)
 	}
@@ -342,31 +373,37 @@ func TestCompactWithSummaryPersistsMatchingModelHistory(t *testing.T) {
 	if err := store.DB().QueryRowContext(ctx, `SELECT json_group_array(json_object('sequence',sequence,'data',hex(data))) FROM session_blocks WHERE session_id='session' ORDER BY sequence`).Scan(&rowsBefore); err != nil {
 		t.Fatal(err)
 	}
-	projection, err := service.CompactWithSummary(ctx, "session", CompactionPlan{
-		Summary: summary, ModelHistory: history, ExpectedUpdatedAt: before.UpdatedAt, TailStart: 4,
+	highWater := before.Blocks[len(before.Blocks)-1].Sequence
+	manifest := &ContextManifestRecord{
+		ID: "context-archive", RunID: "manual-compaction", CanonicalHighWater: &highWater,
+		PolicyVersion: 3, ManifestHash: "archive-hash",
+		Data: json.RawMessage(`{"id":"context-archive","policy_version":3,"manifest_hash":"archive-hash"}`),
+	}
+	projection, err := service.ActivateArchiveCheckpoint(ctx, "session", ArchivePlan{
+		ModelHistory: history, ExpectedUpdatedAt: before.UpdatedAt, ExpectedHighWater: &highWater, Manifest: manifest,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(projection.Blocks) != 8 || projection.Blocks[0].Content != "message 0" {
-		t.Fatalf("compacted blocks = %#v", projection.Blocks)
+		t.Fatalf("archived blocks = %#v", projection.Blocks)
 	}
 	if projection.ModelHistory.ProviderID != "chatgpt" || len(projection.ModelHistory.Messages) != 2 {
-		t.Fatalf("compacted model history = %#v", projection.ModelHistory)
+		t.Fatalf("archived model history = %#v", projection.ModelHistory)
 	}
 	var rowsAfter string
 	if err := store.DB().QueryRowContext(ctx, `SELECT json_group_array(json_object('sequence',sequence,'data',hex(data))) FROM session_blocks WHERE session_id='session' ORDER BY sequence`).Scan(&rowsAfter); err != nil {
 		t.Fatal(err)
 	}
 	if rowsAfter != rowsBefore {
-		t.Fatalf("manual compaction rewrote session blocks\nbefore=%s\nafter=%s", rowsBefore, rowsAfter)
+		t.Fatalf("manual archive rewrote session blocks\nbefore=%s\nafter=%s", rowsBefore, rowsAfter)
 	}
 	reloaded, err := service.LoadProjection(ctx, "session")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reloaded.Blocks[0].Content != "message 0" || reloaded.ModelHistory.InstructionFingerprint != "fingerprint" {
-		t.Fatalf("reloaded compaction = %#v %#v", reloaded.Blocks, reloaded.ModelHistory)
+		t.Fatalf("reloaded archive = %#v %#v", reloaded.Blocks, reloaded.ModelHistory)
 	}
 }
 
@@ -377,7 +414,7 @@ func TestSaveRunCheckpointPersistsHistoryWithoutCompletingTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -439,8 +476,8 @@ func TestSaveRunCheckpointPersistsHistoryWithoutCompletingTurn(t *testing.T) {
 	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run-1", Content: "late guidance", State: "guidance"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
-		t.Fatalf("checkpoint with uncovered same-run guidance: %v", err)
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); !errors.Is(err, ErrRunCheckpointStale) {
+		t.Fatalf("checkpoint with uncovered same-run guidance error = %v", err)
 	}
 	afterStaleReplay, err := service.LoadProjection(ctx, "session")
 	if err != nil {
@@ -458,179 +495,37 @@ func TestSaveRunCheckpointPersistsHistoryWithoutCompletingTurn(t *testing.T) {
 	}
 }
 
-func TestRunCheckpointCommitsSemanticStateAndManifestAtomically(t *testing.T) {
+func TestSaveRunCheckpointRejectsCanonicalTailAppendedAfterPreparation(t *testing.T) {
 	ctx := context.Background()
-	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "semantic-checkpoint.db"))
+	store, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
-	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Semantic"}); err != nil {
+	service := NewService(store.DB(), store.Blobs())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
 		t.Fatal(err)
 	}
-	sequence, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "ship it"})
+	preparedThrough, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "original"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := json.RawMessage(`{"version":1,"objective":{"text":"ship it"}}`)
-	digest := strings.Repeat("a", 64)
-	cursor := WriterCursorV1{CanonicalSequence: sequence}
-	patch, err := json.Marshal(map[string]any{
-		"version": 1, "base_revision": 0, "through": cursor, "source_digest": digest, "operations": []any{},
-	})
-	if err != nil {
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "late guidance"}); err != nil {
 		t.Fatal(err)
 	}
-	manifestHash := strings.Repeat("b", 64)
-	manifestData := json.RawMessage(fmt.Sprintf(`{"version":1,"id":"manifest-1","semantic_revision":1,"policy_version":1,"manifest_hash":"%s"}`, manifestHash))
-	highWater := sequence
 	checkpoint := RunCheckpoint{
-		RunID: "run", CacheIdentity: "cache-v2", ExpectedHighWater: &sequence,
-		ModelHistory: ModelHistory{Messages: []message.Message{message.NewText(message.RoleAssistant, "semantic state")}},
-		SemanticCommit: &SemanticCommit{
-			CheckpointID: "semantic-1", BaseRevision: 0, Cursor: cursor,
-			State: state, Patch: patch, SourceDigest: digest,
-		},
-		Manifest: &ContextManifestRecord{
-			ID: "manifest-1", RunID: "run", CanonicalHighWater: &highWater, SemanticRevision: 1,
-			PolicyVersion: 1, ManifestHash: manifestHash, Data: manifestData,
-		},
+		RunID: "run", CacheIdentity: "stale-cache", ExpectedHighWater: &preparedThrough,
+		ModelHistory: ModelHistory{Messages: []message.Message{message.NewText(message.RoleAssistant, "omits late guidance")}},
 	}
-	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
-		t.Fatal(err)
-	}
-	assertSemanticCheckpointPersisted(t, ctx, service, checkpoint, state, digest, sequence)
-	assertStaleSemanticCheckpointRejected(t, ctx, service, checkpoint, state, cursor, digest)
-}
-
-func assertSemanticCheckpointPersisted(t *testing.T, ctx context.Context, service *Service, checkpoint RunCheckpoint, state json.RawMessage, digest string, sequence int64) {
-	t.Helper()
-	assertSemanticState(t, ctx, service, state, digest, sequence)
-	assertSemanticEvent(t, ctx, service, digest)
-	assertSemanticManifest(t, ctx, service)
-	assertSemanticProjection(t, ctx, service, checkpoint)
-}
-
-func assertSemanticState(t *testing.T, ctx context.Context, service *Service, state json.RawMessage, digest string, sequence int64) {
-	t.Helper()
-	semantic, err := service.LoadSemanticCheckpoint(ctx, "session")
-	if err != nil || semantic.Revision != 1 || semantic.ID != "semantic-1" || semantic.Cursor.CanonicalSequence != sequence || !bytes.Equal(semantic.State, state) {
-		t.Fatalf("semantic checkpoint=%+v err=%v", semantic, err)
-	}
-}
-
-func assertSemanticEvent(t *testing.T, ctx context.Context, service *Service, digest string) {
-	t.Helper()
-	events, err := service.ListSemanticStateEvents(ctx, "session")
-	if err != nil || len(events) != 1 || events[0].SourceDigest != digest {
-		t.Fatalf("semantic events=%+v err=%v", events, err)
-	}
-}
-
-func assertSemanticManifest(t *testing.T, ctx context.Context, service *Service) {
-	t.Helper()
-	manifest, err := service.LoadActiveContextManifest(ctx, "session")
-	if err != nil || manifest.ID != "manifest-1" || manifest.SemanticRevision != 1 {
-		t.Fatalf("active manifest=%+v err=%v", manifest, err)
-	}
-}
-
-func assertSemanticProjection(t *testing.T, ctx context.Context, service *Service, checkpoint RunCheckpoint) {
-	t.Helper()
-	projection, err := service.LoadProjection(ctx, "session")
-	if err != nil || projection.ModelHistory.WireVersion != CurrentWireVersion || projection.ModelHistory.ContextManifestHash != checkpoint.Manifest.ManifestHash || projection.ModelHistory.SemanticRevision != 1 {
-		t.Fatalf("model history=%+v err=%v", projection.ModelHistory, err)
-	}
-}
-
-func assertStaleSemanticCheckpointRejected(t *testing.T, ctx context.Context, service *Service, checkpoint RunCheckpoint, state json.RawMessage, cursor WriterCursorV1, digest string) {
-	t.Helper()
-	stale := checkpoint
-	stale.CacheIdentity = "cache-stale"
-	staleDigest := strings.Repeat("c", 64)
-	stalePatch, err := json.Marshal(map[string]any{
-		"version": 1, "base_revision": 0, "through": cursor, "source_digest": staleDigest, "operations": []any{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stale.SemanticCommit = &SemanticCommit{CheckpointID: "semantic-stale", BaseRevision: 0, Cursor: cursor, State: state, Patch: stalePatch, SourceDigest: staleDigest}
-	if err := service.SaveRunCheckpoint(ctx, "session", stale); !errors.Is(err, ErrRunCheckpointStale) {
-		t.Fatalf("stale semantic commit error=%v", err)
-	}
-	unchanged, err := service.LoadSemanticCheckpoint(ctx, "session")
-	if err != nil || unchanged.Revision != 1 || unchanged.SourceDigest != digest {
-		t.Fatalf("stale commit mutated state=%+v err=%v", unchanged, err)
-	}
-}
-
-func TestRunCheckpointRejectsDivergentSemanticStateForSameSourceDigest(t *testing.T) {
-	ctx := context.Background()
-	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "semantic-divergent.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close(ctx)
-	service := NewService(store.DB())
-	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Semantic"}); err != nil {
-		t.Fatal(err)
-	}
-	sequence, err := service.AppendBlock(ctx, "session", Block{Kind: "user", RunID: "run", Content: "ship it"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := strings.Repeat("d", 64)
-	cursor := WriterCursorV1{CanonicalSequence: sequence}
-	checkpoint := semanticCheckpointForTest(t, "run", "cache-a", "semantic-a", 0, cursor, digest, `{"version":1,"objective":{"text":"A"}}`, "model A")
-	checkpoint.ExpectedHighWater = &sequence
-	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); err != nil {
-		t.Fatal(err)
-	}
-
-	divergent := semanticCheckpointForTest(t, "run", "cache-b", "semantic-b", 0, cursor, digest, `{"version":1,"objective":{"text":"B"}}`, "model B")
-	divergent.ExpectedHighWater = &sequence
-	if err := service.SaveRunCheckpoint(ctx, "session", divergent); !errors.Is(err, ErrRunCheckpointStale) {
-		t.Fatalf("divergent semantic commit error=%v", err)
+	if err := service.SaveRunCheckpoint(ctx, "session", checkpoint); !errors.Is(err, ErrRunCheckpointStale) {
+		t.Fatalf("stale checkpoint error = %v", err)
 	}
 	projection, err := service.LoadProjection(ctx, "session")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if projection.CacheIdentityHash != "cache-a" || len(projection.ModelHistory.Messages) != 1 || projection.ModelHistory.Messages[0].Text != "model A" {
-		t.Fatalf("divergent checkpoint mutated projection: %+v", projection.ModelHistory)
-	}
-	semantic, err := service.LoadSemanticCheckpoint(ctx, "session")
-	if err != nil || !bytes.Contains(semantic.State, []byte(`"A"`)) {
-		t.Fatalf("semantic checkpoint=%+v err=%v", semantic, err)
-	}
-}
-
-func semanticCheckpointForTest(t *testing.T, runID, cacheIdentity, checkpointID string, baseRevision int64, cursor WriterCursorV1, digest, state, modelText string) RunCheckpoint {
-	t.Helper()
-	patch, err := json.Marshal(map[string]any{
-		"version": 1, "base_revision": baseRevision, "through": cursor, "source_digest": digest, "operations": []any{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return RunCheckpoint{
-		RunID: runID, CacheIdentity: cacheIdentity,
-		ModelHistory: ModelHistory{Messages: []message.Message{message.NewText(message.RoleAssistant, modelText)}},
-		SemanticCommit: &SemanticCommit{
-			CheckpointID: checkpointID, BaseRevision: baseRevision, Cursor: cursor,
-			State: json.RawMessage(state), Patch: patch, SourceDigest: digest,
-		},
-	}
-}
-
-func TestWriterCursorRejectsBackwardTieBreakers(t *testing.T) {
-	current := WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-b", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-b"}
-	if cursorAtOrAfter(WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-a", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-b"}, current) {
-		t.Fatal("tool cursor accepted a lexicographically older tie")
-	}
-	if cursorAtOrAfter(WriterCursorV1{CanonicalSequence: 4, TodoRevision: 2, ToolCompletedAtNS: 10, ToolRunID: "run-b", ToolCallID: "call", SubagentFinishedAtNS: 20, SubagentID: "agent-a"}, current) {
-		t.Fatal("subagent cursor accepted a lexicographically older tie")
+	if len(projection.ModelHistory.Messages) != 0 || projection.CacheIdentityHash != "" {
+		t.Fatalf("stale checkpoint mutated projection: %+v", projection)
 	}
 }
 
@@ -641,7 +536,7 @@ func TestCompleteTurnRejectsOlderRunAfterNewerRunCompleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -679,7 +574,7 @@ func TestCompleteTurnPersistsModelHistoryWithoutEmptyAssistantBlock(t *testing.T
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +604,7 @@ func TestCompleteTurnPersistsReasoningBeforeAssistant(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Reasoning"}); err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +648,7 @@ func TestUpsertAgentBlockPreservesLifecyclePosition(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model", Reasoning: "high", AgentMode: "single"}); err != nil {
 		t.Fatal(err)
 	}
@@ -793,67 +688,6 @@ func TestUpsertAgentBlockPreservesLifecyclePosition(t *testing.T) {
 	}
 }
 
-func TestAgentBlockUpsertAfterCompactionDoesNotDuplicate(t *testing.T) {
-	ctx := context.Background()
-	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "agent-compaction.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close(ctx)
-	service := NewService(store.DB())
-	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model", Reasoning: "high", AgentMode: "single"}); err != nil {
-		t.Fatal(err)
-	}
-	agent := Block{
-		Kind: "agent", RunID: "parent", AgentID: "child", ParentToolCallID: "spawn-call",
-		Title: "explore", Content: "running", State: "running",
-	}
-	if err := service.UpsertAgentBlock(ctx, "session", agent.AgentID, agent); err != nil {
-		t.Fatal(err)
-	}
-	for index := range 6 {
-		if _, err := service.AppendBlock(ctx, "session", Block{
-			Kind: "assistant", RunID: fmt.Sprintf("run-%d", index), Content: fmt.Sprintf("message %d", index),
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	before, err := service.LoadProjection(ctx, "session")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.CompactWithSummary(ctx, "session", CompactionPlan{
-		Summary: "model-generated summary", ExpectedUpdatedAt: before.UpdatedAt, TailStart: 3,
-		ModelHistory: ModelHistory{ProviderID: "chatgpt", ModelID: "model"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	agent.Content = "done"
-	agent.State = "completed"
-	if err := service.UpsertAgentBlock(ctx, "session", agent.AgentID, agent); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.UpsertAgentBlock(ctx, "session", agent.AgentID, agent); err != nil {
-		t.Fatal(err)
-	}
-	projection, err := service.LoadProjection(ctx, "session")
-	if err != nil {
-		t.Fatal(err)
-	}
-	count := 0
-	for _, block := range projection.Blocks {
-		if block.Kind == "agent" && block.AgentID == agent.AgentID {
-			count++
-			if block.State != "completed" || block.Content != "done" {
-				t.Fatalf("reloaded agent block = %#v", block)
-			}
-		}
-	}
-	if count != 1 {
-		t.Fatalf("agent block count after compaction = %d: %#v", count, projection.Blocks)
-	}
-}
-
 func TestCompleteTurnStoresAssistantBlockAndModelHistoryTogether(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "completion.db"))
@@ -861,7 +695,7 @@ func TestCompleteTurnStoresAssistantBlockAndModelHistoryTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model"}); err != nil {
 		t.Fatal(err)
 	}
@@ -908,7 +742,7 @@ func TestCompactWithSummaryRejectsStaleProjectionWithoutMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -924,8 +758,13 @@ func TestCompactWithSummaryRejectsStaleProjectionWithoutMutation(t *testing.T) {
 	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "assistant", Content: "concurrent update"}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.CompactWithSummary(ctx, "session", CompactionPlan{
-		Summary: "stale summary", ExpectedUpdatedAt: stale.UpdatedAt, TailStart: 2,
+	manifest := &ContextManifestRecord{
+		ID: "stale-archive", PolicyVersion: 3, ManifestHash: "stale-hash",
+		Data: json.RawMessage(`{"id":"stale-archive","policy_version":3,"manifest_hash":"stale-hash"}`),
+	}
+	_, err = service.ActivateArchiveCheckpoint(ctx, "session", ArchivePlan{
+		ExpectedUpdatedAt: stale.UpdatedAt, Manifest: manifest,
+		ModelHistory: ModelHistory{Messages: []message.Message{message.NewText(message.RoleAssistant, "stale archive")}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "projection changed") {
 		t.Fatalf("stale compaction error = %v", err)
@@ -946,7 +785,7 @@ func TestSessionBlocksUseRowsWithoutRewritingProjectionJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Rows"}); err != nil {
 		t.Fatal(err)
 	}
@@ -959,11 +798,7 @@ func TestSessionBlocksUseRowsWithoutRewritingProjectionJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var legacy string
 	var rowCount int
-	if err := store.DB().QueryRowContext(ctx, `SELECT CAST(blocks AS TEXT) FROM session_projections WHERE session_id='session'`).Scan(&legacy); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM session_blocks WHERE session_id='session'`).Scan(&rowCount); err != nil {
 		t.Fatal(err)
 	}
@@ -971,8 +806,8 @@ func TestSessionBlocksUseRowsWithoutRewritingProjectionJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if legacy != "[]" || rowCount != 2 || len(projection.Blocks) != 2 || projection.Blocks[1].Content != "first second" {
-		t.Fatalf("row projection legacy=%q rows=%d blocks=%#v", legacy, rowCount, projection.Blocks)
+	if rowCount != 2 || len(projection.Blocks) != 2 || projection.Blocks[1].Content != "first second" {
+		t.Fatalf("row projection rows=%d blocks=%#v", rowCount, projection.Blocks)
 	}
 }
 
@@ -983,7 +818,7 @@ func TestBlockMutationsInvalidateExactProviderHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "History"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1026,7 +861,7 @@ func TestCompleteTurnRollsBackBlockAndModelHistoryOnSessionUpdateFailure(t *test
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Test", ProviderID: "chatgpt", ModelID: "model"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1061,7 +896,7 @@ func TestToolTimelineAndWorkspaceSessionSurviveReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Durable"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1107,7 +942,7 @@ func TestToolTimelineAndWorkspaceSessionSurviveReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close(ctx)
-	recovered := NewService(reopened.DB())
+	recovered := NewService(reopened.DB(), reopened.Blobs())
 	projection, err := recovered.LoadProjection(ctx, "session")
 	if err != nil {
 		t.Fatal(err)
@@ -1152,7 +987,7 @@ func TestArchiveInactiveSkipsPinnedRecentAndCurrentSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	alpha := t.TempDir()
 	beta := t.TempDir()
 	stale := time.Now().UTC().Add(-40 * 24 * time.Hour)
@@ -1214,7 +1049,7 @@ func TestListKeepsArchivedSessionsOutsideTheActiveLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	workspace := t.TempDir()
 	now := time.Now().UTC()
 	seedListableSession(t, ctx, service, "active-new", "Active New", workspace, now)
@@ -1264,7 +1099,7 @@ func TestSessionMenuStateAndForkPersist(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	sourceArtifactID := prepareSessionMenuTest(t, ctx, service)
 
 	listed, err := service.List(ctx, 1)
@@ -1356,7 +1191,7 @@ func TestRenameIfTitleDoesNotOverwriteManualRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "New session"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1432,4 +1267,148 @@ func prepareSessionMenuTest(t *testing.T, ctx context.Context, service *Service)
 		t.Fatal(err)
 	}
 	return artifact.ID
+}
+
+func TestLargePayloadsSpillToBlobsAndReload(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "spill.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB(), store.Blobs())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Spill"}); err != nil {
+		t.Fatal(err)
+	}
+	large := strings.Repeat("thinking output ", 400)
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", Content: "ask"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "thinking", Content: large, State: "completed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartToolRecord(ctx, "session", ToolRecord{RunID: "run", ToolCallID: "call", Name: "coding.shell"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.FinishToolRecord(ctx, "session", ToolRecord{RunID: "run", ToolCallID: "call", State: ToolCompleted, Content: large}); err != nil {
+		t.Fatal(err)
+	}
+	var thinkingInline, toolInline int
+	if err := store.DB().QueryRowContext(ctx, `SELECT
+		(SELECT length(data) FROM session_blocks WHERE session_id='session' AND kind='thinking'),
+		(SELECT length(content) FROM session_tool_records WHERE tool_call_id='call')`).Scan(&thinkingInline, &toolInline); err != nil {
+		t.Fatal(err)
+	}
+	if thinkingInline > 8 || toolInline != 0 {
+		t.Fatalf("large payloads stayed inline thinking=%d tool=%d", thinkingInline, toolInline)
+	}
+	projection, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 2 || projection.Blocks[1].Content != large {
+		t.Fatalf("reloaded thinking=%#v", projection.Blocks)
+	}
+	if len(projection.ToolRecords) != 1 || projection.ToolRecords[0].Content != large {
+		t.Fatalf("reloaded tool=%#v", projection.ToolRecords)
+	}
+}
+
+func TestForkRemapsSpilledToolContent(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "spill-fork.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB(), store.Blobs())
+	if _, err := service.Ensure(ctx, Session{ID: "source", Title: "Source"}); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := service.PutArtifact(ctx, "source", "run", "tool_result", []byte("payload"), "preview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	large := strings.Repeat("tool body ", 500) + artifact.ID
+	structured := []byte(strings.Repeat(`{"evidence":"structured body"}`, 300) + artifact.ID)
+	if _, err := service.StartToolRecord(ctx, "source", ToolRecord{RunID: "run", ToolCallID: "done", Name: "coding.shell"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.FinishToolRecord(ctx, "source", ToolRecord{
+		RunID: "run", ToolCallID: "done", State: ToolCompleted, Content: large, Structured: structured, ArtifactID: artifact.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Fork(ctx, "source", "forked"); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.LoadProjection(ctx, "forked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.ToolRecords) != 1 {
+		t.Fatalf("forked tools=%#v", projection.ToolRecords)
+	}
+	record := projection.ToolRecords[0]
+	if record.ArtifactID == "" || record.ArtifactID == artifact.ID || !strings.Contains(record.Content, record.ArtifactID) ||
+		strings.Contains(record.Content, artifact.ID) || !bytes.Contains(record.Structured, []byte(record.ArtifactID)) ||
+		bytes.Contains(record.Structured, []byte(artifact.ID)) {
+		t.Fatalf("forked spilled tool payloads were not remapped: %#v", record)
+	}
+}
+
+func TestForkRebuildsDerivedContextInsteadOfCopyingArchiveCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB(), store.Blobs())
+	if _, err := service.Ensure(ctx, Session{ID: "source", Title: "Source"}); err != nil {
+		t.Fatal(err)
+	}
+	sequence, err := service.AppendBlock(ctx, "source", Block{Kind: "user", RunID: "run", Content: "canonical request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := service.PutArtifact(ctx, "source", "run", "context_archive", []byte(`{"version":1,"messages":[]}`), "archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestHash := strings.Repeat("e", 64)
+	manifest := &ContextManifestRecord{
+		ID: "manifest-source", RunID: "run", CanonicalHighWater: &sequence,
+		PolicyVersion: 3, ManifestHash: manifestHash,
+		Data: json.RawMessage(fmt.Sprintf(`{"id":"manifest-source","policy_version":3,"manifest_hash":%q}`, manifestHash)),
+	}
+	carrier := message.NewText(message.RoleUser, "archive carrier "+archive.ID)
+	carrier.Kind = message.KindCompactionSummary
+	carrier.Visibility = message.VisibilityPrivate
+	checkpoint := RunCheckpoint{
+		RunID: "run", CacheIdentity: "archive-cache", ExpectedHighWater: &sequence, Manifest: manifest,
+		ModelHistory: ModelHistory{Messages: []message.Message{carrier}},
+	}
+	if err := service.SaveRunCheckpoint(ctx, "source", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Fork(ctx, "source", "forked"); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.LoadProjection(ctx, "forked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 1 || projection.Blocks[0].Content != "canonical request" ||
+		len(projection.ModelHistory.Messages) != 0 || projection.CheckpointGeneration != 0 ||
+		projection.CacheEpoch != 0 || projection.CacheIdentityHash != "" {
+		t.Fatalf("forked derived context was not reset: %+v", projection)
+	}
+	if _, err := service.LoadActiveContextManifest(ctx, "forked"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("forked active manifest error=%v", err)
+	}
+	var archiveCount int
+	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM context_artifacts WHERE session_id='forked' AND kind='context_archive'`).Scan(&archiveCount); err != nil || archiveCount != 0 {
+		t.Fatalf("forked archive artifacts=%d err=%v", archiveCount, err)
+	}
 }

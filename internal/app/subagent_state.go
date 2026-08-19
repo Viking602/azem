@@ -118,7 +118,13 @@ func (r *subagentRuntime) snapshotFromActiveLocked(active *activeSubagent) agent
 	return snapshotFromRun(run)
 }
 
-func (r *subagentRuntime) List(_ context.Context, sessionID string) []agentservice.SubagentSnapshot {
+func (r *subagentRuntime) setHost(host providerHost) {
+	r.mu.Lock()
+	r.host = host
+	r.mu.Unlock()
+}
+
+func (r *subagentRuntime) List(ctx context.Context, sessionID string) []agentservice.SubagentSnapshot {
 	runs, _ := r.store.List(r.ctx, sessionID)
 	byID := make(map[string]agentservice.SubagentSnapshot, len(runs))
 	for _, run := range runs {
@@ -136,6 +142,15 @@ func (r *subagentRuntime) List(_ context.Context, sessionID string) []agentservi
 			byID[id] = fallback
 		}
 	}
+	for id, status := range r.evidenceStatus {
+		snapshot, exists := byID[id]
+		if !exists || snapshot.Run.EvidenceStatus != "" {
+			continue
+		}
+		snapshot.Run.EvidenceStatus = status
+		byID[id] = snapshot
+	}
+	host := r.host
 	r.mu.Unlock()
 	result := make([]agentservice.SubagentSnapshot, 0, len(byID))
 	for _, snapshot := range byID {
@@ -147,6 +162,46 @@ func (r *subagentRuntime) List(_ context.Context, sessionID string) []agentservi
 		}
 		return strings.Compare(a.Run.ID, b.Run.ID)
 	})
+	if host != nil {
+		for index := range result {
+			run := &result[index].Run
+			if run.EvidenceStatus != "" || run.ChildRunID == "" || !subagentTerminal(run.State) {
+				continue
+			}
+			run.EvidenceStatus = loadRunEvidenceStatus(ctx, host.Sessions(), sessionID, run.ChildRunID)
+			if run.EvidenceStatus != "" {
+				r.mu.Lock()
+				r.evidenceStatus[run.ID] = run.EvidenceStatus
+				r.mu.Unlock()
+			}
+		}
+	}
+	return result
+}
+
+func (r *subagentRuntime) relatedRunIDs(sessionID, parentRunID string) []string {
+	result := []string{parentRunID}
+	known := map[string]struct{}{parentRunID: {}}
+	snapshots := r.List(context.Background(), sessionID)
+	for changed := true; changed; {
+		changed = false
+		for _, snapshot := range snapshots {
+			run := snapshot.Run
+			if run.ChildRunID == "" {
+				continue
+			}
+			if _, parentKnown := known[run.ParentRunID]; !parentKnown {
+				continue
+			}
+			if _, exists := known[run.ChildRunID]; exists {
+				continue
+			}
+			known[run.ChildRunID] = struct{}{}
+			result = append(result, run.ChildRunID)
+			changed = true
+		}
+	}
+	slices.Sort(result[1:])
 	return result
 }
 
@@ -692,10 +747,22 @@ func subagentStateEvent(run agentservice.SubagentRun, activity string) Event {
 			Type: run.Type, Description: run.Description, Model: run.Model, Background: run.Background,
 			CapabilityMode: run.CapabilityMode, RequestedIsolation: run.RequestedIsolation, Isolation: run.Isolation,
 			CWD: run.CWD, ParentRunID: run.ParentRunID, ParentToolCallID: run.ParentToolCallID,
-			ChildRunID: run.ChildRunID, Activity: activity, Warning: run.Warning, WorktreePath: run.WorktreePath,
+			ChildRunID: run.ChildRunID, Activity: activity, Warning: run.Warning,
+			EvidenceStatus: projectedEvidenceStatus(run.EvidenceStatus), WorktreePath: run.WorktreePath,
 			ToolCalls: run.ToolCalls, Turns: run.Turns, TokensUsed: run.TokensUsed, ElapsedMS: elapsed.Milliseconds(),
 		},
 		Data: map[string]string{"id": run.ID, "role": run.Type, "state": string(run.State), "summary": run.Summary},
+	}
+}
+
+func projectedEvidenceStatus(value string) string {
+	switch value {
+	case "provisional", "verified", "stale":
+		return value
+	default:
+		// Evidence status is populated only by a durable result/disposition
+		// producer. Missing or unknown data must remain visibly unverified.
+		return ""
 	}
 }
 

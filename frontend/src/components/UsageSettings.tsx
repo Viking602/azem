@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 import { listUsageReport } from "../bridge";
 import { tFormat, translator, type Language } from "../i18n";
 import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ModelOption } from "../store";
@@ -99,6 +99,65 @@ export function activityLevel(tokens: number, peak: number): 0 | 1 | 2 | 3 {
   return 1;
 }
 
+const SHARE_COLORS = [
+  "color-mix(in srgb, var(--blue) 88%, var(--paper))",
+  "color-mix(in srgb, var(--blue) 64%, var(--paper))",
+  "color-mix(in srgb, var(--blue) 40%, var(--paper))",
+  "color-mix(in srgb, var(--ink) 28%, var(--paper))",
+  "color-mix(in srgb, var(--ink) 14%, var(--paper))",
+];
+
+export type UsageShare = { key: string; label: string; tokens: number; percent: number; color: string };
+
+export function usageShares(models: UsageModelRow[], unlabeled: string): UsageShare[] {
+  const total = models.reduce((sum, model) => sum + Math.max(0, model.tokens), 0);
+  if (total <= 0) return [];
+  const ranked = [...models].sort((left, right) => right.tokens - left.tokens);
+  const head = ranked.slice(0, 4);
+  const tail = ranked.slice(4).reduce((sum, model) => sum + model.tokens, 0);
+  const rows = head.map((model) => ({
+    key: `${model.provider}:${model.model}`,
+    label: model.model.trim() || unlabeled,
+    tokens: model.tokens,
+  }));
+  if (tail > 0) rows.push({ key: "other", label: unlabeled, tokens: tail });
+  return rows.map((row, index) => ({
+    ...row,
+    percent: (row.tokens / total) * 100,
+    color: SHARE_COLORS[index] ?? SHARE_COLORS[SHARE_COLORS.length - 1]!,
+  }));
+}
+
+function useCountUp(target: number) {
+  const [shown, setShown] = useState(target);
+  const primed = useRef(false);
+  useEffect(() => {
+    if (!primed.current || shown === 0 || target === 0) {
+      primed.current = true;
+      setShown(target);
+      return;
+    }
+    if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setShown(target);
+      return;
+    }
+    const from = shown;
+    const started = performance.now();
+    let frame = 0;
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - started) / 520);
+      const eased = 1 - (1 - progress) ** 3;
+      setShown(Math.round(from + (target - from) * eased));
+      if (progress < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [target]);
+  return shown;
+}
+
+
+
 export function activityHeatmap(from: string, to: string, days: UsageDay[], grain: ActivityGrain, language: Language): ActivityHeatmap {
   if (!from || !to) return { weeks: [], months: [], peak: 0 };
   const start = parseISODate(from);
@@ -158,11 +217,42 @@ export function activityHeatmap(from: string, to: string, days: UsageDay[], grai
   return { weeks: painted, months, peak };
 }
 
+function UsageDonut({ shares, total, language, label }: { shares: UsageShare[]; total: number; language: Language; label: string }) {
+  const radius = 36;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+  return <div className="usage-donut" role="img" aria-label={label}>
+    <svg viewBox="0 0 88 88" width="88" height="88">
+      <circle className="usage-donut-track" cx="44" cy="44" r={radius} />
+      {shares.map((share) => {
+        const length = Math.max(0, (share.percent / 100) * circumference);
+        const current = offset;
+        offset += length;
+        return <circle
+          key={share.key}
+          className="usage-donut-arc"
+          cx="44"
+          cy="44"
+          r={radius}
+          stroke={share.color}
+          strokeDasharray={`${length} ${circumference - length}`}
+          strokeDashoffset={-current}
+        />;
+      })}
+    </svg>
+    <div className="usage-donut-center">
+      <strong>{formatUsageCount(total, language)}</strong>
+      <span>TOKENS</span>
+    </div>
+  </div>;
+}
+
 export default function UsageSettings({ language, onError }: { language: Language; onError: (message: string) => void }) {
   const report = useRuntimeStore((state) => state.usageReport);
   const t = translator(language);
   const [scope, setScope] = useState<UsageScope>("project");
   const [grain, setGrain] = useState<ActivityGrain>("daily");
+  const [selectedDay, setSelectedDay] = useState<HeatCell | null>(null);
   const [loading, setLoading] = useState(!report);
 
   const applyReport = useCallback((nextScope: UsageScope) => {
@@ -188,7 +278,13 @@ export default function UsageSettings({ language, onError }: { language: Languag
 
   useEffect(() => {
     setHeatTip(null);
+    setSelectedDay(null);
   }, [grain, report?.from, report?.to, report?.scope]);
+  const counted = useCountUp(report && !report.empty ? report.totalTokens : 0);
+  const shares = useMemo(
+    () => usageShares(report?.models ?? [], t("usageOtherModels")),
+    [report?.models, t],
+  );
 
   const showHeatTip = useCallback((cell: HeatCell, week: HeatCell[], target: HTMLElement) => {
     const host = heatmapRef.current;
@@ -198,6 +294,7 @@ export default function UsageSettings({ language, onError }: { language: Languag
       ...placeHeatTip(target, host),
     });
   }, [grain, language, t]);
+
 
   return <div className="usage-settings">
     <div className="usage-toolbar">
@@ -222,7 +319,7 @@ export default function UsageSettings({ language, onError }: { language: Languag
             <small>{tFormat(language, "usageWindow", { from: report.from, to: report.to })}</small>
           </div>
         </header>
-        <p className="usage-ledger-total">{formatUsageCount(report.totalTokens, language)}</p>
+        <p className="usage-ledger-total">{formatUsageCount(counted, language)}</p>
         <p className="usage-ledger-unit">{t("usageTotalTokens")}</p>
         <div className="usage-ledger-split">
           <span>{t("usageInput")} {formatUsageCount(report.inputTokens, language)}</span>
@@ -256,51 +353,87 @@ export default function UsageSettings({ language, onError }: { language: Languag
           </div>
         </header>
         <div className="usage-activity-visual">
-          <div
-            ref={heatmapRef}
-            className="usage-heatmap"
-            data-grain={grain}
-            style={{ "--weeks": String(Math.max(1, heatmap.weeks.length)) } as CSSProperties}
-          >
-            <div className="usage-heatmap-grid" role="group" aria-label={t("usageActivityTitle")} onMouseLeave={() => setHeatTip(null)}>
-              {heatmap.weeks.map((week, weekIndex) => <div
-                key={week[0]?.date ?? weekIndex}
-                className="usage-heatmap-week"
-                style={{ "--week": String(weekIndex) } as CSSProperties}
-              >
-                {week.map((cell) => {
-                  const level = cell.inRange ? activityLevel(cell.tokens, heatmap.peak) : 0;
-                  if (!cell.inRange) {
-                    return <i key={cell.date} className="usage-heat-cell" data-level={level} data-out="" data-date={cell.date} aria-hidden />;
-                  }
-                  return <button
-                    key={cell.date}
-                    type="button"
-                    className="usage-heat-cell"
-                    data-level={level}
-                    data-date={cell.date}
-                    aria-label={heatCellLabel(cell, week, grain, language, t("usageLegendNone"))}
-                    onMouseEnter={(event) => showHeatTip(cell, week, event.currentTarget)}
-                    onFocus={(event) => showHeatTip(cell, week, event.currentTarget)}
-                    onBlur={() => setHeatTip(null)}
-                  />;
+          <div className="usage-skyline">
+            <UsageDonut shares={shares} total={counted} language={language} label={t("usageSkylineTitle")} />
+            <div
+              ref={heatmapRef}
+              className="usage-heatmap"
+              data-grain={grain}
+              style={{ "--weeks": String(Math.max(1, heatmap.weeks.length)) } as CSSProperties}
+            >
+              <div className="usage-heatmap-grid" role="group" aria-label={t("usageActivityTitle")} onMouseLeave={() => setHeatTip(null)}>
+                {heatmap.weeks.map((week, weekIndex) => <div
+                  key={week[0]?.date ?? weekIndex}
+                  className="usage-heatmap-week"
+                  style={{ "--week": String(weekIndex) } as CSSProperties}
+                >
+                  {week.map((cell) => {
+                    const level = cell.inRange ? activityLevel(cell.tokens, heatmap.peak) : 0;
+                    if (!cell.inRange) {
+                      return <i key={cell.date} className="usage-heat-cell" data-level={level} data-out="" data-date={cell.date} aria-hidden />;
+                    }
+                    return <button
+                      key={cell.date}
+                      type="button"
+                      className="usage-heat-cell"
+                      data-level={level}
+                      data-date={cell.date}
+                      data-selected={selectedDay?.date === cell.date ? "" : undefined}
+                      aria-pressed={selectedDay?.date === cell.date}
+                      aria-label={heatCellLabel(cell, week, grain, language, t("usageLegendNone"))}
+                      onClick={() => setSelectedDay((current) => current?.date === cell.date ? null : cell)}
+                      onMouseEnter={(event) => showHeatTip(cell, week, event.currentTarget)}
+                      onFocus={(event) => showHeatTip(cell, week, event.currentTarget)}
+                      onBlur={() => setHeatTip(null)}
+                    />;
+                  })}
+                </div>)}
+              </div>
+              <div className="usage-heatmap-months" aria-hidden="true">
+                {heatmap.weeks.map((week, weekIndex) => {
+                  const month = heatmap.months.find((item) => item.weekIndex === weekIndex);
+                  return <span key={week[0]?.date ?? weekIndex}>{month?.label ?? ""}</span>;
                 })}
-              </div>)}
+              </div>
+              {heatTip ? <div
+                className="usage-heatmap-tip"
+                role="tooltip"
+                aria-hidden="true"
+                data-placement={heatTip.below ? "below" : "above"}
+                style={{ left: heatTip.left, top: heatTip.top }}
+              >{heatTip.text}</div> : null}
             </div>
-            <div className="usage-heatmap-months" aria-hidden="true">
-              {heatmap.weeks.map((week, weekIndex) => {
-                const month = heatmap.months.find((item) => item.weekIndex === weekIndex);
-                return <span key={week[0]?.date ?? weekIndex}>{month?.label ?? ""}</span>;
-              })}
-            </div>
-            {heatTip ? <div
-              className="usage-heatmap-tip"
-              role="tooltip"
-              aria-hidden="true"
-              data-placement={heatTip.below ? "below" : "above"}
-              style={{ left: heatTip.left, top: heatTip.top }}
-            >{heatTip.text}</div> : null}
           </div>
+          <p className="usage-skyline-hint">{t("usageSkylineHint")}</p>
+          {selectedDay ? <div className="usage-day-panel" data-testid="usage-day-panel">
+            <header>
+              <strong>{selectedDay.date}</strong>
+              <button type="button" className="small-button" onClick={() => setSelectedDay(null)} aria-label={t("usageCloseDay")}>
+                <X size={12} />
+              </button>
+            </header>
+            <p className="usage-day-total">{formatUsageCount(selectedDay.tokens, language)}</p>
+            <p className="usage-day-meta">
+              {tFormat(language, "usageRequestCount", { n: report.days.find((day) => day.date === selectedDay.date)?.requests ?? 0 })}
+              {" · "}
+              {tFormat(language, "usageDayShare", {
+                percent: report.totalTokens > 0 ? ((selectedDay.tokens / report.totalTokens) * 100).toFixed(1) : "0",
+              })}
+            </p>
+          </div> : null}
+          {shares.length > 0 ? <div className="usage-share">
+            <span>{t("usageByModel")}</span>
+            <div className="usage-share-track" aria-hidden="true">
+              {shares.map((share) => <i key={share.key} style={{ width: `${share.percent}%`, background: share.color }} />)}
+            </div>
+            <ul>
+              {shares.map((share) => <li key={share.key}>
+                <i style={{ background: share.color }} />
+                <em>{share.label}</em>
+                <span>{share.percent.toFixed(0)}%</span>
+              </li>)}
+            </ul>
+          </div> : null}
           <footer className="usage-legend">
             <span>{t("usageLegendNone")}</span>
             <i data-level="0" />

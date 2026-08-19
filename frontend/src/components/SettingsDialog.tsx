@@ -438,7 +438,7 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
 
   const requiresExplicitRoute = route.scope === "vision";
   const provider = value.provider || (requiresExplicitRoute ? "" : snapshot.provider);
-  const providerModels = (modelsByProvider[provider] ?? []).filter((item) => isRouteModelVisible(item, requiresExplicitRoute));
+  const providerModels = (modelsByProvider[provider] ?? []).filter((item) => !item.disabled);
   const requestedModel = value.model || (provider === snapshot.provider ? snapshot.model : "");
   const model = findModelOption(providerModels, requestedModel)?.id || providerModels[0]?.id || "";
   const modelInfo = findModelOption(providerModels, model);
@@ -449,7 +449,7 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
   ]);
   const inherited = !value.provider && !value.model && !value.reasoning;
   const title = routeTitle(route, language);
-  const configuredModelOptions = routeModelOptions(modelsByProvider, modelProviders, requiresExplicitRoute);
+  const configuredModelOptions = routeModelOptions(modelsByProvider, modelProviders, requiresExplicitRoute, t("modelImageUnsupported"));
   const allModelOptions = requiresExplicitRoute
     ? [{ value: "::", label: t("routeNotConfigured") }, ...configuredModelOptions]
     : configuredModelOptions;
@@ -497,22 +497,29 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
   </div>;
 }
 
-function isRouteModelVisible(item: ModelOption, requiresImages: boolean) {
-  if (item.disabled) return false;
-  if (!requiresImages || !item.inputModalities?.length) return true;
-  return item.inputModalities.some((modality) => modality.toLocaleLowerCase() === "image");
-}
 
-function routeModelOptions(modelsByProvider: Record<string, ModelOption[]>, modelProviders: ModelProvider[], requiresImages: boolean) {
+function routeModelOptions(
+  modelsByProvider: Record<string, ModelOption[]>,
+  modelProviders: ModelProvider[],
+  requiresImages: boolean,
+  imageUnsupportedLabel: string,
+) {
   return Object.entries(modelsByProvider).flatMap(([providerID, models]) => models
-    .filter((item) => isRouteModelVisible(item, requiresImages))
-    .map((item) => ({
-      value: `${providerID}::${item.id}`,
-      label: modelDisplayName(item.id, item.name),
-      caption: providerDisplayName(providerID, modelProviders),
-      keywords: [providerID, providerDisplayName(providerID, modelProviders), ...(item.aliases ?? [])],
-      icon: <ProviderIcon provider={providerID} />,
-    })));
+    .filter((item) => !item.disabled)
+    .map((item) => {
+      const supportsImages = !item.inputModalities?.length
+        || item.inputModalities.some((modality) => modality.toLocaleLowerCase() === "image");
+      const imageUnsupported = requiresImages && !supportsImages;
+      const providerName = providerDisplayName(providerID, modelProviders);
+      return {
+        value: `${providerID}::${item.id}`,
+        label: modelDisplayName(item.id, item.name),
+        caption: imageUnsupported ? `${providerName} · ${imageUnsupportedLabel}` : providerName,
+        keywords: [providerID, providerName, ...(item.aliases ?? [])],
+        icon: <ProviderIcon provider={providerID} />,
+        disabled: imageUnsupported,
+      };
+    }));
 }
 
 function SettingRow({ label, description, settingID, children }: { label: string; description: string; settingID?: string; children: React.ReactNode }) { return <div className="setting-row" data-setting-id={settingID}><div><strong>{label}</strong><p>{description}</p></div><div>{children}</div></div>; }
@@ -542,7 +549,6 @@ function routeTitle(route: ModelRoute, language: Language) {
   if (route.scope === "plan") return t("routePlan");
   if (route.scope === "approval") return t("routeApproval");
   if (route.scope === "vision") return t("routeVision");
-  if (route.scope === "compaction") return t("routeCompaction");
   if (route.scope === "recap") return t("routeRecap");
   if (route.role === "research") return language === "zh-CN" ? "研究与文档" : "Research and documentation";
   if (route.role === "review") return language === "zh-CN" ? "编码与审查" : "Coding and review";
@@ -555,7 +561,6 @@ function routeDescription(route: ModelRoute, description: string, language: Lang
   if (route.scope === "plan") return t("routePlanHint");
   if (route.scope === "approval") return t("routeApprovalHint");
   if (route.scope === "vision") return t("routeVisionHint");
-	if (route.scope === "compaction") return t("routeCompactionHint");
 	if (route.scope === "recap") return t("routeRecapHint");
 	if (route.role === "research") return language === "zh-CN" ? "检索、映射、说明文档" : "Research, mapping, and documentation";
 	if (route.role === "review") return language === "zh-CN" ? "实现、调试、架构判断" : "Implementation, debugging, and architecture";

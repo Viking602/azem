@@ -1,4 +1,4 @@
-import { toolGroupLabel, translator, type Language, type ToolCategory } from "../i18n";
+import { tFormat, toolGroupLabel, translator, type Language, type ToolCategory } from "../i18n";
 import type { Block } from "../types";
 import { plainAnsiText } from "./AnsiText";
 import { isFileChangeTool } from "./fileChanges";
@@ -633,6 +633,29 @@ export function formatDuration(milliseconds: number) {
       : `${rest}s`;
 }
 
+/** Codex worked-for clock: “5分钟 5秒” / “5 minutes 5 seconds”. */
+export function formatWorkedDuration(milliseconds: number, language: Language) {
+  const seconds = Math.floor(Math.max(0, milliseconds) / 1000);
+  if (seconds <= 0) return "";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  const zh = language.startsWith("zh");
+  const parts: string[] = [];
+  if (zh) {
+    if (hours) parts.push(`${hours}小时`);
+    if (minutes) parts.push(`${minutes}分钟`);
+    if (rest || !parts.length) parts.push(`${rest}秒`);
+    return parts.join(" ");
+  }
+  const unit = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+  if (hours) parts.push(unit(hours, "hour", "hours"));
+  if (minutes) parts.push(unit(minutes, "minute", "minutes"));
+  if (rest || !parts.length) parts.push(unit(rest, "second", "seconds"));
+  return parts.join(" ");
+}
+
+
 /** Thinking clock: hide zero, tenths under a minute, then the compact minute/hour form. */
 export function formatThinkingDuration(milliseconds: number) {
   const ms = Math.max(0, milliseconds);
@@ -641,7 +664,10 @@ export function formatThinkingDuration(milliseconds: number) {
   return formatDuration(ms);
 }
 
-/** Sparkle wording only. The elapsed clock lives in the bar's meta slot. */
-export function thinkingStateLabel(language: Language, active = false) {
-  return translator(language)(active ? "thinkingActive" : "thinking");
+/** Live wait is 正在思考; after the turn ends Codex uses 已思考 / 已完成思考. */
+export function thinkingStateLabel(language: Language, active = false, elapsedMs = 0) {
+  if (active) return translator(language)("thinkingActive");
+  const duration = formatThinkingDuration(elapsedMs);
+  if (duration) return tFormat(language, "thoughtFor", { duration });
+  return translator(language)("thought");
 }

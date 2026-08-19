@@ -43,7 +43,7 @@ func TestConcurrentUsagePersistenceDoesNotLoseUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-usage"}); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestMainOccupancyClearPreservesNewerTrackedUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-clear"}); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestHistoricalEvidenceIsBoundedStructuredDataAndExcludedFromTeamPrompt(t *t
 	}
 	defer store.Close(ctx)
 	workspace := t.TempDir()
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestPersistRecapGeneratesConciseSummaryAndEmitsUpdatedEvent(t *testing.T) {
 	}
 	defer store.Close(ctx)
 	workspace := t.TempDir()
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestHeadlessSurfaceSkipsTitleAndRecap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1", Title: "Initial title"}); err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestFirstTurnGeneratesTitleAndEmitsUpdatedSessionList(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	service := NewService(ctx, config.Default())
 	service.AttachDurable(sessions, nil)
 	requests := make(chan titleGenerationRequest, 1)
@@ -456,7 +456,7 @@ func TestPersistRecapGenerationFailureKeepsPreviousRecap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +684,7 @@ func TestNewSessionStaysEphemeralUntilFirstTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	cfg := config.Default()
 	cfg.Workspace.Root = t.TempDir()
 	service := NewService(ctx, cfg)
@@ -778,7 +778,7 @@ func TestArchiveInactiveSessionsAndRestoreByProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	cfg := config.Default()
 	cfg.Workspace.Root = t.TempDir()
 	service := NewService(ctx, cfg)
@@ -877,7 +877,7 @@ func TestResumeSessionProjectsGlobalActiveRunOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	service := NewService(ctx, config.Default())
 	service.AttachDurable(sessions, nil)
 	t.Cleanup(func() {
@@ -919,7 +919,7 @@ func TestMarkSessionUnreadPersistsUntilResume(t *testing.T) {
 	store, err := sqlitestore.Open(ctx, ":memory:")
 	requireAppTestNoError(t, err)
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	_, err = sessions.Ensure(ctx, session.Session{ID: "background-session", Title: "Background task"})
 	requireAppTestNoError(t, err)
 	_, err = sessions.AppendBlock(ctx, "background-session", session.Block{Kind: "user", Content: "Run in background"})
@@ -959,7 +959,7 @@ func TestResumeSessionIncludesPersistedRecap(t *testing.T) {
 	}
 	defer store.Close(ctx)
 	workspace := t.TempDir()
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -989,7 +989,7 @@ func TestResumeSessionIncludesPersistedUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-usage", ProviderID: "chatgpt", ModelID: "gpt-main"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1029,7 +1029,7 @@ func TestResumeSessionReturnsCompleteFailedOutputWithoutTruncation(t *testing.T)
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "failed-session", Title: "Failed"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1088,9 +1088,6 @@ func TestResumeSessionReturnsCompleteFailedOutputWithoutTruncation(t *testing.T)
 func TestBootstrapUsesFreshUnpersistedSessionEachLaunch(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("AZEM_FAKE_PROVIDER", "1")
 	configFile := filepath.Join(root, "azem.yaml")
 	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: file\n  import_codex: false\n  import_grok: false\nmcp:\n  servers:\n    grep:\n      enabled: false\n"), 0o600); err != nil {
@@ -1136,9 +1133,6 @@ func TestBootstrapStartsFreshAndResumesPersistedSessionExplicitly(t *testing.T) 
 	ctx := context.Background()
 	root := t.TempDir()
 	t.Setenv("HOME", root)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("AZEM_FAKE_PROVIDER", "1")
 	configFile := filepath.Join(root, "azem.yaml")
 	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: file\n  import_codex: false\n  import_grok: false\nmcp:\n  servers:\n    grep:\n      enabled: false\n"), 0o600); err != nil {
@@ -1239,9 +1233,6 @@ func TestBootstrapRoutesLegacyCredentialReference(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	t.Setenv("HOME", root)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
 	t.Setenv("AZEM_FAKE_PROVIDER", "1")
 	configFile := filepath.Join(root, "azem.yaml")
 	if err := os.WriteFile(configFile, []byte("version: 1\nauth:\n  store: sqlite\n  import_codex: false\n  import_grok: false\nmcp:\n  servers:\n    grep:\n      enabled: false\n"), 0o600); err != nil {
@@ -1336,7 +1327,7 @@ func TestActiveSkillPreflightBeforeDurableRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	cfg := config.Default()
 	cfg.Workspace.Root = workspace
 	service := NewService(ctx, cfg)
@@ -2102,7 +2093,6 @@ func skillEventEntry(entries []SkillCatalogEntry, name string) (SkillCatalogEntr
 func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	cfg := config.Default()
 	cfg.Agents.Plan = config.ModelRouteConfig{Provider: "grok", Model: "architect"}
-	cfg.Agents.Compaction = config.ModelRouteConfig{Provider: "chatgpt", Model: "summary"}
 	cfg.Agents.Subagents.Roles = map[string]config.SubagentRoleConfig{
 		"zeta":  {Description: "Zeta", Provider: "grok", Model: "z-model"},
 		"alpha": {Description: "Alpha", Provider: "chatgpt", Model: "a-model"},
@@ -2119,8 +2109,8 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	}
 	if got := []string{
 		event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Scope, event.ModelRoutes[3].Scope, event.ModelRoutes[4].Scope,
-		event.ModelRoutes[5].Scope, event.ModelRoutes[6].Scope, event.ModelRoutes[7].Role, event.ModelRoutes[8].Role, event.ModelRoutes[9].Role,
-	}; !reflect.DeepEqual(got, []string{"main", "title", "plan", "approval", "vision", "compaction", "recap", "alpha", "off", "zeta"}) {
+		event.ModelRoutes[5].Scope, event.ModelRoutes[6].Role, event.ModelRoutes[7].Role, event.ModelRoutes[8].Role,
+	}; !reflect.DeepEqual(got, []string{"main", "title", "plan", "approval", "vision", "recap", "alpha", "off", "zeta"}) {
 		t.Fatalf("route order = %v", got)
 	}
 	clone := event.Clone()
@@ -2375,7 +2365,7 @@ func TestSessionPreferencesActionPersistsDefaultsAndSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close(ctx) })
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	service := NewService(ctx, config.Default())
 	service.SetConfigPath(path)
 	service.AttachDurable(sessions, nil)

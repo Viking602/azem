@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/Viking602/azem/internal/blobstore"
 	"github.com/Viking602/venat/api"
 	_ "modernc.org/sqlite"
 )
@@ -16,12 +17,31 @@ import (
 var memoryCounter atomic.Uint64
 
 type Provider struct {
-	db *sql.DB
+	db    *sql.DB
+	blobs blobstore.Store
 }
 
-func Open(ctx context.Context, path string) (*Provider, error) {
+type OpenOption func(*openOptions)
+
+type openOptions struct {
+	blobRoot string
+}
+
+func WithBlobRoot(root string) OpenOption {
+	return func(opts *openOptions) {
+		opts.blobRoot = strings.TrimSpace(root)
+	}
+}
+
+func Open(ctx context.Context, path string, opts ...OpenOption) (*Provider, error) {
 	if path == "" {
 		return nil, fmt.Errorf("sqlite path is empty")
+	}
+	var options openOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
 	}
 	memory := path == ":memory:"
 	existed := false
@@ -61,6 +81,11 @@ func Open(ctx context.Context, path string) (*Provider, error) {
 			return nil, fmt.Errorf("configure sqlite: %w", err)
 		}
 	}
+	blobs, err := openBlobStore(path, memory, options.blobRoot)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	upgrade := func() error {
 		if _, err := db.ExecContext(ctx, `PRAGMA journal_mode = WAL`); err != nil {
 			return fmt.Errorf("configure sqlite journal: %w", err)
@@ -77,7 +102,7 @@ func Open(ctx context.Context, path string) (*Provider, error) {
 				return err
 			}
 		}
-		return migrate(ctx, db)
+		return migrate(ctx, db, blobs)
 	}
 	if !memory {
 		err = withDatabaseUpgradeLock(ctx, path, upgrade)
@@ -94,7 +119,29 @@ func Open(ctx context.Context, path string) (*Provider, error) {
 			return nil, fmt.Errorf("protect database: %w", err)
 		}
 	}
-	return &Provider{db: db}, nil
+	return &Provider{db: db, blobs: blobs}, nil
+}
+
+func openBlobStore(path string, memory bool, root string) (blobstore.Store, error) {
+	root = strings.TrimSpace(root)
+	if memory && root == "" {
+		return blobstore.NewMemory(), nil
+	}
+	if root == "" {
+		root = filepath.Join(filepath.Dir(path), "blobs")
+	}
+	store, err := blobstore.NewDirectory(root)
+	if err != nil {
+		return nil, fmt.Errorf("open blob store: %w", err)
+	}
+	return store, nil
+}
+
+func (p *Provider) Blobs() blobstore.Store {
+	if p == nil || p.blobs == nil {
+		return blobstore.NewMemory()
+	}
+	return p.blobs
 }
 
 func (p *Provider) Begin(ctx context.Context) (api.UnitOfWork, error) {
@@ -102,7 +149,7 @@ func (p *Provider) Begin(ctx context.Context) (api.UnitOfWork, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin sqlite unit of work: %w", err)
 	}
-	return &unitOfWork{tx: tx}, nil
+	return &unitOfWork{db: p.db, tx: tx, blobs: p.Blobs()}, nil
 }
 
 func (p *Provider) Capabilities(context.Context) (api.StoreCapabilities, error) {

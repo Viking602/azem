@@ -3,7 +3,7 @@ import { Bot, Square, X } from "lucide-react";
 import { execute } from "../bridge";
 import { chatTypographyVars } from "../chatTypography";
 import { translator } from "../i18n";
-import { isSubagentActive, subagentDisplayName, subagentStatusLabel } from "../subagents";
+import { isSubagentActive, subagentDisplayName, subagentEvidenceStatusLabel, subagentStatusLabel } from "../subagents";
 import { useRuntimeStore } from "../store";
 import type { AgentState, Block, Snapshot } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
@@ -26,6 +26,7 @@ export default function AgentSideChat() {
   const running = isSubagentActive(agent?.state);
   const cancellable = agent?.state === "initializing" || agent?.state === "queued" || agent?.state === "running" || agent?.state === "started";
   const role = agent ? subagentDisplayName(agent, agents, language) : selectedAgentId || t("subagents");
+  const evidenceStatus = subagentEvidenceStatusLabel(agent?.evidenceStatus, language);
   const liveElapsedMs = useLiveAgentElapsed(agent, selectedAgentId, running);
 
   // Hydrate once. Live agent events are the source of truth; polling the full
@@ -78,6 +79,7 @@ export default function AgentSideChat() {
             <h2 id="subagent-detail-title" ref={titleRef} tabIndex={-1}>{role}</h2>
             <small>
               <em data-state={agent?.state || "idle"}>{subagentStatusLabel(agent?.state, language)}</em>
+              {evidenceStatus ? <span className="subagent-evidence-status" data-evidence-status={agent?.evidenceStatus}>{evidenceStatus}</span> : null}
               {(running || liveElapsedMs > 0) ? <time>{formatDuration(liveElapsedMs)}</time> : null}
             </small>
           </div>

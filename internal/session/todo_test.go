@@ -17,7 +17,7 @@ func TestTodoRevisionStateMachineAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "s", Title: "todo"}); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestTodoRevisionStateMachineAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reloaded, err := NewService(store.DB()).LoadTodo(ctx, "s")
+	reloaded, err := NewService(store.DB(), store.Blobs()).LoadTodo(ctx, "s")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestTodoValidationRejectsAmbiguousPlansAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	service := NewService(store.DB())
+	service := NewService(store.DB(), store.Blobs())
 	if _, err := service.Ensure(ctx, Session{ID: "s", Title: "todo"}); err != nil {
 		t.Fatal(err)
 	}

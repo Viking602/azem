@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -44,7 +45,7 @@ func TestFailedProviderTurnPersistsStreamedBreakpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "failed-session", Title: "Failed"}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +122,7 @@ func TestProviderTurnSuspensionEmitsRecoveryWithoutTerminalFailure(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "suspended-session", Title: "Suspended"}); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +212,7 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "retry-session", Title: "Retry"}); err != nil {
 		t.Fatal(err)
 	}
@@ -320,6 +321,9 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
+	if output, err := exec.Command("git", "init", workspace).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
 	var responseCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer access" || request.Header.Get("ChatGPT-Account-ID") != "acct" {
@@ -341,13 +345,23 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 				t.Errorf("provider selection = model:%q reasoning:%v service_tier:%q", payload.Model, payload.Reasoning, payload.ServiceTier)
 			}
 			writer.Header().Set("Content-Type", "text/event-stream")
-			if responseCalls.Add(1) == 1 {
+			switch responseCalls.Add(1) {
+			case 1:
 				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"write-1\",\"name\":\"coding.write_file\",\"arguments\":\"{\\\"path\\\":\\\"created.txt\\\",\\\"content\\\":\\\"created by agent\\\\n\\\"}\"}}\n\n")
 				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14,\"input_tokens_details\":{\"cached_tokens\":6,\"cache_write_tokens\":2}}}}\n\n")
-				return
+			case 2:
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Created and verified.\"}\n\n")
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":20,\"output_tokens\":6,\"total_tokens\":26,\"input_tokens_details\":{\"cached_tokens\":15,\"cache_write_tokens\":3}}}}\n\n")
+			case 3:
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"item-3a\",\"call_id\":\"readback-1\",\"name\":\"coding.read_file\",\"arguments\":\"{\\\"path\\\":\\\"created.txt\\\"}\"}}\n\n")
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"item-3b\",\"call_id\":\"diff-check-1\",\"name\":\"coding.shell\",\"arguments\":\"{\\\"command\\\":\\\"git diff --check -- created.txt\\\",\\\"wall_clock_seconds\\\":60}\"}}\n\n")
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-3\",\"status\":\"completed\",\"usage\":{\"input_tokens\":25,\"output_tokens\":8,\"total_tokens\":33}}}\n\n")
+			case 4:
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Created and verified.\"}\n\n")
+				_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-4\",\"status\":\"completed\",\"usage\":{\"input_tokens\":30,\"output_tokens\":6,\"total_tokens\":36}}}\n\n")
+			default:
+				t.Errorf("unexpected response call %d", responseCalls.Load())
 			}
-			_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Created and verified.\"}\n\n")
-			_, _ = fmt.Fprint(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-2\",\"status\":\"completed\",\"usage\":{\"input_tokens\":20,\"output_tokens\":6,\"total_tokens\":26,\"input_tokens_details\":{\"cached_tokens\":15,\"cache_write_tokens\":3}}}}\n\n")
 		default:
 			writer.WriteHeader(http.StatusNotFound)
 		}
@@ -385,7 +399,7 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 		t.Fatal(err)
 	}
 	providerRuntime.ChatGPTEndpoint = server.URL + "/responses"
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "default", Title: "Test", ProviderID: "chatgpt", ModelID: "gpt-test", Reasoning: "high", AgentMode: "single"}); err != nil {
 		t.Fatal(err)
 	}
@@ -436,6 +450,10 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 			if event.TextPhase != string(hyprovider.TextPhaseCommentary) {
 				output.WriteString(event.Text)
 			}
+		case EventProviderRetry:
+			if event.State == "restarted" && event.Data["scope"] == "output_guard" {
+				output.Reset()
+			}
 		case EventContextUsage:
 			if event.State == "reported" {
 				if event.Data["inputTokens"] != "" {
@@ -453,13 +471,22 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 				toolLifecycle = append(toolLifecycle, event.State)
 			}
 		case EventApprovalRequested:
-			if event.ToolCallID != "write-1" || event.Data["tool"] != "coding.write_file" {
-				t.Fatalf("approval event = %+v", event)
+			switch event.ToolCallID {
+			case "write-1":
+				if event.Data["tool"] != "coding.write_file" {
+					t.Fatalf("approval event = %+v", event)
+				}
+				approved = true
+			case "diff-check-1":
+				if !approved || event.Data["tool"] != "coding.shell" {
+					t.Fatalf("verification approval event = %+v", event)
+				}
+			default:
+				t.Fatalf("unexpected approval event = %+v", event)
 			}
 			if err := service.ExecuteAction(ctx, Action{Kind: ActionResolveApproval, Target: event.ApprovalID, Decision: "once"}); err != nil {
 				t.Fatal(err)
 			}
-			approved = true
 		case EventRunFailed:
 			t.Fatalf("run failed: %s", event.Text)
 		case EventRunFinished:
@@ -468,16 +495,16 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	}
 
 finished:
-	if !approved || output.String() != "Created and verified." || responseCalls.Load() != 2 {
+	if !approved || output.String() != "Created and verified." || responseCalls.Load() != 4 {
 		t.Fatalf("turn = approved:%v output:%q response calls:%d", approved, output.String(), responseCalls.Load())
 	}
 	if want := []string{"queued", "awaiting_approval", "running"}; !reflect.DeepEqual(toolLifecycle, want) {
 		t.Fatalf("tool lifecycle = %v, want %v", toolLifecycle, want)
 	}
-	if want := [][3]string{{"10", "6", "4"}, {"20", "15", "6"}}; !reflect.DeepEqual(contextUsage, want) {
+	if want := [][3]string{{"10", "6", "4"}, {"20", "15", "6"}, {"25", "0", "8"}, {"30", "0", "6"}}; !reflect.DeepEqual(contextUsage, want) {
 		t.Fatalf("context usage events = %v, want %v", contextUsage, want)
 	}
-	if !reflect.DeepEqual(cacheWrites, []string{"2", "3"}) {
+	if !reflect.DeepEqual(cacheWrites, []string{"2", "3", "0", "0"}) {
 		t.Fatalf("cache write events = %v", cacheWrites)
 	}
 	if estimatedUsage < 2 {
@@ -507,13 +534,16 @@ finished:
 	if sessionProjection.Usage.CacheWriteTokens != 5 || sessionProjection.Usage.MainCacheWrite != 5 {
 		t.Fatalf("persisted cache writes = %+v", sessionProjection.Usage)
 	}
-	if len(sessionProjection.Blocks) != 3 ||
+	if len(sessionProjection.Blocks) != 4 ||
 		sessionProjection.Blocks[1].Kind != "commentary" ||
 		sessionProjection.Blocks[1].Content != fallbackToolAnnouncement ||
 		sessionProjection.Blocks[1].Data["synthetic"] != fallbackToolAnnouncementSynthetic ||
-		sessionProjection.Blocks[2].Kind != "assistant" ||
-		sessionProjection.Blocks[2].TextPhase != string(hyprovider.TextPhaseFinalAnswer) ||
-		sessionProjection.Blocks[2].Content != "Created and verified." {
+		sessionProjection.Blocks[2].Kind != "commentary" ||
+		sessionProjection.Blocks[2].Content != fallbackToolAnnouncement ||
+		sessionProjection.Blocks[2].Data["synthetic"] != fallbackToolAnnouncementSynthetic ||
+		sessionProjection.Blocks[3].Kind != "assistant" ||
+		sessionProjection.Blocks[3].TextPhase != string(hyprovider.TextPhaseFinalAnswer) ||
+		sessionProjection.Blocks[3].Content != "Created and verified." {
 		t.Fatalf("session projection = %+v", sessionProjection.Blocks)
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)

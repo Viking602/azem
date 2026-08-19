@@ -93,6 +93,53 @@ describe("Beautiful UI primitives", () => {
     container.remove();
   });
 
+  it("renders quiet Codex wait as gray text with a cadenced sweep", async () => {
+    vi.useFakeTimers();
+    const container = await render(
+      <ThinkingState active expanded={false} label="正在思考" quiet disabled />,
+    );
+    const wait = container.querySelector(".bui-thinking-state.quiet");
+    const shimmer = container.querySelector(".bui-cadenced-shimmer");
+    expect(wait).not.toBeNull();
+    expect(shimmer?.querySelector(".bui-cadenced-shimmer-text")?.textContent).toBe("正在思考");
+    expect(shimmer?.querySelector(".bui-cadenced-shimmer-sweep")).not.toBeNull();
+    expect(wait?.querySelector(".azem-thinking-mark")).toBeNull();
+    expect(wait?.querySelector(".bui-thinking-meta")).toBeNull();
+    expect(wait?.querySelector(".reasoning-chevron")).toBeNull();
+    expect(wait?.querySelector(".reasoning-label-sweep, .bui-shimmer-label, .reasoning-summary")).toBeNull();
+    expect(shimmer?.classList.contains("bui-cadenced-shimmer-active")).toBe(false);
+    await act(async () => { vi.advanceTimersByTime(600); });
+    expect(shimmer?.classList.contains("bui-cadenced-shimmer-active")).toBe(true);
+    await act(async () => { vi.advanceTimersByTime(1000); });
+    expect(shimmer?.classList.contains("bui-cadenced-shimmer-active")).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("rolls the quiet thinking label when a tool name replaces 正在思考", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(
+      <ThinkingState active expanded={false} label="正在思考" labelKey="正在思考" quiet expandable />,
+    ));
+    const shimmer = container.querySelector(".bui-cadenced-shimmer");
+    expect(shimmer?.querySelector(".bui-cadenced-shimmer-text")?.textContent).toBe("正在思考");
+    expect(shimmer?.classList.contains("rolling")).toBe(false);
+
+    await act(async () => root.render(
+      <ThinkingState active expanded={false} label="搜索代码" labelKey="搜索代码" quiet expandable />,
+    ));
+    expect(container.querySelector(".bui-cadenced-shimmer")).toBe(shimmer);
+    expect(shimmer?.classList.contains("rolling")).toBe(true);
+    expect(shimmer?.querySelector(".reasoning-label-out")?.textContent).toBe("正在思考");
+    expect(shimmer?.querySelector(".bui-cadenced-shimmer-text")?.textContent).toBe("搜索代码");
+    expect(container.querySelector(".azem-thinking-mark")).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+
+
   it("hides the thinking tablist when only reasoning exists", async () => {
     const container = await render(
       <ThinkingState

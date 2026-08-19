@@ -95,8 +95,9 @@ describe("composer slash commands", () => {
 		expect(transcriptFollowBehavior(true)).toBe("instant");
 		expect(transcriptFollowBehavior(false)).toBe("smooth");
 		expect(transcriptFollowBehavior(false, true)).toBe("instant");
-		expect(threadSurface).toContain("transcriptFollowBehavior(running, pinInstant.current)");
+		expect(threadSurface).toContain("pinTranscriptTail(node, \"instant\")");
 	});
+
 
 	it("opens a switched session at the tail instead of the first line", () => {
 		expect(threadSurface).toContain("sessionFollow.current !== currentSessionId");
@@ -105,9 +106,14 @@ describe("composer slash commands", () => {
 		expect(threadSurface).toContain("typeof ResizeObserver === \"undefined\"");
 		expect(threadSurface).toContain("observer.observe(transcript)");
 		expect(threadSurface).toContain("[blocks, following, queuedPrompts.length, running, currentSessionId]");
-		const viewport = { scrollHeight: 2400, scrollTo: vi.fn() };
+		expect(threadSurface).toContain("viewport.scrollTop = top");
+		expect(threadSurface).toContain("if (pinning.current) return");
+		const viewport = { scrollHeight: 2400, scrollTop: 0, scrollTo: vi.fn() };
 		pinTranscriptTail(viewport as unknown as HTMLElement, "instant");
-		expect(viewport.scrollTo).toHaveBeenCalledWith({ top: 2400, behavior: "instant" });
+		expect(viewport.scrollTop).toBe(2400);
+		expect(viewport.scrollTo).not.toHaveBeenCalled();
+		pinTranscriptTail(viewport as unknown as HTMLElement, "smooth");
+		expect(viewport.scrollTo).toHaveBeenCalledWith({ top: 2400, behavior: "smooth" });
 	});
 
 	it("overlays a transparent composer dock so the timeline stays visible and scrollable", () => {
@@ -119,7 +125,7 @@ describe("composer slash commands", () => {
 		expect(threadSurface).toContain('className="transcript-composer-clearance"');
 		expect(styles).toMatch(/\.transcript-composer-clearance\s*\{[^}]*height:\s*var\(--transcript-bottom-gap\)/s);
 		expect(styles).toMatch(/\.thread-session-stage\s*\{[^}]*--transcript-bottom-gap:\s*148px/s);
-		expect(styles).toMatch(/\.transcript\s*\{[^}]*padding:\s*31px 0 0/s);
+		expect(styles).toMatch(/\.transcript\s*\{[^}]*padding:\s*34px 0 0/s);
 		expect(styles).toMatch(/\.composer-dock\s*\{[^}]*position:\s*absolute;[^}]*background:\s*transparent;[^}]*pointer-events:\s*none;/s);
 		expect(styles).toMatch(/\.composer-dock \.composer-stack,\s*\.composer-dock \.jump-latest\s*\{[^}]*pointer-events:\s*auto;/s);
 		expect(styles).not.toMatch(/\.composer-dock \.composer-card::before/);
@@ -225,6 +231,9 @@ describe("composer slash commands", () => {
 		expect(styles).toMatch(/\.streaming-text-reveal\s*\{[^}]*streaming-text-reveal-in/s);
 		expect(styles).not.toMatch(/\.assistant-block\.phase-pending::before/);
 		expect(styles).toMatch(/\.timeline-feed > \.process-fold,\s*\.timeline-feed > \.session-turn-current,\s*\.timeline-feed > \.session-history-turn:last-of-type[\s\S]*?contain-intrinsic-size:\s*none/s);
+		expect(styles).toMatch(/\.timeline-feed > \.session-history-turn\s*\{[^}]*contain-intrinsic-size:\s*180px/);
+		expect(styles).not.toMatch(/\.timeline-feed > \.session-history-turn\s*\{[^}]*contain-intrinsic-size:\s*auto/);
+
 		expect(styles).not.toMatch(/\.process-status-rule/);
 		// The running sparkle breathes on scale and brightness, never on a
 		// muted-to-ink color swap (UI-016).
@@ -234,7 +243,7 @@ describe("composer slash commands", () => {
 		expect(beautifulUIStyles).toMatch(/\.subagent-run-card\s*\{[^}]*width:\s*100%;/s);
 		expect(beautifulUIStyles).toMatch(/\.bui-task-row\s*\{[^}]*border-radius:\s*var\(--bui-radius-task\);[^}]*background:\s*var\(--paper\);/s);
 		expect(beautifulUIStyles).toMatch(/\.bui-task-mark\[data-state="completed"\]\s*\{[^}]*background:\s*var\(--green\);/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-tool-chip-detail\s*\{[^}]*border-radius:\s*999px;[^}]*font-family:\s*var\(--mono\);/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-tool-chip-detail\s*\{[^}]*background:\s*transparent;[^}]*color:\s*color-mix\(in srgb, var\(--ink\) 40%, transparent\);/s);
 		expect(beautifulUIStyles).toMatch(/\.bui-file-change-pill\s*\{[^}]*border-radius:\s*999px;[^}]*background:\s*var\(--paper\);/s);
 	});
 

@@ -1,6 +1,6 @@
 .transcript-viewport { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; scroll-behavior: smooth; }
 .workspace-grid[data-inspector="open"] .transcript-viewport { padding-right: var(--inspector-reserve); }
-.transcript { width: min(760px, calc(100% - 48px)); margin: 0 auto; padding: 31px 0 0; }
+  .transcript { width: min(760px, calc(100% - 48px)); margin: 0 auto; padding: 18px 0 0; }
 /* A real box, not padding-bottom: WebKit content-visibility on the last
  * answer can drop parent padding from scrollHeight and hide it under the dock. */
 .transcript-composer-clearance {
@@ -22,40 +22,18 @@
   min-width: 0;
 }
 .session-turn-current { min-width: 0; }
-.session-history-turn {
-  margin: 0 0 28px;
-  padding: 0 0 22px;
-  border: 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-.session-history-turn:last-of-type {
-  margin-bottom: 8px;
-  border-bottom-color: var(--line);
-}
-.session-turn-label {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 0 14px;
-}
-.session-turn-index {
-  flex: 0 0 auto;
-  color: var(--faint);
-  font-family: var(--mono);
-  font-size: var(--text-2xs);
-  font-weight: 700;
-  letter-spacing: .04em;
-  white-space: nowrap;
-}
-.session-turn-index.current { color: var(--blue); }
-.session-turn-current.has-history-context {
-  margin-top: 4px;
-  padding-top: 16px;
-}
-.session-document .session-turn > .user-block { margin-bottom: 16px; }
+  .session-history-turn {
+    margin: 0 0 18px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  .session-history-turn:last-of-type {
+    margin-bottom: 18px;
+  }
+  .session-document .session-turn > .user-block { margin-bottom: 10px; }
 .session-document .session-turn > .subagent-wake-notice { margin-bottom: 16px; }
 .subagent-wake-notice {
   display: flex;
@@ -116,12 +94,12 @@
 .session-document > .process-fold,
 .session-turn > .process-fold { margin-top: 4px; }
 .session-document > .assistant-block,
-.session-turn > .assistant-block { margin-top: 10px; }
-.session-turn > .process-fold + .assistant-block,
-.session-turn > .process-fold + .commentary-block {
-  margin-top: 8px;
-  margin-bottom: 12px;
-}
+  .session-turn > .assistant-block { margin-top: 8px; }
+  .session-turn > .process-fold + .assistant-block,
+  .session-turn > .process-fold + .commentary-block {
+    margin-top: 6px;
+    margin-bottom: 10px;
+  }
 .queued-prompts { position: relative; z-index: 1; overflow: hidden; margin: 0 22px -1px; border: 1px solid var(--line); border-radius: 15px 15px 0 0; background: var(--paper); box-shadow: 0 8px 28px rgb(24 24 20 / 8%); }
 .queue-paused { min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 9px 5px 12px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: var(--text-sm); }
 .queue-paused button { min-height: 26px; padding: 0 9px; border-radius: 7px; color: var(--ink); font-weight: 600; }.queue-paused button:hover { background: var(--paper-muted); }
@@ -138,9 +116,9 @@
  *  - .timeline-prose  = assistant body (primary ink, larger type, relaxed leading)
  *  - .work-entry      = tools / thinking / groups (muted meta rows, compact)
  */
-.assistant-block {
-  position: relative;
-  margin: 14px 0 26px;
+  .assistant-block {
+    position: relative;
+    margin: 8px 0 16px;
   color: var(--ink);
   font-size: var(--text-chat);
   font-weight: 400;

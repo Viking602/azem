@@ -290,6 +290,34 @@ dialog { border: 0; padding: 0; background: transparent; color: var(--ink); }.co
 .usage-facts dt { color: var(--faint); font-size: var(--text-2xs); }
 .usage-facts dd { margin: 3px 0 0; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .usage-activity-visual { width: 100%; display: grid; justify-items: start; gap: 8px; padding: 10px 20px 18px; } /* 活动区铺满报告宽度 */
+.usage-skyline { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 14px 18px; align-items: center; }
+.usage-skyline-hint { margin: 0; color: var(--faint); font-size: 10px; }
+.usage-donut { position: relative; width: 88px; height: 88px; animation: usage-skyline-in 360ms ease both; }
+.usage-donut svg { display: block; transform: rotate(-90deg); }
+.usage-donut-track, .usage-donut-arc { fill: none; stroke-width: 8; }
+.usage-donut-track { stroke: color-mix(in srgb, var(--ink) 8%, var(--paper)); }
+.usage-donut-arc { stroke-linecap: butt; }
+.usage-donut-center { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; text-align: center; pointer-events: none; }
+.usage-donut-center strong { font-size: 13px; letter-spacing: -.03em; font-variant-numeric: tabular-nums; line-height: 1; }
+.usage-donut-center span { margin-top: 3px; color: var(--faint); font-size: 8px; letter-spacing: .08em; }
+.usage-heat-cell:not([data-out]) { cursor: pointer; }
+.usage-heat-cell[data-selected] { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--ink) 72%, var(--blue)); transform: scale(1.08); }
+.usage-day-panel {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: color-mix(in srgb, var(--ink) 2.5%, var(--paper)); animation: usage-day-in 220ms ease;
+}
+.usage-day-panel header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.usage-day-total { margin: 6px 0 0; font-size: 22px; letter-spacing: -.03em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.usage-day-meta { margin: 4px 0 0; color: var(--muted); font-size: var(--text-2xs); }
+.usage-share { width: 100%; display: grid; gap: 8px; }
+.usage-share > span { color: var(--faint); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.usage-share-track { display: flex; height: 6px; overflow: hidden; border-radius: 99px; background: var(--paper-muted); }
+.usage-share-track > i { display: block; height: 100%; min-width: 0; transform-origin: left; animation: usage-share-in 520ms cubic-bezier(.2, .8, .2, 1) both; }
+.usage-share ul { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 0; padding: 0; list-style: none; }
+.usage-share li { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
+.usage-share li i { width: 6px; height: 6px; border-radius: 99px; }
+.usage-share li em { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: normal; color: var(--ink); }
+.usage-share li span { font-variant-numeric: tabular-nums; }
 .usage-heatmap { --heat-size: 10px; --heat-gap: 2px; --weeks: 53; position: relative; display: grid; gap: 6px; padding: 0; }
 .usage-heatmap-grid, .usage-heatmap-months {
   display: grid; grid-template-columns: repeat(var(--weeks), var(--heat-size)); gap: var(--heat-gap); justify-content: start;
@@ -368,6 +396,9 @@ dialog { border: 0; padding: 0; background: transparent; color: var(--ink); }.co
   from { opacity: 0; transform: translate(-50%, 2px); }
   to { opacity: 1; transform: translate(-50%, 6px); }
 }
+@keyframes usage-skyline-in { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: none; } }
+@keyframes usage-day-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes usage-share-in { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 @media (prefers-reduced-motion: reduce) {
   .usage-heat-cell,
   .usage-heat-cell:not([data-out]):hover,
@@ -376,7 +407,10 @@ dialog { border: 0; padding: 0; background: transparent; color: var(--ink); }.co
   .usage-heatmap-tip[data-placement="below"],
   .usage-activity-grains button,
   .usage-breakdown li,
-  .usage-bar > i {
+  .usage-bar > i,
+  .usage-donut,
+  .usage-day-panel,
+  .usage-share-track > i {
     transition: none;
     animation: none;
     transform: none;
@@ -398,7 +432,7 @@ dialog { border: 0; padding: 0; background: transparent; color: var(--ink); }.co
   .subagent-row > button { gap: 12px; padding-inline: 8px; }
   .workspace-browser { grid-template-columns: clamp(190px, 31vw, 238px) minmax(0, 1fr); }
   .changes-review-layout { grid-template-columns: minmax(0, 1fr) 250px; }
-  .resize-left { display: none; }.composer-shell, .composer-stack { width: min(650px, calc(100vw - 250px)); }.composer-stack .composer-shell { width: 100%; }.settings-shell { grid-template-columns: 196px minmax(0, 1fr); }.settings-content { width: calc(100% - 38px); }.route-controls { grid-template-columns: 1fr 1.4fr; }.route-actions { justify-content: flex-end; }.data-grid { grid-template-columns: 1fr; }.usage-split { grid-template-columns: 1fr; align-items: start; }.usage-split > .usage-breakdown { height: auto; }.usage-split > .usage-breakdown + .usage-breakdown { border-inline-start: 0; border-block-start: 1px solid var(--line); }.usage-ledger-total { font-size: 28px; }
+  .resize-left { display: none; }.composer-shell, .composer-stack { width: min(650px, calc(100vw - 250px)); }.composer-stack .composer-shell { width: 100%; }.settings-shell { grid-template-columns: 196px minmax(0, 1fr); }.settings-content { width: calc(100% - 38px); }.route-controls { grid-template-columns: 1fr 1.4fr; }.route-actions { justify-content: flex-end; }.data-grid { grid-template-columns: 1fr; }.usage-split { grid-template-columns: 1fr; align-items: start; }.usage-split > .usage-breakdown { height: auto; }.usage-split > .usage-breakdown + .usage-breakdown { border-inline-start: 0; border-block-start: 1px solid var(--line); }.usage-ledger-total { font-size: 28px; }.usage-skyline { grid-template-columns: 1fr; }
 }
 @media (max-width: 680px) {
   .subagents-page, .agent-side-chat { width: 100%; }

@@ -16,12 +16,12 @@ const usage: ContextUsage = {
 };
 
 describe("context cache metrics", () => {
-  it("derives the hit rate only from cache-reporting input", () => {
+  it("does not mix aggregate history into the latest-request metric", () => {
     expect(contextCacheMetrics(usage)).toEqual({
-      reported: true,
-      hitRate: 74,
-      cachedTokens: 74_000,
-      totalCacheTokens: 100_000,
+      reported: false,
+      hitRate: null,
+      cachedTokens: 0,
+      totalCacheTokens: 58_000,
     });
   });
 
@@ -30,7 +30,7 @@ describe("context cache metrics", () => {
       .toMatchObject({ reported: false, hitRate: null });
     expect(contextCacheMetrics({
       inputTokens: 12, outputTokens: 2, contextLimit: 128_000, reported: true,
-      cacheInputTokens: 12, cachedInputTokens: 0, cacheReported: true,
+      uncachedInputTokens: 12, mainCacheReported: true,
     })).toMatchObject({ reported: true, hitRate: 0 });
   });
 

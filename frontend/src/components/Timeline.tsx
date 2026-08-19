@@ -91,7 +91,6 @@ function TimelineFeedView({
     ? projection.turns
     : waiting || running ? [{ id: "current-empty", items: [] }] : [];
   const currentIndex = Math.max(0, turns.length - 1);
-  const multiTurn = turns.length > 1;
   return <div className="timeline-feed session-document" ref={feed}>
     {turns.map((turn, index) => {
       const current = index === currentIndex;
@@ -101,7 +100,6 @@ function TimelineFeedView({
         language={language}
         index={index}
         current={current}
-        multiTurn={multiTurn}
         activeRunId={activeRunId}
         running={running}
         waiting={waiting}
@@ -113,36 +111,25 @@ function TimelineFeedView({
 }
 
 function SessionTurnView({
-  turn, language, index, current, multiTurn, activeRunId, running, waiting,
+  turn, language, index, current, activeRunId, running, waiting,
   foldActiveProcess, collapseCompletedProcess,
 }: {
   turn: SessionTurn;
   language: Snapshot["language"];
   index: number;
   current: boolean;
-  multiTurn: boolean;
   activeRunId: string;
   running: boolean;
   waiting: boolean;
   foldActiveProcess: boolean;
   collapseCompletedProcess: boolean;
 }) {
-  const t = translator(language);
   const fileSummary = turnEditedFiles(turn, { activeRunId, running });
   return <section
-    className={`session-turn ${current ? `session-turn-current${multiTurn ? " has-history-context" : ""}` : "session-history-turn"}`}
+    className={`session-turn ${current ? "session-turn-current" : "session-history-turn"}`}
     data-screen-label={current ? "current-turn" : undefined}
     data-turn={current ? undefined : String(index + 1).padStart(2, "0")}
   >
-    {current
-      ? multiTurn
-        ? <div className="session-turn-label">
-          <span className="session-turn-index current">{t("currentTurn")}</span>
-        </div>
-        : null
-      : <div className="session-turn-label">
-        <span className="session-turn-index">{tFormat(language, "turnIndex", { n: String(index + 1).padStart(2, "0") })}</span>
-      </div>}
     {turn.user ? <TimelineBlock block={turn.user} language={language} /> : null}
     <TurnItems
       turn={turn}
@@ -150,7 +137,7 @@ function SessionTurnView({
       foldActiveProcess={foldActiveProcess}
       collapseCompletedProcess={collapseCompletedProcess}
       waiting={current && waiting}
-      pendingWait={!turn.user && current && waiting}
+      pendingWait={Boolean(current && waiting && !turn.items.some((item) => item.kind === "process"))}
     />
     {fileSummary ? <EditedFilesSummary summary={fileSummary} language={language} /> : null}
   </section>;
@@ -177,11 +164,9 @@ function TurnItems({
     }),
   );
 
-  // Key process steps by ordinal so appending tools cannot remount the bar.
-  // ChatGPT.app `ma()` does not invent a Processing rule or empty Thinking
-  // row on send. A user turn therefore stays just the bubble until the
-  // model emits thinking or tools. Side-chat wait (no user bubble) still
-  // needs a live 思考 bar so an empty running drawer is not 运行中.
+  // Codex shows gray “正在思考” from send. The pending step keeps the same
+  // ordinal key as the first real process step so the wait row becomes the
+  // later thinking/tools bar (UI-016).
   const stepKeys = new Map(processIndexes.map((index, ordinal) => [index, `process-step-${ordinal}`]));
   const children = turn.items.map((item, index) => {
     const previous = turn.items[index - 1];

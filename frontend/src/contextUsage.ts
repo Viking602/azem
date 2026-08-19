@@ -29,19 +29,16 @@ export function contextOccupancy(usage: ContextUsage, profile: ContextProfile | 
 }
 
 export function contextCacheMetrics(usage: ContextUsage) {
-  const latestMainReported = usage.mainCacheReported === true && usage.uncachedInputTokens !== undefined;
-  const cacheInputTokens = latestMainReported
-    ? Math.max(0, usage.inputTokens)
-    : Math.max(0, usage.cacheInputTokens ?? 0);
-  const cachedTokens = latestMainReported
-    ? Math.max(0, cacheInputTokens - Math.min(cacheInputTokens, Math.max(0, usage.uncachedInputTokens ?? 0)))
-    : Math.max(0, usage.cachedInputTokens ?? 0);
-  const reported = latestMainReported || usage.cacheReported === true;
+  const reported = usage.mainCacheReported === true && usage.uncachedInputTokens !== undefined;
+  const requestInputTokens = Math.max(0, usage.inputTokens);
+  const cachedTokens = reported
+    ? Math.max(0, requestInputTokens - Math.min(requestInputTokens, Math.max(0, usage.uncachedInputTokens ?? 0)))
+    : 0;
   return {
     reported,
-    hitRate: reported && cacheInputTokens > 0 ? cacheHitPercentage(cachedTokens, cacheInputTokens) : null,
+    hitRate: reported && requestInputTokens > 0 ? cacheHitPercentage(cachedTokens, requestInputTokens) : null,
     cachedTokens,
-    totalCacheTokens: cacheInputTokens,
+    totalCacheTokens: requestInputTokens,
   };
 }
 

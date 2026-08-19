@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Viking602/azem/internal/config"
 )
 
 type Event string
@@ -275,11 +277,11 @@ func marshalEnvelope(e Envelope) ([]byte, error) {
 }
 
 func defaultTranscriptPath(sessionID string) string {
-	cache, err := os.UserCacheDir()
+	home, err := config.Home()
 	if err != nil {
 		return ""
 	}
-	directory := filepath.Join(cache, "azem", "hook-transcripts")
+	directory := filepath.Join(home, "hook-transcripts")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return ""
 	}
@@ -337,8 +339,10 @@ func optional(input map[string]any, key, value string) {
 	}
 }
 
-var exactMatcher = regexp.MustCompile(`^[A-Za-z0-9_|]+$`)
-var aliases = map[string]string{"Bash": "coding.shell", "Read": "coding.read_file", "Edit": "coding.edit_hashline", "Write": "coding.write_file", "Grep": "coding.search", "Glob": "coding.list_files", "Agent": "subagent.spawn", "TodoWrite": "todo"}
+var (
+	exactMatcher = regexp.MustCompile(`^[A-Za-z0-9_|]+$`)
+	aliases      = map[string]string{"Bash": "coding.shell", "Read": "coding.read_file", "Edit": "coding.edit_hashline", "Write": "coding.write_file", "Grep": "coding.search", "Glob": "coding.list_files", "Agent": "subagent.spawn", "TodoWrite": "todo"}
+)
 
 func compileMatcher(c *Command) error {
 	m := strings.TrimSpace(c.Matcher)

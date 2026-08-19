@@ -2,20 +2,11 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
 	"time"
 )
-
-func semanticStateForTest(objective string) string {
-	encoded, _ := json.Marshal(SemanticStateV1{Version: 1, Objective: StateFactV1{
-		Text: objective, Status: "active", Authority: "agent", Confidence: "inferred",
-		Sources: []EvidenceRefV1{{Kind: "checkpoint", ID: "test:evidence"}},
-	}})
-	return string(encoded)
-}
 
 func writeProviderToolCall(writer http.ResponseWriter, responseID, callID, name, arguments string) {
 	_, _ = fmt.Fprintf(writer, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":%q,\"call_id\":%q,\"name\":%q,\"arguments\":%q}}\n\n", responseID+"-item", callID, name, arguments)

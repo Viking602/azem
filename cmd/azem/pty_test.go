@@ -38,9 +38,6 @@ func TestPTYStreamResizeCancelAndExit(t *testing.T) {
 	command.Dir = temp
 	command.Env = append(os.Environ(),
 		"HOME="+temp,
-		"XDG_CONFIG_HOME="+filepath.Join(temp, "config"),
-		"XDG_DATA_HOME="+filepath.Join(temp, "data"),
-		"XDG_STATE_HOME="+filepath.Join(temp, "state"),
 		"TERM=xterm-256color",
 		"AZEM_FAKE_PROVIDER=1",
 		"AZEM_REDUCED_MOTION=1",
@@ -128,9 +125,6 @@ func TestPTYRecoveryApprovalDoesNotReplayPendingEdit(t *testing.T) {
 	command.Dir = temp
 	command.Env = append(os.Environ(),
 		"HOME="+temp,
-		"XDG_CONFIG_HOME="+filepath.Join(temp, "config"),
-		"XDG_DATA_HOME="+filepath.Join(temp, "data"),
-		"XDG_STATE_HOME="+filepath.Join(temp, "state"),
 		"TERM=xterm-256color",
 		"AZEM_FAKE_PROVIDER=1",
 		"NO_COLOR=1",
@@ -189,7 +183,7 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 	if err := os.WriteFile(skillPath, []byte("---\nname: demo\ndescription: initial skill description\n---\nUse this skill for PTY verification.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	configDir := filepath.Join(temp, "config", "azem")
+	configDir := filepath.Join(temp, ".azem")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -205,9 +199,6 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 	command.Dir = temp
 	command.Env = append(os.Environ(),
 		"HOME="+temp,
-		"XDG_CONFIG_HOME="+filepath.Join(temp, "config"),
-		"XDG_DATA_HOME="+filepath.Join(temp, "data"),
-		"XDG_STATE_HOME="+filepath.Join(temp, "state"),
 		"TERM=xterm-256color",
 		"AZEM_FAKE_PROVIDER=1",
 		"NO_COLOR=1",
@@ -262,7 +253,7 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 func seedPendingEditApproval(t *testing.T, workspace string) {
 	t.Helper()
 	ctx := context.Background()
-	database := filepath.Join(workspace, "config", "azem", "azem.db")
+	database := filepath.Join(workspace, ".azem", "azem.db")
 	store, err := sqlitestore.Open(ctx, database)
 	if err != nil {
 		t.Fatal(err)

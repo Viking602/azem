@@ -8,6 +8,7 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/contextarchive"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/venat/message"
@@ -57,6 +58,30 @@ func TestContextProfileFromRequestClassifiesEveryWireContribution(t *testing.T) 
 	}
 }
 
+func TestContextProfileProjectsArchiveCarrierDiagnostics(t *testing.T) {
+	archive := contextarchive.Manifest{
+		Version: contextarchive.Version, RendererVersion: contextarchive.RendererVersion, Carrier: "bitmap",
+		SourceArtifactID: "archive-1", SourceSHA256: strings.Repeat("a", 64), SourceCharacters: 120_000,
+		FrameCount: 4, FrameBytes: 512 << 10, TotalPages: 9, TruncatedChars: 16_000,
+	}
+	carrier, err := archiveCarrierMessage(contextarchive.Result{Manifest: archive}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := ArchiveContextManifestV1{Version: 1, ID: "pending", PolicyVersion: contextRebuildPolicyVersion, Archive: &archive}
+	manifest.ManifestHash = archiveContextManifestHash(manifest)
+	manifest.ID = "context-" + manifest.ManifestHash[:24]
+	carrier, err = attachArchiveContextManifest(carrier, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := contextProfileFromRequest(hyprovider.Request{Messages: []message.Message{carrier}})
+	if profile.Archive == nil || profile.Archive.Carrier != "bitmap" || profile.Archive.SourceArtifactID != "archive-1" ||
+		profile.Archive.FrameCount != 4 || profile.Archive.TruncatedCharacters != 16_000 {
+		t.Fatalf("archive profile=%+v", profile.Archive)
+	}
+}
+
 func TestEstimateContextProfileUsesLiveSubagentCatalog(t *testing.T) {
 	ctx := context.Background()
 	providerStore, err := sqlitestore.Open(ctx, ":memory:")
@@ -70,7 +95,7 @@ func TestEstimateContextProfileUsesLiveSubagentCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer coding.Close(ctx)
-	subagentStore, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	subagentStore, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}

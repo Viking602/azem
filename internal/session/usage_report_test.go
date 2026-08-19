@@ -226,7 +226,7 @@ func newUsageReportService(t *testing.T) *Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close(ctx) })
-	return NewService(store.DB())
+	return NewService(store.DB(), store.Blobs())
 }
 
 func localDayAfternoon(now time.Time, daysAgo int) time.Time {

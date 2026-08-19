@@ -22,6 +22,9 @@ func (m *AppModel) updateAgent(event app.Event) {
 	for index := range m.agents {
 		if m.agents[index].ID == event.AgentID {
 			value.Blocks = m.agents[index].Blocks
+			// agent_state is intentionally sparse; an omitted evidence status
+			// must not erase the last durable projection.
+			value.EvidenceStatus = first(value.EvidenceStatus, m.agents[index].EvidenceStatus)
 			m.agents[index] = value
 			m.updateAgentBlock(event, value)
 			return
@@ -59,7 +62,8 @@ func agentViewFromPayload(id, state, summary string, payload *app.AgentStatePayl
 		RequestedIsolation: payload.RequestedIsolation, Isolation: payload.Isolation, CWD: payload.CWD,
 		ParentRunID: payload.ParentRunID, ParentToolCallID: payload.ParentToolCallID,
 		ChildRunID: payload.ChildRunID, Activity: payload.Activity, Warning: payload.Warning,
-		WorktreePath: payload.WorktreePath, ToolCalls: payload.ToolCalls, Turns: payload.Turns,
+		EvidenceStatus: payload.EvidenceStatus, WorktreePath: payload.WorktreePath,
+		ToolCalls: payload.ToolCalls, Turns: payload.Turns,
 		TokensUsed: payload.TokensUsed, ElapsedMS: payload.ElapsedMS,
 	}
 }

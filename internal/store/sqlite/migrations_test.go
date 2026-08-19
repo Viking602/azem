@@ -1,10 +1,16 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/Viking602/azem/internal/session"
 )
 
 func TestMigrationV3PreservesV2SubagentRuns(t *testing.T) {
@@ -82,7 +88,7 @@ func TestPhase3MigrationV11ArtifactForeignKeyCascade(t *testing.T) {
 	if _, err := provider.db.ExecContext(ctx, `INSERT INTO sessions(id,title,created_at,updated_at) VALUES('s','S',1,1)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.db.ExecContext(ctx, `INSERT INTO context_artifacts(id,session_id,kind,sha256,payload,created_at) VALUES('a','s','tool_result','hash',X'01',1)`); err != nil {
+	if _, err := provider.db.ExecContext(ctx, `INSERT INTO context_artifacts(id,session_id,kind,sha256,created_at) VALUES('a','s','tool_result','hash',1)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := provider.db.ExecContext(ctx, `DELETE FROM sessions WHERE id='s'`); err != nil {
@@ -159,9 +165,9 @@ func TestMigrationV7MovesProjectionBlocksIntoAppendOnlyRows(t *testing.T) {
 	}
 	defer provider.Close(ctx)
 	var version int
-	var gotBlocks, modelHistory string
-	if err := provider.db.QueryRowContext(ctx, `SELECT blocks,model_history FROM session_projections WHERE session_id='session'`).Scan(
-		&gotBlocks, &modelHistory,
+	var modelHistory string
+	if err := provider.db.QueryRowContext(ctx, `SELECT model_history FROM session_projections WHERE session_id='session'`).Scan(
+		&modelHistory,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -175,8 +181,12 @@ func TestMigrationV7MovesProjectionBlocksIntoAppendOnlyRows(t *testing.T) {
 	if err := provider.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != schemaVersion || gotBlocks != "[]" || modelHistory != "{}" || sequence != 0 || kind != "user" || runID != "run-1" || data != blocks[1:len(blocks)-1] {
-		t.Fatalf("migration result version=%d blocks=%q model_history=%q row=%d/%q/%q/%q", version, gotBlocks, modelHistory, sequence, kind, runID, data)
+	var leftoverBlocks int
+	if err := provider.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('session_projections') WHERE name='blocks'`).Scan(&leftoverBlocks); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion || leftoverBlocks != 0 || modelHistory != "{}" || sequence != 0 || kind != "user" || runID != "run-1" || data != blocks[1:len(blocks)-1] {
+		t.Fatalf("migration result version=%d leftover_blocks=%d model_history=%q row=%d/%q/%q/%q", version, leftoverBlocks, modelHistory, sequence, kind, runID, data)
 	}
 }
 
@@ -409,6 +419,171 @@ func TestMigrationV19BackfillsDesktopProjectOwnershipAndReopens(t *testing.T) {
 	if err := reopened.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestUpgradeCopiedUserDatabase(t *testing.T) {
+	source := strings.TrimSpace(os.Getenv("AZEM_UPGRADE_SOURCE"))
+	if source == "" {
+		t.Skip("set AZEM_UPGRADE_SOURCE to a real azem.db to measure schema 21 extraction")
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "azem.db")
+	if os.Getenv("AZEM_UPGRADE_IN_PLACE") == "1" {
+		path = source
+	} else if err := copyFile(source, path); err != nil {
+		t.Fatal(err)
+	}
+	before := info.Size()
+	blobs := strings.TrimSpace(os.Getenv("AZEM_UPGRADE_BLOBS"))
+	if blobs == "" {
+		blobs = filepath.Join(dir, "blobs")
+	}
+	provider, err := Open(ctx, path, WithBlobRoot(blobs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	var version, eventInline, leftoverPayload int
+	if err := provider.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.db.QueryRowContext(ctx, `SELECT ifnull(max(length(data)),0) FROM events`).Scan(&eventInline); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('context_artifacts') WHERE name='payload'`).Scan(&leftoverPayload); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion || leftoverPayload != 0 || eventInline > inlinePayloadLimit {
+		t.Fatalf("upgrade version=%d payload_col=%d max_event=%d", version, leftoverPayload, eventInline)
+	}
+	t.Logf("database %d -> %d bytes; blobs at %s", before, after.Size(), blobs)
+}
+
+func copyFile(source, target string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := out.ReadFrom(in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+func TestMigrationV21MovesArtifactPayloadsOutOfSQLite(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "blobs.db")
+	large := strings.Repeat("spill-me ", 800)
+	prepareSchema20BlobFixture(t, ctx, path, large)
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(ctx)
+	for _, column := range []struct{ table, name string }{
+		{"context_artifacts", "payload"},
+		{"session_projections", "blocks"},
+	} {
+		var found int
+		if err := provider.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info(?) WHERE name=?`, column.table, column.name).Scan(&found); err != nil {
+			t.Fatal(err)
+		}
+		if found != 0 {
+			t.Fatalf("%s.%s survived schema 21", column.table, column.name)
+		}
+	}
+	svc := session.NewService(provider.DB(), provider.Blobs())
+	artifact, err := svc.LoadArtifact(ctx, "s", "a")
+	if err != nil || !bytes.Equal(artifact.Payload, []byte{1}) {
+		t.Fatalf("extracted artifact=%#v err=%v", artifact, err)
+	}
+	emptyArtifact, err := svc.LoadArtifact(ctx, "s", "empty")
+	if err != nil || len(emptyArtifact.Payload) != 0 {
+		t.Fatalf("extracted empty artifact=%#v err=%v", emptyArtifact, err)
+	}
+	tools, err := svc.ListToolRecords(ctx, "s")
+	if err != nil || len(tools) != 1 || tools[0].Content != large {
+		t.Fatalf("extracted tool content=%#v err=%v", tools, err)
+	}
+	projection, err := svc.LoadProjection(ctx, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 2 || projection.Blocks[0].Content != "canonicalsearchterm" || projection.Blocks[1].Content != large {
+		t.Fatalf("extracted blocks=%#v", projection.Blocks)
+	}
+	var toolInline, thinkingInline, historyInline int
+	if err := provider.db.QueryRowContext(ctx, `SELECT
+		(SELECT length(content) FROM session_tool_records WHERE tool_call_id='call'),
+		(SELECT length(data) FROM session_blocks WHERE sequence=1),
+		(SELECT length(model_history) FROM session_projections WHERE session_id='s')`).Scan(&toolInline, &thinkingInline, &historyInline); err != nil {
+		t.Fatal(err)
+	}
+	if toolInline != 0 || thinkingInline > 8 || historyInline > 512 {
+		t.Fatalf("inline sizes tool=%d thinking=%d history=%d", toolInline, thinkingInline, historyInline)
+	}
+	if projection.ModelHistory.InstructionFingerprint != "legacy-fingerprint" {
+		t.Fatalf("extracted model history=%#v", projection.ModelHistory)
+	}
+	var hits int
+	if err := provider.db.QueryRowContext(ctx, `SELECT count(*) FROM history_fts WHERE history_fts MATCH 'canonicalsearchterm'`).Scan(&hits); err != nil || hits != 1 {
+		t.Fatalf("user FTS hits=%d err=%v", hits, err)
+	}
+}
+
+func prepareSchema20BlobFixture(t *testing.T, ctx context.Context, path, large string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 20; version++ {
+		if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
+			t.Fatalf("apply fixture migration %d: %v", version, err)
+		}
+	}
+	history := `{"instructionFingerprint":"legacy-fingerprint","generation":3,"padding":"` + large + `"}`
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO sessions(id,title,created_at,updated_at) VALUES('s','Session',1,1)`, nil},
+		{`INSERT INTO session_projections(session_id,model_history,updated_at) VALUES('s',?,1)`, []any{history}},
+		{`INSERT INTO session_blocks(session_id,sequence,kind,data) VALUES('s',0,'user','{"kind":"user","content":"canonicalsearchterm"}')`, nil},
+		{`INSERT INTO session_blocks(session_id,sequence,kind,data) VALUES('s',1,'thinking',?)`, []any{`{"kind":"thinking","content":` + quoteJSON(large) + `}`}},
+		{`INSERT INTO session_tool_records(session_id,run_id,tool_call_id,name,state,content,started_at) VALUES('s','run','call','coding.shell','completed',?,1)`, []any{large}},
+		{`INSERT INTO context_artifacts(id,session_id,kind,sha256,payload,preview,created_at) VALUES('a','s','tool_result','digest',X'01','preview',1)`, nil},
+		{`INSERT INTO context_artifacts(id,session_id,kind,sha256,payload,preview,created_at) VALUES('empty','s','tool_result','empty-digest',X'','empty',1)`, nil},
+		{`PRAGMA user_version=20`, nil},
+	}
+	for _, statement := range statements {
+		if _, err := db.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func quoteJSON(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }
 
 func TestMigrationV20InvalidatesOnlyReplaceableContextState(t *testing.T) {

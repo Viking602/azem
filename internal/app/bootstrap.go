@@ -82,13 +82,9 @@ func (b *bootstrapAssembly) build(startupWorkspace, configFile string, forceWork
 }
 
 func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile string, forceWorkspace, desktopMode bool) error {
-	paths, err := config.ResolvePaths(startupWorkspace)
+	paths, err := config.ResolvePathsWithConfig(startupWorkspace, configFile)
 	if err != nil {
 		return err
-	}
-	if configFile != "" {
-		paths.ConfigFile = configFile
-		paths.ConfigDir = directoryOf(configFile)
 	}
 	if desktopMode && !forceWorkspace {
 		if err := b.restoreDesktopWorkspace(&paths); err != nil {
@@ -121,11 +117,11 @@ func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile strin
 
 func (b *bootstrapAssembly) restoreDesktopWorkspace(paths *config.Paths) error {
 	var err error
-	b.store, err = sqlitestore.Open(b.ctx, paths.Database)
+	b.store, err = sqlitestore.Open(b.ctx, paths.Database, sqlitestore.WithBlobRoot(filepath.Join(paths.DataDir, "blobs")))
 	if err != nil {
 		return err
 	}
-	b.sessions = session.NewService(b.store.DB())
+	b.sessions = session.NewService(b.store.DB(), b.store.Blobs())
 	if workspace, restoreErr := b.sessions.LastProject(b.ctx); restoreErr == nil {
 		paths.Workspace = workspace
 		return nil
@@ -145,13 +141,13 @@ func (b *bootstrapAssembly) restoreDesktopWorkspace(paths *config.Paths) error {
 func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 	var err error
 	if b.store == nil {
-		b.store, err = sqlitestore.Open(b.ctx, b.paths.Database)
+		b.store, err = sqlitestore.Open(b.ctx, b.paths.Database, sqlitestore.WithBlobRoot(filepath.Join(b.paths.DataDir, "blobs")))
 		if err != nil {
 			return err
 		}
 	}
 	if b.sessions == nil {
-		b.sessions = session.NewService(b.store.DB())
+		b.sessions = session.NewService(b.store.DB(), b.store.Blobs())
 	}
 	b.skillCatalog, err = skills.Load(skills.LoadOptions{
 		HomeDir:      b.homeDir,
@@ -190,7 +186,7 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 	if err != nil {
 		return err
 	}
-	b.subagentRuns, err = agentservice.NewSQLSubagentRunStore(b.store.DB())
+	b.subagentRuns, err = agentservice.NewSQLSubagentRunStore(b.store.DB(), b.store.Blobs())
 	if err != nil {
 		return err
 	}

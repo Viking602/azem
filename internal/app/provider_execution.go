@@ -369,16 +369,24 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	var executionOutcome hyworker.ExecutionOutcome
 	var runErr error
 	restartingAttempt := false
+	guardRetryPending := false
 	uiSink := s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
 	sink := stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
-		if restartingAttempt && frame.Kind != stream.FrameError {
+		if (restartingAttempt || guardRetryPending) && frame.Kind != stream.FrameError {
+			scope := "attempt"
+			if guardRetryPending && !restartingAttempt {
+				scope = "output_guard"
+			}
 			if !s.emit(ctx, Event{
 				Kind: EventProviderRetry, SessionID: request.SessionID, RunID: run.RunID,
-				State: "restarted", Data: map[string]string{"scope": "attempt"},
+				State: "restarted", Data: map[string]string{"scope": scope},
 			}) {
 				return eventDeliveryError(ctx)
 			}
+			streamed.Reset()
+			reasoningTrace.discardAttempt()
 			restartingAttempt = false
+			guardRetryPending = false
 		}
 		switch frame.Kind {
 		case stream.FrameText:
@@ -392,7 +400,11 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			turnUsedTool = true
 		case stream.FrameDone:
 			finalAnswer.finishTurn()
-			reasoningTrace.commit(turnUsedTool)
+			if turnUsedTool {
+				reasoningTrace.commit(true)
+			} else {
+				guardRetryPending = true
+			}
 			turnUsedTool = false
 		case stream.FrameError:
 			reasoningTrace.discardAttempt()
@@ -405,6 +417,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	executionOutcome, runErr = executeMainRunUntilAvailable(ctx, func() (hyworker.ExecutionOutcome, error) {
 		return s.coding.ExecuteRun(workerCtx, run, engine, sink)
 	})
+	reasoningTrace.commit(false)
 	result = executionOutcome.Result
 	finalText := sanitizeFinalAnswerText(finalAnswer.resolve(result.Text))
 	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {
@@ -482,7 +495,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	if runErr == nil && ctx.Err() == nil && s.sessions != nil &&
 		(strings.TrimSpace(finalText) != "" || strings.TrimSpace(result.Thinking) != "" || reasoningTrace.len() > 0 || len(result.Messages) > 0) {
 		_, instructionFingerprint := turnInstructions(request.PlanMode)
-		_, manifest := extractContextCheckpoint(result.Messages)
+		manifest := extractArchiveContextManifest(result.Messages)
 		history := session.ModelHistory{
 			ProviderID: request.Provider, ModelID: engine.Model,
 			InstructionFingerprint: instructionFingerprint,
@@ -492,7 +505,6 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		}
 		if manifest != nil {
 			history.ContextManifestHash = manifest.ManifestHash
-			history.SemanticRevision = manifest.SemanticRevision
 			history.PolicyVersion = manifest.PolicyVersion
 		}
 		thinking := reasoningTrace.text()
@@ -581,11 +593,10 @@ func teamPrompt(request TurnRequest) string {
 }
 
 type teamExecutionPolicy struct {
-	contextBudget         ContextBudget
-	attachmentRoot        string
-	images                []session.Attachment
-	resourceClaims        []api.ResourceClaimSpec
-	newSummarizerResolver func(string) func(context.Context) (func(context.Context, string) (string, error), int, error)
+	contextBudget  ContextBudget
+	attachmentRoot string
+	images         []session.Attachment
+	resourceClaims []api.ResourceClaimSpec
 }
 
 func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, contextWindow int, tools *tool.Bus) (teamExecutionPolicy, error) {
@@ -599,7 +610,7 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 		}
 		toolTokens = (bytes + estimatedBytesPerToken - 1) / estimatedBytesPerToken
 	}
-	budget, err := calculateContextBudget(request.Provider, request.Model, contextWindow, toolTokens, s.cfg.Agents.Context)
+	budget, err := calculateContextBudget(request.Model, contextWindow, toolTokens, s.cfg.Agents.Context)
 	if err != nil {
 		return teamExecutionPolicy{}, err
 	}
@@ -609,28 +620,6 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 	)
 	if err != nil {
 		return teamExecutionPolicy{}, err
-	}
-	compactionRoute, _ := s.providers.modelRouteSnapshot()
-	report := s.providers.compactionUsageReporter(s, request.SessionID, parentRunID)
-	policy.newSummarizerResolver = func(cacheKey string) func(context.Context) (func(context.Context, string) (string, error), int, error) {
-		return lazyCompactionResolver(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
-			_, resolvedModel, window, driver, resolveErr := s.providers.resolveDriver(ctx, provider, model, reasoning)
-			if resolveErr == nil {
-				observeProviderRetries(ctx, s, request.SessionID, parentRunID, provider, driver)
-			}
-			if resolveErr == nil && s.sessions != nil {
-				driver = &meteredProviderDriver{
-					inner: driver, store: s.sessions, host: s, sessionID: request.SessionID,
-					runID: parentRunID, kind: "compaction", provider: provider, model: resolvedModel, transport: driver.Metadata().Name,
-				}
-			}
-			return resolvedModel, window, driver, resolveErr
-		}, compactionRoute, request.Provider, request.Model, request.Reasoning, cacheKey, nil, func() compactionUsageReporter {
-			if s.sessions != nil {
-				return nil
-			}
-			return report
-		}(), s.cfg.Agents.Context.MaxSummaryTokens)
 	}
 	return policy, nil
 }
@@ -783,33 +772,36 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 			additional: contextText, historical: historical,
 			history: history,
 		}
+		contextTarget := policy.contextBudget.Trigger
+		if !s.cfg.Agents.Context.Enabled {
+			contextTarget = 0
+		}
 		requestPreparer := &teamRequestPreparer{
 			context: requestContext, images: images, todo: request.Todo, loadTodo: loadTodo, runID: dispatch.Task.RunID,
-			target: policy.contextBudget.HardTrigger,
+			target: contextTarget,
 		}
-		if policy.newSummarizerResolver != nil {
-			requestPreparer.compactor = &turnContext{
-				runID: dispatch.Task.RunID, todo: request.Todo, loadTodo: loadTodo,
-				resolveSummarizer: policy.newSummarizerResolver(roleCacheKey + ":compaction"), structuredSummary: true,
-				largeToolTokens: s.cfg.Agents.Context.LargeToolResultTokens, compactTargetTokens: policy.contextBudget.Target,
-				minReclaimTokens: s.cfg.Agents.Context.MinReclaimTokens, softTriggerTokens: policy.contextBudget.SoftTrigger,
-				backgroundPrepare: s.cfg.Agents.Context.BackgroundPrepare, coordinator: &compactionCoordinator{},
-				compactHooks: s.autoCompactHooks(metadata),
-				reportContextTokens: func(_ context.Context, tokens int) {
-					s.emit(s.ctx, Event{
-						Kind: EventContextUsage, SessionID: sessionID, RunID: parentRunID, State: "estimated",
-						Data: map[string]string{
-							"inputTokens": fmt.Sprint(tokens), "outputTokens": "0", "totalTokens": fmt.Sprint(tokens),
-							"cacheStatus": "pending", "aggregateOnly": "true", "requestKind": "team", "role": class.Name, "agentID": dispatch.To,
-							"provider": request.Provider, "model": request.Model, "reasoning": request.Reasoning, "teamContextTarget": fmt.Sprint(policy.contextBudget.Target),
-						},
-					})
-				},
-			}
-			if s.sessions != nil {
-				requestPreparer.compactor.putArtifact = func(ctx context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
-					return s.sessions.PutArtifact(ctx, sessionID, dispatch.Task.RunID, kind, payload, preview)
-				}
+		requestPreparer.compactor = &turnContext{
+			sessionID: sessionID, runID: dispatch.Task.RunID, providerID: request.Provider, modelID: request.Model,
+			todo: request.Todo, loadTodo: loadTodo,
+			largeToolTokens:  s.cfg.Agents.Context.LargeToolResultTokens,
+			keepRecentTokens: policy.contextBudget.KeepRecent,
+			coordinator:      &compactionCoordinator{},
+			compactHooks:     s.autoCompactHooks(metadata),
+			reportContextTokens: func(_ context.Context, tokens int) {
+				s.emit(s.ctx, Event{
+					Kind: EventContextUsage, SessionID: sessionID, RunID: parentRunID, State: "estimated",
+					Data: map[string]string{
+						"inputTokens": fmt.Sprint(tokens), "outputTokens": "0", "totalTokens": fmt.Sprint(tokens),
+						"cacheStatus": "pending", "aggregateOnly": "true", "requestKind": "team", "role": class.Name, "agentID": dispatch.To,
+						"provider": request.Provider, "model": request.Model, "reasoning": request.Reasoning, "teamContextTarget": fmt.Sprint(contextTarget),
+					},
+				})
+			},
+		}
+		configureArchiveContext(ctx, requestPreparer.compactor, s, sessionID, dispatch.Task.RunID, request.Provider, "", request.Model)
+		if s.sessions != nil {
+			requestPreparer.compactor.putArtifact = func(ctx context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
+				return s.sessions.PutArtifact(ctx, sessionID, dispatch.Task.RunID, kind, payload, preview)
 			}
 		}
 		if engine.Provider != nil {

@@ -210,10 +210,18 @@ func durableApprovalKey(call tool.Call) string {
 
 func teamApprovalReviewRequest(goal, runID string, call tool.Call, definition tool.Definition) approvalReviewRequest {
 	target := teamToolTarget(call)
+	risk := firstNonempty(definition.RiskLevel, definition.Security.RiskLevel, "medium")
+	if call.Name == agentservice.ToolShell {
+		var input struct {
+			Command string `json:"command"`
+			Network bool   `json:"network"`
+		}
+		_ = json.Unmarshal(call.Arguments, &input)
+		risk = agentservice.ClassifyShellRisk(input.Command, input.Network)
+	}
 	return approvalReviewRequest{
 		Goal: goal, AgentID: runID, AgentType: "team", ToolName: call.Name, Arguments: call.Arguments,
-		Target: target, Effect: string(definition.EffectType),
-		Risk:            firstNonempty(definition.RiskLevel, definition.Security.RiskLevel, "high"),
+		Target: target, Effect: string(definition.EffectType), Risk: risk,
 		RequestedAction: call.Name + " · " + target, RequestedReason: "team agent requested a governed tool action",
 	}
 }
@@ -720,6 +728,9 @@ func (s *Service) prefetchAutoReview(ctx context.Context, sessionID, runID, tool
 	if s == nil || strings.TrimSpace(toolCallID) == "" || toolStartsWithoutApproval(toolName) {
 		return
 	}
+	if classifyApprovalRisk(approvalReviewRequest{ToolName: toolName, Arguments: arguments, Risk: "medium"}) == "low" {
+		return
+	}
 	if len(arguments) == 0 || !json.Valid(arguments) {
 		return
 	}
@@ -820,6 +831,10 @@ func (s *Service) automaticApproval(
 	if !s.emit(ctx, event) {
 		return approvalResolution{}, eventDeliveryError(ctx)
 	}
+	request.Risk = classifyApprovalRisk(request)
+	if request.Risk == "low" {
+		return s.finishHostAutomaticApproval(ctx, event, request, decide)
+	}
 
 	providerRequest, err := request.codexRequest()
 	failureKind := codex.ReviewFailureInvalidRequest
@@ -883,6 +898,7 @@ func (s *Service) automaticApproval(
 		return approvalResolution{Mode: agentservice.ApprovalDenied, DenialMessage: message}, nil
 	}
 
+	assessment = codex.ApplyGuardianOutcome(assessment, reviewHostAuthorization(request))
 	rationale := boundedReviewText(assessment.Rationale, 600)
 	event.Data["reviewer"] = firstNonempty(assessment.Model, event.Data["reviewer"])
 	if assessment.Outcome == "allow" {
@@ -912,6 +928,50 @@ func (s *Service) automaticApproval(
 		return approvalResolution{}, eventDeliveryError(ctx)
 	}
 	return approvalResolution{NeedsUserApproval: true, DenialMessage: message}, nil
+}
+
+func classifyApprovalRisk(request approvalReviewRequest) string {
+	if request.ToolName == agentservice.ToolShell {
+		var input struct {
+			Command string `json:"command"`
+			Network bool   `json:"network"`
+		}
+		_ = json.Unmarshal(request.Arguments, &input)
+		return agentservice.ClassifyShellRisk(input.Command, input.Network)
+	}
+	return firstNonempty(request.Risk, "medium")
+}
+
+func reviewHostAuthorization(request approvalReviewRequest) string {
+	var input struct {
+		Command string `json:"command"`
+	}
+	_ = json.Unmarshal(request.Arguments, &input)
+	return codex.ScoreUserAuthorization(request.Goal, request.ToolName, request.Target, input.Command)
+}
+
+func (s *Service) finishHostAutomaticApproval(
+	ctx context.Context,
+	event Event,
+	request approvalReviewRequest,
+	decide func(context.Context, agentservice.ApprovalMode, string) error,
+) (approvalResolution, error) {
+	rationale := "Host classified this action as low-risk under the Codex guardian policy."
+	event.Data["reviewer"] = "host:guardian-policy"
+	decisionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	decisionErr := decide(decisionCtx, agentservice.ApprovalOnce, event.Data["reviewer"])
+	cancel()
+	s.recordAutoReview(event.RunID, false)
+	if decisionErr != nil {
+		message := "Automatic review could not record approval; action did not run."
+		_ = s.emitAutomaticApprovalResolved(event, "auto_failed", request.Risk, "high", rationale, "decision", message)
+		return approvalResolution{}, fmt.Errorf("record automatic approval: %w", decisionErr)
+	}
+	message := "Approved by automatic review: " + rationale
+	if !s.emitAutomaticApprovalResolved(event, "auto_approved", request.Risk, "high", rationale, "", message) {
+		return approvalResolution{}, eventDeliveryError(ctx)
+	}
+	return approvalResolution{Mode: agentservice.ApprovalOnce}, nil
 }
 
 func (s *Service) emitAutomaticApprovalResolved(event Event, state, risk, authorization, rationale, errorKind, text string) bool {

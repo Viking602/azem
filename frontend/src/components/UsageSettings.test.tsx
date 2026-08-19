@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { listUsageReport } from "../bridge";
 import { useRuntimeStore, type ModelOption } from "../store";
 import type { ModelProvider, Snapshot, UsageReport } from "../types";
-import UsageSettings, { activityHeatmap, activityLevel, cacheHitLabel, formatUsageCount, formatUsageDuration, usageModelTitle } from "./UsageSettings";
+import UsageSettings, { activityHeatmap, activityLevel, cacheHitLabel, formatUsageCount, formatUsageDuration, usageModelTitle, usageShares } from "./UsageSettings";
 
 const settingsCss = readFileSync("src/styles/settings.css", "utf8");
 
@@ -142,6 +142,19 @@ describe("UsageSettings helpers", () => {
     expect(cumulative.peak).toBe(125_000);
     expect(cumulative.months[0]?.label).toBe("Aug");
   });
+
+  it("keeps the top four model shares and folds the rest", () => {
+    const shares = usageShares([
+      { provider: "a", model: "one", tokens: 50, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheReported: false, cacheWriteReported: false, requests: 1 },
+      { provider: "a", model: "two", tokens: 30, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheReported: false, cacheWriteReported: false, requests: 1 },
+      { provider: "a", model: "three", tokens: 10, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheReported: false, cacheWriteReported: false, requests: 1 },
+      { provider: "a", model: "four", tokens: 6, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheReported: false, cacheWriteReported: false, requests: 1 },
+      { provider: "a", model: "five", tokens: 4, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheReported: false, cacheWriteReported: false, requests: 1 },
+    ], "其他");
+    expect(shares.map((share) => share.label)).toEqual(["one", "two", "three", "four", "其他"]);
+    expect(shares[0]?.percent).toBe(50);
+    expect(shares[4]?.tokens).toBe(4);
+  });
 });
 
 describe("UsageSettings", () => {
@@ -222,6 +235,33 @@ describe("UsageSettings", () => {
     container.remove();
   });
 
+  it("opens a day breakdown from a heatmap cell and keeps the skyline donut", async () => {
+    vi.mocked(listUsageReport).mockResolvedValueOnce(populatedReport());
+    useRuntimeStore.setState({ snapshot, usageReport: null, ...usageCatalog() });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<UsageSettings language="zh-CN" onError={() => undefined} />));
+    await act(async () => Promise.resolve());
+    expect(container.querySelector(".usage-donut")?.getAttribute("aria-label")).toBe("用量天际线");
+    expect(container.querySelector(".usage-share")).not.toBeNull();
+    expect(container.querySelector("[data-testid='usage-day-panel']")).toBeNull();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".usage-heat-cell[data-date='2026-08-14']")!.click();
+    });
+    const panel = container.querySelector("[data-testid='usage-day-panel']");
+    expect(panel?.textContent).toContain("2026-08-14");
+    expect(panel?.textContent).toContain("8万");
+    expect(panel?.textContent).toContain("占总用量 64.0%");
+    expect(container.querySelector(".usage-heat-cell[data-date='2026-08-14']")?.hasAttribute("data-selected")).toBe(true);
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='usage-day-panel'] .small-button")!.click();
+    });
+    expect(container.querySelector("[data-testid='usage-day-panel']")).toBeNull();
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("keeps Codex-sized heat cells and shows a custom usage tip on hover and focus", async () => {
     expect(settingsCss).toMatch(/--heat-size:\s*10px/);
     expect(settingsCss).toMatch(/--heat-gap:\s*2px/);
@@ -230,6 +270,11 @@ describe("UsageSettings", () => {
     expect(settingsCss).not.toMatch(/活动网格居中/);
     expect(settingsCss).not.toMatch(/\.usage-heatmap-grid[^{]*\{[^}]*minmax\(0,\s*1fr\)/);
     expect(settingsCss).not.toMatch(/#2ea44f|#3fb950|#216e39|github.*green/i);
+    expect(settingsCss).toMatch(/\.usage-skyline\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\)/);
+    expect(settingsCss).toMatch(/\.usage-donut\s*\{/);
+    expect(settingsCss).toMatch(/usage-day-in/);
+    expect(settingsCss).toMatch(/usage-share-in/);
+
     expect(settingsCss).toMatch(/\.usage-split\s*\{[^}]*align-items:\s*stretch/);
     expect(settingsCss).toMatch(/\.usage-split\s*>\s*\.usage-breakdown\s*\{[^}]*height:\s*100%/);
     expect(settingsCss).toMatch(/\.usage-heat-cell\s*\{[^}]*transition:[^;]*background-color 220ms/);

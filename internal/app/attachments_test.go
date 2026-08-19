@@ -42,6 +42,22 @@ func TestImportBytesStoresImage(t *testing.T) {
 	}
 }
 
+func TestAttachmentStoreRejectsUnsafeSessionPathComponents(t *testing.T) {
+	store := NewAttachmentStore(filepath.Join(t.TempDir(), "attachments"))
+	for _, sessionID := range []string{".", "..", "a/b", `a\b`, "a:b"} {
+		if _, err := store.ImportGeneratedImageBytes(sessionID, "archive.png", "image/png", minimalPNG()); err == nil || !strings.Contains(err.Error(), "not safe") {
+			t.Fatalf("generated attachment session %q error = %v", sessionID, err)
+		}
+	}
+	att, err := store.ImportGeneratedImageBytes("session-1", "archive.png", "image/png", minimalPNG())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ValidateSessionAttachments(".", []session.Attachment{att}); err == nil || !strings.Contains(err.Error(), "not safe") {
+		t.Fatalf("unsafe session validation error = %v", err)
+	}
+}
+
 func TestAttachmentStoreReadKeepsSessionBoundary(t *testing.T) {
 	store := NewAttachmentStore(filepath.Join(t.TempDir(), "attachments"))
 	want := minimalPNG()
@@ -58,6 +74,12 @@ func TestAttachmentStoreReadKeepsSessionBoundary(t *testing.T) {
 	}
 	if _, err := store.Read("session-2", att); err == nil || !strings.Contains(err.Error(), "does not belong") {
 		t.Fatalf("cross-session read error = %v", err)
+	}
+	if err := os.WriteFile(att.Path, append(append([]byte(nil), want...), 0), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read("session-1", att); err == nil || !strings.Contains(err.Error(), "size changed") {
+		t.Fatalf("grown attachment read error = %v", err)
 	}
 }
 
@@ -111,5 +133,34 @@ func TestUserMessageWithAttachmentsMetadata(t *testing.T) {
 	atts := AttachmentsFromMessage(msg)
 	if len(atts) != 1 || atts[0].Name != "a.png" {
 		t.Fatalf("meta attachments = %#v", atts)
+	}
+}
+
+func TestImportGeneratedImageBytesIsStableAndRepairsCorruption(t *testing.T) {
+	store := NewAttachmentStore(filepath.Join(t.TempDir(), "attachments"))
+	first, err := store.ImportGeneratedImageBytes("session-1", "archive-001.png", "image/png", minimalPNG())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ImportGeneratedImageBytes("session-1", "archive-001.png", "image/png", minimalPNG())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("content-derived attachment changed: first=%+v second=%+v", first, second)
+	}
+	if err := os.WriteFile(first.Path, []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := store.ImportGeneratedImageBytes("session-1", "archive-001.png", "image/png", minimalPNG())
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(repaired.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.ID != first.ID || !bytes.Equal(payload, minimalPNG()) {
+		t.Fatalf("generated attachment was not repaired: %+v", repaired)
 	}
 }

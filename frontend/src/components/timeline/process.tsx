@@ -8,8 +8,8 @@ import {
 import { useRuntimeStore } from "../../store";
 import type { AgentState, Block, Snapshot } from "../../types";
 import {
-  displayedToolState, formatDuration, formatThinkingDuration, formatToolPresentation, groupProcessTimelineBlocks,
-  isActiveProcessBlock, isHostFallbackCommentary, isRunningTool, processElapsedMs, thinkingTraceElapsedMs,
+  displayedToolState, formatDuration, formatToolPresentation, formatWorkedDuration, groupProcessTimelineBlocks,
+  isActiveProcessBlock, isHostFallbackCommentary, isRunningTool, processElapsedMs, summarizeToolGroup, thinkingStateLabel, thinkingTraceElapsedMs,
   type ModelProgressPresentation, type ProcessTimelineEntry,
 } from "../toolTimeline";
 import { fileChangePillsForBlocks, formatProcessGroupCount, processGroupCountLabel, processGroupCounts, thinkingChipPreview, toolChipModel } from "../toolChip";
@@ -38,8 +38,9 @@ import { ToolExecutionLog } from "./ToolExecutionLog";
 import { useLiveElapsed } from "./useLiveElapsed";
 
 /**
- * A run's process trail. Every step inside it owns its own sparkle bar, so this
- * only carries the trail and the wait for the step that has not started yet.
+ * Codex: after the turn finishes, 耗时 hides the process. Opening it shows
+ * commentary plus folded tool summaries. Thinking stays inside the duration
+ * label and is not dumped as prose.
  */
 export function ProcessFold({
   blocks, elapsedMs = 0, language, featured, active = false, collapseCompleted = false, waiting = false,
@@ -53,18 +54,17 @@ export function ProcessFold({
   waiting?: boolean;
 }) {
   const hasTools = hasProcessTools(blocks);
-  // A finished tool trail folds under 已处理. Live work stays the open step
-  // list; thinking-only or commentary-only trails never use this chrome.
   const foldCompleted = Boolean(collapseCompleted && !active && !waiting && hasTools);
   const [open, setOpen] = useState(false);
   const t = translator(language);
-  const duration = elapsedMs > 0 ? formatDuration(elapsedMs) : "";
+  const duration = elapsedMs > 0 ? formatWorkedDuration(elapsedMs, language) : "";
+  const foldLabel = duration ? tFormat(language, "processedFor", { duration }) : t("processed");
   const entries = <ProcessEntries
     blocks={blocks}
     language={language}
     active={active}
-    deferBodies={!active && !collapseCompleted}
     waiting={waiting}
+    omitThinking={foldCompleted}
   />;
   return <div
     className="process-fold"
@@ -82,14 +82,17 @@ export function ProcessFold({
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <ChevronDown className="process-fold-chevron" size={14} aria-hidden="true" />
-        <strong>{t("processed")}</strong>
-        {duration ? <span className="bui-thinking-meta">{duration}</span> : null}
+        <span className="process-fold-label">{foldLabel}</span>
+        <ChevronDown className="process-fold-chevron" size={12} aria-hidden="true" />
       </button>
       {open ? entries : null}
     </> : entries}
   </div>;
 }
+
+
+
+
 
 /**
  * One step: the tools and thinking that follow one model message. The bar is the
@@ -103,63 +106,57 @@ function ProcessStep({
   language: Snapshot["language"];
   live?: boolean;
   waiting?: boolean;
-  /** Window a long settled body instead of mounting every row (UI-012). */
   deferred?: boolean;
-  /** Visible commentary that heads this step, counted on the settled card. */
   messageCount?: number;
-  /** The current live step must not collapse into a count row between batches. */
   canSettle?: boolean;
   hideClocks?: boolean;
   children?: ReactNode;
 }) {
   const hasTools = hasProcessTools(blocks);
   const running = waiting || (live && blocks.some(isActiveProcessBlock));
-  // Live reasoning keeps streaming under its bar (UI-016); the moment the step
-  // calls a tool the rows belong to the bar and nothing shows outside it.
   const [choice, setChoice] = useState<boolean | null>(null);
   const expanded = choice ?? (running && !hasTools && blocks.length > 0);
-  const elapsedMs = useMemo(
-    () => processElapsedMs(blocks, running ? Date.now() : 0),
-    [blocks, running],
-  );
   const panelId = `process-step-${(blocks[0]?.id || "pending").replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
-  // A delegation card or an empty heartbeat is not a step of its own.
   if (!stepBarVisible(blocks, waiting, running)) return <>{children}</>;
-  // Hold the sparkle only while this step is still waiting or executing.
-  // Once the model is writing commentary, this step is already over — settle
-  // immediately so that prose never sits under 「运行了 N 个工具」.
-  const settledTools = hasTools && !running && (canSettle || !waiting);
-  const { tools, messages } = processGroupCounts(blocks);
-  const settledLabel = formatProcessGroupCount(tools, messages + messageCount, language);
+  if (!running && canSettle && hasTools) {
+    const open = choice === true;
+    const tools = blocks.filter((block) => block.kind === "tool" || block.kind === "diff");
+    const label = summarizeToolGroup(tools, language) || formatProcessGroupCount(tools.length, 0, language);
+    return <div className="process-step" data-state="completed" data-step="tools" data-settled="" data-open={open || undefined}>
+
+      <button
+        type="button"
+        className="process-fold-summary process-step-count"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setChoice(!open)}
+      >
+        <span className="process-fold-label">{label}</span>
+        <ChevronDown className="process-fold-chevron" size={12} aria-hidden="true" />
+      </button>
+      {open ? <div className="process-step-body" id={panelId}>
+        <ProcessStepBody blocks={blocks} language={language} deferred={deferred}>
+          {children}
+        </ProcessStepBody>
+      </div> : null}
+    </div>;
+  }
   return <div
-    className={`process-step${settledTools ? " bui-tool-chip-group" : ""}`}
+    className="process-step"
     data-state={running ? "running" : "completed"}
     data-step={hasTools ? "tools" : "reasoning"}
-    data-settled={settledTools || undefined}
-    data-open={settledTools && expanded ? "true" : undefined}
   >
-    {settledTools ? <button
-      type="button"
-      className="bui-tool-chip-group-header"
-      aria-expanded={expanded}
-      aria-controls={panelId}
-      onClick={() => setChoice(!expanded)}
-    >
-      <ChevronDown className="bui-tool-chip-chevron" size={14} aria-hidden="true" />
-      <strong>{settledLabel}</strong>
-    </button> : <ProcessStepBar
+    <ProcessStepBar
       blocks={blocks}
       language={language}
-      elapsedMs={elapsedMs}
       hasTools={hasTools}
       active={running}
       waiting={waiting}
       live={live}
       expanded={expanded}
       panelId={panelId}
-      hideClock={hideClocks}
       onToggle={() => setChoice(!expanded)}
-    />}
+    />
     {expanded ? <div className="process-step-body" id={panelId}>
       <ProcessStepBody blocks={blocks} language={language} deferred={deferred && !running}>
         {children}
@@ -168,55 +165,40 @@ function ProcessStep({
   </div>;
 }
 
+
 /**
- * The bar owns the running clock on purpose: ticking it in ProcessFold would
- * re-render the whole trail every second and replay row entrances (UI-012).
+ * Live tools stay on the quiet 正在思考 row. The label rolls to the tool name;
+ * a clock on this bar would switch chrome and replay as a second style.
  */
 function ProcessStepBar({
-  blocks, language, elapsedMs, hasTools, active, waiting, live = false, expanded, panelId, hideClock = false, onToggle,
+  blocks, language, hasTools, active, waiting, live = false, expanded, panelId, onToggle,
 }: {
   blocks: Block[];
   language: Snapshot["language"];
-  elapsedMs: number;
   hasTools: boolean;
   active: boolean;
   waiting: boolean;
   live?: boolean;
   expanded: boolean;
   panelId: string;
-  hideClock?: boolean;
   onToggle?: () => void;
 }) {
   const reasoning = useMemo(() => blocks.filter((block) => block.kind === "thinking"), [blocks]);
-  // ChatGPT keeps the elapsed clock on this sparkle row. Individual tool
-  // chips stay untimed while the step is live.
   const reasoningRunning = reasoning.some((block) => isActiveProcessBlock(block) && Boolean(block.content?.trim()));
   const ticking = waiting || (hasTools ? active : reasoningRunning);
-  const thinkingElapsedMs = useMemo(
-    () => hideClock ? 0 : thinkingTraceElapsedMs(reasoning, reasoningRunning ? Date.now() : 0),
-    [hideClock, reasoning, reasoningRunning],
-  );
-  const liveElapsedMs = useLiveElapsed(
-    hideClock ? 0 : hasTools ? elapsedMs : thinkingElapsedMs,
-    !hideClock && ticking,
-    hasTools ? 1000 : 100,
-  );
-  // UI-016: never print a 0s clock; a sub-second tool step simply shows no time.
-  // Thinking-only still reports tenths in meta. The label never includes time.
-  const duration = hideClock
-    ? ""
-    : hasTools
-      ? (liveElapsedMs >= 1000 ? formatDuration(liveElapsedMs) : "")
-      : formatThinkingDuration(liveElapsedMs);
-  // A live/waiting bar never uses settled wording like 「运行了 N 个工具」.
-  const label = activityBarLabel(blocks, language, { waiting, live: ticking || waiting || live });
+  const settledThinking = !hasTools && !reasoningRunning && reasoning.some((block) => Boolean(block.content?.trim()));
+  const label = activityBarLabel(blocks, language, {
+    waiting: waiting && !settledThinking,
+    live: (ticking || waiting || live) && !settledThinking,
+  });
+  const expandable = hasTools || reasoning.some((block) => Boolean(block.content?.trim()));
   return <ThinkingState
     active={ticking}
     expanded={expanded}
     label={label}
     labelKey={label}
-    meta={duration ? <time>{duration}</time> : undefined}
-    expandable
+    quiet
+    expandable={expandable}
     panelId={panelId}
     onToggle={onToggle}
   />;
@@ -237,7 +219,6 @@ function ProcessStepBody({ blocks, language, deferred, children }: {
   }
   return <>{children}</>;
 }
-
 export function ProcessEntries({
   blocks, language, active = false, compact = false, deferBodies = false,
   omitThinking = false, omitLiveTools = false, summarized = false, stepHasTools = false,
@@ -250,11 +231,8 @@ export function ProcessEntries({
   deferBodies?: boolean;
   omitThinking?: boolean;
   omitLiveTools?: boolean;
-  /** An enclosing sparkle bar already reports this trail, so groups stay bare. */
   summarized?: boolean;
-  /** Whether that bar heads a tool step; a pure thinking step shows prose. */
   stepHasTools?: boolean;
-  /** The next step has not produced a block yet; it still owns a live bar. */
   waiting?: boolean;
   hideClocks?: boolean;
 }) {
@@ -275,21 +253,18 @@ export function ProcessEntries({
   const listed = waiting && !hostWaitOnLast && !lastIsLiveProse
     ? [...visibleEntries, PENDING_ENTRY]
     : visibleEntries;
-  // Keying by position lets the wait bar become the step that follows it
-  // instead of being replaced by a second bar (UI-016). Settled file pills
-  // live inside each step's chip card, not as a second list after the trail.
   return <div className={`process-entries ${active ? "active" : ""}`} aria-live={active ? "polite" : undefined} aria-busy={active || undefined}>
     {listed.map((entry, index) => {
       const pending = entry === PENDING_ENTRY;
-      const lastReal = !pending && index === lastRealIndex;
+      const lastRealEntry = !pending && index === lastRealIndex;
       return <ProcessEntry
         key={`entry-${index}`}
         entry={entry}
         language={language}
         compact={compact}
         siblings={blocks}
-        live={active && (pending || lastReal)}
-        waiting={pending || (hostWaitOnLast && lastReal)}
+        live={active && (pending || lastRealEntry)}
+        waiting={pending || (hostWaitOnLast && lastRealEntry)}
         canSettle={!active || (!pending && index < lastRealIndex)}
         omitThinking={omitThinking}
         omitLiveTools={omitLiveTools}
@@ -300,17 +275,16 @@ export function ProcessEntries({
     })}
   </div>;
 }
-
 function processEntryWork(entry: ActiveProcessEntry) {
   if (entry.kind === "block") return [entry.block];
   return entry.blocks.filter((block) => !isSubagentSpawnBlock(block));
 }
 
-/** A finished tool/thinking step can keep the between-batch 思考 wait on itself. */
 function processEntryCanHostWait(entry: ActiveProcessEntry) {
   const work = processEntryWork(entry);
   return hasProcessTools(work) || work.some((block) => block.kind === "thinking" && Boolean(block.content?.trim()));
 }
+
 
 const PENDING_ENTRY: ActiveProcessEntry = { kind: "tool-steps", id: "pending-step", blocks: [] };
 
@@ -437,7 +411,6 @@ function DeferredThinkingRow({ blocks, language }: { blocks: Block[]; language: 
 
 type ModelProgressEntry = Extract<ProcessTimelineEntry, { kind: "model-progress" }>;
 type ActiveProcessEntry = ProcessTimelineEntry | { kind: "tool-steps"; id: string; blocks: Block[] };
-
 function ProcessEntry({
   entry, language, compact, siblings, live = false, waiting = false, canSettle = true,
   omitThinking = false, omitLiveTools = false,
@@ -528,6 +501,8 @@ function ProcessEntry({
   }
   return <TimelineBlock block={entry.block} language={language} compact={compact} siblings={siblings} />;
 }
+
+
 
 function activeProcessEntries(entries: ProcessTimelineEntry[]): ActiveProcessEntry[] {
   const result: ActiveProcessEntry[] = [];
@@ -742,16 +717,14 @@ export function ProcessActivity({
   const hasReasoning = reasoning.some((block) => Boolean(block.content?.trim()));
   const { showBar, liveWork } = processActivityVisibility(blocks, waiting);
   const clockActive = waiting || liveWork;
-  const observedElapsedMs = useMemo(
-    () => hasReasoning ? thinkingTraceElapsedMs(reasoning, clockActive ? Date.now() : 0) : 0,
-    [clockActive, hasReasoning, reasoning],
-  );
-  const elapsedMs = useLiveElapsed(observedElapsedMs, clockActive, 100);
   const [open, setOpen] = useState(false);
-  const label = activityBarLabel(blocks, language, { waiting, live: clockActive });
-  const duration = formatThinkingDuration(elapsedMs);
   const placeholder = waiting && !liveWork && !hasReasoning;
-  const expandable = hasReasoning;
+  const settledThinking = !hasTools && hasReasoning && !liveWork;
+  const label = activityBarLabel(blocks, language, {
+    waiting: waiting && !settledThinking,
+    live: clockActive && !settledThinking,
+  });
+  const expandable = hasReasoning && !placeholder;
   const panelId = expandable
     ? `activity-${(blocks[0]?.id || "wait").replace(/[^a-zA-Z0-9_-]/gu, "-")}`
     : undefined;
@@ -771,7 +744,8 @@ export function ProcessActivity({
       active={clockActive}
       expanded={open && expandable}
       label={label}
-      meta={duration ? <time>{duration}</time> : undefined}
+      quiet
+      labelKey={label}
       disabled={!expandable}
       expandable={expandable}
       panelId={panelId}
@@ -848,15 +822,16 @@ function ProcessChipList({ blocks, language, siblings, live = false, summarized 
   // the same count above every group, and an enclosing bar already says it once.
   const countLabel = summarized ? "" : processGroupCountLabel(blocks, language);
   const settledCard = summarized && !live && tools.length > 0;
-  // The settled count row lives on ProcessStep. Live summarized rows sit
-  // under the sparkle bar. Only an unsummarized trail grows its own group.
-  const grouped = !summarized && thinking.length + tools.length >= 1;
+  // Settled cards keep the group class so opened count-rows match the chip
+  // list. Unsummarized trails still grow their own headered group.
+  const grouped = settledCard || (!summarized && thinking.length + tools.length >= 1);
   const rowIds = [
     ...(thinking.length ? [`thinking-${thinking[0]!.id}`] : []),
     ...tools.map((block) => block.id),
   ];
   const delays = useStepEntrance(rowIds, live);
   const count = rowIds.length;
+
   const pills = settledCard ? fileChangePillsForBlocks(tools) : { files: [] };
   let index = 0;
   const toolRow = (block: Block) => (
@@ -914,7 +889,7 @@ function ThinkingChip({ blocks, language }: { blocks: Block[]; language: Snapsho
     className="timeline-step thinking-chip"
     state={running ? "running" : "completed"}
     kind="thinking"
-    label={translator(language)("thinking")}
+    label={thinkingStateLabel(language, running, running ? 0 : thinkingTraceElapsedMs(blocks))}
     chip={preview || undefined}
     onToggle={(event) => setOpened(event.currentTarget.open)}
   >

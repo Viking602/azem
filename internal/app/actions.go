@@ -362,7 +362,6 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 		{Scope: "plan", Label: "Plan", Route: s.cfg.Agents.Plan},
 		{Scope: "approval", Label: "Approval", Route: s.cfg.Agents.Approval},
 		{Scope: "vision", Label: "Vision", Route: s.cfg.Agents.Vision},
-		{Scope: "compaction", Label: "Compaction", Route: s.cfg.Agents.Compaction},
 		{Scope: "recap", Label: "Recap", Route: s.cfg.Agents.Recap},
 	}
 	names := make([]string, 0, len(s.cfg.Agents.Subagents.Roles))
@@ -407,7 +406,7 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "compaction" && entry.Scope != "recap" && entry.Scope != "subagent" {
+	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "recap" && entry.Scope != "subagent" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
 	if entry.Scope != "subagent" && entry.Role != "" {
@@ -476,8 +475,6 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		s.cfg.Agents.Approval = route
 	} else if entry.Scope == "vision" {
 		s.cfg.Agents.Vision = route
-	} else if entry.Scope == "compaction" {
-		s.cfg.Agents.Compaction = route
 	} else if entry.Scope == "recap" {
 		s.cfg.Agents.Recap = route
 	} else {

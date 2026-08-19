@@ -23,7 +23,7 @@ func TestSpillAgentToolResultPersistsFullOutputWithLocator(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err = sessions.Ensure(ctx, session.Session{ID: "spill-session", Title: "spill"}); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestSpillAgentToolResultSpillsOversizedStructuredPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err = sessions.Ensure(ctx, session.Session{ID: "spill-structured", Title: "spill"}); err != nil {
 		t.Fatal(err)
 	}

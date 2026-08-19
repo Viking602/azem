@@ -188,7 +188,7 @@ func TestRuntimeUsesAndCleansEffectiveIsolatedCWD(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer coding.Close(ctx)
-	runStore, err := agentservice.NewSQLSubagentRunStore(providerStore.DB())
+	runStore, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
 	if err != nil {
 		t.Fatal(err)
 	}

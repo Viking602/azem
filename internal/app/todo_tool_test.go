@@ -21,7 +21,7 @@ func TestTodoDriverReturnsStableIDsAndAdvancesCurrentItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1", Title: "Todo"}); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestTodoConcurrentMutationsCannotSkipCurrentItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1", Title: "Todo"}); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestCompactRejectsShortSessionWithoutReportingFalseSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(ctx)
-	sessions := session.NewService(store.DB())
+	sessions := session.NewService(store.DB(), store.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1", Title: "Todo"}); err != nil {
 		t.Fatal(err)
 	}
@@ -196,5 +196,22 @@ func TestCompactRejectsShortSessionWithoutReportingFalseSuccess(t *testing.T) {
 	}
 	if todo, err := sessions.LoadTodo(ctx, "session-1"); err != nil || todo.Revision != initialized.Revision || todo.Goal != initialized.Goal {
 		t.Fatalf("short compact changed todo=%+v error=%v", todo, err)
+	}
+}
+
+func TestCompactRejectsWhenContextArchivingIsDisabled(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	cfg := config.Default()
+	cfg.Agents.Context.Enabled = false
+	service := NewService(ctx, cfg)
+	service.sessions = session.NewService(store.DB(), store.Blobs())
+
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionCompact, Target: "session-1"}); !errors.Is(err, ErrContextArchivingDisabled) {
+		t.Fatalf("disabled compact error = %v", err)
 	}
 }

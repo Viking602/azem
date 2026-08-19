@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "version": 1,
+      "id": "go-sum-repair",
+      "prompt": "Fix Add so it returns the arithmetic sum without changing the public API.",
+      "container_image": "docker.io/library/golang:1.25.6@sha256:06d1251c59a75761ce4ebc8b299030576233d7437c886a68b43464bad62d4bb1",
+      "repository": {"noise_pair_id": "go-sum-repair", "sha256": "ea09e5aa248dd01eff739a8e399e6eb10916ea23ce6389ebfceb24c38766f916"},
+      "setup": [],
+      "visible_validators": [
+        {"id": "visible-go-test", "command": {"argv": ["go", "test", "./..."], "timeout_ms": 60000}}
+      ],
+      "held_out_validators": [
+        {
+          "id": "heldout-negative-and-zero",
+          "command": {"argv": ["go", "test", "./..."], "timeout_ms": 60000},
+          "hidden_files": {
+            "heldout_test.go": "package sum\n\nimport \"testing\"\n\nfunc TestAddHeldOut(t *testing.T) {\n\tfor _, tc := range []struct{ a, b, want int }{{-4, 1, -3}, {0, 0, 0}, {-2, -3, -5}} {\n\t\tif got := Add(tc.a, tc.b); got != tc.want { t.Fatalf(\"Add(%d,%d)=%d want %d\", tc.a, tc.b, got, tc.want) }\n\t}\n}\n"
+          }
+        }
+      ],
+      "allowed_side_effects": ["workspace_files"],
+      "resources": {"cpus": 1, "memory_mb": 512, "pids": 128, "wall_time_ms": 120000, "network_mode": "none"},
+      "noise_fixture_id": "go-sum-repair",
+      "expected_evidence": [
+        {"kind": "validator", "id": "visible-go-test"},
+        {"kind": "validator", "id": "heldout-negative-and-zero"}
+      ],
+      "decontamination": {"source": "authored_fixture", "license": "repository-test-only", "contamination_risk": "low", "held_out_separated": true, "notes": "Held-out test bytes are absent from the candidate repository."}
+    },
+    {
+      "version": 1,
+      "id": "go-slug-normalization",
+      "prompt": "Normalize a title to a lower-case hyphenated slug while preserving the exported function name.",
+      "container_image": "docker.io/library/golang:1.25.6@sha256:06d1251c59a75761ce4ebc8b299030576233d7437c886a68b43464bad62d4bb1",
+      "repository": {"noise_pair_id": "go-slug-normalization", "sha256": "687579c4fce9e891155e143a6283f510a9b5b49a169becbc118cdb983a41362e"},
+      "setup": [],
+      "visible_validators": [
+        {"id": "visible-go-test", "command": {"argv": ["go", "test", "./..."], "timeout_ms": 60000}}
+      ],
+      "held_out_validators": [
+        {
+          "id": "heldout-whitespace",
+          "command": {"argv": ["go", "test", "./..."], "timeout_ms": 60000},
+          "hidden_files": {
+            "heldout_test.go": "package slug\n\nimport \"testing\"\n\nfunc TestNormalizeHeldOut(t *testing.T) {\n\tfor input, want := range map[string]string{\"\": \"\", \"  A\\tB  \" : \"a-b\", \"Already-Slug\": \"already-slug\"} {\n\t\tif got := Normalize(input); got != want { t.Fatalf(\"Normalize(%q)=%q want %q\", input, got, want) }\n\t}\n}\n"
+          }
+        }
+      ],
+      "allowed_side_effects": ["workspace_files"],
+      "resources": {"cpus": 1, "memory_mb": 512, "pids": 128, "wall_time_ms": 120000, "network_mode": "none"},
+      "noise_fixture_id": "go-slug-normalization",
+      "expected_evidence": [
+        {"kind": "validator", "id": "visible-go-test"},
+        {"kind": "validator", "id": "heldout-whitespace"}
+      ],
+      "decontamination": {"source": "authored_fixture", "license": "repository-test-only", "contamination_risk": "low", "held_out_separated": true, "notes": "Held-out test bytes are materialized only after the candidate solution is fixed."}
+    }
+  ]
+}

@@ -10,9 +10,7 @@ import (
 
 func TestDesktopBootstrapRestoresLastProjectWithoutChangingConfiguration(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	t.Setenv("AZEM_HOME", root)
 	t.Setenv("AZEM_FAKE_PROVIDER", "1")
 	configFile := filepath.Join(root, "config.yaml")
 	const contents = "version: 1\nauth:\n  store: file\n  import_codex: false\n  import_grok: false\nmcp:\n  servers: {}\n"

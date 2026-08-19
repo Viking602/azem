@@ -112,6 +112,7 @@ type AgentStatePayload struct {
 	ChildRunID         string `json:"childRunId,omitempty"`
 	Activity           string `json:"activity,omitempty"`
 	Warning            string `json:"warning,omitempty"`
+	EvidenceStatus     string `json:"evidenceStatus,omitempty"`
 	WorktreePath       string `json:"worktreePath,omitempty"`
 	ToolCalls          int    `json:"toolCalls"`
 	Turns              int    `json:"turns"`
@@ -254,6 +255,17 @@ type ContextContribution struct {
 	Tokens   int             `json:"tokens"`
 }
 
+type ContextArchiveProfile struct {
+	Carrier             string `json:"carrier"`
+	SourceArtifactID    string `json:"sourceArtifactId,omitempty"`
+	SourceSHA256        string `json:"sourceSHA256,omitempty"`
+	SourceCharacters    int    `json:"sourceCharacters,omitempty"`
+	FrameCount          int    `json:"frameCount,omitempty"`
+	FrameBytes          int    `json:"frameBytes,omitempty"`
+	TotalPages          int    `json:"totalPages,omitempty"`
+	TruncatedCharacters int    `json:"truncatedCharacters,omitempty"`
+	DeterministicHash   string `json:"deterministicHash,omitempty"`
+}
 type ContextProfile struct {
 	Source               string                 `json:"source"`
 	Estimated            bool                   `json:"estimated"`
@@ -261,14 +273,12 @@ type ContextProfile struct {
 	ReportedInputTokens  int                    `json:"reportedInputTokens,omitempty"`
 	ReportedOutputTokens int                    `json:"reportedOutputTokens,omitempty"`
 	ManifestHash         string                 `json:"manifestHash,omitempty"`
-	SemanticRevision     int64                  `json:"semanticRevision,omitempty"`
-	SemanticCursor       session.WriterCursorV1 `json:"semanticCursor,omitempty"`
 	CanonicalHighWater   int64                  `json:"canonicalHighWater,omitempty"`
 	PolicyVersion        int                    `json:"policyVersion,omitempty"`
 	RebuildReason        string                 `json:"rebuildReason,omitempty"`
-	WriterLag            int64                  `json:"writerLag,omitempty"`
 	Segments             []ContextSegmentV1     `json:"segments,omitempty"`
 	Exclusions           []ContextExclusionV1   `json:"exclusions,omitempty"`
+	Archive              *ContextArchiveProfile `json:"archive,omitempty"`
 }
 
 func (p ContextProfile) TotalTokens() int {

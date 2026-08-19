@@ -176,7 +176,7 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
           data-value={option.value}
           key={option.value}
           onClick={() => choose(option.value)}
-        ><Check size={13} />{option.icon}<span className={option.caption ? "menu-select-option-copy" : undefined}><strong>{option.label}</strong>{option.caption && <small>{option.caption}</small>}</span></button>)}
+        >{option.icon}<span className={option.caption ? "menu-select-option-copy" : undefined}><strong>{option.label}</strong>{option.caption && <small>{option.caption}</small>}</span><Check className="menu-select-check" size={13} /></button>)}
         {visibleOptions.length === 0 && <div className="menu-select-empty" role="status">{emptyLabel}</div>}
       </div>
     </div>,

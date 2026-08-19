@@ -580,13 +580,13 @@ func (m AppModel) agentDetailScrollbar(width, height int) (overlayScrollbarGeome
 func (m AppModel) renderAgentDetailOverlay(width, height int) string {
 	agent, found := m.agentDetail()
 	left := m.theme.Header.Render("⌁ " + strings.ToUpper(m.tr("overlay.agent_detail.title")))
-	if found {
-		left += m.theme.Muted.Render("  " + first(agent.Description, agent.ID, m.tr("overlay.agent_detail.child_execution")))
-	}
 	right := ""
 	if found {
 		right = m.theme.Muted.Render(first(agent.Model, m.tr("value.inherit"))) + m.theme.MetaDivider.Render(" │ ") +
 			m.stateStyle(agent.State).Render(stateMark(agent.State)+" "+strings.ToUpper(m.displayState(agent.State)))
+		if evidence := m.evidenceStatusLabel(agent.EvidenceStatus); evidence != "" {
+			right += m.theme.MetaDivider.Render(" │ ") + m.theme.Muted.Render(evidence)
+		}
 	}
 	header := renderSurface(m.theme.Chrome, joinSides(left, right, width))
 	bodyHeight := agentDetailBodyHeight(height)
@@ -1327,7 +1327,11 @@ func (m AppModel) overlayOptions() []overlayOption {
 	case OverlayAgents:
 		options := make([]overlayOption, 0, len(m.agents))
 		for _, agent := range m.agents {
-			options = append(options, overlayOption{Label: first(agent.Role, agent.ID), Detail: agent.Summary, State: agent.State})
+			detail := agent.Summary
+			if evidence := m.evidenceStatusLabel(agent.EvidenceStatus); evidence != "" {
+				detail = strings.TrimSpace(strings.Join([]string{detail, evidence}, " · "))
+			}
+			options = append(options, overlayOption{Label: first(agent.Role, agent.ID), Detail: detail, State: agent.State})
 		}
 		return options
 	case OverlayAgentTypes:

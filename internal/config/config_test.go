@@ -622,11 +622,10 @@ func TestPersistedBuiltInRoleRouteReloadsWithoutExplicitRoleDefinition(t *testin
 	}
 }
 
-func TestModelRouteValidationAndPlanLoad(t *testing.T) {
+func TestModelRouteValidationAndDeprecatedCompactionRouteCompatibility(t *testing.T) {
 	cfg := Default()
 	cfg.Agents.Title = ModelRouteConfig{Provider: "chatgpt", Model: "gpt-title", Reasoning: "low"}
 	cfg.Agents.Plan = ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}
-	cfg.Agents.Compaction = ModelRouteConfig{Provider: "chatgpt", Model: "gpt-test"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid model routes: %v", err)
 	}
@@ -644,7 +643,7 @@ func TestModelRouteValidationAndPlanLoad(t *testing.T) {
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  title:\n    provider: grok\n    model: grok-title\n    reasoning: low\n  plan:\n    provider: grok\n    model: grok-plan\n    reasoning: high\n  compaction:\n    provider: chatgpt\n    model: gpt-test\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  title:\n    provider: grok\n    model: grok-title\n    reasoning: low\n  plan:\n    provider: grok\n    model: grok-plan\n    reasoning: high\n  compaction:\n    provider: chatgpt\n    model: gpt-test\n  context:\n    enabled: false\n    reserve_tokens: 12000\n    soft_trigger_ratio: 0.68\n    hard_trigger_ratio: 0.82\n    target_ratio: 0.45\n    background_prepare: true\n    safety_margin_ratio: 0.08\n    reserve_output_tokens: 16384\n    reserve_reasoning_tokens: 8192\n    min_reclaim_tokens: 16000\n    max_summary_tokens: 32768\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := Load(path, root)
@@ -657,8 +656,8 @@ func TestModelRouteValidationAndPlanLoad(t *testing.T) {
 	if loaded.Agents.Plan != (ModelRouteConfig{Provider: "grok", Model: "grok-plan", Reasoning: "high"}) {
 		t.Fatalf("plan route = %#v", loaded.Agents.Plan)
 	}
-	if loaded.Agents.Compaction != (ModelRouteConfig{Provider: "chatgpt", Model: "gpt-test"}) {
-		t.Fatalf("compaction route = %#v", loaded.Agents.Compaction)
+	if loaded.Agents.Context.Enabled || loaded.Agents.Context.ReserveTokens != 12000 {
+		t.Fatalf("context config = %#v", loaded.Agents.Context)
 	}
 }
 
@@ -780,21 +779,18 @@ func TestUpdateTitleModelRoutePersistsAndResetsToInherited(t *testing.T) {
 	}
 }
 
-func TestPhase3ContextDefaultsAndValidation(t *testing.T) {
+func TestArchiveContextDefaultsAndValidation(t *testing.T) {
 	defaults := Default().Agents.Context
-	if !defaults.Enabled || defaults.TargetRatio != .45 || defaults.SoftTriggerRatio != .68 ||
-		defaults.HardTriggerRatio != .82 || !defaults.BackgroundPrepare ||
-		defaults.ReserveOutputTokens != 16384 || defaults.ReserveReasoningTokens != 8192 ||
-		defaults.MaxSummaryTokens != 32768 {
+	if !defaults.Enabled || defaults.ReserveTokens != 16384 ||
+		defaults.KeepRecentTokens != 20000 || defaults.LargeToolResultTokens != 12000 ||
+		defaults.HistoryRetrievalTokens != 4096 {
 		t.Fatalf("defaults=%+v", defaults)
 	}
 	for _, mutate := range []func(*ContextConfig){
-		func(c *ContextConfig) { c.TargetRatio = c.HardTriggerRatio },
-		func(c *ContextConfig) { c.SoftTriggerRatio = c.TargetRatio },
-		func(c *ContextConfig) { c.SoftTriggerRatio = c.HardTriggerRatio },
-		func(c *ContextConfig) { c.SafetyMarginRatio = -1 },
-		func(c *ContextConfig) { c.ReserveOutputTokens = -1 },
-		func(c *ContextConfig) { c.MaxSummaryTokens = 0 },
+		func(c *ContextConfig) { c.ReserveTokens = 0 },
+		func(c *ContextConfig) { c.KeepRecentTokens = 0 },
+		func(c *ContextConfig) { c.LargeToolResultTokens = 0 },
+		func(c *ContextConfig) { c.HistoryRetrievalTokens = 0 },
 	} {
 		cfg := Default()
 		mutate(&cfg.Agents.Context)
@@ -1436,7 +1432,7 @@ func TestDiscoverSubagentProfilesUsesStrictRootPrecedenceAndFormats(t *testing.T
 	home := filepath.Join(t.TempDir(), "home")
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	compat := filepath.Join(home, ".agents", "agents")
-	user := filepath.Join(home, ".config", "azem", "agents")
+	user := filepath.Join(home, ".azem", "agents")
 	project := filepath.Join(workspace, ".azem", "agents")
 	for _, directory := range []string{compat, user, project} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {

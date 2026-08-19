@@ -40,8 +40,15 @@ export function transcriptFollowBehavior(running: boolean, sessionOpen = false):
   return running || sessionOpen ? "instant" : "smooth";
 }
 
-export function pinTranscriptTail(viewport: HTMLElement, behavior: ScrollBehavior) {
-  viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+export function pinTranscriptTail(viewport: HTMLElement, behavior: ScrollBehavior = "instant") {
+  const top = Math.max(0, viewport.scrollHeight);
+  // WKWebView ignores scrollTo({ behavior: "instant" }), so instant pins must
+  // assign scrollTop. Otherwise session switch and send stay on the first line.
+  if (behavior === "smooth") {
+    viewport.scrollTo({ top, behavior: "smooth" });
+    return;
+  }
+  viewport.scrollTop = top;
 }
 
 export function sessionStageMotion(reducedMotion: boolean) {
@@ -97,10 +104,12 @@ export default function ThreadSurface() {
   const followingRef = useRef(following);
   const sessionFollow = useRef(currentSessionId);
   const pinInstant = useRef(false);
+  const pinning = useRef(false);
   followingRef.current = following;
   if (sessionFollow.current !== currentSessionId) {
     sessionFollow.current = currentSessionId;
     pinInstant.current = true;
+    followingRef.current = true;
     if (!following) setFollowing(true);
   }
   const reduceMotion = useReducedMotion();
@@ -110,26 +119,37 @@ export default function ThreadSurface() {
   const sessionMotion = sessionStageMotion(Boolean(reduceMotion));
 
   useLayoutEffect(() => {
-    if (!following) return;
+    if (!following && !pinInstant.current) return;
     const node = viewport.current;
     if (!node) return;
-    const pin = (behavior: ScrollBehavior) => {
+    const pin = () => {
       if (!followingRef.current || viewport.current !== node) return;
-      pinTranscriptTail(node, behavior);
+      pinning.current = true;
+      pinTranscriptTail(node, "instant");
+      requestAnimationFrame(() => {
+        pinning.current = false;
+      });
     };
-    // Opening a session remounts the stage at scrollTop 0. History turns also
-    // start at a 180px content-visibility estimate, so pin instantly and again
-    // when the transcript grows to its real height.
-    pin(transcriptFollowBehavior(running, pinInstant.current));
+    // Opening a session remounts the stage at scrollTop 0. History turns start
+    // at a 180px estimate, so pin instantly and again when height grows.
+    pin();
     const transcript = node.querySelector(".transcript");
     if (!(transcript instanceof HTMLElement) || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      pin("instant");
+      pin();
       pinInstant.current = false;
     });
     observer.observe(transcript);
-    return () => observer.disconnect();
+    const retry = requestAnimationFrame(() => {
+      pin();
+      requestAnimationFrame(pin);
+    });
+    return () => {
+      cancelAnimationFrame(retry);
+      observer.disconnect();
+    };
   }, [blocks, following, queuedPrompts.length, running, currentSessionId]);
+
 
   useEffect(() => setDeliveryMode(snapshot.queueMode ?? "queue"), [currentSessionId, snapshot.queueMode]);
   useEffect(() => {
@@ -354,9 +374,11 @@ export default function ThreadSurface() {
             ) : (
               <>
                 <div className="transcript-viewport" ref={viewport} onScroll={(event) => {
+                  if (pinning.current) return;
                   const node = event.currentTarget;
                   setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 72);
                 }}>
+
                   <div className="transcript">
                     <TimelineFeed
                       blocks={blocks}

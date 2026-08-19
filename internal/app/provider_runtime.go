@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Viking602/azem/internal/adapterdeployment"
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
@@ -41,6 +42,7 @@ type ProviderRuntime struct {
 	approvalReviewTimeout time.Duration
 	ChatGPTEndpoint       string
 	GrokEndpoint          string
+	adapters              *adapterdeployment.Registry
 
 	mu              sync.RWMutex
 	host            providerHost
@@ -145,6 +147,9 @@ func (r *ProviderRuntime) Attach(host providerHost, manager *mcpruntime.Manager,
 	if r.subagents == nil && r.subagentInitErr == nil && host != nil && subagentStore != nil {
 		r.subagents, r.subagentInitErr = newSubagentRuntime(host.BaseContext(), r.cfg.Agents.Subagents, subagentStore, r.subagentWorktreeRoot)
 	}
+	if r.subagents != nil {
+		r.subagents.setHost(host)
+	}
 }
 
 func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agentservice.Run, hyagent.Engine, error) {
@@ -234,20 +239,17 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		return nil, hyagent.Engine{}, fmt.Errorf("%w: max tokens reached", errResumeBudgetExhausted)
 	}
 	driver = &budgetedProviderDriver{inner: driver, budget: usageBudget}
-	contextTarget, err := modelContextTokenTarget(request.Provider, modelID, contextWindow, 0)
+	parentBudget, err := calculateContextBudget(modelID, contextWindow, 0, r.cfg.Agents.Context)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
-	compactionRoute, routeSubagents := r.modelRouteSnapshot()
+	contextTarget := parentBudget.Trigger
 	r.mu.RLock()
 	host := r.host
 	manager := r.mcp
 	subagents := r.subagents
 	subagentInitErr := r.subagentInitErr
 	r.mu.RUnlock()
-	if routeSubagents != nil {
-		subagents = routeSubagents
-	}
 	observeProviderRetries(ctx, host, request.SessionID, run.RunID, request.Provider, providerDriver)
 	if subagentInitErr != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, subagentInitErr.Error(), subagentInitErr)
@@ -298,11 +300,6 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			PlanMode:      request.PlanMode,
 			ContextConfig: r.cfg.Agents.Context,
 			WorkspaceRoot: r.cfg.Workspace.Root, Driver: driver, Coding: r.coding, Host: host,
-			CompactionRoute: compactionRoute,
-			CompactionRouteSnapshot: func() config.ModelRouteConfig {
-				route, _ := r.modelRouteSnapshot()
-				return route
-			},
 			ResolveDriver: func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
 				boundAccountID := ""
 				if provider == request.Provider {
@@ -338,7 +335,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	activeSkills := mergeSkillNames(skillSnapshot.Eager, request.ActiveSkills)
 	activeSkills = mergeSkillNames(activeSkills, loadSessionActivatedSkills(ctx, host, request.SessionID, skillSnapshot.Registry))
 	instructions, instructionFingerprint := turnInstructions(request.PlanMode)
-	budgetConfig, err := calculateContextBudget(request.Provider, modelID, contextWindow, estimateToolDefinitionTokens(drivers), r.cfg.Agents.Context)
+	budgetConfig, err := calculateContextBudget(modelID, contextWindow, estimateToolDefinitionTokens(drivers), r.cfg.Agents.Context)
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
@@ -358,10 +355,9 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	if maxOutputTokens > 0 {
 		extraBody["max_output_tokens"] = maxOutputTokens
 	}
-	hardContextTarget := budgetConfig.HardTrigger
-	softContextTarget := budgetConfig.HardTrigger
-	if r.cfg.Agents.Context.Enabled {
-		softContextTarget = budgetConfig.SoftTrigger
+	hardContextTarget := budgetConfig.Trigger
+	if !r.cfg.Agents.Context.Enabled {
+		hardContextTarget = 0
 	}
 	spec := hyagent.Spec{
 		Instructions:    instructions,
@@ -377,16 +373,6 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			ContextTokenTarget:  hardContextTarget,
 		},
 	}
-	semanticCheckpoint := session.SemanticCheckpointV1{SessionID: request.SessionID, Cursor: session.WriterCursorV1{CanonicalSequence: -1}, State: json.RawMessage(`{"version":1}`)}
-	if host != nil && host.Sessions() != nil {
-		loaded, loadErr := host.Sessions().LoadSemanticCheckpoint(ctx, request.SessionID)
-		if loadErr != nil {
-			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, loadErr.Error(), loadErr)
-			return nil, hyagent.Engine{}, fmt.Errorf("load semantic checkpoint: %w", loadErr)
-		}
-		semanticCheckpoint = loaded
-	}
-	subagentFinishedAtNS, subagentID := latestSubagentCursor(r.ListSubagents(ctx, request.SessionID))
 	deadlineAt := time.Time{}
 	if maxWallClock > 0 {
 		deadlineAt = time.Now().Add(maxWallClock)
@@ -403,17 +389,11 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		history:    request.History, modelHistory: request.modelHistory, toolRecords: request.toolRecords,
 		workspaceRoot: r.cfg.Workspace.Root, checkpointBoundary: request.checkpointBoundary,
 		images: effectiveTurnImages(request), todo: request.Todo,
-		largeToolTokens:      r.cfg.Agents.Context.LargeToolResultTokens,
-		compactTargetTokens:  budgetConfig.Target,
-		minReclaimTokens:     r.cfg.Agents.Context.MinReclaimTokens,
-		structuredSummary:    true,
-		softTriggerTokens:    softContextTarget,
-		backgroundPrepare:    r.cfg.Agents.Context.BackgroundPrepare,
-		coordinator:          &compactionCoordinator{},
-		semanticCheckpoint:   semanticCheckpoint,
-		subagentFinishedAtNS: subagentFinishedAtNS,
-		subagentID:           subagentID,
+		largeToolTokens:  r.cfg.Agents.Context.LargeToolResultTokens,
+		keepRecentTokens: budgetConfig.KeepRecent,
+		coordinator:      &compactionCoordinator{},
 	}
+	configureArchiveContext(ctx, &contextManager, host, request.SessionID, run.RunID, request.Provider, accountID, modelID)
 	if host != nil {
 		contextManager.reportCachePrefixDegraded = func(reason string) {
 			host.EmitEvent(host.BaseContext(), Event{
@@ -456,13 +436,13 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	staticPayload, marshalErr := json.Marshal(struct {
 		Provider, Account, Model, Reasoning, Transport, Instructions string
 		Skills, Tools                                                any
-		RuntimeConfig, CompactionRoute                               any
+		RuntimeConfig                                                any
 		ChatGPTEndpoint, GrokEndpoint, AttachmentRoot                string
 		PlanMode, DisableSubagents                                   bool
 		Wire                                                         int
 	}{
 		request.Provider, accountID, modelID, request.Reasoning, driver.Metadata().Name, instructionFingerprint,
-		resolvedSkills, tool.NewBus(drivers...).Definitions(), r.cfg, compactionRoute,
+		resolvedSkills, tool.NewBus(drivers...).Definitions(), r.cfg,
 		r.ChatGPTEndpoint, r.GrokEndpoint, attachmentRoot,
 		request.PlanMode, request.DisableSubagents, session.CurrentWireVersion,
 	})
@@ -488,21 +468,17 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 			return nil, hyagent.Engine{}, err
 		}
-		contextManager.loadSemanticCheckpoint = func(activateCtx context.Context) (session.SemanticCheckpointV1, error) {
-			return host.Sessions().LoadSemanticCheckpoint(activateCtx, request.SessionID)
-		}
 		contextManager.activateCompaction = func(activateCtx context.Context, messages []message.Message, identity string) error {
-			semanticCommit, manifest := extractContextCheckpoint(messages)
-			projection, err := host.Sessions().LoadProjection(activateCtx, request.SessionID)
-			if err != nil {
-				return err
+			manifest := extractArchiveContextManifestRecord(messages)
+			expectedHighWater := request.checkpointBoundary
+			if manifest != nil && manifest.CanonicalHighWater != nil {
+				highWater := *manifest.CanonicalHighWater
+				expectedHighWater = &highWater
 			}
-			expectedHighWater := canonicalProjectionHighWater(projection.Blocks)
 			return host.Sessions().SaveRunCheckpoint(activateCtx, request.SessionID, session.RunCheckpoint{
 				RunID:             run.RunID,
 				CacheIdentity:     identity,
 				ExpectedHighWater: expectedHighWater,
-				SemanticCommit:    semanticCommit,
 				Manifest:          manifest,
 				ModelHistory: session.ModelHistory{
 					ProviderID: request.Provider, ModelID: modelID,
@@ -515,12 +491,6 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 							return manifest.ManifestHash
 						}
 						return ""
-					}(),
-					SemanticRevision: func() int64 {
-						if manifest != nil {
-							return manifest.SemanticRevision
-						}
-						return 0
 					}(),
 					PolicyVersion: func() int {
 						if manifest != nil {
@@ -549,29 +519,6 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			return host.Sessions().PutArtifact(ctx, request.SessionID, run.RunID, kind, payload, preview)
 		}
 	}
-	reportCompaction := r.compactionUsageReporter(host, request.SessionID, run.RunID)
-	contextManager.resolveSummarizer = lazyCompactionResolver(func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
-		boundAccountID := ""
-		if provider == request.Provider {
-			boundAccountID = accountID
-		}
-		_, resolvedModel, window, resolved, resolveErr := r.resolveDriverForAccount(ctx, provider, model, reasoning, boundAccountID)
-		if resolveErr == nil {
-			observeProviderRetries(ctx, host, request.SessionID, run.RunID, provider, resolved)
-		}
-		if resolveErr == nil && host != nil && host.Sessions() != nil {
-			resolved = &meteredProviderDriver{
-				inner: resolved, store: host.Sessions(), host: host, sessionID: request.SessionID,
-				runID: run.RunID, kind: "compaction", provider: provider, model: resolvedModel, transport: resolved.Metadata().Name,
-			}
-		}
-		return resolvedModel, window, resolved, resolveErr
-	}, compactionRoute, request.Provider, modelID, request.Reasoning, request.SessionID+":compaction", usageBudget, func() compactionUsageReporter {
-		if host != nil && host.Sessions() != nil {
-			return nil
-		}
-		return reportCompaction
-	}(), r.cfg.Agents.Context.MaxSummaryTokens)
 	if host != nil {
 		contextManager.compactHooks = host.AutoCompactHooks(host.HookMetadata(request.SessionID, run.RunID))
 		if host.Sessions() != nil {
@@ -648,6 +595,16 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 				return backgroundChildStatuses(host.RunningBackgroundChildren(sessionID, parentRunID))
 			}))
 		}
+		sessionID, parentRunID := request.SessionID, run.RunID
+		engine.OutputGuardrails = append(engine.OutputGuardrails, newMutatingVerificationGuardrail(
+			host.Sessions(), r.cfg.Workspace.Root, sessionID, parentRunID,
+			func() []string {
+				if r.subagents == nil {
+					return []string{parentRunID}
+				}
+				return r.subagents.relatedRunIDs(sessionID, parentRunID)
+			},
+		))
 	}
 	return run, engine, nil
 }
@@ -822,39 +779,64 @@ func (c activeGuidanceContext) Build(ctx context.Context, task api.Task) ([]mess
 }
 
 func (c activeGuidanceContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
-	snapshot := c.peek()
-	prepared := append([]message.Message(nil), history...)
-	compacted, err := c.inner.Compact(ctx, append(prepared, guidanceMessages(snapshot.values)...))
-	if err == nil {
-		c.acknowledge(snapshot)
-	}
-	return compacted, err
+	return c.compactWithGuidance(ctx, history, func(prepared []message.Message) ([]message.Message, error) {
+		return c.inner.Compact(ctx, prepared)
+	})
 }
 
 func (c activeGuidanceContext) CompactTo(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, error) {
-	snapshot := c.peek()
-	prepared := append([]message.Message(nil), history...)
-	compacted, err := c.inner.CompactTo(ctx, append(prepared, guidanceMessages(snapshot.values)...), targetTokens)
-	if err == nil {
-		c.acknowledge(snapshot)
+	return c.compactWithGuidance(ctx, history, func(prepared []message.Message) ([]message.Message, error) {
+		return c.inner.CompactTo(ctx, prepared, targetTokens)
+	})
+}
+
+func (c activeGuidanceContext) compactWithGuidance(
+	ctx context.Context,
+	history []message.Message,
+	compact func([]message.Message) ([]message.Message, error),
+) ([]message.Message, error) {
+	var compacted []message.Message
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		snapshot := c.peek()
+		prepared := append([]message.Message(nil), history...)
+		compacted, err = compact(append(prepared, guidanceMessages(snapshot.values)...))
+		if err == nil {
+			c.acknowledge(snapshot)
+			return compacted, nil
+		}
+		if !errors.Is(err, session.ErrRunCheckpointStale) {
+			return compacted, err
+		}
+		select {
+		case <-ctx.Done():
+			return compacted, ctx.Err()
+		default:
+		}
 	}
 	return compacted, err
 }
 
 func guidanceMessages(values []activeGuidanceMessage) []message.Message {
 	cleaned := make([]activeGuidanceMessage, 0, len(values))
+	var highWater int64
 	for _, value := range values {
 		value.Text = strings.TrimSpace(value.Text)
 		value.Attachments = CloneAttachments(value.Attachments)
 		if value.Text != "" || len(value.Attachments) > 0 {
 			cleaned = append(cleaned, value)
+			highWater = max(highWater, value.Sequence)
 		}
 	}
 	if len(cleaned) == 0 {
 		return nil
 	}
 	if len(cleaned) == 1 {
-		return []message.Message{UserMessageWithAttachments(cleaned[0].Text, cleaned[0].Attachments)}
+		value := UserMessageWithAttachments(cleaned[0].Text, cleaned[0].Attachments)
+		if highWater > 0 {
+			value.Metadata = copyMessageMetadata(value.Metadata, highWater)
+		}
+		return []message.Message{value}
 	}
 	var combined strings.Builder
 	combined.WriteString("[User guidance received while the task was running]\n")
@@ -867,47 +849,32 @@ func guidanceMessages(values []activeGuidanceMessage) []message.Message {
 		fmt.Fprintf(&combined, "%d. %s\n", index+1, text)
 		attachments = append(attachments, value.Attachments...)
 	}
-	return []message.Message{UserMessageWithAttachments(strings.TrimSpace(combined.String()), attachments)}
+	result := UserMessageWithAttachments(strings.TrimSpace(combined.String()), attachments)
+	if highWater > 0 {
+		result.Metadata = copyMessageMetadata(result.Metadata, highWater)
+	}
+	return []message.Message{result}
 }
 
-func modelContextTokenTarget(providerID, modelID string, contextWindow, toolTokens int) (int, error) {
+type ContextBudget struct {
+	ContextWindow int
+	Trigger       int
+	KeepRecent    int
+}
+
+func calculateContextBudget(modelID string, contextWindow, toolTokens int, cfg config.ContextConfig) (ContextBudget, error) {
 	if contextWindow <= 0 {
-		return 0, fmt.Errorf("model %q catalog omitted a positive context window", modelID)
-	}
-	target := contextWindow/4*3 + (contextWindow%4)*3/4
-	if providerID == "grok" && contextWindow > 200_000 && target > 180_000 {
-		target = 180_000
-	}
-	if providerID == "chatgpt" && strings.HasPrefix(strings.ToLower(modelID), "gpt-5.6") && target > 250_000 {
-		target = 250_000
-	}
-	target -= max(0, toolTokens) + 8_192
-	if target <= 0 {
-		return 0, fmt.Errorf("model %q context window is too small", modelID)
-	}
-	return target, nil
-}
-
-type ContextBudget struct{ Usable, SoftTrigger, HardTrigger, Target int }
-
-func calculateContextBudget(providerID, modelID string, rawWindow, toolTokens int, cfg config.ContextConfig) (ContextBudget, error) {
-	if rawWindow <= 0 {
 		return ContextBudget{}, fmt.Errorf("model %q catalog omitted a positive context window", modelID)
 	}
-	window := rawWindow
-	if providerID == "grok" && window > 200_000 && window > 180_000 {
-		window = 180_000
+	reserve := cfg.ReserveTokens
+	trigger := contextWindow - max(0, toolTokens) - reserve
+	if trigger <= 0 {
+		return ContextBudget{}, fmt.Errorf("model %q context window is too small after the OMP reserve", modelID)
 	}
-	if providerID == "chatgpt" && strings.HasPrefix(strings.ToLower(modelID), "gpt-5.6") && window > 250_000 {
-		window = 250_000
+	if cfg.KeepRecentTokens >= trigger {
+		return ContextBudget{}, fmt.Errorf("model %q context window leaves %d history tokens, below keep_recent_tokens=%d", modelID, trigger, cfg.KeepRecentTokens)
 	}
-	const providerFramingReserve = 8192
-	safety := int(float64(rawWindow) * cfg.SafetyMarginRatio)
-	usable := window - max(0, toolTokens) - cfg.ReserveOutputTokens - cfg.ReserveReasoningTokens - providerFramingReserve - safety
-	if usable <= 0 {
-		return ContextBudget{}, fmt.Errorf("model %q context window is too small after configured reserves", modelID)
-	}
-	return ContextBudget{Usable: usable, SoftTrigger: int(float64(usable) * cfg.SoftTriggerRatio), HardTrigger: int(float64(usable) * cfg.HardTriggerRatio), Target: int(float64(usable) * cfg.TargetRatio)}, nil
+	return ContextBudget{ContextWindow: contextWindow, Trigger: trigger, KeepRecent: cfg.KeepRecentTokens}, nil
 }
 
 func estimateToolDefinitionTokens(drivers []tool.Driver) int {
@@ -922,28 +889,6 @@ func estimateToolDefinitionTokens(drivers []tool.Driver) int {
 		}
 	}
 	return (bytes + estimatedBytesPerToken - 1) / estimatedBytesPerToken
-}
-
-func (r *ProviderRuntime) compactionUsageReporter(host providerHost, sessionID, runID string) compactionUsageReporter {
-	if host == nil || strings.TrimSpace(sessionID) == "" {
-		return nil
-	}
-	return func(providerID, modelID, reasoning, transport string, usage hyprovider.Usage, reasoningTokens, cacheWriteTokens int) {
-		model := cacheModelForProvider(providerID, "")
-		if model == responses.CacheModelAutomatic {
-			cacheWriteTokens = 0
-		}
-		host.EmitEvent(host.BaseContext(), Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{
-			"inputTokens": fmt.Sprint(usage.InputTokens), "cachedInputTokens": fmt.Sprint(usage.CachedInputTokens),
-			"outputTokens": fmt.Sprint(usage.OutputTokens), "totalTokens": fmt.Sprint(usage.TotalTokens),
-			"reasoningTokens":     fmt.Sprint(reasoningTokens),
-			"cacheWriteTokens":    fmt.Sprint(cacheWriteTokens),
-			"uncachedInputTokens": fmt.Sprint(max(0, usage.InputTokens-usage.CachedInputTokens)),
-			"cacheStatus":         "reported", "aggregateOnly": "true", "requestKind": "compaction",
-			"provider": providerID, "model": modelID, "reasoning": reasoning, "transport": transport,
-			"cacheModel": model,
-		}})
-	}
 }
 
 func (r *ProviderRuntime) responseUsageReporter(host providerHost, sessionID, runID, requestKind, providerID, modelID, transport string) responses.UsageReporter {
@@ -1113,19 +1058,6 @@ func (r *ProviderRuntime) ListSubagents(ctx context.Context, sessionID string) [
 		return nil
 	}
 	return runtime.List(ctx, sessionID)
-}
-
-func latestSubagentCursor(snapshots []agentservice.SubagentSnapshot) (int64, string) {
-	var finishedAt int64
-	var id string
-	for _, snapshot := range snapshots {
-		current := snapshot.Run.FinishedAt.UnixNano()
-		if snapshot.Run.FinishedAt.IsZero() || current < finishedAt || (current == finishedAt && snapshot.Run.ID <= id) {
-			continue
-		}
-		finishedAt, id = current, snapshot.Run.ID
-	}
-	return finishedAt, id
 }
 
 func (r *ProviderRuntime) DetailSubagent(ctx context.Context, sessionID, id string) ([]AgentTranscriptBlock, error) {

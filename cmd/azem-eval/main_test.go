@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Viking602/azem/internal/config"
+	evalpkg "github.com/Viking602/azem/internal/eval"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -84,5 +85,48 @@ func TestExportAuthCopiesAccountsAndCredentials(t *testing.T) {
 	}
 	if info.Size() > 8<<20 {
 		t.Fatalf("slim auth database too large: %d", info.Size())
+	}
+}
+
+func TestExportTrajectoryWritesReadOnlySessionSnapshot(t *testing.T) {
+	ctx := t.Context()
+	directory := t.TempDir()
+	createdPath := filepath.Join(directory, "source.db")
+	source, err := sqlitestore.Open(ctx, createdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.DB().ExecContext(ctx, `INSERT INTO sessions(id, title, created_at, updated_at) VALUES('session-1', 'one', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(directory, "source?#.db")
+	if err := os.Rename(createdPath, sourcePath); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(directory, "trajectory.json")
+	if err := exportTrajectory(sourcePath, "", "session-1", outputPath); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	trajectory, err := evalpkg.ReadTrajectory(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trajectory.SessionID != "session-1" {
+		t.Fatalf("session id = %q", trajectory.SessionID)
+	}
+	info, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("trajectory mode = %o, want 600", info.Mode().Perm())
 	}
 }

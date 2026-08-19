@@ -36,7 +36,7 @@ type discoveredSubagentProfile struct {
 func discoverSubagentProfiles(cfg *Config, workspaceRoot, homeDir string, explicitRoles, explicitPersonas map[string]bool) error {
 	roots := []string{
 		filepath.Join(homeDir, ".agents", "agents"),
-		filepath.Join(homeDir, ".config", "azem", "agents"),
+		filepath.Join(ResolveHome(homeDir), "agents"),
 		filepath.Join(workspaceRoot, ".azem", "agents"),
 	}
 	for _, root := range roots {

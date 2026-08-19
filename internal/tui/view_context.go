@@ -801,7 +801,6 @@ func (m AppModel) statusReportLines() []string {
 		"  "+m.tr("overlay.status.field.approval")+": "+m.approvalModeLabel(),
 		"  "+m.tr("overlay.status.field.session")+": "+first(m.sessionID, "—"),
 		m.tr("overlay.status.section.model"),
-		"  "+m.tr("overlay.status.field.provider")+": "+first(m.provider, "—"),
 		"  "+m.tr("overlay.status.field.model")+": "+first(m.model, "—"),
 		"  "+m.tr("overlay.status.field.reasoning")+": "+first(m.reasoning, "—"),
 		m.tr("overlay.status.section.context"),
