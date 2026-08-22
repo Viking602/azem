@@ -20,6 +20,7 @@ import (
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
+	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 	"github.com/Viking602/azem/internal/provider/errcode"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
@@ -43,6 +44,7 @@ type ProviderRuntime struct {
 	ChatGPTEndpoint       string
 	GrokEndpoint          string
 	adapters              *adapterdeployment.Registry
+	cursorConversations   *cursordriver.ConversationCache
 
 	mu              sync.RWMutex
 	host            providerHost
@@ -135,7 +137,7 @@ func NewProviderRuntime(cfg config.Config, authentication *auth.Service, modelCa
 	cfg.Providers.LLMux = cloneLLMuxProviders(cfg.Providers.LLMux)
 	return &ProviderRuntime{
 		cfg: cfg, auth: authentication, catalog: modelCatalog, coding: codingService,
-		subagentWorktreeRoot: subagentWorktreeRoot,
+		subagentWorktreeRoot: subagentWorktreeRoot, cursorConversations: cursordriver.NewConversationCache(),
 	}, nil
 }
 
@@ -188,10 +190,14 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	host := r.host
 	r.mu.RUnlock()
 	if host != nil && host.Sessions() != nil {
-		if _, appendErr := host.Sessions().AppendBlock(ctx, request.SessionID, userTurnBlock(run.RunID, request)); appendErr != nil {
+		persistedUser := userTurnBlock(run.RunID, request)
+		sequence, appendErr := host.Sessions().AppendBlock(ctx, request.SessionID, persistedUser)
+		if appendErr != nil {
 			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, appendErr.Error(), appendErr)
 			return nil, hyagent.Engine{}, fmt.Errorf("persist user turn: %w", appendErr)
 		}
+		persistedUser.Sequence = sequence
+		request.History = append(request.History, persistedUser)
 	}
 	request, err = r.prepareVisionAssistance(ctx, request, run.RunID, account.ID, modelID)
 	if err != nil {
@@ -212,6 +218,18 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		return nil, hyagent.Engine{}, err
 	}
 	return r.buildSingleRun(ctx, request, run, account.ID, modelID, contextWindow, driver)
+}
+
+func canonicalRunUserHighWater(blocks []session.Block, runID string) *int64 {
+	var highWater *int64
+	for _, block := range blocks {
+		if block.RunID != runID || block.Kind != "user" || (highWater != nil && block.Sequence <= *highWater) {
+			continue
+		}
+		sequence := block.Sequence
+		highWater = &sequence
+	}
+	return highWater
 }
 
 func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnRequest, run *agentservice.Run, accountID, modelID string, contextWindow int, driver hyprovider.Driver) (*agentservice.Run, hyagent.Engine, error) {
@@ -335,7 +353,8 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	activeSkills := mergeSkillNames(skillSnapshot.Eager, request.ActiveSkills)
 	activeSkills = mergeSkillNames(activeSkills, loadSessionActivatedSkills(ctx, host, request.SessionID, skillSnapshot.Registry))
 	instructions, instructionFingerprint := turnInstructions(request.PlanMode)
-	budgetConfig, err := calculateContextBudget(modelID, contextWindow, estimateToolDefinitionTokens(drivers), r.cfg.Agents.Context)
+	toolDefinitionTokens := estimateToolDefinitionTokens(drivers)
+	budgetConfig, err := calculateContextBudget(modelID, contextWindow, toolDefinitionTokens, r.cfg.Agents.Context)
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
@@ -380,6 +399,11 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	if ctxDeadline, ok := ctx.Deadline(); ok && (deadlineAt.IsZero() || ctxDeadline.Before(deadlineAt)) {
 		deadlineAt = ctxDeadline
 	}
+	canonicalHighWater := canonicalRunUserHighWater(request.History, run.RunID)
+	if canonicalHighWater == nil && request.checkpointBoundary != nil {
+		value := *request.checkpointBoundary
+		canonicalHighWater = &value
+	}
 	contextManager := turnContext{
 		sessionID:    request.SessionID,
 		instructions: instructions, instructionFingerprint: instructionFingerprint, providerID: request.Provider, modelID: modelID, runID: run.RunID,
@@ -387,11 +411,12 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		deadlineAt: deadlineAt,
 		resuming:   request.resuming,
 		history:    request.History, modelHistory: request.modelHistory, toolRecords: request.toolRecords,
-		workspaceRoot: r.cfg.Workspace.Root, checkpointBoundary: request.checkpointBoundary,
+		workspaceRoot: r.cfg.Workspace.Root, checkpointBoundary: request.checkpointBoundary, canonicalHighWater: canonicalHighWater,
 		images: effectiveTurnImages(request), todo: request.Todo,
 		largeToolTokens:  r.cfg.Agents.Context.LargeToolResultTokens,
 		keepRecentTokens: budgetConfig.KeepRecent,
 		coordinator:      &compactionCoordinator{},
+		providerPressure: &providerContextPressure{toolTokens: toolDefinitionTokens},
 	}
 	configureArchiveContext(ctx, &contextManager, host, request.SessionID, run.RunID, request.Provider, accountID, modelID)
 	if host != nil {
@@ -433,15 +458,21 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	if host != nil {
 		attachmentRoot = host.AttachmentRoot()
 	}
+	driverMetadata := driver.Metadata()
+	transportVersion := ""
+	if request.Provider == "cursor" {
+		transportVersion = driverMetadata.Version
+	}
 	staticPayload, marshalErr := json.Marshal(struct {
 		Provider, Account, Model, Reasoning, Transport, Instructions string
+		TransportVersion                                             string `json:"transport_version,omitempty"`
 		Skills, Tools                                                any
 		RuntimeConfig                                                any
 		ChatGPTEndpoint, GrokEndpoint, AttachmentRoot                string
 		PlanMode, DisableSubagents                                   bool
 		Wire                                                         int
 	}{
-		request.Provider, accountID, modelID, request.Reasoning, driver.Metadata().Name, instructionFingerprint,
+		request.Provider, accountID, modelID, request.Reasoning, driverMetadata.Name, instructionFingerprint, transportVersion,
 		resolvedSkills, tool.NewBus(drivers...).Definitions(), r.cfg,
 		r.ChatGPTEndpoint, r.GrokEndpoint, attachmentRoot,
 		request.PlanMode, request.DisableSubagents, session.CurrentWireVersion,
@@ -470,10 +501,17 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		}
 		contextManager.activateCompaction = func(activateCtx context.Context, messages []message.Message, identity string) error {
 			manifest := extractArchiveContextManifestRecord(messages)
-			expectedHighWater := request.checkpointBoundary
-			if manifest != nil && manifest.CanonicalHighWater != nil {
+			// The current run's durable user block is the CAS boundary. Do not
+			// infer it from provider-facing message metadata: provider
+			// conversion and loop normalization do not own that host protocol.
+			expectedHighWater := contextManager.canonicalHighWater
+			if expectedHighWater == nil && manifest != nil && manifest.CanonicalHighWater != nil {
 				highWater := *manifest.CanonicalHighWater
 				expectedHighWater = &highWater
+			} else if expectedHighWater == nil {
+				if highWater := canonicalMessageHighWater(messages); highWater >= 0 {
+					expectedHighWater = &highWater
+				}
 			}
 			return host.Sessions().SaveRunCheckpoint(activateCtx, request.SessionID, session.RunCheckpoint{
 				RunID:             run.RunID,
@@ -512,6 +550,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		driver = &meteredProviderDriver{
 			inner: driver, store: host.Sessions(), host: host, sessionID: request.SessionID,
 			runID: run.RunID, kind: "main", provider: request.Provider, model: modelID, transport: driver.Metadata().Name,
+			reportInputTokens: contextManager.providerPressure.observeInputTokens,
 		}
 	}
 	if host != nil && host.Sessions() != nil {
@@ -558,15 +597,21 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			"runtime_identity": contextManager.staticIdentity,
 		},
 	)
+	toolBus := tool.NewBus(drivers...)
 	engine, err := materializeAgentDefinition(ctx, r.coding, definition, spec, hyagent.BuildDeps{
 		Providers:      hyprovider.Single(driver),
 		Skills:         skillSnapshot.Registry,
-		Tools:          tool.NewBus(drivers...),
+		Tools:          toolBus,
 		ContextManager: engineContext,
 	})
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
+	}
+	if request.Provider == "cursor" {
+		engine.ExtraBody = withCursorExecHost(engine.ExtraBody, newCursorExecHost(
+			host, r.cfg.Workspace.Root, request.SessionID, run.RunID, run.RunID, "", toolBus,
+		))
 	}
 	engine.Hooks = engine.Hooks.Prepend(editRecoveryHook{run: run})
 	if host != nil {
@@ -592,12 +637,12 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		if !request.DisableSubagents {
 			sessionID, parentRunID := request.SessionID, run.RunID
 			engine.OutputGuardrails = append(engine.OutputGuardrails, pendingBackgroundChildrenGuardrail(func() []backgroundChildStatus {
-				return backgroundChildStatuses(host.RunningBackgroundChildren(sessionID, parentRunID))
+				return backgroundChildStatuses(host.UnfinishedChildren(sessionID, parentRunID))
 			}))
 		}
 		sessionID, parentRunID := request.SessionID, run.RunID
 		engine.OutputGuardrails = append(engine.OutputGuardrails, newMutatingVerificationGuardrail(
-			host.Sessions(), r.cfg.Workspace.Root, sessionID, parentRunID,
+			host.Sessions(), r.cfg.Workspace.Root, sessionID, parentRunID, true,
 			func() []string {
 				if r.subagents == nil {
 					return []string{parentRunID}
@@ -862,14 +907,23 @@ type ContextBudget struct {
 	KeepRecent    int
 }
 
+const (
+	snapcompactReserveNumerator   = 15
+	snapcompactReserveDenominator = 100
+)
+
 func calculateContextBudget(modelID string, contextWindow, toolTokens int, cfg config.ContextConfig) (ContextBudget, error) {
 	if contextWindow <= 0 {
 		return ContextBudget{}, fmt.Errorf("model %q catalog omitted a positive context window", modelID)
 	}
-	reserve := cfg.ReserveTokens
+	reserve := max(
+		cfg.ReserveTokens,
+		contextWindow/snapcompactReserveDenominator*snapcompactReserveNumerator+
+			(contextWindow%snapcompactReserveDenominator)*snapcompactReserveNumerator/snapcompactReserveDenominator,
+	)
 	trigger := contextWindow - max(0, toolTokens) - reserve
 	if trigger <= 0 {
-		return ContextBudget{}, fmt.Errorf("model %q context window is too small after the OMP reserve", modelID)
+		return ContextBudget{}, fmt.Errorf("model %q context window is too small after the Snapcompact reserve", modelID)
 	}
 	if cfg.KeepRecentTokens >= trigger {
 		return ContextBudget{}, fmt.Errorf("model %q context window leaves %d history tokens, below keep_recent_tokens=%d", modelID, trigger, cfg.KeepRecentTokens)
@@ -1031,14 +1085,23 @@ func (r *ProviderRuntime) CancelParentSubagents(sessionID, parentRunID string) {
 	}
 }
 
-func (r *ProviderRuntime) RunningBackgroundChildren(sessionID, parentRunID string) []agentservice.SubagentRun {
+func (r *ProviderRuntime) UnfinishedChildren(sessionID, parentRunID string) []agentservice.SubagentRun {
 	r.mu.RLock()
 	runtime := r.subagents
 	r.mu.RUnlock()
 	if runtime == nil {
 		return nil
 	}
-	return runtime.listRunningBackgroundChildren(sessionID, parentRunID)
+	return runtime.listUnfinishedChildren(sessionID, parentRunID)
+}
+
+func (r *ProviderRuntime) MarkParentChildrenDelivered(sessionID, parentRunID string) {
+	r.mu.RLock()
+	runtime := r.subagents
+	r.mu.RUnlock()
+	if runtime != nil {
+		runtime.markParentChildrenDelivered(runtime.ctx, sessionID, parentRunID)
+	}
 }
 
 func (r *ProviderRuntime) AutoWakePending(sessionID string) {
@@ -1073,11 +1136,16 @@ func (r *ProviderRuntime) DetailSubagent(ctx context.Context, sessionID, id stri
 func (r *ProviderRuntime) Shutdown(ctx context.Context) error {
 	r.mu.RLock()
 	runtime := r.subagents
+	conversations := r.cursorConversations
 	r.mu.RUnlock()
-	if runtime == nil {
-		return nil
+	var err error
+	if runtime != nil {
+		err = runtime.Shutdown(ctx)
 	}
-	return runtime.Shutdown(ctx)
+	if conversations != nil {
+		conversations.Clear()
+	}
+	return err
 }
 
 type teamProviderResolution struct {

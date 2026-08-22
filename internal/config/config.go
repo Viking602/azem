@@ -27,6 +27,19 @@ const (
 	DefaultShellMaxWallClock = 10 * time.Minute
 )
 
+func SubscriptionProviderIDs() []string {
+	return []string{"chatgpt", "grok", "cursor"}
+}
+
+func IsSubscriptionProvider(id string) bool {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case "chatgpt", "grok", "cursor":
+		return true
+	default:
+		return false
+	}
+}
+
 type Config struct {
 	Version   int             `yaml:"version"`
 	Defaults  DefaultsConfig  `yaml:"defaults"`
@@ -98,13 +111,15 @@ type AuthConfig struct {
 type ProvidersConfig struct {
 	ChatGPT ChatGPTConfig                  `yaml:"chatgpt"`
 	Grok    GrokConfig                     `yaml:"grok"`
+	Cursor  CursorConfig                   `yaml:"cursor"`
 	LLMux   map[string]LLMuxProviderConfig `yaml:"llmux,omitempty"`
 }
 
 type LLMuxProviderConfig struct {
-	Enabled bool               `yaml:"enabled" json:"enabled"`
-	BaseURL string             `yaml:"base_url,omitempty" json:"baseURL,omitempty"`
-	Models  []LLMuxModelConfig `yaml:"models,omitempty" json:"models,omitempty"`
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	BaseURL string `yaml:"base_url,omitempty" json:"baseURL,omitempty"`
+	// Models is accepted from legacy YAML on load, then stored in SQLite.
+	Models []LLMuxModelConfig `yaml:"models,omitempty" json:"models,omitempty"`
 }
 
 type LLMuxModelConfig struct {
@@ -138,6 +153,10 @@ type GrokConfig struct {
 	ProviderConfig    `yaml:",inline"`
 	ExperimentalOAuth bool   `yaml:"experimental_oauth"`
 	Transport         string `yaml:"transport"`
+}
+
+type CursorConfig struct {
+	ProviderConfig `yaml:",inline"`
 }
 
 type AgentsConfig struct {
@@ -336,6 +355,7 @@ func Default() Config {
 		Providers: ProvidersConfig{
 			ChatGPT: ChatGPTConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}},
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
+			Cursor:  CursorConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}},
 			LLMux:   map[string]LLMuxProviderConfig{},
 		},
 		Retry: RetryConfig{
@@ -387,8 +407,8 @@ func builtInMCPServers() map[string]MCPServerConfig {
 }
 
 func builtInSubagentRoles() map[string]SubagentRoleConfig {
-	readOnly := []string{"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff"}
-	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell")
+	readOnly := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "coding.git_diff"}
+	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell")
 	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell")
 	return map[string]SubagentRoleConfig{
 		"worker": {
@@ -472,7 +492,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("workspace.shell.max_wall_clock must be a duration of at least 1s")
 	}
 	c.Workspace.Shell.MaxWallClockDuration = shellWall
-	for name, provider := range map[string]*ProviderConfig{"chatgpt": &c.Providers.ChatGPT.ProviderConfig, "grok": &c.Providers.Grok.ProviderConfig} {
+	for name, provider := range map[string]*ProviderConfig{"chatgpt": &c.Providers.ChatGPT.ProviderConfig, "grok": &c.Providers.Grok.ProviderConfig, "cursor": &c.Providers.Cursor.ProviderConfig} {
 		ttl, err := time.ParseDuration(provider.TTL)
 		if err != nil || ttl <= 0 {
 			return fmt.Errorf("providers.%s.catalog_ttl must be a positive duration", name)
@@ -790,8 +810,8 @@ func (c *Config) validateSubagents() error {
 		subagents.Personas = map[string]SubagentPersonaConfig{}
 	}
 	allowedTools := map[string]bool{
-		"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true,
-		"coding.edit_hashline": true, "coding.write_file": true, "coding.gofmt": true,
+		"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true,
+		"coding.edit_hashline": true, "coding.replace": true, "coding.write_file": true, "coding.delete_file": true, "coding.gofmt": true,
 		"coding.go_test": true, "coding.shell": true,
 	}
 	for name, persona := range subagents.Personas {
@@ -814,7 +834,7 @@ func (c *Config) validateSubagents() error {
 			return fmt.Errorf("agents.subagents persona %q isolation must be none or worktree", name)
 		}
 	}
-	readOnlyTools := []string{"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff"}
+	readOnlyTools := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "coding.git_diff"}
 	if len(subagents.Roles) > maxConfiguredSubagentRoles {
 		return fmt.Errorf("agents.subagents.roles must contain at most %d roles", maxConfiguredSubagentRoles)
 	}

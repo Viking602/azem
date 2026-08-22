@@ -10,10 +10,10 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ4pzQ=
 github.com/MakeNowJust/heredoc v1.0.0/go.mod h1:mG5amYoWBHf8vpLOuehzbGGw0EHxpZZ6lCpQ4fNJ8LE=
-github.com/Viking602/llmux v0.2.4 h1:HDv+CcO01JzjH1zOQB5Ri31Jzaap5SKS3b+SVdmsV5A=
-github.com/Viking602/llmux v0.2.4/go.mod h1:0m26z1MqRU4LcJQfspZ8yWZVH6y3ofIUEs9Gt4gMTCw=
-github.com/Viking602/venat v0.14.2-0.20260819024942-459643d22ae8 h1:x931OJqXeAHDYQ0Cp1xYmD2xCGLhUgH1MhKwwO8e9a4=
-github.com/Viking602/venat v0.14.2-0.20260819024942-459643d22ae8/go.mod h1:2ROFF0yXjhZcQpAlksz9Q+rqjO2mjQxb8fmWQWFWgDk=
+github.com/Viking602/llmux v0.2.5 h1:3fIWkUIYXkCYFCWuiba1EZlG1UuSdwsPgIGHPawzOMI=
+github.com/Viking602/llmux v0.2.5/go.mod h1:0m26z1MqRU4LcJQfspZ8yWZVH6y3ofIUEs9Gt4gMTCw=
+github.com/Viking602/venat v0.14.2 h1:LSLQcAnR78TFFr/aQdH3eQF/Cgtb3RtJtDcIy2CVg4g=
+github.com/Viking602/venat v0.14.2/go.mod h1:2ROFF0yXjhZcQpAlksz9Q+rqjO2mjQxb8fmWQWFWgDk=
 github.com/adrg/xdg v0.5.3 h1:xRnxJXne7+oWDatRhR1JLnvuccuIeCoBu2rtuLqQB78=
 github.com/adrg/xdg v0.5.3/go.mod h1:nlTsY+NNiCBGCK2tpm09vRqfVzrc2fLmXGpBLF0zlTQ=
 github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=

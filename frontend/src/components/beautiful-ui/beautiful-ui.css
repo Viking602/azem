@@ -86,19 +86,11 @@
   color: var(--faint);
   cursor: default;
 }
-  .bui-thinking-state.completed.quiet .reasoning-summary:has(.reasoning-chevron) {
-    display: flex;
-    width: 100%;
-    max-width: 100%;
-    gap: 6px;
-  }
-  .bui-thinking-state.completed.quiet .reasoning-summary::after {
-    content: "";
-    flex: 1 1 auto;
-    height: 1px;
-    margin-left: 2px;
-    background: var(--line);
-  }
+.bui-thinking-state.completed.quiet {
+  height: auto;
+  min-height: 0;
+  align-self: start;
+}
 .bui-thinking-wait,
 .bui-cadenced-shimmer {
   --shimmer-text-secondary: var(--faint);
@@ -110,7 +102,9 @@
   color: var(--shimmer-text-secondary);
   font-size: var(--text-chat);
   font-weight: 400;
-  line-height: var(--leading-chat);
+  /* Match the roll clip. `--leading-chat` is font+8px and left a WKWebView
+     hairline under 正在思考 after a tool→思考 roll. */
+  line-height: 1.2;
   white-space: nowrap;
   user-select: none;
   -webkit-user-select: none;
@@ -125,8 +119,12 @@
 .bui-cadenced-shimmer-text {
   color: var(--shimmer-text-secondary);
   -webkit-text-fill-color: currentColor;
+  line-height: inherit;
 }
 .bui-cadenced-shimmer-sweep {
+  /* Idle must drop the box. An absolute masked duplicate left a hairline
+     under 正在思考 the same way the streaming caret did (UI-016). */
+  display: none;
   pointer-events: none;
   position: absolute;
   inset: 0 auto 0 0;
@@ -149,8 +147,12 @@
   animation-timing-function: steps(48, end);
   animation-iteration-count: 1;
 }
-.bui-cadenced-shimmer-active .bui-cadenced-shimmer-sweep { animation-name: bui-cadenced-shimmer-sweep; }
+.bui-cadenced-shimmer-active .bui-cadenced-shimmer-sweep {
+  display: block;
+  animation-name: bui-cadenced-shimmer-sweep;
+}
 .bui-cadenced-shimmer-active .bui-cadenced-shimmer-highlight { animation-name: bui-cadenced-shimmer-highlight; }
+.bui-cadenced-shimmer.rolling .bui-cadenced-shimmer-sweep { display: none; }
 @keyframes bui-cadenced-shimmer-sweep {
   from { transform: translateX(-50%); }
   to { transform: translateX(125%); }
@@ -161,7 +163,7 @@
 }
 
 .bui-cadenced-shimmer .reasoning-label-out,
-.bui-cadenced-shimmer .bui-cadenced-shimmer-text { grid-area: 1 / 1; }
+.bui-cadenced-shimmer .bui-cadenced-shimmer-text { grid-area: 1 / 1; line-height: inherit; }
 .bui-cadenced-shimmer.rolling .reasoning-label-out {
   animation: reasoning-label-roll-out .34s cubic-bezier(.22, 1, .36, 1) both;
 }
@@ -183,6 +185,41 @@
   grid-template-columns: max-content 13px;
   gap: 6px;
   cursor: pointer;
+}
+
+.bui-thinking-state.quiet .reasoning-summary:has(.bui-running-mark) {
+  grid-template-columns: 14px max-content;
+  gap: 6px;
+  align-items: center;
+}
+.bui-thinking-state.quiet .reasoning-summary:has(.bui-tool-chip-icon) {
+  grid-template-columns: 14px max-content;
+  gap: 6px;
+  align-items: center;
+}
+.bui-thinking-lead[data-empty="true"] { display: none; }
+.bui-thinking-state.quiet .bui-tool-chip-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--faint);
+}
+.bui-running-mark {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  position: relative;
+  border: 1.4px solid currentColor;
+  border-radius: 50%;
+  color: var(--faint);
+}
+.bui-running-mark::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  top: 50%;
+  height: 1.4px;
+  background: currentColor;
 }
 
 .bui-thinking-state .reasoning-summary:hover:not(:disabled) { background: var(--hover); transform: none; color: var(--thinking-ink); }
@@ -325,7 +362,6 @@
   pointer-events: none;
   animation: bui-caret 850ms ease-in-out infinite;
 }
-.bui-streaming-text .streaming-text-reveal { animation-duration: .1s; animation-timing-function: ease-out; }
 
 .bui-tool-row > summary { border-radius: var(--bui-radius-control); }
 .bui-tool-row > summary:hover { background: var(--hover); transform: none; }
@@ -795,6 +831,10 @@ button.bui-task-header { cursor: pointer; }
 }
 .bui-tool-chip-group-header:hover,
 .bui-tool-chip-group-header:hover svg { color: var(--muted); opacity: 1; }
+
+.run-status-marker.section-marker { margin: 8px 0 6px; }
+.final-answer-marker,
+.process-fold + .final-answer-marker { margin-top: 8px; }
 .bui-thinking-meta {
   display: inline-flex;
   align-items: baseline;

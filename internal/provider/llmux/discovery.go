@@ -55,13 +55,9 @@ func DiscoverModels(ctx context.Context, config DiscoveryConfig) ([]catalog.Mode
 		}
 		warning = "provider API unavailable: " + providerErr.Error() + "; using models.dev catalog"
 	} else {
-		var matched int
-		providerID, matched = metadata.Enrich(catalog.ModelsDevProviderHint{
+		providerID, _ = metadata.Enrich(catalog.ModelsDevProviderHint{
 			ID: config.Profile.ID, Name: config.Profile.DisplayName, API: config.Profile.BaseURL, EnvKey: config.Profile.EnvKey,
 		}, models)
-		if matched < len(models) {
-			warning = fmt.Sprintf("models.dev metadata did not match %d model(s)", len(models)-matched)
-		}
 	}
 	sort.SliceStable(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	return models, providerID, warning, nil

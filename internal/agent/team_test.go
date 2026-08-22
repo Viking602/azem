@@ -153,7 +153,7 @@ func TestCodingTeamRolePermissions(t *testing.T) {
 	if !containsString(byName[ImplementerClass].Tools, ToolShell) || !containsString(byName[ReviewerClass].Tools, ToolShell) {
 		t.Fatalf("execution roles did not receive %s", ToolShell)
 	}
-	if !containsString(byName[ImplementerClass].Tools, "coding.edit_hashline") || !containsString(byName[ImplementerClass].Tools, "coding.write_file") || !containsString(byName[ImplementerClass].Tools, "coding.go_test") {
+	if !containsString(byName[ImplementerClass].Tools, "coding.edit_hashline") || !containsString(byName[ImplementerClass].Tools, "coding.replace") || !containsString(byName[ImplementerClass].Tools, "coding.write_file") || !containsString(byName[ImplementerClass].Tools, "coding.delete_file") || !containsString(byName[ImplementerClass].Tools, "coding.go_test") || !containsString(byName[ImplementerClass].Tools, ToolGlob) {
 		t.Fatalf("implementer tools = %v", byName[ImplementerClass].Tools)
 	}
 	if !containsString(byName[ReviewerClass].Tools, "coding.go_test") {

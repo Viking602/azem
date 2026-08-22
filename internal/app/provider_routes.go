@@ -11,6 +11,7 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
+	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 	"github.com/Viking602/azem/internal/provider/xai"
 	hyprovider "github.com/Viking602/venat/provider"
 )
@@ -144,6 +145,8 @@ func (r *ProviderRuntime) UpdateSubscriptionDisabledModels(provider string, mode
 		r.cfg.Providers.ChatGPT.DisabledModels = append([]string(nil), models...)
 	} else if provider == "grok" {
 		r.cfg.Providers.Grok.DisabledModels = append([]string(nil), models...)
+	} else if provider == "cursor" {
+		r.cfg.Providers.Cursor.DisabledModels = append([]string(nil), models...)
 	}
 }
 
@@ -187,7 +190,7 @@ func (r *ProviderRuntime) resolveDriverForAccount(ctx context.Context, providerI
 }
 
 func (r *ProviderRuntime) resolveDriverForAccountRoute(ctx context.Context, providerID, modelID, requestedReasoning, accountID string) (auth.Account, string, int, hyprovider.Driver, error) {
-	if providerID != "chatgpt" && providerID != "grok" {
+	if !config.IsSubscriptionProvider(providerID) {
 		return r.resolveLLMuxDriverForAccount(ctx, providerID, modelID, requestedReasoning, accountID)
 	}
 	accounts, err := r.auth.Accounts(ctx, providerID)
@@ -215,8 +218,10 @@ func (r *ProviderRuntime) resolveDriverForAccountRoute(ctx context.Context, prov
 	var disabledModels []string
 	if providerID == "chatgpt" {
 		disabledModels = append([]string(nil), r.cfg.Providers.ChatGPT.DisabledModels...)
-	} else {
+	} else if providerID == "grok" {
 		disabledModels = append([]string(nil), r.cfg.Providers.Grok.DisabledModels...)
+	} else {
+		disabledModels = append([]string(nil), r.cfg.Providers.Cursor.DisabledModels...)
 	}
 	r.mu.RUnlock()
 	if modelID == "" {
@@ -271,13 +276,19 @@ func (r *ProviderRuntime) resolveDriverForAccountRoute(ctx context.Context, prov
 		}
 		driver, err := xai.New(transport, modelIDs, reasoningEffort)
 		return account, modelID, selectedModel.ContextWindow, driver, err
+	case "cursor":
+		driver, err := cursordriver.New(func(ctx context.Context) (string, error) {
+			credential, err := r.auth.Credential(ctx, "cursor", account.ID)
+			return credential.AccessToken, err
+		}, account.ID, modelIDs, selectedModel.CursorMaxMode, r.cursorConversations)
+		return account, modelID, selectedModel.ContextWindow, driver, err
 	default:
 		return auth.Account{}, "", 0, nil, fmt.Errorf("unsupported provider %q", providerID)
 	}
 }
 
 func (r *ProviderRuntime) resolvedReasoningEffort(ctx context.Context, providerID, accountID, modelID, requested string) (string, error) {
-	if providerID != "chatgpt" && providerID != "grok" {
+	if !config.IsSubscriptionProvider(providerID) {
 		return r.resolvedLLMuxReasoningEffort(providerID, modelID, requested)
 	}
 	models, err := r.catalog.List(ctx, providerID, accountID, false)

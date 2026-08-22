@@ -1147,8 +1147,8 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 
 func TestBuiltInSubagentRoleContracts(t *testing.T) {
 	roles := builtInSubagentRoles()
-	readOnly := []string{"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff"}
-	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell")
+	readOnly := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "coding.git_diff"}
+	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell")
 	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell")
 	want := map[string]struct {
 		description string

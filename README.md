@@ -23,7 +23,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 | **Terminal and desktop workflows** | A fast Bubble Tea TUI plus a Wails desktop workspace with frame-paced streaming output, inline approvals and diffs, Agent inspection, recovery, and role-model settings |
 | **Governed execution** | Prompt, Auto Review, and YOLO approval modes for file, shell, and external actions |
 | **Durable state** | SQLite-backed sessions, runs, approvals, leases, side-effect reconciliation, and Team resume |
-| **Multiple providers** | ChatGPT through Codex-compatible OAuth and Grok through API or CLI-proxy transport |
+| **Multiple providers** | ChatGPT through Codex-compatible OAuth, Grok through API or CLI-proxy transport, Cursor through its native agent service, and configurable llmux providers |
 | **Extensible tools** | Codex-compatible plugins, MCP servers over stdio or Streamable HTTP, plus dynamically loaded Agent Skills |
 | **Multi-agent work** | Structured team mode and resumable subagents with optional Git worktree isolation |
 | **Evidence-bound evaluation** | Deterministic durable trajectory export, revision-compatible verification records, offline route/training evaluation, and validated exact-model adapter experiments without a second live router |
@@ -76,9 +76,14 @@ and `NO_PROXY` remain explicit per-process overrides on every platform.
 Desktop text output is presented in frame-paced chunks. Rendering is capped independently from the display refresh rate, large backlogs catch up automatically, and reduced-motion preferences disable animation without disabling bounded rendering.
 
 Desktop **Settings → Usage** shows a project-scoped token ledger from completed
-provider requests: totals, a month-row activity calendar, main vs subagent
-breakdown, and model (and skill, when recorded) counts. Cache stays unreported
-for providers that do not report it.
+provider requests: totals, a responsive full-width activity heatmap, main vs
+subagent breakdown, and model (and skill, when recorded) counts. Cache stays
+unreported for providers that do not report it.
+
+Cursor keeps one isolated conversation/checkpoint cache per logical main,
+Team-role, or subagent request stream. Cursor does not return cache-read token
+counts, so its cache card settles on **Not reported** rather than treating the
+missing field as a zero-percent hit.
 
 Desktop **Settings → Appearance** provides persistent global interface font,
 11–20 px chrome font-size, language, and theme controls, plus separate chat
@@ -150,7 +155,7 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Embedded desktop terminal in the current project workspace (`Cmd+`` / `Ctrl+``), with tabs and a real PTY; this is a human console, not the agent shell tool
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
 - Interactive planning mode with durable `ask` questions, versioned plan proposals, review and revision turns, and an explicit Execute Plan handoff into a new ordinary implementation turn
-- OpenAI/ChatGPT and Grok subscription login with live model catalogs, remaining weekly quota, reset time, and credit balance, plus llmux-backed OpenAI, Anthropic, Google, Mistral, Cohere, xAI, OpenRouter, DeepSeek, local inference, and other compatible providers in one searchable, progressively loaded desktop registry; enabled API providers can fetch their live model list and merge models.dev capabilities, while providers flagged for Anthropic Messages use that protocol instead of OpenAI Chat Completions
+- OpenAI/ChatGPT, Grok, and Cursor subscription login with live model catalogs, account identity and plan, provider-specific remaining quota, reset countdowns, credit balance, and Cursor Total/Cursor/Third Party pace forecasts. Cursor's exact tier, Thinking, and Fast IDs collapse into one base-model row; each row reports its available variant inventory. Thinking is selected automatically whenever the family has a matching same-tier variant. Fast is changed inside the model picker and appears outside only as `· Fast` in the selected-model summary for both Cursor and ChatGPT/Codex subscriptions. The provider model catalog is searchable, and a family switch enables or disables every raw variant atomically. Models without a zero-data-retention guarantee show an explicit localized data-retention warning instead of embedding `NO ZDR` in the model name. The 1M and max-mode metadata drive the effective context budget. Grok keeps the complete chat-capable OAuth catalog across restarts. The same registry includes llmux-backed OpenAI, Anthropic, Google, Mistral, Cohere, xAI, OpenRouter, DeepSeek, local inference, and other compatible providers; enabled API providers can fetch their live model list and merge models.dev capabilities, while providers flagged for Anthropic Messages use that protocol instead of OpenAI Chat Completions.
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
 - Persistent conversations start in a fresh session on every launch; use `/resume` to reopen prior sessions with their context, tool history, and recap
@@ -181,7 +186,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 flowchart LR
     U[Terminal UI] --> A[Application runtime]
     D[Wails desktop UI] --> A
-    A --> P[ChatGPT / Grok subscriptions or llmux providers]
+    A --> P[ChatGPT / Grok / Cursor subscriptions or llmux providers]
     A --> G[Approval and tool governance]
     G --> T[Files, tests, and shell]
     G --> M[MCP servers]
@@ -332,17 +337,8 @@ providers:
       enabled: true
       # API keys are not written here. Configure one in Desktop Settings or set OPENROUTER_API_KEY.
       base_url: "" # empty uses llmux's provider default
-      models:
-        - id: anthropic/claude-sonnet-4.5
-          disabled: false # keep visible in settings but allow one-click disabling
-          name: Claude Sonnet 4.5
-          context_window: 200000
-          max_output_tokens: 64000 # positive per-request ceiling; 0 means unknown/unset, not unlimited
-          reasoning_levels: [low, medium, high]
-          default_reasoning: medium
-          capabilities: [tools, reasoning]
-          input_modalities: [text, image, attachment]
-          output_modalities: [text]
+      # Model catalogs live in SQLite (`llmux_provider_models`), not this file.
+
 
 retry:
   enabled: true
@@ -385,7 +381,7 @@ agents:
     reasoning: low
   context:
     enabled: true
-    reserve_tokens: 16384       # fixed headroom kept for the next model output
+    reserve_tokens: 16384       # minimum headroom; effective reserve is at least 15% of the context window
     keep_recent_tokens: 20000   # preferred hot-tail floor; latest 3 user turns are always preserved
     large_tool_result_tokens: 12000
     history_retrieval_tokens: 4096 # private, session-scoped SQLite FTS evidence budget
@@ -552,12 +548,14 @@ credential service. Keys are write-only from the UI: runtime events expose only
 whether a stored key or environment variable is available. Once enabled, a
 provider can fetch its authenticated model list and display the exact
 models.dev context limits, modalities, capabilities, and reasoning levels
-before saving the catalog. Subscription and llmux catalogs resolve provider
-slugs and aliases through models.dev, so every model picker shows the friendly
-models.dev name while requests still use the provider's actual model ID. Every
-provider uses the same model cards: one click disables or re-enables a model;
-disabled models remain manageable in Settings but disappear from model and
-role-route selectors and are rejected by the runtime.
+before storing the catalog in SQLite. Subscription and llmux catalogs resolve provider
+slugs and aliases through models.dev, so model pickers show friendly names
+while requests still use the provider's actual model ID. Cursor may publish one
+raw ID for every reasoning, Thinking, and Fast combination; Model settings
+groups only IDs with a recognized shared base and lets the user switch the
+variant inside that card. The availability switch still targets that exact raw
+ID. Disabled variants remain manageable in Settings but disappear from model
+and role-route selectors and are rejected by the runtime.
 
 ## Security Model
 
@@ -587,7 +585,7 @@ internal/desktop/       Bounded Wails bridge and desktop lifecycle
 internal/desktop/termhost/ Human-only PTY host for the embedded desktop terminal
 internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/mcp/           MCP connection and tool management
-internal/provider/      ChatGPT/Codex, Grok, llmux drivers, and model catalogs
+internal/provider/      ChatGPT/Codex, Grok, Cursor, llmux drivers, and model catalogs
 internal/recovery/      Crash recovery and side-effect reconciliation
 internal/blobstore/     Content-addressed files for large payloads
 internal/session/       Session persistence and compaction

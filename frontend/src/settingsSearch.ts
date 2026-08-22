@@ -49,7 +49,7 @@ const staticSettings: Copy[] = [
   ["usage:ledger", "usage", "用量账本", "Usage ledger", "累计 Token、输入输出与缓存", "Total tokens, input, output, and cache", ["累计", "total", "cache"]],
   ["usage:activity", "usage", "Token 活动", "Token activity", "近一年热力网格", "Year-long token heatmap", ["热力", "calendar", "heatmap", "连续", "活动"]],
   ["usage:kinds", "usage", "主会话与子智能体", "Main and subagents", "按请求类型分解用量", "Break usage down by request kind", ["subagent", "子智能体", "main"]],
-  ["usage:models", "usage", "模型用量", "Model usage", "按提供方与模型汇总", "Totals by provider and model", ["chatgpt", "grok", "llmux", "deepseek"]],
+  ["usage:models", "usage", "模型用量", "Model usage", "按提供方与模型汇总", "Totals by provider and model", ["chatgpt", "grok", "cursor", "llmux", "deepseek"]],
   ["usage:skills", "usage", "技能", "Skills", "技能调用次数", "Skill call counts", ["skill", "技能"]],
 ];
 

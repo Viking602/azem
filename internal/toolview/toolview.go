@@ -34,24 +34,27 @@ type FileChangeSummary struct {
 // IsFileChangeTool reports whether the named tool mutates workspace files and
 // therefore participates in file-change projections.
 func IsFileChangeTool(name string) bool {
-	return name == "coding.edit_hashline" || name == "coding.write_file"
+	return name == "coding.edit_hashline" || name == "coding.replace" ||
+		name == "coding.write_file" || name == "coding.delete_file"
 }
 
 // CompletedFileChanges projects a completed file-change tool call into its
-// structured summary. For hashline edits it prefers the structured result
-// sections and falls back to the compact edit output; for file writes it
-// derives the change from the call arguments. It returns false when the tool
-// is not a file-change tool or nothing attributable was found.
+// structured summary. Hashline/replace edits prefer structured result sections
+// and fall back to compact output; writes derive content from arguments; deletes
+// retain their target path. It returns false when the tool is not a file-change
+// tool or nothing attributable was found.
 func CompletedFileChanges(name, arguments, structured, output string) (FileChangeSummary, bool) {
 	var sections []FileChange
 	switch name {
-	case "coding.edit_hashline":
+	case "coding.edit_hashline", "coding.replace":
 		sections = structuredSections(structured)
 		if len(sections) == 0 {
 			sections = ParseCompactEditOutput(output)
 		}
 	case "coding.write_file":
 		sections = writeFileSections(arguments)
+	case "coding.delete_file":
+		sections = pathOnlySections(arguments)
 	default:
 		return FileChangeSummary{}, false
 	}
@@ -139,6 +142,20 @@ func writeFileSections(arguments string) []FileChange {
 		}
 	}
 	return []FileChange{{Path: path, FirstChangedLine: 1, Diff: strings.Join(lines, "\n")}}
+}
+
+func pathOnlySections(arguments string) []FileChange {
+	var input struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(arguments), &input); err != nil {
+		return nil
+	}
+	path := strings.TrimSpace(input.Path)
+	if path == "" {
+		return nil
+	}
+	return []FileChange{{Path: path, FirstChangedLine: 1}}
 }
 
 // ParseCompactEditOutput recovers file sections from the compact textual edit

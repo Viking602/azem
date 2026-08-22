@@ -88,7 +88,7 @@ func (s *streamAdapter) finish(part sdk.Part) hyprovider.Event {
 // normalizeProviderUsage translates provider wire accounting into Venat's
 // inclusive input-token convention. DeepSeek's Anthropic-compatible response
 // reports cache misses in input_tokens and cache hits separately in
-// cache_read_input_tokens. llmux v0.2.4 preserves the values but neither adds
+// cache_read_input_tokens. llmux v0.2.5 preserves the values but neither adds
 // them nor marks the cache field as reported, which makes a real hit appear as
 // an unsupported metric in the desktop.
 func normalizeProviderUsage(provider string, usage sdk.Usage) sdk.Usage {

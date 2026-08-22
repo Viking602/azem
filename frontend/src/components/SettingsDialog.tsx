@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive, ArrowLeft, BarChart3, Bot, Check, CornerDownRight, Database, Gauge, Hand, List, Minus, Palette, Plus, Puzzle,
-  RefreshCw, Search, Settings2, ShieldAlert, ShieldCheck, X,
+  RefreshCw, Search, Settings2, ShieldAlert, ShieldCheck, X, Zap,
 } from "lucide-react";
 import { execute, listHookCatalog, listSkillCatalog, listSystemFonts, type SystemFont } from "../bridge";
 import {
@@ -10,6 +10,7 @@ import {
   CHAT_UI_FONT_MAX,
   CHAT_UI_FONT_MIN,
 } from "../chatTypography";
+import { cursorTiersForMode, cursorVariantForSelection, findCursorModelGroup, groupCursorModelVariants, preferredCursorVariant } from "../cursorModelVariants";
 import { reasoningLabel, sortReasoningLevels, tFormat, translator, type Language } from "../i18n";
 import { routeSearchID, settingsSectionSearchAliases } from "../settingsSearch";
 import { findModelOption, modelDisplayName, providerDisplayName, useRuntimeStore, type ModelOption } from "../store";
@@ -442,38 +443,66 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
   const requestedModel = value.model || (provider === snapshot.provider ? snapshot.model : "");
   const model = findModelOption(providerModels, requestedModel)?.id || providerModels[0]?.id || "";
   const modelInfo = findModelOption(providerModels, model);
-  const reasoning = value.reasoning || modelInfo?.defaultReasoning || snapshot.reasoning;
-  const reasoningLevels = sortReasoningLevels([
-    ...(modelInfo?.reasoningLevels ?? []),
-    reasoning,
-  ]);
+  const cursorGroups = provider === "cursor" ? groupCursorModelVariants(providerModels) : [];
+  const cursorGroup = findCursorModelGroup(cursorGroups, model);
+  const cursorVariant = cursorGroup?.variants.find((variant) => variant.model.id === model);
+  const reasoning = cursorVariant?.tier || value.reasoning || modelInfo?.defaultReasoning || snapshot.reasoning;
+  const cursorThinking = cursorTiersForMode(cursorGroup, true, cursorVariant?.fast ?? false).length > 0;
+  const reasoningLevels = sortReasoningLevels(cursorVariant
+    ? cursorTiersForMode(cursorGroup, cursorThinking, cursorVariant.fast)
+    : [...(modelInfo?.reasoningLevels ?? []), reasoning]);
+  const fastCounterpart = cursorVariant && cursorVariantForSelection(
+    cursorGroup, reasoning, cursorThinking, !cursorVariant.fast,
+  );
   const inherited = !value.provider && !value.model && !value.reasoning;
   const title = routeTitle(route, language);
-  const configuredModelOptions = routeModelOptions(modelsByProvider, modelProviders, requiresExplicitRoute, t("modelImageUnsupported"));
+  const configuredModelOptions = routeModelOptions(
+    modelsByProvider,
+    modelProviders,
+    requiresExplicitRoute,
+    t("modelImageUnsupported"),
+    provider,
+    model,
+    reasoning,
+    language,
+  );
   const allModelOptions = requiresExplicitRoute
     ? [{ value: "::", label: t("routeNotConfigured") }, ...configuredModelOptions]
     : configuredModelOptions;
   const selectedValue = `${provider}::${model}`;
+  const saveValue = (nextValue: ModelRouteConfig) => {
+    setValue(nextValue);
+    void action("set_model_route", "", { ...route, route: nextValue });
+  };
   const selectModel = (next: string) => {
     if (requiresExplicitRoute && next === "::") {
-      const nextValue = { provider: "", model: "", reasoning: "" };
-      setValue(nextValue);
-      void action("set_model_route", "", { ...route, route: nextValue });
+      saveValue({ provider: "", model: "", reasoning: "" });
       return;
     }
     const separator = next.indexOf("::");
     const nextProvider = separator >= 0 ? next.slice(0, separator) : provider;
     const nextModelID = separator >= 0 ? next.slice(separator + 2) : next;
     const nextModel = findModelOption(modelsByProvider[nextProvider] ?? [], nextModelID);
-    const nextReasoning = nextModel?.defaultReasoning || reasoning || snapshot.reasoning;
-    const nextValue = { provider: nextProvider, model: nextModelID, reasoning: nextReasoning };
-    setValue(nextValue);
-    void action("set_model_route", "", { ...route, route: nextValue });
+    const nextCursorGroup = nextProvider === "cursor"
+      ? findCursorModelGroup(groupCursorModelVariants((modelsByProvider[nextProvider] ?? []).filter((item) => !item.disabled)), nextModelID)
+      : undefined;
+    const nextCursorVariant = nextCursorGroup?.variants.find((variant) => variant.model.id === nextModelID);
+    const nextReasoning = nextCursorVariant?.tier || nextModel?.defaultReasoning || reasoning || snapshot.reasoning;
+    saveValue({ provider: nextProvider, model: nextModelID, reasoning: nextReasoning });
   };
   const selectReasoning = (nextReasoning: string) => {
-    const nextValue = { provider, model, reasoning: nextReasoning };
-    setValue(nextValue);
-    void action("set_model_route", "", { ...route, route: nextValue });
+    const nextVariant = cursorVariant && cursorVariantForSelection(
+      cursorGroup, nextReasoning, cursorThinking, cursorVariant.fast,
+    );
+    saveValue({
+      provider,
+      model: nextVariant?.model.id || model,
+      reasoning: nextVariant?.tier || nextReasoning,
+    });
+  };
+  const selectCursorFast = () => {
+    if (!fastCounterpart) return;
+    saveValue({ provider, model: fastCounterpart.model.id, reasoning: fastCounterpart.tier });
   };
 
   return <div className="route-row" data-setting-id={routeSearchID(route)}>
@@ -481,18 +510,23 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
     <div className="route-copy"><strong>{title}</strong><small>{routeDescription(route, description, language)}</small></div>
     <div className="route-controls">
       <MenuSelect className="route-model-menu" panelClassName="route-model-options" value={selectedValue} options={allModelOptions} onChange={selectModel} ariaLabel={`${title} ${t("model")}`} searchable searchPlaceholder={t("searchModels")} emptyLabel={t("noMatchingModels")} fit="full" showSelectedIcon={false} menuWidth={292} menuAlign="right" />
-      <MenuSelect
-        className="route-reasoning-menu"
-        panelClassName="route-reasoning-options"
-        value={reasoning}
-        options={reasoningLevels.map((level) => ({ value: level, label: reasoningLabel(level, language) }))}
-        onChange={selectReasoning}
-        ariaLabel={`${title} ${t("reasoning")}`}
-        disabled={reasoningLevels.length <= 1}
-        showSelectedIcon={false}
-        menuWidth={148}
-        menuAlign="right"
-      />
+      <div className="route-effort-controls">
+        <MenuSelect
+          className="route-reasoning-menu"
+          panelClassName="route-reasoning-options"
+          value={reasoning}
+          options={reasoningLevels.map((level) => ({ value: level, label: reasoningLabel(level, language) }))}
+          onChange={selectReasoning}
+          ariaLabel={`${title} ${t("reasoning")}`}
+          disabled={reasoningLevels.length <= 1}
+          showSelectedIcon={false}
+          menuWidth={148}
+          menuAlign="right"
+        />
+        {cursorVariant && <span className="route-cursor-modes">
+          <button type="button" className={cursorVariant.fast ? "on" : ""} aria-label={`${title} Fast`} aria-pressed={cursorVariant.fast} disabled={!fastCounterpart} onClick={selectCursorFast}><Zap size={14} /></button>
+        </span>}
+      </div>
     </div>
   </div>;
 }
@@ -503,23 +537,63 @@ function routeModelOptions(
   modelProviders: ModelProvider[],
   requiresImages: boolean,
   imageUnsupportedLabel: string,
+  selectedProvider: string,
+  selectedModel: string,
+  selectedReasoning: string,
+  language: Language,
 ) {
-  return Object.entries(modelsByProvider).flatMap(([providerID, models]) => models
-    .filter((item) => !item.disabled)
-    .map((item) => {
+  return Object.entries(modelsByProvider).flatMap(([providerID, models]) => {
+    const enabled = models.filter((item) => !item.disabled);
+    const cursorGroups = providerID === "cursor" ? groupCursorModelVariants(enabled) : [];
+    const selectedCursorGroup = selectedProvider === providerID
+      ? findCursorModelGroup(cursorGroups, selectedModel)
+      : undefined;
+    const selectedCursorVariant = selectedCursorGroup?.variants.find((variant) => variant.model.id === selectedModel);
+    const choices = providerID === "cursor"
+      ? cursorGroups.map((group) => {
+        const selectedID = selectedCursorGroup?.id === group.id ? selectedModel : "";
+        const selectedFast = selectedCursorVariant?.fast ?? false;
+        const defaultThinking = cursorTiersForMode(group, true, selectedFast).length > 0;
+        const variant = preferredCursorVariant(
+          group,
+          selectedCursorVariant?.tier || selectedReasoning,
+          defaultThinking,
+          selectedFast,
+          selectedID,
+        );
+        return {
+          item: variant.model,
+          label: group.name,
+          keywords: group.variants.flatMap((candidate) => [
+            candidate.model.id,
+            candidate.model.name ?? "",
+            ...(candidate.model.aliases ?? []),
+          ]),
+          noZDR: variant.noZDR,
+        };
+      })
+      : enabled.map((item) => ({
+        item,
+        label: modelDisplayName(item.id, item.name),
+        keywords: [item.id, ...(item.aliases ?? [])],
+        noZDR: false,
+      }));
+    return choices.map(({ item, label, keywords, noZDR }) => {
       const supportsImages = !item.inputModalities?.length
         || item.inputModalities.some((modality) => modality.toLocaleLowerCase() === "image");
       const imageUnsupported = requiresImages && !supportsImages;
       const providerName = providerDisplayName(providerID, modelProviders);
+      const retention = noZDR ? (language === "zh-CN" ? "数据会被保留" : "data retained") : "";
       return {
         value: `${providerID}::${item.id}`,
-        label: modelDisplayName(item.id, item.name),
-        caption: imageUnsupported ? `${providerName} · ${imageUnsupportedLabel}` : providerName,
-        keywords: [providerID, providerName, ...(item.aliases ?? [])],
+        label,
+        caption: [providerName, imageUnsupported ? imageUnsupportedLabel : "", retention].filter(Boolean).join(" · "),
+        keywords: [providerID, providerName, ...keywords],
         icon: <ProviderIcon provider={providerID} />,
         disabled: imageUnsupported,
       };
-    }));
+    });
+  });
 }
 
 function SettingRow({ label, description, settingID, children }: { label: string; description: string; settingID?: string; children: React.ReactNode }) { return <div className="setting-row" data-setting-id={settingID}><div><strong>{label}</strong><p>{description}</p></div><div>{children}</div></div>; }

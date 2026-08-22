@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Viking602/azem/internal/config"
@@ -76,6 +77,34 @@ func TestTodoDriverReturnsStableIDsAndAdvancesCurrentItem(t *testing.T) {
 	}
 }
 
+func TestTodoDriverInfersInitFromUnambiguousPayload(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-1", Title: "Todo"}); err != nil {
+		t.Fatal(err)
+	}
+	driver := &todoDriver{sessionID: "session-1", store: sessions}
+	result, err := driver.Execute(ctx, tool.Call{ID: "implicit-init", Name: "todo", Arguments: json.RawMessage(`{
+		"goal":"ship","phases":[{"title":"Build","items":[{"content":"first"}]}]
+	}`)}, nil)
+	if err != nil || result.IsError {
+		t.Fatalf("implicit init result=%+v err=%v", result, err)
+	}
+	var todo session.TodoList
+	if err := json.Unmarshal(result.Structured, &todo); err != nil {
+		t.Fatal(err)
+	}
+	if todo.Revision != 1 || todo.Goal != "ship" || len(todo.Phases) != 1 ||
+		len(todo.Phases[0].Items) != 1 || todo.Phases[0].Items[0].Status != session.TodoInProgress {
+		t.Fatalf("implicit init todo=%+v", todo)
+	}
+}
+
 func TestTodoDriverRequiresRevisionAfterInit(t *testing.T) {
 	driver := &todoDriver{}
 	result, err := driver.Execute(context.Background(), tool.Call{ID: "done", Name: "todo", Arguments: json.RawMessage(`{"op":"done","item_id":"item-1"}`)}, nil)
@@ -95,6 +124,74 @@ func TestTodoInitRejectsForgedSubagentBinding(t *testing.T) {
 	})
 	if err == nil || err.Error() != "subagentRunId is owned by subagent.spawn" {
 		t.Fatalf("forged binding error=%v", err)
+	}
+}
+
+func TestTodoDefinitionKeepsInitIdentityHostOwned(t *testing.T) {
+	definition := (&todoDriver{}).Definition()
+	phases := definition.InputSchema.Properties["phases"]
+	if phases.Items == nil {
+		t.Fatal("Todo phases schema has no item definition")
+	}
+	phaseSchema := *phases.Items
+	itemList := phaseSchema.Properties["items"]
+	if itemList.Items == nil {
+		t.Fatal("Todo items schema has no item definition")
+	}
+	itemSchema := *itemList.Items
+	if _, exposed := phaseSchema.Properties["id"]; exposed {
+		t.Fatal("Todo init exposes caller-owned phase IDs")
+	}
+	for _, property := range []string{"id", "status"} {
+		if _, exposed := itemSchema.Properties[property]; exposed {
+			t.Fatalf("Todo init exposes caller-owned item %s", property)
+		}
+	}
+	if !strings.Contains(definition.Description, "IDs and status are host-assigned") {
+		t.Fatalf("Todo description omits host ownership: %q", definition.Description)
+	}
+	for _, required := range definition.InputSchema.Required {
+		if required == "op" {
+			t.Fatal("Todo init schema still requires the inferred op discriminator")
+		}
+	}
+}
+
+func TestTodoInitRejectsCallerOwnedIdentityAndStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		phases []session.TodoPhase
+		want   string
+	}{
+		{
+			name: "phase ID",
+			phases: []session.TodoPhase{{
+				ID: "phase", Title: "Build", Items: []session.TodoItem{{Content: "work"}},
+			}},
+			want: "todo phase IDs are host-assigned",
+		},
+		{
+			name: "item ID",
+			phases: []session.TodoPhase{{
+				Title: "Build", Items: []session.TodoItem{{ID: "item", Content: "work"}},
+			}},
+			want: "todo item IDs are host-assigned",
+		},
+		{
+			name: "item status",
+			phases: []session.TodoPhase{{
+				Title: "Build", Items: []session.TodoItem{{Content: "work", Status: session.TodoCompleted}},
+			}},
+			want: "todo item status is host-assigned",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := applyTodoOp(&session.TodoList{}, todoInput{Op: "init", Goal: "ship", Phases: test.phases})
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("init error=%v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

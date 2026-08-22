@@ -238,8 +238,8 @@ func UpdateChatGPTFastMode(path string, enabled bool) error {
 
 func UpdateSubscriptionDisabledModels(path, provider string, models []string) error {
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider != "chatgpt" && provider != "grok" {
-		return fmt.Errorf("subscription provider must be chatgpt or grok")
+	if !IsSubscriptionProvider(provider) {
+		return fmt.Errorf("subscription provider must be chatgpt, grok, or cursor")
 	}
 	if err := validateDisabledModels(provider, models); err != nil {
 		return err

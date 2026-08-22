@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contextCacheMetrics, contextComposition } from "./contextUsage";
+import { contextCacheMetrics, contextComposition, stickyCacheMetrics } from "./contextUsage";
 import type { ContextUsage } from "./store";
 import type { ContextProfile } from "./types";
 
@@ -66,6 +66,21 @@ describe("context cache metrics", () => {
       cachedTokens: 55_552,
       totalCacheTokens: 55_817,
     });
+  });
+
+  it("keeps the last reported hit rate until a newer report arrives", () => {
+    const reported = contextCacheMetrics({
+      inputTokens: 32_456, outputTokens: 2, contextLimit: 128_000, reported: true,
+      uncachedInputTokens: 5_320, mainCacheReported: true,
+    });
+    const pending = contextCacheMetrics({
+      inputTokens: 58_000, outputTokens: 0, contextLimit: 128_000, reported: false,
+      cacheInputTokens: 100_000, cachedInputTokens: 88_000, cacheReported: true,
+    });
+    expect(stickyCacheMetrics(pending, null, true).reported).toBe(false);
+    expect(stickyCacheMetrics(pending, reported, true)).toEqual(reported);
+    expect(stickyCacheMetrics(pending, reported, false)).toEqual(pending);
+    expect(stickyCacheMetrics(reported, pending, false)).toEqual(reported);
   });
 });
 

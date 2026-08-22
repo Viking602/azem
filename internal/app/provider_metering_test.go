@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Viking602/azem/internal/config"
+	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -25,6 +26,17 @@ func (d *phase4MeteringDriver) Stream(_ context.Context, request hyprovider.Requ
 		reporter(responses.UsageDetails{ProviderRequestID: "upstream", InputTokens: 12, CachedTokens: 5, OutputTokens: 3, TotalTokens: 15, CacheReported: true})
 	}
 	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 12, OutputTokens: 3, TotalTokens: 15}}}), nil
+}
+
+type cursorContextMeteringDriver struct{}
+
+func (*cursorContextMeteringDriver) Metadata() hyprovider.Metadata { return hyprovider.Metadata{} }
+func (*cursorContextMeteringDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	reporter, _ := request.ExtraBody[cursordriver.ContextUsageReporterExtraKey].(cursordriver.ContextUsageReporter)
+	if reporter != nil {
+		reporter(cursordriver.ContextUsage{UsedTokens: 321, MaxTokens: 1000})
+	}
+	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{OutputTokens: 7, TotalTokens: 7}}}), nil
 }
 
 func TestProviderStreamSinkWithFactsDoesNotEmitLegacyAdditiveUsage(t *testing.T) {
@@ -181,7 +193,11 @@ func TestMeteredProviderDriverPersistsTerminalFactsAndUsesDistinctRequestIDs(t *
 		t.Fatal(err)
 	}
 	inner := &phase4MeteringDriver{}
-	driver := &meteredProviderDriver{inner: inner, store: svc, sessionID: "s", runID: "r", kind: "main", provider: "p", model: "m"}
+	reportedInputs := make([]int, 0, 2)
+	driver := &meteredProviderDriver{
+		inner: inner, store: svc, sessionID: "s", runID: "r", kind: "main", provider: "p", model: "m",
+		reportInputTokens: func(tokens int) { reportedInputs = append(reportedInputs, tokens) },
+	}
 	for i := 0; i < 2; i++ {
 		stream, streamErr := driver.Stream(ctx, hyprovider.Request{})
 		if streamErr != nil {
@@ -204,6 +220,9 @@ func TestMeteredProviderDriverPersistsTerminalFactsAndUsesDistinctRequestIDs(t *
 	}
 	if snap.CurrentTurnMainRequests != 2 || snap.CurrentTurnMainInput != 24 || snap.CurrentTurnMainCached != 10 {
 		t.Fatalf("snapshot=%#v", snap)
+	}
+	if len(reportedInputs) != 2 || reportedInputs[0] != 12 || reportedInputs[1] != 12 {
+		t.Fatalf("reported inputs=%v", reportedInputs)
 	}
 }
 
@@ -300,11 +319,49 @@ func TestCacheModelForProviderDefaults(t *testing.T) {
 	if got := cacheModelForProvider("grok", ""); got != responses.CacheModelAutomatic {
 		t.Fatalf("grok default=%q", got)
 	}
+	if got := cacheModelForProvider("cursor", ""); got != responses.CacheModelAutomatic {
+		t.Fatalf("cursor default=%q", got)
+	}
 	if got := cacheModelForProvider("chatgpt", ""); got != responses.CacheModelWriteTokens {
 		t.Fatalf("chatgpt default=%q", got)
 	}
 	if got := cacheModelForProvider("grok", responses.CacheModelWriteTokens); got != responses.CacheModelWriteTokens {
 		t.Fatalf("tagged override=%q", got)
+	}
+}
+
+func TestMeteredCursorReportsContextPressureWithoutBillingItAsInput(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "cursor-context.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	svc := session.NewService(store.DB(), store.Blobs())
+	if _, err = svc.Ensure(ctx, session.Session{ID: "s", Title: "cursor"}); err != nil {
+		t.Fatal(err)
+	}
+	var reported []int
+	driver := &meteredProviderDriver{
+		inner: &cursorContextMeteringDriver{}, store: svc, sessionID: "s", runID: "r", kind: "main",
+		provider: "cursor", model: "composer-2", reportInputTokens: func(tokens int) { reported = append(reported, tokens) },
+	}
+	stream, err := driver.Stream(ctx, hyprovider.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event, recvErr := stream.Recv(); recvErr != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("event=%+v err=%v", event, recvErr)
+	}
+	snapshot, err := svc.ProviderUsageSnapshot(ctx, "s", "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reported) != 1 || reported[0] != 321 {
+		t.Fatalf("context pressure = %v", reported)
+	}
+	if snapshot.InputTokens != 0 || snapshot.OutputTokens != 7 || snapshot.MainCacheReported {
+		t.Fatalf("Cursor billing/cache snapshot = %+v", snapshot)
 	}
 }
 

@@ -1045,8 +1045,9 @@ func (r *subagentRuntime) execute(id string) {
 	skillSnapshot := parent.Coding.SkillSnapshot()
 	activeSkills := mergeSkillNames(skillSnapshot.Eager, loadSessionActivatedSkills(ctx, parent.Host, parent.SessionID, skillSnapshot.Registry))
 	instructions := renderSubagentInstructions(profile)
+	toolDefinitionTokens := estimateToolDefinitionTokens(governed)
 	if childContextWindow > 0 {
-		contextBudget, err = calculateContextBudget(childModel, childContextWindow, estimateToolDefinitionTokens(governed), parent.ContextConfig)
+		contextBudget, err = calculateContextBudget(childModel, childContextWindow, toolDefinitionTokens, parent.ContextConfig)
 		contextTarget = contextBudget.Trigger
 		if err != nil {
 			r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: err})
@@ -1080,12 +1081,14 @@ func (r *subagentRuntime) execute(id string) {
 		},
 		ExtraBody: extraBody,
 	}
+	providerPressure := &providerContextPressure{toolTokens: toolDefinitionTokens}
 	if parent.Host != nil && parent.Host.HasProviderRuntime() {
 		if parent.Host.Sessions() != nil {
 			childDriver = &meteredProviderDriver{
 				inner: childDriver, store: parent.Host.Sessions(), host: parent.Host,
 				sessionID: parent.SessionID, runID: parent.ParentRunID, kind: "subagent", provider: profile.Provider,
 				model: childModel, transport: childDriver.Metadata().Name,
+				reportInputTokens: providerPressure.observeInputTokens,
 			}
 		}
 	}
@@ -1097,6 +1100,7 @@ func (r *subagentRuntime) execute(id string) {
 			largeToolTokens:  parent.ContextConfig.LargeToolResultTokens,
 			keepRecentTokens: contextBudget.KeepRecent,
 			coordinator:      &compactionCoordinator{},
+			providerPressure: providerPressure,
 		},
 	}
 	configureArchiveContext(ctx, &contextManager.inner, parent.Host, parent.SessionID, childRun.RunID, profile.Provider, profile.AccountID, childModel)
@@ -1117,14 +1121,20 @@ func (r *subagentRuntime) execute(id string) {
 		spec, executionPolicy.Governance,
 		map[string]string{"role": profile.Type, "provider": profile.Provider},
 	)
+	childBus := tool.NewBus(governed...)
 	engine, err := materializeAgentDefinition(ctx, parent.Coding, definition, spec, hyagent.BuildDeps{
 		Skills:    skillSnapshot.Registry,
-		Providers: hyprovider.Single(childDriver), Tools: tool.NewBus(governed...), ContextManager: contextManager,
+		Providers: hyprovider.Single(childDriver), Tools: childBus, ContextManager: contextManager,
 	})
 	if err != nil {
 		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", err)
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("build child engine: %w", err)})
 		return
+	}
+	if profile.Provider == "cursor" {
+		engine.ExtraBody = withCursorExecHost(engine.ExtraBody, newCursorExecHost(
+			parent.Host, profile.CWD, parent.SessionID, childRun.RunID, parent.ParentRunID, id, childBus,
+		))
 	}
 	engine.Hooks = engine.Hooks.Prepend(editRecoveryHook{run: childRun})
 	if parent.Host != nil {
@@ -1157,7 +1167,7 @@ func (r *subagentRuntime) execute(id string) {
 	if parent.Host != nil {
 		sessionID, childRunID := parent.SessionID, childRun.RunID
 		engine.OutputGuardrails = append(engine.OutputGuardrails, newMutatingVerificationGuardrail(
-			parent.Host.Sessions(), profile.CWD, sessionID, childRunID,
+			parent.Host.Sessions(), profile.CWD, sessionID, childRunID, false,
 			func() []string { return r.relatedRunIDs(sessionID, childRunID) },
 		))
 	}

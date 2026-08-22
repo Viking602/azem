@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/session"
@@ -1407,7 +1408,7 @@ func (m AppModel) overlayOptionCount() int {
 	case OverlayCommand:
 		return len(commandPaletteOptions)
 	case OverlayProvider:
-		return 2
+		return 3
 	case OverlayModel:
 		return len(m.modelPickerEntries())
 	case OverlayModelRoutes:
@@ -1470,7 +1471,7 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 	case OverlayCommand:
 		return m.activatePaletteOption()
 	case OverlayProvider:
-		providers := []string{"chatgpt", "grok"}
+		providers := []string{"chatgpt", "grok", "cursor"}
 		if m.overlayCursor >= len(providers) {
 			return m, nil
 		}
@@ -2193,7 +2194,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		provider := strings.ToLower(command.Args[0])
-		if provider != "chatgpt" && provider != "grok" {
+		if !config.IsSubscriptionProvider(provider) {
 			m.errorBanner = m.tr("provider.invalid")
 			break
 		}
@@ -2205,13 +2206,13 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		}
 		if len(command.Args) >= 1 {
 			provider := strings.ToLower(command.Args[0])
-			if provider != "chatgpt" && provider != "grok" {
+			if !config.IsSubscriptionProvider(provider) {
 				m.errorBanner = m.tr("provider.invalid")
 				break
 			}
 			target := provider
 			if len(command.Args) == 2 {
-				if (provider == "chatgpt" && command.Args[1] != "--import-codex") || (provider == "grok" && command.Args[1] != "--import") {
+				if (provider == "chatgpt" && command.Args[1] != "--import-codex") || ((provider == "grok" || provider == "cursor") && command.Args[1] != "--import") {
 					m.errorBanner = m.tr("command.usage.login_import")
 					break
 				}

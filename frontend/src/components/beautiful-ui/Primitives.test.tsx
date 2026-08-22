@@ -49,7 +49,8 @@ describe("Beautiful UI primitives", () => {
 
     const thinking = container.querySelector<HTMLButtonElement>(".reasoning-summary")!;
     expect(thinking.getAttribute("aria-expanded")).toBe("false");
-    expect(container.querySelector<HTMLDivElement>("#trace")?.hidden).toBe(true);
+    expect(container.querySelector("#trace")?.closest(".reasoning-body-clip")?.getAttribute("data-open")).toBe("false");
+    expect(container.querySelector("#trace")?.hasAttribute("inert")).toBe(true);
     await act(async () => thinking.click());
     expect(toggled).toBe(true);
     expect(container.querySelector(".bui-streaming-text.active")).not.toBeNull();
@@ -88,6 +89,18 @@ describe("Beautiful UI primitives", () => {
     expect(label?.classList.contains("rolling")).toBe(true);
     expect(label?.querySelector(".reasoning-label-out")?.textContent).toBe("思考");
     expect(label?.querySelector(".reasoning-label-base")?.textContent).toBe("搜索了网页");
+    const outgoing = label?.querySelector(".reasoning-label-out");
+    const incoming = label?.querySelector(".reasoning-label-base");
+
+    await act(async () => root.render(
+      <ThinkingState active expanded={false} label="思考" labelKey="思考" />,
+    ));
+    expect(container.querySelector(".reasoning-label")).toBe(label);
+    expect(label?.classList.contains("rolling")).toBe(true);
+    expect(label?.querySelector(".reasoning-label-out")?.textContent).toBe("搜索了网页");
+    expect(label?.querySelector(".reasoning-label-base")?.textContent).toBe("思考");
+    expect(label?.querySelector(".reasoning-label-out")).not.toBe(outgoing);
+    expect(label?.querySelector(".reasoning-label-base")).not.toBe(incoming);
 
     await act(async () => root.unmount());
     container.remove();
@@ -126,13 +139,35 @@ describe("Beautiful UI primitives", () => {
     expect(shimmer?.classList.contains("rolling")).toBe(false);
 
     await act(async () => root.render(
-      <ThinkingState active expanded={false} label="搜索代码" labelKey="搜索代码" quiet expandable />,
+      <ThinkingState
+        active
+        expanded={false}
+        label="搜索代码"
+        labelKey="搜索代码"
+        quiet
+        expandable
+        quietMark
+        mark={<span className="bui-tool-chip-icon" data-icon="search" />}
+      />,
     ));
     expect(container.querySelector(".bui-cadenced-shimmer")).toBe(shimmer);
     expect(shimmer?.classList.contains("rolling")).toBe(true);
     expect(shimmer?.querySelector(".reasoning-label-out")?.textContent).toBe("正在思考");
     expect(shimmer?.querySelector(".bui-cadenced-shimmer-text")?.textContent).toBe("搜索代码");
     expect(container.querySelector(".azem-thinking-mark")).toBeNull();
+
+    const outgoing = shimmer?.querySelector(".reasoning-label-out");
+    const incoming = shimmer?.querySelector(".bui-cadenced-shimmer-text");
+
+    await act(async () => root.render(
+      <ThinkingState active expanded={false} label="正在思考" labelKey="正在思考" quiet expandable />,
+    ));
+    expect(container.querySelector(".bui-cadenced-shimmer")).toBe(shimmer);
+    expect(shimmer?.classList.contains("rolling")).toBe(true);
+    expect(shimmer?.querySelector(".reasoning-label-out")?.textContent).toBe("搜索代码");
+    expect(shimmer?.querySelector(".bui-cadenced-shimmer-text")?.textContent).toBe("正在思考");
+    expect(shimmer?.querySelector(".reasoning-label-out")).not.toBe(outgoing);
+    expect(shimmer?.querySelector(".bui-cadenced-shimmer-text")).not.toBe(incoming);
 
     await act(async () => root.unmount());
     container.remove();

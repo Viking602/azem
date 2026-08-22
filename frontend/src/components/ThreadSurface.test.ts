@@ -8,11 +8,10 @@ import {
   composerOverlayGap,
   pinTranscriptTail,
   sessionStageMotion,
-  threadHeaderStage,
   transcriptFollowBehavior,
 } from "./ThreadSurface";
 import { branchMenuLayout, composerPromptPlaceholder } from "./thread/Composer";
-import { effectiveComposerRoute, supportsFastMode } from "./thread/composerModels";
+import { composerModelChoices, effectiveComposerRoute, supportsFastMode } from "./thread/composerModels";
 import { filterModelControlOptions, modelControlWidth, nextModelControlView } from "./thread/ModelControls";
 import { namedClipboardImage, pastedImages, shouldReadNativeClipboard } from "./thread/clipboard";
 import { parseSkillPrompt, skillTitle, slashSuggestions } from "./thread/slash";
@@ -72,6 +71,61 @@ describe("composer slash commands", () => {
 		expect(effectiveComposerRoute(snapshot, true, [{ scope: "plan", role: "", label: "Plan", route: {} }])).toEqual({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
 	});
 
+	it("collapses every Cursor mode into one family row while retaining the active wire model", () => {
+		const choices = composerModelChoices({
+			cursor: [
+				{ id: "gpt-5.6-sol-low", name: "GPT-5.6 Sol 1M Low", reasoningLevels: ["low"] },
+				{ id: "gpt-5.6-sol-xhigh", name: "GPT-5.6 Sol 1M Extra High", reasoningLevels: ["xhigh"] },
+				{ id: "gpt-5.6-sol-low-thinking", name: "GPT-5.6 Sol 1M Low Thinking", reasoningLevels: ["low"] },
+				{ id: "gpt-5.6-sol-xhigh-thinking", name: "GPT-5.6 Sol 1M Extra High Thinking", reasoningLevels: ["xhigh"] },
+				{ id: "gpt-5.6-sol-low-fast", name: "GPT-5.6 Sol Low Fast", reasoningLevels: ["low"] },
+			],
+		}, { provider: "cursor", model: "gpt-5.6-sol-xhigh-thinking", reasoning: "low" });
+
+		expect(choices).toHaveLength(1);
+		expect(choices[0]).toMatchObject({
+			id: "gpt-5.6-sol-xhigh-thinking",
+			name: "GPT-5.6 Sol 1M",
+			reasoningLevels: ["low", "xhigh"],
+			defaultReasoning: "xhigh",
+		});
+		expect(choices[0]?.cursorGroup?.variants).toHaveLength(5);
+	});
+
+	it("defaults a newly selected Cursor family to its Thinking variant", () => {
+		const choices = composerModelChoices({
+			cursor: [
+				{ id: "claude-4-sonnet", name: "Claude Sonnet 4", reasoningLevels: ["default"] },
+				{ id: "claude-4-sonnet-thinking", name: "Claude Sonnet 4 Thinking", reasoningLevels: ["default"] },
+			],
+		}, { provider: "chatgpt", model: "gpt-5.6", reasoning: "default" });
+
+		expect(choices).toHaveLength(1);
+		expect(choices[0]).toMatchObject({ id: "claude-4-sonnet-thinking", name: "Claude Sonnet 4" });
+	});
+
+	it("keeps a folded Cursor family's exact inventory and retention metadata visible", () => {
+		const choices = composerModelChoices({
+			cursor: [
+				{ id: "claude-fable-5-low", name: "Claude Fable 5 1M Low (NO ZDR)", reasoningLevels: ["low"] },
+				{ id: "claude-fable-5-high", name: "Claude Fable 5 1M (NO ZDR)", reasoningLevels: ["high"] },
+				{ id: "claude-fable-5-thinking-high", name: "Claude Fable 5 1M Thinking (NO ZDR)", reasoningLevels: ["high"] },
+			],
+		}, { provider: "cursor", model: "claude-fable-5-high", reasoning: "high" });
+
+		expect(choices).toHaveLength(1);
+		expect(choices[0]).toMatchObject({
+			name: "Claude Fable 5 1M",
+			cursorVariantCount: 3,
+			cursorTierCount: 2,
+			cursorHasFast: false,
+			cursorNoZDR: true,
+		});
+		expect(choices[0]?.aliases).toEqual(expect.arrayContaining([
+			"claude-fable-5-low", "claude-fable-5-high", "claude-fable-5-thinking-high",
+		]));
+	});
+
 	it("does not look idle while a run is active", () => {
 		const t: ReturnType<typeof translator> = translator("zh-CN");
 		expect(composerPromptPlaceholder(t, {
@@ -93,9 +147,10 @@ describe("composer slash commands", () => {
 		expect(styles).not.toMatch(/\.composer-card textarea\s*\{[^}]*user-select:\s*none;/s);
 	});
 
-	it("uses desktop selection behavior for chrome while preserving selectable content", () => {
-		expect(styles).toMatch(/\.desktop-shell\s*\{[^}]*-webkit-user-select:\s*none;[^}]*user-select:\s*none;[^}]*-webkit-touch-callout:\s*none;/s);
-		expect(styles).toMatch(/\.desktop-shell :where\([^}]*input[^}]*\.markdown[^}]*\.workspace-code-viewport[^}]*\)\s*\{[^}]*-webkit-user-select:\s*text;[^}]*user-select:\s*text;/s);
+	it("keeps content text selectable while chrome stays non-selectable", () => {
+		expect(styles).not.toMatch(/\.desktop-shell\s*\{[^}]*user-select:\s*none;/s);
+		expect(styles).toMatch(/\.titlebar-region[^{]*\{[^}]*user-select:\s*none;/s);
+		expect(styles).toMatch(/\.resize-handle\s*\{[^}]*user-select:\s*none;/s);
 		expect(styles).toMatch(/\.desktop-shell :where\(img, svg\)\s*\{[^}]*-webkit-user-drag:\s*none;/s);
 	});
 
@@ -114,11 +169,14 @@ describe("composer slash commands", () => {
 		expect(threadSurface).toContain("typeof ResizeObserver === \"undefined\"");
 		expect(threadSurface).toContain("observer.observe(transcript)");
 		expect(threadSurface).toContain("[blocks, following, queuedPrompts.length, running, currentSessionId]");
+		expect(threadSurface).toContain("viewport.style.scrollBehavior = \"auto\"");
 		expect(threadSurface).toContain("viewport.scrollTop = top");
-		expect(threadSurface).toContain("if (pinning.current) return");
-		const viewport = { scrollHeight: 2400, scrollTop: 0, scrollTo: vi.fn() };
+		expect(threadSurface).toContain("if (pinning.current || pinInstant.current) return");
+		expect(styles).not.toMatch(/\.transcript-viewport\s*\{[^}]*scroll-behavior:\s*smooth/);
+		const viewport = { scrollHeight: 2400, scrollTop: 0, scrollTo: vi.fn(), style: { scrollBehavior: "smooth" } };
 		pinTranscriptTail(viewport as unknown as HTMLElement, "instant");
 		expect(viewport.scrollTop).toBe(2400);
+		expect(viewport.style.scrollBehavior).toBe("auto");
 		expect(viewport.scrollTo).not.toHaveBeenCalled();
 		pinTranscriptTail(viewport as unknown as HTMLElement, "smooth");
 		expect(viewport.scrollTo).toHaveBeenCalledWith({ top: 2400, behavior: "smooth" });
@@ -179,13 +237,14 @@ describe("composer slash commands", () => {
 		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-state \.reasoning-summary\s*\{[^}]*minmax\(12em/s);
 		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-meta\s*\{[^}]*min-width:\s*4\.5em/s);
 		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-state \.reasoning-label\s*\{[^}]*min-width:\s*12em/s);
+		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-state\.completed\.quiet \.reasoning-summary::after\s*\{[^}]*height:\s*1px/s);
+		expect(styles).not.toMatch(/\.process-fold\[data-folded\] \.process-fold-summary::after\s*\{[^}]*height:\s*1px/s);
 	});
 
-	it("treats thinking and tool execution as one in-progress header state", () => {
-		expect(threadHeaderStage(true)).toBe("in-progress");
-		expect(threadHeaderStage(false)).toBe("completed");
-		expect(threadSurface).toContain('{t("inProgress")}');
-		expect(styles).toMatch(/\.thread-stage\s*\{[^}]*grid-template-columns:\s*repeat\(2,/s);
+	it("does not show an in-progress / completed stage switch in the header", () => {
+		expect(threadSurface).not.toContain('className="thread-stage"');
+		expect(threadSurface).not.toContain('{t("inProgress")}');
+		expect(threadSurface).not.toContain("threadHeaderStage");
 	});
 
 	it("keeps the header status chip beside the terminal control instead of stacking them", () => {
@@ -233,10 +292,19 @@ describe("composer slash commands", () => {
 		expect(beautifulUIStyles).toMatch(/\.bui-streaming-text > :last-child::after\s*\{[^}]*content:\s*none;[^}]*display:\s*none;/s);
 		expect(beautifulUIStyles).toMatch(/\.bui-streaming-text.active > :last-child::after\s*\{[^}]*display:\s*inline-block;/s);
 		expect(beautifulUIStyles).not.toMatch(/\.bui-streaming-text > :last-child::after\s*\{[^}]*position:\s*absolute;/s);
+		// Idle cadenced sweep must not paint. WKWebView left a hairline under
+		// 正在思考 the same way an absolute caret did between paragraphs (UI-016).
+		expect(beautifulUIStyles).toMatch(/\.bui-cadenced-shimmer-sweep\s*\{[^}]*display:\s*none;/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-cadenced-shimmer-active \.bui-cadenced-shimmer-sweep\s*\{[^}]*display:\s*block;/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-cadenced-shimmer\.rolling \.bui-cadenced-shimmer-sweep\s*\{[^}]*display:\s*none;/s);
+		expect(beautifulUIStyles).toMatch(/\.bui-thinking-wait,\s*\.bui-cadenced-shimmer\s*\{[^}]*line-height:\s*1\.2;/s);
+		expect(styles).toMatch(/\.reasoning-label-roll\s*\{[^}]*overflow:\s*hidden;[^}]*line-height:\s*1\.2;/s);
 		// Settled block children must not replay enter motion while the tail streams (UI-003).
 		expect(styles).not.toMatch(/\.streaming-text\.active\s*>\s*:where\([^)]*\)\s*\{[^}]*streaming-block-in/s);
 		expect(beautifulUIStyles).not.toMatch(/\.streaming-text\.active\s*>\s*\.bui-code-block\s*\{[^}]*streaming-block-in/s);
-		expect(styles).toMatch(/\.streaming-text-reveal\s*\{[^}]*streaming-text-reveal-in/s);
+		expect(styles).toMatch(/\.streaming-text-reveal\s*\{[^}]*streaming-text-reveal-in 260ms cubic-bezier\(\.16,\s*1,\s*\.3,\s*1\) both/s);
+		expect(styles).toMatch(/@keyframes streaming-text-reveal-in\s*\{\s*from\s*\{[^}]*opacity:\s*\.28;[^}]*blur\(5px\)/s);
+		expect(beautifulUIStyles).not.toMatch(/\.bui-streaming-text \.streaming-text-reveal \{[^}]*animation-duration:\s*\.1s/);
 		expect(styles).not.toMatch(/\.assistant-block\.phase-pending::before/);
 		expect(styles).toMatch(/\.timeline-feed > \.process-fold,\s*\.timeline-feed > \.session-turn-current,\s*\.timeline-feed > \.session-history-turn:last-of-type[\s\S]*?contain-intrinsic-size:\s*none/s);
 		expect(styles).toMatch(/\.timeline-feed > \.session-history-turn\s*\{[^}]*contain-intrinsic-size:\s*180px/);
@@ -314,29 +382,35 @@ describe("composer slash commands", () => {
 		expect(supportsFastMode("openai", ["fast"])).toBe(false);
 	});
 
-	it("keeps the complete new-conversation launcher and direct fast-mode control", () => {
+	it("keeps Thinking implicit and exposes Fast only inside the picker and summary", () => {
 		expect(threadSurface).not.toContain('className="azem-mark empty-launch-mark"');
 		expect(threadSurface).toContain('className="empty-composer-heading"><h1>{t("promptTitle")}</h1>');
 		expect(threadSurface).toContain('{showContextBar ? <ComposerContextBar /> : null}');
 		expect(threadSurface).toContain('className={`effort-panel-speed');
-		expect(threadSurface).toContain('onClick={() => onSpeedChange(fastActive ? "standard" : "fast")}');
-		expect(threadSurface).toContain('className={`composer-fast-mode');
-		expect(threadSurface).toContain('aria-label={snapshot.language === "zh-CN" ? "Fast 模式" : "Fast mode"}');
-		expect(threadSurface).toContain('fastAvailable={fastAvailable}');
+		expect(threadSurface).toContain('fast ? "Fast" : ""');
+		expect(threadSurface).not.toContain('className={`composer-fast-mode');
+		expect(threadSurface).not.toContain('thinkingAvailable={thinkingAvailable}');
+		expect(threadSurface).not.toContain('onThinkingChange={changeThinking}');
 		expect(composerModelPicker).toContain("const fastAvailable = props.fastAvailable;");
+		expect(composerModelPicker).toContain('data-mode="fast"');
+		expect(composerModelPicker).not.toContain('data-mode="thinking"');
 		expect(threadSurface).not.toContain('className="model-controls-fast-icon"');
 		expect(composerModelPicker).not.toContain('className="model-controls-fast-icon"');
-		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-card\s*\{[^}]*padding:\s*11px 13px 10px;/s);
-		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-context-bar > \.composer-chip:nth-child\(2\)\s*\{[^}]*display:\s*none;/s);
-		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-branch-menu > summary::before\s*\{[^}]*height:\s*14px;[^}]*transform:\s*translateY\(-50%\);/s);
-		expect(prototypeStyles).toMatch(/\.composer-fast-mode > button\s*\{[^}]*width:\s*27px;/s);
-		expect(prototypeStyles).toMatch(/\.composer-fast-mode > button\s*\{[^}]*background:\s*transparent;[^}]*color:\s*var\(--faint\);/s);
-		expect(prototypeStyles).toMatch(/\.composer-fast-mode > button svg\s*\{[^}]*fill:\s*none;[^}]*stroke:\s*currentColor;/s);
-		expect(prototypeStyles).toMatch(/\.composer-fast-mode\.active > button\s*\{[^}]*color:\s*var\(--blue\);/s);
-		expect(prototypeStyles).toMatch(/\.composer-fast-mode\.active > button svg\s*\{[^}]*fill:\s*currentColor;[^}]*stroke:\s*currentColor;/s);
-		expect(prototypeStyles).toMatch(/\.composer-popover-fast > button\s*\{[^}]*color:\s*var\(--faint\);/s);
-		expect(prototypeStyles).toMatch(/\.composer-popover-fast > button\.on svg\s*\{[^}]*fill:\s*currentColor;/s);
+		expect(prototypeStyles).not.toMatch(/\.composer-fast-mode/);
+		expect(prototypeStyles).toMatch(/\.composer-popover-mode > button\s*\{[^}]*color:\s*var\(--faint\);/s);
+		expect(prototypeStyles).toMatch(/\.composer-popover-mode\[data-mode="fast"\] > button\.on svg\s*\{[^}]*fill:\s*currentColor;/s);
+		expect(prototypeStyles).toMatch(/\.composer-model-popover \.effort-slider\[data-fixed="true"\] \.effort-slider-labels\s*\{[^}]*justify-content:\s*flex-end;/s);
+		expect(styles).toMatch(/\.effort-slider\[data-fixed="true"\]\s*\{[^}]*pointer-events:\s*none;/s);
 		expect(styles).toMatch(/\.effort-panel-speed\.active\s*\{[^}]*color:\s*var\(--blue\);/s);
+	});
+
+	it("keeps route controls contained and applies one enlarged settings type scale", () => {
+		expect(prototypeStyles).toMatch(/\.route-card\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;/s);
+		expect(prototypeStyles).toMatch(/\.route-card \.route-row\s*\{[^}]*grid-template-columns:\s*22px minmax\(0, 1fr\) minmax\(270px, 44%\);/s);
+		expect(prototypeStyles).toMatch(/\.route-card \.route-controls\s*\{[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden;/s);
+		expect(styles).toMatch(/\.settings-dialog\s*\{[^}]*--text-2xs:\s*calc\(var\(--ui-font-size\) - 1px\);[^}]*--text-sm:\s*calc\(var\(--ui-font-size\) \+ 1px\);/s);
+		expect(prototypeStyles).toMatch(/\.route-copy strong\s*\{[^}]*font-size:\s*var\(--text-sm\);/s);
+		expect(prototypeStyles).toMatch(/\.route-copy small\s*\{[^}]*font-size:\s*var\(--text-xs\);/s);
 	});
 
 	it("searches model names, IDs, and aliases, then filters by provider", () => {
@@ -441,14 +515,10 @@ describe("composer slash commands", () => {
     expect(shouldReadNativeClipboard(textClipboard)).toBe(false);
   });
 
-  it("sends Select Action through the existing composer submitTurn path", () => {
-    expect(threadSurface).toContain("<SelectActionHost");
-    expect(threadSurface).toContain("onSubmit={sendSelectAction}");
-    expect(threadSurface).toContain('source: "composer" | "select-action"');
-    expect(threadSurface).toContain('void submitTurn(text, [], undefined, "select-action")');
+  it("keeps the plain composer submit path without the Select Action island", () => {
+    expect(threadSurface).not.toContain("<SelectActionHost");
+    expect(threadSurface).not.toContain("sendSelectAction");
     expect(threadSurface).toContain('source === "composer" && editingQueuedId');
-    expect(threadSurface).not.toContain("kind: \"select_action\"");
-    expect(beautifulUIStyles).toMatch(/\.bui-action-island\s*\{[^}]*border-radius:\s*999px;/s);
     expect(beautifulUIStyles).toMatch(/\.assistant-block ::selection,\s*\.commentary-block ::selection,\s*\.user-block ::selection/);
   });
 });

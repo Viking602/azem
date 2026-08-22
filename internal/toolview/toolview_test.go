@@ -53,6 +53,20 @@ func TestCompletedFileChangesPreservesEmptyWrite(t *testing.T) {
 	}
 }
 
+func TestCompletedFileChangesIncludesReplaceAndDelete(t *testing.T) {
+	replace, ok := CompletedFileChanges("coding.replace", `{"path":"a.go"}`, `{"sections":[{"path":"a.go","diff":"-old\n+new"}]}`, "")
+	if !ok || len(replace.Files) != 1 || replace.Files[0].Path != "a.go" || replace.Additions != 1 || replace.Deletions != 1 {
+		t.Fatalf("replace summary = %+v, ok=%v", replace, ok)
+	}
+	deleted, ok := CompletedFileChanges("coding.delete_file", `{"path":"gone.txt"}`, "", `{"path":"gone.txt","size":4}`)
+	if !ok || len(deleted.Files) != 1 || deleted.Files[0].Path != "gone.txt" {
+		t.Fatalf("delete summary = %+v, ok=%v", deleted, ok)
+	}
+	if !IsFileChangeTool("coding.replace") || !IsFileChangeTool("coding.delete_file") {
+		t.Fatal("replace/delete were not classified as file-change tools")
+	}
+}
+
 func TestCompletedFileChangesIgnoresOtherTools(t *testing.T) {
 	if _, ok := CompletedFileChanges("shell.execute", `{"command":"ls"}`, "", ""); ok {
 		t.Fatal("non file-change tools must not project file changes")

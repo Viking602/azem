@@ -28,7 +28,14 @@ export function contextOccupancy(usage: ContextUsage, profile: ContextProfile | 
   return { used, limit, percentage, remaining: Math.max(0, limit - used), estimated };
 }
 
-export function contextCacheMetrics(usage: ContextUsage) {
+export interface ContextCacheMetrics {
+  reported: boolean;
+  hitRate: number | null;
+  cachedTokens: number;
+  totalCacheTokens: number;
+}
+
+export function contextCacheMetrics(usage: ContextUsage): ContextCacheMetrics {
   const reported = usage.mainCacheReported === true && usage.uncachedInputTokens !== undefined;
   const requestInputTokens = Math.max(0, usage.inputTokens);
   const cachedTokens = reported
@@ -40,6 +47,14 @@ export function contextCacheMetrics(usage: ContextUsage) {
     cachedTokens,
     totalCacheTokens: requestInputTokens,
   };
+}
+
+export function stickyCacheMetrics(
+  current: ContextCacheMetrics,
+  previous: ContextCacheMetrics | null,
+  pending: boolean,
+) {
+  return current.reported ? current : pending && previous?.reported ? previous : current;
 }
 
 function cacheHitPercentage(cachedTokens: number, inputTokens: number) {

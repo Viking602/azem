@@ -309,3 +309,13 @@ SELECT * FROM subagent_runs WHERE session_id=? ORDER BY started_at,id;
 UPDATE subagent_runs SET completion_delivered=? WHERE id=?;
 -- name: InterruptIncompleteSubagents :execresult
 UPDATE subagent_runs SET state='interrupted',summary='interrupted by process restart',error='interrupted by process restart',finished_at=? WHERE state IN ('initializing','queued','running','cancelling');
+-- name: ListLLMuxProviderModels :many
+SELECT model_id, payload, updated_at FROM llmux_provider_models WHERE provider_id=? ORDER BY model_id;
+-- name: DeleteLLMuxProviderModels :exec
+DELETE FROM llmux_provider_models WHERE provider_id=?;
+-- name: InsertLLMuxProviderModel :exec
+INSERT INTO llmux_provider_models(provider_id, model_id, payload, updated_at) VALUES(?,?,?,?);
+-- name: GetLLMuxProviderModel :one
+SELECT model_id, payload, updated_at FROM llmux_provider_models WHERE provider_id=? AND model_id=?;
+-- name: UpdateLLMuxProviderModel :exec
+UPDATE llmux_provider_models SET payload=?, updated_at=? WHERE provider_id=? AND model_id=?;

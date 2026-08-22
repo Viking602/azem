@@ -594,6 +594,7 @@ func teamPrompt(request TurnRequest) string {
 
 type teamExecutionPolicy struct {
 	contextBudget  ContextBudget
+	toolTokens     int
 	attachmentRoot string
 	images         []session.Attachment
 	resourceClaims []api.ResourceClaimSpec
@@ -614,7 +615,7 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 	if err != nil {
 		return teamExecutionPolicy{}, err
 	}
-	policy := teamExecutionPolicy{contextBudget: budget, attachmentRoot: s.attachments.Root, images: effectiveTurnImages(request)}
+	policy := teamExecutionPolicy{contextBudget: budget, toolTokens: toolTokens, attachmentRoot: s.attachments.Root, images: effectiveTurnImages(request)}
 	policy.resourceClaims, err = topLevelWorkspaceWriteClaims(
 		s.cfg.Workspace.AllowWrite, s.cfg.Workspace.ShellPolicy, s.cfg.Workspace.Root,
 	)
@@ -740,6 +741,11 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 		if strings.TrimSpace(policy.attachmentRoot) != "" {
 			extraBody[responses.AttachmentRootExtraKey] = policy.attachmentRoot
 		}
+		if request.Provider == "cursor" {
+			extraBody = withCursorExecHost(extraBody, newCursorExecHost(
+				s, s.cfg.Workspace.Root, sessionID, dispatch.Task.RunID, parentRunID, dispatch.To, engine.Tools,
+			))
+		}
 		engine.ExtraBody = extraBody
 		decision := s.hooks.Dispatch(ctx, hooks.Envelope{
 			SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To,
@@ -776,6 +782,7 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 		if !s.cfg.Agents.Context.Enabled {
 			contextTarget = 0
 		}
+		providerPressure := &providerContextPressure{toolTokens: policy.toolTokens}
 		requestPreparer := &teamRequestPreparer{
 			context: requestContext, images: images, todo: request.Todo, loadTodo: loadTodo, runID: dispatch.Task.RunID,
 			target: contextTarget,
@@ -786,6 +793,7 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 			largeToolTokens:  s.cfg.Agents.Context.LargeToolResultTokens,
 			keepRecentTokens: policy.contextBudget.KeepRecent,
 			coordinator:      &compactionCoordinator{},
+			providerPressure: providerPressure,
 			compactHooks:     s.autoCompactHooks(metadata),
 			reportContextTokens: func(_ context.Context, tokens int) {
 				s.emit(s.ctx, Event{
@@ -811,6 +819,7 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 				inner = &meteredProviderDriver{
 					inner: inner, store: s.sessions, host: s, sessionID: sessionID,
 					runID: parentRunID, kind: "team", provider: request.Provider, model: request.Model, transport: transport,
+					reportInputTokens: providerPressure.observeInputTokens,
 				}
 			}
 			engine.Provider = &teamUsageDriver{

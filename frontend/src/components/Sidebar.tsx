@@ -4,7 +4,7 @@ import {
   ChevronDown, ChevronRight, CircleDotDashed, FolderOpen, FolderPlus,
   GitPullRequest, Plus, Search, Settings, X,
 } from "lucide-react";
-import { createProject, execute, isDesktopRuntime, openProject, openProjectSession, selectProjectFolder, subscribeSessionMenu } from "../bridge";
+import { createProject, execute, isDesktopRuntime, openProject, openProjectSession, resumeSession, selectProjectFolder, subscribeSessionMenu } from "../bridge";
 import { translator } from "../i18n";
 import { formatRelativeTime, useRelativeNow } from "../relativeTime";
 import { openPullRequest, refreshPullRequestDashboard } from "../pullRequests";
@@ -16,6 +16,7 @@ export default function Sidebar() {
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const applyEvents = useRuntimeStore((state) => state.applyEvents);
   const sessions = useRuntimeStore((state) => state.sessions);
   const projects = useRuntimeStore((state) => state.projects);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
@@ -72,7 +73,12 @@ export default function Sidebar() {
         window.location.assign(url);
         return;
       }
-      await execute({ kind, target, sessionId: currentSessionId });
+      if (kind === "resume_session" && isDesktopRuntime()) {
+        const projection = await resumeSession(target);
+        if (projection) applyEvents([projection]);
+      } else {
+        await execute({ kind, target, sessionId: currentSessionId });
+      }
       selectPullRequest(null);
       setView("thread");
     } catch (error) {

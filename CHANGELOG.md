@@ -1,6 +1,237 @@
 # Changelog
 
 ## Unreleased
+- Open Todo items (`pending` / `in_progress`) block a model-initiated finish
+  even when the run did not mutate files. The host keeps retrying until those
+  items are completed or cancelled. User stop still cancels. This injects a
+  per-retry host user message and does not change the static instruction prefix.
+
+- Desktop stop now signals the durable coordinator before returning, so a
+  provider cannot finish in the gap and turn an explicit user cancellation
+  into a failed run. Durable tool/provider cleanup still converges in the
+  background, keeping the stop control responsive. Static instructions,
+  provider messages, and tool schemas are unchanged.
+
+- Core agent tool guidance now reuses completed search/read results for
+  unchanged files, accepts hashline anchors from search, read, and successful
+  edit results, batches same-snapshot changes, and re-reads only missing,
+  changed, renumbered, or stale/conflicting ranges. Updating
+  `internal/app/prompts/main.md` advances the static instruction fingerprint
+  and provider cache epoch once; later turns reuse the stable new prefix.
+  Tool schemas and provider message order are unchanged.
+
+- Providers: upgrade to llmux v0.2.5. OpenRouter Responses streams that expose
+  one tool call first as `fc_tmp_*` and then as a final UUID now produce one
+  canonical SDK tool call. llmux correlates output indexes and raw/prefixed
+  IDs, preserves progressive input events and distinct/id-less calls, makes
+  duplicate terminal frames idempotent across every streaming protocol, and
+  fails closed on conflicting identities, post-terminal calls, or bounded
+  frame/state limits. Azem removes its temporary local alias deduplicator.
+  Static instructions and provider message order are unchanged; canonical
+  history now omits the phantom duplicate tail, so the cache epoch does not
+  advance.
+
+- Shell supervision distinguishes foreground descriptor/pipeline syntax such as
+  `2>&1`, `<&`, `&>`, `|&`, and `&&`, but rejects every POSIX background
+  operator. A new session can escape process-group cleanup even with a bounded
+  wall clock, so foreground-only execution is the fail-closed boundary.
+  Quote/backslash-concatenated detach primitives such as `set''sid` are also
+  rejected. The advertised `coding.shell` definition changes, advancing static
+  tool-definition cache identity once; instructions and provider message order
+  are unchanged.
+
+- llmux model catalogs now live in SQLite (`llmux_provider_models`, schema 22)
+  instead of `config.yaml`. YAML keeps only provider `enabled` and `base_url`.
+  Existing YAML `models:` lists import once on launch. Discover, enable, and
+  disable update SQLite so OpenRouter-sized catalogs no longer bloat the
+  config file. This does not change the static instruction prefix or provider
+  message order.
+  Startup also forwards the hydrated SQLite catalog into the provider runtime
+  before the first turn, so a visible OpenRouter model is not rejected as
+  unconfigured. Synchronous start failures render one timeline card instead
+  of repeating below the transcript. This does not change the static
+  instruction prefix or provider message order.
+
+- Cursor model catalog now lists one family row. Thinking and Fast variants
+  stay in that family's inventory caption and search aliases; they are not
+  shown as independent cards or an exact-variant menu. A family switch still
+  writes every raw ID atomically. This does not change the static instruction
+  prefix or provider message order.
+
+- Cursor's authenticated `GetUsableModels` response is fail-closed: HTTP,
+  authentication, decode, and empty-catalog failures no longer become fresh
+  bundled model rows. Existing successfully authenticated cached rows may still
+  be surfaced through the catalog's explicit stale path.
+
+- Settings 「从 API 获取」 is now a read-only probe. It projects discovered
+  models into the current UI without storing the pending API key, SQLite
+  catalog, YAML, or runtime provider configuration; only 「保存提供商」 persists
+  those values.
+
+- `coding.delete_file` now removes Unix files through root-anchored,
+  no-symlink `openat`/`unlinkat` traversal. A repository symlink cannot redirect
+  deletion outside the workspace; unsupported platforms fail closed.
+
+- Subagents: the parent can no longer finish while any child of the current
+  run is still running, queued, or initializing. `pending-background-children`
+  keeps retrying until every child is terminal. The host still does not
+  cancel a slow child; `idle_timeout` may cancel a silent one. A successful
+  parent finish marks that run's terminal children delivered so auto-wake
+  does not start a second stream. Changing `internal/app/prompts/main.md`
+  rewrites the static instruction prefix, so provider prefix-cache hits
+  reset once and then stay stable for later turns.
+
+- Subagents no longer inherit the parent session's unfinished Todo completion
+  gate. A child can finish its assigned read/review task after its own evidence
+  checks; the parent still cannot finish until `pending-background-children`
+  observes that child as terminal.
+
+- Cold-start sidebar session clicks now use the same direct durable
+  `ResumeSession` readback as global search. The initiating window applies the
+  returned projection immediately instead of waiting only for a broadcast event
+  racing bootstrap catalog/session requests.
+
+
+- `coding.search` now scans every Git-tracked and unignored untracked text file
+  instead of stopping after the first 1,000 walker entries. Dependency/build
+  trees no longer crowd real source files out of the search set, `maxResults`
+  caps matched lines rather than files examined, and matched files still enter
+  the shared Hashline snapshot store for safe follow-up edits.
+
+- Verification guardrails now accept current-SHA evidence from dedicated
+  `coding.gofmt` calls instead of requiring the model to repeat the same work
+  as a literal `gofmt -d` shell command. A no-op formatter no longer advances
+  the mutation boundary, so valid final answers are not followed by a false
+  verification retry.
+
+- Timeline process totals inspect formatter results: `coding.gofmt` with
+  `changed=false` remains visible as a tool step but no longer claims that a
+  file was edited.
+
+
+- Coding tools: `coding.glob`, `coding.replace`, and `coding.delete_file` are
+  now first-class workspace tools for every provider. Hashline remains the
+  default edit path; `coding.replace` applies unique `old_text`/`new_text`
+  pairs through hashline. `coding.delete_file` removes one regular file after
+  write approval. Cursor `pi_find`/`pi_edit`/`delete` map onto these names.
+  Changing `internal/app/prompts/main.md` rewrites the static instruction
+  prefix, so provider prefix-cache hits reset once and then stay stable.
+
+- Coding tool adapters now preserve the outer call identity and exact trailing
+  bytes. `coding.replace` refuses to rewrite from a truncated read,
+  unsuccessful `coding.go_test` executions are tool errors, and successful
+  replace/delete operations enter both durable file observations and completed
+  change projections. A completed delete records expected absence without a
+  false capture error; continuity verifies continued absence and marks a
+  recreated path stale.
+
+- Governed tool calls now reject duplicate JSON argument keys before approval
+  or execution, including duplicates nested in arrays/objects or spelled with
+  equivalent escapes. Ambiguous provider output returns a recoverable tool
+  error with the original call identity and cannot select an unintended target.
+  This host-side check does not change the static instruction prefix, message
+  order, or provider cache identity.
+
+- Todo initialization now matches the host-owned OMP lifecycle: the model
+  supplies only a goal, phase titles, and item content. Azem assigns every
+  phase/item ID and status, so a phase/item naming collision cannot invalidate
+  the first durable snapshot. A complete goal-plus-phases payload is also
+  treated as `init` when a provider omits only that discriminator; no other
+  missing operation is inferred. The tool schema and executable prompt change
+  the static prefix once; later turns retain the new stable prefix and cache
+  identity.
+
+- Trajectory export now recognizes schema-21's `{}` JSON spill sentinel as
+  externalized data, loads the referenced BlobStore payload, and verifies its
+  SHA-256. Real session exports no longer fail with a false inline-digest
+  mismatch; non-sentinel mismatches and missing/corrupt blobs still fail closed.
+
+- Desktop and TUI now treat Cursor as a reserved subscription like ChatGPT
+  and Grok. Login uses Oh My Pi's `loginDeepControl` PKCE poll against
+  `api2.cursor.sh`; models come from `GetUsableModels` with a bundled
+  fallback; turns stream over Connect protobuf `AgentService/Run`. Native
+  Cursor `read`/`bash`/`write`/`delete`/`grep`/`ls` and `pi_*` execs run
+  on that same stream: Azem answers `request_context`, executes mapped
+  coding tools through the existing approval path, and writes typed
+  results. Existing-file writes become `coding.edit_hashline`. Native
+  `delete` removes a regular workspace file only after write approval.
+  `pi_edit` applies unique replace pairs then hashline; `pi_find` lists
+  files by glob. Fetch, diagnostics, and other unknown execs are rejected
+  on the Cursor stream so they cannot fail the Venat run as an unknown tool.
+  Cursor now derives `conversation_id` from Azem's existing main, Team-role,
+  subagent, title, recap, and vision cache keys; reuses checkpoints and blobs
+  across driver instances; answers both KV get/set operations; rebuilds
+  structured turns from canonical history; and sends `resume_action` after
+  assistant/tool output. A shared user task remains the active action when
+  private historical or vision evidence follows it, so that evidence stays
+  context instead of replacing the request.
+  Native execs now keep approval waits, durable tool records, file
+  observations, live events, and exact call/result replay instead of
+  disappearing inside the provider stream. Team roles and subagents bind
+  request-scoped tool hosts, preventing one shared Cursor driver from routing
+  calls to the wrong run. Server-confirmed Todo snapshots mirror into durable
+  Todo state. Validated image and image-only messages use Cursor's native
+  selected-image protocol, while Kimi K3 reasoning replays only from the same
+  Cursor model. Local conversation state is account-scoped; frame, protobuf,
+  checkpoint, and server-set blob validation prevents malformed remote state
+  from replacing the last known good checkpoint. A poisoned
+  `resource_exhausted` conversation rotates its wire ID once without dropping
+  validated state.
+  Token deltas count as output, while checkpoint occupancy feeds context
+  pressure without being recorded as billable input. Cursor does not expose
+  cache-read tokens, so completed cache cards now say 未上报 / Not reported
+  rather than waiting forever or retaining another provider's value. Cursor
+  transport metadata advances to version 3,
+  resetting only Cursor's derived cache identity once; subsequent turns keep
+  an append-stable root prefix.
+  Cursor settings read account email and membership tier from the dashboard,
+  show Total, Cursor, and Third Party remaining lanes from `usage-summary`,
+  and derive reset countdowns plus deficit/reserve and exhaustion forecasts
+  from the billing-cycle boundary. They fall back to
+  `api2.cursor.sh/auth/usage` when that dashboard request is unavailable.
+  Cursor's raw tier, Thinking, and Fast model IDs now collapse into one
+  base-model row in the composer and route selectors, matching Cursor's
+  model-first interaction. Thinking now defaults on whenever the family has a
+  matching same-tier variant and is no longer shown as a separate control or
+  label. Reasoning depth chooses the tier and Fast remains optional; a family
+  with no Thinking variants continues to use its standard IDs. Every change
+  still persists and sends the selected raw Cursor ID. The model catalog card
+  retains its exact-variant menu so individual raw IDs can still be managed.
+  Fast remains configurable inside the model picker but the separate composer
+  lightning button is removed; both Cursor and ChatGPT/Codex subscriptions show
+  active Fast state only as `· Fast` in the selected-model summary. One-level
+  reasoning ladders render full, align their sole label to the maximum end, and
+  are removed from pointer and keyboard interaction.
+  Folded rows now report both base-family and exact-variant counts, retain every
+  raw ID as a search alias, and show tier/Fast availability. Cursor's
+  account-scoped `GetUsableModels` response remains authoritative; static OMP
+  rows absent from that response are not injected as potentially unusable
+  models. Raw `(NO ZDR)` text is removed from the model name and replaced with
+  a localized data-retention warning and explanation.
+  Model catalog search matches a family name, variant label, alias, or exact raw
+  ID while retaining the complete matching family. A family switch now changes
+  every variant in one atomic configuration update; partial families show an
+  explicit enabled count. The variant panel separates current version, family
+  capabilities, availability, and a searchable exact-version selector.
+  Grok OAuth now overlays and injects the nine current chat-capable curated
+  models instead of replacing the catalog with a partial two-row response.
+  Reasoning tiers are normalized when cached rows load, so restarting no
+  longer disables the depth control until a manual model refresh. A later
+  subscription catalog refresh also no longer wipes a live quota card.
+  These catalog and projection changes do not alter the static instruction
+  prefix or provider message order. Choosing a different Cursor tier changes
+  the model identity intentionally; later turns on that exact tier keep the
+  same cache identity.
+- Reading an undeclared skill resource such as `SKILL.md`, or a resource
+  from a skill that is not active, now returns an error tool result instead
+  of aborting the Main, Team, or subagent run. The model sees the miss and
+  can continue; the desktop no longer shows `missing tool result` for that
+  call. Requires Venat v0.14.2.
+
+- Live assistant text now sharpens from a readable blur tail, matching the
+  Meta AI stream: newest increments fade in over 260ms with a 5px blur, up
+  to eight in-flight ranges stay visible, and Markdown reparse resumes the
+  same motion instead of replaying settled lines.
 
 - Context compaction now has one deterministic host path across automatic,
   `/compact`, `/rebuild`, Main, Team, and subagent runs. It serializes omitted
@@ -17,6 +248,33 @@
   wire version 3 and archive policy version 3 reset old derived cache identity
   once; later archives retain the stable system prefix and message ordering.
 
+- Fixed automatic archiving that could remain idle while the provider reported
+  98% context occupancy because the trigger trusted only the lower local
+  `bytes/4` estimate and a fixed 16,384-token reserve. The trigger now uses the
+  larger of local history pressure and current-run provider-reported input
+  after tool definitions, and reserves at least 15% of every model context
+  window. Successful archive activation clears the prior provider pressure.
+  Static instructions and provider message order are unchanged; only an
+  earlier archive carrier can start a new cache epoch.
+
+- Fixed deterministic context activation after manifest-free pruning. The
+  checkpoint CAS boundary now comes directly from the current run's persisted
+  canonical user block, including resumed runs, rather than the pre-turn
+  checkpoint or provider-facing message metadata. This prevents healthy long
+  runs from failing with a stale checkpoint while preserving CAS rejection
+  when another canonical message is appended after preparation. Static
+  instructions, message order, and provider payloads are unchanged, so existing
+  prefix cache hits survive.
+
+- Manual context compaction now repairs legacy tool history before Snapcompact
+  archiving. When both the call and result are absent from an older
+  ModelHistory but the terminal durable tool record still exists, Azem restores
+  the pair at its canonical anchor, including full artifact-backed output and
+  failed state. Partial pairs, name mismatches, missing artifacts, and invalid
+  records still fail closed. Static instructions are unchanged; a successful
+  manual archive intentionally replaces only the derived history tail, so the
+  stable provider prefix remains reusable.
+
 - Evaluation and adaptation now use a versioned, evidence-bound offline
   pipeline. `azem-eval` exports deterministic durable trajectories and baseline
   identities; replay/noise fixtures, verification plans, structural retrieval,
@@ -32,6 +290,13 @@
 - Settings usage now has a Lody-style skyline: a model donut beside the year
   heatmap, a stacked by-model bar, and a click-to-open day panel. Totals snap
   on first paint and ease on later refreshes. No invented cost figures.
+
+- Settings layout now uses one enlarged typography scale across navigation,
+  cards, route rows, controls, model catalogs, and Usage. Model route controls
+  use bounded grid columns and clipped card geometry so Fast/reasoning controls
+  cannot leave the card. The Usage activity heatmap uses responsive square
+  cells across the full report width instead of a fixed 10px grid with a large
+  empty right side.
 
 - Persistence: schema 21 keeps SQLite as the catalog, FTS index, and Venat
   control plane, and stores large payloads as content-addressed files under

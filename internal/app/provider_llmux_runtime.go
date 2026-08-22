@@ -120,7 +120,7 @@ func configuredModel(providerID string, models []config.LLMuxModelConfig, modelI
 // their transports omit or reject max_output_tokens on the main path.
 func (r *ProviderRuntime) modelMaxOutputTokens(providerID, modelID string) int {
 	providerID = llmuxdriver.CanonicalProviderID(providerID)
-	if providerID == "" || providerID == "chatgpt" || providerID == "grok" {
+	if providerID == "" || config.IsSubscriptionProvider(providerID) {
 		return 0
 	}
 	r.mu.RLock()

@@ -96,6 +96,31 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
         { id: "grok-4.20", name: "Grok 4.20", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
         { id: "grok-code-fast", name: "Grok Code Fast", reasoningLevels: ["low", "medium"], defaultReasoning: "medium", capabilities: ["tools", "code", "fast"] },
       ],
+      cursor: [
+        { id: "gpt-5.2-low", name: "GPT-5.2 Low", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-low-fast", name: "GPT-5.2 Low Fast", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-high", name: "GPT-5.2 High", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-low-thinking", name: "GPT-5.2 Low Thinking", reasoningLevels: ["low"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-high-thinking", name: "GPT-5.2 High Thinking", reasoningLevels: ["high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-high-fast", name: "GPT-5.2 High Fast", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-xhigh", name: "GPT-5.2 Extra High", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-xhigh-fast", name: "GPT-5.2 Extra High Fast", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-xhigh-thinking", name: "GPT-5.2 Extra High Thinking", reasoningLevels: ["xhigh"], defaultReasoning: "xhigh", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-low-thinking-fast", name: "GPT-5.2 Low Thinking Fast", reasoningLevels: ["low"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-high-thinking-fast", name: "GPT-5.2 High Thinking Fast", reasoningLevels: ["high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-xhigh-thinking-fast", name: "GPT-5.2 Extra High Thinking Fast", reasoningLevels: ["xhigh"], defaultReasoning: "xhigh", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "claude-fable-5-low", name: "Claude Fable 5 1M Low (NO ZDR)", reasoningLevels: ["low"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-medium", name: "Claude Fable 5 1M Medium (NO ZDR)", reasoningLevels: ["medium"], defaultReasoning: "medium", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-high", name: "Claude Fable 5 1M (NO ZDR)", reasoningLevels: ["high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-xhigh", name: "Claude Fable 5 1M Extra High (NO ZDR)", reasoningLevels: ["xhigh"], defaultReasoning: "xhigh", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-max", name: "Claude Fable 5 1M Max (NO ZDR)", reasoningLevels: ["max"], defaultReasoning: "max", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-low", name: "Claude Fable 5 1M Low Thinking (NO ZDR)", reasoningLevels: ["low"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-medium", name: "Claude Fable 5 1M Medium Thinking (NO ZDR)", reasoningLevels: ["medium"], defaultReasoning: "medium", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-high", name: "Claude Fable 5 1M Thinking (NO ZDR)", reasoningLevels: ["high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-xhigh", name: "Claude Fable 5 1M Extra High Thinking (NO ZDR)", reasoningLevels: ["xhigh"], defaultReasoning: "xhigh", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-max", name: "Claude Fable 5 1M Max Thinking (NO ZDR)", reasoningLevels: ["max"], defaultReasoning: "max", capabilities: ["reasoning", "tools", "image"] },
+        { id: "composer-2", name: "Composer 2", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools"] },
+      ],
       openrouter: [
         { id: "claude-sonnet-4.5", name: "Claude Sonnet 4.5", reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
         { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
@@ -207,6 +232,10 @@ function demoBlocks(review: boolean): Block[] {
 }
 
 function demoModelProviders(): ModelProvider[] {
+  const now = Date.now();
+  const cursorCycleStart = Math.floor((now-(6*24+4)*60*60*1000)/1000);
+  const cursorCycleEnd = Math.floor((now+(24*24+20)*60*60*1000)/1000);
+  const cursorQuotaUpdatedAt = new Date(now-60_000).toISOString();
   return [
     {
       id: "chatgpt", displayName: "ChatGPT", backend: "subscription", defaultBaseUrl: "", baseUrl: "", envKey: "", enabled: true,
@@ -225,6 +254,16 @@ function demoModelProviders(): ModelProvider[] {
       models: [
         { id: "grok-4.20", name: "Grok 4.20", contextWindow: 256000, reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools"], inputModalities: ["text", "image"], outputModalities: ["text"] },
         { id: "grok-code-fast", name: "Grok Code Fast", contextWindow: 128000, reasoningLevels: ["low", "medium"], defaultReasoning: "medium", capabilities: ["tools"], inputModalities: ["text"], outputModalities: ["text"] },
+      ],
+    },
+    {
+      id: "cursor", displayName: "Cursor", backend: "subscription", defaultBaseUrl: "", baseUrl: "", envKey: "", enabled: true,
+      credentialConfigured: true, credentialSource: "stored", subscription: true, accountLabel: "viking@example.com", accountPlan: "ultra",
+      quotaAvailable: true, quotaPeriod: "monthly", quotaStartedAt: cursorCycleStart, quotaUsedPercent: 28,
+      quotaBreakdown: [{ id: "cursor", usedPercent: 16 }, { id: "third_party", usedPercent: 74 }],
+      quotaResetsAt: cursorCycleEnd, quotaUpdatedAt: cursorQuotaUpdatedAt, modelsDevId: "cursor", modelsSource: "subscription",
+      models: [
+        { id: "composer-2", name: "Composer 2", contextWindow: 200000, reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools"], inputModalities: ["text"], outputModalities: ["text"] },
       ],
     },
     {

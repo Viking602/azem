@@ -1,13 +1,13 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { execute, openProject, openProjectSession, selectProjectFolder } from "../bridge";
+import { execute, openProject, openProjectSession, resumeSession, selectProjectFolder } from "../bridge";
 import { useRuntimeStore } from "../store";
-import type { Session, Snapshot } from "../types";
+import type { RuntimeEvent, Session, Snapshot } from "../types";
 import Sidebar from "./Sidebar";
 
 vi.mock("../bridge", () => ({
-  createProject: vi.fn(), execute: vi.fn(), openProject: vi.fn().mockResolvedValue(undefined), openProjectSession: vi.fn().mockResolvedValue(undefined), selectProjectFolder: vi.fn(),
+  createProject: vi.fn(), execute: vi.fn(), openProject: vi.fn().mockResolvedValue(undefined), openProjectSession: vi.fn().mockResolvedValue(undefined), resumeSession: vi.fn().mockResolvedValue(null), selectProjectFolder: vi.fn(),
   isDesktopRuntime: vi.fn(() => true),
   subscribeSessionMenu: vi.fn(() => () => undefined),
 }));
@@ -57,6 +57,37 @@ describe("Sidebar project sessions", () => {
 
     await act(async () => container.querySelector<HTMLButtonElement>('.project-action[aria-label="新对话"]')!.click());
     expect(execute).toHaveBeenCalledWith({ kind: "new_session", target: "", sessionId: "session-1" });
+    await act(async () => root.unmount());
+  });
+
+  it("applies the direct session projection when a cold-start sidebar row is clicked", async () => {
+    const sessions: Session[] = [
+      { id: "session-1", workspace: snapshot.workspace, title: "当前会话", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString() },
+      { id: "session-2", workspace: snapshot.workspace, title: "冷启动目标", providerId: "chatgpt", modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single", updatedAt: new Date().toISOString() },
+    ];
+    const projection: RuntimeEvent = {
+      sequence: 0,
+      kind: "session_loaded",
+      sessionId: "session-2",
+      state: "loaded",
+      data: { provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", blocks: "[]" },
+    };
+    vi.mocked(resumeSession).mockResolvedValueOnce(projection);
+    useRuntimeStore.setState({
+      snapshot, projects: [{ workspace: snapshot.workspace, updatedAt: "" }], sessions,
+      currentSessionId: "session-1", view: "thread", lastSequence: 42,
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(<Sidebar />));
+    const target = Array.from(container.querySelectorAll<HTMLButtonElement>(".thread-list > button"))
+      .find((button) => button.textContent?.includes("冷启动目标"))!;
+    await act(async () => target.click());
+
+    expect(resumeSession).toHaveBeenCalledWith("session-2");
+    expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ kind: "resume_session" }));
+    expect(useRuntimeStore.getState().currentSessionId).toBe("session-2");
     await act(async () => root.unmount());
   });
 

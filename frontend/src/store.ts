@@ -284,7 +284,7 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   setRunId: (runId) => set({ runId }),
   failRun: (message) => set((state) => ({
     running: false,
-    error: message,
+    error: "",
     blocks: [...state.blocks, { id: `error-${Date.now()}`, kind: "error", title: translator(state.snapshot?.language === "en" ? "en" : "zh-CN")("runFailed"), content: message, state: "failed" }],
   })),
   setError: (error) => set({ error }),

@@ -688,6 +688,103 @@ func TestMainTurnsKeepSerializedPrefixStableAndAppendRawOutputAndNewTail(t *test
 	}
 }
 
+func TestCompactionUsesDurableRunUserBoundaryWithoutMessageMetadata(t *testing.T) {
+	blocks := []session.Block{
+		{Sequence: 444, Kind: "assistant", RunID: "prior-run"},
+		{Sequence: 445, Kind: "user", RunID: "current-run"},
+		{Sequence: 446, Kind: "commentary", RunID: "current-run"},
+		{Sequence: 447, Kind: "user", RunID: "other-run"},
+	}
+	boundary := canonicalRunUserHighWater(blocks, "current-run")
+	if boundary == nil || *boundary != 445 {
+		t.Fatalf("current run boundary = %v, want 445", boundary)
+	}
+	source := []message.Message{
+		message.NewText(message.RoleSystem, mainInstructions),
+		message.NewText(message.RoleUser, "current request"),
+	}
+	if got := canonicalMessageHighWater(source); got != -1 {
+		t.Fatalf("provider-facing message high-water = %d, want unavailable", got)
+	}
+	manifest := newArchiveContextManifest(
+		turnContext{runID: "current-run", canonicalHighWater: boundary},
+		"automatic",
+		source,
+		source,
+		nil,
+		contextarchive.Manifest{},
+		1000,
+	)
+	if manifest.CanonicalHighWater != 445 {
+		t.Fatalf("manifest canonical high-water = %d, want 445", manifest.CanonicalHighWater)
+	}
+}
+
+func TestMainTurnPrunedCheckpointCoversCurrentUser(t *testing.T) {
+	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, _ string, writer http.ResponseWriter) {
+		if call != 1 {
+			t.Errorf("unexpected provider request %d", call)
+		}
+		writeProviderText(writer, "resp-pruned-checkpoint", "continued after pruning")
+	})
+	ctx := context.Background()
+	sessions := harness.service.sessions
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "pruned-checkpoint", Title: "Pruned checkpoint", ProviderID: "chatgpt", ModelID: "gpt-skill", Reasoning: "minimal", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "pruned-checkpoint", session.Block{
+		Kind: "user", RunID: "seed-run", Content: "seed request",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	history := []message.Message{
+		message.NewText(message.RoleSystem, mainInstructions),
+		message.NewText(message.RoleUser, "seed request"),
+	}
+	for index := range 20 {
+		callID := fmt.Sprintf("seed-tool-%d", index)
+		history = append(history,
+			message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: "seed_tool"}}},
+			message.NewToolResult(message.ToolResult{
+				ToolCallID: callID,
+				Name:       "seed_tool",
+				Content:    strings.Repeat("x", 40_000),
+			}),
+		)
+	}
+	for index := range 3 {
+		history = append(history,
+			message.NewText(message.RoleUser, fmt.Sprintf("recent request %d", index)),
+			message.NewText(message.RoleAssistant, fmt.Sprintf("recent answer %d", index)),
+		)
+	}
+	if err := sessions.CompleteTurn(ctx, "pruned-checkpoint", session.Block{
+		Kind: "assistant", RunID: "seed-run", Content: "seed answer",
+	}, session.ModelHistory{
+		ProviderID: "chatgpt", ModelID: "gpt-skill",
+		InstructionFingerprint: mainInstructionFingerprint,
+		StaticPrefixHash:       mainInstructionFingerprint,
+		WireVersion:            session.CurrentWireVersion,
+		Messages:               history,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "pruned-checkpoint", Prompt: "current request", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, runID)
+	if got := harness.calls.Load(); got != 1 {
+		t.Fatalf("provider requests = %d, want 1", got)
+	}
+}
+
 func TestMainTurnReplacesMismatchedSnapshotOnlyAfterSuccessfulFallback(t *testing.T) {
 	const freshOutput = `[{"type":"message","id":"fresh_message","role":"assistant","content":[{"type":"output_text","text":"fresh answer"}]}]`
 	var capturedBody string

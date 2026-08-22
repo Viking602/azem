@@ -329,10 +329,30 @@ export function classifyToolCategory(title = ""): ToolCategory {
   return "other";
 }
 
+function classifyToolBlockCategory(block: Block): ToolCategory {
+  const title = block.title || block.data?.tool || block.data?.name || "";
+  const normalized = title.trim().toLowerCase().replaceAll("_", ".");
+  if (normalized === "coding.gofmt") {
+    if (block.state && block.state !== "completed") return "other";
+    const structured = block.data?.structured || "";
+    if (structured) {
+      try {
+        const result = JSON.parse(structured) as { changed?: unknown };
+        if (result.changed === false) return "other";
+      } catch {
+        // Legacy projections may not carry structured formatter output.
+      }
+    }
+    if (/\balready formatted\b/iu.test(block.content || "")) return "other";
+  }
+  return classifyToolCategory(title);
+}
+
+
 export function summarizeToolGroup(blocks: Block[], language: Language) {
   const counts = new Map<ToolCategory, number>();
   for (const block of blocks) {
-    const category = classifyToolCategory(block.title || block.data?.tool || "");
+    const category = classifyToolBlockCategory(block);
     counts.set(category, (counts.get(category) ?? 0) + 1);
   }
   const order: ToolCategory[] = ["search", "read", "edit", "diff", "shell", "agent", "other"];

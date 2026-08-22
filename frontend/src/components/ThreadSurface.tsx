@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, GitBranch, Search } from "lucide-react";
 import { cancelActive, execute, guide, importAttachment, importClipboardImage, startTurn } from "../bridge";
 import { chatTypographyVars } from "../chatTypography";
-import { translator } from "../i18n";
+import { tFormat, translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 import type { Attachment, DeliveryMode, QueuedPrompt, Snapshot } from "../types";
 import { useTerminalStore } from "../terminalStore";
-import { SelectActionHost } from "./SelectActionHost";
 import { TimelineFeed } from "./Timeline";
 import { Composer } from "./thread/Composer";
 import { QueuedPrompts } from "./thread/QueueBar";
@@ -34,11 +33,13 @@ export function transcriptFollowBehavior(running: boolean, sessionOpen = false):
 export function pinTranscriptTail(viewport: HTMLElement, behavior: ScrollBehavior = "instant") {
   const top = Math.max(0, viewport.scrollHeight);
   // WKWebView ignores scrollTo({ behavior: "instant" }), so instant pins must
-  // assign scrollTop. Otherwise session switch and send stay on the first line.
+  // assign scrollTop. CSS scroll-behavior:smooth would still animate that
+  // assignment and slide from the first line on session switch.
   if (behavior === "smooth") {
     viewport.scrollTo({ top, behavior: "smooth" });
     return;
   }
+  viewport.style.scrollBehavior = "auto";
   viewport.scrollTop = top;
 }
 
@@ -119,6 +120,7 @@ export default function ThreadSurface() {
       pinTranscriptTail(node, "instant");
       requestAnimationFrame(() => {
         pinning.current = false;
+        if (node.scrollHeight - node.scrollTop - node.clientHeight < 72) pinInstant.current = false;
       });
     };
     // Opening a session remounts the stage at scrollTop 0. History turns start
@@ -128,7 +130,6 @@ export default function ThreadSurface() {
     if (!(transcript instanceof HTMLElement) || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
       pin();
-      pinInstant.current = false;
     });
     observer.observe(transcript);
     const retry = requestAnimationFrame(() => {
@@ -169,6 +170,10 @@ export default function ThreadSurface() {
     if (!stage) return;
     const sync = () => {
       stage.style.setProperty("--transcript-bottom-gap", `${composerOverlayGap(node.offsetHeight)}px`);
+      if (!followingRef.current || !viewport.current) return;
+      pinning.current = true;
+      pinTranscriptTail(viewport.current, "instant");
+      requestAnimationFrame(() => { pinning.current = false; });
     };
     sync();
     if (typeof ResizeObserver === "undefined") {
@@ -254,10 +259,6 @@ export default function ThreadSurface() {
   const submit = async (modeOverride?: DeliveryMode) => {
     await submitTurn(prompt.trim(), [...attachments], modeOverride, "composer");
   };
-
-  const sendSelectAction = useCallback((text: string) => {
-    void submitTurn(text, [], undefined, "select-action");
-  }, [submitTurn]);
 
   const editQueued = (item: QueuedPrompt) => {
     if (item.sessionId !== currentSessionId) return;
@@ -365,7 +366,7 @@ export default function ThreadSurface() {
             ) : (
               <>
                 <div className="transcript-viewport" ref={viewport} onScroll={(event) => {
-                  if (pinning.current) return;
+                  if (pinning.current || pinInstant.current) return;
                   const node = event.currentTarget;
                   setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 72);
                 }}>
@@ -380,12 +381,6 @@ export default function ThreadSurface() {
                       collapseCompletedProcess
                     />
                     {error && <div className="inline-error" role="alert">{error}</div>}
-                    <SelectActionHost
-                      rootRef={viewport}
-                      composerRef={dock}
-                      language={snapshot.language}
-                      onSubmit={sendSelectAction}
-                    />
                     <div className="transcript-composer-clearance" aria-hidden="true" />
                   </div>
                 </div>
@@ -495,30 +490,112 @@ function ThreadHeader({ empty }: { empty: boolean }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const title = useRuntimeStore((state) => state.currentTitle);
   const running = useRuntimeStore((state) => state.running);
-  const branches = useRuntimeStore((state) => state.branches);
   const t = translator(snapshot.language);
-  if (empty) return null;
   const heading = title || t("newSession");
   const status = headerStatus(running, t);
-  const stage = threadHeaderStage(running);
-  const branch = branches.find((item) => item.current)?.name || snapshot.currentBranch || t("noBranches");
-  const projectName = snapshot.workspace.split(/[\\/]/).filter(Boolean).at(-1) || t("workingTree");
   return <header className="thread-header titlebar-region">
-    <div className="thread-heading-copy"><span className="thread-eyebrow">{heading.includes("UI") ? "DESIGN TASK" : "TASK"}</span><strong>{heading}</strong><small>{projectName} · {branch}</small></div>
-    <div className="thread-stage" role="status" aria-label={status}>
-      <span data-active={String(stage === "in-progress")}>{t("inProgress")}</span>
-      <span data-active={String(stage === "completed")}>{t("completed")}</span>
+    <div className="thread-heading-copy">
+      {empty ? null : <>
+        <span className="thread-eyebrow">{heading.includes("UI") ? "DESIGN TASK" : "TASK"}</span>
+        <strong>{heading}</strong>
+        <span className="thread-heading-rule" aria-hidden="true">|</span>
+        <BranchSwitch />
+      </>}
     </div>
-    <div className="thread-header-end">
+    {empty ? null : <div className="thread-header-end">
       <span className="thread-runtime-status" data-running={String(running)}>{status}</span>
       <HeaderActions empty={empty} />
-    </div>
+    </div>}
   </header>;
 }
 
-export function threadHeaderStage(running: boolean): "in-progress" | "completed" {
-  return running ? "in-progress" : "completed";
+function BranchSwitch() {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const branches = useRuntimeStore((state) => state.branches);
+  const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
+  const setError = useRuntimeStore((state) => state.setError);
+  const [branchOpen, setBranchOpen] = useState(false);
+  const [branchSearch, setBranchSearch] = useState("");
+  const branchSwitch = useRef<HTMLDivElement>(null);
+  const t = translator(snapshot.language);
+  const project = snapshot.workspace.split(/[\\/]/).filter(Boolean).at(-1) || t("workingTree");
+  const branch = branches.find((item) => item.current)?.name || snapshot.currentBranch || t("noBranches");
+  const visibleBranches = branches
+    .filter((item) => !branchSearch.trim() || item.name.toLowerCase().includes(branchSearch.trim().toLowerCase()))
+    .slice()
+    .sort((left, right) => Number(right.current) - Number(left.current) || left.name.localeCompare(right.name));
+
+  useEffect(() => {
+    if (!branchOpen) return;
+    const close = (event: PointerEvent) => {
+      if (branchSwitch.current && !branchSwitch.current.contains(event.target as Node)) setBranchOpen(false);
+    };
+    const closeWithKeyboard = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setBranchOpen(false);
+        setBranchSearch("");
+      }
+    };
+    document.addEventListener("pointerdown", close, true);
+    document.addEventListener("keydown", closeWithKeyboard);
+    return () => {
+      document.removeEventListener("pointerdown", close, true);
+      document.removeEventListener("keydown", closeWithKeyboard);
+    };
+  }, [branchOpen]);
+
+  const switchBranch = async (name: string, confirmDirty = false) => {
+    if (!name || name === branch) {
+      setBranchOpen(false);
+      setBranchSearch("");
+      return;
+    }
+    try {
+      await execute({
+        kind: "switch_git_branch",
+        target: name,
+        decision: confirmDirty ? "confirm_dirty" : undefined,
+      });
+      setBranchOpen(false);
+      setBranchSearch("");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!confirmDirty && /uncommitted changes/i.test(message)) {
+        if (window.confirm(tFormat(snapshot.language, "dirtySwitchConfirm", { branch: name }))) {
+          await switchBranch(name, true);
+        }
+        return;
+      }
+      setError(message);
+    }
+  };
+
+  return <div className="titlebar-project-switch" ref={branchSwitch}>
+    <button type="button" className="titlebar-project" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} onClick={() => setBranchOpen((open) => !open)}>
+      <strong>{project}</strong><b aria-hidden="true">·</b><span>{branch}</span><ChevronDown size={14} />
+    </button>
+    {branchOpen && <section className="titlebar-project-popover" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}>
+      <header><strong>{snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}</strong><span>{project}</span></header>
+      <label className="titlebar-project-search"><Search size={14} /><input autoFocus value={branchSearch} onChange={(event) => setBranchSearch(event.target.value)} placeholder={`${t("searchBranches")}…`} aria-label={t("searchBranches")} /></label>
+      <div className="titlebar-project-options" role="listbox">
+        {visibleBranches.map((item) => {
+          const currentDetail = workspaceChangedFiles > 0
+            ? tFormat(snapshot.language, "uncommittedFiles", { count: workspaceChangedFiles })
+            : t("clean");
+          return <button key={item.name} type="button" role="option" aria-selected={item.current} onClick={() => void switchBranch(item.name)}>
+            <span className="titlebar-project-letter"><GitBranch size={14} /></span>
+            <span><strong>{item.name}</strong><small>{item.current ? currentDetail : t("local")}</small></span>
+            <em>{item.current ? snapshot.language === "zh-CN" ? "当前" : "Current" : ""}</em>
+            <Check size={14} />
+          </button>;
+        })}
+      </div>
+      {visibleBranches.length === 0 && <p>{t("noMatchingBranches")}</p>}
+      <footer><span>↵ {snapshot.language === "zh-CN" ? "切换" : "Switch"}</span><span>esc {snapshot.language === "zh-CN" ? "关闭" : "Close"}</span></footer>
+    </section>}
+  </div>;
 }
+
 
 function headerStatus(running: boolean, t: ReturnType<typeof translator>) { return running ? t("running") : t("ready"); }
 

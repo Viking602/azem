@@ -125,7 +125,7 @@ export function FileChangePills({
   </div>;
 }
 
-function ToolChipIcon({ kind, approval }: { kind: ToolChipKind; approval: boolean }) {
+export function ToolChipIcon({ kind, approval = false }: { kind: ToolChipKind; approval?: boolean }) {
   if (approval) return <ShieldCheck size={13} />;
   if (kind === "thinking") {
     return <span className="azem-thinking-mark bui-thinking-mark" aria-hidden="true"><i /><i /></span>;

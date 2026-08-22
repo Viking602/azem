@@ -125,12 +125,14 @@ boundary releases only the parent call — it never cancels the child
   `interrupted`; `subagentRuntime.recoverInterrupted` requeues restart-
   interrupted children that still have a durable child run.
 
-The desktop stop action is an explicit include-children stop and stays
-asynchronous: `CancelActiveWithChildren(true)` cancels the parent’s
-subagents, then delivers the cancellation to the durable coordinator and
-returns immediately, so a slow tool cleanup cannot freeze the stop button
-(TOOL-002, SUBAGENT-006). A parent-wait expiry or TUI parent-only choice
-still detaches safe children instead of cancelling them (SUBAGENT-001).
+The desktop stop action is an explicit include-children stop.
+`CancelActiveWithChildren(true)` cancels the parent’s subagents and signals the
+active durable coordinator synchronously, so the explicit cancellation cause
+cannot lose a race with provider completion. It then returns immediately while
+bounded durable cleanup continues in the background, so a slow tool cannot
+freeze the stop button (TOOL-002, SUBAGENT-006). A parent-wait expiry or TUI
+parent-only choice still detaches safe children instead of cancelling them
+(SUBAGENT-001).
 
 ## Team resume
 

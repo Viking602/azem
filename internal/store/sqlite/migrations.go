@@ -8,7 +8,7 @@ import (
 	"github.com/Viking602/azem/internal/blobstore"
 )
 
-const schemaVersion = 21
+const schemaVersion = 22
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -434,6 +434,14 @@ var migrations = []string{
 	ALTER TABLE subagent_runs ADD COLUMN output_sha256 TEXT NOT NULL DEFAULT '';
 	ALTER TABLE session_projections ADD COLUMN model_history_sha256 TEXT NOT NULL DEFAULT '';
 	ALTER TABLE session_blocks ADD COLUMN data_sha256 TEXT NOT NULL DEFAULT '';`,
+	`CREATE TABLE llmux_provider_models (
+		provider_id TEXT NOT NULL,
+		model_id TEXT NOT NULL,
+		payload BLOB NOT NULL,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY(provider_id, model_id)
+	);
+	CREATE INDEX llmux_provider_models_provider ON llmux_provider_models(provider_id, model_id);`,
 }
 
 func migrate(ctx context.Context, db *sql.DB, blobs blobstore.Store) error {

@@ -46,7 +46,7 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 		if index > 0 && profiles[index-1].ID >= profile.ID {
 			t.Fatalf("profiles are not sorted and unique at %q", profile.ID)
 		}
-		if profile.ID == "chatgpt" || profile.ID == "grok" {
+		if profile.ID == "chatgpt" || profile.ID == "grok" || profile.ID == "cursor" {
 			t.Fatalf("reserved Azem provider leaked into llmux settings: %q", profile.ID)
 		}
 		foundOpenAI = foundOpenAI || profile.ID == "openai"
@@ -54,6 +54,9 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 	}
 	if !foundOpenAI || !foundOpenRouter {
 		t.Fatalf("missing expected profiles: openai=%v openrouter=%v", foundOpenAI, foundOpenRouter)
+	}
+	if _, ok := LookupProfile("cursor"); ok {
+		t.Fatal("cursor leaked into llmux profiles")
 	}
 	if profile, ok := LookupProfile("opencode"); !ok || profile.ID != "opencode-zen" || profile.BaseURL != "https://opencode.ai/zen/v1" {
 		t.Fatalf("opencode profile = %+v, found=%v", profile, ok)

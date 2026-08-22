@@ -45,3 +45,5 @@ CREATE TABLE session_semantic_state_events (session_id TEXT NOT NULL REFERENCES 
 CREATE TABLE context_manifests (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, run_id TEXT NOT NULL DEFAULT '', canonical_high_water INTEGER NOT NULL DEFAULT -1, semantic_revision INTEGER NOT NULL DEFAULT 0, policy_version INTEGER NOT NULL, manifest_hash TEXT NOT NULL, activated INTEGER NOT NULL DEFAULT 0, data BLOB NOT NULL, created_at INTEGER NOT NULL, UNIQUE(session_id,manifest_hash));
 CREATE INDEX context_manifests_session_created ON context_manifests(session_id,created_at DESC,id);
 CREATE UNIQUE INDEX context_manifests_one_active ON context_manifests(session_id) WHERE activated=1;
+CREATE TABLE llmux_provider_models (provider_id TEXT NOT NULL, model_id TEXT NOT NULL, payload BLOB NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(provider_id, model_id));
+CREATE INDEX llmux_provider_models_provider ON llmux_provider_models(provider_id, model_id);

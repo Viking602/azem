@@ -45,7 +45,7 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 		switch request.URL.Path {
 		case "/models":
 			writer.Header().Set("Content-Type", "application/json")
-			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-subagent","title":"GPT Subagent","context_window":128000,"supports_tools":true}]}`))
+			_, _ = writer.Write([]byte(`{"models":[{"slug":"gpt-subagent","title":"GPT Subagent","context_window":1000000,"supports_tools":true}]}`))
 		case "/responses":
 			body, err := io.ReadAll(request.Body)
 			if err != nil {
@@ -81,8 +81,8 @@ func TestSubagentRuntimeReceivesSkillCatalog(t *testing.T) {
 			}
 			inputTokens, totalTokens, cachedTokens := 10, 15, 0
 			if call == 2 {
-				// A child run can spend more than the old 128K default while
-				// remaining below the current cumulative safety limit.
+				// A child run can spend more than the old 128K cumulative
+				// default while remaining within this model's declared window.
 				inputTokens, totalTokens = 139_995, 140_000
 			}
 			if call == 3 {
@@ -890,18 +890,18 @@ func TestSubagentResultJSONContracts(t *testing.T) {
 
 func TestEffectiveSubagentToolsIntersectsCapabilityAndRoleAllowlist(t *testing.T) {
 	allTools := []string{
-		"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff",
-		"coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell",
+		"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "coding.git_diff",
+		"coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell",
 		"subagent.spawn", "mcp.external",
 	}
 	tests := []struct {
 		mode string
 		want []string
 	}{
-		{mode: "read-only", want: []string{"coding.git_diff", "coding.list_files", "coding.read_file", "coding.search"}},
-		{mode: "read-write", want: []string{"coding.edit_hashline", "coding.git_diff", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.search", "coding.write_file"}},
-		{mode: "execute", want: []string{"coding.git_diff", "coding.go_test", "coding.list_files", "coding.read_file", "coding.search", "coding.shell"}},
-		{mode: "all", want: []string{"coding.edit_hashline", "coding.git_diff", "coding.go_test", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.search", "coding.shell", "coding.write_file"}},
+		{mode: "read-only", want: []string{"coding.git_diff", "coding.glob", "coding.list_files", "coding.read_file", "coding.search"}},
+		{mode: "read-write", want: []string{"coding.delete_file", "coding.edit_hashline", "coding.git_diff", "coding.glob", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.replace", "coding.search", "coding.write_file"}},
+		{mode: "execute", want: []string{"coding.git_diff", "coding.glob", "coding.go_test", "coding.list_files", "coding.read_file", "coding.search", "coding.shell"}},
+		{mode: "all", want: []string{"coding.delete_file", "coding.edit_hashline", "coding.git_diff", "coding.glob", "coding.go_test", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.replace", "coding.search", "coding.shell", "coding.write_file"}},
 		{mode: "invalid"},
 	}
 	for _, test := range tests {
@@ -1036,7 +1036,7 @@ func TestDefaultSubagentSpawnResolvesWorker(t *testing.T) {
 		}
 	}
 	allowed := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
-	for _, toolName := range []string{"coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell"} {
+	for _, toolName := range []string{"coding.glob", "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell"} {
 		if !allowed[toolName] {
 			t.Errorf("default worker does not allow %q: %v", toolName, allowed)
 		}
@@ -1058,7 +1058,7 @@ func TestPlanModeCapsSubagentAtReadOnly(t *testing.T) {
 		t.Fatalf("plan subagent profile = %#v", profile)
 	}
 	allowed := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
-	for _, forbidden := range []string{"coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell"} {
+	for _, forbidden := range []string{"coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell"} {
 		if allowed[forbidden] {
 			t.Fatalf("plan subagent retained %q: %v", forbidden, allowed)
 		}
@@ -2264,7 +2264,7 @@ func TestBackgroundCompletionsBatchIntoOneWake(t *testing.T) {
 	}
 }
 
-func TestListRunningBackgroundChildrenOmitsForegroundAndTerminal(t *testing.T) {
+func TestListUnfinishedChildrenIncludesForegroundAndOmitsTerminal(t *testing.T) {
 	runtime := &subagentRuntime{active: map[string]*activeSubagent{
 		"bg-running": {run: agentservice.SubagentRun{
 			ID: "bg-running", SessionID: "session", ParentRunID: "parent", Type: "review",
@@ -2282,14 +2282,48 @@ func TestListRunningBackgroundChildrenOmitsForegroundAndTerminal(t *testing.T) {
 			ID: "bg-other-parent", SessionID: "session", ParentRunID: "other", Type: "review",
 			State: agentservice.SubagentRunning, Background: true,
 		}},
-		"bg-delivered": {run: agentservice.SubagentRun{
-			ID: "bg-delivered", SessionID: "session", ParentRunID: "parent", Type: "review",
-			State: agentservice.SubagentRunning, Background: true, CompletionDelivered: true,
+		"bg-done": {run: agentservice.SubagentRun{
+			ID: "bg-done", SessionID: "session", ParentRunID: "parent", Type: "review",
+			State: agentservice.SubagentCompleted, Background: true,
 		}},
 	}}
-	got := runtime.listRunningBackgroundChildren("session", "parent")
-	if len(got) != 2 || got[0].ID != "bg-queued" || got[1].ID != "bg-running" {
-		t.Fatalf("running background children = %#v", got)
+	got := runtime.listUnfinishedChildren("session", "parent")
+	if len(got) != 3 || got[0].ID != "bg-queued" || got[1].ID != "bg-running" || got[2].ID != "fg-running" {
+		t.Fatalf("unfinished children = %#v", got)
+	}
+}
+
+func TestMarkParentChildrenDeliveredSuppressesAutoWake(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := newSubagentRuntime(ctx, config.Default().Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.cancel()
+	run := agentservice.SubagentRun{
+		ID: "late-review", SessionID: "session", ParentRunID: "parent", Type: "review",
+		State: agentservice.SubagentCompleted, Background: true, StartedAt: time.Now().UTC(),
+		FinishedAt: time.Now().UTC(),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.markParentChildrenDelivered(ctx, "session", "parent")
+	pending, err := runtime.undeliveredBackgroundCompletions("session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("undelivered after successful parent finish = %#v", pending)
 	}
 }
 

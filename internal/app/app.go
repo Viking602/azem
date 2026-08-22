@@ -50,68 +50,72 @@ type runtimeRecoveryFence interface {
 }
 
 type Service struct {
-	cfg                config.Config
-	configPath         string
-	events             *eventBroker
-	ctx                context.Context
-	cancel             context.CancelFunc
-	mu                 sync.Mutex
-	activeRun          string
-	activeSession      string
-	activeGuidance     []activeGuidanceMessage
-	guidanceGeneration uint64
-	guidanceOpen       bool
-	currentSession     string
-	workspaceAnchor    string
-	hookSessions       map[string]struct{}
-	hookInitialUsers   map[string]string
-	hookInitialContext map[string]string
-	hookAsyncContext   map[string][]string
-	activeEnd          context.CancelFunc
-	activeCancelIntent string
-	wg                 sync.WaitGroup
-	hookWG             sync.WaitGroup
-	shuttingDown       bool
-	shutdownOnce       sync.Once
-	shutdownDone       chan struct{}
-	shutdownErr        error
-	sessions           *session.Service
-	coding             *agentservice.Service
-	providers          *ProviderRuntime
-	liveApprovals      map[string]*liveApproval
-	liveUserInputs     map[string]*liveUserInput
-	teamApprovals      map[string]struct{}
-	autoReviews        map[string]*prefetchedAutoReview
-	approvalMode       ApprovalMode
-	autoReviewDenials  map[string]*autoReviewDenialTracker
-	mcp                *mcpruntime.Manager
-	subagentStore      agentservice.SubagentRunStore
-	authentication     *authservice.Service
-	catalog            *catalog.Service
-	recovery           recovery.Summary
-	reconciler         ReconcileResolver
-	skillCatalog       *skills.Catalog
-	pluginCatalog      []PluginCatalogEntry
-	pluginDiagnostics  []PluginDiagnostic
-	pluginOptions      plugins.Options
-	pluginSkillDirs    []string
-	pluginMCPNames     []string
-	pluginHookSources  []plugins.HookSource
-	hooks              hooks.Dispatcher
-	hookOptions        hooks.Options
-	hookWatcher        *hookWatcher
-	routeMu            sync.Mutex
-	memory             *memory.Service
-	recap              *recap.Service
-	usagePersistMu     sync.Mutex
-	sessionUsage       map[string]session.Usage
-	attachments        AttachmentStore
-	background         *backgroundservice.Manager
-	historySearch      func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error)
-	recapGenerator     func(context.Context, recapGenerationRequest) (string, error)
-	titleGenerator     func(context.Context, titleGenerationRequest) (string, error)
-	desktopSurface     bool
-	runtimeFence       runtimeRecoveryFence
+	cfg                         config.Config
+	configPath                  string
+	events                      *eventBroker
+	ctx                         context.Context
+	cancel                      context.CancelFunc
+	mu                          sync.Mutex
+	activeRun                   string
+	activeSession               string
+	activeGuidance              []activeGuidanceMessage
+	guidanceGeneration          uint64
+	guidanceOpen                bool
+	currentSession              string
+	workspaceAnchor             string
+	hookSessions                map[string]struct{}
+	hookInitialUsers            map[string]string
+	hookInitialContext          map[string]string
+	hookAsyncContext            map[string][]string
+	activeEnd                   context.CancelFunc
+	activeCancelIntent          string
+	wg                          sync.WaitGroup
+	hookWG                      sync.WaitGroup
+	shuttingDown                bool
+	shutdownOnce                sync.Once
+	shutdownDone                chan struct{}
+	shutdownErr                 error
+	sessions                    *session.Service
+	coding                      *agentservice.Service
+	providers                   *ProviderRuntime
+	liveApprovals               map[string]*liveApproval
+	liveUserInputs              map[string]*liveUserInput
+	teamApprovals               map[string]struct{}
+	autoReviews                 map[string]*prefetchedAutoReview
+	approvalMode                ApprovalMode
+	autoReviewDenials           map[string]*autoReviewDenialTracker
+	mcp                         *mcpruntime.Manager
+	subagentStore               agentservice.SubagentRunStore
+	authentication              *authservice.Service
+	catalog                     *catalog.Service
+	recovery                    recovery.Summary
+	reconciler                  ReconcileResolver
+	skillCatalog                *skills.Catalog
+	pluginCatalog               []PluginCatalogEntry
+	pluginDiagnostics           []PluginDiagnostic
+	pluginOptions               plugins.Options
+	pluginSkillDirs             []string
+	pluginMCPNames              []string
+	pluginHookSources           []plugins.HookSource
+	hooks                       hooks.Dispatcher
+	hookOptions                 hooks.Options
+	hookWatcher                 *hookWatcher
+	routeMu                     sync.Mutex
+	memory                      *memory.Service
+	recap                       *recap.Service
+	usagePersistMu              sync.Mutex
+	sessionUsage                map[string]session.Usage
+	attachments                 AttachmentStore
+	background                  *backgroundservice.Manager
+	historySearch               func(context.Context, string, string, int, int, int) ([]session.HistoryRecord, error)
+	recapGenerator              func(context.Context, recapGenerationRequest) (string, error)
+	titleGenerator              func(context.Context, titleGenerationRequest) (string, error)
+	desktopSurface              bool
+	runtimeFence                runtimeRecoveryFence
+	quotaMu                     sync.Mutex
+	subscriptionQuotas          map[string]subscriptionQuotaSnapshot
+	subscriptionQuotaLookup     func(context.Context, string, string) (authservice.SubscriptionQuota, error)
+	subscriptionQuotaRetryDelay func(int) time.Duration
 }
 
 func NewService(parent context.Context, cfg config.Config) *Service {
@@ -266,6 +270,9 @@ func (s *Service) AttachAuth(authentication *authservice.Service, modelCatalog *
 	if authentication != nil {
 		authentication.SetStatusChangeCallback(s.handleAuthStatusChange)
 	}
+	if modelCatalog != nil {
+		s.hydrateLLMuxModels(s.ctx)
+	}
 }
 
 func (s *Service) handleAuthStatusChange(ctx context.Context, change authservice.AccountStatusChange) {
@@ -274,6 +281,9 @@ func (s *Service) handleAuthStatusChange(ctx context.Context, change authservice
 		data["email"] = account.Email
 		data["displayName"] = account.DisplayName
 		data["plan"] = account.Plan
+	}
+	if change.Status != "active" {
+		s.forgetSubscriptionQuota(change.Provider, change.AccountID)
 	}
 	s.emit(s.ctx, Event{Kind: EventAuthState, State: change.Status, Text: change.AccountID, Data: data})
 	s.emitApprovalMode(s.ctx)
@@ -302,6 +312,12 @@ func (s *Service) AttachPlugins(entries []PluginCatalogEntry, diagnostics []Plug
 func (s *Service) AttachProviderRuntime(runtime *ProviderRuntime) {
 	s.providers = runtime
 	if runtime != nil {
+		s.mu.Lock()
+		providers := cloneLLMuxProviders(s.cfg.Providers.LLMux)
+		s.mu.Unlock()
+		for id, provider := range providers {
+			runtime.UpdateLLMuxProvider(id, provider)
+		}
 		s.titleGenerator = runtime.GenerateTitle
 		s.recapGenerator = runtime.GenerateRecap
 		runtime.Attach(s, s.mcp, s.subagentStore)
@@ -1087,18 +1103,23 @@ func (s *Service) CancelActiveWithChildren(children bool) bool {
 		providers.CancelParentSubagents(sessionID, runID)
 	}
 	if coding != nil && runID != "" && runID != "starting" {
-		// The durable coordinator owns the terminal cancellation cause, but it
-		// waits for the active tool/provider execution to unwind before returning.
-		// Never make the desktop Bridge wait on that cleanup: MCP processes can
-		// acknowledge context cancellation slowly even though the stop request has
-		// already reached the coordinator.
-		go func() {
-			cancelCtx, cancelRun := context.WithTimeout(context.Background(), 5*time.Second)
-			_, _ = coding.CancelTrackedRun(cancelCtx, runID)
-			cancelRun()
-			cancel()
-		}()
-		return true
+		// Deliver the explicit cancellation cause before returning through the
+		// desktop Bridge. A pre-cancelled wait context makes SingleRunner.Cancel
+		// signal its active execution synchronously without waiting for provider
+		// or tool cleanup. The bounded background call then owns durable
+		// convergence and only afterwards cancels the app-owned run context.
+		deliveryCtx, stopDeliveryWait := context.WithCancel(context.Background())
+		stopDeliveryWait()
+		tracked, _ := coding.CancelTrackedRun(deliveryCtx, runID)
+		if tracked {
+			go func() {
+				cancelCtx, cancelRun := context.WithTimeout(context.Background(), 5*time.Second)
+				_, _ = coding.CancelTrackedRun(cancelCtx, runID)
+				cancelRun()
+				cancel()
+			}()
+			return true
+		}
 	}
 	cancel()
 	return true
@@ -1355,6 +1376,9 @@ func (s *Service) emitTerminal(_ context.Context, event Event) bool {
 		cancel()
 	}
 	if sessionID != "" && providers != nil {
+		if event.Kind == EventRunFinished && event.State == "completed" {
+			providers.MarkParentChildrenDelivered(sessionID, event.RunID)
+		}
 		providers.AutoWakePending(sessionID)
 	}
 	return published

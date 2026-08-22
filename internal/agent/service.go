@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os/exec"
 	"path/filepath"
@@ -64,7 +66,7 @@ type Service struct {
 	recoveredApprovals map[string]map[string]recoveredApprovalDecision
 }
 
-const hashlineEditToolDescription = `Apply a hashline patch to existing files. This is not unified diff. Copy the exact ¶PATH#TAG header and N:TEXT line numbers from the latest coding.read_file result. Grammar:
+const hashlineEditToolDescription = `Apply a hashline patch to existing files. This is not unified diff. Reuse the exact ¶PATH#TAG and N:TEXT lines from the latest coding.search, coding.read_file, or successful coding.edit_hashline result while the file is unchanged. A successful edit returns the fresh header and compact diff for subsequent known anchors. Re-read only for unseen or renumbered lines, a stale/conflicting tag, or a surprising result. Grammar:
 ¶PATH#TAG
 replace N:
 +final replacement line
@@ -89,7 +91,7 @@ const hashlineRetryGuidance = `Required hashline retry format:
 ¶PATH#TAG
 replace N..M:
 +final content only
-Copy ¶PATH#TAG and line numbers from the latest coding.read_file result. Allowed operations: replace N or N..M, delete N or N..M, insert before/after N, insert head/tail, replace block N, delete block N. Never use @@, ~N:M, -old rows, or bare context.`
+Reuse current ¶PATH#TAG and line numbers when a syntax/no-op rejection left the file unchanged. Re-read only when the result says the tag is stale/file changed or the required lines were never shown. Allowed operations: replace N or N..M, delete N or N..M, insert before/after N, insert head/tail, replace block N, delete block N. Never use @@, ~N:M, -old rows, or bare context.`
 
 type definitionOverrideDriver struct {
 	tool.Driver
@@ -97,6 +99,22 @@ type definitionOverrideDriver struct {
 }
 
 func (d definitionOverrideDriver) Definition() tool.Definition { return d.definition }
+
+type goTestStatusDriver struct {
+	tool.Driver
+}
+
+func (driver goTestStatusDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	result, err := driver.Driver.Execute(ctx, call, sink)
+	if err != nil || result.IsError || len(result.Structured) == 0 {
+		return result, err
+	}
+	var status coding.GoTestToolResult
+	if json.Unmarshal(result.Structured, &status) == nil && !status.Passed {
+		result.IsError = true
+	}
+	return result, err
+}
 
 type EditRecovery struct {
 	mu           sync.Mutex
@@ -160,6 +178,9 @@ func (recovery *EditRecovery) Observe(call tool.Call, result tool.Result, execut
 		if executionErr == nil && !result.IsError {
 			return
 		}
+		if !result.IsError || !hashlineFailureRequiresRead(result.Content) {
+			return
+		}
 		if recovery.readRequired == nil {
 			recovery.readRequired = make(map[string]struct{})
 		}
@@ -171,6 +192,24 @@ func (recovery *EditRecovery) Observe(call tool.Call, result tool.Result, execut
 		delete(recovery.readRequired, target)
 		delete(recovery.readRequired, "workspace")
 	}
+}
+
+func hashlineFailureRequiresRead(content string) bool {
+	if index := strings.Index(content, "Required hashline retry format:"); index >= 0 {
+		content = content[:index]
+	}
+	content = strings.ToLower(content)
+	for _, marker := range []string{
+		"tag is stale",
+		"snapshot tag does not match",
+		"stale edit conflicts",
+		"file changed since you read it",
+	} {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type RunExecutionPolicy struct {
@@ -541,6 +580,99 @@ func trackedRun(state hyworker.SingleRun) *Run {
 	}
 }
 
+const maxToolArgumentDepth = 128
+
+func validateToolArguments(arguments json.RawMessage) error {
+	if len(bytes.TrimSpace(arguments)) == 0 {
+		return nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(arguments))
+	decoder.UseNumber()
+	if err := validateToolArgumentValue(decoder, 0, true); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func validateToolArgumentValue(decoder *json.Decoder, depth int, requireObject bool) error {
+	if depth > maxToolArgumentDepth {
+		return fmt.Errorf("JSON nesting exceeds %d levels", maxToolArgumentDepth)
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, compound := token.(json.Delim)
+	if requireObject && (!compound || delim != '{') {
+		return fmt.Errorf("arguments must be a JSON object")
+	}
+	if !compound {
+		return nil
+	}
+	switch delim {
+	case '{':
+		keys := make(map[string]struct{})
+		for decoder.More() {
+			token, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := token.(string)
+			if !ok {
+				return fmt.Errorf("object key is not a string")
+			}
+			if _, duplicate := keys[key]; duplicate {
+				return fmt.Errorf("duplicate object key %q", key)
+			}
+			keys[key] = struct{}{}
+			if err := validateToolArgumentValue(decoder, depth+1, false); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim('}') {
+			return fmt.Errorf("object ended with %q", end)
+		}
+	case '[':
+		for decoder.More() {
+			if err := validateToolArgumentValue(decoder, depth+1, false); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim(']') {
+			return fmt.Errorf("array ended with %q", end)
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+	return nil
+}
+
+func invalidToolArguments(call tool.Call, err error) ExecutionResult {
+	return ExecutionResult{
+		Result: tool.Result{
+			ToolCallID: call.ID,
+			Name:       call.Name,
+			Content:    fmt.Sprintf("%s rejected: invalid arguments: %v", call.Name, err),
+			IsError:    true,
+		},
+		Executed: true,
+	}
+}
+
 func (s *Service) ExecuteTool(ctx context.Context, run *Run, call tool.Call, sink tool.UpdateSink) (ExecutionResult, error) {
 	if run == nil {
 		return ExecutionResult{}, fmt.Errorf("run is nil")
@@ -564,6 +696,9 @@ func (s *Service) PrepareDriver(ctx context.Context, run *Run, driver tool.Drive
 	definition := driver.Definition()
 	if call.Name != definition.Name {
 		return ExecutionResult{}, false, fmt.Errorf("tool call %q does not match driver %q", call.Name, definition.Name)
+	}
+	if err := validateToolArguments(call.Arguments); err != nil {
+		return invalidToolArguments(call, err), false, nil
 	}
 	if blocked, required := run.editRecovery.BlockedEdit(call); required {
 		return ExecutionResult{Result: blocked, Executed: true}, false, nil
@@ -770,7 +905,8 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 	workspace := coding.NewLocalWorkspace(absoluteRoot)
 	candidates := coding.NewToolSet(workspace)
 	isGitRepo := workspaceIsGitRepo(ctx, absoluteRoot)
-	drivers := make([]tool.Driver, 0, len(candidates))
+	drivers := make([]tool.Driver, 0, len(candidates)+4)
+	var readDriver, editDriver, searchDriver tool.Driver
 	for _, driver := range candidates {
 		definition := driver.Definition()
 		if definition.Name == coding.ToolGitDiff && !isGitRepo {
@@ -783,7 +919,33 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 			definition.Description = hashlineEditToolDescription
 			driver = definitionOverrideDriver{Driver: driver, definition: definition}
 		}
+		if definition.Name == coding.ToolGoTest {
+			driver = goTestStatusDriver{Driver: driver}
+		}
+		switch definition.Name {
+		case coding.ToolReadFile:
+			readDriver = driver
+		case coding.ToolSearch:
+			searchDriver = driver
+			continue
+		case coding.ToolEditHashline:
+			editDriver = driver
+		}
 		drivers = append(drivers, driver)
+	}
+	if searchDriver != nil {
+		if readDriver != nil {
+			drivers = append(drivers, newReliableSearchDriver(absoluteRoot, workspace, readDriver))
+		} else {
+			drivers = append(drivers, searchDriver)
+		}
+	}
+	drivers = append(drivers, newGlobDriver(workspace))
+	if s.allowWrite {
+		if readDriver != nil && editDriver != nil {
+			drivers = append(drivers, newReplaceDriver(readDriver, editDriver))
+		}
+		drivers = append(drivers, newDeleteFileDriver(absoluteRoot))
 	}
 	if s.shellPolicy != "deny" {
 		drivers = append(drivers, newRuntimeShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork, s.shellRuntime))

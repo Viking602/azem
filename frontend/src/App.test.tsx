@@ -199,21 +199,32 @@ describe("application interactions", () => {
 
     expect(container.querySelector(".empty-composer-heading h1")?.textContent).toBe("准备开始什么？");
     expect(container.querySelector(".empty-launch-mark")).toBeNull();
+    expect(container.querySelector(".thread-header .titlebar-project")).toBeNull();
+    expect(container.querySelector(".thread-heading-rule")).toBeNull();
   });
 
-  it("uses the titlebar control for branches and keeps the project label intact", async () => {
+  it("uses the thread header control for branches and keeps the project label intact", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
 
     await act(async () => root?.render(<App />));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    await act(async () => useRuntimeStore.setState({
+      view: "thread",
+      currentTitle: "统一工具调用展示样式",
+      blocks: [{ id: "answer-1", kind: "assistant", content: "已完成" }],
+    }));
 
-    const trigger = container.querySelector<HTMLButtonElement>(".titlebar-project");
+    expect(container.querySelector(".app-titlebar .titlebar-project")).toBeNull();
+    const heading = container.querySelector(".thread-heading-copy");
+    expect(heading?.querySelector("strong")?.textContent).toBe("统一工具调用展示样式");
+    expect(heading?.querySelector(".thread-heading-rule")?.textContent).toBe("|");
+    const trigger = container.querySelector<HTMLButtonElement>(".thread-header .titlebar-project");
     expect(trigger?.getAttribute("aria-label")).toBe("切换分支");
     expect(trigger?.getAttribute("title")).toBeNull();
     expect(trigger?.querySelector("strong")?.textContent).toBe("azem");
-
+    expect(heading?.querySelector(".thread-heading-rule")?.nextElementSibling).toBe(trigger?.closest(".titlebar-project-switch"));
     await act(async () => trigger?.click());
     const popover = container.querySelector<HTMLElement>(".titlebar-project-popover");
     expect(popover?.getAttribute("aria-label")).toBe("切换分支");
@@ -231,6 +242,7 @@ describe("application interactions", () => {
   it("keeps long branch catalogs inside a scrollable viewport", () => {
     expect(applicationStyles).toMatch(/\.titlebar-project-popover\s*\{[^}]*max-height:\s*min\(540px,\s*calc\(100vh - 58px\)\);[^}]*overflow:\s*hidden;/s);
     expect(applicationStyles).toMatch(/\.titlebar-project-options\s*\{[^}]*max-height:\s*min\(420px,\s*calc\(100vh - 160px\)\);[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain;/s);
+    expect(prototypeStyles).toMatch(/\.thread-heading-copy \.titlebar-project-switch,\s*\.desktop-shell\[data-runtime="true"\]\[data-platform\*="mac" i\] \.thread-heading-copy \.titlebar-project-switch\s*\{[^}]*padding-left:\s*0;/s);
   });
 
   it("paces streaming text without breaking Unicode or event order", () => {
@@ -521,15 +533,8 @@ describe("application interactions", () => {
     expect(container?.querySelector(".agent-side-chat-meta")).toBeNull();
     expect(user?.closest(".process-fold")).toBeNull();
     expect(answer?.closest(".process-fold")).toBeNull();
-    const bar = process?.querySelector<HTMLButtonElement>(".process-fold-summary");
-    expect(bar?.getAttribute("aria-expanded")).toBe("false");
-    expect(bar?.textContent).toContain("已处理");
+    expect(process?.getAttribute("data-folded")).toBe("true");
     expect(process?.querySelector(".commentary-block")).toBeNull();
-
-    await act(async () => bar?.click());
-    expect(bar?.getAttribute("aria-expanded")).toBe("true");
-    expect(process?.textContent).toContain("核对安全边界");
-    expect(process?.querySelector(".process-step-count")?.getAttribute("aria-expanded")).toBe("false");
     expect(process?.querySelector(".timeline-step")).toBeNull();
 
 

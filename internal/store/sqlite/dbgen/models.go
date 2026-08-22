@@ -97,6 +97,13 @@ type Lease struct {
 	Data      []byte `db:"data"`
 }
 
+type LlmuxProviderModel struct {
+	ProviderID string `db:"provider_id"`
+	ModelID    string `db:"model_id"`
+	Payload    []byte `db:"payload"`
+	UpdatedAt  int64  `db:"updated_at"`
+}
+
 type MemoriesFt struct {
 	Content string `db:"content"`
 }

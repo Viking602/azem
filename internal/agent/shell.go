@@ -277,7 +277,7 @@ func (d *shellDriver) Definition() tool.Definition {
 	additional := false
 	maxWall := d.maxWallClock()
 	maxSec := maxWallClockSeconds(maxWall)
-	description := fmt.Sprintf("Run a foreground command. Set wall_clock_seconds to the hard deadline you need for this command, from 1 to %d seconds (workspace.shell.max_wall_clock). Omit it to use the configured maximum. timeout_seconds is the maximum interval without stdout/stderr; active output extends that interval up to the wall clock. If you set wall_clock_seconds and omit timeout_seconds, a silent command may run until the wall clock. stdin is optional UTF-8 fed to the process (scripted keystrokes or piped input). Detached/background processes are not permitted.", maxSec)
+	description := fmt.Sprintf("Run a supervised foreground command. Set wall_clock_seconds to the hard deadline you need for this command, from 1 to %d seconds (workspace.shell.max_wall_clock). Omit it to use the configured maximum. timeout_seconds is the maximum interval without stdout/stderr; active output extends that interval up to the wall clock. If you set wall_clock_seconds and omit timeout_seconds, a silent command may run until the wall clock. stdin is optional UTF-8 fed to the process (scripted keystrokes or piped input). POSIX background operators and known detach primitives are rejected because descendants that create another session can escape process-group supervision.", maxSec)
 	if runtime.GOOS == "windows" {
 		description += " Commands use PowerShell on Windows."
 	}
@@ -305,12 +305,32 @@ func (d *shellDriver) Definition() tool.Definition {
 	}
 }
 
-// rejectDetached is defense in depth. Process-group/job ownership is the actual boundary.
+// rejectDetached is defense in depth for commands that can escape the process
+// group or Job Object. Process ownership is the primary containment boundary.
 func rejectDetached(command string) bool {
 	return rejectDetachedForOS(command, runtime.GOOS)
 }
 
-func rejectDetachedForOS(command, goos string) bool {
+func rejectDetachedForOS(command, _ string) bool {
+	// POSIX shells concatenate quoted and escaped word fragments before command
+	// lookup (for example set''sid and set\\sid both execute setsid). Removing
+	// those syntax characters is conservative defense in depth; process
+	// supervision must never depend on an exact raw token spelling.
+	normalized := strings.NewReplacer("'", "", `"`, "", `\`, "").Replace(command)
+	for _, token := range strings.Fields(normalized) {
+		plain := strings.Trim(token, "();")
+		if plain == "nohup" || plain == "setsid" || plain == "disown" || plain == "daemonize" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBackgroundOperator(command string) bool {
+	return hasBackgroundOperatorForOS(command, runtime.GOOS)
+}
+
+func hasBackgroundOperatorForOS(command, goos string) bool {
 	var quote byte
 	escaped := false
 	for index := 0; index < len(command); index++ {
@@ -333,27 +353,29 @@ func rejectDetachedForOS(command, goos string) bool {
 			quote = current
 			continue
 		}
-		if current == '&' {
-			// PowerShell uses & as its foreground invocation operator. The Windows
-			// Job Object remains the process-tree containment boundary.
-			if goos == "windows" {
-				continue
-			}
-			if index+1 < len(command) && command[index+1] == '&' {
-				index++
-				continue
-			}
-			return true
+		if current != '&' || goos == "windows" {
+			continue
 		}
-	}
-	tokens := strings.Fields(command)
-	for _, token := range tokens {
-		plain := strings.Trim(token, "'\"();")
-		if plain == "nohup" || plain == "setsid" || plain == "disown" || plain == "daemonize" {
-			return true
+		if index+1 < len(command) && command[index+1] == '&' {
+			index++
+			continue
 		}
+		if ampersandIsRedirection(command, index) {
+			continue
+		}
+		return true
 	}
 	return false
+}
+
+func ampersandIsRedirection(command string, index int) bool {
+	if index > 0 {
+		switch command[index-1] {
+		case '>', '<', '|':
+			return true
+		}
+	}
+	return index+1 < len(command) && command[index+1] == '>'
 }
 
 func shellCommand(command string) *exec.Cmd {
@@ -378,7 +400,10 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 		return shellError(call, "command is empty"), nil
 	}
 	if rejectDetached(input.Command) {
-		return shellError(call, "detached/background execution is not permitted"), nil
+		return shellError(call, "detached execution that can escape process supervision is not permitted"), nil
+	}
+	if hasBackgroundOperator(input.Command) {
+		return shellError(call, "background operators that can escape process supervision are not permitted"), nil
 	}
 	if d.approval == "deny" {
 		return shellError(call, "shell commands are disabled by workspace.shell_policy"), nil
@@ -492,7 +517,11 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 			}
 			remaining := inactivityTimeout - probedAt.Sub(activityAt)
 			if remaining <= 0 {
-				reason = "timeout"
+				if !probedAt.Before(absoluteDeadline) {
+					reason = "wall_clock_timeout"
+				} else {
+					reason = "timeout"
+				}
 				break
 			}
 			deadline = activityAt.Add(inactivityTimeout)

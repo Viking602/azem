@@ -84,13 +84,6 @@ pre, code, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Men
 .desktop-shell {
   height: 100%;
   background: var(--sidebar);
-  -webkit-user-select: none;
-  user-select: none;
-  -webkit-touch-callout: none;
-}
-.desktop-shell :where(input, textarea, [contenteditable="true"], .user-block, .markdown, .reasoning-body, .tool-detail, .tool-log, .code-diff-scroll, .workspace-code-viewport, .workspace-patch, .pull-request-markdown, .error-block, [role="alert"], [data-text-selectable="true"], pre, code) {
-  -webkit-user-select: text;
-  user-select: text;
 }
 .desktop-shell :where(img, svg) { -webkit-user-drag: none; }
 .titlebar-region, .secondary-page > header { --wails-draggable: drag; user-select: none; }
@@ -101,7 +94,7 @@ pre, code, kbd { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Men
 .workspace-grid { --inspector-reserve: 380px; position: relative; height: 100%; display: grid; grid-template-columns: var(--sidebar-width) 1px minmax(0, 1fr); background: var(--sidebar); }
 .workspace-sidebar { grid-column: 1; min-width: 0; min-height: 0; height: 100%; overflow: hidden; display: flex; flex-direction: column; background: color-mix(in srgb, var(--sidebar) 92%, transparent); padding: 0 9px 10px; backdrop-filter: blur(18px); }
 .workspace-main { position: relative; z-index: 2; grid-column: 3; min-width: 0; overflow: hidden; border-radius: 14px 0 0 14px; background: var(--paper); box-shadow: inset 1px 0 var(--line), -7px 0 18px -15px rgb(20 20 17 / 38%); }
-.resize-handle { z-index: 8; width: 5px; margin-left: -2px; cursor: col-resize; touch-action: none; }
+.resize-handle { z-index: 8; width: 5px; margin-left: -2px; cursor: col-resize; touch-action: none; user-select: none; }
 .resize-handle::after { content: ""; display: block; width: 1px; height: 100%; margin-left: 2px; background: transparent; }
 .resize-left { grid-column: 2; }
 .resize-handle:hover::after { background: var(--blue); }

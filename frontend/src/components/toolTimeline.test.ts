@@ -437,6 +437,19 @@ describe("tool timeline grouping", () => {
     ], "en")).toBe("Viewed 2 diffs");
   });
 
+  it("does not count an unchanged gofmt result as an edited file", () => {
+    const formatter: Block = {
+      ...tool("format", "coding.gofmt"),
+      data: {
+        name: "coding.gofmt",
+        structured: JSON.stringify({ path: "internal/app/work_evidence.go", changed: false, diff: "" }),
+      },
+    };
+    const summary = summarizeToolGroup([formatter, tool("build", "coding.shell")], "zh-CN");
+    expect(summary).not.toContain("编辑");
+    expect(summary).toContain("运行了 1 条命令");
+  });
+
   it("collapses consecutive settled tools into a summary", () => {
     const blocks: Block[] = [
       { id: "u1", kind: "user", content: "go" },

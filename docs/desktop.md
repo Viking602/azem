@@ -64,6 +64,13 @@ it does not expose a generic shell executor to the WebView. The in-app bottom
 panel is a separate human-only PTY and does not replace that host-terminal
 action.
 
+Same-workspace session navigation is deterministic: Sidebar rows and global
+search call `Bridge.ResumeSession` and apply the returned sequence-0 durable
+projection directly in the initiating window. Bootstrap may still list
+sessions, models, routes, and branches concurrently, but those event timings
+cannot make the first session click a no-op. A different project's session
+continues through `OpenProjectSession` so it opens under its owning workspace.
+
 The Workspace overview is the parent route for repository work. It combines the
 current branch, bounded working-tree summary, current Pull Request, repository
 status, and recent project sessions. Files and Changes are child routes and
@@ -117,18 +124,31 @@ or unrelated runs. `internal/tui` projects the same field in its agent detail
 line, so GUI and TUI cannot disagree about stale work.
 
 Settings use one Codex-style full-window layout with a searchable left
-navigation and a consistent content column. Opening Settings focuses the dialog
-surface rather than 返回工作台, so the WebView does not draw a default focus
-ring on that control. Escape and the back control still close Settings; Tab
-still reaches the back control and uses the product `:focus-visible` ring. Model catalog, model routing,
-Subagents, Approvals, Appearance, Extensions, Archive, and Usage remain
-complete sections rather than separate modal variants. Usage is a read-only
-ledger of completed `provider_requests` (and completed skill activations when
-those rows exist). The query is bounded to the last 366 local-calendar days
-and at most 20 models and 20 skills. Cache read/write follow the inclusive
-reported-fact rule: unknown providers stay unreported instead of becoming
-zero. Missing metrics render as —; an empty database does not invent a
-heatmap. Archive lists archived
+navigation, a consistent enlarged typography scale, and a bounded content
+column. Opening Settings focuses the dialog surface rather than 返回工作台, so
+the WebView does not draw a default focus ring on that control. Escape and the
+back control still close Settings; Tab still reaches the back control and uses
+the product `:focus-visible` ring. Model catalog, model routing, Subagents,
+Approvals, Appearance, Extensions, Archive, and Usage remain complete sections
+rather than separate modal variants. Route cards use bounded responsive grid
+columns and contain their model, reasoning, and Fast controls inside the card.
+Usage is a read-only ledger of completed `provider_requests` (and completed
+skill activations when those rows exist). The query is bounded to the last 366
+local-calendar days and at most 20 models and 20 skills. Its activity cells
+scale across the complete report width instead of leaving a fixed-grid gap.
+Cache read/write follow the inclusive reported-fact rule: unknown providers
+stay unreported instead of becoming zero. Missing metrics render as —; an empty
+database does not invent a heatmap.
+
+The Cursor provider header shows the refreshed account email and normalized
+subscription tier. Its quota section renders Total, Cursor, and Third Party
+remaining lanes with one reset countdown and cycle-pace forecast. Cursor's raw
+reasoning, Thinking, and Fast model IDs are grouped into searchable base-model
+cards. The version panel can inspect one exact raw ID, while the family switch
+enables or disables every grouped variant in one backend configuration update.
+Partial family availability remains visible as an enabled count.
+
+Archive lists archived
 conversations grouped by owning project; groups start collapsed and paginate
 rows, and each row shows its project. It can bulk-archive unpinned
 sessions that have been idle for a chosen number of days, and restores a
@@ -436,9 +456,13 @@ Packaged windows append the build timestamp to the `wails://` document URL.
 This invalidates WKWebView's document cache between builds while Vite's hashed
 asset names continue to provide immutable JavaScript and CSS resources.
 
-Launch `dist/Azem.app/Contents/MacOS/Azem`, open Workspace, expand nested
-directories, preview a text file and an image, verify binary and oversized
-states, switch tabs, and confirm the file viewer and sidebar scroll
+Launch `dist/Azem.app/Contents/MacOS/Azem`. On a cold launch, click a
+non-current session in the active project's sidebar before background catalog
+refreshes settle and confirm its transcript opens on the first click.
+
+Then open Workspace, expand nested directories, preview a text file and an
+image, verify binary and oversized states, switch tabs, and confirm the file
+viewer and sidebar scroll
 independently. Then open Environment, click Changes, filter and expand a changed
 file, verify added/deleted lines, and confirm a large change set starts folded.
 Verify every child route returns to Workspace, each project can create a new

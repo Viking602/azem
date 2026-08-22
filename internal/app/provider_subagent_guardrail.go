@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync/atomic"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	hyagent "github.com/Viking602/venat/agent"
@@ -29,16 +28,9 @@ func backgroundChildStatuses(runs []agentservice.SubagentRun) []backgroundChildS
 }
 
 func pendingBackgroundChildrenGuardrail(list func() []backgroundChildStatus) hyagent.OutputGuardrail {
-	var prompted atomic.Bool
 	return hyagent.NewOutputGuardrail("pending-background-children", func(_ context.Context, _ hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
-		if prompted.Load() {
-			return hyagent.AllowOutput(), nil
-		}
 		children := list()
 		if len(children) == 0 {
-			return hyagent.AllowOutput(), nil
-		}
-		if !prompted.CompareAndSwap(false, true) {
 			return hyagent.AllowOutput(), nil
 		}
 		return hyagent.RetryOutput(message.NewText(message.RoleUser, pendingBackgroundChildrenPrompt(children))), nil
@@ -47,7 +39,7 @@ func pendingBackgroundChildrenGuardrail(list func() []backgroundChildStatus) hya
 
 func pendingBackgroundChildrenPrompt(children []backgroundChildStatus) string {
 	var builder strings.Builder
-	builder.WriteString("[Host] Background subagents spawned in this run are still running:\n")
+	builder.WriteString("[Host] Subagents spawned in this run are not terminal. You may not finish until every listed child is completed, failed, or cancelled.\n")
 	for _, child := range children {
 		role := strings.TrimSpace(child.Type)
 		if role == "" {
@@ -62,6 +54,6 @@ func pendingBackgroundChildrenPrompt(children []backgroundChildStatus) string {
 		}
 		builder.WriteByte('\n')
 	}
-	builder.WriteString("Call `subagent.get_output` with these task_ids and a `timeout_ms` long enough to wait for a terminal state, then consume the result before any gated action. If this background work is independent of the current conclusion, say so explicitly and then you may finish. Do not cancel the children merely because they are still running.")
+	builder.WriteString("Call `subagent.get_output` with these task_ids and a `timeout_ms` long enough to wait for a terminal state, then consume the result. Repeat until the list is empty. Do not cancel a child merely because it is still running. The host may cancel a silent child after idle_timeout; only then is that child terminal.")
 	return builder.String()
 }

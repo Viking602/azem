@@ -294,6 +294,35 @@ The pipeline stages have fixed responsibilities:
 5. **Observation** — durable tool records, file observations, and UI
    projections read the settled result; they never mutate it.
 
+Adapters preserve the original call ID and public tool name in their settled
+result. A whole-file adapter must reject a truncated source read rather than
+rewrite from an incomplete prefix. Structured command status and the generic
+tool error bit agree: in particular, `coding.go_test` with a non-zero exit is
+an error result. Successful `coding.replace` and `coding.delete_file` calls
+produce the same durable file observations and completed-change projections as
+the corresponding hashline edit and write paths.
+
+`coding.search` enumerates Git-tracked and unignored untracked files with an
+argv-only `git ls-files -co --exclude-standard -z` boundary. Its result limit
+caps matched lines, not files scanned, so dependency/build trees cannot
+truncate source discovery. A matched path is reread through the shared
+`coding.read_file` driver before projection; the returned `¶PATH#TAG` therefore
+names the exact snapshot available to a following Hashline edit. Non-Git
+workspaces use a bounded walker with common dependency/build trees excluded.
+For a completed delete, path absence is the captured postcondition rather than
+a read failure. Continuity marks continued absence `verified_unchanged` and a
+recreated path `stale`.
+
+Before approval, the governed boundary also parses the raw argument object
+without last-key-wins semantics. Duplicate keys at any depth are rejected as a
+recoverable result under the original call ID; no approval or driver execution
+occurs for an ambiguous object.
+
+Todo initialization follows the same ownership boundary: the model supplies
+goal/title/content only, while Azem assigns phase/item IDs and status before
+the snapshot becomes durable. A complete goal-plus-phases payload can recover
+an omitted `init` discriminator; other operations remain explicit.
+
 File changes appear only after execution produces evidence. Non-idempotent
 actions are recorded as durable action attempts. At startup, incomplete action
 attempts become `unknown` and require reconciliation; successfully recorded

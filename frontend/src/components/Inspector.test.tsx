@@ -67,7 +67,7 @@ describe("Inspector", () => {
     const root = createRoot(container);
 
     await act(async () => root.render(<Inspector />));
-    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("最近请求命中率80%");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("缓存命中率80%");
     expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("命中缓存11k");
     expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("请求输入14k");
     expect(container.querySelector(".context-composition")?.textContent).toContain("上下文构成");
@@ -92,7 +92,19 @@ describe("Inspector", () => {
     await act(async () => toggle.click());
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(groups.hidden).toBe(true);
+
+    await act(async () => useRuntimeStore.setState({
+      running: true,
+      contextUsage: {
+        inputTokens: 58_000, outputTokens: 0, contextLimit: 128_000, reported: false,
+        cacheInputTokens: 100_000, cachedInputTokens: 88_000, cacheReported: true,
+      },
+    }));
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("80%");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).not.toContain("等待上报");
+
     await act(async () => root.unmount());
+    useRuntimeStore.setState({ running: false });
   });
 
   it("labels a new running request as pending instead of showing aggregate history", async () => {
@@ -109,11 +121,31 @@ describe("Inspector", () => {
     const root = createRoot(container);
 
     await act(async () => root.render(<Inspector />));
-    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("最近请求命中率等待上报");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("缓存命中率等待上报");
     expect(container.querySelector(".inspector-cache-summary")?.textContent).not.toContain("88%");
 
     await act(async () => root.unmount());
     useRuntimeStore.setState({ running: false });
+  });
+
+  it("labels completed Cursor cache telemetry as unreported", async () => {
+    useRuntimeStore.setState({
+      snapshot: { ...snapshot, provider: "cursor", model: "composer-2" },
+      view: "thread", currentSessionId: "session-1", blocks: [], agents: [], backgroundProcesses: [],
+      branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
+      todo: null, recap: null, contextProfile: null, running: false,
+      contextUsage: {
+        inputTokens: 0, outputTokens: 7, contextLimit: 200_000, reported: true,
+      },
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => root.render(<Inspector />));
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).toContain("缓存命中率未上报");
+    expect(container.querySelector(".inspector-cache-summary")?.textContent).not.toContain("等待上报");
+
+    await act(async () => root.unmount());
   });
 
   it("lists distinct image names with typed and web-search URLs, and opens them", async () => {
@@ -155,7 +187,7 @@ describe("Inspector", () => {
     container.remove();
   });
 
-  it("renders todo phases as Beautiful UI Task Row capsules", async () => {
+  it("renders todo phases as a heading plus task list", async () => {
     useRuntimeStore.setState({
       snapshot, view: "thread", currentSessionId: "session-1", blocks: [], agents: [], backgroundProcesses: [],
       branches: [{ name: "main", current: true }], workspaceAdditions: 0, workspaceDeletions: 0, recap: null, contextProfile: null,
@@ -182,34 +214,25 @@ describe("Inspector", () => {
     const root = createRoot(container);
     await act(async () => root.render(<Inspector />));
 
-    const rows = Array.from(container.querySelectorAll(".todo-section .bui-task-row"));
-    expect(rows).toHaveLength(2);
-    expect(rows[0]!.getAttribute("data-status")).toBe("completed");
-    expect(rows[0]!.getAttribute("data-variant")).toBe("capsules");
-    expect(rows[0]!.getAttribute("data-expanded")).toBe("false");
-    expect(rows[0]!.querySelector(".bui-task-mark")?.getAttribute("data-state")).toBe("completed");
-    expect(rows[0]!.querySelector(".bui-task-title")?.textContent).toBe("核验供应商");
-    expect(rows[0]!.querySelector(".bui-task-metric")?.textContent).toBe("2/2");
-    expect(rows[0]!.querySelector(".bui-task-badge")?.textContent).toBe("已完成");
-    expect(rows[0]!.querySelector(".bui-task-header")?.getAttribute("aria-expanded")).toBe("false");
-    expect(rows[0]!.querySelector<HTMLDivElement>(".bui-task-body")?.hidden).toBe(true);
+    const section = container.querySelector(".todo-section")!;
+    expect(section.querySelector(".todo-title")?.textContent).toBe("核验供应商并映射库存");
+    expect(section.querySelector(".todo-kicker")).toBeNull();
+    expect(section.querySelector(".inspector-section-header small")?.textContent).toBe("2 / 4");
+    expect(section.querySelectorAll(".bui-task-row")).toHaveLength(0);
 
-    expect(rows[1]!.getAttribute("data-status")).toBe("in_progress");
-    expect(rows[1]!.querySelector(".bui-task-mark em")?.textContent).toBe("2");
-    expect(rows[1]!.querySelector(".bui-task-title")?.textContent).toBe("映射库存");
-    expect(rows[1]!.querySelector(".bui-task-metric")?.textContent).toBe("0/2");
-    expect(rows[1]!.querySelector(".bui-task-badge")?.textContent).toBe("进行中");
-    expect(rows[1]!.querySelector(".bui-task-header")?.getAttribute("aria-expanded")).toBe("true");
-    expect(rows[1]!.querySelector<HTMLDivElement>(".bui-task-body")?.hidden).toBe(false);
-    expect(rows[1]!.textContent).toContain("读取库存文件");
-    expect(rows[1]!.textContent).toContain("评估缺货");
+    const phases = Array.from(section.querySelectorAll(".todo-phase"));
+    expect(phases).toHaveLength(2);
+    expect(phases[0]!.querySelector(".todo-phase-title")?.textContent).toBe("核验供应商");
+    expect(phases[0]!.getAttribute("data-state")).toBe("completed");
+    expect(Array.from(phases[0]!.querySelectorAll(".todo-task-label")).map((node) => node.textContent)).toEqual(["匹配税号", "核对联系人"]);
 
-    await act(async () => rows[0]!.querySelector<HTMLButtonElement>(".bui-task-header")!.click());
-    expect(rows[0]!.querySelector(".bui-task-header")?.getAttribute("aria-expanded")).toBe("true");
-    expect(rows[0]!.querySelector<HTMLDivElement>(".bui-task-body")?.hidden).toBe(false);
-    expect(rows[0]!.textContent).toContain("匹配税号");
-    expect(rows[0]!.textContent).toContain("2/2");
-    expect(container.querySelector(".todo-section .inspector-section-header small")?.textContent).toBe("2 / 4");
+    expect(phases[1]!.querySelector(".todo-phase-title")?.textContent).toBe("映射库存");
+    expect(phases[1]!.getAttribute("data-state")).toBe("in_progress");
+    const tasks = Array.from(phases[1]!.querySelectorAll(".todo-task"));
+    expect(tasks[0]!.getAttribute("data-status")).toBe("in_progress");
+    expect(tasks[0]!.textContent).toContain("读取库存文件");
+    expect(tasks[1]!.getAttribute("data-status")).toBe("pending");
+    expect(tasks[1]!.textContent).toContain("评估缺货");
 
     await act(async () => root.unmount());
   });

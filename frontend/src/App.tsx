@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, GitBranch, Search } from "lucide-react";
 import { execute, initialise, isDesktopRuntime, resumeSession, subscribe, subscribePullRequests } from "./bridge";
 import Sidebar from "./components/Sidebar";
 import { AppOverlays, AppWorkspace } from "./components/AppSurfaces";
-import { tFormat, translator } from "./i18n";
+import { translator } from "./i18n";
 import { isTerminalToggleKey } from "./terminal";
 import { useTerminalStore } from "./terminalStore";
 import {
@@ -245,7 +244,12 @@ export default function App() {
   }, [appearanceReady, theme, uiFont, uiFontSize, chatFontSize, chatCodeFontSize]);
 
   useEffect(() => {
-    const preventNativeContextMenu = (event: MouseEvent) => event.preventDefault();
+    const preventNativeContextMenu = (event: MouseEvent) => {
+      // Keep the native copy menu usable on selections and editable text.
+      if (window.getSelection()?.toString()) return;
+      if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable=\"true\"]")) return;
+      event.preventDefault();
+    };
     document.addEventListener("contextmenu", preventNativeContextMenu);
     return () => document.removeEventListener("contextmenu", preventNativeContextMenu);
   }, []);
@@ -345,92 +349,8 @@ export default function App() {
 }
 
 function AppTitleBar() {
-  const snapshot = useRuntimeStore((state) => state.snapshot)!;
-  const branches = useRuntimeStore((state) => state.branches);
-  const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
-  const setError = useRuntimeStore((state) => state.setError);
-  const [branchOpen, setBranchOpen] = useState(false);
-  const [branchSearch, setBranchSearch] = useState("");
-  const branchSwitch = useRef<HTMLDivElement>(null);
-  const t = translator(snapshot.language);
-  const project = snapshot.workspace.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
-  const branch = branches.find((item) => item.current)?.name || snapshot.currentBranch || t("noBranches");
-  const visibleBranches = branches
-    .filter((item) => !branchSearch.trim() || item.name.toLowerCase().includes(branchSearch.trim().toLowerCase()))
-    .slice()
-    .sort((left, right) => Number(right.current) - Number(left.current) || left.name.localeCompare(right.name));
-
-  useEffect(() => {
-    if (!branchOpen) return;
-    const close = (event: PointerEvent) => {
-      if (branchSwitch.current && !branchSwitch.current.contains(event.target as Node)) setBranchOpen(false);
-    };
-    const closeWithKeyboard = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setBranchOpen(false);
-        setBranchSearch("");
-      }
-    };
-    document.addEventListener("pointerdown", close, true);
-    document.addEventListener("keydown", closeWithKeyboard);
-    return () => {
-      document.removeEventListener("pointerdown", close, true);
-      document.removeEventListener("keydown", closeWithKeyboard);
-    };
-  }, [branchOpen]);
-
-  const switchBranch = async (name: string, confirmDirty = false) => {
-    if (!name || name === branch) {
-      setBranchOpen(false);
-      setBranchSearch("");
-      return;
-    }
-    try {
-      await execute({
-        kind: "switch_git_branch",
-        target: name,
-        decision: confirmDirty ? "confirm_dirty" : undefined,
-      });
-      setBranchOpen(false);
-      setBranchSearch("");
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      if (!confirmDirty && /uncommitted changes/i.test(message)) {
-        if (window.confirm(tFormat(snapshot.language, "dirtySwitchConfirm", { branch: name }))) {
-          await switchBranch(name, true);
-        }
-        return;
-      }
-      setError(message);
-    }
-  };
-
   return <header className="app-titlebar titlebar-region">
     <div className="window-controls" aria-hidden="true"><i /><i /><i /></div>
-    <div className="titlebar-project-switch" ref={branchSwitch}>
-      <button type="button" className="titlebar-project" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} onClick={() => setBranchOpen((open) => !open)}>
-        <strong>{project}</strong><b aria-hidden="true">/</b><span>{branch}</span><ChevronDown size={14} />
-      </button>
-      {branchOpen && <section className="titlebar-project-popover" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}>
-        <header><strong>{snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}</strong><span>{project}</span></header>
-        <label className="titlebar-project-search"><Search size={14} /><input autoFocus value={branchSearch} onChange={(event) => setBranchSearch(event.target.value)} placeholder={`${t("searchBranches")}…`} aria-label={t("searchBranches")} /></label>
-        <div className="titlebar-project-options" role="listbox">
-          {visibleBranches.map((item) => {
-            const currentDetail = workspaceChangedFiles > 0
-              ? tFormat(snapshot.language, "uncommittedFiles", { count: workspaceChangedFiles })
-              : t("clean");
-            return <button key={item.name} type="button" role="option" aria-selected={item.current} onClick={() => void switchBranch(item.name)}>
-              <span className="titlebar-project-letter"><GitBranch size={14} /></span>
-              <span><strong>{item.name}</strong><small>{item.current ? currentDetail : t("local")}</small></span>
-              <em>{item.current ? snapshot.language === "zh-CN" ? "当前" : "Current" : ""}</em>
-              <Check size={14} />
-            </button>;
-          })}
-        </div>
-        {visibleBranches.length === 0 && <p>{t("noMatchingBranches")}</p>}
-        <footer><span>↵ {snapshot.language === "zh-CN" ? "切换" : "Switch"}</span><span>esc {snapshot.language === "zh-CN" ? "关闭" : "Close"}</span></footer>
-      </section>}
-    </div>
   </header>;
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Viking602/azem/internal/contextarchive"
@@ -89,6 +90,31 @@ const (
 	subagentWakeBlockState = "subagent_wake"
 )
 
+type providerContextPressure struct {
+	toolTokens            int
+	reportedHistoryTokens atomic.Int64
+}
+
+func (p *providerContextPressure) observeInputTokens(inputTokens int) {
+	if p == nil || inputTokens <= 0 {
+		return
+	}
+	p.reportedHistoryTokens.Store(int64(max(0, inputTokens-max(0, p.toolTokens))))
+}
+
+func (p *providerContextPressure) tokens(localEstimate int) int {
+	if p == nil {
+		return localEstimate
+	}
+	return max(localEstimate, int(p.reportedHistoryTokens.Load()))
+}
+
+func (p *providerContextPressure) reset() {
+	if p != nil {
+		p.reportedHistoryTokens.Store(0)
+	}
+}
+
 type turnContext struct {
 	sessionID                 string
 	instructions              string
@@ -108,6 +134,8 @@ type turnContext struct {
 	workspaceRoot             string
 	images                    []session.Attachment
 	checkpointBoundary        *int64
+	canonicalHighWater        *int64
+	providerPressure          *providerContextPressure
 	reportContextTokens       func(context.Context, int)
 	compactHooks              func(context.Context, []message.Message, []message.Message, error) error
 	putArtifact               func(context.Context, string, []byte, string) (session.ContextArtifact, error)
@@ -256,13 +284,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	}
 	goal := strings.TrimSpace(task.Goal)
 	images := c.images
-	if c.resuming {
-		for _, block := range c.history {
-			if block.RunID == c.runID && block.Kind == "user" {
-				goal = ""
-				images = nil
-				break
-			}
+	for _, block := range c.history {
+		if c.runID != "" && block.RunID == c.runID && block.Kind == "user" {
+			goal = ""
+			images = nil
+			break
 		}
 	}
 	if goal != "" || len(images) > 0 {

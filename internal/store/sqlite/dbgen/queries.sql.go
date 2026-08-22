@@ -552,6 +552,15 @@ func (q *Queries) DeleteCredential(ctx context.Context, arg DeleteCredentialPara
 	return err
 }
 
+const deleteLLMuxProviderModels = `-- name: DeleteLLMuxProviderModels :exec
+DELETE FROM llmux_provider_models WHERE provider_id=?
+`
+
+func (q *Queries) DeleteLLMuxProviderModels(ctx context.Context, providerID string) error {
+	_, err := q.db.ExecContext(ctx, deleteLLMuxProviderModels, providerID)
+	return err
+}
+
 const ensureSession = `-- name: EnsureSession :exec
 INSERT INTO sessions(id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING
 `
@@ -943,6 +952,28 @@ func (q *Queries) GetCredentialRef(ctx context.Context, arg GetCredentialRefPara
 	var credential_ref string
 	err := row.Scan(&credential_ref)
 	return credential_ref, err
+}
+
+const getLLMuxProviderModel = `-- name: GetLLMuxProviderModel :one
+SELECT model_id, payload, updated_at FROM llmux_provider_models WHERE provider_id=? AND model_id=?
+`
+
+type GetLLMuxProviderModelParams struct {
+	ProviderID string `db:"provider_id"`
+	ModelID    string `db:"model_id"`
+}
+
+type GetLLMuxProviderModelRow struct {
+	ModelID   string `db:"model_id"`
+	Payload   []byte `db:"payload"`
+	UpdatedAt int64  `db:"updated_at"`
+}
+
+func (q *Queries) GetLLMuxProviderModel(ctx context.Context, arg GetLLMuxProviderModelParams) (GetLLMuxProviderModelRow, error) {
+	row := q.db.QueryRowContext(ctx, getLLMuxProviderModel, arg.ProviderID, arg.ModelID)
+	var i GetLLMuxProviderModelRow
+	err := row.Scan(&i.ModelID, &i.Payload, &i.UpdatedAt)
+	return i, err
 }
 
 const getLatestContextArtifactByKind = `-- name: GetLatestContextArtifactByKind :one
@@ -1571,6 +1602,27 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 		arg.RecordedAt,
 		arg.Data,
 		arg.DataSha256,
+	)
+	return err
+}
+
+const insertLLMuxProviderModel = `-- name: InsertLLMuxProviderModel :exec
+INSERT INTO llmux_provider_models(provider_id, model_id, payload, updated_at) VALUES(?,?,?,?)
+`
+
+type InsertLLMuxProviderModelParams struct {
+	ProviderID string `db:"provider_id"`
+	ModelID    string `db:"model_id"`
+	Payload    []byte `db:"payload"`
+	UpdatedAt  int64  `db:"updated_at"`
+}
+
+func (q *Queries) InsertLLMuxProviderModel(ctx context.Context, arg InsertLLMuxProviderModelParams) error {
+	_, err := q.db.ExecContext(ctx, insertLLMuxProviderModel,
+		arg.ProviderID,
+		arg.ModelID,
+		arg.Payload,
+		arg.UpdatedAt,
 	)
 	return err
 }
@@ -2294,6 +2346,39 @@ func (q *Queries) ListIncompleteActionAttempts(ctx context.Context, arg ListInco
 	for rows.Next() {
 		var i ListIncompleteActionAttemptsRow
 		if err := rows.Scan(&i.Key1, &i.Data); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLLMuxProviderModels = `-- name: ListLLMuxProviderModels :many
+SELECT model_id, payload, updated_at FROM llmux_provider_models WHERE provider_id=? ORDER BY model_id
+`
+
+type ListLLMuxProviderModelsRow struct {
+	ModelID   string `db:"model_id"`
+	Payload   []byte `db:"payload"`
+	UpdatedAt int64  `db:"updated_at"`
+}
+
+func (q *Queries) ListLLMuxProviderModels(ctx context.Context, providerID string) ([]ListLLMuxProviderModelsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLLMuxProviderModels, providerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLLMuxProviderModelsRow
+	for rows.Next() {
+		var i ListLLMuxProviderModelsRow
+		if err := rows.Scan(&i.ModelID, &i.Payload, &i.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -3283,6 +3368,27 @@ func (q *Queries) UpdateAgentBlock(ctx context.Context, arg UpdateAgentBlockPara
 		arg.SessionID,
 		arg.AgentID,
 	)
+}
+
+const updateLLMuxProviderModel = `-- name: UpdateLLMuxProviderModel :exec
+UPDATE llmux_provider_models SET payload=?, updated_at=? WHERE provider_id=? AND model_id=?
+`
+
+type UpdateLLMuxProviderModelParams struct {
+	Payload    []byte `db:"payload"`
+	UpdatedAt  int64  `db:"updated_at"`
+	ProviderID string `db:"provider_id"`
+	ModelID    string `db:"model_id"`
+}
+
+func (q *Queries) UpdateLLMuxProviderModel(ctx context.Context, arg UpdateLLMuxProviderModelParams) error {
+	_, err := q.db.ExecContext(ctx, updateLLMuxProviderModel,
+		arg.Payload,
+		arg.UpdatedAt,
+		arg.ProviderID,
+		arg.ModelID,
+	)
+	return err
 }
 
 const updateProjectionRun = `-- name: UpdateProjectionRun :exec

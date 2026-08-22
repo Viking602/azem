@@ -217,6 +217,17 @@ func (t *durableToolTimeline) fileObservations(name string, arguments, structure
 	remaining := int64(maxWorkspaceTotalBytes)
 	for index := range observations {
 		value, err := readWorkspaceEvidence(t.workspace, observations[index].Path, &remaining)
+		if observations[index].Operation == "delete" {
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				// Absence is the expected postcondition of a completed delete.
+			case err != nil:
+				observations[index].ErrorCode = workspaceLimitOrCaptureCode(err)
+			default:
+				observations[index].ErrorCode = "path_present"
+			}
+			continue
+		}
 		if err != nil {
 			observations[index].ErrorCode = workspaceLimitOrCaptureCode(err)
 			continue
@@ -240,10 +251,12 @@ func requestedFileObservations(name string, arguments, structured json.RawMessag
 	switch name {
 	case coding.ToolReadFile:
 		operation = "read"
-	case coding.ToolEditHashline:
+	case coding.ToolEditHashline, "coding.replace":
 		operation = "edit"
 	case coding.ToolWriteFile:
 		operation = "write"
+	case "coding.delete_file":
+		operation = "delete"
 	case coding.ToolGofmt:
 		operation = "format"
 	default:
@@ -381,6 +394,19 @@ func (c turnContext) toolContinuityMessages(ctx context.Context) []message.Messa
 	for _, path := range paths {
 		observation := latest[path].observation
 		fact := fileFact{Path: path, Operation: observation.Operation, SavedHash: observation.SHA256, State: "unverified", ErrorCode: observation.ErrorCode}
+		if observation.Operation == "delete" && c.workspaceRoot != "" {
+			_, err := readWorkspaceEvidence(c.workspaceRoot, path, &remaining)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				fact.State, fact.ErrorCode = "verified_unchanged", ""
+			case err != nil:
+				fact.ErrorCode = workspaceLimitOrCaptureCode(err)
+			default:
+				fact.State, fact.ErrorCode = "stale", ""
+			}
+			files = append(files, fact)
+			continue
+		}
 		if observation.SHA256 != "" && c.workspaceRoot != "" {
 			value, err := readWorkspaceEvidence(c.workspaceRoot, path, &remaining)
 			if err != nil {

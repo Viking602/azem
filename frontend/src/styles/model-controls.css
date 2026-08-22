@@ -330,6 +330,8 @@
   position: relative;
 }
 .effort-slider[data-disabled="true"] { opacity: .6; pointer-events: none; }
+.effort-slider[data-fixed="true"] { pointer-events: none; }
+.effort-slider[data-fixed="true"] .effort-slider-track { cursor: default; }
 /*
  * Label band above the track (only while dragging):
  *   ends  → 更高效 / 更智能

@@ -80,3 +80,23 @@ func TestModelsDevOnlyFillsMissingProviderMetadata(t *testing.T) {
 		t.Fatalf("provider lists were overwritten: %+v", model)
 	}
 }
+
+func TestModelsDevMatchesCursorFamilyByName(t *testing.T) {
+	opus := modelsDevModel{ID: "claude-opus-4-6", Name: "Claude 4.6 Opus", Reasoning: true, ToolCall: true, Attachment: true}
+	opus.Modalities.Input = []string{"text", "image"}
+	opus.Modalities.Output = []string{"text"}
+	catalog := ModelsDevCatalog{
+		providers: map[string]modelsDevProvider{
+			"anthropic": {Models: map[string]modelsDevModel{"claude-opus-4-6": opus}},
+		},
+		byID: map[string][]modelsDevMatch{},
+	}
+	models := []Model{{ID: "claude-4.6-opus-high-thinking", Name: "Claude 4.6 Opus High Thinking"}}
+	_, matched := catalog.Enrich(ModelsDevProviderHint{ID: "cursor"}, models)
+	if matched != 1 {
+		t.Fatalf("matched=%d", matched)
+	}
+	if !models[0].SupportsTools || !models[0].SupportsReasoning || fmt.Sprint(models[0].InputModalities) != "[text image attachment]" {
+		t.Fatalf("model=%+v", models[0])
+	}
+}

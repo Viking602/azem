@@ -479,7 +479,7 @@ export function modelDisplayName(id: string, name = "") {
 }
 
 export function providerDisplayName(id: string, providers: ModelProvider[]) {
-	return providers.find((provider) => provider.id === id)?.displayName ?? (id === "chatgpt" ? "ChatGPT" : id === "grok" ? "Grok" : id);
+	return providers.find((provider) => provider.id === id)?.displayName ?? (id === "chatgpt" ? "ChatGPT" : id === "grok" ? "Grok" : id === "cursor" ? "Cursor" : id);
 }
 
 export function emptyContextUsage(contextLimit = 0): ContextUsage {

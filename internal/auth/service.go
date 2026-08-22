@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/Viking602/azem/internal/auth/chatgpt"
+	"github.com/Viking602/azem/internal/auth/cursor"
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/netproxy"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
@@ -51,17 +52,21 @@ func (e EntitlementError) Error() string {
 }
 
 type Service struct {
-	db           *sql.DB
-	store        CredentialStore
-	chatgpt      *chatgpt.Client
-	grok         *grok.Client
-	httpClient   *resty.Client
-	streamClient *resty.Client
-	refresh      singleflight.Group
-	statusMu     sync.RWMutex
-	statusChange StatusChangeCallback
-	GrokUserURL  string
-	GrokQuotaURL string
+	db               *sql.DB
+	store            CredentialStore
+	chatgpt          *chatgpt.Client
+	grok             *grok.Client
+	cursor           *cursor.Client
+	httpClient       *resty.Client
+	streamClient     *resty.Client
+	refresh          singleflight.Group
+	statusMu         sync.RWMutex
+	statusChange     StatusChangeCallback
+	GrokUserURL      string
+	GrokQuotaURL     string
+	CursorUsageURL   string
+	CursorSummaryURL string
+	CursorMeURL      string
 }
 
 func NewService(db *sql.DB, store CredentialStore, chatgptClient *chatgpt.Client, grokClient *grok.Client) *Service {
@@ -78,7 +83,7 @@ func NewService(db *sql.DB, store CredentialStore, chatgptClient *chatgpt.Client
 	}).SetResponseDoNotParse(true)
 	netproxy.ConfigureTransport(streamClient.Transport())
 	return &Service{
-		db: db, store: store, chatgpt: chatgptClient, grok: grokClient,
+		db: db, store: store, chatgpt: chatgptClient, grok: grokClient, cursor: cursor.NewClient(),
 		httpClient: httpClient, streamClient: streamClient,
 	}
 }
@@ -122,6 +127,22 @@ func (s *Service) LoginGrok(ctx context.Context, notify func(grok.DeviceAuthoriz
 		tokens.ClientID = s.grok.ClientID
 	}
 	return s.storeGrok(ctx, s.completeGrokTokens(tokens))
+}
+
+func (s *Service) LoginCursor(ctx context.Context, openURL func(string) error) (Account, error) {
+	tokens, err := s.cursor.Login(ctx, openURL)
+	if err != nil {
+		return Account{}, err
+	}
+	return s.storeCursor(ctx, tokens)
+}
+
+func (s *Service) ImportCursorToken(ctx context.Context, accessToken, refreshToken string) (Account, error) {
+	tokens := cursor.Tokens{AccessToken: strings.TrimSpace(accessToken), RefreshToken: strings.TrimSpace(refreshToken)}
+	if tokens.AccessToken == "" {
+		return Account{}, fmt.Errorf("cursor access token is empty")
+	}
+	return s.storeCursor(ctx, tokens)
 }
 
 func (s *Service) ImportGrok(ctx context.Context, path string) (Account, error) {
@@ -265,6 +286,13 @@ func (s *Service) Refresh(ctx context.Context, provider string, accountID string
 			tokens.SourceKey = credential.SourceKey
 			refreshedGrok = &tokens
 			applyGrokTokens(&credential, tokens)
+		case "cursor":
+			tokens, err := s.cursor.Refresh(ctx, credential.RefreshToken)
+			if err != nil {
+				s.markStatus(context.WithoutCancel(ctx), provider, accountID, "reauth_required")
+				return Credential{}, err
+			}
+			applyCursorTokens(&credential, tokens)
 		default:
 			return Credential{}, fmt.Errorf("unsupported provider %q", provider)
 		}
@@ -402,6 +430,7 @@ func (s *Service) Close() error {
 		s.streamClient.Close(),
 		s.chatgpt.Close(),
 		s.grok.Close(),
+		s.cursor.Close(),
 	)
 }
 
@@ -420,6 +449,39 @@ func (s *Service) Account(ctx context.Context, provider string, accountID string
 		return Account{}, err
 	}
 	return accountFromDB(row), nil
+}
+
+func (s *Service) storeCursor(ctx context.Context, tokens cursor.Tokens) (Account, error) {
+	identity := cursor.IdentityFromAccessToken(tokens.AccessToken)
+	accountID := firstNonEmpty(tokens.AccountID, identity.UserID)
+	email := firstNonEmpty(tokens.Email, identity.Email)
+	displayName := firstNonEmpty(tokens.DisplayName, identity.DisplayName, email, accountID)
+	expiresAt := tokens.ExpiresAt
+	if expiresAt.IsZero() {
+		expiresAt = identity.ExpiresAt
+	}
+	credential := Credential{
+		Provider: "cursor", AccountID: stableAccountID(accountID, email, tokens.AccessToken),
+		AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, TokenType: "Bearer",
+		ExpiresAt: expiresAt, Email: email, DisplayName: displayName,
+	}
+	return s.storeCredential(ctx, credential)
+}
+
+func applyCursorTokens(credential *Credential, tokens cursor.Tokens) {
+	credential.AccessToken = tokens.AccessToken
+	if tokens.RefreshToken != "" {
+		credential.RefreshToken = tokens.RefreshToken
+	}
+	if !tokens.ExpiresAt.IsZero() {
+		credential.ExpiresAt = tokens.ExpiresAt
+	}
+	if tokens.Email != "" {
+		credential.Email = tokens.Email
+	}
+	if tokens.DisplayName != "" {
+		credential.DisplayName = tokens.DisplayName
+	}
 }
 
 func (s *Service) storeChatGPT(ctx context.Context, tokens chatgpt.Tokens) (Account, error) {
@@ -588,12 +650,8 @@ func applyGrokTokens(credential *Credential, tokens grok.Tokens) {
 	}
 }
 
-func (s *Service) grokClientFor(clientID string) grok.Client {
-	client := *s.grok
-	if clientID != "" {
-		client.ClientID = clientID
-	}
-	return client
+func (s *Service) grokClientFor(clientID string) *grok.Client {
+	return s.grok.WithClientID(clientID)
 }
 
 func stableAccountID(accountID string, email string, accessToken string) string {

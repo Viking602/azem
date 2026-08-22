@@ -30,7 +30,7 @@ var nativeProfiles = []Profile{
 
 func Profiles() []Profile {
 	profiles := append([]Profile(nil), nativeProfiles...)
-	seen := map[string]bool{"chatgpt": true, "grok": true}
+	seen := map[string]bool{"chatgpt": true, "grok": true, "cursor": true}
 	for _, profile := range nativeProfiles {
 		seen[profile.ID] = true
 	}

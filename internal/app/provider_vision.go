@@ -50,7 +50,7 @@ func (r *ProviderRuntime) modelImageInputSupport(ctx context.Context, providerID
 
 func (r *ProviderRuntime) modelInputModalities(ctx context.Context, providerID, accountID, modelID string) ([]string, error) {
 	providerID = llmuxdriver.CanonicalProviderID(providerID)
-	if providerID != "chatgpt" && providerID != "grok" {
+	if !config.IsSubscriptionProvider(providerID) {
 		r.mu.RLock()
 		provider, ok := r.cfg.Providers.LLMux[providerID]
 		r.mu.RUnlock()

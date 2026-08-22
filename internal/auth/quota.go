@@ -13,6 +13,7 @@ import (
 
 	"resty.dev/v3"
 
+	cursorauth "github.com/Viking602/azem/internal/auth/cursor"
 	"github.com/Viking602/azem/internal/auth/grok"
 )
 
@@ -24,15 +25,26 @@ const (
 	grokUserBodySize          = 64 << 10
 	chatgptQuotaTimeout       = 5 * time.Second
 	grokQuotaTimeout          = 15 * time.Second
+	DefaultCursorUsageURL     = "https://api2.cursor.sh/auth/usage"
+	DefaultCursorSummaryURL   = "https://cursor.com/api/usage-summary"
+	DefaultCursorMeURL        = "https://cursor.com/api/auth/me"
+	cursorQuotaTimeout        = 15 * time.Second
 )
+
+type SubscriptionQuotaBreakdown struct {
+	ID          string
+	UsedPercent float64
+}
 
 type SubscriptionQuota struct {
 	Plan        string
 	Period      string
+	StartsAt    int64
 	UsedPercent float64
 	ResetsAt    int64
 	Balance     string
 	Unlimited   bool
+	Breakdown   []SubscriptionQuotaBreakdown
 	Email       string
 	DisplayName string
 	UserID      string
@@ -44,6 +56,8 @@ func (s *Service) SubscriptionQuota(ctx context.Context, provider, accountID str
 		return s.chatGPTQuota(ctx, accountID)
 	case "grok":
 		return s.grokQuota(ctx, accountID)
+	case "cursor":
+		return s.cursorQuota(ctx, accountID)
 	default:
 		return SubscriptionQuota{}, fmt.Errorf("subscription quota is unsupported for %q", provider)
 	}
@@ -79,9 +93,7 @@ func (s *Service) grokQuota(ctx context.Context, accountID string) (Subscription
 	if identity.UserID == "" {
 		return quota, fmt.Errorf("Grok user lookup returned no user id")
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, grokQuotaTimeout)
-	defer cancel()
-	response, err := s.grokProxyGET(requestCtx, accountID, s.grokQuotaURL(), func(request *resty.Request) {
+	response, err := s.grokProxyGET(ctx, accountID, s.grokQuotaURL(), func(request *resty.Request) {
 		configureGrokProxyRequest(request, identity.UserID, subscriptionQuotaBodySize)
 	})
 	if err != nil {
@@ -105,9 +117,7 @@ func (s *Service) grokQuota(ctx context.Context, accountID string) (Subscription
 
 func (s *Service) grokIdentity(ctx context.Context, accountID string) (grok.Identity, error) {
 	identity := s.storedGrokIdentity(ctx, accountID)
-	requestCtx, cancel := context.WithTimeout(ctx, grokQuotaTimeout)
-	defer cancel()
-	response, err := s.grokProxyGET(requestCtx, accountID, s.grokUserURL(), func(request *resty.Request) {
+	response, err := s.grokProxyGET(ctx, accountID, s.grokUserURL(), func(request *resty.Request) {
 		configureGrokProxyRequest(request, "", grokUserBodySize)
 	})
 	if err != nil {
@@ -162,12 +172,21 @@ func (s *Service) grokQuotaURL() string {
 }
 
 func (s *Service) grokProxyGET(ctx context.Context, accountID, endpoint string, configure func(*resty.Request)) (*resty.Response, error) {
-	response, err := s.DoWithRefresh(ctx, "grok", accountID, resty.MethodGet, endpoint, configure)
-	if err == nil || !isTransientTransportError(err) {
-		return response, err
+	var response *resty.Response
+	var err error
+	for attempt := range 2 {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, grokQuotaTimeout)
+		response, err = s.DoWithRefresh(requestCtx, "grok", accountID, resty.MethodGet, endpoint, configure)
+		cancel()
+		if err == nil || !IsRetryableSubscriptionQuotaError(err) || attempt == 1 {
+			return response, err
+		}
+		s.closeIdleHTTP()
 	}
-	s.closeIdleHTTP()
-	return s.DoWithRefresh(ctx, "grok", accountID, resty.MethodGet, endpoint, configure)
+	return response, err
 }
 
 func (s *Service) closeIdleHTTP() {
@@ -179,16 +198,21 @@ func (s *Service) closeIdleHTTP() {
 	}
 }
 
-func isTransientTransportError(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+// IsRetryableSubscriptionQuotaError reports transport failures that can recover
+// without changing credentials or subscription state.
+func IsRetryableSubscriptionQuotaError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
 		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
 		return true
-	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		return isTransientTransportError(urlErr.Err)
 	}
 	message := strings.ToLower(err.Error())
 	for _, needle := range []string{
@@ -198,6 +222,8 @@ func isTransientTransportError(err error) bool {
 		"http2: stream closed",
 		"http2: client conn not usable",
 		"unexpected eof",
+		"tls handshake timeout",
+		"i/o timeout",
 	} {
 		if strings.Contains(message, needle) {
 			return true
@@ -413,3 +439,295 @@ func parseGrokQuotaTime(value string) int64 {
 }
 
 func clampPercent(value float64) float64 { return max(0, min(100, value)) }
+
+func (s *Service) cursorQuota(ctx context.Context, accountID string) (SubscriptionQuota, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, cursorQuotaTimeout)
+	defer cancel()
+	credential, err := s.Credential(requestCtx, "cursor", accountID)
+	if err != nil {
+		return SubscriptionQuota{}, err
+	}
+	identity := cursorauth.IdentityFromAccessToken(credential.AccessToken)
+	if summary, summaryErr := s.cursorUsageSummary(requestCtx, credential.AccessToken, identity.UserID); summaryErr == nil {
+		if identity.Email != "" {
+			summary.Email = firstNonEmpty(summary.Email, identity.Email)
+			summary.DisplayName = firstNonEmpty(summary.DisplayName, identity.DisplayName, identity.Email)
+		}
+		if me, meErr := s.cursorProfile(requestCtx, credential.AccessToken, identity.UserID); meErr == nil {
+			summary.Email = firstNonEmpty(me, summary.Email)
+			summary.DisplayName = firstNonEmpty(summary.DisplayName, me)
+		}
+		summary.UserID = firstNonEmpty(identity.UserID, accountID)
+		return summary, nil
+	}
+	usage, err := s.cursorAuthUsage(requestCtx, accountID)
+	if err != nil {
+		return SubscriptionQuota{}, err
+	}
+	usage.Email = firstNonEmpty(usage.Email, identity.Email)
+	usage.DisplayName = firstNonEmpty(usage.DisplayName, identity.DisplayName, identity.Email)
+	usage.UserID = firstNonEmpty(identity.UserID, accountID)
+	return usage, nil
+}
+
+func (s *Service) cursorUsageSummary(ctx context.Context, accessToken, userID string) (SubscriptionQuota, error) {
+	if strings.TrimSpace(userID) == "" {
+		return SubscriptionQuota{}, fmt.Errorf("cursor usage-summary requires a user id")
+	}
+	endpoint := firstNonEmpty(s.CursorSummaryURL, DefaultCursorSummaryURL)
+	response, err := s.httpClient.R().SetContext(ctx).SetResponseBodyLimit(subscriptionQuotaBodySize).
+		SetHeader("Accept", "application/json").
+		SetHeader("Cookie", "WorkosCursorSessionToken="+url.QueryEscape(userID+"::"+accessToken)).
+		Get(endpoint)
+	if err != nil {
+		return SubscriptionQuota{}, err
+	}
+	if response.StatusCode()/100 != 2 {
+		return SubscriptionQuota{}, quotaHTTPError("cursor", response.StatusCode(), response.Bytes())
+	}
+	return decodeCursorUsageSummary(response.Bytes())
+}
+
+func (s *Service) cursorProfile(ctx context.Context, accessToken, userID string) (string, error) {
+	if strings.TrimSpace(userID) == "" {
+		return "", fmt.Errorf("cursor profile requires a user id")
+	}
+	endpoint := firstNonEmpty(s.CursorMeURL, DefaultCursorMeURL)
+	response, err := s.httpClient.R().SetContext(ctx).SetResponseBodyLimit(grokUserBodySize).
+		SetHeader("Accept", "application/json").
+		SetHeader("Cookie", "WorkosCursorSessionToken="+url.QueryEscape(userID+"::"+accessToken)).
+		Get(endpoint)
+	if err != nil {
+		return "", err
+	}
+	if response.StatusCode()/100 != 2 {
+		return "", quotaHTTPError("cursor", response.StatusCode(), response.Bytes())
+	}
+	var payload struct {
+		Sub   string `json:"sub"`
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(response.Bytes(), &payload); err != nil {
+		return "", err
+	}
+	if payload.Sub != "" && payload.Sub != userID {
+		return "", fmt.Errorf("cursor profile user mismatch")
+	}
+	return strings.TrimSpace(payload.Email), nil
+}
+
+func (s *Service) cursorAuthUsage(ctx context.Context, accountID string) (SubscriptionQuota, error) {
+	endpoint := firstNonEmpty(s.CursorUsageURL, DefaultCursorUsageURL)
+	response, err := s.DoWithRefresh(ctx, "cursor", accountID, resty.MethodGet, endpoint, func(request *resty.Request) {
+		request.SetResponseBodyLimit(subscriptionQuotaBodySize).
+			SetHeader("Accept", "application/json").
+			SetHeader("User-Agent", "azem/1")
+	})
+	if err != nil {
+		return SubscriptionQuota{}, err
+	}
+	if response.StatusCode()/100 != 2 {
+		return SubscriptionQuota{}, quotaHTTPError("cursor", response.StatusCode(), response.Bytes())
+	}
+	return decodeCursorAuthUsage(response.Bytes())
+}
+
+type cursorUsageAmount struct {
+	Enabled   *bool    `json:"enabled"`
+	Limit     *float64 `json:"limit"`
+	Used      *float64 `json:"used"`
+	Remaining *float64 `json:"remaining"`
+}
+
+type cursorPlanUsage struct {
+	Enabled          *bool    `json:"enabled"`
+	Limit            *float64 `json:"limit"`
+	Used             *float64 `json:"used"`
+	Remaining        *float64 `json:"remaining"`
+	AutoPercentUsed  *float64 `json:"autoPercentUsed"`
+	APIPercentUsed   *float64 `json:"apiPercentUsed"`
+	TotalPercentUsed *float64 `json:"totalPercentUsed"`
+}
+
+type cursorIndividualUsage struct {
+	Plan     *cursorPlanUsage   `json:"plan"`
+	Overall  *cursorUsageAmount `json:"overall"`
+	OnDemand *cursorUsageAmount `json:"onDemand"`
+}
+
+type cursorTeamUsage struct {
+	Pooled   *cursorUsageAmount `json:"pooled"`
+	OnDemand *cursorUsageAmount `json:"onDemand"`
+}
+
+type cursorUsageSummaryPayload struct {
+	MembershipType    string                 `json:"membershipType"`
+	BillingCycleStart string                 `json:"billingCycleStart"`
+	BillingCycleEnd   string                 `json:"billingCycleEnd"`
+	StartOfMonth      string                 `json:"startOfMonth"`
+	IndividualUsage   *cursorIndividualUsage `json:"individualUsage"`
+	TeamUsage         *cursorTeamUsage       `json:"teamUsage"`
+}
+
+func decodeCursorUsageSummary(data []byte) (SubscriptionQuota, error) {
+	var payload cursorUsageSummaryPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return SubscriptionQuota{}, fmt.Errorf("decode cursor usage-summary: %w", err)
+	}
+	quota := SubscriptionQuota{Plan: strings.TrimSpace(payload.MembershipType), Period: "monthly"}
+	quota.StartsAt = parseGrokQuotaTime(firstNonEmpty(payload.BillingCycleStart, payload.StartOfMonth))
+	quota.ResetsAt = parseGrokQuotaTime(payload.BillingCycleEnd)
+	if quota.ResetsAt == 0 && quota.StartsAt > 0 {
+		quota.ResetsAt = time.Unix(quota.StartsAt, 0).UTC().AddDate(0, 1, 0).Unix()
+	}
+	used, ok := cursorSummaryUsedPercent(&payload)
+	if !ok && quota.ResetsAt == 0 {
+		return SubscriptionQuota{}, fmt.Errorf("cursor usage-summary contained no usage")
+	}
+	quota.UsedPercent = clampPercent(used)
+	quota.Breakdown = cursorSummaryBreakdown(payload.IndividualUsage)
+	if remaining := cursorOnDemandRemaining(payload.IndividualUsage, payload.TeamUsage); remaining != "" {
+		quota.Balance = remaining
+	}
+	return quota, nil
+}
+
+func cursorSummaryUsedPercent(payload *cursorUsageSummaryPayload) (float64, bool) {
+	if payload == nil {
+		return 0, false
+	}
+	var plan *cursorPlanUsage
+	var overall, pooled *cursorUsageAmount
+	if payload.IndividualUsage != nil {
+		plan = payload.IndividualUsage.Plan
+		overall = payload.IndividualUsage.Overall
+	}
+	if payload.TeamUsage != nil {
+		pooled = payload.TeamUsage.Pooled
+	}
+	if plan != nil && cursorUsageEnabled(plan.Enabled) {
+		switch {
+		case plan.TotalPercentUsed != nil:
+			return *plan.TotalPercentUsed, true
+		case plan.AutoPercentUsed != nil && plan.APIPercentUsed != nil:
+			return (*plan.AutoPercentUsed + *plan.APIPercentUsed) / 2, true
+		case plan.APIPercentUsed != nil:
+			return *plan.APIPercentUsed, true
+		case plan.AutoPercentUsed != nil:
+			return *plan.AutoPercentUsed, true
+		case plan.Limit != nil && *plan.Limit > 0 && plan.Used != nil:
+			return *plan.Used / *plan.Limit * 100, true
+		}
+	}
+	for _, usage := range []*cursorUsageAmount{overall, pooled} {
+		if usage != nil && cursorUsageEnabled(usage.Enabled) && usage.Limit != nil && *usage.Limit > 0 && usage.Used != nil {
+			return *usage.Used / *usage.Limit * 100, true
+		}
+	}
+	return 0, false
+}
+
+func cursorSummaryBreakdown(usage *cursorIndividualUsage) []SubscriptionQuotaBreakdown {
+	if usage == nil || usage.Plan == nil || !cursorUsageEnabled(usage.Plan.Enabled) {
+		return nil
+	}
+	breakdown := make([]SubscriptionQuotaBreakdown, 0, 2)
+	if usage.Plan.AutoPercentUsed != nil {
+		breakdown = append(breakdown, SubscriptionQuotaBreakdown{ID: "cursor", UsedPercent: clampPercent(*usage.Plan.AutoPercentUsed)})
+	}
+	if usage.Plan.APIPercentUsed != nil {
+		breakdown = append(breakdown, SubscriptionQuotaBreakdown{ID: "third_party", UsedPercent: clampPercent(*usage.Plan.APIPercentUsed)})
+	}
+	return breakdown
+}
+
+func cursorOnDemandRemaining(individual *cursorIndividualUsage, team *cursorTeamUsage) string {
+	if individual != nil {
+		if remaining := cursorUsageRemaining(individual.OnDemand); remaining != "" {
+			return remaining
+		}
+	}
+	if team != nil {
+		return cursorUsageRemaining(team.OnDemand)
+	}
+	return ""
+}
+
+func cursorUsageRemaining(usage *cursorUsageAmount) string {
+	if usage == nil || !cursorUsageEnabled(usage.Enabled) {
+		return ""
+	}
+	return cursorCentsRemaining(usage.Remaining, usage.Limit, usage.Used)
+}
+
+func cursorUsageEnabled(enabled *bool) bool {
+	return enabled == nil || *enabled
+}
+
+func cursorCentsRemaining(remaining, limit, used *float64) string {
+	var cents float64
+	switch {
+	case remaining != nil && *remaining >= 0:
+		cents = *remaining
+	case limit != nil && used != nil:
+		cents = max(0, *limit-*used)
+	default:
+		return ""
+	}
+	return fmt.Sprintf("%.2f", cents/100)
+}
+
+func decodeCursorAuthUsage(data []byte) (SubscriptionQuota, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return SubscriptionQuota{}, fmt.Errorf("decode cursor auth usage: %w", err)
+	}
+	quota := SubscriptionQuota{
+		Period:   "monthly",
+		StartsAt: cursorTimeFromMap(payload, "billingCycleStart", "startOfMonth"),
+		ResetsAt: cursorTimeFromMap(payload, "billingCycleEnd", "endOfMonth", "resetsAt", "nextReset"),
+	}
+	if quota.ResetsAt == 0 && quota.StartsAt > 0 {
+		quota.ResetsAt = time.Unix(quota.StartsAt, 0).UTC().AddDate(0, 1, 0).Unix()
+	}
+	for _, value := range payload {
+		bucket, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		used := firstNumber(bucket, "numRequests", "used", "amountUsed", "usdUsed")
+		limit := firstNumber(bucket, "maxRequestUsage", "limit", "amountLimit", "usdLimit")
+		if used == nil || limit == nil || *limit <= 0 {
+			continue
+		}
+		quota.UsedPercent = clampPercent(*used / *limit * 100)
+		return quota, nil
+	}
+	if quota.ResetsAt > 0 {
+		return quota, nil
+	}
+	return SubscriptionQuota{}, fmt.Errorf("cursor auth usage contained no request or spend limit")
+}
+
+func cursorTimeFromMap(payload map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		if timestamp := parseGrokQuotaTime(fmt.Sprint(payload[key])); timestamp > 0 {
+			return timestamp
+		}
+	}
+	return 0
+}
+
+func firstNumber(values map[string]any, keys ...string) *float64 {
+	for _, key := range keys {
+		switch value := values[key].(type) {
+		case float64:
+			return &value
+		case json.Number:
+			if parsed, err := value.Float64(); err == nil {
+				return &parsed
+			}
+		}
+	}
+	return nil
+}

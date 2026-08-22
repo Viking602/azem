@@ -36,6 +36,7 @@ type runtimeEvidenceSnapshot struct {
 	work             session.WorkSpecV1
 	revision         session.WorkRevisionV1
 	plan             session.VerificationPlanV1
+	todo             session.TodoList
 	records          []session.ToolRecord
 	goalSource       session.SourceRefV1
 	mutating         bool
@@ -148,7 +149,7 @@ func persistToolObservation(ctx context.Context, sessions *session.Service, work
 	return store.SaveDisposition(ctx, disposition)
 }
 
-func newMutatingVerificationGuardrail(sessions *session.Service, workspace, sessionID, runID string, relatedRunIDs func() []string) hyagent.OutputGuardrail {
+func newMutatingVerificationGuardrail(sessions *session.Service, workspace, sessionID, runID string, enforceSessionTodo bool, relatedRunIDs func() []string) hyagent.OutputGuardrail {
 	if sessions == nil || strings.TrimSpace(workspace) == "" {
 		return hyagent.NewOutputGuardrail("current-work-verification", func(context.Context, hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
 			return hyagent.AllowOutput(), nil
@@ -156,7 +157,7 @@ func newMutatingVerificationGuardrail(sessions *session.Service, workspace, sess
 	}
 	resultStore, storeErr := verification.NewArtifactResultStore(sessions, sessionID, runID)
 	guard, guardErr := verification.NewFinalClaimGuard(resultStore, nil)
-	return hyagent.NewOutputGuardrail("current-work-verification", func(ctx context.Context, _ hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
+	return hyagent.NewOutputGuardrail("current-work-verification", func(ctx context.Context, input hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
 		if storeErr != nil {
 			return hyagent.OutputGuardrailResult{}, storeErr
 		}
@@ -177,6 +178,9 @@ func newMutatingVerificationGuardrail(sessions *session.Service, workspace, sess
 		}
 		if err := persistRuntimeContracts(ctx, sessions, sessionID, runID, snapshot); err != nil {
 			return hyagent.OutputGuardrailResult{}, err
+		}
+		if items := guardrailTodoItems(snapshot.todo, enforceSessionTodo); len(items) > 0 {
+			return hyagent.RetryOutput(message.NewText(message.RoleUser, unfinishedTodoRetryMessage(items))), nil
 		}
 		if !snapshot.mutating {
 			return hyagent.AllowOutput(), nil
@@ -202,15 +206,27 @@ func newMutatingVerificationGuardrail(sessions *session.Service, workspace, sess
 		case "retry":
 			return hyagent.RetryOutput(message.NewText(message.RoleUser, verificationRetryMessage(snapshot, state.missing))), nil
 		case "surface":
-			status := decision.Status
-			if status == "fail" {
-				return hyagent.ReplaceOutput(message.NewText(message.RoleAssistant, "Verification failed for the current workspace snapshot. The attempted result is not reported as complete; inspect the failed checks and correct the work before retrying.")), nil
-			}
-			return hyagent.ReplaceOutput(message.NewText(message.RoleAssistant, "Verification evidence is missing or stale for the current workspace snapshot after one retry. The work remains uncertain and is not reported as complete.")), nil
+			return surfaceVerificationOutput(input.Output, decision.Status), nil
 		default:
 			return hyagent.BlockOutput("invalid verification guard decision"), nil
 		}
 	})
+}
+
+// surfaceVerificationOutput keeps the model's own final answer and appends the
+// guard verdict instead of replacing it. Replacing wholesale erased the real
+// deliverable summary from the durable session, so restarts replayed only the
+// canned notice.
+func surfaceVerificationOutput(output message.Message, status string) hyagent.OutputGuardrailResult {
+	notice := "Verification evidence is missing or stale for the current workspace snapshot after one retry. The work remains uncertain and is not reported as complete."
+	if status == "fail" {
+		notice = "Verification failed for the current workspace snapshot. The attempted result is not reported as complete; inspect the failed checks and correct the work before retrying."
+	}
+	if strings.TrimSpace(output.Text) == "" {
+		return hyagent.ReplaceOutput(message.NewText(message.RoleAssistant, notice))
+	}
+	output.Text = strings.TrimRight(output.Text, "\n") + "\n\n" + notice
+	return hyagent.ReplaceOutput(output)
 }
 
 func deriveRuntimeEvidence(ctx context.Context, sessions *session.Service, workspace, sessionID, runID string, relatedRunIDs []string) (runtimeEvidenceSnapshot, error) {
@@ -268,7 +284,7 @@ func deriveRuntimeEvidence(ctx context.Context, sessions *session.Service, works
 		plan = addRuntimeReadbackChecks(plan, revision.Files)
 	}
 	return runtimeEvidenceSnapshot{
-		work: work, revision: revision, plan: plan, records: records, goalSource: goalSource,
+		work: work, revision: revision, plan: plan, todo: todo, records: records, goalSource: goalSource,
 		mutating: mutating, latestMutationAt: latestMutationAt, captureErrors: captureErrors,
 	}, nil
 }
@@ -428,7 +444,8 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 		if record.State != session.ToolCompleted {
 			continue
 		}
-		if mutatingToolName(record.Name) {
+		recordMutated := toolRecordMutated(record)
+		if recordMutated {
 			mutating = true
 			if record.CompletedAt.After(latestMutationAt) {
 				latestMutationAt = record.CompletedAt
@@ -440,7 +457,7 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 				continue
 			}
 			entry := owned[path]
-			if observation.Operation == "read" {
+			if observation.Operation == "read" || observation.Operation == "format" && !recordMutated {
 				entry.observed = true
 			} else {
 				entry.touched = true
@@ -476,10 +493,18 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 	return files, mutating, latestMutationAt, captureErrors
 }
 
-func mutatingToolName(name string) bool {
-	switch name {
-	case "coding.edit_hashline", "coding.write_file", "coding.gofmt":
+func toolRecordMutated(record session.ToolRecord) bool {
+	switch record.Name {
+	case "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file":
 		return true
+	case "coding.gofmt":
+		var result struct {
+			Changed *bool `json:"changed"`
+		}
+		if json.Unmarshal(record.Structured, &result) == nil && result.Changed != nil {
+			return *result.Changed
+		}
+		return !strings.Contains(strings.ToLower(record.Content), "already formatted")
 	default:
 		return false
 	}
@@ -524,6 +549,21 @@ func evaluateRuntimeChecks(snapshot runtimeEvidenceSnapshot) runtimeCheckState {
 		var record *session.ToolRecord
 		if check.Kind == "command" {
 			record = matchingCommandRecord(check, snapshot.records, snapshot.latestMutationAt)
+			if record == nil {
+				if formatterRecords, formatterCheck := matchingGofmtRecords(check, snapshot.revision.Files, snapshot.records); formatterCheck {
+					if len(formatterRecords) == 0 {
+						state.status = ""
+						state.missing = append(state.missing, checkInstruction(check))
+					} else {
+						for _, formatterRecord := range formatterRecords {
+							state.evidence = appendUniqueSource(state.evidence, session.SourceRefV1{
+								Kind: "tool_record", ID: formatterRecord.RunID + ":" + formatterRecord.ToolCallID,
+							})
+						}
+					}
+					continue
+				}
+			}
 		} else if check.Kind == "artifact" && strings.HasPrefix(check.ArtifactRef, "file:") {
 			path := strings.TrimPrefix(check.ArtifactRef, "file:")
 			record = matchingReadbackRecord(path, snapshot.revision.Files, snapshot.records, snapshot.latestMutationAt)
@@ -557,6 +597,58 @@ func matchingCommandRecord(check session.VerificationCheckV1, records []session.
 		}
 	}
 	return matched
+}
+
+func matchingGofmtRecords(check session.VerificationCheckV1, files []session.WorkRevisionFileV1, records []session.ToolRecord) ([]*session.ToolRecord, bool) {
+	if len(check.Command) < 3 || filepath.Base(check.Command[0]) != "gofmt" || check.Command[1] != "-d" {
+		return nil, false
+	}
+	currentSHA := make(map[string]string, len(files))
+	for _, file := range files {
+		currentSHA[filepath.ToSlash(filepath.Clean(file.Path))] = file.SHA256
+	}
+	matches := make([]*session.ToolRecord, 0, len(check.Command)-2)
+	seen := make(map[string]struct{}, len(check.Command)-2)
+	for _, rawPath := range check.Command[2:] {
+		path := filepath.ToSlash(filepath.Clean(rawPath))
+		if path == "." {
+			return nil, true
+		}
+		if _, duplicate := seen[path]; duplicate {
+			continue
+		}
+		seen[path] = struct{}{}
+		sha := currentSHA[path]
+		if sha == "" {
+			return nil, true
+		}
+		var matched *session.ToolRecord
+		for index := range records {
+			record := &records[index]
+			if record.Name != "coding.gofmt" || record.State != session.ToolCompleted {
+				continue
+			}
+			var result struct {
+				Path string `json:"path"`
+			}
+			if json.Unmarshal(record.Structured, &result) != nil || filepath.ToSlash(filepath.Clean(result.Path)) != path {
+				continue
+			}
+			for _, observation := range record.Observations {
+				if observation.Operation == "format" && filepath.ToSlash(filepath.Clean(observation.Path)) == path && observation.SHA256 == sha {
+					if matched == nil || matched.CompletedAt.Before(record.CompletedAt) {
+						matched = record
+					}
+					break
+				}
+			}
+		}
+		if matched == nil {
+			return nil, true
+		}
+		matches = append(matches, matched)
+	}
+	return matches, true
 }
 
 func matchingReadbackRecord(path string, files []session.WorkRevisionFileV1, records []session.ToolRecord, after time.Time) *session.ToolRecord {
@@ -704,6 +796,39 @@ func verificationRetryMessage(snapshot runtimeEvidenceSnapshot, missing []string
 		missing = []string{"Record current criterion-linked verification evidence"}
 	}
 	return "Before answering, complete exactly one verification retry for the current workspace snapshot. Run or perform each missing check, inspect failures, and only then answer:\n- " + strings.Join(missing, "\n- ")
+}
+
+func guardrailTodoItems(todo session.TodoList, enforceSessionTodo bool) []session.TodoItem {
+	if !enforceSessionTodo {
+		return nil
+	}
+	return incompleteTodoItems(todo)
+}
+
+func incompleteTodoItems(todo session.TodoList) []session.TodoItem {
+	items := make([]session.TodoItem, 0)
+	for _, phase := range todo.Phases {
+		for _, item := range phase.Items {
+			if item.Status == session.TodoPending || item.Status == session.TodoInProgress {
+				items = append(items, item)
+			}
+		}
+	}
+	return items
+}
+
+func unfinishedTodoRetryMessage(items []session.TodoItem) string {
+	var builder strings.Builder
+	builder.WriteString("[Host] This run still has unfinished Todo items. You may not finish until every item is completed or cancelled.\n")
+	for _, item := range items {
+		status := strings.TrimSpace(string(item.Status))
+		if status == "" {
+			status = string(session.TodoPending)
+		}
+		fmt.Fprintf(&builder, "- %s: %s\n", status, strings.TrimSpace(item.Content))
+	}
+	builder.WriteString("Continue the current in_progress item. Do not write a final answer yet.")
+	return builder.String()
 }
 
 func appendUniqueSource(values []session.SourceRefV1, value session.SourceRefV1) []session.SourceRefV1 {

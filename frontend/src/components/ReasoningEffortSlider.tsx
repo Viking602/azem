@@ -19,6 +19,13 @@ export function reasoningLevelIndex(levels: string[], value: string): number {
   return index >= 0 ? index : 0;
 }
 
+/** Fixed one-level ladders render at the full endpoint; empty ladders remain at zero. */
+export function reasoningVisualRatio(count: number, index: number): number {
+  if (count <= 0) return 0;
+  if (count === 1) return 1;
+  return Math.max(0, Math.min(1, index / (count - 1)));
+}
+
 /** High-cost tiers that warrant the usage-limit hint (Codex “极高+”). */
 export function isHighCostReasoning(level: string): boolean {
   return level === "xhigh" || level === "max" || level === "ultra";
@@ -98,9 +105,11 @@ export default function ReasoningEffortSlider({
   const pendingRatio = useRef<number | null>(null);
   const labelId = useId();
   const sorted = levels.length ? levels : [value].filter(Boolean);
+  const fixed = sorted.length === 1;
+  const interactionDisabled = disabled || fixed;
   const lastIndex = Math.max(0, sorted.length - 1);
   const committed = reasoningLevelIndex(sorted, value);
-  const committedRatio = lastIndex === 0 ? 0 : committed / lastIndex;
+  const committedRatio = reasoningVisualRatio(sorted.length, committed);
 
   const [dragging, setDragging] = useState(false);
   const [dragRatio, setDragRatio] = useState<number | null>(null);
@@ -115,8 +124,9 @@ export default function ReasoningEffortSlider({
   const currentLabel = labels[current] ?? current;
   const intensity = effortIntensity(visualRatio);
   const high = isHighCostReasoning(current) || intensity === "high";
-  const showHint = Boolean(high && highCostHint);
+  const showHint = Boolean((isHighCostReasoning(current) || (!fixed && intensity === "high")) && highCostHint);
   const atMax = sorted.length > 1 && visualIndex >= lastIndex;
+  const visualAtEnd = visualRatio >= 1;
   // Only while dragging: mid/low → 更高效/更智能; high/ultra → 更快消耗使用额度.
   // Idle → no overlay (高级 / ⚡ only).
   const labelsMode = !dragging ? "none" : showHint ? "hint" : "ends";
@@ -157,7 +167,7 @@ export default function ReasoningEffortSlider({
   };
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (disabled || sorted.length <= 1) return;
+    if (interactionDisabled) return;
     event.preventDefault();
     draggingRef.current = true;
     setDragging(true);
@@ -168,7 +178,7 @@ export default function ReasoningEffortSlider({
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!draggingRef.current || disabled) return;
+    if (!draggingRef.current || interactionDisabled) return;
     const ratio = ratioFromEvent(event.clientX);
     if (ratio === null) return;
     setVisualRatio(ratio);
@@ -191,7 +201,7 @@ export default function ReasoningEffortSlider({
   };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (disabled || sorted.length <= 1) return;
+    if (interactionDisabled) return;
     let next = committed;
     if (event.key === "ArrowLeft" || event.key === "ArrowDown") next = Math.max(0, committed - 1);
     else if (event.key === "ArrowRight" || event.key === "ArrowUp") next = Math.min(lastIndex, committed + 1);
@@ -214,6 +224,7 @@ export default function ReasoningEffortSlider({
     <div
       className="effort-slider"
       data-disabled={String(disabled)}
+      data-fixed={String(fixed)}
       data-high={String(high)}
       data-intensity={intensity}
       data-dragging={String(dragging)}
@@ -243,14 +254,14 @@ export default function ReasoningEffortSlider({
         ref={trackRef}
         className="effort-slider-track"
         role="slider"
-        tabIndex={disabled ? -1 : 0}
+        tabIndex={interactionDisabled ? -1 : 0}
         aria-label={ariaLabel}
         aria-labelledby={labelId}
         aria-valuemin={0}
         aria-valuemax={lastIndex}
         aria-valuenow={visualIndex}
         aria-valuetext={currentLabel}
-        aria-disabled={disabled}
+        aria-disabled={interactionDisabled}
         data-dragging={String(dragging)}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -272,7 +283,7 @@ export default function ReasoningEffortSlider({
             <span
               key={level}
               className={`effort-slider-tick ${i <= visualIndex ? "active" : ""}`}
-              style={stopStyle(lastIndex === 0 ? 0 : i / lastIndex)}
+              style={stopStyle(fixed ? 1 : i / lastIndex)}
             />
           ))}
         </div>
@@ -280,7 +291,7 @@ export default function ReasoningEffortSlider({
           className="effort-slider-thumb-wrap"
           style={thumbPos}
           data-high={String(high)}
-          data-end={String(atMax)}
+          data-end={String(visualAtEnd)}
         >
           {/* Codex MaxBurst: absolute inset 0 on the thumb; Burst remounts via key. */}
           {showBurst ? (
@@ -292,7 +303,7 @@ export default function ReasoningEffortSlider({
               </span>
             </span>
           ) : null}
-          <div className="effort-slider-thumb" data-high={String(high)} data-end={String(atMax)} />
+          <div className="effort-slider-thumb" data-high={String(high)} data-end={String(visualAtEnd)} />
         </div>
       </div>
       <div className="effort-slider-labels" aria-hidden="true">

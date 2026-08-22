@@ -15,6 +15,7 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
+	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 )
 
 func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testing.T) {
@@ -52,7 +53,7 @@ func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testin
 	failedPatch, _ := json.Marshal(map[string]string{"input": "[internal/app/app.go#ABCD]\ninvalid"})
 	recovery.Observe(
 		tool.Call{ID: "failed-edit", Name: coding.ToolEditHashline, Arguments: failedPatch},
-		tool.Result{ToolCallID: "failed-edit", Name: coding.ToolEditHashline, IsError: true},
+		tool.Result{ToolCallID: "failed-edit", Name: coding.ToolEditHashline, Content: "hashline edit failed: file changed since you read it", IsError: true},
 		nil,
 	)
 	recoveryRequest := provider.Request{Tools: []message.ToolDefinition{
@@ -80,5 +81,33 @@ func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testin
 	}
 	if len(restoredRequest.Tools) != 2 {
 		t.Fatalf("team tools were not restored after read: %#v", restoredRequest.Tools)
+	}
+}
+
+func TestTeamPrepareEngineBindsDistinctCursorExecHostsPerRole(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	hooks := service.teamHooks(
+		TurnRequest{SessionID: "session-1", Provider: "cursor", Model: "composer-2.5"},
+		"team-parent", teamExecutionPolicy{}, &agentservice.EditRecovery{},
+	)
+	base := agent.Engine{Tools: tool.NewBus(cursorApprovalResultDriver{})}
+	prepare := func(runID, role string) (*cursorExecHost, agent.Engine) {
+		t.Helper()
+		prepared, err := hooks.PrepareEngine(context.Background(), base, multiagent.Dispatch{
+			Task: api.Task{RunID: runID}, To: role,
+		}, multiagent.AgentClass{Name: role})
+		if err != nil {
+			t.Fatal(err)
+		}
+		host, ok := prepared.ExtraBody[cursordriver.ExecHostExtraKey].(*cursorExecHost)
+		if !ok || host == nil || host.bus != prepared.Tools {
+			t.Fatalf("role %s Cursor host=%#v tools=%p", role, host, prepared.Tools)
+		}
+		return host, prepared
+	}
+	implementer, first := prepare("run-1", agentservice.ImplementerClass)
+	reviewer, second := prepare("run-2", agentservice.ReviewerClass)
+	if implementer == reviewer || implementer.bus == reviewer.bus || first.ExtraBody["prompt_cache_key"] == second.ExtraBody["prompt_cache_key"] {
+		t.Fatalf("Cursor Team roles shared state: implementer=%p reviewer=%p", implementer, reviewer)
 	}
 }

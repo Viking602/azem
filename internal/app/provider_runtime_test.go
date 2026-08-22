@@ -63,8 +63,8 @@ func TestMainInstructionsContract(t *testing.T) {
 		t.Fatalf("main instructions size = %d bytes, want 4096..16384", size)
 	}
 	for _, name := range []string{
-		"coding.list_files", "coding.search", "coding.read_file", "coding.git_diff",
-		"coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test",
+		"coding.list_files", "coding.glob", "coding.search", "coding.read_file", "coding.git_diff",
+		"coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test",
 		"coding.shell", "todo", "subagent.spawn", "subagent.get_output", "subagent.kill",
 	} {
 		if !strings.Contains(mainInstructions, "`"+name+"`") {
@@ -83,6 +83,18 @@ func TestMainInstructionsContract(t *testing.T) {
 			t.Errorf("main instructions omit hashline grammar %q", grammar)
 		}
 	}
+	requireInstructionFragments(t, "read reuse and hashline freshness", []string{
+		"`coding.search`/`coding.read_file` results remain valid until the file changes",
+		"Never repeat the same/overlapping read",
+		"Re-read only missing ranges, changed files, or stale/conflict",
+		"latest `coding.search`/`coding.read_file`/successful `coding.edit_hashline` result",
+		"Success returns fresh header+diff; do not re-read to confirm",
+		"Re-read only unseen/renumbered lines or stale/conflict/surprise",
+	})
+	requireInstructionFragments(t, "Todo host ownership", []string{
+		"On `init`, provide only the goal, phase titles, and item content",
+		"host assigns IDs and status",
+	})
 	requireInstructionFragments(t, "language and contract", []string{
 		"language of the current user message",
 		"Settings language is for the UI only",
@@ -98,6 +110,7 @@ func TestMainInstructionsContract(t *testing.T) {
 		"exactly one mutating `todo` call", "never batch Todo mutations", "`done` automatically advances",
 		"actual lifecycle", "failed, cancelled, and stalled", "review as an approval gate", "independently inspect the changed files",
 		"must stay foreground", "`timeout_ms`", "before any gated action or ending the turn",
+		"Do not end the turn while any child spawned", "`idle_timeout`",
 		"ordinary commentary sentences", "Never emit a tool call before this commentary", "I'm ready",
 	})
 	requireInstructionFragments(t, "todo-first workflow", []string{

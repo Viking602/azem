@@ -1,7 +1,7 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  ChevronRight, ExternalLink, FileImage, Globe, Link2, ListChecks, LoaderCircle, Plus, SquareTerminal, X,
+  ChevronRight, ExternalLink, FileImage, Globe, Link2, LoaderCircle, Plus, SquareTerminal, X,
 } from "lucide-react";
 import { attachmentDataURL, execute, openExternalURL } from "../bridge";
 import { tFormat, translator } from "../i18n";
@@ -12,11 +12,10 @@ import {
   subagentSummaryLabel,
 } from "../subagents";
 import { useRuntimeStore } from "../store";
-import { contextCacheMetrics, contextComposition, contextOccupancy } from "../contextUsage";
-import type { ContextCompositionGroup } from "../contextUsage";
+import { contextCacheMetrics, contextComposition, contextOccupancy, stickyCacheMetrics, type ContextCacheMetrics, type ContextCompositionGroup } from "../contextUsage";
 import type { AgentState, Attachment, ContextProfile, SessionRecap, Snapshot, TodoItem, TodoList, TodoStatus } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
-import { TaskRow } from "./beautiful-ui/Primitives";
+import { RollingLabel } from "./beautiful-ui/Primitives";
 import { collectConversationSources, type ConversationSource } from "./inspectorSources";
 
 
@@ -33,8 +32,8 @@ export default function Inspector() {
   const backgroundProcesses = useRuntimeStore((state) => state.backgroundProcesses);
   const contextProfile = useRuntimeStore((state) => state.contextProfile);
   const contextUsage = useRuntimeStore((state) => state.contextUsage);
-  const running = useRuntimeStore((state) => state.running);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
+  const running = useRuntimeStore((state) => state.running);
   const selectAgent = useRuntimeStore((state) => state.selectAgent);
   const setError = useRuntimeStore((state) => state.setError);
   const setView = useRuntimeStore((state) => state.setView);
@@ -44,8 +43,17 @@ export default function Inspector() {
   const [preview, setPreview] = useState<ConversationSource | null>(null);
   const currentBranch = branches.find((branch) => branch.current)?.name || "";
   const occupancy = contextOccupancy(contextUsage, contextProfile);
-  const cache = contextCacheMetrics(contextUsage);
+  const cacheReport = contextCacheMetrics(contextUsage);
+  const cacheScope = `${currentSessionId}\u0000${snapshot.provider}\u0000${snapshot.model}`;
+  const lastCache = useRef<{ scope: string; metrics: ContextCacheMetrics } | null>(null);
+  const previousCache = lastCache.current?.scope === cacheScope ? lastCache.current.metrics : null;
+  const cache = stickyCacheMetrics(cacheReport, previousCache, running);
+  if (cache.reported) lastCache.current = { scope: cacheScope, metrics: cache };
+  else if (!running) lastCache.current = null;
   const composition = contextComposition(contextUsage, contextProfile);
+  const cacheHitLabel = cache.reported ? (cache.hitRate === null ? "—" : `${cache.hitRate}%`) : t(running ? "cachePending" : "cacheUnreported");
+  const cacheHitsLabel = cache.reported ? formatCompactTokens(cache.cachedTokens) : "—";
+  const cacheInputLabel = cache.reported ? formatCompactTokens(cache.totalCacheTokens) : "—";
   const prototypeDemo = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("demo");
 
   useEffect(() => {
@@ -63,12 +71,15 @@ export default function Inspector() {
           <header className="inspector-section-header"><h2>{t("contextKernel")}</h2><small className="inspector-current">CURRENT</small></header>
           <div className="inspector-context-orbit" aria-label={`${occupancy.percentage}%`}>
             <span className="orbit arc-one" /><span className="orbit arc-two" /><span className="orbit arc-three" />
-            <div><strong>{occupancy.limit > 0 ? `${occupancy.percentage}%` : "—"}</strong><small>{occupancy.limit > 0 ? `${formatCompactTokens(occupancy.used)} / ${formatCompactTokens(occupancy.limit)}` : t("contextUnavailable")}</small></div>
+            <div>
+              <strong><RollingLabel text={occupancy.limit > 0 ? `${occupancy.percentage}%` : "—"} active={false} /></strong>
+              <small><RollingLabel text={occupancy.limit > 0 ? `${formatCompactTokens(occupancy.used)} / ${formatCompactTokens(occupancy.limit)}` : t("contextUnavailable")} active={false} /></small>
+            </div>
           </div>
           <div className="inspector-cache-summary" aria-label={t("cacheHitRate")}>
-            <div><span>{t("cacheHitRate")}</span><strong aria-live="polite">{cache.reported ? (cache.hitRate === null ? "—" : `${cache.hitRate}%`) : running ? t("cachePending") : t("cacheUnreported")}</strong></div>
-            <div><span>{t("cacheHits")}</span><strong>{cache.reported ? formatCompactTokens(cache.cachedTokens) : "—"}</strong></div>
-            <div><span>{t("cacheRequestInput")}</span><strong>{cache.reported ? formatCompactTokens(cache.totalCacheTokens) : "—"}</strong></div>
+            <div><span>{t("cacheHitRate")}</span><strong aria-live="polite"><RollingLabel text={cacheHitLabel} active={false} /></strong></div>
+            <div><span>{t("cacheHits")}</span><strong><RollingLabel text={cacheHitsLabel} active={false} /></strong></div>
+            <div><span>{t("cacheRequestInput")}</span><strong><RollingLabel text={cacheInputLabel} active={false} /></strong></div>
           </div>
           <ContextComposition groups={composition.groups} totalTokens={composition.totalTokens} estimated={composition.estimated} language={snapshot.language} />
           <ContextDiagnostics profile={contextProfile} language={snapshot.language} />
@@ -154,7 +165,7 @@ function ContextComposition({ groups, totalTokens, estimated, language }: {
   return <div className="context-composition">
     <header>
       <strong>{t("contextComposition")}</strong>
-      <small>{totalTokens > 0 ? `${estimated ? `${t("estimated")} · ` : ""}${formatCompactTokens(totalTokens)}` : "—"}</small>
+      <small><RollingLabel text={totalTokens > 0 ? `${estimated ? `${t("estimated")} · ` : ""}${formatCompactTokens(totalTokens)}` : "—"} active={false} /></small>
     </header>
     {groups.length > 0 ? <>
       <button
@@ -257,46 +268,47 @@ function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["lang
   const items = todo.phases.flatMap((phase) => phase.items);
   const completed = items.filter((item) => item.status === "completed" || item.status === "cancelled").length;
   const percentage = items.length > 0 ? Math.round((completed / items.length) * 100) : 0;
-  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const heading = todo.goal?.trim() || t("todoTitle");
 
-  return <section className="inspector-section todo-section" aria-label={t("todoTitle")}>
+  return <section className="inspector-section todo-section" aria-label={heading}>
     <header className="inspector-section-header">
-      <h2><ListChecks size={14} />{language === "zh-CN" ? "执行计划" : "Execution plan"}</h2>
+      <h2 className="todo-title">{heading}</h2>
       <small>{completed} / {items.length}</small>
     </header>
-    {todo.goal && <p className="todo-goal"><span>{t("todoGoal")}</span>{todo.goal}</p>}
-    <div className="todo-progress-row">
+    {percentage > 0 ? <div className="todo-progress-row">
       <div className="todo-progress-track" role="progressbar" aria-label={tFormat(language, "todoProgress", { done: completed, total: items.length })} aria-valuemin={0} aria-valuemax={items.length} aria-valuenow={completed}>
         <span style={{ width: `${percentage}%` }} />
       </div>
-    </div>
+    </div> : null}
     <div className="todo-phases">
       {todo.phases.map((phase, phaseIndex) => {
         const phaseKey = phase.id || phase.title || String(phaseIndex);
-        const phaseState = todoPhaseState(phase.items);
-        const counts = todoPhaseCounts(phase.items);
-        const defaultOpen = phaseState !== "completed" && phaseState !== "cancelled";
-        const expanded = open[phaseKey] ?? defaultOpen;
-        return <TaskRow
-          key={phaseKey}
-          state={phaseState}
-          title={phase.title || phase.items[0]?.content || t("todoTitle")}
-          metric={counts.total > 0 ? `${counts.done}/${counts.total}` : undefined}
-          statusLabel={todoStatusLabel(phaseState, language)}
-          index={phaseState === "in_progress" ? phaseIndex + 1 : undefined}
-          progress={phaseState === "in_progress" ? counts.ratio : undefined}
-          expanded={expanded}
-          onToggle={phase.items.length > 0 ? () => setOpen((current) => ({ ...current, [phaseKey]: !expanded })) : undefined}
-          steps={phase.items.map((item) => ({
-            key: item.id || item.content,
-            label: item.content,
-            value: todoStatusLabel(item.status, language),
-          }))}
-          aria-label={`${phase.title || t("todoTitle")}，${todoStatusLabel(phaseState, language)}`}
-        />;
+        return <section key={phaseKey} className="todo-phase" data-state={todoPhaseState(phase.items)}>
+          {phase.title && phase.items.length > 1 ? <h3 className="todo-phase-title">{phase.title}</h3> : null}
+          <ul className="todo-items">
+            {phase.items.map((item) => <li key={item.id || item.content} className="todo-task" data-status={item.status} aria-label={`${item.content}，${todoStatusLabel(item.status, language)}`}>
+              <TodoTaskMark state={item.status} />
+              <span className="todo-task-label">{item.content}</span>
+            </li>)}
+          </ul>
+        </section>;
       })}
     </div>
   </section>;
+}
+
+function TodoTaskMark({ state }: { state: TodoStatus }) {
+  if (state === "completed") {
+    return <span className="todo-task-mark" data-state="completed" aria-hidden="true">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3.6 8.2 6.7 11.2 12.4 4.8" /></svg>
+    </span>;
+  }
+  if (state === "cancelled") {
+    return <span className="todo-task-mark" data-state="cancelled" aria-hidden="true">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M4.5 8h7" /></svg>
+    </span>;
+  }
+  return <span className="todo-task-mark" data-state={state} aria-hidden="true" />;
 }
 
 function todoPhaseState(items: TodoItem[]): TodoStatus {
@@ -304,11 +316,6 @@ function todoPhaseState(items: TodoItem[]): TodoStatus {
   if (items.some((item) => item.status === "pending")) return "pending";
   if (items.length > 0 && items.every((item) => item.status === "cancelled")) return "cancelled";
   return "completed";
-}
-
-function todoPhaseCounts(items: TodoItem[]) {
-  const done = items.filter((item) => item.status === "completed" || item.status === "cancelled").length;
-  return { done, total: items.length, ratio: items.length > 0 ? done / items.length : 0 };
 }
 
 function todoStatusLabel(status: TodoStatus, language: Snapshot["language"]) {

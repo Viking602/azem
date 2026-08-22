@@ -97,6 +97,72 @@ func TestDurableToolTimelineCapturesCompletedReadObservation(t *testing.T) {
 	}
 }
 
+func TestDurableToolTimelineCapturesCompletedDeleteObservation(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "gone.txt")
+	if err := os.WriteFile(path, []byte("remove me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Timeline"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "session", session.Block{Kind: "user", RunID: "run", Content: "delete file"}); err != nil {
+		t.Fatal(err)
+	}
+	arguments := json.RawMessage(`{"path":"gone.txt"}`)
+	timeline := newDurableToolTimeline(sessions, root, "session", "run")
+	if err := timeline.start(ctx, tool.Call{ID: "delete-1", Name: agentservice.ToolDeleteFile, Arguments: arguments}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := timeline.finish(ctx, tool.Result{ToolCallID: "delete-1", Name: agentservice.ToolDeleteFile, Content: `{"path":"gone.txt"}`}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := sessions.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.ToolRecords) != 1 || len(projection.ToolRecords[0].Observations) != 1 {
+		t.Fatalf("durable delete record=%#v", projection.ToolRecords)
+	}
+	observation := projection.ToolRecords[0].Observations[0]
+	if observation.Path != "gone.txt" || observation.Operation != "delete" || observation.SHA256 != "" || observation.ErrorCode != "" {
+		t.Fatalf("durable delete observation=%#v", observation)
+	}
+}
+
+func TestDurableToolContinuityVerifiesDeletedPath(t *testing.T) {
+	root := t.TempDir()
+	manager := turnContext{
+		workspaceRoot: root,
+		toolRecords: []session.ToolRecord{{
+			RunID: "run", ToolCallID: "delete-1", Name: agentservice.ToolDeleteFile, State: session.ToolCompleted,
+			Observations: []session.FileObservation{{Path: "gone.txt", Operation: "delete"}},
+		}},
+	}
+	messages := manager.toolContinuityMessages(context.Background())
+	if len(messages) != 2 || !strings.Contains(messages[1].Text, `"operation":"delete"`) ||
+		!strings.Contains(messages[1].Text, `"state":"verified_unchanged"`) {
+		t.Fatalf("deleted file evidence=%#v", messages)
+	}
+	if err := os.WriteFile(filepath.Join(root, "gone.txt"), []byte("recreated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	messages = manager.toolContinuityMessages(context.Background())
+	if len(messages) != 2 || !strings.Contains(messages[1].Text, `"state":"stale"`) {
+		t.Fatalf("recreated deleted path evidence=%#v", messages)
+	}
+}
+
 func TestShellArtifactSinkPersistsAfterExecutionCancellation(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "shell-artifact.db"))

@@ -417,15 +417,15 @@ func childMatchesLiveShell(active *activeSubagent, shells []agentservice.ShellEx
 	return false
 }
 
-func (r *subagentRuntime) listRunningBackgroundChildren(sessionID, parentRunID string) []agentservice.SubagentRun {
+func (r *subagentRuntime) listUnfinishedChildren(sessionID, parentRunID string) []agentservice.SubagentRun {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	children := make([]agentservice.SubagentRun, 0)
 	for _, active := range r.active {
-		if active.run.SessionID != sessionID || active.run.ParentRunID != parentRunID || !active.run.Background {
+		if active.run.SessionID != sessionID || active.run.ParentRunID != parentRunID {
 			continue
 		}
-		if active.run.CompletionDelivered || subagentTerminal(active.run.State) {
+		if subagentTerminal(active.run.State) {
 			continue
 		}
 		children = append(children, active.run)
@@ -434,6 +434,22 @@ func (r *subagentRuntime) listRunningBackgroundChildren(sessionID, parentRunID s
 		return strings.Compare(left.ID, right.ID)
 	})
 	return children
+}
+
+func (r *subagentRuntime) markParentChildrenDelivered(ctx context.Context, sessionID, parentRunID string) {
+	if r.store == nil || strings.TrimSpace(sessionID) == "" || strings.TrimSpace(parentRunID) == "" {
+		return
+	}
+	runs, err := r.store.List(ctx, sessionID)
+	if err != nil {
+		return
+	}
+	for _, run := range runs {
+		if run.ParentRunID != parentRunID || run.CompletionDelivered || !subagentTerminal(run.State) {
+			continue
+		}
+		_ = r.store.SetCompletionDelivered(ctx, run.ID, true)
+	}
 }
 
 func (r *subagentRuntime) HasActiveByParentRun(sessionID, parentRunID string) bool {

@@ -66,31 +66,39 @@ type ModelRouteEntry struct {
 	Route config.ModelRouteConfig `json:"route"`
 }
 
+type ModelProviderQuotaBreakdown struct {
+	ID          string  `json:"id"`
+	UsedPercent float64 `json:"usedPercent"`
+}
+
 type ModelProviderEntry struct {
-	ID                   string                    `json:"id"`
-	DisplayName          string                    `json:"displayName"`
-	Backend              string                    `json:"backend"`
-	DefaultBaseURL       string                    `json:"defaultBaseUrl"`
-	BaseURL              string                    `json:"baseUrl"`
-	EnvKey               string                    `json:"envKey"`
-	Enabled              bool                      `json:"enabled"`
-	CredentialConfigured bool                      `json:"credentialConfigured"`
-	CredentialSource     string                    `json:"credentialSource"`
-	Subscription         bool                      `json:"subscription,omitempty"`
-	AccountID            string                    `json:"accountId,omitempty"`
-	AccountLabel         string                    `json:"accountLabel,omitempty"`
-	AccountPlan          string                    `json:"accountPlan,omitempty"`
-	QuotaAvailable       bool                      `json:"quotaAvailable,omitempty"`
-	QuotaPeriod          string                    `json:"quotaPeriod,omitempty"`
-	QuotaUsedPercent     float64                   `json:"quotaUsedPercent,omitempty"`
-	QuotaResetsAt        int64                     `json:"quotaResetsAt,omitempty"`
-	QuotaBalance         string                    `json:"quotaBalance,omitempty"`
-	QuotaUnlimited       bool                      `json:"quotaUnlimited,omitempty"`
-	QuotaWarning         string                    `json:"quotaWarning,omitempty"`
-	ModelsDevID          string                    `json:"modelsDevId,omitempty"`
-	ModelsSource         string                    `json:"modelsSource,omitempty"`
-	ModelsWarning        string                    `json:"modelsWarning,omitempty"`
-	Models               []config.LLMuxModelConfig `json:"models"`
+	ID                   string                        `json:"id"`
+	DisplayName          string                        `json:"displayName"`
+	Backend              string                        `json:"backend"`
+	DefaultBaseURL       string                        `json:"defaultBaseUrl"`
+	BaseURL              string                        `json:"baseUrl"`
+	EnvKey               string                        `json:"envKey"`
+	Enabled              bool                          `json:"enabled"`
+	CredentialConfigured bool                          `json:"credentialConfigured"`
+	CredentialSource     string                        `json:"credentialSource"`
+	Subscription         bool                          `json:"subscription,omitempty"`
+	AccountID            string                        `json:"accountId,omitempty"`
+	AccountLabel         string                        `json:"accountLabel,omitempty"`
+	AccountPlan          string                        `json:"accountPlan,omitempty"`
+	QuotaAvailable       bool                          `json:"quotaAvailable,omitempty"`
+	QuotaPeriod          string                        `json:"quotaPeriod,omitempty"`
+	QuotaStartedAt       int64                         `json:"quotaStartedAt,omitempty"`
+	QuotaUsedPercent     float64                       `json:"quotaUsedPercent,omitempty"`
+	QuotaBreakdown       []ModelProviderQuotaBreakdown `json:"quotaBreakdown,omitempty"`
+	QuotaResetsAt        int64                         `json:"quotaResetsAt,omitempty"`
+	QuotaUpdatedAt       string                        `json:"quotaUpdatedAt,omitempty"`
+	QuotaBalance         string                        `json:"quotaBalance,omitempty"`
+	QuotaUnlimited       bool                          `json:"quotaUnlimited,omitempty"`
+	QuotaWarning         string                        `json:"quotaWarning,omitempty"`
+	ModelsDevID          string                        `json:"modelsDevId,omitempty"`
+	ModelsSource         string                        `json:"modelsSource,omitempty"`
+	ModelsWarning        string                        `json:"modelsWarning,omitempty"`
+	Models               []config.LLMuxModelConfig     `json:"models"`
 }
 
 type GitBranchEntry struct {
@@ -401,6 +409,9 @@ func (e Event) Clone() Event {
 			if e.ModelProviders[i].Models != nil {
 				cloned.ModelProviders[i].Models = make([]config.LLMuxModelConfig, len(e.ModelProviders[i].Models))
 				copy(cloned.ModelProviders[i].Models, e.ModelProviders[i].Models)
+			}
+			if e.ModelProviders[i].QuotaBreakdown != nil {
+				cloned.ModelProviders[i].QuotaBreakdown = append([]ModelProviderQuotaBreakdown(nil), e.ModelProviders[i].QuotaBreakdown...)
 			}
 			for j := range cloned.ModelProviders[i].Models {
 				cloned.ModelProviders[i].Models[j].ReasoningLevels = append([]string(nil), e.ModelProviders[i].Models[j].ReasoningLevels...)

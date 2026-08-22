@@ -195,6 +195,28 @@ describe("runtime event projection", () => {
 		expect(projected.modelProviders[0]).not.toHaveProperty("secret");
 	});
 
+	it("does not let subscription provider snapshots wipe an enriched Cursor catalog", () => {
+		const projected = reduceEvents(state(), [{
+			sequence: 1, kind: "model_catalog", data: {
+				provider: "cursor",
+				models: JSON.stringify([{
+					id: "claude-4.5-sonnet", name: "Claude Sonnet 4.5",
+					supportsTools: true, supportsReasoning: true,
+					inputModalities: ["text", "image"], outputModalities: ["text"],
+				}]),
+			},
+		}, {
+			sequence: 2, kind: "model_providers", modelProviders: [{
+				id: "cursor", displayName: "Cursor 订阅", backend: "subscription", subscription: true,
+				defaultBaseUrl: "", baseUrl: "", envKey: "", enabled: true,
+				credentialConfigured: true, credentialSource: "stored",
+				models: [{ id: "claude-4.5-sonnet", name: "Claude Sonnet 4.5", contextWindow: 200000, capabilities: ["tools", "reasoning"] }],
+			}],
+		}]);
+		expect(projected.modelsByProvider.cursor?.[0]?.inputModalities).toEqual(["text", "image"]);
+		expect(projected.modelsByProvider.cursor?.[0]?.capabilities).toEqual(expect.arrayContaining(["tools", "reasoning"]));
+	});
+
   it("keeps bootstrap events emitted before initialise returns", () => {
     useRuntimeStore.setState(state());
     useRuntimeStore.getState().hydrate({ ...snapshot, sequence: 6 });
@@ -386,6 +408,15 @@ describe("runtime event projection", () => {
 		expect(failed.error).toBe("");
 		expect(failed.blocks.filter((block) => block.kind === "error")).toHaveLength(1);
 		expect(failed.blocks.at(-1)?.content).toBe("provider unavailable");
+	});
+
+	it("does not repeat a synchronously rejected turn below its failure card", () => {
+		useRuntimeStore.setState(state());
+		useRuntimeStore.getState().failRun("model unavailable");
+		const failed = useRuntimeStore.getState();
+		expect(failed.error).toBe("");
+		expect(failed.blocks.filter((block) => block.kind === "error")).toHaveLength(1);
+		expect(failed.blocks.at(-1)?.content).toBe("model unavailable");
 	});
 
 	it("titles a run failure from the stable provider error code", () => {
@@ -1379,7 +1410,6 @@ describe("runtime event projection", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     await act(async () => root.render(createElement(Inspector)));
-    expect(container.textContent).toContain("执行计划");
     expect(container.textContent).toContain("在桌面端展示任务进度");
     expect(container.textContent).toContain("添加 Inspector 展示");
     expect(container.querySelector(".todo-section .inspector-section-header small")?.textContent).toBe("2 / 3");

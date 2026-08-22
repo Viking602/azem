@@ -10,6 +10,7 @@ import (
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/provider/catalog"
+	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 )
 
 // buildProviderServices assembles the credential stores, authentication
@@ -33,6 +34,14 @@ func (b *bootstrapAssembly) buildProviderServices() error {
 	b.modelCatalog = catalog.NewService(b.store.DB(), b.authentication)
 	b.modelCatalog.TTL["chatgpt"] = b.cfg.Providers.ChatGPT.CatalogTTL
 	b.modelCatalog.TTL["grok"] = b.cfg.Providers.Grok.CatalogTTL
+	b.modelCatalog.TTL["cursor"] = b.cfg.Providers.Cursor.CatalogTTL
+	b.modelCatalog.Fetchers["cursor"] = func(ctx context.Context, accountID string) ([]catalog.Model, error) {
+		credential, err := b.authentication.Credential(ctx, "cursor", accountID)
+		if err != nil {
+			return nil, err
+		}
+		return cursordriver.FetchUsableModels(ctx, cursordriver.CatalogConfig{AccessToken: credential.AccessToken})
+	}
 	b.providerRuntime, err = NewProviderRuntime(b.cfg, b.authentication, b.modelCatalog, b.coding, filepath.Join(b.paths.DataDir, "subagent-worktrees"))
 	return err
 }

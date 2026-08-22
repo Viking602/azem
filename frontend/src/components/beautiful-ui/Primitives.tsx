@@ -25,6 +25,9 @@ type ThinkingStateProps = {
   expandable?: boolean;
   /** Codex wait: gray “正在思考”, cadenced sweep, no sparkle or clock. */
   quiet?: boolean;
+  /** Quiet live tools: show the actual tool mark before 正在运行. */
+  quietMark?: boolean;
+  mark?: ReactNode;
   className?: string;
   tabs?: ThinkingTab[];
   activeTab?: ThinkingTabId;
@@ -58,6 +61,50 @@ export function thinkingTablist(tabs: ThinkingTab[] | undefined) {
 const SHIMMER_DELAY_MS = 600;
 const SHIMMER_PULSE_MS = 1000;
 const SHIMMER_INTERVAL_MS = 4000;
+const ROLL_MS = 400;
+
+/** Page-roll identity. A new rollId remounts in/out spans so a second
+ *  tool→思考 swap restarts CSS animation even if `.rolling` never left. */
+function useRollingText(text: string, textKey?: string, enabled = true) {
+  const identity = textKey ?? text;
+  const reduceMotion = Boolean(useReducedMotion());
+  const [shown, setShown] = useState(text);
+  const [shownKey, setShownKey] = useState(identity);
+  const [outgoing, setOutgoing] = useState<string | null>(null);
+  const [rollId, setRollId] = useState(0);
+
+  useEffect(() => {
+    if (!enabled) return;
+    if (identity === shownKey) {
+      if (text !== shown) setShown(text);
+      return;
+    }
+    if (reduceMotion || !shown) {
+      setOutgoing(null);
+      setShown(text);
+      setShownKey(identity);
+      return;
+    }
+    setOutgoing(shown);
+    setShown(text);
+    setShownKey(identity);
+    setRollId((value) => value + 1);
+  }, [enabled, identity, reduceMotion, shown, shownKey, text]);
+
+  useEffect(() => {
+    if (!outgoing) return;
+    const timer = window.setTimeout(() => setOutgoing(null), ROLL_MS);
+    return () => window.clearTimeout(timer);
+  }, [outgoing, rollId]);
+
+  return {
+    shown,
+    outgoing,
+    rolling: Boolean(outgoing && outgoing !== shown),
+    rollId,
+    reduceMotion,
+  };
+}
 
 /** ChatGPT Codex thinking-shimmer: one 1s sweep after 600ms, then every 4s. */
 export function CadencedShimmer({
@@ -69,13 +116,9 @@ export function CadencedShimmer({
   textKey?: string;
 }) {
   const text = typeof children === "string" ? children : "";
-  const identity = textKey ?? text;
-  const reduceMotion = Boolean(useReducedMotion());
+  const { shown, outgoing, rolling, rollId, reduceMotion } = useRollingText(text, textKey, Boolean(text));
   const ref = useRef<HTMLSpanElement>(null);
   const enabled = active && !reduceMotion;
-  const [shown, setShown] = useState(text);
-  const [shownKey, setShownKey] = useState(identity);
-  const [outgoing, setOutgoing] = useState<string | null>(null);
 
   useEffect(() => {
     const node = ref.current;
@@ -108,35 +151,11 @@ export function CadencedShimmer({
     };
   }, [enabled]);
 
-  useEffect(() => {
-    if (!text) return;
-    if (identity === shownKey) {
-      if (text !== shown) setShown(text);
-      return;
-    }
-    if (reduceMotion || !shown) {
-      setOutgoing(null);
-      setShown(text);
-      setShownKey(identity);
-      return;
-    }
-    setOutgoing(shown);
-    setShown(text);
-    setShownKey(identity);
-  }, [identity, reduceMotion, shown, shownKey, text]);
-
-  useEffect(() => {
-    if (!outgoing) return;
-    const timer = window.setTimeout(() => setOutgoing(null), 400);
-    return () => window.clearTimeout(timer);
-  }, [outgoing, shownKey]);
-
-  const rolling = Boolean(outgoing && outgoing !== shown);
   const display = text ? shown : children;
   return <span ref={enabled ? ref : undefined} className={`bui-cadenced-shimmer ${className} ${rolling ? "rolling" : ""}`.trim()}>
     <span className="reasoning-label-roll">
-      {rolling ? <span className="reasoning-label-out" aria-hidden="true">{outgoing}</span> : null}
-      <span className="bui-cadenced-shimmer-text">{display}</span>
+      {rolling ? <span key={`out-${rollId}`} className="reasoning-label-out" aria-hidden="true">{outgoing}</span> : null}
+      <span key={`in-${rollId}`} className="bui-cadenced-shimmer-text">{display}</span>
     </span>
     {active ? <span aria-hidden="true" className="bui-cadenced-shimmer-sweep">
       <span className="bui-cadenced-shimmer-highlight">{display}</span>
@@ -146,65 +165,37 @@ export function CadencedShimmer({
 
 
 /** Vertical page-roll when the action meaning changes. Clock ticks stay still. */
-function RollingLabel({
+export function RollingLabel({
   text, textKey, active,
 }: {
   text: string;
   textKey?: string;
   active: boolean;
 }) {
-  const identity = textKey ?? text;
-  const reduceMotion = Boolean(useReducedMotion());
-  const [shown, setShown] = useState(text);
-  const [shownKey, setShownKey] = useState(identity);
-  const [outgoing, setOutgoing] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (identity === shownKey) {
-      if (text !== shown) setShown(text);
-      return;
-    }
-    if (reduceMotion || !shown) {
-      setOutgoing(null);
-      setShown(text);
-      setShownKey(identity);
-      return;
-    }
-    setOutgoing(shown);
-    setShown(text);
-    setShownKey(identity);
-  }, [identity, reduceMotion, shown, shownKey, text]);
-
-  useEffect(() => {
-    if (!outgoing) return;
-    const timer = window.setTimeout(() => setOutgoing(null), 400);
-    return () => window.clearTimeout(timer);
-  }, [outgoing, shownKey]);
-
-  const rolling = Boolean(outgoing && outgoing !== shown);
+  const { shown, outgoing, rolling, rollId } = useRollingText(text, textKey);
   return <span className={`reasoning-label bui-shimmer-label ${active ? "active" : ""} ${rolling ? "rolling" : ""}`}>
     <span className="reasoning-label-roll">
-      {rolling ? <span className="reasoning-label-out" aria-hidden="true">{outgoing}</span> : null}
-      <span className="reasoning-label-base">{shown}</span>
+      {rolling ? <span key={`out-${rollId}`} className="reasoning-label-out" aria-hidden="true">{outgoing}</span> : null}
+      <span key={`in-${rollId}`} className="reasoning-label-base">{shown}</span>
     </span>
     {active ? <span className="reasoning-label-sweep" aria-hidden="true"><span className="reasoning-label-highlight">{shown}</span></span> : null}
   </span>;
 }
 
 export function ThinkingState({
-  active, expanded, label, labelKey, meta, panelId, disabled, expandable, quiet = false, className = "", tabs, activeTab, onTabChange, onToggle, children,
+  active, expanded, label, labelKey, meta, panelId, disabled, expandable, quiet = false, quietMark = false, mark, className = "", tabs, activeTab, onTabChange, onToggle, children,
 }: ThinkingStateProps) {
   const tablist = thinkingTablist(tabs);
   const hasDetails = expandable || Children.count(children) > 0 || tablist.length > 0;
   const ownsPanel = Children.count(children) > 0 || tablist.length > 0;
   const showChrome = !quiet;
-  const waitLabel = <CadencedShimmer className="bui-thinking-wait" active={active} textKey={labelKey}>{label}</CadencedShimmer>;
+  const waitLabel = <CadencedShimmer key="thinking-wait" className="bui-thinking-wait" active={active} textKey={labelKey}>{label}</CadencedShimmer>;
   return <section
     className={`reasoning-trace bui-thinking-state ${active ? "streaming" : "completed"} ${expanded ? "open" : ""} ${quiet ? "quiet" : ""} ${className}`.trim()}
     data-testid="thinking-header"
     aria-busy={active || undefined}
   >
-    {quiet && !hasDetails ? waitLabel : <button
+    {quiet && !hasDetails && !quietMark ? waitLabel : <button
       className={`reasoning-summary ${quiet ? "quiet" : ""}`}
       type="button"
       aria-expanded={hasDetails ? expanded : undefined}
@@ -212,10 +203,13 @@ export function ThinkingState({
       onClick={hasDetails ? onToggle : undefined}
       disabled={disabled || !hasDetails}
     >
+      {quiet ? <span className="bui-thinking-lead" data-empty={quietMark ? undefined : "true"} aria-hidden="true">
+        {quietMark ? mark ?? <span className="bui-running-mark" /> : null}
+      </span> : null}
       {showChrome ? <span className={`azem-thinking-mark bui-thinking-mark ${active ? "active" : ""}`} aria-hidden="true"><i /><i /></span> : null}
       {quiet ? waitLabel : <RollingLabel text={label} textKey={labelKey} active={active} />}
       {showChrome ? <span className="bui-thinking-meta" data-empty={meta ? undefined : "true"}>{meta}</span> : null}
-      {hasDetails || showChrome ? <svg
+      {!quiet && (hasDetails || showChrome) ? <svg
         className="reasoning-chevron"
         data-reserved={hasDetails ? undefined : "true"}
         width="13"
@@ -229,7 +223,8 @@ export function ThinkingState({
         aria-hidden="true"
       ><path d="M6 9l6 6 6-6" /></svg> : null}
     </button>}
-    {ownsPanel ? <div className="reasoning-body bui-thinking-body" id={panelId} hidden={!expanded}>
+    {ownsPanel ? <div className="reasoning-body-clip" data-open={expanded ? "true" : "false"}>
+      <div className="reasoning-body bui-thinking-body" id={panelId} inert={expanded ? undefined : true} aria-hidden={expanded ? undefined : true}>
       {tablist.length ? <div className="bui-thinking-tabs" role="tablist">
         {tablist.map((tab) => <button
           key={tab.id}
@@ -245,6 +240,7 @@ export function ThinkingState({
         >{tab.label}</button>)}
       </div> : null}
       {children}
+      </div>
     </div> : null}
   </section>;
 }

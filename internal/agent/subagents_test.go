@@ -153,7 +153,7 @@ func TestWorkspaceDriversFilterGitDiffByEffectiveRoot(t *testing.T) {
 			continue
 		}
 		foundEditDefinition = true
-		for _, required := range []string{"¶PATH#TAG", "replace N..M:", "Never send @@ hunks", "-old rows"} {
+		for _, required := range []string{"¶PATH#TAG", "replace N..M:", "Never send @@ hunks", "-old rows", "coding.search", "successful coding.edit_hashline", "Re-read only"} {
 			if !strings.Contains(definition.Description, required) {
 				t.Fatalf("edit tool description omitted %q: %q", required, definition.Description)
 			}

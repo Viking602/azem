@@ -944,7 +944,7 @@ func (m AppModel) overlayDescription() []string {
 	case OverlayProvider:
 		if m.overlayPurpose == "login" {
 			return []string{
-				m.tr("overlay.signin.chatgpt"), m.tr("overlay.signin.grok"), m.tr("overlay.signin.existing"),
+				m.tr("overlay.signin.chatgpt"), m.tr("overlay.signin.grok"), m.tr("overlay.signin.cursor"), m.tr("overlay.signin.existing"),
 			}
 		}
 	case OverlayModel:
@@ -1157,8 +1157,8 @@ func (m AppModel) overlayOptions() []overlayOption {
 		}
 		return options
 	case OverlayProvider:
-		options := make([]overlayOption, 0, 2)
-		for _, provider := range []string{"chatgpt", "grok"} {
+		options := make([]overlayOption, 0, 3)
+		for _, provider := range []string{"chatgpt", "grok", "cursor"} {
 			auth := m.auth[provider]
 			detail := m.tr("provider.not_signed_in")
 			state := auth.State

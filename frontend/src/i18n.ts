@@ -19,11 +19,6 @@ const messages = {
     noTextualChange: "此文件没有可显示的文本差异。", patchTruncated: "差异过大，仅显示前 6 MiB。",
     recovery: "恢复中心", promptTitle: "准备开始什么？", promptSubtitle: "选择一个项目，然后描述要交给 Azem 完成的任务。", taskSuggestions: "任务建议",
     promptPlaceholder: "描述任务、附加图片或引用文件…", send: "发送", cancel: "取消",
-    selectAction: "选择行动", selectActionDescribe: "描述编辑", selectActionExplain: "解释",
-    selectActionImprove: "改进", selectActionSubmit: "提交编辑",
-    selectActionExplainPrompt: "请解释下面这段文字：\n\n{quote}",
-    selectActionImprovePrompt: "请改进并重写下面这段文字，保持原意，让表达更清晰准确：\n\n{quote}",
-    selectActionDescribePrompt: "请按以下要求编辑下面这段文字：\n\n{quote}\n\n要求：{instruction}",
     deliveryMode: "跟进消息行为", queue: "队列", guide: "引导", queuedMessages: "已排队消息",
     queuePlaceholder: "输入下一轮消息…", guidePlaceholder: "引导当前任务…",
     runningPlaceholder: "模型正在思考，输入将排入下一轮…",
@@ -37,12 +32,12 @@ const messages = {
     backgroundProcesses: "后台进程", backgroundTerminal: "后台终端", sources: "来源",
     sourceImage: "图片", sourceInputURL: "输入链接", sourceSearchURL: "网页搜索",
     openSource: "打开来源", closeSourceImage: "关闭图片",
-    todoTitle: "任务计划", todoGoal: "目标", todoProgress: "进度 {done}/{total}", todoOpen: "{count} 个待办",
+    todoTitle: "任务计划", todoKicker: "任务", todoGoal: "目标", todoProgress: "进度 {done}/{total}", todoOpen: "{count} 个待办",
     todoPending: "待处理", todoInProgress: "进行中", todoCompleted: "已完成",
     contextUsage: "上下文占用", contextRemaining: "剩余", contextUnavailable: "上下文用量暂不可用",
     contextKernel: "上下文归档", archivePolicy: "归档策略", canonicalHighWater: "覆盖到序号", rebuildReason: "归档原因", contextSegments: "上下文片段",
     recapTitle: "会话回顾", recapEmpty: "成功完成一个回合后会在这里生成简短回顾。", recapGoal: "当前目标", recapOpenItems: "未完成事项",
-    cacheHitRate: "最近请求命中率", cacheHits: "命中缓存", cacheRequestInput: "请求输入", cacheUnreported: "未上报", cachePending: "等待上报",
+    cacheHitRate: "缓存命中率", cacheHits: "命中缓存", cacheRequestInput: "请求输入", cacheUnreported: "未上报", cachePending: "等待上报",
     contextComposition: "上下文构成", contextCompositionEmpty: "下一次模型请求后显示构成", estimated: "估算",
     contextCore: "核心指令", contextConversation: "会话消息", contextBuiltinTools: "内置工具", contextSkills: "技能", contextMCP: "MCP 工具",
     contextCurrentOutput: "当前输出", contextProviderInput: "模型输入", contextOther: "其他", azemCoreInstructions: "Azem 核心指令",
@@ -89,7 +84,7 @@ const messages = {
     toolSearch: "搜索代码", toolListFiles: "列出文件", toolShell: "运行命令", toolGoTest: "运行 Go 测试", toolGofmt: "格式化 Go 代码",
     toolGitDiff: "查看 Git 差异", toolActivateSkill: "加载技能", toolReadSkillResource: "读取技能资源", toolSpawn: "启动子智能体", toolGetSubagentOutput: "获取子智能体输出", toolStopSubagent: "停止子智能体",
     // Timeline / process
-    thinking: "正在思考", thinkingActive: "正在思考", thinkingActiveFor: "正在思考", executing: "执行中", thought: "已完成思考", thoughtFor: "已思考 {duration}", thinkingSearchedWeb: "搜索了网页", thinkingSearchedCode: "搜索了代码", thinkingRanOneTool: "运行了 1 个工具", thinkingRanTools: "运行了 {count} 个工具", thinkingRunningTools: "正在运行 {count} 个工具", thinkingTabSteps: "步骤", thinkingTabReasoning: "推理", thinkingTabSearch: "搜索", thinkingTabCoding: "编码", thinkingTabEmpty: "这一步还没有内容", thinkingSearchMore: "还有 {count} 条", progressUpdate: "进度更新", processed: "已处理", processedFor: "耗时 {duration}", processing: "正在处理", finalAnswer: "最终回答",
+    thinking: "正在思考", thinkingActive: "正在思考", thinkingActiveFor: "正在思考", executing: "执行中", thought: "已完成思考", thoughtFor: "已思考 {duration}", thinkingSearchedWeb: "搜索了网页", thinkingSearchedCode: "搜索了代码", thinkingRanOneTool: "运行了 1 个工具", thinkingRanTools: "运行了 {count} 个工具", thinkingRunning: "正在运行 {detail}", thinkingRunningTools: "正在运行 {count} 个工具", thinkingTabSteps: "步骤", thinkingTabReasoning: "推理", thinkingTabSearch: "搜索", thinkingTabCoding: "编码", thinkingTabEmpty: "这一步还没有内容", thinkingSearchMore: "还有 {count} 条", progressUpdate: "进度更新", processed: "已处理", processedFor: "耗时 {duration}", processing: "正在处理", finalAnswer: "最终回答",
     subagentWakeCompleted: "后台子代理已完成", subagentWakeFailed: "后台子代理失败", subagentWakeMixed: "后台子代理已结束",
     subagentWakeShowResult: "查看结果", subagentWakeTask: "{type} · {id} · {state}",
     currentTask: "当前任务", earlierTurn: "更早的回合",
@@ -175,10 +170,13 @@ const messages = {
 	modelSettings: "模型目录", modelSettingsHint: "管理订阅模型与 OpenAI 兼容提供方。凭据只存放在系统钥匙串中。",
 	settingsNavCatalog: "提供商、凭据与模型目录", searchProviders: "搜索 llmux 提供商…", searchModels: "搜索模型名称或别名…", noMatchingModels: "没有匹配的模型", moreProviders: "向下滚动加载剩余 {count} 个提供商",
 	noProviders: "没有可用的 llmux 提供商。", loadingProviders: "正在加载提供商…", providersLoadFailed: "加载提供商目录失败。", enabled: "已启用", enableProvider: "启用提供商", apiBaseURL: "API 地址", apiKey: "API Key",
-	signedIn: "已登录", notSignedIn: "未登录", subscriptionProvider: "订阅登录", subscriptionLoginRequired: "尚未登录订阅账户", subscriptionLoginHint: "登录后自动获取该订阅账户可用的模型。", subscriptionModelsHint: "模型由订阅服务实时返回，无需手动填写 API 地址或 API Key。", subscriptionModelsEmpty: "订阅服务暂未返回可用模型。", refreshSubscriptionModels: "获取模型", subscriptionTier: "订阅等级", subscriptionQuota: "订阅额度", subscriptionQuotaHint: "来自订阅服务的实时额度。", quotaRemaining: "剩余 {percent}%", quotaResetsAt: "{time} 重置", weeklyQuota: "每周额度", monthlyQuota: "每月额度", creditsQuota: "额度", quotaBalance: "额外额度", quotaUnlimited: "无限额度", quotaUnavailable: "获取失败", quotaUnavailableReason: "获取失败：{reason}", login: "登录", logout: "退出登录", working: "处理中…",
-	customAPIBaseURL: "填写自定义 API 地址", customAPIAddressHint: "此自托管供应商需要你填写 API 地址。", officialAPIAddressLocked: "官方预设地址，由 llmux 管理，不允许修改。",
+	signedIn: "已登录", notSignedIn: "未登录", subscriptionProvider: "订阅登录", subscriptionLoginRequired: "尚未登录订阅账户", subscriptionLoginHint: "登录后自动获取该订阅账户可用的模型。", subscriptionModelsHint: "模型由订阅服务实时返回，无需手动填写 API 地址或 API Key。", subscriptionModelsEmpty: "订阅服务暂未返回可用模型。", refreshSubscriptionModels: "获取模型", subscriptionTier: "订阅等级", subscriptionQuota: "订阅额度", subscriptionQuotaHint: "来自订阅服务的实时额度。", quotaRemaining: "剩余 {percent}%", quotaResetsAt: "{time} 重置", weeklyQuota: "每周额度", monthlyQuota: "每月额度", creditsQuota: "额度", quotaBalance: "额外额度", quotaUnlimited: "无限额度", quotaUnavailable: "正在获取…", quotaUnavailableReason: "获取失败：{reason}", login: "登录", logout: "退出登录", working: "处理中…",
+	quotaTotal: "总计", quotaCursor: "Cursor", quotaThirdParty: "Third Party", quotaUpdated: "{time}已更新",
+	quotaDeficit: "超额 {percent}%", quotaReserve: "余量 {percent}%", quotaOnPace: "按计划",
+	quotaRunsOut: "预计 {time} 后耗尽", quotaLastsReset: "持续到重置", quotaResetCountdown: "{time} 后重置",
+	customAPIBaseURL: "填写自定义 API 地址", customAPIAddressHint: "此自托管供应商需要你填写 API 地址。", officialAPIAddressLocked: "官方预设地址，不允许修改。",
 	keepCredential: "留空以保留现有凭据", credentialStored: "已保存在受保护的凭据存储中。", credentialEnvironment: "正在使用环境变量 {key}。", credentialPending: "正在使用本次输入的 API Key；保存提供商后写入受保护的凭据存储。", credentialNotRequired: "此本地提供商不要求 API Key。", credentialMissing: "填写 API Key，或设置环境变量 {key}。",
-	models: "模型", providerModelsHint: "启用后可从供应商 API 获取模型，并用 models.dev 补齐能力。", discoverModels: "从 API 获取", discoveringModels: "正在获取…", discoveredModels: "已从 API 获取 {count} 个模型，并合并 models.dev 能力", discoveredAPIModels: "已从供应商 API 获取 {count} 个模型", addModel: "添加模型", noConfiguredModels: "启用提供商后，从 API 获取可用模型。",
+	models: "模型", providerModelsHint: "启用后可从供应商 API 获取模型。", discoverModels: "从 API 获取", discoveringModels: "正在获取…", discoveredModels: "已从 API 获取 {count} 个模型", discoveredAPIModels: "已从供应商 API 获取 {count} 个模型", addModel: "添加模型", noConfiguredModels: "启用提供商后，从 API 获取可用模型。",
 	modelID: "模型 ID", displayName: "显示名称", contextWindow: "上下文窗口", maxOutputTokens: "最大输出", reasoningLevels: "思考等级", defaultReasoning: "默认思考", noDefaultReasoning: "未设置", noReasoningLevels: "无思考等级", modelCapabilities: "模型能力", removeModel: "移除模型", enableModel: "启用 {model}", disableModel: "禁用 {model}", editModel: "编辑 {model}", modelEnabled: "已启用", modelDisabled: "已禁用",
 	saving: "保存中…", saveProvider: "保存提供商",
     settingsSubagents: "子智能体", settingsSubagentsHint: "设置并发与隔离，并查看只读的调度与主会话展示方式。",
@@ -317,11 +315,6 @@ const messages = {
     noTextualChange: "This file has no displayable text diff.", patchTruncated: "The diff is large; showing the first 6 MiB.",
     recovery: "Recovery", promptTitle: "What are you ready to build?", promptSubtitle: "Choose a project, then describe the task you want Azem to complete.", taskSuggestions: "Task suggestions",
     promptPlaceholder: "Describe a task, attach an image, or reference a file…", send: "Send", cancel: "Cancel",
-    selectAction: "Select action", selectActionDescribe: "Describe edit", selectActionExplain: "Explain",
-    selectActionImprove: "Improve", selectActionSubmit: "Submit edit",
-    selectActionExplainPrompt: "Explain the following passage:\n\n{quote}",
-    selectActionImprovePrompt: "Improve and rewrite the following passage. Keep the meaning; make it clearer and more precise:\n\n{quote}",
-    selectActionDescribePrompt: "Edit the following passage as requested:\n\n{quote}\n\nRequest: {instruction}",
     deliveryMode: "Follow-up behavior", queue: "Queue", guide: "Steer", queuedMessages: "Queued messages",
     queuePlaceholder: "Add a message for the next turn…", guidePlaceholder: "Steer the current task…",
     runningPlaceholder: "Model is thinking — type to queue the next turn…",
@@ -335,12 +328,12 @@ const messages = {
     backgroundProcesses: "Background processes", backgroundTerminal: "Background terminal", sources: "Sources",
     sourceImage: "Image", sourceInputURL: "Typed link", sourceSearchURL: "Web search",
     openSource: "Open source", closeSourceImage: "Close image",
-    todoTitle: "Task plan", todoGoal: "Goal", todoProgress: "Progress {done}/{total}", todoOpen: "{count} open tasks",
+    todoTitle: "Task plan", todoKicker: "Tasks", todoGoal: "Goal", todoProgress: "Progress {done}/{total}", todoOpen: "{count} open tasks",
     todoPending: "Pending", todoInProgress: "In progress", todoCompleted: "Completed",
     contextUsage: "Context usage", contextRemaining: "Remaining", contextUnavailable: "Context usage unavailable",
     contextKernel: "Context archive", archivePolicy: "Archive policy", canonicalHighWater: "Canonical high-water", rebuildReason: "Archive reason", contextSegments: "Context segments",
     recapTitle: "Session recap", recapEmpty: "A concise recap appears here after a turn completes successfully.", recapGoal: "Current goal", recapOpenItems: "Open items",
-    cacheHitRate: "Latest request hit rate", cacheHits: "Cache hits", cacheRequestInput: "Request input", cacheUnreported: "Not reported", cachePending: "Awaiting report",
+    cacheHitRate: "Cache hit rate", cacheHits: "Cache hits", cacheRequestInput: "Request input", cacheUnreported: "Not reported", cachePending: "Awaiting report",
     contextComposition: "Context composition", contextCompositionEmpty: "Composition appears after the next model request", estimated: "Estimated",
     contextCore: "Core instructions", contextConversation: "Conversation", contextBuiltinTools: "Built-in tools", contextSkills: "Skills", contextMCP: "MCP tools",
     contextCurrentOutput: "Current output", contextProviderInput: "Provider input", contextOther: "Other", azemCoreInstructions: "Azem core instructions",
@@ -386,7 +379,7 @@ const messages = {
     toolGeneric: "Use tool", toolReadFile: "Read File", toolReadArtifact: "Read Artifact", toolWriteFile: "Write File", toolEditFile: "Edit File",
     toolSearch: "Search Code", toolListFiles: "List Files", toolShell: "Run Command", toolGoTest: "Run Go Tests", toolGofmt: "Format Go Code",
     toolGitDiff: "View Git Diff", toolActivateSkill: "Load Skill", toolReadSkillResource: "Read Skill Resource", toolSpawn: "Start Subagent", toolGetSubagentOutput: "Get Subagent Output", toolStopSubagent: "Stop Subagent",
-    thinking: "Thinking", thinkingActive: "Thinking", thinkingActiveFor: "Thinking", executing: "Executing", thought: "Thought", thoughtFor: "Thought for {duration}", thinkingSearchedWeb: "Searched the web", thinkingSearchedCode: "Searched code", thinkingRanOneTool: "Ran 1 tool", thinkingRanTools: "Ran {count} tools", thinkingRunningTools: "Running {count} tools", thinkingTabSteps: "Steps", thinkingTabReasoning: "Reasoning", thinkingTabSearch: "Search", thinkingTabCoding: "Coding", thinkingTabEmpty: "Nothing in this step yet", thinkingSearchMore: "+{count} more", progressUpdate: "Progress update", processed: "Worked", processedFor: "Worked for {duration}", processing: "Processing", finalAnswer: "Final answer",
+    thinking: "Thinking", thinkingActive: "Thinking", thinkingActiveFor: "Thinking", executing: "Executing", thought: "Thought", thoughtFor: "Thought for {duration}", thinkingSearchedWeb: "Searched the web", thinkingSearchedCode: "Searched code", thinkingRanOneTool: "Ran 1 tool", thinkingRanTools: "Ran {count} tools", thinkingRunning: "Running {detail}", thinkingRunningTools: "Running {count} tools", thinkingTabSteps: "Steps", thinkingTabReasoning: "Reasoning", thinkingTabSearch: "Search", thinkingTabCoding: "Coding", thinkingTabEmpty: "Nothing in this step yet", thinkingSearchMore: "+{count} more", progressUpdate: "Progress update", processed: "Worked", processedFor: "Worked for {duration}", processing: "Processing", finalAnswer: "Final answer",
     subagentWakeCompleted: "Background subagent completed", subagentWakeFailed: "Background subagent failed", subagentWakeMixed: "Background subagent finished",
     subagentWakeShowResult: "Show result", subagentWakeTask: "{type} · {id} · {state}",
     currentTask: "Current task", earlierTurn: "Earlier turn",
@@ -465,10 +458,13 @@ const messages = {
 	modelSettings: "Model catalog", modelSettingsHint: "Configure llmux providers, API endpoints, credentials, and available models. API keys are stored only in the protected credential store.",
 	settingsNavCatalog: "Providers, credentials, and model catalog", searchProviders: "Search llmux providers…", searchModels: "Search model names or aliases…", noMatchingModels: "No matching models", moreProviders: "Scroll to load {count} more providers",
 	noProviders: "No llmux providers available.", loadingProviders: "Loading providers…", providersLoadFailed: "Failed to load the provider catalog.", enabled: "Enabled", enableProvider: "Enable provider", apiBaseURL: "API base URL", apiKey: "API key",
-	signedIn: "Signed in", notSignedIn: "Not signed in", subscriptionProvider: "Subscription login", subscriptionLoginRequired: "No subscription account is signed in", subscriptionLoginHint: "Sign in to load the models available to this subscription.", subscriptionModelsHint: "Models come from the subscription service; no API base URL or API key is required.", subscriptionModelsEmpty: "The subscription service has not returned any models yet.", refreshSubscriptionModels: "Fetch models", subscriptionTier: "Plan", subscriptionQuota: "Subscription quota", subscriptionQuotaHint: "Live allowance reported by the subscription service.", quotaRemaining: "{percent}% remaining", quotaResetsAt: "Resets {time}", weeklyQuota: "Weekly quota", monthlyQuota: "Monthly quota", creditsQuota: "Credits", quotaBalance: "Extra credits", quotaUnlimited: "Unlimited", quotaUnavailable: "Failed to load", quotaUnavailableReason: "Failed to load: {reason}", login: "Sign in", logout: "Sign out", working: "Working…",
-	customAPIBaseURL: "Enter a custom API base URL", customAPIAddressHint: "This self-hosted provider requires a custom API base URL.", officialAPIAddressLocked: "Official preset managed by llmux; it cannot be edited.",
+	signedIn: "Signed in", notSignedIn: "Not signed in", subscriptionProvider: "Subscription login", subscriptionLoginRequired: "No subscription account is signed in", subscriptionLoginHint: "Sign in to load the models available to this subscription.", subscriptionModelsHint: "Models come from the subscription service; no API base URL or API key is required.", subscriptionModelsEmpty: "The subscription service has not returned any models yet.", refreshSubscriptionModels: "Fetch models", subscriptionTier: "Plan", subscriptionQuota: "Subscription quota", subscriptionQuotaHint: "Live allowance reported by the subscription service.", quotaRemaining: "{percent}% remaining", quotaResetsAt: "Resets {time}", weeklyQuota: "Weekly quota", monthlyQuota: "Monthly quota", creditsQuota: "Credits", quotaBalance: "Extra credits", quotaUnlimited: "Unlimited", quotaUnavailable: "Fetching…", quotaUnavailableReason: "Failed to load: {reason}", login: "Sign in", logout: "Sign out", working: "Working…",
+	quotaTotal: "Total", quotaCursor: "Cursor", quotaThirdParty: "Third Party", quotaUpdated: "Updated {time}",
+	quotaDeficit: "{percent}% in deficit", quotaReserve: "{percent}% in reserve", quotaOnPace: "On pace",
+	quotaRunsOut: "Runs out in {time}", quotaLastsReset: "Lasts until reset", quotaResetCountdown: "Resets in {time}",
+	customAPIBaseURL: "Enter a custom API base URL", customAPIAddressHint: "This self-hosted provider requires a custom API base URL.", officialAPIAddressLocked: "Official preset address; it cannot be edited.",
 	keepCredential: "Leave blank to keep the current credential", credentialStored: "Stored in the protected credential store.", credentialEnvironment: "Using environment variable {key}.", credentialPending: "Using the API key entered for this edit; saving the provider stores it in the protected credential store.", credentialNotRequired: "This local provider does not require an API key.", credentialMissing: "Enter an API key or set environment variable {key}.",
-	models: "Models", providerModelsHint: "Enable the provider to fetch its models and enrich capabilities from models.dev.", discoverModels: "Fetch from API", discoveringModels: "Fetching…", discoveredModels: "Fetched {count} models from the API and merged models.dev capabilities", discoveredAPIModels: "Fetched {count} models from the provider API", addModel: "Add model", noConfiguredModels: "Enable the provider, then fetch its available models from the API.",
+	models: "Models", providerModelsHint: "Enable the provider to fetch its models from the API.", discoverModels: "Fetch from API", discoveringModels: "Fetching…", discoveredModels: "Fetched {count} models from the API", discoveredAPIModels: "Fetched {count} models from the provider API", addModel: "Add model", noConfiguredModels: "Enable the provider, then fetch its available models from the API.",
 	modelID: "Model ID", displayName: "Display name", contextWindow: "Context window", maxOutputTokens: "Max output", reasoningLevels: "Reasoning levels", defaultReasoning: "Default reasoning", noDefaultReasoning: "Not set", noReasoningLevels: "No reasoning levels", modelCapabilities: "Model capabilities", removeModel: "Remove model", enableModel: "Enable {model}", disableModel: "Disable {model}", editModel: "Edit {model}", modelEnabled: "Enabled", modelDisabled: "Disabled",
 	saving: "Saving…", saveProvider: "Save provider",
     settingsSubagents: "Subagents", settingsSubagentsHint: "Set concurrency and isolation, and review read-only scheduling and main-session display.",
@@ -615,8 +611,8 @@ export function toolDisplayName(name: string, language: Language) {
   return key ? translator(language)(key) : name;
 }
 
-/** Canonical low → high order (Codex-style). */
-export const REASONING_LEVEL_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+/** Canonical Cursor/Codex order: provider default, disabled, then low → high. */
+export const REASONING_LEVEL_ORDER = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 
 export function sortReasoningLevels(levels: string[]): string[] {
   return [...new Set(levels.filter(Boolean))].sort((a, b) => {
@@ -630,6 +626,8 @@ export function sortReasoningLevels(levels: string[]): string[] {
 }
 
 export function reasoningLabel(level: string, language: Language) {
+  if (level === "default") return language === "zh-CN" ? "默认" : "Default";
+  if (level === "none") return language === "zh-CN" ? "无思考" : "No reasoning";
   const map: Record<string, MessageKey> = {
     minimal: "reasoningMinimal", low: "reasoningLow", medium: "reasoningMedium",
     high: "reasoningHigh", xhigh: "reasoningXHigh", max: "reasoningMax", ultra: "reasoningUltra",

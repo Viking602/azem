@@ -61,7 +61,10 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
 	case "model_providers":
 	  next.modelProviders = (event.modelProviders ?? []).map((provider) => ({ ...provider, models: provider.models ?? [] }));
 	  for (const provider of next.modelProviders) {
-		if (provider.enabled && provider.models.length > 0) next.modelsByProvider = {
+		if (!provider.enabled || provider.models.length === 0) continue;
+		const existing = next.modelsByProvider[provider.id] ?? [];
+		if (provider.subscription && existing.length > 0) continue;
+		next.modelsByProvider = {
 		  ...next.modelsByProvider,
 		  [provider.id]: provider.models.map((model) => normalizeModel(model as unknown as Record<string, unknown>)),
 		};
@@ -76,7 +79,7 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
       next.modelsByProvider = { ...next.modelsByProvider, [provider]: models };
       if (next.snapshot?.provider === provider) {
         const contextLimit = findModelOption(next.modelsByProvider[provider] ?? [], next.snapshot?.model ?? "")?.contextWindow ?? 0;
-        const subscription = provider === "chatgpt" || provider === "grok";
+        const subscription = provider === "chatgpt" || provider === "grok" || provider === "cursor";
         if (contextLimit > 0 && (subscription || next.contextUsage.contextLimit === 0)) next.contextUsage = { ...next.contextUsage, contextLimit };
       }
       break;

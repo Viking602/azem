@@ -292,9 +292,9 @@ export function ReasoningTrace({ block, language }: { block: Block; language: Sn
     disabled={!steps.length}
     onToggle={() => setOpen((value) => !value)}
   >
-    <div className="bui-thinking-panel" data-tab="reasoning">
+    {steps.length ? <div className="bui-thinking-panel" data-tab="reasoning">
       {steps.map((step, index) => <p className="reasoning-step" key={index}>{step}</p>)}
-    </div>
+    </div> : null}
   </ThinkingState>;
 }
 

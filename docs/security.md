@@ -48,6 +48,19 @@ approved shell process. `shell_policy` controls shell approval and
 commands inherit the Azem process identity and may reach paths outside the
 workspace. Use external sandboxing when that is unacceptable.
 
+`coding.shell` accepts foreground commands only. Descriptor/pipeline syntax is
+not confused with a background operator, but real POSIX `&` and normalized
+detachment primitives are rejected because a new session can escape
+process-group cleanup. Wall-clock and inactivity limits bound the owned group;
+they are not a descendant sandbox.
+
+`coding.delete_file` is a separate governed write. On supported Unix systems it
+opens each parent directory relative to the workspace root with no-follow
+semantics, verifies the leaf without following symlinks, and unlinks by
+directory descriptor. A repository symlink therefore cannot redirect deletion
+outside the workspace. Platforms without an equivalent implementation reject
+the tool rather than fall back to lexical path checks.
+
 Azem provider and HTTP integration traffic follows matching process proxy
 environment variables and, on macOS, the active SystemConfiguration HTTP,
 HTTPS, or SOCKS proxy plus its bypass list. Selecting a system proxy therefore
@@ -71,6 +84,22 @@ labelled as untrusted visual evidence and enters the main model as a private
 user-evidence message, never as trusted system or hook instructions. Selecting
 this route therefore authorizes image bytes to cross that provider boundary;
 API credentials remain isolated to each provider driver.
+
+Cursor's bidirectional AgentService stream is an additional remote-control
+boundary, not a bypass around Azem tools. Native exec requests bind to the
+current main, Team-role, or subagent governed tool bus and retain ordinary
+approval, durable timeline, and file-observation rules. Conversation
+checkpoints and server-set blobs are isolated by account, size-bounded,
+content-addressed, and validated before replacing known-good state. Cursor
+image parts use the same trusted attachment loader described above. The
+provider does not expose cache-read counters; Azem records that field as
+unreported rather than inferring a hit or miss.
+
+The authenticated Cursor `GetUsableModels` response is authoritative. HTTP,
+authentication, protobuf/decode, and empty-catalog failures remain errors; only
+the last successfully authenticated cache may be shown explicitly as stale.
+Static bundled rows are never substituted into an authenticated account
+catalog.
 
 Local composer and transcript thumbnails use the focused `AttachmentDataURL`
 Bridge method. It accepts the complete attachment record, validates that its
@@ -112,6 +141,11 @@ Model discovery sends the API key only to the validated HTTPS provider base URL
 separate public request to `https://models.dev/api.json` carries no provider
 credential and is used only to enrich model capabilities and resolve the
 models.dev provider logo ID.
+
+「Fetch from API」/「从 API 获取」 is a read-only credential use: discovered
+models are projected transiently to the current Settings UI. The pending key,
+catalog rows, YAML, and runtime provider state are persisted only after the
+explicit Save provider action. Pending secrets are never placed in events.
 
 ## MCP, Skills, and hooks
 

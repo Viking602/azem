@@ -1,5 +1,5 @@
 import { ChevronDown } from "lucide-react";
-import { startTransition, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { tFormat, translator } from "../../i18n";
 import { useRuntimeStore } from "../../store";
 import type { Block, Snapshot } from "../../types";
@@ -8,10 +8,10 @@ import {
   isActiveProcessBlock, isHostFallbackCommentary, isRunningTool, summarizeToolGroup,
   type ModelProgressPresentation, type ProcessTimelineEntry,
 } from "../toolTimeline";
-import { fileChangePillsForBlocks, formatProcessGroupCount, processGroupCounts } from "../toolChip";
+import { fileChangePillsForBlocks, formatProcessGroupCount, processGroupCounts, toolChipModel } from "../toolChip";
 import { ThinkingState } from "../beautiful-ui/Primitives";
 import { StepRow } from "../beautiful-ui/StepRow";
-import { FileChangePills, ToolChip } from "../beautiful-ui/ToolChip";
+import { FileChangePills, ToolChip, ToolChipIcon } from "../beautiful-ui/ToolChip";
 import {
   isActiveFileChangeBlock, isFileChangeTool, isPendingFileChangeBlock,
 } from "../fileChanges";
@@ -33,9 +33,9 @@ import { isSubagentSpawnBlock, SubagentRunCard } from "./subagentRunCard";
 export { isSubagentSpawnBlock } from "./subagentRunCard";
 
 /**
- * Codex: after the turn finishes, 耗时 hides the process. Opening it shows
- * commentary plus folded tool summaries. Thinking stays inside the duration
- * label and is not dumped as prose.
+ * Codex-style: a completed turn's whole process — narration, tools, and
+ * thinking — folds under 耗时 so only the answer stays primary. Expanding
+ * reveals the trail; live/waiting runs never fold.
  */
 export function ProcessFold({
   blocks, elapsedMs = 0, language, featured, active = false, collapseCompleted = false, waiting = false,
@@ -49,7 +49,10 @@ export function ProcessFold({
   waiting?: boolean;
 }) {
   const hasTools = hasProcessTools(blocks);
-  const foldCompleted = Boolean(collapseCompleted && !active && !waiting && hasTools);
+  const hasFoldableWork = hasTools
+    || blocks.some((block) => block.kind === "thinking" && Boolean(block.content?.trim()))
+    || blocks.some((block) => block.kind === "commentary" && !isHostFallbackCommentary(block) && Boolean(block.content?.trim()));
+  const foldCompleted = Boolean(collapseCompleted && !active && !waiting && hasFoldableWork);
   const [open, setOpen] = useState(false);
   const t = translator(language);
   const duration = elapsedMs > 0 ? formatWorkedDuration(elapsedMs, language) : "";
@@ -80,8 +83,26 @@ export function ProcessFold({
         <span className="process-fold-label">{foldLabel}</span>
         <ChevronDown className="process-fold-chevron" size={12} aria-hidden="true" />
       </button>
-      {open ? entries : null}
+      <FoldClip open={open}>{entries}</FoldClip>
     </> : entries}
+  </div>;
+}
+function FoldClip({ open, children }: { open: boolean; children: ReactNode }) {
+  const [present, setPresent] = useState(open);
+  const [expanded, setExpanded] = useState(open);
+  useLayoutEffect(() => {
+    if (open) {
+      setPresent(true);
+      const frame = requestAnimationFrame(() => setExpanded(true));
+      return () => cancelAnimationFrame(frame);
+    }
+    setExpanded(false);
+    const timer = window.setTimeout(() => setPresent(false), 220);
+    return () => window.clearTimeout(timer);
+  }, [open]);
+  if (!present) return null;
+  return <div className="process-fold-clip" data-open={expanded ? "true" : "false"}>
+    <div className="process-fold-body">{children}</div>
   </div>;
 }
 
@@ -109,8 +130,11 @@ function ProcessStep({
 }) {
   const hasTools = hasProcessTools(blocks);
   const running = waiting || (live && blocks.some(isActiveProcessBlock));
+  const reasoningLive = blocks.some((block) => (
+    block.kind === "thinking" && isActiveProcessBlock(block) && Boolean(block.content?.trim())
+  ));
   const [choice, setChoice] = useState<boolean | null>(null);
-  const expanded = choice ?? (running && !hasTools && blocks.length > 0);
+  const expanded = choice ?? (running && !hasTools && reasoningLive);
   const panelId = `process-step-${(blocks[0]?.id || "pending").replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
   if (!stepBarVisible(blocks, waiting, running)) return <>{children}</>;
   if (!running && canSettle && hasTools) {
@@ -187,12 +211,16 @@ function ProcessStepBar({
     live: (ticking || waiting || live) && !settledThinking,
   });
   const expandable = hasTools || reasoning.some((block) => Boolean(block.content?.trim()));
+  const running = blocks.filter((block) => (block.kind === "tool" || block.kind === "diff") && isRunningTool(block));
+  const runningKind = running.length ? toolChipModel(running[running.length - 1]!, language).kind : undefined;
   return <ThinkingState
     active={ticking}
     expanded={expanded}
     label={label}
     labelKey={label}
     quiet
+    quietMark={Boolean(runningKind)}
+    mark={runningKind ? <span className="bui-tool-chip-icon" data-icon={runningKind} aria-hidden="true"><ToolChipIcon kind={runningKind} /></span> : undefined}
     expandable={expandable}
     panelId={panelId}
     onToggle={onToggle}
@@ -557,6 +585,7 @@ function stepBarVisible(blocks: Block[], waiting: boolean, active: boolean) {
 function hasProcessTools(blocks: Block[]) {
   return blocks.some((block) => block.kind === "tool" || block.kind === "diff");
 }
+
 
 function isFileChangePresentation(block: Block) {
   return block.kind === "diff"

@@ -38,10 +38,30 @@ func TestShellUsesWorkspaceAndReturnsStructuredExit(t *testing.T) {
 	}
 }
 
+func TestShellFDDuplicationRedirectionIsForeground(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX descriptor redirection")
+	}
+	driver := newShellDriver(t.TempDir(), "allow", "deny")
+	arguments, _ := json.Marshal(shellInput{Command: `printf shell-ok 2>&1 | tail -20`})
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "fd-redirection", Name: ToolShell, Arguments: arguments}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError || !strings.Contains(result.Content, "shell-ok") {
+		t.Fatalf("descriptor redirection result=%+v", result)
+	}
+}
+
 func TestShellDefinitionPreservesApprovalAndNetworkPolicy(t *testing.T) {
 	definition := newShellDriver(t.TempDir(), "allow", "prompt").Definition()
 	if definition.Metadata["approval"] != "allow" || definition.Metadata["network"] != "prompt" || definition.Metadata["platform"] != runtime.GOOS {
 		t.Fatalf("shell metadata=%#v", definition.Metadata)
+	}
+	for _, required := range []string{"supervised foreground command", "background operators and known detach primitives are rejected"} {
+		if !strings.Contains(definition.Description, required) {
+			t.Fatalf("shell definition omitted %q: %s", required, definition.Description)
+		}
 	}
 }
 
@@ -237,6 +257,43 @@ func TestShellHonorsModelRequestedWallClock(t *testing.T) {
 	}
 }
 
+func TestShellRejectsBackgroundOperator(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX background operator")
+	}
+	driver := newShellDriver(t.TempDir(), "allow", "deny")
+	arguments, _ := json.Marshal(shellInput{Command: "sleep 1 & wait"})
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "background-unbounded", Name: ToolShell, Arguments: arguments}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(result.Content, "background operators that can escape process supervision are not permitted") {
+		t.Fatalf("background result=%+v", result)
+	}
+}
+
+func TestShellRejectsBoundedBackground(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX background operator")
+	}
+	root := t.TempDir()
+	driver := newShellDriver(root, "allow", "deny")
+	arguments, _ := json.Marshal(shellInput{
+		Command:          "(sleep 1 && touch child-finished) & wait",
+		WallClockSeconds: 2,
+	})
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "background-bounded", Name: ToolShell, Arguments: arguments}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(result.Content, "background operators that can escape process supervision are not permitted") {
+		t.Fatalf("bounded background result=%+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "child-finished")); !os.IsNotExist(err) {
+		t.Fatalf("rejected background command changed workspace: %v", err)
+	}
+}
+
 func TestShellWallClockLimitCannotBeExtendedByOutput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a POSIX shell command")
@@ -420,14 +477,38 @@ func TestShellSinkFailuresAreSurfaced(t *testing.T) {
 }
 
 func TestShellRejectsDetachedForms(t *testing.T) {
-	for _, command := range []string{"sleep 10 &", "nohup sleep 10", "setsid sleep 10", "disown", "daemonize app"} {
+	for _, command := range []string{"nohup sleep 10", "setsid sleep 10", "set''sid sleep 10", `set\\sid sleep 10`, `s\"et\"sid sleep 10`, "disown", "daemonize app"} {
 		if !rejectDetached(command) {
 			t.Errorf("did not reject %q", command)
 		}
 	}
-	for _, command := range []string{"printf one && printf two", `printf '&'`, `printf \&`} {
+	for _, command := range []string{
+		"printf one && printf two",
+		`printf '&'`,
+		`printf \&`,
+		`printf shell-ok 2>&1 | tail -20`,
+		"sleep 10 & wait",
+	} {
 		if rejectDetached(command) {
-			t.Errorf("rejected foreground command %q", command)
+			t.Errorf("rejected supervised command %q", command)
+		}
+	}
+	for _, command := range []string{
+		"printf one && printf two",
+		`printf '&'`,
+		`printf \&`,
+		`printf shell-ok 2>&1 | tail -20`,
+		`printf shell-ok 1<&0`,
+		`printf shell-ok &>output`,
+		`printf shell-ok |& cat`,
+	} {
+		if hasBackgroundOperatorForOS(command, "darwin") {
+			t.Errorf("classified foreground syntax as background %q", command)
+		}
+	}
+	for _, command := range []string{"sleep 10 &", "sleep 10 & wait"} {
+		if !hasBackgroundOperatorForOS(command, "darwin") {
+			t.Errorf("missed background operator in %q", command)
 		}
 	}
 	if rejectDetachedForOS(`& "C:\Program Files\Git\bin\git.exe" status`, "windows") {

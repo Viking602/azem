@@ -1,11 +1,11 @@
 # Persistence and Recovery
 
-Last verified: 2026-08-17
+Last verified: 2026-08-21
 
 Azem stores configuration and durable runtime state locally. SQLite is the
 authoritative catalog, search index, and Venat control plane. Large opaque
 payloads live in a content-addressed file store so one `azem.db` does not grow
-without bound. Current schema version: **21**.
+without bound. Current schema version: **22**.
 
 ## Paths and permissions
 
@@ -162,11 +162,21 @@ No new SQLite migration is required; the existing checkpoint transaction
 commits archive manifest and replaceable model history together with
 `semantic_revision=0`.
 
+Schema 22 stores llmux provider model catalogs in SQLite:
+
+- `llmux_provider_models` holds each provider's discovered or imported model
+  rows (`id`, enabled flag, display metadata, modalities) as JSON payloads.
+- `config.yaml` keeps `providers.llmux.<id>.enabled` and `base_url` only.
+  A launch that still has YAML `models` copies them into SQLite once and
+  rewrites that provider without the catalog.
+- Discover, enable/disable, and later list/load paths use the SQLite catalog.
+  Subscription ChatGPT/Grok/Cursor rows stay in `model_catalog`.
+
 ### Revision, evidence, and learning records
 
-The adaptive coding pipeline does not add schema 22. Session-scoped control
-records reuse `context_artifacts`, whose payloads already live in the schema-21
-blob store. Artifact kinds are versioned and purpose-specific:
+The adaptive coding pipeline does not add tables beyond schema 22. Session-scoped
+control records reuse `context_artifacts`, whose payloads already live in the
+schema-21 blob store. Artifact kinds are versioned and purpose-specific:
 
 - `work_revision_v1:*`, `action_intent_v1:*`,
   `observation_envelope_v1:*`, `work_disposition_v1:*`, and
@@ -181,11 +191,16 @@ blob store. Artifact kinds are versioned and purpose-specific:
 
 These records are strict JSON inside the existing session/run ownership and
 SHA-256 boundaries. Large payload behavior, deletion, fork behavior, and blob
-verification therefore remain schema-21 behavior; runtime migration files and
-`dbgen/schema.sql` are unchanged. The trajectory exporter opens the database
+verification therefore remain schema-21 behavior. Schema 22 only adds
+`llmux_provider_models`. The trajectory exporter opens the database
 read-only at the service boundary and writes a detached JSON export. Replay,
 noise, routing, training, tool-lab, and adapter artifacts are offline files or
 in-process control-plane inputs; they do not create hidden SQLite tables.
+Schema-21 JSON offload leaves `{}` in the inline column; text/byte payloads
+leave an empty sentinel. Trajectory export recognizes only those sentinels,
+loads the referenced blob, and verifies its SHA-256. A non-sentinel inline
+value whose bytes disagree with the stored digest remains corruption and makes
+the export fail closed.
 
 
 `history_fts` is also the durable conversation-content index used by desktop
@@ -273,5 +288,6 @@ Required coverage includes runtime-fence ownership and failed-owner takeover,
 previous-schema upgrade, schema 18 control-plane
 tables and indexes, schema 19 project ownership backfill, schema 20 compaction-state
 invalidation with canonical data retention, schema 21 blob extraction with
-payload-column removal, current-version reopen, automatic backup, and rejection of a future schema. Run
+payload-column removal, schema 22 `llmux_provider_models` upgrade and reopen,
+current-version reopen, automatic backup, and rejection of a future schema. Run
 `GOWORK=off go test ./...` before release.

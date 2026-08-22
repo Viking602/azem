@@ -1,4 +1,4 @@
-import { Check, MessageCircleQuestion, PencilLine, Play, ShieldCheck, X } from "lucide-react";
+import { ArrowUpRight, Check, MessageCircleQuestion, PencilLine, Play, ShieldCheck, X } from "lucide-react";
 import { useState } from "react";
 import { execute } from "../../bridge";
 import { useRuntimeStore } from "../../store";
@@ -37,12 +37,14 @@ function planningLabels(language: Snapshot["language"]) {
   if (language === "en") return {
     question: "Planning question", recommended: "Recommended", other: "Other",
     otherPlaceholder: "Type another answer", submit: "Submit answers", submitting: "Submitting…", answered: "Answered",
+    planTitle: "Plan", view: "View", hide: "Hide",
     ask: "Ask about plan", revise: "Request changes", revisePrefix: "Revise the plan with these changes:\n",
     execute: "Execute plan", starting: "Starting…",
   };
   return {
     question: "规划问题", recommended: "推荐", other: "其他",
     otherPlaceholder: "输入其他答案", submit: "提交选择", submitting: "提交中…", answered: "已回答",
+    planTitle: "计划", view: "查看", hide: "收起",
     ask: "提出疑问", revise: "修改计划", revisePrefix: "请根据以下要求修改计划：\n",
     execute: "执行计划", starting: "启动中…",
   };
@@ -114,11 +116,21 @@ function planReviewStateLabel(state: string | undefined, language: Snapshot["lan
   return language === "en" ? "Ready for review" : "等待审阅";
 }
 
+function planSteps(content = "") {
+  const steps: Array<{ done: boolean; label: string }> = [];
+  for (const line of (content || "").split("\n")) {
+    const match = /^\s*[-*+]\s+\[( |x|X)\]\s*(.*)$/.exec(line);
+    if (match && match[2].trim()) steps.push({ done: match[1] !== " ", label: match[2].trim() });
+  }
+  return steps;
+}
+
 export function PlanBlock({ block, language }: { block: Block; language: Snapshot["language"] }) {
   const running = useRuntimeStore((state) => state.running);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
   const setError = useRuntimeStore((state) => state.setError);
   const [submitting, setSubmitting] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const labels = planningLabels(language);
   const proposed = block.state === "proposed";
   const compose = (prefix: string) => window.dispatchEvent(new CustomEvent("azem:plan-compose", { detail: { prefix } }));
@@ -132,15 +144,33 @@ export function PlanBlock({ block, language }: { block: Block; language: Snapsho
       setSubmitting(false);
     }
   };
+  const steps = planSteps(block.content);
+  const doneCount = steps.filter((step) => step.done).length;
+  const version = block.data?.version || "1";
   const stateLabel = planReviewStateLabel(block.state, language);
   return <article className="plan-review" data-state={block.state || "proposed"}>
-    <header><div><small>{language === "en" ? `Plan v${block.data?.version || "1"}` : `计划 v${block.data?.version || "1"}`}</small><h3>{block.title}</h3></div><span>{stateLabel}</span></header>
-    <div className="plan-review-body markdown"><Markdown>{block.content || ""}</Markdown></div>
-    {proposed ? <footer>
-      <button onClick={() => compose("")}><MessageCircleQuestion size={14} />{labels.ask}</button>
-      <button onClick={() => compose(labels.revisePrefix)}><PencilLine size={14} />{labels.revise}</button>
-      <button className="primary" disabled={running || submitting} onClick={executePlan}><Play size={14} />{submitting ? labels.starting : labels.execute}</button>
-    </footer> : null}
+    <header><h3>{labels.planTitle}</h3>{steps.length > 0 ? <span className="plan-review-count">{doneCount} of {steps.length}</span> : null}</header>
+    <div className="plan-review-rule" aria-hidden="true" />
+    {steps.length > 0 ? <ul className="plan-review-steps">
+      {steps.map((step, index) => <li key={index} data-done={String(step.done)}>
+        <span className="plan-step-mark" aria-hidden="true">{step.done ? <Check size={12} strokeWidth={2.5} /> : null}</span>
+        <span className="plan-step-label">{step.label}</span>
+      </li>)}
+    </ul> : null}
+    <footer>
+      <button type="button" className="plan-view" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+        {expanded ? labels.hide : labels.view}<ArrowUpRight size={14} />
+      </button>
+    </footer>
+    {expanded ? <div className="plan-review-detail">
+      <div className="plan-review-meta"><strong>{block.title}</strong><span>v{version} · {stateLabel}</span></div>
+      <div className="plan-review-body markdown"><Markdown>{block.content || ""}</Markdown></div>
+      {proposed ? <div className="plan-review-actions">
+        <button onClick={() => compose("")}><MessageCircleQuestion size={14} />{labels.ask}</button>
+        <button onClick={() => compose(labels.revisePrefix)}><PencilLine size={14} />{labels.revise}</button>
+        <button className="primary" disabled={running || submitting} onClick={executePlan}><Play size={14} />{submitting ? labels.starting : labels.execute}</button>
+      </div> : null}
+    </div> : null}
   </article>;
 }
 

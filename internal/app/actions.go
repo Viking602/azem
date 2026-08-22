@@ -1093,8 +1093,14 @@ func (s *Service) login(ctx context.Context, provider string) error {
 				return openBrowserURL(verificationURL)
 			})
 		}
+	case "cursor":
+		if mode == "import" {
+			account, err = s.authentication.ImportCursorToken(ctx, os.Getenv("CURSOR_ACCESS_TOKEN"), os.Getenv("CURSOR_REFRESH_TOKEN"))
+		} else {
+			account, err = s.authentication.LoginCursor(ctx, openBrowserURL)
+		}
 	default:
-		return fmt.Errorf("provider must be chatgpt or grok")
+		return fmt.Errorf("provider must be chatgpt, grok, or cursor")
 	}
 	if err != nil {
 		return err
@@ -1122,7 +1128,7 @@ func (s *Service) emitAuthCatalog(ctx context.Context) {
 	if s.authentication == nil || s.catalog == nil {
 		return
 	}
-	for _, provider := range []string{"chatgpt", "grok"} {
+	for _, provider := range []string{"chatgpt", "grok", "cursor"} {
 		account, ok := s.activeSubscriptionAccount(ctx, provider)
 		if !ok {
 			continue
@@ -1134,6 +1140,7 @@ func (s *Service) emitAuthCatalog(ctx context.Context) {
 		if err != nil || !found {
 			continue
 		}
+		cached = s.catalog.EnrichWithModelsDev(ctx, cached)
 		cached.Models = s.catalogModelsWithAvailability(account.Provider, cached.Models)
 		encoded, err := json.Marshal(cached.Models)
 		if err != nil {

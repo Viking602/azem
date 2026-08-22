@@ -34,6 +34,25 @@
 .thread-header-end { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .thread-actions { display: flex; gap: 6px; }
 .thread-header-end .thread-actions { margin-left: 0; }
+.thread-heading-copy .titlebar-project-switch { position: relative; width: auto; min-width: 0; flex: 0 1 auto; }
+.thread-heading-copy .titlebar-project {
+  height: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0 0 0 9px;
+  overflow: hidden;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--faint);
+  font-size: var(--text-2xs);
+  font-weight: 450;
+}
+.thread-heading-copy .titlebar-project strong { overflow: hidden; color: var(--faint); font-size: inherit; font-weight: 450; text-overflow: ellipsis; }
+.thread-heading-copy .titlebar-project b { margin: 0 4px; color: var(--faint); font-weight: 450; }
+.thread-heading-copy .titlebar-project span { min-width: 0; overflow: hidden; color: var(--faint); font-size: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.thread-heading-copy .titlebar-project svg { flex: 0 0 auto; color: var(--faint); }
+.thread-heading-copy .titlebar-project-popover { top: calc(100% + 8px); left: 0; }
 .thread-actions .icon-button[hidden] { display: none; }
 .inspector-toggle[data-open="true"] .inspector-closed-icon, .inspector-toggle[data-open="false"] .inspector-open-icon { display: none; }
 .subtle-button, .small-button { height: 29px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--muted); white-space: nowrap; }

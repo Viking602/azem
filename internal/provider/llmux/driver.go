@@ -100,7 +100,7 @@ func newProvider(config Config) (sdk.Provider, error) {
 }
 
 func (d *Driver) Metadata() hyprovider.Metadata {
-	return hyprovider.Metadata{Name: "llmux:" + d.providerID, Models: append([]string(nil), d.models...), Version: "0.2.3"}
+	return hyprovider.Metadata{Name: "llmux:" + d.providerID, Models: append([]string(nil), d.models...), Version: "0.2.5"}
 }
 
 func (d *Driver) SetRetryObserver(observer hyprovider.RetryObserver) { d.retryObserver = observer }

@@ -115,15 +115,33 @@ shutdown (SUBAGENT-001), or an optional configured `idle_timeout`
 (SUBAGENT-005).
 
 The main agent prompt requires review or verification that gates later work
-to stay foreground. If the model still backgrounds such a child and then
-tries to finish, `pending-background-children` (`internal/app/
-provider_subagent_guardrail.go`) injects one host retry listing the running
-task IDs and requiring `subagent.get_output` or an explicit independence
-claim. The guardrail never cancels children (SUBAGENT-004).
+to stay foreground. If any child of the current run is still non-terminal
+when the parent tries to finish, `pending-background-children` (`internal/app/
+provider_subagent_guardrail.go`) keeps injecting a host retry listing those
+task IDs and requiring `subagent.get_output`. The parent cannot claim the
+work is independent and finish. The guardrail never cancels children;
+`idle_timeout` may cancel a silent child (SUBAGENT-004, SUBAGENT-005).
+
+The session Todo completion guard belongs to the parent run. A child still
+executes `current-work-verification` for its own mutations and evidence, but it
+does not retry on the parent's open Todo item. Otherwise a foreground child
+that already produced a valid result could never become terminal, while the
+parent simultaneously waits for that terminal state (SUBAGENT-008).
+
+`current-work-verification` accepts equivalent evidence from governed dedicated
+tools. In particular, one completed `coding.gofmt` result per required path
+satisfies a deterministic `gofmt -d` check when its recorded post-format SHA
+matches the current work revision. `changed=false` is an observation rather
+than a mutation: it does not move the mutation high-water or make already-run
+checks stale. This prevents a valid model final answer from triggering another
+provider turn solely because the guard failed to recognize dedicated formatter
+evidence (VERIF-002).
 
 When the session is idle, `AutoWakePending` collects every background child
 that is terminal, not cancelled, and not yet `CompletionDelivered`, then
-starts one wake turn. The wake user block keeps `kind=user` so it remains in
+starts one wake turn. A successful parent `run_finished` marks that run's
+terminal children delivered first, so a waited-out review does not start a
+second stream. The wake user block keeps `kind=user` so it remains in
 model context, but sets `state=subagent_wake` and structured `data.tasks`
 (UI-013). Wake turns set `DisableSubagents` to prevent a spawn loop.
 

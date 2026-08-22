@@ -101,10 +101,14 @@ func (c turnContext) archiveCompactTo(ctx context.Context, history []message.Mes
 	if err != nil {
 		return history, err
 	}
-	tokens := estimateContextTokens(refreshed)
-	if targetTokens <= 0 || tokens <= targetTokens {
+	estimatedTokens := estimateContextTokens(refreshed)
+	pressureTokens := estimatedTokens
+	if c.providerPressure != nil {
+		pressureTokens = c.providerPressure.tokens(estimatedTokens)
+	}
+	if targetTokens <= 0 || pressureTokens <= targetTokens {
 		if c.reportContextTokens != nil {
-			c.reportContextTokens(ctx, tokens)
+			c.reportContextTokens(ctx, estimatedTokens)
 		}
 		return refreshed, nil
 	}
@@ -112,7 +116,11 @@ func (c turnContext) archiveCompactTo(ctx context.Context, history []message.Mes
 	if err != nil || reflect.DeepEqual(result, refreshed) {
 		return result, err
 	}
-	return c.activateCompactionResult(ctx, result)
+	activated, err := c.activateCompactionResult(ctx, result)
+	if err == nil {
+		c.providerPressure.reset()
+	}
+	return activated, err
 }
 
 func assembleArchiveMessages(prefix, suffix []message.Message, carrier *message.Message) []message.Message {
@@ -166,7 +174,7 @@ func (c turnContext) normalizeArchiveInput(ctx context.Context, history []messag
 	if err != nil {
 		return history, 0, false, err
 	}
-	beforeTokens := estimateContextTokens(normalized)
+	beforeTokens := c.providerPressure.tokens(estimateContextTokens(normalized))
 	targetTokens := c.archiveTargetTokens(beforeTokens, hardTriggerTokens, reason)
 	if targetTokens <= 0 || (reason != "manual" && beforeTokens <= targetTokens) {
 		return normalized, targetTokens, true, nil
@@ -181,7 +189,7 @@ func (c turnContext) normalizeArchiveInput(ctx context.Context, history []messag
 	return normalized, targetTokens, false, nil
 }
 
-func ompArchiveCutPoint(history []message.Message, prefixEnd, keepRecentTokens int) (int, error) {
+func snapcompactArchiveCutPoint(history []message.Message, prefixEnd, keepRecentTokens int) (int, error) {
 	if err := message.ValidateCompleteTurns(history); err != nil {
 		return 0, err
 	}
@@ -227,7 +235,7 @@ func (c turnContext) partitionArchiveHistory(ctx context.Context, history []mess
 		return archivePreparation{}, err
 	}
 	history = append(append([]message.Message(nil), history[:prefixEnd]...), expanded...)
-	recentStart, err := ompArchiveCutPoint(history, prefixEnd, keepRecentTokens)
+	recentStart, err := snapcompactArchiveCutPoint(history, prefixEnd, keepRecentTokens)
 	if err != nil {
 		return archivePreparation{}, err
 	}

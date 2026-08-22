@@ -649,6 +649,11 @@ export interface LLMuxModelConfig {
 	outputModalities?: string[];
 }
 
+export interface ModelProviderQuotaBreakdown {
+	id: string;
+	usedPercent: number;
+}
+
 export interface ModelProvider {
 	id: string;
 	displayName: string;
@@ -665,8 +670,11 @@ export interface ModelProvider {
 	accountPlan?: string;
 	quotaAvailable?: boolean;
 	quotaPeriod?: "weekly" | "monthly" | "credits" | string;
+	quotaStartedAt?: number;
 	quotaUsedPercent?: number;
+	quotaBreakdown?: ModelProviderQuotaBreakdown[];
 	quotaResetsAt?: number;
+	quotaUpdatedAt?: string;
 	quotaBalance?: string;
 	quotaUnlimited?: boolean;
 	quotaWarning?: string;
