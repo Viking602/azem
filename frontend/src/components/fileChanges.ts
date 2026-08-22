@@ -21,7 +21,8 @@ type RawSection = {
 };
 
 export function isFileChangeTool(name = "") {
-  return name === "coding.edit_hashline" || name === "coding.write_file";
+  return name === "coding.edit_hashline" || name === "coding.replace"
+    || name === "coding.write_file" || name === "coding.delete_file";
 }
 
 const pendingFileChangeStates = new Set(["queued", "awaiting_approval", "reviewing_approval"]);
@@ -104,7 +105,7 @@ function projectedFileChanges(payload: string): FileChange[] | null {
     for (const raw of parsed.files as Array<Record<string, unknown>>) {
       const path = typeof raw.path === "string" ? raw.path.trim() : "";
       const diff = typeof raw.diff === "string" ? raw.diff : "";
-      if (!path || !diff) continue;
+      if (!path) continue;
       changes.push({
         path,
         firstChangedLine: positiveInteger(raw.firstChangedLine, 1),

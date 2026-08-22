@@ -5,7 +5,7 @@ import type { StepEdge, StepMarkState } from "../timeline/stepRail";
  * One row of a process trail: a rail node plus whatever chip renders the work.
  * The rail itself is a per-row CSS segment, so expanded bodies keep it whole.
  */
-export function StepRow({
+export function ToolTimelineStep({
   mark,
   edge,
   delayMs,
@@ -22,12 +22,13 @@ export function StepRow({
   return <div
     className="timeline-step-row"
     role="listitem"
+    data-slot="tool-timeline-step"
     data-step-state={mark}
     data-step-edge={edge}
     data-step-enter={delayMs === undefined ? undefined : "true"}
     style={style}
   >
-    <span className="bui-step-mark" data-step-mark={mark} aria-hidden="true">
+    <span className="aui-tool-timeline-mark" data-step-mark={mark} aria-hidden="true">
       <StepMarkGlyph state={mark} />
     </span>
     <div className="timeline-step-row-body">{children}</div>
@@ -36,15 +37,15 @@ export function StepRow({
 
 function StepMarkGlyph({ state }: { state: StepMarkState }) {
   if (state === "running") {
-    return <span className="bui-step-mark-glyph bui-step-spinner" />;
+    return <span className="aui-tool-timeline-mark-glyph aui-tool-timeline-spinner" />;
   }
   if (state === "pending") {
-    return <span className="bui-step-mark-glyph bui-step-dot" data-variant="hollow" />;
+    return <span className="aui-tool-timeline-mark-glyph aui-tool-timeline-dot" data-variant="hollow" />;
   }
   if (state === "note") {
-    return <span className="bui-step-mark-glyph bui-step-dot" data-variant="note" />;
+    return <span className="aui-tool-timeline-mark-glyph aui-tool-timeline-dot" data-variant="note" />;
   }
-  return <span className="bui-step-mark-glyph">
+  return <span className="aui-tool-timeline-mark-glyph">
     <svg
       width="11"
       height="11"

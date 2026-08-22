@@ -51,10 +51,11 @@ rewrite the prior wire prefix. A trailing assistant or tool result uses
 Image-capable Cursor routes receive validated text-plus-image or image-only
 messages through the shared trusted attachment loader. Kimi K3 reasoning is
 replayed only when the source provider state identifies the same Cursor model.
-Connect frames, protobuf lengths, and server-set blobs are bounded and
-validated before state is committed; a per-conversation
-`resource_exhausted` rotates the wire ID once while retaining the validated
-checkpoint.
+Connect frames, protobuf lengths, server-set blobs, decoded field counts,
+aggregate decoded bytes, and nested protobuf Value depth are bounded before
+state is committed or provider-controlled values become Go maps/slices. A
+per-conversation `resource_exhausted` rotates the wire ID once while retaining
+the validated checkpoint.
 Cursor token deltas count as output, while checkpoint `used_tokens` feed
 context-pressure decisions without being recorded as billable input. Cursor
 controls prompt caching automatically but does not report cache-read tokens,

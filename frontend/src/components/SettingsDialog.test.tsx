@@ -77,12 +77,12 @@ describe("SettingsDialog", () => {
 		expect(filterProviderCatalogModels("cursor", models, "missing")).toEqual([]);
 	});
 
-	it("shows folded Cursor inventory and explains retained-data variants", async () => {
+	it("keeps the entire model chip as the sole repeated dismissal target", async () => {
 		const container = document.createElement("div");
 		document.body.append(container);
 		const root = createRoot(container);
-		await act(async () => root.render(<ComposerModelPicker
-			running={false}
+		const renderPicker = (running: boolean) => root.render(<ComposerModelPicker
+			running={running}
 			models={[{
 				provider: "cursor", id: "claude-fable-5-high", name: "Claude Fable 5 1M",
 				aliases: ["claude-fable-5-low", "claude-fable-5-thinking-high"],
@@ -108,16 +108,53 @@ describe("SettingsDialog", () => {
 			fastBoostTitle="Cursor Fast"
 			fastBoostDetail="Fast"
 			language="zh-CN"
-		/>));
-		const picker = container.querySelector<HTMLDetailsElement>(".model-controls")!;
-		await act(async () => {
-			picker.open = true;
-			picker.dispatchEvent(new Event("toggle", { bubbles: true }));
-		});
+		/>);
+		await act(async () => renderPicker(false));
+		const picker = container.querySelector<HTMLElement>(".model-controls")!;
+		const trigger = picker.querySelector<HTMLButtonElement>(".model-controls-trigger")!;
+		expect(picker.querySelector(".model-controls-chevron")).toBeNull();
+		expect(picker.tagName).toBe("DIV");
+		expect(trigger.tagName).toBe("BUTTON");
+		expect(picker.querySelector("summary")).toBeNull();
+		expect(picker.dataset.open).toBe("false");
+		const eventAt = <T extends Event>(event: T, timeStamp?: number) => {
+			if (timeStamp !== undefined) Object.defineProperty(event, "timeStamp", { value: timeStamp });
+			return event;
+		};
+		const pointerDownTrigger = async (timeStamp?: number) => {
+			await act(async () => trigger.dispatchEvent(eventAt(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerType: "mouse", isPrimary: true }), timeStamp)));
+		};
+		const pointerUpTrigger = async (timeStamp?: number) => {
+			await act(async () => trigger.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true }), timeStamp)));
+		};
+		const pointerUpAndClickTrigger = async (pointerTimeStamp?: number, clickTimeStamp?: number, detail = 1) => {
+			await act(async () => {
+				trigger.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true }), pointerTimeStamp));
+				trigger.dispatchEvent(eventAt(new MouseEvent("click", { bubbles: true, cancelable: true, detail }), clickTimeStamp));
+			});
+		};
+		const clickTrigger = async () => {
+			await pointerDownTrigger();
+			await pointerUpAndClickTrigger();
+		};
+		const clickOnlyTrigger = async (detail: number) => {
+			await act(async () => trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail })));
+		};
+		const keyboardClickTrigger = async () => clickOnlyTrigger(0);
+		const releaseFirstTrackpadTrigger = async (detail: number, timeStamp: number) => {
+			await act(async () => {
+				trigger.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp + 4));
+				trigger.dispatchEvent(eventAt(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp + 4));
+				trigger.dispatchEvent(eventAt(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp));
+				trigger.dispatchEvent(eventAt(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp));
+			});
+			await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+		};
+		await clickTrigger();
 		await vi.waitFor(() => {
 			expect(document.body.querySelector(".composer-model-popover")).not.toBeNull();
 		});
-		const popover = document.body.querySelector(".composer-model-popover")!;
+		const popover = document.body.querySelector<HTMLElement>(".composer-model-popover")!;
 		expect(popover.querySelector(".composer-model-inventory")).toBeNull();
 		expect(popover.textContent).not.toContain("个基础模型");
 		expect(popover.textContent).not.toContain("个可用版本");
@@ -128,10 +165,69 @@ describe("SettingsDialog", () => {
 		expect(popover.querySelector(".composer-model-list small")?.textContent).not.toContain("个版本");
 		expect(popover.querySelector('[data-mode="thinking"]')).toBeNull();
 		expect(popover.textContent).not.toContain("(NO ZDR)");
-		const summary = picker.querySelector("summary")!;
-		await act(async () => summary.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
-		expect(document.body.querySelector(".composer-model-popover")).toBeNull();
+		expect(popover.hidden).toBe(false);
+		// WKWebView can omit Pointer Events for a trackpad activation while still
+		// delivering click. That sequence must remain a complete toggle path.
+		await clickOnlyTrigger(1);
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		await clickOnlyTrigger(1);
+		expect(picker.dataset.open).toBe("true");
+		expect(popover.hidden).toBe(false);
+		// macOS tap-to-click may deliver release before a buttons=0 press pair and
+		// omit click. Treat the release as one activation and ignore the false press.
+		await releaseFirstTrackpadTrigger(2, 500);
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		await releaseFirstTrackpadTrigger(3, 700);
+		expect(picker.dataset.open).toBe("true");
+		expect(popover.hidden).toBe(false);
+		// WKWebView can deliver pointerdown without a later click. Dismissal must
+		// complete on that event, while a paired click with another timestamp is inert.
+		await pointerDownTrigger(100);
+		expect(picker.dataset.open).toBe("false");
+		expect(document.body.querySelector(".composer-model-popover")).toBe(popover);
+		expect(popover.hidden).toBe(true);
+		await pointerUpAndClickTrigger(120, 2200);
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		// A pointer sequence without click must release its dedupe marker before a
+		// later click-only trackpad activation.
+		await pointerDownTrigger(300);
+		expect(picker.dataset.open).toBe("true");
+		await pointerUpTrigger(320);
+		await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+		await clickOnlyTrigger(1);
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		for (let index = 0; index < 12; index += 1) {
+			await clickTrigger();
+			expect(picker.dataset.open).toBe("true");
+			expect(document.body.querySelector(".composer-model-popover")).toBe(popover);
+			expect(popover.hidden).toBe(false);
+			await clickTrigger();
+			expect(picker.dataset.open).toBe("false");
+			expect(document.body.querySelector(".composer-model-popover")).toBe(popover);
+			expect(popover.hidden).toBe(true);
+		}
+		await keyboardClickTrigger();
+		expect(picker.dataset.open).toBe("true");
+		expect(popover.hidden).toBe(false);
+		await keyboardClickTrigger();
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		await clickTrigger();
+		expect(picker.dataset.open).toBe("true");
+		await act(async () => window.dispatchEvent(new Event("blur")));
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		await clickTrigger();
+		await act(async () => renderPicker(true));
+		expect(picker.dataset.open).toBe("false");
+		expect(document.body.querySelector(".composer-model-popover")).toBe(popover);
+		expect(popover.hidden).toBe(true);
 		await act(async () => root.unmount());
+		expect(document.body.querySelector(".composer-model-popover")).toBeNull();
 		container.remove();
 	});
 

@@ -92,7 +92,7 @@ const messages = {
     stoppedAfter: "你在 {duration} 后停止了", stopped: "你停止了运行",
     editingFiles: "正在编辑文件", editedFiles: "已编辑的文件", editedFileCount: "已编辑 {count} 个文件", editedOneFile: "已编辑 1 个文件",
     editedFilesShowMore: "再显示 {count} 个文件", editedFilesShowLess: "收起",
-    editedFileDiff: "文件编辑差异", copyDiff: "复制差异", copyCode: "复制", copiedCode: "已复制", toolExecuting: "正在执行…",
+    editedFileDiff: "文件编辑差异", copyCode: "复制", copiedCode: "已复制", toolExecuting: "正在执行…",
     toolStatusRunning: "运行中", toolStatusFailed: "失败", toolStatusDone: "完成",
     jumpLatest: "返回最新",
     // Tool group summaries ({n} = count)
@@ -387,7 +387,7 @@ const messages = {
     stoppedAfter: "You stopped after {duration}", stopped: "You stopped the run",
     editingFiles: "Editing files", editedFiles: "Edited files", editedFileCount: "Edited {count} files", editedOneFile: "Edited 1 file",
     editedFilesShowMore: "Show {count} more files", editedFilesShowLess: "Show less",
-    editedFileDiff: "File edit diff", copyDiff: "Copy diff", copyCode: "Copy", copiedCode: "Copied", toolExecuting: "Running…",
+    editedFileDiff: "File edit diff", copyCode: "Copy", copiedCode: "Copied", toolExecuting: "Running…",
     toolStatusRunning: "Running", toolStatusFailed: "Failed", toolStatusDone: "Done",
     jumpLatest: "Jump to latest",
     toolGroupSearch: "Searched {n} times", toolGroupRead: "Read {n} files", toolGroupEdit: "Edited {n} files",

@@ -2,9 +2,9 @@ import { FileText, Image, Pencil, Search, ShieldCheck, SquareTerminal, Wrench } 
 import { useState, type ReactNode, type ToggleEvent } from "react";
 import { tFormat, type Language } from "../../i18n";
 import { FILE_CHANGE_PILL_LIMIT, toolChipBasename, type ToolChipKind } from "../toolChip";
-import { ToolRow } from "./Primitives";
+import { ToolCall } from "./Elements";
 
-export function ToolChip({
+export function ToolTimelineItem({
   state,
   kind,
   label,
@@ -34,26 +34,26 @@ export function ToolChip({
   children?: ReactNode;
 }) {
   const approval = state === "awaiting_approval" || state === "reviewing_approval";
-  return <ToolRow
-    className={`bui-tool-chip tool-block work-entry ${nested ? "nested" : ""} ${compact ? "compact" : ""} ${className}`.trim()}
+  return <ToolCall
+    className={`aui-tool-timeline-item tool-block work-entry ${nested ? "nested" : ""} ${compact ? "compact" : ""} ${className}`.trim()}
     state={state}
     role={role}
     aria-current={ariaCurrent}
     onToggle={onToggle}
   >
     <summary>
-      <span className="bui-tool-chip-icon work-entry-icon" data-icon={approval ? "shield" : kind} aria-hidden="true">
-        <ToolChipIcon kind={kind} approval={approval} />
+      <span className="aui-tool-timeline-icon work-entry-icon" data-icon={approval ? "shield" : kind} aria-hidden="true">
+        <ToolTimelineIcon kind={kind} approval={approval} />
       </span>
-      <strong className="bui-tool-chip-label work-entry-label">{label}</strong>
-      {chip ? <span className="bui-tool-chip-detail">{chip}</span> : null}
+      <strong className="aui-tool-timeline-label work-entry-label">{label}</strong>
+      {chip ? <span className="aui-tool-timeline-detail">{chip}</span> : null}
       {status ? <span className="tool-status">{status}</span> : null}
     </summary>
     {children}
-  </ToolRow>;
+  </ToolCall>;
 }
 
-export function ToolChipPending({
+export function ToolTimelinePending({
   state,
   label,
   chip,
@@ -69,34 +69,34 @@ export function ToolChipPending({
   nested?: boolean;
 }) {
   return <article
-    className={`bui-tool-chip file-change-entry work-entry pending-file-edit ${nested ? "nested" : ""} ${className}`.trim()}
+    className={`aui-tool-timeline-item file-change-entry work-entry pending-file-edit ${nested ? "nested" : ""} ${className}`.trim()}
     data-state={state}
     aria-busy="true"
   >
     <div className="file-change-pending-summary">
-      <span className="work-entry-icon bui-tool-chip-icon" data-icon="shield" aria-hidden="true">
+      <span className="work-entry-icon aui-tool-timeline-icon" data-icon="shield" aria-hidden="true">
         <ShieldCheck size={13} />
       </span>
-      <strong className="bui-tool-chip-label work-entry-label">{label}</strong>
-      {chip ? <span className="bui-tool-chip-detail">{chip}</span> : null}
+      <strong className="aui-tool-timeline-label work-entry-label">{label}</strong>
+      {chip ? <span className="aui-tool-timeline-detail">{chip}</span> : null}
       <span className="tool-status">{status}</span>
     </div>
   </article>;
 }
 
-export function ToolChipStatus({ lines }: { lines: string[] }) {
+export function ToolTimelineStatus({ lines }: { lines: string[] }) {
   if (!lines.length) return null;
-  return <ul className="bui-tool-chip-status">
+  return <ul className="aui-tool-timeline-status">
     {lines.map((line, index) => <li key={`${line}-${index}`}><span aria-hidden="true">✓</span>{line}</li>)}
   </ul>;
 }
 
-export function ToolChipMeta({ lines }: { lines: string[] }) {
+export function ToolTimelineMeta({ lines }: { lines: string[] }) {
   if (!lines.length) return null;
-  return <div className="bui-tool-chip-meta">{lines.map((line, index) => <p key={`${line}-${index}`}>{line}</p>)}</div>;
+  return <div className="aui-tool-timeline-meta">{lines.map((line, index) => <p key={`${line}-${index}`}>{line}</p>)}</div>;
 }
 
-export function FileChangePills({
+export function ToolTimelineFiles({
   files,
   language,
   limit = FILE_CHANGE_PILL_LIMIT,
@@ -109,15 +109,15 @@ export function FileChangePills({
   if (!files.length) return null;
   const hidden = Math.max(0, files.length - limit);
   const visible = expanded ? files : files.slice(0, limit);
-  return <div className="bui-file-change-pills" role="list">
-    {visible.map((file) => <span key={file.path} className="bui-file-change-pill" role="listitem">
-      <span className="bui-file-change-pill-name">{toolChipBasename(file.path)}</span>
+  return <div className="aui-tool-timeline-files" role="list">
+    {visible.map((file) => <span key={file.path} className="aui-tool-timeline-file" role="listitem">
+      <span className="aui-tool-timeline-file-name">{toolChipBasename(file.path)}</span>
       {file.additions > 0 ? <span className="plus">+{file.additions}</span> : null}
       {file.deletions > 0 ? <span className="minus">-{file.deletions}</span> : null}
     </span>)}
     {hidden > 0 && !expanded ? <button
       type="button"
-      className="bui-file-change-more"
+      className="aui-tool-timeline-more"
       onClick={() => setExpanded(true)}
     >
       {tFormat(language, "fileChangeMore", { count: hidden })}
@@ -125,10 +125,10 @@ export function FileChangePills({
   </div>;
 }
 
-export function ToolChipIcon({ kind, approval = false }: { kind: ToolChipKind; approval?: boolean }) {
+export function ToolTimelineIcon({ kind, approval = false }: { kind: ToolChipKind; approval?: boolean }) {
   if (approval) return <ShieldCheck size={13} />;
   if (kind === "thinking") {
-    return <span className="azem-thinking-mark bui-thinking-mark" aria-hidden="true"><i /><i /></span>;
+    return <span className="azem-thinking-mark aui-reasoning-mark" aria-hidden="true"><i /><i /></span>;
   }
   if (kind === "write" || kind === "edit") return <Pencil size={13} />;
   if (kind === "image") return <Image size={13} />;

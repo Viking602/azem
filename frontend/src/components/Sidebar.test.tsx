@@ -151,7 +151,7 @@ describe("Sidebar project sessions", () => {
     await act(async () => root.unmount());
   });
 
-  it("shows minute-level session age instead of collapsing the last hour to 刚刚", async () => {
+  it("keeps project and session rows single-line without decorative metadata", async () => {
     const sessions: Session[] = [{
       id: "session-1", workspace: snapshot.workspace, title: "分析当前变更内容", providerId: "chatgpt",
       modelId: "gpt-5.6-sol", reasoning: "high", agentMode: "single",
@@ -164,7 +164,15 @@ describe("Sidebar project sessions", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     await act(async () => root.render(<Sidebar />));
-    expect(container.querySelector(".session-copy small")?.textContent).toBe("17 分钟前");
+    const project = container.querySelector(".project-toggle")!;
+    const session = container.querySelector(".thread-list > button")!;
+    expect(project.querySelector(".project-heading-copy strong")?.textContent).toBe("azem");
+    expect(project.querySelector(".project-initial")).toBeNull();
+    expect(project.querySelector(".project-heading-copy small")).toBeNull();
+    expect(project.querySelector(":scope > em")).toBeNull();
+    expect(session.querySelector(".session-copy strong")?.textContent).toBe("分析当前变更内容");
+    expect(session.querySelector(".session-copy small")).toBeNull();
+    expect(container.textContent).not.toContain("17 分钟前");
     await act(async () => root.unmount());
   });
 

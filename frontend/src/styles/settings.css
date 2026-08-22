@@ -502,11 +502,10 @@ dialog { border: 0; padding: 0; background: transparent; color: var(--ink); }.co
   .workspace-grid { --inspector-reserve: 304px; }
   .workspace-sidebar { padding: 10px 10px 12px; }
   .sidebar-switcher { margin: 0 2px 12px; }
-  .project-heading { min-height: 43px; padding: 4px 4px 4px 5px; }
-  .project-toggle { min-height: 35px; display: grid; grid-template-columns: 10px 25px minmax(0, 1fr) auto; gap: 7px; }
-  .project-initial { width: 25px; flex-basis: 25px; }
+  .project-heading { min-height: 35px; padding: 2px 4px 2px 5px; }
+  .project-toggle { min-height: 31px; display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 7px; }
   .thread-list { margin-left: 17px; padding-left: 10px; }
-  .thread-list button { min-height: 47px; gap: 6px; padding: 5px 6px; }
+  .thread-list button { min-height: 35px; gap: 6px; padding: 4px 6px; }
   .thread-header { min-height: 50px; height: 50px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 12px; padding: 0 17px 0 22px; }
   .thread-heading-copy { display: flex !important; align-items: center !important; gap: 9px !important; }
   .thread-heading-copy .thread-eyebrow { grid-row: auto; }.thread-heading-copy strong { font-size: 13px; }.thread-heading-copy small { padding-left: 9px; border-left: 1px solid var(--line); font-size: 11px; }

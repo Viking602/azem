@@ -209,23 +209,18 @@
 .empty-thread .composer-branch-menu > summary::before { content: ""; position: absolute; left: 0; top: 50%; width: 1px; height: 14px; border-radius: 99px; background: var(--line); transform: translateY(-50%); }
 .empty-thread .composer-card > textarea { min-height: 82px; padding: 12px 3px 8px; font-size: 13px; line-height: 1.65; }
 .empty-thread .composer-toolbar { min-height: 30px; padding: 0; }
-.empty-thread .context-meter { display: none; }
 .composer-fast-toggle-wrap { position: relative; display: flex; align-items: center; }.composer-fast-toggle { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; color: var(--muted); }.composer-fast-toggle:hover, .composer-fast-toggle-wrap.active .composer-fast-toggle { background: var(--paper-muted); color: var(--blue); }.composer-fast-toggle-tip { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 6; min-width: 94px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper-strong); box-shadow: var(--shadow-soft); opacity: 0; pointer-events: none; transform: translateY(3px); transition: opacity var(--motion-fast) ease, transform var(--motion-fast) ease; }.composer-fast-toggle-tip strong, .composer-fast-toggle-tip span { display: block; white-space: nowrap; }.composer-fast-toggle-tip strong { font-size: 10px; }.composer-fast-toggle-tip span { margin-top: 2px; color: var(--faint); font-size: 9px; }.composer-fast-toggle-wrap:hover .composer-fast-toggle-tip, .composer-fast-toggle:focus-visible + .composer-fast-toggle-tip { opacity: 1; transform: translateY(0); }
 .empty-thread .empty-task-suggestions { margin-top: 4px; }
 .primary-nav button.active { background: var(--paper); color: var(--ink); }
 .primary-nav button.active > svg { color: var(--accent); }
 
 /* Composer remains compact while allowing every model name to render in full. */
-.model-controls, .model-controls[open] { width: max-content; max-width: min(340px, 36vw); }
-.model-controls > summary { width: max-content; min-width: 0; max-width: min(340px, 36vw); height: 28px; padding: 0 8px; border-radius: 8px; background: transparent; }
-.model-controls[open] > summary { position: relative; z-index: 240; padding-inline: 8px; background: var(--paper-muted); }
-.model-controls > summary span { min-width: 0; max-width: 240px; overflow: visible; text-overflow: clip; white-space: nowrap; }
-.model-controls > summary .model-selected-name { display: inline-flex; align-items: center; gap: 4px; }.model-controls > summary .model-retention-icon { display: inline-flex; flex: 0 0 auto; color: var(--red); }
-.model-controls > summary:hover { background: var(--paper-muted); }
-.model-controls-chevron { position: static; opacity: 1; color: var(--faint); transform: none; transition: transform var(--motion-fast) var(--ease-out); }
-.model-controls[open] .model-controls-chevron { opacity: 1; transform: rotate(180deg); }
-.context-meter > summary { width: 22px; height: 22px; border-radius: 6px; }
-.context-meter > summary svg { width: 20px; height: 20px; }
+.model-controls, .model-controls[data-open="true"] { width: max-content; max-width: min(340px, 36vw); }
+.model-controls > .model-controls-trigger { width: max-content; min-width: 0; max-width: min(340px, 36vw); height: 28px; padding: 0 8px; border-radius: 8px; background: transparent; }
+.model-controls[data-open="true"] > .model-controls-trigger { position: relative; z-index: 240; padding-inline: 8px; background: var(--paper-muted); }
+.model-controls > .model-controls-trigger span { min-width: 0; max-width: 240px; overflow: visible; text-overflow: clip; white-space: nowrap; }
+.model-controls > .model-controls-trigger .model-selected-name { display: inline-flex; align-items: center; gap: 4px; }.model-controls > .model-controls-trigger .model-retention-icon { display: inline-flex; flex: 0 0 auto; color: var(--red); }
+.model-controls > .model-controls-trigger:hover { background: var(--paper-muted); }
 .titlebar-project-switch { width: min(560px, calc(100% - 24px)); }
 .titlebar-project { width: min(470px, 100%); max-width: 100%; }
 .titlebar-project strong { min-width: max-content; flex: 0 0 auto; overflow: visible; text-overflow: clip; }
@@ -281,7 +276,8 @@
   background: transparent;
 }
 
-.composer-model-popover { z-index: 230; overflow: hidden; padding: 6px; border: 1px solid var(--line-strong); border-radius: 13px; background: color-mix(in srgb, var(--paper-strong) 97%, transparent); box-shadow: var(--shadow-float); backdrop-filter: blur(20px); animation: composer-model-in 240ms var(--ease-out) both; }
+.composer-model-popover { z-index: 230; overflow: hidden; padding: 6px; border: 1px solid var(--line-strong); border-radius: 13px; background: var(--paper-strong); box-shadow: var(--shadow-float); }
+.composer-model-popover[hidden] { display: none !important; }
 .composer-model-popover > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 7px 8px 6px; }
 .composer-model-popover > header strong { font-size: 11px; }.composer-model-popover > header small { color: var(--faint); font-size: 9px; }
 .composer-model-search { height: 36px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 6px; margin: 0 7px 5px; border-bottom: 1px solid var(--line); color: var(--faint); }
@@ -297,8 +293,6 @@
 .composer-popover-modes { display: flex; align-items: center; gap: 1px; }.composer-popover-mode { position: relative; }.composer-popover-mode > button { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 0; background: transparent; color: var(--faint); transition: color var(--motion-fast) ease, transform var(--motion-fast) var(--ease-out); }.composer-popover-mode > button svg { fill: none; stroke: currentColor; transition: fill var(--motion-fast) ease, stroke var(--motion-fast) ease; }.composer-popover-mode > button:hover, .composer-popover-mode > button:focus-visible { color: var(--muted); }.composer-popover-mode > button:active { transform: scale(.94); }.composer-popover-mode > button.on { background: transparent; color: var(--blue); }.composer-popover-mode[data-mode="fast"] > button.on svg { fill: currentColor; stroke: currentColor; }.composer-popover-mode > button:disabled { opacity: .3; cursor: default; }.composer-popover-mode > span { position: absolute; z-index: 4; right: -5px; bottom: calc(100% + 7px); width: 118px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-strong); box-shadow: var(--shadow-float); opacity: 0; transform: translateY(4px) scale(.97); pointer-events: none; transition: opacity var(--motion-fast) ease, transform var(--motion-fast) var(--ease-out); }.composer-popover-mode > span strong, .composer-popover-mode > span small { display: block; }.composer-popover-mode > span strong { font-size: 11px; }.composer-popover-mode > span small { margin-top: 1px; color: var(--faint); font-size: 9px; }.composer-popover-mode:hover > span, .composer-popover-mode:focus-within > span { opacity: 1; transform: none; }
 .composer-model-popover .effort-slider { margin-top: 9px; }.composer-model-popover .effort-slider-legend { display: none; }.composer-model-popover .effort-slider-track { height: 24px; }.composer-model-popover .effort-slider-rail { left: 11px; right: 11px; height: 12px; border-radius: 999px; }.composer-model-popover .effort-slider-thumb-wrap { width: 22px; height: 22px; }.composer-model-popover .effort-slider-thumb { width: 22px; height: 22px; }.composer-model-popover .effort-slider-tick { width: 5px; height: 5px; }.composer-model-popover .effort-slider-labels { display: flex; align-items: center; justify-content: space-between; margin-top: 1px; }.composer-model-popover .effort-slider-labels span { width: 30px; color: var(--faint); font-size: 9px; text-align: center; }.composer-model-popover .effort-slider-labels span.selected { color: var(--purple); font-weight: 700; transform: translateY(-1px); }
 .composer-model-popover .effort-slider[data-fixed="true"] .effort-slider-labels { justify-content: flex-end; }
-@keyframes composer-model-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-@media (prefers-reduced-motion: reduce) { .composer-model-popover { animation: none; } }
 
 /* Active task trail: one continuous rail, not a collapsed tool summary. */
 .timeline-step-list { position: relative; display: grid; gap: 0; margin: 10px 0 17px 3px; }

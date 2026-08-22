@@ -1,5 +1,5 @@
 import { ChevronDown, FilePenLine } from "lucide-react";
-import { Fragment, memo, useEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { tFormat, translator } from "../i18n";
 import { isSubagentActive } from "../subagents";
 import { useRuntimeStore } from "../store";
@@ -12,9 +12,33 @@ import {
   type SessionTurn,
   type SessionTurnItem,
 } from "./sessionDocument";
-import { TimelineBlock } from "./timeline/blocks";
+import { MessagePairRoot } from "./elements/message-pair";
+import { TimelineBlock, visibleAssistantContent } from "./timeline/blocks";
 import { isSubagentSpawnBlock, ProcessEntries, ProcessFold } from "./timeline/process";
 export { approvalPresentation, TimelineBlock, visibleCommentaryTitle } from "./timeline/blocks";
+
+function visibleTimelineBlocks(blocks: Block[]) {
+  let changed = false;
+  const visible: Block[] = [];
+  for (const block of blocks) {
+    if (block.kind !== "assistant") {
+      visible.push(block);
+      continue;
+    }
+    const content = visibleAssistantContent(block.content);
+    if (!content) {
+      changed = true;
+      continue;
+    }
+    if (content !== block.content) {
+      changed = true;
+      visible.push({ ...block, content });
+      continue;
+    }
+    visible.push(block);
+  }
+  return changed ? visible : blocks;
+}
 
 function TimelineFeedView({
   blocks, language, compact = false, activeRunId = "", running = false, waitingForModel = false,
@@ -32,6 +56,7 @@ function TimelineFeedView({
   const searchTarget = useRuntimeStore((state) => state.sessionSearchTarget);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
   const feed = useRef<HTMLDivElement>(null);
+  const displayBlocks = useMemo(() => visibleTimelineBlocks(blocks), [blocks]);
   const activeDelegation = useRuntimeStore((state) => Boolean(activeRunId) && state.agents.some((agent) =>
     isSubagentActive(agent.state) && agent.parentRunId === activeRunId));
   useEffect(() => {
@@ -64,11 +89,11 @@ function TimelineFeedView({
       window.clearTimeout(clearTimer);
       revealRoot?.classList.remove("timeline-search-reveal");
     };
-  }, [blocks, currentSessionId, searchTarget]);
+  }, [displayBlocks, currentSessionId, searchTarget]);
   // Side chat stays flat/compact; main session uses document projection.
   if (compact) {
     return <div className="timeline-feed compact">
-      <ProcessEntries blocks={blocks} language={language} compact />
+      <ProcessEntries blocks={displayBlocks} language={language} compact />
     </div>;
   }
 
@@ -76,12 +101,12 @@ function TimelineFeedView({
   // attachment by default so the answer body stays the primary surface.
   const foldProcess = foldActiveProcess;
   const collapseCompleted = collapseCompletedProcess;
-  const projection = projectSessionDocument(blocks, { activeRunId, running });
-  const runningSpawn = blocks.some((block) => isSubagentSpawnBlock(block) && isRunningTool(block));
+  const projection = projectSessionDocument(displayBlocks, { activeRunId, running });
+  const runningSpawn = displayBlocks.some((block) => isSubagentSpawnBlock(block) && isRunningTool(block));
   // First-token and between-batch waits use the same thinking row as a live
   // or completed trace. Completed/failed tools and empty thinking frames are
   // not live progress (UI-016 / UI-008).
-  const waiting = shouldShowThinkingWait(blocks, {
+  const waiting = shouldShowThinkingWait(displayBlocks, {
     waiting: waitingForModel || running,
     activeRunId,
     activeDelegation,
@@ -125,7 +150,7 @@ function SessionTurnView({
   collapseCompletedProcess: boolean;
 }) {
   const fileSummary = turnEditedFiles(turn, { activeRunId, running });
-  return <section
+  return <MessagePairRoot
     className={`session-turn ${current ? "session-turn-current" : "session-history-turn"}`}
     data-screen-label={current ? "current-turn" : undefined}
     data-turn={current ? undefined : String(index + 1).padStart(2, "0")}
@@ -140,7 +165,7 @@ function SessionTurnView({
       pendingWait={Boolean(current && waiting && !turn.items.some((item) => item.kind === "process"))}
     />
     {fileSummary ? <EditedFilesSummary summary={fileSummary} language={language} /> : null}
-  </section>;
+  </MessagePairRoot>;
 }
 
 function TurnItems({

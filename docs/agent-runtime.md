@@ -137,6 +137,14 @@ checks stale. This prevents a valid model final answer from triggering another
 provider turn solely because the guard failed to recognize dedicated formatter
 evidence (VERIF-002).
 
+After the one allowed evidence retry, an `uncertain` or `fail` result remains
+persisted in the verification store and blocks a successful terminal run.
+The guardrail reason is surfaced as a host-owned run failure; it is never
+appended, substituted, or assigned `RoleAssistant`, so the model-authored
+stream cannot be mistaken for verified output. The desktop strips the two
+exact historical notice suffixes when projecting legacy durable blocks and
+drops a notice-only assistant block (VERIF-001).
+
 When the session is idle, `AutoWakePending` collects every background child
 that is terminal, not cancelled, and not yet `CompletionDelivered`, then
 starts one wake turn. A successful parent `run_finished` marks that run's

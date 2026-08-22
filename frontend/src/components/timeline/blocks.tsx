@@ -11,9 +11,15 @@ import { displayedToolState, formatDuration, formatToolPresentation, isHostFallb
 import { toolChipBasename, toolChipModel } from "../toolChip";
 import AnsiText from "../AnsiText";
 import AttachmentPreview from "../AttachmentPreview";
-import CodeDiff from "../CodeDiff";
-import { ThinkingState } from "../beautiful-ui/Primitives";
-import { ToolChip, ToolChipMeta, ToolChipPending, ToolChipStatus } from "../beautiful-ui/ToolChip";
+import CodeDiff from "../assistant-ui/CodeDiff";
+import { ReasoningPanel } from "../assistant-ui/Elements";
+import {
+  MessagePairAssistant as AssistantMessage,
+  MessagePairError as ErrorMessage,
+  MessagePairProgress as ProgressMessage,
+  MessagePairUser as UserMessage,
+} from "../elements/message-pair";
+import { ToolTimelineItem, ToolTimelineMeta, ToolTimelinePending, ToolTimelineStatus } from "../assistant-ui/ToolTimeline";
 import {
   fileChangesForBlock, isActiveFileChangeBlock, isPendingFileChangeBlock, pendingFileChangeSummaryForBlock,
   pendingFileEditPaths,
@@ -32,44 +38,61 @@ export type TimelineBlockProps = {
   siblings?: Block[];
 };
 
+const hostVerificationNotices = [
+  "Verification evidence is missing or stale for the current workspace snapshot after one retry. The work remains uncertain and is not reported as complete.",
+  "Verification failed for the current workspace snapshot. The attempted result is not reported as complete; inspect the failed checks and correct the work before retrying.",
+] as const;
+
+export function visibleAssistantContent(content = "") {
+  const trimmed = content.trimEnd();
+  for (const notice of hostVerificationNotices) {
+    if (trimmed.endsWith(notice)) {
+      return trimmed.slice(0, -notice.length).trimEnd();
+    }
+  }
+  return content;
+}
+
 function TimelineBlockView({ block, language, compact = false, nested = false, siblings }: TimelineBlockProps) {
   const sessionId = useRuntimeStore((state) => state.currentSessionId || state.snapshot?.sessionId || "");
   if (block.kind === "user") {
     if (block.state === "subagent_wake") {
       return <SubagentWakeNotice block={block} language={language} />;
     }
-    return <article className="user-block" data-session-sequence={block.sequence}>
+    return <UserMessage data-session-sequence={block.sequence}>
       {block.attachments?.length ? <div className="user-attachments">{block.attachments.map((item) => <AttachmentPreview key={item.id} attachment={item} sessionId={sessionId} language={language} variant="message" />)}</div> : null}
       {block.content ? <p>{block.content}</p> : null}
-    </article>;
+    </UserMessage>;
   }
   if (block.kind === "commentary") {
     if (isHostFallbackCommentary(block)) return null;
     const active = ["streaming", "running", "started", "progress"].includes(block.state || "");
-    return <article
-      className={`commentary-block markdown timeline-prose ${active ? "active" : ""} ${compact ? "compact" : ""}`}
+    return <ProgressMessage
+      className={`markdown timeline-prose ${active ? "active" : ""} ${compact ? "compact" : ""}`}
       data-state={active ? "active" : "completed"}
       aria-label={translator(language)("progressUpdate")}
     >
       <TimelineProse content={block.content || ""} active={active} />
-    </article>;
+    </ProgressMessage>;
   }
   if (block.kind === "assistant") {
     const active = ["streaming", "running", "started", "progress"].includes(block.state || "");
+    const content = visibleAssistantContent(block.content);
+    if (!content && !active) return null;
     // Unphased text stays an assistant body. textPhasePending only affects
     // section markers and later commentary promotion — not a pending chrome.
-    return <article
-      className={`assistant-block markdown timeline-prose ${active ? "streaming" : ""} ${compact ? "compact" : ""}`}
+    return <AssistantMessage
+      className={`markdown timeline-prose ${active ? "streaming" : ""} ${compact ? "compact" : ""}`}
       data-testid="timeline-prose"
       aria-busy={active || undefined}
       data-session-sequence={block.sequence}
     >
       <TimelineProse
-        content={block.content || ""}
+        content={content}
         active={active}
         debugReplay={import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "running"}
       />
-    </article>;
+    </AssistantMessage>;
   }
   if (block.kind === "question") return <QuestionBlock block={block} language={language} />;
   if (block.kind === "plan") return <PlanBlock block={block} language={language} />;
@@ -79,7 +102,7 @@ function TimelineBlockView({ block, language, compact = false, nested = false, s
   if (block.kind === "approval") return <ApprovalBlock block={block} />;
   if (block.kind === "status") return <RunStatusMarker block={block} language={language} />;
   if (block.kind === "error") {
-    return <article className="error-block"><CircleStop size={15} /><div><strong>{block.title}</strong><p>{block.content}</p></div></article>;
+    return <ErrorMessage><CircleStop size={15} /><div><strong>{block.title}</strong><p>{block.content}</p></div></ErrorMessage>;
   }
   // agent / hook are filtered by segmentProcessTrail; keep a quiet fallback for nested callers.
   if (block.kind === "agent" || block.kind === "hook") return null;
@@ -184,7 +207,7 @@ function PendingFileEditRow({ block, language, nested = false }: { block: Block;
   const awaiting = block.state === "awaiting_approval";
   const status = awaiting ? "awaiting_approval" : "reviewing_approval";
   const paths = pendingFileEditPaths(block);
-  return <ToolChipPending
+  return <ToolTimelinePending
     state={status}
     label={t("toolEditFile")}
     chip={paths.length ? paths.map(toolChipBasename).join(" · ") : undefined}
@@ -212,7 +235,7 @@ function ToolDisclosure({ block, language, compact = false, nested = false, sibl
     [opened, payload, language],
   );
   const truncated = block.data?.contentTruncated === "true";
-  return <ToolChip
+  return <ToolTimelineItem
     className={`${nested ? "nested" : ""} ${compact ? "compact" : ""}`.trim()}
     state={state}
     kind={model.kind}
@@ -234,8 +257,8 @@ function ToolDisclosure({ block, language, compact = false, nested = false, sibl
   >
     {opened ? (
       <div className="tool-detail">
-        <ToolChipStatus lines={model.statusLines} />
-        <ToolChipMeta lines={model.meta} />
+        <ToolTimelineStatus lines={model.statusLines} />
+        <ToolTimelineMeta lines={model.meta} />
         {presentation?.fields.length ? <dl className="tool-fields">
           {presentation.fields.map((field) => <div key={`${field.label}-${field.value}`}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}
         </dl> : null}
@@ -248,7 +271,7 @@ function ToolDisclosure({ block, language, compact = false, nested = false, sibl
           : null}
       </div>
     ) : null}
-  </ToolChip>;
+  </ToolTimelineItem>;
 }
 
 
@@ -283,7 +306,7 @@ export function ReasoningTrace({ block, language }: { block: Block; language: Sn
   // is the actionable source of truth; retain reasoning only once it has text.
   if (delegated && steps.length === 0) return null;
 
-  return <ThinkingState
+  return <ReasoningPanel
     active={active}
     expanded={open}
     label={label}
@@ -292,10 +315,10 @@ export function ReasoningTrace({ block, language }: { block: Block; language: Sn
     disabled={!steps.length}
     onToggle={() => setOpen((value) => !value)}
   >
-    {steps.length ? <div className="bui-thinking-panel" data-tab="reasoning">
+    {steps.length ? <div className="aui-reasoning-content" data-tab="reasoning">
       {steps.map((step, index) => <p className="reasoning-step" key={index}>{step}</p>)}
     </div> : null}
-  </ThinkingState>;
+  </ReasoningPanel>;
 }
 
 export function FileChangeBlock({ changes, summary, language, nested, running = false }: {
@@ -311,15 +334,15 @@ export function FileChangeBlock({ changes, summary, language, nested, running = 
   const deletions = summary?.deletions ?? changes.reduce((total, change) => total + change.deletions, 0);
   const pathChip = (summary?.files[0]?.path || changes[0]?.path) ? toolChipBasename(summary?.files[0]?.path || changes[0]?.path || "") : "";
   return <details
-    className={`file-change-entry work-entry bui-tool-chip ${nested ? "nested" : ""}`}
+    className={`file-change-entry work-entry aui-tool-timeline-item ${nested ? "nested" : ""}`}
     data-state={running ? "running" : "completed"}
     aria-busy={running || undefined}
     onToggle={(event) => setOpened(event.currentTarget.open)}
   >
     <summary>
-      <span className="work-entry-icon bui-tool-chip-icon" data-icon="pencil" aria-hidden="true"><Pencil size={13} /></span>
-      <strong className="work-entry-label bui-tool-chip-label">{t(running ? "editingFiles" : "editedFiles")}</strong>
-      {pathChip ? <span className="bui-tool-chip-detail">{pathChip}</span> : null}
+      <span className="work-entry-icon aui-tool-timeline-icon" data-icon="pencil" aria-hidden="true"><Pencil size={13} /></span>
+      <strong className="work-entry-label aui-tool-timeline-label">{t(running ? "editingFiles" : "editedFiles")}</strong>
+      {pathChip ? <span className="aui-tool-timeline-detail">{pathChip}</span> : null}
       <span className="file-change-chevron" aria-hidden="true"><ChevronDown size={13} /></span>
       {additions > 0 || deletions > 0 ? <span className="file-change-totals">{additions > 0 ? <span className="plus">+{additions}</span> : null}{deletions > 0 ? <span className="minus">-{deletions}</span> : null}</span> : null}
     </summary>

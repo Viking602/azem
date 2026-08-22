@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, Search, ShieldAlert, Zap } from "lucide-react";
+import { Check, Search, ShieldAlert, Zap } from "lucide-react";
 import ProviderIcon from "./ProviderIcon";
 import ReasoningEffortSlider from "./ReasoningEffortSlider";
 
@@ -45,8 +45,12 @@ type Props = {
 type Position = { left: number; bottom: number; width: number };
 
 export default function ComposerModelPicker(props: Props) {
-  const root = useRef<HTMLDetailsElement>(null);
-  const panel = useRef<HTMLDivElement>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const panel = useRef<HTMLElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const activationSequence = useRef(0);
+  const pendingActivation = useRef(0);
+  const activationResetTimer = useRef(0);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [position, setPosition] = useState<Position | null>(null);
@@ -64,9 +68,9 @@ export default function ComposerModelPicker(props: Props) {
     : "NO ZDR: this model has no zero-data-retention guarantee; Cursor or the model provider may retain inputs and outputs.";
 
   const place = useCallback(() => {
-    const summary = root.current?.querySelector("summary");
-    if (!summary) return;
-    const rect = summary.getBoundingClientRect();
+    const trigger = root.current?.querySelector<HTMLButtonElement>(".model-controls-trigger");
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
     const width = Math.min(336, window.innerWidth - 24);
     const left = Math.min(Math.max(12, rect.right - width), window.innerWidth - width - 12);
     setPosition({ left, bottom: window.innerHeight - rect.top + 8, width });
@@ -84,11 +88,83 @@ export default function ComposerModelPicker(props: Props) {
     };
   }, [open, place]);
 
+  useEffect(() => {
+    const resetAfterRelease = () => {
+      const sequence = pendingActivation.current;
+      if (!sequence) return;
+      if (activationResetTimer.current) window.clearTimeout(activationResetTimer.current);
+      activationResetTimer.current = window.setTimeout(() => {
+        if (pendingActivation.current === sequence) pendingActivation.current = 0;
+        activationResetTimer.current = 0;
+      }, 0);
+    };
+    const resetImmediately = () => {
+      if (activationResetTimer.current) window.clearTimeout(activationResetTimer.current);
+      activationResetTimer.current = 0;
+      pendingActivation.current = 0;
+    };
+    document.addEventListener("pointerup", resetAfterRelease);
+    document.addEventListener("mouseup", resetAfterRelease);
+    document.addEventListener("pointercancel", resetImmediately, true);
+    window.addEventListener("blur", resetImmediately);
+    return () => {
+      document.removeEventListener("pointerup", resetAfterRelease);
+      document.removeEventListener("mouseup", resetAfterRelease);
+      document.removeEventListener("pointercancel", resetImmediately, true);
+      window.removeEventListener("blur", resetImmediately);
+      resetImmediately();
+    };
+  }, []);
+
   const closePicker = useCallback(() => {
-    if (root.current) root.current.open = false;
     setOpen(false);
-    setPosition(null);
     setQuery("");
+  }, []);
+
+  const togglePicker = useCallback(() => {
+    if (props.running) return;
+    if (open) {
+      closePicker();
+      return;
+    }
+    place();
+    setOpen(true);
+  }, [props.running, open, closePicker, place]);
+
+  const beginActivation = useCallback(() => {
+    if (activationResetTimer.current) window.clearTimeout(activationResetTimer.current);
+    activationResetTimer.current = 0;
+    pendingActivation.current = ++activationSequence.current;
+    togglePicker();
+  }, [togglePicker]);
+
+  const beginReleaseFallback = useCallback(() => {
+    if (!pendingActivation.current) beginActivation();
+  }, [beginActivation]);
+
+  const completeClickActivation = useCallback(() => {
+    if (pendingActivation.current) {
+      pendingActivation.current = 0;
+      if (activationResetTimer.current) window.clearTimeout(activationResetTimer.current);
+      activationResetTimer.current = 0;
+      return;
+    }
+    togglePicker();
+  }, [togglePicker]);
+
+  useLayoutEffect(() => {
+    if (props.running && open) closePicker();
+  }, [props.running, open, closePicker]);
+
+  useLayoutEffect(() => {
+    if (open && position) searchInput.current?.focus();
+  }, [open, position]);
+
+  useLayoutEffect(() => () => {
+    const node = panel.current;
+    if (!node) return;
+    node.hidden = true;
+    node.style.display = "none";
   }, []);
 
   useEffect(() => {
@@ -106,9 +182,11 @@ export default function ComposerModelPicker(props: Props) {
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("blur", closePicker);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("blur", closePicker);
     };
   }, [open, closePicker]);
 
@@ -117,10 +195,10 @@ export default function ComposerModelPicker(props: Props) {
     closePicker();
   };
 
-  const popover = open && position ? createPortal(
-    <section ref={panel} className="composer-model-popover" style={{ position: "fixed", left: position.left, bottom: position.bottom, width: position.width }} aria-label={zh ? "模型与思考" : "Model and reasoning"}>
+  const popover = position ? createPortal(
+    <section ref={panel} hidden={!open} data-open={String(open)} className="composer-model-popover" style={{ position: "fixed", left: position.left, bottom: position.bottom, width: position.width }} aria-label={zh ? "模型与思考" : "Model and reasoning"}>
       <header><strong>{zh ? "模型与思考" : "Model and reasoning"}</strong><small>{zh ? "仅应用到当前会话" : "Applies to this conversation"}</small></header>
-      <label className="composer-model-search"><Search size={14} /><input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={zh ? "搜索模型或提供方" : "Search models or providers"} /><kbd>⌘F</kbd></label>
+      <label className="composer-model-search"><Search size={14} /><input ref={searchInput} autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={zh ? "搜索模型或提供方" : "Search models or providers"} /><kbd>⌘F</kbd></label>
       <div className="composer-model-list" role="listbox">
         {visibleModels.map((model) => {
           const selected = `${model.provider}/${model.id}` === props.selectedModel;
@@ -152,33 +230,35 @@ export default function ComposerModelPicker(props: Props) {
   ) : null;
 
   return <>
-    <details ref={root} className="model-controls" data-disabled={String(props.running)} onToggle={(event) => {
-      if (props.running) {
-        event.currentTarget.open = false;
-        closePicker();
-        return;
-      }
-      const next = event.currentTarget.open;
-      setOpen(next);
-      next ? requestAnimationFrame(place) : setPosition(null);
-    }}>
-      <summary
+    <div ref={root} className="model-controls" data-open={String(open)} data-disabled={String(props.running)}>
+      <button
+        type="button"
+        className="model-controls-trigger"
         aria-disabled={props.running}
         aria-expanded={open}
         onPointerDown={(event) => {
-          if (!open || props.running) return;
-          event.preventDefault();
-          closePicker();
+          if (props.running || event.button !== 0 || (event.pointerType === "touch" && !event.isPrimary)) return;
+          if ((event.buttons & 1) === 0) return;
+          beginActivation();
         }}
-        onClick={(event) => {
-          if (!open) return;
-          event.preventDefault();
+        onPointerUp={(event) => {
+          if (props.running || event.button !== 0 || (event.pointerType === "touch" && !event.isPrimary)) return;
+          beginReleaseFallback();
         }}
+        onMouseDown={(event) => {
+          if (props.running || event.button !== 0 || (event.buttons & 1) === 0 || pendingActivation.current) return;
+          beginActivation();
+        }}
+        onMouseUp={(event) => {
+          if (props.running || event.button !== 0) return;
+          beginReleaseFallback();
+        }}
+        onClick={completeClickActivation}
       >
         <ProviderIcon provider={props.selectedProvider} size={14} />
-        <span className="model-selected-name">{props.selectedModelName}{selectedModelInfo?.cursorNoZDR && <span className="model-retention-icon" aria-label={retentionLabel} title={retentionDetail}><ShieldAlert size={11} aria-hidden="true" /></span>}</span><small>{props.selectedReasoningName}</small><ChevronDown size={12} className="model-controls-chevron" />
-      </summary>
-    </details>
+        <span className="model-selected-name">{props.selectedModelName}{selectedModelInfo?.cursorNoZDR && <span className="model-retention-icon" aria-label={retentionLabel} title={retentionDetail}><ShieldAlert size={11} aria-hidden="true" /></span>}</span><small>{props.selectedReasoningName}</small>
+      </button>
+    </div>
     {popover}
   </>;
 }

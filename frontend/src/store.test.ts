@@ -6,7 +6,8 @@ import { findModelOption, mergeSessionTranscript, modelDisplayName, providerDisp
 import type { Session, Snapshot } from "./types";
 import Inspector from "./components/Inspector";
 import ThreadSurface from "./components/ThreadSurface";
-import { ContextMeter } from "./components/thread/ContextMeter";
+import { ComposerContext } from "./components/elements/composer";
+import { composerContextUsage } from "./components/thread/Composer";
 import { approvalPresentation, TimelineBlock } from "./components/Timeline";
 import { formatDuration } from "./components/toolTimeline";
 import { contextOccupancy } from "./contextUsage";
@@ -918,8 +919,8 @@ describe("runtime event projection", () => {
     expect(send.getAttribute("aria-label")).toBe("发送");
     expect(container.querySelector(".approval-picker > summary")?.getAttribute("title")).toBeNull();
     expect(container.querySelector(".plan-mode-toggle")?.getAttribute("title")).toBeNull();
-    expect(container.querySelector(".attach-button")?.getAttribute("title")).toBeNull();
-    expect(container.querySelector(".attach-button")?.getAttribute("aria-label")).toBe("添加图片");
+    expect(container.querySelector('[data-slot="composer-attach"]')?.getAttribute("title")).toBeNull();
+    expect(container.querySelector('[data-slot="composer-attach"]')?.getAttribute("aria-label")).toBe("添加图片");
     await act(async () => send.click());
     expect(useRuntimeStore.getState()).toMatchObject({ running: true, attachments: [] });
     expect(useRuntimeStore.getState().blocks.at(-1)).toMatchObject({ kind: "user", content: "", attachments: [image] });
@@ -1294,25 +1295,30 @@ describe("runtime event projection", () => {
     expect(sessionLast.contextUsage.contextLimit).toBe(272_000);
   });
 
-  it("restores and renders the current conversation context occupancy", async () => {
+  it("restores and renders context occupancy through assistant-ui ComposerContext", async () => {
     const restored = reduceEvents(state(), [{
       sequence: 1, kind: "session_loaded", sessionId: "s1", state: "loaded",
       data: { blocks: "[]", provider: "chatgpt", model: "gpt-5.6-sol", reasoning: "high", agentMode: "single", usage: JSON.stringify({ inputTokens: 68_000, outputTokens: 4_000, contextLimit: 288_000, currentTurnMainReported: true }) },
     }]);
     expect(restored.contextUsage).toEqual({ inputTokens: 68_000, outputTokens: 4_000, contextLimit: 288_000, reported: true });
     expect(contextOccupancy(restored.contextUsage, null)).toMatchObject({ used: 72_000, limit: 288_000, percentage: 25, remaining: 216_000, estimated: false });
+    const usage = composerContextUsage(restored.contextUsage, null, "zh-CN");
+    expect(usage).toEqual({
+      segments: [
+        { key: "provider_input", label: "模型输入", tokens: 68_000, tone: "primary" },
+        { key: "current_output", label: "当前输出", tokens: 4_000, tone: "secondary" },
+      ],
+      total: 288_000,
+    });
 
-    useRuntimeStore.setState(restored);
     const container = document.createElement("div");
     const root = createRoot(container);
-    await act(async () => root.render(createElement(ContextMeter)));
-    expect(container.querySelector("summary")?.getAttribute("aria-label")).toBe("上下文占用 25%");
-    expect(container.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("25");
-    expect(container.textContent).toContain("72K / 288K");
-    const details = container.querySelector("details")!;
-    details.open = true;
-    await act(async () => document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })));
-    expect(details.open).toBe(false);
+    await act(async () => root.render(createElement(ComposerContext, { usage, label: "上下文构成", totalLabel: "总计" })));
+    expect(container.querySelector('[data-slot="composer-context"]')).not.toBeNull();
+    expect(container.querySelector("button")?.getAttribute("aria-label")).toBe("上下文构成");
+    expect(container.textContent).toContain("模型输入94%68k");
+    expect(container.textContent).toContain("当前输出6%4k");
+    expect(container.textContent).toContain("总计72k / 288k");
     await act(async () => root.unmount());
   });
 

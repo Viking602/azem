@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contextCacheMetrics, contextComposition, stickyCacheMetrics } from "./contextUsage";
+import { contextCacheMetrics, contextCategoryLabel, contextComposition, stickyCacheMetrics } from "./contextUsage";
 import type { ContextUsage } from "./store";
 import type { ContextProfile } from "./types";
 
@@ -105,6 +105,12 @@ describe("context composition", () => {
       ["conversation", 5_250, 28],
       ["current_output", 4_000, 21],
       ["builtin_tools", 2_280, 12],
+    ]);
+    expect(composition.groups.map((group) => contextCategoryLabel(group.category, "zh-CN"))).toEqual([
+      "核心指令",
+      "会话消息",
+      "当前输出",
+      "内置工具",
     ]);
     expect(composition.groups[1]?.items.map((item) => item.name)).toEqual([
       "message:user:1",

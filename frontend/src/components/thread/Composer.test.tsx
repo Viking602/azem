@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { execute, openProject, selectProjectFolder } from "../../bridge";
 import { useRuntimeStore, type RuntimeData } from "../../store";
 import type { Snapshot } from "../../types";
-import { Composer } from "./Composer";
+import { Composer, composerContextUsage } from "./Composer";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: () => undefined });
@@ -65,8 +65,36 @@ describe("Composer IME Enter guard", () => {
   it("sends on a plain Enter outside composition", async () => {
     const submit = vi.fn();
     await renderComposer(submit);
+    expect(document.querySelector('[data-slot="composer"]')).not.toBeNull();
+    expect(document.querySelector(".composer-card")?.getAttribute("data-slot")).toBe("composer-bar");
+    expect(document.querySelector("#azem-composer")?.getAttribute("data-slot")).toBe("composer-input");
+    expect(document.querySelector(".composer-toolbar")?.getAttribute("data-slot")).toBe("composer-toolbar");
+    expect(document.querySelector('[data-slot="composer-attach"]')).not.toBeNull();
+    expect(document.querySelector('[data-slot="composer-context"]')).not.toBeNull();
+    expect(document.querySelector('[data-slot="composer-send"]')).not.toBeNull();
     pressEnter(2000);
     expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps actual context categories into assistant-ui ComposerContext", () => {
+    expect(composerContextUsage({
+      inputTokens: 8_500, outputTokens: 1_500, contextLimit: 20_000, reported: true,
+    }, {
+      source: "request", estimated: false, reportedInputTokens: 8_500, reportedOutputTokens: 1_500,
+      contributions: [
+        { category: "core", name: "instructions", tokens: 4_000 },
+        { category: "builtin_tools", name: "coding.read_file", tokens: 2_000 },
+        { category: "conversation", name: "message:user:1", tokens: 2_500 },
+      ],
+    }, "zh-CN")).toEqual({
+      segments: [
+        { key: "core", label: "核心指令", tokens: 4_000, tone: "primary" },
+        { key: "conversation", label: "会话消息", tokens: 2_500, tone: "tertiary" },
+        { key: "builtin_tools", label: "内置工具", tokens: 2_000, tone: "tertiary" },
+        { key: "current_output", label: "当前输出", tokens: 1_500, tone: "secondary" },
+      ],
+      total: 20_000,
+    });
   });
 
   it("ignores the composing Enter (Chromium order)", async () => {

@@ -6,9 +6,12 @@ import (
 )
 
 const (
-	connectFlagCompressed = 0x01
-	connectFlagEndStream  = 0x02
-	maxConnectFrameBytes  = 16 << 20
+	connectFlagCompressed      = 0x01
+	connectFlagEndStream       = 0x02
+	maxConnectFrameBytes       = 16 << 20
+	maxCursorProtoFields       = 1 << 16
+	maxCursorProtoDecodedBytes = 64 << 20
+	maxCursorProtoValueDepth   = 128
 
 	fieldAgentRunRequest  = 1
 	fieldAgentKVClient    = 3
@@ -396,7 +399,41 @@ type protoField struct {
 	Var   uint64
 }
 
+type protoDecodeBudget struct {
+	fields       int
+	decodedBytes int
+}
+
+func (budget *protoDecodeBudget) consumePayload(size int) error {
+	if budget == nil {
+		return fmt.Errorf("cursor proto decode budget is nil")
+	}
+	if size < 0 || size > maxCursorProtoDecodedBytes-budget.decodedBytes {
+		return fmt.Errorf("cursor proto decoded byte budget exceeds %d", maxCursorProtoDecodedBytes)
+	}
+	budget.decodedBytes += size
+	return nil
+}
+
+func (budget *protoDecodeBudget) consumeField() error {
+	if budget == nil {
+		return fmt.Errorf("cursor proto decode budget is nil")
+	}
+	if budget.fields >= maxCursorProtoFields {
+		return fmt.Errorf("cursor proto field budget exceeds %d", maxCursorProtoFields)
+	}
+	budget.fields++
+	return nil
+}
+
 func decodeFields(payload []byte) ([]protoField, error) {
+	return decodeFieldsWithBudget(payload, &protoDecodeBudget{})
+}
+
+func decodeFieldsWithBudget(payload []byte, budget *protoDecodeBudget) ([]protoField, error) {
+	if err := budget.consumePayload(len(payload)); err != nil {
+		return nil, err
+	}
 	var fields []protoField
 	offset := 0
 	for offset < len(payload) {
@@ -407,6 +444,9 @@ func decodeFields(payload []byte) ([]protoField, error) {
 		offset += n
 		field := int(key >> 3)
 		wire := int(key & 7)
+		if err := budget.consumeField(); err != nil {
+			return nil, err
+		}
 		current := protoField{Field: field, Wire: wire}
 		switch wire {
 		case 0:

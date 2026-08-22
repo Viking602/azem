@@ -845,7 +845,14 @@ func encodeProtoValue(value any) ([]byte, error) {
 }
 
 func decodeProtoValue(payload []byte) (any, error) {
-	fields, err := decodeFields(payload)
+	return decodeProtoValueWithBudget(payload, &protoDecodeBudget{}, 0)
+}
+
+func decodeProtoValueWithBudget(payload []byte, budget *protoDecodeBudget, depth int) (any, error) {
+	if depth > maxCursorProtoValueDepth {
+		return nil, fmt.Errorf("cursor protobuf Value nesting exceeds %d levels", maxCursorProtoValueDepth)
+	}
+	fields, err := decodeFieldsWithBudget(payload, budget)
 	if err != nil {
 		return nil, err
 	}
@@ -867,20 +874,20 @@ func decodeProtoValue(payload []byte) (any, error) {
 		case field.Field == fieldValueBool && field.Wire == 0:
 			return field.Var != 0, nil
 		case field.Field == fieldValueStruct && field.Wire == 2:
-			objectFields, err := decodeFields(field.Bytes)
+			objectFields, err := decodeFieldsWithBudget(field.Bytes, budget)
 			if err != nil {
 				return nil, err
 			}
 			object := make(map[string]any)
 			for _, rawEntry := range fieldAllBytes(objectFields, fieldStructFields) {
-				entry, err := decodeFields(rawEntry)
+				entry, err := decodeFieldsWithBudget(rawEntry, budget)
 				if err != nil {
 					return nil, err
 				}
 				if !hasField(entry, fieldMapKey) || !hasField(entry, fieldMapValue) {
 					return nil, fmt.Errorf("cursor protobuf struct entry is incomplete")
 				}
-				value, err := decodeProtoValue(fieldBytes(entry, fieldMapValue))
+				value, err := decodeProtoValueWithBudget(fieldBytes(entry, fieldMapValue), budget, depth+1)
 				if err != nil {
 					return nil, err
 				}
@@ -888,14 +895,14 @@ func decodeProtoValue(payload []byte) (any, error) {
 			}
 			return object, nil
 		case field.Field == fieldValueList && field.Wire == 2:
-			listFields, err := decodeFields(field.Bytes)
+			listFields, err := decodeFieldsWithBudget(field.Bytes, budget)
 			if err != nil {
 				return nil, err
 			}
 			items := fieldAllBytes(listFields, fieldListValueItem)
 			list := make([]any, 0, len(items))
 			for _, rawItem := range items {
-				item, err := decodeProtoValue(rawItem)
+				item, err := decodeProtoValueWithBudget(rawItem, budget, depth+1)
 				if err != nil {
 					return nil, err
 				}

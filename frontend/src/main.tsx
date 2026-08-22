@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./styles.css";
 import "./prototype.css";
-import "./components/beautiful-ui/beautiful-ui.css";
+import "./components/assistant-ui/elements.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

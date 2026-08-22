@@ -18,18 +18,18 @@ describe("Markdown code blocks", () => {
     return container;
   }
 
-  it("renders a fenced block with Beautiful UI header, copy, and line numbers", async () => {
+  it("renders a fenced block with assistant-ui Elements header, copy, and line numbers", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const source = "```churn.ts\nexport async function churnBatch(flavor: string) {\n  return flavor;\n}\n```";
     const container = await render(createElement(Markdown, { children: source }));
-    const card = container.querySelector(".bui-code-block");
-    expect(card?.querySelector(".bui-code-filename")?.textContent).toBe("churn.ts");
-    expect(card?.querySelector(".bui-code-lang")?.textContent).toBe("TypeScript");
+    const card = container.querySelector(".aui-code-block");
+    expect(card?.querySelector(".aui-code-filename")?.textContent).toBe("churn.ts");
+    expect(card?.querySelector(".aui-code-lang")?.textContent).toBe("TypeScript");
     expect(card?.querySelector(".syntax-keyword")?.textContent).toBe("export");
-    expect(Array.from(card?.querySelectorAll(".bui-code-gutter span") ?? []).map((node) => node.textContent)).toEqual(["1", "2", "3"]);
-    expect(container.querySelector("p .bui-code-block")).toBeNull();
-    const copy = container.querySelector<HTMLButtonElement>(".bui-code-copy")!;
+    expect(Array.from(card?.querySelectorAll(".aui-code-gutter span") ?? []).map((node) => node.textContent)).toEqual(["1", "2", "3"]);
+    expect(container.querySelector("p .aui-code-block")).toBeNull();
+    const copy = container.querySelector<HTMLButtonElement>(".aui-code-copy")!;
     expect(copy.textContent).toContain("复制");
     await act(async () => copy.click());
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("export async function churnBatch"));
@@ -37,14 +37,14 @@ describe("Markdown code blocks", () => {
 
   it("shows only the language label when the info-string is not a filename", async () => {
     const container = await render(createElement(Markdown, { children: "```typescript\nconst ready = true;\n```" }));
-    expect(container.querySelector(".bui-code-filename")?.textContent).toBe("TypeScript");
-    expect(container.querySelector(".bui-code-lang")).toBeNull();
-    expect(container.querySelector(".bui-code-copy")).not.toBeNull();
+    expect(container.querySelector(".aui-code-filename")?.textContent).toBe("TypeScript");
+    expect(container.querySelector(".aui-code-lang")).toBeNull();
+    expect(container.querySelector(".aui-code-copy")).not.toBeNull();
   });
 
   it("leaves inline code as ordinary marks instead of a Code Block card", async () => {
     const container = await render(createElement(Markdown, { children: "使用 `测试` 核对。" }));
-    expect(container.querySelector(".bui-code-block")).toBeNull();
+    expect(container.querySelector(".aui-code-block")).toBeNull();
     expect(container.querySelector("p code")?.textContent).toBe("测试");
   });
 
@@ -60,10 +60,10 @@ describe("Markdown code blocks", () => {
       children: first,
       ranges: [{ id: 0, start: 0, end: first.length }],
     })));
-    const card = container.querySelector(".bui-code-block");
-    const initialLines = card?.querySelectorAll(".bui-code-gutter span").length ?? 0;
-    expect(card?.querySelector(".bui-code-filename")?.textContent).toBe("churn.ts");
-    expect(card?.querySelector(".bui-code-copy")).not.toBeNull();
+    const card = container.querySelector(".aui-code-block");
+    const initialLines = card?.querySelectorAll(".aui-code-gutter span").length ?? 0;
+    expect(card?.querySelector(".aui-code-filename")?.textContent).toBe("churn.ts");
+    expect(card?.querySelector(".aui-code-copy")).not.toBeNull();
     expect(initialLines).toBeGreaterThan(0);
 
     const next = `${first}  const base = await getFlavor(flavor);\n`;
@@ -71,9 +71,9 @@ describe("Markdown code blocks", () => {
       children: next,
       ranges: [{ id: 1, start: first.length, end: next.length }],
     })));
-    expect(container.querySelector(".bui-code-block")).toBe(card);
+    expect(container.querySelector(".aui-code-block")).toBe(card);
     expect(card?.textContent).toContain("getFlavor");
-    expect(card?.querySelectorAll(".bui-code-gutter span").length ?? 0).toBeGreaterThan(initialLines);
+    expect(card?.querySelectorAll(".aui-code-gutter span").length ?? 0).toBeGreaterThan(initialLines);
   });
 
   it("keeps only the newest unsettled reveal ranges live so earlier lines stay settled", () => {

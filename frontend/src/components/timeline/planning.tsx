@@ -5,7 +5,7 @@ import { useRuntimeStore } from "../../store";
 import { toolDisplayName, translator } from "../../i18n";
 import type { Block, Snapshot } from "../../types";
 import { Markdown } from "../Markdown";
-import { ApprovalCard } from "../beautiful-ui/Primitives";
+import { ApprovalCard } from "../assistant-ui/Elements";
 
 type PlanningQuestion = {
   id: string;
@@ -146,13 +146,18 @@ export function PlanBlock({ block, language }: { block: Block; language: Snapsho
   };
   const steps = planSteps(block.content);
   const doneCount = steps.filter((step) => step.done).length;
+  const progress = steps.length > 0 ? Math.round((doneCount / steps.length) * 100) : 0;
+  const activeIndex = block.state === "approved" ? steps.findIndex((step) => !step.done) : -1;
   const version = block.data?.version || "1";
   const stateLabel = planReviewStateLabel(block.state, language);
-  return <article className="plan-review" data-state={block.state || "proposed"}>
-    <header><h3>{labels.planTitle}</h3>{steps.length > 0 ? <span className="plan-review-count">{doneCount} of {steps.length}</span> : null}</header>
-    <div className="plan-review-rule" aria-hidden="true" />
+  const countLabel = language === "zh-CN" ? `${doneCount} / ${steps.length}` : `${doneCount} of ${steps.length}`;
+  return <article className="plan-review" data-slot="agent-plan" data-state={block.state || "proposed"}>
+    <header><h3>{labels.planTitle}</h3>{steps.length > 0 ? <span className="plan-review-count">{countLabel}</span> : null}</header>
+    {steps.length > 0 ? <div className="plan-review-rule" role="progressbar" aria-label={countLabel} aria-valuemin={0} aria-valuemax={steps.length} aria-valuenow={doneCount}>
+      <span style={{ width: `${progress}%` }} />
+    </div> : null}
     {steps.length > 0 ? <ul className="plan-review-steps">
-      {steps.map((step, index) => <li key={index} data-done={String(step.done)}>
+      {steps.map((step, index) => <li key={index} data-done={String(step.done)} data-active={index === activeIndex ? "true" : undefined}>
         <span className="plan-step-mark" aria-hidden="true">{step.done ? <Check size={12} strokeWidth={2.5} /> : null}</span>
         <span className="plan-step-label">{step.label}</span>
       </li>)}

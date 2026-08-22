@@ -30,7 +30,7 @@ describe("ReasoningTrace empty heartbeats", () => {
   it("mounts no collapsible panel shell for an empty thinking heartbeat", () => {
     const { container } = renderTrace({ id: "think-empty", kind: "thinking", state: "streaming", content: "" });
     expect(container.querySelector(".reasoning-body-clip")).toBeNull();
-    expect(container.querySelector(".bui-thinking-panel")).toBeNull();
+    expect(container.querySelector(".aui-reasoning-content")).toBeNull();
     expect(container.textContent).toContain("正在思考");
   });
 

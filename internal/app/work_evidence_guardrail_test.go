@@ -9,7 +9,6 @@ import (
 	"time"
 
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/message"
 
 	"github.com/Viking602/azem/internal/session"
 )
@@ -71,26 +70,20 @@ func TestIncompleteTodoItemsEmptyWhenDone(t *testing.T) {
 	}
 }
 
-func TestSurfaceVerificationKeepsModelAnswer(t *testing.T) {
-	answer := message.NewText(message.RoleAssistant, "修复完成，验证通过。")
-	result := surfaceVerificationOutput(answer, "uncertain")
-	if result.Action != hyagent.OutputGuardrailActionReplace || result.Replacement == nil {
-		t.Fatalf("action = %#v", result)
+func TestSurfaceVerificationBlocksWithoutReplacingModelAnswer(t *testing.T) {
+	result := surfaceVerificationOutput("verification result is fail")
+	if result.Action != hyagent.OutputGuardrailActionBlock || result.Replacement != nil {
+		t.Fatalf("verification failure was not blocked: %#v", result)
 	}
-	text := result.Replacement.Text
-	if !strings.Contains(text, "修复完成，验证通过。") {
-		t.Fatalf("model answer dropped: %q", text)
-	}
-	if !strings.Contains(text, "Verification evidence is missing or stale") {
-		t.Fatalf("uncertain notice missing: %q", text)
+	if result.Reason != "verification result is fail" {
+		t.Fatalf("reason = %q", result.Reason)
 	}
 }
 
-func TestSurfaceVerificationFallsBackToNoticeWithoutAnswer(t *testing.T) {
-	result := surfaceVerificationOutput(message.Message{}, "fail")
-	text := result.Replacement.Text
-	if !strings.HasPrefix(text, "Verification failed") || strings.Contains(text, "missing or stale") {
-		t.Fatalf("fail notice = %q", text)
+func TestSurfaceVerificationRequiresAVisibleFailureReason(t *testing.T) {
+	result := surfaceVerificationOutput("")
+	if result.Action != hyagent.OutputGuardrailActionBlock || result.Reason == "" || result.Replacement != nil {
+		t.Fatalf("verification fallback = %#v", result)
 	}
 }
 

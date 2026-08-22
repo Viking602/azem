@@ -1,8 +1,8 @@
 import { Children, cloneElement, isValidElement, memo, useMemo, useRef, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { CodeBlock, parseCodeFenceInfo } from "./beautiful-ui/CodeBlock";
-import { syntaxTokens } from "./CodeDiff";
+import { CodeBlock, parseCodeFenceInfo } from "./assistant-ui/CodeBlock";
+import { syntaxTokens } from "./syntaxTokens";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 

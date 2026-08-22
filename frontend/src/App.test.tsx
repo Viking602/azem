@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 // @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
 import { readFileSync } from "node:fs";
-import App, { isHighPriorityEvent, takeRuntimeEventFrame } from "./App";
+import App, { isHighPriorityEvent, takeRuntimeEventFrame, toolCompletionRefreshesWorkspace } from "./App";
 import { execute } from "./bridge";
 import { useRuntimeStore } from "./store";
 import { useTerminalStore } from "./terminalStore";
@@ -189,6 +189,14 @@ describe("application interactions", () => {
     expect(container.textContent).not.toContain("Replay stream");
   });
 
+  it("refreshes Git after every file mutation tool", () => {
+    for (const tool of ["coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt"]) {
+      expect(toolCompletionRefreshesWorkspace("tool_finished", tool)).toBe(true);
+    }
+    expect(toolCompletionRefreshesWorkspace("tool_started", "coding.replace")).toBe(false);
+    expect(toolCompletionRefreshesWorkspace("tool_finished", "coding.read_file")).toBe(false);
+  });
+
   it("keeps the empty launcher title without a logo", async () => {
     container = document.createElement("div");
     document.body.append(container);
@@ -338,20 +346,21 @@ describe("application interactions", () => {
     expect(document.documentElement.style.getPropertyValue("--chat-code-font-size")).toBe("14px");
   });
 
-  it("lets the sidebar session tree follow the interface font size", () => {
+  it("lets the single-line sidebar labels follow the interface font size", () => {
     const desktopBlocks = [...applicationStyles.matchAll(/@media \(min-width: 981px\) \{[\s\S]*?\n\}/g)].map((match) => match[0]);
     expect(desktopBlocks.length).toBeGreaterThan(0);
     for (const block of desktopBlocks) {
       expect(block).not.toMatch(/\.session-copy strong\s*\{[^}]*font-size:\s*\d+px/);
-      expect(block).not.toMatch(/\.session-copy small\s*\{[^}]*font-size:\s*\d+px/);
       expect(block).not.toMatch(/\.project-heading-copy strong\s*\{[^}]*font-size:\s*\d+px/);
     }
     expect(applicationStyles).toMatch(/\.session-copy strong\s*\{[^}]*font-size:\s*var\(--text-sm\)/);
-    expect(applicationStyles).toMatch(/\.session-copy small\s*\{[^}]*font-size:\s*var\(--text-2xs\)/);
+    expect(applicationStyles).not.toMatch(/\.session-copy small/);
+    expect(applicationStyles).not.toMatch(/\.project-heading-copy small/);
+    expect(applicationStyles).not.toMatch(/\.project-initial/);
   });
 
   it("keeps sidebar session titles on one line with ellipsis and no wrap", () => {
-    expect(applicationStyles).toMatch(/\.session-copy strong(?:,\s*\.session-copy small)?\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/s);
+    expect(applicationStyles).toMatch(/\.session-copy strong\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/s);
     expect(applicationStyles).not.toMatch(/\.thread-list button \.session-copy\s*\{[^}]*white-space:\s*normal/);
     expect(applicationStyles).not.toMatch(/\.session-copy strong\s*\{[^}]*white-space:\s*normal/);
     expect(applicationStyles).not.toMatch(/\.session-copy strong\s*\{[^}]*overflow-wrap:\s*anywhere/);
@@ -580,7 +589,7 @@ describe("application interactions", () => {
     expect(drawer.textContent).toContain("运行中");
     expect(drawer.textContent).toContain("先核对模块边界");
     expect(drawer.querySelector(".reasoning-placeholder")).toBeNull();
-    expect(drawer.querySelector(".bui-thinking-state, .reasoning-summary, [data-testid='timeline-prose']")).not.toBeNull();
+    expect(drawer.querySelector(".aui-reasoning-panel, .reasoning-summary, [data-testid='timeline-prose']")).not.toBeNull();
   });
 
   it("shows the thinking wait pill while a running subagent has no tokens yet", async () => {
@@ -616,7 +625,7 @@ describe("application interactions", () => {
     const drawer = container!.querySelector(".agent-side-chat")!;
     expect(drawer.querySelector(".agent-side-chat-empty")).toBeNull();
     // SUBAGENT-005: the wait is the running step's own bar, not a bare 运行中.
-    expect(drawer.querySelector(".process-fold .bui-thinking-state.streaming")).not.toBeNull();
+    expect(drawer.querySelector(".process-fold .aui-reasoning-panel.streaming")).not.toBeNull();
     expect(drawer.textContent).toContain("正在思考");
   });
 

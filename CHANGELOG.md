@@ -12,6 +12,74 @@
   background, keeping the stop control responsive. Static instructions,
   provider messages, and tool schemas are unchanged.
 
+- Desktop conversation UI now vendors assistant-ui Elements source components
+  under `frontend/src/components/assistant-ui/` and shadcn registry output under
+  `components/elements/`, without adding the assistant-ui runtime. Tailwind v4
+  and shadcn compile the copied source; Azem remains the only event, state,
+  approval, and persistence runtime. Registry `MessagePair` owns the turn plus
+  user, assistant, progress, and error surfaces; registry `Composer` owns input,
+  attachment, context, toolbar, and send chrome. ReasoningPanel, ToolTimeline,
+  ApprovalCard, AgentPlan, and CodeBlock replace every runtime import from the
+  former `beautiful-ui` directory. Official `data-slot` contracts and `aui-*`
+  classes share the Azem token bridge. Plan cards expose real checklist
+  progress, and the Inspector keeps a short 「任务计划」 heading with subordinate
+  goal text.
+
+- Chat file diffs now render through the registry-installed
+  `@assistant-ui/elements-code-diff` component. A thin adapter maps durable
+  `FileChange` data and removes duplicated file headers. Rows enter in 200ms
+  with a 32ms stagger capped at six. The old table, line-number gutter, syntax
+  highlighting, copy control, and vertical diff scroller are removed.
+
+- Completed `coding.replace` and `coding.delete_file` calls now use the same
+  structured live/replay file-change projection as hashline edits and writes.
+  Deleted paths remain visible even without reconstructable diff lines, and
+  replace/delete completion refreshes Git/workspace counts immediately.
+
+- Messages and Composer now use the exact registry sources installed with
+  `bunx --bun shadcn@latest add "@assistant-ui/elements-message-pair"` and
+  `bunx --bun shadcn@latest add "@assistant-ui/elements-composer"`. Azem maps
+  durable turn blocks into MessagePair slots and supplies ComposerContext with
+  the actual ordered context groups and the same localized labels as Inspector.
+  Provider input and current output are no longer mislabeled as fixed
+  System/Tools/Messages buckets. IME, slash, attachment, approval, plan, model,
+  queue/guide, and cancellation behavior remain Azem-owned.
+
+- The macOS model picker now handles WKWebView's real tap-to-click ordering.
+  Trackpad input can omit `pointerdown` or `click`, and can deliver release
+  before a later-dispatched `buttons=0` press pair. The whole-chip toggle now
+  accepts valid primary presses, unpaired primary releases, mouse-only
+  sequences, click-only activation, keyboard, and assistive input, while
+  deduplicating the remaining compatibility events. It does not infer a press
+  from `button` alone, assume down-before-up order, or correlate timestamps.
+  An inactive macOS window keeps the standard activation-only first click;
+  losing focus closes the picker instead of enabling WebView-wide click-through.
+  The persistent Portal, search, outside-click, Escape, model, run, and session
+  dismissal paths remain intact.
+
+- Desktop project and conversation rows are now compact single-line entries.
+  Project headings keep only expand/collapse, the project name, and the
+  project-scoped new-conversation action; monograms, branch/path subtitles, and
+  session-count badges are removed. Session rows keep title and real
+  running/unread state without relative-age labels.
+
+- Expanding a completed pre-answer process no longer opens a second
+  `56vh`/`520px` scroll pane. The elapsed-time row still folds the work, but
+  opening it restores the complete process to the ordinary transcript flow
+  immediately before the final answer, matching Codex.app. The transcript
+  viewport remains the only conversation scrollbar.
+
+- Assistant answers and progress prose now use the complete bounded transcript
+  column instead of imposing a second `68ch` limit that left a large empty
+  strip on the right. The transcript remains the single responsive width owner.
+
+- Verification guardrail `uncertain` / `fail` verdicts remain durable internal
+  state and now make the run terminally fail after the one allowed evidence
+  retry. The host-owned reason is not inserted into the model's final answer.
+  The desktop also strips the two exact legacy host-notice suffixes from
+  existing assistant blocks, preserving real model text and hiding notice-only
+  blocks.
+
 - Core agent tool guidance now reuses completed search/read results for
   unchanged files, accepts hashline anchors from search, read, and successful
   edit results, batches same-snapshot changes, and re-reads only missing,
@@ -174,7 +242,9 @@
   selected-image protocol, while Kimi K3 reasoning replays only from the same
   Cursor model. Local conversation state is account-scoped; frame, protobuf,
   checkpoint, and server-set blob validation prevents malformed remote state
-  from replacing the last known good checkpoint. A poisoned
+  from replacing the last known good checkpoint. Remote protobuf decoding now
+  caps field descriptors, aggregate decoded bytes, and nested Value depth
+  before provider-controlled frames allocate maps/slices or recurse. A poisoned
   `resource_exhausted` conversation rotates its wire ID once without dropping
   validated state.
   Token deltas count as output, while checkpoint occupancy feeds context
@@ -471,14 +541,11 @@
   content-visibility was dropping padding-bottom from scroll height),
   and the overlay fallback is tall enough for the resting input card.
 
-- Desktop transcript: fenced code in answers uses the Beautiful UI
-  Code Block card — white elevated paper, filename + language, Copy,
-  and a line-number gutter. Keywords stay blue and strings stay green.
-
-- Desktop transcript: a completed tool step is one gray Tool Chip card.
-  The first row is the 思考 chip (preview capsule), then write/shell/read
-  chips, then file-change pills. Live wait/thinking stays the sparkle bar
-  plus prose and is not turned into that chip.
+- Desktop transcript: fenced code in answers uses the assistant-ui `CodeBlock`
+  component with elevated paper, filename/language, Copy, and a line-number
+  gutter. A completed tool step opens one flat `ToolTimeline`: reasoning first,
+  then write/shell/read items and file statistics. Live wait and reasoning stay
+  on the shared `ReasoningPanel` bar.
 
 - Desktop frontend: the production bundle no longer ships one 666 kB
   entry chunk. xterm loads only after the terminal is first opened,
@@ -490,16 +557,14 @@
   Page titles sit on a compact bar. Change review no longer invents an
   architecture-violation count.
 
-- Desktop transcript: first-token wait, live reasoning, and live
-  search/tools now share one left-aligned sparkle row. Only the label
-  changes; the header does not remount or reset its clock. The old wait
-  capsule is gone. A thinking-only trail is still 「思考」 plus the
-  reasoning prose; while the run is live the elapsed clock sits on that
-  sparkle bar, not on individual tool rows. Each completed tool row keeps its own duration
-  instead of repeating the step's total. After the current step completes with tools, it expands
-  to one chip list: thinking as the first chip, then tool chips and
-  file-change pills, with an honest `N tool calls, N messages` header.
-  There is no Steps / Reasoning / Search / Coding switcher.
+- Desktop transcript: first-token wait, live reasoning, and live search/tools
+  share one left-aligned `ReasoningPanel` bar. Only the label changes; the
+  element does not remount or reset its clock. A thinking-only trail remains
+  「思考」 plus reasoning prose, while individual tool rows retain only their own
+  completed duration. A settled tool step opens one `ToolTimeline` containing
+  reasoning, tool items, and file statistics with an honest
+  `N tool calls, N messages` header. There is no Steps / Reasoning / Search /
+  Coding switcher.
 
 - Embedded terminal: every PTY host wait is now bounded. Closing a tab or the
   window kills and reaps sessions in parallel under a fixed budget, a child
@@ -542,9 +607,9 @@
   rewrites the static instruction prefix, so provider prefix-cache hits reset
   once and then stay stable for later turns.
 
-- Desktop transcript: expanding a large completed 已处理 fold first paints
-  collapsed tool/progress chips and only mounts that row’s diff, Markdown,
-  Thinking panel, or Subagent list when the row is opened.
+- Desktop transcript: expanding a large completed process first paints
+  collapsed ToolTimeline rows and mounts each row's diff, Markdown, reasoning,
+  or Subagent detail only when that row is opened.
 
 - Subagents: a child that stays `运行中` with no thinking, text, or tool
   activity is now cancelled after `agents.subagents.idle_timeout` (default
@@ -576,55 +641,38 @@
   thread surface and subagent side-chat transcript. Sidebar, Settings chrome,
   and Inspector chrome keep the existing global interface font size.
 
-- Desktop transcript: first-token wait uses the Thinking sparkle pill
-  (`思考` / `思考 0.3s`), not the pixel-grid Loading icon. The wait pill
-  keeps the same `--ink` charcoal as the later 「思考了 Xs」 header from
-  first paint; a disabled summary no longer inherits the global
-  `button:disabled` 45% fade. Live reasoning and process traces keep
-  expandable Thinking. Reasoning, search, and other tools stack as
-  separate sparkle rows instead of a tab switcher.
+- Desktop transcript: first-token wait uses the shared `ReasoningPanel`
+  (`思考` / `思考 0.3s`), not the pixel-grid LoadingState. The disabled wait
+  trigger keeps the same charcoal ink as its settled label. Live reasoning,
+  search, and tool states update that one mounted panel instead of creating a
+  tab switcher.
   Completing a stream keeps the same mounted Markdown tree and only stops
   reveal/caret motion; the idle caret uses `content: none` so it cannot
   remain as a hairline between settled paragraphs. Elapsed time still
   starts at `0.1s` and never shows `0s`.
 
-- Desktop transcript: tool calls use Beautiful UI Tool Chips (icon, bold
-  label, mono path/command/query chip). Process folds keep 已处理 / 处理中
-  and may append honest tool/progress counts. Executed file edits add white
-  `+N`/`-N` pills. Reasoning is unchanged. Queued and approval-bound writes
-  stay out of file-change pills until they run.
+- Desktop transcript: tool calls render through assistant-ui
+  `ToolTimelineItem` disclosures with an icon, verb, target, and status.
+  Process folds may append honest tool/progress counts; executed file edits add
+  compact `path +N -N` statistics only after execution.
 
-- Desktop transcript: fenced Markdown code now uses the Beautiful UI Code
-  Block card (filename or language, copy, line numbers) while the agent is
-  still streaming and after the answer settles. File-change diffs are
-  unchanged.
+- Desktop transcript: fenced Markdown code uses the assistant-ui `CodeBlock`
+  component while streaming and after settlement. File-change diffs retain
+  their existing review surface.
 
-- Desktop Inspector: the task plan uses Beautiful UI Task Row capsules. Each
-  Todo phase is a white rounded card with a status mark (green check or
-  numbered progress ring), title, honest `done/total` count, status badge, and
-  an expand rail for the phase items. Commentary and thinking chrome are
-  unchanged.
-
-- Desktop transcript: highlighting assistant, commentary, or user prose opens
-  a Beautiful UI Select Action island. 解释, 改进, and a custom 描述编辑 send
-  a normal user turn through the existing composer path with the quoted
-  passage. Thinking, tool dumps, and wake notices are ignored. An active run
-  still follows queue / steer rules.
+- Desktop Inspector: the task plan uses the assistant-ui AgentPlan hierarchy:
+  a fixed short heading, bounded goal, honest `done/total` rule, phase labels,
+  and completed/running/pending/cancelled marks.
 
 - Desktop stop now cancels the active run and its subagents together. The
   previous stop left children running in the background after the parent
   ended. TUI still offers a parent-only choice when children are active.
 
-- Desktop session: Beautiful UI cool-gray / blue tokens stay global so the
-  chrome does not fall back to the prototype warm palette. Progress
-  commentary is ordinary prose instead of a titled duration card, and it is
-  not laid out on the old 15px marker grid. Subagent run cards keep their
-  full-width frame. The first-token wait uses the Thinking sparkle pill;
-  live reasoning uses the expandable Thinking row. Elapsed time stays in that
-  label, appears only after the first tenth of a second, and never shows
-  `0s`. Changing
-  `internal/app/prompts/main.md` rewrites the static instruction prefix, so
-  provider prefix-cache hits reset once and then stay stable for later turns.
+- Desktop session: the assistant-ui Elements token layer stays global so chrome
+  does not fall back to the prototype warm palette. Progress is ordinary
+  `ProgressMessage` prose, not a duration card or old marker grid; user and
+  assistant blocks use `Message` components. First-token wait and live
+  reasoning use `ReasoningPanel`, with elapsed time in the same stable label.
 
 - Subagents: Settings and `agents.subagents.idle_timeout` can cancel a
   running child that produces no thinking, output, or tool activity for a
@@ -731,9 +779,6 @@
   the sidebar, and inspect or restore them in Settings grouped by project.
   Opening an archived conversation restores it.
 
-- Desktop sidebar: session ages use minutes and update on the next label
-  boundary with a single timeout. Hidden windows do not tick.
-
 - Grok subscription catalog: fetch models from the Grok CLI proxy instead of
   api.x.ai, keep optional language-model metadata best-effort, and add a
   Fetch models button on the subscription catalog page.
@@ -761,9 +806,8 @@
   rows only show the file name; Hashline bodies and write payloads stay
   hidden until the edit actually runs.
 
-- Desktop sidebar: session titles, timestamps, and the project heading now
-  follow the Appearance font size. The desktop layout pass no longer pins
-  those labels to 11px / 9px.
+- Desktop sidebar session titles and project headings follow the Appearance
+  font size. The desktop layout pass no longer pins those labels to 11px.
 
 - Subagent scheduling: raise the default concurrency to 32, accept zero
   as unbounded, and support recursive delegation with a default depth of

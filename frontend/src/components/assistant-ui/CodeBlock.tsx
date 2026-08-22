@@ -134,17 +134,17 @@ export function CodeBlock({
     }
   };
 
-  return <figure className="bui-code-block" aria-label={label}>
-    <header className="bui-code-header">
-      {filename ? <strong className="bui-code-filename">{filename}</strong> : language ? <strong className="bui-code-filename">{language}</strong> : null}
-      {filename && language ? <span className="bui-code-lang">{language}</span> : null}
-      <button type="button" className="bui-code-copy" onClick={() => void copy()}>
+  return <figure className="aui-code-block" aria-label={label}>
+    <header className="aui-code-header">
+      {filename ? <strong className="aui-code-filename">{filename}</strong> : language ? <strong className="aui-code-filename">{language}</strong> : null}
+      {filename && language ? <span className="aui-code-lang">{language}</span> : null}
+      <button type="button" className="aui-code-copy" onClick={() => void copy()}>
         <Copy size={14} strokeWidth={2} aria-hidden="true" />
         <span aria-live="polite">{copied ? copiedLabel : copyLabel}</span>
       </button>
     </header>
-    <div className="bui-code-body">
-      <div className="bui-code-gutter" aria-hidden="true">
+    <div className="aui-code-body">
+      <div className="aui-code-gutter" aria-hidden="true">
         {Array.from({ length: lineCount }, (_, index) => <span key={index + 1}>{index + 1}</span>)}
       </div>
       <pre><code>{children}</code></pre>

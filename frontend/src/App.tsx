@@ -18,6 +18,9 @@ const STREAM_FRAME_INTERVAL_MS = 32;
 const PROJECTION_RESYNC_DELAY_MS = 32;
 const STREAM_EVENT_KINDS = new Set(["text_delta", "thinking_delta"]);
 const TERMINAL_EVENT_KINDS = new Set(["run_finished", "run_failed", "run_cancelled"]);
+const WORKSPACE_MUTATION_TOOLS = new Set([
+  "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt",
+]);
 const HIGH_PRIORITY_EVENT_KINDS = new Set([
   ...TERMINAL_EVENT_KINDS,
   "approval_requested",
@@ -29,6 +32,10 @@ const HIGH_PRIORITY_EVENT_KINDS = new Set([
 // per-frame text budget): dispatch them immediately.
 export function isHighPriorityEvent(kind: string): boolean {
   return HIGH_PRIORITY_EVENT_KINDS.has(kind);
+}
+
+export function toolCompletionRefreshesWorkspace(kind: string, tool: string): boolean {
+  return kind === "tool_finished" && WORKSPACE_MUTATION_TOOLS.has(tool);
 }
 const SYSTEM_FONT_STACK = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif';
 
@@ -178,7 +185,7 @@ export default function App() {
       }
       const tool = event.data?.name ?? "";
       if (TERMINAL_EVENT_KINDS.has(event.kind) ||
-          (event.kind === "tool_finished" && ["coding.edit_hashline", "coding.write_file", "coding.gofmt"].includes(tool))) refreshWorkspace();
+          toolCompletionRefreshesWorkspace(event.kind, tool)) refreshWorkspace();
     });
     const unsubscribePullRequests = subscribePullRequests((monitor) => useRuntimeStore.getState().updatePullRequestMonitor(monitor));
     window.addEventListener("focus", refreshWorkspace);

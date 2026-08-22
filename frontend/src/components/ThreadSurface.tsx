@@ -333,7 +333,7 @@ export default function ThreadSurface() {
   /> : null;
 
   return (
-    <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`} style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
+    <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`} data-slot="thread" style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
       <ThreadHeader empty={empty} />
       <div className="thread-session-viewport">
         <motion.div
@@ -343,7 +343,7 @@ export default function ThreadSurface() {
           animate={sessionMotion.animate}
         >
             {empty ? (
-              <div className="empty-composer-wrap">
+              <div className="empty-composer-wrap" data-slot="empty-state">
                 <div className="empty-composer-heading"><h1>{t("promptTitle")}</h1><p>{t("promptSubtitle")}</p></div>
                 <div className="composer-stack">
                   {queue}
@@ -371,7 +371,7 @@ export default function ThreadSurface() {
                   setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 72);
                 }}>
 
-                  <div className="transcript">
+                  <div className="transcript" data-slot="thread-messages">
                     <TimelineFeed
                       blocks={blocks}
                       language={snapshot.language}

@@ -341,42 +341,45 @@ func mapLsArgs(fallbackID string, raw []byte) (message.ToolCall, bool) {
 }
 
 func mapMCPArgs(fallbackID string, raw []byte) (message.ToolCall, bool) {
-	fields, err := decodeFields(raw)
+	budget := &protoDecodeBudget{}
+	fields, err := decodeFieldsWithBudget(raw, budget)
 	if err != nil {
 		return message.ToolCall{}, false
 	}
 	if nested := fieldBytes(fields, fieldMCPArgs); len(nested) > 0 {
-		if inner, innerErr := decodeFields(nested); innerErr == nil {
-			fields = inner
+		inner, innerErr := decodeFieldsWithBudget(nested, budget)
+		if innerErr != nil {
+			return message.ToolCall{}, false
 		}
+		fields = inner
 	}
 	name := firstNonEmpty(fieldString(fields, fieldMCPArgName), fieldString(fields, fieldMCPArgToolName))
 	id := firstNonEmpty(fieldString(fields, fieldMCPArgToolCallID), fallbackID)
 	if name == "" || id == "" {
 		return message.ToolCall{}, false
 	}
-	args, err := decodeMCPArgMap(fields)
+	args, err := decodeMCPArgMap(fields, budget)
 	if err != nil {
 		return message.ToolCall{}, false
 	}
 	return message.ToolCall{ID: id, Name: name, Arguments: args}, true
 }
 
-func decodeMCPArgMap(fields []protoField) (json.RawMessage, error) {
+func decodeMCPArgMap(fields []protoField, budget *protoDecodeBudget) (json.RawMessage, error) {
 	entries := fieldRepeated(fields, fieldMCPArgMap)
 	if len(entries) == 0 {
 		return json.RawMessage(`{}`), nil
 	}
 	object := make(map[string]any, len(entries))
 	for _, entry := range entries {
-		item, err := decodeFields(entry)
+		item, err := decodeFieldsWithBudget(entry, budget)
 		if err != nil {
 			return nil, err
 		}
 		if !hasField(item, fieldMapKey) || !hasField(item, fieldMapValue) {
 			return nil, fmt.Errorf("cursor MCP argument entry is incomplete")
 		}
-		value, err := decodeProtoValue(fieldBytes(item, fieldMapValue))
+		value, err := decodeProtoValueWithBudget(fieldBytes(item, fieldMapValue), budget, 0)
 		if err != nil {
 			return nil, err
 		}

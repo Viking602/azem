@@ -21,7 +21,9 @@ import { readStylesheetTree } from "../testStyles";
 
 const styles = readStylesheetTree("src/styles.css");
 const prototypeStyles = readFileSync("src/prototype.css", "utf8");
-const beautifulUIStyles = readFileSync("src/components/beautiful-ui/beautiful-ui.css", "utf8");
+const assistantUIStyles = readFileSync("src/components/assistant-ui/elements.css", "utf8");
+const assistantMessageElements = readFileSync("src/components/elements/message-pair.tsx", "utf8");
+const assistantComposerElements = readFileSync("src/components/elements/composer.tsx", "utf8");
 // ThreadSurface.tsx is a composition root; include its thread/ submodules so
 // source-content assertions keep covering the complete composer surface.
 const threadSurface = [
@@ -225,19 +227,19 @@ describe("composer slash commands", () => {
 
 	it("scopes chat UI and code font sizes to the thread and side-chat surfaces", () => {
 		expect(styles).toMatch(/\.thread-surface,\s*\n\.agent-side-chat\s*\{[^}]*--text-chat:\s*var\(--chat-ui-font-size/s);
-		expect(styles).toMatch(/\.thread-surface \.bui-code-block,\s*\n\.agent-side-chat \.bui-code-block\s*\{[^}]*--bui-code-size:\s*var\(--chat-code-font-size/s);
+		expect(styles).toMatch(/\.thread-surface \.aui-code-block,\s*\n\.agent-side-chat \.aui-code-block\s*\{[^}]*--aui-code-size:\s*var\(--chat-code-font-size/s);
 		expect(threadSurface).toContain("chatTypographyVars(chatFontSize, chatCodeFontSize)");
 		expect(agentSideChat).toContain("chatTypographyVars(chatFontSize, chatCodeFontSize)");
-		expect(beautifulUIStyles).toMatch(/\.bui-code-block\s*\{[^}]*--bui-code-size:\s*var\(--chat-code-font-size/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-code-block\s*\{[^}]*--bui-code-radius:\s*18px/s);
-		expect(beautifulUIStyles).toMatch(/\.process-step\.bui-tool-chip-group\[data-settled\][^{]*\{[^}]*background:\s*transparent/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-code-block\s*\{[^}]*border:\s*0/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-code-header\s*\{[^}]*min-height:\s*44px/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-thinking-state \.reasoning-summary\s*\{[^}]*grid-template-columns:\s*16px max-content max-content 13px/s);
-		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-state \.reasoning-summary\s*\{[^}]*minmax\(12em/s);
-		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-meta\s*\{[^}]*min-width:\s*4\.5em/s);
-		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-state \.reasoning-label\s*\{[^}]*min-width:\s*12em/s);
-		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-state\.completed\.quiet \.reasoning-summary::after\s*\{[^}]*height:\s*1px/s);
+		expect(assistantUIStyles).toMatch(/\.aui-code-block\s*\{[^}]*--aui-code-size:\s*var\(--chat-code-font-size/s);
+		expect(assistantUIStyles).toMatch(/\.aui-code-block\s*\{[^}]*--aui-code-radius:\s*18px/s);
+		expect(assistantUIStyles).toMatch(/\.process-step\.aui-tool-timeline\[data-settled\][^{]*\{[^}]*background:\s*transparent/s);
+		expect(assistantUIStyles).toMatch(/\.aui-code-block\s*\{[^}]*border:\s*0/s);
+		expect(assistantUIStyles).toMatch(/\.aui-code-header\s*\{[^}]*min-height:\s*44px/s);
+		expect(assistantUIStyles).toMatch(/\.aui-reasoning-panel \.reasoning-summary\s*\{[^}]*grid-template-columns:\s*16px max-content max-content 13px/s);
+		expect(assistantUIStyles).not.toMatch(/\.aui-reasoning-panel \.reasoning-summary\s*\{[^}]*minmax\(12em/s);
+		expect(assistantUIStyles).not.toMatch(/\.aui-reasoning-meta\s*\{[^}]*min-width:\s*4\.5em/s);
+		expect(assistantUIStyles).not.toMatch(/\.aui-reasoning-panel \.reasoning-label\s*\{[^}]*min-width:\s*12em/s);
+		expect(assistantUIStyles).not.toMatch(/\.aui-reasoning-panel\.completed\.quiet \.reasoning-summary::after\s*\{[^}]*height:\s*1px/s);
 		expect(styles).not.toMatch(/\.process-fold\[data-folded\] \.process-fold-summary::after\s*\{[^}]*height:\s*1px/s);
 	});
 
@@ -277,34 +279,34 @@ describe("composer slash commands", () => {
 		expect(prototypeStyles).toMatch(/\.reasoning-step::before\s*\{[^}]*display:\s*none;/s);
 	});
 
-	it("keeps Beautiful UI blue tokens global and does not wrap commentary on the marker grid", () => {
-		expect(beautifulUIStyles).toMatch(/:root\s*\{[^}]*--accent:\s*#0285ff;/s);
+	it("keeps assistant-ui Elements blue tokens global and does not wrap commentary on the marker grid", () => {
+		expect(assistantUIStyles).toMatch(/:root\s*\{[^}]*--accent:\s*#0285ff;/s);
 		// One muted token for every thinking state, light and dark. The regression
 		// is a per-state colour, not the shade itself (UI-016).
-		expect(beautifulUIStyles.match(/--thinking-ink:\s*var\(--muted\);/gu)).toHaveLength(2);
-		expect(beautifulUIStyles).toMatch(/\.bui-thinking-mark\s*\{[^}]*color:\s*var\(--thinking-ink\);/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-thinking-mark\.active\s*\{[^}]*color:\s*var\(--thinking-ink\);/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-thinking-state \.reasoning-summary:disabled\s*\{[^}]*opacity:\s*1;[^}]*color:\s*var\(--thinking-ink\);/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-thinking-state \.reasoning-label,\s*\.bui-thinking-state \.reasoning-label-base\s*\{[^}]*color:\s*var\(--thinking-ink\);[^}]*opacity:\s*1;/s);
-		expect(beautifulUIStyles).not.toMatch(/\.bui-thinking-pill/);
+		expect(assistantUIStyles.match(/--thinking-ink:\s*var\(--muted\);/gu)).toHaveLength(2);
+		expect(assistantUIStyles).toMatch(/\.aui-reasoning-mark\s*\{[^}]*color:\s*var\(--thinking-ink\);/s);
+		expect(assistantUIStyles).toMatch(/\.aui-reasoning-mark\.active\s*\{[^}]*color:\s*var\(--thinking-ink\);/s);
+		expect(assistantUIStyles).toMatch(/\.aui-reasoning-panel \.reasoning-summary:disabled\s*\{[^}]*opacity:\s*1;[^}]*color:\s*var\(--thinking-ink\);/s);
+		expect(assistantUIStyles).toMatch(/\.aui-reasoning-panel \.reasoning-label,\s*\.aui-reasoning-panel \.reasoning-label-base\s*\{[^}]*color:\s*var\(--thinking-ink\);[^}]*opacity:\s*1;/s);
+		expect(assistantUIStyles).not.toMatch(/\.aui-reasoning-pill/);
 		expect(styles).toMatch(/button\.reasoning-summary:disabled\s*\{[^}]*opacity:\s*1;[^}]*color:\s*var\(--thinking-ink\);/s);
 		expect(prototypeStyles).toMatch(/\.azem-thinking-mark\.active i:first-child\s*\{[^}]*animation:\s*none;/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-streaming-text > :last-child::after\s*\{[^}]*content:\s*none;[^}]*display:\s*none;/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-streaming-text.active > :last-child::after\s*\{[^}]*display:\s*inline-block;/s);
-		expect(beautifulUIStyles).not.toMatch(/\.bui-streaming-text > :last-child::after\s*\{[^}]*position:\s*absolute;/s);
+		expect(assistantUIStyles).toMatch(/\.aui-streaming-text > :last-child::after\s*\{[^}]*content:\s*none;[^}]*display:\s*none;/s);
+		expect(assistantUIStyles).toMatch(/\.aui-streaming-text.active > :last-child::after\s*\{[^}]*display:\s*inline-block;/s);
+		expect(assistantUIStyles).not.toMatch(/\.aui-streaming-text > :last-child::after\s*\{[^}]*position:\s*absolute;/s);
 		// Idle cadenced sweep must not paint. WKWebView left a hairline under
 		// 正在思考 the same way an absolute caret did between paragraphs (UI-016).
-		expect(beautifulUIStyles).toMatch(/\.bui-cadenced-shimmer-sweep\s*\{[^}]*display:\s*none;/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-cadenced-shimmer-active \.bui-cadenced-shimmer-sweep\s*\{[^}]*display:\s*block;/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-cadenced-shimmer\.rolling \.bui-cadenced-shimmer-sweep\s*\{[^}]*display:\s*none;/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-thinking-wait,\s*\.bui-cadenced-shimmer\s*\{[^}]*line-height:\s*1\.2;/s);
+		expect(assistantUIStyles).toMatch(/\.aui-cadenced-shimmer-sweep\s*\{[^}]*display:\s*none;/s);
+		expect(assistantUIStyles).toMatch(/\.aui-cadenced-shimmer-active \.aui-cadenced-shimmer-sweep\s*\{[^}]*display:\s*block;/s);
+		expect(assistantUIStyles).toMatch(/\.aui-cadenced-shimmer\.rolling \.aui-cadenced-shimmer-sweep\s*\{[^}]*display:\s*none;/s);
+		expect(assistantUIStyles).toMatch(/\.aui-reasoning-wait,\s*\.aui-cadenced-shimmer\s*\{[^}]*line-height:\s*1\.2;/s);
 		expect(styles).toMatch(/\.reasoning-label-roll\s*\{[^}]*overflow:\s*hidden;[^}]*line-height:\s*1\.2;/s);
 		// Settled block children must not replay enter motion while the tail streams (UI-003).
 		expect(styles).not.toMatch(/\.streaming-text\.active\s*>\s*:where\([^)]*\)\s*\{[^}]*streaming-block-in/s);
-		expect(beautifulUIStyles).not.toMatch(/\.streaming-text\.active\s*>\s*\.bui-code-block\s*\{[^}]*streaming-block-in/s);
+		expect(assistantUIStyles).not.toMatch(/\.streaming-text\.active\s*>\s*\.aui-code-block\s*\{[^}]*streaming-block-in/s);
 		expect(styles).toMatch(/\.streaming-text-reveal\s*\{[^}]*streaming-text-reveal-in 260ms cubic-bezier\(\.16,\s*1,\s*\.3,\s*1\) both/s);
 		expect(styles).toMatch(/@keyframes streaming-text-reveal-in\s*\{\s*from\s*\{[^}]*opacity:\s*\.28;[^}]*blur\(5px\)/s);
-		expect(beautifulUIStyles).not.toMatch(/\.bui-streaming-text \.streaming-text-reveal \{[^}]*animation-duration:\s*\.1s/);
+		expect(assistantUIStyles).not.toMatch(/\.aui-streaming-text \.streaming-text-reveal \{[^}]*animation-duration:\s*\.1s/);
 		expect(styles).not.toMatch(/\.assistant-block\.phase-pending::before/);
 		expect(styles).toMatch(/\.timeline-feed > \.process-fold,\s*\.timeline-feed > \.session-turn-current,\s*\.timeline-feed > \.session-history-turn:last-of-type[\s\S]*?contain-intrinsic-size:\s*none/s);
 		expect(styles).toMatch(/\.timeline-feed > \.session-history-turn\s*\{[^}]*contain-intrinsic-size:\s*180px/);
@@ -313,29 +315,29 @@ describe("composer slash commands", () => {
 		expect(styles).not.toMatch(/\.process-status-rule/);
 		// The running sparkle breathes on scale and brightness, never on a
 		// muted-to-ink color swap (UI-016).
-		expect(beautifulUIStyles).toMatch(/\.bui-thinking-mark\.active\s*\{[^}]*color:\s*var\(--thinking-ink\);[^}]*animation:\s*bui-thinking-pulse/s);
-		expect(beautifulUIStyles).toMatch(/@keyframes bui-thinking-pulse\s*\{[\s\S]*?transform:\s*scale\(1\.16\);/);
-		expect(beautifulUIStyles).toMatch(/\.commentary-block\s*\{[^}]*display:\s*block;[^}]*grid-template-columns:\s*none;/s);
-		expect(beautifulUIStyles).toMatch(/\.subagent-run-card\s*\{[^}]*width:\s*100%;/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-task-row\s*\{[^}]*border-radius:\s*var\(--bui-radius-task\);[^}]*background:\s*var\(--paper\);/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-task-mark\[data-state="completed"\]\s*\{[^}]*background:\s*var\(--green\);/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-tool-chip-detail\s*\{[^}]*background:\s*transparent;[^}]*color:\s*color-mix\(in srgb, var\(--ink\) 40%, transparent\);/s);
-		expect(beautifulUIStyles).toMatch(/\.bui-file-change-pill\s*\{[^}]*border-radius:\s*999px;[^}]*background:\s*var\(--paper\);/s);
+		expect(assistantUIStyles).toMatch(/\.aui-reasoning-mark\.active\s*\{[^}]*color:\s*var\(--thinking-ink\);[^}]*animation:\s*aui-reasoning-pulse/s);
+		expect(assistantUIStyles).toMatch(/@keyframes aui-reasoning-pulse\s*\{[\s\S]*?transform:\s*scale\(1\.16\);/);
+		expect(assistantUIStyles).toMatch(/\.commentary-block\s*\{[^}]*display:\s*block;[^}]*grid-template-columns:\s*none;/s);
+		expect(assistantUIStyles).toMatch(/\.subagent-run-card\s*\{[^}]*width:\s*100%;/s);
+		expect(assistantUIStyles).toMatch(/\.aui-agent-plan\s*\{[^}]*border-radius:\s*var\(--aui-radius-task\);[^}]*background:\s*var\(--paper\);/s);
+		expect(assistantUIStyles).toMatch(/\.aui-agent-plan-mark\[data-state="completed"\]\s*\{[^}]*background:\s*var\(--green\);/s);
+		expect(assistantUIStyles).toMatch(/\.aui-tool-timeline-detail\s*\{[^}]*background:\s*transparent;[^}]*color:\s*color-mix\(in srgb, var\(--ink\) 40%, transparent\);/s);
+		expect(assistantUIStyles).toMatch(/\.aui-tool-timeline-file\s*\{[^}]*border-radius:\s*999px;[^}]*background:\s*var\(--paper\);/s);
 	});
 
 	it("draws the step rail as per-row segments so an expanded body cannot break the thread", () => {
-		expect(beautifulUIStyles).toMatch(/\.timeline-step-row::before\s*\{[^}]*top:\s*0;[^}]*bottom:\s*0;[^}]*width:\s*1px;/s);
-		expect(beautifulUIStyles).toMatch(/\[data-step-edge="first"\]::before\s*\{\s*top:\s*var\(--step-rail-lead\);/);
-		expect(beautifulUIStyles).toMatch(/\[data-step-edge="last"\]::before\s*\{\s*bottom:\s*calc\(100% - var\(--step-rail-lead\)\);/);
-		expect(beautifulUIStyles).toMatch(/\[data-step-edge="only"\]::before\s*\{\s*content:\s*none;/);
+		expect(assistantUIStyles).toMatch(/\.timeline-step-row::before\s*\{[^}]*top:\s*0;[^}]*bottom:\s*0;[^}]*width:\s*1px;/s);
+		expect(assistantUIStyles).toMatch(/\[data-step-edge="first"\]::before\s*\{\s*top:\s*var\(--step-rail-lead\);/);
+		expect(assistantUIStyles).toMatch(/\[data-step-edge="last"\]::before\s*\{\s*bottom:\s*calc\(100% - var\(--step-rail-lead\)\);/);
+		expect(assistantUIStyles).toMatch(/\[data-step-edge="only"\]::before\s*\{\s*content:\s*none;/);
 		// The virtualized window scrolls past spacers; the rail must survive them.
-		expect(beautifulUIStyles).toMatch(/\.deferred-process-spacer::before\s*\{[^}]*width:\s*1px;/s);
+		expect(assistantUIStyles).toMatch(/\.deferred-process-spacer::before\s*\{[^}]*width:\s*1px;/s);
 		// UI-010: the thread runs in its own gutter, so no node needs a paper mask
 		// that could survive as a detached disc on a lit row.
-		expect(beautifulUIStyles).toMatch(/\.timeline-step-row\s*\{[^}]*padding-left:\s*var\(--step-rail-gutter\);/s);
-		expect(beautifulUIStyles).not.toMatch(/\.bui-step-mark-glyph\s*\{[^}]*box-shadow:/s);
-		expect(beautifulUIStyles).toMatch(
-			/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.bui-step-spinner\s*\{\s*animation:\s*none;[^}]*\}\s*\.timeline-step-row\[data-step-enter="true"\]\s*\{\s*animation:\s*none;/s,
+		expect(assistantUIStyles).toMatch(/\.timeline-step-row\s*\{[^}]*padding-left:\s*var\(--step-rail-gutter\);/s);
+		expect(assistantUIStyles).not.toMatch(/\.aui-tool-timeline-mark-glyph\s*\{[^}]*box-shadow:/s);
+		expect(assistantUIStyles).toMatch(
+			/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.aui-tool-timeline-spinner\s*\{\s*animation:\s*none;[^}]*\}\s*\.timeline-step-row\[data-step-enter="true"\]\s*\{\s*animation:\s*none;/s,
 		);
 	});
 
@@ -359,7 +361,7 @@ describe("composer slash commands", () => {
 		expect(styles).not.toMatch(/\.effort-slider-fill\s*\{[^}]*will-change:\s*width/s);
 	});
 
-	it("keeps the model chip compact, expands to the effort panel width, and respects narrow viewports", () => {
+	it("keeps one compact whole-chip model trigger without a chevron target", () => {
 		expect([modelControlWidth(false, 1200), modelControlWidth(true, 1200)]).toEqual([190, 248]);
 		expect(modelControlWidth(false, 1200, 84)).toBe(84);
 		expect(modelControlWidth(false, 1200, 236)).toBe(236);
@@ -369,8 +371,20 @@ describe("composer slash commands", () => {
 		expect(styles).toMatch(/\.model-controls\s*\{[^}]*flex:\s*0 0 auto;/s);
 		expect(styles).toMatch(/\.model-controls\s*\{[^}]*--model-control-closed-padding:\s*8px;/s);
 		expect(threadSurface).toContain('getPropertyValue("--model-control-closed-padding")');
-		expect(styles).toMatch(/\.model-controls > summary\s*\{[^}]*background:\s*transparent;/s);
-		expect(styles).toMatch(/\.model-controls > summary:hover\s*\{[^}]*background:\s*var\(--paper-muted\);/s);
+		expect(styles).toMatch(/\.model-controls > \.model-controls-trigger\s*\{[^}]*background:\s*transparent;/s);
+		expect(styles).toMatch(/\.model-controls > \.model-controls-trigger:hover\s*\{[^}]*background:\s*var\(--paper-muted\);/s);
+		expect(composerModelPicker).toContain('className="model-controls-trigger"');
+		expect(composerModelPicker).not.toContain("model-controls-chevron");
+		expect(composerModelPicker).not.toContain("ChevronDown");
+		expect(composerModelPicker).toContain('data-open={String(open)}');
+		expect(composerModelPicker).not.toContain("<details");
+		expect(composerModelPicker).not.toContain("<summary");
+		expect(composerModelPicker).toContain("hidden={!open}");
+		expect(composerModelPicker).toContain("const popover = position ? createPortal");
+		expect(composerModelPicker).not.toContain("open && position ? createPortal");
+		expect(prototypeStyles).toMatch(/\.composer-model-popover\[hidden\]\s*\{[^}]*display:\s*none !important;/s);
+		expect(prototypeStyles).not.toMatch(/\.composer-model-popover\s*\{[^}]*(?:backdrop-filter|animation)\s*:/s);
+		expect(prototypeStyles).not.toContain("@keyframes composer-model-in");
 		expect(styles).toMatch(/\.model-control-back\s*\{[^}]*width:\s*fit-content;[^}]*min-height:\s*32px;/s);
 		expect(styles).not.toMatch(/\.model-control-back:hover[^}]*background:/s);
 	});
@@ -519,6 +533,43 @@ describe("composer slash commands", () => {
     expect(threadSurface).not.toContain("<SelectActionHost");
     expect(threadSurface).not.toContain("sendSelectAction");
     expect(threadSurface).toContain('source === "composer" && editingQueuedId');
-    expect(beautifulUIStyles).toMatch(/\.assistant-block ::selection,\s*\.commentary-block ::selection,\s*\.user-block ::selection/);
+    expect(assistantUIStyles).toMatch(/\.assistant-block ::selection,\s*\.commentary-block ::selection,\s*\.user-block ::selection/);
+  });
+
+  it("adapts assistant-ui Elements as semantic presentation slots without replacing runtime state", () => {
+    expect(threadSurface).toContain('data-slot="thread"');
+    expect(threadSurface).toContain('data-slot="empty-state"');
+    expect(threadSurface).toContain('data-slot="thread-messages"');
+    expect(assistantMessageElements).toContain('data-slot="assistant-message"');
+    expect(assistantMessageElements).toContain('data-slot="user-message"');
+    expect(timeline).toContain("<AssistantMessage");
+    expect(timeline).toContain("<UserMessage");
+    expect(timeline).toContain('data-slot="agent-plan"');
+    expect(timeline).toContain('data-slot="tool-timeline"');
+    expect(assistantUIStyles).toMatch(/--aui-element-surface:/);
+    expect(assistantUIStyles).toMatch(/\[data-slot="composer-bar"\]\.composer-card\s*\{[^}]*backdrop-filter:\s*none;/s);
+    expect(assistantUIStyles).toMatch(/\.aui-tool-timeline,\s*\.aui-tool-timeline\[data-settled\]\s*\{[^}]*background:\s*transparent;/s);
+    expect(assistantUIStyles).toMatch(/\[data-slot="agent-plan"\]\.plan-review\s*\{[^}]*--aui-element-shadow/s);
+    expect(assistantComposerElements).toContain('data-slot="composer"');
+    expect(assistantComposerElements).toContain('data-slot="composer-bar"');
+    expect(assistantComposerElements).toContain('data-slot="composer-context"');
+    expect(assistantComposerElements).toContain('data-slot="composer-send"');
+    expect(threadSurface).toContain('from "../elements/composer"');
+    expect(`${threadSurface}\n${timeline}\n${assistantMessageElements}`).not.toContain("beautiful-ui");
+  });
+
+  it("keeps an expanded completed process in the transcript scroll instead of nesting a second scroller", () => {
+    expect(styles).toMatch(/\.transcript-viewport\s*\{[^}]*overflow:\s*auto;/s);
+    const expandedBody = styles.match(/\.process-fold-clip\[data-open="true"\]\s*>\s*\.process-fold-body\s*\{[^}]*\}/s)?.[0] ?? "";
+    expect(expandedBody).toContain("overflow: visible");
+    expect(expandedBody).not.toMatch(/max-height|overflow:\s*auto|overscroll-behavior/);
+    expect(timeline).toContain("<FoldClip open={open}>{entries}</FoldClip>");
+  });
+
+  it("lets assistant and progress prose use the complete transcript column", () => {
+    const proseWidth = assistantUIStyles.match(/\[data-slot="assistant-message"\],\s*\[data-slot="assistant-progress"\]\s*\{[^}]*\}/s)?.[0] ?? "";
+    expect(proseWidth).toContain("width: 100%");
+    expect(proseWidth).toContain("max-width: none");
+    expect(proseWidth).not.toContain("68ch");
   });
 });

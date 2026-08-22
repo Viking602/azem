@@ -122,17 +122,15 @@
 .sidebar-section-title { margin: 0; padding: 0 6px; color: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
 .project-launcher { margin: 0 1px 0 0; }.project-add-button { width: 25px; height: 25px; }
 .project-node + .project-node { margin-top: 4px; }
-.project-heading { min-height: 43px; padding: 4px 4px 4px 5px; border-radius: 9px; }
-.project-toggle { min-height: 35px; display: grid; grid-template-columns: 10px 25px minmax(0, 1fr) auto; gap: 7px; }
-.project-initial { width: 25px; color: var(--accent); font-size: var(--text-base); font-weight: 780; }
-.project-heading-copy strong { font-size: var(--text-sm); font-weight: 670; }.project-heading-copy small { margin-top: 1px; font-size: var(--text-2xs); }
-.project-toggle > em { padding: 2px 5px; border-radius: 999px; background: var(--paper-muted); font-size: var(--text-2xs); }
+.project-heading { min-height: 35px; padding: 2px 4px 2px 5px; border-radius: 9px; }
+.project-toggle { min-height: 31px; display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 7px; }
+.project-heading-copy strong { font-size: var(--text-sm); font-weight: 670; }
 .project-action.project-new-session { width: 22px; height: 22px; color: var(--faint); }
 .sidebar-pr-row { margin: 1px 0 2px 27px; border: 0; }.sidebar-pr-main { min-height: 42px; padding: 5px 6px; }.sidebar-pr-main > span:nth-child(2) { font-size: var(--text-xs); }.sidebar-pr-main small { font-size: var(--text-2xs); }
 .thread-list { margin-left: 17px; padding-left: 10px; border-left: 1px solid color-mix(in srgb, var(--line-strong) 74%, var(--muted)); }
-.thread-list button { min-height: 47px; gap: 6px; padding: 5px 6px; border-radius: 8px; font-size: var(--text-sm); transition: background var(--motion-instant) ease, color var(--motion-instant) ease; }
+.thread-list button { min-height: 35px; gap: 6px; padding: 4px 6px; border-radius: 8px; font-size: var(--text-sm); transition: background var(--motion-instant) ease, color var(--motion-instant) ease; }
 .thread-list button.active { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 65%, transparent); }
-.session-copy strong { font-size: var(--text-sm); font-weight: 590; }.session-copy small { margin-top: 1px; font-size: var(--text-2xs); }
+.session-copy strong { font-size: var(--text-sm); font-weight: 590; }
 .sidebar-footer > button { min-height: 32px; display: grid; grid-template-columns: 18px 1fr auto; font-size: 12px; }
 
 .thread-header { min-height: 50px; height: 50px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 12px; padding: 0 17px 0 22px; }
@@ -154,8 +152,7 @@
 .composer-card textarea { min-height: 57px; max-height: 130px; resize: none; padding: 13px 14px 6px; font-size: 13px; line-height: 1.55; }
 .composer-toolbar { min-height: 38px; gap: 5px; padding: 4px 7px 7px; }
 .composer-toolbar > :is(button, label, details > summary) { border-radius: 7px; }
-.context-meter > summary { width: 22px; height: 22px; }.context-meter > summary svg { width: 22px; height: 22px; }
-.model-controls { width: max-content; max-width: none; }.model-controls[open] { width: max-content; }.model-controls > summary { width: max-content; min-width: 126px; height: 28px; padding-inline: 8px; border-radius: 999px; font-size: 11px; }
+.model-controls { width: max-content; max-width: none; }.model-controls[data-open="true"] { width: max-content; }.model-controls > .model-controls-trigger { width: max-content; min-width: 126px; height: 28px; padding-inline: 8px; border-radius: 999px; font-size: 11px; }
 .send-button, .cancel-button { width: 27px; height: 27px; }
 
 .context-inspector { width: var(--inspector-reserve); background: var(--paper-muted); }
@@ -216,15 +213,12 @@
 .sidebar-switcher { margin-top: 0; }
 
 .project-node + .project-node { margin-top: 3px; }
-.project-heading { align-items: stretch; min-height: 45px; padding-left: 3px; }
-.project-toggle { min-height: 45px; gap: 6px; }
+.project-heading { align-items: center; min-height: 35px; padding-left: 3px; }
+.project-toggle { min-height: 31px; gap: 6px; }
 .project-toggle > svg { flex: 0 0 auto; color: var(--faint); }
-.project-initial { width: 19px; flex: 0 0 19px; color: var(--accent); font-size: var(--text-base); font-weight: 720; text-align: center; }
 .project-heading-copy { min-width: 0; flex: 1; display: block; }
-.project-heading-copy strong, .project-heading-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-heading-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-heading-copy strong { color: var(--ink); font-size: var(--text-sm); font-weight: 650; }
-.project-heading-copy small { margin-top: 2px; color: var(--faint); font-size: var(--text-2xs); font-weight: 450; }
-.project-toggle > em { flex: 0 0 auto; align-self: center; padding: 2px 6px; color: var(--faint); font-size: var(--text-2xs); font-style: normal; font-weight: 600; }
 .sidebar-branch-row { display: none; }
 
 /* Exact 4311 settings surface: centered desktop sheet, compact navigation and
@@ -336,21 +330,20 @@
 .sidebar-pr-main > span:nth-child(2) { font-weight: 600; }
 .sidebar-pr-main small { padding: 2px 5px; border-radius: 5px; background: color-mix(in srgb, #7c62f3 10%, transparent); color: #7157d8; }
 .thread-list { padding-left: 25px; }
-.thread-list button { min-height: 46px; gap: 8px; padding-block: 6px; }
+.thread-list button { min-height: 35px; gap: 8px; padding-block: 4px; }
 .thread-list button.active { background: var(--paper); box-shadow: 0 1px 3px rgb(20 20 17 / 6%); }
 .session-state-dot { width: 7px; height: 7px; flex: 0 0 7px !important; border: 1px solid var(--faint); border-radius: 50%; }
 .session-state-dot[data-running="true"] { border: 0; background: var(--blue); box-shadow: 0 0 0 4px color-mix(in srgb, var(--blue) 10%, transparent); animation: session-running-pulse 1.6s ease-in-out infinite; }
 .session-copy { min-width: 0; flex: 1; display: block !important; }
-.session-copy strong, .session-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-copy strong { color: inherit; font-size: var(--text-sm); font-weight: 600; }
-.session-copy small { margin-top: 2px; color: var(--faint); font-size: var(--text-2xs); font-weight: 400; }
 .session-running-indicator { display: none; }
 
 /* A project without a visible PR is a directory heading followed by a session
  * tree, not one stacked card. The explicit layout state keeps the PR branch
  * untouched while giving the first session its own visual plane. */
 .project-node[data-project-layout="sessions-only"][data-expanded="true"] .project-heading {
-  margin-bottom: 7px;
+  margin-bottom: 3px;
 }
 .project-node.active[data-project-layout="sessions-only"] .project-heading {
   background: color-mix(in srgb, var(--accent) 4%, var(--sidebar));

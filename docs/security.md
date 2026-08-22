@@ -32,6 +32,11 @@ matches the work you intend to authorize.
   updates the current workspace-session pointer, and returns the same bounded
   durable projection already used by the event stream. It does not add a new
   filesystem, shell, provider, or external-network capability.
+- On macOS, an inactive Azem window keeps AppKit's activation-only first click.
+  Azem does not enable WebView-wide click-through, because that same event could
+  trigger Stop, approval, deletion, or navigation controls. Losing focus closes
+  the model picker instead of preserving an actionable overlay in the inactive
+  window.
 - Built-in tools, MCP tools, hooks, and GitHub operations are separate external
   boundaries and remain subject to their own validation and approval policy.
 - Model output, repository text, PR content, tool output, and remote responses
@@ -90,8 +95,10 @@ boundary, not a bypass around Azem tools. Native exec requests bind to the
 current main, Team-role, or subagent governed tool bus and retain ordinary
 approval, durable timeline, and file-observation rules. Conversation
 checkpoints and server-set blobs are isolated by account, size-bounded,
-content-addressed, and validated before replacing known-good state. Cursor
-image parts use the same trusted attachment loader described above. The
+content-addressed, and validated before replacing known-good state. Remote
+protobuf decoding also enforces field-count, aggregate decoded-byte, and nested
+Value-depth budgets before allocation or recursion can expand a bounded frame.
+Cursor image parts use the same trusted attachment loader described above. The
 provider does not expose cache-read counters; Azem records that field as
 unreported rather than inferring a hit or miss.
 

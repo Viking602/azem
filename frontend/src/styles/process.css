@@ -60,10 +60,11 @@
 }
 .process-fold-clip[data-open="true"] { grid-template-rows: 1fr; }
 .process-fold-body { min-height: 0; overflow: hidden; }
+/* Expanded work remains ordinary transcript content. The viewport already
+   owns scrolling; a second max-height/overflow pane traps the wheel and makes
+   the pre-answer process look detached from the final response. */
 .process-fold-clip[data-open="true"] > .process-fold-body {
-  max-height: min(56vh, 520px);
-  overflow: auto;
-  overscroll-behavior: contain;
+  overflow: visible;
 }
 @media (prefers-reduced-motion: reduce) {
   .process-fold-clip { transition: none; }
@@ -85,7 +86,7 @@
 
 .process-step[data-settled] { margin: 4px 0 6px; }
 .process-step[data-settled] + .model-progress-prose { margin-top: 4px; }
-.process-step.bui-tool-chip-group > .process-step-body { margin-top: 2px; }
+.process-step.aui-tool-timeline > .process-step-body { margin-top: 2px; }
 /* The rows carry their own step rail, so the reasoning quote line would be a
    second competing vertical. The body opens from under the bar: reasoning prose
    first, then the tools it led to. */
@@ -104,15 +105,15 @@
 .process-step-body > .model-progress-tools { margin: 0; padding: 0; }
 /* Reasoning sits under the sparkle label, not under the tool text, so the
    old 36px quote-rail indent does not leave an empty gutter. */
-  .process-step-body .bui-thinking-panel[data-tab="reasoning"] {
+  .process-step-body .aui-reasoning-content[data-tab="reasoning"] {
     margin: 1px 0 0;
     padding: 0 0 2px;
   color: color-mix(in srgb, var(--muted) 88%, var(--faint));
   font-size: var(--text-chat);
   line-height: 1.5;
 }
-.process-step-body .bui-thinking-panel[data-tab="reasoning"] .reasoning-step { margin: 0; }
-.process-step-body .bui-thinking-panel[data-tab="reasoning"] .reasoning-step + .reasoning-step { margin-top: .45em; }
+.process-step-body .aui-reasoning-content[data-tab="reasoning"] .reasoning-step { margin: 0; }
+.process-step-body .aui-reasoning-content[data-tab="reasoning"] .reasoning-step + .reasoning-step { margin-top: .45em; }
 .process-step-body > * + *,
 .process-step-body > .model-progress-tools > * + * { margin-top: 6px; }
 @keyframes process-step-open {
@@ -314,7 +315,7 @@ button.reasoning-summary:disabled { cursor: default; opacity: 1; color: var(--th
   overscroll-behavior: contain;
 }
 .reasoning-body[hidden],
-.bui-thinking-body[hidden] {
+.aui-reasoning-body[hidden] {
   display: none !important;
 }
 .reasoning-step {

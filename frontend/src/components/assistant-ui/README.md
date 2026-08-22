@@ -1,0 +1,67 @@
+# assistant-ui Elements integration
+
+Azem vendors presentational source components from
+[assistant-ui Elements](https://www.assistant-ui.com/elements). It does not add
+the assistant-ui runtime. Registry components are installed through shadcn and
+compiled by Tailwind v4; Azem's durable event stream, Zustand projection,
+approvals, session ownership, and tool execution remain the only behavioral
+state owners.
+
+## Components
+
+- `components/elements/message-pair.tsx` owns the turn root plus user,
+  assistant, progress, and error message surfaces through `data-slot`
+  contracts. Azem imports those registry components directly; assistant and
+  progress prose use the full bounded transcript width.
+- `components/elements/composer.tsx` owns Composer, ComposerBar, menu,
+  attachments, textarea, toolbar, attach, context, and send slots. The Azem
+  thread component supplies durable input behavior and passes the actual
+  ordered `contextComposition` groups with Inspector's localized category
+  labels into ComposerContext.
+- `Elements.tsx` owns LoadingState, ReasoningPanel, StreamingText, ToolCall,
+  ApprovalCard, AgentPlan, and shared label-motion helpers.
+- `ToolTimeline.tsx` and `ToolTimelineStep.tsx` own work rows, status marks,
+  file statistics, and the single connected process rail.
+- `CodeBlock.tsx` owns fenced Markdown code with filename/language, copy, and a
+  line-number gutter.
+- `CodeDiff.tsx` maps Azem `FileChange` records into the registry-installed
+  `components/elements/code-diff.tsx` contract. Its rows enter in 200ms with a
+  32ms stagger capped at six rows.
+- `elements.css` bridges shadcn semantic colors to Azem's light/dark tokens and
+  supplies product-specific layout overrides after the Tailwind entry point.
+
+## Conversation invariants
+
+Assistant prose is the primary reading layer. Model-authored progress stays in
+that same column. A completed pre-answer process may fold under its elapsed-time
+row, but opening it restores all commentary, reasoning, tools, and diffs to the
+ordinary transcript flow immediately before the final answer. The outer
+transcript viewport is the only conversation scrollbar.
+
+First-token wait, reasoning, search, and live tools share one ReasoningPanel
+bar. The label changes in place; the clock never remounts the body. Settled work
+opens as a ToolTimeline with the reasoning item first, followed by tool rows and
+file statistics. Every row retains its real completed, running, pending, or
+failed state and reduced-motion behavior.
+
+The Inspector Todo projection remains a compact AgentPlan-style hierarchy with
+a short fixed heading, bounded goal, honest `done/total` rule, phase labels, and
+task status marks. It does not create a second task state.
+
+## Registry
+
+`components.json` registers `https://r.assistant-ui.com/{name}.json`. Installed
+sources and their commands:
+
+```sh
+npx shadcn@latest add "@assistant-ui/elements-code-diff"
+bunx --bun shadcn@latest add "@assistant-ui/elements-message-pair"
+bunx --bun shadcn@latest add "@assistant-ui/elements-composer"
+```
+
+Do not restore the custom Message or Composer presentation wrappers, old diff
+table, line-number gutter, syntax tokenizer, copy action, or vertical chat-diff
+scroller. Shared syntax highlighting for Markdown and workspace viewers lives
+independently in `components/syntaxTokens.ts`.
+
+Third-party MIT notices are preserved under `frontend/THIRD_PARTY_NOTICES/`.

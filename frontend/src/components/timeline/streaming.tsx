@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { stabilizeStreamingMarkdown } from "../../streamMarkdown";
 import { MAX_LIVE_REVEAL_RANGES, sameRevealRanges, StreamingMarkdown, type StreamingRevealRange } from "../Markdown";
-import { StreamingText as BeautifulStreamingText } from "../beautiful-ui/Primitives";
+import { StreamingText as AssistantStreamingText } from "../assistant-ui/Elements";
 
 function revealGlyphs(text: string) {
   if (typeof Intl.Segmenter === "function") {
@@ -124,9 +124,9 @@ export function StreamingText({ content, active = true, debugReplay = false }: {
   const stableContent = active ? stabilizeStreamingMarkdown(visibleContent) : visibleContent;
   const ranges = active ? presentation.ranges : [];
 
-  return <BeautifulStreamingText active={active}>
+  return <AssistantStreamingText active={active}>
     <StreamingMarkdown ranges={ranges}>{stableContent}</StreamingMarkdown>
-  </BeautifulStreamingText>;
+  </AssistantStreamingText>;
 }
 
 /** One Markdown tree for live and settled prose. Completion only stops reveal CSS. */

@@ -12,10 +12,10 @@ import {
   subagentSummaryLabel,
 } from "../subagents";
 import { useRuntimeStore } from "../store";
-import { contextCacheMetrics, contextComposition, contextOccupancy, stickyCacheMetrics, type ContextCacheMetrics, type ContextCompositionGroup } from "../contextUsage";
+import { contextCacheMetrics, contextCategoryLabel, contextComposition, contextOccupancy, stickyCacheMetrics, type ContextCacheMetrics, type ContextCompositionGroup } from "../contextUsage";
 import type { AgentState, Attachment, ContextProfile, SessionRecap, Snapshot, TodoItem, TodoList, TodoStatus } from "../types";
 import SubagentGlyph from "./SubagentGlyph";
-import { RollingLabel } from "./beautiful-ui/Primitives";
+import { RollingLabel } from "./assistant-ui/Elements";
 import { collectConversationSources, type ConversationSource } from "./inspectorSources";
 
 
@@ -198,14 +198,6 @@ function ContextComposition({ groups, totalTokens, estimated, language }: {
   </div>;
 }
 
-function contextCategoryLabel(category: string, language: Snapshot["language"]) {
-  const t = translator(language);
-  return ({
-    core: t("contextCore"), conversation: t("contextConversation"), builtin_tools: t("contextBuiltinTools"),
-    skills: t("contextSkills"), mcp: t("contextMCP"), current_output: t("contextCurrentOutput"),
-    provider_input: t("contextProviderInput"), other: t("contextOther"),
-  } as Record<string, string>)[category] ?? category.replaceAll("_", " ");
-}
 
 function contextContributionLabel(name: string, language: Snapshot["language"]) {
   const t = translator(language);
@@ -268,13 +260,15 @@ function TodoPlan({ todo, language }: { todo: TodoList; language: Snapshot["lang
   const items = todo.phases.flatMap((phase) => phase.items);
   const completed = items.filter((item) => item.status === "completed" || item.status === "cancelled").length;
   const percentage = items.length > 0 ? Math.round((completed / items.length) * 100) : 0;
-  const heading = todo.goal?.trim() || t("todoTitle");
+  const heading = t("todoTitle");
+  const goal = todo.goal?.trim() || "";
 
-  return <section className="inspector-section todo-section" aria-label={heading}>
+  return <section className="inspector-section todo-section" data-slot="todo-list" aria-label={goal ? `${heading}: ${goal}` : heading}>
     <header className="inspector-section-header">
       <h2 className="todo-title">{heading}</h2>
       <small>{completed} / {items.length}</small>
     </header>
+    {goal ? <p className="todo-goal">{goal}</p> : null}
     {percentage > 0 ? <div className="todo-progress-row">
       <div className="todo-progress-track" role="progressbar" aria-label={tFormat(language, "todoProgress", { done: completed, total: items.length })} aria-valuemin={0} aria-valuemax={items.length} aria-valuenow={completed}>
         <span style={{ width: `${percentage}%` }} />

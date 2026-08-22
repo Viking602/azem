@@ -215,10 +215,13 @@ describe("Inspector", () => {
     await act(async () => root.render(<Inspector />));
 
     const section = container.querySelector(".todo-section")!;
-    expect(section.querySelector(".todo-title")?.textContent).toBe("核验供应商并映射库存");
+    expect(section.getAttribute("data-slot")).toBe("todo-list");
+    expect(section.getAttribute("aria-label")).toBe("任务计划: 核验供应商并映射库存");
+    expect(section.querySelector(".todo-title")?.textContent).toBe("任务计划");
+    expect(section.querySelector(".todo-goal")?.textContent).toBe("核验供应商并映射库存");
     expect(section.querySelector(".todo-kicker")).toBeNull();
     expect(section.querySelector(".inspector-section-header small")?.textContent).toBe("2 / 4");
-    expect(section.querySelectorAll(".bui-task-row")).toHaveLength(0);
+    expect(section.querySelectorAll(".aui-agent-plan")).toHaveLength(0);
 
     const phases = Array.from(section.querySelectorAll(".todo-phase"));
     expect(phases).toHaveLength(2);

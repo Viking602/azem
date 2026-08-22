@@ -157,7 +157,7 @@ func newMutatingVerificationGuardrail(sessions *session.Service, workspace, sess
 	}
 	resultStore, storeErr := verification.NewArtifactResultStore(sessions, sessionID, runID)
 	guard, guardErr := verification.NewFinalClaimGuard(resultStore, nil)
-	return hyagent.NewOutputGuardrail("current-work-verification", func(ctx context.Context, input hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
+	return hyagent.NewOutputGuardrail("current-work-verification", func(ctx context.Context, _ hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
 		if storeErr != nil {
 			return hyagent.OutputGuardrailResult{}, storeErr
 		}
@@ -206,27 +206,22 @@ func newMutatingVerificationGuardrail(sessions *session.Service, workspace, sess
 		case "retry":
 			return hyagent.RetryOutput(message.NewText(message.RoleUser, verificationRetryMessage(snapshot, state.missing))), nil
 		case "surface":
-			return surfaceVerificationOutput(input.Output, decision.Status), nil
+			return surfaceVerificationOutput(decision.Reason), nil
 		default:
 			return hyagent.BlockOutput("invalid verification guard decision"), nil
 		}
 	})
 }
 
-// surfaceVerificationOutput keeps the model's own final answer and appends the
-// guard verdict instead of replacing it. Replacing wholesale erased the real
-// deliverable summary from the durable session, so restarts replayed only the
-// canned notice.
-func surfaceVerificationOutput(output message.Message, status string) hyagent.OutputGuardrailResult {
-	notice := "Verification evidence is missing or stale for the current workspace snapshot after one retry. The work remains uncertain and is not reported as complete."
-	if status == "fail" {
-		notice = "Verification failed for the current workspace snapshot. The attempted result is not reported as complete; inspect the failed checks and correct the work before retrying."
+// surfaceVerificationOutput blocks an unverified terminal claim without
+// rewriting the model-authored message as host prose. The candidate output
+// remains attached to Venat's guardrail error while the run finishes failed.
+func surfaceVerificationOutput(reason string) hyagent.OutputGuardrailResult {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "Verification evidence is missing, stale, or failed for the current workspace snapshot."
 	}
-	if strings.TrimSpace(output.Text) == "" {
-		return hyagent.ReplaceOutput(message.NewText(message.RoleAssistant, notice))
-	}
-	output.Text = strings.TrimRight(output.Text, "\n") + "\n\n" + notice
-	return hyagent.ReplaceOutput(output)
+	return hyagent.BlockOutput(reason)
 }
 
 func deriveRuntimeEvidence(ctx context.Context, sessions *session.Service, workspace, sessionID, runID string, relatedRunIDs []string) (runtimeEvidenceSnapshot, error) {
@@ -281,7 +276,7 @@ func deriveRuntimeEvidence(ctx context.Context, sessions *session.Service, works
 		}
 	}
 	if mutating {
-		plan = addRuntimeReadbackChecks(plan, revision.Files)
+		plan = addRuntimeReadbackChecks(plan, revision.Files, workspace)
 	}
 	return runtimeEvidenceSnapshot{
 		work: work, revision: revision, plan: plan, todo: todo, records: records, goalSource: goalSource,
@@ -510,7 +505,7 @@ func toolRecordMutated(record session.ToolRecord) bool {
 	}
 }
 
-func addRuntimeReadbackChecks(plan session.VerificationPlanV1, files []session.WorkRevisionFileV1) session.VerificationPlanV1 {
+func addRuntimeReadbackChecks(plan session.VerificationPlanV1, files []session.WorkRevisionFileV1, workspace string) session.VerificationPlanV1 {
 	criterionIDs := make([]string, 0)
 	seenCriteria := make(map[string]struct{})
 	for _, check := range plan.Checks {
@@ -531,13 +526,28 @@ func addRuntimeReadbackChecks(plan session.VerificationPlanV1, files []session.W
 			}}, plan.Checks...)
 		}
 	}
-	if len(touched) > 0 {
+	if len(touched) > 0 && workspaceHasGitMetadata(workspace) {
 		command := append([]string{"git", "diff", "--check", "--"}, touched...)
 		plan.Checks = append([]session.VerificationCheckV1{{
 			ID: "git-diff-check", CriterionIDs: append([]string(nil), criterionIDs...), Kind: "command", Command: command, TimeoutMS: 60_000,
 		}}, plan.Checks...)
 	}
 	return plan
+}
+
+func workspaceHasGitMetadata(workspace string) bool {
+	current := filepath.Clean(strings.TrimSpace(workspace))
+	for current != "" && current != "." {
+		if info, err := os.Stat(filepath.Join(current, ".git")); err == nil && (info.IsDir() || info.Mode().IsRegular()) {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return false
 }
 
 func evaluateRuntimeChecks(snapshot runtimeEvidenceSnapshot) runtimeCheckState {

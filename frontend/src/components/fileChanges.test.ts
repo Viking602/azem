@@ -63,6 +63,34 @@ describe("file change extraction", () => {
     expect(fileChangesForBlock(malformed)).toMatchObject([{ path: "fallback.ts", additions: 1, deletions: 0 }]);
   });
 
+  it("renders backend replace and delete projections", () => {
+    const replace: Block = {
+      id: "replace", kind: "tool", title: "coding.replace", state: "completed",
+      data: { fileChange: JSON.stringify({
+        files: [{ path: "src/app.ts", firstChangedLine: 4, diff: "-old\n+new", additions: 1, deletions: 1 }],
+        additions: 1, deletions: 1,
+      }) },
+    };
+    const deleted: Block = {
+      id: "delete", kind: "tool", title: "coding.delete_file", state: "completed",
+      data: { fileChange: JSON.stringify({
+        files: [{ path: "src/gone.txt", firstChangedLine: 1, diff: "", additions: 0, deletions: 0 }],
+        additions: 0, deletions: 0,
+      }) },
+    };
+
+    expect(fileChangesForBlock(replace)).toEqual([
+      { path: "src/app.ts", firstChangedLine: 4, diff: "-old\n+new", additions: 1, deletions: 1 },
+    ]);
+    expect(fileChangesForBlock(deleted)).toEqual([
+      { path: "src/gone.txt", firstChangedLine: 1, diff: "", additions: 0, deletions: 0 },
+    ]);
+    expect(aggregateEditedFiles([replace, deleted]).files).toEqual([
+      { path: "src/app.ts", additions: 1, deletions: 1 },
+      { path: "src/gone.txt", additions: 0, deletions: 0 },
+    ]);
+  });
+
   it("does not present an unexecuted write as an edited file", () => {
     for (const state of ["queued", "awaiting_approval", "reviewing_approval", "running", "failed", "cancelled", "interrupted"]) {
       const block: Block = {

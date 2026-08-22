@@ -87,8 +87,8 @@
   min-width: 0;
   color: var(--muted);
 }
-.model-controls[open] { width: min(248px, 52vw); }
-.model-controls > summary {
+.model-controls[data-open="true"] { width: min(248px, 52vw); }
+.model-controls > .model-controls-trigger {
   position: relative;
   width: 100%;
   height: 27px;
@@ -102,12 +102,10 @@
   cursor: pointer;
   list-style: none;
   white-space: nowrap;
-  transition: background-color .16s ease, color .16s ease, padding .2s cubic-bezier(.23, 1, .32, 1);
+  transition: background-color .16s ease, color .16s ease;
 }
-.model-controls[open] > summary { padding-inline: 30px; }
-.model-controls > summary::-webkit-details-marker { display: none; }
-.model-controls > summary:hover { background: var(--paper-muted); color: var(--ink); }
-.model-controls > summary span {
+.model-controls > .model-controls-trigger:hover { background: var(--paper-muted); color: var(--ink); }
+.model-controls > .model-controls-trigger span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -115,20 +113,17 @@
   font-weight: 560;
   color: var(--ink);
 }
-.model-controls > summary small {
+.model-controls > .model-controls-trigger small {
   flex: 0 0 auto;
   color: var(--faint);
   font-size: var(--text-sm);
 }
-.model-controls > summary small[data-high="true"] {
+.model-controls > .model-controls-trigger small[data-high="true"] {
   color: #7c5cf0;
   font-weight: 620;
 }
-.model-controls > summary svg { flex: 0 0 auto; }
-.model-controls-chevron { position: absolute; right: 10px; opacity: 0; transform: translateX(-3px); transition: opacity .14s ease, transform .18s cubic-bezier(.23, 1, .32, 1); }
-.model-controls[open] .model-controls-chevron { opacity: 1; transform: translateX(0); }
-.model-controls > summary:active .model-controls-chevron { transform: translateY(1px); }
-.model-controls[data-disabled="true"] > summary { pointer-events: none; opacity: .45; }
+.model-controls > .model-controls-trigger svg { flex: 0 0 auto; }
+.model-controls[data-disabled="true"] > .model-controls-trigger { pointer-events: none; opacity: .45; }
 /* Portaled model menus — fixed to viewport so long names are never clipped by composer/overflow. */
 .model-control-menu-portal,
 .model-control-submenu-portal {
@@ -159,7 +154,7 @@
 .model-control-menu-portal[data-transitioning="true"] .model-control-page-stack { overflow: hidden; }
 .model-control-menu-portal[data-transitioning="true"] .model-control-page { will-change: transform; }
 @media (prefers-reduced-motion: reduce) {
-  .model-controls > summary, .model-controls-chevron { transition: none; }
+  .model-controls > .model-controls-trigger { transition: none; }
   .model-control-menu-portal, .model-control-submenu-portal { animation: none; }
 }
 /*
@@ -644,8 +639,8 @@ html.dark .effort-slider-thumb {
 }
 html[data-theme="dark"] .effort-slider-hint,
 html.dark .effort-slider-hint,
-html[data-theme="dark"] .model-controls > summary small[data-high="true"],
-html.dark .model-controls > summary small[data-high="true"] {
+html[data-theme="dark"] .model-controls > .model-controls-trigger small[data-high="true"],
+html.dark .model-controls > .model-controls-trigger small[data-high="true"] {
   color: #a78bfa;
 }
 html[data-theme="dark"] .effort-panel-speed:hover:not(:disabled),
@@ -768,16 +763,6 @@ html.dark .effort-panel-speed.active {
   font-size: var(--text-sm);
   line-height: 1.4;
 }
-.context-meter { --meter-color: var(--blue); position: relative; flex: 0 0 auto; }
-.context-meter[data-tone="critical"] { --meter-color: var(--red); }
-.context-meter > summary { width: 27px; height: 27px; display: grid; place-items: center; border-radius: 8px; cursor: pointer; list-style: none; }
-.context-meter > summary::-webkit-details-marker { display: none; }.context-meter > summary:hover, .context-meter[open] > summary { background: var(--paper-muted); }
-.context-meter svg { width: 19px; height: 19px; overflow: visible; }.context-meter circle { fill: none; stroke-width: 2.3; }
-.context-ring-track { stroke: var(--line-strong); }.context-ring-value { stroke: var(--meter-color); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; transition: stroke-dasharray .18s ease; }
-.context-meter-popover { position: absolute; z-index: 21; left: 50%; bottom: calc(100% + 8px); width: 220px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); box-shadow: var(--shadow-float); transform: translateX(-50%); }
-.context-meter-popover header, .context-meter-popover footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.context-meter-popover header strong { font-size: var(--text-sm); }.context-meter-popover header span { color: var(--meter-color); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
-.context-progress { height: 5px; overflow: hidden; margin: 10px 0 8px; border-radius: 999px; background: var(--paper-muted); }.context-progress span { height: 100%; display: block; border-radius: inherit; background: var(--meter-color); transition: width .18s ease; }
-.context-meter-popover footer { color: var(--faint); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; }
 .send-button, .cancel-button { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: var(--ink); color: var(--paper); }.send-button { border-radius: 50%; }.cancel-button { background: var(--red); color: white; }
 /* Overlay the composer on the timeline. The dock is a transparent hit-through
  * layer so conversation stays visible and scrollable beside the solid card.

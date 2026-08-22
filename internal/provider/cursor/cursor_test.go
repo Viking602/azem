@@ -784,6 +784,33 @@ func TestConversationEncodingPreservesEmptyJSONValuesAndToolResults(t *testing.T
 	}
 }
 
+func TestCursorProtoDecoderRejectsExcessiveFields(t *testing.T) {
+	payload := make([]byte, 0, (maxCursorProtoFields+1)*2)
+	for range maxCursorProtoFields + 1 {
+		payload = encodeUint32(payload, 1, 1)
+	}
+	if _, err := decodeFields(payload); err == nil || !strings.Contains(err.Error(), "field budget") {
+		t.Fatalf("field budget error = %v", err)
+	}
+}
+
+func TestCursorProtoValueRejectsExcessiveNesting(t *testing.T) {
+	value := encodeString(nil, fieldValueString, "leaf")
+	for range maxCursorProtoValueDepth + 2 {
+		value = encodeBytes(nil, fieldValueList, encodeMessage(nil, fieldListValueItem, value))
+	}
+	if _, err := decodeProtoValue(value); err == nil || !strings.Contains(err.Error(), "nesting exceeds") {
+		t.Fatalf("nesting error = %v", err)
+	}
+}
+
+func TestCursorProtoDecoderRejectsAggregateDecodedBytes(t *testing.T) {
+	budget := &protoDecodeBudget{decodedBytes: maxCursorProtoDecodedBytes - 1}
+	if _, err := decodeFieldsWithBudget(encodeUint32(nil, 1, 1), budget); err == nil || !strings.Contains(err.Error(), "decoded byte budget") {
+		t.Fatalf("decoded byte budget error = %v", err)
+	}
+}
+
 func TestDecodeTodoCompletionUsesServerSnapshot(t *testing.T) {
 	item := encodeString(nil, fieldTodoItemID, "todo-1")
 	item = encodeString(item, fieldTodoItemContent, "check cache")
@@ -855,6 +882,23 @@ func TestMCPDefinitionsAndArgumentsUseProtoValue(t *testing.T) {
 	nestedObject, ok := decoded["nested"].(map[string]any)
 	if !ok || nestedObject["x"] != "y" {
 		t.Fatalf("decoded nested MCP argument = %#v", decoded["nested"])
+	}
+}
+
+func TestMCPArgumentsShareOneProtoDecodeBudget(t *testing.T) {
+	value, err := encodeProtoValue(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpArgs := encodeString(nil, fieldMCPArgName, "coding.lookup")
+	mcpArgs = encodeString(mcpArgs, fieldMCPArgToolCallID, "call-budget")
+	for range maxCursorProtoFields/3 + 1 {
+		entry := encodeString(nil, fieldMapKey, "same-key")
+		entry = encodeBytes(entry, fieldMapValue, value)
+		mcpArgs = encodeMessage(mcpArgs, fieldMCPArgMap, entry)
+	}
+	if _, ok := mapMCPArgs("", encodeMessage(nil, fieldMCPArgs, mcpArgs)); ok {
+		t.Fatal("MCP arguments bypassed the aggregate proto decode budget")
 	}
 }
 

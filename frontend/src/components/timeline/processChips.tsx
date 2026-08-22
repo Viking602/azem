@@ -20,8 +20,8 @@ import {
   toolChipModel,
 } from "../toolChip";
 import AnsiText from "../AnsiText";
-import { StepRow } from "../beautiful-ui/StepRow";
-import { FileChangePills, ToolChip, ToolChipMeta, ToolChipStatus } from "../beautiful-ui/ToolChip";
+import { ToolTimelineStep } from "../assistant-ui/ToolTimelineStep";
+import { ToolTimelineFiles, ToolTimelineItem, ToolTimelineMeta, ToolTimelineStatus } from "../assistant-ui/ToolTimeline";
 import {
   isActiveFileChangeBlock,
   isFileChangeTool,
@@ -29,7 +29,7 @@ import {
 } from "../fileChanges";
 import { ToolTimelineBlock, toolStatusLabel } from "./blocks";
 import { blocksMarkState, stepEdge, stepEntranceDelays, stepMarkState } from "./stepRail";
-import { ReasoningPanel } from "./ThinkingTrace";
+import { ReasoningSteps } from "./ThinkingTrace";
 import { ToolExecutionLog } from "./ToolExecutionLog";
 import { useLiveElapsed } from "./useLiveElapsed";
 
@@ -69,30 +69,30 @@ export function ProcessChipList({ blocks, language, siblings, live = false, summ
       ? <ToolTimelineBlock block={block} language={language} siblings={siblings} />
       : <ToolStep block={block} language={language} siblings={siblings} hideTime={settledCard || hideClocks || live} />
   );
-  return <div className={`timeline-step-list${grouped ? " bui-tool-chip-group" : ""}`} data-settled={settledCard || undefined}>
-    {countLabel && tools.length >= 2 ? <div className="bui-tool-chip-group-header">
-      <ChevronDown className="bui-tool-chip-chevron" size={14} aria-hidden="true" />
+  return <div className={`timeline-step-list${grouped ? " aui-tool-timeline" : ""}`} data-settled={settledCard || undefined}>
+    {countLabel && tools.length >= 2 ? <div className="aui-tool-timeline-header">
+      <ChevronDown className="aui-tool-timeline-item-chevron" size={14} aria-hidden="true" />
       <strong>{countLabel}</strong>
     </div> : null}
     <div className="timeline-step-rows" role="list">
-      {thinking.length ? <StepRow
+      {thinking.length ? <ToolTimelineStep
         key={rowIds[0]}
         mark={blocksMarkState(thinking)}
         edge={stepEdge(index++, count)}
         delayMs={delays.get(rowIds[0]!)}
       >
         <ThinkingChip blocks={thinking} language={language} />
-      </StepRow> : null}
-      {tools.map((block) => <StepRow
+      </ToolTimelineStep> : null}
+      {tools.map((block) => <ToolTimelineStep
         key={block.id}
         mark={stepMarkState(displayedToolState(block, peers))}
         edge={stepEdge(index++, count)}
         delayMs={delays.get(block.id)}
       >
         {toolRow(block)}
-      </StepRow>)}
+      </ToolTimelineStep>)}
     </div>
-    {pills.files.length ? <FileChangePills files={pills.files} language={language} /> : null}
+    {pills.files.length ? <ToolTimelineFiles files={pills.files} language={language} /> : null}
   </div>;
 }
 
@@ -112,7 +112,7 @@ export function ThinkingChip({ blocks, language }: { blocks: Block[]; language: 
   const [opened, setOpened] = useState(false);
   const running = blocks.some((block) => isActiveProcessBlock(block) && Boolean(block.content?.trim()));
   const preview = thinkingChipPreview(blocks);
-  return <ToolChip
+  return <ToolTimelineItem
     className="timeline-step thinking-chip"
     state={running ? "running" : "completed"}
     kind="thinking"
@@ -120,10 +120,10 @@ export function ThinkingChip({ blocks, language }: { blocks: Block[]; language: 
     chip={preview || undefined}
     onToggle={(event) => setOpened(event.currentTarget.open)}
   >
-    {opened ? <div className="timeline-step-detail bui-thinking-panel" data-tab="reasoning">
-      <ReasoningPanel blocks={blocks} />
+    {opened ? <div className="timeline-step-detail aui-reasoning-content" data-tab="reasoning">
+      <ReasoningSteps blocks={blocks} />
     </div> : null}
-  </ToolChip>;
+  </ToolTimelineItem>;
 }
 
 function ToolStep({ block, language, siblings, hideTime = false }: {
@@ -155,7 +155,7 @@ function ToolStep({ block, language, siblings, hideTime = false }: {
     : elapsedMs > 0
       ? formatDuration(elapsedMs)
       : running ? translator(language)("running") : completed ? "" : toolStatusLabel(state, language);
-  return <ToolChip
+  return <ToolTimelineItem
     className="timeline-step"
     state={state}
     kind={model.kind}
@@ -166,8 +166,8 @@ function ToolStep({ block, language, siblings, hideTime = false }: {
     onToggle={(event) => setOpened(event.currentTarget.open)}
   >
     {opened ? <div className="timeline-step-detail">
-      <ToolChipStatus lines={model.statusLines} />
-      <ToolChipMeta lines={model.meta} />
+      <ToolTimelineStatus lines={model.statusLines} />
+      <ToolTimelineMeta lines={model.meta} />
       {presentation?.fields.length ? <dl className="tool-fields">
         {presentation.fields.map((field) => <div key={`${field.label}-${field.value}`}><dt>{field.label}</dt><dd>{field.value}</dd></div>)}
       </dl> : null}
@@ -175,5 +175,5 @@ function ToolStep({ block, language, siblings, hideTime = false }: {
         ? <ToolExecutionLog output={liveOutput} label={`${model.label} · ${translator(language)("fieldDetail")}`} />
         : presentation?.result ? <pre className="tool-result"><AnsiText text={presentation.result} /></pre> : null}
     </div> : null}
-  </ToolChip>;
+  </ToolTimelineItem>;
 }

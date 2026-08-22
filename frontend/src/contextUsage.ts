@@ -1,4 +1,5 @@
 import type { ContextUsage } from "./store";
+import { translator, type Language } from "./i18n";
 import type { ContextProfile } from "./types";
 
 export interface ContextCompositionItem {
@@ -11,6 +12,20 @@ export interface ContextCompositionGroup {
   tokens: number;
   percentage: number;
   items: ContextCompositionItem[];
+}
+
+export function contextCategoryLabel(category: string, language: Language) {
+  const t = translator(language);
+  return ({
+    core: t("contextCore"),
+    conversation: t("contextConversation"),
+    builtin_tools: t("contextBuiltinTools"),
+    skills: t("contextSkills"),
+    mcp: t("contextMCP"),
+    current_output: t("contextCurrentOutput"),
+    provider_input: t("contextProviderInput"),
+    other: t("contextOther"),
+  } as Record<string, string>)[category] ?? category.replaceAll("_", " ");
 }
 
 export function contextOccupancy(usage: ContextUsage, profile: ContextProfile | null) {
