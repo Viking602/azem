@@ -112,4 +112,54 @@ describe("MenuSelect", () => {
     await act(async () => root.unmount());
     dialog.remove();
   });
+
+  it("toggles once when WKWebView delivers a release-first trackpad sequence", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(
+      <MenuSelect
+        value="model-a"
+        options={[{ value: "model-a", label: "Model A" }, { value: "model-b", label: "Model B" }]}
+        onChange={() => {}}
+        ariaLabel="Model route"
+      />,
+    ));
+
+    const details = container.querySelector<HTMLDetailsElement>("details")!;
+    const summary = details.querySelector<HTMLElement>("summary")!;
+    const releaseFirst = async (detail: number, timeStamp: number) => {
+      const eventAt = <T extends Event>(event: T, value: number) => {
+        Object.defineProperty(event, "timeStamp", { value });
+        return event;
+      };
+      await act(async () => {
+        summary.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp + 4));
+        summary.dispatchEvent(eventAt(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp + 4));
+        summary.dispatchEvent(eventAt(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp));
+        summary.dispatchEvent(eventAt(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp));
+      });
+      await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+    };
+
+    await act(async () => summary.click());
+    expect(details.open).toBe(true);
+    await act(async () => summary.click());
+    expect(details.open).toBe(false);
+
+    await releaseFirst(2, 500);
+    expect(details.open).toBe(true);
+    expect(document.body.querySelector(".menu-select-options-portal")).not.toBeNull();
+    await act(async () => window.dispatchEvent(new Event("blur")));
+    expect(details.open).toBe(false);
+
+    await releaseFirst(3, 700);
+    expect(details.open).toBe(true);
+    await releaseFirst(4, 900);
+    expect(details.open).toBe(false);
+    expect(document.body.querySelector(".menu-select-options-portal")).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
 });

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Check, Search, ShieldAlert, Zap } from "lucide-react";
 import ProviderIcon from "./ProviderIcon";
 import ReasoningEffortSlider from "./ReasoningEffortSlider";
+import usePressActivation from "./usePressActivation";
 
 export type ComposerPickerModel = {
   provider: string;
@@ -48,9 +49,6 @@ export default function ComposerModelPicker(props: Props) {
   const root = useRef<HTMLDivElement>(null);
   const panel = useRef<HTMLElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
-  const activationSequence = useRef(0);
-  const pendingActivation = useRef(0);
-  const activationResetTimer = useRef(0);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [position, setPosition] = useState<Position | null>(null);
@@ -88,34 +86,6 @@ export default function ComposerModelPicker(props: Props) {
     };
   }, [open, place]);
 
-  useEffect(() => {
-    const resetAfterRelease = () => {
-      const sequence = pendingActivation.current;
-      if (!sequence) return;
-      if (activationResetTimer.current) window.clearTimeout(activationResetTimer.current);
-      activationResetTimer.current = window.setTimeout(() => {
-        if (pendingActivation.current === sequence) pendingActivation.current = 0;
-        activationResetTimer.current = 0;
-      }, 0);
-    };
-    const resetImmediately = () => {
-      if (activationResetTimer.current) window.clearTimeout(activationResetTimer.current);
-      activationResetTimer.current = 0;
-      pendingActivation.current = 0;
-    };
-    document.addEventListener("pointerup", resetAfterRelease);
-    document.addEventListener("mouseup", resetAfterRelease);
-    document.addEventListener("pointercancel", resetImmediately, true);
-    window.addEventListener("blur", resetImmediately);
-    return () => {
-      document.removeEventListener("pointerup", resetAfterRelease);
-      document.removeEventListener("mouseup", resetAfterRelease);
-      document.removeEventListener("pointercancel", resetImmediately, true);
-      window.removeEventListener("blur", resetImmediately);
-      resetImmediately();
-    };
-  }, []);
-
   const closePicker = useCallback(() => {
     setOpen(false);
     setQuery("");
@@ -130,27 +100,7 @@ export default function ComposerModelPicker(props: Props) {
     place();
     setOpen(true);
   }, [props.running, open, closePicker, place]);
-
-  const beginActivation = useCallback(() => {
-    if (activationResetTimer.current) window.clearTimeout(activationResetTimer.current);
-    activationResetTimer.current = 0;
-    pendingActivation.current = ++activationSequence.current;
-    togglePicker();
-  }, [togglePicker]);
-
-  const beginReleaseFallback = useCallback(() => {
-    if (!pendingActivation.current) beginActivation();
-  }, [beginActivation]);
-
-  const completeClickActivation = useCallback(() => {
-    if (pendingActivation.current) {
-      pendingActivation.current = 0;
-      if (activationResetTimer.current) window.clearTimeout(activationResetTimer.current);
-      activationResetTimer.current = 0;
-      return;
-    }
-    togglePicker();
-  }, [togglePicker]);
+  const pressActivation = usePressActivation<HTMLButtonElement>(togglePicker, props.running);
 
   useLayoutEffect(() => {
     if (props.running && open) closePicker();
@@ -236,24 +186,7 @@ export default function ComposerModelPicker(props: Props) {
         className="model-controls-trigger"
         aria-disabled={props.running}
         aria-expanded={open}
-        onPointerDown={(event) => {
-          if (props.running || event.button !== 0 || (event.pointerType === "touch" && !event.isPrimary)) return;
-          if ((event.buttons & 1) === 0) return;
-          beginActivation();
-        }}
-        onPointerUp={(event) => {
-          if (props.running || event.button !== 0 || (event.pointerType === "touch" && !event.isPrimary)) return;
-          beginReleaseFallback();
-        }}
-        onMouseDown={(event) => {
-          if (props.running || event.button !== 0 || (event.buttons & 1) === 0 || pendingActivation.current) return;
-          beginActivation();
-        }}
-        onMouseUp={(event) => {
-          if (props.running || event.button !== 0) return;
-          beginReleaseFallback();
-        }}
-        onClick={completeClickActivation}
+        {...pressActivation}
       >
         <ProviderIcon provider={props.selectedProvider} size={14} />
         <span className="model-selected-name">{props.selectedModelName}{selectedModelInfo?.cursorNoZDR && <span className="model-retention-icon" aria-label={retentionLabel} title={retentionDetail}><ShieldAlert size={11} aria-hidden="true" /></span>}</span><small>{props.selectedReasoningName}</small>
