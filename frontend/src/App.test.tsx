@@ -49,6 +49,20 @@ vi.mock("./bridge", async (importOriginal) => {
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
+async function dispatchReleaseFirstActivation(target: HTMLElement, detail: number, timeStamp: number) {
+  const eventAt = <T extends Event>(event: T, value: number) => {
+    Object.defineProperty(event, "timeStamp", { value });
+    return event;
+  };
+  await act(async () => {
+    target.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp + 4));
+    target.dispatchEvent(eventAt(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp + 4));
+    target.dispatchEvent(eventAt(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp));
+    target.dispatchEvent(eventAt(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp));
+  });
+  await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+}
+
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   container?.remove();
@@ -211,6 +225,32 @@ describe("application interactions", () => {
     expect(container.querySelector(".thread-heading-rule")).toBeNull();
   });
 
+  it("normalizes the new-conversation branch menu across trackpad event orderings", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+    await act(async () => useRuntimeStore.setState({
+      view: "thread", blocks: [], running: false,
+      branches: [{ name: "main", current: true }, { name: "feature", current: false }],
+    }));
+
+    const details = container.querySelector<HTMLDetailsElement>(".composer-branch-menu")!;
+    const summary = details.querySelector<HTMLElement>("summary")!;
+    await act(async () => summary.click());
+    expect(details.open).toBe(true);
+    await dispatchReleaseFirstActivation(summary, 2, 500);
+    expect(details.open).toBe(false);
+    await act(async () => summary.click());
+    await act(async () => window.dispatchEvent(new Event("blur")));
+    expect(details.open).toBe(false);
+    await act(async () => summary.click());
+    const currentBranch = details.querySelector<HTMLButtonElement>('[role="option"][aria-selected="true"]')!;
+    await act(async () => currentBranch.click());
+    expect(details.open).toBe(false);
+  });
+
   it("uses the thread header control for branches and keeps the project label intact", async () => {
     container = document.createElement("div");
     document.body.append(container);
@@ -234,11 +274,15 @@ describe("application interactions", () => {
     expect(trigger?.querySelector("strong")?.textContent).toBe("azem");
     expect(heading?.querySelector(".thread-heading-rule")?.nextElementSibling).toBe(trigger?.closest(".titlebar-project-switch"));
     await act(async () => trigger?.click());
-    const popover = container.querySelector<HTMLElement>(".titlebar-project-popover");
+    let popover = container.querySelector<HTMLElement>(".titlebar-project-popover");
     expect(popover?.getAttribute("aria-label")).toBe("切换分支");
     expect(popover?.textContent).not.toContain("项目与分支");
     expect(popover?.textContent).not.toContain("llmux");
     expect(popover?.textContent).toContain("feat/usage-store");
+    await dispatchReleaseFirstActivation(trigger!, 2, 500);
+    expect(container.querySelector(".titlebar-project-popover")).toBeNull();
+    await act(async () => trigger?.click());
+    popover = container.querySelector<HTMLElement>(".titlebar-project-popover");
 
     vi.mocked(execute).mockClear();
     const branchOption = Array.from(popover?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])

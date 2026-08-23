@@ -9,6 +9,7 @@ import { useRuntimeStore } from "../../store";
 import type { DeliveryMode } from "../../types";
 import AttachmentPreview from "../AttachmentPreview";
 import ComposerModelPicker from "../ComposerModelPicker";
+import usePressActivation from "../usePressActivation";
 import { ApprovalPicker } from "./ApprovalPicker";
 import { namedClipboardImage, pastedImages, shouldReadNativeClipboard } from "./clipboard";
 import { effectiveComposerRoute, useComposerModels } from "./composerModels";
@@ -323,6 +324,16 @@ function ComposerContextBar() {
   const branchMenu = useRef<HTMLDetailsElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const createRef = useRef<HTMLInputElement>(null);
+  const closeBranchMenu = useCallback(() => {
+    if (branchMenu.current) branchMenu.current.open = false;
+    setQuery("");
+    setCreating(false);
+    setNewBranch("");
+  }, []);
+  const toggleBranchMenu = useCallback(() => {
+    if (branchMenu.current) branchMenu.current.open = !branchMenu.current.open;
+  }, []);
+  const branchPressActivation = usePressActivation<HTMLElement>(toggleBranchMenu);
 
   const updateBranchLayout = useCallback(() => {
     const node = branchMenu.current;
@@ -341,14 +352,15 @@ function ComposerContextBar() {
     const close = (event: PointerEvent) => {
       const node = branchMenu.current;
       if (!node?.open || node.contains(event.target as Node)) return;
-      node.open = false;
-      setQuery("");
-      setCreating(false);
-      setNewBranch("");
+      closeBranchMenu();
     };
     document.addEventListener("pointerdown", close, true);
-    return () => document.removeEventListener("pointerdown", close, true);
-  }, []);
+    window.addEventListener("blur", closeBranchMenu);
+    return () => {
+      document.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("blur", closeBranchMenu);
+    };
+  }, [closeBranchMenu]);
 
   useEffect(() => {
     const node = branchMenu.current;
@@ -397,15 +409,17 @@ function ComposerContextBar() {
   };
 
   const switchBranch = async (name: string, confirmDirty = false) => {
-    if (!name || name === currentBranch) return;
+    if (!name || name === currentBranch) {
+      closeBranchMenu();
+      return;
+    }
     try {
       await execute({
         kind: "switch_git_branch",
         target: name,
         decision: confirmDirty ? "confirm_dirty" : undefined,
       });
-      if (branchMenu.current) branchMenu.current.open = false;
-      setQuery("");
+      closeBranchMenu();
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       if (!confirmDirty && /uncommitted changes/i.test(message)) {
@@ -423,10 +437,7 @@ function ComposerContextBar() {
     setCreatingBusy(true);
     try {
       await execute({ kind: "create_git_branch", target: name });
-      if (branchMenu.current) branchMenu.current.open = false;
-      setCreating(false);
-      setNewBranch("");
-      setQuery("");
+      closeBranchMenu();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -446,7 +457,14 @@ function ComposerContextBar() {
       </span>
       {branches.length > 0 ? (
         <details ref={branchMenu} className="composer-branch-menu">
-          <summary className="composer-chip composer-chip-action">
+          <summary
+            className="composer-chip composer-chip-action"
+            {...branchPressActivation}
+            onClick={(event) => {
+              event.preventDefault();
+              branchPressActivation.onClick(event);
+            }}
+          >
             <GitBranch size={13} />
             <span>{currentBranch || t("branch")}</span>
             <ChevronDown size={11} />

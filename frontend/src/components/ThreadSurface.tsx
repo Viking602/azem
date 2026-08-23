@@ -12,6 +12,7 @@ import { Composer } from "./thread/Composer";
 import { QueuedPrompts } from "./thread/QueueBar";
 import { namedClipboardImage } from "./thread/clipboard";
 import { parseSkillPrompt } from "./thread/slash";
+import usePressActivation from "./usePressActivation";
 
 const SESSION_STAGE_EASE = [0.16, 1, 0.3, 1] as const;
 
@@ -517,6 +518,12 @@ function BranchSwitch() {
   const [branchOpen, setBranchOpen] = useState(false);
   const [branchSearch, setBranchSearch] = useState("");
   const branchSwitch = useRef<HTMLDivElement>(null);
+  const closeBranch = useCallback(() => {
+    setBranchOpen(false);
+    setBranchSearch("");
+  }, []);
+  const toggleBranch = useCallback(() => setBranchOpen((open) => !open), []);
+  const branchPressActivation = usePressActivation<HTMLButtonElement>(toggleBranch);
   const t = translator(snapshot.language);
   const project = snapshot.workspace.split(/[\\/]/).filter(Boolean).at(-1) || t("workingTree");
   const branch = branches.find((item) => item.current)?.name || snapshot.currentBranch || t("noBranches");
@@ -528,26 +535,24 @@ function BranchSwitch() {
   useEffect(() => {
     if (!branchOpen) return;
     const close = (event: PointerEvent) => {
-      if (branchSwitch.current && !branchSwitch.current.contains(event.target as Node)) setBranchOpen(false);
+      if (branchSwitch.current && !branchSwitch.current.contains(event.target as Node)) closeBranch();
     };
     const closeWithKeyboard = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setBranchOpen(false);
-        setBranchSearch("");
-      }
+      if (event.key === "Escape") closeBranch();
     };
     document.addEventListener("pointerdown", close, true);
     document.addEventListener("keydown", closeWithKeyboard);
+    window.addEventListener("blur", closeBranch);
     return () => {
       document.removeEventListener("pointerdown", close, true);
       document.removeEventListener("keydown", closeWithKeyboard);
+      window.removeEventListener("blur", closeBranch);
     };
-  }, [branchOpen]);
+  }, [branchOpen, closeBranch]);
 
   const switchBranch = async (name: string, confirmDirty = false) => {
     if (!name || name === branch) {
-      setBranchOpen(false);
-      setBranchSearch("");
+      closeBranch();
       return;
     }
     try {
@@ -556,8 +561,7 @@ function BranchSwitch() {
         target: name,
         decision: confirmDirty ? "confirm_dirty" : undefined,
       });
-      setBranchOpen(false);
-      setBranchSearch("");
+      closeBranch();
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       if (!confirmDirty && /uncommitted changes/i.test(message)) {
@@ -571,7 +575,7 @@ function BranchSwitch() {
   };
 
   return <div className="titlebar-project-switch" ref={branchSwitch}>
-    <button type="button" className="titlebar-project" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} onClick={() => setBranchOpen((open) => !open)}>
+    <button type="button" className="titlebar-project" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} {...branchPressActivation}>
       <strong>{project}</strong><b aria-hidden="true">·</b><span>{branch}</span><ChevronDown size={14} />
     </button>
     {branchOpen && <section className="titlebar-project-popover" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}>
