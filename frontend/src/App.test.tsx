@@ -229,7 +229,7 @@ describe("application interactions", () => {
     expect(container.querySelector(".thread-heading-rule")).toBeNull();
   });
 
-  it("reclaims the right side and projects plan, recap, and sources above the composer", async () => {
+  it("mounts compact plan count above the composer and a Synara-style floating reference panel", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -255,22 +255,25 @@ describe("application interactions", () => {
       recap: { sessionId: "session-demo", revision: 4, summary: "回顾摘要", goal: "当前目标", openItems: "未完成事项", updatedAt: "2026-08-23T00:00:00Z" },
     }));
 
-    const support = container.querySelector(".composer-stack > .thread-support-shell")!;
-    const plan = support.querySelector<HTMLButtonElement>(".thread-support-plan-trigger")!;
-    const recap = support.querySelector<HTMLButtonElement>('[aria-label^="回顾"]')!;
-    const sources = support.querySelector<HTMLButtonElement>('[aria-label^="来源"]')!;
-    expect(plan.textContent).toContain("添加输入框支撑栏");
-    expect(plan.textContent).not.toContain("验证响应式");
-    expect(recap.textContent).toContain("r4");
-    expect(sources.textContent).toContain("1");
-    expect(container.querySelector(".thread-plan-shell")).toBeNull();
+    const thread = container.querySelector(".thread-surface")!;
+    const plan = thread.querySelector<HTMLButtonElement>(".composer-stack .thread-plan-control-trigger")!;
+    const referenceHost = thread.querySelector(".thread-reference-host")!;
+    const reference = referenceHost.querySelector(".thread-reference-card")!;
+    const tabs = reference.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    expect(plan.querySelector("svg")).not.toBeNull();
+    expect(plan.textContent).toBe("计划1 / 3");
+    expect(plan.textContent).not.toContain("添加输入框支撑栏");
+    expect(tabs).toHaveLength(2);
+    expect(tabs[0]?.textContent).toContain("r4");
+    expect(tabs[1]?.textContent).toContain("1");
+    expect(reference.parentElement).toBe(referenceHost);
+    expect(referenceHost.parentElement).toBe(thread);
+    expect(reference.querySelectorAll("[data-thread-reference-resize-edge]")).toHaveLength(8);
+    expect(reference.querySelector(".thread-reference-drag")).not.toBeNull();
+    expect(thread.querySelector(".composer-workbench")).toBeNull();
     expect(container.querySelector(".workspace-grid")?.getAttribute("data-panel")).toBe("closed");
     expect(container.querySelector(".context-inspector")).toBeNull();
 
-    await act(async () => recap.click());
-    expect(container.querySelector(".thread-support-panel")?.textContent).toContain("回顾摘要");
-    await act(async () => sources.click());
-    expect(container.querySelector(".thread-support-source-row")?.textContent).toContain("example.com");
   });
 
   it("normalizes the new-conversation branch menu across trackpad event orderings", async () => {

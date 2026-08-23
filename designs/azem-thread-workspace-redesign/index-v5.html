@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light" />
+  <title>Azem 线程工作区 · Codex 右上角参考卡片</title>
+  <!--
+    Assumptions
+    - The persistent right-side context inspector remains removed.
+    - Context occupancy stays in the existing composer context control.
+    - Todo, recap, and conversation sources keep their durable stores; this surface only projects them.
+
+    Design decision
+    - Reduce plan to one left-side icon and dynamic `done/total` count.
+    - Keep recap and sources visible in a persistent right-side card with two tabs.
+    - Pin the reference card to the thread's upper-right corner while the composer remains centered at every width.
+    - Visual language continues the assistant-ui × Tool UI synthesis: quiet border, large radius, compact state marks.
+  -->
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #f5f5f3;
+      --paper: #ffffff;
+      --paper-muted: #fafaf9;
+      --sidebar: #f1f1ef;
+      --hover: #e9e9e6;
+      --ink: #171716;
+      --muted: #72726e;
+      --faint: #a6a6a0;
+      --line: #e5e5e1;
+      --line-strong: #d8d8d2;
+      --blue: #3478f6;
+      --green: #16884b;
+      --red: #d94747;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif;
+      --mono: "SFMono-Regular", "Cascadia Code", Consolas, Menlo, monospace;
+      font-family: var(--font);
+      font-synthesis: none;
+    }
+
+    * { box-sizing: border-box; }
+    html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body { background: #111; color: var(--ink); }
+    button, textarea { font: inherit; }
+    button { border: 0; background: none; color: inherit; cursor: pointer; }
+    button:focus-visible, textarea:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+    .window {
+      width: calc(100% - 36px);
+      height: calc(100% - 36px);
+      min-width: 820px;
+      min-height: 620px;
+      margin: 18px;
+      overflow: hidden;
+      border: 1px solid rgb(255 255 255 / 38%);
+      border-radius: 22px;
+      background: var(--paper);
+      box-shadow: 0 24px 80px rgb(0 0 0 / 22%);
+    }
+
+    .titlebar {
+      height: 38px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f5f6f7;
+    }
+
+    .traffic { width: 12px; height: 12px; border-radius: 50%; }
+    .traffic.red { background: #ef6a61; }
+    .traffic.amber { background: #f4bd4f; }
+    .traffic.green { background: #61c454; }
+
+    .app-grid {
+      height: calc(100% - 38px);
+      display: grid;
+      grid-template-columns: 246px 1px minmax(0, 1fr);
+      background: var(--paper);
+    }
+
+    .sidebar {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--sidebar);
+    }
+
+    .divider { background: var(--line); }
+
+    .sidebar-tabs {
+      height: 52px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      padding: 10px 12px;
+    }
+
+    .sidebar-tabs button {
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .sidebar-tabs button.active {
+      background: var(--paper);
+      color: var(--ink);
+      box-shadow: 0 1px 3px rgb(20 20 17 / 8%);
+    }
+
+    .sidebar-nav { display: grid; gap: 2px; padding: 4px 10px 12px; border-bottom: 1px solid var(--line); }
+    .sidebar-nav button, .sidebar-footer button {
+      min-height: 32px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 0 9px;
+      border-radius: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: left;
+    }
+    .sidebar-nav button:hover, .sidebar-footer button:hover { background: var(--hover); color: var(--ink); }
+    .nav-mark { width: 14px; text-align: center; font-size: 16px; font-weight: 300; }
+    .shortcut { margin-left: auto; color: var(--faint); font: 9px var(--mono); }
+
+    .project-scroll { min-height: 0; flex: 1; overflow: auto; padding: 18px 11px; }
+    .project-label { display: flex; align-items: center; justify-content: space-between; padding: 0 7px 8px; color: var(--faint); font-size: 9px; }
+    .project-heading { height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 7px; font-size: 12px; font-weight: 620; }
+    .session-list { display: grid; gap: 1px; margin: 5px 0 14px 15px; padding-left: 8px; border-left: 1px solid var(--line-strong); }
+    .session-row { min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 7px; border-radius: 7px; color: var(--muted); font-size: 11px; text-align: left; }
+    .session-row:hover, .session-row.active { background: color-mix(in srgb, var(--paper) 72%, transparent); color: var(--ink); }
+    .session-dot { width: 6px; height: 6px; flex: 0 0 6px; border: 1px solid var(--faint); border-radius: 50%; }
+    .session-row span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .sidebar-footer { padding: 8px 10px; border-top: 1px solid var(--line); }
+
+    .thread {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      background: var(--paper);
+    }
+
+    .thread-header {
+      height: 50px;
+      flex: 0 0 50px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px 0 20px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .task-kicker { color: var(--faint); font: 9px var(--mono); letter-spacing: .12em; }
+    .thread-title { min-width: 0; max-width: 360px; overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+    .thread-meta { min-width: 0; display: flex; align-items: center; gap: 7px; padding-left: 10px; border-left: 1px solid var(--line); color: var(--faint); font: 9px var(--mono); }
+    .thread-meta span { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .header-spacer { flex: 1; }
+    .status-pill { min-height: 26px; display: inline-flex; align-items: center; padding: 0 9px; border-radius: 999px; background: color-mix(in srgb, var(--green) 7%, transparent); color: var(--green); font-size: 10px; }
+    .header-button { min-height: 30px; padding: 0 10px; border-radius: 8px; color: var(--muted); font-size: 11px; }
+    .header-button:hover { background: var(--paper-muted); color: var(--ink); }
+
+    .composer-workbench {
+      position: relative;
+      width: min(680px, calc(100% - 42px));
+      display: block;
+      pointer-events: auto;
+    }
+    .support-stack { position: relative; width: 100%; display: flex; flex-direction: column; gap: 8px; }
+    .support-row { min-height: 36px; display: flex; align-items: center; }
+    .support-plan-box {
+      width: fit-content;
+      min-height: 36px;
+      display: flex;
+      align-items: center;
+      padding: 3px;
+      border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--paper) 96%, transparent);
+      box-shadow: 0 4px 16px rgb(20 20 18 / 6%);
+    }
+    .support-trigger {
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 9px;
+      border-radius: 9px;
+      color: var(--muted);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .support-trigger:hover,
+    .support-trigger[aria-expanded="true"] { background: var(--paper-muted); color: var(--ink); }
+    .support-trigger strong { font-size: 10px; font-weight: 650; }
+    .support-trigger em { color: var(--faint); font: normal 9px var(--mono); }
+    .plan-icon { width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--muted); font-size: 10px; }
+
+    .reference-card {
+      position: absolute;
+      z-index: 42;
+      top: 62px;
+      right: 14px;
+      width: 300px;
+      height: min(360px, calc(100% - 84px));
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid color-mix(in srgb, var(--line-strong) 78%, transparent);
+      border-radius: 22px;
+      background: var(--paper);
+      box-shadow: 0 18px 60px rgb(20 20 18 / 12%), 0 2px 8px rgb(20 20 18 / 5%);
+    }
+    .reference-tabs { height: 42px; flex: 0 0 42px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 5px; border-bottom: 1px solid var(--line); }
+    .reference-tab { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 9px; color: var(--muted); font-size: 10px; }
+    .reference-tab:hover,
+    .reference-tab[aria-selected="true"] { background: var(--paper-muted); color: var(--ink); }
+    .support-badge { min-width: 17px; padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--faint); font: 9px var(--mono); text-align: center; }
+    .reference-body { min-height: 0; flex: 1; overflow: auto; }
+    .support-panel {
+      position: absolute;
+      z-index: 50;
+      right: 0;
+      bottom: calc(100% + 8px);
+      width: min(480px, calc(100vw - 294px));
+      max-height: min(520px, calc(100vh - 190px));
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid color-mix(in srgb, var(--line-strong) 78%, transparent);
+      border-radius: 22px;
+      background: var(--paper);
+      box-shadow: 0 18px 60px rgb(20 20 18 / 16%), 0 2px 8px rgb(20 20 18 / 6%);
+      animation: panel-in 160ms cubic-bezier(.22, 1, .36, 1);
+    }
+    .support-panel[data-panel="plan"] { left: 0; right: auto; }
+    .support-panel-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px 14px;
+      padding: 16px 17px 13px;
+      border-bottom: 1px solid var(--line);
+    }
+    .support-panel-heading { display: flex; align-items: baseline; gap: 9px; }
+    .support-panel-heading h2 { margin: 0; font-size: 14px; font-weight: 650; }
+    .support-panel-heading span { color: var(--faint); font: 9px var(--mono); }
+    .support-panel-header p { grid-column: 1; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; text-wrap: pretty; }
+    .support-close { grid-column: 2; grid-row: 1 / span 2; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; color: var(--muted); font-size: 17px; }
+    .support-close:hover { background: var(--paper-muted); color: var(--ink); }
+    .support-scroll { min-height: 0; overflow: auto; padding: 8px 10px 14px; }
+
+    .support-progress { height: 4px; flex: 0 0 4px; overflow: hidden; background: var(--paper-muted); }
+    .support-progress span { width: 20%; height: 100%; display: block; background: var(--blue); }
+    .support-phase { padding: 10px 8px 2px; }
+    .support-phase + .support-phase { margin-top: 4px; border-top: 1px solid var(--line); }
+    .support-phase h3 { margin: 0 0 5px; color: var(--faint); font: 560 9px var(--mono); letter-spacing: .04em; }
+    .support-items { margin: 0; padding: 0; list-style: none; }
+    .support-item { min-height: 39px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 5px 7px; border-radius: 10px; color: var(--muted); }
+    .support-item[data-state="in_progress"] { background: color-mix(in srgb, var(--blue) 5%, var(--paper)); color: var(--ink); }
+    .support-item-label { min-width: 0; font-size: 11px; line-height: 1.35; }
+    .support-item-state { color: var(--faint); font: 9px var(--mono); }
+    .support-item[data-state="in_progress"] .support-item-state { color: var(--blue); }
+    .support-item[data-state="completed"] .support-item-state { color: var(--green); }
+    .task-mark { width: 15px; height: 15px; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--green); font-size: 10px; }
+    .support-item[data-state="completed"] .task-mark { border-color: color-mix(in srgb, var(--green) 50%, var(--line)); }
+    .support-item[data-state="in_progress"] .task-mark { border-color: color-mix(in srgb, var(--blue) 55%, var(--line)); }
+    .support-item[data-state="in_progress"] .task-mark::after { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--blue); }
+
+    .recap-content { display: grid; gap: 12px; padding: 14px 16px 18px; }
+    .recap-summary { margin: 0; color: var(--ink); font-size: 11px; line-height: 1.6; }
+    .recap-block { display: grid; gap: 4px; padding-top: 11px; border-top: 1px solid var(--line); }
+    .recap-block span { color: var(--faint); font: 9px var(--mono); }
+    .recap-block p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; white-space: pre-line; }
+
+    .source-list { display: grid; gap: 2px; padding: 6px; }
+    .source-row { min-height: 44px; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 10px; color: var(--muted); text-align: left; }
+    .source-row:hover { background: var(--paper-muted); color: var(--ink); }
+    .source-icon { width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 7px; font-size: 11px; }
+    .source-row strong, .source-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .source-row strong { color: var(--ink); font-size: 10px; }
+    .source-row small { margin-top: 2px; color: var(--faint); font: 8px var(--mono); }
+    .source-open { color: var(--faint); font-size: 12px; }
+
+    .thread-body { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+    .transcript { height: 100%; overflow: auto; padding: 26px 0 178px; }
+    .reading-column { width: min(840px, calc(100% - 56px)); margin: 0 auto; }
+    .answer { font-size: 13px; line-height: 1.72; }
+    .answer h1 { margin: 0 0 10px; font-size: 20px; letter-spacing: -.025em; }
+    .answer h2 { margin: 24px 0 8px; font-size: 14px; }
+    .answer p { margin: 0 0 12px; }
+    .answer code { padding: 2px 5px; border-radius: 5px; background: var(--paper-muted); font: 11px var(--mono); }
+    .answer ul { display: grid; gap: 7px; margin: 8px 0 16px; padding-left: 20px; }
+
+    .change-card { margin-top: 24px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; }
+    .change-card header { display: flex; align-items: center; gap: 10px; min-height: 54px; padding: 0 14px; border-bottom: 1px solid var(--line); }
+    .change-card header strong { font-size: 12px; }
+    .change-card header small { color: var(--faint); font: 9px var(--mono); }
+    .change-card header span { margin-left: auto; color: var(--green); font: 10px var(--mono); }
+    .file-row { min-height: 40px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding: 0 14px; border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent); }
+    .file-row:last-child { border-bottom: 0; }
+    .file-row code { overflow: hidden; background: transparent; text-overflow: ellipsis; white-space: nowrap; }
+    .file-row span { color: var(--green); font: 10px var(--mono); }
+
+    .composer-dock { position: absolute; z-index: 18; left: 0; right: 0; bottom: 14px; display: flex; justify-content: center; pointer-events: none; }
+    .composer { width: 100%; display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--line) 72%, transparent); border-radius: 24px; background: var(--paper); box-shadow: 0 9px 30px rgb(24 24 20 / 13%); }
+    .composer textarea { width: 100%; min-height: 58px; resize: none; border: 0; outline: 0; padding: 7px 9px; background: transparent; color: var(--ink); font-size: 13px; line-height: 1.55; }
+    .composer textarea::placeholder { color: var(--faint); }
+    .composer-toolbar { min-height: 32px; display: flex; align-items: center; gap: 4px; }
+    .composer-toolbar button { min-height: 32px; padding: 0 10px; border-radius: 999px; color: var(--muted); font-size: 11px; }
+    .composer-toolbar button:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--ink); }
+    .composer-toolbar .plus-button, .composer-toolbar .context-button, .composer-toolbar .send-button { width: 32px; padding: 0; }
+    .composer-toolbar .spacer { flex: 1; }
+    .composer-toolbar .send-button { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--faint); }
+
+    @keyframes panel-in { from { opacity: 0; transform: translateY(5px) scale(.985); } }
+
+    @media (max-width: 1100px) {
+      .app-grid { grid-template-columns: 206px 1px minmax(0, 1fr); }
+      .reference-card { top: 62px; right: 10px; width: 260px; height: 260px; }
+      .support-panel { width: min(400px, calc(100vw - 246px)); }
+      .thread-meta { display: none; }
+    }
+
+    @media (max-width: 760px) {
+      .reference-card { width: 240px; }
+    }
+
+    @media (max-height: 700px) {
+      .transcript { padding-top: 18px; }
+      .answer h2 { margin-top: 17px; }
+      .reference-card { height: 220px; }
+      .support-panel { max-height: calc(100vh - 170px); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0s !important; transition-duration: 0s !important; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <script type="text/babel">
+    const { useEffect, useRef, useState } = React;
+
+    const planPhases = [{
+      title: "完成",
+      items: [
+        { label: "分离任务计划与参考信息", state: "completed", stateLabel: "完成" },
+        { label: "增加计划图标与计数", state: "completed", stateLabel: "完成" },
+        { label: "验证宽屏与窄窗口布局", state: "completed", stateLabel: "完成" },
+      ],
+    }];
+
+    const sources = [
+      { title: "界面截图 1", detail: "图片 · image.png", icon: "▧" },
+      { title: "assistant-ui Elements", detail: "网页 · assistant-ui.com", icon: "↗" },
+      { title: "Tool UI", detail: "网页 · tool-ui.com", icon: "↗" },
+      { title: "线程工作区原型", detail: "文件 · index.html", icon: "⌘" },
+    ];
+
+    function PlanPanel({ onClose }) {
+      return (
+        <section className="support-panel" data-panel="plan" id="thread-support-panel" role="region" aria-label="任务计划">
+          <header className="support-panel-header">
+            <div className="support-panel-heading"><h2>任务计划</h2><span>3 / 3</span></div>
+            <p>当前计划已经完成。</p>
+            <button type="button" className="support-close" aria-label="关闭任务计划" onClick={onClose}>×</button>
+          </header>
+          <div className="support-progress" role="progressbar" aria-label="任务进度 3 / 3" aria-valuemin="0" aria-valuemax="3" aria-valuenow="3"><span style={{ width: "100%" }}></span></div>
+          <div className="support-scroll">
+            {planPhases.map((phase) => (
+              <section className="support-phase" key={phase.title}>
+                <h3>{phase.title}</h3>
+                <ul className="support-items">
+                  {phase.items.map((item) => (
+                    <li className="support-item" data-state={item.state} key={item.label}>
+                      <span className="task-mark" aria-hidden="true">✓</span>
+                      <span className="support-item-label">{item.label}</span>
+                      <span className="support-item-state">{item.stateLabel}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
+        </section>
+      );
+    }
+
+    function ReferenceCard({ tab, setTab }) {
+      return (
+        <aside className="reference-card" aria-label="回顾和来源">
+          <div className="reference-tabs" role="tablist" aria-label="参考信息">
+            <button type="button" className="reference-tab" role="tab" aria-selected={tab === "recap"} onClick={() => setTab("recap")}>回顾<span className="support-badge">r4</span></button>
+            <button type="button" className="reference-tab" role="tab" aria-selected={tab === "sources"} onClick={() => setTab("sources")}>来源<span className="support-badge">{sources.length}</span></button>
+          </div>
+          <div className="reference-body" role="tabpanel">
+            {tab === "recap" ? <div className="recap-content">
+              <p className="recap-summary">任务计划已缩成左侧计数按钮；会话回顾与来源作为常驻右侧卡片保留。</p>
+              <div className="recap-block"><span>当前目标</span><p>保持 prompt 输入区清晰，同时让证据与跨回合状态持续可见。</p></div>
+              <div className="recap-block"><span>未完成事项</span><p>检查实际数据密度\n验证窄窗口浮动位置</p></div>
+            </div> : <div className="source-list">
+              {sources.map((source) => <button type="button" className="source-row" key={source.title}>
+                <span className="source-icon" aria-hidden="true">{source.icon}</span>
+                <span><strong>{source.title}</strong><small>{source.detail}</small></span>
+                <span className="source-open" aria-hidden="true">↗</span>
+              </button>)}
+            </div>}
+          </div>
+        </aside>
+      );
+    }
+
+    function App() {
+      const [planOpen, setPlanOpen] = useState(false);
+      const [referenceTab, setReferenceTab] = useState("recap");
+      const shellRef = useRef(null);
+      const planTriggerRef = useRef(null);
+
+      const closePlan = (returnFocus = false) => {
+        setPlanOpen(false);
+        if (returnFocus) requestAnimationFrame(() => planTriggerRef.current?.focus());
+      };
+
+      useEffect(() => {
+        const outside = (event) => {
+          if (!shellRef.current?.contains(event.target)) setPlanOpen(false);
+        };
+        const keyboard = (event) => {
+          if (event.key === "Escape" && planOpen) closePlan(true);
+        };
+        document.addEventListener("pointerdown", outside, true);
+        document.addEventListener("keydown", keyboard);
+        return () => {
+          document.removeEventListener("pointerdown", outside, true);
+          document.removeEventListener("keydown", keyboard);
+        };
+      }, [planOpen]);
+
+      return (
+        <main className="window" data-screen-label="Azem thread workspace — Codex-style upper-right reference card">
+          <div className="titlebar" aria-hidden="true"><span className="traffic red"></span><span className="traffic amber"></span><span className="traffic green"></span></div>
+          <div className="app-grid">
+            <aside className="sidebar" aria-label="会话导航">
+              <div className="sidebar-tabs"><button type="button" className="active">会话</button><button type="button">工作区</button></div>
+              <nav className="sidebar-nav" aria-label="主要导航">
+                <button type="button"><span className="nav-mark">＋</span><span>新对话</span><span className="shortcut">⌘N</span></button>
+                <button type="button"><span className="nav-mark">⌕</span><span>搜索</span><span className="shortcut">⌘K</span></button>
+                <button type="button"><span className="nav-mark">◇</span><span>安全扫描</span></button>
+              </nav>
+              <div className="project-scroll">
+                <div className="project-label"><span>项目</span><span>＋</span></div>
+                <div className="project-heading"><span>⌄</span><span>azem</span></div>
+                <div className="session-list">
+                  <button type="button" className="session-row active"><span className="session-dot"></span><span>重新设计回顾与来源位置</span></button>
+                  <button type="button" className="session-row"><span className="session-dot"></span><span>修复输入法英文回车误发送问题</span></button>
+                  <button type="button" className="session-row"><span className="session-dot"></span><span>参考 assistant-ui 改造 plan</span></button>
+                  <button type="button" className="session-row"><span className="session-dot"></span><span>调整留白并移除当前回合</span></button>
+                </div>
+                <div className="project-heading"><span>›</span><span>shark-cmdb</span></div>
+              </div>
+              <div className="sidebar-footer"><button type="button"><span className="nav-mark">⚙</span><span>设置</span></button></div>
+            </aside>
+            <div className="divider"></div>
+            <section className="thread">
+              <header className="thread-header">
+                <span className="task-kicker">TASK</span>
+                <strong className="thread-title">重新设计回顾与来源位置</strong>
+                <div className="thread-meta"><span>azem</span><span>·</span><span>feat/runtime-provider-desktop-reliability</span></div>
+                <span className="header-spacer"></span>
+                <span className="status-pill">就绪</span>
+                <button type="button" className="header-button">终端</button>
+              </header>
+              <ReferenceCard tab={referenceTab} setTab={setReferenceTab} />
+
+              <div className="thread-body">
+                <div className="transcript">
+                  <article className="reading-column answer">
+                    <p>参考 Codex 的环境信息挂载方式：</p>
+                    <h1>回顾与来源固定在线程右上角，prompt 重新居中</h1>
+                    <p>计划只保留图标与 3/3 计数；回顾和来源通过右上角浮动卡片持续可见，不再参与底部输入区布局。</p>
+                    <h2>新结构</h2>
+                    <ul>
+                      <li>prompt 左上只显示计划图标、标签和完成数。</li>
+                      <li>右上角卡片使用「回顾 / 来源」标签切换。</li>
+                      <li>卡片覆盖在正文边缘，不改变 prompt 和阅读列宽度。</li>
+                    </ul>
+                    <h2>交互约束</h2>
+                    <p>只有计划使用向上浮层；回顾与来源始终挂在线程右上角。</p>
+                    <div className="change-card">
+                      <header><strong>已编辑 5 个文件</strong><small>SUPPORT DOCK</small><span>+182 −96</span></header>
+                      <div className="file-row"><code>components/thread/ThreadSupportBar.tsx</code><span>+148</span></div>
+                      <div className="file-row"><code>components/conversationSources.ts</code><span>+26</span></div>
+                      <div className="file-row"><code>components/ThreadSurface.tsx</code><span>+8 −12</span></div>
+                    </div>
+                  </article>
+                </div>
+                <div className="composer-dock">
+                  <div className="composer-workbench" ref={shellRef}>
+                    <div className="support-stack">
+                      <div className="support-row" aria-label="任务计划">
+                        <div className="support-plan-box">
+                          <button ref={planTriggerRef} type="button" className="support-trigger" aria-expanded={planOpen} aria-controls="thread-support-panel" onClick={() => setPlanOpen(!planOpen)}>
+                            <span className="plan-icon" aria-hidden="true">✓</span><strong>计划</strong><em>3 / 3</em>
+                          </button>
+                        </div>
+                      </div>
+                      {planOpen ? <PlanPanel onClose={() => closePlan(true)} /> : null}
+                      <section className="composer" aria-label="消息编辑器">
+                        <textarea aria-label="继续对话" placeholder="继续描述你想调整的界面…"></textarea>
+                        <footer className="composer-toolbar">
+                          <button type="button" className="plus-button" aria-label="添加图片">＋</button>
+                          <button type="button">自动审查⌄</button>
+                          <button type="button">计划</button>
+                          <span className="spacer"></span>
+                          <button type="button" className="context-button" aria-label="上下文构成">◔</button>
+                          <button type="button">Ox Alpha&nbsp; 最高</button>
+                          <button type="button" className="send-button" aria-label="发送">↑</button>
+                        </footer>
+                      </section>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </main>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

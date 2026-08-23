@@ -44,11 +44,11 @@ opens as a ToolTimeline with the reasoning item first, followed by tool rows and
 file statistics. Every row retains its real completed, running, pending, or
 failed state and reduced-motion behavior.
 
-The durable Todo projection shares one 36px support dock above the active
-composer with recap and conversation sources. The compact plan trigger shows
-honest `done/total` plus current work. Plan, recap, and sources expand upward
-through one bounded overlay; they never create duplicate state or change
-transcript width.
+The durable Todo projection uses a compact icon/count control above the active
+composer. Recap and conversation sources live in a Synara-inspired floating
+panel inside the thread: it opens at the bottom-right, supports drag and
+eight-direction resize, and is clamped back into view when the host changes.
+The plan overlay and reference panel never change transcript or composer width.
 
 ## Registry
 

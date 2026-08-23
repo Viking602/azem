@@ -1,67 +1,62 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { Check, ExternalLink, FileImage, Globe, Link2, LoaderCircle, Minus, Plus, X } from "lucide-react";
+import { Check, Ellipsis, ExternalLink, FileImage, Globe, Link2, ListTodo, LoaderCircle, Minus, Plus, X } from "lucide-react";
 import { attachmentDataURL, openExternalURL } from "../../bridge";
 import { tFormat, translator } from "../../i18n";
 import { useRuntimeStore } from "../../store";
 import type { Attachment, SessionRecap, Snapshot, TodoItem, TodoList, TodoStatus } from "../../types";
 import { collectConversationSources, type ConversationSource } from "../conversationSources";
-
-export type ThreadSupportPanel = "plan" | "recap" | "sources";
+import {
+  clampThreadReferencePanelRect,
+  initialThreadReferencePanelRect,
+  isThreadReferencePanelDragGesture,
+  moveThreadReferencePanelRect,
+  resizeThreadReferencePanelRect,
+  THREAD_REFERENCE_PANEL_DEFAULT_SIZE,
+  THREAD_REFERENCE_PANEL_MARGIN_PX,
+  THREAD_REFERENCE_RESIZE_EDGES,
+  threadReferenceResizeCursor,
+  type ThreadReferencePanelHostSize,
+  type ThreadReferencePanelRect,
+  type ThreadReferenceResizeEdge,
+} from "./threadReferencePanelGeometry";
 
 export interface ThreadPlanSummary {
   items: TodoItem[];
   completed: number;
   percentage: number;
-  current: TodoItem;
 }
 
 export function summarizeThreadPlan(todo: TodoList): ThreadPlanSummary | null {
   const items = todo.phases.flatMap((phase) => phase.items);
   if (items.length === 0) return null;
   const completed = items.filter((item) => item.status === "completed" || item.status === "cancelled").length;
-  let currentIndex = items.findIndex((item) => item.status === "in_progress");
-  if (currentIndex < 0) currentIndex = items.findIndex((item) => item.status === "pending");
-  if (currentIndex < 0) currentIndex = items.length - 1;
-  return {
-    items,
-    completed,
-    percentage: Math.round((completed / items.length) * 100),
-    current: items[currentIndex]!,
-  };
+  return { items, completed, percentage: Math.round((completed / items.length) * 100) };
 }
 
-export default function ThreadSupportBar() {
+export function ThreadPlanControl() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
-  const blocks = useRuntimeStore((state) => state.blocks);
   const todo = useRuntimeStore((state) => state.todo);
-  const recap = useRuntimeStore((state) => state.recap);
-  const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
-  const setError = useRuntimeStore((state) => state.setError);
-  const [activePanel, setActivePanel] = useState<ThreadSupportPanel | null>(null);
-  const [preview, setPreview] = useState<ConversationSource | null>(null);
+  const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
+  const [expanded, setExpanded] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
-  const triggerRefs = useRef<Partial<Record<ThreadSupportPanel, HTMLButtonElement | null>>>({});
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const panelId = useId();
   const language = snapshot.language;
   const t = translator(language);
-  const plan = todo ? summarizeThreadPlan(todo) : null;
-  const sources = useMemo(() => collectConversationSources(blocks, language), [blocks, language]);
+  const summary = todo ? summarizeThreadPlan(todo) : null;
 
   const close = useCallback((returnFocus = false) => {
-    setActivePanel((current) => {
-      if (returnFocus && current) requestAnimationFrame(() => triggerRefs.current[current]?.focus());
-      return null;
-    });
+    setExpanded(false);
+    if (returnFocus) requestAnimationFrame(() => triggerRef.current?.focus());
   }, []);
 
   useEffect(() => {
     close(false);
-    setPreview(null);
   }, [close, currentSessionId]);
 
   useEffect(() => {
-    if (!activePanel) return;
+    if (!expanded) return;
     const outside = (event: PointerEvent) => {
       if (!shellRef.current?.contains(event.target as Node)) close(false);
     };
@@ -77,66 +72,278 @@ export default function ThreadSupportBar() {
       document.removeEventListener("keydown", keyboard);
       window.removeEventListener("blur", blur);
     };
-  }, [activePanel, close]);
+  }, [close, expanded]);
 
-  const toggle = (panel: ThreadSupportPanel) => setActivePanel((current) => current === panel ? null : panel);
-  const complete = plan ? plan.completed === plan.items.length : false;
-  const planCurrentLabel = complete ? t("todoCompleted") : language === "zh-CN" ? "当前" : "Current";
+  if (!todo || !summary) return null;
+
+  const planLabel = `${t("todoTitle")} ${summary.completed} / ${summary.items.length}`;
+  const shortPlanLabel = language === "zh-CN" ? "计划" : "Plan";
+  const complete = summary.completed === summary.items.length;
+  return <div className="thread-plan-control" ref={shellRef} data-slot="thread-plan-control">
+    <button ref={triggerRef} type="button" className="thread-plan-control-trigger" aria-label={planLabel} aria-expanded={expanded} aria-controls={panelId} onClick={() => setExpanded((value) => !value)}>
+      <ListTodo size={14} aria-hidden="true" /><strong>{shortPlanLabel}</strong><em>{summary.completed} / {summary.items.length}</em>
+    </button>
+    {expanded ? <section id={panelId} className="thread-support-panel thread-plan-panel" role="region" aria-label={t("todoTitle")}>
+      <header className="thread-support-panel-header">
+        <div><h2>{t("todoTitle")}</h2><span>{summary.completed} / {summary.items.length}</span></div>
+        <p>{complete ? (language === "zh-CN" ? "当前计划已经完成。" : "The current plan is complete.") : (language === "zh-CN" ? "完整阶段与任务状态。" : "Complete phases and task states.")}</p>
+        <button type="button" aria-label={language === "zh-CN" ? "关闭任务计划" : "Close task plan"} onClick={() => close(true)}><X size={15} /></button>
+      </header>
+      <PlanPanel todo={todo} summary={summary} language={language} />
+    </section> : null}
+  </div>;
+}
+
+const DEFAULT_THREAD_REFERENCE_PANEL_RECT: ThreadReferencePanelRect = {
+  left: THREAD_REFERENCE_PANEL_MARGIN_PX,
+  top: THREAD_REFERENCE_PANEL_MARGIN_PX,
+  ...THREAD_REFERENCE_PANEL_DEFAULT_SIZE,
+};
+
+function threadReferencePanelHostSize(host: HTMLElement): ThreadReferencePanelHostSize {
+  const bounds = host.getBoundingClientRect();
+  return {
+    width: host.clientWidth || bounds.width,
+    height: host.clientHeight || bounds.height,
+  };
+}
+
+function sameThreadReferencePanelRect(left: ThreadReferencePanelRect, right: ThreadReferencePanelRect): boolean {
+  return left.left === right.left && left.top === right.top && left.width === right.width && left.height === right.height;
+}
+
+export function ThreadReferenceCard() {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const blocks = useRuntimeStore((state) => state.blocks);
+  const recap = useRuntimeStore((state) => state.recap);
+  const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
+  const setError = useRuntimeStore((state) => state.setError);
+  const [tab, setTab] = useState<"recap" | "sources">("recap");
+  const [preview, setPreview] = useState<ConversationSource | null>(null);
+  const [panelRect, setPanelRect] = useState<ThreadReferencePanelRect>(DEFAULT_THREAD_REFERENCE_PANEL_RECT);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const panelRectRef = useRef<ThreadReferencePanelRect>(DEFAULT_THREAD_REFERENCE_PANEL_RECT);
+  const activeInteractionCleanupRef = useRef<(() => void) | null>(null);
+  const interactingRef = useRef(false);
+  const hasMeasuredHostRef = useRef(false);
+  const panelId = useId();
+  const language = snapshot.language;
+  const sources = useMemo(() => collectConversationSources(blocks, language), [blocks, language]);
   const recapLabel = language === "zh-CN" ? "回顾" : "Recap";
   const sourcesLabel = language === "zh-CN" ? "来源" : "Sources";
+  const moveLabel = language === "zh-CN" ? "移动回顾和来源面板" : "Move recap and sources panel";
+  const moveInstructions = language === "zh-CN"
+    ? "拖动移动；方向键微调；Option 加方向键缩放；Home 复位"
+    : "Drag to move; use arrow keys to nudge; Option plus arrow keys to resize; Home resets";
 
-  return <div className="thread-support-shell" ref={shellRef} data-slot="thread-support">
-    <nav className="thread-support-bar" data-has-plan={String(Boolean(plan))} aria-label={language === "zh-CN" ? "线程辅助信息" : "Thread support"}>
-      {plan ? <button
-        ref={(node) => { triggerRefs.current.plan = node; }}
-        type="button"
-        className="thread-support-trigger thread-support-plan-trigger"
-        aria-label={`${t("todoTitle")} ${plan.completed} / ${plan.items.length}。${planCurrentLabel}：${plan.current.content}`}
-        aria-expanded={activePanel === "plan"}
-        aria-controls={panelId}
-        onClick={() => toggle("plan")}
-      >
-        <strong>{t("todoTitle")}</strong><em>{plan.completed} / {plan.items.length}</em><span>{planCurrentLabel} · {plan.current.content}</span>
-      </button> : null}
-      <button
-        ref={(node) => { triggerRefs.current.recap = node; }}
-        type="button"
-        className="thread-support-trigger"
-        aria-label={`${recapLabel} ${recap ? `r${recap.revision}` : "—"}`}
-        aria-expanded={activePanel === "recap"}
-        aria-controls={panelId}
-        onClick={() => toggle("recap")}
-      >
-        <strong>{recapLabel}</strong><span className="thread-support-badge">{recap ? `r${recap.revision}` : "—"}</span>
-      </button>
-      <button
-        ref={(node) => { triggerRefs.current.sources = node; }}
-        type="button"
-        className="thread-support-trigger"
-        aria-label={`${sourcesLabel} ${sources.length}`}
-        aria-expanded={activePanel === "sources"}
-        aria-controls={panelId}
-        onClick={() => toggle("sources")}
-      >
-        <strong>{sourcesLabel}</strong><span className="thread-support-badge">{sources.length}</span>
-      </button>
-    </nav>
-    {activePanel ? <section id={panelId} className="thread-support-panel" role="region" aria-label={panelTitle(activePanel, language)}>
-      <header className="thread-support-panel-header">
-        <div><h2>{panelTitle(activePanel, language)}</h2><span>{panelMetric(activePanel, plan, recap?.revision ?? null, sources.length)}</span></div>
-        <p>{panelDescription(activePanel, language)}</p>
-        <button type="button" aria-label={language === "zh-CN" ? `关闭${panelTitle(activePanel, language)}` : `Close ${panelTitle(activePanel, language)}`} onClick={() => close(true)}><X size={15} /></button>
-      </header>
-      {activePanel === "plan" && plan && todo ? <PlanPanel todo={todo} summary={plan} language={language} /> : null}
-      {activePanel === "recap" ? <RecapPanel recap={recap} language={language} /> : null}
-      {activePanel === "sources" ? <SourcesPanel sources={sources} language={language} openSource={(source) => {
-        if (source.kind === "image") {
-          setPreview(source);
-          return;
-        }
-        if (source.href) void openExternalURL(source.href).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-      }} /> : null}
-    </section> : null}
+  const applyPanelRect = useCallback((next: ThreadReferencePanelRect, host: HTMLElement) => {
+    const clamped = clampThreadReferencePanelRect(next, threadReferencePanelHostSize(host));
+    panelRectRef.current = clamped;
+    const panel = panelRef.current;
+    if (panel) {
+      panel.style.left = `${clamped.left}px`;
+      panel.style.top = `${clamped.top}px`;
+      panel.style.width = `${clamped.width}px`;
+      panel.style.height = `${clamped.height}px`;
+    }
+    return clamped;
+  }, []);
+
+  const commitPanelRect = useCallback((next: ThreadReferencePanelRect, host: HTMLElement) => {
+    setPanelRect(applyPanelRect(next, host));
+  }, [applyPanelRect]);
+
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    activeInteractionCleanupRef.current?.();
+    activeInteractionCleanupRef.current = null;
+    hasMeasuredHostRef.current = false;
+
+    const measure = () => {
+      if (interactingRef.current) return;
+      const size = threadReferencePanelHostSize(host);
+      if (size.width <= 0 || size.height <= 0) return;
+      if (!hasMeasuredHostRef.current) {
+        hasMeasuredHostRef.current = true;
+        commitPanelRect(initialThreadReferencePanelRect(size), host);
+        return;
+      }
+      const clamped = clampThreadReferencePanelRect(panelRectRef.current, size);
+      if (!sameThreadReferencePanelRect(clamped, panelRectRef.current)) commitPanelRect(clamped, host);
+    };
+
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, [commitPanelRect, currentSessionId]);
+
+  useEffect(() => {
+    setTab("recap");
+    setPreview(null);
+  }, [currentSessionId]);
+
+  useEffect(() => () => {
+    activeInteractionCleanupRef.current?.();
+    activeInteractionCleanupRef.current = null;
+  }, []);
+
+  const startPointerInteraction = useCallback((
+    event: ReactPointerEvent<HTMLElement>,
+    cursor: string,
+    waitForDragThreshold: boolean,
+    nextRect: (
+      start: ThreadReferencePanelRect,
+      delta: { x: number; y: number },
+      host: ThreadReferencePanelHostSize,
+    ) => ThreadReferencePanelRect,
+  ) => {
+    const host = hostRef.current;
+    if (!host || event.button !== 0 || (event.pointerType === "touch" && !event.isPrimary)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    activeInteractionCleanupRef.current?.();
+
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
+    const startRect = panelRectRef.current;
+    const overlay = document.createElement("div");
+    overlay.className = "thread-reference-pointer-overlay";
+    overlay.style.cursor = cursor;
+    document.body.append(overlay);
+    const previousBodyCursor = document.body.style.cursor;
+    const previousBodyUserSelect = document.body.style.userSelect;
+    let moved = !waitForDragThreshold;
+    let finished = false;
+    interactingRef.current = moved;
+
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", finish, true);
+      window.removeEventListener("pointercancel", finish, true);
+      window.removeEventListener("blur", finish);
+      overlay.remove();
+      document.body.style.cursor = previousBodyCursor;
+      document.body.style.userSelect = previousBodyUserSelect;
+      interactingRef.current = false;
+      if (activeInteractionCleanupRef.current === finish) activeInteractionCleanupRef.current = null;
+      if (moved) commitPanelRect(panelRectRef.current, host);
+    };
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const delta = { x: moveEvent.clientX - startClientX, y: moveEvent.clientY - startClientY };
+      if (!moved) {
+        if (!isThreadReferencePanelDragGesture(delta)) return;
+        moved = true;
+        interactingRef.current = true;
+      }
+      document.body.style.cursor = cursor;
+      document.body.style.userSelect = "none";
+      applyPanelRect(nextRect(startRect, delta, threadReferencePanelHostSize(host)), host);
+    };
+
+    if (moved) {
+      document.body.style.cursor = cursor;
+      document.body.style.userSelect = "none";
+    }
+    window.addEventListener("pointermove", onPointerMove, true);
+    window.addEventListener("pointerup", finish, true);
+    window.addEventListener("pointercancel", finish, true);
+    window.addEventListener("blur", finish);
+    activeInteractionCleanupRef.current = finish;
+  }, [applyPanelRect, commitPanelRect]);
+
+  const startDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    startPointerInteraction(event, "grabbing", true, (start, delta, host) => moveThreadReferencePanelRect(start, delta, host));
+  };
+
+  const startResize = (event: ReactPointerEvent<HTMLSpanElement>, edge: ThreadReferenceResizeEdge) => {
+    startPointerInteraction(event, threadReferenceResizeCursor(edge), false, (start, delta, host) => resizeThreadReferencePanelRect(start, {
+      edge,
+      deltaX: delta.x,
+      deltaY: delta.y,
+    }, host));
+  };
+
+  const moveWithKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    const host = hostRef.current;
+    if (!host) return;
+    if (event.key === "Home") {
+      event.preventDefault();
+      commitPanelRect(initialThreadReferencePanelRect(threadReferencePanelHostSize(host)), host);
+      return;
+    }
+    const step = event.shiftKey ? 30 : 10;
+    const delta = {
+      ArrowLeft: { x: -step, y: 0 },
+      ArrowRight: { x: step, y: 0 },
+      ArrowUp: { x: 0, y: -step },
+      ArrowDown: { x: 0, y: step },
+    }[event.key];
+    if (!delta) return;
+    event.preventDefault();
+    const size = threadReferencePanelHostSize(host);
+    const next = event.altKey
+      ? resizeThreadReferencePanelRect(panelRectRef.current, {
+        edge: delta.x === 0 ? "s" : "e",
+        deltaX: delta.x,
+        deltaY: delta.y,
+      }, size)
+      : moveThreadReferencePanelRect(panelRectRef.current, delta, size);
+    commitPanelRect(next, host);
+  };
+
+  return <div ref={hostRef} className="thread-reference-host" data-floating-reference-host="true">
+    <aside
+      ref={panelRef}
+      className="thread-reference-card"
+      data-floating-reference-panel="true"
+      role="region"
+      aria-label={language === "zh-CN" ? "回顾和来源" : "Recap and sources"}
+      style={{ left: panelRect.left, top: panelRect.top, width: panelRect.width, height: panelRect.height }}
+    >
+      <div className="thread-reference-card-content">
+        <div className="thread-reference-tabs" role="tablist" aria-label={language === "zh-CN" ? "参考信息" : "Reference information"}>
+          <button type="button" role="tab" aria-selected={tab === "recap"} aria-controls={panelId} onClick={() => setTab("recap")}><span>{recapLabel}</span><em>{recap ? `r${recap.revision}` : "—"}</em></button>
+          <button type="button" role="tab" aria-selected={tab === "sources"} aria-controls={panelId} onClick={() => setTab("sources")}><span>{sourcesLabel}</span><em>{sources.length}</em></button>
+        </div>
+        <div id={panelId} className="thread-reference-body" role="tabpanel">
+          {tab === "recap" ? <RecapPanel recap={recap} language={language} /> : <SourcesPanel sources={sources} language={language} openSource={(source) => {
+            if (source.kind === "image") {
+              setPreview(source);
+              return;
+            }
+            if (source.href) void openExternalURL(source.href).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+          }} />}
+        </div>
+      </div>
+      <div className="thread-reference-controls">
+        <button
+          type="button"
+          className="thread-reference-drag"
+          aria-label={moveLabel}
+          aria-keyshortcuts="ArrowLeft ArrowRight ArrowUp ArrowDown Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown Home"
+          title={moveInstructions}
+          onPointerDown={startDrag}
+          onKeyDown={moveWithKeyboard}
+        >
+          <Ellipsis size={14} aria-hidden="true" />
+        </button>
+      </div>
+      {THREAD_REFERENCE_RESIZE_EDGES.map((edge) => <span
+        key={edge}
+        className="thread-reference-resize-handle"
+        data-edge={edge}
+        data-thread-reference-resize-edge={edge}
+        aria-hidden="true"
+        onPointerDown={(event) => startResize(event, edge)}
+      />)}
+    </aside>
     {preview?.attachment ? <SourceImageLightbox source={preview} sessionId={currentSessionId} language={language} onClose={() => setPreview(null)} /> : null}
   </div>;
 }
@@ -201,29 +408,6 @@ function statusLabel(status: TodoStatus, language: Snapshot["language"]) {
   if (status === "cancelled") return t("cancelled");
   if (status === "in_progress") return t("todoInProgress");
   return t("todoPending");
-}
-
-function panelTitle(panel: ThreadSupportPanel, language: Snapshot["language"]) {
-  if (panel === "plan") return translator(language)("todoTitle");
-  if (panel === "recap") return language === "zh-CN" ? "会话回顾" : "Session recap";
-  return language === "zh-CN" ? "来源" : "Sources";
-}
-
-function panelMetric(panel: ThreadSupportPanel, plan: ThreadPlanSummary | null, recapRevision: number | null, sourceCount: number) {
-  if (panel === "plan") return plan ? `${plan.completed} / ${plan.items.length}` : "—";
-  if (panel === "recap") return recapRevision == null ? "—" : `r${recapRevision}`;
-  return String(sourceCount);
-}
-
-function panelDescription(panel: ThreadSupportPanel, language: Snapshot["language"]) {
-  if (language === "zh-CN") {
-    if (panel === "plan") return "完整阶段与任务状态。";
-    if (panel === "recap") return "跨回合摘要、当前目标与未完成事项。";
-    return "本轮引用的图片、网页和文件。";
-  }
-  if (panel === "plan") return "Complete phases and task states.";
-  if (panel === "recap") return "Cross-turn summary, current goal, and open items.";
-  return "Images, pages, and files referenced in this turn.";
 }
 
 function SourceImageLightbox({ source, sessionId, language, onClose }: { source: ConversationSource; sessionId: string; language: Snapshot["language"]; onClose: () => void }) {

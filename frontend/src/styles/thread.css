@@ -66,23 +66,22 @@
 .azem-symbol-road-accent { stroke: color-mix(in srgb, var(--accent) 78%, var(--muted)); }
 
 
-.thread-support-shell { position: relative; z-index: 26; width: 100%; pointer-events: auto; }
-.composer-stack:has(.queued-prompts) .thread-support-shell { margin-bottom: 8px; }
-.thread-support-bar {
+.thread-plan-control {
+  position: relative;
+  z-index: 26;
+  width: fit-content;
   min-height: 36px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  display: flex;
   align-items: center;
-  gap: 2px;
   padding: 3px;
   border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
   border-radius: 12px;
   background: color-mix(in srgb, var(--paper) 96%, transparent);
   box-shadow: 0 4px 16px rgb(20 20 18 / 6%);
+  pointer-events: auto;
 }
-.thread-support-bar[data-has-plan="false"] { grid-template-columns: auto auto; justify-content: start; }
-.thread-support-trigger {
-  min-width: 0;
+.composer-stack:has(.queued-prompts) .thread-plan-control { margin-bottom: 8px; }
+.thread-plan-control-trigger {
   height: 28px;
   display: inline-flex;
   align-items: center;
@@ -90,19 +89,90 @@
   padding: 0 9px;
   border-radius: 9px;
   color: var(--muted);
-  font-size: var(--text-2xs);
   white-space: nowrap;
 }
-.thread-support-trigger:hover,
-.thread-support-trigger[aria-expanded="true"] { background: var(--paper-muted); color: var(--ink); }
-.thread-support-trigger strong { font-size: var(--text-2xs); font-weight: 650; }
-.thread-support-trigger em { color: var(--faint); font: normal var(--text-2xs) var(--mono); }
-.thread-support-plan-trigger > span { min-width: 0; overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
-.thread-support-badge { min-width: 17px; padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--faint); font: var(--text-2xs) var(--mono); text-align: center; }
+.thread-plan-control-trigger:hover,
+.thread-plan-control-trigger[aria-expanded="true"] { background: var(--paper-muted); color: var(--ink); }
+.thread-plan-control-trigger strong { font-size: var(--text-2xs); font-weight: 650; }
+.thread-plan-control-trigger em { color: var(--faint); font: normal var(--text-2xs) var(--mono); }
+.thread-plan-control-trigger > svg { flex: 0 0 auto; }
+.thread-reference-host {
+  position: absolute;
+  z-index: 42;
+  inset: 46px 0 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.thread-reference-card {
+  position: absolute;
+  overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--line-strong) 78%, transparent);
+  border-radius: 18px;
+  background: transparent;
+  box-shadow: 0 24px 80px rgb(20 20 18 / 18%), 0 2px 8px rgb(20 20 18 / 6%);
+  outline: 1px solid rgb(0 0 0 / 5%);
+  pointer-events: auto;
+}
+.thread-reference-card-content {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: inherit;
+  background: var(--paper);
+}
+.thread-reference-tabs { height: 42px; flex: 0 0 42px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 5px 38px 5px 5px; border-bottom: 1px solid var(--line); }
+.thread-reference-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 9px; color: var(--muted); font-size: var(--text-2xs); }
+.thread-reference-tabs button:hover,
+.thread-reference-tabs button[aria-selected="true"] { background: var(--paper-muted); color: var(--ink); }
+.thread-reference-tabs em { min-width: 17px; padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 5%, transparent); color: var(--faint); font: normal var(--text-2xs) var(--mono); text-align: center; }
+.thread-reference-body { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; }
+.thread-reference-controls {
+  position: absolute;
+  z-index: 70;
+  top: 7px;
+  right: 7px;
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  box-shadow: 0 1px 3px rgb(20 20 18 / 8%);
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+}
+.thread-reference-drag {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  pointer-events: auto;
+}
+.thread-reference-drag:hover { background: var(--paper-muted); color: var(--ink); }
+.thread-reference-drag:active { cursor: grabbing; }
+.thread-reference-resize-handle { position: absolute; z-index: 60; touch-action: none; user-select: none; }
+.thread-reference-resize-handle[data-edge="n"] { top: -8px; left: 16px; right: 16px; height: 16px; cursor: ns-resize; }
+.thread-reference-resize-handle[data-edge="e"] { top: 16px; right: -8px; bottom: 16px; width: 16px; cursor: ew-resize; }
+.thread-reference-resize-handle[data-edge="s"] { bottom: -8px; left: 16px; right: 16px; height: 16px; cursor: ns-resize; }
+.thread-reference-resize-handle[data-edge="w"] { top: 16px; left: -8px; bottom: 16px; width: 16px; cursor: ew-resize; }
+.thread-reference-resize-handle[data-edge="ne"] { top: -8px; right: -8px; width: 24px; height: 24px; cursor: nesw-resize; }
+.thread-reference-resize-handle[data-edge="nw"] { top: -8px; left: -8px; width: 24px; height: 24px; cursor: nwse-resize; }
+.thread-reference-resize-handle[data-edge="se"] { right: -8px; bottom: -8px; width: 24px; height: 24px; cursor: nwse-resize; }
+.thread-reference-resize-handle[data-edge="sw"] { left: -8px; bottom: -8px; width: 24px; height: 24px; cursor: nesw-resize; }
+.thread-reference-pointer-overlay { position: fixed; z-index: 2147483646; inset: 0; background: transparent; touch-action: none; }
 .thread-support-panel {
   position: absolute;
   z-index: 50;
-  right: 0;
+  left: 0;
   bottom: calc(100% + 8px);
   width: min(480px, calc(100vw - var(--sidebar-width) - 40px));
   max-height: min(520px, calc(100vh - 190px));
@@ -160,8 +230,11 @@
 .thread-support-source-row > svg { color: var(--faint); }
 .thread-support-empty { margin: 0; padding: 18px 16px 20px; color: var(--muted); font-size: var(--text-xs); line-height: 1.55; }
 @keyframes thread-support-panel-in { from { opacity: 0; transform: translateY(5px) scale(.985); } }
-@media (max-width: 760px) {
-  .thread-support-plan-trigger > span { display: none; }
+@media (max-width: 1100px) {
+  .thread-plan-control .thread-support-panel { width: min(400px, calc(100vw - var(--sidebar-width) - 40px)); }
+}
+@media (max-height: 700px) {
+  .thread-support-panel { max-height: calc(100vh - 170px); }
 }
 @media (prefers-reduced-motion: reduce) {
   .thread-support-panel { animation: none; }
