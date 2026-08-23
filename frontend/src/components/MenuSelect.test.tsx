@@ -1,9 +1,13 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
+// @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
+import { readFileSync } from "node:fs";
 import MenuSelect from "./MenuSelect";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const prototypeStyles = readFileSync("src/prototype.css", "utf8");
 
 async function openMenu(details: HTMLDetailsElement) {
   details.open = true;
@@ -111,6 +115,17 @@ describe("MenuSelect", () => {
     expect(panel.style.top).toBe("406px");
     await act(async () => root.unmount());
     dialog.remove();
+  });
+
+  it("keeps route controls contained and governance typography token-driven", () => {
+    expect(prototypeStyles).toMatch(/\.route-reasoning-menu > summary\s*\{[^}]*min-width:\s*0;/s);
+    const governanceStart = prototypeStyles.indexOf(".governance-pane");
+    const governanceEnd = prototypeStyles.indexOf(".workspace-overview-page", governanceStart);
+    const governanceStyles = prototypeStyles.slice(governanceStart, governanceEnd);
+    expect(governanceStart).toBeGreaterThanOrEqual(0);
+    expect(governanceEnd).toBeGreaterThan(governanceStart);
+    expect(governanceStyles).toContain("font-size: var(--text-");
+    expect(governanceStyles).not.toMatch(/font-size:\s*\d+px/);
   });
 
   it("toggles once when WKWebView delivers a release-first trackpad sequence", async () => {

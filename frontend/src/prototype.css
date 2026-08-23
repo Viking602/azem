@@ -132,7 +132,7 @@
 .governance-settings { overflow: hidden; }
 .governance-row { min-height: 82px; display: grid; grid-template-columns: minmax(170px, .72fr) minmax(390px, 1.28fr); align-items: center; gap: 22px; padding: 13px 15px; border-bottom: 1px solid var(--line); }
 .governance-row-copy strong, .governance-row-copy small { display: block; }
-.governance-row-copy strong { font-size: 12px; }.governance-row-copy small { margin-top: 4px; color: var(--faint); font-size: 10px; }
+.governance-row-copy strong { font-size: var(--text-sm); }.governance-row-copy small { margin-top: 4px; color: var(--faint); font-size: var(--text-xs); }
 .governance-options { min-width: 0; display: grid; gap: 2px; overflow: hidden; padding: 3px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-muted); }
 .governance-options-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }.governance-options-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .governance-options > button { position: relative; min-width: 0; min-height: 48px; display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 7px; padding: 6px 22px 6px 8px; border-radius: 7px; color: var(--muted); text-align: left; }
@@ -140,11 +140,11 @@
 .governance-options > button:hover { color: var(--ink); background: color-mix(in srgb, var(--paper) 58%, transparent); }.governance-options > button.selected { z-index: 1; background: var(--paper-strong); color: var(--ink); box-shadow: 0 1px 3px rgb(24 24 20 / 9%), inset 0 -2px 0 color-mix(in srgb, var(--accent) 72%, transparent); }
 .governance-options > button > svg:first-child { color: var(--faint); }.governance-options > button.selected > svg:first-child { color: var(--accent); }
 .governance-options > button span, .governance-options > button strong, .governance-options > button small { min-width: 0; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.governance-options > button strong { font-size: 11px; }.governance-options > button small { margin-top: 2px; color: var(--faint); font-size: 9px; }
-.governance-options > button em { position: absolute; top: 4px; right: 5px; color: var(--accent); font-size: 8px; font-style: normal; }.governance-check { position: absolute; right: 6px; bottom: 5px; color: var(--accent); }
+.governance-options > button strong { font-size: var(--text-sm); }.governance-options > button small { margin-top: 2px; color: var(--faint); font-size: var(--text-2xs); }
+.governance-options > button em { position: absolute; top: 4px; right: 5px; color: var(--accent); font-size: var(--text-2xs); font-style: normal; }.governance-check { position: absolute; right: 6px; bottom: 5px; color: var(--accent); }
 .governance-integrity { min-height: 64px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 22px; padding: 10px 15px; }
-.governance-integrity > span { display: none; }.governance-integrity strong, .governance-integrity small { display: block; }.governance-integrity strong { font-size: 11px; }.governance-integrity small { margin-top: 3px; color: var(--faint); font-size: 9px; }
-.governance-integrity em { display: flex; align-items: center; gap: 7px; color: var(--green); font-size: 10px; font-style: normal; }.governance-integrity em i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.governance-integrity > span { display: none; }.governance-integrity strong, .governance-integrity small { display: block; }.governance-integrity strong { font-size: var(--text-sm); }.governance-integrity small { margin-top: 3px; color: var(--faint); font-size: var(--text-2xs); }
+.governance-integrity em { display: flex; align-items: center; gap: 7px; color: var(--green); font-size: var(--text-xs); font-style: normal; }.governance-integrity em i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 
 .workspace-overview-page { overflow: hidden; background: var(--paper); }
 .workspace-overview-header { min-height: 124px; padding: 27px 30px 20px; background: var(--paper); }
@@ -337,7 +337,7 @@ html[data-reduce-motion="true"] *::after { animation-duration: .01ms !important;
 .route-card .route-model-menu { width: 100%; }
 .route-reasoning-menu { width: 88px; min-width: 0; }
 .route-effort-controls { min-width: 88px; max-width: 124px; display: flex; align-items: center; justify-content: flex-end; gap: 4px; }.route-effort-controls > .route-reasoning-menu > summary { width: 100%; }.route-cursor-modes { flex: 0 0 auto; display: flex; align-items: center; overflow: hidden; border-radius: 8px; background: var(--paper-muted); }.route-cursor-modes button { width: 30px; height: 40px; display: grid; place-items: center; border-radius: 0; color: var(--faint); }.route-cursor-modes button:hover, .route-cursor-modes button:focus-visible { color: var(--muted); }.route-cursor-modes button.on { color: var(--blue); }.route-cursor-modes button:disabled { opacity: .28; cursor: default; }
-.route-reasoning-menu > summary { min-height: 40px; border: 0; border-radius: 8px; background: var(--paper-muted); box-shadow: none; font-size: var(--text-xs); }
+.route-reasoning-menu > summary { min-width: 0; min-height: 40px; border: 0; border-radius: 8px; background: var(--paper-muted); box-shadow: none; font-size: var(--text-xs); }
 .route-reasoning-menu[data-disabled="true"] > summary { color: var(--faint); cursor: default; }
 .route-reasoning-options .menu-select-option { min-height: 34px; }
 .route-reasoning-options .menu-select-option strong { font-size: var(--text-xs); }
