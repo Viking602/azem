@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { ArrowDown, Check, ChevronDown, GitBranch, Search } from "lucide-react";
+import { ArrowDown, Check, ChevronDown, GitBranch, PanelsTopLeft, Plus, Search, SquareTerminal, Users } from "lucide-react";
 import { cancelActive, execute, guide, importAttachment, importClipboardImage, startTurn } from "../bridge";
 import { chatTypographyVars } from "../chatTypography";
 import { tFormat, translator } from "../i18n";
@@ -10,7 +10,7 @@ import { useTerminalStore } from "../terminalStore";
 import { TimelineFeed } from "./Timeline";
 import { Composer } from "./thread/Composer";
 import { QueuedPrompts } from "./thread/QueueBar";
-import { ThreadPlanControl, ThreadReferenceCard } from "./thread/ThreadSupportBar";
+import { ThreadEnvironmentPanel } from "./thread/ThreadSupportBar";
 import { namedClipboardImage } from "./thread/clipboard";
 import { parseSkillPrompt } from "./thread/slash";
 import usePressActivation from "./usePressActivation";
@@ -93,6 +93,7 @@ export default function ThreadSurface() {
   const agentMode = "single";
   const setAgentMode = (_value: string) => undefined;
   const [following, setFollowing] = useState(true);
+  const [environmentOpen, setEnvironmentOpen] = useState(true);
   const viewport = useRef<HTMLDivElement>(null);
   const dock = useRef<HTMLDivElement>(null);
   const followingRef = useRef(following);
@@ -164,6 +165,7 @@ export default function ThreadSurface() {
     setPrompt("");
     clearAttachments();
     setEditingQueuedId(null);
+    setEnvironmentOpen(true);
   }, [clearAttachments, currentSessionId]);
   useLayoutEffect(() => {
     const node = dock.current;
@@ -335,9 +337,8 @@ export default function ThreadSurface() {
   /> : null;
 
   return (
-    <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`} data-slot="thread" style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
-      <ThreadHeader empty={empty} />
-      {!empty ? <ThreadReferenceCard /> : null}
+    <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`} data-slot="thread" data-environment-open={String(!empty && environmentOpen)} style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
+      <ThreadHeader empty={empty} environmentOpen={environmentOpen} onEnvironmentOpenChange={setEnvironmentOpen} />
       <div className="thread-session-viewport">
         <motion.div
           key={currentSessionId}
@@ -389,7 +390,6 @@ export default function ThreadSurface() {
                 <div className="composer-dock" ref={dock}>
                   {!following && <button className="jump-latest" aria-label={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
                   <div className="composer-stack">
-                    <ThreadPlanControl />
                     {queue}
                     <Composer
                       prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
@@ -403,6 +403,7 @@ export default function ThreadSurface() {
               </>
             )}
         </motion.div>
+        {!empty ? <ThreadEnvironmentPanel open={environmentOpen} /> : null}
       </div>
     </section>
   );
@@ -489,7 +490,11 @@ function useQueuedTurnRunner(
   }, [beginTurn, busy, editingQueuedId, failQueuedPrompt, pauseReason, queuedPrompts, removeQueuedPrompt]);
 }
 
-function ThreadHeader({ empty }: { empty: boolean }) {
+function ThreadHeader({ empty, environmentOpen, onEnvironmentOpenChange }: {
+  empty: boolean;
+  environmentOpen: boolean;
+  onEnvironmentOpenChange: (open: boolean) => void;
+}) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const title = useRuntimeStore((state) => state.currentTitle);
   const running = useRuntimeStore((state) => state.running);
@@ -507,7 +512,7 @@ function ThreadHeader({ empty }: { empty: boolean }) {
     </div>
     {empty ? null : <div className="thread-header-end">
       <span className="thread-runtime-status" data-running={String(running)}>{status}</span>
-      <HeaderActions empty={empty} />
+      <HeaderActions environmentOpen={environmentOpen} onEnvironmentOpenChange={onEnvironmentOpenChange} />
     </div>}
   </header>;
 }
@@ -605,12 +610,22 @@ function BranchSwitch() {
 
 function headerStatus(running: boolean, t: ReturnType<typeof translator>) { return running ? t("running") : t("ready"); }
 
-function HeaderActions({ empty }: { empty: boolean }) {
+function HeaderActions({ environmentOpen, onEnvironmentOpenChange }: {
+  environmentOpen: boolean;
+  onEnvironmentOpenChange: (open: boolean) => void;
+}) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const setView = useRuntimeStore((state) => state.setView);
   const terminalOpen = useTerminalStore((state) => state.open);
   const t = translator(snapshot.language);
+  const collaborateLabel = t("collaborate");
+  const addSourceLabel = t("addSource");
+  const environmentLabel = t("environment");
   return <div className="thread-actions">
-    <button hidden={empty} type="button" className="square-button terminal-toggle" data-open={String(terminalOpen)} aria-pressed={terminalOpen} title={t("toggleTerminal")} onClick={() => useTerminalStore.getState().toggle()}>{t("terminal")}</button>
+    <button type="button" className="thread-header-action" onClick={() => setView("agents")}><Users size={14} aria-hidden="true" /><span>{collaborateLabel}</span></button>
+    <button type="button" className="thread-header-action" onClick={() => document.querySelector<HTMLInputElement>(".attach-button input")?.click()}><Plus size={14} aria-hidden="true" /><span>{addSourceLabel}</span></button>
+    <button type="button" className="square-button thread-environment-toggle" data-open={String(environmentOpen)} aria-label={environmentLabel} aria-pressed={environmentOpen} title={environmentLabel} onClick={() => onEnvironmentOpenChange(!environmentOpen)}><PanelsTopLeft size={15} aria-hidden="true" /></button>
+    <button type="button" className="square-button terminal-toggle" data-open={String(terminalOpen)} aria-label={t("toggleTerminal")} aria-pressed={terminalOpen} title={t("toggleTerminal")} onClick={() => useTerminalStore.getState().toggle()}><SquareTerminal size={15} aria-hidden="true" /></button>
   </div>;
 }
 

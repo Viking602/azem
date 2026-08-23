@@ -44,11 +44,14 @@ opens as a ToolTimeline with the reasoning item first, followed by tool rows and
 file statistics. Every row retains its real completed, running, pending, or
 failed state and reduced-motion behavior.
 
-The durable Todo projection uses a compact icon/count control above the active
-composer. Recap and conversation sources live in a Synara-inspired floating
-panel inside the thread: it opens at the bottom-right, supports drag and
-eight-direction resize, and is clamped back into view when the host changes.
-The plan overlay and reference panel never change transcript or composer width.
+Todo, recap, and conversation sources live under `Conversation` in the
+Synara-derived Environment panel. The fixed 288px card sits 12px from the
+thread's top-right edge beside real workspace rows for changes, branch, local
+servers, files, and terminal. Wide threads reserve its 312px footprint; narrow
+threads keep the same card as an overlay. The header Environment button owns
+open/close state, and the card never becomes a draggable browser window.
+All panel chrome, section labels, row labels, and accessible names resolve
+through the shared `translator()` dictionary for both Chinese and English.
 
 ## Registry
 

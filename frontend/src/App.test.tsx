@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
 import { readFileSync } from "node:fs";
 import App, { isHighPriorityEvent, takeRuntimeEventFrame, toolCompletionRefreshesWorkspace } from "./App";
-import { execute } from "./bridge";
+import { execute, listWorkspaceChanges } from "./bridge";
 import { useRuntimeStore } from "./store";
 import { useTerminalStore } from "./terminalStore";
 import type { RuntimeEvent, Session, Snapshot } from "./types";
@@ -39,6 +39,7 @@ vi.mock("./bridge", async (importOriginal) => {
   return {
     ...original,
     execute: vi.fn(original.execute),
+    listWorkspaceChanges: vi.fn(async () => ({ repository: true, branch: "feature/environment", additions: 12, deletions: 3, files: [] })),
     subscribe: vi.fn((listener: (event: RuntimeEvent) => void) => {
       bridgeRuntime.listener = listener;
       return () => { if (bridgeRuntime.listener === listener) bridgeRuntime.listener = null; };
@@ -120,7 +121,7 @@ describe("application interactions", () => {
     expect(container.querySelector(".command-dialog")).not.toBeNull();
   });
 
-  it("renders one 终端 label on the thread header control", async () => {
+  it("renders Synara-style environment and terminal icon controls in the thread header", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -136,22 +137,25 @@ describe("application interactions", () => {
       });
     });
 
-    const toggle = container.querySelector<HTMLButtonElement>(".thread-header .terminal-toggle");
-    expect(toggle).not.toBeNull();
-    expect(toggle?.textContent).toBe("终端");
-    expect(toggle?.childNodes).toHaveLength(1);
-    expect(toggle?.firstChild?.nodeType).toBe(Node.TEXT_NODE);
-    expect(toggle?.querySelector(".streaming-text")).toBeNull();
-    expect(toggle?.getAttribute("aria-label")).toBeNull();
-    expect(toggle?.getAttribute("title")).toBe("打开或收起终端");
-    expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+    const environment = container.querySelector<HTMLButtonElement>(".thread-header .thread-environment-toggle");
+    const terminal = container.querySelector<HTMLButtonElement>(".thread-header .terminal-toggle");
+    expect(environment?.querySelector("svg")).not.toBeNull();
+    expect(environment?.textContent).toBe("");
+    expect(environment?.getAttribute("aria-label")).toBe("环境");
+    expect(environment?.getAttribute("aria-pressed")).toBe("true");
+    expect(terminal?.querySelector("svg")).not.toBeNull();
+    expect(terminal?.textContent).toBe("");
+    expect(terminal?.querySelector(".streaming-text")).toBeNull();
+    expect(terminal?.getAttribute("aria-label")).toBe("打开或收起终端");
+    expect(terminal?.getAttribute("title")).toBe("打开或收起终端");
+    expect(terminal?.getAttribute("aria-pressed")).toBe("false");
 
     const status = container.querySelector(".thread-header .thread-runtime-status");
     expect(status?.textContent).toBe("就绪");
-    expect(toggle?.contains(status)).toBe(false);
+    expect(terminal?.contains(status)).toBe(false);
     expect(status?.closest(".thread-header-end")).not.toBeNull();
-    expect(toggle?.closest(".thread-header-end")).toBe(status?.closest(".thread-header-end"));
-    expect(status?.nextElementSibling).toBe(toggle?.closest(".thread-actions"));
+    expect(terminal?.closest(".thread-header-end")).toBe(status?.closest(".thread-header-end"));
+    expect(status?.nextElementSibling).toBe(terminal?.closest(".thread-actions"));
   });
 
   it("toggles the embedded terminal with the primary backtick shortcut", async () => {
@@ -229,7 +233,7 @@ describe("application interactions", () => {
     expect(container.querySelector(".thread-heading-rule")).toBeNull();
   });
 
-  it("mounts compact plan count above the composer and a Synara-style floating reference panel", async () => {
+  it("mounts a fixed Synara Environment panel and reserves plan, recap, and sources inside it", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -254,26 +258,31 @@ describe("application interactions", () => {
       },
       recap: { sessionId: "session-demo", revision: 4, summary: "回顾摘要", goal: "当前目标", openItems: "未完成事项", updatedAt: "2026-08-23T00:00:00Z" },
     }));
+    await act(async () => Promise.resolve());
 
-    const thread = container.querySelector(".thread-surface")!;
-    const plan = thread.querySelector<HTMLButtonElement>(".composer-stack .thread-plan-control-trigger")!;
-    const referenceHost = thread.querySelector(".thread-reference-host")!;
-    const reference = referenceHost.querySelector(".thread-reference-card")!;
-    const tabs = reference.querySelectorAll<HTMLButtonElement>('[role="tab"]');
-    expect(plan.querySelector("svg")).not.toBeNull();
-    expect(plan.textContent).toBe("计划1 / 3");
-    expect(plan.textContent).not.toContain("添加输入框支撑栏");
-    expect(tabs).toHaveLength(2);
-    expect(tabs[0]?.textContent).toContain("r4");
-    expect(tabs[1]?.textContent).toContain("1");
-    expect(reference.parentElement).toBe(referenceHost);
-    expect(referenceHost.parentElement).toBe(thread);
-    expect(reference.querySelectorAll("[data-thread-reference-resize-edge]")).toHaveLength(8);
-    expect(reference.querySelector(".thread-reference-drag")).not.toBeNull();
+    const thread = container.querySelector<HTMLElement>(".thread-surface")!;
+    const viewport = thread.querySelector(".thread-session-viewport")!;
+    const overlay = viewport.querySelector<HTMLElement>(".thread-environment-overlay")!;
+    const environment = overlay.querySelector<HTMLElement>(".thread-environment-card")!;
+    const toggle = thread.querySelector<HTMLButtonElement>(".thread-environment-toggle")!;
+    expect(thread.dataset.environmentOpen).toBe("true");
+    expect(environment.parentElement).toBe(overlay);
+    expect(environment.textContent).toContain("环境");
+    expect(environment.textContent).toContain("计划1 / 3");
+    expect(environment.textContent).toContain("回顾r4");
+    expect(environment.textContent).toContain("来源1");
+    expect(environment.querySelector(".thread-reference-drag")).toBeNull();
+    expect(thread.querySelector(".composer-stack .thread-plan-control-trigger")).toBeNull();
+    expect(thread.querySelectorAll(".thread-header-action")).toHaveLength(2);
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => toggle.click());
+    expect(thread.dataset.environmentOpen).toBe("false");
+    expect(overlay.dataset.open).toBe("false");
+    expect(environment.hasAttribute("inert")).toBe(true);
     expect(thread.querySelector(".composer-workbench")).toBeNull();
     expect(container.querySelector(".workspace-grid")?.getAttribute("data-panel")).toBe("closed");
     expect(container.querySelector(".context-inspector")).toBeNull();
-
   });
 
   it("normalizes the new-conversation branch menu across trackpad event orderings", async () => {

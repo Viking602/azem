@@ -39,10 +39,16 @@
           "createdAt": "2026-08-23T11:01:32.145Z",
           "status": "needs-review",
           "subtitle": "Synara 浮动面板"
+        },
+        {
+          "path": "index-v7.html",
+          "createdAt": "2026-08-23T12:03:35.484Z",
+          "status": "needs-review",
+          "subtitle": "Synara Environment 面板"
         }
       ]
     }
   },
   "createdAt": "2026-08-23T07:30:32.249Z",
-  "updatedAt": "2026-08-23T11:01:32.146Z"
+  "updatedAt": "2026-08-23T12:03:35.484Z"
 }

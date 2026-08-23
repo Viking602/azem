@@ -251,17 +251,21 @@ describe("composer slash commands", () => {
 		expect(threadSurface).not.toContain("threadHeaderStage");
 	});
 
-	it("keeps the header status chip beside the terminal control instead of stacking them", () => {
+	it("keeps the header status beside icon controls and hosts the fixed Environment panel below", () => {
 		expect(threadSurface).toContain('className="thread-header-end"');
+		expect(threadSurface).toContain('className="square-button thread-environment-toggle"');
 		expect(threadSurface).toContain('className="square-button terminal-toggle"');
-		expect(threadSurface).toContain('{t("terminal")}');
+		expect(threadSurface).toContain("<ThreadEnvironmentPanel open={environmentOpen}");
+		expect(threadSurface).toContain("<SquareTerminal");
 		expect(threadSurface).not.toContain("streaming-text");
 		expect(styles).toMatch(/\.thread-header-end\s*\{[^}]*display:\s*flex;[^}]*align-items:\s*center;/s);
 		expect(styles).toMatch(/\.thread-header-end\s*\{[^}]*grid-column:\s*3;[^}]*justify-self:\s*end;/s);
+		expect(styles).toMatch(/\.thread-environment-overlay\s*\{[^}]*padding:\s*12px;[^}]*pointer-events:\s*none;/s);
+		expect(styles).toMatch(/\.thread-environment-card\s*\{[^}]*width:\s*min\(288px,[^}]*border-radius:\s*18px;/s);
+		expect(styles).toMatch(/\.thread-surface\[data-environment-open="true"\] \.transcript-viewport,[\s\S]*?padding-right:\s*312px;/s);
 		expect(styles).not.toMatch(/\.thread-runtime-status\s*\{[^}]*grid-column:\s*3;[^}]*grid-row:\s*1;[^}]*margin-right:\s*45px;/s);
 		expect(styles).not.toMatch(/\.thread-actions\s*\{[^}]*grid-column:\s*3;[^}]*grid-row:\s*1;/s);
 		expect(styles).not.toMatch(/\.thread-header[^{]*\{[^}]*\.streaming-text/s);
-		expect(styles).not.toMatch(/\.terminal-toggle[^{]*\{[^}]*\.streaming-text/s);
 	});
 
 	it("uses an editorial process rail without repeating generic progress labels", () => {
