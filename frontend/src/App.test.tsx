@@ -211,7 +211,7 @@ describe("application interactions", () => {
     expect(toolCompletionRefreshesWorkspace("tool_finished", "coding.read_file")).toBe(false);
   });
 
-  it("renders the command-workbench launcher without suggestion cards", async () => {
+  it("renders the compact reference-led launcher without suggestion cards", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);

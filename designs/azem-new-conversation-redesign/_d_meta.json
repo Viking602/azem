@@ -9,10 +9,16 @@
           "path": "index.html",
           "createdAt": "2026-08-23T06:08:18.072Z",
           "status": "needs-review"
+        },
+        {
+          "path": "index-v2.html",
+          "createdAt": "2026-08-23T06:57:35.419Z",
+          "status": "needs-review",
+          "subtitle": "assistant-ui × Tool UI"
         }
       ]
     }
   },
   "createdAt": "2026-08-23T06:08:18.073Z",
-  "updatedAt": "2026-08-23T06:39:27.636Z"
+  "updatedAt": "2026-08-23T06:57:35.420Z"
 }

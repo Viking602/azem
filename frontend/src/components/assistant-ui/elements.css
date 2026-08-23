@@ -1073,6 +1073,21 @@ button.aui-agent-plan-header { cursor: pointer; }
   transform: none;
 }
 
+[data-slot="empty-state"] [data-slot="composer-bar"].composer-card {
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--aui-element-stroke) 72%, transparent);
+  border-radius: 24px;
+  background: var(--aui-element-surface);
+  box-shadow: 0 1px 3px rgb(24 24 20 / 8%), 0 1px 2px -1px rgb(24 24 20 / 7%);
+}
+
+[data-slot="empty-state"] [data-slot="composer-bar"].composer-card:focus-within {
+  border-color: color-mix(in srgb, var(--blue) 30%, var(--aui-element-stroke));
+  background: var(--aui-element-surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 8%, transparent), 0 1px 3px rgb(24 24 20 / 8%);
+}
+
 [data-slot="reasoning-panel"] .reasoning-summary {
   min-height: 24px;
   gap: 6px;

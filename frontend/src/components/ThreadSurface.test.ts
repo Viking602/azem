@@ -210,7 +210,7 @@ describe("composer slash commands", () => {
 		expect(threadSurface).toContain('className="empty-composer-wrap"');
 		expect(threadSurface).toContain('className="empty-launch-stage"');
 		expect(styles).toMatch(/\.empty-composer-wrap\s*\{[^}]*display:\s*flex;[^}]*padding:\s*clamp\(40px,\s*7vh,\s*76px\)/s);
-		expect(styles).toMatch(/\.empty-launch-stage\s*\{[^}]*position:\s*relative;[^}]*width:\s*min\(960px,\s*100%\);[^}]*padding-left:\s*34px;/s);
+		expect(styles).toMatch(/\.empty-launch-stage\s*\{[^}]*position:\s*relative;[^}]*width:\s*min\(840px,\s*100%\);[^}]*min-width:\s*0;/s);
 		expect(styles).not.toMatch(/\.empty-composer-wrap\s*\{[^}]*--transcript-bottom-gap/s);
 	});
 
@@ -398,20 +398,20 @@ describe("composer slash commands", () => {
 		expect(supportsFastMode("openai", ["fast"])).toBe(false);
 	});
 
-	it("keeps the new-conversation composer as the sole grounded workbench action", () => {
+	it("keeps the new-conversation composer as one compact reference-led action", () => {
 		expect(threadSurface).not.toContain("empty-task-suggestions");
 		expect(threadSurface).not.toContain("emptySuggestions(");
 		expect(styles).not.toContain(".empty-task-suggestions");
 		expect(prototypeStyles).not.toContain(".empty-task-suggestions");
 		expect(assistantUIStyles).not.toContain(".empty-task-suggestions");
-		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-launch-stage::before\s*\{[^}]*bottom:\s*0;[^}]*width:\s*1px;/s);
-		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-composer-heading\s*\{[^}]*display:\s*block;[^}]*text-align:\s*left;/s);
-		expect(prototypeStyles).toMatch(/\.empty-thread\s*\{[^}]*--empty-workbench-rail:\s*color-mix\(in srgb,\s*var\(--paper-muted\)\s*78%,\s*var\(--paper\)\);[^}]*--empty-workbench-signal:\s*var\(--blue\);/s);
-		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-context-bar\s*\{[^}]*min-height:\s*44px;[^}]*border-bottom:\s*1px solid var\(--line\);[^}]*background:\s*var\(--empty-workbench-rail\);/s);
-		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-branch-menu\[open\] > summary\s*\{[^}]*background:\s*var\(--hover\);[^}]*color:\s*var\(--ink\);/s);
-		expect(prototypeStyles).not.toContain("--empty-workbench-rail: #181816");
-		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-card > textarea\s*\{[^}]*min-height:\s*132px;/s);
-		expect(prototypeStyles).toMatch(/\.empty-thread \.send-button\s*\{[^}]*width:\s*34px;[^}]*border-radius:\s*7px;/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-launch-stage::before,\s*\.empty-thread \.empty-launch-stage::after\s*\{[^}]*content:\s*none;/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-composer-wrap \.empty-composer-heading h1\s*\{[^}]*font-size:\s*clamp\(30px,\s*3vw,\s*36px\);/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-context-bar\s*\{[^}]*min-height:\s*30px;[^}]*gap:\s*6px;[^}]*border:\s*0;[^}]*background:\s*transparent;/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-branch-menu > summary\s*\{[^}]*border-radius:\s*999px;[^}]*background:\s*color-mix\(in srgb,\s*var\(--ink\)\s*3%,\s*transparent\);/s);
+		expect(prototypeStyles).not.toContain("--empty-workbench-rail");
+		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-card > textarea\s*\{[^}]*min-height:\s*88px;[^}]*font-size:\s*15px;/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.send-button\s*\{[^}]*width:\s*32px;[^}]*border-radius:\s*999px;/s);
+		expect(assistantUIStyles).toMatch(/\[data-slot="empty-state"\] \[data-slot="composer-bar"\]\.composer-card\s*\{[^}]*gap:\s*8px;[^}]*padding:\s*10px;[^}]*border-radius:\s*24px;/s);
 	});
 
 	it("keeps Thinking implicit and exposes Fast only inside the picker and summary", () => {
