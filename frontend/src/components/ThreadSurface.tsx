@@ -10,7 +10,7 @@ import { useTerminalStore } from "../terminalStore";
 import { TimelineFeed } from "./Timeline";
 import { Composer } from "./thread/Composer";
 import { QueuedPrompts } from "./thread/QueueBar";
-import ThreadPlanBar from "./thread/ThreadPlanBar";
+import ThreadSupportBar from "./thread/ThreadSupportBar";
 import { namedClipboardImage } from "./thread/clipboard";
 import { parseSkillPrompt } from "./thread/slash";
 import usePressActivation from "./usePressActivation";
@@ -337,7 +337,6 @@ export default function ThreadSurface() {
   return (
     <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`} data-slot="thread" style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
       <ThreadHeader empty={empty} />
-      <ThreadPlanBar hidden={empty} />
       <div className="thread-session-viewport">
         <motion.div
           key={currentSessionId}
@@ -389,6 +388,7 @@ export default function ThreadSurface() {
                 <div className="composer-dock" ref={dock}>
                   {!following && <button className="jump-latest" aria-label={t("jumpLatest")} onClick={() => setFollowing(true)}><ArrowDown size={16} /></button>}
                   <div className="composer-stack">
+                    <ThreadSupportBar />
                     {queue}
                     <Composer
                       prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}

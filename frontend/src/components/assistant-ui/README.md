@@ -44,10 +44,11 @@ opens as a ToolTimeline with the reasoning item first, followed by tool rows and
 file statistics. Every row retains its real completed, running, pending, or
 failed state and reduced-motion behavior.
 
-The durable Todo projection lives in the 44px thread plan strip below the
-thread header. Its collapsed state shows honest `done/total`, current work, and
-next work. Expanding opens one bounded overlay with the complete phase/task
-hierarchy; it never creates a second task state or changes transcript width.
+The durable Todo projection shares one 36px support dock above the active
+composer with recap and conversation sources. The compact plan trigger shows
+honest `done/total` plus current work. Plan, recap, and sources expand upward
+through one bounded overlay; they never create duplicate state or change
+transcript width.
 
 ## Registry
 

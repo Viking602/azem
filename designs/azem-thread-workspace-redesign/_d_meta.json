@@ -9,10 +9,16 @@
           "path": "index.html",
           "createdAt": "2026-08-23T07:30:32.248Z",
           "status": "needs-review"
+        },
+        {
+          "path": "index-v2.html",
+          "createdAt": "2026-08-23T08:57:42.911Z",
+          "status": "needs-review",
+          "subtitle": "Composer 支撑栏"
         }
       ]
     }
   },
   "createdAt": "2026-08-23T07:30:32.249Z",
-  "updatedAt": "2026-08-23T07:33:35.531Z"
+  "updatedAt": "2026-08-23T08:57:42.911Z"
 }

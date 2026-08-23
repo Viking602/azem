@@ -229,7 +229,7 @@ describe("application interactions", () => {
     expect(container.querySelector(".thread-heading-rule")).toBeNull();
   });
 
-  it("reclaims the right side and projects the durable plan below the thread header", async () => {
+  it("reclaims the right side and projects plan, recap, and sources above the composer", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -238,27 +238,39 @@ describe("application interactions", () => {
     await act(async () => useRuntimeStore.setState({
       view: "thread",
       currentSessionId: "session-demo",
-      blocks: [{ id: "answer-plan", kind: "assistant", content: "主会话保持全宽" }],
+      blocks: [
+        { id: "user-source", kind: "user", content: "参考 https://example.com/design" },
+        { id: "answer-plan", kind: "assistant", content: "主会话保持全宽" },
+      ],
       running: false,
       todo: {
         goal: "迁移任务计划",
         revision: 1,
         phases: [{ id: "phase", title: "实现", items: [
           { id: "done", content: "移除右栏", status: "completed" },
-          { id: "current", content: "添加顶部计划条", status: "in_progress" },
+          { id: "current", content: "添加输入框支撑栏", status: "in_progress" },
           { id: "next", content: "验证响应式", status: "pending" },
         ] }],
       },
+      recap: { sessionId: "session-demo", revision: 4, summary: "回顾摘要", goal: "当前目标", openItems: "未完成事项", updatedAt: "2026-08-23T00:00:00Z" },
     }));
 
-    const trigger = container.querySelector<HTMLButtonElement>(".thread-plan-trigger")!;
-    expect(trigger.textContent).toContain("添加顶部计划条");
-    expect(trigger.textContent).toContain("验证响应式");
+    const support = container.querySelector(".composer-stack > .thread-support-shell")!;
+    const plan = support.querySelector<HTMLButtonElement>(".thread-support-plan-trigger")!;
+    const recap = support.querySelector<HTMLButtonElement>('[aria-label^="回顾"]')!;
+    const sources = support.querySelector<HTMLButtonElement>('[aria-label^="来源"]')!;
+    expect(plan.textContent).toContain("添加输入框支撑栏");
+    expect(plan.textContent).not.toContain("验证响应式");
+    expect(recap.textContent).toContain("r4");
+    expect(sources.textContent).toContain("1");
+    expect(container.querySelector(".thread-plan-shell")).toBeNull();
     expect(container.querySelector(".workspace-grid")?.getAttribute("data-panel")).toBe("closed");
     expect(container.querySelector(".context-inspector")).toBeNull();
-    expect(container.querySelector(".inspector-toggle")).toBeNull();
-    await act(async () => trigger.click());
-    expect(container.querySelector(".thread-plan-panel")?.textContent).toContain("迁移任务计划");
+
+    await act(async () => recap.click());
+    expect(container.querySelector(".thread-support-panel")?.textContent).toContain("回顾摘要");
+    await act(async () => sources.click());
+    expect(container.querySelector(".thread-support-source-row")?.textContent).toContain("example.com");
   });
 
   it("normalizes the new-conversation branch menu across trackpad event orderings", async () => {

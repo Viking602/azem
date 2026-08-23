@@ -300,7 +300,7 @@ export default function App() {
         if (useRuntimeStore.getState().view === "agents") {
           event.preventDefault();
           useRuntimeStore.getState().setView("thread");
-          requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".thread-plan-trigger, .terminal-toggle")?.focus());
+          requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".thread-support-trigger, .terminal-toggle")?.focus());
           return;
         }
         if (useRuntimeStore.getState().view === "files" || useRuntimeStore.getState().view === "changes") {
