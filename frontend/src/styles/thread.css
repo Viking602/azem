@@ -57,8 +57,8 @@
 .inspector-toggle[data-open="true"] .inspector-closed-icon, .inspector-toggle[data-open="false"] .inspector-open-icon { display: none; }
 .subtle-button, .small-button { height: 29px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--muted); white-space: nowrap; }
 .subtle-button:hover, .small-button:hover { background: var(--paper-muted); border-color: var(--line-strong); color: var(--ink); }
-.empty-composer-wrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: clamp(32px, 8vh, 72px) clamp(24px, 4vw, 52px) clamp(72px, 12vh, 116px); }
-.empty-launch-stage { width: min(780px, 100%); min-width: 0; }
+.empty-composer-wrap { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: clamp(40px, 7vh, 76px) clamp(34px, 6vw, 96px) clamp(72px, 12vh, 132px); }
+.empty-launch-stage { position: relative; width: min(960px, 100%); min-width: 0; padding-left: 34px; }
 .azem-symbol { width: 44px; height: 44px; margin-bottom: 14px; overflow: visible; }
 .azem-symbol-sun, .azem-symbol-road { fill: none; stroke-linecap: round; stroke-linejoin: round; }
 .azem-symbol-sun { stroke: var(--accent); stroke-width: 2.6; }

@@ -209,8 +209,8 @@ describe("composer slash commands", () => {
 		expect(threadSurface).toContain("[blocks, following, queuedPrompts.length, running, currentSessionId]");
 		expect(threadSurface).toContain('className="empty-composer-wrap"');
 		expect(threadSurface).toContain('className="empty-launch-stage"');
-		expect(styles).toMatch(/\.empty-composer-wrap\s*\{[^}]*display:\s*flex;[^}]*padding:\s*clamp\(32px,\s*8vh,\s*72px\)/s);
-		expect(styles).toMatch(/\.empty-launch-stage\s*\{[^}]*width:\s*min\(780px,\s*100%\)/s);
+		expect(styles).toMatch(/\.empty-composer-wrap\s*\{[^}]*display:\s*flex;[^}]*padding:\s*clamp\(40px,\s*7vh,\s*76px\)/s);
+		expect(styles).toMatch(/\.empty-launch-stage\s*\{[^}]*position:\s*relative;[^}]*width:\s*min\(960px,\s*100%\);[^}]*padding-left:\s*34px;/s);
 		expect(styles).not.toMatch(/\.empty-composer-wrap\s*\{[^}]*--transcript-bottom-gap/s);
 	});
 
@@ -398,14 +398,17 @@ describe("composer slash commands", () => {
 		expect(supportsFastMode("openai", ["fast"])).toBe(false);
 	});
 
-	it("keeps the new-conversation composer as the sole launch action", () => {
+	it("keeps the new-conversation composer as the sole grounded workbench action", () => {
 		expect(threadSurface).not.toContain("empty-task-suggestions");
 		expect(threadSurface).not.toContain("emptySuggestions(");
 		expect(styles).not.toContain(".empty-task-suggestions");
 		expect(prototypeStyles).not.toContain(".empty-task-suggestions");
 		expect(assistantUIStyles).not.toContain(".empty-task-suggestions");
-		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-composer-heading\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*3fr\)\s*minmax\(220px,\s*2fr\);[^}]*text-align:\s*left;/s);
-		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-card > textarea\s*\{[^}]*min-height:\s*104px;/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-launch-stage::before\s*\{[^}]*bottom:\s*0;[^}]*width:\s*1px;/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-composer-heading\s*\{[^}]*display:\s*block;[^}]*text-align:\s*left;/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-context-bar\s*\{[^}]*min-height:\s*44px;[^}]*background:\s*var\(--empty-workbench-rail\);/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-card > textarea\s*\{[^}]*min-height:\s*132px;/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.send-button\s*\{[^}]*width:\s*34px;[^}]*border-radius:\s*7px;/s);
 	});
 
 	it("keeps Thinking implicit and exposes Fast only inside the picker and summary", () => {
