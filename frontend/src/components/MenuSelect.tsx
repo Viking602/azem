@@ -130,7 +130,7 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
     updatePosition();
     const onReposition = () => updatePosition();
     window.addEventListener("resize", onReposition);
-    // Capture scroll from any ancestor (inspector-scroll, transcript, etc.).
+    // Capture scroll from any ancestor (settings, transcript, or nested panels).
     window.addEventListener("scroll", onReposition, true);
     return () => {
       window.removeEventListener("resize", onReposition);

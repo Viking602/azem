@@ -8,7 +8,7 @@ import type { SkillEntry, Snapshot } from "../../types";
 
 export type SlashAction =
   | "new" | "compact" | "settings" | "skills" | "plan" | "fast"
-  | "reasoning" | "approval" | "agents" | "mcp" | "reload-skills" | "inspector";
+  | "reasoning" | "approval" | "agents" | "mcp" | "reload-skills";
 type SlashIcon = ComponentType<{ size?: number; className?: string }>;
 export type SlashSuggestion = {
   value: string;

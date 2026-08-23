@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 import * as bridge from "./bridge";
 import { findModelOption, mergeSessionTranscript, modelDisplayName, providerDisplayName, reduceEvents, reorderSessionQueue, shouldMarkSessionUnread, type RuntimeData, useRuntimeStore } from "./store";
 import type { Session, Snapshot } from "./types";
-import Inspector from "./components/Inspector";
 import ThreadSurface from "./components/ThreadSurface";
 import { ComposerContext } from "./components/elements/composer";
 import { composerContextUsage } from "./components/thread/Composer";
@@ -40,7 +39,7 @@ function state(): RuntimeData {
     contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recap: null, recovery: [],
     runId: "", running: false, globalRunId: "", globalRunSessionId: "", runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
-    lastSequence: 0, error: "", view: "thread", inspectorTab: "environment", inspectorOpen: true,
+    lastSequence: 0, error: "", view: "thread",
     settingsOpen: false, settingsTarget: null, commandOpen: false, sessionSearchTarget: null, planMode: false, attachments: [], queuedPrompts: [], queuePauseReasons: {}, theme: "system", uiFont: "system", uiFontSize: 14, chatFontSize: 13, chatCodeFontSize: 12,
   };
 }
@@ -616,25 +615,6 @@ describe("runtime event projection", () => {
     expect(useRuntimeStore.getState()).toMatchObject({ selectedAgentId: "agent-b", agentBlocks: [] });
   });
 
-  it("keeps the inspector preference across temporary pages and side panels", () => {
-    useRuntimeStore.setState(state());
-    useRuntimeStore.getState().setView("extensions");
-    useRuntimeStore.getState().selectAgent("agent-a");
-    useRuntimeStore.getState().selectAgent("");
-    useRuntimeStore.getState().selectPullRequest(42);
-    useRuntimeStore.getState().selectPullRequest(null);
-    useRuntimeStore.getState().setView("thread");
-    expect(useRuntimeStore.getState().inspectorOpen).toBe(true);
-
-    useRuntimeStore.getState().setInspectorOpen(false);
-    useRuntimeStore.getState().setView("extensions");
-    useRuntimeStore.getState().selectAgent("agent-a");
-    useRuntimeStore.getState().selectAgent("");
-    useRuntimeStore.getState().selectPullRequest(42);
-    useRuntimeStore.getState().selectPullRequest(null);
-    useRuntimeStore.getState().setView("thread");
-    expect(useRuntimeStore.getState().inspectorOpen).toBe(false);
-  });
 
   it("separates discrete thinking blurbs instead of gluing **A****B**", () => {
     const projected = reduceEvents(state(), [
@@ -1390,12 +1370,12 @@ describe("runtime event projection", () => {
     });
   });
 
-  it("restores, updates, and renders the current Todo plan", async () => {
+  it("restores and updates the current Todo plan", () => {
     const initialTodo = {
       goal: "在桌面端展示任务进度", revision: 1,
       phases: [{ id: "phase-1", title: "实现", items: [
         { id: "item-1", content: "同步 Todo 状态", status: "completed" as const },
-        { id: "item-2", content: "添加 Inspector 展示", status: "in_progress" as const },
+        { id: "item-2", content: "添加顶部计划条", status: "in_progress" as const },
         { id: "item-3", content: "运行验证", status: "pending" as const },
       ] }],
     };
@@ -1410,75 +1390,9 @@ describe("runtime event projection", () => {
       phases: [{ ...initialTodo.phases[0]!, items: initialTodo.phases[0]!.items.map((item) => item.id === "item-2" ? { ...item, status: "completed" as const } : item) }],
     };
     const updated = reduceEvents(restored, [{ sequence: 2, kind: "todo_updated", sessionId: "s1", todo: updatedTodo }]);
-    expect(updated.todo?.revision).toBe(2);
-
-    useRuntimeStore.setState(updated);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    await act(async () => root.render(createElement(Inspector)));
-    expect(container.textContent).toContain("在桌面端展示任务进度");
-    expect(container.textContent).toContain("添加 Inspector 展示");
-    expect(container.querySelector(".todo-section .inspector-section-header small")?.textContent).toBe("2 / 3");
-    expect(container.textContent?.match(/2 \/ 3/g)).toHaveLength(1);
-    expect(container.querySelector(".todo-progress-row > span")).toBeNull();
-    expect(container.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("2");
-    expect(container.querySelector('[data-status="in_progress"]')).toBeNull();
-    await act(async () => root.unmount());
+    expect(updated.todo).toEqual(updatedTodo);
   });
 
-  it("keeps the inspector subagent roster folded and opens a selected detail directly", async () => {
-    let projected = state();
-    const states = ["running", "running", "queued", "completed", "completed", "failed"];
-    for (let index = 0; index < states.length; index += 1) {
-      projected = reduceEvents(projected, [{
-        sequence: index + 1,
-        kind: "agent_state",
-        agentId: `agent-${index + 1}`,
-        state: states[index],
-        text: states[index] === "completed" ? `完成任务 ${index + 1}` : "",
-        agent: {
-          type: index < 2 ? "explore" : "worker",
-          description: `任务 ${index + 1}`,
-          summary: states[index] === "completed" ? `完成任务 ${index + 1}` : "",
-          activity: states[index] === "running" ? `正在检查文件 ${index + 1}` : "",
-          elapsedMs: (index + 1) * 1000,
-        },
-      }]);
-    }
-    useRuntimeStore.setState(projected);
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-
-    await act(async () => root.render(createElement(Inspector)));
-    const summary = container.querySelector<HTMLButtonElement>(".subagent-summary-button")!;
-    const inspectorList = container.querySelector<HTMLDivElement>(".inspector-subagent-list")!;
-    expect(summary.textContent).toContain("2 个运行中 · 1 个排队中");
-    expect(summary.getAttribute("aria-expanded")).toBe("false");
-    expect(inspectorList.hidden).toBe(true);
-    expect(container.querySelector(".agent-roster")).toBeNull();
-
-    await act(async () => summary.click());
-    expect(summary.getAttribute("aria-expanded")).toBe("true");
-    expect(inspectorList.hidden).toBe(false);
-    expect(container.querySelectorAll(".inspector-subagent-row")).toHaveLength(6);
-    expect(container.textContent).toContain("任务 6");
-    expect(container.textContent).toContain("失败");
-    expect(useRuntimeStore.getState().view).toBe("thread");
-    expect(useRuntimeStore.getState().inspectorOpen).toBe(true);
-
-    const rows = container.querySelectorAll<HTMLButtonElement>(".inspector-subagent-row");
-    await act(async () => rows[0]!.click());
-    const firstSelected = useRuntimeStore.getState().selectedAgentId;
-    expect(firstSelected).not.toBe("");
-    await act(async () => useRuntimeStore.setState({ agentBlocks: [{ id: "stale", kind: "assistant", content: "旧详情" }] }));
-    await act(async () => rows[1]!.click());
-    expect(useRuntimeStore.getState().selectedAgentId).not.toBe(firstSelected);
-    expect(useRuntimeStore.getState().agentBlocks).toEqual([]);
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
 
   it("localizes built-in skill runtime tools", () => {
     expect(toolDisplayName("hydaelyn_activate_skill", "zh-CN")).toBe("加载技能");
@@ -1486,51 +1400,17 @@ describe("runtime event projection", () => {
     expect(toolDisplayName("hydaelyn_read_skill_resource", "en")).toBe("Read Skill Resource");
   });
 
-  it("projects current workspace line changes from git status events", async () => {
+  it("projects current workspace line changes from git status events", () => {
     const changed = reduceEvents(state(), [{
       sequence: 1, kind: "git_branches", workspaceDirty: true,
       data: { additions: "21", deletions: "4", changed_files: "54" },
     }]);
     expect(changed).toMatchObject({ workspaceDirty: true, workspaceAdditions: 21, workspaceDeletions: 4, workspaceChangedFiles: 54 });
-    useRuntimeStore.setState(changed);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    await act(async () => root.render(createElement(Inspector)));
-    expect(container.textContent).toContain("+21");
 
     const clean = reduceEvents(changed, [{ sequence: 2, kind: "git_branches", workspaceDirty: false, data: { additions: "0", deletions: "0", changed_files: "0" } }]);
     expect(clean).toMatchObject({ workspaceDirty: false, workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0 });
-    await act(async () => useRuntimeStore.setState(clean));
-    expect(container.textContent).not.toContain("+0");
-    expect(container.textContent).not.toContain("−0");
-    await act(async () => root.unmount());
   });
 
-  it("renders archive-first context kernel diagnostics", async () => {
-    useRuntimeStore.setState({
-      ...state(),
-      contextProfile: {
-        source: "request", estimated: true, contributions: [],
-        manifestHash: "abcdef0123456789", canonicalHighWater: 44,
-        policyVersion: 3, rebuildReason: "automatic_hard",
-        segments: [{ kind: "archive_carrier", mandatory: true, token_estimate: 3240, content_hash: "segment-hash", source_refs: ["artifact:archive-1"] }],
-        exclusions: [{ source_ref: "sequence:1", reason: "represented_by_archive" }],
-        archive: { carrier: "bitmap", sourceArtifactId: "archive-1", sourceCharacters: 120000, frameCount: 4, frameBytes: 524288, totalPages: 9, truncatedCharacters: 16000 },
-      },
-    });
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    await act(async () => root.render(createElement(Inspector)));
-    expect(container.textContent).toContain("上下文归档");
-    expect(container.textContent).toContain("automatic_hard");
-    expect(container.textContent).toContain("archive carrier");
-    expect(container.textContent).toContain("bitmap");
-    expect(container.textContent).toContain("4 / 9");
-    expect(container.textContent).toContain("512 KiB");
-    expect(container.textContent).toContain("16,000");
-    expect(Array.from(container.querySelectorAll(".context-manifest-hash")).map((node) => node.textContent)).toEqual(["abcdef0123456789", "archive-1"]);
-    await act(async () => root.unmount());
-  });
 
   it("clears pull request detail loading when its panel closes", () => {
     useRuntimeStore.setState({ ...state(), selectedPullRequestNumber: 42, pullRequestLoading: true });
@@ -1538,27 +1418,4 @@ describe("runtime event projection", () => {
     expect(useRuntimeStore.getState()).toMatchObject({ selectedPullRequestNumber: null, pullRequestLoading: false });
   });
 
-  it("keeps runtime processes, sources, and branch details in the live context panel", async () => {
-    const projected = reduceEvents({
-      ...state(),
-      blocks: [{ id: "user-1", kind: "user", content: "检查截图", attachments: [{ id: "image-1", name: "screen.png", mimeType: "image/png", path: "/tmp/screen.png", size: 42 }] }],
-      branches: [{ name: "codex/read-only-branch", current: true }],
-    }, [{
-      sequence: 1,
-      kind: "background_state",
-      background: [{ id: "terminal-1", name: "后台终端", command: "bun run dev", cwd: "/tmp/azem", pid: 123, state: "running", exitCode: 0, startedAt: "2026-08-02T12:00:00Z" }],
-    }]);
-    useRuntimeStore.setState(projected);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    await act(async () => root.render(createElement(Inspector)));
-    expect(container.textContent).toContain("环境信息");
-    expect(container.textContent).toContain("bun run dev");
-    expect(container.textContent).toContain("screen.png");
-    expect(container.querySelector(".inspector-branch-value")?.textContent).toBe("codex/read-only-branch");
-    expect(container.querySelector(".inspector-branch-select")).toBeNull();
-    expect(container.textContent).not.toContain("上下文检查器");
-    expect(container.textContent).not.toContain("Runtime 正常");
-    await act(async () => root.unmount());
-  });
 });

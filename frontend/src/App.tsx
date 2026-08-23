@@ -119,10 +119,7 @@ export default function App() {
   const setError = useRuntimeStore((state) => state.setError);
   const snapshot = useRuntimeStore((state) => state.snapshot);
   const view = useRuntimeStore((state) => state.view);
-  const blocks = useRuntimeStore((state) => state.blocks);
   const running = useRuntimeStore((state) => state.running);
-  const inspectorOpen = useRuntimeStore((state) => state.inspectorOpen);
-  const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const selectedAgentId = useRuntimeStore((state) => state.selectedAgentId);
   const selectedPullRequestNumber = useRuntimeStore((state) => state.selectedPullRequestNumber);
   const settingsOpen = useRuntimeStore((state) => state.settingsOpen);
@@ -303,7 +300,7 @@ export default function App() {
         if (useRuntimeStore.getState().view === "agents") {
           event.preventDefault();
           useRuntimeStore.getState().setView("thread");
-          requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".inspector-toggle")?.focus());
+          requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".thread-plan-trigger, .terminal-toggle")?.focus());
           return;
         }
         if (useRuntimeStore.getState().view === "files" || useRuntimeStore.getState().view === "changes") {
@@ -323,20 +320,18 @@ export default function App() {
     return <div className="app-loading"><span className="azem-mark" />{translator("zh-CN")("loading")}</div>;
   }
 
-  const hasContext = blocks.length > 0 || running;
   const showPullRequest = Boolean(selectedPullRequestNumber);
   const showAgentDetailDrawer = !showPullRequest && (view === "thread" || view === "agents") && Boolean(selectedAgentId);
   const showAgentDrawer = view === "agents" && !selectedAgentId;
-  const showInspector = !showPullRequest && view === "thread" && hasContext && inspectorOpen && !showAgentDetailDrawer;
   // Subagent inspection is an overlay, not another workspace column. Opening a
   // child conversation must never reflow or squeeze the parent transcript.
-  const layoutMode = showPullRequest ? "pull-request" : showInspector ? "open" : "closed";
+  const panelMode = showPullRequest ? "pull-request" : "closed";
   const t = translator(snapshot.language);
   const lazyFallback = <div className="app-loading"><span className="azem-mark" />{t("loading")}</div>;
   return (
     <div className="desktop-shell" data-runtime={String(isDesktopRuntime())} data-platform={navigator.platform} style={{ "--sidebar-width": `${sidebarWidth}px` } as React.CSSProperties}>
       <AppTitleBar />
-      <div className="workspace-grid" data-inspector={layoutMode}>
+      <div className="workspace-grid" data-panel={panelMode}>
         <Sidebar />
         <ResizeHandle value={sidebarWidth} setValue={setSidebarWidth} min={224} max={340} />
         <AppWorkspace
@@ -344,7 +339,6 @@ export default function App() {
           fallback={lazyFallback}
           terminalOpen={terminalOpen}
           terminalMounted={terminalMounted}
-          showInspector={showInspector}
           showAgentDrawer={showAgentDrawer}
           showAgentDetailDrawer={showAgentDetailDrawer}
           showPullRequest={showPullRequest}

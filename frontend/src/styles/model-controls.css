@@ -22,7 +22,7 @@
   background: var(--paper);
   box-shadow: var(--shadow-float);
 }
-/* Fixed body portal — escapes inspector/composer overflow clipping. */
+/* Fixed body portal — escapes nested panel and composer overflow clipping. */
 .menu-select-options-portal {
   position: fixed;
   right: auto;
@@ -793,6 +793,4 @@ html.dark .effort-panel-speed.active {
 .composer-stack .composer-shell { width: 100%; }
 .composer-stack:has(.queued-prompts) .composer-shell { position: relative; z-index: 2; }
 .composer-dock .composer-card { box-shadow: 0 9px 30px rgb(24 24 20 / 13%); overflow: visible; }
-.workspace-grid[data-inspector="open"] .composer-dock { padding-right: var(--inspector-reserve); }
-.workspace-grid[data-inspector="open"] .composer-stack { width: min(680px, calc(100% - 24px)); }
 

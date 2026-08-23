@@ -3,7 +3,6 @@ import { translator } from "./i18n";
 import type {
   Attachment,
   DeliveryMode,
-  InspectorTab,
   PullRequestDashboard,
   PullRequestDetailResponse,
   PullRequestMonitorState,
@@ -48,8 +47,6 @@ interface RuntimeActions {
   applyEvents: (events: RuntimeEvent[]) => void;
   setView: (view: View) => void;
   startLocalDraft: () => void;
-  setInspectorTab: (tab: InspectorTab) => void;
-  setInspectorOpen: (open: boolean) => void;
   selectAgent: (agentId: string) => void;
   setSettingsOpen: (open: boolean, target?: SettingsSearchTarget) => void;
   setCommandOpen: (open: boolean) => void;
@@ -135,8 +132,6 @@ const initialData: RuntimeData = {
   lastSequence: 0,
   error: "",
   view: "thread",
-  inspectorTab: "environment",
-  inspectorOpen: true,
   settingsOpen: false,
   settingsTarget: null,
   commandOpen: false,
@@ -181,13 +176,10 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
     pullRequestDetail: null,
     view: "thread",
   }),
-  setInspectorTab: (inspectorTab) => set({ inspectorTab, inspectorOpen: true }),
-  setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
   selectAgent: (selectedAgentId) => set((state) => ({
     selectedAgentId,
     selectedPullRequestNumber: selectedAgentId ? null : state.selectedPullRequestNumber,
     agentBlocks: selectedAgentId && selectedAgentId === state.selectedAgentId ? state.agentBlocks : [],
-    inspectorTab: selectedAgentId ? "agents" : state.inspectorTab,
   })),
   setSettingsOpen: (settingsOpen, settingsTarget) => set({
     settingsOpen,

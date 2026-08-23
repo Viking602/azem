@@ -1,4 +1,4 @@
-import { isWebResearchTool } from "../inspectorSources";
+import { isWebResearchTool } from "../webResearchTool";
 import { tFormat, translator, type Language } from "../../i18n";
 import type { Block } from "../../types";
 import {

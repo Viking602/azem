@@ -229,6 +229,38 @@ describe("application interactions", () => {
     expect(container.querySelector(".thread-heading-rule")).toBeNull();
   });
 
+  it("reclaims the right side and projects the durable plan below the thread header", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+    await act(async () => useRuntimeStore.setState({
+      view: "thread",
+      currentSessionId: "session-demo",
+      blocks: [{ id: "answer-plan", kind: "assistant", content: "主会话保持全宽" }],
+      running: false,
+      todo: {
+        goal: "迁移任务计划",
+        revision: 1,
+        phases: [{ id: "phase", title: "实现", items: [
+          { id: "done", content: "移除右栏", status: "completed" },
+          { id: "current", content: "添加顶部计划条", status: "in_progress" },
+          { id: "next", content: "验证响应式", status: "pending" },
+        ] }],
+      },
+    }));
+
+    const trigger = container.querySelector<HTMLButtonElement>(".thread-plan-trigger")!;
+    expect(trigger.textContent).toContain("添加顶部计划条");
+    expect(trigger.textContent).toContain("验证响应式");
+    expect(container.querySelector(".workspace-grid")?.getAttribute("data-panel")).toBe("closed");
+    expect(container.querySelector(".context-inspector")).toBeNull();
+    expect(container.querySelector(".inspector-toggle")).toBeNull();
+    await act(async () => trigger.click());
+    expect(container.querySelector(".thread-plan-panel")?.textContent).toContain("迁移任务计划");
+  });
+
   it("normalizes the new-conversation branch menu across trackpad event orderings", async () => {
     container = document.createElement("div");
     document.body.append(container);
@@ -475,7 +507,7 @@ describe("application interactions", () => {
     await vi.waitFor(() => expect(container?.querySelector(".subagents-drawer-layer")).toBeNull());
     await vi.waitFor(() => expect(container?.querySelector(".subagent-detail-drawer-layer")).not.toBeNull());
     await vi.waitFor(() => expect(container?.querySelector(".agent-side-chat")).not.toBeNull());
-    expect(container.querySelector(".workspace-grid")?.getAttribute("data-inspector")).not.toBe("agent");
+    expect(container.querySelector(".workspace-grid")?.getAttribute("data-panel")).not.toBe("agent");
     expect(container.querySelector(".agent-side-chat .subagent-evidence-status")?.textContent).toBe("证据已验证");
     const agentTabs = [...container.querySelectorAll<HTMLButtonElement>(".agent-side-chat-tabs button")];
     expect(agentTabs).toHaveLength(3);
@@ -486,61 +518,6 @@ describe("application interactions", () => {
     expect(useRuntimeStore.getState().view).toBe("thread");
   });
 
-  it("expands the inspector roster before opening a subagent conversation drawer", async () => {
-    const snapshot: Snapshot = {
-      workspace: "/tmp/azem", sessionId: "s1", provider: "chatgpt", model: "gpt-5.6-sol",
-      reasoning: "high", agentMode: "single", language: "zh-CN", approvalMode: "prompt",
-      queueMode: "queue", subagentConcurrency: 2, chatgptFastMode: false, sequence: 0,
-    };
-    const agent = {
-      id: "agent-direct", type: "review", description: "审查前端改动", model: "gpt-5.6-sol",
-      background: true, capabilityMode: "read-only", isolation: "none", cwd: "/tmp/azem",
-      activity: "正在核对交互状态", warning: "", worktreePath: "", toolCalls: 1, turns: 1, tokensUsed: 20,
-      elapsedMs: 1000, state: "running", summary: "", preview: "正在核对交互状态",
-      previewKind: "thinking", previewRunId: "child-direct", elapsedObservedAt: Date.now(),
-    } as const;
-    useRuntimeStore.setState({ snapshot });
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-
-    await act(async () => root?.render(<App />));
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
-    await act(async () => useRuntimeStore.setState({
-      snapshot,
-      view: "thread",
-      currentSessionId: "s1",
-      blocks: [{ id: "answer-direct", kind: "assistant", content: "主会话" }],
-      inspectorOpen: true,
-      selectedAgentId: "",
-      agents: [agent],
-    }));
-
-    await vi.waitFor(() => expect(container?.querySelector(".subagent-summary-button")).not.toBeNull());
-    const summary = container!.querySelector<HTMLButtonElement>(".subagent-summary-button")!;
-    const inspectorList = container!.querySelector<HTMLDivElement>(".inspector-subagent-list")!;
-    expect(summary.getAttribute("aria-expanded")).toBe("false");
-    expect(inspectorList.hidden).toBe(true);
-    await act(async () => summary.click());
-    expect(summary.getAttribute("aria-expanded")).toBe("true");
-    expect(inspectorList.hidden).toBe(false);
-
-    await act(async () => container?.querySelector<HTMLButtonElement>(".inspector-subagent-row")?.click());
-    await vi.waitFor(() => expect(container?.querySelector(".subagent-detail-drawer-layer")).not.toBeNull());
-    await vi.waitFor(() => expect(container?.querySelector(".agent-side-chat")).not.toBeNull());
-    expect(useRuntimeStore.getState()).toMatchObject({ view: "thread", selectedAgentId: "agent-direct" });
-    expect(execute).toHaveBeenCalledWith({ kind: "inspect_agent", target: "agent-direct", sessionId: "s1" });
-    await act(async () => useRuntimeStore.setState({
-      agentBlocks: [{
-        id: "child-progress", kind: "commentary", runId: "child-direct", title: "progress",
-        content: "正在核对交互状态", state: "completed", data: { elapsedMs: "1000" },
-      }],
-    }));
-    // UI-007: live commentary stays readable; it must not fold into 处理中.
-    expect(container?.querySelector(".agent-side-chat")?.textContent).not.toContain("处理中");
-    expect(container?.querySelector(".agent-side-chat .commentary-block")?.textContent)
-      .toContain("正在核对交互状态");
-  });
 
   it("renders a completed subagent transcript like the main conversation and folds only its process trail", async () => {
     const snapshot: Snapshot = {

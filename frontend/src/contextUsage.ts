@@ -43,38 +43,6 @@ export function contextOccupancy(usage: ContextUsage, profile: ContextProfile | 
   return { used, limit, percentage, remaining: Math.max(0, limit - used), estimated };
 }
 
-export interface ContextCacheMetrics {
-  reported: boolean;
-  hitRate: number | null;
-  cachedTokens: number;
-  totalCacheTokens: number;
-}
-
-export function contextCacheMetrics(usage: ContextUsage): ContextCacheMetrics {
-  const reported = usage.mainCacheReported === true && usage.uncachedInputTokens !== undefined;
-  const requestInputTokens = Math.max(0, usage.inputTokens);
-  const cachedTokens = reported
-    ? Math.max(0, requestInputTokens - Math.min(requestInputTokens, Math.max(0, usage.uncachedInputTokens ?? 0)))
-    : 0;
-  return {
-    reported,
-    hitRate: reported && requestInputTokens > 0 ? cacheHitPercentage(cachedTokens, requestInputTokens) : null,
-    cachedTokens,
-    totalCacheTokens: requestInputTokens,
-  };
-}
-
-export function stickyCacheMetrics(
-  current: ContextCacheMetrics,
-  previous: ContextCacheMetrics | null,
-  pending: boolean,
-) {
-  return current.reported ? current : pending && previous?.reported ? previous : current;
-}
-
-function cacheHitPercentage(cachedTokens: number, inputTokens: number) {
-  return Math.min(100, Math.trunc(cachedTokens * 10_000 / inputTokens) / 100);
-}
 
 export function contextComposition(usage: ContextUsage, profile: ContextProfile | null) {
   const grouped = new Map<string, ContextCompositionItem[]>();

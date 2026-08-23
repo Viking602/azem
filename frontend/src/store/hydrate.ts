@@ -205,7 +205,7 @@ function demoReviewAgents(): AgentState[] {
 function demoBlocks(review: boolean): Block[] {
   const blocks: Block[] = [
     { id: "user-demo", kind: "user", runId: "demo-run", content: "给我一个具体优化这个项目 UI 的方案，页面切换和文字流式输出的动效都要有。", state: "submitted" },
-    { id: "progress-structure", kind: "commentary", runId: "demo-run", title: "progress", content: "**读取当前前端结构**\nApp、Sidebar、Timeline 与 Inspector", textPhase: "commentary", state: "completed", data: { startedAt: "1000", completedAt: "1100" } },
+    { id: "progress-structure", kind: "commentary", runId: "demo-run", title: "progress", content: "**读取当前前端结构**\nApp、Sidebar、Timeline 与顶部任务计划", textPhase: "commentary", state: "completed", data: { startedAt: "1000", completedAt: "1100" } },
     { id: "tool-structure", kind: "tool", runId: "demo-run", title: "coding.read_file", content: "{\"path\":\"frontend/src/components/Timeline.tsx\"}", state: "completed", data: { startedAt: "1100", completedAt: "2200", elapsedMs: "1100" } },
     { id: "progress-baseline", kind: "commentary", runId: "demo-run", title: "progress", content: "**提取视觉与动效基线**\n暖白纸面 · 8 个流式尾部节点 · reduced motion", textPhase: "commentary", state: "completed", data: { startedAt: "2300", completedAt: "2400" } },
     { id: "tool-baseline", kind: "tool", runId: "demo-run", title: "coding.search", content: "{\"query\":\"reduced-motion\",\"path\":\"frontend/src\"}", state: "completed", data: { startedAt: "2400", completedAt: "3100", elapsedMs: "700" } },

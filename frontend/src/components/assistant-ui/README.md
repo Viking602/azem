@@ -16,8 +16,8 @@ state owners.
 - `components/elements/composer.tsx` owns Composer, ComposerBar, menu,
   attachments, textarea, toolbar, attach, context, and send slots. The Azem
   thread component supplies durable input behavior and passes the actual
-  ordered `contextComposition` groups with Inspector's localized category
-  labels into ComposerContext.
+  ordered `contextComposition` groups with shared localized category labels
+  into ComposerContext.
 - `Elements.tsx` owns LoadingState, ReasoningPanel, StreamingText, ToolCall,
   ApprovalCard, AgentPlan, and shared label-motion helpers.
 - `ToolTimeline.tsx` and `ToolTimelineStep.tsx` own work rows, status marks,
@@ -44,9 +44,10 @@ opens as a ToolTimeline with the reasoning item first, followed by tool rows and
 file statistics. Every row retains its real completed, running, pending, or
 failed state and reduced-motion behavior.
 
-The Inspector Todo projection remains a compact AgentPlan-style hierarchy with
-a short fixed heading, bounded goal, honest `done/total` rule, phase labels, and
-task status marks. It does not create a second task state.
+The durable Todo projection lives in the 44px thread plan strip below the
+thread header. Its collapsed state shows honest `done/total`, current work, and
+next work. Expanding opens one bounded overlay with the complete phase/task
+hierarchy; it never creates a second task state or changes transcript width.
 
 ## Registry
 

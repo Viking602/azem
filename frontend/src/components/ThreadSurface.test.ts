@@ -487,13 +487,13 @@ describe("composer slash commands", () => {
     expect(items.some((item) => item.value === "/skill:animation-systems")).toBe(true);
     expect(items.some((item) => item.value === "/skill:disabled-skill")).toBe(false);
     expect(items.some((item) => item.action === "skills" || item.value === "/skills" || item.label === "技能")).toBe(false);
-    expect(items.some((item) => item.action === "inspector" || item.value === "/inspector" || item.label === "环境信息")).toBe(false);
+    expect(items.some((item) => item.value === "/inspector" || item.label === "环境信息")).toBe(false);
   });
 
-  it("does not surface the skills catalog or inspector commands when those queries are typed", () => {
+  it("does not surface removed catalog or context-panel commands", () => {
     expect(slashSuggestions("/skills", skills, "zh-CN").some((item) => item.action === "skills" || item.label === "技能")).toBe(false);
-    expect(slashSuggestions("/inspector", skills, "zh-CN").some((item) => item.action === "inspector" || item.label === "环境信息")).toBe(false);
-    expect(slashSuggestions("/环境", skills, "zh-CN").some((item) => item.action === "inspector" || item.label === "环境信息")).toBe(false);
+    expect(slashSuggestions("/inspector", skills, "zh-CN").filter((item) => item.kind === "command")).toEqual([]);
+    expect(slashSuggestions("/环境", skills, "zh-CN").filter((item) => item.kind === "command")).toEqual([]);
   });
 
   it("matches skills by name or description and shows source badges", () => {

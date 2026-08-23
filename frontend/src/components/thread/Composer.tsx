@@ -72,7 +72,6 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
   const approvalMode = useRuntimeStore((state) => state.approvalMode) || snapshot.approvalMode;
   const contextUsage = useRuntimeStore((state) => state.contextUsage);
   const contextProfile = useRuntimeStore((state) => state.contextProfile);
-  const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
   const removeAttachment = useRuntimeStore((state) => state.removeAttachment);
   const setError = useRuntimeStore((state) => state.setError);
@@ -161,7 +160,6 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
         case "fast": changeSpeed(snapshot.chatgptFastMode ? "standard" : "fast"); break;
         case "reasoning": cycleReasoning(); break;
         case "mcp": await execute({ kind: "refresh_mcp" }); break;
-        case "inspector": setView("thread"); setInspectorOpen(true); break;
       }
     };
     void run().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));

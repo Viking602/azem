@@ -3,7 +3,6 @@ import type { ActionKind, EventKind } from "./contracts";
 export type { ActionKind, EventKind } from "./contracts";
 
 export type View = "thread" | "projects" | "files" | "changes" | "pullRequests" | "runs" | "agents" | "extensions" | "recovery";
-export type InspectorTab = "environment" | "changes" | "agents" | "context";
 export type DeliveryMode = "queue" | "guide";
 export type TextPhase = "commentary" | "final_answer";
 

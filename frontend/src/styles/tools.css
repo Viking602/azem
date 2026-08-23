@@ -157,7 +157,6 @@
 .inline-error { margin-top: 10px; padding: 9px 11px; border-radius: 9px; color: var(--red); background: color-mix(in srgb, var(--red) 8%, var(--paper)); }
 .jump-latest { position: absolute; z-index: 7; left: 50%; top: -44px; width: 34px; height: 34px; transform: translateX(-50%); display: grid; place-items: center; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--paper); box-shadow: var(--shadow); color: var(--muted); }
 .jump-latest:hover { background: var(--paper-muted); color: var(--ink); }
-.workspace-grid[data-inspector="open"] .jump-latest { left: calc((100% - var(--inspector-reserve)) / 2); }
 
 .plus { color: var(--green) !important; }
 .minus { color: var(--red) !important; }

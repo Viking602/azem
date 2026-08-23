@@ -47,7 +47,7 @@
 .pull-request-unavailable code { max-width: 560px; padding: 8px 10px; border-radius: 7px; background: var(--paper-muted); color: var(--muted); font-size: var(--text-sm); white-space: normal; }
 .pull-request-loading { min-height: 340px; display: grid; place-content: center; justify-items: center; gap: 10px; color: var(--muted); text-align: center; }
 
-.workspace-grid[data-inspector="pull-request"] { --pull-request-width: min(650px, 52vw); grid-template-columns: var(--sidebar-width) 1px minmax(0, 1fr) var(--pull-request-width); }
+.workspace-grid[data-panel="pull-request"] { --pull-request-width: min(650px, 52vw); grid-template-columns: var(--sidebar-width) 1px minmax(0, 1fr) var(--pull-request-width); }
 .pull-request-panel { grid-column: 4; min-width: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid var(--line-strong); background: var(--paper); box-shadow: -10px 0 32px rgb(20 20 17 / 4%); animation: side-chat-in .16s ease both; }
 .pull-request-panel-header { height: 47px; flex: 0 0 auto; display: flex; align-items: center; gap: 5px; padding: 0 10px 0 15px; border-bottom: 1px solid var(--line); }
 .pull-request-tab { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; color: var(--muted); }

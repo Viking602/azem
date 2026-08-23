@@ -10,6 +10,7 @@ import { useTerminalStore } from "../terminalStore";
 import { TimelineFeed } from "./Timeline";
 import { Composer } from "./thread/Composer";
 import { QueuedPrompts } from "./thread/QueueBar";
+import ThreadPlanBar from "./thread/ThreadPlanBar";
 import { namedClipboardImage } from "./thread/clipboard";
 import { parseSkillPrompt } from "./thread/slash";
 import usePressActivation from "./usePressActivation";
@@ -336,6 +337,7 @@ export default function ThreadSurface() {
   return (
     <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`} data-slot="thread" style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
       <ThreadHeader empty={empty} />
+      <ThreadPlanBar hidden={empty} />
       <div className="thread-session-viewport">
         <motion.div
           key={currentSessionId}
@@ -604,13 +606,10 @@ function headerStatus(running: boolean, t: ReturnType<typeof translator>) { retu
 
 function HeaderActions({ empty }: { empty: boolean }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
-  const inspectorOpen = useRuntimeStore((state) => state.inspectorOpen);
-  const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const terminalOpen = useTerminalStore((state) => state.open);
   const t = translator(snapshot.language);
   return <div className="thread-actions">
     <button hidden={empty} type="button" className="square-button terminal-toggle" data-open={String(terminalOpen)} aria-pressed={terminalOpen} title={t("toggleTerminal")} onClick={() => useTerminalStore.getState().toggle()}>{t("terminal")}</button>
-    <button hidden={empty} className="square-button inspector-toggle" data-open={String(inspectorOpen)} aria-label={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}>{snapshot.language === "zh-CN" ? "侧栏" : "Panel"}</button>
   </div>;
 }
 

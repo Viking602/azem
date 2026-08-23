@@ -250,8 +250,8 @@ describe("tool timeline grouping", () => {
   });
 
   it("recognizes only the explicit model progress contract", () => {
-    expect(parseModelProgress("**读取当前前端结构**\nApp、Sidebar、Timeline 与 Inspector"))
-      .toEqual({ title: "读取当前前端结构", detail: "App、Sidebar、Timeline 与 Inspector" });
+    expect(parseModelProgress("**读取当前前端结构**\nApp、Sidebar、Timeline 与顶部任务计划"))
+      .toEqual({ title: "读取当前前端结构", detail: "App、Sidebar、Timeline 与顶部任务计划" });
     expect(parseModelProgress("**构建高保真交互原"))
       .toEqual({ title: "构建高保真交互原", detail: "" });
     expect(parseModelProgress("我先读取当前结构，然后再修改。"))

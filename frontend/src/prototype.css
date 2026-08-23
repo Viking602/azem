@@ -575,9 +575,8 @@ html[data-reduce-motion="true"] *::after { animation-duration: .01ms !important;
   .workspace-sidebar { grid-column: 1; }
   .workspace-main { grid-column: 2; box-shadow: none; }
   .resize-left { position: absolute; z-index: 12; top: 0; bottom: 0; left: calc(var(--sidebar-width) - 2px); grid-column: auto; }
-  .workspace-grid[data-inspector="pull-request"] { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--pull-request-width); }
-  .workspace-grid[data-inspector="pull-request"] .pull-request-panel { grid-column: 3; }
-  .workspace-grid[data-inspector="open"] .transcript-viewport { width: calc(100% - var(--inspector-reserve)); padding-right: 0; }
+  .workspace-grid[data-panel="pull-request"] { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--pull-request-width); }
+  .workspace-grid[data-panel="pull-request"] .pull-request-panel { grid-column: 3; }
 }
 
 .thread-runtime-status { border-radius: 999px; }
@@ -814,7 +813,6 @@ button.reasoning-summary:hover .azem-thinking-mark,
 .composer-card textarea { height: 57px; min-height: 57px; }
 .composer-toolbar { min-height: 38px; }
 
-.context-inspector .todo-phases { gap: 8px; }
 
 /* Unified provider catalog
  * Subscription and llmux-backed providers share the same workspace, state

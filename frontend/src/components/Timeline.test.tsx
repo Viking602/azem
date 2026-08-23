@@ -1331,7 +1331,7 @@ describe("Codex-style process timeline", () => {
     const blocks: Block[] = [
       {
         id: "progress-done", kind: "commentary", runId: "run", title: "progress", state: "completed",
-        content: "**读取当前前端结构**\nApp、Sidebar、Timeline 与 Inspector",
+        content: "**读取当前前端结构**\nApp、Sidebar、Timeline 与顶部任务计划",
         data: { startedAt: "1000", completedAt: "1100" },
       },
       {
@@ -1364,7 +1364,7 @@ describe("Codex-style process timeline", () => {
     const groups = Array.from(container.querySelectorAll<HTMLElement>(".model-progress-prose"));
     expect(groups).toHaveLength(3);
     expect(groups[0]?.querySelector(".commentary-block")?.textContent).toContain("读取当前前端结构");
-    expect(groups[0]?.querySelector(".commentary-block")?.textContent).toContain("App、Sidebar、Timeline 与 Inspector");
+    expect(groups[0]?.querySelector(".commentary-block")?.textContent).toContain("App、Sidebar、Timeline 与顶部任务计划");
     expect(groups[0]?.querySelector(":scope > time")).toBeNull();
     expect(groups[0]?.getAttribute("data-state")).toBe("settled");
     expect(groups[1]?.getAttribute("data-state")).toBe("running");

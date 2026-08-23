@@ -8,7 +8,6 @@ const Pages = lazy(() => import("./Pages"));
 const SubagentsDrawer = lazy(() => import("./SubagentsPage"));
 const SettingsDialog = lazy(() => import("./SettingsDialog"));
 const PullRequestPanel = lazy(() => import("./PullRequestPanel"));
-const Inspector = lazy(() => import("./Inspector"));
 const AgentSideChat = lazy(() => import("./AgentSideChat"));
 const TerminalPanel = lazy(() => import("./TerminalPanel"));
 
@@ -17,7 +16,6 @@ export function AppWorkspace({
   fallback,
   terminalOpen,
   terminalMounted,
-  showInspector,
   showAgentDrawer,
   showAgentDetailDrawer,
   showPullRequest,
@@ -26,7 +24,6 @@ export function AppWorkspace({
   fallback: ReactNode;
   terminalOpen: boolean;
   terminalMounted: boolean;
-  showInspector: boolean;
   showAgentDrawer: boolean;
   showAgentDetailDrawer: boolean;
   showPullRequest: boolean;
@@ -41,7 +38,6 @@ export function AppWorkspace({
             <Pages view={view} />
           </Suspense>
         )}
-        {showInspector && <Suspense fallback={null}><Inspector /></Suspense>}
         {showAgentDrawer && <Suspense fallback={null}>
           <div className="subagents-drawer-layer" onClick={(event) => {
             if (event.target === event.currentTarget) useRuntimeStore.getState().setView("thread");

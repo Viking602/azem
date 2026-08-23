@@ -7,7 +7,6 @@ import type {
   ContextProfile,
   GitBranch,
   HookCatalog,
-  InspectorTab,
   MCPServerEntry,
   ModelRoute,
 	ModelProvider,
@@ -76,8 +75,6 @@ export interface RuntimeData {
   lastSequence: number;
   error: string;
   view: View;
-  inspectorTab: InspectorTab;
-  inspectorOpen: boolean;
   settingsOpen: boolean;
   settingsTarget: SettingsSearchTarget | null;
   commandOpen: boolean;

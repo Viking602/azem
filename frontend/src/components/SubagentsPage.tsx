@@ -48,7 +48,7 @@ export default function SubagentsPage() {
   const closePage = () => {
     selectAgent("");
     setView("thread");
-    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".inspector-toggle")?.focus());
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".thread-plan-trigger, .terminal-toggle")?.focus());
   };
 
   const inspectAgent = (agentId: string) => selectAgent(agentId);

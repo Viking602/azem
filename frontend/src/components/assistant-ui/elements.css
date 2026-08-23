@@ -404,8 +404,6 @@
   line-height: 1.35;
   grid-template-columns: none;
 }
-.context-inspector .aui-agent-plan,
-.context-inspector .aui-agent-plan[data-status],
 .aui-agent-plan[data-status="in_progress"] { background: var(--paper); color: var(--ink); }
 .aui-agent-plan-header {
   display: grid;
@@ -1352,35 +1350,6 @@ button.aui-agent-plan-header { cursor: pointer; }
   color: var(--paper);
 }
 
-[data-slot="todo-list"] .todo-goal {
-  display: -webkit-box;
-  margin: 3px 0 8px;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: var(--text-xs);
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-[data-slot="todo-list"] .todo-progress-track {
-  height: 1px;
-  border-radius: 0;
-}
-
-[data-slot="todo-list"] .todo-task-mark[data-state="in_progress"] {
-  position: relative;
-  border-color: color-mix(in srgb, var(--blue) 74%, var(--line-strong));
-}
-
-[data-slot="todo-list"] .todo-task-mark[data-state="in_progress"]::after {
-  content: "";
-  position: absolute;
-  inset: 3px;
-  border-radius: 50%;
-  background: var(--blue);
-}
 
 
 @media (max-width: 680px) {

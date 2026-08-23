@@ -1,5 +1,4 @@
 .transcript-viewport { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.workspace-grid[data-inspector="open"] .transcript-viewport { padding-right: var(--inspector-reserve); }
   .transcript { width: min(760px, calc(100% - 48px)); margin: 0 auto; padding: 18px 0 0; }
 /* A real box, not padding-bottom: WebKit content-visibility on the last
  * answer can drop parent padding from scrollHeight and hide it under the dock. */
