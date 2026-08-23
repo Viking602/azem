@@ -1367,25 +1367,6 @@ button.aui-agent-plan-header { cursor: pointer; }
   background: var(--blue);
 }
 
-[data-slot="empty-state"] .empty-task-suggestions {
-  gap: 6px;
-  margin-top: 0;
-}
-
-[data-slot="empty-state"] .empty-task-suggestions button {
-  min-height: 50px;
-  padding: 9px 11px;
-  border-color: color-mix(in srgb, var(--line) 82%, transparent);
-  border-radius: 10px;
-  background: transparent;
-  box-shadow: none;
-}
-
-[data-slot="empty-state"] .empty-task-suggestions button:hover {
-  border-color: var(--line-strong);
-  background: var(--aui-element-subtle);
-  transform: none;
-}
 
 @media (max-width: 680px) {
   .plan-review-actions {
@@ -1395,14 +1376,10 @@ button.aui-agent-plan-header { cursor: pointer; }
     width: 100%;
     justify-content: center;
   }
-  [data-slot="empty-state"] .empty-task-suggestions {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   [data-slot="composer-bar"].composer-card,
-  [data-slot="empty-state"] .empty-task-suggestions button,
   .plan-review-rule > span {
     transition: none;
   }

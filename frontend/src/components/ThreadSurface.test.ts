@@ -208,7 +208,9 @@ describe("composer slash commands", () => {
 		expect(threadSurface).toContain("useLayoutEffect(() => {");
 		expect(threadSurface).toContain("[blocks, following, queuedPrompts.length, running, currentSessionId]");
 		expect(threadSurface).toContain('className="empty-composer-wrap"');
-		expect(styles).toMatch(/\.empty-composer-wrap\s*\{[^}]*padding:\s*20px 32px 80px;/s);
+		expect(threadSurface).toContain('className="empty-launch-stage"');
+		expect(styles).toMatch(/\.empty-composer-wrap\s*\{[^}]*display:\s*flex;[^}]*padding:\s*clamp\(32px,\s*8vh,\s*72px\)/s);
+		expect(styles).toMatch(/\.empty-launch-stage\s*\{[^}]*width:\s*min\(780px,\s*100%\)/s);
 		expect(styles).not.toMatch(/\.empty-composer-wrap\s*\{[^}]*--transcript-bottom-gap/s);
 	});
 
@@ -396,9 +398,20 @@ describe("composer slash commands", () => {
 		expect(supportsFastMode("openai", ["fast"])).toBe(false);
 	});
 
+	it("keeps the new-conversation composer as the sole launch action", () => {
+		expect(threadSurface).not.toContain("empty-task-suggestions");
+		expect(threadSurface).not.toContain("emptySuggestions(");
+		expect(styles).not.toContain(".empty-task-suggestions");
+		expect(prototypeStyles).not.toContain(".empty-task-suggestions");
+		expect(assistantUIStyles).not.toContain(".empty-task-suggestions");
+		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-composer-heading\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*3fr\)\s*minmax\(220px,\s*2fr\);[^}]*text-align:\s*left;/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-card > textarea\s*\{[^}]*min-height:\s*104px;/s);
+	});
+
 	it("keeps Thinking implicit and exposes Fast only inside the picker and summary", () => {
 		expect(threadSurface).not.toContain('className="azem-mark empty-launch-mark"');
-		expect(threadSurface).toContain('className="empty-composer-heading"><h1>{t("promptTitle")}</h1>');
+		expect(threadSurface).toContain('className="empty-composer-heading"');
+		expect(threadSurface).toContain('<h1>{t("promptTitle")}</h1>');
 		expect(threadSurface).toContain('{showContextBar ? <ComposerContextBar /> : null}');
 		expect(threadSurface).toContain('className={`effort-panel-speed');
 		expect(threadSurface).toContain('fast ? "Fast" : ""');

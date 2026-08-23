@@ -191,15 +191,17 @@
 .context-diagnostics .context-kernel-grid { padding-top: 4px; }
 .context-diagnostics .context-manifest-hash { margin-bottom: 7px; }
 
-/* New conversation: reproduce the centered Codex/Zcode launcher while keeping
- * the production Composer, model catalog, approvals, attachments and routing. */
-.empty-thread .empty-composer-wrap { place-content: center; padding: 54px 42px 82px; }
-.empty-thread .empty-composer-heading { width: min(720px, 100%); margin: -24px 0 28px; display: flex; flex-direction: column; align-items: center; text-align: center; }
-.empty-thread .empty-composer-wrap .empty-composer-heading h1 { margin: 0; font-size: clamp(26px, 3vw, 34px); font-weight: 570; letter-spacing: -.04em; }
-.empty-thread .empty-composer-heading p { margin: 7px 0 0; color: var(--faint); font-size: 11px; }
-.empty-thread .composer-stack { width: min(720px, calc(100vw - var(--sidebar-width) - 54px)); gap: 18px; }
-.empty-thread .composer-card { padding: 11px 13px 10px; border-radius: 14px; box-shadow: 0 12px 34px -27px rgb(24 24 20 / 48%), 0 1px 2px rgb(24 24 20 / 5%); }
-.empty-thread .composer-card:focus-within { transform: translateY(-1px); }
+/* New conversation: a quiet editorial launch surface with the production
+ * Composer as the sole action. */
+.empty-thread .empty-composer-wrap { align-items: center; justify-content: center; padding: clamp(42px, 8vh, 78px) clamp(30px, 5vw, 64px) clamp(88px, 13vh, 132px); }
+.empty-thread .empty-launch-stage { width: min(780px, 100%); min-width: 0; }
+.empty-thread .empty-composer-heading { position: relative; width: 100%; margin: 0 0 26px; padding-top: 18px; display: grid; grid-template-columns: minmax(0, 3fr) minmax(220px, 2fr); align-items: end; gap: clamp(24px, 5vw, 52px); border-top: 1px solid var(--line); text-align: left; }
+.empty-thread .empty-composer-heading::before { content: ""; position: absolute; top: -1px; left: 0; width: 52px; height: 1px; background: var(--ink); }
+.empty-thread .empty-composer-wrap .empty-composer-heading h1 { max-width: 460px; margin: 0; font-size: clamp(30px, 3.2vw, 40px); font-weight: 570; letter-spacing: -.045em; line-height: 1.04; }
+.empty-thread .empty-composer-heading p { max-width: 260px; margin: 0 0 4px; color: var(--muted); font-size: var(--text-sm); line-height: 1.55; }
+.empty-thread .composer-stack { width: 100%; gap: 12px; }
+.empty-thread .composer-card { padding: 12px 14px 11px; border: 1px solid var(--line-strong); border-radius: 16px; background: color-mix(in srgb, var(--paper-strong) 96%, var(--canvas)); box-shadow: 0 18px 48px -38px rgb(24 24 20 / 58%), 0 1px 2px rgb(24 24 20 / 5%); }
+.empty-thread .composer-card:focus-within { border-color: color-mix(in srgb, var(--ink) 28%, var(--line-strong)); box-shadow: 0 22px 56px -40px rgb(24 24 20 / 64%), 0 1px 3px rgb(24 24 20 / 7%); transform: translateY(-1px); }
 .empty-thread .composer-context-bar { flex-wrap: nowrap; gap: 0; padding: 0 2px; }
 .empty-thread .composer-context-bar > .composer-chip { min-height: 30px; max-width: 220px; padding: 0 5px; border: 0; border-radius: 6px; background: transparent; font-size: 10px; }
 .empty-thread .composer-context-bar > .composer-chip,
@@ -207,10 +209,18 @@
 .empty-thread .composer-context-bar > .composer-chip:nth-child(2) { display: none; }
 .empty-thread .composer-branch-menu > summary { position: relative; min-height: 30px; max-width: 280px; padding: 0 5px 0 9px; border: 0; border-radius: 0; background: transparent; font-family: var(--mono); font-size: 9px; }
 .empty-thread .composer-branch-menu > summary::before { content: ""; position: absolute; left: 0; top: 50%; width: 1px; height: 14px; border-radius: 99px; background: var(--line); transform: translateY(-50%); }
-.empty-thread .composer-card > textarea { min-height: 82px; padding: 12px 3px 8px; font-size: 13px; line-height: 1.65; }
+.empty-thread .composer-card > textarea { min-height: 104px; padding: 14px 4px 10px; font-size: 13px; line-height: 1.6; }
 .empty-thread .composer-toolbar { min-height: 30px; padding: 0; }
-.composer-fast-toggle-wrap { position: relative; display: flex; align-items: center; }.composer-fast-toggle { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; color: var(--muted); }.composer-fast-toggle:hover, .composer-fast-toggle-wrap.active .composer-fast-toggle { background: var(--paper-muted); color: var(--blue); }.composer-fast-toggle-tip { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 6; min-width: 94px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper-strong); box-shadow: var(--shadow-soft); opacity: 0; pointer-events: none; transform: translateY(3px); transition: opacity var(--motion-fast) ease, transform var(--motion-fast) ease; }.composer-fast-toggle-tip strong, .composer-fast-toggle-tip span { display: block; white-space: nowrap; }.composer-fast-toggle-tip strong { font-size: 10px; }.composer-fast-toggle-tip span { margin-top: 2px; color: var(--faint); font-size: 9px; }.composer-fast-toggle-wrap:hover .composer-fast-toggle-tip, .composer-fast-toggle:focus-visible + .composer-fast-toggle-tip { opacity: 1; transform: translateY(0); }
-.empty-thread .empty-task-suggestions { margin-top: 4px; }
+@media (max-width: 760px) {
+  .empty-thread .empty-composer-wrap { align-items: flex-start; padding: 48px 24px 72px; }
+  .empty-thread .empty-composer-heading { grid-template-columns: 1fr; gap: 8px; margin-bottom: 20px; padding-top: 14px; }
+  .empty-thread .empty-composer-heading p { max-width: 440px; margin: 0; }
+}
+@media (max-height: 660px) {
+  .empty-thread .empty-composer-wrap { padding-top: 30px; padding-bottom: 48px; }
+  .empty-thread .empty-composer-heading { margin-bottom: 18px; padding-top: 14px; }
+  .empty-thread .composer-card > textarea { min-height: 72px; }
+}
 .primary-nav button.active { background: var(--paper); color: var(--ink); }
 .primary-nav button.active > svg { color: var(--accent); }
 

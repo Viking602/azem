@@ -345,22 +345,21 @@ export default function ThreadSurface() {
         >
             {empty ? (
               <div className="empty-composer-wrap" data-slot="empty-state">
-                <div className="empty-composer-heading"><h1>{t("promptTitle")}</h1><p>{t("promptSubtitle")}</p></div>
-                <div className="composer-stack">
-                  {queue}
-                  <Composer
-                    prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
-                    agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
-                    running={running}
-                    busy={runtimeBusy}
-                    deliveryMode={deliveryMode}
-                    showContextBar
-                  />
-                  <div className="empty-task-suggestions" aria-label={t("taskSuggestions")}>
-                    {emptySuggestions(snapshot.language).map((suggestion) => <button type="button" key={suggestion.title} onClick={() => {
-                      setPrompt(suggestion.prompt);
-                      requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#azem-composer")?.focus());
-                    }}><strong>{suggestion.title}</strong><span>{suggestion.detail}</span></button>)}
+                <div className="empty-launch-stage">
+                  <header className="empty-composer-heading">
+                    <h1>{t("promptTitle")}</h1>
+                    <p>{t("promptSubtitle")}</p>
+                  </header>
+                  <div className="composer-stack">
+                    {queue}
+                    <Composer
+                      prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
+                      agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
+                      running={running}
+                      busy={runtimeBusy}
+                      deliveryMode={deliveryMode}
+                      showContextBar
+                    />
                   </div>
                 </div>
               </div>
@@ -615,14 +614,3 @@ function HeaderActions({ empty }: { empty: boolean }) {
   </div>;
 }
 
-function emptySuggestions(language: Snapshot["language"]) {
-  return language === "zh-CN" ? [
-    { title: "检查代码改动", detail: "查看当前工作树的风险", prompt: "分析当前项目的代码改动，按风险高低给出结论" },
-    { title: "修复失败检查", detail: "定位测试与 CI 问题", prompt: "定位当前项目失败的测试或 CI 检查，并修复根因" },
-    { title: "制定实现计划", detail: "拆分步骤与验收标准", prompt: "理解当前需求并整理一份可以直接执行的实现计划" },
-  ] : [
-    { title: "Review changes", detail: "Assess working tree risk", prompt: "Review the current project changes and rank findings by risk." },
-    { title: "Fix checks", detail: "Trace test and CI failures", prompt: "Find the failed tests or CI checks and fix the root cause." },
-    { title: "Build a plan", detail: "Define steps and acceptance", prompt: "Turn the current requirement into an executable implementation plan." },
-  ];
-}

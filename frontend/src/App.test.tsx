@@ -211,7 +211,7 @@ describe("application interactions", () => {
     expect(toolCompletionRefreshesWorkspace("tool_finished", "coding.read_file")).toBe(false);
   });
 
-  it("keeps the empty launcher title without a logo", async () => {
+  it("renders the editorial empty launcher without suggestion cards", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -219,7 +219,11 @@ describe("application interactions", () => {
     await act(async () => root?.render(<App />));
     await act(async () => useRuntimeStore.setState({ view: "thread", blocks: [], running: false }));
 
-    expect(container.querySelector(".empty-composer-heading h1")?.textContent).toBe("准备开始什么？");
+    const launchStage = container.querySelector(".empty-launch-stage");
+    expect(launchStage?.querySelector(".empty-composer-heading h1")?.textContent).toBe("准备开始什么？");
+    expect(launchStage?.querySelector("#azem-composer")).not.toBeNull();
+    expect(container.querySelector(".empty-task-suggestions")).toBeNull();
+    expect(container.textContent).not.toContain("检查代码改动");
     expect(container.querySelector(".empty-launch-mark")).toBeNull();
     expect(container.querySelector(".thread-header .titlebar-project")).toBeNull();
     expect(container.querySelector(".thread-heading-rule")).toBeNull();
