@@ -193,29 +193,29 @@
 
 /* New conversation: one grounded command workbench with the production
  * Composer as the sole action. */
-.empty-thread { --empty-workbench-rail: #181816; --empty-workbench-rail-text: #cecdc6; --empty-workbench-signal: #2858ff; }
+.empty-thread { --empty-workbench-rail: color-mix(in srgb, var(--paper-muted) 78%, var(--paper)); --empty-workbench-rail-text: var(--muted); --empty-workbench-signal: var(--blue); }
 .empty-thread .empty-composer-wrap { align-items: center; justify-content: center; padding: clamp(40px, 7vh, 76px) clamp(34px, 6vw, 96px) clamp(72px, 12vh, 132px); }
 .empty-thread .empty-launch-stage { position: relative; width: min(960px, 100%); min-width: 0; padding-left: 34px; transform: translateY(-2.5vh); }
 .empty-thread .empty-launch-stage::before { content: ""; position: absolute; top: 4px; bottom: 0; left: 0; width: 1px; background: var(--line); }
 .empty-thread .empty-launch-stage::after { content: ""; position: absolute; top: 0; left: -3px; width: 7px; height: 7px; border: 1px solid color-mix(in srgb, var(--ink) 82%, var(--line)); background: var(--paper); }
 .empty-thread .empty-composer-heading { width: min(620px, 100%); margin: 0 0 26px; display: block; text-align: left; }
-.empty-thread .empty-composer-wrap .empty-composer-heading h1 { margin: 0; font-size: clamp(32px, 3.4vw, 42px); font-weight: 620; letter-spacing: -.045em; line-height: 1.08; text-wrap: balance; }
+.empty-thread .empty-composer-wrap .empty-composer-heading h1 { margin: 0; font-size: clamp(32px, 3.4vw, 42px); font-weight: 600; letter-spacing: -.045em; line-height: 1.08; text-wrap: balance; }
 .empty-thread .empty-composer-heading p { max-width: 520px; margin: 10px 0 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.7; text-wrap: pretty; }
 .empty-thread .composer-stack { width: 100%; gap: 12px; }
-.empty-thread .composer-card { padding: 0; border: 1px solid var(--line-strong); border-bottom-color: var(--empty-workbench-rail); border-radius: 12px; background: var(--paper); box-shadow: 0 16px 36px -30px rgb(24 24 20 / 42%); transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
-.empty-thread .composer-card:focus-within { border-color: color-mix(in srgb, var(--empty-workbench-signal) 42%, var(--line-strong)); border-bottom-color: var(--empty-workbench-signal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--empty-workbench-signal) 10%, transparent), 0 18px 38px -30px rgb(24 24 20 / 48%); transform: translateY(-1px); }
-.empty-thread .composer-context-bar { min-height: 44px; flex-wrap: nowrap; gap: 0; padding: 0 9px; border-radius: 10px 10px 0 0; background: var(--empty-workbench-rail); color: var(--empty-workbench-rail-text); }
+.empty-thread .composer-card { padding: 0; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--paper); box-shadow: var(--shadow); transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
+.empty-thread .composer-card:focus-within { border-color: color-mix(in srgb, var(--empty-workbench-signal) 42%, var(--line-strong)); border-bottom-color: var(--empty-workbench-signal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--empty-workbench-signal) 10%, transparent), var(--shadow); transform: translateY(-1px); }
+.empty-thread .composer-context-bar { min-height: 44px; flex-wrap: nowrap; gap: 0; padding: 0 9px; border-bottom: 1px solid var(--line); border-radius: 12px 12px 0 0; background: var(--empty-workbench-rail); color: var(--empty-workbench-rail-text); }
 .empty-thread .composer-context-bar > .composer-chip,
 .empty-thread .composer-branch-menu > summary { min-height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--empty-workbench-rail-text); box-shadow: none; font-family: var(--mono); font-size: 10px; }
 .empty-thread .composer-context-bar > .composer-chip { max-width: 220px; }
 .empty-thread .composer-context-bar > .composer-chip:hover,
 .empty-thread .composer-branch-menu > summary:hover,
-.empty-thread .composer-branch-menu[open] > summary { background: rgb(255 255 255 / 9%); color: white; }
+.empty-thread .composer-branch-menu[open] > summary { background: var(--hover); color: var(--ink); }
 .empty-thread .composer-context-bar :is(.composer-chip, .composer-branch-menu > summary) > svg { color: currentColor; opacity: .78; }
 .empty-thread .composer-context-bar > .composer-chip:nth-child(2) { display: none; }
 .empty-thread .composer-branch-menu { min-width: 0; max-width: min(520px, 60%); }
 .empty-thread .composer-branch-menu > summary { position: relative; max-width: 100%; padding-left: 11px; }
-.empty-thread .composer-branch-menu > summary::before { content: ""; position: absolute; left: 0; top: 50%; width: 1px; height: 16px; background: rgb(255 255 255 / 16%); transform: translateY(-50%); }
+.empty-thread .composer-branch-menu > summary::before { content: ""; position: absolute; left: 0; top: 50%; width: 1px; height: 16px; background: var(--line-strong); transform: translateY(-50%); }
 .empty-thread .composer-card > textarea { min-height: 132px; padding: 22px 22px 16px; font-size: var(--text-base); line-height: 1.65; }
 .empty-thread .composer-toolbar { min-height: 48px; gap: 5px; padding: 7px 9px; border-top: 1px solid var(--line); }
 .empty-thread .composer-toolbar > :is(button, label, details > summary),

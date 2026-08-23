@@ -406,7 +406,10 @@ describe("composer slash commands", () => {
 		expect(assistantUIStyles).not.toContain(".empty-task-suggestions");
 		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-launch-stage::before\s*\{[^}]*bottom:\s*0;[^}]*width:\s*1px;/s);
 		expect(prototypeStyles).toMatch(/\.empty-thread \.empty-composer-heading\s*\{[^}]*display:\s*block;[^}]*text-align:\s*left;/s);
-		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-context-bar\s*\{[^}]*min-height:\s*44px;[^}]*background:\s*var\(--empty-workbench-rail\);/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread\s*\{[^}]*--empty-workbench-rail:\s*color-mix\(in srgb,\s*var\(--paper-muted\)\s*78%,\s*var\(--paper\)\);[^}]*--empty-workbench-signal:\s*var\(--blue\);/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-context-bar\s*\{[^}]*min-height:\s*44px;[^}]*border-bottom:\s*1px solid var\(--line\);[^}]*background:\s*var\(--empty-workbench-rail\);/s);
+		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-branch-menu\[open\] > summary\s*\{[^}]*background:\s*var\(--hover\);[^}]*color:\s*var\(--ink\);/s);
+		expect(prototypeStyles).not.toContain("--empty-workbench-rail: #181816");
 		expect(prototypeStyles).toMatch(/\.empty-thread \.composer-card > textarea\s*\{[^}]*min-height:\s*132px;/s);
 		expect(prototypeStyles).toMatch(/\.empty-thread \.send-button\s*\{[^}]*width:\s*34px;[^}]*border-radius:\s*7px;/s);
 	});
