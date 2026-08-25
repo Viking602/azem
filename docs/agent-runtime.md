@@ -1,6 +1,6 @@
 # Agent Runtime
 
-Last verified: 2026-08-15
+Last verified: 2026-08-24
 
 Azem executes every conversation turn through the Venat agent framework
 (`github.com/Viking602/venat` in `go.mod`). `internal/agent` wraps Venat's
@@ -53,6 +53,10 @@ Durable coordination and transient execution are separate objects:
    `singleRunManifest` (version 2: provider, account, model, reasoning, active
    skills, plan state, `StaticIdentity`, budgets, `StartedAt`) in run metadata
    for resume.
+   Completed Skill activations restore resource-read authorization on later
+   turns without adding eager Skill bodies or changing the advertised
+   activation/resource schemas. Venat v0.15.4 therefore keeps the provider
+   system/tool prefix byte-stable across activation replay.
 3. `materializeAgentDefinition` deploys the content-hashed agent definition
    through `hyworker.DefinitionDeployment`, which persists
    `agent_definition_snapshots` rows (schema 18).
@@ -245,6 +249,64 @@ Hard budgets terminate; the soft budget only advises.
 
 Budget failures are wrapped with configuration hints
 (`increase agents.main.max_tokens ...`) before they reach the UI.
+
+## OMP-compatible run controls
+
+Azem keeps every mode on the same Venat run and durable session:
+
+- Steering and queued follow-ups use Venat's durable turn-control channel.
+  Steering is consumed before undispatched tool work; follow-ups remain ordered
+  for the next turn.
+- Goal state, checkpoint/rewind metadata, Todo, and provider-neutral loop-guard
+  decisions persist with the session. Goal completion never bypasses unfinished
+  Todo or verification guardrails.
+- Advisor observes independently and may emit bounded inline advice without
+  becoming the execution owner.
+- TTSR evaluates configured text/AST stream rules and reinjects one durable
+  interruption according to repeat and context policy.
+- Prewalk and Plan YOLO translate an approved plan into execution context.
+  Vibe owns persistent fast/good read-only workers and does not expose ordinary
+  workspace mutation tools to its director.
+- The model-facing Hub combines peer messaging, background jobs, supervised
+  processes, and waits. Parked agents revive on addressed messages without
+  creating a second scheduler.
+
+`ask` is a general single-agent interactive tool. Plan mode adds
+`submit_plan`; it does not own a second question implementation. Headless
+clients without a responder terminate the waiting context explicitly.
+
+## Coding tool runtime
+
+`internal/agent` owns OMP-compatible read, write, Hashline edit, glob, grep,
+AST, LSP, DAP, eval, browser, computer, web search, GitHub, SSH, jobs, media,
+and memory drivers. Bun bridges are bounded subprocess protocols, not agent
+loops. Python, JavaScript, Ruby, and Julia eval kernels are persistent per
+session/language when the host runtime is available.
+
+Custom extension file fallbacks are consulted only after an ordinary local
+write/delete fails with `EACCES`, `EPERM`, or `EROFS`. Archive, SQLite,
+unresolved-symlink, non-permission, and out-of-workspace mutations never reach
+that seam.
+
+## Background security runs
+
+Security scans use `ProviderRuntime` through an internal automation profile,
+not `Service.StartConfiguredTurn`. The profile starts a normal Venat run with
+the host-resolved Azem route, a snapshot-rooted read-only tool set, native
+security submission tools, ordinary retry ownership, and zero Token/tool-call
+`TaskBudget` limits. Audit children are limited to bundled security roles,
+cannot nest, and receive no project Skills/MCP/hooks. The scan coordinator owns
+the persisted absolute deadline and convergence bounds. Native Desktop starts
+therefore cannot be terminated by Azem's partial provider-usage accounting.
+The scan deliberately does not claim the process-wide foreground run slot,
+persist a hidden conversation session, or inherit live guidance.
+
+App shutdown cancels the execution context, which leaves the scan blocked and
+resumable while retaining its immutable source snapshot and worker artifacts.
+Explicit scan cancellation terminalizes the scan and removes the snapshot.
+Deep Scan reloads succeeded audit/reducer artifacts and advances worker
+sequence after restart rather than replaying accepted work. See
+[Security scanning](security-scanning.md).
 
 ## Verification
 

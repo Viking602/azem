@@ -10,8 +10,7 @@ import {
 } from "../toolTimeline";
 import { fileChangePillsForBlocks, formatProcessGroupCount, processGroupCounts, toolChipModel } from "../toolChip";
 import { ReasoningPanel } from "../assistant-ui/Elements";
-import { ToolTimelineStep } from "../assistant-ui/ToolTimelineStep";
-import { ToolTimelineFiles, ToolTimelineItem, ToolTimelineIcon } from "../assistant-ui/ToolTimeline";
+import { ToolTimelineFiles, ToolTimelineIcon, ToolTimelineItem, ToolTimelineStep } from "../assistant-ui/ToolTimeline";
 import {
   isActiveFileChangeBlock, isFileChangeTool, isPendingFileChangeBlock,
 } from "../fileChanges";

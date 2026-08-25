@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  AlertTriangle, AppWindow, Box, Globe2, LockKeyhole, PackageOpen,
+  AlertTriangle, AppWindow, Box, ExternalLink, Globe2, LockKeyhole, PackageOpen,
   Plug, Plus, RefreshCw, RotateCw, Search, Server, Sparkles, Terminal, Trash2, Wrench, X,
 } from "lucide-react";
 import { tFormat, translator, type Language } from "../i18n";
-import { listHookCatalog, listSkillCatalog } from "../bridge";
+import { listHookCatalog, listMarketplaceCatalog, listSkillCatalog, openExternalURL } from "../bridge";
 import { pluginImportID, useRuntimeStore } from "../store";
-import type { ActionRequest, MCPServerEntry, MCPServerMutation } from "../types";
+import type { ActionRequest, MarketplaceCatalog, MarketplaceInstalledPlugin, MarketplacePlugin, MCPServerEntry, MCPServerMutation } from "../types";
 import SkillCatalogManager from "./SkillCatalogManager";
 
-type ExtensionTab = "mcp" | "skills" | "plugins" | "hooks";
+type ExtensionTab = "mcp" | "skills" | "plugins" | "marketplace" | "hooks";
 type PluginFilter = "all" | "imported" | "available";
 
 interface ExtensionsSettingsProps {
@@ -49,6 +49,7 @@ export default function ExtensionsSettings({
   const skills = useRuntimeStore((state) => state.skills);
   const plugins = useRuntimeStore((state) => state.plugins);
   const hookCatalog = useRuntimeStore((state) => state.hookCatalog);
+  const marketplaceCatalog = useRuntimeStore((state) => state.marketplaceCatalog);
   const [tab, setTab] = useState<ExtensionTab>("mcp");
   const [addOpen, setAddOpen] = useState(false);
   const [actionError, setActionError] = useState("");
@@ -61,6 +62,7 @@ export default function ExtensionsSettings({
   const enabledSkills = skills.filter((skill) => !skill.disabled).length;
   const enabledPlugins = plugins.filter((plugin) => plugin.enabled && plugin.status !== "invalid").length;
   const connectedMCP = mcpServers.filter((server) => server.enabled && server.state === "ready").length;
+  const installedMarketplacePlugins = marketplaceCatalog.installed.filter((plugin) => plugin.enabled).length;
 
   useEffect(() => {
     if (openAddRequest > previousAddRequest.current) {
@@ -74,6 +76,20 @@ export default function ExtensionsSettings({
   useEffect(() => {
     if (targetTab) setTab(targetTab);
   }, [targetTab]);
+
+  useEffect(() => {
+    if (tab !== "marketplace") return;
+    let active = true;
+    void listMarketplaceCatalog()
+      .then((catalog) => {
+        if (!active) return;
+        useRuntimeStore.getState().applyEvents([{ sequence: 0, kind: "marketplace_catalog", state: "listed", marketplaceCatalog: catalog }]);
+      })
+      .catch((cause) => {
+        if (active) onError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => { active = false; };
+  }, [onError, tab]);
 
   const run = async (request: ActionRequest) => {
     try {
@@ -102,11 +118,12 @@ export default function ExtensionsSettings({
       <ExtensionTabButton targetID="extensions:mcp" active={tab === "mcp"} icon={Server} label={t("extensionTabMCP")} count={`${connectedMCP}/${mcpServers.length}`} countLabel={t("mcpConnectedServicesMetric")} onClick={() => setTab("mcp")} />
       <ExtensionTabButton targetID="extensions:skills" active={tab === "skills"} icon={Sparkles} label={t("extensionTabSkills")} count={`${enabledSkills}/${skills.length}`} countLabel={t("extensionSkillsMetric")} onClick={() => setTab("skills")} />
       <ExtensionTabButton targetID="extensions:plugins" active={tab === "plugins"} icon={Plug} label={t("extensionTabPlugins")} count={`${enabledPlugins}/${plugins.length}`} countLabel={t("extensionPluginsMetric")} onClick={() => setTab("plugins")} />
+      <ExtensionTabButton targetID="extensions:marketplace" active={tab === "marketplace"} icon={PackageOpen} label={language === "zh-CN" ? "市场" : "Marketplace"} count={`${installedMarketplacePlugins}/${marketplaceCatalog.available.length}`} countLabel={language === "zh-CN" ? "已安装市场插件" : "Installed marketplace plugins"} onClick={() => setTab("marketplace")} />
       <ExtensionTabButton targetID="extensions:hooks" active={tab === "hooks"} icon={Wrench} label={t("extensionTabHooks")} count={`${hookCatalog.sources.filter((source) => source.trusted).length}/${hookCatalog.sources.length}`} countLabel={t("extensionHooksMetric")} onClick={() => setTab("hooks")} />
     </div>
 
     {actionError && <div className="extension-action-error" role="alert">{actionError}</div>}
-    <ExtensionContent tab={tab} language={language} mcpServers={mcpServers} skills={skills} plugins={plugins} hookCatalog={hookCatalog} run={run} refreshSkills={refreshSkills} openAdd={openAdd} />
+    <ExtensionContent tab={tab} language={language} mcpServers={mcpServers} skills={skills} plugins={plugins} marketplaceCatalog={marketplaceCatalog} hookCatalog={hookCatalog} run={run} refreshSkills={refreshSkills} openAdd={openAdd} />
 
     {addOpen && <AddMCPDialog language={language} returnFocusTo={addOpener.current} onClose={() => setAddOpen(false)} onSave={async (payload) => {
       await run({ kind: "upsert_mcp_server", payload });
@@ -119,12 +136,13 @@ function ExtensionTabButton({ active, icon: Icon, label, count, countLabel, onCl
   return <button type="button" role="tab" data-setting-id={targetID} aria-selected={active} aria-label={`${label} · ${countLabel}`} className={active ? "active" : ""} onClick={onClick}><Icon size={14} /><span>{label}</span><em>{count}</em></button>;
 }
 
-function ExtensionContent({ tab, language, mcpServers, skills, plugins, hookCatalog, run, refreshSkills, openAdd }: {
+function ExtensionContent({ tab, language, mcpServers, skills, plugins, marketplaceCatalog, hookCatalog, run, refreshSkills, openAdd }: {
   tab: ExtensionTab;
   language: Language;
   mcpServers: ReturnType<typeof useRuntimeStore.getState>["mcpServers"];
   skills: ReturnType<typeof useRuntimeStore.getState>["skills"];
   plugins: ReturnType<typeof useRuntimeStore.getState>["plugins"];
+  marketplaceCatalog: MarketplaceCatalog;
   hookCatalog: ReturnType<typeof useRuntimeStore.getState>["hookCatalog"];
   run: (request: ActionRequest) => Promise<void>;
   refreshSkills: () => Promise<void>;
@@ -133,9 +151,128 @@ function ExtensionContent({ tab, language, mcpServers, skills, plugins, hookCata
   if (tab === "mcp") return <MCPServicesPanel language={language} servers={mcpServers} run={run} openAdd={openAdd} />;
   if (tab === "skills") return <section className="extension-panel" role="tabpanel"><SkillCatalogManager skills={skills} language={language} onReload={refreshSkills} onSetEnabled={(name, enabled) => run({ kind: "set_skill_enabled", target: name, decision: String(enabled) })} /></section>;
   if (tab === "hooks") return <HooksPanel language={language} catalog={hookCatalog} run={run} />;
+  if (tab === "marketplace") return <MarketplacePanel language={language} catalog={marketplaceCatalog} run={run} />;
   return <PluginsPanel language={language} plugins={plugins} run={run} />;
 }
 
+
+function MarketplacePanel({ language, catalog, run }: {
+  language: Language;
+  catalog: MarketplaceCatalog;
+  run: (request: ActionRequest) => Promise<void>;
+}) {
+  const zh = language === "zh-CN";
+  const [query, setQuery] = useState("");
+  const [source, setSource] = useState("");
+  const [scope, setScope] = useState<"user" | "project">("user");
+  const [busy, setBusy] = useState<Set<string>>(new Set());
+  const [confirming, setConfirming] = useState("");
+  const refresh = async () => {
+    const snapshot = await listMarketplaceCatalog();
+    useRuntimeStore.getState().applyEvents([{ sequence: 0, kind: "marketplace_catalog", state: "listed", marketplaceCatalog: snapshot }]);
+  };
+  const mutate = async (key: string, request: ActionRequest) => {
+    setBusy((current) => new Set(current).add(key));
+    try {
+      await run(request);
+      await refresh();
+    } catch {
+      // run reports the failure through the settings alert.
+    } finally {
+      setBusy((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
+  const plugins = useMemo(() => {
+    const entries = [...catalog.available];
+    for (const installed of catalog.installed) {
+      if (!entries.some((entry) => entry.id === installed.id)) {
+        entries.push({
+          id: installed.id, name: installed.name, marketplace: installed.marketplace, version: installed.version,
+          description: "", category: "", homepage: "", license: "", keywords: [], tags: [],
+        });
+      }
+    }
+    const normalized = query.trim().toLocaleLowerCase(language);
+    return normalized ? entries.filter((plugin) => [
+      plugin.id, plugin.name, plugin.marketplace, plugin.description, plugin.category, ...plugin.keywords, ...plugin.tags,
+    ].join("\n").toLocaleLowerCase(language).includes(normalized)) : entries;
+  }, [catalog.available, catalog.installed, language, query]);
+  const addSource = (event: React.FormEvent) => {
+    event.preventDefault();
+    const value = source.trim();
+    if (!value) return;
+    void mutate(`source:${value}`, { kind: "marketplace_add", target: value }).then(() => setSource(""));
+  };
+  return <section className="extension-panel marketplace-panel" role="tabpanel">
+    <header className="extension-panel-header"><div><h2>{zh ? "插件市场" : "Plugin marketplace"}</h2><p>{zh ? "从 Git、目录或目录 JSON 中浏览和安装 OMP / Claude 兼容插件。" : "Browse and install OMP or Claude-compatible plugins from Git, directories, or catalog JSON."}</p></div><button type="button" className="subtle-button" onClick={() => void refresh()}><RefreshCw size={13} />{zh ? "刷新" : "Refresh"}</button></header>
+    <form className="marketplace-source-form" onSubmit={addSource}>
+      <label><span>{zh ? "添加市场源" : "Add marketplace source"}</span><input value={source} onChange={(event) => setSource(event.target.value)} placeholder="owner/repo, https://…, ./path" /></label>
+      <button type="submit" className="primary-button" disabled={!source.trim() || busy.has(`source:${source.trim()}`)}><Plus size={13} />{zh ? "添加" : "Add"}</button>
+    </form>
+    {catalog.marketplaces.length > 0 ? <div className="marketplace-source-list" aria-label={zh ? "已配置市场" : "Configured marketplaces"}>
+      {catalog.marketplaces.map((marketplace) => {
+        const key = `market:${marketplace.name}`;
+        const removing = confirming === key;
+        return <div className="marketplace-source-row" key={marketplace.name}>
+          <div><strong>{marketplace.name}</strong><small>{marketplace.source}</small></div>
+          <span>{marketplace.type}</span>
+          <button type="button" disabled={busy.has(key)} aria-label={zh ? `更新 ${marketplace.name}` : `Update ${marketplace.name}`} onClick={() => void mutate(key, { kind: "marketplace_update", target: marketplace.name })}><RotateCw size={13} /></button>
+          {removing ? <><button type="button" className="danger-text" onClick={() => void mutate(key, { kind: "marketplace_remove", target: marketplace.name }).then(() => setConfirming(""))}>{zh ? "确认" : "Confirm"}</button><button type="button" aria-label={zh ? "取消移除" : "Cancel removal"} onClick={() => setConfirming("")}><X size={13} /></button></> : <button type="button" aria-label={zh ? `移除 ${marketplace.name}` : `Remove ${marketplace.name}`} onClick={() => setConfirming(key)}><Trash2 size={13} /></button>}
+        </div>;
+      })}
+    </div> : <p className="marketplace-empty">{zh ? "还没有市场。添加目录源后即可浏览插件。" : "No marketplaces yet. Add a catalog source to browse plugins."}</p>}
+    <div className="marketplace-browser-tools">
+      <label className="marketplace-search"><Search size={13} aria-hidden="true" /><span className="sr-only">{zh ? "搜索市场插件" : "Search marketplace plugins"}</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={zh ? "搜索名称、说明、标签…" : "Search names, descriptions, or tags…"} /></label>
+      <label className="marketplace-scope"><span>{zh ? "安装范围" : "Install scope"}</span><select value={scope} onChange={(event) => setScope(event.target.value as "user" | "project")}><option value="user">{zh ? "用户" : "User"}</option><option value="project">{zh ? "当前项目" : "Project"}</option></select></label>
+    </div>
+    {plugins.length > 0 ? <div className="marketplace-plugin-list">{plugins.map((plugin) => <MarketplacePluginRow
+      key={plugin.id}
+      plugin={plugin}
+      installs={catalog.installed.filter((installed) => installed.id === plugin.id)}
+      upgrades={catalog.upgrades}
+      language={language}
+      installScope={scope}
+      busy={busy}
+      confirming={confirming}
+      onConfirm={setConfirming}
+      onMutate={mutate}
+    />)}</div> : <p className="marketplace-empty">{zh ? "没有匹配的市场插件。" : "No matching marketplace plugins."}</p>}
+  </section>;
+}
+
+function MarketplacePluginRow({ plugin, installs, upgrades, language, installScope, busy, confirming, onConfirm, onMutate }: {
+  plugin: MarketplacePlugin;
+  installs: MarketplaceInstalledPlugin[];
+  upgrades: MarketplaceCatalog["upgrades"];
+  language: Language;
+  installScope: "user" | "project";
+  busy: Set<string>;
+  confirming: string;
+  onConfirm: (key: string) => void;
+  onMutate: (key: string, request: ActionRequest) => Promise<void>;
+}) {
+  const zh = language === "zh-CN";
+  return <article className="marketplace-plugin-row">
+    <div className="marketplace-plugin-heading"><div><strong>{plugin.name}</strong><small>{plugin.marketplace}{plugin.version ? ` · ${plugin.version}` : ""}</small></div>{plugin.homepage ? <button type="button" aria-label={zh ? `打开 ${plugin.name} 主页` : `Open ${plugin.name} homepage`} onClick={() => void openExternalURL(plugin.homepage)}><ExternalLink size={13} /></button> : null}</div>
+    {plugin.description ? <p>{plugin.description}</p> : null}
+    <div className="marketplace-plugin-meta">{[plugin.category, plugin.license, ...plugin.tags.slice(0, 3)].filter(Boolean).map((item) => <span key={item}>{item}</span>)}</div>
+    {installs.length === 0 ? <button type="button" className="primary-button marketplace-install" disabled={busy.has(`${plugin.id}:${installScope}`)} onClick={() => void onMutate(`${plugin.id}:${installScope}`, { kind: "marketplace_install", target: plugin.id, decision: installScope, payload: { scope: installScope } })}><PackageOpen size={13} />{zh ? `安装到${installScope === "user" ? "用户" : "项目"}` : `Install for ${installScope}`}</button> : <div className="marketplace-install-list">{installs.map((installed) => {
+      const key = `${installed.id}:${installed.scope}`;
+      const upgrade = upgrades.find((item) => item.plugin.id === installed.id && item.plugin.scope === installed.scope);
+      const removing = confirming === key;
+      return <div key={key} className="marketplace-install-row">
+        <span><b>{installed.scope === "user" ? zh ? "用户" : "User" : zh ? "项目" : "Project"}</b>{installed.version}{upgrade ? ` → ${upgrade.latest}` : ""}</span>
+        <button type="button" disabled={busy.has(key)} onClick={() => void onMutate(key, { kind: installed.enabled ? "marketplace_disable" : "marketplace_enable", target: installed.id, decision: installed.scope, payload: { scope: installed.scope } })}>{installed.enabled ? zh ? "停用" : "Disable" : zh ? "启用" : "Enable"}</button>
+        {upgrade ? <button type="button" disabled={busy.has(key)} onClick={() => void onMutate(key, { kind: "marketplace_upgrade", target: installed.id, decision: installed.scope, payload: { scope: installed.scope } })}>{zh ? "升级" : "Upgrade"}</button> : null}
+        {removing ? <><button type="button" className="danger-text" onClick={() => void onMutate(key, { kind: "marketplace_uninstall", target: installed.id, decision: installed.scope, payload: { scope: installed.scope } }).then(() => onConfirm(""))}>{zh ? "确认卸载" : "Confirm"}</button><button type="button" aria-label={zh ? "取消卸载" : "Cancel uninstall"} onClick={() => onConfirm("")}><X size={12} /></button></> : <button type="button" aria-label={zh ? `卸载 ${plugin.name}` : `Uninstall ${plugin.name}`} onClick={() => onConfirm(key)}><Trash2 size={12} /></button>}
+      </div>;
+    })}</div>}
+  </article>;
+}
 function MCPServicesPanel({ language, servers, run, openAdd }: {
   language: Language;
   servers: MCPServerEntry[];

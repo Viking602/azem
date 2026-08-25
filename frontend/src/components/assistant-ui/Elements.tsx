@@ -1,3 +1,4 @@
+export { default as CodeDiff } from "./CodeDiff";
 import { Children, useEffect, useRef, useState, type ComponentPropsWithoutRef, type ReactNode, useId } from "react";
 import { useReducedMotion } from "motion/react";
 

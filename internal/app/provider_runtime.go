@@ -51,6 +51,7 @@ type ProviderRuntime struct {
 	mcp             *mcpruntime.Manager
 	subagents       *subagentRuntime
 	subagentInitErr error
+	advisors        map[string]*advisorWatchdog
 }
 
 type editRecoveryRequirement interface {
@@ -135,10 +136,11 @@ func NewProviderRuntime(cfg config.Config, authentication *auth.Service, modelCa
 	}
 	cfg.Agents.Subagents = cloneSubagentConfig(cfg.Agents.Subagents)
 	cfg.Providers.LLMux = cloneLLMuxProviders(cfg.Providers.LLMux)
-	return &ProviderRuntime{
+	runtime := &ProviderRuntime{
 		cfg: cfg, auth: authentication, catalog: modelCatalog, coding: codingService,
-		subagentWorktreeRoot: subagentWorktreeRoot, cursorConversations: cursordriver.NewConversationCache(),
-	}, nil
+		subagentWorktreeRoot: subagentWorktreeRoot, cursorConversations: cursordriver.NewConversationCache(), advisors: make(map[string]*advisorWatchdog),
+	}
+	return runtime, nil
 }
 
 func (r *ProviderRuntime) Attach(host providerHost, manager *mcpruntime.Manager, subagentStore agentservice.SubagentRunStore) {
@@ -152,9 +154,13 @@ func (r *ProviderRuntime) Attach(host providerHost, manager *mcpruntime.Manager,
 	if r.subagents != nil {
 		r.subagents.setHost(host)
 	}
+	r.coding.SetHubPeerBroker(r.subagents)
 }
 
 func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agentservice.Run, hyagent.Engine, error) {
+	if request.automation != nil {
+		return r.startAutomation(ctx, request)
+	}
 	account, modelID, contextWindow, driver, err := r.resolveDriver(ctx, request.Provider, request.Model, request.Reasoning)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
@@ -189,7 +195,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	r.mu.RLock()
 	host := r.host
 	r.mu.RUnlock()
-	if host != nil && host.Sessions() != nil {
+	if host != nil && host.Sessions() != nil && request.origin != turnOriginAutoLearn {
 		persistedUser := userTurnBlock(run.RunID, request)
 		sequence, appendErr := host.Sessions().AppendBlock(ctx, request.SessionID, persistedUser)
 		if appendErr != nil {
@@ -273,37 +279,79 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, subagentInitErr.Error(), subagentInitErr)
 		return nil, hyagent.Engine{}, subagentInitErr
 	}
+	if request.VibeMode && subagents == nil {
+		err := fmt.Errorf("vibe mode requires an initialized subagent runtime")
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+		return nil, hyagent.Engine{}, err
+	}
 
 	workspaceDrivers, err := r.coding.WorkspaceDrivers(ctx, r.cfg.Workspace.Root)
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
+	if managedSkill := r.coding.ManagedSkillDriver(); managedSkill != nil && !request.VibeMode {
+		workspaceDrivers = append(workspaceDrivers, managedSkill)
+	}
+	if request.origin == turnOriginAutoLearn {
+		workspaceDrivers = workspaceDrivers[:0]
+		if managedSkill := r.coding.ManagedSkillDriver(); managedSkill != nil {
+			workspaceDrivers = append(workspaceDrivers, managedSkill)
+		}
+	}
 	drivers := make([]tool.Driver, 0, len(workspaceDrivers)+9)
 	toolNames := make([]string, 0, len(workspaceDrivers)+8)
+	var checkpoint *checkpointController
+	if host != nil && host.Sessions() != nil && !request.VibeMode {
+		checkpoint, err = newCheckpointController(ctx, host.Sessions(), request.SessionID, run.RunID)
+		if err != nil {
+			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+			return nil, hyagent.Engine{}, err
+		}
+	}
+
 	for _, workspaceDriver := range workspaceDrivers {
 		definition := workspaceDriver.Definition()
+		if request.origin == turnOriginAutoLearn {
+			drivers = append(drivers, workspaceDriver)
+			toolNames = append(toolNames, definition.Name)
+			continue
+		}
+		if request.VibeMode && !vibeDirectorWorkspaceTool(definition.Name) {
+			continue
+		}
+
 		governed := &governedAgentTool{definition: definition, driver: workspaceDriver, coding: r.coding, run: run, host: host, sessionID: request.SessionID}
 		metadata := hooks.Metadata{SessionID: request.SessionID, RunID: run.RunID, AgentID: "main", AgentType: "main", CWD: r.cfg.Workspace.Root}
 		drivers = append(drivers, wrapHookDriver(host, metadata, governed))
 		toolNames = append(toolNames, definition.Name)
 	}
-	if host != nil && host.Sessions() != nil {
+	if host != nil && host.Sessions() != nil && request.origin != turnOriginAutoLearn {
 		drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), &todoDriver{sessionID: request.SessionID, store: host.Sessions(), emit: func(event Event) bool {
 			return host.EmitTodoUpdated(request.SessionID, *event.Todo)
 		}}))
+		if checkpoint != nil {
+			for _, checkpointDriver := range checkpoint.drivers() {
+				drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), checkpointDriver))
+				toolNames = append(toolNames, checkpointDriver.Definition().Name)
+			}
+		}
 		toolNames = append(toolNames, "todo")
+		if !request.VibeMode {
+			drivers = append(drivers,
+				wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), &goalDriver{sessionID: request.SessionID, runID: run.RunID, store: host.Sessions()}),
+				&askDriver{sessionID: request.SessionID, runID: run.RunID, host: host},
+			)
+			toolNames = append(toolNames, goalToolName, askToolName)
+		}
 		drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), &contextArtifactDriver{sessionID: request.SessionID, store: host.Sessions()}))
 		toolNames = append(toolNames, contextReadArtifactTool)
 		if request.PlanMode {
-			drivers = append(drivers,
-				&askDriver{sessionID: request.SessionID, runID: run.RunID, host: host},
-				&submitPlanDriver{sessionID: request.SessionID, runID: run.RunID, host: host},
-			)
-			toolNames = append(toolNames, askToolName, submitPlanToolName)
+			drivers = append(drivers, &submitPlanDriver{sessionID: request.SessionID, runID: run.RunID, host: host, planYolo: request.PlanYolo})
+			toolNames = append(toolNames, submitPlanToolName)
 		}
 	}
-	if manager != nil {
+	if manager != nil && !request.VibeMode && request.origin != turnOriginAutoLearn {
 		for _, external := range manager.Snapshot() {
 			definition := external.Definition()
 			governed := &governedAgentTool{definition: definition, driver: external, coding: r.coding, run: run, host: host, sessionID: request.SessionID}
@@ -311,11 +359,11 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			toolNames = append(toolNames, definition.Name)
 		}
 	}
-	if subagents != nil && !request.DisableSubagents {
-		subagentDrivers, buildErr := subagents.Drivers(subagentParentRuntime{
+	if subagents != nil && !request.DisableSubagents && request.origin != turnOriginAutoLearn {
+		parentRuntime := subagentParentRuntime{
 			SessionID: request.SessionID, ParentRunID: run.RunID, ParentAgentID: run.HolderID,
 			ProviderID: request.Provider, AccountID: accountID, ModelID: modelID, Reasoning: request.Reasoning, ContextTokenTarget: contextTarget,
-			PlanMode:      request.PlanMode,
+			PlanMode: request.PlanMode, DirectorReadOnly: request.VibeMode,
 			ContextConfig: r.cfg.Agents.Context,
 			WorkspaceRoot: r.cfg.Workspace.Root, Driver: driver, Coding: r.coding, Host: host,
 			ResolveDriver: func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
@@ -333,10 +381,18 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 				resolvedAccount, resolvedModel, window, resolved, resolveErr := r.resolveDriverForAccount(ctx, provider, model, reasoning, requestedAccountID)
 				return resolvedAccount.ID, resolvedModel, window, resolved, resolveErr
 			},
-		})
+		}
+		subagentDrivers, buildErr := subagents.Drivers(parentRuntime)
 		if buildErr != nil {
 			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, buildErr.Error(), buildErr)
 			return nil, hyagent.Engine{}, buildErr
+		}
+		if request.VibeMode {
+			subagentDrivers, buildErr = newVibeDrivers(subagents, parentRuntime, r.cfg.Agents.Vibe)
+			if buildErr != nil {
+				_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, buildErr.Error(), buildErr)
+				return nil, hyagent.Engine{}, buildErr
+			}
 		}
 		for _, external := range subagentDrivers {
 			definition := external.Definition()
@@ -349,31 +405,33 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		drivers = planModeToolDrivers(drivers)
 		toolNames = toolDriverNames(drivers)
 	}
+	turnTools := newDynamicToolCatalog()
+	for _, driver := range drivers {
+		if err := turnTools.Register(dynamicToolSource(driver.Definition().Name), driver); err != nil {
+			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+			return nil, hyagent.Engine{}, err
+		}
+	}
+	drivers = turnTools.Drivers()
+	toolNames = turnTools.Names()
 	skillSnapshot := r.coding.SkillSnapshot()
 	activeSkills := mergeSkillNames(skillSnapshot.Eager, request.ActiveSkills)
 	activeSkills = mergeSkillNames(activeSkills, loadSessionActivatedSkills(ctx, host, request.SessionID, skillSnapshot.Registry))
-	instructions, instructionFingerprint := turnInstructions(request.PlanMode)
+	availableSkills := skillSnapshot.Available
+	if request.VibeMode {
+		activeSkills = nil
+		availableSkills = nil
+	}
+	instructions, instructionFingerprint := turnInstructionsWithProject(request.PlanMode, request.projectContext)
 	toolDefinitionTokens := estimateToolDefinitionTokens(drivers)
 	budgetConfig, err := calculateContextBudget(modelID, contextWindow, toolDefinitionTokens, r.cfg.Agents.Context)
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
-	extraBody := map[string]any{"prompt_cache_key": request.SessionID}
+	extraBody := map[string]any{}
 	enableExplicitPromptCache(extraBody, request.Provider, modelID)
-	if host != nil && strings.TrimSpace(host.AttachmentRoot()) != "" {
-		extraBody[responses.AttachmentRootExtraKey] = host.AttachmentRoot()
-	}
-	if reporter := r.responseUsageReporter(host, request.SessionID, run.RunID, "main", request.Provider, modelID, driver.Metadata().Name); reporter != nil && (host == nil || host.Sessions() == nil) {
-		extraBody[responses.UsageReporterExtraKey] = reporter
-	}
-	// Catalog max output is not display-only: pass it on the main request so
-	// providers that require max_tokens (Anthropic-compatible, including
-	// DeepSeek) do not fall back to the adapter default of 4096.
 	maxOutputTokens := r.modelMaxOutputTokens(request.Provider, modelID)
-	if maxOutputTokens > 0 {
-		extraBody["max_output_tokens"] = maxOutputTokens
-	}
 	hardContextTarget := budgetConfig.Trigger
 	if !r.cfg.Agents.Context.Enabled {
 		hardContextTarget = 0
@@ -381,7 +439,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	spec := hyagent.Spec{
 		Instructions:    instructions,
 		Skills:          activeSkills,
-		AvailableSkills: skillSnapshot.Available,
+		AvailableSkills: availableSkills,
 		Model:           modelID,
 		Tools:           toolNames,
 		MaxTokens:       maxOutputTokens,
@@ -418,7 +476,13 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		coordinator:      &compactionCoordinator{},
 		providerPressure: &providerContextPressure{toolTokens: toolDefinitionTokens},
 	}
-	configureArchiveContext(ctx, &contextManager, host, request.SessionID, run.RunID, request.Provider, accountID, modelID)
+	if request.origin != turnOriginAutoLearn {
+		configureArchiveContext(ctx, &contextManager, host, request.SessionID, run.RunID, request.Provider, accountID, modelID)
+	}
+	requestKind := "main"
+	if request.origin == turnOriginAutoLearn {
+		requestKind = "autolearn"
+	}
 	if host != nil {
 		contextManager.reportCachePrefixDegraded = func(reason string) {
 			host.EmitEvent(host.BaseContext(), Event{
@@ -429,6 +493,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 					"provider":    request.Provider,
 					"model":       modelID,
 					"cacheModel":  cacheModelForProvider(request.Provider, ""),
+					"requestKind": requestKind,
 				},
 			})
 		}
@@ -491,7 +556,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, persistErr.Error(), persistErr)
 		return nil, hyagent.Engine{}, persistErr
 	}
-	if host != nil && host.Sessions() != nil {
+	if host != nil && host.Sessions() != nil && request.origin != turnOriginAutoLearn {
 		staticIdentity := activeCacheIdentity(contextManager.staticIdentity, request.modelHistory.ContextManifestHash, request.modelHistory.SummaryHash)
 		_, _, identityErr := host.Sessions().EnsureCacheIdentity(ctx, request.SessionID, staticIdentity)
 		if identityErr != nil {
@@ -544,14 +609,19 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			encoded, _ := json.Marshal(usage)
 			host.EmitEvent(host.BaseContext(), Event{
 				Kind: EventContextUsage, SessionID: request.SessionID, RunID: run.RunID, State: "pending",
-				Data: map[string]string{"factSnapshot": "true", "usageSnapshot": string(encoded), "requestKind": "main"},
+				Data: map[string]string{"factSnapshot": "true", "usageSnapshot": string(encoded), "requestKind": requestKind},
 			})
 		}
 		driver = &meteredProviderDriver{
 			inner: driver, store: host.Sessions(), host: host, sessionID: request.SessionID,
-			runID: run.RunID, kind: "main", provider: request.Provider, model: modelID, transport: driver.Metadata().Name,
+			runID: run.RunID, kind: requestKind, provider: request.Provider, model: modelID, transport: driver.Metadata().Name,
 			reportInputTokens: contextManager.providerPressure.observeInputTokens,
 		}
+	}
+	driver, prewalkSwitch, err := r.preparePrewalkDriver(ctx, request, run, host, accountID, driver, usageBudget)
+	if err != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+		return nil, hyagent.Engine{}, err
 	}
 	if host != nil && host.Sessions() != nil {
 		contextManager.putArtifact = func(ctx context.Context, kind string, payload []byte, preview string) (session.ContextArtifact, error) {
@@ -568,20 +638,12 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		contextManager.reportContextTokens = func(_ context.Context, tokens int) {
 			host.EmitEvent(host.BaseContext(), Event{Kind: EventContextUsage, SessionID: request.SessionID, RunID: run.RunID, State: "estimated", Data: map[string]string{
 				"inputTokens": fmt.Sprint(tokens), "outputTokens": "0", "totalTokens": fmt.Sprint(tokens), "cacheStatus": "pending",
+				"requestKind": requestKind,
 			}})
 		}
 	}
 	var engineContext hyagent.ContextManager = contextManager
-	if host != nil {
-		engineContext = activeGuidanceContext{
-			inner: contextManager,
-			peek:  func() activeGuidanceSnapshot { return host.PeekActiveGuidance(request.SessionID, run.RunID) },
-			acknowledge: func(snapshot activeGuidanceSnapshot) {
-				host.AcknowledgeActiveGuidance(request.SessionID, run.RunID, snapshot)
-			},
-		}
-	}
-	if host != nil {
+	if host != nil && request.origin != turnOriginAutoLearn {
 		driver = &contextProfileProviderDriver{inner: driver, emit: func(profile ContextProfile) {
 			host.EmitEvent(host.BaseContext(), Event{
 				Kind: EventContextProfile, SessionID: request.SessionID, RunID: run.RunID,
@@ -597,7 +659,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			"runtime_identity": contextManager.staticIdentity,
 		},
 	)
-	toolBus := tool.NewBus(drivers...)
+	toolBus := turnTools.Bus()
 	engine, err := materializeAgentDefinition(ctx, r.coding, definition, spec, hyagent.BuildDeps{
 		Providers:      hyprovider.Single(driver),
 		Skills:         skillSnapshot.Registry,
@@ -608,18 +670,79 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
+	parallelToolCalls := true
+	engine.PromptCacheKey = request.SessionID
+	if request.origin != turnOriginAutoLearn && host != nil && host.Sessions() != nil {
+		inheritedCacheKey, cacheKeyErr := host.Sessions().PromptCacheKey(ctx, request.SessionID)
+		if cacheKeyErr != nil {
+			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, cacheKeyErr.Error(), cacheKeyErr)
+			return nil, hyagent.Engine{}, cacheKeyErr
+		}
+		engine.PromptCacheKey = inheritedCacheKey
+	}
+	if request.origin == turnOriginAutoLearn {
+		engine.PromptCacheKey += ":autolearn"
+	}
+	engine.ParallelToolCalls = &parallelToolCalls
+	var turnControl *hyagent.ControlQueue
+	if host != nil {
+		turnControl = host.TurnControl(run.RunID)
+		engine.Control = turnControl
+	}
+	engine.NativeToolHost = newAttachmentRequestHost(host)
 	if request.Provider == "cursor" {
-		engine.ExtraBody = withCursorExecHost(engine.ExtraBody, newCursorExecHost(
+		engine.NativeToolHost = newCursorExecHost(
 			host, r.cfg.Workspace.Root, request.SessionID, run.RunID, run.RunID, "", toolBus,
-		))
+		)
+	}
+	if prewalkSwitch != nil {
+		prewalkSwitch.targetNativeHost = newAttachmentRequestHost(host)
+		if prewalkSwitch.targetProvider == "cursor" {
+			prewalkSwitch.targetNativeHost = newCursorExecHost(
+				host, r.cfg.Workspace.Root, request.SessionID, run.RunID, run.RunID, "", toolBus,
+			)
+		}
+	}
+	advisor := r.advisorForRun(ctx, host, request.SessionID, run.RunID, request.Provider, accountID, modelID, request.Reasoning)
+	r.mu.RLock()
+	ttsrConfig := cloneTTSRConfig(r.cfg.TTSR)
+	loopGuardConfig := r.cfg.Agents.LoopGuards
+	loopGuardConfig.ToolCallExemptTools = append([]string(nil), loopGuardConfig.ToolCallExemptTools...)
+	r.mu.RUnlock()
+	ttsr, ttsrErr := newTTSRHook(ttsrConfig, r.coding, func() *session.Service {
+		if host != nil {
+			return host.Sessions()
+		}
+		return nil
+	}(), request.SessionID, run.RunID, turnControl)
+	if ttsrErr != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, ttsrErr.Error(), ttsrErr)
+		return nil, hyagent.Engine{}, ttsrErr
+	}
+	if checkpoint != nil {
+		engine.ContextTransition = checkpoint
+		engine.Hooks = engine.Hooks.Prepend(checkpoint)
+		engine.OutputGuardrails = append(engine.OutputGuardrails, checkpoint.guardrail())
+	}
+	var loopStore *session.Service
+	if host != nil {
+		loopStore = host.Sessions()
+	}
+	loopGuard := newModelLoopGuard(loopGuardConfig, turnControl, loopStore, request.SessionID, run.RunID)
+	engine.Hooks = engine.Hooks.Prepend(loopGuard)
+	if guardrail := newUnexpectedStopGuard(loopGuardConfig); guardrail != nil {
+		engine.OutputGuardrails = append(engine.OutputGuardrails, guardrail)
+	}
+	if ttsr != nil {
+		engine.Hooks = engine.Hooks.Prepend(ttsr)
 	}
 	engine.Hooks = engine.Hooks.Prepend(editRecoveryHook{run: run})
-	if host != nil {
-		engine.Hooks = engine.Hooks.Prepend(activeGuidanceModelHook{
-			peek: func() activeGuidanceSnapshot {
-				return host.PeekActiveGuidance(request.SessionID, run.RunID)
-			},
-		})
+	if prewalkSwitch != nil {
+		prewalk := &prewalkHook{driver: prewalkSwitch, control: turnControl, sessionID: request.SessionID, runID: run.RunID}
+		if host != nil {
+			prewalk.store = host.Sessions()
+		}
+		engine.Hooks = engine.Hooks.Prepend(prewalk)
 	}
 	if host != nil {
 		metadata := host.HookMetadata(request.SessionID, run.RunID)
@@ -627,13 +750,14 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			messages := append(append([]message.Message(nil), input.Messages...), input.Output)
 			return writeSessionHookTranscript(request.SessionID, messages)
 		}))
-		engine.OutputGuardrails = append(engine.OutputGuardrails, hyagent.NewOutputGuardrail("active-user-guidance", func(_ context.Context, _ hyagent.OutputGuardrailInput) (hyagent.OutputGuardrailResult, error) {
-			guidance := host.FinishActiveGuidance(request.SessionID, run.RunID)
-			if len(guidance) == 0 {
-				return hyagent.AllowOutput(), nil
+		if advisor != nil {
+			if guardrail := advisor.Guardrail(); guardrail != nil {
+				engine.OutputGuardrails = append(engine.OutputGuardrails, guardrail)
 			}
-			return hyagent.RetryOutput(guidanceMessages(guidance)...), nil
-		}))
+		}
+		if guardrail := goalOutputGuardrail(host.Sessions(), request.SessionID, run.RunID); guardrail != nil {
+			engine.OutputGuardrails = append(engine.OutputGuardrails, guardrail)
+		}
 		if !request.DisableSubagents {
 			sessionID, parentRunID := request.SessionID, run.RunID
 			engine.OutputGuardrails = append(engine.OutputGuardrails, pendingBackgroundChildrenGuardrail(func() []backgroundChildStatus {
@@ -779,128 +903,6 @@ func (r *ProviderRuntime) persistSingleRunManifest(ctx context.Context, runID st
 	return r.coding.Runner().SaveRun(ctx, durable)
 }
 
-// activeGuidanceModelHook projects pending guidance into every model request.
-// The engine's hook context is request-local, so guidance remains pending until
-// compaction adopts it into durable history or the terminal guardrail retries.
-type activeGuidanceModelHook struct {
-	peek func() activeGuidanceSnapshot
-}
-
-func (h activeGuidanceModelHook) TransformContext(_ context.Context, messages []message.Message) ([]message.Message, error) {
-	if h.peek == nil {
-		return messages, nil
-	}
-	guidance := guidanceMessages(h.peek().values)
-	if len(guidance) == 0 {
-		return messages, nil
-	}
-	return append(append([]message.Message(nil), messages...), guidance...), nil
-}
-
-func (activeGuidanceModelHook) BeforeModelCall(context.Context, *hyprovider.Request) error {
-	return nil
-}
-
-func (activeGuidanceModelHook) BeforeToolCall(context.Context, *tool.Call) error {
-	return nil
-}
-
-func (activeGuidanceModelHook) AfterToolCall(context.Context, *tool.Result) error {
-	return nil
-}
-
-func (activeGuidanceModelHook) OnEvent(context.Context, hyprovider.Event) error {
-	return nil
-}
-
-type activeGuidanceContext struct {
-	inner       hyagent.TargetContextManager
-	peek        func() activeGuidanceSnapshot
-	acknowledge func(activeGuidanceSnapshot)
-}
-
-func (c activeGuidanceContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
-	return c.inner.Build(ctx, task)
-}
-
-func (c activeGuidanceContext) Compact(ctx context.Context, history []message.Message) ([]message.Message, error) {
-	return c.compactWithGuidance(ctx, history, func(prepared []message.Message) ([]message.Message, error) {
-		return c.inner.Compact(ctx, prepared)
-	})
-}
-
-func (c activeGuidanceContext) CompactTo(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, error) {
-	return c.compactWithGuidance(ctx, history, func(prepared []message.Message) ([]message.Message, error) {
-		return c.inner.CompactTo(ctx, prepared, targetTokens)
-	})
-}
-
-func (c activeGuidanceContext) compactWithGuidance(
-	ctx context.Context,
-	history []message.Message,
-	compact func([]message.Message) ([]message.Message, error),
-) ([]message.Message, error) {
-	var compacted []message.Message
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		snapshot := c.peek()
-		prepared := append([]message.Message(nil), history...)
-		compacted, err = compact(append(prepared, guidanceMessages(snapshot.values)...))
-		if err == nil {
-			c.acknowledge(snapshot)
-			return compacted, nil
-		}
-		if !errors.Is(err, session.ErrRunCheckpointStale) {
-			return compacted, err
-		}
-		select {
-		case <-ctx.Done():
-			return compacted, ctx.Err()
-		default:
-		}
-	}
-	return compacted, err
-}
-
-func guidanceMessages(values []activeGuidanceMessage) []message.Message {
-	cleaned := make([]activeGuidanceMessage, 0, len(values))
-	var highWater int64
-	for _, value := range values {
-		value.Text = strings.TrimSpace(value.Text)
-		value.Attachments = CloneAttachments(value.Attachments)
-		if value.Text != "" || len(value.Attachments) > 0 {
-			cleaned = append(cleaned, value)
-			highWater = max(highWater, value.Sequence)
-		}
-	}
-	if len(cleaned) == 0 {
-		return nil
-	}
-	if len(cleaned) == 1 {
-		value := UserMessageWithAttachments(cleaned[0].Text, cleaned[0].Attachments)
-		if highWater > 0 {
-			value.Metadata = copyMessageMetadata(value.Metadata, highWater)
-		}
-		return []message.Message{value}
-	}
-	var combined strings.Builder
-	combined.WriteString("[User guidance received while the task was running]\n")
-	attachments := make([]session.Attachment, 0)
-	for index, value := range cleaned {
-		text := value.Text
-		if text == "" {
-			text = "[Attached image]"
-		}
-		fmt.Fprintf(&combined, "%d. %s\n", index+1, text)
-		attachments = append(attachments, value.Attachments...)
-	}
-	result := UserMessageWithAttachments(strings.TrimSpace(combined.String()), attachments)
-	if highWater > 0 {
-		result.Metadata = copyMessageMetadata(result.Metadata, highWater)
-	}
-	return []message.Message{result}
-}
-
 type ContextBudget struct {
 	ContextWindow int
 	Trigger       int
@@ -943,23 +945,6 @@ func estimateToolDefinitionTokens(drivers []tool.Driver) int {
 		}
 	}
 	return (bytes + estimatedBytesPerToken - 1) / estimatedBytesPerToken
-}
-
-func (r *ProviderRuntime) responseUsageReporter(host providerHost, sessionID, runID, requestKind, providerID, modelID, transport string) responses.UsageReporter {
-	if host == nil {
-		return nil
-	}
-	return func(details responses.UsageDetails) {
-		details = responses.NormalizeUsage(details, cacheModelForProvider(providerID, details.CacheModel))
-		if details.ReasoningTokens == 0 && details.CacheWriteTokens == 0 && !details.CacheWriteReported {
-			return
-		}
-		host.EmitEvent(host.BaseContext(), Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{
-			"reasoningTokens": fmt.Sprint(details.ReasoningTokens), "cacheWriteTokens": fmt.Sprint(details.CacheWriteTokens), "uncachedInputTokens": fmt.Sprint(max(0, details.InputTokens-details.CachedTokens)),
-			"aggregateOnly": "true", "requestKind": requestKind, "provider": providerID, "model": modelID, "transport": transport,
-			"cacheModel": details.CacheModel, "cacheWriteStatus": map[bool]string{true: "reported", false: "unreported"}[details.CacheWriteReported],
-		}})
-	}
 }
 
 func enableExplicitPromptCache(extraBody map[string]any, provider, model string) {

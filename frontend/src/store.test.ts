@@ -33,10 +33,11 @@ const snapshot: Snapshot = {
 function state(): RuntimeData {
   return {
     snapshot, sessions: [], projects: [], currentSessionId: "s1", currentTitle: "", blocks: [], agents: [], backgroundProcesses: [], selectedAgentId: "", agentBlocks: [], agentCatalog: [],
-    skills: [], mcpServers: [], plugins: [], hookCatalog: { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] }, usageReport: null, branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
+    skills: [], mcpServers: [], plugins: [], marketplaceCatalog: { marketplaces: [], available: [], installed: [], upgrades: [] }, extensionThemes: [], hookCatalog: { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] }, usageReport: null, branches: [], pullRequestDashboard: null, selectedPullRequestNumber: null, pullRequestDetail: null,
     pullRequestMonitors: new Map(), pullRequestLoading: false, pullRequestMutating: false, pullRequestError: "",
     modelRoutes: [], modelProviders: [], modelsByProvider: {}, contextProfile: null,
-    contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recap: null, recovery: [],
+    contextUsage: { inputTokens: 0, outputTokens: 0, contextLimit: 0, reported: false }, todo: null, recap: null,
+    securityScans: [], securityConfig: null, securityScansLoaded: false, securityProjection: null, securityProjections: {}, securityFindings: [], securityFindingsByScan: {}, selectedSecurityFinding: null, securityPatch: null, securityExportPath: "", securityPublication: null, recovery: [],
     runId: "", running: false, globalRunId: "", globalRunSessionId: "", runStartedAt: 0, activity: "", approvalMode: "prompt", workspaceDirty: false,
     workspaceAdditions: 0, workspaceDeletions: 0, workspaceChangedFiles: 0,
     lastSequence: 0, error: "", view: "thread",
@@ -45,6 +46,27 @@ function state(): RuntimeData {
 }
 
 describe("runtime event projection", () => {
+  it("projects the complete Desktop security configuration", () => {
+    const securityConfig = {
+      enabled: true, defaultMode: "standard" as const, workers: 4, subagents: 3,
+      stopAfterNoNew: 4, stopAfterConsecutiveErrors: 3, maxDiscoveryRuns: 40,
+      maxTimeHours: 96,
+      publicationTool: "mcp__linear__create_issue",
+      routes: { audit: {}, reducer: {}, fixer: {}, verifier: {} },
+    };
+    const projected = reduceEvents(state(), [{
+      sequence: 1, kind: "security_config_state", state: "loaded", securityConfig,
+    }]);
+    expect(projected.securityConfig).toEqual(securityConfig);
+  });
+  it("hydrates demo Security settings without a Wails event", () => {
+    useRuntimeStore.setState(state());
+    useRuntimeStore.getState().hydrate(snapshot, true);
+    expect(useRuntimeStore.getState().securityConfig).toMatchObject({
+      enabled: true, workers: 4, maxTimeHours: 96,
+    });
+    expect(useRuntimeStore.getState().modelRoutes.filter((route) => route.scope === "security")).toHaveLength(4);
+  });
   it("projects interactive planning questions and versioned plan review state", () => {
     const questions = JSON.stringify([{
       id: "scope", header: "范围", question: "选择范围",
@@ -147,6 +169,22 @@ describe("runtime event projection", () => {
 		expect(projected.plugins[0]).toMatchObject({ id: "demo@market", displayName: "Demo", origin: "codex", skillCount: 2, integratedMCPCount: 1, hasApp: true });
 	});
 
+	it("projects marketplace inventory, installs, and upgrades as one catalog", () => {
+		const projected = reduceEvents(state(), [{
+			sequence: 1,
+			kind: "marketplace_catalog",
+			marketplaceCatalog: {
+				marketplaces: [{ name: "official", source: "owner/repo", type: "github", cachePath: "/cache", updatedAt: "2026-08-23T00:00:00Z" }],
+				available: [{ id: "demo@official", name: "demo", marketplace: "official", version: "2.0.0", description: "Demo", category: "development", homepage: "", license: "MIT", keywords: [], tags: [] }],
+				installed: [{ id: "demo@official", name: "demo", marketplace: "official", version: "1.0.0", scope: "project", enabled: true, path: "/plugins/demo" }],
+				upgrades: [{ plugin: { id: "demo@official", name: "demo", marketplace: "official", version: "1.0.0", scope: "project", enabled: true, path: "/plugins/demo" }, current: "1.0.0", latest: "2.0.0" }],
+			},
+		}]);
+		expect(projected.marketplaceCatalog.marketplaces[0]?.name).toBe("official");
+		expect(projected.marketplaceCatalog.installed[0]).toMatchObject({ id: "demo@official", scope: "project", enabled: true });
+		expect(projected.marketplaceCatalog.upgrades[0]?.latest).toBe("2.0.0");
+	});
+
 	it("composes a Codex plugin id from name and marketplace when the wire omits id", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "plugin_catalog", pluginCatalog: [{
@@ -161,12 +199,30 @@ describe("runtime event projection", () => {
 		const projected = reduceEvents(state(), [{
 			sequence: 1, kind: "mcp_state", state: "snapshot", data: { servers: JSON.stringify([{
 				name: "grep", enabled: true, state: "ready", transport: "streamable_http", target: "https://mcp.grep.app",
-				approval: "never", maxConcurrency: 2, toolCount: 1, tools: [{ name: "searchGitHub", effect: "read_only" }], error: "",
+				approval: "never", maxConcurrency: 2, toolCount: 1, tools: [{ name: "searchGitHub", effect: "read_only" }],
+				resourceCount: 1, resources: [{ server: "grep", uri: "file:///guide.md", name: "Guide" }],
+				resourceTemplateCount: 1, resourceTemplates: [{ server: "grep", uriTemplate: "file:///{name}.md", name: "Markdown" }],
+				promptCount: 1, prompts: [{ server: "grep", name: "summarize", arguments: [{ name: "text", required: true }] }], error: "",
 			}]) },
 		}, {
 			sequence: 2, kind: "mcp_state", state: "degraded", text: "offline", data: { server: "grep", state: "degraded", error: "offline" },
+		}, {
+			sequence: 3, kind: "mcp_state", state: "notification", data: { server: "grep", notification: "resources/updated", uri: "file:///guide.md" },
 		}]);
-		expect(projected.mcpServers[0]).toMatchObject({ name: "grep", state: "degraded", toolCount: 1, error: "offline" });
+		expect(projected.mcpServers[0]).toMatchObject({
+			name: "grep", state: "degraded", toolCount: 1, resourceCount: 1, resourceTemplateCount: 1, promptCount: 1, error: "offline",
+			resources: [{ server: "grep", uri: "file:///guide.md", name: "Guide" }],
+			resourceTemplates: [{ server: "grep", uriTemplate: "file:///{name}.md", name: "Markdown" }],
+			prompts: [{ server: "grep", name: "summarize", arguments: [{ name: "text", required: true }] }],
+		});
+	});
+
+	it("projects extension theme catalogs", () => {
+		const projected = reduceEvents(state(), [{
+			sequence: 1, kind: "theme_catalog", state: "snapshot",
+			data: { themes: JSON.stringify([{ name: "custom-dark", path: "/theme.json", colors: { accent: "#fff" }, source: "user" }]) },
+		}]);
+		expect(projected.extensionThemes).toEqual([{ name: "custom-dark", path: "/theme.json", colors: { accent: "#fff" }, source: "user" }]);
 	});
 
 	it("projects configured provider reasoning levels and resolves model aliases", () => {
@@ -945,7 +1001,8 @@ describe("runtime event projection", () => {
     expect(useRuntimeStore.getState().queuedPrompts).toHaveLength(0);
   });
 
-  it("shows queued guidance as an attached row without a delivery dropdown", async () => {
+  it("delivers Queue mode to the active backend run as a non-interrupting follow-up", async () => {
+    const followUp = vi.spyOn(bridge, "followUp").mockResolvedValue();
     useRuntimeStore.setState({
       ...state(),
       blocks: [{ id: "assistant-1", kind: "assistant", content: "处理中" }],
@@ -965,12 +1022,12 @@ describe("runtime event projection", () => {
     expect(container.querySelector(".send-button")).not.toBeNull();
     await act(async () => container.querySelector<HTMLButtonElement>(".send-button")!.click());
 
-    expect(useRuntimeStore.getState().queuedPrompts[0]?.text).toBe("下一轮再处理");
-    expect(container.querySelector(".queued-prompts + .composer-shell")).not.toBeNull();
-    expect(container.querySelector(".queued-guide")?.textContent).toContain("引导");
-    expect(container.querySelector(".queued-icon")).not.toBeNull();
-    expect(container.querySelector(".queue-menu")).not.toBeNull();
+    expect(followUp).toHaveBeenCalledWith("s1", "r1", "下一轮再处理", []);
+    expect(useRuntimeStore.getState().queuedPrompts).toHaveLength(0);
+    expect(useRuntimeStore.getState().blocks.at(-1)).toMatchObject({ kind: "user", content: "下一轮再处理" });
+    expect(container.querySelector(".queued-prompts")).toBeNull();
 
+    followUp.mockRestore();
     await act(async () => root.unmount());
     container.remove();
   });
@@ -1127,6 +1184,7 @@ describe("runtime event projection", () => {
   });
 
   it("uses Cmd+Shift+Enter to invert Queue into Steer for one follow-up", async () => {
+    const guide = vi.spyOn(bridge, "guide").mockResolvedValue();
     useRuntimeStore.setState({ ...state(), blocks: [{ id: "assistant-1", kind: "assistant", content: "处理中" }], running: true, runId: "r1", runStartedAt: Date.now() });
     const container = document.createElement("div");
     document.body.append(container);
@@ -1138,7 +1196,9 @@ describe("runtime event projection", () => {
       bubbles: true, cancelable: true, key: "Enter", code: "Enter", metaKey: true, shiftKey: true,
     })));
     await act(async () => Promise.resolve());
+    expect(guide).toHaveBeenCalledWith("s1", "r1", "立即调整方向", []);
     expect(useRuntimeStore.getState().queuedPrompts).toHaveLength(0);
+    guide.mockRestore();
     expect(useRuntimeStore.getState().blocks.at(-1)).toMatchObject({ kind: "user", content: "立即调整方向" });
     await act(async () => root.unmount());
     container.remove();
@@ -1360,6 +1420,10 @@ describe("runtime event projection", () => {
       {
         sequence: 4, kind: "context_usage", sessionId: "s1", state: "reported",
         data: { requestKind: "subagent", aggregateOnly: "true", inputTokens: "80", outputTokens: "12", cachedInputTokens: "70", cacheWriteTokens: "8", cacheStatus: "reported", cacheWriteStatus: "reported" },
+      },
+      {
+        sequence: 5, kind: "context_usage", sessionId: "s1", state: "pending",
+        data: { requestKind: "autolearn", factSnapshot: "true", usageSnapshot: JSON.stringify({ inputTokens: 999, outputTokens: 99, reported: true }) },
       },
     ]);
     expect(projected.contextProfile).toEqual(mainProfile);

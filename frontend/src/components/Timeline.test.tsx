@@ -1835,15 +1835,16 @@ describe("Codex-style process timeline", () => {
     const runningEdit: Block = {
       id: "edit-live", kind: "tool", runId: "run-live-edit", title: "coding.edit_hashline", state: "running",
       data: { arguments: JSON.stringify({ input: [
-        "¶src/app.ts#ABCD",
-        "replace 4:",
+        "*** Begin Patch",
+        "[src/app.ts#ABCD]",
+        "PUT 4.=4:",
         "+const next = 2;",
-        "insert after 8:",
+        "PUT >8:",
         "+line one",
         "+line two",
-        "",
-        "¶src/theme.ts#1234",
-        "delete 2..3",
+        "[src/theme.ts#1234]",
+        "CUT 2.=3",
+        "*** End Patch",
       ].join("\n") }) },
     };
     const container = document.createElement("div");

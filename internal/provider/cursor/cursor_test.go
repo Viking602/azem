@@ -14,10 +14,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
+
+type cursorTestRequestHost struct{ root string }
+
+func (host cursorTestRequestHost) AttachmentRoot() string { return host.root }
+func (cursorTestRequestHost) ExecuteNativeTool(context.Context, message.ToolCall) (message.ToolResult, error) {
+	return message.ToolResult{}, nil
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -202,7 +208,7 @@ func TestBuildRunRequestPreservesImageOnlyUserAttachment(t *testing.T) {
 	user.Metadata = map[string]string{"azem.attachments": string(attachments)}
 	payload, err := buildRunRequest(hyprovider.Request{
 		Model: "composer-2", Messages: []message.Message{user},
-		ExtraBody: map[string]any{responses.AttachmentRootExtraKey: root},
+		NativeToolHost: cursorTestRequestHost{root: root},
 	}, "session-1", "account-1", NewConversationCache())
 	if err != nil {
 		t.Fatal(err)
@@ -250,9 +256,9 @@ func TestBuildRunRequestPreservesImageOnlyUserAttachment(t *testing.T) {
 
 func TestBuildRunRequestUsesPromptCacheKeyAsConversationID(t *testing.T) {
 	request := hyprovider.Request{
-		Model:     "composer-2",
-		Messages:  []message.Message{message.NewText(message.RoleUser, "hello")},
-		ExtraBody: map[string]any{"prompt_cache_key": "session-cache"},
+		Model:          "composer-2",
+		Messages:       []message.Message{message.NewText(message.RoleUser, "hello")},
+		PromptCacheKey: "session-cache",
 	}
 	cache := NewConversationCache()
 	first, err := buildRunRequest(request, "", "account-1", cache)
@@ -1048,13 +1054,11 @@ func TestStreamCachesCheckpointAndReportsTokenDeltaWithoutBillingCheckpointToken
 	})})
 	var reportedContext ContextUsage
 	stream, err := driver.Stream(context.Background(), hyprovider.Request{
-		Model:    "composer-2",
-		Messages: []message.Message{message.NewText(message.RoleSystem, "rules"), message.NewText(message.RoleUser, "ask")},
-		ExtraBody: map[string]any{
-			"prompt_cache_key": "session-cache",
-			ContextUsageReporterExtraKey: ContextUsageReporter(func(usage ContextUsage) {
-				reportedContext = usage
-			}),
+		Model:          "composer-2",
+		Messages:       []message.Message{message.NewText(message.RoleSystem, "rules"), message.NewText(message.RoleUser, "ask")},
+		PromptCacheKey: "session-cache",
+		ContextUsage: func(usage hyprovider.ContextUsage) {
+			reportedContext = ContextUsage{UsedTokens: usage.UsedTokens, MaxTokens: usage.MaxTokens}
 		},
 	})
 	if err != nil {

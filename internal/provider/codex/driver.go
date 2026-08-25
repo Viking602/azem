@@ -78,11 +78,8 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 	if err != nil {
 		return nil, err
 	}
-	// ChatGPT/Codex can report explicit cache write counters; tag their semantics
-	// while preserving whether the upstream field was actually present.
-	reporter := responses.WrapUsageReporter(responses.RequestUsageReporter(request), responses.CacheModelWriteTokens)
 	open := func() (hyprovider.Stream, error) {
-		return d.openStream(ctx, payload, reverseNames, cacheKey, reporter)
+		return d.openStream(ctx, payload, reverseNames, cacheKey, nil)
 	}
 	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
 		Max:      maxProviderStreamRetries,
@@ -125,8 +122,7 @@ func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames ma
 }
 
 func promptCacheKey(request hyprovider.Request) string {
-	value, _ := request.ExtraBody["prompt_cache_key"].(string)
-	return strings.TrimSpace(value)
+	return strings.TrimSpace(request.PromptCacheKey)
 }
 
 const maxProviderStreamRetries = hyprovider.DefaultMaxStreamRetries

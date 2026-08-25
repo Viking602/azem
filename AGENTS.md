@@ -1,6 +1,6 @@
 # Azem Agent Guide
 
-Last verified: 2026-08-18
+Last verified: 2026-08-24
 
 ## Scope
 
@@ -37,6 +37,7 @@ state changes; do not use it for temporary task progress.
 | Sessions and durable timeline | `internal/session/`, `internal/app/tool_timeline.go` |
 | Desktop bridge | `internal/desktop/`, `internal/desktop/termhost/`, `cmd/azem-gui/`, `frontend/src/bridge.ts` |
 | GitHub PR capability | `internal/githubpr/`, `frontend/src/components/PullRequestPanel.tsx`, `frontend/src/components/PullRequestsPage.tsx` |
+| Native security scanning | `internal/securityscan/`, `docs/security-scanning.md` |
 | TUI | `internal/tui/` |
 | Executable prompts | `internal/app/prompts/`, `internal/agent/prompts/`, `internal/config/prompts/` |
 | User entry documentation | `README.md` |
@@ -58,7 +59,7 @@ Status values:
 
 | ID | Status | Issue and impact | Evidence | Required handling |
 |---|---|---|---|---|
-| DB-001 | Fixed, guarded | A user database reached schema 18 while source only supported 17, causing packaged startup to fail with `database schema 18 is newer than supported schema 17`. | `internal/store/sqlite/migrations.go`, `migrations_test.go`, real schema 18 reopen verification. | Keep `schemaVersion == len(migrations)`. Preserve migration 18 control-plane stores, schema 19 project ownership, schema 20 semantic context stores, schema 21 blob offload, schema 22 llmux provider models, upgrade/reopen coverage, and rejection of unknown future schemas. |
+| DB-001 | Fixed, guarded | A user database reached schema 18 while source only supported 17, causing packaged startup to fail with `database schema 18 is newer than supported schema 17`. | `internal/store/sqlite/migrations.go`, `migrations_test.go`, real schema 18 reopen verification. | Keep `schemaVersion == len(migrations)`. Preserve migration 18 control-plane stores, schema 19 project ownership, schema 20 semantic context stores, schema 21 blob offload, schema 22 llmux provider models, schema 23 security scans, schema 24 session graphs, schema 25 auth-broker state, schema 26 webhook receipts, upgrade/reopen coverage, and rejection of unknown future schemas. |
 | DB-002 | Fixed, guarded | Runtime migrations and the SQLC schema are separate definitions that must remain synchronized. | `internal/store/sqlite/migrations.go`, `internal/store/sqlite/dbgen/schema.sql`, `docs/persistence.md`, `docs/decisions/0001-schema-versioning.md`. | Keep both definitions, the persistence guide, and the schema ADR synchronized. Every schema change tests upgrade, reopen, and data retention. |
 | PROJECT-001 | Fixed, guarded | The desktop process previously exposed one fallback workspace while session history was global, so direct app launches lost the real project name, branch, and PR context and rendered every session under the wrong project. | Schema 19 project/session ownership tables, desktop bootstrap restore test, session catalog test, multi-project Sidebar test. | Keep project catalog state in SQLite rather than `config.yaml`; preserve one immutable project owner per session; direct desktop launch restores the most recently opened valid project; cross-project sessions open with that project's workspace. |
 | STREAM-001 | Fixed, guarded | Commentary, reasoning, and final answers were previously merged, hiding progress around tool calls or duplicating final output. | Provider stream, app event, session timeline, and frontend reducer `TextPhase` tests. | Preserve `commentary` and `final_answer` end to end; reasoning must not impersonate commentary; final output renders once. Unphased live text uses the same body-prose chrome as a final answer; do not paint a pending blue-dot card while the phase is unresolved. |
@@ -103,7 +104,7 @@ Status values:
 | TOOL-007 | Fixed, guarded | `coding.search` delegated to Venat's default `ListFiles` walker, which stops after the first 1,000 eligible files and ignores only `.git`. In the real Azem workspace, generated/dependency files placed `internal/app/work_evidence.go` at eligible position 15,921; search returned no matches with `truncated=true`, so the model abandoned the tool and used shell `grep`. | User screenshot/commentary, live workspace census (17,632 eligible files; 12,022 under `frontend/node_modules`; first 1,000 ended in `frontend/dist`), and `TestSearchSkipsIgnoredTreesInsteadOfTruncatingBeforeSource`. | In Git workspaces, enumerate all tracked plus unignored untracked files with argv-only `git ls-files -co --exclude-standard -z`; never cap files scanned at the matched-line limit. Keep the 200-line result cap explicit, skip unreadable/binary/oversized files, preserve regexp/glob filters, and route each matched file through the shared `coding.read_file` snapshot store so returned Hashline anchors remain editable. |
 | APPROVAL-001 | Fixed, guarded | Configurable Anthropic-compatible approval models can ignore native response-schema options and return the decision as a Markdown JSON fence, which previously caused `Automatic review failed (parse)` and prevented an authorized action from running. | `internal/provider/codex/guardian_policy.go`, `reviewer.go`, `guardian_outcome.go`, provider reviewer and app automatic-approval tests. | Keep the explicit JSON-only output contract and strict fail-closed validation. Accept only raw JSON or one whole-response JSON fence; never extract a decision from surrounding prose or execute after an invalid review. Apply the Codex host matrix so `low`/`medium` denials do not fall back to a person unless the rationale is an explicit injection or tenant deny. |
 | SKILL-001 | Fixed, guarded | Skill activation is run-scoped Venat memory, while durable transcripts keep the prior `hydaelyn_activate_skill` result. After a failed compact or a later turn, the model treated `check` as already active and called `hydaelyn_read_skill_resource`, failing immediately with `skill "check" is not active`. | Desktop retry 0s failures, `loadSessionActivatedSkills`, `TestProviderRuntimeReplaysActivatedSkillsOnLaterTurn`, and `TestProviderRuntimeDoesNotReplayDisabledOrDeletedSkills`. | Replay completed activations from session tool records into the next run's Skills set. Drop names that are no longer resolvable. A session that never activated the skill still fails closed. |
-| SKILL-002 | Unresolved | Replaying a session-activated Skill as an eager Venat Skill keeps `hydaelyn_read_skill_resource` usable, but it also changes the next run's static Skill set and activation-tool schema. A turn that activates `verify` can therefore invalidate the provider prefix on the following turn and start a new cache epoch with an almost entirely uncached request. | Session `session_1eb44415c423640d3d3602d4`: run `run_19a493728f40360680f24f15` ended near 99% cache hit, then run `run_ba7f18eb7d01c3063d93e749` changed `active_skills` from `[]` to `["verify"]`, changed `static_identity`, advanced `cache_epoch` from 0 to 1, and reported 128 cached tokens out of 229,906 input tokens. Venat v0.14.0 `newSkillRuntime`, `availableSkills`, `injectSkillMessages`, and `compactTo`. | Preserve SKILL-001 until Venat can restore a Skill's resource-read authorization without moving its full body or changing the advertised activation/resource schemas. Keep the Skill catalog and tool definitions stable across turns; do not merge cache epochs or hide the real cold request in the UI. |
+| SKILL-002 | Fixed, guarded | Replaying a session-activated Skill used to change the next run's static Skill set and activation/resource schemas, invalidating the provider prefix and starting a cold cache epoch. | Production session `session_1eb44415c423640d3d3602d4`; Venat v0.15.4 `TestSkillActivationAuthorizationRestoresWithoutChangingProviderPrefix`; Azem replay tests. | Restore resource-read authorization from durable activation records without adding eager Skill bodies or changing the advertised Skill tools. The system prefix and tool definitions must remain byte-stable across activation and replay. |
 | SKILL-003 | Fixed, guarded | A child that called `hydaelyn_read_skill_resource` on `SKILL.md` (or an inactive skill) received a Venat driver Go error, so the whole subagent loop died and the desktop showed `missing tool result`. | Desktop architecture-review child, Venat `skillResourceDriver.Execute`, `TestRunContinuesAfterUndeclaredSkillResource`, `TestProviderRuntimeSkillMDResourceDoesNotFailRun`. | Skill activation and resource misses return `IsError` tool results. Do not abort the run. `SKILL.md` is the activation body, not a resource. |
 | TODO-001 | Fixed, guarded | Parallel Todo mutations shared stale revisions and could skip/demote work. The model-facing `init` schema later exposed host-owned identity/status, then documented an omitted-`op` compatibility path while still marking `op` required, so Venat rejected the payload before the driver could infer `init`. | Todo concurrency/identity tests, `TestTodoDriverInfersInitFromUnambiguousPayload`, `TestTodoDefinitionKeepsInitIdentityHostOwned`, corrected live run `run_1e23618b7fc49e2f60463c72`, and deep architecture review. | Keep Todo mutations serial and revisioned. The `init` schema must allow `op` to be omitted only when goal+phases unambiguously define initialization; the driver rejects every other missing operation. IDs/status remain host-owned. `done` is the normal completion transition and automatically advances the next item. |
 | UI-001 | Fixed, guarded | Todo, Subagents, active-thinking motion, and process groups once existed only on an integration branch and disappeared from the GUI branch. | Commit `c2e4030`, frontend components/styles, frontend regression tests. | Move these projections and views as one unit. Do not restore the old `AgentList` or port styling without the store/event projection. |
@@ -158,6 +159,7 @@ Status values:
 | DOC-003 | Fixed, guarded | Development documentation previously covered only Go tests and formatting. | `docs/testing.md`, README Development section, `Makefile`. | Keep Go, frontend, desktop, SQLite, architecture, and GUI smoke commands synchronized with the real build. |
 | SEC-001 | Fixed, guarded | Combined GitHub, OAuth/API-key credential, hook, MCP, and automated-repair risks previously lacked a full threat model. | README Security Model and `docs/security.md`. | Keep the threat model synchronized with every new Bridge action, credential path, external mutation, hook, MCP, and automated-repair capability. |
 | OPS-001 | Unresolved | There is no complete database upgrade, backup, rollback, corruption recovery, or downgrade runbook. | Schema 17/18 incident; automatic `.bak` implementation. | Write `docs/release.md` and `docs/troubleshooting.md`; prohibit downgrade writes. |
+| PARITY-001 | Fixed, guarded | Azem's initial frozen OMP v18.0.3 audit recorded partial or missing behavior across tools, agent modes, extensibility, sessions, protocols, and operator workflows. | `internal/parity/manifest.json`, `TestManifestLoadsValidatedOMPBaseline`, cross-repository provider contracts, real coding fixtures, protocol suites, frontend/GUI checks, and zero `.sentrux` violations. | Keep the baseline pinned to OMP commit `160ed439ac0df594347e7d7018b813a7ffdb5e81`. Every capability remains `complete` or `stronger` with current source evidence; new OMP baselines require a new audit rather than silently changing this one. |
 | TEST-001 | Fixed, guarded | Maintainers previously lacked a unified command matrix by change type. | `docs/testing.md`, verification matrix below. | Keep commands executable and require a real GUI launch for desktop behavior changes. |
 
 Public issue state is not evidence that the product has no defects; the
@@ -194,6 +196,33 @@ evidence-backed internal record above remains the maintenance backlog.
 - Schema 22 contains `llmux_provider_models`. llmux discovered and imported
   model catalogs live there; `config.yaml` keeps only provider `enabled` and
   `base_url`. Legacy YAML `models:` lists are imported once on launch.
+- Schema 23 contains native security scans, workers, progress, artifacts,
+  findings, occurrences, locations, triage, remediation, matching, and
+  publication receipts. Canonical report bytes remain private scan-local files.
+- Schema 24 contains `session_graphs`, parent-linked `session_graph_entries`,
+  named `session_branches`, and `session_labels`. Appending a canonical block
+  advances the active leaf transactionally; navigation never deletes another
+  branch.
+- Schema 25 contains auth-broker access tokens, disabled credentials,
+  temporary account blocks, and usage observations. Broker credentials remain
+  server-side; clients persist only encrypted snapshots and read-only account
+  projections.
+- Schema 26 contains signed GitHub webhook delivery receipts. Delivery IDs and
+  payload digests make redelivery idempotent before a repair trigger is
+  admitted.
+
+
+### Frozen OMP parity baseline
+
+- `internal/parity/manifest.json` pins OMP v18.0.3 commit
+  `160ed439ac0df594347e7d7018b813a7ffdb5e81`.
+- Every in-scope capability must remain `complete` or `stronger` and carry
+  current Azem evidence. `OpenCapabilities()` returning a row is a release
+  blocker.
+- Public-library API compatibility and OMP visual identity remain outside the
+  frozen scope. User-visible coding-agent and operator behavior do not.
+- A newer OMP release changes the comparison baseline only through an explicit
+  manifest audit with matching tests and documentation.
 
 ### Archive-first context compaction
 
@@ -350,6 +379,25 @@ provider stream
 - OAuth-only MCP and `.app.json` connections remain visibly unavailable until
   a separately authenticated connection exists.
 
+### Native security scanning
+
+- Security audits use Azem provider drivers and Venat; never add a Codex CLI,
+  Node, Python, second scheduler, hidden conversation session, or second scan
+  database.
+- Audit models and their security-only child roles read an immutable private
+  snapshot with read-only tools. Progress paths require successful read
+  receipts, and complete claims with missing receipts become partial. Models
+  submit semantic drafts only; target/finding scope binding, stable IDs, Schema
+  validation, report/SARIF, diff-evidence sealing, and completion are host owned.
+- Deep Scan persists independent complete audits, usage, and one serial reducer.
+  Native scans set no Token/tool-call hard ceiling. Absolute-deadline/error
+  stops preserve completed work as partial coverage; zero completed source
+  review is never a complete no-findings result.
+- Patching requires a completed non-stale scan and clean Git checkout, edits an
+  isolated worktree only within host-accepted finding locations, and needs an
+  independent non-editing verifier with read/test receipts before commit or PR
+  publication.
+
 ### GitHub pull requests
 
 The complete PR contract includes capability detection, dashboard lists,
@@ -382,6 +430,7 @@ Security requirements:
 | `docs/recovery.md` | Complete | Recovery fence, crash recovery, side-effect reconciliation, tool timeline continuity, background subagent continuation, Team resume, suspension, failure surfaces. | Update for recovery, reconciliation, or run-state changes. |
 | `docs/context-rebuild-plan.md` | Complete | Deterministic context archive kernel, safe cuts, artifact/bitmap carriers, persistence, recovery, and failure semantics. | Keep synchronized with context policy and schema changes. |
 | `docs/plugins.md` | Complete | Shared Codex plugin standard, compatibility matrix, discovery, trust, and runtime projection. | Update when the upstream manifest or supported capability boundary changes. |
+| `docs/security-scanning.md` | Complete | Native target snapshots, Standard/Deep runtime, contracts, findings, remediation, UI, publication, and verification. | Update with every security-scan behavior or schema change. |
 | `CHANGELOG.md` | Current | User-visible compatibility and behavior changes. | Update for schema, configuration, dependency, or behavior changes. |
 | `docs/decisions/README.md` | Current | ADR index and status rules. | Add and supersede ADRs through the index. |
 | `docs/decisions/0001-schema-versioning.md` | Accepted | Schema compatibility, dual definitions, backup, and rollback rules. | Update only by superseding ADR. |
@@ -449,6 +498,7 @@ surface before delivery.
 | GitHub PR frontend | Frontend typecheck/test/build; verify list, detail, failure feedback, and changed mutation in an authenticated workspace |
 | Provider streaming | Provider parser, app runtime, session persistence, frontend reducer/timeline tests |
 | Prompt/bundled Skill | Matching app/agent/config/Skills tests and a real conversation path |
+| Native security scan | `go test ./internal/securityscan ./internal/app ./internal/store/sqlite`; matching SecurityPage Vitest; complete Go/frontend checks; real GUI Standard scan/start/cancel/finding/export keyboard path |
 | Harbor eval adapter | `PYTHONPATH="$PWD" python3 -m unittest eval.harbor.timeout_test`; `go test ./cmd/azem-eval` |
 | Architecture | `sentrux check .` and `session_end` with zero new cycles or violations |
 | README/documentation | Validate paths, commands, links, and descriptions against current source |

@@ -612,7 +612,7 @@ func TestAutomaticApprovalDoesNotCreateChatBlockBeforeEdit(t *testing.T) {
 	})
 	model.applyEvent(app.Event{
 		Kind: app.EventToolStarted, SessionID: "default", RunID: "run-1", ToolCallID: "edit-1",
-		Data: map[string]string{"name": "coding.edit_hashline", "arguments": `{"input":"¶README.md#ABCD\nreplace 1:\n+new"}`},
+		Data: map[string]string{"name": "coding.edit_hashline", "arguments": `{"input":"*** Begin Patch\n[README.md#ABCD]\nPUT 1.=1:\n+new\n*** End Patch\n"}`},
 	})
 	model.applyEvent(app.Event{
 		Kind: app.EventToolFinished, SessionID: "default", RunID: "run-1", ToolCallID: "edit-1", State: "completed",

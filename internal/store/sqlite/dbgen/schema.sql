@@ -47,3 +47,142 @@ CREATE INDEX context_manifests_session_created ON context_manifests(session_id,c
 CREATE UNIQUE INDEX context_manifests_one_active ON context_manifests(session_id) WHERE activated=1;
 CREATE TABLE llmux_provider_models (provider_id TEXT NOT NULL, model_id TEXT NOT NULL, payload BLOB NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(provider_id, model_id));
 CREATE INDEX llmux_provider_models_provider ON llmux_provider_models(provider_id, model_id);
+CREATE TABLE security_scans (id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '', requested_session_id TEXT NOT NULL DEFAULT '', root_run_id TEXT NOT NULL DEFAULT '', parent_scan_id TEXT NOT NULL DEFAULT '', target_id TEXT NOT NULL, target_kind TEXT NOT NULL, target_path TEXT NOT NULL, target_snapshot_digest TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL, completeness TEXT NOT NULL DEFAULT '', route_json BLOB NOT NULL, budget_json BLOB NOT NULL, deep_json BLOB NOT NULL, target_json BLOB NOT NULL, knowledge_json BLOB NOT NULL DEFAULT '[]', user_context TEXT NOT NULL DEFAULT '', workflow_version TEXT NOT NULL, contract_version TEXT NOT NULL, output_dir TEXT NOT NULL, failure_message TEXT NOT NULL DEFAULT '', blocking_reason TEXT NOT NULL DEFAULT '', warning TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, cached_input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, started_at INTEGER NOT NULL DEFAULT 0, completed_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL);
+CREATE INDEX security_scans_project_created ON security_scans(project_id,created_at DESC,id);
+CREATE INDEX security_scans_target_status ON security_scans(target_id,status,created_at DESC,id);
+CREATE INDEX security_scans_parent ON security_scans(parent_scan_id,created_at,id);
+CREATE UNIQUE INDEX security_scans_one_active_deep_target ON security_scans(project_id,target_id,target_snapshot_digest) WHERE mode='deep' AND status IN ('queued','running','blocked');
+CREATE TABLE security_scan_workers (id TEXT PRIMARY KEY, scan_id TEXT NOT NULL REFERENCES security_scans(id) ON DELETE CASCADE, run_id TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, status TEXT NOT NULL, sequence INTEGER NOT NULL, attempt INTEGER NOT NULL, completion_sequence INTEGER NOT NULL DEFAULT 0, route_json BLOB NOT NULL, result_path TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL DEFAULT 0, completed_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, UNIQUE(scan_id,kind,sequence,attempt));
+CREATE INDEX security_scan_workers_scan_status ON security_scan_workers(scan_id,status,kind,sequence);
+CREATE UNIQUE INDEX security_scan_workers_completion ON security_scan_workers(scan_id,completion_sequence) WHERE completion_sequence > 0;
+CREATE TABLE security_scan_progress (scan_id TEXT PRIMARY KEY REFERENCES security_scans(id) ON DELETE CASCADE, phase TEXT NOT NULL, files_completed INTEGER NOT NULL DEFAULT 0, files_total INTEGER NOT NULL DEFAULT 0, reviewed_paths_json BLOB NOT NULL DEFAULT '[]', workers_planned INTEGER NOT NULL DEFAULT 0, workers_running INTEGER NOT NULL DEFAULT 0, workers_done INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL);
+CREATE TABLE security_scan_artifacts (scan_id TEXT NOT NULL REFERENCES security_scans(id) ON DELETE CASCADE, kind TEXT NOT NULL, path TEXT NOT NULL, media_type TEXT NOT NULL, sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(scan_id,kind,path));
+CREATE TABLE security_findings (id TEXT PRIMARY KEY, target_id TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE, rule_id TEXT NOT NULL, identity_anchor TEXT NOT NULL, identity_instance TEXT NOT NULL DEFAULT '', first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL);
+CREATE INDEX security_findings_target_last_seen ON security_findings(target_id,last_seen_at DESC,id);
+CREATE TABLE security_finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT NOT NULL REFERENCES security_findings(id), scan_id TEXT NOT NULL REFERENCES security_scans(id) ON DELETE CASCADE, severity TEXT NOT NULL, confidence TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', title TEXT NOT NULL, summary TEXT NOT NULL, details_json BLOB NOT NULL, created_at INTEGER NOT NULL, UNIQUE(scan_id,finding_id));
+CREATE INDEX security_occurrences_scan_severity ON security_finding_occurrences(scan_id,severity,id);
+CREATE INDEX security_occurrences_finding_scan ON security_finding_occurrences(finding_id,scan_id);
+CREATE TABLE security_finding_locations (occurrence_id TEXT NOT NULL REFERENCES security_finding_occurrences(id) ON DELETE CASCADE, sort_order INTEGER NOT NULL, path TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, role TEXT NOT NULL, PRIMARY KEY(occurrence_id,sort_order));
+CREATE TABLE security_finding_triage (occurrence_id TEXT PRIMARY KEY REFERENCES security_finding_occurrences(id) ON DELETE CASCADE, status TEXT NOT NULL, close_reason TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL);
+CREATE TABLE security_remediation_attempts (id TEXT PRIMARY KEY, occurrence_id TEXT NOT NULL REFERENCES security_finding_occurrences(id) ON DELETE CASCADE, state TEXT NOT NULL, version INTEGER NOT NULL, base_revision TEXT NOT NULL, base_snapshot_digest TEXT NOT NULL, applied_snapshot_digest TEXT NOT NULL DEFAULT '', files_json BLOB NOT NULL DEFAULT '[]', verification TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '', branch TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX security_remediation_occurrence_created ON security_remediation_attempts(occurrence_id,created_at DESC,id);
+CREATE TABLE security_scan_matches (before_occurrence_id TEXT NOT NULL, after_occurrence_id TEXT NOT NULL, match_kind TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, PRIMARY KEY(before_occurrence_id,after_occurrence_id));
+CREATE TABLE security_publications (scan_id TEXT NOT NULL REFERENCES security_scans(id) ON DELETE CASCADE, occurrence_id TEXT NOT NULL REFERENCES security_finding_occurrences(id) ON DELETE CASCADE, destination TEXT NOT NULL, status TEXT NOT NULL, external_id TEXT NOT NULL DEFAULT '', external_url TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(scan_id,occurrence_id,destination));
+
+CREATE TABLE session_graphs (
+	session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+	root_session_id TEXT NOT NULL,
+	parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+	forked_from_entry_id TEXT NOT NULL DEFAULT '',
+	prompt_cache_key TEXT NOT NULL DEFAULT '',
+	active_branch TEXT NOT NULL DEFAULT 'main',
+	active_leaf_entry_id TEXT NOT NULL DEFAULT '',
+	source_kind TEXT NOT NULL DEFAULT 'native',
+	source_ref TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	CHECK(parent_session_id IS NULL OR parent_session_id <> session_id)
+);
+CREATE INDEX session_graphs_root_created ON session_graphs(root_session_id,created_at,session_id);
+CREATE INDEX session_graphs_parent_created ON session_graphs(parent_session_id,created_at,session_id);
+CREATE TABLE session_graph_entries (
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	entry_id TEXT NOT NULL,
+	source_entry_id TEXT NOT NULL DEFAULT '',
+	parent_entry_id TEXT,
+	block_sequence INTEGER NOT NULL,
+	kind TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	PRIMARY KEY(session_id,entry_id),
+	UNIQUE(session_id,block_sequence),
+	FOREIGN KEY(session_id,parent_entry_id) REFERENCES session_graph_entries(session_id,entry_id),
+	FOREIGN KEY(session_id,block_sequence) REFERENCES session_blocks(session_id,sequence) ON DELETE CASCADE
+);
+CREATE INDEX session_graph_entries_parent ON session_graph_entries(session_id,parent_entry_id,block_sequence);
+CREATE UNIQUE INDEX session_graph_entries_source ON session_graph_entries(session_id,source_entry_id) WHERE source_entry_id<>'';
+CREATE TABLE session_branches (
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	name TEXT NOT NULL COLLATE NOCASE,
+	head_entry_id TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY(session_id,name)
+);
+CREATE TABLE session_labels (
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	entry_id TEXT NOT NULL,
+	label TEXT NOT NULL,
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY(session_id,entry_id),
+	FOREIGN KEY(session_id,entry_id) REFERENCES session_graph_entries(session_id,entry_id) ON DELETE CASCADE
+);
+CREATE INDEX session_labels_lookup ON session_labels(session_id,label,entry_id);
+CREATE TRIGGER session_graph_after_session_insert AFTER INSERT ON sessions BEGIN
+	INSERT INTO session_graphs(session_id,root_session_id,parent_session_id,forked_from_entry_id,prompt_cache_key,active_branch,active_leaf_entry_id,source_kind,source_ref,created_at,updated_at)
+	VALUES(NEW.id,NEW.id,NULL,'','', 'main','', 'native','',NEW.created_at,NEW.updated_at);
+	INSERT INTO session_branches(session_id,name,head_entry_id,created_at,updated_at) VALUES(NEW.id,'main','',NEW.created_at,NEW.updated_at);
+END;
+CREATE TRIGGER session_graph_after_block_insert AFTER INSERT ON session_blocks BEGIN
+	INSERT INTO session_graph_entries(session_id,entry_id,parent_entry_id,block_sequence,kind,created_at)
+	VALUES(NEW.session_id,NEW.session_id || ':' || printf('%020d',NEW.sequence),NULLIF((SELECT active_leaf_entry_id FROM session_graphs WHERE session_id=NEW.session_id),''),NEW.sequence,NEW.kind,COALESCE((SELECT updated_at FROM sessions WHERE id=NEW.session_id),NEW.sequence));
+	UPDATE session_graphs SET active_leaf_entry_id=NEW.session_id || ':' || printf('%020d',NEW.sequence),updated_at=COALESCE((SELECT updated_at FROM sessions WHERE id=NEW.session_id),updated_at) WHERE session_id=NEW.session_id;
+	INSERT INTO session_branches(session_id,name,head_entry_id,created_at,updated_at)
+	VALUES(NEW.session_id,COALESCE((SELECT active_branch FROM session_graphs WHERE session_id=NEW.session_id),'main'),NEW.session_id || ':' || printf('%020d',NEW.sequence),COALESCE((SELECT updated_at FROM sessions WHERE id=NEW.session_id),NEW.sequence),COALESCE((SELECT updated_at FROM sessions WHERE id=NEW.session_id),NEW.sequence))
+	ON CONFLICT(session_id,name) DO UPDATE SET head_entry_id=excluded.head_entry_id,updated_at=excluded.updated_at;
+END;
+
+CREATE TABLE auth_broker_state (
+	id INTEGER PRIMARY KEY CHECK(id=1),
+	generation INTEGER NOT NULL DEFAULT 0,
+	updated_at INTEGER NOT NULL
+);
+CREATE TABLE auth_broker_disabled (
+	credential_id TEXT PRIMARY KEY,
+	provider_id TEXT NOT NULL,
+	account_id TEXT NOT NULL,
+	cause TEXT NOT NULL DEFAULT '',
+	updated_at INTEGER NOT NULL
+);
+CREATE INDEX auth_broker_disabled_provider ON auth_broker_disabled(provider_id,updated_at,credential_id);
+CREATE TABLE auth_broker_blocks (
+	credential_id TEXT NOT NULL,
+	provider_id TEXT NOT NULL,
+	scope TEXT NOT NULL,
+	blocked_until INTEGER NOT NULL,
+	reason TEXT NOT NULL DEFAULT '',
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY(credential_id,scope)
+);
+CREATE INDEX auth_broker_blocks_provider_expiry ON auth_broker_blocks(provider_id,blocked_until,credential_id);
+CREATE TABLE auth_broker_usage_observations (
+	id TEXT PRIMARY KEY,
+	client_id TEXT NOT NULL DEFAULT '',
+	credential_id TEXT NOT NULL DEFAULT '',
+	provider_id TEXT NOT NULL,
+	account_id TEXT NOT NULL DEFAULT '',
+	payload BLOB NOT NULL,
+	observed_at INTEGER NOT NULL
+);
+CREATE INDEX auth_broker_usage_provider_time ON auth_broker_usage_observations(provider_id,observed_at,id);
+CREATE INDEX auth_broker_usage_client_time ON auth_broker_usage_observations(client_id,observed_at,id);
+CREATE TRIGGER auth_broker_credentials_ai AFTER INSERT ON auth_credentials BEGIN
+	UPDATE auth_broker_state SET generation=generation+1,updated_at=NEW.updated_at WHERE id=1;
+END;
+CREATE TRIGGER auth_broker_credentials_au AFTER UPDATE ON auth_credentials BEGIN
+	UPDATE auth_broker_state SET generation=generation+1,updated_at=NEW.updated_at WHERE id=1;
+END;
+CREATE TRIGGER auth_broker_credentials_ad AFTER DELETE ON auth_credentials BEGIN
+	UPDATE auth_broker_state SET generation=generation+1,updated_at=CAST(strftime('%s','now') AS INTEGER)*1000000000 WHERE id=1;
+END;
+CREATE TABLE github_webhook_deliveries (
+	delivery_id TEXT PRIMARY KEY,
+	event_name TEXT NOT NULL,
+	repository TEXT NOT NULL,
+	pull_request_number INTEGER NOT NULL DEFAULT 0,
+	action TEXT NOT NULL DEFAULT '',
+	payload_sha256 TEXT NOT NULL,
+	status TEXT NOT NULL,
+	received_at INTEGER NOT NULL
+);
+CREATE INDEX github_webhook_deliveries_received ON github_webhook_deliveries(received_at,delivery_id);
+CREATE INDEX github_webhook_deliveries_pr ON github_webhook_deliveries(repository,pull_request_number,received_at);

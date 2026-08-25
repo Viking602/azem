@@ -191,7 +191,8 @@ type HashlinePlanState = {
 };
 
 function consumeHashlinePlanLine(state: HashlinePlanState, line: string) {
-  if (line.startsWith("¶")) return openHashlinePlanSection(state, line);
+  if (line === "*** Begin Patch" || line === "*** End Patch") return finishHashlineOperation(state);
+  if (line.startsWith("[") || line.startsWith("¶")) return openHashlinePlanSection(state, line);
   if (!line.trim()) return finishHashlineOperation(state);
   if (!state.current) return false;
   if (line.startsWith("+")) return appendHashlinePlanBody(state);
@@ -206,8 +207,9 @@ function consumeHashlinePlanLine(state: HashlinePlanState, line: string) {
 
 function openHashlinePlanSection(state: HashlinePlanState, line: string) {
   if (!finishHashlineOperation(state)) return false;
+  const markerLength = line.startsWith("¶") ? 1 : line.startsWith("[") ? 1 : 0;
   const hash = line.lastIndexOf("#");
-  const path = hash > 1 ? line.slice(1, hash).trim() : "";
+  const path = hash > markerLength ? line.slice(markerLength, hash).trim() : "";
   if (!path) return false;
   state.current = state.byPath.get(path) ?? { path, additions: 0, deletions: 0 };
   state.byPath.set(path, state.current);
@@ -229,17 +231,23 @@ function finishHashlineOperation(state: HashlinePlanState) {
 }
 
 function plannedHashlineOperation(line: string): { deletions: number; bodyRequired: boolean } | null {
-  if (/^(?:replace|delete) block\b/u.test(line)) return null;
-  const range = /^(replace|delete) (\d+)(?:\.\.(\d+))?:?$/u.exec(line);
+  const range = /^PUT (\d+)\.=(\d+):$/u.exec(line);
   if (range) {
-    const start = Number(range[2]);
-    const end = Number(range[3] || range[2]);
+    const start = Number(range[1]);
+    const end = Number(range[2]);
     if (start < 1 || end < start) return null;
-    return { deletions: end - start + 1, bodyRequired: range[1] === "replace" };
+    return { deletions: end - start + 1, bodyRequired: true };
   }
-  return /^insert (?:before \d+|after \d+|head|tail):?$/u.test(line)
-    ? { deletions: 0, bodyRequired: true }
-    : null;
+  const cut = /^CUT (\d+)\.=(\d+)(?: @[A-Za-z0-9_-]+)?$/u.exec(line);
+  if (cut) {
+    const start = Number(cut[1]);
+    const end = Number(cut[2]);
+    if (start < 1 || end < start) return null;
+    return { deletions: end - start + 1, bodyRequired: false };
+  }
+  if (/^PUT (?:<\d+|>\d+|>\$):$/u.test(line)) return { deletions: 0, bodyRequired: true };
+  if (/^(?:MV .+|REM)$/u.test(line)) return { deletions: 0, bodyRequired: false };
+  return null;
 }
 
 function parseStructuredSections(value: string): RawSection[] {
@@ -288,9 +296,11 @@ function parseCompactEditOutput(output: string): RawSection[] {
     }
   };
   for (const line of output.replace(/\r\n?/gu, "\n").split("\n")) {
-    if (line.startsWith("¶")) {
+    if ((line.startsWith("[") && line.endsWith("]")) || line.startsWith("¶")) {
       flush();
-      current = { path: line.slice(1).split("#", 1)[0]?.trim() || "", firstChangedLine: 1, lines: [], inDiff: false };
+      const marker = 1;
+      const hash = line.lastIndexOf("#");
+      current = { path: hash > marker ? line.slice(marker, hash).trim() : "", firstChangedLine: 1, lines: [], inDiff: false };
       continue;
     }
     if (!current) continue;

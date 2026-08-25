@@ -13,13 +13,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Viking602/azem/internal/provider/responses"
 	sdk "github.com/Viking602/llmux"
 	"github.com/Viking602/llmux/provider/anthropic"
 	"github.com/Viking602/llmux/provider/openai/compat"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
+
+type llmuxTestRequestHost struct{ root string }
+
+func (host llmuxTestRequestHost) AttachmentRoot() string { return host.root }
+func (llmuxTestRequestHost) ExecuteNativeTool(context.Context, message.ToolCall) (message.ToolResult, error) {
+	return message.ToolResult{}, nil
+}
 
 type sliceStream struct {
 	parts []sdk.Part
@@ -66,7 +72,7 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 		{Kind: sdk.PartFinish, FinishReason: sdk.FinishStop, Usage: sdk.Usage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5}},
 	}}}
 	text, err := stream.Recv()
-	if err != nil || text.Kind != hyprovider.EventTextDelta || text.Text != "hello" || text.TextPhase != "" {
+	if err != nil || text.Kind != hyprovider.EventTextDelta || text.Text != "hello" || text.TextPhase != hyprovider.TextPhaseFinalAnswer {
 		t.Fatalf("text event = %+v, error = %v", text, err)
 	}
 	done, err := stream.Recv()
@@ -75,87 +81,67 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 	}
 }
 
-func TestDeepSeekStreamReportsInclusiveCacheUsage(t *testing.T) {
-	for _, test := range []cacheUsageExpectation{
-		{name: "deepseek cache hit", provider: "deepseek", input: 4_336, cached: 4_608, wantInput: 8_944, wantTotal: 8_964, wantReported: true},
-		{name: "deepseek zero hit", provider: "deepseek", input: 8_499, wantInput: 8_499, wantTotal: 8_519, wantReported: true},
-		{name: "unknown provider stays unreported", provider: "custom", input: 4_336, cached: 4_608, wantInput: 4_336, wantTotal: 4_356, wantReported: false},
+func TestStreamPreservesNormalizedCacheUsage(t *testing.T) {
+	for _, test := range []struct {
+		name                  string
+		usage                 sdk.Usage
+		wantInput, wantCached int
+		wantTotal             int
+		wantReported          bool
+	}{
+		{
+			name: "cache hit",
+			usage: sdk.Usage{
+				InputTokens: 8_944, CachedInputTokens: 4_608, CachedInputTokensReported: true,
+				OutputTokens: 20, TotalTokens: 8_964,
+			},
+			wantInput: 8_944, wantCached: 4_608, wantTotal: 8_964, wantReported: true,
+		},
+		{
+			name: "explicit zero",
+			usage: sdk.Usage{
+				InputTokens: 8_499, CachedInputTokensReported: true,
+				OutputTokens: 20, TotalTokens: 8_519,
+			},
+			wantInput: 8_499, wantTotal: 8_519, wantReported: true,
+		},
+		{
+			name:      "unsupported cache",
+			usage:     sdk.Usage{InputTokens: 4_336, OutputTokens: 20, TotalTokens: 4_356},
+			wantInput: 4_336, wantTotal: 4_356,
+		},
 	} {
-		t.Log(test.name)
-		assertCacheUsage(t, test)
+		t.Run(test.name, func(t *testing.T) {
+			stream := &streamAdapter{inner: &sliceStream{parts: []sdk.Part{{
+				Kind: sdk.PartFinish, FinishReason: sdk.FinishStop, Usage: test.usage,
+			}}}}
+			done, err := stream.Recv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done.Usage.InputTokens != test.wantInput ||
+				done.Usage.CachedInputTokens != test.wantCached ||
+				done.Usage.TotalTokens != test.wantTotal ||
+				done.Usage.CachedInputTokensReported != test.wantReported {
+				t.Fatalf("usage = %#v", done.Usage)
+			}
+		})
 	}
 }
 
-type cacheUsageExpectation struct {
-	name         string
-	provider     string
-	input        int
-	cached       int
-	wantInput    int
-	wantTotal    int
-	wantReported bool
-}
-
-type cacheUsageObservation struct {
-	eventInput     int
-	eventCached    int
-	eventTotal     int
-	reportedInput  int
-	reportedCached int
-	reportedTotal  int
-	cacheReported  bool
-}
-
-func assertCacheUsage(t *testing.T, test cacheUsageExpectation) {
-	t.Helper()
-	var details responses.UsageDetails
-	stream := &streamAdapter{
-		provider: test.provider,
-		reporter: func(got responses.UsageDetails) { details = got },
-		inner: &sliceStream{parts: []sdk.Part{{
-			Kind: sdk.PartFinish, FinishReason: sdk.FinishStop,
-			Usage: sdk.Usage{InputTokens: test.input, CachedInputTokens: test.cached, OutputTokens: 20, TotalTokens: test.input + 20},
-		}}},
-	}
-	done, err := stream.Recv()
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := cacheUsageObservation{
-		eventInput: done.Usage.InputTokens, eventCached: done.Usage.CachedInputTokens, eventTotal: done.Usage.TotalTokens,
-		reportedInput: details.InputTokens, reportedCached: details.CachedTokens, reportedTotal: details.TotalTokens, cacheReported: details.CacheReported,
-	}
-	want := cacheUsageObservation{
-		eventInput: test.wantInput, eventCached: test.cached, eventTotal: test.wantTotal,
-		reportedInput: test.wantInput, reportedCached: test.cached, reportedTotal: test.wantTotal, cacheReported: test.wantReported,
-	}
-	if got != want {
-		t.Fatalf("usage = %+v, reported = %+v, want input=%d cached=%d total=%d reported=%v", done.Usage, details, test.wantInput, test.cached, test.wantTotal, test.wantReported)
-	}
-}
-
-func TestConvertRequestHonorsMaxOutputTokens(t *testing.T) {
-	fromExtra, _, err := convertRequest(hyprovider.Request{
-		Model:     "deepseek-v4-pro",
-		ExtraBody: map[string]any{"max_output_tokens": 384000},
-		MaxTokens: 1024,
+func TestConvertRequestHonorsTypedPortableOptions(t *testing.T) {
+	parallel := false
+	converted, _, err := convertRequest(hyprovider.Request{
+		Model: "deepseek-v4-pro", MaxTokens: 384000,
+		PromptCacheKey: "session-cache", ServiceTier: "priority", ParallelToolCalls: &parallel,
 	}, "", "deepseek")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fromExtra.Options.MaxOutputTokens == nil || *fromExtra.Options.MaxOutputTokens != 384000 {
-		t.Fatalf("extra body max_output_tokens = %v, want 384000", fromExtra.Options.MaxOutputTokens)
-	}
-
-	fromMaxTokens, _, err := convertRequest(hyprovider.Request{
-		Model:     "deepseek-v4-pro",
-		MaxTokens: 64000,
-	}, "", "deepseek")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fromMaxTokens.Options.MaxOutputTokens == nil || *fromMaxTokens.Options.MaxOutputTokens != 64000 {
-		t.Fatalf("request.MaxTokens = %v, want 64000", fromMaxTokens.Options.MaxOutputTokens)
+	if converted.Options.MaxOutputTokens == nil || *converted.Options.MaxOutputTokens != 384000 ||
+		converted.Options.PromptCacheKey != "session-cache" || converted.Options.ServiceTier != "priority" ||
+		converted.Options.ParallelToolCalls == nil || *converted.Options.ParallelToolCalls {
+		t.Fatalf("portable options = %#v", converted.Options)
 	}
 
 	unset, _, err := convertRequest(hyprovider.Request{Model: "deepseek-v4-pro"}, "", "deepseek")
@@ -167,15 +153,15 @@ func TestConvertRequestHonorsMaxOutputTokens(t *testing.T) {
 	}
 }
 
-func TestStopReasonMapsLengthToMaxTurns(t *testing.T) {
-	if got := stopReason(sdk.FinishLength); got != hyprovider.StopReasonMaxTurns {
-		t.Fatalf("FinishLength stop reason = %q, want %q", got, hyprovider.StopReasonMaxTurns)
+func TestStopReasonMapsLengthDistinctly(t *testing.T) {
+	if got := stopReason(sdk.FinishLength); got != hyprovider.StopReasonLength {
+		t.Fatalf("FinishLength stop reason = %q, want %q", got, hyprovider.StopReasonLength)
 	}
 	stream := &streamAdapter{inner: &sliceStream{parts: []sdk.Part{
 		{Kind: sdk.PartFinish, FinishReason: sdk.FinishLength, Usage: sdk.Usage{OutputTokens: 4096}},
 	}}}
 	done, err := stream.Recv()
-	if err != nil || done.Kind != hyprovider.EventDone || done.StopReason != hyprovider.StopReasonMaxTurns {
+	if err != nil || done.Kind != hyprovider.EventDone || done.StopReason != hyprovider.StopReasonLength {
 		t.Fatalf("length finish event = %+v, error = %v", done, err)
 	}
 }
@@ -280,10 +266,8 @@ func TestTextOnlyModelOmitsHistoricalImages(t *testing.T) {
 			message.NewText(message.RoleAssistant, "I saw it."),
 			message.NewText(message.RoleUser, "continue without the image"),
 		},
-		ExtraBody: map[string]any{
-			responses.AttachmentRootExtraKey: dir,
-			disableImageInputExtraKey:        true,
-		},
+		NativeToolHost: llmuxTestRequestHost{root: dir},
+		ExtraBody:      map[string]any{disableImageInputExtraKey: true},
 	}, "", "opencode-go")
 	if err != nil {
 		t.Fatal(err)
@@ -308,12 +292,10 @@ func TestTextOnlyModelRejectsCurrentImageLocally(t *testing.T) {
 		"azem.attachments": `[{"id":"img1","name":"shot.png","mime":"image/png","path":` + jsonString(path) + `}]`,
 	}
 	_, _, err := convertRequest(hyprovider.Request{
-		Model:    "deepseek-v4-flash",
-		Messages: []message.Message{current},
-		ExtraBody: map[string]any{
-			responses.AttachmentRootExtraKey: dir,
-			disableImageInputExtraKey:        true,
-		},
+		Model:          "deepseek-v4-flash",
+		Messages:       []message.Message{current},
+		NativeToolHost: llmuxTestRequestHost{root: dir},
+		ExtraBody:      map[string]any{disableImageInputExtraKey: true},
 	}, "", "opencode-go")
 	if err == nil || !strings.Contains(err.Error(), "does not support image input") {
 		t.Fatalf("convertRequest error = %v, want local image capability rejection", err)

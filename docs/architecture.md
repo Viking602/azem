@@ -1,6 +1,6 @@
 # Architecture
 
-Last verified: 2026-08-17
+Last verified: 2026-08-24
 
 Azem is a local-first coding agent with two user interfaces over one Go
 runtime. The terminal and desktop applications share configuration, agent
@@ -65,6 +65,7 @@ runtime.
 | `internal/blobstore` | Content-addressed SHA-256 files for large payloads | Session catalog or Venat control plane |
 | `internal/store/sqlite` | Runtime migrations, SQLC adapters, Venat store contracts, blob-store open | UI or provider transport behavior |
 | `internal/workrevision` | Revision-bound intents, observations, guidance, dispositions, and verification records | UI status as an independent source of truth |
+| `internal/securityscan` | Native security targets, immutable snapshots, durable Standard/Deep coordination, findings, remediation, contracts, and exports | Provider transport parsing, foreground session ownership, or UI rendering |
 | `internal/evidence` / `internal/codingmemory` | Structural retrieval lineage and opt-in typed memory | Provider routing or automatic promotion |
 | `internal/eval` / `internal/routeeval` / `internal/training` | Offline trajectory, replay, calibration, synthesis, and release evaluation | Live admission or mutation authority |
 | `internal/toollab` | Non-installable generated-tool sandbox and human promotion records | Production tool registration |
@@ -341,6 +342,16 @@ and product policy. Do not duplicate framework recovery or scheduling behavior
 inside presentation packages. Release verification uses `GOWORK=off` so the
 declared module version, not an adjacent checkout, defines behavior.
 
+### Native security scanning
+
+`internal/securityscan` uses the same provider drivers, Venat store, governed
+tools, and subagent scheduler as interactive work. `internal/app` constructs a
+background automation profile without claiming the single foreground
+`Service.activeRun`, so scans do not create a second model runtime or block a
+conversation. Models submit semantic drafts through host-bound tools; the Go
+finalizer owns target binding, stable identities, report/SARIF projection,
+sealing, and terminal state. See [Security scanning](security-scanning.md).
+
 ## Extension points
 
 - **Providers:** implement transport and stream normalization under
@@ -349,12 +360,17 @@ declared module version, not an adjacent checkout, defines behavior.
   reserved for their subscription drivers.
 - **MCP:** configure stdio or Streamable HTTP servers through `internal/mcp`;
   keep secrets as environment or keyring references.
-- **Plugins:** `internal/plugins` scans Azem-owned packages, copies optional
-  Codex imports into that package directory through a staged replacement, then
-  validates manifests and projects plugin Skills, MCP descriptors, hook
-  sources, and App requirements into existing runtime boundaries. Runtime
-  capability paths never point at Codex storage, and this layer does not create
-  a second Skill, MCP, or hook implementation.
+- **Plugins and marketplaces:** `internal/plugins` scans Azem-owned packages,
+  copies optional Codex imports, manages Git/local/direct-JSON marketplace
+  catalogs, and stages scoped installs before atomically replacing registry
+  state. It validates manifests and projects Skills, MCP descriptors, hooks,
+  commands, agents, providers, tools, themes, and App requirements into the
+  existing runtime boundaries. Runtime capability paths never point at Codex
+  storage.
+- **Custom extensions:** `internal/customtools` owns the bounded Bun subprocess
+  protocol. Registration is atomic per module. Permission-only file
+  write/delete fallbacks receive a symlink-resolved workspace destination and
+  cannot expand Azem's filesystem boundary.
 - **Skills:** add user, project, configured, or bundled Skill directories;
   activation must flow through the existing `activeSkills` request field.
 - **Hooks:** discover supported hook sources through `internal/hooks`; preserve
@@ -363,6 +379,31 @@ declared module version, not an adjacent checkout, defines behavior.
   second scheduler.
 - **Desktop:** add the smallest typed Bridge method and project its result
   through the existing store/event path.
+
+## Frozen OMP behavior surface
+
+`internal/parity/manifest.json` pins OMP v18.0.3 at commit
+`160ed439ac0df594347e7d7018b813a7ffdb5e81`. The manifest is executable release
+state: all 71 in-scope capabilities must remain `complete` or `stronger` with a
+current source path.
+
+The additional boundaries are deliberately boring:
+
+- `internal/agent` owns the portable coding tools and bridges only those OMP
+  runtimes that require Bun, language servers, DAP, browser, desktop, or media
+  processes.
+- `internal/app` owns Goal, Advisor, Vibe, TTSR, prewalk, loop guards,
+  checkpoint/rewind, subagent Hub, and the one provider/event pipeline.
+- `internal/session`, `sessionimport`, `sessionexport`, `sessionshare`, and
+  `collab` share canonical session blocks and parent-linked graph identity.
+- `internal/headless`, `rpc`, and `acp` are protocol adapters over the same
+  application service. The root Go package is the supported embedding facade.
+- `internal/operator`, `maintenance`, `usageview`, `benchmark`,
+  `authbroker`, `authgateway`, and `githubwebhook` compose operator commands;
+  none owns a second agent loop or provider implementation.
+
+Public-library API compatibility and OMP visual identity are excluded from the
+frozen comparison. User-visible coding-agent and operator behavior is not.
 
 ## Architecture checks
 

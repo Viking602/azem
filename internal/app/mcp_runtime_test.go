@@ -25,14 +25,19 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/provider/catalog"
+	"github.com/Viking602/azem/internal/resource"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
 type appFakeMCPClient struct {
-	calls    atomic.Int32
-	lastTool string
-	callErr  error
+	calls     atomic.Int32
+	lastTool  string
+	callErr   error
+	resources []mcpcontract.Resource
+	content   []mcpcontract.ResourceContent
+	prompts   []mcpcontract.Prompt
+	messages  []mcpcontract.PromptMessage
 }
 
 func (c *appFakeMCPClient) Initialize(context.Context, string, string) (mcpcontract.InitializeResult, error) {
@@ -53,19 +58,19 @@ func (c *appFakeMCPClient) CallTool(_ context.Context, name string, _ map[string
 }
 
 func (c *appFakeMCPClient) ListResources(context.Context) ([]mcpcontract.Resource, error) {
-	return nil, nil
+	return append([]mcpcontract.Resource(nil), c.resources...), nil
 }
 
 func (c *appFakeMCPClient) ReadResource(context.Context, string) ([]mcpcontract.ResourceContent, error) {
-	return nil, nil
+	return append([]mcpcontract.ResourceContent(nil), c.content...), nil
 }
 
 func (c *appFakeMCPClient) ListPrompts(context.Context) ([]mcpcontract.Prompt, error) {
-	return nil, nil
+	return append([]mcpcontract.Prompt(nil), c.prompts...), nil
 }
 
 func (c *appFakeMCPClient) GetPrompt(context.Context, string, map[string]string) ([]mcpcontract.PromptMessage, error) {
-	return nil, nil
+	return append([]mcpcontract.PromptMessage(nil), c.messages...), nil
 }
 func (c *appFakeMCPClient) Close() error { return nil }
 
@@ -96,6 +101,46 @@ func TestRefreshMCPActionWithoutTargetRefreshesConnectedServers(t *testing.T) {
 	}
 	if event.Kind != EventMCPState || event.State != "snapshot" {
 		t.Fatalf("MCP refresh event = %#v", event)
+	}
+}
+
+func TestMCPResourcesAndPromptsReachResourceRouterAndActions(t *testing.T) {
+	ctx := context.Background()
+	client := &appFakeMCPClient{
+		resources: []mcpcontract.Resource{{URI: "file:///guide.md", Name: "Guide", MimeType: "text/markdown"}},
+		content:   []mcpcontract.ResourceContent{{URI: "file:///guide.md", MimeType: "text/markdown", Text: "# Guide"}},
+		prompts:   []mcpcontract.Prompt{{Name: "summarize", Description: "Summarize"}},
+		messages:  []mcpcontract.PromptMessage{{Role: "user", Content: mcpcontract.ContentBlock{Type: "text", Text: "Summarize this"}}},
+	}
+	manager := mcpruntime.NewManager(map[string]config.MCPServerConfig{
+		"demo": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
+	}, "test", nil, mcpruntime.Options{Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		return client, nil
+	}})
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	router, err := buildResourceRouter(nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := router.Register("mcp", mcpResourceHandler{manager: manager}); err != nil {
+		t.Fatal(err)
+	}
+	resourceResult, err := router.Read(ctx, "mcp://demo/file:///guide.md", "", resource.Scope{})
+	if err != nil || string(resourceResult.Data) != "# Guide" || resourceResult.MediaType != "text/markdown" {
+		t.Fatalf("MCP resource = %#v, %v", resourceResult, err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachAgentExtensions(manager, nil)
+	payload, _ := json.Marshal(map[string]any{"server": "demo", "name": "summarize"})
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionGetMCPPrompt, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil || event.State != "prompt" || !strings.Contains(event.Data["messages"], "Summarize this") {
+		t.Fatalf("prompt event = %#v, %v", event, err)
 	}
 }
 

@@ -51,7 +51,7 @@ func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntr
 		configured[llmuxdriver.CanonicalProviderID(id)] = provider
 	}
 	s.mu.Unlock()
-	profiles := llmuxdriver.Profiles()
+	profiles := llmuxdriver.ProfilesWithConfig(configured)
 	entries := make([]ModelProviderEntry, 0, len(profiles)+2)
 	// Subscription quota is loaded asynchronously after the catalog is emitted so
 	// list_model_providers never blocks the settings UI on external HTTP calls.
@@ -110,7 +110,13 @@ func (s *Service) discoverModelProviderWith(
 		return fmt.Errorf("model provider is required")
 	}
 	id := llmuxdriver.CanonicalProviderID(entry.ID)
-	profile, ok := llmuxdriver.LookupProfile(id)
+	s.mu.Lock()
+	configuredProfiles := make(map[string]config.LLMuxProviderConfig, len(s.cfg.Providers.LLMux))
+	for providerID, provider := range s.cfg.Providers.LLMux {
+		configuredProfiles[providerID] = provider
+	}
+	s.mu.Unlock()
+	profile, ok := llmuxdriver.LookupProfileWithConfig(id, configuredProfiles)
 	if !ok {
 		return fmt.Errorf("unsupported llmux provider %q", id)
 	}
@@ -529,17 +535,30 @@ func (s *Service) updateModelProvider(ctx context.Context, entry *ModelProviderE
 		return fmt.Errorf("model provider is required")
 	}
 	id := llmuxdriver.CanonicalProviderID(entry.ID)
-	profile, ok := llmuxdriver.LookupProfile(id)
+	s.mu.Lock()
+	configuredProfiles := make(map[string]config.LLMuxProviderConfig, len(s.cfg.Providers.LLMux))
+	for providerID, provider := range s.cfg.Providers.LLMux {
+		configuredProfiles[providerID] = provider
+	}
+	s.mu.Unlock()
+	profile, ok := llmuxdriver.LookupProfileWithConfig(id, configuredProfiles)
 	if !ok {
 		return fmt.Errorf("unsupported llmux provider %q", id)
 	}
+	provider := configuredProfiles[id]
 	baseURL := strings.TrimSpace(entry.BaseURL)
 	if profile.BaseURL != "" {
-		baseURL = ""
+		if provider.Backend != "" {
+			baseURL = provider.BaseURL
+		} else {
+			baseURL = ""
+		}
 	} else if entry.Enabled && baseURL == "" {
 		return fmt.Errorf("%s requires a custom API base URL", profile.DisplayName)
 	}
-	provider := config.LLMuxProviderConfig{Enabled: entry.Enabled, BaseURL: baseURL, Models: cloneLLMuxModels(entry.Models)}
+	provider.Enabled = entry.Enabled
+	provider.BaseURL = baseURL
+	provider.Models = cloneLLMuxModels(entry.Models)
 	if err := config.ValidateLLMuxProvider(id, provider); err != nil {
 		return err
 	}
@@ -993,6 +1012,7 @@ func cloneLLMuxProviders(providers map[string]config.LLMuxProviderConfig) map[st
 	cloned := make(map[string]config.LLMuxProviderConfig, len(providers))
 	for id, provider := range providers {
 		provider.Models = cloneLLMuxModels(provider.Models)
+		provider.RuntimeHeaders = cloneMCPStringMap(provider.RuntimeHeaders)
 		cloned[id] = provider
 	}
 	return cloned

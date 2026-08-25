@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/Viking602/azem/internal/config"
-	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -20,21 +19,24 @@ import (
 type phase4MeteringDriver struct{ calls int }
 
 func (*phase4MeteringDriver) Metadata() hyprovider.Metadata { return hyprovider.Metadata{} }
-func (d *phase4MeteringDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+func (d *phase4MeteringDriver) Stream(_ context.Context, _ hyprovider.Request) (hyprovider.Stream, error) {
 	d.calls++
-	if reporter := responses.RequestUsageReporter(request); reporter != nil {
-		reporter(responses.UsageDetails{ProviderRequestID: "upstream", InputTokens: 12, CachedTokens: 5, OutputTokens: 3, TotalTokens: 15, CacheReported: true})
-	}
-	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 12, OutputTokens: 3, TotalTokens: 15}}}), nil
+	return hyprovider.NewSliceStream([]hyprovider.Event{{
+		Kind: hyprovider.EventDone,
+		Usage: hyprovider.Usage{
+			InputTokens: 12, CachedInputTokens: 5, CachedInputTokensReported: true,
+			OutputTokens: 3, TotalTokens: 15,
+		},
+		Response: hyprovider.ResponseMetadata{ID: "upstream"},
+	}}), nil
 }
 
 type cursorContextMeteringDriver struct{}
 
 func (*cursorContextMeteringDriver) Metadata() hyprovider.Metadata { return hyprovider.Metadata{} }
 func (*cursorContextMeteringDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
-	reporter, _ := request.ExtraBody[cursordriver.ContextUsageReporterExtraKey].(cursordriver.ContextUsageReporter)
-	if reporter != nil {
-		reporter(cursordriver.ContextUsage{UsedTokens: 321, MaxTokens: 1000})
+	if request.ContextUsage != nil {
+		request.ContextUsage(hyprovider.ContextUsage{UsedTokens: 321, MaxTokens: 1000})
 	}
 	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{OutputTokens: 7, TotalTokens: 7}}}), nil
 }
@@ -397,15 +399,16 @@ func TestMeteredProviderDriverZerosAutomaticCacheWrites(t *testing.T) {
 type writeTokenNoiseDriver struct{}
 
 func (writeTokenNoiseDriver) Metadata() hyprovider.Metadata { return hyprovider.Metadata{} }
-func (writeTokenNoiseDriver) Stream(_ context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
-	if reporter := responses.RequestUsageReporter(request); reporter != nil {
-		// Simulate a noisy peer field that automatic caches must drop even without a driver wrap.
-		reporter(responses.UsageDetails{
-			ProviderRequestID: "upstream", InputTokens: 20, CachedTokens: 12, CacheWriteTokens: 8,
-			OutputTokens: 4, TotalTokens: 24, CacheReported: true, CacheWriteReported: true, CacheModel: responses.CacheModelAutomatic,
-		})
-	}
-	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, Usage: hyprovider.Usage{InputTokens: 20, CachedInputTokens: 12, OutputTokens: 4, TotalTokens: 24}}}), nil
+func (writeTokenNoiseDriver) Stream(_ context.Context, _ hyprovider.Request) (hyprovider.Stream, error) {
+	return hyprovider.NewSliceStream([]hyprovider.Event{{
+		Kind: hyprovider.EventDone,
+		Usage: hyprovider.Usage{
+			InputTokens: 20, CachedInputTokens: 12, CachedInputTokensReported: true,
+			CacheWriteInputTokens: 8, CacheWriteInputTokensReported: true,
+			OutputTokens: 4, TotalTokens: 24,
+		},
+		Response: hyprovider.ResponseMetadata{ID: "upstream"},
+	}}), nil
 }
 
 func TestMeteredProviderDriverDoesNotInferMissingCacheFieldAsZero(t *testing.T) {

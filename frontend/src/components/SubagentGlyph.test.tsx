@@ -1,3 +1,5 @@
+// @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
+import { readFileSync } from "node:fs";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it } from "vitest";
@@ -32,4 +34,11 @@ describe("SubagentGlyph", () => {
 
     await act(async () => root.unmount());
   });
+  it("keeps the drawer, page, rows, glyphs, and motion definitions together", () => {
+    const styles = readFileSync("src/styles/subagents.css", "utf8");
+    for (const selector of [".subagents-drawer-layer", ".subagents-page", ".subagent-row > button", ".subagent-glyph", "@keyframes subagents-drawer-backdrop-in"]) {
+      expect(styles).toContain(selector);
+    }
+  });
+
 });

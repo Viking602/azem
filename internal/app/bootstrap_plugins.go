@@ -19,8 +19,8 @@ func (b *bootstrapAssembly) loadPlugins(desktopMode bool) error {
 		return err
 	}
 	b.pluginCatalog = plugins.Discover(b.ctx, plugins.Options{
-		HomeDir: b.homeDir, DataDir: b.paths.DataDir, ImportCodex: b.cfg.Plugins.ImportCodex,
-		CodexImports: b.cfg.Plugins.CodexImports, TrustHooks: b.cfg.Plugins.TrustHooks,
+		HomeDir: b.homeDir, DataDir: b.paths.DataDir, WorkspaceDir: b.paths.Workspace,
+		ImportCodex: b.cfg.Plugins.ImportCodex, CodexImports: b.cfg.Plugins.CodexImports, TrustHooks: b.cfg.Plugins.TrustHooks,
 	})
 	b.mergePlugins()
 	return nil
@@ -58,6 +58,24 @@ func (b *bootstrapAssembly) mergePlugins() {
 			continue
 		}
 		b.cfg.MCP.Servers[name] = server
+	}
+}
+
+func mergeDiscoveredMCP(cfg *config.Config, discovered map[string]config.MCPServerConfig) {
+	if cfg == nil {
+		return
+	}
+	if cfg.MCP.Servers == nil {
+		cfg.MCP.Servers = make(map[string]config.MCPServerConfig)
+	}
+	removed := make(map[string]bool, len(cfg.MCP.RemovedServers))
+	for _, name := range cfg.MCP.RemovedServers {
+		removed[name] = true
+	}
+	for name, server := range discovered {
+		if _, exists := cfg.MCP.Servers[name]; !exists && !removed[name] {
+			cfg.MCP.Servers[name] = server
+		}
 	}
 }
 

@@ -394,7 +394,7 @@ func TestAutoReviewReviewsWorkspaceFileEdits(t *testing.T) {
 	})
 	_ = nextApprovalEvent(t, harness.host, EventApprovalMode)
 	driver := namedApprovalDriver{name: "coding.edit_hashline", executions: &atomic.Int32{}}
-	call := tool.Call{ID: "edit-1", Name: "coding.edit_hashline", Arguments: json.RawMessage(`{"input":"¶src/main.go#ABCD replace 1:\n-old\n+new"}`)}
+	call := tool.Call{ID: "edit-1", Name: "coding.edit_hashline", Arguments: json.RawMessage(`{"input":"*** Begin Patch\n[src/main.go#ABCD]\nPUT 1.=1:\n+new\n*** End Patch\n"}`)}
 	execution, err := harness.coding.ExecuteDriver(context.Background(), harness.run, driver, call, nil)
 	if err != nil || execution.Approval == nil {
 		t.Fatalf("prepare workspace edit=%+v error=%v", execution, err)
@@ -424,8 +424,8 @@ func TestAutoReviewPrefetchesWorkspaceEditsInParallel(t *testing.T) {
 		writeAutomaticReviewWithUsage(writer, "```json\n"+`{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized"}`+"\n```")
 	})
 	_ = nextApprovalEvent(t, harness.host, EventApprovalMode)
-	first := json.RawMessage(`{"input":"¶src/a.go#AAAA replace 1:\n-old\n+new"}`)
-	second := json.RawMessage(`{"input":"¶src/b.go#BBBB replace 1:\n-old\n+new"}`)
+	first := json.RawMessage(`{"input":"*** Begin Patch\n[src/a.go#AAAA]\nPUT 1.=1:\n+new\n*** End Patch\n"}`)
+	second := json.RawMessage(`{"input":"*** Begin Patch\n[src/b.go#BBBB]\nPUT 1.=1:\n+new\n*** End Patch\n"}`)
 	harness.host.prefetchAutoReview(context.Background(), "session", harness.run.RunID, "edit-1", coding.ToolEditHashline, first)
 	harness.host.prefetchAutoReview(context.Background(), "session", harness.run.RunID, "edit-2", coding.ToolEditHashline, second)
 	deadline := time.After(2 * time.Second)

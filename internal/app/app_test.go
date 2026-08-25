@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -2107,10 +2108,15 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := []string{
-		event.ModelRoutes[0].Scope, event.ModelRoutes[1].Scope, event.ModelRoutes[2].Scope, event.ModelRoutes[3].Scope, event.ModelRoutes[4].Scope,
-		event.ModelRoutes[5].Scope, event.ModelRoutes[6].Role, event.ModelRoutes[7].Role, event.ModelRoutes[8].Role,
-	}; !reflect.DeepEqual(got, []string{"main", "title", "plan", "approval", "vision", "recap", "alpha", "off", "zeta"}) {
+	var got []string
+	for _, route := range event.ModelRoutes {
+		if route.Scope == "security" || route.Scope == "subagent" || route.Scope == "vibe" {
+			got = append(got, route.Scope+":"+route.Role)
+		} else {
+			got = append(got, route.Scope)
+		}
+	}
+	if want := []string{"main", "title", "plan", "approval", "vision", "recap", "advisor", "vibe:fast", "vibe:good", "security:audit", "security:reducer", "security:fixer", "security:verifier", "subagent:alpha", "subagent:off", "subagent:zeta"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("route order = %v", got)
 	}
 	clone := event.Clone()
@@ -2639,5 +2645,84 @@ func waitForTerminalRun(t *testing.T, service *Service, runID string) {
 		if event.Kind == EventRunFailed || event.Kind == EventRunCancelled {
 			t.Fatalf("run %s ended as %s: %s", runID, event.Kind, event.Text)
 		}
+	}
+}
+
+func TestConfiguredSecurityBudgetDoesNotInterruptOnTokenOrToolUsage(t *testing.T) {
+	budget := configuredSecurityBudget(96)
+	if budget.MaxTimeHours != 96 || budget.MaxTokens != 0 || budget.MaxToolCalls != 0 || budget.MaxWallClockNS != 0 {
+		t.Fatalf("configured security budget = %+v", budget)
+	}
+}
+
+func TestDesktopSecurityConfigActionsPersistAndProject(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	cfg := config.Default()
+	cfg.Security.PublicationTool = "mcp__linear__create_issue"
+	cfg.Security.PublicationArguments = map[string]any{"team": "security"}
+	if err := config.UpdateSecurityConfig(path, cfg.Security); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, cfg)
+	service.SetConfigPath(path)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionGetSecurityConfig}); err != nil {
+		t.Fatal(err)
+	}
+	loadedEvent, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedEvent.Kind != EventSecurityConfig || loadedEvent.SecurityConfig == nil || loadedEvent.SecurityConfig.Workers != 4 ||
+		loadedEvent.SecurityConfig.PublicationTool != "mcp__linear__create_issue" || loadedEvent.SecurityConfig.PublicationArguments != nil {
+		t.Fatalf("loaded security event = %+v", loadedEvent)
+	}
+	requested := *loadedEvent.SecurityConfig
+	input := desktopSecurityConfigInput{
+		Enabled: false, DefaultMode: "deep", Workers: 8, Subagents: requested.Subagents,
+		StopAfterNoNew: requested.StopAfterNoNew, StopAfterConsecutiveErrors: requested.StopAfterConsecutiveErrors,
+		MaxDiscoveryRuns: requested.MaxDiscoveryRuns, MaxTimeHours: 18,
+	}
+	poisoned, err := json.Marshal(map[string]any{"publicationArguments": map[string]any{"token": "renderer-secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSecurityConfig, Payload: poisoned}); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("renderer publication config was accepted: %v", err)
+	}
+	quota, err := json.Marshal(map[string]any{"maxTokens": 1, "maxToolCalls": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSecurityConfig, Payload: quota}); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("renderer quota config was accepted: %v", err)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSecurityConfig, Payload: bytes.Repeat([]byte{'x'}, maxDesktopSecurityConfigPayloadBytes+1)}); err == nil {
+		t.Fatal("oversized Desktop security config was accepted")
+	}
+	payload, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionSetSecurityConfig, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	updatedEvent, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedEvent.Kind != EventSecurityConfig || updatedEvent.State != "updated" || updatedEvent.SecurityConfig == nil ||
+		updatedEvent.SecurityConfig.Enabled || updatedEvent.SecurityConfig.Workers != 8 ||
+		updatedEvent.SecurityConfig.PublicationTool != "mcp__linear__create_issue" || updatedEvent.SecurityConfig.PublicationArguments != nil {
+		t.Fatalf("updated security event = %+v", updatedEvent)
+	}
+	persisted, err := config.Load(path, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Security.Enabled || persisted.Security.DefaultMode != "deep" || persisted.Security.Workers != 8 ||
+		persisted.Security.PublicationTool != "mcp__linear__create_issue" || persisted.Security.PublicationArguments["team"] != "security" {
+		t.Fatalf("persisted security config = %+v", persisted.Security)
 	}
 }

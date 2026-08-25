@@ -4,7 +4,7 @@
 
 **A local-first AI coding agent for your terminal and desktop.**
 
-Governed tools, durable sessions, side-effect recovery, MCP integrations, Agent Skills, and multi-agent workflows - all from a keyboard-driven TUI.
+Governed tools, durable session trees, extensible runtimes, collaboration, protocol servers, and multi-agent workflows - from the TUI, desktop, headless CLI, or Go API.
 
 [![Go](https://img.shields.io/badge/Go-1.25.8-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
@@ -27,6 +27,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 | **Extensible tools** | Codex-compatible plugins, MCP servers over stdio or Streamable HTTP, plus dynamically loaded Agent Skills |
 | **Multi-agent work** | Structured team mode and resumable subagents with optional Git worktree isolation |
 | **Evidence-bound evaluation** | Deterministic durable trajectory export, revision-compatible verification records, offline route/training evaluation, and validated exact-model adapter experiments without a second live router |
+| **OMP v18.0.3 behavioral parity** | Frozen, tested coverage for coding tools, Goal/Advisor/Vibe/TTSR modes, extensions and marketplaces, session trees/import/export/share/collaboration, JSON-RPC, ACP, headless operation, auth brokering, and operator workflows |
 
 ## Quick Start
 
@@ -154,8 +155,8 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Codex-style desktop workspace browser and change-review surface with lazy file trees, bounded tabs, virtualized text viewing, image previews, directory-folded large change sets, and per-file unified diffs loaded on demand
 - Embedded desktop terminal in the current project workspace (`Cmd+`` / `Ctrl+``), with tabs and a real PTY; this is a human console, not the agent shell tool
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
-- Interactive planning mode with durable `ask` questions, versioned plan proposals, review and revision turns, and an explicit Execute Plan handoff into a new ordinary implementation turn
-- OpenAI/ChatGPT, Grok, and Cursor subscription login with live model catalogs, account identity and plan, provider-specific remaining quota, reset countdowns, credit balance, and Cursor Total/Cursor/Third Party pace forecasts. Cursor's exact tier, Thinking, and Fast IDs collapse into one base-model row; each row reports its available variant inventory. Thinking is selected automatically whenever the family has a matching same-tier variant. Fast is changed inside the model picker and appears outside only as `· Fast` in the selected-model summary for both Cursor and ChatGPT/Codex subscriptions. The provider model catalog is searchable, and a family switch enables or disables every raw variant atomically. Models without a zero-data-retention guarantee show an explicit localized data-retention warning instead of embedding `NO ZDR` in the model name. The 1M and max-mode metadata drive the effective context budget. Grok keeps the complete chat-capable OAuth catalog across restarts. The same registry includes llmux-backed OpenAI, Anthropic, Google, Mistral, Cohere, xAI, OpenRouter, DeepSeek, local inference, and other compatible providers; enabled API providers can fetch their live model list and merge models.dev capabilities, while providers flagged for Anthropic Messages use that protocol instead of OpenAI Chat Completions.
+- General interactive `ask` questions plus a separate planning mode with versioned proposals, review and revision turns, and an explicit Execute Plan handoff into a new ordinary implementation turn
+- ChatGPT, Grok, and Cursor subscription login with live model catalogs, account identity and plan, provider-specific remaining quota, reset countdowns, credit balance, and Cursor Total/Cursor/Third Party pace forecasts. Cursor's exact tier, Thinking, and Fast IDs collapse into one base-model row; each row reports its available variant inventory. Thinking is selected automatically whenever the family has a matching same-tier variant. Fast is changed inside the model picker and appears outside only as `· Fast` in the selected-model summary for both Cursor and ChatGPT/Codex subscriptions. The provider model catalog is searchable, and a family switch enables or disables every raw variant atomically. Models without a zero-data-retention guarantee show an explicit warning.
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
 - Persistent conversations start in a fresh session on every launch; use `/resume` to reopen prior sessions with their context, tool history, and recap
@@ -168,6 +169,13 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Background subagents with role, persona, model, budget, resume, and cancellation controls
 - Independent tool calls dispatch in parallel while shell and subagent runtimes enforce their configured concurrency limits
 - Optional detached Git worktrees for isolated subagent changes
+- Native Standard, scoped, diff, working-tree, and Deep security scans using host-resolved Azem provider/model routes, immutable read-only source snapshots, durable worker/reducer recovery, canonical findings/reports/SARIF, triage, isolated verified patches, and governed GitHub/MCP publication
+- OMP-compatible read/write/Hashline/AST/LSP/DAP/eval/browser/computer/web/GitHub/SSH/process/media/memory tools, with Python, JavaScript, Ruby, and Julia eval kernels enabled when their host runtimes exist
+- Goal, Advisor, Vibe, TTSR, prewalk, checkpoint/rewind, loop guards, structured subagents, Hub peer messaging, and parked-agent revival
+- Parent-linked session trees with named branches and labels, Claude/Codex import, HTML/text/lossless JSON export, encrypted sharing, and encrypted live collaboration
+- Text and NDJSON headless modes, JSON-RPC, ACP, and the supported Go embedding API
+- Marketplace source management, scoped plugin install/update/upgrade/enable/uninstall, custom Bun tools/commands/providers/agents/themes, and permission-only extension file mutation brokerage
+- Operator commands for auth broker/gateway services, setup/update/garbage collection, usage reports, benchmarks, signed GitHub webhooks, and bash/zsh/fish completion generation
 
 ## Terminal Workflow
 
@@ -193,6 +201,7 @@ flowchart LR
     A --> S[(SQLite state)]
     A --> C[Teams and subagents]
     A --> K[Agent Skills]
+    A --> Q[Native Security scans]
 ```
 
 Each turn is routed through the application runtime, which selects a provider, assembles the available tools, applies approval policy, persists execution state, and streams events back to the TUI. Structured tool results are projected into readable summaries and file diffs. After a restart, Azem restores durable run projections and surfaces side effects that require reconciliation. Team runs and eligible Single-Agent runs resume automatically; runs requiring side-effect reconciliation remain paused for an explicit decision.
@@ -258,6 +267,17 @@ Without `-config`, Azem reads `~/.azem/config.yaml`. If the file does not exist,
 | `/new` | Create a new session |
 | `/sessions` | List saved sessions |
 | `/resume` | Resume a saved session |
+| `/tree` | Show the current parent-linked session tree |
+| `/branch <entry-id>` | Move the active session leaf to an existing entry |
+| `/fork <target-session-id> [entry-id]` | Fork a session at an entry |
+| `/label <entry-id> [label]` | Set or clear a branch entry label |
+| `/export <path> [html\|text\|json]` | Export the current session |
+| `/share <server-url> [blob\|gist]` | Publish an encrypted session snapshot |
+| `/import <claude\|codex> <jsonl-path> <target-session-id>` | Import a foreign transcript |
+| `/collab [host\|join\|stop\|status]` | Manage encrypted live collaboration |
+| `/usage [all]` | Show the token usage report |
+| `/extensions` | List loaded plugin and extension capabilities |
+| `/marketplace ...` | List, discover, add, update, install, upgrade, enable, disable, or uninstall marketplace plugins |
 | `/compact` | Archive older context with the deterministic host kernel |
 | `/rebuild` | Immediately rebuild context with the same deterministic archive path |
 | `/memory [query]` | Search workspace-native memory |
@@ -274,9 +294,10 @@ Without `-config`, Azem reads `~/.azem/config.yaml`. If the file does not exist,
 
 ### Planning workflow
 
-Planning mode is a separate, read-only conversation phase. The planner may use
-`ask` to present one to three concrete questions with selectable answers, then
-publishes a durable proposal with `submit_plan`. You can ask follow-up questions
+`ask` is available in ordinary single-agent turns whenever the runtime has an
+interactive client. Planning mode additionally constrains the planner to
+read-only tools and lets it use `ask` for one to three concrete questions before
+publishing a durable proposal with `submit_plan`. You can ask follow-up questions
 or request changes without leaving planning mode; every new proposal supersedes
 the previous version while preserving the review history. Selecting **Execute
 Plan** is the only approval action. Azem then starts a new ordinary turn with
@@ -320,6 +341,12 @@ auth:
   store: keyring           # sqlite | keyring | file
   import_codex: true
   import_grok: true
+  broker:
+    url: ""                # HTTPS, except loopback HTTP
+    token: ""              # prefer AZEM_AUTH_BROKER_TOKEN
+    snapshot_cache: ""
+    snapshot_ttl: 1h
+    account_pool_file: ""
 
 providers:
   chatgpt:
@@ -345,6 +372,14 @@ retry:
   max_retries: 5          # full-engine retries after transport retries are exhausted
   base_delay: 500ms       # exponential task-retry backoff base
   max_delay: 5m           # maximum task or server-requested retry delay; 0s disables the cap
+
+ttsr:
+  enabled: true
+  context_mode: discard
+  interrupt_mode: always
+  repeat_mode: once
+  repeat_gap: 10
+  rules: []
 
 agents:
   main:
@@ -379,6 +414,23 @@ agents:
     provider: chatgpt
     model: gpt-5.6-luna
     reasoning: low
+  advisor:
+    enabled: false
+    provider: chatgpt
+    model: gpt-5.6-luna
+    reasoning: low
+    catchup_timeout: 30s
+  vibe:
+    fast: { provider: chatgpt, model: gpt-5.6-luna, reasoning: low }
+    good: {}
+  loop_guards:
+    thinking_enabled: true
+    assistant_text_enabled: true
+    tool_call_enabled: true
+    tool_call_threshold: 5
+    tool_call_exempt_tools: [hub, vibe_wait, subagent.get_output]
+    unexpected_stop: mechanical
+    unexpected_stop_retries: 2
   context:
     enabled: true
     reserve_tokens: 16384       # minimum headroom; effective reserve is at least 15% of the context window
@@ -405,6 +457,27 @@ agents:
       max_tool_calls: 0      # optional; 0 means unbounded
       max_turns: 0           # optional; 0 means unbounded
       max_wall_clock: 0s     # optional; 0s means unbounded
+security:
+  enabled: true
+  default_mode: standard
+  workers: 4
+  subagents: 3
+  stop_after_no_new: 4
+  stop_after_consecutive_errors: 3
+  max_discovery_runs: 40
+  max_time_hours: 96     # persisted deadline; native scans have no token/tool hard ceiling
+  max_cost_usd: 0       # reserved for trusted provider pricing; must remain zero
+  publication_tool: ""   # exact MCP tool; publication stays disabled while empty
+  publication_destination: ""
+  publication_arguments: {}
+  publication_title_field: title
+  publication_description_field: description
+  routes:
+    audit: { provider: "", model: "", reasoning: "" }
+    reducer: { provider: "", model: "", reasoning: "" }
+    fixer: { provider: "", model: "", reasoning: "" }
+    verifier: { provider: "", model: "", reasoning: "" }
+
 
 skills:
   enabled: true
@@ -418,6 +491,31 @@ plugins:
   import_codex: true         # list available Codex plugins for explicit selection
   codex_imports: []          # exact plugin IDs selected for copying into Azem
   trust_hooks: false         # installation is not execution trust; opt in explicitly
+  marketplace_auto_update: notify # off | notify | auto
+
+extensions:
+  enabled: true
+  trust_project_code: false
+  additional_tool_paths: []
+  additional_command_dirs: []
+  additional_extension_paths: []
+  additional_agent_dirs: []
+  additional_theme_dirs: []
+
+autolearn:
+  enabled: false
+  auto_continue: false
+  min_tool_calls: 5
+
+discovery:
+  context_files: true
+  rules: true
+  skills: true
+  mcp: true
+  hooks: true
+  disabled_providers: []
+  disabled_rules: []
+  additional_context_files: []
 
 hooks:
   enabled: true
@@ -535,6 +633,7 @@ one home directory:
 | Large payloads | `blobs/` in that home |
 | Plugin packages | `plugin-packages/` in that home |
 | Runtime state | `azem.log`, window state, and hook transcripts in that home |
+| Security scans | `security-scans/` in that home |
 
 Existing files in `~/.config/azem`, the platform Application Support or
 `~/.local/share/azem` data directory, and the platform cache directory are
@@ -568,6 +667,14 @@ Azem's approvals and persistent action boundaries help reduce accidental operati
 - `allow_network` relies on tools declaring network use and does not enforce OS-level network isolation.
 - `shell_policy: allow` and YOLO mode remove important confirmation points.
 - A subagent that explicitly requests worktree isolation fails if the worktree cannot be created; it never falls back to the shared workspace.
+- A trusted custom extension may register file write/delete fallbacks. Azem
+  consults them only after an ordinary workspace-local file mutation fails with
+  `EACCES`, `EPERM`, or `EROFS`; non-permission failures, archive/SQLite writes,
+  unresolved symlinks, and paths outside the workspace never reach the broker.
+- Auth broker and gateway bearer tokens grant access to credential projections.
+  Use HTTPS except on loopback, keep tokens out of YAML when environment or
+  permission-restricted token files are available, and expose neither service
+  on an untrusted network.
 
 For strict isolation, run Azem inside a container, virtual machine, or restricted OS account, and enforce filesystem and network policy outside the application.
 
@@ -584,12 +691,23 @@ internal/config/        Configuration, paths, roles, and personas
 internal/desktop/       Bounded Wails bridge and desktop lifecycle
 internal/desktop/termhost/ Human-only PTY host for the embedded desktop terminal
 internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
+internal/authbroker/    Multi-process credential snapshots, refresh, account pools, and usage
+internal/authgateway/   Protocol-compatible provider forwarding gateway
+internal/collab/        Encrypted host/guest live collaboration relay
+internal/customtools/   Isolated Bun tools, commands, providers, agents, themes, and file broker
+internal/parity/        Frozen OMP v18.0.3 capability manifest
+internal/rpc/           JSON-RPC v1/v2 server
+internal/acp/           Agent Client Protocol server
+internal/sessionimport/ Claude and Codex JSONL importers
+internal/sessionexport/ HTML, text, and lossless JSON exporters
+internal/sessionshare/  Encrypted blob/gist session sharing
 internal/mcp/           MCP connection and tool management
 internal/provider/      ChatGPT/Codex, Grok, Cursor, llmux drivers, and model catalogs
 internal/recovery/      Crash recovery and side-effect reconciliation
 internal/blobstore/     Content-addressed files for large payloads
 internal/session/       Session persistence and compaction
 internal/skills/        Agent Skills discovery and activation
+internal/securityscan/  Native scan snapshots, orchestration, findings, remediation, contracts, and exports
 internal/store/sqlite/  SQLite schema and storage implementation
 internal/tui/           Bubble Tea terminal interface
 docs/                   Maintainer architecture, persistence, and testing guides
@@ -602,6 +720,7 @@ Maintainer documentation:
 - [Desktop application and workspace browser](docs/desktop.md)
 - [Persistence and recovery](docs/persistence.md)
 - [Testing and desktop smoke checks](docs/testing.md)
+- [Native security scanning](docs/security-scanning.md)
 
 ## Development
 

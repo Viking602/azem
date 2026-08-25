@@ -10,7 +10,7 @@ import (
 	hyprovider "github.com/Viking602/venat/provider"
 )
 
-func TestNormalizeUsageAndWrapReporterApplyCacheModels(t *testing.T) {
+func TestNormalizeUsageAppliesCacheModels(t *testing.T) {
 	automatic := NormalizeUsage(UsageDetails{CachedTokens: 10, CacheWriteTokens: 7, CacheReported: true, CacheWriteReported: true}, CacheModelAutomatic)
 	if automatic.CacheModel != CacheModelAutomatic || automatic.CacheWriteTokens != 0 || automatic.CacheWriteReported || automatic.CachedTokens != 10 {
 		t.Fatalf("automatic normalize=%+v", automatic)
@@ -18,14 +18,6 @@ func TestNormalizeUsageAndWrapReporterApplyCacheModels(t *testing.T) {
 	write := NormalizeUsage(UsageDetails{CachedTokens: 10, CacheWriteTokens: 7, CacheReported: true}, CacheModelWriteTokens)
 	if write.CacheModel != CacheModelWriteTokens || write.CacheWriteTokens != 7 {
 		t.Fatalf("write-token normalize=%+v", write)
-	}
-	if WrapUsageReporter(nil, CacheModelAutomatic) != nil {
-		t.Fatal("nil reporter should stay nil")
-	}
-	var got UsageDetails
-	WrapUsageReporter(func(details UsageDetails) { got = details }, CacheModelAutomatic)(UsageDetails{CacheWriteTokens: 9, CachedTokens: 3})
-	if got.CacheWriteTokens != 0 || got.CachedTokens != 3 || got.CacheModel != CacheModelAutomatic {
-		t.Fatalf("wrapped reporter=%+v", got)
 	}
 }
 
@@ -38,8 +30,8 @@ func TestBuildGatesGPT56ExplicitBreakpointByProviderCapability(t *testing.T) {
 			message.NewText(message.RoleAssistant, "answer"),
 			message.NewText(message.RoleUser, "current turn"),
 		},
+		PromptCacheKey: "session-1",
 		ExtraBody: map[string]any{
-			"prompt_cache_key":            "session-1",
 			PromptCacheBreakpointExtraKey: PromptCacheBreakpointLastUser,
 		},
 	}
@@ -70,6 +62,7 @@ func TestBuildGatesGPT56ExplicitBreakpointByProviderCapability(t *testing.T) {
 }
 
 func TestBuildMapsHistoryToolsReasoningAndFormat(t *testing.T) {
+	parallelToolCalls := false
 	additional := false
 	request := hyprovider.Request{
 		Model: "gpt-test",
@@ -79,10 +72,12 @@ func TestBuildMapsHistoryToolsReasoningAndFormat(t *testing.T) {
 			{Role: message.RoleAssistant, Text: "calling", ToolCalls: []message.ToolCall{{ID: "call-1", Name: "read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)}}},
 			message.NewToolResult(message.ToolResult{ToolCallID: "call-1", Name: "read_file", Content: "package a"}),
 		},
-		Tools:          []message.ToolDefinition{{Name: "read_file", Description: "read", InputSchema: message.JSONSchema{Type: "object", Properties: map[string]message.JSONSchema{"path": {Type: "string"}}, Required: []string{"path"}, AdditionalProperties: &additional}}},
-		Metadata:       map[string]string{"reasoning_effort": "high", "run_id": "run-1", "secret": "omit"},
-		ExtraBody:      map[string]any{"max_output_tokens": 2048, "parallel_tool_calls": false, "prompt_cache_key": "session-1"},
-		ResponseFormat: &hyprovider.ResponseFormat{Type: "json_schema", Name: "result", Strict: true, Schema: &message.JSONSchema{Type: "object"}},
+		Tools:             []message.ToolDefinition{{Name: "read_file", Description: "read", InputSchema: message.JSONSchema{Type: "object", Properties: map[string]message.JSONSchema{"path": {Type: "string"}}, Required: []string{"path"}, AdditionalProperties: &additional}}},
+		Metadata:          map[string]string{"reasoning_effort": "high", "run_id": "run-1", "secret": "omit"},
+		MaxTokens:         2048,
+		ParallelToolCalls: &parallelToolCalls,
+		PromptCacheKey:    "session-1",
+		ResponseFormat:    &hyprovider.ResponseFormat{Type: "json_schema", Name: "result", Strict: true, Schema: &message.JSONSchema{Type: "object"}},
 	}
 	data, err := Build(request, BuildOptions{IncludeEncryptedReasoning: true, DefaultParallelTools: true})
 	if err != nil {
@@ -180,8 +175,7 @@ func TestBuildPrivateTodoUpdatePreservesExactWirePrefix(t *testing.T) {
 		message.NewText(message.RoleUser, "continue"),
 	}
 	request := hyprovider.Request{
-		Model: "gpt-test", Messages: history,
-		ExtraBody: map[string]any{"prompt_cache_key": "session-1"},
+		Model: "gpt-test", Messages: history, PromptCacheKey: "session-1",
 	}
 	firstData, err := Build(request, BuildOptions{})
 	if err != nil {

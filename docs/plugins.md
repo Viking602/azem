@@ -1,6 +1,6 @@
 # Plugin compatibility
 
-Last verified: 2026-08-14
+Last verified: 2026-08-24
 
 Azem supports the OpenAI plugin package format, but owns its plugin storage.
 The current authoritative package specification is the OpenAI
@@ -17,10 +17,11 @@ plugin-root/
     plugin.json
 ```
 
-The root may also contain `skills/`, `hooks/`, `.mcp.json`, `.app.json`, and
-assets. `plugin.json` can declare `skills`, `mcpServers`, `apps`, `hooks`, and
-interface metadata. Every declared path begins with `./`, is relative to the
-plugin root, and must remain inside that root after symlink resolution.
+The root may also contain `skills/`, `hooks/`, `tools/`, `commands/`,
+`agents/`, `themes/`, extension modules, `.mcp.json`, `.app.json`, LSP/DAP
+descriptors, and assets. `plugin.json` can declare those paths. Every declared
+path begins with `./`, is relative to the plugin root, and must remain inside
+that root after symlink resolution.
 
 The manifest supports identity and discovery fields (`name`, `version`,
 `description`, `author`, `homepage`, `repository`, `license`, `keywords`) and
@@ -39,6 +40,8 @@ plugin directly from a Codex installation or cache directory.
 plugin-packages/
   local/<plugin>/                    # installed directly for Azem
   codex/<marketplace>/<plugin>/      # Azem-owned copy imported from Codex
+  marketplace/<market>/<name>/       # user-scoped marketplace install
+<workspace>/.azem/plugin-packages/marketplace/<market>/<name>/ # project scope
 ```
 
 `<Azem data>` is `~/.azem`, or `$AZEM_HOME`. Plugins therefore live at
@@ -69,6 +72,11 @@ value still point at Azem storage.
 | Hooks | Cataloged in the Extensions Hooks tab even before trust; executed only when `plugins.trust_hooks: true` and the command is not listed in `hooks.disabled` |
 | `.app.json` | Cataloged as an App requirement; requires separate connector authorization |
 | Interface assets | Validated and cataloged; supported icons up to 1 MiB render from bounded image data |
+| Commands | Markdown commands and extension-registered handlers share the normal slash-command path |
+| Tools and extensions | Loaded in the bounded Bun host with duplicate-name rejection and governed tool definitions |
+| Agents and providers | Validated and merged into the existing subagent/provider registries |
+| Themes | Discovered from validated plugin roots and projected as token maps |
+| LSP/DAP descriptors | Copied and resolved through the existing language/debug runtimes |
 
 Directly installed plugins are loaded at desktop startup. Codex plugins first
 appear as available choices; selecting one persists its ID in
@@ -79,6 +87,33 @@ source path, then the last listed catalog, then the local Codex cache and
 outage must not block copying a package that is already visible in Extensions.
 Removing the selection unloads those capabilities in the current process while
 leaving the dormant copy recoverable.
+
+## Marketplace lifecycle
+
+`internal/plugins.MarketplaceManager` accepts GitHub shorthand, Git/SSH/HTTP
+repositories, local directories, and direct catalog JSON. Catalogs use
+`.omp-plugin/marketplace.json` with the Claude-compatible
+`.claude-plugin/marketplace.json` fallback. Names and paths are validated,
+catalogs are bounded, and relative plugin sources cannot escape the staged
+marketplace root.
+
+Installs are identified by `name@marketplace` and scoped to `user` or
+`project`. Enabled project installs shadow enabled user installs. Add, remove,
+update, discover, install, uninstall, upgrade, enable, and disable are
+serialized through one manager and atomically update the registry. Updating a
+catalog does not silently reinstall a plugin; upgrading compares the installed
+and advertised version. `plugins.marketplace_auto_update` is `off`, `notify`
+(default), or `auto`.
+
+Desktop Settings → Extensions → Marketplace and TUI `/marketplace` expose the
+same application actions. The desktop re-reads the typed catalog after each
+mutation. Neither UI receives a cache path as an executable capability.
+
+Custom extension modules may register file write/delete fallbacks. The Bun host
+runs handlers in registration order, skips a throwing handler, and accepts the
+first explicit `true`. Azem calls this seam only after a local ordinary-file
+mutation fails with `EACCES`, `EPERM`, or `EROFS`; it passes the resolved
+workspace destination and preserves the original error if no handler accepts.
 
 ## Security boundary
 

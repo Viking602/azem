@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -34,70 +36,103 @@ const (
 type ActionKind string
 
 const (
-	ActionLogin                   ActionKind = "login"
-	ActionLogout                  ActionKind = "logout"
-	ActionNewSession              ActionKind = "new_session"
-	ActionListSessions            ActionKind = "list_sessions"
-	ActionListUsage               ActionKind = "list_usage"
-	ActionResumeSession           ActionKind = "resume_session"
-	ActionRefreshSession          ActionKind = "refresh_session"
-	ActionRenameSession           ActionKind = "rename_session"
-	ActionPinSession              ActionKind = "pin_session"
-	ActionArchiveSession          ActionKind = "archive_session"
-	ActionArchiveInactiveSessions ActionKind = "archive_inactive_sessions"
-	ActionMarkSessionUnread       ActionKind = "mark_session_unread"
-	ActionCompact                 ActionKind = "compact"
-	ActionResolveApproval         ActionKind = "resolve_approval"
-	ActionResolveUserInput        ActionKind = "resolve_user_input"
-	ActionResolvePlan             ActionKind = "resolve_plan"
-	ActionSetApprovalMode         ActionKind = "set_approval_mode"
-	ActionSetLanguage             ActionKind = "set_language"
-	ActionSetQueueMode            ActionKind = "set_queue_mode"
-	ActionReconcileAttempt        ActionKind = "reconcile_attempt"
-	ActionInspectAgent            ActionKind = "inspect_agent"
-	ActionListAgentTypes          ActionKind = "list_agent_types"
-	ActionListPersonas            ActionKind = "list_personas"
-	ActionCancelAgent             ActionKind = "cancel_agent"
-	ActionRefreshMCP              ActionKind = "refresh_mcp"
-	ActionReconnectMCP            ActionKind = "reconnect_mcp"
-	ActionSetMCPEnabled           ActionKind = "set_mcp_enabled"
-	ActionUpsertMCPServer         ActionKind = "upsert_mcp_server"
-	ActionDeleteMCPServer         ActionKind = "delete_mcp_server"
-	ActionListSkills              ActionKind = "list_skills"
-	ActionListPlugins             ActionKind = "list_plugins"
-	ActionSetPluginImported       ActionKind = "set_plugin_imported"
-	ActionListHooks               ActionKind = "list_hooks"
-	ActionSetPluginHooksTrusted   ActionKind = "set_plugin_hooks_trusted"
-	ActionSetHookEnabled          ActionKind = "set_hook_enabled"
-	ActionReloadSkills            ActionKind = "reload_skills"
-	ActionSetSkillEnabled         ActionKind = "set_skill_enabled"
-	ActionListMemories            ActionKind = "list_memories"
-	ActionRemember                ActionKind = "remember"
-	ActionForgetMemory            ActionKind = "forget_memory"
-	ActionShowRecap               ActionKind = "show_recap"
-	ActionListModels              ActionKind = "list_models"
-	ActionListModelProviders      ActionKind = "list_model_providers"
-	ActionDiscoverProviderModels  ActionKind = "discover_provider_models"
-	ActionSetModelProvider        ActionKind = "set_model_provider"
-	ActionSetModelEnabled         ActionKind = "set_model_enabled"
-	ActionListModelRoutes         ActionKind = "list_model_routes"
-	ActionSetModelRoute           ActionKind = "set_model_route"
-	ActionResetModelRoute         ActionKind = "reset_model_route"
-	ActionSetSubagentConcurrency  ActionKind = "set_subagent_concurrency"
-	ActionSetSubagentDepth        ActionKind = "set_subagent_depth"
-	ActionSetShellConcurrency     ActionKind = "set_shell_concurrency"
-	ActionSetShellMaxWallClock    ActionKind = "set_shell_max_wall_clock"
-	ActionSetSubagentAwait        ActionKind = "set_subagent_await_timeout"
-	ActionSetSubagentIdle         ActionKind = "set_subagent_idle_timeout"
-	ActionSetChatGPTFastMode      ActionKind = "set_chatgpt_fast_mode"
-	ActionSetSessionPreferences   ActionKind = "set_session_preferences"
-	ActionListBackground          ActionKind = "list_background"
-	ActionStartBackground         ActionKind = "start_background"
-	ActionStopBackground          ActionKind = "stop_background"
-	ActionLogsBackground          ActionKind = "logs_background"
-	ActionListGitBranches         ActionKind = "list_git_branches"
-	ActionSwitchGitBranch         ActionKind = "switch_git_branch"
-	ActionCreateGitBranch         ActionKind = "create_git_branch"
+	ActionLogin                    ActionKind = "login"
+	ActionLogout                   ActionKind = "logout"
+	ActionNewSession               ActionKind = "new_session"
+	ActionListSessions             ActionKind = "list_sessions"
+	ActionListUsage                ActionKind = "list_usage"
+	ActionResumeSession            ActionKind = "resume_session"
+	ActionRefreshSession           ActionKind = "refresh_session"
+	ActionRenameSession            ActionKind = "rename_session"
+	ActionPinSession               ActionKind = "pin_session"
+	ActionArchiveSession           ActionKind = "archive_session"
+	ActionArchiveInactiveSessions  ActionKind = "archive_inactive_sessions"
+	ActionMarkSessionUnread        ActionKind = "mark_session_unread"
+	ActionCompact                  ActionKind = "compact"
+	ActionResolveApproval          ActionKind = "resolve_approval"
+	ActionResolveUserInput         ActionKind = "resolve_user_input"
+	ActionResolvePlan              ActionKind = "resolve_plan"
+	ActionSetApprovalMode          ActionKind = "set_approval_mode"
+	ActionSetLanguage              ActionKind = "set_language"
+	ActionSetQueueMode             ActionKind = "set_queue_mode"
+	ActionReconcileAttempt         ActionKind = "reconcile_attempt"
+	ActionInspectAgent             ActionKind = "inspect_agent"
+	ActionListAgentTypes           ActionKind = "list_agent_types"
+	ActionListPersonas             ActionKind = "list_personas"
+	ActionCancelAgent              ActionKind = "cancel_agent"
+	ActionRefreshMCP               ActionKind = "refresh_mcp"
+	ActionReconnectMCP             ActionKind = "reconnect_mcp"
+	ActionSetMCPEnabled            ActionKind = "set_mcp_enabled"
+	ActionUpsertMCPServer          ActionKind = "upsert_mcp_server"
+	ActionDeleteMCPServer          ActionKind = "delete_mcp_server"
+	ActionGetMCPPrompt             ActionKind = "get_mcp_prompt"
+	ActionSubscribeMCPResource     ActionKind = "subscribe_mcp_resource"
+	ActionUnsubscribeMCPResource   ActionKind = "unsubscribe_mcp_resource"
+	ActionAuthenticateMCPServer    ActionKind = "authenticate_mcp_server"
+	ActionUnauthenticateMCPServer  ActionKind = "unauthenticate_mcp_server"
+	ActionMarketplaceAdd           ActionKind = "marketplace_add"
+	ActionMarketplaceRemove        ActionKind = "marketplace_remove"
+	ActionMarketplaceUpdate        ActionKind = "marketplace_update"
+	ActionMarketplaceList          ActionKind = "marketplace_list"
+	ActionMarketplaceDiscover      ActionKind = "marketplace_discover"
+	ActionMarketplaceInstall       ActionKind = "marketplace_install"
+	ActionMarketplaceUninstall     ActionKind = "marketplace_uninstall"
+	ActionMarketplaceInstalled     ActionKind = "marketplace_installed"
+	ActionMarketplaceUpgrade       ActionKind = "marketplace_upgrade"
+	ActionMarketplaceEnable        ActionKind = "marketplace_enable"
+	ActionMarketplaceDisable       ActionKind = "marketplace_disable"
+	ActionListCustomCommands       ActionKind = "list_custom_commands"
+	ActionListThemes               ActionKind = "list_themes"
+	ActionListSkills               ActionKind = "list_skills"
+	ActionListPlugins              ActionKind = "list_plugins"
+	ActionSetPluginImported        ActionKind = "set_plugin_imported"
+	ActionListHooks                ActionKind = "list_hooks"
+	ActionSetPluginHooksTrusted    ActionKind = "set_plugin_hooks_trusted"
+	ActionSetHookEnabled           ActionKind = "set_hook_enabled"
+	ActionReloadSkills             ActionKind = "reload_skills"
+	ActionSetSkillEnabled          ActionKind = "set_skill_enabled"
+	ActionListMemories             ActionKind = "list_memories"
+	ActionRemember                 ActionKind = "remember"
+	ActionForgetMemory             ActionKind = "forget_memory"
+	ActionShowRecap                ActionKind = "show_recap"
+	ActionListModels               ActionKind = "list_models"
+	ActionListModelProviders       ActionKind = "list_model_providers"
+	ActionDiscoverProviderModels   ActionKind = "discover_provider_models"
+	ActionSetModelProvider         ActionKind = "set_model_provider"
+	ActionSetModelEnabled          ActionKind = "set_model_enabled"
+	ActionListModelRoutes          ActionKind = "list_model_routes"
+	ActionSetModelRoute            ActionKind = "set_model_route"
+	ActionResetModelRoute          ActionKind = "reset_model_route"
+	ActionSetSubagentConcurrency   ActionKind = "set_subagent_concurrency"
+	ActionSetSubagentDepth         ActionKind = "set_subagent_depth"
+	ActionSetShellConcurrency      ActionKind = "set_shell_concurrency"
+	ActionSetShellMaxWallClock     ActionKind = "set_shell_max_wall_clock"
+	ActionSetSubagentAwait         ActionKind = "set_subagent_await_timeout"
+	ActionSetSubagentIdle          ActionKind = "set_subagent_idle_timeout"
+	ActionSetChatGPTFastMode       ActionKind = "set_chatgpt_fast_mode"
+	ActionSetSessionPreferences    ActionKind = "set_session_preferences"
+	ActionListBackground           ActionKind = "list_background"
+	ActionStartBackground          ActionKind = "start_background"
+	ActionStopBackground           ActionKind = "stop_background"
+	ActionLogsBackground           ActionKind = "logs_background"
+	ActionListGitBranches          ActionKind = "list_git_branches"
+	ActionSwitchGitBranch          ActionKind = "switch_git_branch"
+	ActionCreateGitBranch          ActionKind = "create_git_branch"
+	ActionStartSecurityScan        ActionKind = "start_security_scan"
+	ActionCancelSecurityScan       ActionKind = "cancel_security_scan"
+	ActionResumeSecurityScan       ActionKind = "resume_security_scan"
+	ActionListSecurityScans        ActionKind = "list_security_scans"
+	ActionGetSecurityScan          ActionKind = "get_security_scan"
+	ActionListSecurityFindings     ActionKind = "list_security_findings"
+	ActionGetSecurityConfig        ActionKind = "get_security_config"
+	ActionSetSecurityConfig        ActionKind = "set_security_config"
+	ActionGetSecurityFinding       ActionKind = "get_security_finding"
+	ActionSetSecurityTriage        ActionKind = "set_security_finding_triage"
+	ActionPatchSecurityFindings    ActionKind = "patch_security_findings"
+	ActionPatchSecurityWithPR      ActionKind = "patch_security_findings_with_pr"
+	ActionExportSecurityScan       ActionKind = "export_security_scan"
+	ActionPublishSecurityScan      ActionKind = "publish_security_scan"
+	ActionReconcileSecurityPublish ActionKind = "reconcile_security_publication"
 )
 
 type Action struct {
@@ -363,6 +398,22 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 		{Scope: "approval", Label: "Approval", Route: s.cfg.Agents.Approval},
 		{Scope: "vision", Label: "Vision", Route: s.cfg.Agents.Vision},
 		{Scope: "recap", Label: "Recap", Route: s.cfg.Agents.Recap},
+		{Scope: "advisor", Label: "Advisor", Route: s.cfg.Agents.Advisor.Route()},
+		{Scope: "vibe", Role: "fast", Label: "Vibe fast", Route: s.cfg.Agents.Vibe.Fast},
+		{Scope: "vibe", Role: "good", Label: "Vibe good", Route: s.cfg.Agents.Vibe.Good},
+	}
+	securityRoutes := []struct {
+		role  string
+		label string
+		route config.ModelRouteConfig
+	}{
+		{role: "audit", label: "Security audit", route: s.cfg.Security.Routes.Audit},
+		{role: "reducer", label: "Security reducer", route: s.cfg.Security.Routes.Reducer},
+		{role: "fixer", label: "Security fixer", route: s.cfg.Security.Routes.Fixer},
+		{role: "verifier", label: "Security verifier", route: s.cfg.Security.Routes.Verifier},
+	}
+	for _, item := range securityRoutes {
+		entries = append(entries, ModelRouteEntry{Scope: "security", Role: item.role, Label: item.label, Route: item.route})
 	}
 	names := make([]string, 0, len(s.cfg.Agents.Subagents.Roles))
 	for name := range s.cfg.Agents.Subagents.Roles {
@@ -406,10 +457,11 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "recap" && entry.Scope != "subagent" {
+	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "recap" && entry.Scope != "advisor" && entry.Scope != "vibe" && entry.Scope != "subagent" && entry.Scope != "security" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
-	if entry.Scope != "subagent" && entry.Role != "" {
+	roleScope := entry.Scope == "subagent" || entry.Scope == "security" || entry.Scope == "vibe"
+	if !roleScope && entry.Role != "" {
 		return fmt.Errorf("role is not valid for %s route", entry.Scope)
 	}
 	s.mu.Lock()
@@ -418,6 +470,12 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	s.mu.Unlock()
 	if entry.Scope == "subagent" && (!roleExists || strings.TrimSpace(entry.Role) == "") {
 		return fmt.Errorf("unknown subagent role %q", entry.Role)
+	}
+	if entry.Scope == "security" && !slices.Contains([]string{"audit", "reducer", "fixer", "verifier"}, entry.Role) {
+		return fmt.Errorf("unknown security route %q", entry.Role)
+	}
+	if entry.Scope == "vibe" && !slices.Contains([]string{"fast", "good"}, entry.Role) {
+		return fmt.Errorf("unknown vibe route %q", entry.Role)
 	}
 	route := entry.Route
 	if reset {
@@ -477,6 +535,25 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		s.cfg.Agents.Vision = route
 	} else if entry.Scope == "recap" {
 		s.cfg.Agents.Recap = route
+	} else if entry.Scope == "advisor" {
+		s.cfg.Agents.Advisor.Provider, s.cfg.Agents.Advisor.Model, s.cfg.Agents.Advisor.Reasoning = route.Provider, route.Model, route.Reasoning
+	} else if entry.Scope == "vibe" {
+		if entry.Role == "fast" {
+			s.cfg.Agents.Vibe.Fast = route
+		} else {
+			s.cfg.Agents.Vibe.Good = route
+		}
+	} else if entry.Scope == "security" {
+		switch entry.Role {
+		case "audit":
+			s.cfg.Security.Routes.Audit = route
+		case "reducer":
+			s.cfg.Security.Routes.Reducer = route
+		case "fixer":
+			s.cfg.Security.Routes.Fixer = route
+		case "verifier":
+			s.cfg.Security.Routes.Verifier = route
+		}
 	} else {
 		role := s.cfg.Agents.Subagents.Roles[entry.Role]
 		role.Provider, role.Model, role.Reasoning = route.Provider, route.Model, route.Reasoning
@@ -493,6 +570,9 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		s.providers.UpdateModelRoute(entry.Scope, entry.Role, route)
 	}
 	s.emit(ctx, s.modelRoutesEvent("updated"))
+	if entry.Scope == "security" {
+		s.emit(ctx, s.securityConfigEvent("updated"))
+	}
 	return nil
 }
 
@@ -770,7 +850,7 @@ func (s *Service) SkillCatalogSnapshot() ([]SkillCatalogEntry, []SkillDiagnostic
 	for i, entry := range snapshot.Entries {
 		entries[i] = SkillCatalogEntry{
 			Name: entry.Name, Description: entry.Description, SourcePath: entry.SourcePath,
-			LogoPath: entry.LogoPath, Bundled: entry.Bundled, Eager: entry.Eager, Disabled: entry.Disabled,
+			LogoPath: entry.LogoPath, Bundled: entry.Bundled, Managed: entry.Managed, Eager: entry.Eager, Disabled: entry.Disabled,
 			ModelVisible: entry.ModelVisible, ResourceCount: entry.ResourceCount,
 		}
 	}
@@ -1188,8 +1268,8 @@ func (s *Service) emitMCPSnapshot(ctx context.Context) error {
 			})
 		}
 		values = append(values, buildMCPServerView(
-			snapshot.Name, string(snapshot.State), snapshot.ToolCount,
-			tools, snapshot.LastError, s.cfg.MCP.Servers[snapshot.Name],
+			snapshot.Name, string(snapshot.State), snapshot.ToolCount, tools,
+			snapshot.Resources, snapshot.ResourceTemplates, snapshot.Prompts, snapshot.LastError, s.cfg.MCP.Servers[snapshot.Name],
 		))
 	}
 	encoded, err := json.Marshal(values)
@@ -1212,23 +1292,29 @@ type mcpToolView struct {
 }
 
 type mcpServerView struct {
-	Name           string        `json:"name"`
-	Enabled        bool          `json:"enabled"`
-	State          string        `json:"state"`
-	Transport      string        `json:"transport"`
-	Target         string        `json:"target"`
-	Command        string        `json:"command,omitempty"`
-	Args           []string      `json:"args,omitempty"`
-	CWD            string        `json:"cwd,omitempty"`
-	InheritEnv     bool          `json:"inheritEnv,omitempty"`
-	URL            string        `json:"url,omitempty"`
-	Approval       string        `json:"approval"`
-	MaxConcurrency int           `json:"maxConcurrency"`
-	ToolCount      int           `json:"toolCount"`
-	Tools          []mcpToolView `json:"tools,omitempty"`
-	Error          string        `json:"error"`
-	Removable      bool          `json:"removable"`
-	Icon           string        `json:"icon,omitempty"`
+	Name                  string                                `json:"name"`
+	Enabled               bool                                  `json:"enabled"`
+	State                 string                                `json:"state"`
+	Transport             string                                `json:"transport"`
+	Target                string                                `json:"target"`
+	Command               string                                `json:"command,omitempty"`
+	Args                  []string                              `json:"args,omitempty"`
+	CWD                   string                                `json:"cwd,omitempty"`
+	InheritEnv            bool                                  `json:"inheritEnv,omitempty"`
+	URL                   string                                `json:"url,omitempty"`
+	Approval              string                                `json:"approval"`
+	MaxConcurrency        int                                   `json:"maxConcurrency"`
+	ToolCount             int                                   `json:"toolCount"`
+	Tools                 []mcpToolView                         `json:"tools,omitempty"`
+	ResourceCount         int                                   `json:"resourceCount"`
+	PromptCount           int                                   `json:"promptCount"`
+	ResourceTemplateCount int                                   `json:"resourceTemplateCount"`
+	ResourceTemplates     []mcpruntime.ResourceTemplateSnapshot `json:"resourceTemplates,omitempty"`
+	Resources             []mcpruntime.ResourceSnapshot         `json:"resources,omitempty"`
+	Prompts               []mcpruntime.PromptSnapshot           `json:"prompts,omitempty"`
+	Error                 string                                `json:"error"`
+	Removable             bool                                  `json:"removable"`
+	Icon                  string                                `json:"icon,omitempty"`
 }
 
 func buildMCPServerView(
@@ -1236,6 +1322,9 @@ func buildMCPServerView(
 	state string,
 	toolCount int,
 	tools []mcpToolView,
+	resources []mcpruntime.ResourceSnapshot,
+	resourceTemplates []mcpruntime.ResourceTemplateSnapshot,
+	prompts []mcpruntime.PromptSnapshot,
 	lastError string,
 	serverConfig config.MCPServerConfig,
 ) mcpServerView {
@@ -1248,6 +1337,10 @@ func buildMCPServerView(
 		Transport: serverConfig.Transport, Target: target, Command: serverConfig.Command,
 		Args: append([]string(nil), serverConfig.Args...), CWD: serverConfig.CWD, InheritEnv: serverConfig.InheritEnv,
 		URL: serverConfig.URL, Approval: serverConfig.Approval, MaxConcurrency: serverConfig.MaxConcurrency,
-		ToolCount: toolCount, Tools: tools, Error: lastError, Removable: true, Icon: serverConfig.Icon,
+		ToolCount: toolCount, Tools: tools, ResourceCount: len(resources), ResourceTemplateCount: len(resourceTemplates), PromptCount: len(prompts),
+		Resources:         append([]mcpruntime.ResourceSnapshot(nil), resources...),
+		ResourceTemplates: append([]mcpruntime.ResourceTemplateSnapshot(nil), resourceTemplates...),
+		Prompts:           append([]mcpruntime.PromptSnapshot(nil), prompts...),
+		Error:             lastError, Removable: true, Icon: serverConfig.Icon,
 	}
 }

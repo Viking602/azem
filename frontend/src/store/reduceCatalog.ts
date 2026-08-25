@@ -23,9 +23,28 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
     case "plugin_catalog":
       next.plugins = (event.pluginCatalog ?? []).map(normalizePlugin);
       break;
+    case "marketplace_catalog": {
+      const catalog = event.marketplaceCatalog;
+      next.marketplaceCatalog = catalog ? {
+        marketplaces: (catalog.marketplaces ?? []).map((item) => ({ ...item })),
+        available: (catalog.available ?? []).map((item) => ({ ...item, keywords: item.keywords ?? [], tags: item.tags ?? [] })),
+        installed: (catalog.installed ?? []).map((item) => ({ ...item })),
+        upgrades: (catalog.upgrades ?? []).map((item) => ({ ...item, plugin: { ...item.plugin } })),
+      } : { marketplaces: [], available: [], installed: [], upgrades: [] };
+      break;
+    }
     case "hook_catalog":
       next.hookCatalog = normalizeHookCatalog(event.hookCatalog);
       break;
+    case "theme_catalog": {
+      try {
+        const themes = JSON.parse(data.themes ?? "[]");
+        next.extensionThemes = Array.isArray(themes) ? themes.filter((theme) => theme && typeof theme === "object") : [];
+      } catch {
+        next.extensionThemes = [];
+      }
+      break;
+    }
     case "usage_report":
       next.usageReport = normalizeUsageReport(event.usageReport);
       break;
@@ -34,6 +53,7 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
         next.mcpServers = parseMCPServers(data.servers);
         break;
       }
+      if (event.state === "notification" || event.state === "prompt") break;
       const name = data.server?.trim();
       if (!name) break;
       const index = next.mcpServers.findIndex((server) => server.name === name);

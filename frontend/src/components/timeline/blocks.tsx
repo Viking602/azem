@@ -11,8 +11,7 @@ import { displayedToolState, formatDuration, formatToolPresentation, isHostFallb
 import { toolChipBasename, toolChipModel } from "../toolChip";
 import AnsiText from "../AnsiText";
 import AttachmentPreview from "../AttachmentPreview";
-import CodeDiff from "../assistant-ui/CodeDiff";
-import { ReasoningPanel } from "../assistant-ui/Elements";
+import { CodeDiff, ReasoningPanel } from "../assistant-ui/Elements";
 import {
   MessagePairAssistant as AssistantMessage,
   MessagePairError as ErrorMessage,

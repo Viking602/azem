@@ -26,6 +26,7 @@ import { hydrateData } from "./store/hydrate";
 import { reduceAgentEvent } from "./store/reduceAgents";
 import { reduceCatalogEvent } from "./store/reduceCatalog";
 import { reduceRunEvent } from "./store/reduceRun";
+import { reduceSecurityEvent } from "./store/reduceSecurity";
 import { reduceSessionEvent } from "./store/reduceSession";
 import { reduceTextEvent } from "./store/reduceText";
 import { reduceToolEvent } from "./store/reduceTools";
@@ -100,6 +101,8 @@ const initialData: RuntimeData = {
   skills: [],
   mcpServers: [],
   plugins: [],
+  marketplaceCatalog: { marketplaces: [], available: [], installed: [], upgrades: [] },
+  extensionThemes: [],
   hookCatalog: { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] },
   usageReport: null,
   branches: [],
@@ -117,6 +120,17 @@ const initialData: RuntimeData = {
   contextUsage: emptyContextUsage(),
   todo: null,
   recap: null,
+  securityScans: [],
+  securityConfig: null,
+  securityScansLoaded: false,
+  securityProjection: null,
+  securityProjections: {},
+  securityFindings: [],
+  selectedSecurityFinding: null,
+  securityPatch: null,
+  securityFindingsByScan: {},
+  securityExportPath: "",
+  securityPublication: null,
   recovery: [],
   runId: "",
   running: false,
@@ -454,7 +468,9 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       break;
     case "skill_catalog":
     case "plugin_catalog":
+    case "marketplace_catalog":
     case "hook_catalog":
+    case "theme_catalog":
     case "usage_report":
     case "mcp_state":
     case "model_routes":
@@ -464,6 +480,15 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "git_branches":
     case "recovery_state":
       reduceCatalogEvent(next, event);
+      break;
+    case "security_config_state":
+    case "security_scan_state":
+    case "security_scan_list":
+    case "security_finding_list":
+    case "security_finding_detail":
+    case "security_patch_state":
+    case "security_publication_state":
+      reduceSecurityEvent(next, event);
       break;
   }
   return next;

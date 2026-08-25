@@ -15,6 +15,59 @@ import { refreshPullRequestDashboard } from "./pullRequests";
 import type { RuntimeEvent } from "./types";
 
 const STREAM_FRAME_INTERVAL_MS = 32;
+const CUSTOM_THEME_PROPERTIES: Record<string, string[]> = {
+  accent: ["--accent", "--blue"],
+  border: ["--line"],
+  borderMuted: ["--line-soft"],
+  text: ["--ink"],
+  thinkingText: ["--muted"],
+  muted: ["--muted"],
+  dim: ["--faint"],
+  selectedBg: ["--hover"],
+  userMessageBg: ["--paper-muted"],
+  customMessageBg: ["--paper"],
+  success: ["--success"],
+  error: ["--danger"],
+  warning: ["--warning"],
+};
+
+function resolveExtensionThemeColor(value: unknown, vars: Record<string, unknown> | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const resolved = typeof vars?.[value] === "string" ? String(vars[value]) : value;
+  return CSS.supports("color", resolved) ? resolved : null;
+}
+
+function colorLuminance(value: string | null): number | null {
+  if (!value) return null;
+  const match = /^#([0-9a-f]{6})$/i.exec(value);
+  if (!match) return null;
+  const hex = match[1];
+  const red = Number.parseInt(hex.slice(0, 2), 16);
+  const green = Number.parseInt(hex.slice(2, 4), 16);
+  const blue = Number.parseInt(hex.slice(4, 6), 16);
+  return (red * 0.2126 + green * 0.7152 + blue * 0.0722) / 255;
+}
+
+function extensionThemeBase(theme: { dark?: boolean; colors: Record<string, unknown>; vars?: Record<string, unknown> }): "light" | "dark" {
+  if (typeof theme.dark === "boolean") return theme.dark ? "dark" : "light";
+  const text = resolveExtensionThemeColor(theme.colors.text, theme.vars);
+  const textLuminance = colorLuminance(text);
+  return textLuminance != null && textLuminance > 0.6 ? "dark" : "light";
+}
+
+function applyExtensionTheme(theme: { colors: Record<string, unknown>; vars?: Record<string, unknown> } | undefined): void {
+  const root = document.documentElement;
+  for (const properties of Object.values(CUSTOM_THEME_PROPERTIES)) {
+    for (const property of properties) root.style.removeProperty(property);
+  }
+  if (!theme) return;
+  for (const [token, properties] of Object.entries(CUSTOM_THEME_PROPERTIES)) {
+    const color = resolveExtensionThemeColor(theme.colors[token], theme.vars);
+    if (!color) continue;
+    for (const property of properties) root.style.setProperty(property, color);
+  }
+}
+
 const PROJECTION_RESYNC_DELAY_MS = 32;
 const STREAM_EVENT_KINDS = new Set(["text_delta", "thinking_delta"]);
 const TERMINAL_EVENT_KINDS = new Set(["run_finished", "run_failed", "run_cancelled"]);
@@ -129,6 +182,7 @@ export default function App() {
   const terminalOpen = useTerminalStore((state) => state.open);
   const [terminalMounted, setTerminalMounted] = useState(() => useTerminalStore.getState().open);
   const theme = useRuntimeStore((state) => state.theme);
+  const extensionThemes = useRuntimeStore((state) => state.extensionThemes);
   const uiFont = useRuntimeStore((state) => state.uiFont);
   const uiFontSize = useRuntimeStore((state) => state.uiFontSize);
   const chatFontSize = useRuntimeStore((state) => state.chatFontSize);
@@ -222,7 +276,7 @@ export default function App() {
 
   useEffect(() => {
     const saved = localStorage.getItem("azem:theme");
-    if (saved === "light" || saved === "dark" || saved === "system") useRuntimeStore.getState().setTheme(saved);
+    if (saved) useRuntimeStore.getState().setTheme(saved);
     const savedFont = localStorage.getItem("azem:ui-font");
     if (savedFont) useRuntimeStore.getState().setUIFont(savedFont);
     const savedFontSize = Number(localStorage.getItem("azem:ui-font-size"));
@@ -236,7 +290,12 @@ export default function App() {
 
   useEffect(() => {
     if (!appearanceReady) return;
-    document.documentElement.dataset.theme = theme;
+    const customTheme = extensionThemes.find((candidate) => candidate.name === theme);
+    const builtInTheme = theme === "light" || theme === "dark" || theme === "system";
+    document.documentElement.dataset.theme = customTheme ? extensionThemeBase(customTheme) : builtInTheme ? theme : "system";
+    if (customTheme) document.documentElement.dataset.extensionTheme = customTheme.name;
+    else delete document.documentElement.dataset.extensionTheme;
+    applyExtensionTheme(customTheme);
     document.documentElement.style.setProperty("--ui-font-family", interfaceFontStack(uiFont));
     document.documentElement.style.setProperty("--ui-font-size", `${uiFontSize}px`);
     applyChatTypography(chatFontSize, chatCodeFontSize);
@@ -245,7 +304,7 @@ export default function App() {
     localStorage.setItem("azem:ui-font-size", String(uiFontSize));
     localStorage.setItem(CHAT_UI_FONT_STORAGE_KEY, String(chatFontSize));
     localStorage.setItem(CHAT_CODE_FONT_STORAGE_KEY, String(chatCodeFontSize));
-  }, [appearanceReady, theme, uiFont, uiFontSize, chatFontSize, chatCodeFontSize]);
+  }, [appearanceReady, theme, extensionThemes, uiFont, uiFontSize, chatFontSize, chatCodeFontSize]);
 
   useEffect(() => {
     const preventNativeContextMenu = (event: MouseEvent) => {
@@ -303,7 +362,7 @@ export default function App() {
           requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(".thread-support-trigger, .terminal-toggle")?.focus());
           return;
         }
-        if (useRuntimeStore.getState().view === "files" || useRuntimeStore.getState().view === "changes") {
+        if (useRuntimeStore.getState().view === "files" || useRuntimeStore.getState().view === "changes" || useRuntimeStore.getState().view === "security") {
           event.preventDefault();
           useRuntimeStore.getState().setView("projects");
           return;

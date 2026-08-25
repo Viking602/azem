@@ -15,7 +15,6 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
-	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 )
 
 func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testing.T) {
@@ -25,7 +24,8 @@ func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testin
 	if hooks.RetryPolicy.MaxBackoff != service.cfg.Retry.MaxDelayDuration {
 		t.Fatalf("team retry max backoff = %v, want %v", hooks.RetryPolicy.MaxBackoff, service.cfg.Retry.MaxDelayDuration)
 	}
-	base := agent.Engine{ExtraBody: map[string]any{"parallel_tool_calls": false}}
+	parallelToolCalls := false
+	base := agent.Engine{ParallelToolCalls: &parallelToolCalls}
 	prepare := func(runID, role string) agent.Engine {
 		t.Helper()
 		prepared, err := hooks.PrepareEngine(context.Background(), base, multiagent.Dispatch{
@@ -34,21 +34,21 @@ func TestTeamPrepareEnginePartitionsPromptCacheKeysAndPreservesOptions(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		if prepared.ExtraBody["parallel_tool_calls"] != false {
-			t.Fatalf("existing provider option lost: %#v", prepared.ExtraBody)
+		if prepared.ParallelToolCalls == nil || *prepared.ParallelToolCalls {
+			t.Fatalf("existing provider option lost: %#v", prepared.ParallelToolCalls)
 		}
 		return prepared
 	}
 	first := prepare("child-run-1", agentservice.ImplementerClass)
 	repeated := prepare("child-run-2", agentservice.ImplementerClass)
 	secondRole := prepare("child-run-2", agentservice.ReviewerClass)
-	if first.ExtraBody["prompt_cache_key"] != "session-1:team:chatgpt:gpt-team:implementer" ||
-		repeated.ExtraBody["prompt_cache_key"] != first.ExtraBody["prompt_cache_key"] ||
-		secondRole.ExtraBody["prompt_cache_key"] == first.ExtraBody["prompt_cache_key"] {
-		t.Fatalf("team cache keys first=%#v repeated=%#v secondRole=%#v", first.ExtraBody, repeated.ExtraBody, secondRole.ExtraBody)
+	if first.PromptCacheKey != "session-1:team:chatgpt:gpt-team:implementer" ||
+		repeated.PromptCacheKey != first.PromptCacheKey ||
+		secondRole.PromptCacheKey == first.PromptCacheKey {
+		t.Fatalf("team cache keys first=%q repeated=%q secondRole=%q", first.PromptCacheKey, repeated.PromptCacheKey, secondRole.PromptCacheKey)
 	}
-	if _, mutated := base.ExtraBody["prompt_cache_key"]; mutated {
-		t.Fatalf("base engine ExtraBody mutated: %#v", base.ExtraBody)
+	if base.PromptCacheKey != "" {
+		t.Fatalf("base engine prompt cache key mutated: %q", base.PromptCacheKey)
 	}
 	failedPatch, _ := json.Marshal(map[string]string{"input": "[internal/app/app.go#ABCD]\ninvalid"})
 	recovery.Observe(
@@ -99,7 +99,7 @@ func TestTeamPrepareEngineBindsDistinctCursorExecHostsPerRole(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		host, ok := prepared.ExtraBody[cursordriver.ExecHostExtraKey].(*cursorExecHost)
+		host, ok := prepared.NativeToolHost.(*cursorExecHost)
 		if !ok || host == nil || host.bus != prepared.Tools {
 			t.Fatalf("role %s Cursor host=%#v tools=%p", role, host, prepared.Tools)
 		}
@@ -107,7 +107,7 @@ func TestTeamPrepareEngineBindsDistinctCursorExecHostsPerRole(t *testing.T) {
 	}
 	implementer, first := prepare("run-1", agentservice.ImplementerClass)
 	reviewer, second := prepare("run-2", agentservice.ReviewerClass)
-	if implementer == reviewer || implementer.bus == reviewer.bus || first.ExtraBody["prompt_cache_key"] == second.ExtraBody["prompt_cache_key"] {
+	if implementer == reviewer || implementer.bus == reviewer.bus || first.PromptCacheKey == second.PromptCacheKey {
 		t.Fatalf("Cursor Team roles shared state: implementer=%p reviewer=%p", implementer, reviewer)
 	}
 }

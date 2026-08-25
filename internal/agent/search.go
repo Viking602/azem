@@ -10,7 +10,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/Viking602/azem/internal/resource"
 	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
@@ -24,29 +26,32 @@ const (
 type reliableSearchInput struct {
 	Query      string `json:"query"`
 	Regexp     bool   `json:"regexp,omitempty"`
+	Path       string `json:"path,omitempty"`
 	Glob       string `json:"glob,omitempty"`
 	MaxResults int    `json:"maxResults,omitempty"`
 }
 
 type reliableSearchDriver struct {
-	root string
-	ws   coding.Workspace
-	read tool.Driver
+	root      string
+	ws        coding.Workspace
+	read      tool.Driver
+	resources *resource.Router
 }
 
-func newReliableSearchDriver(root string, ws coding.Workspace, read tool.Driver) tool.Driver {
-	return reliableSearchDriver{root: root, ws: ws, read: read}
+func newReliableSearchDriver(root string, ws coding.Workspace, read tool.Driver, resources *resource.Router) tool.Driver {
+	return reliableSearchDriver{root: root, ws: ws, read: read, resources: resources}
 }
 
 func (d reliableSearchDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        coding.ToolSearch,
-		Description: "Search all Git-tracked and unignored workspace text files for a case-sensitive substring or Go regexp. Returns grouped ¶PATH#TAG matches; maxResults caps matched lines, not files scanned.",
+		Description: "Search Git-tracked/unignored workspace text or one exact internal resource URI (including ssh://) for a case-sensitive substring or Go regexp. Returns grouped [PATH#TAG] matches; maxResults caps matched lines, not files scanned.",
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{
 				"query":      {Type: "string"},
+				"path":       {Type: "string"},
 				"regexp":     {Type: "boolean"},
 				"glob":       {Type: "string"},
 				"maxResults": {Type: "integer"},
@@ -81,6 +86,9 @@ func (d reliableSearchDriver) Execute(ctx context.Context, call tool.Call, _ too
 	if maxResults <= 0 || maxResults > reliableSearchMaxResults {
 		maxResults = reliableSearchMaxResults
 	}
+	if strings.Contains(input.Path, "://") {
+		return d.searchInternalResource(ctx, call, input, expression, maxResults), nil
+	}
 	paths, listedTruncated, err := d.searchPaths(ctx, input.Glob)
 	if err != nil {
 		return reliableSearchError(call, err.Error()), nil
@@ -112,7 +120,7 @@ func (d reliableSearchDriver) Execute(ctx context.Context, call tool.Call, _ too
 		if len(matches) == 0 {
 			continue
 		}
-		result.Files = append(result.Files, coding.SearchToolFile{Path: read.Path, Tag: read.Tag, Header: read.Header, Matches: matches})
+		result.Files = append(result.Files, coding.SearchToolFile{Path: read.Path, Tag: read.Tag, Header: "[" + read.Path + "#" + read.Tag + "]", Matches: matches})
 		total += len(matches)
 		if total >= maxResults {
 			result.Truncated = true
@@ -122,6 +130,44 @@ func (d reliableSearchDriver) Execute(ctx context.Context, call tool.Call, _ too
 	result.Content = renderReliableSearch(result.Files)
 	structured, _ := json.Marshal(result)
 	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: result.Content, Structured: structured}, nil
+}
+
+func (d reliableSearchDriver) searchInternalResource(ctx context.Context, call tool.Call, input reliableSearchInput, expression *regexp.Regexp, maxResults int) tool.Result {
+	if d.resources == nil {
+		return reliableSearchError(call, "internal resources are unavailable")
+	}
+	caller, _ := tool.CallerFromContext(ctx)
+	result, err := d.resources.Read(ctx, input.Path, "raw", resource.Scope{SessionID: caller.SessionID, RunID: caller.TeamRunID, Workspace: d.root})
+	if err != nil {
+		return reliableSearchError(call, err.Error())
+	}
+	if result.Metadata["directory"] == "true" {
+		return reliableSearchError(call, "cannot search an internal directory listing; read a concrete file")
+	}
+	if strings.IndexByte(string(result.Data), 0) >= 0 || !utf8.Valid(result.Data) {
+		return reliableSearchError(call, "internal resource is not UTF-8 text")
+	}
+	text := string(result.Data)
+	lines := strings.Split(text, "\n")
+	matches := make([]coding.SearchMatch, 0)
+	for index, line := range lines {
+		matched := expression != nil && expression.MatchString(line) || expression == nil && strings.Contains(line, input.Query)
+		if matched {
+			matches = append(matches, coding.SearchMatch{LineNumber: index + 1, Line: line})
+			if len(matches) >= maxResults {
+				break
+			}
+		}
+	}
+	tag := computeHashlineTag(normalizeHashlineText(result.Data))
+	file := coding.SearchToolFile{Path: input.Path, Tag: tag, Header: "[" + input.Path + "#" + tag + "]", Matches: matches}
+	output := coding.SearchToolResult{Files: []coding.SearchToolFile{file}, Truncated: len(matches) >= maxResults}
+	if len(matches) == 0 {
+		output.Files = nil
+	}
+	output.Content = renderReliableSearch(output.Files)
+	structured, _ := json.Marshal(output)
+	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: output.Content, Structured: structured}
 }
 
 func (d reliableSearchDriver) searchPaths(ctx context.Context, pattern string) ([]string, bool, error) {

@@ -116,7 +116,7 @@ func (r Runner) Run(ctx context.Context, c Command, e Envelope) (result RunResul
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 	var cmd *exec.Cmd
-	if len(c.Args) > 0 {
+	if c.direct || len(c.Args) > 0 {
 		cmd = exec.CommandContext(ctx, c.RawCommand, c.Args...)
 	} else if c.Shell == "powershell" {
 		powershell := powerShell()

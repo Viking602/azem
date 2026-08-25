@@ -196,6 +196,160 @@ type ResourceClaim struct {
 	Data        []byte `db:"data"`
 }
 
+type SecurityFinding struct {
+	ID               string `db:"id"`
+	TargetID         string `db:"target_id"`
+	Fingerprint      string `db:"fingerprint"`
+	RuleID           string `db:"rule_id"`
+	IdentityAnchor   string `db:"identity_anchor"`
+	IdentityInstance string `db:"identity_instance"`
+	FirstSeenAt      int64  `db:"first_seen_at"`
+	LastSeenAt       int64  `db:"last_seen_at"`
+}
+
+type SecurityFindingLocation struct {
+	OccurrenceID string `db:"occurrence_id"`
+	SortOrder    int64  `db:"sort_order"`
+	Path         string `db:"path"`
+	StartLine    int64  `db:"start_line"`
+	EndLine      int64  `db:"end_line"`
+	Role         string `db:"role"`
+}
+
+type SecurityFindingOccurrence struct {
+	ID          string `db:"id"`
+	FindingID   string `db:"finding_id"`
+	ScanID      string `db:"scan_id"`
+	Severity    string `db:"severity"`
+	Confidence  string `db:"confidence"`
+	Status      string `db:"status"`
+	Title       string `db:"title"`
+	Summary     string `db:"summary"`
+	DetailsJson []byte `db:"details_json"`
+	CreatedAt   int64  `db:"created_at"`
+}
+
+type SecurityFindingTriage struct {
+	OccurrenceID string `db:"occurrence_id"`
+	Status       string `db:"status"`
+	CloseReason  string `db:"close_reason"`
+	Note         string `db:"note"`
+	UpdatedAt    int64  `db:"updated_at"`
+}
+
+type SecurityPublication struct {
+	ScanID       string `db:"scan_id"`
+	OccurrenceID string `db:"occurrence_id"`
+	Destination  string `db:"destination"`
+	Status       string `db:"status"`
+	ExternalID   string `db:"external_id"`
+	ExternalUrl  string `db:"external_url"`
+	Error        string `db:"error"`
+	CreatedAt    int64  `db:"created_at"`
+	UpdatedAt    int64  `db:"updated_at"`
+}
+
+type SecurityRemediationAttempt struct {
+	ID                    string `db:"id"`
+	OccurrenceID          string `db:"occurrence_id"`
+	State                 string `db:"state"`
+	Version               int64  `db:"version"`
+	BaseRevision          string `db:"base_revision"`
+	BaseSnapshotDigest    string `db:"base_snapshot_digest"`
+	AppliedSnapshotDigest string `db:"applied_snapshot_digest"`
+	FilesJson             []byte `db:"files_json"`
+	Verification          string `db:"verification"`
+	Reason                string `db:"reason"`
+	Branch                string `db:"branch"`
+	CommitSha             string `db:"commit_sha"`
+	CreatedAt             int64  `db:"created_at"`
+	UpdatedAt             int64  `db:"updated_at"`
+}
+
+type SecurityScan struct {
+	ID                   string  `db:"id"`
+	ProjectID            string  `db:"project_id"`
+	RequestedSessionID   string  `db:"requested_session_id"`
+	RootRunID            string  `db:"root_run_id"`
+	ParentScanID         string  `db:"parent_scan_id"`
+	TargetID             string  `db:"target_id"`
+	TargetKind           string  `db:"target_kind"`
+	TargetPath           string  `db:"target_path"`
+	TargetSnapshotDigest string  `db:"target_snapshot_digest"`
+	Mode                 string  `db:"mode"`
+	Status               string  `db:"status"`
+	Phase                string  `db:"phase"`
+	Completeness         string  `db:"completeness"`
+	RouteJson            []byte  `db:"route_json"`
+	BudgetJson           []byte  `db:"budget_json"`
+	DeepJson             []byte  `db:"deep_json"`
+	TargetJson           []byte  `db:"target_json"`
+	KnowledgeJson        []byte  `db:"knowledge_json"`
+	UserContext          string  `db:"user_context"`
+	WorkflowVersion      string  `db:"workflow_version"`
+	ContractVersion      string  `db:"contract_version"`
+	OutputDir            string  `db:"output_dir"`
+	FailureMessage       string  `db:"failure_message"`
+	BlockingReason       string  `db:"blocking_reason"`
+	Warning              string  `db:"warning"`
+	InputTokens          int64   `db:"input_tokens"`
+	CachedInputTokens    int64   `db:"cached_input_tokens"`
+	OutputTokens         int64   `db:"output_tokens"`
+	EstimatedCostUsd     float64 `db:"estimated_cost_usd"`
+	CreatedAt            int64   `db:"created_at"`
+	StartedAt            int64   `db:"started_at"`
+	CompletedAt          int64   `db:"completed_at"`
+	UpdatedAt            int64   `db:"updated_at"`
+}
+
+type SecurityScanArtifact struct {
+	ScanID    string `db:"scan_id"`
+	Kind      string `db:"kind"`
+	Path      string `db:"path"`
+	MediaType string `db:"media_type"`
+	Sha256    string `db:"sha256"`
+	ByteSize  int64  `db:"byte_size"`
+	CreatedAt int64  `db:"created_at"`
+}
+
+type SecurityScanMatch struct {
+	BeforeOccurrenceID string  `db:"before_occurrence_id"`
+	AfterOccurrenceID  string  `db:"after_occurrence_id"`
+	MatchKind          string  `db:"match_kind"`
+	Confidence         float64 `db:"confidence"`
+	CreatedAt          int64   `db:"created_at"`
+}
+
+type SecurityScanProgress struct {
+	ScanID            string `db:"scan_id"`
+	Phase             string `db:"phase"`
+	FilesCompleted    int64  `db:"files_completed"`
+	FilesTotal        int64  `db:"files_total"`
+	ReviewedPathsJson []byte `db:"reviewed_paths_json"`
+	WorkersPlanned    int64  `db:"workers_planned"`
+	WorkersRunning    int64  `db:"workers_running"`
+	WorkersDone       int64  `db:"workers_done"`
+	Message           string `db:"message"`
+	UpdatedAt         int64  `db:"updated_at"`
+}
+
+type SecurityScanWorker struct {
+	ID                 string `db:"id"`
+	ScanID             string `db:"scan_id"`
+	RunID              string `db:"run_id"`
+	Kind               string `db:"kind"`
+	Status             string `db:"status"`
+	Sequence           int64  `db:"sequence"`
+	Attempt            int64  `db:"attempt"`
+	CompletionSequence int64  `db:"completion_sequence"`
+	RouteJson          []byte `db:"route_json"`
+	ResultPath         string `db:"result_path"`
+	Error              string `db:"error"`
+	StartedAt          int64  `db:"started_at"`
+	CompletedAt        int64  `db:"completed_at"`
+	UpdatedAt          int64  `db:"updated_at"`
+}
+
 type Session struct {
 	ID         string `db:"id"`
 	Title      string `db:"title"`

@@ -158,9 +158,8 @@ func pathOnlySections(arguments string) []FileChange {
 	return []FileChange{{Path: path, FirstChangedLine: 1}}
 }
 
-// ParseCompactEditOutput recovers file sections from the compact textual edit
-// result (`¶path#…`, `firstChangedLine:`, `--- compact diff ---`) persisted in
-// durable tool output when no structured result survived.
+// ParseCompactEditOutput recovers current `[path#TAG]` sections and legacy
+// `¶path#TAG` sections from durable compact edit output when structured data is absent.
 func ParseCompactEditOutput(output string) []FileChange {
 	var sections []FileChange
 	var current *FileChange
@@ -176,6 +175,16 @@ func ParseCompactEditOutput(output string) []FileChange {
 		}
 	}
 	for _, line := range strings.Split(normalizeNewlines(output), "\n") {
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			flush()
+			inner := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+			if marker := strings.LastIndex(inner, "#"); marker > 0 {
+				current = &FileChange{Path: strings.TrimSpace(inner[:marker]), FirstChangedLine: 1}
+				diffLines = nil
+				inDiff = false
+			}
+			continue
+		}
 		if strings.HasPrefix(line, "¶") {
 			flush()
 			path := strings.TrimSpace(strings.TrimPrefix(strings.SplitN(line, "#", 2)[0], "¶"))

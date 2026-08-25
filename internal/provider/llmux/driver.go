@@ -18,17 +18,21 @@ import (
 	hyprovider "github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/netproxy"
-	"github.com/Viking602/azem/internal/provider/responses"
 )
 
 type Config struct {
 	ProviderID      string
+	Backend         string
 	APIKey          string
 	BaseURL         string
 	Models          []string
 	ReasoningEffort string
 	MaxOutputTokens int
 	DisableImages   bool
+	Headers         http.Header
+	AllowEmptyKey   bool
+	APIKeyHeader    string
+	APIKeyPrefix    string
 	Client          *http.Client
 }
 
@@ -72,18 +76,26 @@ func New(config Config) (*Driver, error) {
 
 func newProvider(config Config) (sdk.Provider, error) {
 	retry := sdk.RetryPolicy{MaxAttempts: 1}
-	if _, ok := compat.Lookup(config.ProviderID); ok {
+	backend := strings.ToLower(strings.TrimSpace(config.Backend))
+	if backend == "" {
+		backend = config.ProviderID
+	}
+	if _, ok := compat.Lookup(config.ProviderID); ok && (config.Backend == "" || backend == "openai-compatible") {
 		return compat.New(config.ProviderID, compat.Config{
-			APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry,
+			APIKey: config.APIKey, BaseURL: config.BaseURL, Headers: config.Headers, Client: config.Client, Retry: retry,
 			DefaultMaxOutputTokens: config.MaxOutputTokens,
 		})
 	}
-	switch config.ProviderID {
-	case "openai":
-		return openai.New(openai.Config{APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry})
+	switch backend {
+	case "openai", "openai-compatible", "openai-completions", "openai-responses":
+		return openai.New(openai.Config{
+			APIKey: config.APIKey, BaseURL: config.BaseURL, Headers: config.Headers, Client: config.Client, Retry: retry,
+			ProviderName: config.ProviderID, AllowEmptyAPIKey: config.AllowEmptyKey, APIKeyHeader: config.APIKeyHeader, APIKeyPrefix: config.APIKeyPrefix,
+		})
 	case "anthropic":
 		return anthropic.New(anthropic.Config{
-			APIKey: config.APIKey, BaseURL: config.BaseURL, Client: config.Client, Retry: retry,
+			APIKey: config.APIKey, BaseURL: config.BaseURL, Headers: config.Headers, Client: config.Client, Retry: retry,
+			ProviderName: config.ProviderID, AllowEmptyAPIKey: config.AllowEmptyKey, APIKeyHeader: config.APIKeyHeader, APIKeyPrefix: config.APIKeyPrefix,
 			DefaultMaxOutputTokens: config.MaxOutputTokens,
 		})
 	case "google":
@@ -122,13 +134,12 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 			return nil, mapError(err)
 		}
 	}
-	reporter := responses.WrapUsageReporter(responses.RequestUsageReporter(request), responses.CacheModelAutomatic)
 	open := func() (hyprovider.Stream, error) {
 		stream, err := model.Stream(ctx, converted)
 		if err != nil {
 			return nil, mapError(err)
 		}
-		return &streamAdapter{inner: stream, reporter: reporter, names: names, provider: d.providerID}, nil
+		return &streamAdapter{inner: stream, names: names}, nil
 	}
 	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
 		Delay: d.retryDelay, MaxDelay: d.maxRetryDelay, Observer: d.retryObserver,

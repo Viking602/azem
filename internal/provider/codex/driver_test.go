@@ -494,7 +494,7 @@ func TestDriverAlignsPromptCacheBodyHeadersAndPrefersProviderState(t *testing.T)
 			},
 			message.NewToolResult(message.ToolResult{ToolCallID: "call_1", Name: "lookup", Content: "result"}),
 		},
-		ExtraBody: map[string]any{"prompt_cache_key": " session-cache-key "},
+		PromptCacheKey: " session-cache-key ",
 	})
 	if err != nil {
 		t.Fatal(err)

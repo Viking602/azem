@@ -207,6 +207,7 @@ func (r *Reviewer) reviewOnce(ctx context.Context, request ApprovalReviewRequest
 	if err != nil {
 		return ApprovalReview{}, false, reviewError(ReviewFailureInvalidRequest, fmt.Errorf("encode review evidence: %w", err))
 	}
+	parallelToolCalls := false
 	providerRequest := hyprovider.Request{
 		Model: model,
 		Messages: []message.Message{
@@ -220,10 +221,8 @@ func (r *Reviewer) reviewOnce(ctx context.Context, request ApprovalReviewRequest
 			Strict: true,
 			Schema: approvalReviewSchema(),
 		},
-		ExtraBody: map[string]any{
-			"parallel_tool_calls": false,
-			"prompt_cache_key":    "azem-approval-review-v1",
-		},
+		ParallelToolCalls: &parallelToolCalls,
+		PromptCacheKey:    "azem-approval-review-v1",
 	}
 	stream, err := r.streamDriver.Stream(ctx, providerRequest)
 	if err != nil {

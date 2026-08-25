@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/venat/tool"
 )
@@ -347,6 +348,7 @@ type submitPlanDriver struct {
 	sessionID string
 	runID     string
 	host      providerHost
+	planYolo  *config.ModelRouteConfig
 }
 
 func (d *submitPlanDriver) Definition() tool.Definition {
@@ -382,9 +384,25 @@ func (d *submitPlanDriver) Execute(ctx context.Context, call tool.Call, _ tool.U
 	if err != nil {
 		return planningToolError(call, err.Error()), nil
 	}
+	state := "proposed"
 	data := map[string]string{"planId": artifact.ID, "version": fmt.Sprint(version)}
-	if _, err := d.host.Sessions().AppendBlock(ctx, d.sessionID, session.Block{Kind: "plan", RunID: d.runID, Title: input.Title, Content: input.Plan, State: "proposed", Data: data}); err != nil {
+	if d.planYolo != nil {
+		state = "approved"
+		data["planYolo"] = "true"
+		data["targetProvider"], data["targetModel"], data["targetReasoning"] = d.planYolo.Provider, d.planYolo.Model, d.planYolo.Reasoning
+	}
+	if _, err := d.host.Sessions().AppendBlock(ctx, d.sessionID, session.Block{Kind: "plan", RunID: d.runID, Title: input.Title, Content: input.Plan, State: state, Data: data}); err != nil {
 		return planningToolError(call, err.Error()), nil
+	}
+	if d.planYolo != nil {
+		if err := d.host.RegisterPlanYoloHandoff(d.runID, d.sessionID, artifact.ID, input.Title, *d.planYolo); err != nil {
+			return planningToolError(call, err.Error()), nil
+		}
+		if !d.host.EmitEvent(ctx, Event{Kind: EventPlanResolved, SessionID: d.sessionID, RunID: d.runID, ToolCallID: call.ID, PlanID: artifact.ID, Text: input.Plan, State: "handoff_pending", Data: map[string]string{"title": input.Title, "version": fmt.Sprint(version), "automatic": "true"}}) {
+			return planningToolError(call, eventDeliveryError(ctx).Error()), nil
+		}
+		structured, _ := json.Marshal(map[string]any{"plan_id": artifact.ID, "version": version, "state": "approved", "automatic": true})
+		return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "Plan approved automatically; implementation handoff starts when this planning turn closes.", Structured: structured}, nil
 	}
 	if !d.host.EmitEvent(ctx, Event{Kind: EventPlanProposed, SessionID: d.sessionID, RunID: d.runID, ToolCallID: call.ID, PlanID: artifact.ID, Text: input.Plan, State: "proposed", Data: map[string]string{"title": input.Title, "version": fmt.Sprint(version)}}) {
 		return planningToolError(call, eventDeliveryError(ctx).Error()), nil

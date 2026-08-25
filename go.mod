@@ -8,20 +8,26 @@ require (
 	charm.land/bubbles/v2 v2.1.1
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5
-	github.com/Viking602/llmux v0.2.5
+	github.com/Viking602/llmux v0.3.1
 )
 
 require (
 	charm.land/glamour/v2 v2.0.1
 	github.com/BurntSushi/toml v1.6.0
+	github.com/Viking602/venat v0.15.4
 	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/atotto/clipboard v0.1.4
+	github.com/coder/websocket v1.8.14
 	github.com/creack/pty v1.1.24
+	github.com/dlclark/regexp2 v1.11.5
 	github.com/google/uuid v1.6.0
+	github.com/klauspost/compress v1.19.2
 	github.com/modelcontextprotocol/go-sdk v1.7.0-pre.3
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/wailsapp/wails/v3 v3.0.0-alpha2.121
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/image v0.40.0
+	golang.org/x/mod v0.37.0
 	modernc.org/sqlite v1.54.0
 	resty.dev/v3 v3.0.0-rc.3
 )
@@ -30,9 +36,7 @@ require (
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/charmbracelet/x/exp/slice v0.0.0-20260122224438-b01af16209d9 // indirect
-	github.com/coder/websocket v1.8.14 // indirect
 	github.com/danieljoos/wincred v1.2.3 // indirect
-	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
@@ -59,7 +63,6 @@ require (
 )
 
 require (
-	github.com/Viking602/venat v0.14.2
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260703014108-f5a850f9c2b7 // indirect
 	github.com/charmbracelet/x/ansi v0.11.7

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -57,6 +58,40 @@ type Diagnostic struct {
 	Tool   string
 	Error  string
 }
+type Notification struct {
+	Server        string
+	Kind          string
+	URI           string
+	Level         string
+	Logger        string
+	Message       string
+	ProgressToken string
+	Progress      float64
+	Total         float64
+	Data          any
+}
+
+type ResourceSnapshot struct {
+	Server      string `json:"server"`
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MediaType   string `json:"mediaType,omitempty"`
+}
+type ResourceTemplateSnapshot struct {
+	Server      string `json:"server"`
+	URITemplate string `json:"uriTemplate"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MediaType   string `json:"mediaType,omitempty"`
+}
+
+type PromptSnapshot struct {
+	Server      string                       `json:"server"`
+	Name        string                       `json:"name"`
+	Description string                       `json:"description,omitempty"`
+	Arguments   []mcpcontract.PromptArgument `json:"arguments,omitempty"`
+}
 
 type ToolSnapshot struct {
 	Name             string
@@ -66,12 +101,15 @@ type ToolSnapshot struct {
 }
 
 type ServerSnapshot struct {
-	Name        string
-	State       State
-	ToolCount   int
-	Tools       []ToolSnapshot
-	Diagnostics []Diagnostic
-	LastError   string
+	Name              string
+	State             State
+	ToolCount         int
+	Tools             []ToolSnapshot
+	Diagnostics       []Diagnostic
+	Resources         []ResourceSnapshot
+	Prompts           []PromptSnapshot
+	ResourceTemplates []ResourceTemplateSnapshot
+	LastError         string
 }
 
 type (
@@ -81,24 +119,28 @@ type (
 )
 
 type Options struct {
-	Dial        DialFunc
-	Sleep       SleepFunc
-	Sink        func(Event)
-	Elicitation func(context.Context, string, mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error)
+	Dial         DialFunc
+	Sleep        SleepFunc
+	Sink         func(Event)
+	Elicitation  func(context.Context, string, mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error)
+	Notification func(Notification)
+	OAuth        *OAuthBroker
 }
 
 type Manager struct {
-	mu       sync.RWMutex
-	config   map[string]config.MCPServerConfig
-	version  string
-	resolve  SecretResolver
-	dial     DialFunc
-	sleep    SleepFunc
-	sink     func(Event)
-	servers  map[string]*server
-	attempts map[string]*connectionAttempt
-	closing  []*connectionAttempt
-	closed   bool
+	mu           sync.RWMutex
+	config       map[string]config.MCPServerConfig
+	version      string
+	resolve      SecretResolver
+	dial         DialFunc
+	sleep        SleepFunc
+	sink         func(Event)
+	notification func(Notification)
+	servers      map[string]*server
+	oauth        *OAuthBroker
+	attempts     map[string]*connectionAttempt
+	closing      []*connectionAttempt
+	closed       bool
 }
 
 type connectionAttempt struct {
@@ -121,6 +163,9 @@ func newDialAttempt(cancel context.CancelFunc) *connectionAttempt {
 }
 
 func (a *connectionAttempt) finishDial(client mcpcontract.Client) {
+	if isNilMCPClient(client) {
+		client = nil
+	}
 	a.client = client
 	close(a.ready)
 }
@@ -128,12 +173,22 @@ func (a *connectionAttempt) finishDial(client mcpcontract.Client) {
 func (a *connectionAttempt) close() {
 	a.once.Do(func() {
 		go func() {
-			if a.cancel != nil {
-				a.cancel()
-			}
-			<-a.ready
-			if a.client != nil {
-				a.err = a.client.Close()
+			select {
+			case <-a.ready:
+				if a.client != nil {
+					a.err = a.client.Close()
+				}
+				if a.cancel != nil {
+					a.cancel()
+				}
+			default:
+				if a.cancel != nil {
+					a.cancel()
+				}
+				<-a.ready
+				if a.client != nil {
+					a.err = a.client.Close()
+				}
 			}
 			close(a.done)
 		}()
@@ -162,6 +217,9 @@ type server struct {
 	connection  *connectionAttempt
 	tools       []tool.Driver
 	diagnostics []Diagnostic
+	resources   []ResourceSnapshot
+	prompts     []PromptSnapshot
+	templates   []ResourceTemplateSnapshot
 	lastError   string
 }
 
@@ -175,15 +233,24 @@ func NewManager(servers map[string]config.MCPServerConfig, version string, resol
 	if resolve == nil {
 		resolve = resolveEnvironmentReference
 	}
-	if options.Dial == nil {
-		options.Dial = func(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header) (mcpcontract.Client, error) {
-			return defaultDial(ctx, name, serverConfig, environment, headers, options.Elicitation)
-		}
-	}
 	if options.Sleep == nil {
 		options.Sleep = sleepContext
 	}
-	return &Manager{config: copied, version: version, resolve: resolve, dial: options.Dial, sleep: options.Sleep, sink: options.Sink, servers: states, attempts: make(map[string]*connectionAttempt)}
+	manager := &Manager{
+		config: copied, version: version, resolve: resolve, sleep: options.Sleep, sink: options.Sink,
+		notification: options.Notification, oauth: options.OAuth,
+		servers: states, attempts: make(map[string]*connectionAttempt),
+	}
+	if options.Dial != nil {
+		manager.dial = options.Dial
+	} else {
+		manager.dial = func(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header) (mcpcontract.Client, error) {
+			return defaultDial(ctx, name, serverConfig, environment, headers, options.Elicitation, func(handlerCtx context.Context, notification mcpcontract.Notification) {
+				manager.handleNotification(handlerCtx, name, notification)
+			})
+		}
+	}
+	return manager
 }
 
 func (m *Manager) Start(ctx context.Context) error {
@@ -224,9 +291,38 @@ func (m *Manager) Reconnect(ctx context.Context, name string) error {
 	return m.connectWithRetry(ctx, name)
 }
 
-// Remove drops one server from future tool snapshots and begins closing any
-// active or in-flight connection. Persistence owns whether a catalog-provided
-// service may be recreated on the next bootstrap.
+// Authenticate completes OAuth for one remote server and reconnects it.
+func (m *Manager) Authenticate(ctx context.Context, name string, openURL func(string) error) error {
+	serverConfig, ok := m.serverConfig(strings.TrimSpace(name))
+	if !ok {
+		return fmt.Errorf("mcp server %q not found", name)
+	}
+	if m.oauth == nil {
+		return errors.New("MCP OAuth broker is unavailable")
+	}
+	if err := m.oauth.Authenticate(ctx, name, serverConfig, openURL); err != nil {
+		return err
+	}
+	return m.Reconnect(ctx, name)
+}
+
+func (m *Manager) Unauthenticate(ctx context.Context, name string) error {
+	serverConfig, ok := m.serverConfig(strings.TrimSpace(name))
+	if !ok {
+		return fmt.Errorf("mcp server %q not found", name)
+	}
+	if m.oauth == nil {
+		return errors.New("MCP OAuth broker is unavailable")
+	}
+	if err := m.oauth.Unauthenticate(ctx, name, serverConfig); err != nil {
+		return err
+	}
+	m.closeClient(name)
+	m.transition(name, StateDegraded, errors.New("MCP OAuth authorization removed"))
+	return nil
+}
+
+// Remove drops one server from future tool snapshots and begins closing any active or in-flight connection.
 func (m *Manager) Remove(name string) error {
 	name = strings.TrimSpace(name)
 	m.mu.Lock()
@@ -358,6 +454,7 @@ func (m *Manager) Refresh(ctx context.Context, name string) error {
 	if !ok {
 		return ErrServerRemoved
 	}
+
 	callCtx, cancel := context.WithTimeout(ctx, callTimeout(serverConfig))
 	defer cancel()
 	drivers, diagnostics, err := m.importTools(callCtx, name, serverConfig, client)
@@ -365,6 +462,8 @@ func (m *Manager) Refresh(ctx context.Context, name string) error {
 		m.transition(name, StateDegraded, err)
 		return err
 	}
+	resources, templates, prompts, featureDiagnostics := m.importFeatures(callCtx, name, client)
+	diagnostics = append(diagnostics, featureDiagnostics...)
 	m.mu.Lock()
 	current = m.servers[name]
 	if m.closed || current == nil || current.connection != connection {
@@ -373,9 +472,170 @@ func (m *Manager) Refresh(ctx context.Context, name string) error {
 	}
 	current.tools = drivers
 	current.diagnostics = diagnostics
+	current.resources = resources
+	current.templates = templates
+	current.prompts = prompts
 	m.mu.Unlock()
 	m.transition(name, StateReady, nil)
 	return nil
+}
+
+func (m *Manager) Resources(serverName string) []ResourceSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if serverName != "" {
+		current := m.servers[serverName]
+		if current == nil {
+			return nil
+		}
+		return append([]ResourceSnapshot(nil), current.resources...)
+	}
+	var result []ResourceSnapshot
+	for _, current := range m.servers {
+		result = append(result, current.resources...)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Server != result[j].Server {
+			return result[i].Server < result[j].Server
+		}
+		return result[i].URI < result[j].URI
+	})
+	return result
+}
+
+func (m *Manager) ResourceTemplates(serverName string) []ResourceTemplateSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if serverName != "" {
+		current := m.servers[serverName]
+		if current == nil {
+			return nil
+		}
+		return append([]ResourceTemplateSnapshot(nil), current.templates...)
+	}
+	var result []ResourceTemplateSnapshot
+	for _, current := range m.servers {
+		result = append(result, current.templates...)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Server != result[j].Server {
+			return result[i].Server < result[j].Server
+		}
+		return result[i].URITemplate < result[j].URITemplate
+	})
+	return result
+}
+
+func (m *Manager) Prompts(serverName string) []PromptSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if serverName != "" {
+		current := m.servers[serverName]
+		if current == nil {
+			return nil
+		}
+		return append([]PromptSnapshot(nil), current.prompts...)
+	}
+	var result []PromptSnapshot
+	for _, current := range m.servers {
+		result = append(result, current.prompts...)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Server != result[j].Server {
+			return result[i].Server < result[j].Server
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result
+}
+
+func (m *Manager) ReadResource(ctx context.Context, serverName, uri string) ([]mcpcontract.ResourceContent, error) {
+	client, serverConfig, err := m.featureClient(serverName)
+	if err != nil {
+		return nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout(serverConfig))
+	defer cancel()
+	content, err := client.ReadResource(callCtx, uri)
+	if err != nil {
+		return nil, err
+	}
+	total := 0
+	for _, item := range content {
+		total += len(item.Text)
+	}
+	if total > maxMCPModelOutputBytes {
+		return nil, fmt.Errorf("MCP resource exceeds %d bytes", maxMCPModelOutputBytes)
+	}
+	return content, nil
+}
+
+func (m *Manager) GetPrompt(ctx context.Context, serverName, name string, arguments map[string]string) ([]mcpcontract.PromptMessage, error) {
+	client, serverConfig, err := m.featureClient(serverName)
+	if err != nil {
+		return nil, err
+	}
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout(serverConfig))
+	defer cancel()
+	messages, err := client.GetPrompt(callCtx, name, arguments)
+	if err != nil {
+		return nil, err
+	}
+	total := 0
+	for _, item := range messages {
+		total += len(item.Content.Text)
+	}
+	if total > maxMCPModelOutputBytes {
+		return nil, fmt.Errorf("MCP prompt exceeds %d bytes", maxMCPModelOutputBytes)
+	}
+	return messages, nil
+}
+
+func (m *Manager) SubscribeResource(ctx context.Context, serverName, uri string) error {
+	client, serverConfig, err := m.featureClient(serverName)
+	if err != nil {
+		return err
+	}
+	subscriber, ok := client.(mcpcontract.SubscriptionClient)
+	if !ok {
+		return fmt.Errorf("MCP server %q client does not support resource subscriptions", serverName)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout(serverConfig))
+	defer cancel()
+	return subscriber.SubscribeResource(callCtx, uri)
+}
+
+func (m *Manager) UnsubscribeResource(ctx context.Context, serverName, uri string) error {
+	client, serverConfig, err := m.featureClient(serverName)
+	if err != nil {
+		return err
+	}
+	subscriber, ok := client.(mcpcontract.SubscriptionClient)
+	if !ok {
+		return fmt.Errorf("MCP server %q client does not support resource subscriptions", serverName)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, callTimeout(serverConfig))
+	defer cancel()
+	return subscriber.UnsubscribeResource(callCtx, uri)
+}
+
+func (m *Manager) featureClient(serverName string) (mcpcontract.Client, config.MCPServerConfig, error) {
+	serverName = strings.TrimSpace(serverName)
+	m.mu.RLock()
+	current := m.servers[serverName]
+	client := mcpcontract.Client(nil)
+	if current != nil {
+		client = current.client
+	}
+	serverConfig, configured := m.config[serverName]
+	m.mu.RUnlock()
+	if !configured {
+		return nil, config.MCPServerConfig{}, fmt.Errorf("mcp server %q not found", serverName)
+	}
+	if client == nil {
+		return nil, config.MCPServerConfig{}, fmt.Errorf("mcp server %q is not connected", serverName)
+	}
+	return client, serverConfig, nil
 }
 
 // Snapshot returns a copy of the currently ready tool catalog. A caller keeps
@@ -415,7 +675,11 @@ func (m *Manager) Servers() []ServerSnapshot {
 		}
 		result = append(result, ServerSnapshot{
 			Name: name, State: current.state, ToolCount: len(tools), Tools: tools,
-			Diagnostics: append([]Diagnostic(nil), current.diagnostics...), LastError: current.lastError,
+			Diagnostics:       append([]Diagnostic(nil), current.diagnostics...),
+			Resources:         append([]ResourceSnapshot(nil), current.resources...),
+			ResourceTemplates: append([]ResourceTemplateSnapshot(nil), current.templates...),
+			Prompts:           append([]PromptSnapshot(nil), current.prompts...),
+			LastError:         current.lastError,
 		})
 	}
 	return result
@@ -502,6 +766,15 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("resolve headers: %w", err)
 	}
+	if headerValues["Authorization"] == "" && m.oauth != nil {
+		authorization, authErr := m.oauth.AuthorizationHeader(ctx, name, serverConfig)
+		if authErr != nil {
+			return fmt.Errorf("resolve MCP OAuth credential: %w", authErr)
+		}
+		if authorization != "" {
+			headerValues["Authorization"] = authorization
+		}
+	}
 	for key, value := range serverConfig.RuntimeHeaders {
 		headerValues[key] = value
 	}
@@ -509,9 +782,10 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	for key, value := range headerValues {
 		headers.Set(key, value)
 	}
-	connectCtx, cancel := context.WithTimeout(ctx, connectTimeout(serverConfig))
-	defer cancel()
-	attempt := newDialAttempt(cancel)
+	lifetimeCtx, lifetimeCancel := context.WithCancel(ctx)
+	connectCtx, connectCancel := context.WithTimeout(lifetimeCtx, connectTimeout(serverConfig))
+	defer connectCancel()
+	attempt := newDialAttempt(lifetimeCancel)
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -545,10 +819,17 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 			attempt.close()
 		}
 	}()
-	client, err := m.dial(connectCtx, name, serverConfig, environment, headers)
+	dialCtx := connectCtx
+	if serverConfig.Transport == "stdio" {
+		dialCtx = lifetimeCtx
+	}
+	client, err := m.dial(dialCtx, name, serverConfig, environment, headers)
 	attempt.finishDial(client)
 	if err != nil {
 		return err
+	}
+	if isNilMCPClient(client) {
+		return errors.New("MCP dial returned a nil client")
 	}
 	if _, err := client.Initialize(connectCtx, "azem", m.version); err != nil {
 		return fmt.Errorf("initialize: %w", err)
@@ -557,6 +838,8 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("import tools: %w", err)
 	}
+	resources, templates, prompts, featureDiagnostics := m.importFeatures(connectCtx, name, client)
+	diagnostics = append(diagnostics, featureDiagnostics...)
 	m.mu.Lock()
 	current := m.servers[name]
 	if m.closed {
@@ -572,6 +855,10 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	current.connection = attempt
 	current.tools = drivers
 	current.diagnostics = diagnostics
+
+	current.resources = resources
+	current.templates = templates
+	current.prompts = prompts
 	current.lastError = ""
 	delete(m.attempts, name)
 	if old != nil {
@@ -584,6 +871,19 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	published = true
 	m.transition(name, StateReady, nil)
 	return nil
+}
+
+func isNilMCPClient(client mcpcontract.Client) bool {
+	if client == nil {
+		return true
+	}
+	value := reflect.ValueOf(client)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func (m *Manager) importTools(ctx context.Context, name string, serverConfig config.MCPServerConfig, client mcpcontract.Client) ([]tool.Driver, []Diagnostic, error) {
@@ -642,6 +942,51 @@ func (m *Manager) importTools(ctx context.Context, name string, serverConfig con
 	return drivers, diagnostics, nil
 }
 
+func (m *Manager) importFeatures(ctx context.Context, name string, client mcpcontract.Client) ([]ResourceSnapshot, []ResourceTemplateSnapshot, []PromptSnapshot, []Diagnostic) {
+	var diagnostics []Diagnostic
+	var resources []ResourceSnapshot
+	listedResources, err := client.ListResources(ctx)
+	if err != nil {
+		diagnostics = append(diagnostics, Diagnostic{Server: name, Error: "list resources: " + err.Error()})
+	} else {
+		for _, resource := range listedResources {
+			resources = append(resources, ResourceSnapshot{
+				Server: name, URI: resource.URI, Name: resource.Name, Description: resource.Description, MediaType: resource.MimeType,
+			})
+		}
+		sort.Slice(resources, func(i, j int) bool { return resources[i].URI < resources[j].URI })
+	}
+	var templates []ResourceTemplateSnapshot
+	if templateClient, ok := client.(mcpcontract.ResourceTemplateClient); ok {
+		listedTemplates, templateErr := templateClient.ListResourceTemplates(ctx)
+		if templateErr != nil {
+			diagnostics = append(diagnostics, Diagnostic{Server: name, Error: "list resource templates: " + templateErr.Error()})
+		} else {
+			for _, template := range listedTemplates {
+				templates = append(templates, ResourceTemplateSnapshot{
+					Server: name, URITemplate: template.URITemplate, Name: template.Name,
+					Description: template.Description, MediaType: template.MimeType,
+				})
+			}
+			sort.Slice(templates, func(i, j int) bool { return templates[i].URITemplate < templates[j].URITemplate })
+		}
+	}
+	var prompts []PromptSnapshot
+	listedPrompts, err := client.ListPrompts(ctx)
+	if err != nil {
+		diagnostics = append(diagnostics, Diagnostic{Server: name, Error: "list prompts: " + err.Error()})
+	} else {
+		for _, prompt := range listedPrompts {
+			prompts = append(prompts, PromptSnapshot{
+				Server: name, Name: prompt.Name, Description: prompt.Description,
+				Arguments: append([]mcpcontract.PromptArgument(nil), prompt.Arguments...),
+			})
+		}
+		sort.Slice(prompts, func(i, j int) bool { return prompts[i].Name < prompts[j].Name })
+	}
+	return resources, templates, prompts, diagnostics
+}
+
 func (m *Manager) resolveMap(ctx context.Context, references map[string]string) (map[string]string, error) {
 	resolved := make(map[string]string, len(references))
 	keys := make([]string, 0, len(references))
@@ -687,6 +1032,25 @@ func (m *Manager) transition(name string, state State, cause error) {
 	}
 }
 
+func (m *Manager) handleNotification(ctx context.Context, serverName string, incoming mcpcontract.Notification) {
+	notification := Notification{
+		Server: serverName, Kind: incoming.Kind, URI: incoming.URI, Level: incoming.Level,
+		Logger: incoming.Logger, Message: incoming.Message, ProgressToken: incoming.ProgressToken,
+		Progress: incoming.Progress, Total: incoming.Total, Data: incoming.Data,
+	}
+	if sink := m.notification; sink != nil {
+		sink(notification)
+	}
+	switch incoming.Kind {
+	case "tools/list_changed", "prompts/list_changed", "resources/list_changed":
+		go func() {
+			refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			_ = m.Refresh(refreshCtx, serverName)
+		}()
+	}
+}
+
 func (m *Manager) degrade(name string, cause error) {
 	m.transition(name, StateDegraded, cause)
 }
@@ -700,6 +1064,9 @@ func (m *Manager) closeClient(name string) {
 		current.client = nil
 		current.connection = nil
 		current.tools = nil
+		current.resources = nil
+		current.prompts = nil
+		current.templates = nil
 		if connection != nil {
 			m.closing = append(m.closing, connection)
 		}
@@ -814,13 +1181,14 @@ func mcpOutputEncodingError(result tool.Result) tool.Result {
 	}
 }
 
-func defaultDial(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header, elicitation func(context.Context, string, mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error)) (mcpcontract.Client, error) {
+func defaultDial(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header, elicitation func(context.Context, string, mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error), notification mcpcontract.NotificationHandler) (mcpcontract.Client, error) {
 	clientOptions := mcpclient.Options{}
 	if elicitation != nil {
 		clientOptions.ElicitationHandler = func(handlerCtx context.Context, request mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error) {
 			return elicitation(handlerCtx, name, request)
 		}
 	}
+	clientOptions.NotificationHandler = notification
 	switch serverConfig.Transport {
 	case "stdio":
 		keys := make([]string, 0, len(environment))

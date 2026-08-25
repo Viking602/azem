@@ -33,6 +33,21 @@ func validateLLMuxProvider(id string, provider LLMuxProviderConfig) error {
 	if !mcpServerNamePattern.MatchString(id) {
 		return fmt.Errorf("providers.llmux provider %q must match [a-z0-9_-]+", id)
 	}
+	if provider.Backend != "" {
+		switch provider.Backend {
+		case "openai", "openai-compatible", "openai-completions", "openai-responses", "anthropic", "google", "mistral", "cohere", "xai":
+		default:
+			return fmt.Errorf("providers.llmux.%s.backend is unsupported", id)
+		}
+	}
+	for field, value := range map[string]string{
+		"display_name": provider.DisplayName, "env_key": provider.EnvKey,
+		"api_key_header": provider.APIKeyHeader, "api_key_prefix": provider.APIKeyPrefix,
+	} {
+		if len(value) > 256 || strings.ContainsAny(value, "\r\n\x00") {
+			return fmt.Errorf("providers.llmux.%s.%s is invalid", id, field)
+		}
+	}
 	if len(provider.Models) > 2048 {
 		return fmt.Errorf("providers.llmux.%s.models must contain at most 2048 models", id)
 	}

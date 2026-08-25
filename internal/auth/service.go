@@ -94,6 +94,42 @@ func (s *Service) SetStatusChangeCallback(callback StatusChangeCallback) {
 	s.statusMu.Unlock()
 }
 
+func (s *Service) PutCredential(ctx context.Context, credential Credential) (string, error) {
+	if s == nil || s.store == nil {
+		return "", errors.New("credential store is unavailable")
+	}
+	return s.store.Put(ctx, credential)
+}
+
+// StoreCredential atomically persists a broker-imported credential and its
+// routable account metadata through the same store boundary as interactive
+// OAuth flows.
+func (s *Service) StoreCredential(ctx context.Context, credential Credential) (Account, error) {
+	if s == nil || s.store == nil || s.db == nil {
+		return Account{}, errors.New("credential store is unavailable")
+	}
+	credential.Provider = strings.TrimSpace(credential.Provider)
+	credential.AccountID = strings.TrimSpace(credential.AccountID)
+	if credential.Provider == "" || credential.AccountID == "" || strings.TrimSpace(credential.AccessToken) == "" {
+		return Account{}, errors.New("provider, account, and access token are required")
+	}
+	return s.storeCredential(ctx, credential)
+}
+
+func (s *Service) StoredCredential(ctx context.Context, provider, accountID string) (Credential, error) {
+	if s == nil || s.store == nil {
+		return Credential{}, errors.New("credential store is unavailable")
+	}
+	return s.store.Get(ctx, provider, accountID)
+}
+
+func (s *Service) DeleteCredential(ctx context.Context, provider, accountID string) error {
+	if s == nil || s.store == nil {
+		return errors.New("credential store is unavailable")
+	}
+	return s.store.Delete(ctx, provider, accountID)
+}
+
 func (s *Service) LoginChatGPT(ctx context.Context, openURL func(string) error) (Account, error) {
 	tokens, err := s.chatgpt.Login(ctx, openURL)
 	if err != nil {

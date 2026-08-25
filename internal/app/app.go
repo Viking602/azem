@@ -17,7 +17,12 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
 	backgroundservice "github.com/Viking602/azem/internal/background"
+	"github.com/Viking602/azem/internal/capability"
+	"github.com/Viking602/azem/internal/commands"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/contextfiles"
+	"github.com/Viking602/azem/internal/customtools"
+	"github.com/Viking602/azem/internal/extensions"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/memory"
@@ -25,9 +30,13 @@ import (
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
+	"github.com/Viking602/azem/internal/resource"
+	"github.com/Viking602/azem/internal/rules"
+	"github.com/Viking602/azem/internal/securityscan"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	"github.com/Viking602/azem/internal/toolview"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 )
 
@@ -37,12 +46,6 @@ var (
 	ErrContextArchivingDisabled = errors.New("context archiving is disabled")
 	ErrDirtyWorkspace           = errors.New("workspace has uncommitted changes")
 )
-
-type activeGuidanceMessage struct {
-	Text        string
-	Attachments []session.Attachment
-	Sequence    int64
-}
 
 type runtimeRecoveryFence interface {
 	Close() error
@@ -58,9 +61,8 @@ type Service struct {
 	mu                          sync.Mutex
 	activeRun                   string
 	activeSession               string
-	activeGuidance              []activeGuidanceMessage
-	guidanceGeneration          uint64
 	guidanceOpen                bool
+	turnControls                map[string]*hyagent.ControlQueue
 	currentSession              string
 	workspaceAnchor             string
 	hookSessions                map[string]struct{}
@@ -69,7 +71,10 @@ type Service struct {
 	hookAsyncContext            map[string][]string
 	activeEnd                   context.CancelFunc
 	activeCancelIntent          string
+	pendingPlanYolo             map[string]planYoloHandoff
 	wg                          sync.WaitGroup
+	projectContext              string
+	contextDiagnostics          []string
 	hookWG                      sync.WaitGroup
 	shuttingDown                bool
 	shutdownOnce                sync.Once
@@ -88,12 +93,20 @@ type Service struct {
 	subagentStore               agentservice.SubagentRunStore
 	authentication              *authservice.Service
 	catalog                     *catalog.Service
+	capabilities                *capability.Registry
 	recovery                    recovery.Summary
 	reconciler                  ReconcileResolver
+	security                    *securityscan.Service
+	commandCatalog              *commands.Catalog
+	commandDiagnostics          []string
+	extensionHost               *customtools.Host
+	extensionThemes             []extensions.Theme
+	extensionDiagnostics        []string
 	skillCatalog                *skills.Catalog
 	pluginCatalog               []PluginCatalogEntry
 	pluginDiagnostics           []PluginDiagnostic
 	pluginOptions               plugins.Options
+	marketplace                 *plugins.MarketplaceManager
 	pluginSkillDirs             []string
 	pluginMCPNames              []string
 	pluginHookSources           []plugins.HookSource
@@ -102,6 +115,7 @@ type Service struct {
 	hookWatcher                 *hookWatcher
 	routeMu                     sync.Mutex
 	memory                      *memory.Service
+	resources                   *resource.Router
 	recap                       *recap.Service
 	usagePersistMu              sync.Mutex
 	sessionUsage                map[string]session.Usage
@@ -131,6 +145,7 @@ func NewService(parent context.Context, cfg config.Config) *Service {
 		shutdownDone: make(chan struct{}), liveApprovals: make(map[string]*liveApproval), liveUserInputs: make(map[string]*liveUserInput),
 		teamApprovals: make(map[string]struct{}), autoReviews: make(map[string]*prefetchedAutoReview), autoReviewDenials: make(map[string]*autoReviewDenialTracker),
 		hookSessions: make(map[string]struct{}), hookInitialUsers: make(map[string]string), hookInitialContext: make(map[string]string), hookAsyncContext: make(map[string][]string), approvalMode: approvalMode,
+		turnControls: make(map[string]*hyagent.ControlQueue), pendingPlanYolo: make(map[string]planYoloHandoff),
 		sessionUsage: make(map[string]session.Usage), desktopSurface: true,
 	}
 }
@@ -168,6 +183,10 @@ func (s *Service) AttachDurable(sessions *session.Service, coding *agentservice.
 	if sessions != nil {
 		s.historySearch = sessions.SearchHistory
 	}
+}
+
+func (s *Service) AttachSecurity(service *securityscan.Service) {
+	s.security = service
 }
 
 func (s *Service) SetWorkspaceAnchor(anchor string) {
@@ -227,8 +246,38 @@ func (s *Service) AttachMemory(memoryService *memory.Service, recapService *reca
 	s.memory, s.recap = memoryService, recapService
 }
 
+func (s *Service) AttachContextFiles(result contextfiles.Result) {
+	s.mu.Lock()
+	s.projectContext = contextfiles.Render(result)
+	s.contextDiagnostics = append([]string(nil), result.Warnings...)
+	s.mu.Unlock()
+}
+
+func (s *Service) AttachRules(result rules.Result) {
+	s.mu.Lock()
+	if prompt := rules.Render(result, s.projectContext); prompt != "" {
+		if strings.TrimSpace(s.projectContext) != "" {
+			s.projectContext += "\n\n"
+		}
+		s.projectContext += prompt
+	}
+	s.contextDiagnostics = append(s.contextDiagnostics, result.Warnings...)
+	s.mu.Unlock()
+}
+
 func (s *Service) AttachAttachments(root string) {
 	s.attachments = NewAttachmentStore(root)
+}
+
+func (s *Service) AttachAutoLearnInstructions() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	const guidance = `## Auto-Learn
+` + "`manage_skill`" + ` creates, updates, or deletes reusable managed skills only under the isolated host-managed directory. Never edit authored skills. Capture sparingly: only repeatable procedures worth reusing; prefer updating an existing managed skill over creating a duplicate.`
+	if strings.TrimSpace(s.projectContext) != "" {
+		s.projectContext += "\n\n"
+	}
+	s.projectContext += guidance
 }
 
 func (s *Service) AttachBackground(manager *backgroundservice.Manager) {
@@ -300,8 +349,44 @@ func (s *Service) emitApprovalMode(ctx context.Context) {
 	})
 }
 
+func (s *Service) AttachCapabilities(registry *capability.Registry) {
+	s.capabilities = registry
+}
+
+func (s *Service) CapabilitySnapshot() ([]capability.Descriptor, error) {
+	if s == nil || s.capabilities == nil {
+		return nil, nil
+	}
+	return s.capabilities.Snapshot()
+}
+
+func (s *Service) AttachResources(router *resource.Router) {
+	s.resources = router
+}
+
+func (s *Service) ReadResource(
+	ctx context.Context,
+	rawURI string,
+	selector string,
+	scope resource.Scope,
+) (resource.Result, error) {
+	if s == nil || s.resources == nil {
+		return resource.Result{}, errors.New("resources are unavailable")
+	}
+	return s.resources.Read(ctx, rawURI, selector, scope)
+}
+
 func (s *Service) AttachSkills(catalog *skills.Catalog) {
 	s.skillCatalog = catalog
+}
+
+func (s *Service) AttachCommands(catalog *commands.Catalog, diagnostics []string) {
+	s.commandCatalog = catalog
+	s.commandDiagnostics = append([]string(nil), diagnostics...)
+}
+
+func (s *Service) AttachExtensionHost(host *customtools.Host) {
+	s.extensionHost = host
 }
 
 func (s *Service) AttachPlugins(entries []PluginCatalogEntry, diagnostics []PluginDiagnostic) {
@@ -348,6 +433,11 @@ func (s *Service) Bootstrap() {
 		_ = s.emitSkillCatalog(s.ctx, "snapshot")
 	}
 	s.emit(s.ctx, Event{Kind: EventPluginCatalog, State: "snapshot", PluginCatalog: s.pluginCatalog, PluginDiagnostics: s.pluginDiagnostics})
+	_ = s.emitThemeCatalog(s.ctx, "snapshot")
+	if s.marketplace != nil {
+		_ = s.emitMarketplaceCatalog(s.ctx, "snapshot", "")
+	}
+	_ = s.emitCommandCatalog(s.ctx, "snapshot")
 	_ = s.emitHookCatalog(s.ctx, "snapshot")
 	s.emitRecoveryState()
 	s.emitApprovalMode(s.ctx)
@@ -713,11 +803,49 @@ func (s *Service) startSessionTitleGeneration(request titleGenerationRequest, cu
 
 func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	request = normalizeTurnRequest(request, s.cfg.Defaults)
+	if expanded, ok := s.commandCatalog.Expand(request.Prompt); ok {
+		request.Prompt = expanded
+	} else if name, arguments, ok := extensionCommandInput(request.Prompt); ok && s.extensionHost != nil {
+		expanded, matched, err := s.extensionHost.ExecuteCommand(s.ctx, name, arguments)
+		if err != nil {
+			return "", err
+		}
+		if matched {
+			if strings.TrimSpace(expanded) == "" {
+				return "", fmt.Errorf("extension command %q produced no prompt", name)
+			}
+			request.Prompt = expanded
+		}
+	}
 	if request.Prompt == "" && len(request.Images) == 0 {
 		return "", fmt.Errorf("prompt is empty")
 	}
 	if err := s.attachments.ValidateSessionAttachments(request.SessionID, request.Images); err != nil {
 		return "", err
+	}
+	if request.Prewalk != nil && request.PlanYolo != nil {
+		return "", fmt.Errorf("prewalk and plan-yolo cannot be combined")
+	}
+	if request.VibeMode && (request.PlanMode || request.Prewalk != nil || request.PlanYolo != nil || request.AgentMode != "single") {
+		return "", fmt.Errorf("vibe mode requires single-agent mode and cannot combine with plan or prewalk modes")
+	}
+	if request.VibeMode && (!s.cfg.Agents.Subagents.Enabled || request.DisableSubagents) {
+		return "", fmt.Errorf("vibe mode requires the subagent runtime")
+	}
+	for name, route := range map[string]*config.ModelRouteConfig{"prewalk": request.Prewalk, "plan-yolo": request.PlanYolo} {
+		if route == nil {
+			continue
+		}
+		if strings.TrimSpace(route.Provider) == "" || strings.TrimSpace(route.Model) == "" {
+			return "", fmt.Errorf("%s requires provider and model", name)
+		}
+		cloned := *route
+		if name == "prewalk" {
+			request.Prewalk = &cloned
+		} else {
+			request.PlanYolo = &cloned
+			request.PlanMode = true
+		}
 	}
 	if request.PlanMode && request.AgentMode != "single" {
 		return "", fmt.Errorf("plan mode requires single-agent mode")
@@ -732,6 +860,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		}
 	}
 	s.mu.Lock()
+	request.projectContext = s.projectContext
 	if s.shuttingDown {
 		s.mu.Unlock()
 		return "", fmt.Errorf("application is shutting down")
@@ -743,8 +872,6 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	runCtx, cancel := context.WithCancel(s.ctx)
 	s.activeRun = "starting"
 	s.activeSession = request.SessionID
-	s.activeGuidance = nil
-	s.guidanceGeneration++
 	s.guidanceOpen = false
 	s.activeEnd = cancel
 	s.activeCancelIntent = ""
@@ -823,6 +950,29 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		return "", err
 	}
 	request.privateContext = privateContext
+	if s.sessions != nil {
+		goalContext, goalErr := activeGoalContext(runCtx, s.sessions, request.SessionID)
+		if goalErr != nil {
+			cancel()
+			s.clearRun("starting")
+			return "", goalErr
+		}
+		if goalContext != "" {
+			request.privateContext = strings.TrimSpace(strings.Join([]string{request.privateContext, "[Trusted Goal mode state]\n" + goalContext}, "\n\n"))
+		}
+	}
+	if request.Prewalk != nil {
+		request.privateContext = strings.TrimSpace(strings.Join([]string{
+			request.privateContext,
+			fmt.Sprintf("[Trusted Prewalk mode]\\nPlan the task deeply on the current model. Create the durable todo before implementation. After the first successful workspace mutation, the runtime switches once to %s/%s and injects a final consistency/scope/verification checklist.", request.Prewalk.Provider, request.Prewalk.Model),
+		}, "\n\n"))
+	}
+	if request.PlanYolo != nil {
+		request.privateContext = strings.TrimSpace(strings.Join([]string{
+			request.privateContext,
+			fmt.Sprintf("[Trusted Plan-yolo mode]\\nProduce one decision-complete plan and call submit_plan. No user approval is required for this mode: after the planning turn ends, the runtime automatically starts implementation on %s/%s with the approved plan.", request.PlanYolo.Provider, request.PlanYolo.Model),
+		}, "\n\n"))
+	}
 	if request.approvedPlanArtifactID != "" {
 		request.approvedPlanContext, err = s.approvedPlanContext(runCtx, request.SessionID, request.approvedPlanArtifactID)
 		if err != nil {
@@ -830,6 +980,12 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 			s.clearRun("starting")
 			return "", err
 		}
+	}
+	if request.VibeMode {
+		request.privateContext = strings.TrimSpace(strings.Join([]string{
+			request.privateContext,
+			"[Trusted Vibe mode]\\nYou are the read-only director. Never edit files, run commands, grep, build, or verify by execution yourself. Drive persistent `fast` and `good` worker sessions with vibe_spawn/send/wait/kill/list. Workers start blank; give complete briefs. Keep one session per workstream and send follow-ups to that same name. Work concurrently. Verify worker claims only by reading the changed files before accepting them.",
+		}, "\n\n"))
 	}
 	if initialUser != "" {
 		request.History = append(request.History, session.Block{Kind: "user", Title: "SessionStart hook", Content: initialUser, State: "hook"})
@@ -913,18 +1069,22 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		s.clearRun("starting")
 		return "", err
 	}
-	if err := s.persistSessionPreferences(s.ctx, sessionPreferences); err != nil {
-		cancel()
-		_ = s.coding.CompleteRun(context.WithoutCancel(s.ctx), durableRun, err.Error(), err)
-		s.clearRun("starting")
-		return "", err
+	if request.origin != turnOriginAutoLearn {
+		if err := s.persistSessionPreferences(s.ctx, sessionPreferences); err != nil {
+			cancel()
+			_ = s.coding.CompleteRun(context.WithoutCancel(s.ctx), durableRun, err.Error(), err)
+			s.clearRun("starting")
+			return "", err
+		}
 	}
 	engine = s.bindProviderEngine(engine)
 	s.mu.Lock()
 	s.activeRun = durableRun.RunID
 	s.guidanceOpen = true
 	s.mu.Unlock()
-	s.startSessionTitleGeneration(titleGenerationRequest{SessionID: request.SessionID, RunID: durableRun.RunID, Prompt: request.Prompt}, autoTitleCurrent)
+	if request.origin != turnOriginAutoLearn {
+		s.startSessionTitleGeneration(titleGenerationRequest{SessionID: request.SessionID, RunID: durableRun.RunID, Prompt: request.Prompt}, autoTitleCurrent)
+	}
 	handedOff = true
 	go s.runProviderTurn(runCtx, request, durableRun, engine)
 	return durableRun.RunID, nil
@@ -958,13 +1118,30 @@ func (s *Service) GuideActiveTurn(sessionID, runID, text string) error {
 	return s.GuideActiveTurnWithAttachments(sessionID, runID, text, nil)
 }
 
-// GuideActiveTurnWithAttachments steers the matching active run without
-// cancelling it or replaying completed tools.
+// GuideActiveTurnWithAttachments steers the matching active single-agent run.
+// Steer controls interrupt a running tool, cancel undispatched sibling calls,
+// and enter the conversation at the next deterministic loop boundary.
 func (s *Service) GuideActiveTurnWithAttachments(sessionID, runID, text string, attachments []session.Attachment) error {
+	return s.enqueueActiveTurnControl(sessionID, runID, text, attachments, hyagent.ControlSteer)
+}
+
+// FollowUpActiveTurn queues a text-only message after the active answer.
+func (s *Service) FollowUpActiveTurn(sessionID, runID, text string) error {
+	return s.FollowUpActiveTurnWithAttachments(sessionID, runID, text, nil)
+}
+
+// FollowUpActiveTurnWithAttachments queues a user message without interrupting
+// the provider stream or running tools. The same agent run drains it only after
+// the current answer reaches its durable turn boundary.
+func (s *Service) FollowUpActiveTurnWithAttachments(sessionID, runID, text string, attachments []session.Attachment) error {
+	return s.enqueueActiveTurnControl(sessionID, runID, text, attachments, hyagent.ControlFollowUp)
+}
+
+func (s *Service) enqueueActiveTurnControl(sessionID, runID, text string, attachments []session.Attachment, kind hyagent.ControlKind) error {
 	text = strings.TrimSpace(text)
 	attachments = CloneAttachments(attachments)
 	if text == "" && len(attachments) == 0 {
-		return fmt.Errorf("guidance message is empty")
+		return fmt.Errorf("turn control message is empty")
 	}
 	if err := s.attachments.ValidateSessionAttachments(sessionID, attachments); err != nil {
 		return err
@@ -978,85 +1155,41 @@ func (s *Service) GuideActiveTurnWithAttachments(sessionID, runID, text string, 
 		return fmt.Errorf("run %q is not active for session %q", runID, sessionID)
 	}
 	if !s.guidanceOpen {
-		return fmt.Errorf("the active run is finishing and cannot accept guidance")
+		return fmt.Errorf("the active run is finishing and cannot accept turn control")
+	}
+	control := s.turnControls[runID]
+	if control == nil {
+		return fmt.Errorf("run %q does not support live turn control", runID)
+	}
+	state, title := "guidance", "Guidance"
+	if kind == hyagent.ControlFollowUp {
+		state, title = "follow_up", "Follow-up"
 	}
 	var sequence int64
 	if s.sessions != nil {
 		var err error
 		sequence, err = s.sessions.AppendBlock(s.ctx, sessionID, session.Block{
-			Kind: "user", RunID: s.activeRun, Title: "Guidance", Content: text, State: "guidance",
+			Kind: "user", RunID: runID, Title: title, Content: text, State: state,
 			Attachments: CloneAttachments(attachments),
 		})
 		if err != nil {
-			return fmt.Errorf("persist guidance message: %w", err)
+			return fmt.Errorf("persist %s message: %w", state, err)
 		}
 	}
-	s.activeGuidance = append(s.activeGuidance, activeGuidanceMessage{Text: text, Attachments: attachments, Sequence: sequence})
-	return nil
-}
-
-func (s *Service) drainActiveGuidance(sessionID, runID string) []activeGuidanceMessage {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID || len(s.activeGuidance) == 0 {
-		return nil
-	}
-	messages := cloneActiveGuidance(s.activeGuidance)
-	s.activeGuidance = nil
-	s.guidanceGeneration++
-	return messages
-}
-
-type activeGuidanceSnapshot struct {
-	values     []activeGuidanceMessage
-	generation uint64
-}
-
-func (s *Service) peekActiveGuidance(sessionID, runID string) activeGuidanceSnapshot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID || len(s.activeGuidance) == 0 {
-		return activeGuidanceSnapshot{}
-	}
-	return activeGuidanceSnapshot{
-		values: cloneActiveGuidance(s.activeGuidance), generation: s.guidanceGeneration,
-	}
-}
-
-func (s *Service) acknowledgeActiveGuidance(sessionID, runID string, snapshot activeGuidanceSnapshot) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if snapshot.generation != s.guidanceGeneration || s.activeSession != sessionID || s.activeRun != runID || len(snapshot.values) > len(s.activeGuidance) {
-		return
-	}
-	s.activeGuidance = cloneActiveGuidance(s.activeGuidance[len(snapshot.values):])
-	s.guidanceGeneration++
-}
-
-func (s *Service) finishActiveGuidance(sessionID, runID string) []activeGuidanceMessage {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.guidanceOpen || s.activeSession != sessionID || s.activeRun != runID {
-		return nil
-	}
-	if len(s.activeGuidance) > 0 {
-		messages := cloneActiveGuidance(s.activeGuidance)
-		s.activeGuidance = nil
-		s.guidanceGeneration++
-		return messages
-	}
-	s.guidanceOpen = false
-	return nil
-}
-
-func cloneActiveGuidance(values []activeGuidanceMessage) []activeGuidanceMessage {
-	cloned := make([]activeGuidanceMessage, len(values))
-	for index, value := range values {
-		cloned[index] = activeGuidanceMessage{
-			Text: value.Text, Attachments: CloneAttachments(value.Attachments), Sequence: value.Sequence,
+	id := fmt.Sprintf("%s:%d", runID, sequence)
+	if sequence == 0 {
+		random, err := randomID("control")
+		if err != nil {
+			return err
 		}
+		id = random
 	}
-	return cloned
+	if err := control.Enqueue(hyagent.ControlMessage{
+		ID: id, Kind: kind, Message: UserMessageWithAttachments(text, attachments),
+	}); err != nil {
+		return fmt.Errorf("queue %s message: %w", state, err)
+	}
+	return nil
 }
 
 func (s *Service) CancelActive() bool {
@@ -1166,6 +1299,11 @@ func (s *Service) shutdown() {
 	s.endAllSessionHooks(hookCtx, "prompt_input_exit")
 	hookCancel()
 	s.cancel()
+	if s.security != nil {
+		if err := s.security.Shutdown(context.Background()); err != nil {
+			s.shutdownErr = errors.Join(s.shutdownErr, err)
+		}
+	}
 	mcpCtx, mcpCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer mcpCancel()
 	mcpClosed := make(chan error, 1)
@@ -1320,9 +1458,9 @@ func (s *Service) releaseRun(runID string) (string, *ProviderRuntime) {
 		sessionID = s.activeSession
 		s.activeRun = ""
 		s.activeSession = ""
-		s.activeGuidance = nil
-		s.guidanceGeneration++
 		s.guidanceOpen = false
+		delete(s.turnControls, runID)
+		delete(s.pendingPlanYolo, runID)
 		cancel = s.activeEnd
 		s.activeEnd = nil
 		s.activeCancelIntent = ""
@@ -1330,6 +1468,9 @@ func (s *Service) releaseRun(runID string) (string, *ProviderRuntime) {
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if providers != nil {
+		providers.ReleaseAdvisor(runID)
 	}
 	return sessionID, providers
 }
@@ -1362,9 +1503,11 @@ func (s *Service) emitTerminal(_ context.Context, event Event) bool {
 		sessionID = s.activeSession
 		s.activeRun = ""
 		s.activeSession = ""
-		s.activeGuidance = nil
-		s.guidanceGeneration++
 		s.guidanceOpen = false
+		delete(s.turnControls, event.RunID)
+		if event.Kind != EventRunFinished || event.State != "completed" {
+			delete(s.pendingPlanYolo, event.RunID)
+		}
 		cancel = s.activeEnd
 		s.activeEnd = nil
 		s.activeCancelIntent = ""
@@ -1375,10 +1518,14 @@ func (s *Service) emitTerminal(_ context.Context, event Event) bool {
 	if cancel != nil {
 		cancel()
 	}
-	if sessionID != "" && providers != nil {
-		if event.Kind == EventRunFinished && event.State == "completed" {
-			providers.MarkParentChildrenDelivered(sessionID, event.RunID)
-		}
+	if providers != nil {
+		providers.ReleaseAdvisor(event.RunID)
+	}
+	if sessionID != "" && providers != nil && event.Kind == EventRunFinished && event.State == "completed" {
+		providers.MarkParentChildrenDelivered(sessionID, event.RunID)
+	}
+	planYoloStarted := event.Kind == EventRunFinished && event.State == "completed" && s.startPlanYoloHandoff(event.RunID)
+	if sessionID != "" && providers != nil && !planYoloStarted {
 		providers.AutoWakePending(sessionID)
 	}
 	return published

@@ -1,6 +1,6 @@
 # Security
 
-Last verified: 2026-08-17
+Last verified: 2026-08-24
 
 Azem is a local development agent. Its approvals, typed Bridge, credential
 stores, and durable action ledger are governance boundaries, not an operating-
@@ -121,6 +121,27 @@ disabled. A patch can be requested only for a relative path currently returned
 by `git status`; the Bridge never accepts an arbitrary revision, path outside
 the workspace, shell fragment, staging operation, restore, commit, or push.
 
+Native security scans never give the audit model the live workspace. Preflight
+creates a private read-only snapshot outside the repository, uses `os.Root`
+for beneath-root file access, sanitizes Git environment overrides, rejects a
+repository-local Git executable, and binds the run to source and diff digests.
+Deleted/base content is preserved in a sealed diff artifact. Audit, reducer,
+and constrained security-child profiles have no shell, write, network, generic
+MCP, or arbitrary output-path tools. Progress counts only in-scope paths with a
+successful read receipt; complete claims with missing receipts become partial.
+The model submits semantic drafts; the host binds finding locations to scope,
+derives identities, validates JSON Schema, writes atomically, seals SHA-256
+artifacts, and owns completion.
+
+Security patching is a separate explicit action. It requires a completed,
+non-stale scan and clean Git checkout, edits an isolated worktree, rejects files
+outside host-accepted finding locations, compares the reported file set with the
+Git diff, and requires an independent non-editing verifier with concrete read
+and test receipts. Failed or inconclusive attempts reset to the pre-finding
+checkpoint. Only verified commits can enter a sanitized, hook-disabled GitHub
+PR argv boundary.
+
+
 ## Credentials
 
 OAuth tokens and API keys use the configured `internal/auth` credential store:
@@ -154,6 +175,20 @@ models are projected transiently to the current Settings UI. The pending key,
 catalog rows, YAML, and runtime provider state are persisted only after the
 explicit Save provider action. Pending secrets are never placed in events.
 
+### Auth broker and gateway
+
+The auth broker stores hashed bearer-token identities, account disable/block
+state, refresh leases, and usage observations. Remote clients receive
+read-only credential projections and encrypted snapshot caches; they never
+receive refresh tokens. HTTPS is required except on loopback. Tokens may come
+from environment or permission-restricted files and are omitted from runtime
+configuration JSON and events.
+
+The auth gateway validates its own bearer token before proxying a
+protocol-compatible provider request. It selects only active, unblocked account
+credentials and uses the shared provider transport. Do not expose either
+service directly to an untrusted network.
+
 ## MCP, Skills, and hooks
 
 Trust project Skills only for repositories you trust. MCP servers can execute
@@ -185,6 +220,19 @@ they are not serialized into Azem configuration or desktop events. Remote MCP
 descriptors without an explicit bearer-token environment variable remain
 disabled until Azem has an authenticated connection, and `.app.json` metadata
 does not grant access to a ChatGPT connector by itself.
+
+Marketplace catalogs are untrusted metadata. Add/update/install stages source
+bytes in a private directory, validates name/path/source constraints, and only
+then atomically activates the scoped package. Updating a catalog never grants
+hook trust. Desktop and TUI mutations are explicit typed actions.
+
+A trusted extension may register file mutation fallbacks. Azem invokes them
+only after a workspace-local ordinary-file mutation fails with `EACCES`,
+`EPERM`, or `EROFS`. The request carries a symlink-resolved authoritative
+destination. Unresolved paths, escapes, non-permission errors, archives,
+SQLite, LSP writes, and subprocess writes never enter this broker. Hashline
+multi-file fallback attempts rollback through the same broker if a later
+handler declines.
 
 ## Offline learning, generated tools, and adapters
 
@@ -221,13 +269,26 @@ respect repository permissions and merge methods and pin the displayed head
 OID. Monitor-and-fix deduplicates failure fingerprints and starts an isolated
 repair session; it does not grant that session authority to merge.
 
+Signed GitHub webhooks verify the configured HMAC before parsing a delivery.
+Schema 26 records delivery ID and payload digest before admitting a monitor
+trigger, so redelivery cannot start a duplicate repair.
+
+Encrypted session sharing generates a fresh AES-256-GCM key that remains in the
+URL fragment; blob/gist storage receives only sealed bytes. The exporter
+redacts credentials and bounds/truncates publish payloads. Live collaboration
+uses encrypted frames, authenticated room links, reconnect buffering, a
+chunked snapshot, and a read-only guest replica. Only the host owns provider
+execution, approvals, and durable workspace mutation.
+
 ## Approved-plan handoff
 
-Planning mode exposes read-only tools plus the bounded `ask` and `submit_plan`
-tools. A submitted proposal cannot grant itself write, shell, network, MCP, or
-approval authority. The desktop Bridge accepts structured question answers and
-an explicit plan decision only for the active session; the application service
-validates IDs and state transitions against durable blocks and artifacts.
+`ask` is available to an ordinary interactive single-agent turn and carries no
+write or approval authority. Planning mode additionally exposes read-only tools
+plus `submit_plan`. A submitted proposal cannot grant itself write, shell,
+network, MCP, or approval authority. The desktop Bridge accepts structured
+question answers and an explicit plan decision only for the active session;
+the application service validates IDs and state transitions against durable
+blocks and artifacts.
 
 When the user executes a plan, Azem starts a separate ordinary turn. The
 approved `plan_v1` artifact is loaded by the backend and inserted through a

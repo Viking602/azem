@@ -173,6 +173,23 @@ func (m *Monitor) States() []MonitorState {
 	return states
 }
 
+// Trigger schedules an immediate evidence refresh for an enabled pull request.
+// The monitor still re-fetches GitHub state and applies its fingerprint
+// deduplication before starting a repair.
+func (m *Monitor) Trigger(number int) error {
+	if number <= 0 {
+		return fmt.Errorf("pull request number must be positive")
+	}
+	m.mu.Lock()
+	enabled := m.states[number].Enabled
+	m.mu.Unlock()
+	if !enabled {
+		return fmt.Errorf("pull request %d is not monitored", number)
+	}
+	m.signal()
+	return nil
+}
+
 // ObserveSession updates a repair lifecycle from the Azem runtime event stream.
 func (m *Monitor) ObserveSession(sessionID, eventKind string) {
 	if strings.TrimSpace(sessionID) == "" {

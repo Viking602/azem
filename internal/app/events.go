@@ -6,7 +6,9 @@ import (
 	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/recap"
+	"github.com/Viking602/azem/internal/securityscan"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -40,6 +42,9 @@ const (
 	EventModelProviders     EventKind = "model_providers"
 	EventSkillCatalog       EventKind = "skill_catalog"
 	EventPluginCatalog      EventKind = "plugin_catalog"
+	EventMarketplaceCatalog EventKind = "marketplace_catalog"
+	EventCommandCatalog     EventKind = "command_catalog"
+	EventThemeCatalog       EventKind = "theme_catalog"
 	EventHookCatalog        EventKind = "hook_catalog"
 	EventAuthState          EventKind = "auth_state"
 	EventMCPState           EventKind = "mcp_state"
@@ -57,6 +62,13 @@ const (
 	EventBackgroundLogs     EventKind = "background_logs"
 	EventGitBranches        EventKind = "git_branches"
 	EventUsageReport        EventKind = "usage_report"
+	EventSecurityConfig     EventKind = "security_config_state"
+	EventSecurityScanState  EventKind = "security_scan_state"
+	EventSecurityScanList   EventKind = "security_scan_list"
+	EventSecurityFindings   EventKind = "security_finding_list"
+	EventSecurityFinding    EventKind = "security_finding_detail"
+	EventSecurityPatch      EventKind = "security_patch_state"
+	EventSecurityPublish    EventKind = "security_publication_state"
 )
 
 type ModelRouteEntry struct {
@@ -158,6 +170,7 @@ type SkillCatalogEntry struct {
 	SourcePath    string `json:"sourcePath,omitempty"`
 	LogoPath      string `json:"logoPath,omitempty"`
 	Bundled       bool   `json:"bundled,omitempty"`
+	Managed       bool   `json:"managed,omitempty"`
 	Eager         bool   `json:"eager,omitempty"`
 	Disabled      bool   `json:"disabled,omitempty"`
 	ModelVisible  bool   `json:"modelVisible,omitempty"`
@@ -176,6 +189,7 @@ type PluginCatalogEntry struct {
 	Version            string   `json:"version,omitempty"`
 	Marketplace        string   `json:"marketplace,omitempty"`
 	Origin             string   `json:"origin,omitempty"`
+	Scope              string   `json:"scope,omitempty"`
 	Description        string   `json:"description,omitempty"`
 	DeveloperName      string   `json:"developerName,omitempty"`
 	Category           string   `json:"category,omitempty"`
@@ -187,6 +201,11 @@ type PluginCatalogEntry struct {
 	IntegratedMCPCount int      `json:"integratedMCPCount,omitempty"`
 	HookCount          int      `json:"hookCount,omitempty"`
 	HooksTrusted       bool     `json:"hooksTrusted,omitempty"`
+	ToolCount          int      `json:"toolCount,omitempty"`
+	CommandCount       int      `json:"commandCount,omitempty"`
+	AgentCount         int      `json:"agentCount,omitempty"`
+	ThemeCount         int      `json:"themeCount,omitempty"`
+	ExtensionCount     int      `json:"extensionCount,omitempty"`
 	HasApp             bool     `json:"hasApp,omitempty"`
 	Capabilities       []string `json:"capabilities,omitempty"`
 	Status             string   `json:"status,omitempty"`
@@ -198,6 +217,13 @@ type PluginDiagnostic struct {
 	PluginID string `json:"pluginId,omitempty"`
 	Path     string `json:"path"`
 	Message  string `json:"message"`
+}
+
+type MarketplaceCatalogPayload struct {
+	Marketplaces []plugins.MarketplaceRecord          `json:"marketplaces"`
+	Available    []plugins.MarketplacePluginView      `json:"available"`
+	Installed    []plugins.MarketplaceInstalledPlugin `json:"installed"`
+	Upgrades     []plugins.MarketplaceUpgrade         `json:"upgrades"`
 }
 
 type HookSourceEntry struct {
@@ -306,39 +332,46 @@ func saturatingContextTokenSum(left, right int) int {
 }
 
 type Event struct {
-	Kind              EventKind
-	SessionID         string
-	RunID             string
-	AgentID           string
-	ToolCallID        string
-	ApprovalID        string
-	UserInputID       string
-	PlanID            string
-	Text              string
-	TextPhase         string
-	State             string
-	Data              map[string]string
-	Agent             *AgentStatePayload
-	AgentBlocks       []AgentTranscriptBlock
-	AgentCatalog      []AgentCatalogEntry
-	AgentSnapshots    []AgentSnapshotPayload
-	SkillCatalog      []SkillCatalogEntry
-	SkillDiagnostics  []SkillDiagnostic
-	PluginCatalog     []PluginCatalogEntry
-	PluginDiagnostics []PluginDiagnostic
-	HookCatalog       *HookCatalogSnapshot
-	ContextProfile    *ContextProfile
-	Todo              *session.TodoList
-	Memories          []memory.Memory
-	Recap             *recap.Recap
-	ModelRoutes       []ModelRouteEntry
-	ModelProviders    []ModelProviderEntry
-	Background        []backgroundservice.Process
-	BackgroundLogs    *backgroundservice.LogSnapshot
-	GitBranches       []GitBranchEntry
-	UsageReport       *session.UsageReport
-	WorkspaceDirty    bool
-	At                time.Time
+	Kind               EventKind
+	SessionID          string
+	RunID              string
+	AgentID            string
+	ToolCallID         string
+	ApprovalID         string
+	UserInputID        string
+	PlanID             string
+	Text               string
+	TextPhase          string
+	State              string
+	Data               map[string]string
+	Agent              *AgentStatePayload
+	AgentBlocks        []AgentTranscriptBlock
+	AgentCatalog       []AgentCatalogEntry
+	AgentSnapshots     []AgentSnapshotPayload
+	SkillCatalog       []SkillCatalogEntry
+	SkillDiagnostics   []SkillDiagnostic
+	PluginCatalog      []PluginCatalogEntry
+	PluginDiagnostics  []PluginDiagnostic
+	MarketplaceCatalog *MarketplaceCatalogPayload
+	HookCatalog        *HookCatalogSnapshot
+	ContextProfile     *ContextProfile
+	Todo               *session.TodoList
+	Memories           []memory.Memory
+	Recap              *recap.Recap
+	ModelRoutes        []ModelRouteEntry
+	ModelProviders     []ModelProviderEntry
+	Background         []backgroundservice.Process
+	BackgroundLogs     *backgroundservice.LogSnapshot
+	GitBranches        []GitBranchEntry
+	UsageReport        *session.UsageReport
+	SecurityConfig     *config.SecurityConfig
+	Security           *securityscan.Projection
+	SecurityScans      []securityscan.Scan
+	SecurityFindings   []securityscan.Finding
+	SecurityFinding    *securityscan.Finding
+	SecurityPatch      *securityscan.PatchResult
+	WorkspaceDirty     bool
+	At                 time.Time
 }
 
 func (e Event) Clone() Event {
@@ -348,6 +381,16 @@ func (e Event) Clone() Event {
 		for key, value := range e.Data {
 			cloned.Data[key] = value
 		}
+	}
+	if e.SecurityConfig != nil {
+		security := *e.SecurityConfig
+		if e.SecurityConfig.PublicationArguments != nil {
+			security.PublicationArguments = make(map[string]any, len(e.SecurityConfig.PublicationArguments))
+			for key, value := range e.SecurityConfig.PublicationArguments {
+				security.PublicationArguments[key] = value
+			}
+		}
+		cloned.SecurityConfig = &security
 	}
 	if e.Agent != nil {
 		agent := *e.Agent
@@ -376,6 +419,18 @@ func (e Event) Clone() Event {
 	}
 	if e.PluginDiagnostics != nil {
 		cloned.PluginDiagnostics = append([]PluginDiagnostic(nil), e.PluginDiagnostics...)
+	}
+	if e.MarketplaceCatalog != nil {
+		catalog := *e.MarketplaceCatalog
+		catalog.Marketplaces = append([]plugins.MarketplaceRecord(nil), e.MarketplaceCatalog.Marketplaces...)
+		catalog.Available = append([]plugins.MarketplacePluginView(nil), e.MarketplaceCatalog.Available...)
+		for i := range catalog.Available {
+			catalog.Available[i].Keywords = append([]string(nil), e.MarketplaceCatalog.Available[i].Keywords...)
+			catalog.Available[i].Tags = append([]string(nil), e.MarketplaceCatalog.Available[i].Tags...)
+		}
+		catalog.Installed = append([]plugins.MarketplaceInstalledPlugin(nil), e.MarketplaceCatalog.Installed...)
+		catalog.Upgrades = append([]plugins.MarketplaceUpgrade(nil), e.MarketplaceCatalog.Upgrades...)
+		cloned.MarketplaceCatalog = &catalog
 	}
 	if e.HookCatalog != nil {
 		catalog := *e.HookCatalog
@@ -435,6 +490,29 @@ func (e Event) Clone() Event {
 	if e.UsageReport != nil {
 		report := e.UsageReport.Clone()
 		cloned.UsageReport = &report
+	}
+	if e.Security != nil {
+		value := *e.Security
+		value.Workers = append([]securityscan.Worker(nil), e.Security.Workers...)
+		value.Findings = append([]securityscan.Finding(nil), e.Security.Findings...)
+		value.Artifacts = append([]securityscan.Artifact(nil), e.Security.Artifacts...)
+		value.Progress.ReviewedPaths = append([]string(nil), e.Security.Progress.ReviewedPaths...)
+		cloned.Security = &value
+	}
+	if e.SecurityScans != nil {
+		cloned.SecurityScans = append([]securityscan.Scan(nil), e.SecurityScans...)
+	}
+	if e.SecurityFindings != nil {
+		cloned.SecurityFindings = append([]securityscan.Finding(nil), e.SecurityFindings...)
+	}
+	if e.SecurityFinding != nil {
+		value := *e.SecurityFinding
+		cloned.SecurityFinding = &value
+	}
+	if e.SecurityPatch != nil {
+		value := *e.SecurityPatch
+		value.Files = append([]string(nil), e.SecurityPatch.Files...)
+		cloned.SecurityPatch = &value
 	}
 	return cloned
 }

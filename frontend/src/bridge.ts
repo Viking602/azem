@@ -1,8 +1,9 @@
 import { Browser, Call, Dialogs, Events } from "@wailsio/runtime";
 import type {
-  ActionRequest, Attachment, PullRequest, PullRequestDashboard, PullRequestDetailResponse,
+  ActionRequest, Attachment, MarketplaceCatalog, PullRequest, PullRequestDashboard, PullRequestDetailResponse,
   PullRequestMonitorState, PullRequestMutationRequest, RuntimeEvent, Snapshot, TurnRequest,
-  SessionSearchResult, SkillEntry, UsageReport, UsageScope, WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
+  SessionSearchResult, SessionShareResult, SessionTree, SkillEntry, UsageReport, UsageScope,
+  WorkspaceChange, WorkspaceChangeSet, WorkspaceDirectory, WorkspaceFile,
 } from "./types";
 import type { TerminalEvent, TerminalSession } from "./terminal";
 
@@ -70,6 +71,17 @@ export async function listHookCatalog(): Promise<Record<string, unknown>> {
   if (!isDesktopRuntime()) return { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] };
   const result = await Call.ByName(`${bridgeName}.HookCatalog`) as Record<string, unknown> | null;
   return result ?? { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] };
+}
+
+export async function listMarketplaceCatalog(): Promise<MarketplaceCatalog> {
+  if (!isDesktopRuntime()) return {
+    marketplaces: [{ name: "omp-official", source: "oh-my-pi/omp-marketplace", type: "github", cachePath: "", updatedAt: "2026-08-23T00:00:00Z" }],
+    available: [{ id: "review@omp-official", name: "review", marketplace: "omp-official", version: "1.2.0", description: "Repository review workflow", category: "development", homepage: "https://github.com/oh-my-pi/omp-marketplace", license: "MIT", keywords: ["review"], tags: ["development"] }],
+    installed: [],
+    upgrades: [],
+  };
+  const result = await Call.ByName(`${bridgeName}.MarketplaceCatalog`) as MarketplaceCatalog | null;
+  return result ?? { marketplaces: [], available: [], installed: [], upgrades: [] };
 }
 
 export async function listUsageReport(scope: UsageScope = "project"): Promise<UsageReport> {
@@ -140,6 +152,46 @@ export async function resumeSession(sessionId: string): Promise<RuntimeEvent | n
   return Call.ByName(`${bridgeName}.ResumeSession`, sessionId) as Promise<RuntimeEvent>;
 }
 
+export async function getSessionTree(sessionId: string): Promise<SessionTree> {
+  if (!isDesktopRuntime()) return {
+    sessionId, rootSessionId: sessionId, sourceKind: "native", activeBranch: "main",
+    activeLeafEntryId: "demo-entry", roots: [{
+      entry: { id: "demo-entry", sequence: 0, kind: "user", label: "Start", createdAt: new Date().toISOString() },
+    }],
+    branches: [{ name: "main", headEntryId: "demo-entry", active: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
+  };
+  return Call.ByName(`${bridgeName}.SessionTree`, sessionId) as Promise<SessionTree>;
+}
+
+export async function navigateSessionTree(sessionId: string, entryId: string): Promise<RuntimeEvent | null> {
+  if (!isDesktopRuntime()) return null;
+  return Call.ByName(`${bridgeName}.NavigateSessionTree`, sessionId, entryId) as Promise<RuntimeEvent>;
+}
+
+export async function createSessionFork(sessionId: string, targetId: string, entryId = ""): Promise<SessionTree> {
+  if (!isDesktopRuntime()) return getSessionTree(targetId);
+  return Call.ByName(`${bridgeName}.CreateSessionFork`, sessionId, targetId, entryId) as Promise<SessionTree>;
+}
+
+export async function setSessionEntryLabel(sessionId: string, entryId: string, label: string): Promise<SessionTree> {
+  if (!isDesktopRuntime()) {
+    const tree = await getSessionTree(sessionId);
+    if (tree.roots[0]?.entry.id === entryId) tree.roots[0].entry.label = label;
+    return tree;
+  }
+  return Call.ByName(`${bridgeName}.SetSessionEntryLabel`, sessionId, entryId, label) as Promise<SessionTree>;
+}
+
+export async function exportSession(sessionId: string, outputPath: string, format: "html" | "text" | "json", allBranches = false): Promise<string> {
+  if (!isDesktopRuntime()) return outputPath;
+  return Call.ByName(`${bridgeName}.ExportSession`, sessionId, outputPath, format, allBranches) as Promise<string>;
+}
+
+export async function shareSession(sessionId: string, serverUrl: string, store: "blob" | "gist" = "blob", allBranches = false): Promise<SessionShareResult> {
+  if (!isDesktopRuntime()) return { url: `${serverUrl}/demo#key`, method: store === "gist" ? "gist" : "server", truncated: false, sealedBytes: 128 };
+  return Call.ByName(`${bridgeName}.ShareSession`, sessionId, serverUrl, store, allBranches) as Promise<SessionShareResult>;
+}
+
 export async function listWorkspaceEntries(path = ""): Promise<WorkspaceDirectory> {
   if (!isDesktopRuntime()) return demoWorkspaceDirectory(path);
   return Call.ByName(`${bridgeName}.WorkspaceEntries`, path) as Promise<WorkspaceDirectory>;
@@ -169,6 +221,11 @@ export async function guide(sessionId: string, runId: string, text: string, atta
   if (!isDesktopRuntime()) return;
   await Call.ByName(`${bridgeName}.Guide`, sessionId, runId, text, attachments);
 }
+export async function followUp(sessionId: string, runId: string, text: string, attachments: Attachment[] = []): Promise<void> {
+  if (!isDesktopRuntime()) return;
+  await Call.ByName(`${bridgeName}.FollowUp`, sessionId, runId, text, attachments);
+}
+
 
 export async function importAttachment(sessionId: string, file: File): Promise<Attachment> {
   const encoded = await fileToBase64(file);

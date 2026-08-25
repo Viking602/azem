@@ -417,6 +417,12 @@ describe("tool timeline grouping", () => {
 
   it("classifies azem tool titles", () => {
     expect(classifyToolCategory("coding.search")).toBe("search");
+    expect(classifyToolCategory("ast_grep")).toBe("search");
+    expect(classifyToolCategory("debug")).toBe("shell");
+    expect(classifyToolCategory("eval")).toBe("shell");
+    expect(classifyToolCategory("browser")).toBe("shell");
+    expect(classifyToolCategory("computer")).toBe("shell");
+    expect(classifyToolCategory("hub")).toBe("agent");
     expect(classifyToolCategory("coding.read_file")).toBe("read");
     expect(classifyToolCategory("coding.edit_hashline")).toBe("edit");
     expect(classifyToolCategory("coding.git_diff")).toBe("diff");

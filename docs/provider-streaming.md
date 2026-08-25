@@ -1,6 +1,6 @@
 # Provider Streaming
 
-Last verified: 2026-08-21
+Last verified: 2026-08-24
 
 Azem normalizes every provider into Venat's `provider.Driver` contract. The
 application runtime owns provider/model selection, retries, usage persistence,
@@ -14,7 +14,7 @@ parsing.
 | `chatgpt` | Existing Codex Responses subscription driver |
 | `grok` | Existing xAI API or CLI-proxy subscription driver |
 | `cursor` | Oh My Pi-compatible `api2.cursor.sh` Connect protobuf agent driver |
-| llmux profile IDs | `internal/provider/llmux`, backed by llmux v0.2.5 |
+| llmux profile IDs | `internal/provider/llmux`, backed by llmux v0.3.1 |
 
 Cursor still advertises Azem tools as MCP definitions. Composer also emits
 built-in execs (`read`/`shell`/`write`/`delete`/`grep`/`ls` and `pi_*`
@@ -297,6 +297,27 @@ a retry cause is known. Consumers use the code for presentation only — the
 desktop titles the failure block from the code and the block keeps the
 original error text — while Venat remains the single retry owner;
 `errcode.Retryable` is UI guidance, never a runtime retry decision.
+
+## Portable provider contract
+
+Azem pins Venat v0.15.4 and llmux v0.3.1. The shared contract preserves
+commentary/final text phase, terminal state, distinct length/error stop reasons,
+reported usage flags, cache reads/writes, sources, files, warnings, portable
+modality metadata, and provider compatibility descriptors. Tool argument
+objects are duplicate-key checked before approval or execution.
+
+llmux protocol parsers own provisional/canonical tool identity correlation and
+at-most-once finalization. Azem forwards canonical calls and never deduplicates
+across streams or model turns. Venat remains the only retry owner and rejects
+duplicate tool registrations, invalid arguments, or post-terminal frames.
+
+Cross-repository release verification is:
+
+```bash
+(cd ../llmux && GOWORK=off go test ./...)
+(cd ../venat && GOWORK=off go test ./...)
+GOWORK=off go test ./internal/provider/... ./internal/auth/...
+```
 
 ## Verification
 

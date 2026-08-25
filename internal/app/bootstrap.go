@@ -3,16 +3,19 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/contextfiles"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/memory"
@@ -20,6 +23,8 @@ import (
 	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
+	"github.com/Viking602/azem/internal/rules"
+	"github.com/Viking602/azem/internal/securityscan"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -149,14 +154,84 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 	if b.sessions == nil {
 		b.sessions = session.NewService(b.store.DB(), b.store.Blobs())
 	}
+	b.memory = memory.NewService(b.store.DB(), b.paths.Workspace)
+	if b.cfg.Discovery.ContextFiles {
+		disabled := make(map[string]bool, len(b.cfg.Discovery.DisabledProviders))
+		for _, provider := range b.cfg.Discovery.DisabledProviders {
+			disabled[strings.ToLower(strings.TrimSpace(provider))] = true
+		}
+		b.contextFiles, err = contextfiles.Discover(b.ctx, contextfiles.Options{
+			Workspace: b.paths.Workspace, HomeDir: b.homeDir, DisabledProviders: disabled,
+			AdditionalFiles: append([]string(nil), b.cfg.Discovery.AdditionalContextFiles...),
+		})
+		if err != nil {
+			return fmt.Errorf("discover context files: %w", err)
+		}
+	}
+	if b.cfg.Discovery.Rules {
+		disabledProviders := make(map[string]bool, len(b.cfg.Discovery.DisabledProviders))
+		for _, provider := range b.cfg.Discovery.DisabledProviders {
+			disabledProviders[strings.ToLower(strings.TrimSpace(provider))] = true
+		}
+		disabledRules := make(map[string]bool, len(b.cfg.Discovery.DisabledRules))
+		for _, name := range b.cfg.Discovery.DisabledRules {
+			disabledRules[strings.TrimSpace(name)] = true
+		}
+		b.ruleResult, err = rules.Discover(b.ctx, rules.Options{
+			Workspace: b.paths.Workspace, HomeDir: b.homeDir,
+			DisabledProviders: disabledProviders, DisabledRules: disabledRules,
+		})
+		if err != nil {
+			return fmt.Errorf("discover rules: %w", err)
+		}
+		discoveredRules := rules.TTSRRules(b.ruleResult)
+		if len(discoveredRules) > 0 {
+			seen := make(map[string]bool, len(b.cfg.TTSR.Rules))
+			for _, rule := range b.cfg.TTSR.Rules {
+				seen[rule.Name] = true
+			}
+			for _, rule := range discoveredRules {
+				if !seen[rule.Name] {
+					b.cfg.TTSR.Rules = append(b.cfg.TTSR.Rules, rule)
+					seen[rule.Name] = true
+				}
+			}
+			b.cfg.TTSR.Enabled = true
+		}
+	}
+	b.ruleCatalog = rules.NewCatalog(b.ruleResult)
+	b.managedSkillsDir = filepath.Join(b.homeDir, ".omp", "agent", "managed-skills")
+	if nativeDir := strings.TrimSpace(os.Getenv("PI_CODING_AGENT_DIR")); nativeDir != "" {
+		b.managedSkillsDir = filepath.Join(nativeDir, "managed-skills")
+	}
+	if b.cfg.Discovery.MCP {
+		disabledProviders := make(map[string]bool, len(b.cfg.Discovery.DisabledProviders))
+		for _, provider := range b.cfg.Discovery.DisabledProviders {
+			disabledProviders[strings.ToLower(strings.TrimSpace(provider))] = true
+		}
+		discovered := mcpruntime.DiscoverConfig(b.ctx, mcpruntime.DiscoveryOptions{
+			Workspace: b.paths.Workspace, HomeDir: b.homeDir, DisabledProviders: disabledProviders,
+		})
+		b.mcpDiscovery = append([]mcpruntime.Diagnostic(nil), discovered.Diagnostics...)
+		mergeDiscoveredMCP(&b.cfg, discovered.Servers)
+	}
 	b.skillCatalog, err = skills.Load(skills.LoadOptions{
 		HomeDir:      b.homeDir,
 		ConfigDir:    b.configDir,
+		ManagedDir:   b.managedSkillsDir,
 		WorkspaceDir: b.paths.Workspace,
+		Discovery:    b.cfg.Discovery,
 		Config:       b.cfg.Skills,
 	})
 	if err != nil {
 		return fmt.Errorf("load skills: %w", err)
+	}
+	b.resources, err = buildResourceRouter(b.sessions, b.skillCatalog, b.ruleCatalog)
+	if err != nil {
+		return err
+	}
+	if err := b.loadExtensions(); err != nil {
+		return err
 	}
 	if desktopMode {
 		if err := b.sessions.TouchProject(b.ctx, b.paths.Workspace); err != nil {
@@ -182,9 +257,23 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 		agentservice.WithShellOptions(shellOptions),
 		agentservice.WithTeamLimits(b.cfg.Agents.Team.MaxConcurrency, b.cfg.Agents.Team.MaxTicks),
 		agentservice.WithSkills(b.skillCatalog),
+		agentservice.WithResourceRouter(b.resources),
+		agentservice.WithMemory(b.memory),
 	)
 	if err != nil {
 		return err
+	}
+	if b.customTools != nil {
+		b.coding.SetFileMutationBroker(b.customTools)
+		drivers, driverErr := b.customTools.Drivers()
+		if driverErr != nil {
+			_ = b.customTools.Close(context.Background())
+			return driverErr
+		}
+		if err := b.coding.AttachExternalTools(drivers, b.customTools.Close); err != nil {
+			_ = b.customTools.Close(context.Background())
+			return err
+		}
 	}
 	b.subagentRuns, err = agentservice.NewSQLSubagentRunStore(b.store.DB(), b.store.Blobs())
 	if err != nil {
@@ -202,20 +291,66 @@ func (b *bootstrapAssembly) wireService() error {
 	b.service.AttachDurable(b.sessions, b.coding)
 	b.service.SetWorkspaceAnchor(canonicalWorkspaceAnchor(b.paths.Workspace))
 	b.service.AttachAttachments(filepath.Join(b.paths.DataDir, "attachments"))
-	b.service.AttachMemory(memory.NewService(b.store.DB(), b.cfg.Workspace.Root), recap.NewService(b.store.DB(), b.cfg.Workspace.Root))
+	b.service.AttachMemory(b.memory, recap.NewService(b.store.DB(), b.cfg.Workspace.Root))
+	b.service.AttachContextFiles(b.contextFiles)
+	b.service.AttachRules(b.ruleResult)
 	b.service.AttachAuth(b.authentication, b.modelCatalog)
 	b.service.AttachSkills(b.skillCatalog)
+	if b.cfg.AutoLearn.Enabled {
+		managedSkills := skills.NewManagedSkillManager(b.managedSkillsDir, b.skillCatalog)
+		managedSkills.SetReloadCallback(func() { _ = b.service.emitSkillCatalog(b.service.ctx, "managed") })
+		if err := b.coding.AttachManagedSkillTool(managedSkills.Driver()); err != nil {
+			return err
+		}
+	}
 	b.service.AttachPlugins(pluginCatalogEntries(b.pluginCatalog), pluginDiagnostics(b.pluginCatalog))
+	b.service.AttachCommands(b.commandCatalog, append(append(append([]string(nil), b.commandDiagnostics...), b.customDiagnostics...), b.extensionDiagnostics...))
+	b.service.AttachExtensionHost(b.customTools)
+	b.service.AttachThemes(b.extensionThemes, b.extensionDiagnostics)
 	b.service.AttachPluginRuntime(plugins.Options{
-		HomeDir: b.homeDir, DataDir: b.paths.DataDir,
+		HomeDir: b.homeDir, DataDir: b.paths.DataDir, WorkspaceDir: b.paths.Workspace,
 		ImportCodex: b.cfg.Plugins.ImportCodex, TrustHooks: b.cfg.Plugins.TrustHooks,
 	}, b.pluginCatalog)
+	marketplace, err := plugins.NewMarketplaceManager(plugins.MarketplaceManagerOptions{
+		DataDir: b.paths.DataDir, WorkspaceDir: b.paths.Workspace,
+	})
+	if err != nil {
+		return err
+	}
+	b.service.marketplace = marketplace
 
 	b.manager = mcpruntime.NewManager(b.cfg.MCP.Servers, fmt.Sprintf("azem/%d", config.CurrentVersion), func(_ context.Context, reference string) (string, error) {
 		return config.ResolveReference(reference, os.LookupEnv, authservice.LookupKeyringSecret)
 	}, mcpruntime.Options{Sink: func(event mcpruntime.Event) {
 		b.service.emit(b.service.ctx, Event{Kind: EventMCPState, State: string(event.State), Text: event.Error, Data: map[string]string{"server": event.Server, "state": string(event.State), "error": event.Error}})
-	}, Elicitation: b.service.handleMCPElicitation})
+	}, Elicitation: b.service.handleMCPElicitation, OAuth: &mcpruntime.OAuthBroker{
+		Store: mcpOAuthStore{auth: b.authentication}, ResolveSecret: func(ctx context.Context, reference string) (string, error) {
+			return config.ResolveReference(reference, os.LookupEnv, authservice.LookupKeyringSecret)
+		},
+	}, Notification: func(notification mcpruntime.Notification) {
+		encoded, _ := json.Marshal(notification.Data)
+		if len(encoded) > 64<<10 {
+			encoded = encoded[:64<<10]
+		}
+		b.service.emit(b.service.ctx, Event{Kind: EventMCPState, State: "notification", Text: notification.Message, Data: map[string]string{
+			"server": notification.Server, "notification": notification.Kind, "uri": notification.URI,
+			"level": notification.Level, "logger": notification.Logger, "progressToken": notification.ProgressToken,
+			"progress": strconv.FormatFloat(notification.Progress, 'f', -1, 64), "total": strconv.FormatFloat(notification.Total, 'f', -1, 64),
+			"payload": string(encoded),
+		}})
+	}})
+	if b.cfg.AutoLearn.Enabled {
+		b.service.AttachAutoLearnInstructions()
+	}
+	if err := b.resources.Register("mcp", mcpResourceHandler{manager: b.manager}); err != nil {
+		return err
+	}
+	b.service.AttachResources(b.resources)
+	capabilities, err := buildCapabilityRegistry(b.cfg, b.coding, b.skillCatalog, b.manager, b.resources)
+	if err != nil {
+		return err
+	}
+	b.service.AttachCapabilities(capabilities)
 	b.service.AttachAgentExtensions(b.manager, b.subagentRuns)
 
 	var teamResumer recovery.TeamResumer
@@ -227,11 +362,33 @@ func (b *bootstrapAssembly) wireService() error {
 	if err := b.attachBackground(); err != nil {
 		return err
 	}
+	securityStore, err := securityscan.NewSQLStore(b.store.DB())
+	if err != nil {
+		return err
+	}
+	finalizer, err := securityscan.NewFinalizer()
+	if err != nil {
+		return err
+	}
+	b.securityStore = securityStore
+	b.securityRunner = &securityExecutor{runtime: b.providerRuntime, coding: b.coding}
+	b.securityService, err = securityscan.NewService(securityscan.ServiceOptions{
+		Store: securityStore, Executor: b.securityRunner, BaseContext: b.service.ctx,
+		Snapshotter: securityscan.Snapshotter{DataRoot: b.paths.DataDir}, Finalizer: finalizer,
+		Emit: func(projection securityscan.Projection) {
+			b.service.emit(b.service.ctx, Event{Kind: EventKind("security_scan_state"), State: string(projection.Scan.Status), Security: &projection})
+		},
+	})
+	if err != nil {
+		return err
+	}
+	b.securityRunner.service = b.securityService
+	b.service.AttachSecurity(b.securityService)
 	return b.attachRecovery(teamResumer, runResumer)
 }
 
 func (b *bootstrapAssembly) attachHooks() {
-	sources := hookSources(b.cfg.Hooks, b.configDir, b.homeDir, b.paths.Workspace)
+	sources := hookSourcesForDiscovery(b.cfg.Hooks, b.cfg.Discovery, b.configDir, b.homeDir, b.paths.Workspace)
 	if b.cfg.Plugins.TrustHooks {
 		for _, source := range b.pluginCatalog.HookSources {
 			if dataDir := source.Environment["PLUGIN_DATA"]; dataDir != "" {
@@ -240,12 +397,25 @@ func (b *bootstrapAssembly) attachHooks() {
 			sources = append(sources, hooks.Source{Path: source.Path, Trusted: true, Environment: source.Environment})
 		}
 	}
+	var scriptDiagnostics []hooks.Diagnostic
+	var scripts []hooks.ScriptSource
+	if b.cfg.Discovery.Hooks {
+		disabledProviders := make(map[string]bool, len(b.cfg.Discovery.DisabledProviders))
+		for _, provider := range b.cfg.Discovery.DisabledProviders {
+			disabledProviders[strings.ToLower(strings.TrimSpace(provider))] = true
+		}
+		scripts, scriptDiagnostics = hooks.DiscoverHarnessScripts(hooks.HarnessDiscoveryOptions{
+			Workspace: b.paths.Workspace, HomeDir: b.homeDir, TrustProject: b.cfg.Hooks.TrustProject,
+			DisabledProviders: disabledProviders,
+		})
+	}
 	hookOptions := hooks.Options{
-		Sources: sources, DefaultTimeout: b.cfg.Hooks.DefaultTimeoutParsed,
+		Sources: sources, Scripts: scripts, DefaultTimeout: b.cfg.Hooks.DefaultTimeoutParsed,
 		FailurePolicy: hooks.FailurePolicy(b.cfg.Hooks.FailurePolicy),
 		Disabled:      append([]string(nil), b.cfg.Hooks.Disabled...),
 	}
 	b.registry = hooks.Discover(hookOptions)
+	b.registry.Diagnostics = append(b.registry.Diagnostics, scriptDiagnostics...)
 	b.service.AttachHooks(hooks.Dispatcher{Registry: b.registry, Runner: hooks.Runner{Workspace: b.paths.Workspace}})
 	b.service.hookOptions = hookOptions
 	for _, source := range sources {
@@ -288,6 +458,11 @@ func (b *bootstrapAssembly) start() error {
 	if err := b.recover(); err != nil {
 		return err
 	}
+	if b.securityService != nil {
+		if err := b.securityService.Recover(b.ctx, b.cfg.Workspace.Root); err != nil {
+			return err
+		}
+	}
 	b.emitStartupInstructions()
 	b.startBackgroundRuntimes()
 	return nil
@@ -328,6 +503,11 @@ func (b *bootstrapAssembly) startBackgroundRuntimes() {
 		defer b.service.wg.Done()
 		_ = b.manager.Start(b.service.ctx)
 		_ = b.service.emitMCPSnapshot(b.service.ctx)
+	}()
+	b.service.wg.Add(1)
+	go func() {
+		defer b.service.wg.Done()
+		b.service.runMarketplaceAutoUpdate(b.service.ctx)
 	}()
 	for _, diagnostic := range b.registry.Diagnostics {
 		b.service.emitHookEvent(Event{Kind: EventHookDiagnostic, State: "failed", Text: diagnostic.Message, Data: map[string]string{"event": string(diagnostic.Event), "source": diagnostic.Source, "reason": diagnostic.Message}})

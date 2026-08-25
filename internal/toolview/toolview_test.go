@@ -24,7 +24,7 @@ func TestCompletedFileChangesFromStructuredSections(t *testing.T) {
 }
 
 func TestCompletedFileChangesFallsBackToCompactOutput(t *testing.T) {
-	output := "¶main.go#a1b2\nfirstChangedLine: 7\n--- compact diff ---\n-return nil\n+return err\n"
+	output := "[main.go#a1b2]\nfirstChangedLine: 7\n--- compact diff ---\n-return nil\n+return err\n"
 	summary, ok := CompletedFileChanges("coding.edit_hashline", "", "not json", output)
 	if !ok || len(summary.Files) != 1 {
 		t.Fatalf("expected compact fallback projection, got ok=%v files=%d", ok, len(summary.Files))

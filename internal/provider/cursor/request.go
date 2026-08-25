@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	promptCacheKeyExtra        = "prompt_cache_key"
 	maxCursorBlobBytes         = 8 << 20
 	maxConversationBlobBytes   = 64 << 20
 	maxConversationBlobEntries = 4096
@@ -272,10 +271,8 @@ func requestConversationID(request hyprovider.Request, explicit string) string {
 	if value := strings.TrimSpace(explicit); value != "" {
 		return value
 	}
-	if request.ExtraBody != nil {
-		if value, ok := request.ExtraBody[promptCacheKeyExtra].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
+	if value := strings.TrimSpace(request.PromptCacheKey); value != "" {
+		return value
 	}
 	if value := strings.TrimSpace(request.Metadata["session_id"]); value != "" {
 		return value
@@ -284,11 +281,7 @@ func requestConversationID(request hyprovider.Request, explicit string) string {
 }
 
 func requestAttachmentRoot(request hyprovider.Request) string {
-	if request.ExtraBody == nil {
-		return ""
-	}
-	value, _ := request.ExtraBody[responses.AttachmentRootExtraKey].(string)
-	return strings.TrimSpace(value)
+	return responses.RequestAttachmentRoot(request)
 }
 
 func promptBlobs(request hyprovider.Request, blobs *blobStore) (promptLayout, error) {

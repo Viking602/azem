@@ -59,7 +59,7 @@ func TestRecoverProjectsPendingApprovalAndInterruptsSubagents(t *testing.T) {
 	if err := json.Unmarshal(read.Result.Structured, &readResult); err != nil {
 		t.Fatal(err)
 	}
-	editArgs, _ := json.Marshal(map[string]string{"input": readResult.Header + "\nreplace 1:\n+after\n"})
+	editArgs, _ := json.Marshal(map[string]string{"input": "*** Begin Patch\n" + readResult.Header + "\nPUT 1.=1:\n+after\n*** End Patch\n"})
 	edit, err := codingService.ExecuteTool(ctx, run, tool.Call{ID: "edit-1", Name: coding.ToolEditHashline, Arguments: editArgs}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -157,5 +157,35 @@ func TestRecoverResumesRedispatchedSingleAgentRun(t *testing.T) {
 	}
 	if !reflect.DeepEqual(events, []string{"session_loaded", "resume"}) {
 		t.Fatalf("recovery event order=%v", events)
+	}
+}
+
+func TestRecoverLeavesSecurityAutomationToSecurityCoordinator(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	codingService, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer codingService.Close(ctx)
+	if _, err := codingService.StartRunWithMetadata(ctx, "security audit", map[string]string{
+		"automation_kind": "security_audit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resumer := &recordingRunResumer{}
+	recoveryService, err := NewService(store, codingService, nil, nil, resumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := recoveryService.Recover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Runs) != 0 || len(resumer.runIDs) != 0 {
+		t.Fatalf("security automation entered generic recovery: summary=%+v resumed=%v", summary.Runs, resumer.runIDs)
 	}
 }

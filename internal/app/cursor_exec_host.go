@@ -4,16 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/toolview"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
 )
@@ -43,11 +39,6 @@ func (h *cursorExecHost) Execute(ctx context.Context, call message.ToolCall) (cu
 		return cursordriver.HostResult{Content: "Tool not available", IsError: true, Code: cursordriver.DeleteCodeRejected}, nil
 	}
 	toolCall := tool.Call{ID: call.ID, Name: call.Name, Arguments: call.Arguments}
-	if call.Name == coding.ToolWriteFile {
-		if rewritten, ok := h.rewriteExistingWrite(ctx, toolCall); ok {
-			toolCall = rewritten
-		}
-	}
 	driver, ok := h.bus.Driver(toolCall.Name)
 	if !ok {
 		return cursordriver.HostResult{Content: fmt.Sprintf("Tool %q not available", toolCall.Name), IsError: true, Code: cursordriver.DeleteCodeRejected}, nil
@@ -91,6 +82,20 @@ func (h *cursorExecHost) Execute(ctx context.Context, call message.ToolCall) (cu
 		code = cursordriver.DeleteCodeRejected
 	}
 	return cursordriver.HostResult{Content: result.Content, IsError: result.IsError, Code: code}, nil
+}
+
+func (h *cursorExecHost) ExecuteNativeTool(ctx context.Context, call message.ToolCall) (message.ToolResult, error) {
+	result, err := h.Execute(ctx, call)
+	return message.ToolResult{
+		ToolCallID: call.ID, Name: call.Name, Content: result.Content, IsError: result.IsError,
+	}, err
+}
+
+func (h *cursorExecHost) AttachmentRoot() string {
+	if h == nil || h.events == nil {
+		return ""
+	}
+	return h.events.AttachmentRoot()
 }
 
 func (h *cursorExecHost) start(ctx context.Context, call tool.Call) error {
@@ -157,6 +162,10 @@ func (h *cursorExecHost) finish(ctx context.Context, call tool.Call, result tool
 	return nil
 }
 
+func (h *cursorExecHost) SyncTodos(ctx context.Context, snapshot cursordriver.TodoSnapshot, callID, providerError string) cursordriver.HostResult {
+	return h.syncTodos(ctx, snapshot, callID, providerError)
+}
+
 func (h *cursorExecHost) syncTodos(ctx context.Context, snapshot cursordriver.TodoSnapshot, callID, providerError string) cursordriver.HostResult {
 	if strings.TrimSpace(providerError) != "" {
 		return cursordriver.HostResult{Content: providerError, IsError: true}
@@ -199,77 +208,6 @@ func (h *cursorExecHost) syncTodos(ctx context.Context, snapshot cursordriver.To
 		return cursordriver.HostResult{Content: err.Error(), IsError: true}
 	}
 	return cursordriver.HostResult{Content: string(encoded)}
-}
-
-func (h *cursorExecHost) rewriteExistingWrite(ctx context.Context, call tool.Call) (tool.Call, bool) {
-	var input struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
-	}
-	if json.Unmarshal(call.Arguments, &input) != nil || strings.TrimSpace(input.Path) == "" {
-		return call, false
-	}
-	abs := filepath.Join(h.workspace, filepath.FromSlash(input.Path))
-	if _, err := os.Stat(abs); err != nil {
-		return call, false
-	}
-	readDriver, ok := h.bus.Driver(coding.ToolReadFile)
-	if !ok {
-		return call, false
-	}
-	readArgs, _ := json.Marshal(map[string]string{"path": input.Path})
-	read, err := readDriver.Execute(ctx, tool.Call{ID: call.ID + "-read", Name: coding.ToolReadFile, Arguments: readArgs}, nil)
-	if err != nil || read.IsError {
-		return call, false
-	}
-	header, lines := hashlineHeaderAndCount(read.Content)
-	if header == "" || lines == 0 {
-		return call, false
-	}
-	args, _ := json.Marshal(map[string]string{"input": hashlineOverwritePatch(header, lines, input.Content)})
-	return tool.Call{ID: call.ID, Name: coding.ToolEditHashline, Arguments: args}, true
-}
-
-func hashlineOverwritePatch(header string, lines int, content string) string {
-	var body strings.Builder
-	body.WriteString(header)
-	body.WriteString("\nreplace 1..")
-	body.WriteString(strconv.Itoa(lines))
-	body.WriteString(":\n")
-	for _, line := range strings.Split(strings.TrimRight(content, "\n"), "\n") {
-		body.WriteString("+")
-		body.WriteString(line)
-		body.WriteString("\n")
-	}
-	return body.String()
-}
-
-func hashlineHeaderAndCount(content string) (string, int) {
-	lines := strings.Split(content, "\n")
-	if len(lines) == 0 || !strings.HasPrefix(lines[0], "¶") {
-		return "", 0
-	}
-	count := 0
-	for _, line := range lines[1:] {
-		if line != "" {
-			count++
-		}
-	}
-	return lines[0], count
-}
-
-func withCursorExecHost(extraBody map[string]any, host cursordriver.ExecHost) map[string]any {
-	bound := make(map[string]any, len(extraBody)+1)
-	for key, value := range extraBody {
-		bound[key] = value
-	}
-	if concrete, ok := host.(*cursorExecHost); ok {
-		bound[cursordriver.TodoSyncExtraKey] = cursordriver.TodoSync(concrete.syncTodos)
-	}
-	if host != nil {
-		bound[cursordriver.ExecHostExtraKey] = host
-	}
-	return bound
 }
 
 func classifyDeleteError(message string) string {

@@ -36,7 +36,7 @@ func (d replaceDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolReplace,
-		Description: "Replace unique old_text with new_text in an existing file. Each old_text must occur exactly once. Prefer coding.edit_hashline when you already have current ¶PATH#TAG line anchors.",
+		Description: "Replace unique old_text with new_text in an existing file. Each old_text must occur exactly once. Prefer coding.edit_hashline when you already have current [PATH#TAG] line anchors.",
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{
@@ -111,13 +111,15 @@ func replaceError(call tool.Call, message string) tool.Result {
 
 func hashlineHeaderAndCount(content string) (string, int) {
 	lines := strings.Split(content, "\n")
-	if len(lines) == 0 || !strings.HasPrefix(lines[0], "¶") {
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "[") || !strings.HasSuffix(lines[0], "]") {
 		return "", 0
 	}
 	count := 0
 	for _, line := range lines[1:] {
-		if line != "" {
-			count++
+		if separator := strings.IndexByte(line, ':'); separator > 0 {
+			if _, err := strconv.Atoi(line[:separator]); err == nil {
+				count++
+			}
 		}
 	}
 	return lines[0], count
@@ -125,7 +127,7 @@ func hashlineHeaderAndCount(content string) (string, int) {
 
 func hashlineSourceText(content string) string {
 	lines := strings.Split(content, "\n")
-	if len(lines) == 0 || !strings.HasPrefix(lines[0], "¶") {
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "[") || !strings.HasSuffix(lines[0], "]") {
 		return ""
 	}
 	var body []string
@@ -139,8 +141,9 @@ func hashlineSourceText(content string) string {
 
 func hashlineOverwritePatch(header string, lines int, content string) string {
 	var body strings.Builder
+	body.WriteString("*** Begin Patch\n")
 	body.WriteString(header)
-	body.WriteString("\nreplace 1..")
+	body.WriteString("\nPUT 1.=")
 	body.WriteString(strconv.Itoa(lines))
 	body.WriteString(":\n")
 	for _, line := range strings.Split(content, "\n") {
@@ -148,6 +151,7 @@ func hashlineOverwritePatch(header string, lines int, content string) string {
 		body.WriteString(line)
 		body.WriteString("\n")
 	}
+	body.WriteString("*** End Patch\n")
 	return body.String()
 }
 

@@ -31,7 +31,7 @@ const messages = {
     handoff: "转交", actions: "操作", environment: "环境", changes: "变更", context: "上下文",
     environmentSettings: "环境面板设置", localServers: "本地服务", environmentConversation: "会话",
     recap: "回顾", sources: "来源", editor: "编辑器", editorView: "编辑器视图",
-    collaborate: "协作", addSource: "添加来源", recapCurrentGoal: "当前目标", recapOpenItems: "未完成事项",
+    recapCurrentGoal: "当前目标", recapOpenItems: "未完成事项",
     recapEmpty: "成功完成一个回合后会生成会话回顾。", sourcesEmpty: "本轮还没有图片或链接来源。",
     sourceImage: "图片", sourceWebSearch: "网页搜索", sourceTypedLink: "输入链接",
     openSource: "打开来源", closeSourceImage: "关闭来源图片",
@@ -326,7 +326,7 @@ const messages = {
     handoff: "Handoff", actions: "Actions", environment: "Environment", changes: "Changes", context: "Context",
     environmentSettings: "Environment panel settings", localServers: "Local servers", environmentConversation: "Conversation",
     recap: "Recap", sources: "Sources", editor: "Editor", editorView: "Editor view",
-    collaborate: "Collaborate", addSource: "Add source", recapCurrentGoal: "Current goal", recapOpenItems: "Open items",
+    recapCurrentGoal: "Current goal", recapOpenItems: "Open items",
     recapEmpty: "A recap appears after a turn completes successfully.", sourcesEmpty: "No image or link sources in this turn yet.",
     sourceImage: "Image", sourceWebSearch: "Web search", sourceTypedLink: "Typed link",
     openSource: "Open source", closeSourceImage: "Close source image",
@@ -587,7 +587,7 @@ export type Language = "en" | "zh-CN";
 
 const toolNameKeys: Record<string, MessageKey> = {
   "coding.read_file": "toolReadFile", "context.read_artifact": "toolReadArtifact", "coding.write_file": "toolWriteFile", "coding.edit_hashline": "toolEditFile",
-  "coding.search": "toolSearch", "coding.list_files": "toolListFiles", "coding.shell": "toolShell", "coding.go_test": "toolGoTest",
+  "coding.search": "toolSearch", ast_grep: "toolSearch", "coding.list_files": "toolListFiles", "coding.shell": "toolShell", "coding.go_test": "toolGoTest",
   "coding.gofmt": "toolGofmt", "coding.git_diff": "toolGitDiff", hydaelyn_activate_skill: "toolActivateSkill", hydaelyn_read_skill_resource: "toolReadSkillResource",
   "subagent.spawn": "toolSpawn", "subagent.get_output": "toolGetSubagentOutput", "subagent.kill": "toolStopSubagent",
 };

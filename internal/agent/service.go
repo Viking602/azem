@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Viking602/azem/internal/memory"
+	"github.com/Viking602/azem/internal/resource"
 	"github.com/Viking602/azem/internal/skills"
 	"github.com/Viking602/venat"
 	hyagent "github.com/Viking602/venat/agent"
@@ -48,6 +51,9 @@ type Service struct {
 	store              api.StoreProvider
 	workspace          coding.Workspace
 	tools              *tool.Bus
+	workspaceRoot      string
+	externalDrivers    []tool.Driver
+	managedSkillDriver tool.Driver
 	policy             *ApprovalPolicy
 	allowWrite         bool
 	shellPolicy        string
@@ -56,42 +62,47 @@ type Service struct {
 	teamMaxConcurrency int
 	teamMaxTicks       int
 	skills             *skills.Catalog
+	memory             *memory.Service
+	resources          *resource.Router
+	hashlineClipboard  *hashlineClipboard
+	ast                *astBridge
 	runLeaseTTL        time.Duration
 	ctx                context.Context
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup
+	lsp                *lspBridgeRuntime
+	jobs               *backgroundJobManager
+	hubPeers           *hubPeerBrokerRef
+	fileBroker         *fileMutationBrokerRef
 	singleRunMu        sync.Mutex
 	singleRuns         map[string]*hyworker.SingleRunner
 	approvalMu         sync.Mutex
 	recoveredApprovals map[string]map[string]recoveredApprovalDecision
+	externalMu         sync.Mutex
+	externalClosers    []func(context.Context) error
 }
 
-const hashlineEditToolDescription = `Apply a hashline patch to existing files. This is not unified diff. Reuse the exact ¶PATH#TAG and N:TEXT lines from the latest coding.search, coding.read_file, or successful coding.edit_hashline result while the file is unchanged. A successful edit returns the fresh header and compact diff for subsequent known anchors. Re-read only for unseen or renumbered lines, a stale/conflicting tag, or a surprising result. Grammar:
-¶PATH#TAG
-replace N:
-+final replacement line
-replace N..M:
-+first final line
-+second final line
-delete N..M
-insert before N:
-+new final line
-insert after N:
-+new final line
-insert head:
-+new final line
-insert tail:
-+new final line
-replace block N:
-+complete final block
-delete block N
-Use positive 1-based line numbers. Body rows are final content only and each starts with '+'. Never send @@ hunks, ~ or : ranges, -old rows, or bare context rows. Delete has no body.`
+const hashlineEditToolDescription = `Apply an OMP Hashline patch to existing files. Reuse exact [PATH#TAG] headers and N:TEXT anchors from the latest read/search/edit result. Input is:
+*** Begin Patch
+[path#ABCD]
+PUT N.=M:
++final content
+CUT N.=M
+PUT <N: or PUT >N: for insertion; PUT >$: for tail insertion; PUT N*: or CUT N* for a syntactic block. CUT may capture @name and colonless PUT may paste it; named registers persist across calls. REM deletes the section file. MV DEST moves it after prior edits.
+*** End Patch
+All line numbers name the original snapshot. Colon PUT body rows each start with + and contain final content only. Register PUT/CUT/REM/MV have no body. Never send unified @@ hunks, -old/context rows, or widen ranges over lines that remain unchanged. Re-read only unseen or renumbered lines, stale/conflicting tags, or surprising results.`
 
-const hashlineRetryGuidance = `Required hashline retry format:
-¶PATH#TAG
-replace N..M:
+const hashlineRetryGuidance = `Required OMP Hashline retry format:
+*** Begin Patch
+[PATH#TAG]
+PUT N.=M:
 +final content only
-Reuse current ¶PATH#TAG and line numbers when a syntax/no-op rejection left the file unchanged. Re-read only when the result says the tag is stale/file changed or the required lines were never shown. Allowed operations: replace N or N..M, delete N or N..M, insert before/after N, insert head/tail, replace block N, delete block N. Never use @@, ~N:M, -old rows, or bare context.`
+*** End Patch
+Reuse current [PATH#TAG] and original line numbers when a syntax/no-op rejection left the file unchanged. Re-read only for a stale/file-changed tag or unseen lines. Use PUT/CUT locators; never use @@ hunks, -old rows, or bare context.`
+
+type callDefinitionDriver interface {
+	DefinitionForCall(tool.Call) tool.Definition
+}
 
 type definitionOverrideDriver struct {
 	tool.Driver
@@ -156,7 +167,7 @@ func (recovery *EditRecovery) BlockedEdit(call tool.Call) (tool.Result, bool) {
 }
 
 func addHashlineRetryGuidance(call tool.Call, result tool.Result) tool.Result {
-	if call.Name != coding.ToolEditHashline || !result.IsError || strings.Contains(result.Content, "Required hashline retry format:") {
+	if call.Name != coding.ToolEditHashline || !result.IsError || strings.Contains(result.Content, "Required OMP Hashline retry format:") {
 		return result
 	}
 	result.Content = strings.TrimSpace(result.Content) + "\n\n" + hashlineRetryGuidance
@@ -195,7 +206,7 @@ func (recovery *EditRecovery) Observe(call tool.Call, result tool.Result, execut
 }
 
 func hashlineFailureRequiresRead(content string) bool {
-	if index := strings.Index(content, "Required hashline retry format:"); index >= 0 {
+	if index := strings.Index(content, "Required OMP Hashline retry format:"); index >= 0 {
 		content = content[:index]
 	}
 	content = strings.ToLower(content)
@@ -204,6 +215,7 @@ func hashlineFailureRequiresRead(content string) bool {
 		"snapshot tag does not match",
 		"stale edit conflicts",
 		"file changed since you read it",
+		" is stale; current tag is ",
 	} {
 		if strings.Contains(content, marker) {
 			return true
@@ -217,6 +229,7 @@ type RunExecutionPolicy struct {
 	AgentVersion   string
 	Governance     api.GovernancePolicy
 	Budget         *api.TaskBudget
+	OutputSchema   json.RawMessage
 	RetryPolicy    api.RetryPolicy
 	ResourceClaims []api.ResourceClaimSpec
 }
@@ -271,6 +284,8 @@ type serviceOptions struct {
 	teamMaxConcurrency int
 	teamMaxTicks       int
 	skills             *skills.Catalog
+	resources          *resource.Router
+	memory             *memory.Service
 	shellOptions       ShellOptions
 }
 
@@ -301,6 +316,18 @@ func WithSkills(catalog *skills.Catalog) ServiceOption {
 	}
 }
 
+func WithResourceRouter(router *resource.Router) ServiceOption {
+	return func(options *serviceOptions) {
+		options.resources = router
+	}
+}
+
+func WithMemory(service *memory.Service) ServiceOption {
+	return func(options *serviceOptions) {
+		options.memory = service
+	}
+}
+
 func WithShellOptions(options ShellOptions) ServiceOption {
 	return func(settings *serviceOptions) { settings.shellOptions = options }
 }
@@ -321,25 +348,61 @@ func NewService(store api.StoreProvider, workspaceRoot string, options ...Servic
 	workspace := coding.NewLocalWorkspace(workspaceRoot)
 	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 	service := &Service{
-		runner: runner, store: store, workspace: workspace, policy: policy,
+		runner: runner, store: store, workspace: workspace, workspaceRoot: filepath.Clean(workspaceRoot), policy: policy,
 		allowWrite: settings.allowWrite, shellPolicy: settings.shellPolicy, allowNetwork: settings.network,
 		teamMaxConcurrency: settings.teamMaxConcurrency, teamMaxTicks: settings.teamMaxTicks,
-		skills: settings.skills, runLeaseTTL: defaultRunLeaseTTL,
+		skills: settings.skills, resources: settings.resources, memory: settings.memory, hashlineClipboard: newHashlineClipboard(), ast: newASTBridge(), lsp: newLSPBridgeRuntime(), jobs: newBackgroundJobManager(serviceCtx), hubPeers: &hubPeerBrokerRef{}, fileBroker: &fileMutationBrokerRef{}, runLeaseTTL: defaultRunLeaseTTL,
 		ctx: serviceCtx, cancel: serviceCancel,
 		singleRuns:         make(map[string]*hyworker.SingleRunner),
 		recoveredApprovals: make(map[string]map[string]recoveredApprovalDecision),
 	}
+	if settings.resources != nil && settings.resources.Handler("xd") == nil {
+		if err := settings.resources.Register("xd", newASTXDevHandler(service.ast, settings.resources)); err != nil {
+			serviceCancel()
+			return nil, fmt.Errorf("register xd resources: %w", err)
+		}
+	}
+	if settings.resources != nil && settings.resources.Handler("ssh") == nil {
+		if err := settings.resources.Register("ssh", newSSHResourceHandler(service.lsp, settings.network)); err != nil {
+			serviceCancel()
+			return nil, fmt.Errorf("register ssh resources: %w", err)
+		}
+	}
+	if settings.resources != nil && settings.memory != nil && settings.resources.Handler("memory") == nil {
+		if err := settings.resources.Register("memory", memoryResourceHandler{memory: settings.memory}); err != nil {
+			serviceCancel()
+			return nil, fmt.Errorf("register memory resources: %w", err)
+		}
+	}
 	service.shellRuntime = newShellRuntime(serviceCtx, settings.shellOptions)
 	drivers, err := service.WorkspaceDrivers(context.Background(), workspaceRoot)
 	if err != nil {
-		serviceCancel()
 		return nil, err
 	}
 	service.tools = tool.NewBus(drivers...)
 	return service, nil
 }
 
+func (s *Service) SetHubPeerBroker(broker HubPeerBroker) {
+	if s != nil {
+		s.hubPeers.set(broker)
+	}
+}
+
+func (s *Service) SetFileMutationBroker(broker FileMutationBroker) {
+	if s != nil {
+		s.fileBroker.set(broker)
+	}
+}
+
 func (s *Service) Runner() *venat.Runner { return s.runner }
+func (s *Service) MatchASTSnapshot(ctx context.Context, source, language string, patterns []string) (bool, error) {
+	if s == nil || s.ast == nil {
+		return false, errors.New("AST matcher is unavailable")
+	}
+	result, err := s.ast.match(ctx, source, language, append([]string(nil), patterns...))
+	return result.TotalMatches > 0, err
+}
 
 func (s *Service) ResolveReconcileAttempt(ctx context.Context, attemptID string, status api.ActionAttemptStatus, externalResultRef string) error {
 	_, err := s.runner.ResolveActionAttempt(ctx, api.ResolveActionAttemptCommand{
@@ -405,6 +468,7 @@ func (s *Service) StartRunWithMetadata(ctx context.Context, request string, meta
 		RunID: runID, RootTaskID: rootID, TaskID: taskID,
 		Request: request, Metadata: durableMetadata, Goal: request, AllowsAction: true,
 		Budget: executionPolicy.Budget, RetryPolicy: executionPolicy.RetryPolicy,
+		OutputSchema:   append(json.RawMessage(nil), executionPolicy.OutputSchema...),
 		ResourceClaims: append([]api.ResourceClaimSpec(nil), executionPolicy.ResourceClaims...),
 	})
 	if err != nil {
@@ -700,6 +764,9 @@ func (s *Service) PrepareDriver(ctx context.Context, run *Run, driver tool.Drive
 	if err := validateToolArguments(call.Arguments); err != nil {
 		return invalidToolArguments(call, err), false, nil
 	}
+	if dynamic, ok := driver.(callDefinitionDriver); ok {
+		definition = dynamic.DefinitionForCall(call)
+	}
 	if blocked, required := run.editRecovery.BlockedEdit(call); required {
 		return ExecutionResult{Result: blocked, Executed: true}, false, nil
 	}
@@ -893,6 +960,66 @@ func (s *Service) ToolDrivers() []tool.Driver {
 	return drivers
 }
 
+func (s *Service) AttachExternalTools(drivers []tool.Driver, closer func(context.Context) error) error {
+	if s == nil || s.tools == nil {
+		return errors.New("tool registry is unavailable")
+	}
+	seen := make(map[string]bool, len(drivers))
+	for _, driver := range drivers {
+		if driver == nil {
+			return errors.New("external tool driver is nil")
+		}
+		name := strings.TrimSpace(driver.Definition().Name)
+		if name == "" || seen[name] {
+			return fmt.Errorf("duplicate or empty external tool name %q", name)
+		}
+		if _, exists := s.tools.Driver(name); exists {
+			return fmt.Errorf("external tool %q conflicts with an existing tool", name)
+		}
+		seen[name] = true
+	}
+	if err := tool.NewBus(drivers...).Validate(); err != nil {
+		return err
+	}
+	for _, driver := range drivers {
+		if err := s.tools.Register(driver); err != nil {
+			return err
+		}
+	}
+	s.externalMu.Lock()
+	s.externalDrivers = append(s.externalDrivers, drivers...)
+	s.externalMu.Unlock()
+	if closer != nil {
+		s.externalMu.Lock()
+		s.externalClosers = append(s.externalClosers, closer)
+		s.externalMu.Unlock()
+	}
+	return nil
+}
+
+func (s *Service) AttachManagedSkillTool(driver tool.Driver) error {
+	if driver == nil {
+		return nil
+	}
+	name := driver.Definition().Name
+	if _, exists := s.tools.Driver(name); exists {
+		return fmt.Errorf("managed skill tool %q conflicts with an existing tool", name)
+	}
+	if err := s.tools.Register(driver); err != nil {
+		return err
+	}
+	s.externalMu.Lock()
+	s.managedSkillDriver = driver
+	s.externalMu.Unlock()
+	return nil
+}
+
+func (s *Service) ManagedSkillDriver() tool.Driver {
+	s.externalMu.Lock()
+	defer s.externalMu.Unlock()
+	return s.managedSkillDriver
+}
+
 func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Driver, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -906,7 +1033,7 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 	candidates := coding.NewToolSet(workspace)
 	isGitRepo := workspaceIsGitRepo(ctx, absoluteRoot)
 	drivers := make([]tool.Driver, 0, len(candidates)+4)
-	var readDriver, editDriver, searchDriver tool.Driver
+	var readDriver, snapshotReadDriver, editDriver, searchDriver tool.Driver
 	for _, driver := range candidates {
 		definition := driver.Definition()
 		if definition.Name == coding.ToolGitDiff && !isGitRepo {
@@ -915,9 +1042,17 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 		if !s.allowWrite && definition.EffectType == tool.EffectWrite {
 			continue
 		}
+		if definition.Name == coding.ToolReadFile {
+			snapshotReadDriver = driver
+			driver = newOMPReadDriver(absoluteRoot, driver, s.resources, s.allowNetwork)
+		}
+		if definition.Name == coding.ToolWriteFile {
+			driver = newOMPWriteDriver(absoluteRoot, snapshotReadDriver, s.resources, s.fileBroker)
+		}
 		if definition.Name == coding.ToolEditHashline {
 			definition.Description = hashlineEditToolDescription
 			driver = definitionOverrideDriver{Driver: driver, definition: definition}
+			driver = newOMPHashlineDriver(absoluteRoot, snapshotReadDriver, s.hashlineClipboard, s.fileBroker)
 		}
 		if definition.Name == coding.ToolGoTest {
 			driver = goTestStatusDriver{Driver: driver}
@@ -934,13 +1069,27 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 		drivers = append(drivers, driver)
 	}
 	if searchDriver != nil {
-		if readDriver != nil {
-			drivers = append(drivers, newReliableSearchDriver(absoluteRoot, workspace, readDriver))
+		if snapshotReadDriver != nil {
+			drivers = append(drivers, newReliableSearchDriver(absoluteRoot, workspace, snapshotReadDriver, s.resources))
 		} else {
 			drivers = append(drivers, searchDriver)
 		}
 	}
+	drivers = append(drivers, newASTGrepDriver(absoluteRoot, s.ast, snapshotReadDriver, s.resources))
 	drivers = append(drivers, newGlobDriver(workspace))
+	drivers = append(drivers, newLSPDriver(absoluteRoot, s.lsp, false))
+	drivers = append(drivers, newDebugDriver(absoluteRoot, s.lsp, false))
+	drivers = append(drivers, newEvalDriver(absoluteRoot, s.lsp))
+	drivers = append(drivers, newBrowserDriver(absoluteRoot, s.lsp, s.allowNetwork))
+	drivers = append(drivers, newComputerDriver(absoluteRoot, s.lsp))
+	drivers = append(drivers, newWebSearchDriver(absoluteRoot, s.lsp, s.allowNetwork))
+	drivers = append(drivers, newGitHubDriver(absoluteRoot, s.lsp, s.allowNetwork))
+	hub := newHubDriver(absoluteRoot, s.lsp, s.jobs)
+	hub.peers = s.hubPeers
+	drivers = append(drivers, hub)
+	drivers = append(drivers, newImageGenDriver(absoluteRoot, s.lsp, s.allowNetwork))
+	drivers = append(drivers, newTTSDriver(absoluteRoot, s.lsp))
+	drivers = append(drivers, newMemoryToolDrivers(s.memory)...)
 	if s.allowWrite {
 		if readDriver != nil && editDriver != nil {
 			drivers = append(drivers, newReplaceDriver(readDriver, editDriver))
@@ -948,7 +1097,12 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 		drivers = append(drivers, newDeleteFileDriver(absoluteRoot))
 	}
 	if s.shellPolicy != "deny" {
-		drivers = append(drivers, newRuntimeShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork, s.shellRuntime))
+		drivers = append(drivers, newRuntimeShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork, s.shellRuntime, s.jobs))
+	}
+	if filepath.Clean(absoluteRoot) == s.workspaceRoot {
+		s.externalMu.Lock()
+		drivers = append(drivers, s.externalDrivers...)
+		s.externalMu.Unlock()
 	}
 	return drivers, nil
 }
@@ -1038,8 +1192,24 @@ func toolCallRequestsNetwork(arguments json.RawMessage) bool {
 }
 
 func (s *Service) Close(ctx context.Context) error {
+	var jobsErr error
+	if s.jobs != nil {
+		jobsErr = s.jobs.shutdown(ctx)
+	}
+	var lspErr error
+	if s.lsp != nil {
+		lspErr = s.lsp.Close(ctx)
+	}
 	if s.shellRuntime != nil {
 		s.shellRuntime.shutdown()
+	}
+	s.externalMu.Lock()
+	externalClosers := append([]func(context.Context) error(nil), s.externalClosers...)
+	s.externalClosers = nil
+	s.externalMu.Unlock()
+	var externalErr error
+	for _, closeExternal := range externalClosers {
+		externalErr = errors.Join(externalErr, closeExternal(ctx))
 	}
 	s.cancel()
 	done := make(chan struct{})
@@ -1055,10 +1225,11 @@ func (s *Service) Close(ctx context.Context) error {
 		return ctx.Err()
 	case <-done:
 	}
+	var storeErr error
 	if closer, ok := s.store.(api.ProviderCloser); ok {
-		return closer.Close(ctx)
+		storeErr = closer.Close(ctx)
 	}
-	return nil
+	return errors.Join(jobsErr, lspErr, externalErr, storeErr)
 }
 
 // ActiveShellExecutions returns a race-safe point-in-time status view.
@@ -1110,6 +1281,16 @@ func normalizedTarget(arguments json.RawMessage) string {
 	var object map[string]any
 	if json.Unmarshal(arguments, &object) != nil {
 		return ""
+	}
+	if file, ok := object["file"].(string); ok && file != "" {
+		target := filepath.Clean(file)
+		if action, ok := object["action"].(string); ok && action != "" {
+			target = action + ":" + target
+		}
+		if destination, ok := object["new_name"].(string); ok && destination != "" {
+			target += "->" + filepath.Clean(destination)
+		}
+		return target
 	}
 	for _, key := range []string{"path", "cwd", "command"} {
 		if value, ok := object[key].(string); ok && value != "" {

@@ -50,6 +50,11 @@ type SubagentRun struct {
 	Background          bool
 	Output              string
 	Error               string
+	StructuredOutput    json.RawMessage
+	StructuredSource    string
+	StructuredMode      string
+	StructuredStatus    string
+	StructuredError     string
 	Warning             string
 	EvidenceStatus      string
 	Transcript          json.RawMessage

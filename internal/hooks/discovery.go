@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,11 +19,19 @@ type Source struct {
 	Trusted     bool
 	Environment map[string]string
 }
+type ScriptSource struct {
+	Path    string
+	Type    string
+	Tool    string
+	Trusted bool
+}
+
 type Options struct {
 	Sources        []Source
 	DefaultTimeout time.Duration
 	FailurePolicy  FailurePolicy
 	Disabled       []string
+	Scripts        []ScriptSource
 }
 type Registry struct {
 	commands    map[Event][]Command
@@ -64,8 +73,10 @@ func (h *hookSpec) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	allowed := map[string]bool{"name": true, "type": true, "command": true, "args": true, "if": true, "shell": true,
-		"statusMessage": true, "once": true, "async": true, "asyncRewake": true, "timeout": true, "failurePolicy": true}
+	allowed := map[string]bool{
+		"name": true, "type": true, "command": true, "args": true, "if": true, "shell": true,
+		"statusMessage": true, "once": true, "async": true, "asyncRewake": true, "timeout": true, "failurePolicy": true,
+	}
 	for key := range fields {
 		if !allowed[key] {
 			return fmt.Errorf("unsupported command hook field %q", key)
@@ -93,6 +104,9 @@ func Discover(options Options) *Registry {
 		for _, path := range paths {
 			r.load(path, source.Environment, options, seen)
 		}
+	}
+	for _, script := range options.Scripts {
+		r.loadScript(script, options, seen)
 	}
 	return r
 }
@@ -199,9 +213,11 @@ func (r *Registry) load(path string, environment map[string]string, options Opti
 					r.diag(path, event, fmt.Errorf("invalid shell %q", h.Shell))
 					continue
 				}
-				c := Command{Event: event, Name: name, Matcher: g.Matcher, If: h.If, RawCommand: h.Command, Args: append([]string(nil), h.Args...),
+				c := Command{
+					Event: event, Name: name, Matcher: g.Matcher, If: h.If, RawCommand: h.Command, Args: append([]string(nil), h.Args...),
 					Shell: h.Shell, StatusMessage: h.StatusMessage, Once: h.Once, Async: h.Async,
-					Timeout: timeout, FailurePolicy: policy, Source: path, Environment: cloneEnvironment(environment)}
+					Timeout: timeout, FailurePolicy: policy, Source: path, Environment: cloneEnvironment(environment),
+				}
 				if err := compileMatcher(&c); err != nil {
 					r.diag(path, event, err)
 					continue
@@ -216,6 +232,96 @@ func (r *Registry) load(path string, environment map[string]string, options Opti
 	}
 }
 
+func (r *Registry) loadScript(script ScriptSource, options Options, seen map[string]bool) {
+	if !script.Trusted {
+		r.Diagnostics = append(r.Diagnostics, Diagnostic{Source: script.Path, Message: "source is not trusted; skipped"})
+		return
+	}
+	info, err := os.Stat(script.Path)
+	if err != nil || !info.Mode().IsRegular() {
+		if err == nil {
+			err = errors.New("source is not a regular file")
+		}
+		r.diag(script.Path, "", err)
+		return
+	}
+	event := PreToolUse
+	if script.Type == "post" {
+		event = PostToolUse
+	} else if script.Type != "pre" {
+		r.diag(script.Path, "", fmt.Errorf("invalid script hook type %q", script.Type))
+		return
+	}
+	command, args := scriptCommand(script.Path)
+	if command == "" {
+		r.diag(script.Path, event, errors.New("no runtime is available for script hook"))
+		return
+	}
+	matcher := canonicalScriptTool(script.Tool)
+	name := filepath.Base(script.Path)
+	timeout := options.DefaultTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	policy := options.FailurePolicy
+	if policy == "" {
+		policy = FailureOpen
+	}
+	current := Command{
+		Event: event, Name: name, Matcher: matcher, RawCommand: command, Args: args, direct: true,
+		Timeout: timeout, FailurePolicy: policy, Source: script.Path,
+	}
+	if err := compileMatcher(&current); err != nil {
+		r.diag(script.Path, event, err)
+		return
+	}
+	key := string(event) + "\x00script\x00" + script.Path + "\x00" + matcher
+	if !seen[key] {
+		seen[key] = true
+		r.commands[event] = append(r.commands[event], current)
+	}
+}
+
+func scriptCommand(path string) (string, []string) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".ts", ".js", ".mjs", ".cjs":
+		if bun, err := exec.LookPath("bun"); err == nil {
+			return bun, []string{path}
+		}
+		return "", nil
+	case ".sh", ".bash", ".zsh", ".fish":
+		return "/bin/sh", []string{path}
+	default:
+		return path, nil
+	}
+}
+
+func canonicalScriptTool(name string) string {
+	name = strings.TrimSpace(name)
+	switch strings.ToLower(name) {
+	case "", "*":
+		return "*"
+	case "bash", "shell":
+		return "coding.shell"
+	case "read":
+		return "coding.read_file"
+	case "edit":
+		return "coding.edit_hashline"
+	case "write":
+		return "coding.write_file"
+	case "grep", "search":
+		return "coding.search"
+	case "glob":
+		return "coding.glob"
+	case "agent":
+		return "subagent.spawn"
+	case "todowrite":
+		return "todo"
+	default:
+		return name
+	}
+}
+
 func cloneEnvironment(source map[string]string) map[string]string {
 	result := make(map[string]string, len(source))
 	for key, value := range source {
@@ -223,6 +329,7 @@ func cloneEnvironment(source map[string]string) map[string]string {
 	}
 	return result
 }
+
 func (r *Registry) Claim(command Command) bool {
 	if !command.Once {
 		return true
@@ -236,9 +343,11 @@ func (r *Registry) Claim(command Command) bool {
 	r.claimed[key] = true
 	return true
 }
+
 func (r *Registry) diag(source string, event Event, err error) {
 	r.Diagnostics = append(r.Diagnostics, Diagnostic{Source: source, Event: event, Message: err.Error()})
 }
+
 func (r *Registry) Commands(event Event) []Command {
 	r.mu.Lock()
 	defer r.mu.Unlock()

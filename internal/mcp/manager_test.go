@@ -690,6 +690,121 @@ func managerWithClient(client *fakeClient) *Manager {
 	})
 }
 
+func TestManagerProjectsResourcesPromptsAndSubscriptions(t *testing.T) {
+	client := &fakeClient{
+		resources:         []mcpcontract.Resource{{URI: "file:///guide.md", Name: "Guide", MimeType: "text/markdown"}},
+		resourceTemplates: []mcpcontract.ResourceTemplate{{URITemplate: "file:///{name}.md", Name: "Markdown"}},
+		resourceContent:   map[string][]mcpcontract.ResourceContent{"file:///guide.md": {{URI: "file:///guide.md", MimeType: "text/markdown", Text: "# Guide"}}},
+		prompts:           []mcpcontract.Prompt{{Name: "summarize", Description: "Summarize text", Arguments: []mcpcontract.PromptArgument{{Name: "text", Required: true}}}},
+		promptMessages:    []mcpcontract.PromptMessage{{Role: "user", Content: mcpcontract.ContentBlock{Type: "text", Text: "Summarize this"}}},
+	}
+	manager := managerWithClient(client)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	servers := manager.Servers()
+	if len(servers) != 1 || len(servers[0].Resources) != 1 || len(servers[0].ResourceTemplates) != 1 || len(servers[0].Prompts) != 1 {
+		t.Fatalf("feature snapshot = %#v", servers)
+	}
+	content, err := manager.ReadResource(context.Background(), "local", "file:///guide.md")
+	if err != nil || len(content) != 1 || content[0].Text != "# Guide" {
+		t.Fatalf("resource = %#v, %v", content, err)
+	}
+	messages, err := manager.GetPrompt(context.Background(), "local", "summarize", map[string]string{"text": "this"})
+	if err != nil || len(messages) != 1 || messages[0].Content.Text != "Summarize this" {
+		t.Fatalf("prompt = %#v, %v", messages, err)
+	}
+	if err := manager.SubscribeResource(context.Background(), "local", "file:///guide.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.UnsubscribeResource(context.Background(), "local", "file:///guide.md"); err != nil {
+		t.Fatal(err)
+	}
+	if client.subscribed != "file:///guide.md" || client.unsubscribed != "file:///guide.md" {
+		t.Fatalf("subscriptions = %q/%q", client.subscribed, client.unsubscribed)
+	}
+}
+
+func TestManagerRefreshesCatalogAfterListChangedNotification(t *testing.T) {
+	client := &fakeClient{resources: []mcpcontract.Resource{{URI: "file:///one", Name: "One"}}}
+	notifications := make(chan Notification, 1)
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"local": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
+	}, "test", nil, Options{
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+			return client, nil
+		},
+		Notification: func(notification Notification) { notifications <- notification },
+	})
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	client.mu.Lock()
+	client.resources = []mcpcontract.Resource{{URI: "file:///two", Name: "Two"}}
+	client.mu.Unlock()
+	manager.handleNotification(context.Background(), "local", mcpcontract.Notification{Kind: "resources/list_changed"})
+	select {
+	case notification := <-notifications:
+		if notification.Kind != "resources/list_changed" || notification.Server != "local" {
+			t.Fatalf("notification = %#v", notification)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("notification was not projected")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		resources := manager.Resources("local")
+		if len(resources) == 1 && resources[0].URI == "file:///two" {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("refreshed resources = %#v", manager.Resources("local"))
+}
+
+func TestManagerInjectsStoredOAuthCredentialIntoRemoteDial(t *testing.T) {
+	serverConfig := config.MCPServerConfig{
+		Enabled: true, Transport: "streamable_http", URL: "https://mcp.example.test",
+		ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1,
+	}
+	id := mcpOAuthCredentialID("remote", serverConfig)
+	store := &memoryOAuthStore{values: map[string]OAuthCredential{id: {AccessToken: "access", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour)}}}
+	var authorization string
+	manager := NewManager(map[string]config.MCPServerConfig{"remote": serverConfig}, "test", nil, Options{
+		OAuth: &OAuthBroker{Store: store},
+		Dial: func(_ context.Context, _ string, _ config.MCPServerConfig, _ map[string]string, headers http.Header) (mcpcontract.Client, error) {
+			authorization = headers.Get("Authorization")
+			return &fakeClient{}, nil
+		},
+	})
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	if authorization != "Bearer access" {
+		t.Fatalf("OAuth authorization header = %q", authorization)
+	}
+}
+
+func TestManagerRejectsTypedNilDialClientWithoutClosePanic(t *testing.T) {
+	manager := NewManager(map[string]config.MCPServerConfig{
+		"local": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
+	}, "test", nil, Options{
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+			return (*fakeClient)(nil), errors.New("dial failed")
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	if err := manager.Start(context.Background()); err == nil {
+		t.Fatal("typed nil dial unexpectedly succeeded")
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type fakeClient struct {
 	mu                 sync.Mutex
 	tools              []message.ToolDefinition
@@ -706,6 +821,13 @@ type fakeClient struct {
 	initializeBlock    <-chan struct{}
 	initializeStarted  chan<- struct{}
 	closed             bool
+	resources          []mcpcontract.Resource
+	resourceContent    map[string][]mcpcontract.ResourceContent
+	resourceTemplates  []mcpcontract.ResourceTemplate
+	prompts            []mcpcontract.Prompt
+	promptMessages     []mcpcontract.PromptMessage
+	subscribed         string
+	unsubscribed       string
 }
 
 func (c *fakeClient) Initialize(_ context.Context, name, version string) (mcpcontract.InitializeResult, error) {
@@ -741,13 +863,49 @@ func (c *fakeClient) CallTool(_ context.Context, name string, _ map[string]any) 
 	}
 	return mcpcontract.CallToolResult{Content: []mcpcontract.ContentBlock{{Type: "text", Text: "ok"}}, StructuredContent: map[string]any{"ok": true}}, nil
 }
-func (*fakeClient) ListResources(context.Context) ([]mcpcontract.Resource, error) { return nil, nil }
-func (*fakeClient) ReadResource(context.Context, string) ([]mcpcontract.ResourceContent, error) {
-	return nil, nil
+
+func (c *fakeClient) ListResources(context.Context) ([]mcpcontract.Resource, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]mcpcontract.Resource(nil), c.resources...), nil
 }
-func (*fakeClient) ListPrompts(context.Context) ([]mcpcontract.Prompt, error) { return nil, nil }
-func (*fakeClient) GetPrompt(context.Context, string, map[string]string) ([]mcpcontract.PromptMessage, error) {
-	return nil, nil
+
+func (c *fakeClient) ListResourceTemplates(context.Context) ([]mcpcontract.ResourceTemplate, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]mcpcontract.ResourceTemplate(nil), c.resourceTemplates...), nil
+}
+
+func (c *fakeClient) ReadResource(_ context.Context, uri string) ([]mcpcontract.ResourceContent, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]mcpcontract.ResourceContent(nil), c.resourceContent[uri]...), nil
+}
+
+func (c *fakeClient) ListPrompts(context.Context) ([]mcpcontract.Prompt, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]mcpcontract.Prompt(nil), c.prompts...), nil
+}
+
+func (c *fakeClient) GetPrompt(context.Context, string, map[string]string) ([]mcpcontract.PromptMessage, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]mcpcontract.PromptMessage(nil), c.promptMessages...), nil
+}
+
+func (c *fakeClient) SubscribeResource(_ context.Context, uri string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.subscribed = uri
+	return nil
+}
+
+func (c *fakeClient) UnsubscribeResource(_ context.Context, uri string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unsubscribed = uri
+	return nil
 }
 
 func (c *fakeClient) Close() error {

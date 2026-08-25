@@ -19,6 +19,7 @@ var actionRegistry = mergeActionHandlers(
 	extensionActionHandlers,
 	agentActionHandlers,
 	workspaceActionHandlers,
+	securityActionHandlers,
 )
 
 func mergeActionHandlers(groups ...map[ActionKind]actionHandler) map[ActionKind]actionHandler {

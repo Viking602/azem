@@ -65,6 +65,17 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
       { name: "grep", removable: false, enabled: true, state: "ready", transport: "streamable_http", target: "https://mcp.grep.app", url: "https://mcp.grep.app", args: [], inheritEnv: false, approval: "never", maxConcurrency: 2, toolCount: 1, tools: [{ name: "searchGitHub", description: "Search public GitHub code", effect: "read_only", requiresApproval: false }], error: "" },
       { name: "local-docs", removable: true, enabled: false, state: "disabled", transport: "stdio", target: "npx -y @modelcontextprotocol/server-filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem"], inheritEnv: true, approval: "always", maxConcurrency: 1, toolCount: 0, tools: [], error: "" },
     ],
+    securityConfig: {
+      enabled: true, defaultMode: "standard", workers: 4, subagents: 3,
+      stopAfterNoNew: 4, stopAfterConsecutiveErrors: 3, maxDiscoveryRuns: 40,
+      maxTimeHours: 96,
+      routes: {
+        audit: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" },
+        reducer: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" },
+        fixer: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" },
+        verifier: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" },
+      },
+    },
     plugins: [
       { id: "waza@demo", name: "waza", displayName: "Waza", version: "3.33.0", marketplace: "openai", origin: "codex", description: "工程健康、研究、UI 与写作工作流", developerName: "OpenAI", category: "Developer Tools", brandColor: "#3278ef", logoPath: "", enabled: true, skillCount: 6, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "ready", warning: "" },
       { id: "github@demo", name: "github", displayName: "GitHub", version: "0.1.9", marketplace: "openai", origin: "codex", description: "仓库、PR、Issue、Review 与 CI", developerName: "GitHub", category: "Developer Tools", brandColor: "#181717", logoPath: "", enabled: true, skillCount: 2, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: true, capabilities: ["Skills", "MCP"], status: "degraded", warning: "OAuth 等待授权" },
@@ -72,6 +83,7 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
       { id: "custom@demo", name: "custom", displayName: "Custom Toolkit", version: "0.8.0", marketplace: "local", origin: "local", description: "包含未信任的生命周期 Hooks", developerName: "Azem", category: "Local", brandColor: "#ff6a3d", logoPath: "", enabled: true, skillCount: 3, mcpServerCount: 0, integratedMCPCount: 0, hookCount: 2, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "Hooks"], status: "degraded", warning: "Hooks 等待显式信任" },
       { id: "disabled@demo", name: "disabled", displayName: "实验扩展", version: "0.1.0", marketplace: "local", origin: "local", description: "未启用的实验能力", developerName: "Azem", category: "Experimental", brandColor: "#8b8b84", logoPath: "", enabled: false, skillCount: 1, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "disabled", warning: "" },
     ],
+    extensionThemes: [{ name: "demo-night", path: "demo://theme", vars: { accent: "#7aa2f7" }, colors: { accent: "accent", text: "#f4f4f1", muted: "#b3b4ae", selectedBg: "#2a2f45", userMessageBg: "#1f2335" }, source: "demo" }],
     hookCatalog: {
       enabled: true, trustHooks: false,
       sources: [{ id: "custom@demo", name: "Custom Toolkit", origin: "plugin", pluginId: "custom@demo", source: "", hookCount: 2, trusted: false, warning: "Hooks 等待显式信任" }],
@@ -83,6 +95,10 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
       { scope: "approval", role: "", label: "审批", route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
       { scope: "vision", role: "", label: "视觉", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
       { scope: "recap", role: "", label: "会话回顾", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
+      { scope: "security", role: "audit", label: "Security audit", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
+      { scope: "security", role: "reducer", label: "Security reducer", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
+      { scope: "security", role: "fixer", label: "Security fixer", route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
+      { scope: "security", role: "verifier", label: "Security verifier", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
       { scope: "subagent", role: "research", label: "Research", route: { provider: "chatgpt", model: "gpt-5.3-spark", reasoning: "medium" } },
       { scope: "subagent", role: "review", label: "Review", route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
     ],

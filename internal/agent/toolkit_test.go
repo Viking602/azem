@@ -85,7 +85,7 @@ func TestSearchSkipsIgnoredTreesInsteadOfTruncatingBeforeSource(t *testing.T) {
 		t.Fatalf("structured search result=%+v", searchResult)
 	}
 	patch, _ := json.Marshal(map[string]string{
-		"input": searchResult.Files[0].Header + "\nreplace 3:\n+const ReliableSearchNeedle = false\n",
+		"input": ompTestPatch(searchResult.Files[0].Header, "PUT 3.=3:\n+const ReliableSearchNeedle = false"),
 	})
 	edited, err := editDriver.Execute(context.Background(), tool.Call{ID: "edit", Name: coding.ToolEditHashline, Arguments: patch}, nil)
 	if err != nil || edited.IsError {
@@ -146,18 +146,18 @@ func TestReplaceRejectsTruncatedReadWithoutMutation(t *testing.T) {
 
 func testReplaceDriver(t *testing.T, dir string) tool.Driver {
 	t.Helper()
-	var readDriver, editDriver tool.Driver
+	var snapshotRead tool.Driver
 	for _, driver := range coding.NewToolSet(coding.NewLocalWorkspace(dir)) {
-		switch driver.Definition().Name {
-		case coding.ToolReadFile:
-			readDriver = driver
-		case coding.ToolEditHashline:
-			editDriver = driver
+		if driver.Definition().Name == coding.ToolReadFile {
+			snapshotRead = driver
+			break
 		}
 	}
-	if readDriver == nil || editDriver == nil {
-		t.Fatal("read/edit drivers unavailable")
+	if snapshotRead == nil {
+		t.Fatal("read driver unavailable")
 	}
+	readDriver := newOMPReadDriver(dir, snapshotRead, nil, "deny")
+	editDriver := newOMPHashlineDriver(dir, snapshotRead, newHashlineClipboard(), nil)
 	return newReplaceDriver(readDriver, editDriver)
 }
 

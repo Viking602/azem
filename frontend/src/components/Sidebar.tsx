@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 
 import { createPortal } from "react-dom";
 import {
   ChevronDown, ChevronRight, CircleDotDashed, FolderOpen, FolderPlus,
-  GitPullRequest, Plus, Search, Settings, X,
+  GitPullRequest, Plus, Search, Settings, ShieldCheck, X,
 } from "lucide-react";
 import { createProject, execute, isDesktopRuntime, openProject, openProjectSession, resumeSession, selectProjectFolder, subscribeSessionMenu } from "../bridge";
 import { translator } from "../i18n";
@@ -79,6 +79,15 @@ export default function Sidebar() {
       setError(error instanceof Error ? error.message : String(error));
     }
   };
+  const openSecurity = async () => {
+    try {
+      await execute({ kind: "list_security_scans", target: snapshot.workspace, limit: 100, sessionId: currentSessionId });
+      selectPullRequest(null);
+      setView("security");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const launchProject = (workspace: string, sessionId = "") => {
     const action = sessionId ? openProjectSession(workspace, sessionId) : openProject(workspace);
@@ -107,6 +116,7 @@ export default function Sidebar() {
       <nav className="primary-nav" aria-label="Primary">
         <button className={view === "thread" && blocks.length === 0 && !running ? "active" : ""} onClick={() => run("new_session")}><Plus size={15} />{t("newSession")}<kbd>⌘N</kbd></button>
         <button onClick={() => setCommandOpen(true)}><Search size={15} />{t("search")}<kbd>⌘K</kbd></button>
+        <button className={view === "security" ? "active" : ""} onClick={() => void openSecurity()}><ShieldCheck size={15} />{snapshot.language === "zh-CN" ? "安全扫描" : "Security"}</button>
       </nav>
       <section className="project-tree">
         <div className="sidebar-section-header">

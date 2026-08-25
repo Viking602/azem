@@ -108,15 +108,16 @@ describe("file change extraction", () => {
     const running: Block = {
       id: "running-edit", kind: "tool", title: "coding.edit_hashline", state: "running",
       data: { arguments: JSON.stringify({ input: [
-        "¶src/app.ts#ABCD",
-        "replace 4:",
+        "*** Begin Patch",
+        "[src/app.ts#ABCD]",
+        "PUT 4.=4:",
         "+const next = 2;",
-        "insert after 8:",
+        "PUT >8:",
         "+line one",
         "+line two",
-        "",
-        "¶src/theme.ts#1234",
-        "delete 2..3",
+        "[src/theme.ts#1234]",
+        "CUT 2.=3",
+        "*** End Patch",
       ].join("\n") }) },
     };
 
@@ -131,29 +132,29 @@ describe("file change extraction", () => {
     expect(pendingFileChangeSummaryForBlock({ ...running, state: "queued" })).toBeNull();
     expect(pendingFileChangeSummaryForBlock({
       ...running,
-      data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\nreplace block 4:\n+func next() {}" }) },
+      data: { arguments: JSON.stringify({ input: "*** Begin Patch\n[src/app.ts#ABCD]\nPUT 4*:\n+func next() {}\n*** End Patch" }) },
     })).toBeNull();
     expect(isActiveFileChangeBlock({
       ...running,
-      data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\nreplace block 4:\n+func next() {}" }) },
+      data: { arguments: JSON.stringify({ input: "*** Begin Patch\n[src/app.ts#ABCD]\nPUT 4*:\n+func next() {}\n*** End Patch" }) },
     })).toBe(true);
     expect(isActiveFileChangeBlock({ ...running, state: "queued" })).toBe(false);
     expect(isActiveFileChangeBlock({
       ...running,
-      data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\ndelete 4", dryRun: true }) },
+      data: { arguments: JSON.stringify({ input: "*** Begin Patch\n[src/app.ts#ABCD]\nCUT 4.=4\n*** End Patch", dryRun: true }) },
     })).toBe(false);
     expect(isPendingFileChangeBlock({ ...running, state: "reviewing_approval" })).toBe(true);
     expect(pendingFileEditPaths({
       ...running,
       state: "reviewing_approval",
-      data: { arguments: JSON.stringify({ input: "¶src/app.ts#ABCD\ndelete 2..3\n+secret body" }) },
+      data: { arguments: JSON.stringify({ input: "*** Begin Patch\n[src/app.ts#ABCD]\nCUT 2.=3\n*** End Patch" }) },
     })).toEqual(["src/app.ts"]);
   });
 
   it("falls back to the compact edit result stored in durable tool output", () => {
     const block: Block = {
       id: "edit", kind: "tool", title: "coding.edit_hashline", state: "completed",
-      content: "¶src/main.go#ABCD\nupdated src/main.go\nfirstChangedLine: 8\n\n--- compact diff ---\n-return oldValue\n+return newValue",
+      content: "[src/main.go#ABCD]\nupdated src/main.go\nfirstChangedLine: 8\n\n--- compact diff ---\n-return oldValue\n+return newValue",
     };
     expect(fileChangesForBlock(block)).toEqual([{
       path: "src/main.go", firstChangedLine: 8, diff: "-return oldValue\n+return newValue", additions: 1, deletions: 1,

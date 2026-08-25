@@ -62,6 +62,28 @@ func (r *ProviderRuntime) UpdateModelRoute(scope, role string, route config.Mode
 	if target := routeTargets[scope]; target != nil {
 		*target = route
 	}
+	if scope == "advisor" {
+		r.cfg.Agents.Advisor.Provider, r.cfg.Agents.Advisor.Model, r.cfg.Agents.Advisor.Reasoning = route.Provider, route.Model, route.Reasoning
+	}
+	if scope == "vibe" {
+		if role == "fast" {
+			r.cfg.Agents.Vibe.Fast = route
+		} else if role == "good" {
+			r.cfg.Agents.Vibe.Good = route
+		}
+	}
+	if scope == "security" {
+		switch role {
+		case "audit":
+			r.cfg.Security.Routes.Audit = route
+		case "reducer":
+			r.cfg.Security.Routes.Reducer = route
+		case "fixer":
+			r.cfg.Security.Routes.Fixer = route
+		case "verifier":
+			r.cfg.Security.Routes.Verifier = route
+		}
+	}
 	subagents := r.subagents
 	if scope == "subagent" {
 		current := r.cfg.Agents.Subagents.Roles[role]

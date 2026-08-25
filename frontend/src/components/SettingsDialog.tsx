@@ -21,18 +21,21 @@ import ProviderIcon from "./ProviderIcon";
 import ArchiveSettings from "./ArchiveSettings";
 import ExtensionsSettings from "./ExtensionsSettings";
 import UsageSettings from "./UsageSettings";
+import SecuritySettings from "./SecuritySettings";
 
 export default function SettingsDialog() {
   const dialog = useRef<HTMLDialogElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const modelRoutes = useRuntimeStore((state) => state.modelRoutes);
-  const coreModelRoutes = modelRoutes.filter((route) => route.scope !== "subagent" && route.scope !== "main");
-	const subagentModelRoutes = modelRoutes.filter((route) => route.scope === "subagent");
+  const coreModelRoutes = modelRoutes.filter((route) => route.scope !== "subagent" && route.scope !== "security" && route.scope !== "main");
+  const securityModelRoutes = modelRoutes.filter((route) => route.scope === "security");
+  const subagentModelRoutes = modelRoutes.filter((route) => route.scope === "subagent");
   const modelProviders = useRuntimeStore((state) => state.modelProviders);
   const modelsByProvider = useRuntimeStore((state) => state.modelsByProvider);
   const agentCatalog = useRuntimeStore((state) => state.agentCatalog);
   const theme = useRuntimeStore((state) => state.theme);
+  const extensionThemes = useRuntimeStore((state) => state.extensionThemes);
   const uiFont = useRuntimeStore((state) => state.uiFont);
   const uiFontSize = useRuntimeStore((state) => state.uiFontSize);
   const chatFontSize = useRuntimeStore((state) => state.chatFontSize);
@@ -57,6 +60,7 @@ export default function SettingsDialog() {
   const [awaitSeconds, setAwaitSeconds] = useState(snapshot.subagentAwaitSeconds ?? 0);
   const [idleSeconds, setIdleSeconds] = useState(snapshot.subagentIdleSeconds ?? 0);
   const [addProviderRequest, setAddProviderRequest] = useState(0);
+  const [securityDirty, setSecurityDirty] = useState(false);
   const [systemFonts, setSystemFonts] = useState<SystemFont[]>([]);
   const [reducedMotion, setReducedMotion] = useState(() => localStorage.getItem("azem-reduced-motion") === "true");
   const t = translator(snapshot.language);
@@ -64,11 +68,22 @@ export default function SettingsDialog() {
     { value: "system", label: t("systemFont"), caption: snapshot.language === "zh-CN" ? "SF Pro Text · 苹方" : "SF Pro Text · PingFang" },
     ...systemFontOptions(uiFont, systemFonts),
   ];
-  const close = () => useRuntimeStore.getState().setSettingsOpen(false);
+  const confirmDiscardSecurity = () => activeSection !== "security" || !securityDirty || window.confirm(snapshot.language === "zh-CN" ? "尚未保存安全扫描设置。放弃这些更改？" : "Security scan settings are not saved. Discard these changes?");
+  const close = () => {
+    if (!confirmDiscardSecurity()) return;
+    useRuntimeStore.getState().setSettingsOpen(false);
+  };
+  const selectSection = (section: SettingsSection) => {
+    if (section === activeSection) return;
+    if (!confirmDiscardSecurity()) return;
+    setSecurityDirty(false);
+    setActiveSection(section);
+  };
   const sections: Array<{ id: SettingsSection; label: string; description: string; icon: typeof Bot }> = [
 	{ id: "catalog", label: t("modelSettings"), description: t("modelSettingsHint"), icon: Database },
     { id: "models", label: t("roleModels"), description: t("settingsModelsHint"), icon: Bot },
     { id: "subagents", label: t("subagentRuntime"), description: t("settingsSubagentsHint"), icon: Gauge },
+    { id: "security", label: snapshot.language === "zh-CN" ? "安全扫描" : "Security scans", description: snapshot.language === "zh-CN" ? "执行、时限、模型与发布" : "Execution, deadline, models, and publication", icon: ShieldCheck },
     { id: "governance", label: t("settingsGovernance"), description: t("settingsGovernanceHint"), icon: Settings2 },
     { id: "appearance", label: t("appearance"), description: t("settingsAppearanceHint"), icon: Palette },
     { id: "extensions", label: t("settingsExtensions"), description: t("settingsExtensionsHint"), icon: Puzzle },
@@ -146,7 +161,7 @@ export default function SettingsDialog() {
   }, [reducedMotion]);
 
   useEffect(() => {
-    if (settingsTarget) setActiveSection(settingsTarget.section);
+    if (settingsTarget) selectSection(settingsTarget.section);
   }, [settingsTarget]);
 
   useEffect(() => {
@@ -206,11 +221,11 @@ export default function SettingsDialog() {
         <label className="settings-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("searchSettings")} /><kbd>⌘F</kbd></label>
         <div className="settings-nav-group">
           <span>{snapshot.language === "zh-CN" ? "系统" : "System"}</span>
-          {filteredSections.filter((section) => ["catalog", "models", "subagents"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span></button>)}
+          {filteredSections.filter((section) => ["catalog", "models", "subagents", "security"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => selectSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span></button>)}
           <span>{snapshot.language === "zh-CN" ? "偏好" : "Preferences"}</span>
-          {filteredSections.filter((section) => ["governance", "appearance", "extensions", "archive", "usage"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => setActiveSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span></button>)}
+          {filteredSections.filter((section) => ["governance", "appearance", "extensions", "archive", "usage"].includes(section.id)).map((section) => <button key={section.id} className={activeSection === section.id ? "active" : ""} onClick={() => selectSection(section.id)}><section.icon size={15} /><span><strong>{section.label}</strong><small>{section.description}</small></span></button>)}
         </div>
-        <footer><small>{snapshot.language === "zh-CN" ? "配置自动保存到本机" : "Saved locally"}</small><small>Azem v0.8.0</small></footer>
+        <footer><small>{activeSection === "security" ? (snapshot.language === "zh-CN" ? "执行与预算需保存 · 模型路由自动保存" : "Execution and budgets require Save · model routes autosave") : (snapshot.language === "zh-CN" ? "配置自动保存到本机" : "Saved locally")}</small><small>Azem v0.8.0</small></footer>
       </aside>
       <main className="settings-main" data-section={activeSection}>
         <header className="settings-page-header"><div><h1>{current.label}</h1><p>{current.description}</p></div>{activeSection === "catalog" && <button className="settings-primary" onClick={() => setAddProviderRequest((value) => value + 1)}><Plus size={13} />{snapshot.language === "zh-CN" ? "添加提供方" : "Add provider"}</button>}{activeSection === "models" && <span className="settings-valid"><i />{snapshot.language === "zh-CN" ? "配置有效" : "Valid configuration"}</span>}<button className="icon-button settings-close" onClick={close} aria-label={t("closeSettings")}><X size={17} /></button></header>
@@ -336,6 +351,13 @@ export default function SettingsDialog() {
               <DisplayFact settingID="subagents:queue" label={t("subagentQueueWhenFull")} hint={t("subagentQueueWhenFullHint")} status={t("subagentAlwaysOn")} />
             </section>
           </SettingsPane>}
+          {activeSection === "security" && <SettingsPane settingID="section:security" title={snapshot.language === "zh-CN" ? "安全扫描" : "Security scans"} description={snapshot.language === "zh-CN" ? "控制新扫描的执行边界、运行时限、模型职责与外部发布。" : "Control execution boundaries, run deadline, model responsibilities, and external publication for new scans."} className="security-settings-pane">
+            <SecuritySettings language={snapshot.language} sessionId={snapshot.sessionId} onError={setError} onDirtyChange={setSecurityDirty} />
+            <section className="settings-card route-card security-route-card" data-setting-id="security:routes">
+              <header><div><strong>{snapshot.language === "zh-CN" ? "安全模型路由" : "Security model routes"}</strong><small>{snapshot.language === "zh-CN" ? "分别选择审计、归并、修复和独立验证模型；留空时继承默认模型。" : "Choose audit, reduction, fixing, and independent verification models; empty routes inherit the default."}</small></div></header>
+              {securityModelRoutes.length === 0 ? <div className="settings-empty"><span className="azem-mark" />{t("loadingRoles")}</div> : securityModelRoutes.map((route) => <RouteRow key={`${route.scope}-${route.role}`} route={route} description={route.label} modelsByProvider={modelsByProvider} modelProviders={modelProviders} action={action} language={snapshot.language} />)}
+            </section>
+          </SettingsPane>}
           {activeSection === "governance" && <SettingsPane settingID="section:governance" title={t("settingsGovernance")} description={t("settingsGovernanceHint")} className="governance-pane">
             <div className="settings-card governance-settings">
               <GovernanceRow settingID="governance:approval" label={t("defaultApprovalMode")} description={snapshot.language === "zh-CN" ? "控制工具执行边界" : "Control tool execution boundaries"}>
@@ -357,7 +379,7 @@ export default function SettingsDialog() {
           {activeSection === "appearance" && <SettingsPane settingID="section:appearance" title={t("settingsAppearance")} description={t("settingsAppearanceHint")} className="appearance-pane">
             <div className="settings-card appearance-card">
               <SettingRow settingID="appearance:language" label={snapshot.language === "zh-CN" ? "界面语言" : "Interface language"} description={snapshot.language === "zh-CN" ? "应用菜单、按钮与系统消息" : "Application menus, buttons, and system messages"}><div className="appearance-segmented" role="radiogroup"><button type="button" className={snapshot.language === "zh-CN" ? "selected" : ""} onClick={() => { setLanguage("zh-CN"); void action("set_language", "zh-CN"); }}>{t("langZh")}</button><button type="button" className={snapshot.language === "en" ? "selected" : ""} onClick={() => { setLanguage("en"); void action("set_language", "en"); }}>English</button></div></SettingRow>
-              <SettingRow settingID="appearance:theme" label={t("theme")} description={snapshot.language === "zh-CN" ? "跟随系统可自动切换明暗" : "Follow the system appearance automatically"}><div className="theme-preview-group" role="radiogroup">{(["light", "dark", "system"] as const).map((item) => <button type="button" key={item} className={theme === item ? "selected" : ""} onClick={() => setTheme(item)}><span data-theme-preview={item}><i /><b /></span><small>{item === "light" ? (snapshot.language === "zh-CN" ? "暖白" : "Warm light") : item === "dark" ? (snapshot.language === "zh-CN" ? "夜间" : "Night") : t("system")}</small></button>)}</div></SettingRow>
+              <SettingRow settingID="appearance:theme" label={t("theme")} description={snapshot.language === "zh-CN" ? "跟随系统可自动切换明暗" : "Follow the system appearance automatically"}><div className="theme-preview-group" role="radiogroup">{[...(["light", "dark", "system"] as const), ...extensionThemes.map((entry) => entry.name)].map((item) => <button type="button" key={item} className={theme === item ? "selected" : ""} onClick={() => setTheme(item)}><span data-theme-preview={item}><i /><b /></span><small>{item === "light" ? (snapshot.language === "zh-CN" ? "暖白" : "Warm light") : item === "dark" ? (snapshot.language === "zh-CN" ? "夜间" : "Night") : item === "system" ? t("system") : item}</small></button>)}</div></SettingRow>
               <SettingRow settingID="appearance:font" label={t("interfaceFont")} description={t("interfaceFontHint")}><MenuSelect className="setting-menu font-family-menu" value={uiFont} options={fontOptions} onChange={setUIFont} ariaLabel={t("interfaceFont")} fit="full" searchable searchPlaceholder={t("searchFonts")} emptyLabel={t("noMatchingFonts")} /></SettingRow>
               <SettingRow settingID="appearance:font-size" label={t("interfaceFontSize")} description={t("interfaceFontSizeHint")}><FontSizeControl value={uiFontSize} min={11} max={20} onChange={setUIFontSize} decreaseLabel={t("decreaseFontSize")} increaseLabel={t("increaseFontSize")} /></SettingRow>
               <SettingRow settingID="appearance:motion" label={snapshot.language === "zh-CN" ? "减弱动态效果" : "Reduce motion"} description={snapshot.language === "zh-CN" ? "将场景切换与流式渐显缩短为即时更新" : "Make scene transitions and streaming reveals immediate"}><button type="button" role="switch" aria-checked={reducedMotion} className={`settings-switch ${reducedMotion ? "on" : ""}`} onClick={() => setReducedMotion((value) => !value)}><span /></button></SettingRow>
@@ -377,7 +399,7 @@ export default function SettingsDialog() {
               </SettingRow>
             </section>
           </SettingsPane>}
-          {activeSection === "extensions" && <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} executeAction={execute} onError={setError} targetTab={settingsTarget?.id === "extensions:skills" ? "skills" : settingsTarget?.id === "extensions:plugins" ? "plugins" : settingsTarget?.id === "extensions:hooks" ? "hooks" : "mcp"} />}
+          {activeSection === "extensions" && <ExtensionsSettings language={snapshot.language} sessionId={snapshot.sessionId} executeAction={execute} onError={setError} targetTab={settingsTarget?.id === "extensions:skills" ? "skills" : settingsTarget?.id === "extensions:plugins" ? "plugins" : settingsTarget?.id === "extensions:marketplace" ? "marketplace" : settingsTarget?.id === "extensions:hooks" ? "hooks" : "mcp"} />}
           {activeSection === "archive" && <SettingsPane settingID="section:archive" title={t("settingsArchive")} description={t("settingsArchiveHint")} className="archive-settings-pane"><ArchiveSettings language={snapshot.language} sessionId={snapshot.sessionId} onError={setError} /></SettingsPane>}
           {activeSection === "usage" && <SettingsPane settingID="section:usage" title={t("settingsUsage")} description={t("settingsUsageHint")} className="usage-settings-pane"><UsageSettings language={snapshot.language} onError={setError} /></SettingsPane>}
         </div>
@@ -454,7 +476,7 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
   const fastCounterpart = cursorVariant && cursorVariantForSelection(
     cursorGroup, reasoning, cursorThinking, !cursorVariant.fast,
   );
-  const inherited = !value.provider && !value.model && !value.reasoning;
+  const routeIsEmpty = !value.provider && !value.model && !value.reasoning;
   const title = routeTitle(route, language);
   const configuredModelOptions = routeModelOptions(
     modelsByProvider,
@@ -466,16 +488,18 @@ function RouteRow({ route, description, modelsByProvider, modelProviders, action
     reasoning,
     language,
   );
-  const allModelOptions = requiresExplicitRoute
-    ? [{ value: "::", label: t("routeNotConfigured") }, ...configuredModelOptions]
+  const canClearRoute = requiresExplicitRoute || route.scope === "security";
+  const allModelOptions = canClearRoute
+    ? [{ value: "::", label: route.scope === "security" ? (language === "zh-CN" ? "继承默认模型" : "Inherit default model") : t("routeNotConfigured") }, ...configuredModelOptions]
     : configuredModelOptions;
-  const selectedValue = `${provider}::${model}`;
+  const selectedValue = canClearRoute && routeIsEmpty ? "::" : `${provider}::${model}`;
   const saveValue = (nextValue: ModelRouteConfig) => {
     setValue(nextValue);
-    void action("set_model_route", "", { ...route, route: nextValue });
+    const clear = !nextValue.provider && !nextValue.model && !nextValue.reasoning;
+    void action(clear ? "reset_model_route" : "set_model_route", "", { ...route, route: nextValue });
   };
   const selectModel = (next: string) => {
-    if (requiresExplicitRoute && next === "::") {
+    if (canClearRoute && next === "::") {
       saveValue({ provider: "", model: "", reasoning: "" });
       return;
     }
@@ -624,6 +648,12 @@ function routeTitle(route: ModelRoute, language: Language) {
   if (route.scope === "approval") return t("routeApproval");
   if (route.scope === "vision") return t("routeVision");
   if (route.scope === "recap") return t("routeRecap");
+  if (route.scope === "security") {
+    const labels: Record<string, string> = language === "zh-CN"
+      ? { audit: "安全审计", reducer: "语义归并", fixer: "修复生成", verifier: "独立验证" }
+      : { audit: "Security audit", reducer: "Semantic reducer", fixer: "Fix generation", verifier: "Independent verification" };
+    return labels[route.role] || route.label;
+  }
   if (route.role === "research") return language === "zh-CN" ? "研究与文档" : "Research and documentation";
   if (route.role === "review") return language === "zh-CN" ? "编码与审查" : "Coding and review";
   return route.role || route.label;
@@ -636,6 +666,12 @@ function routeDescription(route: ModelRoute, description: string, language: Lang
   if (route.scope === "approval") return t("routeApprovalHint");
   if (route.scope === "vision") return t("routeVisionHint");
 	if (route.scope === "recap") return t("routeRecapHint");
+  if (route.scope === "security") {
+    const descriptions: Record<string, string> = language === "zh-CN"
+      ? { audit: "威胁建模、源码追踪与发现提交", reducer: "合并独立审计结果并保留不确定性", fixer: "在隔离 Worktree 中生成受限修复", verifier: "只读检查变更并提交验证结论" }
+      : { audit: "Threat modeling, source tracing, and finding submission", reducer: "Merge independent audits without dropping uncertainty", fixer: "Generate scoped changes in an isolated worktree", verifier: "Read-only change inspection and verification result" };
+    return descriptions[route.role] || description;
+  }
 	if (route.role === "research") return language === "zh-CN" ? "检索、映射、说明文档" : "Research, mapping, and documentation";
 	if (route.role === "review") return language === "zh-CN" ? "实现、调试、架构判断" : "Implementation, debugging, and architecture";
   return description || tFormat(language, "routeSubagentHint", { role: route.role || route.label });

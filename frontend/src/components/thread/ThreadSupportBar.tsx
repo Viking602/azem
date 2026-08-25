@@ -1,18 +1,19 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
-  Check, ChevronDown, ExternalLink, FileDiff, FileImage, FolderOpen, GitBranch, Globe,
+  Check, ChevronDown, ExternalLink, FileDiff, FileImage, FolderOpen, GitBranch, GitFork, Globe,
   History, Link2, ListTodo, LoaderCircle, Minus, PanelsTopLeft, Plus, Server,
   Settings, SquareTerminal, X,
 } from "lucide-react";
-import { attachmentDataURL, listWorkspaceChanges, openExternalURL } from "../../bridge";
+import { attachmentDataURL, createSessionFork, getSessionTree, navigateSessionTree, openExternalURL, setSessionEntryLabel } from "../../bridge";
 import { tFormat, translator } from "../../i18n";
 import { useRuntimeStore } from "../../store";
 import { useTerminalStore } from "../../terminalStore";
 import type {
-  Attachment, SessionRecap, Snapshot, TodoItem, TodoList, TodoStatus, WorkspaceChangeSet,
+  Attachment, SessionRecap, SessionTree, Snapshot, TodoItem, TodoList, TodoStatus, WorkspaceChangeSet,
 } from "../../types";
 import { collectConversationSources, type ConversationSource } from "../conversationSources";
+import { SessionTreePanel } from "./SessionTreePanel";
 
 // Surface and row architecture adapted from Synara's EnvironmentPanel (MIT).
 // See frontend/THIRD_PARTY_NOTICES/synara.txt.
@@ -27,7 +28,7 @@ export interface ThreadEnvironmentPanelProps {
   open: boolean;
 }
 
-type EnvironmentSection = "plan" | "recap" | "sources";
+type EnvironmentSection = "plan" | "history" | "recap" | "sources";
 
 export function summarizeThreadPlan(todo: TodoList): ThreadPlanSummary | null {
   const items = todo.phases.flatMap((phase) => phase.items);
@@ -44,33 +45,44 @@ export function ThreadEnvironmentPanel({ open }: ThreadEnvironmentPanelProps) {
   const branches = useRuntimeStore((state) => state.branches);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
   const setError = useRuntimeStore((state) => state.setError);
+  const running = useRuntimeStore((state) => state.running);
+  const applyEvents = useRuntimeStore((state) => state.applyEvents);
+  const workspaceAdditions = useRuntimeStore((state) => state.workspaceAdditions);
+  const workspaceDeletions = useRuntimeStore((state) => state.workspaceDeletions);
   const setSettingsOpen = useRuntimeStore((state) => state.setSettingsOpen);
   const setView = useRuntimeStore((state) => state.setView);
   const terminalSessions = useTerminalStore((state) => state.sessions);
   const [expanded, setExpanded] = useState<EnvironmentSection | null>(null);
   const [preview, setPreview] = useState<ConversationSource | null>(null);
-  const [changes, setChanges] = useState<WorkspaceChangeSet | null>(null);
+  const [sessionTree, setSessionTree] = useState<SessionTree | null>(null);
+  const [treeLoading, setTreeLoading] = useState(false);
+  const [busyEntry, setBusyEntry] = useState<string | undefined>();
   const panelId = useId();
   const language = snapshot.language;
   const t = translator(language);
   const sources = useMemo(() => collectConversationSources(blocks, language), [blocks, language]);
   const plan = todo ? summarizeThreadPlan(todo) : null;
-  const currentBranch = changes?.branch || snapshot.currentBranch || branches.find((branch) => branch.current)?.name || "—";
+  const currentBranch = branches.find((branch) => branch.current)?.name || snapshot.currentBranch || "—";
   const runningServers = terminalSessions.filter((session) => session.state === "running").length;
 
   useEffect(() => {
     setExpanded(null);
     setPreview(null);
+    setSessionTree(null);
+    setBusyEntry(undefined);
   }, [currentSessionId]);
 
+
   useEffect(() => {
-    if (!open) return;
+    if (!open || expanded !== "history") return;
     let active = true;
-    void listWorkspaceChanges()
-      .then((value) => { if (active) setChanges(value); })
-      .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : String(cause)); });
+    setTreeLoading(true);
+    void getSessionTree(currentSessionId)
+      .then((value) => { if (active) setSessionTree(value); })
+      .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : String(cause)); })
+      .finally(() => { if (active) setTreeLoading(false); });
     return () => { active = false; };
-  }, [open, setError, snapshot.workspace]);
+  }, [currentSessionId, expanded, open, setError]);
 
   const toggle = (section: EnvironmentSection) => setExpanded((current) => current === section ? null : section);
   const openSource = (source: ConversationSource) => {
@@ -79,6 +91,39 @@ export function ThreadEnvironmentPanel({ open }: ThreadEnvironmentPanelProps) {
       return;
     }
     if (source.href) void openExternalURL(source.href).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  };
+
+  const navigateTree = async (entryId: string) => {
+    setBusyEntry(entryId);
+    try {
+      const projection = await navigateSessionTree(currentSessionId, entryId);
+      if (projection) applyEvents([projection]);
+      setSessionTree(await getSessionTree(currentSessionId));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusyEntry(undefined);
+    }
+  };
+  const labelTreeEntry = async (entryId: string, label: string) => {
+    setBusyEntry(entryId);
+    try {
+      setSessionTree(await setSessionEntryLabel(currentSessionId, entryId, label));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusyEntry(undefined);
+    }
+  };
+  const forkTree = async (targetId: string, entryId: string) => {
+    setBusyEntry(entryId);
+    try {
+      setSessionTree(await createSessionFork(currentSessionId, targetId, entryId));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusyEntry(undefined);
+    }
   };
 
   return <div className="thread-environment-overlay" data-open={String(open)} aria-hidden={!open}>
@@ -92,7 +137,7 @@ export function ThreadEnvironmentPanel({ open }: ThreadEnvironmentPanelProps) {
         <EnvironmentRow
           icon={<FileDiff size={16} />}
           label={t("changes")}
-          trailing={changes ? <><b className="plus">+{changes.additions.toLocaleString()}</b><b className="minus">−{changes.deletions.toLocaleString()}</b></> : <LoaderCircle className="spin" size={13} />}
+          trailing={<><b className="plus">+{workspaceAdditions.toLocaleString()}</b><b className="minus">−{workspaceDeletions.toLocaleString()}</b></>}
           onClick={() => setView("changes")}
         />
         <EnvironmentRow icon={<FolderOpen size={16} />} label={t("local")} trailing={<EnvironmentChevron />} onClick={() => setView("files")} />
@@ -122,6 +167,18 @@ export function ThreadEnvironmentPanel({ open }: ThreadEnvironmentPanelProps) {
             </ul>
           </div>
         </> : null}
+        <EnvironmentRow
+          icon={<GitFork size={16} />}
+          label={language === "zh-CN" ? "会话历史" : "Session history"}
+          trailing={<>{sessionTree ? sessionTree.branches.length : "—"}<EnvironmentChevron /></>}
+          expanded={expanded === "history"}
+          controls={`${panelId}-history`}
+          onClick={() => toggle("history")}
+        />
+        <div id={`${panelId}-history`} className="thread-environment-detail" data-open={String(expanded === "history")}>
+          {treeLoading && !sessionTree ? <p className="thread-environment-empty" role="status">{language === "zh-CN" ? "正在载入会话树…" : "Loading session tree…"}</p> : null}
+          {sessionTree ? <SessionTreePanel tree={sessionTree} language={language} running={running} busyEntry={busyEntry} onNavigate={navigateTree} onLabel={labelTreeEntry} onFork={forkTree} /> : null}
+        </div>
         <EnvironmentRow
           icon={<History size={16} />}
           label={t("recap")}
@@ -193,7 +250,7 @@ function RecapPanel({ recap, language }: { recap: SessionRecap | null; language:
 function SourcesPanel({ sources, language, openSource }: { sources: ConversationSource[]; language: Snapshot["language"]; openSource: (source: ConversationSource) => void }) {
   const t = translator(language);
   return <div className="thread-environment-sources">
-    <button type="button" className="thread-environment-source-add" onClick={() => document.querySelector<HTMLInputElement>(".attach-button input")?.click()}><Plus size={13} /><span>{t("attach")}</span></button>
+    <button type="button" className="thread-environment-source-add" onClick={() => document.querySelector<HTMLButtonElement>('[data-slot="composer-attach"]')?.click()}><Plus size={13} /><span>{t("attach")}</span></button>
     {sources.length > 0 ? sources.map((source) => {
       const Icon = source.kind === "image" ? FileImage : source.kind === "search-url" ? Globe : Link2;
       const kindLabel = source.kind === "image" ? t("sourceImage") : source.kind === "search-url" ? t("sourceWebSearch") : t("sourceTypedLink");

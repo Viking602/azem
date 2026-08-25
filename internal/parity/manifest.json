@@ -1,0 +1,577 @@
+{
+  "schemaVersion": 1,
+  "baselineVersion": "18.0.3",
+  "baselineCommit": "160ed439ac0df594347e7d7018b813a7ffdb5e81",
+  "capturedAt": "2026-08-24",
+  "scope": "User-visible coding-agent and operator behavior. OMP npm/public-library API compatibility and visual identity are excluded.",
+  "capabilities": [
+    {
+      "id": "runtime.durable-loop",
+      "group": "runtime",
+      "owner": "azem",
+      "status": "stronger",
+      "ompEvidence": "packages/agent/src/agent-loop.ts",
+      "azemEvidence": "internal/app/provider_runtime.go; internal/session; internal/store/sqlite"
+    },
+    {
+      "id": "runtime.context-archive",
+      "group": "runtime",
+      "owner": "azem",
+      "status": "stronger",
+      "ompEvidence": "packages/agent/src/compaction; packages/snapcompact",
+      "azemEvidence": "internal/contextarchive; internal/app/provider_context_archive.go"
+    },
+    {
+      "id": "runtime.plan",
+      "group": "runtime",
+      "owner": "azem",
+      "status": "stronger",
+      "ompEvidence": "packages/coding-agent/src/plan-mode",
+      "azemEvidence": "internal/app/planning_tools.go; internal/tui/planning.go"
+    },
+    {
+      "id": "runtime.live-steering",
+      "group": "runtime",
+      "owner": "venat",
+      "status": "complete",
+      "ompEvidence": "packages/agent/src/agent-loop.ts; docs/rpc.md",
+      "azemEvidence": "github.com/Viking602/venat/agent; internal/app/provider_runtime.go; internal/app/app.go"
+    },
+    {
+      "id": "runtime.goal",
+      "group": "runtime",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/goals",
+      "azemEvidence": "internal/app/goal_mode.go; internal/session/work_contracts.go"
+    },
+    {
+      "id": "runtime.advisor",
+      "group": "runtime",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/advisor; docs/advisor-watchdog.md",
+      "azemEvidence": "internal/app/advisor.go; internal/app/advisor_test.go"
+    },
+    {
+      "id": "runtime.ttsr",
+      "group": "runtime",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/session/ttsr-coordinator.ts",
+      "azemEvidence": "internal/app/ttsr.go; internal/app/ttsr_test.go"
+    },
+    {
+      "id": "runtime.prewalk",
+      "group": "runtime",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/session/prewalk.ts",
+      "azemEvidence": "internal/app/prewalk.go; internal/app/prewalk_test.go"
+    },
+    {
+      "id": "runtime.vibe",
+      "group": "runtime",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/vibe",
+      "azemEvidence": "internal/app/vibe.go; internal/app/vibe_test.go"
+    },
+    {
+      "id": "runtime.checkpoint-rewind",
+      "group": "runtime",
+      "owner": "venat",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/checkpoint.ts",
+      "azemEvidence": "internal/app/checkpoint.go; internal/app/checkpoint_test.go"
+    },
+    {
+      "id": "runtime.loop-guards",
+      "group": "runtime",
+      "owner": "venat",
+      "status": "complete",
+      "ompEvidence": "packages/ai/src/utils/thinking-loop.ts; packages/coding-agent/src/session/unexpected-stop-classifier.ts",
+      "azemEvidence": "internal/app/loop_guards.go; internal/verification"
+    },
+    {
+      "id": "tools.read",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/read.ts",
+      "azemEvidence": "internal/agent/read.go; internal/agent/read_test.go; internal/resource"
+    },
+    {
+      "id": "tools.write",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/write.ts",
+      "azemEvidence": "internal/agent/write.go; internal/agent/file_broker.go; internal/agent/write_test.go"
+    },
+    {
+      "id": "tools.hashline",
+      "group": "tools",
+      "owner": "venat",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/edit; packages/hashline",
+      "azemEvidence": "internal/agent/hashline_edit.go; internal/agent/hashline_edit_test.go"
+    },
+    {
+      "id": "tools.glob",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/glob.ts",
+      "azemEvidence": "internal/agent/glob.go; internal/resource"
+    },
+    {
+      "id": "tools.grep",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/grep.ts",
+      "azemEvidence": "internal/agent/search.go; internal/agent/toolkit_test.go"
+    },
+    {
+      "id": "tools.ast",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/ast-grep.ts; packages/coding-agent/src/tools/ast-edit.ts",
+      "azemEvidence": "internal/agent/ast_tools.go; internal/agent/xdev_ast.go; internal/astbridge"
+    },
+    {
+      "id": "tools.lsp",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/lsp",
+      "azemEvidence": "internal/agent/lsp_tool.go; internal/lspbridge; internal/agent/lsp_tool_test.go"
+    },
+    {
+      "id": "tools.debug",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/dap; packages/coding-agent/src/tools/debug.ts",
+      "azemEvidence": "internal/agent/debug_tool.go; internal/lspbridge; internal/agent/debug_tool_test.go"
+    },
+    {
+      "id": "tools.eval",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/eval; packages/coding-agent/src/tools/eval.ts",
+      "azemEvidence": "internal/agent/eval_tool.go; internal/lspbridge; @oh-my-pi/pi-coding-agent eval kernels"
+    },
+    {
+      "id": "tools.browser",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/browser",
+      "azemEvidence": "internal/agent/browser_tool.go; internal/lspbridge; internal/agent/browser_tool_test.go"
+    },
+    {
+      "id": "tools.computer",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/computer",
+      "azemEvidence": "internal/agent/computer_tool.go; internal/lspbridge; internal/agent/computer_tool_test.go"
+    },
+    {
+      "id": "tools.web-search",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/web/search",
+      "azemEvidence": "internal/agent/web_search.go; internal/lspbridge"
+    },
+    {
+      "id": "tools.github",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/gh.ts",
+      "azemEvidence": "internal/agent/github_tool.go; internal/githubpr"
+    },
+    {
+      "id": "tools.ssh",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/ssh",
+      "azemEvidence": "internal/agent/ssh_resource.go; internal/agent/read.go; internal/lspbridge"
+    },
+    {
+      "id": "tools.process",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/hub; packages/coding-agent/src/launch",
+      "azemEvidence": "internal/agent/hub_tool.go; internal/agent/jobs.go; internal/background"
+    },
+    {
+      "id": "tools.media",
+      "group": "tools",
+      "owner": "llmux",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/image-gen.ts; packages/coding-agent/src/tts; packages/coding-agent/src/stt",
+      "azemEvidence": "internal/agent/media_tools.go; internal/lspbridge; github.com/Viking602/venat/message"
+    },
+    {
+      "id": "tools.memory",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/memory-*.ts; packages/mnemopi",
+      "azemEvidence": "internal/agent/memory_tools.go; internal/memory; internal/codingmemory"
+    },
+    {
+      "id": "tools.security-scan",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/security; packages/coding-agent/src/tools/security-scan.ts",
+      "azemEvidence": "internal/securityscan; internal/app/security_runtime.go; internal/app/security_tools.go"
+    },
+    {
+      "id": "tools.ask",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/ask.ts",
+      "azemEvidence": "internal/app/planning_tools.go; internal/app/provider_runtime.go"
+    },
+    {
+      "id": "tools.todo",
+      "group": "tools",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/todo.ts",
+      "azemEvidence": "internal/app/todo_tool.go; internal/session/work_contracts.go; internal/app/goal_mode.go"
+    },
+    {
+      "id": "agents.subagents",
+      "group": "agents",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/task",
+      "azemEvidence": "internal/app/subagent_runtime.go; internal/app/subagent_tools.go; github.com/Viking602/venat/worker"
+    },
+    {
+      "id": "agents.team",
+      "group": "agents",
+      "owner": "azem",
+      "status": "stronger",
+      "ompEvidence": "packages/coding-agent/src/task",
+      "azemEvidence": "internal/agent/team.go; internal/app/provider_execution.go"
+    },
+    {
+      "id": "agents.hub",
+      "group": "agents",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tools/hub; docs/agent-hub.md",
+      "azemEvidence": "internal/agent/hub_tool.go; internal/app/subagent_hub.go"
+    },
+    {
+      "id": "agents.park-revive",
+      "group": "agents",
+      "owner": "venat",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/registry; packages/coding-agent/src/task/persisted-revive.ts",
+      "azemEvidence": "internal/app/subagent_runtime.go; internal/app/subagent_hub.go; github.com/Viking602/venat/worker"
+    },
+    {
+      "id": "ext.context-files",
+      "group": "extensibility",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/discovery; docs/context-files.md",
+      "azemEvidence": "internal/contextfiles; internal/app/provider_context.go"
+    },
+    {
+      "id": "ext.rules",
+      "group": "extensibility",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/capability/rule.ts; docs/rulebook-matching-pipeline.md",
+      "azemEvidence": "internal/rules; internal/app/provider_context.go"
+    },
+    {
+      "id": "ext.skills",
+      "group": "extensibility",
+      "owner": "venat",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/extensibility/skills.ts",
+      "azemEvidence": "internal/skills; github.com/Viking602/venat/skill"
+    },
+    {
+      "id": "ext.mcp",
+      "group": "extensibility",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/mcp",
+      "azemEvidence": "internal/mcp; internal/app/mcp_settings.go"
+    },
+    {
+      "id": "ext.hooks",
+      "group": "extensibility",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/extensibility/hooks",
+      "azemEvidence": "internal/hooks; internal/customtools/bridge.mjs"
+    },
+    {
+      "id": "ext.plugins",
+      "group": "extensibility",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/extensibility/plugins",
+      "azemEvidence": "internal/plugins; internal/customtools; internal/extensions; internal/commands"
+    },
+    {
+      "id": "ext.marketplace",
+      "group": "extensibility",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/extensibility/plugins/marketplace; docs/marketplace.md",
+      "azemEvidence": "internal/plugins/marketplace.go; internal/app/marketplace.go; frontend/src/components/ExtensionsSettings.tsx"
+    },
+    {
+      "id": "ext.custom-capabilities",
+      "group": "extensibility",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/extensibility/custom-tools; packages/coding-agent/src/extensions.ts",
+      "azemEvidence": "internal/customtools; internal/extensions; internal/commands"
+    },
+    {
+      "id": "ext.autolearn",
+      "group": "extensibility",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/autolearn",
+      "azemEvidence": "internal/app/autolearn.go; internal/skills/managed.go"
+    },
+    {
+      "id": "providers.subscriptions",
+      "group": "providers",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/ai/src/registry",
+      "azemEvidence": "internal/auth; internal/provider/codex; internal/provider/xai; internal/provider/cursor; internal/authbroker"
+    },
+    {
+      "id": "providers.api",
+      "group": "providers",
+      "owner": "llmux",
+      "status": "complete",
+      "ompEvidence": "packages/ai/src/registry; packages/catalog",
+      "azemEvidence": "internal/provider/llmux; github.com/Viking602/llmux/provider; github.com/Viking602/llmux/modalities.go"
+    },
+    {
+      "id": "providers.stream",
+      "group": "providers",
+      "owner": "venat",
+      "status": "complete",
+      "ompEvidence": "packages/ai/src/stream.ts; docs/provider-streaming-internals.md",
+      "azemEvidence": "internal/provider; github.com/Viking602/venat/provider; github.com/Viking602/llmux/stream.go"
+    },
+    {
+      "id": "providers.modalities",
+      "group": "providers",
+      "owner": "llmux",
+      "status": "complete",
+      "ompEvidence": "packages/ai/src/types.ts; packages/coding-agent/src/blob-broker",
+      "azemEvidence": "internal/app/attachments.go; internal/agent/media_tools.go; github.com/Viking602/llmux/modalities.go"
+    },
+    {
+      "id": "providers.auth-broker",
+      "group": "providers",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/ai/src/auth-broker; packages/ai/src/auth-gateway",
+      "azemEvidence": "internal/authbroker; internal/authgateway; internal/app/bootstrap_providers.go"
+    },
+    {
+      "id": "providers.local-models",
+      "group": "providers",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/tiny; docs/local-models.md",
+      "azemEvidence": "internal/app/provider_titles.go; internal/codingmemory; internal/routeeval"
+    },
+    {
+      "id": "sessions.persistence",
+      "group": "sessions",
+      "owner": "azem",
+      "status": "stronger",
+      "ompEvidence": "packages/coding-agent/src/session",
+      "azemEvidence": "internal/session; internal/store/sqlite; internal/blobstore"
+    },
+    {
+      "id": "sessions.tree",
+      "group": "sessions",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/session/session-manager.ts; docs/tree.md",
+      "azemEvidence": "internal/session/session_graph.go; internal/store/sqlite/migrations.go; frontend/src/components/thread/SessionTreePanel.tsx"
+    },
+    {
+      "id": "sessions.fork-label",
+      "group": "sessions",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "docs/session-operations-export-share-fork-resume.md",
+      "azemEvidence": "internal/session/session_graph.go; internal/app/actions_sessions.go; internal/tui/session_operations.go"
+    },
+    {
+      "id": "sessions.import",
+      "group": "sessions",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/discovery/claude.ts; packages/coding-agent/src/discovery/codex.ts",
+      "azemEvidence": "internal/sessionimport; internal/session/import.go"
+    },
+    {
+      "id": "sessions.export",
+      "group": "sessions",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/export",
+      "azemEvidence": "internal/sessionexport; internal/session/export.go"
+    },
+    {
+      "id": "sessions.share",
+      "group": "sessions",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/export/share.ts",
+      "azemEvidence": "internal/sessionshare; operations.go"
+    },
+    {
+      "id": "sessions.collab",
+      "group": "sessions",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/collab; packages/collab-web",
+      "azemEvidence": "internal/collab; internal/tui/session_operations.go"
+    },
+    {
+      "id": "protocol.headless",
+      "group": "protocol",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/main.ts",
+      "azemEvidence": "internal/headless; internal/operator; cmd/azem"
+    },
+    {
+      "id": "protocol.json-rpc",
+      "group": "protocol",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/modes/rpc; docs/rpc.md",
+      "azemEvidence": "internal/rpc; protocol.go"
+    },
+    {
+      "id": "protocol.acp",
+      "group": "protocol",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/modes/acp",
+      "azemEvidence": "internal/acp; protocol.go"
+    },
+    {
+      "id": "protocol.sdk",
+      "group": "protocol",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/sdk.ts",
+      "azemEvidence": "azem.go; run.go; subscription.go; operations.go; protocol.go"
+    },
+    {
+      "id": "operator.cli",
+      "group": "operator",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/cli-commands.ts; docs/cli-reference.md",
+      "azemEvidence": "internal/operator; cmd/azem"
+    },
+    {
+      "id": "operator.completions",
+      "group": "operator",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/commands/completions.ts",
+      "azemEvidence": "internal/operator/completion.go; cmd/azem"
+    },
+    {
+      "id": "operator.update-setup-gc",
+      "group": "operator",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/commands/update.ts; setup.ts; gc.ts",
+      "azemEvidence": "internal/maintenance; cmd/azem"
+    },
+    {
+      "id": "operator.stats",
+      "group": "operator",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/stats",
+      "azemEvidence": "internal/usageview; internal/app/usage_report.go; cmd/azem"
+    },
+    {
+      "id": "operator.bench",
+      "group": "operator",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/metaharness; packages/typescript-edit-benchmark",
+      "azemEvidence": "internal/benchmark; internal/eval; cmd/azem-eval"
+    },
+    {
+      "id": "operator.github-automation",
+      "group": "operator",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "python/robomp",
+      "azemEvidence": "internal/githubwebhook; internal/githubpr; cmd/azem"
+    },
+    {
+      "id": "ui.tui",
+      "group": "ui",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/coding-agent/src/modes; packages/tui",
+      "azemEvidence": "internal/tui; internal/tui/session_operations.go"
+    },
+    {
+      "id": "ui.desktop",
+      "group": "ui",
+      "owner": "azem",
+      "status": "stronger",
+      "ompEvidence": "packages/collab-web",
+      "azemEvidence": "frontend/src; internal/desktop"
+    },
+    {
+      "id": "infra.browser-relay",
+      "group": "infrastructure",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "packages/browser-relay",
+      "azemEvidence": "internal/agent/browser_tool.go; internal/lspbridge; @oh-my-pi/pi-coding-agent browser relay"
+    },
+    {
+      "id": "infra.cross-platform-native",
+      "group": "infrastructure",
+      "owner": "azem",
+      "status": "complete",
+      "ompEvidence": "crates/pi-builtins; crates/pi-shell; packages/natives",
+      "azemEvidence": "internal/agent/shell_process_windows.go; internal/agent/delete_file_unsupported.go; internal/agent/computer_tool.go; internal/astbridge"
+    }
+  ]
+}

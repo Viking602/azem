@@ -2,9 +2,7 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/Viking602/azem/internal/config"
@@ -13,33 +11,9 @@ import (
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/tool"
 )
-
-func TestHashlineHeaderAndCount(t *testing.T) {
-	header, count := hashlineHeaderAndCount("¶note.txt#ABCD\n1:alpha\n2:beta\n")
-	if header != "¶note.txt#ABCD" || count != 2 {
-		t.Fatalf("header=%q count=%d", header, count)
-	}
-	if got, n := hashlineHeaderAndCount("plain"); got != "" || n != 0 {
-		t.Fatalf("plain header=%q count=%d", got, n)
-	}
-}
-
-func TestHashlineOverwritePatch(t *testing.T) {
-	got := hashlineOverwritePatch("¶note.txt#ABCD", 2, "new\nline")
-	if !strings.Contains(got, "replace 1..2:") || !strings.Contains(got, "+new\n+line\n") {
-		t.Fatalf("patch = %q", got)
-	}
-}
-
-func TestRewriteExistingWriteSkipsMissingFile(t *testing.T) {
-	host := &cursorExecHost{workspace: t.TempDir(), bus: tool.NewBus()}
-	args, _ := json.Marshal(map[string]string{"path": "missing.txt", "content": "new"})
-	if _, ok := host.rewriteExistingWrite(context.Background(), tool.Call{ID: "w1", Name: coding.ToolWriteFile, Arguments: args}); ok {
-		t.Fatal("missing file must stay write_file")
-	}
-}
 
 func TestCursorExecHostUnavailableWithoutBus(t *testing.T) {
 	result, err := (*cursorExecHost)(nil).Execute(context.Background(), message.ToolCall{Name: coding.ToolReadFile})
@@ -139,12 +113,9 @@ func TestCursorExecHostSyncsServerConfirmedTodoSnapshot(t *testing.T) {
 	}
 }
 
-func TestWithCursorExecHostClonesRequestBody(t *testing.T) {
-	base := map[string]any{"prompt_cache_key": "stable"}
+func TestCursorExecHostImplementsTypedRequestChannels(t *testing.T) {
 	host := &cursorExecHost{bus: tool.NewBus()}
-	bound := withCursorExecHost(base, host)
-	if base[cursordriver.ExecHostExtraKey] != nil || bound[cursordriver.ExecHostExtraKey] != host ||
-		bound[cursordriver.TodoSyncExtraKey] == nil || bound["prompt_cache_key"] != "stable" {
-		t.Fatalf("base=%v bound=%v", base, bound)
-	}
+	var _ hyprovider.NativeToolHost = host
+	var _ cursordriver.ExecHost = host
+	var _ cursordriver.TodoSynchronizer = host
 }

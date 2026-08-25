@@ -16,10 +16,6 @@ import (
 	hyprovider "github.com/Viking602/venat/provider"
 )
 
-// ContextUsageReporterExtraKey carries the optional non-billable Cursor
-// checkpoint-occupancy callback in provider.Request.ExtraBody.
-const ContextUsageReporterExtraKey = "cursor_context_usage_reporter"
-
 const cursorMaxModeExtraKey = "cursor_max_mode"
 
 // ContextUsage reports Cursor's current context occupancy and declared limit.
@@ -101,12 +97,17 @@ func (d *Driver) openStream(ctx context.Context, request hyprovider.Request, bas
 	}
 	body, writer := io.Pipe()
 	var contextUsageReporter ContextUsageReporter
-	var execHost ExecHost
+	if request.ContextUsage != nil {
+		contextUsageReporter = func(usage ContextUsage) {
+			request.ContextUsage(hyprovider.ContextUsage{
+				UsedTokens: usage.UsedTokens, MaxTokens: usage.MaxTokens,
+			})
+		}
+	}
+	execHost, _ := request.NativeToolHost.(ExecHost)
 	var todoSync TodoSync
-	if request.ExtraBody != nil {
-		contextUsageReporter, _ = request.ExtraBody[ContextUsageReporterExtraKey].(ContextUsageReporter)
-		execHost, _ = request.ExtraBody[ExecHostExtraKey].(ExecHost)
-		todoSync, _ = request.ExtraBody[TodoSyncExtraKey].(TodoSync)
+	if synchronizer, ok := request.NativeToolHost.(TodoSynchronizer); ok {
+		todoSync = TodoSync(synchronizer.SyncTodos)
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, d.baseURL+runPath, body)
 	if err != nil {

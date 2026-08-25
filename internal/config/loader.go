@@ -72,7 +72,8 @@ func UpdateDefault(path, key, value string) error {
 
 // UpdateModelRoute atomically updates a nested model route while preserving
 // unrelated YAML fields and comments. Supported scopes are "title", "plan",
-// "approval", "vision", "recap", and "subagent"; role is required only for the latter.
+// "approval", "vision", "recap", "advisor", "security", and "subagent"; role
+// is required for the latter two.
 func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	keys := []string{"agents"}
 	switch scope {
@@ -101,11 +102,26 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 			return fmt.Errorf("role is not valid for recap route")
 		}
 		keys = append(keys, "recap")
+	case "advisor":
+		if role != "" {
+			return fmt.Errorf("role is not valid for advisor route")
+		}
+		keys = append(keys, "advisor")
+	case "vibe":
+		if !slices.Contains([]string{"fast", "good"}, role) {
+			return fmt.Errorf("vibe route role must be fast or good")
+		}
+		keys = append(keys, "vibe", role)
 	case "subagent":
 		if strings.TrimSpace(role) == "" {
 			return fmt.Errorf("role is required for subagent route")
 		}
 		keys = append(keys, "subagents", "routes", role)
+	case "security":
+		if !slices.Contains([]string{"audit", "reducer", "fixer", "verifier"}, role) {
+			return fmt.Errorf("security route role must be audit, reducer, fixer, or verifier")
+		}
+		keys = []string{"security", "routes", role}
 	default:
 		return fmt.Errorf("unsupported model route scope %q", scope)
 	}
@@ -114,7 +130,7 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	}
 	return updateYAML(path, func(root *yaml.Node) {
 		mapping := ensureMappingPath(root, keys...)
-		persistInheritedRoute := (scope == "title" || scope == "approval" || scope == "recap") && route == (ModelRouteConfig{})
+		persistInheritedRoute := (scope == "title" || scope == "approval" || scope == "recap" || scope == "advisor" || scope == "vibe") && route == (ModelRouteConfig{})
 		for key, value := range map[string]string{"provider": route.Provider, "model": route.Model, "reasoning": route.Reasoning} {
 			if strings.TrimSpace(value) == "" {
 				if persistInheritedRoute {
@@ -134,6 +150,84 @@ func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 			}
 		}
 	})
+}
+
+func UpdateSecurityConfig(path string, security SecurityConfig) error {
+	if err := security.Validate(); err != nil {
+		return err
+	}
+	var publicationArguments yaml.Node
+	if len(security.PublicationArguments) > 0 {
+		if err := publicationArguments.Encode(security.PublicationArguments); err != nil {
+			return fmt.Errorf("encode security publication arguments: %w", err)
+		}
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		securityNode := ensureMappingPath(root, "security")
+		setDesktopSecurityScalars(securityNode, security)
+		for key, value := range map[string]string{
+			"publication_tool": security.PublicationTool, "publication_destination": security.PublicationDestination,
+			"publication_title_field": security.PublicationTitleField, "publication_description_field": security.PublicationDescriptionField,
+		} {
+			if strings.TrimSpace(value) == "" {
+				deleteMappingValue(securityNode, key)
+			} else {
+				setMappingScalar(securityNode, key, value)
+			}
+		}
+		deleteMappingValue(securityNode, "publication_arguments")
+		if len(security.PublicationArguments) > 0 {
+			securityNode.Content = append(securityNode.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "publication_arguments"},
+				&publicationArguments,
+			)
+		}
+		for _, item := range []struct {
+			name  string
+			route ModelRouteConfig
+		}{
+			{name: "audit", route: security.Routes.Audit},
+			{name: "reducer", route: security.Routes.Reducer},
+			{name: "fixer", route: security.Routes.Fixer},
+			{name: "verifier", route: security.Routes.Verifier},
+		} {
+			routeNode := ensureMappingPath(securityNode, "routes", item.name)
+			for key, value := range map[string]string{"provider": item.route.Provider, "model": item.route.Model, "reasoning": item.route.Reasoning} {
+				if strings.TrimSpace(value) == "" {
+					deleteMappingValue(routeNode, key)
+				} else {
+					setMappingScalar(routeNode, key, value)
+				}
+			}
+		}
+	})
+}
+
+// UpdateDesktopSecurityConfig writes only fields owned by the Desktop form.
+// Host-admin publication mappings and security routes remain untouched.
+func UpdateDesktopSecurityConfig(path string, security SecurityConfig) error {
+	if err := security.Validate(); err != nil {
+		return err
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		setDesktopSecurityScalars(ensureMappingPath(root, "security"), security)
+	})
+}
+
+func setDesktopSecurityScalars(securityNode *yaml.Node, security SecurityConfig) {
+	setTyped := func(key, value, tag string) {
+		setMappingScalar(securityNode, key, value)
+		mappingValue(securityNode, key).Tag = tag
+	}
+	setTyped("enabled", strconv.FormatBool(security.Enabled), "!!bool")
+	setTyped("default_mode", security.DefaultMode, "!!str")
+	setTyped("workers", strconv.Itoa(security.Workers), "!!int")
+	setTyped("subagents", strconv.Itoa(security.Subagents), "!!int")
+	setTyped("stop_after_no_new", strconv.Itoa(security.StopAfterNoNew), "!!int")
+	setTyped("stop_after_consecutive_errors", strconv.Itoa(security.StopAfterConsecutiveErrors), "!!int")
+	setTyped("max_discovery_runs", strconv.Itoa(security.MaxDiscoveryRuns), "!!int")
+	setTyped("max_time_hours", strconv.FormatFloat(security.MaxTimeHours, 'f', -1, 64), "!!float")
+	setTyped("max_cost_usd", "0", "!!float")
 }
 
 // ResetModelRoute clears a persisted route. For subagents it also removes the

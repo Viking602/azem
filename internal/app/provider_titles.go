@@ -67,19 +67,19 @@ func (r *ProviderRuntime) GenerateTitle(ctx context.Context, input titleGenerati
 			kind: "title", provider: providerID, model: resolvedModel, transport: driver.Metadata().Name,
 		}
 	}
+	maxTokens := 0
+	if providerID != "chatgpt" {
+		maxTokens = 64
+	}
 	request := hyprovider.Request{
 		Model: resolvedModel,
 		Messages: []message.Message{
 			message.NewText(message.RoleSystem, sessionTitlePrompt),
 			message.NewText(message.RoleUser, prompt),
 		},
-		Metadata: map[string]string{"reasoning_effort": reasoning},
-		ExtraBody: map[string]any{
-			"prompt_cache_key": input.SessionID + ":title",
-		},
-	}
-	if providerID != "chatgpt" {
-		request.ExtraBody["max_output_tokens"] = 64
+		Metadata:       map[string]string{"reasoning_effort": reasoning},
+		PromptCacheKey: input.SessionID + ":title",
+		MaxTokens:      maxTokens,
 	}
 	generated, err := collectProviderTextWithReasoningFallback(ctx, driver, request, "title")
 	if err != nil {
@@ -151,19 +151,19 @@ func (r *ProviderRuntime) GenerateRecap(ctx context.Context, input recapGenerati
 			kind: "recap", provider: providerID, model: resolvedModel, transport: driver.Metadata().Name,
 		}
 	}
+	requestMaxTokens := 0
+	if providerID != "chatgpt" {
+		requestMaxTokens = maxOutputTokens
+	}
 	request := hyprovider.Request{
 		Model: resolvedModel,
 		Messages: []message.Message{
 			message.NewText(message.RoleSystem, recapPrompt),
 			message.NewText(message.RoleUser, prompt),
 		},
-		Metadata: map[string]string{"reasoning_effort": reasoning},
-		ExtraBody: map[string]any{
-			"prompt_cache_key": input.SessionID + ":recap",
-		},
-	}
-	if providerID != "chatgpt" {
-		request.ExtraBody["max_output_tokens"] = maxOutputTokens
+		Metadata:       map[string]string{"reasoning_effort": reasoning},
+		PromptCacheKey: input.SessionID + ":recap",
+		MaxTokens:      requestMaxTokens,
 	}
 	return collectProviderTextWithReasoningFallback(ctx, driver, request, "recap")
 }

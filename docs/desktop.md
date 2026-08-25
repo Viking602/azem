@@ -1,6 +1,6 @@
 # Desktop application
 
-Last verified: 2026-08-17
+Last verified: 2026-08-24
 
 Azem's desktop application is a Wails window over the same Go runtime used by
 the TUI. React owns presentation state; it does not duplicate provider,
@@ -15,14 +15,14 @@ actions; read-only desktop integrations use focused methods with their own
 input and output limits.
 
 Desktop bootstrap primes sessions, git branches, model routes, agent types,
-Skills, plugins, and Hooks. Skills and Hooks also expose direct read-only
-Bridge methods (`SkillCatalog()`, `HookCatalog()`) so Settings can project the
-current snapshot after subscribe, without waiting for a `list_*` event that
-may have been emitted before the frontend listener. Usage is not primed:
-Settings → Usage calls `Bridge.UsageReport(scope)` only when that page opens
-or the user refreshes, so the event broker is not polled. `hook_catalog`,
-`skill_catalog`, `plugin_catalog`, and `usage_report` remain replaceable: a
-later sequence must not drop a catalog snapshot that the renderer still needs.
+Skills, plugins, marketplaces, and Hooks. Skills, Hooks, and marketplaces also
+expose direct read-only Bridge methods (`SkillCatalog()`, `HookCatalog()`,
+`MarketplaceCatalog()`) so Settings can project the current snapshot after
+subscribe without waiting for an event emitted before the frontend listener.
+`SessionTree()` provides the same direct readback for the Environment panel.
+Usage is not primed: Settings → Usage calls `Bridge.UsageReport(scope)` only
+when that page opens or the user refreshes. Catalog events remain replaceable:
+a later sequence must not drop a snapshot the renderer still needs.
 
 Runtime events follow this path:
 
@@ -215,6 +215,14 @@ Codex cache path as an active runtime source. Opening Settings explicitly reques
 current plugin snapshot, so startup event timing cannot leave a populated
 runtime looking like an empty catalog.
 
+The Marketplace tab reads configured Git/local/direct-JSON catalogs, searches
+available entries, and exposes explicit user/project install scope. Add,
+remove, update, install, upgrade, enable/disable, and uninstall use validated
+`marketplace_*` actions. Destructive remove/uninstall requires an inline
+confirmation. The UI never receives credentials or executes a catalog path.
+After a mutation it reads `MarketplaceCatalog()` directly so event timing
+cannot leave stale inventory.
+
 Live assistant text renders new grapheme clusters as a bounded per-character
 fade-and-rise tail. The already settled prefix becomes plain text, so long
 streams do not accumulate animation nodes. `prefers-reduced-motion` bypasses the
@@ -322,6 +330,19 @@ The backend, not the React client, enforces the file boundary:
 The tree is a browsing surface, not an agent tool. It cannot write files and
 does not bypass tool approval rules. Editing remains on the governed tool path.
 
+## Session tree and portability
+
+The Environment panel's **Session history** row calls `SessionTree()` only when
+expanded. It renders a semantic nested-history list with the active path,
+branch inventory, native-button navigation, entry labels, and an explicit fork
+target. Navigation is disabled during a live run and applies the
+`NavigateSessionTree` durable projection returned directly by the Bridge.
+`CreateSessionFork` and `SetSessionEntryLabel` return the updated tree.
+
+`ExportSession` supports HTML, text, or lossless JSON. `ShareSession` seals the
+redacted snapshot before blob/gist publication. These methods accept a session
+ID owned by the active runtime and do not expose raw database or blob paths.
+
 ## Workspace change review
 
 The Environment panel's Changes row opens a dedicated read-only review page.
@@ -343,6 +364,33 @@ single-file endpoint accepts only a path currently reported by Git status;
 absolute paths, NUL bytes, parent traversal, and unchanged paths are rejected.
 Both methods are read-only and never stage, restore, commit, or mutate files.
 
+## Security page
+
+The project-level Security route lists durable scans and projects live
+`security_*` events without occupying the foreground conversation. It offers
+Standard/Deep start controls, blocked-scan resume, textual status plus redundant
+severity markers, coverage/file/worker progress, finding list/detail and
+triage, SARIF export with the saved path, explicit cancellation, and isolated
+patch/verification actions. Errors remain visible on the page. Semantic lists,
+buttons and `progress`, a short status-only live region, visible keyboard focus,
+independent finding/detail scrolling, reduced-motion behavior, and
+forced-colors fallbacks cover keyboard and assistive-technology use.
+
+`frontend/src/components/security/SecurityPage.tsx` owns this surface;
+`store/reduceSecurity.ts` owns per-scan projections so a live update cannot
+replace the scan a user is inspecting. Escape and the visible back link return
+to the Workspace parent route. Patch remains a typed desktop action. External
+MCP publication is deliberately absent from the WebView allowlist and requires
+the explicit configured TUI command.
+
+**Settings → Security scans** is the Desktop configuration surface. It exposes
+the new-scan enable switch, Standard/Deep default, Deep worker/subagent and
+stopping limits, the absolute deadline, and audit/reducer/fixer/verifier model
+routes. It does not expose or send Token/tool-call hard ceilings. Saving uses
+the typed `set_security_config` action and node-preserving atomic YAML writer;
+active scans are not mutated. MCP publication arguments remain administrator-only
+YAML and are redacted from Desktop events.
+
 ## Frontend ownership
 
 - `frontend/src/App.tsx` owns top-level navigation and keeps the session surface
@@ -358,6 +406,8 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   folding, lazy patch loading, hunk parsing, and review rendering.
 - `frontend/src/components/WorkspaceOverviewPage.tsx` owns the repository
   overview and routes into Files, Changes, Pull Requests, and project sessions.
+- `frontend/src/components/security/SecurityPage.tsx` owns scan history,
+  progress, finding detail, export, cancellation, and remediation controls.
 - `frontend/src/components/TerminalPanel.tsx` owns the bottom PTY panel, tabs,
   and one xterm instance per session. Session state lives in
   `frontend/src/terminalStore.ts`, not the runtime transcript store.
@@ -501,7 +551,7 @@ Run the focused checks first:
 
 ```bash
 GOWORK=off go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui
-cd frontend && bun run typecheck && bun run test -- WorkspaceOverviewPage.test.tsx WorkspaceFilesPage.test.tsx WorkspaceChangesPage.test.tsx Inspector.test.tsx Timeline.test.tsx TerminalPanel.test.tsx terminal.test.ts
+cd frontend && bun run typecheck && bun run test -- WorkspaceOverviewPage.test.tsx WorkspaceFilesPage.test.tsx WorkspaceChangesPage.test.tsx Inspector.test.tsx Timeline.test.tsx TerminalPanel.test.tsx SecurityPage.test.tsx terminal.test.ts
 ```
 
 Then run the complete desktop gate and package the app:

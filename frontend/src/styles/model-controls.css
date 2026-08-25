@@ -1,5 +1,4 @@
 .composer-toolbar { min-height: 39px; display: flex; align-items: center; gap: 7px; padding: 3px 9px 7px; overflow: visible; -webkit-user-select: none; user-select: none; }
-.attach-button input { display: none; }
 .menu-select { position: relative; min-width: 0; }
 .menu-select > summary { min-width: 104px; height: 30px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--muted); font-size: var(--text-sm); cursor: pointer; list-style: none; }
 .menu-select > summary::-webkit-details-marker { display: none; }
@@ -788,7 +787,7 @@ html.dark .effort-panel-speed.active {
 .composer-dock .composer-stack,
 .composer-dock .jump-latest { pointer-events: auto; }
 .composer-dock .composer-stack { position: relative; }
-.composer-stack { width: min(680px, calc(100vw - var(--sidebar-width) - 54px)); display: flex; flex-direction: column; gap: 8px; }
+.composer-stack { width: min(680px, calc(100vw - var(--sidebar-width) - 54px)); max-width: 100%; display: flex; flex-direction: column; gap: 8px; }
 .composer-stack:has(.queued-prompts) { gap: 0; }
 .composer-stack .composer-shell { width: 100%; }
 .composer-stack:has(.queued-prompts) .composer-shell { position: relative; z-index: 2; }

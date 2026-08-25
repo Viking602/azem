@@ -156,6 +156,52 @@ func TestBridgeResumeSessionReturnsDurableProjectionDirectly(t *testing.T) {
 	}
 }
 
+func TestBridgeSessionTreeNavigationForkLabelAndExport(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "tree.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-tree", Title: "Tree"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, block := range []session.Block{{Kind: "user", Content: "one"}, {Kind: "assistant", Content: "two"}} {
+		if _, err := sessions.AppendBlock(ctx, "session-tree", block); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime := azemapp.NewService(ctx, config.Default())
+	runtime.AttachDurable(sessions, nil)
+	bridge := &Bridge{runtime: runtime, ctx: ctx}
+	tree, err := bridge.SessionTree("session-tree")
+	if err != nil || tree.ActiveLeafEntryID == "" || len(tree.Roots) != 1 {
+		t.Fatalf("tree=%#v error=%v", tree, err)
+	}
+	entryID := tree.Roots[0].Entry.ID
+	tree, err = bridge.SetSessionEntryLabel("session-tree", entryID, "Checkpoint")
+	if err != nil || tree.Roots[0].Entry.Label != "Checkpoint" {
+		t.Fatalf("labeled tree=%#v error=%v", tree, err)
+	}
+	event, err := bridge.NavigateSessionTree("session-tree", entryID)
+	if err != nil || event.SessionID != "session-tree" || !strings.Contains(event.Data["blocks"], "one") || strings.Contains(event.Data["blocks"], "two") {
+		t.Fatalf("navigated event=%#v error=%v", event, err)
+	}
+	fork, err := bridge.CreateSessionFork("session-tree", "session-fork", entryID)
+	if err != nil || fork.ParentSessionID != "session-tree" || fork.ActiveLeafEntryID == "" {
+		t.Fatalf("fork=%#v error=%v", fork, err)
+	}
+	output := filepath.Join(t.TempDir(), "session.json")
+	resolved, err := bridge.ExportSession("session-tree", output, "json", true)
+	if err != nil || resolved != output {
+		t.Fatalf("export=%q error=%v", resolved, err)
+	}
+	if payload, err := os.ReadFile(output); err != nil || !strings.Contains(string(payload), "Checkpoint") {
+		t.Fatalf("export payload=%q error=%v", payload, err)
+	}
+}
+
 func TestBridgeInitialiseAndEventProjection(t *testing.T) {
 	cfg := config.Default()
 	runtime := azemapp.NewService(context.Background(), cfg)
@@ -315,13 +361,32 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if allowedAction(azemapp.ActionKind("arbitrary_shell")) {
 		t.Fatal("unknown desktop actions must be rejected")
 	}
+	for _, kind := range []azemapp.ActionKind{azemapp.ActionPublishSecurityScan, azemapp.ActionPatchSecurityWithPR, azemapp.ActionReconcileSecurityPublish} {
+		if allowedAction(kind) {
+			t.Fatalf("host-only security action %q reached the desktop", kind)
+		}
+	}
+}
+
+func TestDesktopRejectsOversizedSecurityConfigurationBeforeRuntime(t *testing.T) {
+	bridge := &Bridge{}
+	err := bridge.Execute(ActionRequest{
+		Kind:    string(azemapp.ActionSetSecurityConfig),
+		Payload: []byte(strings.Repeat("x", maxSecurityConfigPayloadBytes+1)),
+	})
+	if err == nil || !strings.Contains(err.Error(), "16 KiB") {
+		t.Fatalf("oversized security configuration error = %v", err)
+	}
 }
 
 // TestAllowedDesktopActionsCoverEveryActionKind pins the bridge allowlist to
-// the complete runtime action contract so a newly added ActionKind cannot be
-// silently unreachable from the desktop (regression: set_subagent_depth).
+// the runtime action contract. Security publication is deliberately host/TUI
+// only because it performs a configured external side effect.
 func TestAllowedDesktopActionsCoverEveryActionKind(t *testing.T) {
 	for _, kind := range azemapp.AllActionKinds() {
+		if kind == azemapp.ActionPublishSecurityScan || kind == azemapp.ActionPatchSecurityWithPR || kind == azemapp.ActionReconcileSecurityPublish {
+			continue
+		}
 		if !allowedAction(kind) {
 			t.Errorf("action kind %q is declared by the runtime but rejected by the desktop allowlist", kind)
 		}

@@ -196,6 +196,7 @@ describe("composer slash commands", () => {
 		expect(styles).toMatch(/\.transcript\s*\{[^}]*padding:\s*34px 0 0/s);
 		expect(styles).toMatch(/\.composer-dock\s*\{[^}]*position:\s*absolute;[^}]*background:\s*transparent;[^}]*pointer-events:\s*none;/s);
 		expect(styles).toMatch(/\.composer-dock \.composer-stack,\s*\.composer-dock \.jump-latest\s*\{[^}]*pointer-events:\s*auto;/s);
+		expect(styles).toMatch(/\.composer-stack\s*\{[^}]*max-width:\s*100%/s);
 		expect(styles).not.toMatch(/\.composer-dock \.composer-card::before/);
 		expect(styles).not.toMatch(/\.composer-dock \.composer-stack::before/);
 		expect(styles).not.toMatch(/\.composer-dock \.composer-card::after/);

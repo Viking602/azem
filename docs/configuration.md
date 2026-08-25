@@ -1,6 +1,6 @@
 # Configuration
 
-Last verified: 2026-08-20
+Last verified: 2026-08-24
 
 `internal/config.Config` and `internal/config.Default` are authoritative. Azem
 strictly decodes YAML, applies defaults, and validates the complete result
@@ -16,10 +16,15 @@ before runtime construction. The default file is `~/.azem/config.yaml`;
 | `auth` | Credential backend plus optional Codex, Grok, and Cursor imports |
 | `providers` | Subscription transports and llmux provider/model registry |
 | `retry` | Agent retry count and exponential backoff bounds |
-| `agents` | Main, Team, title, plan, approval, vision, recap, context, and subagent routes/budgets |
+| `agents` | Main, Team, title, plan, approval, vision, recap, Advisor, Vibe, loop guards, context, and subagent routes/budgets |
+| `ttsr` | Stream text/AST interruption rules, context handling, and repeat policy |
+| `security` | Native Standard/Deep defaults, stopping conditions, budgets, and audit/reducer/fixer/verifier model routes |
 | `skills` | Discovery, trust, eager activation, and disabled entries |
-| `plugins` | Azem-owned plugin packages, optional Codex copy import, and explicit hook trust |
-| `mcp` | Stdio or HTTP servers, environment, headers, timeouts, and tool policies |
+| `plugins` | Azem-owned/Codex/marketplace packages, auto-update, and explicit hook trust |
+| `extensions` | Bun tools, commands, providers, agents, themes, and project-code trust |
+| `autolearn` | Managed Skill learning threshold and automatic continuation |
+| `discovery` | Cross-harness context, rules, Skills, MCP, and hook discovery |
+| `mcp` | Stdio or HTTP servers, environment, headers, OAuth, resources, prompts, notifications, timeouts, and tool policies |
 | `hooks` | Lifecycle command handlers and failure policy |
 | `memory`, `recap`, `background` | Optional supporting runtime services |
 
@@ -78,6 +83,57 @@ to zero to disable the reminder. A child is cancelled by explicit
 shutdown, or an optional configured `idle_timeout`. Provider context windows
 still require deterministic archive compaction, but that is not a cumulative
 task-size ceiling and does not depend on the semantic-index model.
+
+## OMP-compatible modes and extension host
+
+```yaml
+ttsr:
+  enabled: true
+  context_mode: discard
+  interrupt_mode: always
+  repeat_mode: once
+  repeat_gap: 10
+  rules: []
+
+agents:
+  advisor:
+    enabled: false
+    provider: chatgpt
+    model: gpt-5.6-luna
+    reasoning: low
+    catchup_timeout: 30s
+  vibe:
+    fast: { provider: chatgpt, model: gpt-5.6-luna, reasoning: low }
+    good: {}
+  loop_guards:
+    thinking_enabled: true
+    assistant_text_enabled: true
+    tool_call_enabled: true
+    tool_call_threshold: 5
+    tool_call_exempt_tools: [hub, vibe_wait, subagent.get_output]
+    unexpected_stop: mechanical
+    unexpected_stop_retries: 2
+
+extensions:
+  enabled: true
+  trust_project_code: false
+  additional_tool_paths: []
+  additional_command_dirs: []
+  additional_extension_paths: []
+  additional_agent_dirs: []
+  additional_theme_dirs: []
+
+autolearn:
+  enabled: false
+  auto_continue: false
+  min_tool_calls: 5
+```
+
+Goal and checkpoint state is session data rather than global YAML. Vibe routes
+inherit the active route when empty. `advisor.catchup_timeout` must be a valid
+non-negative Go duration. TTSR rules validate text conditions, AST conditions,
+scope, globs, and per-rule interruption mode. Project extension code remains
+disabled until `extensions.trust_project_code` is explicit.
 
 ## Skills
 
@@ -147,6 +203,7 @@ plugins:
   import_codex: true
   codex_imports: []
   trust_hooks: false
+  marketplace_auto_update: notify  # off | notify | auto
 ```
 
 The runtime always scans the Azem data directory at
@@ -356,6 +413,30 @@ settings page. Disabled subscription IDs persist in
 `providers.cursor.disabled_models` and follow the same picker/runtime rules as
 llmux models.
 
+### Auth broker
+
+```yaml
+auth:
+  broker:
+    url: https://broker.example.com
+    token: ""                 # prefer AZEM_AUTH_BROKER_TOKEN
+    snapshot_cache: ""
+    snapshot_ttl: 1h
+    account_pool_file: ""
+```
+
+`auth.broker.url` requires HTTPS except for loopback HTTP. The token is omitted
+from runtime JSON/events and may also come from `AZEM_AUTH_BROKER_TOKEN` or its
+OMP-compatible alias `OMP_AUTH_BROKER_TOKEN`. Relative cache/pool paths resolve
+from the config directory. The encrypted snapshot TTL defaults to `1h`; zero
+forces a remote refresh. Broker-backed runtimes are read-only for credential
+mutations and do not import local Codex/Grok credentials.
+
+The operator registry also exposes `auth-broker serve`, `auth-gateway serve`,
+token/status commands, and account-pool selection through flags/config. Service
+bind addresses and bearer-token files are command arguments/environment, not
+persisted secrets.
+
 ## Model routes
 
 Desktop Role models configures these independent routes:
@@ -435,6 +516,47 @@ model supports images, Azem keeps the native direct-image path. If modality
 metadata is unknown, Azem also preserves the native path rather than guessing.
 For a known text-only model, missing or failing vision configuration produces an
 actionable turn error instead of silently discarding the image.
+
+## Security scanning
+
+`security.enabled` gates new scan actions without deleting existing records or
+artifacts. It defaults to `true`; disabling it hides new execution while
+retaining completed scans, findings, and exports.
+
+| Field | Default | Behavior |
+|---|---:|---|
+| `default_mode` | `standard` | Default new-scan mode. |
+| `workers` | `4` | Concurrent independent Deep audit workers; range 1–32. |
+| `subagents` | `3` | Read-only security child allowance per audit; range 0–32. |
+| `stop_after_no_new` | `4` | Consecutive reductions with no new root finding before saturation. |
+| `stop_after_consecutive_errors` | `3` | Consecutive audit/reducer failures before terminal failure. |
+| `max_discovery_runs` | `40` | Maximum independent Deep audits; range 1–1000. |
+| `max_time_hours` | `96` | Positive absolute scan deadline, persisted across restart, at most 96 hours. |
+| `max_cost_usd` | `0` | Reserved for trusted provider pricing and must remain zero. |
+| `publication_tool` | empty | Exact configured MCP tool allowed for explicit TUI publication. |
+| `publication_destination` | tool name | Stable receipt/deduplication destination key. |
+| `publication_arguments` | empty | Host-owned MCP arguments merged with generated title/description. |
+| `publication_title_field` | `title` | Configured MCP title property. |
+| `publication_description_field` | `description` | Configured MCP description property. |
+
+Older files may still contain `max_tokens` or `max_tool_calls`. Azem accepts
+and preserves those keys for compatibility, but native scans ignore them and
+Desktop neither exposes nor sends them. Azem therefore has no per-scan Token or
+tool-call hard ceiling. Provider and account usage limits still apply.
+
+`security.routes.audit`, `reducer`, `fixer`, and `verifier` use the existing
+`ModelRouteConfig` shape. Empty routes inherit the configured default model.
+The resolved provider/account/model/reasoning snapshot is persisted with the
+scan and never changes silently on resume. Renderer payloads cannot override
+routes, the absolute deadline, repository identity, or Deep fan-out.
+
+Desktop users can edit these values in **Settings → Security scans**. The pane
+persists enablement, default mode, Deep convergence limits, and the deadline,
+plus the four security model routes. Changes apply to new scans;
+active scans keep their sealed startup snapshot. External publication tools,
+field mappings, and bounded non-secret base arguments remain trusted
+administrator-only `config.yaml` settings; Desktop displays only the tool name
+and never receives publication arguments or credentials.
 
 ## Safe updates
 

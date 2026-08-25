@@ -16,3 +16,9 @@ var reviewSubagentInstructions string
 
 //go:embed prompts/subagents/verify.md
 var verifySubagentInstructions string
+
+//go:embed prompts/subagents/security-baseline.md
+var securityBaselineSubagentInstructions string
+
+//go:embed prompts/subagents/security-investigator.md
+var securityInvestigatorSubagentInstructions string

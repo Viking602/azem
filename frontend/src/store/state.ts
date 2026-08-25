@@ -5,10 +5,12 @@ import type {
   BackgroundProcess,
   Block,
   ContextProfile,
+  ExtensionTheme,
   GitBranch,
   HookCatalog,
   MCPServerEntry,
   ModelRoute,
+  MarketplaceCatalog,
 	ModelProvider,
   QueuedPrompt,
   PullRequest,
@@ -20,6 +22,11 @@ import type {
   SessionSearchTarget,
   SettingsSearchTarget,
   SessionRecap,
+  SecurityConfig,
+  SecurityFinding,
+  SecurityPatchResult,
+  SecurityProjection,
+  SecurityScan,
   SkillEntry,
   Snapshot,
   TodoList,
@@ -43,6 +50,8 @@ export interface RuntimeData {
   skills: SkillEntry[];
   mcpServers: MCPServerEntry[];
   plugins: PluginEntry[];
+  marketplaceCatalog: MarketplaceCatalog;
+  extensionThemes: ExtensionTheme[];
   hookCatalog: HookCatalog;
   usageReport: UsageReport | null;
   branches: GitBranch[];
@@ -60,6 +69,17 @@ export interface RuntimeData {
   contextUsage: ContextUsage;
   todo: TodoList | null;
   recap: SessionRecap | null;
+  securityScans: SecurityScan[];
+  securityConfig: SecurityConfig | null;
+  securityScansLoaded: boolean;
+  securityProjection: SecurityProjection | null;
+  securityProjections: Record<string, SecurityProjection>;
+  securityFindings: SecurityFinding[];
+  selectedSecurityFinding: SecurityFinding | null;
+  securityPatch: SecurityPatchResult | null;
+  securityFindingsByScan: Record<string, SecurityFinding[]>;
+  securityExportPath: string;
+  securityPublication: Record<string, string> | null;
   recovery: Array<Record<string, unknown>>;
   runId: string;
   running: boolean;
@@ -84,7 +104,7 @@ export interface RuntimeData {
   // Follow-up queues are process-local but session-scoped, matching Codex navigation behavior.
   queuedPrompts: QueuedPrompt[];
   queuePauseReasons: Record<string, "interrupted">;
-  theme: "system" | "light" | "dark";
+  theme: string;
   uiFont: UIFont;
   uiFontSize: number;
   chatFontSize: number;

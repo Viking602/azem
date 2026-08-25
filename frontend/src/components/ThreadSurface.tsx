@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { ArrowDown, Check, ChevronDown, GitBranch, PanelsTopLeft, Plus, Search, SquareTerminal, Users } from "lucide-react";
-import { cancelActive, execute, guide, importAttachment, importClipboardImage, startTurn } from "../bridge";
+import { ArrowDown, Check, ChevronDown, GitBranch, PanelsTopLeft, Search, SquareTerminal } from "lucide-react";
+import { cancelActive, execute, followUp, guide, importAttachment, importClipboardImage, startTurn } from "../bridge";
 import { chatTypographyVars } from "../chatTypography";
 import { tFormat, translator } from "../i18n";
 import { useRuntimeStore } from "../store";
@@ -232,17 +232,18 @@ export default function ThreadSurface() {
       if (source === "composer") resetComposer();
       return void beginTurn(trimmed, images);
     }
-    // Starting (the bridge has not returned runId yet), another session is active,
-    // or Queue is selected: never attempt a concurrent turn.
-    if (!running || !runId || (modeOverride ?? deliveryMode) === "queue") {
+    // Starting, a foreign session, or an unavailable run id cannot accept
+    // run-scoped control; keep those prompts in the local cross-run queue.
+    if (!running || !runId) {
       if (source === "composer") resetComposer();
       enqueuePrompt(trimmed, images);
       setFollowing(true);
       return;
     }
     const sessionId = currentSessionId;
+    const mode = modeOverride ?? deliveryMode;
     if (source === "composer") resetComposer();
-    await sendGuidance(sessionId, runId, trimmed, images, () => {
+    await sendTurnControl(mode, sessionId, runId, trimmed, images, () => {
       if (!isCurrentSession(sessionId)) return;
       addOptimisticUser(trimmed, images);
       setFollowing(true);
@@ -280,7 +281,7 @@ export default function ThreadSurface() {
   const guideQueued = async (item: QueuedPrompt) => {
     if (!running || !runId || item.sessionId !== currentSessionId) return;
     const sessionId = item.sessionId;
-    await sendGuidance(sessionId, runId, item.text, item.attachments, () => {
+    await sendTurnControl("guide", sessionId, runId, item.text, item.attachments, () => {
       removeQueuedPrompt(sessionId, item.id);
       if (isCurrentSession(sessionId)) addOptimisticUser(item.text, item.attachments);
     }, (message) => {
@@ -414,7 +415,8 @@ function isCurrentSession(sessionId: string): boolean {
   return (state.currentSessionId || state.snapshot?.sessionId || "") === sessionId;
 }
 
-async function sendGuidance(
+async function sendTurnControl(
+  mode: DeliveryMode,
   sessionId: string,
   runId: string,
   text: string,
@@ -423,7 +425,8 @@ async function sendGuidance(
   onError: (message: string) => void,
 ) {
   try {
-    await guide(sessionId, runId, text, attachments);
+    if (mode === "queue") await followUp(sessionId, runId, text, attachments);
+    else await guide(sessionId, runId, text, attachments);
     onSuccess();
   } catch (cause) {
     onError(cause instanceof Error ? cause.message : String(cause));
@@ -615,15 +618,10 @@ function HeaderActions({ environmentOpen, onEnvironmentOpenChange }: {
   onEnvironmentOpenChange: (open: boolean) => void;
 }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
-  const setView = useRuntimeStore((state) => state.setView);
   const terminalOpen = useTerminalStore((state) => state.open);
   const t = translator(snapshot.language);
-  const collaborateLabel = t("collaborate");
-  const addSourceLabel = t("addSource");
   const environmentLabel = t("environment");
   return <div className="thread-actions">
-    <button type="button" className="thread-header-action" onClick={() => setView("agents")}><Users size={14} aria-hidden="true" /><span>{collaborateLabel}</span></button>
-    <button type="button" className="thread-header-action" onClick={() => document.querySelector<HTMLInputElement>(".attach-button input")?.click()}><Plus size={14} aria-hidden="true" /><span>{addSourceLabel}</span></button>
     <button type="button" className="square-button thread-environment-toggle" data-open={String(environmentOpen)} aria-label={environmentLabel} aria-pressed={environmentOpen} title={environmentLabel} onClick={() => onEnvironmentOpenChange(!environmentOpen)}><PanelsTopLeft size={15} aria-hidden="true" /></button>
     <button type="button" className="square-button terminal-toggle" data-open={String(terminalOpen)} aria-label={t("toggleTerminal")} aria-pressed={terminalOpen} title={t("toggleTerminal")} onClick={() => useTerminalStore.getState().toggle()}><SquareTerminal size={15} aria-hidden="true" /></button>
   </div>;

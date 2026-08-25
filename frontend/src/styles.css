@@ -7,11 +7,13 @@
  */
 @import "./styles/base.css";
 @import "./styles/side-chat.css";
+@import "./styles/subagents.css";
 @import "./styles/sidebar.css";
 @import "./styles/conversation.css";
 @import "./styles/workspace.css";
 @import "./styles/extensions.css";
 @import "./styles/pull-requests.css";
+@import "./styles/security.css";
 @import "./styles/settings.css";
 @import "./styles/terminal.css";
 @import "tw-animate-css";

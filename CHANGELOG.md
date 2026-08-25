@@ -1,6 +1,85 @@
 # Changelog
 
 ## Unreleased
+- Completed the frozen OMP v18.0.3 behavioral-parity program at commit
+  `160ed439ac0df594347e7d7018b813a7ffdb5e81`. The executable parity manifest
+  now records all 71 in-scope coding-agent and operator capabilities as
+  `complete` or `stronger`; public-library API compatibility and OMP visual
+  identity remain outside that frozen scope.
+
+- Upgraded the shared runtimes to Venat v0.15.4 and llmux v0.3.1. Provider
+  streams now preserve commentary/final phases, terminal state, stop reason,
+  reported usage/cache flags, sources/files/warnings, modalities, and
+  compatibility descriptors. Venat adds validated tool arguments, duplicate
+  registration rejection, per-tool concurrency, durable turn control,
+  replay-safe Skill authorization, and unified subagent scheduling.
+
+- Added OMP-compatible read/write/Hashline/glob/grep/AST/LSP/DAP/eval/browser/
+  computer/web/GitHub/SSH/process/media/memory tools. Eval supports persistent
+  Python, JavaScript, Ruby, and Julia kernels when the host runtime exists.
+  Custom extensions may broker only permission-failed workspace-local ordinary
+  file writes/deletes; non-permission failures, unresolved symlinks, escapes,
+  archives, SQLite, and subprocess writes remain outside that seam.
+
+- Added Goal, Advisor, TTSR, prewalk, Plan YOLO, Vibe, checkpoint/rewind,
+  repeated-loop and unexpected-stop guards, batch structured subagents, Hub
+  peer messaging/process supervision, and parked-agent revival. `ask` is now
+  available in ordinary interactive single-agent turns; `submit_plan` remains
+  plan-only.
+
+- Added cross-harness context/rule/Skill/MCP/Hook discovery; MCP OAuth,
+  resources, templates, prompts, subscriptions, and notifications; staged
+  marketplace lifecycle; custom Bun tools, commands, providers, agents,
+  themes, and file fallbacks; and managed automatic Skill learning. Desktop
+  Extensions now includes a searchable marketplace with user/project scope,
+  direct catalog readback, update/upgrade/enable/uninstall controls, and
+  confirmation for destructive operations. TUI adds `/extensions` and
+  `/marketplace`.
+
+- Added parent-linked session trees, branches, labels, forks, Claude/Codex JSONL
+  import, HTML/text/lossless JSON export, AES-256-GCM session sharing, and
+  encrypted live collaboration. Desktop Environment exposes accessible session
+  history navigation and labels. TUI adds `/tree`, `/branch`, `/fork`,
+  `/label`, `/import`, `/export`, `/share`, `/usage`, and `/collab`.
+
+- Added normal text/NDJSON headless operation, JSON-RPC v1/v2, ACP v2, and the
+  supported root Go embedding API. The operator registry now owns shell
+  completion, setup/update/GC, auth broker/gateway services, usage reports,
+  benchmark workflows, and signed GitHub webhook repair triggers.
+
+- SQLite schema 24 adds session graphs/branches/labels; schema 25 adds
+  auth-broker tokens, disable/block state, and usage observations; schema 26
+  adds idempotent signed-webhook delivery receipts. Runtime migrations and the
+  SQLC schema remain synchronized, preserve user data, and reject unknown future
+  versions.
+
+- These changes intentionally expand the static tool/instruction prefix and
+  therefore start one new provider cache epoch. Stable tool order and message
+  order are preserved afterward. Replaying an activated Skill now restores only
+  resource-read authorization; it no longer changes the static Skill/tool
+  prefix on the following turn.
+- Restored the complete Subagents drawer/page/glyph stylesheet after the
+  Inspector removal, kept the composer inside the Environment panel's reserved
+  width at medium desktop sizes, routed Environment source attachment through
+  the registry Composer control, and read live workspace change counts from the
+  shared store so an open panel cannot go stale.
+
+
+- Added native Azem Security scanning. Standard, scoped, committed-diff,
+  working-tree, and Deep scans use host-resolved Azem routes and constrained
+  read-only security subagents against immutable snapshots. Schema 23 stores
+  durable scans, workers, usage, findings, triage, remediation, matching,
+  artifacts, and at-most-once publication receipts. The host binds read
+  receipts and finding locations to scope, preserves deleted-file diff evidence,
+  and seals canonical manifest/findings/coverage/report/SARIF output. Desktop
+  and TUI expose scan progress, blocked-scan resume, finding detail, export, and
+  isolated independently verified patches; configured MCP publication remains
+  an explicit governed TUI action. Desktop Settings now includes a Security
+  scans section for execution limits, the run deadline, and model routes while
+  keeping MCP publication arguments administrator-only and redacted. Native
+  scans impose no Token/tool-call hard ceiling. No Codex CLI, Node, or Python
+  runtime is added.
+
 - Open Todo items (`pending` / `in_progress`) block a model-initiated finish
   even when the run did not mutate files. The host keeps retrying until those
   items are completed or cancelled. User stop still cancels. This injects a

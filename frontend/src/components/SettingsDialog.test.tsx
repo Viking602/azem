@@ -325,6 +325,8 @@ describe("SettingsDialog", () => {
 	const catalogNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("模型目录"))!;
 	expect(catalogNav.querySelector("em")).toBeNull();
     const routesNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("模型路由"))!;
+    const securityNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.querySelector("strong")?.textContent === "安全扫描");
+    expect(securityNav).toBeTruthy();
     await act(async () => routesNav.click());
     expect(execute).toHaveBeenCalledWith({ kind: "list_model_routes", sessionId: "session-1" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_agent_types", sessionId: "session-1" });
@@ -1216,4 +1218,57 @@ describe("SettingsDialog", () => {
 		await act(async () => root.unmount());
 		container.remove();
 	});
+});
+
+it("guards unsaved Security settings when leaving the pane", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  useRuntimeStore.setState({
+    snapshot,
+    approvalMode: snapshot.approvalMode,
+    settingsOpen: true,
+    settingsTarget: null,
+    securityConfig: {
+      enabled: true, defaultMode: "standard", workers: 4, subagents: 3,
+      stopAfterNoNew: 4, stopAfterConsecutiveErrors: 3, maxDiscoveryRuns: 40,
+      maxTimeHours: 96,
+      routes: { audit: {}, reducer: {}, fixer: {}, verifier: {} },
+    },
+    modelRoutes: [
+      { scope: "security", role: "audit", label: "Security audit", route: {} },
+      { scope: "security", role: "reducer", label: "Security reducer", route: {} },
+      { scope: "security", role: "fixer", label: "Security fixer", route: {} },
+      { scope: "security", role: "verifier", label: "Security verifier", route: {} },
+    ],
+    modelsByProvider: {},
+    modelProviders: [],
+    agentCatalog: [],
+    mcpServers: [],
+    skills: [],
+    plugins: [],
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => root.render(<SettingsDialog />));
+  const securityNav = [...container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")]
+    .find((button) => button.querySelector("strong")?.textContent === "安全扫描")!;
+  await act(async () => securityNav.click());
+  expect(container.querySelectorAll(".security-route-card .route-row")).toHaveLength(4);
+  const workers = [...container.querySelectorAll<HTMLLabelElement>(".security-number-field")]
+    .find((label) => label.textContent?.includes("深度扫描 Worker"))!.querySelector("input")!;
+  await enterInput(workers, "6");
+  expect(container.querySelector(".settings-sidebar footer")?.textContent).toContain("执行与预算需保存");
+
+  const appearance = [...container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")]
+    .find((button) => button.querySelector("strong")?.textContent === "外观")!;
+  await act(async () => appearance.click());
+  expect(confirm).toHaveBeenCalled();
+  expect(container.querySelector(".settings-main")?.getAttribute("data-section")).toBe("security");
+
+  confirm.mockReturnValue(true);
+  await act(async () => appearance.click());
+  expect(container.querySelector(".settings-main")?.getAttribute("data-section")).toBe("appearance");
+  confirm.mockRestore();
+  await act(async () => root.unmount());
+  container.remove();
 });

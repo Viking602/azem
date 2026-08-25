@@ -1,9 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
@@ -41,17 +43,22 @@ func IsSubscriptionProvider(id string) bool {
 }
 
 type Config struct {
-	Version   int             `yaml:"version"`
-	Defaults  DefaultsConfig  `yaml:"defaults"`
-	Workspace WorkspaceConfig `yaml:"workspace"`
-	Auth      AuthConfig      `yaml:"auth"`
-	Providers ProvidersConfig `yaml:"providers"`
-	Agents    AgentsConfig    `yaml:"agents"`
-	MCP       MCPConfig       `yaml:"mcp"`
-	Skills    SkillsConfig    `yaml:"skills"`
-	Plugins   PluginsConfig   `yaml:"plugins"`
-	Hooks     HooksConfig     `yaml:"hooks"`
-	Retry     RetryConfig     `yaml:"retry"`
+	Version    int              `yaml:"version"`
+	Defaults   DefaultsConfig   `yaml:"defaults"`
+	Workspace  WorkspaceConfig  `yaml:"workspace"`
+	Auth       AuthConfig       `yaml:"auth"`
+	Providers  ProvidersConfig  `yaml:"providers"`
+	Agents     AgentsConfig     `yaml:"agents"`
+	Security   SecurityConfig   `yaml:"security"`
+	MCP        MCPConfig        `yaml:"mcp"`
+	Skills     SkillsConfig     `yaml:"skills"`
+	Plugins    PluginsConfig    `yaml:"plugins"`
+	Hooks      HooksConfig      `yaml:"hooks"`
+	Retry      RetryConfig      `yaml:"retry"`
+	Discovery  DiscoveryConfig  `yaml:"discovery" json:"discovery"`
+	Extensions ExtensionsConfig `yaml:"extensions" json:"extensions"`
+	AutoLearn  AutoLearnConfig  `yaml:"autolearn" json:"autolearn"`
+	TTSR       TTSRConfig       `yaml:"ttsr" json:"ttsr"`
 }
 
 type RetryConfig struct {
@@ -72,6 +79,49 @@ type HooksConfig struct {
 	FailurePolicy        string        `yaml:"failure_policy"`
 	AdditionalPaths      []string      `yaml:"additional_paths,omitempty"`
 	Disabled             []string      `yaml:"disabled,omitempty"`
+}
+type TTSRConfig struct {
+	Enabled       bool               `yaml:"enabled" json:"enabled"`
+	ContextMode   string             `yaml:"context_mode" json:"contextMode"`
+	InterruptMode string             `yaml:"interrupt_mode" json:"interruptMode"`
+	RepeatMode    string             `yaml:"repeat_mode" json:"repeatMode"`
+	RepeatGap     int                `yaml:"repeat_gap" json:"repeatGap"`
+	Rules         []StreamRuleConfig `yaml:"rules,omitempty" json:"rules,omitempty"`
+}
+
+type StreamRuleConfig struct {
+	Name          string   `yaml:"name" json:"name"`
+	Content       string   `yaml:"content" json:"content"`
+	Conditions    []string `yaml:"conditions,omitempty" json:"conditions,omitempty"`
+	ASTConditions []string `yaml:"ast_conditions,omitempty" json:"astConditions,omitempty"`
+	Scope         []string `yaml:"scope,omitempty" json:"scope,omitempty"`
+	Globs         []string `yaml:"globs,omitempty" json:"globs,omitempty"`
+	InterruptMode string   `yaml:"interrupt_mode,omitempty" json:"interruptMode,omitempty"`
+}
+type DiscoveryConfig struct {
+	ContextFiles           bool     `yaml:"context_files" json:"contextFiles"`
+	Rules                  bool     `yaml:"rules" json:"rules"`
+	Skills                 bool     `yaml:"skills" json:"skills"`
+	MCP                    bool     `yaml:"mcp" json:"mcp"`
+	Hooks                  bool     `yaml:"hooks" json:"hooks"`
+	DisabledProviders      []string `yaml:"disabled_providers,omitempty" json:"disabledProviders,omitempty"`
+	DisabledRules          []string `yaml:"disabled_rules,omitempty" json:"disabledRules,omitempty"`
+	AdditionalContextFiles []string `yaml:"additional_context_files,omitempty" json:"additionalContextFiles,omitempty"`
+}
+
+type ExtensionsConfig struct {
+	Enabled                  bool     `yaml:"enabled" json:"enabled"`
+	TrustProjectCode         bool     `yaml:"trust_project_code" json:"trustProjectCode"`
+	AdditionalToolPaths      []string `yaml:"additional_tool_paths,omitempty" json:"additionalToolPaths,omitempty"`
+	AdditionalCommandDirs    []string `yaml:"additional_command_dirs,omitempty" json:"additionalCommandDirs,omitempty"`
+	AdditionalExtensionPaths []string `yaml:"additional_extension_paths,omitempty" json:"additionalExtensionPaths,omitempty"`
+	AdditionalAgentDirs      []string `yaml:"additional_agent_dirs,omitempty" json:"additionalAgentDirs,omitempty"`
+	AdditionalThemeDirs      []string `yaml:"additional_theme_dirs,omitempty" json:"additionalThemeDirs,omitempty"`
+}
+type AutoLearnConfig struct {
+	Enabled      bool `yaml:"enabled" json:"enabled"`
+	AutoContinue bool `yaml:"auto_continue" json:"autoContinue"`
+	MinToolCalls int  `yaml:"min_tool_calls" json:"minToolCalls"`
 }
 
 type DefaultsConfig struct {
@@ -103,9 +153,19 @@ type ShellConfig struct {
 }
 
 type AuthConfig struct {
-	Store       string `yaml:"store"`
-	ImportCodex bool   `yaml:"import_codex"`
-	ImportGrok  bool   `yaml:"import_grok"`
+	Store       string           `yaml:"store"`
+	ImportCodex bool             `yaml:"import_codex"`
+	ImportGrok  bool             `yaml:"import_grok"`
+	Broker      AuthBrokerConfig `yaml:"broker,omitempty" json:"broker"`
+}
+
+type AuthBrokerConfig struct {
+	URL               string        `yaml:"url,omitempty" json:"url,omitempty"`
+	Token             string        `yaml:"token,omitempty" json:"-"`
+	SnapshotCache     string        `yaml:"snapshot_cache,omitempty" json:"snapshotCache,omitempty"`
+	SnapshotTTL       string        `yaml:"snapshot_ttl,omitempty" json:"snapshotTTL,omitempty"`
+	SnapshotTTLParsed time.Duration `yaml:"-" json:"-"`
+	AccountPoolFile   string        `yaml:"account_pool_file,omitempty" json:"accountPoolFile,omitempty"`
 }
 
 type ProvidersConfig struct {
@@ -116,8 +176,16 @@ type ProvidersConfig struct {
 }
 
 type LLMuxProviderConfig struct {
-	Enabled bool   `yaml:"enabled" json:"enabled"`
-	BaseURL string `yaml:"base_url,omitempty" json:"baseURL,omitempty"`
+	Enabled        bool              `yaml:"enabled" json:"enabled"`
+	BaseURL        string            `yaml:"base_url,omitempty" json:"baseURL,omitempty"`
+	DisplayName    string            `yaml:"display_name,omitempty" json:"displayName,omitempty"`
+	Backend        string            `yaml:"backend,omitempty" json:"backend,omitempty"`
+	EnvKey         string            `yaml:"env_key,omitempty" json:"envKey,omitempty"`
+	AllowEmptyKey  bool              `yaml:"allow_empty_key,omitempty" json:"allowEmptyKey,omitempty"`
+	APIKeyHeader   string            `yaml:"api_key_header,omitempty" json:"apiKeyHeader,omitempty"`
+	APIKeyPrefix   string            `yaml:"api_key_prefix,omitempty" json:"apiKeyPrefix,omitempty"`
+	RuntimeAPIKey  string            `yaml:"-" json:"-"`
+	RuntimeHeaders map[string]string `yaml:"-" json:"-"`
 	// Models is accepted from legacy YAML on load, then stored in SQLite.
 	Models []LLMuxModelConfig `yaml:"models,omitempty" json:"models,omitempty"`
 }
@@ -160,15 +228,32 @@ type CursorConfig struct {
 }
 
 type AgentsConfig struct {
-	Main      MainAgentConfig  `yaml:"main"`
-	Team      TeamConfig       `yaml:"team"`
-	Title     ModelRouteConfig `yaml:"title" json:"title"`
-	Plan      ModelRouteConfig `yaml:"plan" json:"plan"`
-	Approval  ModelRouteConfig `yaml:"approval" json:"approval"`
-	Vision    ModelRouteConfig `yaml:"vision" json:"vision"`
-	Recap     ModelRouteConfig `yaml:"recap" json:"recap"`
-	Context   ContextConfig    `yaml:"context"`
-	Subagents SubagentConfig   `yaml:"subagents"`
+	Main       MainAgentConfig  `yaml:"main"`
+	Team       TeamConfig       `yaml:"team"`
+	Title      ModelRouteConfig `yaml:"title" json:"title"`
+	Plan       ModelRouteConfig `yaml:"plan" json:"plan"`
+	Approval   ModelRouteConfig `yaml:"approval" json:"approval"`
+	Vision     ModelRouteConfig `yaml:"vision" json:"vision"`
+	Recap      ModelRouteConfig `yaml:"recap" json:"recap"`
+	Advisor    AdvisorConfig    `yaml:"advisor" json:"advisor"`
+	Context    ContextConfig    `yaml:"context"`
+	Vibe       VibeConfig       `yaml:"vibe" json:"vibe"`
+	LoopGuards LoopGuardConfig  `yaml:"loop_guards" json:"loopGuards"`
+	Subagents  SubagentConfig   `yaml:"subagents"`
+}
+
+type VibeConfig struct {
+	Fast ModelRouteConfig `yaml:"fast" json:"fast"`
+	Good ModelRouteConfig `yaml:"good" json:"good"`
+}
+type LoopGuardConfig struct {
+	ThinkingEnabled       bool     `yaml:"thinking_enabled" json:"thinkingEnabled"`
+	AssistantTextEnabled  bool     `yaml:"assistant_text_enabled" json:"assistantTextEnabled"`
+	ToolCallEnabled       bool     `yaml:"tool_call_enabled" json:"toolCallEnabled"`
+	ToolCallThreshold     int      `yaml:"tool_call_threshold" json:"toolCallThreshold"`
+	ToolCallExemptTools   []string `yaml:"tool_call_exempt_tools" json:"toolCallExemptTools"`
+	UnexpectedStop        string   `yaml:"unexpected_stop" json:"unexpectedStop"`
+	UnexpectedStopRetries int      `yaml:"unexpected_stop_retries" json:"unexpectedStopRetries"`
 }
 
 type ContextConfig struct {
@@ -177,6 +262,19 @@ type ContextConfig struct {
 	KeepRecentTokens       int  `yaml:"keep_recent_tokens"`
 	LargeToolResultTokens  int  `yaml:"large_tool_result_tokens"`
 	HistoryRetrievalTokens int  `yaml:"history_retrieval_tokens"`
+}
+type AdvisorConfig struct {
+	Enabled                bool          `yaml:"enabled" json:"enabled"`
+	Provider               string        `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Model                  string        `yaml:"model,omitempty" json:"model,omitempty"`
+	Reasoning              string        `yaml:"reasoning,omitempty" json:"reasoning,omitempty"`
+	CatchupTimeout         string        `yaml:"catchup_timeout" json:"catchupTimeout"`
+	CatchupTimeoutDuration time.Duration `yaml:"-" json:"-"`
+	Instructions           string        `yaml:"instructions,omitempty" json:"instructions,omitempty"`
+}
+
+func (c AdvisorConfig) Route() ModelRouteConfig {
+	return ModelRouteConfig{Provider: c.Provider, Model: c.Model, Reasoning: c.Reasoning}
 }
 
 // ModelRouteConfig selects a provider model for a specific agent operation.
@@ -215,10 +313,142 @@ type SkillsConfig struct {
 // loading never executes directly from the Codex cache. Hooks remain explicitly
 // trusted.
 type PluginsConfig struct {
-	Enabled      bool     `yaml:"enabled"`
-	ImportCodex  bool     `yaml:"import_codex"`
-	CodexImports []string `yaml:"codex_imports,omitempty"`
-	TrustHooks   bool     `yaml:"trust_hooks"`
+	Enabled               bool     `yaml:"enabled"`
+	ImportCodex           bool     `yaml:"import_codex"`
+	CodexImports          []string `yaml:"codex_imports,omitempty"`
+	TrustHooks            bool     `yaml:"trust_hooks"`
+	MarketplaceAutoUpdate string   `yaml:"marketplace_auto_update" json:"marketplaceAutoUpdate"`
+}
+type SecurityRoutesConfig struct {
+	Audit    ModelRouteConfig `yaml:"audit" json:"audit"`
+	Reducer  ModelRouteConfig `yaml:"reducer" json:"reducer"`
+	Fixer    ModelRouteConfig `yaml:"fixer" json:"fixer"`
+	Verifier ModelRouteConfig `yaml:"verifier" json:"verifier"`
+}
+
+type SecurityConfig struct {
+	Enabled                    bool    `yaml:"enabled" json:"enabled"`
+	DefaultMode                string  `yaml:"default_mode" json:"defaultMode"`
+	Workers                    int     `yaml:"workers" json:"workers"`
+	Subagents                  int     `yaml:"subagents" json:"subagents"`
+	StopAfterNoNew             int     `yaml:"stop_after_no_new" json:"stopAfterNoNew"`
+	StopAfterConsecutiveErrors int     `yaml:"stop_after_consecutive_errors" json:"stopAfterConsecutiveErrors"`
+	MaxDiscoveryRuns           int     `yaml:"max_discovery_runs" json:"maxDiscoveryRuns"`
+	MaxTimeHours               float64 `yaml:"max_time_hours" json:"maxTimeHours"`
+	MaxCostUSD                 float64 `yaml:"max_cost_usd" json:"-"`
+	// MaxTokens and MaxToolCalls are retained only to accept older YAML files.
+	// Native scans ignore both values so a partial provider usage count cannot
+	// terminate a security review mid-scan.
+	MaxTokens                   int64                `yaml:"max_tokens,omitempty" json:"-"`
+	MaxToolCalls                int                  `yaml:"max_tool_calls,omitempty" json:"-"`
+	PublicationTool             string               `yaml:"publication_tool,omitempty" json:"publicationTool,omitempty"`
+	PublicationDestination      string               `yaml:"publication_destination,omitempty" json:"publicationDestination,omitempty"`
+	PublicationArguments        map[string]any       `yaml:"publication_arguments,omitempty" json:"publicationArguments,omitempty"`
+	PublicationTitleField       string               `yaml:"publication_title_field,omitempty" json:"publicationTitleField,omitempty"`
+	PublicationDescriptionField string               `yaml:"publication_description_field,omitempty" json:"publicationDescriptionField,omitempty"`
+	Routes                      SecurityRoutesConfig `yaml:"routes" json:"routes"`
+}
+
+func (c SecurityConfig) Validate() error {
+	if c.DefaultMode != "standard" && c.DefaultMode != "deep" {
+		return fmt.Errorf("security.default_mode must be standard or deep")
+	}
+	if c.Workers < 1 || c.Workers > 32 ||
+		c.Subagents < 0 || c.Subagents > 32 ||
+		c.StopAfterNoNew < 1 || c.StopAfterNoNew > 1000 ||
+		c.StopAfterConsecutiveErrors < 1 || c.StopAfterConsecutiveErrors > 1000 ||
+		c.MaxDiscoveryRuns < 1 || c.MaxDiscoveryRuns > 1000 {
+		return fmt.Errorf("security worker and stopping limits are invalid")
+	}
+	if c.MaxTimeHours <= 0 || c.MaxTimeHours > 96 {
+		return fmt.Errorf("security max_time_hours must be in (0,96]")
+	}
+	if c.MaxCostUSD != 0 {
+		return fmt.Errorf("security max_cost_usd requires trusted provider pricing and must remain zero")
+	}
+	if c.MaxTokens < 0 || c.MaxToolCalls < 0 {
+		return fmt.Errorf("security legacy max_tokens and max_tool_calls must be non-negative")
+	}
+	for name, value := range map[string]string{
+		"publication_tool": c.PublicationTool, "publication_destination": c.PublicationDestination,
+		"publication_title_field": c.PublicationTitleField, "publication_description_field": c.PublicationDescriptionField,
+	} {
+		if len(value) > 256 || strings.ContainsAny(value, "\r\n\x00") {
+			return fmt.Errorf("security %s is invalid", name)
+		}
+	}
+	if err := validateSecurityPublicationArguments(c.PublicationArguments); err != nil {
+		return err
+	}
+	for name, route := range map[string]ModelRouteConfig{
+		"audit": c.Routes.Audit, "reducer": c.Routes.Reducer,
+		"fixer": c.Routes.Fixer, "verifier": c.Routes.Verifier,
+	} {
+		if err := validateModelRoute("security.routes."+name, route); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSecurityPublicationArguments(arguments map[string]any) error {
+	if len(arguments) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(arguments)
+	if err != nil {
+		return fmt.Errorf("security publication_arguments must be JSON-compatible: %w", err)
+	}
+	if len(encoded) > 64<<10 {
+		return fmt.Errorf("security publication_arguments exceeds 64 KiB")
+	}
+	totalKeys := 0
+	var inspect func(any, int) error
+	inspect = func(value any, depth int) error {
+		if depth > 8 {
+			return fmt.Errorf("security publication_arguments exceeds maximum nesting depth")
+		}
+		switch typed := value.(type) {
+		case map[string]any:
+			totalKeys += len(typed)
+			if totalKeys > 256 {
+				return fmt.Errorf("security publication_arguments exceeds 256 keys")
+			}
+			for key, nested := range typed {
+				normalized := strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(key))
+				for _, sensitive := range []string{"token", "password", "secret", "api_key", "authorization", "credential"} {
+					if strings.Contains(normalized, sensitive) {
+						return fmt.Errorf("security publication_arguments key %q may not contain credentials", key)
+					}
+				}
+				if len(key) > 256 {
+					return fmt.Errorf("security publication_arguments key is too long")
+				}
+				if err := inspect(nested, depth+1); err != nil {
+					return err
+				}
+			}
+		case []any:
+			if len(typed) > 256 {
+				return fmt.Errorf("security publication_arguments array exceeds 256 values")
+			}
+			for _, nested := range typed {
+				if err := inspect(nested, depth+1); err != nil {
+					return err
+				}
+			}
+		case string:
+			if len(typed) > 8<<10 {
+				return fmt.Errorf("security publication_arguments string exceeds 8 KiB")
+			}
+		case nil, bool, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, json.Number:
+			return nil
+		default:
+			return fmt.Errorf("security publication_arguments contains unsupported value %T", value)
+		}
+		return nil
+	}
+	return inspect(arguments, 1)
 }
 
 type TeamConfig struct {
@@ -331,12 +561,37 @@ type MCPServerConfig struct {
 	ConnectDuration time.Duration           `yaml:"-"`
 	CallDuration    time.Duration           `yaml:"-"`
 	// Managed records catalog ownership for diagnostics and migration. It does
+	Auth                     *MCPAuthConfig  `yaml:"auth,omitempty" json:"auth,omitempty"`
+	OAuth                    *MCPOAuthConfig `yaml:"oauth,omitempty" json:"oauth,omitempty"`
+	RuntimeAuthClientSecret  string          `yaml:"-" json:"-"`
+	RuntimeOAuthClientSecret string          `yaml:"-" json:"-"`
 	// not restrict deletion: removed catalog entries are suppressed explicitly
 	// through MCPConfig.RemovedServers.
 	Managed bool `yaml:"managed,omitempty" json:"-"`
 	// Icon is a bounded data URL projected from a plugin asset. It is never
 	// written to configuration.
 	Icon string `yaml:"-" json:"-"`
+}
+type MCPAuthConfig struct {
+	Type         string `yaml:"type" json:"type"`
+	CredentialID string `yaml:"credential_id,omitempty" json:"credentialId,omitempty"`
+	TokenURL     string `yaml:"token_url,omitempty" json:"tokenUrl,omitempty"`
+	ClientID     string `yaml:"client_id,omitempty" json:"clientId,omitempty"`
+	ClientSecret string `yaml:"client_secret,omitempty" json:"-"`
+	Resource     string `yaml:"resource,omitempty" json:"resource,omitempty"`
+}
+
+type MCPOAuthConfig struct {
+	AuthorizationURL string   `yaml:"authorization_url,omitempty" json:"authorizationUrl,omitempty"`
+	TokenURL         string   `yaml:"token_url,omitempty" json:"tokenUrl,omitempty"`
+	RegistrationURL  string   `yaml:"registration_url,omitempty" json:"registrationUrl,omitempty"`
+	ClientID         string   `yaml:"client_id,omitempty" json:"clientId,omitempty"`
+	ClientSecret     string   `yaml:"client_secret,omitempty" json:"-"`
+	Scopes           []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+	RedirectURI      string   `yaml:"redirect_uri,omitempty" json:"redirectUri,omitempty"`
+	CallbackPort     int      `yaml:"callback_port,omitempty" json:"callbackPort,omitempty"`
+	CallbackPath     string   `yaml:"callback_path,omitempty" json:"callbackPath,omitempty"`
+	Prompt           string   `yaml:"prompt,omitempty" json:"prompt,omitempty"`
 }
 
 type ToolOverride struct {
@@ -351,7 +606,7 @@ func Default() Config {
 			Provider: "chatgpt", Model: "gpt-5.6-sol", Reasoning: "high", AgentMode: "single", Theme: "system", Language: "en", ApprovalMode: "prompt", QueueMode: "queue",
 		},
 		Workspace: WorkspaceConfig{AllowWrite: true, ShellPolicy: "prompt", AllowNetwork: "prompt", Shell: ShellConfig{MaxContextOutputBytes: 65536, MaxArtifactOutputBytes: 4194304, StopOnOutputLimit: true, MaxConcurrency: 2, MaxWallClock: "10m", MaxWallClockDuration: DefaultShellMaxWallClock}},
-		Auth:      AuthConfig{Store: "sqlite", ImportCodex: true, ImportGrok: true},
+		Auth:      AuthConfig{Store: "sqlite", ImportCodex: true, ImportGrok: true, Broker: AuthBrokerConfig{SnapshotTTL: "1h", SnapshotTTLParsed: time.Hour}},
 		Providers: ProvidersConfig{
 			ChatGPT: ChatGPTConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}},
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
@@ -362,12 +617,19 @@ func Default() Config {
 			Enabled: true, MaxRetries: 5, BaseDelay: "500ms", BaseDelayDuration: 500 * time.Millisecond,
 			MaxDelay: "5m", MaxDelayDuration: 5 * time.Minute,
 		},
+		TTSR: TTSRConfig{Enabled: true, ContextMode: "discard", InterruptMode: "always", RepeatMode: "once", RepeatGap: 10, Rules: []StreamRuleConfig{}},
 		Agents: AgentsConfig{
 			Main:     MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
 			Team:     TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
 			Title:    ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
 			Approval: ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
 			Recap:    ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
+			Advisor:  AdvisorConfig{Enabled: false, Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low", CatchupTimeout: "30s", CatchupTimeoutDuration: 30 * time.Second},
+			Vibe:     VibeConfig{Fast: ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"}},
+			LoopGuards: LoopGuardConfig{
+				ThinkingEnabled: true, AssistantTextEnabled: true, ToolCallEnabled: true, ToolCallThreshold: 5,
+				ToolCallExemptTools: []string{"hub", "vibe_wait", "subagent.get_output"}, UnexpectedStop: "mechanical", UnexpectedStopRetries: 2,
+			},
 			Context: ContextConfig{
 				Enabled: true, ReserveTokens: 16384, KeepRecentTokens: 20000,
 				LargeToolResultTokens: 12000, HistoryRetrievalTokens: 4096,
@@ -383,13 +645,27 @@ func Default() Config {
 				},
 			},
 		},
+		Security: SecurityConfig{
+			Enabled: true, DefaultMode: "standard", Workers: 4, Subagents: 3,
+			StopAfterNoNew: 4, StopAfterConsecutiveErrors: 3, MaxDiscoveryRuns: 40, MaxTimeHours: 96,
+		},
 		Skills:  SkillsConfig{Enabled: true, TrustProject: false},
-		Plugins: PluginsConfig{Enabled: true, ImportCodex: true, TrustHooks: false},
+		Plugins: PluginsConfig{Enabled: true, ImportCodex: true, TrustHooks: false, MarketplaceAutoUpdate: "notify"},
 		Hooks: HooksConfig{
 			Enabled: true, ClaudeCompatibility: false, DefaultTimeout: "5s",
 			DefaultTimeoutParsed: 5 * time.Second, FailurePolicy: "open",
 		},
 		MCP: MCPConfig{Servers: builtInMCPServers()},
+		Discovery: DiscoveryConfig{
+			ContextFiles: true, Rules: true, Skills: true, MCP: true, Hooks: true,
+			DisabledProviders: []string{}, DisabledRules: []string{}, AdditionalContextFiles: []string{},
+		},
+		Extensions: ExtensionsConfig{
+			Enabled: true, TrustProjectCode: false,
+			AdditionalToolPaths: []string{}, AdditionalCommandDirs: []string{}, AdditionalExtensionPaths: []string{},
+			AdditionalAgentDirs: []string{}, AdditionalThemeDirs: []string{},
+		},
+		AutoLearn: AutoLearnConfig{Enabled: false, AutoContinue: false, MinToolCalls: 5},
 	}
 }
 
@@ -407,9 +683,9 @@ func builtInMCPServers() map[string]MCPServerConfig {
 }
 
 func builtInSubagentRoles() map[string]SubagentRoleConfig {
-	readOnly := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "coding.git_diff"}
-	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell")
-	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell")
+	readOnly := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "ast_grep", "lsp", "web_search", "github", "recall", "coding.git_diff"}
+	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell", "debug", "eval", "browser", "computer", "hub", "generate_image", "tts", "retain", "memory_edit")
+	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell", "debug", "eval", "browser", "computer", "hub")
 	return map[string]SubagentRoleConfig{
 		"worker": {
 			Description:    "Implement one scoped coding task end-to-end and return verified evidence.",
@@ -429,6 +705,16 @@ func builtInSubagentRoles() map[string]SubagentRoleConfig {
 		"review": {
 			Description:    "Review a delegated change for requirement, correctness, and regression risks without editing.",
 			Instructions:   strings.TrimSpace(reviewSubagentInstructions),
+			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), readOnly...), Source: "builtin",
+		},
+		"security-baseline": {
+			Description:    "Run one independent read-only source-backed security audit.",
+			Instructions:   strings.TrimSpace(securityBaselineSubagentInstructions),
+			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), readOnly...), Source: "builtin",
+		},
+		"security-investigator": {
+			Description:    "Investigate one concrete security packet with exact source evidence.",
+			Instructions:   strings.TrimSpace(securityInvestigatorSubagentInstructions),
 			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), readOnly...), Source: "builtin",
 		},
 		"verify": {
@@ -472,6 +758,24 @@ func (c *Config) Validate() error {
 	if c.Auth.Store != "sqlite" && c.Auth.Store != "keyring" && c.Auth.Store != "file" {
 		return fmt.Errorf("auth.store must be sqlite, keyring, or file")
 	}
+	if strings.TrimSpace(c.Auth.Broker.URL) != "" {
+		endpoint, err := url.Parse(strings.TrimSpace(c.Auth.Broker.URL))
+		if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" ||
+			(endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && isLoopbackHost(endpoint.Hostname()))) {
+			return fmt.Errorf("auth.broker.url must use https (http is allowed only for loopback)")
+		}
+		if strings.ContainsAny(c.Auth.Broker.Token, "\r\n\x00") {
+			return fmt.Errorf("auth.broker.token contains an unsafe character")
+		}
+	}
+	if strings.TrimSpace(c.Auth.Broker.SnapshotTTL) == "" {
+		c.Auth.Broker.SnapshotTTL = "1h"
+	}
+	brokerTTL, err := time.ParseDuration(c.Auth.Broker.SnapshotTTL)
+	if err != nil || brokerTTL < 0 {
+		return fmt.Errorf("auth.broker.snapshot_ttl must be a non-negative duration")
+	}
+	c.Auth.Broker.SnapshotTTLParsed = brokerTTL
 	if c.Workspace.ShellPolicy != "prompt" && c.Workspace.ShellPolicy != "deny" && c.Workspace.ShellPolicy != "allow" {
 		return fmt.Errorf("workspace.shell_policy must be prompt, deny, or allow")
 	}
@@ -550,12 +854,87 @@ func (c *Config) Validate() error {
 	if err := validateModelRoute("agents.recap", c.Agents.Recap); err != nil {
 		return err
 	}
+	if err := validateModelRoute("agents.advisor", c.Agents.Advisor.Route()); err != nil {
+		return err
+	}
+	advisorTimeout, err := time.ParseDuration(c.Agents.Advisor.CatchupTimeout)
+	if err != nil || advisorTimeout <= 0 || advisorTimeout > 30*time.Second {
+		return fmt.Errorf("agents.advisor.catchup_timeout must be between 1ns and 30s")
+	}
+	if len(c.Agents.Advisor.Instructions) > 32<<10 {
+		return fmt.Errorf("agents.advisor.instructions exceeds 32 KiB")
+	}
+	c.Agents.Advisor.CatchupTimeoutDuration = advisorTimeout
+	if err := validateInheritedModelRoute("agents.vibe.fast", c.Agents.Vibe.Fast); err != nil {
+		return err
+	}
+	if err := validateInheritedModelRoute("agents.vibe.good", c.Agents.Vibe.Good); err != nil {
+		return err
+	}
 	contextConfig := c.Agents.Context
+	if c.Agents.LoopGuards.ToolCallThreshold < 2 || c.Agents.LoopGuards.ToolCallThreshold > 100 {
+		return fmt.Errorf("agents.loop_guards.tool_call_threshold must be between 2 and 100")
+	}
+	if len(c.Agents.LoopGuards.ToolCallExemptTools) > 128 {
+		return fmt.Errorf("agents.loop_guards.tool_call_exempt_tools exceeds 128 entries")
+	}
+	for _, name := range c.Agents.LoopGuards.ToolCallExemptTools {
+		if strings.TrimSpace(name) == "" || len(name) > 128 || strings.ContainsAny(name, "\r\n\x00") {
+			return fmt.Errorf("agents.loop_guards contains an invalid exempt tool")
+		}
+	}
+	if c.Agents.LoopGuards.UnexpectedStop != "none" && c.Agents.LoopGuards.UnexpectedStop != "mechanical" && c.Agents.LoopGuards.UnexpectedStop != "smart" {
+		return fmt.Errorf("agents.loop_guards.unexpected_stop must be none, mechanical, or smart")
+	}
+	if c.Agents.LoopGuards.UnexpectedStopRetries < 0 || c.Agents.LoopGuards.UnexpectedStopRetries > 10 {
+		return fmt.Errorf("agents.loop_guards.unexpected_stop_retries must be between 0 and 10")
+	}
 	if contextConfig.ReserveTokens <= 0 || contextConfig.KeepRecentTokens <= 0 || contextConfig.LargeToolResultTokens <= 0 || contextConfig.HistoryRetrievalTokens <= 0 {
 		return fmt.Errorf("agents.context token limits must be positive")
 	}
 	if err := c.validateSubagents(); err != nil {
 		return err
+	}
+	if err := c.Security.Validate(); err != nil {
+		return err
+	}
+	if err := c.validateTTSR(); err != nil {
+		return err
+	}
+	if c.AutoLearn.MinToolCalls <= 0 || c.AutoLearn.MinToolCalls > 1000 {
+		return fmt.Errorf("autolearn.min_tool_calls must be between 1 and 1000")
+	}
+	switch c.Plugins.MarketplaceAutoUpdate {
+	case "", "off", "notify", "auto":
+		if c.Plugins.MarketplaceAutoUpdate == "" {
+			c.Plugins.MarketplaceAutoUpdate = "notify"
+		}
+	default:
+		return fmt.Errorf("plugins.marketplace_auto_update must be off, notify, or auto")
+	}
+	if len(c.Extensions.AdditionalToolPaths) > 128 || len(c.Extensions.AdditionalCommandDirs) > 128 ||
+		len(c.Extensions.AdditionalExtensionPaths) > 128 || len(c.Extensions.AdditionalAgentDirs) > 128 || len(c.Extensions.AdditionalThemeDirs) > 128 {
+		return fmt.Errorf("extensions contains too many additional paths")
+	}
+	extensionPaths := append(append(append(append([]string(nil), c.Extensions.AdditionalToolPaths...), c.Extensions.AdditionalCommandDirs...), c.Extensions.AdditionalExtensionPaths...), c.Extensions.AdditionalAgentDirs...)
+	extensionPaths = append(extensionPaths, c.Extensions.AdditionalThemeDirs...)
+	for _, path := range extensionPaths {
+		if strings.TrimSpace(path) == "" || len(path) > 4096 || strings.ContainsAny(path, "\r\n\x00") {
+			return fmt.Errorf("extensions contains an invalid additional path")
+		}
+	}
+	if len(c.Discovery.DisabledProviders) > 32 || len(c.Discovery.DisabledRules) > 256 || len(c.Discovery.AdditionalContextFiles) > 128 {
+		return fmt.Errorf("discovery configuration exceeds safe limits")
+	}
+	for _, name := range append(append([]string(nil), c.Discovery.DisabledProviders...), c.Discovery.DisabledRules...) {
+		if strings.TrimSpace(name) == "" || len(name) > 128 || strings.ContainsAny(name, "\r\n\x00") {
+			return fmt.Errorf("discovery contains an invalid provider or rule")
+		}
+	}
+	for _, path := range c.Discovery.AdditionalContextFiles {
+		if strings.TrimSpace(path) == "" || len(path) > 4096 || strings.ContainsAny(path, "\r\n\x00") {
+			return fmt.Errorf("discovery contains an invalid additional context file")
+		}
 	}
 	removedServers := make([]string, 0, len(c.MCP.RemovedServers))
 	removedSet := make(map[string]struct{}, len(c.MCP.RemovedServers))
@@ -582,6 +961,87 @@ func (c *Config) Validate() error {
 	}
 	if runtime.GOOS == "js" && c.Auth.Store == "keyring" {
 		return fmt.Errorf("keyring credential storage is unavailable on js")
+	}
+	return nil
+}
+
+func (c *Config) validateTTSR() error {
+	switch c.TTSR.ContextMode {
+	case "discard", "keep":
+	default:
+		return fmt.Errorf("ttsr.context_mode must be discard or keep")
+	}
+	switch c.TTSR.InterruptMode {
+	case "never", "prose-only", "tool-only", "always":
+	default:
+		return fmt.Errorf("ttsr.interrupt_mode must be never, prose-only, tool-only, or always")
+	}
+	switch c.TTSR.RepeatMode {
+	case "once", "after-gap":
+	default:
+		return fmt.Errorf("ttsr.repeat_mode must be once or after-gap")
+	}
+	if c.TTSR.RepeatGap < 1 || c.TTSR.RepeatGap > 10_000 {
+		return fmt.Errorf("ttsr.repeat_gap must be between 1 and 10000")
+	}
+	if len(c.TTSR.Rules) > 128 {
+		return fmt.Errorf("ttsr.rules exceeds 128 entries")
+	}
+	seen := make(map[string]bool, len(c.TTSR.Rules))
+	for index, rule := range c.TTSR.Rules {
+		rule.Name = strings.TrimSpace(rule.Name)
+		if rule.Name == "" || len(rule.Name) > 64 || strings.ContainsAny(rule.Name, "\r\n\x00") {
+			return fmt.Errorf("ttsr rule %d has an invalid name", index+1)
+		}
+		key := strings.ToLower(rule.Name)
+		if seen[key] {
+			return fmt.Errorf("ttsr rule name %q is duplicated", rule.Name)
+		}
+		seen[key] = true
+		if strings.TrimSpace(rule.Content) == "" || len(rule.Content) > 64<<10 {
+			return fmt.Errorf("ttsr rule %q content is empty or exceeds 64 KiB", rule.Name)
+		}
+		if len(rule.Conditions) > 16 || len(rule.ASTConditions) > 16 || len(rule.Scope) > 16 || len(rule.Globs) > 16 {
+			return fmt.Errorf("ttsr rule %q exceeds 16 match entries per field", rule.Name)
+		}
+		if len(rule.Conditions) == 0 && len(rule.ASTConditions) == 0 {
+			return fmt.Errorf("ttsr rule %q requires conditions or ast_conditions", rule.Name)
+		}
+		for _, pattern := range rule.Conditions {
+			if len(pattern) > 4096 {
+				return fmt.Errorf("ttsr rule %q condition exceeds 4096 bytes", rule.Name)
+			}
+			if _, err := regexp.Compile(pattern); err != nil {
+				return fmt.Errorf("ttsr rule %q has invalid condition: %w", rule.Name, err)
+			}
+		}
+		for _, pattern := range rule.ASTConditions {
+			if strings.TrimSpace(pattern) == "" || len(pattern) > 4096 {
+				return fmt.Errorf("ttsr rule %q has an invalid ast_condition", rule.Name)
+			}
+		}
+		for _, pattern := range rule.Globs {
+			if strings.TrimSpace(pattern) == "" {
+				return fmt.Errorf("ttsr rule %q has an empty glob", rule.Name)
+			}
+			if _, err := filepath.Match(pattern, "fixture"); err != nil {
+				return fmt.Errorf("ttsr rule %q has invalid glob %q: %w", rule.Name, pattern, err)
+			}
+		}
+		for _, scope := range rule.Scope {
+			scope = strings.TrimSpace(scope)
+			if scope == "" || len(scope) > 256 || strings.ContainsAny(scope, "\r\n\x00") {
+				return fmt.Errorf("ttsr rule %q has an invalid scope", rule.Name)
+			}
+		}
+		if rule.InterruptMode != "" {
+			switch rule.InterruptMode {
+			case "never", "prose-only", "tool-only", "always":
+			default:
+				return fmt.Errorf("ttsr rule %q has an invalid interrupt_mode", rule.Name)
+			}
+		}
+		c.TTSR.Rules[index] = rule
 	}
 	return nil
 }
@@ -613,7 +1073,53 @@ func NormalizeMCPServer(name string, server MCPServerConfig) (MCPServerConfig, e
 	if err := validateMCPToolOverrides(name, server.ToolOverrides); err != nil {
 		return MCPServerConfig{}, err
 	}
+	if err := validateMCPOAuth(name, server); err != nil {
+		return MCPServerConfig{}, err
+	}
 	return server, nil
+}
+
+func validateMCPOAuth(name string, server MCPServerConfig) error {
+	if server.Auth != nil {
+		if server.Auth.Type != "oauth" && server.Auth.Type != "apikey" {
+			return fmt.Errorf("mcp.servers.%s.auth.type must be oauth or apikey", name)
+		}
+		if server.Auth.ClientSecret != "" {
+			if err := validateSecretReference(server.Auth.ClientSecret); err != nil {
+				return fmt.Errorf("mcp.servers.%s.auth.client_secret: %w", name, err)
+			}
+		}
+	}
+	if server.OAuth == nil {
+		return nil
+	}
+	if server.Transport != "streamable_http" {
+		return fmt.Errorf("mcp.servers.%s.oauth requires streamable_http transport", name)
+	}
+	if server.OAuth.ClientSecret != "" {
+		if err := validateSecretReference(server.OAuth.ClientSecret); err != nil {
+			return fmt.Errorf("mcp.servers.%s.oauth.client_secret: %w", name, err)
+		}
+	}
+	for field, value := range map[string]string{
+		"authorization_url": server.OAuth.AuthorizationURL, "token_url": server.OAuth.TokenURL,
+		"registration_url": server.OAuth.RegistrationURL, "redirect_uri": server.OAuth.RedirectURI,
+	} {
+		if value == "" {
+			continue
+		}
+		endpoint, err := url.Parse(value)
+		if err != nil || endpoint.Host == "" || endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && isLoopbackHost(endpoint.Hostname())) {
+			return fmt.Errorf("mcp.servers.%s.oauth.%s must use https or loopback http", name, field)
+		}
+	}
+	if server.OAuth.CallbackPort < 0 || server.OAuth.CallbackPort > 65535 {
+		return fmt.Errorf("mcp.servers.%s.oauth.callback_port is invalid", name)
+	}
+	if server.OAuth.CallbackPath != "" && !strings.HasPrefix(server.OAuth.CallbackPath, "/") {
+		return fmt.Errorf("mcp.servers.%s.oauth.callback_path must start with /", name)
+	}
+	return nil
 }
 
 func applyMCPServerDefaults(server MCPServerConfig) MCPServerConfig {
@@ -810,9 +1316,9 @@ func (c *Config) validateSubagents() error {
 		subagents.Personas = map[string]SubagentPersonaConfig{}
 	}
 	allowedTools := map[string]bool{
-		"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true,
+		"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, "ast_grep": true, "lsp": true, "web_search": true, "github": true, "recall": true, "coding.git_diff": true,
 		"coding.edit_hashline": true, "coding.replace": true, "coding.write_file": true, "coding.delete_file": true, "coding.gofmt": true,
-		"coding.go_test": true, "coding.shell": true,
+		"coding.go_test": true, "coding.shell": true, "debug": true, "eval": true, "browser": true, "computer": true, "hub": true, "generate_image": true, "tts": true, "retain": true, "memory_edit": true,
 	}
 	for name, persona := range subagents.Personas {
 		if !mcpServerNamePattern.MatchString(name) {
@@ -834,7 +1340,7 @@ func (c *Config) validateSubagents() error {
 			return fmt.Errorf("agents.subagents persona %q isolation must be none or worktree", name)
 		}
 	}
-	readOnlyTools := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "coding.git_diff"}
+	readOnlyTools := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "ast_grep", "lsp", "web_search", "github", "coding.git_diff"}
 	if len(subagents.Roles) > maxConfiguredSubagentRoles {
 		return fmt.Errorf("agents.subagents.roles must contain at most %d roles", maxConfiguredSubagentRoles)
 	}

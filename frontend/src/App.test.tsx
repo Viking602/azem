@@ -273,7 +273,9 @@ describe("application interactions", () => {
     expect(environment.textContent).toContain("来源1");
     expect(environment.querySelector(".thread-reference-drag")).toBeNull();
     expect(thread.querySelector(".composer-stack .thread-plan-control-trigger")).toBeNull();
-    expect(thread.querySelectorAll(".thread-header-action")).toHaveLength(2);
+    expect(thread.querySelectorAll(".thread-header-action")).toHaveLength(0);
+    expect(thread.textContent).not.toContain("协作");
+    expect(thread.textContent).not.toContain("添加来源");
     expect(toggle.getAttribute("aria-pressed")).toBe("true");
 
     await act(async () => toggle.click());

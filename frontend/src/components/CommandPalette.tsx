@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import {
-  Bot, FileCode2, FileDiff, MessageSquareText, Plus, Search, Settings2, Sparkles, SquareTerminal, UserRound,
+  Bot, FileCode2, FileDiff, MessageSquareText, Plus, Search, Settings2, ShieldCheck, Sparkles, SquareTerminal, UserRound,
 } from "lucide-react";
 import { execute, openProjectSession, resumeSession, searchSessions } from "../bridge";
 import { translator } from "../i18n";
@@ -52,6 +52,7 @@ export default function CommandPalette() {
     { id: "new", group: "commands", label: t("newSession"), meta: "⌘N", icon: Plus, run: () => execute({ kind: "new_session" }).then(() => setView("thread")) },
     { id: "files", group: "commands", label: snapshot.language === "zh-CN" ? "查看项目文件" : "View project files", meta: "⌘2", icon: FileCode2, run: () => setView("files") },
     { id: "changes", group: "commands", label: snapshot.language === "zh-CN" ? "查看代码改动" : "Review code changes", meta: "⌘3", icon: FileDiff, run: () => setView("changes") },
+    { id: "security", group: "commands", label: snapshot.language === "zh-CN" ? "打开安全扫描" : "Open security scans", meta: snapshot.language === "zh-CN" ? "工作区" : "Workspace", icon: ShieldCheck, run: () => setView("security") },
     { id: "motion", group: "commands", label: snapshot.language === "zh-CN" ? "打开动效设置" : "Open motion settings", meta: "⌘,", icon: Sparkles, run: () => setSettingsOpen(true, { section: "appearance", id: "appearance:motion" }) },
     { id: "terminal", group: "commands", label: t("toggleTerminal"), meta: "⌘`", icon: SquareTerminal, run: () => useTerminalStore.getState().toggle() },
   ], [setSettingsOpen, setView, snapshot.language, t]);

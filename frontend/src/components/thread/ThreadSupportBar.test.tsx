@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { listWorkspaceChanges } from "../../bridge";
+import { getSessionTree, navigateSessionTree } from "../../bridge";
 import { useRuntimeStore } from "../../store";
 import { useTerminalStore } from "../../terminalStore";
 import type { Snapshot, TodoList } from "../../types";
@@ -9,8 +9,12 @@ import { ThreadEnvironmentPanel, summarizeThreadPlan } from "./ThreadSupportBar"
 
 vi.mock("../../bridge", () => ({
   attachmentDataURL: vi.fn(async () => "data:image/png;base64,AA=="),
+  createSessionFork: vi.fn(async () => sessionTree),
+  getSessionTree: vi.fn(async () => sessionTree),
   listWorkspaceChanges: vi.fn(async () => ({ repository: true, branch: "feature/environment", additions: 12, deletions: 3, files: [] })),
+  navigateSessionTree: vi.fn(async () => null),
   openExternalURL: vi.fn(async () => undefined),
+  setSessionEntryLabel: vi.fn(async () => sessionTree),
 }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,6 +41,15 @@ const todo: TodoList = {
   ],
 };
 
+const sessionTree = {
+  sessionId: "s1", rootSessionId: "s1", sourceKind: "native", activeBranch: "main", activeLeafEntryId: "entry-2",
+  roots: [{ entry: { id: "entry-1", sequence: 1, kind: "user", createdAt: "2026-08-23T00:00:00Z" }, children: [
+    { entry: { id: "entry-2", parentId: "entry-1", sequence: 2, kind: "assistant", label: "Current answer", createdAt: "2026-08-23T00:00:01Z" } },
+    { entry: { id: "entry-3", parentId: "entry-1", sequence: 3, kind: "assistant", label: "Alternative", createdAt: "2026-08-23T00:00:02Z" } },
+  ] }],
+  branches: [{ name: "main", headEntryId: "entry-2", active: true, createdAt: "2026-08-23T00:00:00Z", updatedAt: "2026-08-23T00:00:01Z" }],
+};
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -61,6 +74,9 @@ describe("thread environment panel", () => {
       view: "thread",
       todo,
       settingsOpen: false,
+      branches: [{ name: "feature/environment", current: true }],
+      workspaceAdditions: 12,
+      workspaceDeletions: 3,
       recap: { sessionId: "s1", revision: 4, summary: "回顾摘要", goal: "当前目标", openItems: "未完成事项", updatedAt: "2026-08-23T00:00:00Z" },
       blocks: [
         { id: "user", kind: "user", content: "参考 https://example.com/spec", attachments: [{ id: "img", name: "image.png", mimeType: "image/png", path: "/tmp/image.png", size: 10 }] },
@@ -88,6 +104,9 @@ describe("thread environment panel", () => {
     expect(card.textContent).toContain("+12");
     expect(card.textContent).toContain("−3");
     expect(card.textContent).toContain("feature/environment");
+    await act(async () => useRuntimeStore.setState({ workspaceAdditions: 21, workspaceDeletions: 4 }));
+    expect(card.textContent).toContain("+21");
+    expect(card.textContent).toContain("−4");
     expect(rows.find((row) => row.textContent?.includes("本地服务"))?.textContent).toContain("1");
 
     const plan = rows.find((row) => row.textContent?.includes("计划"))!;
@@ -96,6 +115,14 @@ describe("thread environment panel", () => {
     expect(card.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("2");
     expect(card.querySelectorAll(".thread-environment-plan-items li")).toHaveLength(5);
 
+
+    const history = rows.find((row) => row.textContent?.includes("会话历史"))!;
+    await act(async () => { history.click(); await Promise.resolve(); });
+    expect(getSessionTree).toHaveBeenCalledWith("s1");
+    expect(card.querySelectorAll(".session-tree-list > li")).toHaveLength(3);
+    const alternative = Array.from(card.querySelectorAll<HTMLButtonElement>(".session-tree-entry")).find((button) => button.textContent?.includes("Alternative"))!;
+    await act(async () => { alternative.click(); await Promise.resolve(); });
+    expect(navigateSessionTree).toHaveBeenCalledWith("s1", "entry-3");
     const recap = rows.find((row) => row.textContent?.includes("回顾"))!;
     await act(async () => recap.click());
     expect(recap.getAttribute("aria-expanded")).toBe("true");
@@ -105,6 +132,14 @@ describe("thread environment panel", () => {
     await act(async () => sources.click());
     expect(sources.getAttribute("aria-expanded")).toBe("true");
     expect(card.querySelectorAll(".thread-environment-source-row")).toHaveLength(3);
+    const composerAttach = document.createElement("button");
+    composerAttach.dataset.slot = "composer-attach";
+    const openAttachmentPicker = vi.fn();
+    composerAttach.addEventListener("click", openAttachmentPicker);
+    document.body.append(composerAttach);
+    await act(async () => card.querySelector<HTMLButtonElement>(".thread-environment-source-add")?.click());
+    expect(openAttachmentPicker).toHaveBeenCalledOnce();
+    composerAttach.remove();
 
     await act(async () => card.querySelector<HTMLButtonElement>('.thread-environment-title button')?.click());
     expect(useRuntimeStore.getState().settingsOpen).toBe(true);
@@ -139,13 +174,10 @@ describe("thread environment panel", () => {
   });
 
   it("keeps the closed panel mounted but inert for the slide transition", async () => {
-    vi.mocked(listWorkspaceChanges).mockClear();
     useRuntimeStore.setState({ snapshot, currentSessionId: "s1", todo: null, recap: null, blocks: [] });
     container = document.createElement("div");
     root = createRoot(container);
     await act(async () => root?.render(<ThreadEnvironmentPanel open={false} />));
-    expect(container.querySelector(".thread-environment-overlay")?.getAttribute("aria-hidden")).toBe("true");
     expect(container.querySelector(".thread-environment-card")?.hasAttribute("inert")).toBe(true);
-    expect(listWorkspaceChanges).not.toHaveBeenCalled();
   });
 });

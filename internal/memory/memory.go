@@ -44,6 +44,67 @@ func NewService(db *sql.DB, workspace string) *Service {
 	return &Service{db: db, anchor: filepath.Clean(workspace)}
 }
 
+func (s *Service) Get(ctx context.Context, id string) (Memory, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Memory{}, fmt.Errorf("memory id is empty")
+	}
+	var item Memory
+	var createdAt, updatedAt int64
+	err := s.db.QueryRowContext(ctx, `SELECT id,content,anchor,session_id,provenance,status,importance,created_at,updated_at FROM memories WHERE id=? AND anchor=? AND status='active'`, id, s.anchor).Scan(
+		&item.ID, &item.Content, &item.Anchor, &item.SessionID, &item.Provenance, &item.Status, &item.Importance, &createdAt, &updatedAt,
+	)
+	if err != nil {
+		return Memory{}, err
+	}
+	item.CreatedAt = time.UnixMilli(createdAt).UTC()
+	item.UpdatedAt = time.UnixMilli(updatedAt).UTC()
+	return item, nil
+}
+
+func (s *Service) Update(ctx context.Context, id string, content *string, importance *int) (Memory, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Memory{}, fmt.Errorf("memory id is empty")
+	}
+	if content == nil && importance == nil {
+		return Memory{}, fmt.Errorf("memory update requires content or importance")
+	}
+	current, err := s.Get(ctx, id)
+	if err != nil {
+		return Memory{}, err
+	}
+	if content != nil {
+		next := strings.TrimSpace(*content)
+		if next == "" {
+			return Memory{}, fmt.Errorf("memory content is empty")
+		}
+		if len([]rune(next)) > MaxContentRunes {
+			return Memory{}, fmt.Errorf("memory content exceeds %d characters", MaxContentRunes)
+		}
+		current.Content = next
+	}
+	if importance != nil {
+		if *importance < 0 || *importance > 100 {
+			return Memory{}, fmt.Errorf("importance must be between 0 and 100")
+		}
+		current.Importance = *importance
+	}
+	current.UpdatedAt = time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `UPDATE memories SET content=?,importance=?,updated_at=? WHERE id=? AND anchor=? AND status='active'`, current.Content, current.Importance, current.UpdatedAt.UnixMilli(), id, s.anchor)
+	if err != nil {
+		return Memory{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Memory{}, err
+	}
+	if affected == 0 {
+		return Memory{}, sql.ErrNoRows
+	}
+	return current, nil
+}
+
 func (s *Service) Remember(ctx context.Context, content, sessionID, provenance string, importance int) (Memory, error) {
 	content = strings.TrimSpace(content)
 	if content == "" {

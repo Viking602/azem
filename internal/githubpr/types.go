@@ -167,6 +167,18 @@ type MutationRequest struct {
 	ExpectedHeadOID    string `json:"expectedHeadOid,omitempty"`
 	ExpectedRepository string `json:"expectedRepository,omitempty"`
 }
+type CreateRequest struct {
+	Branch         string `json:"branch"`
+	ExpectedCommit string `json:"expectedCommit"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+}
+
+type CreateResult struct {
+	Branch string `json:"branch"`
+	Commit string `json:"commit"`
+	URL    string `json:"url"`
+}
 
 const (
 	MutationEdit             = "edit"

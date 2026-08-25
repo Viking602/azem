@@ -33,6 +33,24 @@ export type ActionKind =
   | "set_mcp_enabled"
   | "upsert_mcp_server"
   | "delete_mcp_server"
+  | "get_mcp_prompt"
+  | "subscribe_mcp_resource"
+  | "unsubscribe_mcp_resource"
+  | "authenticate_mcp_server"
+  | "unauthenticate_mcp_server"
+  | "marketplace_add"
+  | "marketplace_remove"
+  | "marketplace_update"
+  | "marketplace_list"
+  | "marketplace_discover"
+  | "marketplace_install"
+  | "marketplace_uninstall"
+  | "marketplace_installed"
+  | "marketplace_upgrade"
+  | "marketplace_enable"
+  | "marketplace_disable"
+  | "list_custom_commands"
+  | "list_themes"
   | "list_skills"
   | "list_plugins"
   | "set_plugin_imported"
@@ -68,6 +86,21 @@ export type ActionKind =
   | "list_git_branches"
   | "switch_git_branch"
   | "create_git_branch"
+  | "get_security_config"
+  | "set_security_config"
+  | "start_security_scan"
+  | "cancel_security_scan"
+  | "resume_security_scan"
+  | "list_security_scans"
+  | "get_security_scan"
+  | "list_security_findings"
+  | "get_security_finding"
+  | "set_security_finding_triage"
+  | "patch_security_findings"
+  | "patch_security_findings_with_pr"
+  | "export_security_scan"
+  | "publish_security_scan"
+  | "reconcile_security_publication"
 ;
 
 /** Every runtime event kind (internal/app AllEventKinds) plus desktop bridge-local kinds. */
@@ -101,6 +134,10 @@ export type EventKind =
   | "plugin_catalog"
   | "hook_catalog"
   | "auth_state"
+  | "marketplace_catalog"
+  | "command_catalog"
+  | "theme_catalog"
+  | "security_config_state"
   | "mcp_state"
   | "recovery_state"
   | "run_finished"
@@ -116,6 +153,12 @@ export type EventKind =
   | "background_logs"
   | "git_branches"
   | "usage_report"
+  | "security_scan_state"
+  | "security_scan_list"
+  | "security_finding_list"
+  | "security_finding_detail"
+  | "security_patch_state"
+  | "security_publication_state"
   | "bridge_error"
 ;
 
@@ -149,6 +192,24 @@ export const ACTION_KINDS: readonly ActionKind[] = [
   "set_mcp_enabled",
   "upsert_mcp_server",
   "delete_mcp_server",
+  "get_mcp_prompt",
+  "subscribe_mcp_resource",
+  "unsubscribe_mcp_resource",
+  "authenticate_mcp_server",
+  "unauthenticate_mcp_server",
+  "marketplace_add",
+  "marketplace_remove",
+  "marketplace_update",
+  "marketplace_list",
+  "marketplace_discover",
+  "marketplace_install",
+  "marketplace_uninstall",
+  "marketplace_installed",
+  "marketplace_upgrade",
+  "marketplace_enable",
+  "marketplace_disable",
+  "list_custom_commands",
+  "list_themes",
   "list_skills",
   "list_plugins",
   "set_plugin_imported",
@@ -184,6 +245,21 @@ export const ACTION_KINDS: readonly ActionKind[] = [
   "list_git_branches",
   "switch_git_branch",
   "create_git_branch",
+  "get_security_config",
+  "set_security_config",
+  "start_security_scan",
+  "cancel_security_scan",
+  "resume_security_scan",
+  "list_security_scans",
+  "get_security_scan",
+  "list_security_findings",
+  "get_security_finding",
+  "set_security_finding_triage",
+  "patch_security_findings",
+  "patch_security_findings_with_pr",
+  "export_security_scan",
+  "publish_security_scan",
+  "reconcile_security_publication",
 ];
 
 export const EVENT_KINDS: readonly EventKind[] = [
@@ -216,6 +292,10 @@ export const EVENT_KINDS: readonly EventKind[] = [
   "plugin_catalog",
   "hook_catalog",
   "auth_state",
+  "marketplace_catalog",
+  "command_catalog",
+  "theme_catalog",
+  "security_config_state",
   "mcp_state",
   "recovery_state",
   "run_finished",
@@ -231,5 +311,11 @@ export const EVENT_KINDS: readonly EventKind[] = [
   "background_logs",
   "git_branches",
   "usage_report",
+  "security_scan_state",
+  "security_scan_list",
+  "security_finding_list",
+  "security_finding_detail",
+  "security_patch_state",
+  "security_publication_state",
   "bridge_error",
 ];

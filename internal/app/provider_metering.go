@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	hyprovider "github.com/Viking602/venat/provider"
@@ -48,16 +47,14 @@ func (d *meteredProviderDriver) Stream(ctx context.Context, request hyprovider.R
 		return nil, err
 	}
 	state := &meteredRequestState{driver: d, fact: fact}
-	if request.ExtraBody == nil {
-		request.ExtraBody = make(map[string]any)
-	}
-	// Fact metering owns all usage/detail accounting. Calling the old reporter
-	// here would add the same request to the legacy projection a second time.
-	request.ExtraBody[responses.UsageReporterExtraKey] = responses.UsageReporter(state.details)
 	if d.provider == "cursor" && d.reportInputTokens != nil {
-		request.ExtraBody[cursordriver.ContextUsageReporterExtraKey] = cursordriver.ContextUsageReporter(func(usage cursordriver.ContextUsage) {
+		previous := request.ContextUsage
+		request.ContextUsage = func(usage hyprovider.ContextUsage) {
+			if previous != nil {
+				previous(usage)
+			}
 			d.reportInputTokens(usage.UsedTokens)
-		})
+		}
 	}
 	stream, err := d.inner.Stream(ctx, request)
 	if err != nil {
@@ -197,6 +194,17 @@ func (s *meteredProviderStream) Recv() (hyprovider.Event, error) {
 		return e, err
 	}
 	if e.Kind == hyprovider.EventDone {
+		s.state.details(responses.NormalizeUsage(responses.UsageDetails{
+			ProviderRequestID:  e.Response.ID,
+			InputTokens:        e.Usage.InputTokens,
+			CachedTokens:       e.Usage.CachedInputTokens,
+			CacheReported:      e.Usage.CachedInputTokensReported,
+			CacheWriteTokens:   e.Usage.CacheWriteInputTokens,
+			CacheWriteReported: e.Usage.CacheWriteInputTokensReported,
+			OutputTokens:       e.Usage.OutputTokens,
+			ReasoningTokens:    e.Usage.ReasoningTokens,
+			TotalTokens:        e.Usage.TotalTokens,
+		}, cacheModelForProvider(s.state.fact.Provider, "")))
 		// length / max_turns means the provider hit an output or iteration
 		// ceiling. Persist that distinctly so metering and UI do not treat a
 		// truncated stream as a normal completed request.
@@ -204,7 +212,7 @@ func (s *meteredProviderStream) Recv() (hyprovider.Event, error) {
 		switch e.StopReason {
 		case hyprovider.StopReasonAborted, hyprovider.StopReasonError:
 			status = "unknown"
-		case hyprovider.StopReasonMaxTurns:
+		case hyprovider.StopReasonLength, hyprovider.StopReasonMaxTurns:
 			status = "length"
 		}
 		if err := s.state.finish(status, e.Usage); err != nil {

@@ -1,3 +1,4 @@
+export { ToolTimelineStep } from "./ToolTimelineStep";
 import { FileText, Image, Pencil, Search, ShieldCheck, SquareTerminal, Wrench } from "lucide-react";
 import { useState, type ReactNode, type ToggleEvent } from "react";
 import { tFormat, type Language } from "../../i18n";

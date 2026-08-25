@@ -11,6 +11,7 @@ export interface SettingsSearchEntry {
 export const settingsSectionSearchAliases: Partial<Record<SettingsSection, readonly string[]>> = {
   governance: ["governance", "governance and approval", "governance & approvals", "governance and approvals"],
   usage: ["usage", "token", "tokens", "用量", "token 记录", "token记录"],
+  security: ["security", "security scan", "security scanning", "安全", "安全扫描", "审计"],
 };
 
 type Copy = [id: string, section: SettingsSection, zhTitle: string, enTitle: string, zhDescription: string, enDescription: string, keywords?: string[]];
@@ -27,6 +28,11 @@ const staticSettings: Copy[] = [
   ["subagents:idle", "subagents", "无响应自动取消", "Cancel when idle", "没有思考、输出或工具活动时取消子代理；默认 5 分钟", "Cancel a silent subagent with no thinking, output, or tool activity; default 5 minutes", ["idle", "stuck", "卡住", "无响应", "取消", "timeout"]],
   ["subagents:scheduling", "subagents", "调度策略", "Scheduling policy", "并行工具分发是产品不变量，不能改为串行", "Parallel tool dispatch is a product invariant and cannot be changed to sequential", ["parallel", "调度"]],
   ["subagents:display", "subagents", "主会话展示", "Main-session display", "主会话中的进度、结果卡片与排队呈现", "Progress, result cards, and queuing in the main conversation", ["progress", "queued", "排队", "卡片"]],
+  ["section:security", "security", "安全扫描", "Security scans", "配置扫描模式、深度、运行时限、模型路由和发布边界", "Configure scan mode, depth, runtime, model routes, and publication boundary", ["audit", "sarif", "deep", "finding"]],
+  ["security:execution", "security", "执行策略", "Execution policy", "启用状态、默认模式与深度扫描收敛参数", "Enablement, default mode, and Deep Scan convergence", ["worker", "subagent", "saturation", "并发"]],
+  ["security:deadline", "security", "运行时限", "Run deadline", "只设置最长运行时间，不设置 Token 或工具调用硬中断", "Set only the maximum runtime; no hard token or tool-call interruption", ["deadline", "timeout", "时限"]],
+  ["security:routes", "security", "安全模型路由", "Security model routes", "为审计、归并、修复和验证选择模型", "Choose models for audit, reduction, fixing, and verification", ["audit", "reducer", "fixer", "verifier"]],
+  ["security:publication", "security", "发布边界", "Publication boundary", "查看由受信任 Host 管理的 MCP 发布工具状态", "Inspect the MCP publication tool managed by the trusted host", ["mcp", "linear", "publication", "发布"]],
   ["section:governance", "governance", "治理与审批", "Approvals", "设置默认审批边界和运行中消息处理方式", "Default approval policy and how new messages are handled while a turn is running", ["governance", "governance and approval", "governance & approvals", "governance and approvals", "policy", "审批"]],
   ["governance:approval", "governance", "默认审批模式", "Default approval mode", "逐次确认、自动审查或 YOLO", "Prompt, automatic review, or YOLO", ["approval", "auto review", "审批", "governance"]],
   ["governance:messages", "governance", "运行中消息", "Messages while running", "选择加入队列或实时引导", "Choose queueing or immediate guidance", ["queue", "guide", "队列", "引导"]],
@@ -41,6 +47,7 @@ const staticSettings: Copy[] = [
   ["extensions:mcp", "extensions", "MCP 服务", "MCP services", "添加、启停、重连或删除 MCP 服务", "Add, enable, reconnect, or delete MCP services", ["server", "工具", "tool"]],
   ["extensions:skills", "extensions", "Skills", "Skills", "管理通用 .agents 技能", "Manage shared .agents skills", ["技能", ".agents"]],
   ["extensions:plugins", "extensions", "插件", "Plugins", "选择并导入插件到 Azem 目录", "Select and import plugins into Azem's directory", ["plugin", "codex", "导入"]],
+  ["extensions:marketplace", "extensions", "插件市场", "Marketplace", "添加市场源，浏览、安装、升级和卸载插件", "Add catalog sources and browse, install, upgrade, or uninstall plugins", ["marketplace", "catalog", "install", "市场", "安装"]],
   ["extensions:hooks", "extensions", "Hooks", "Hooks", "查看生命周期 Hooks，单独信任插件 Hooks，并逐条启用或停用", "Inspect lifecycle hooks, explicitly trust plugin hooks, and enable or disable each command", ["hook", "trust_hooks", "hooks.disabled", "set_hook_enabled", "生命周期"]],
   ["section:archive", "archive", "归档", "Archive", "归档过久未活动的会话，并按所属项目查看或恢复", "Archive inactive conversations and restore them by project", ["归档", "archive", "不活跃", "inactive"]],
   ["archive:inactive", "archive", "归档不活跃会话", "Archive inactive conversations", "将超过指定天数未更新且未置顶的会话移出侧栏", "Move unpinned conversations that have been idle past the selected age out of the sidebar", ["inactive", "过期", "清理"]],
