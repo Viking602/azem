@@ -33,9 +33,10 @@ use text_input::TextInput;
 use theme::ThemePalette;
 gpui::actions!(azem, [Submit]);
 
-#[derive(Clone, Copy)]
 enum PendingRequest {
-    ResumeSession,
+    ResumeSession {
+        sequence: Option<i64>,
+    },
     Search,
     Attachment,
     Entries,
@@ -48,6 +49,10 @@ enum PendingRequest {
     Usage,
     Terminals,
     CreateTerminal,
+    Turn {
+        source_text: String,
+        attachments: Vec<serde_json::Value>,
+    },
 }
 
 struct AzemWindow {
@@ -133,6 +138,7 @@ impl AzemWindow {
 
     fn apply_runtime_message(&mut self, message: RuntimeMessage, cx: &mut Context<Self>) {
         let old_block_count = self.state.transcript.blocks.borrow().len();
+        let old_session_id = self.state.navigation.current_session_id.clone();
         match message {
             RuntimeMessage::Connecting(message) => {
                 self.state.connection.connected = false;
@@ -262,6 +268,19 @@ impl AzemWindow {
                         .unwrap_or_default();
                     let _ = launch_gpui_window(workspace, session_id);
                 }
+                if envelope.channel == "terminal"
+                    && envelope
+                        .payload
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("terminal_exit")
+                    && let Some(id) = envelope
+                        .payload
+                        .pointer("/session/id")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    self.terminal_emulators.remove(id);
+                }
                 self.state.apply_envelope(*envelope)
             }
             RuntimeMessage::Event(ClientEvent::Binary(metadata, data)) => {
@@ -283,7 +302,34 @@ impl AzemWindow {
                 Ok(value) => {
                     if let Some(pending) = self.pending_requests.remove(&id) {
                         match pending {
-                            PendingRequest::ResumeSession => self.state.apply_direct_event(value),
+                            PendingRequest::Turn {
+                                source_text,
+                                attachments,
+                            } => {
+                                if self.composer.read(cx).text() == source_text {
+                                    self.composer.update(cx, |composer, cx| composer.clear(cx));
+                                }
+                                if self.state.transcript.attachments == attachments {
+                                    self.state.transcript.attachments.clear();
+                                }
+                            }
+                            PendingRequest::ResumeSession { sequence } => {
+                                self.state.apply_direct_event(value);
+                                if let Some(sequence) = sequence
+                                    && let Some(index) =
+                                        self.state.transcript.blocks.borrow().iter().position(
+                                            |block| {
+                                                block
+                                                    .extra
+                                                    .get("sequence")
+                                                    .and_then(serde_json::Value::as_i64)
+                                                    == Some(sequence)
+                                            },
+                                        )
+                                {
+                                    self.transcript_list.scroll_to_reveal_item(index);
+                                }
+                            }
                             PendingRequest::Search => {
                                 self.state.navigation.search_results =
                                     value.as_array().cloned().unwrap_or_default();
@@ -367,6 +413,12 @@ impl AzemWindow {
         if old_block_count != new_block_count {
             self.transcript_list.reset(new_block_count);
         }
+        if old_session_id != self.state.navigation.current_session_id
+            && !self.state.navigation.current_session_id.is_empty()
+        {
+            self.runtime
+                .set_snapshot_session(self.state.navigation.current_session_id.to_string());
+        }
     }
 
     fn send_message(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -382,21 +434,23 @@ impl AzemWindow {
     }
 
     fn send_current(&mut self, cx: &mut Context<Self>) {
-        let prompt = self.composer.read(cx).text().trim().to_string();
-        if prompt.is_empty() || !self.state.connection.connected {
+        let source_text = self.composer.read(cx).text().to_string();
+        let prompt = source_text.trim().to_string();
+        let attachments = self.state.transcript.attachments.clone();
+        if !composer_has_submission(&prompt, &attachments) || !self.state.connection.connected {
             return;
         }
         let session_id = self.state.navigation.current_session_id.to_string();
-        if self.state.runtime.running {
+        let request_id = if self.state.runtime.running {
             self.runtime.request(
                 Method::FollowUp,
                 json!({
                     "sessionId": session_id,
                     "runId": self.state.runtime.run_id,
                     "text": prompt,
-                    "attachments": self.state.transcript.attachments,
+                    "attachments": attachments.clone(),
                 }),
-            );
+            )
         } else {
             self.runtime.request(
                 Method::StartTurn,
@@ -410,11 +464,17 @@ impl AzemWindow {
                     "planMode": self.state.runtime.plan_mode,
                     "disableSubagents": false,
                     "activeSkills": [],
-                    "images": self.state.transcript.attachments,
+                    "images": attachments.clone(),
                 }),
-            );
-        }
-        self.composer.update(cx, |composer, cx| composer.clear(cx));
+            )
+        };
+        self.pending_requests.insert(
+            request_id,
+            PendingRequest::Turn {
+                source_text,
+                attachments,
+            },
+        );
     }
 
     fn guide_message(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -525,13 +585,63 @@ impl AzemWindow {
     }
 
     fn cycle_reasoning(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let levels = ["none", "low", "medium", "high", "xhigh"];
+        let levels = self.selected_model_reasoning_levels();
+        if levels.len() <= 1 {
+            return;
+        }
         let current = levels
             .iter()
-            .position(|level| *level == self.state.settings.reasoning.as_ref())
-            .unwrap_or(2);
-        self.state.settings.reasoning = levels[(current + 1) % levels.len()].into();
+            .position(|level| level == self.state.settings.reasoning.as_ref())
+            .unwrap_or_default();
+        let next = levels[(current + 1) % levels.len()].clone();
+        self.state.settings.reasoning = next.clone().into();
+        self.runtime.request(
+            Method::Execute,
+            json!({
+                "kind": "set_session_preferences",
+                "sessionId": self.state.navigation.current_session_id,
+                "route": {
+                    "scope": "session",
+                    "role": "",
+                    "label": "",
+                    "route": {
+                        "provider": self.state.settings.provider,
+                        "model": self.state.settings.model,
+                        "reasoning": next,
+                    }
+                }
+            }),
+        );
         cx.notify();
+    }
+
+    fn selected_model_reasoning_levels(&self) -> Vec<String> {
+        self.state
+            .catalogs
+            .providers
+            .iter()
+            .find(|provider| {
+                provider.get("id").and_then(serde_json::Value::as_str)
+                    == Some(self.state.settings.provider.as_ref())
+            })
+            .and_then(|provider| provider.get("models"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|models| {
+                models.iter().find(|model| {
+                    model.get("id").and_then(serde_json::Value::as_str)
+                        == Some(self.state.settings.model.as_ref())
+                })
+            })
+            .and_then(|model| model.get("reasoningLevels"))
+            .and_then(serde_json::Value::as_array)
+            .map(|levels| {
+                levels
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn toggle_model_picker(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -671,6 +781,18 @@ impl AzemWindow {
                     let active = provider_id == selected_provider && model_id == selected_model;
                     let selected_provider_id = provider_id.clone();
                     let selected_model_id = model_id.clone();
+                    let selected_reasoning = model
+                        .get("defaultReasoning")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| {
+                            model
+                                .get("reasoningLevels")
+                                .and_then(serde_json::Value::as_array)
+                                .and_then(|levels| levels.first())
+                                .and_then(serde_json::Value::as_str)
+                        })
+                        .unwrap_or_default()
+                        .to_string();
                     let row_id = format!("model-option-{provider_id}-{model_id}");
                     rows.push(
                         div()
@@ -695,6 +817,24 @@ impl AzemWindow {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.state.settings.provider = selected_provider_id.clone().into();
                                 this.state.settings.model = selected_model_id.clone().into();
+                                this.state.settings.reasoning = selected_reasoning.clone().into();
+                                this.runtime.request(
+                                    Method::Execute,
+                                    json!({
+                                        "kind": "set_session_preferences",
+                                        "sessionId": this.state.navigation.current_session_id,
+                                        "route": {
+                                            "scope": "session",
+                                            "role": "",
+                                            "label": "",
+                                            "route": {
+                                                "provider": selected_provider_id.clone(),
+                                                "model": selected_model_id.clone(),
+                                                "reasoning": selected_reasoning.clone(),
+                                            }
+                                        }
+                                    }),
+                                );
                                 this.model_picker_open = false;
                                 cx.notify();
                             }))
@@ -930,7 +1070,15 @@ impl AzemWindow {
                     .blur_radius(px(48.)),
             ])
             .overflow_hidden()
-            .child(content)
+            .p(px(6.))
+            .child(
+                div()
+                    .id("settings-modal-content")
+                    .size_full()
+                    .rounded(px(17.))
+                    .overflow_hidden()
+                    .child(content),
+            )
             .child(self.settings_close_button(close_label, palette, cx))
             .into_any_element()
     }
@@ -1905,6 +2053,10 @@ impl Render for AzemWindow {
     }
 }
 
+fn composer_has_submission(prompt: &str, attachments: &[serde_json::Value]) -> bool {
+    !prompt.is_empty() || !attachments.is_empty()
+}
+
 fn open_main_window(cx: &mut App, options: RuntimeOptions) -> WindowHandle<AzemWindow> {
     let bounds = Bounds::centered(None, size(px(1360.), px(900.)), cx);
     cx.open_window(
@@ -1996,4 +2148,16 @@ fn main() {
         );
         cx.activate(true);
     });
+}
+#[cfg(test)]
+mod composer_tests {
+    use serde_json::json;
+
+    use super::composer_has_submission;
+
+    #[test]
+    fn image_only_submission_is_allowed() {
+        assert!(composer_has_submission("", &[json!({"id": "image-1"})]));
+        assert!(!composer_has_submission("", &[]));
+    }
 }

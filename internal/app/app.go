@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1006,6 +1007,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		s.mu.Lock()
 		s.activeRun = runID
 		s.mu.Unlock()
+
 		if s.sessions != nil {
 			if _, err := s.sessions.AppendBlock(s.ctx, request.SessionID, userTurnBlock(runID, request)); err != nil {
 				cancel()
@@ -1110,6 +1112,46 @@ func (s *Service) persistSessionPreferences(ctx context.Context, request TurnReq
 		return nil
 	}
 	return s.sessions.UpdatePreferences(ctx, request.SessionID, request.Provider, request.Model, request.Reasoning, request.AgentMode)
+}
+
+// PendingControlEvents returns the live, session-scoped actions a renderer must
+// be able to resolve after replay eviction or a fresh reconnect.
+func (s *Service) PendingControlEvents(sessionID string) []Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := make([]Event, 0)
+	for _, live := range s.liveApprovals {
+		if live.sessionID != sessionID || live.resolved {
+			continue
+		}
+		events = append(events, Event{
+			Kind: EventApprovalRequested, SessionID: live.sessionID, RunID: live.runID,
+			AgentID: live.agentID, ToolCallID: live.callID, ApprovalID: live.approvalID,
+			Text: live.request.RequestedAction, State: "pending",
+			Data: map[string]string{
+				"tool": live.request.ToolName, "target": live.request.Target,
+				"risk": live.request.Risk, "effect": live.request.Effect,
+				"action": live.request.RequestedAction, "agent_type": live.agentType,
+			},
+		})
+	}
+	for _, live := range s.liveUserInputs {
+		if live.sessionID != sessionID {
+			continue
+		}
+		encoded, _ := json.Marshal(live.questions)
+		events = append(events, Event{
+			Kind: EventUserInputRequested, SessionID: live.sessionID, RunID: live.runID,
+			ToolCallID: live.callID, UserInputID: live.id, State: "pending",
+			Data: map[string]string{"questions": string(encoded)},
+		})
+	}
+	sort.Slice(events, func(left, right int) bool {
+		leftID := events[left].ApprovalID + events[left].UserInputID
+		rightID := events[right].ApprovalID + events[right].UserInputID
+		return leftID < rightID
+	})
+	return events
 }
 
 // GuideActiveTurn queues a text-only user message for the next model boundary

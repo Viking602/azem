@@ -28,11 +28,14 @@
   IPC protocol shared with the existing desktop Bridge. Closing or restarting
   GPUI no longer terminates active runs: the daemon retains the Go runtime,
   SQLite state, subagents, tools, and PTYs, then restores a durable snapshot and
-  bounded event/terminal replay on reconnect. Unix sockets and state files are
-  owner-only; Windows named pipes use owner/System ACLs; attachments are
-  chunked and SHA-256 verified. No database schema, runtime configuration
-  default, executable prompt, static provider prefix, or provider message order
-  changed.
+  bounded event/terminal replay on reconnect. Snapshot ordering now prevents
+  replayed transcript duplication, keeps pending approvals/questions and child
+  activity available after replay eviction, preserves the selected session
+  across reconnect, and ignores replayed `open_project` commands so they cannot
+  recursively spawn renderers. Unix sockets and state files are owner-only;
+  Windows named pipes use owner/System ACLs; attachments are chunked and
+  SHA-256 verified. No database schema, runtime configuration default,
+  executable prompt, static provider prefix, or provider message order changed.
 
 - Completed the frozen OMP v18.0.3 behavioral-parity program at commit
   `160ed439ac0df594347e7d7018b813a7ffdb5e81`. The executable parity manifest

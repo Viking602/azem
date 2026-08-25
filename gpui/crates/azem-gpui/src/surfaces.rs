@@ -576,7 +576,9 @@ pub(super) fn sidebar(
                                                         );
                                                         this.pending_requests.insert(
                                                             request_id,
-                                                            PendingRequest::ResumeSession,
+                                                            PendingRequest::ResumeSession {
+                                                                sequence: None,
+                                                            },
                                                         );
                                                         this.state.navigation.surface =
                                                             Surface::Thread;
@@ -811,6 +813,7 @@ pub(super) fn search_surface(
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or_default()
                             .to_string();
+                        let sequence = result.get("sequence").and_then(serde_json::Value::as_i64);
                         let current_workspace = state.workspace.root.to_string();
                         div()
                             .id(("search-result", index))
@@ -835,8 +838,10 @@ pub(super) fn search_surface(
                                         Method::ResumeSession,
                                         json!({"sessionId": session_id}),
                                     );
-                                    this.pending_requests
-                                        .insert(request_id, PendingRequest::ResumeSession);
+                                    this.pending_requests.insert(
+                                        request_id,
+                                        PendingRequest::ResumeSession { sequence },
+                                    );
                                     this.state.navigation.surface = Surface::Thread;
                                     cx.notify();
                                 } else {
@@ -1306,18 +1311,14 @@ pub(super) fn settings_surface(
                 (
                     "catalog",
                     if zh { "模型目录" } else { "Model catalog" },
-                    "bot",
+                    "database",
                 ),
                 (
                     "routes",
                     if zh { "模型路由" } else { "Model routing" },
-                    "git-branch",
+                    "bot",
                 ),
-                (
-                    "agents",
-                    if zh { "子智能体" } else { "Subagents" },
-                    "sparkles",
-                ),
+                ("agents", if zh { "子智能体" } else { "Subagents" }, "gauge"),
                 (
                     "security",
                     if zh { "安全扫描" } else { "Security scan" },
@@ -1333,14 +1334,18 @@ pub(super) fn settings_surface(
                     if zh { "治理与审批" } else { "Governance" },
                     "sliders-horizontal",
                 ),
-                ("appearance", if zh { "外观" } else { "Appearance" }, "sun"),
+                (
+                    "appearance",
+                    if zh { "外观" } else { "Appearance" },
+                    "palette",
+                ),
                 (
                     "extensions",
                     if zh { "扩展" } else { "Extensions" },
-                    "blocks",
+                    "puzzle",
                 ),
                 ("archive", if zh { "归档" } else { "Archive" }, "archive"),
-                ("usage", if zh { "用量" } else { "Usage" }, "activity"),
+                ("usage", if zh { "用量" } else { "Usage" }, "chart"),
             ],
         ),
     ];
@@ -1505,7 +1510,7 @@ pub(super) fn settings_surface(
         .flex_1()
         .min_w_0()
         .bg(palette.paper)
-        .rounded(px(20.))
+        .rounded(px(17.))
         .overflow_hidden()
         .flex()
         .child(
@@ -1518,7 +1523,7 @@ pub(super) fn settings_surface(
                     "Settings categories"
                 })
                 .w(px(216.))
-                .h_full()
+                .h(px(778.))
                 .border_r_1()
                 .border_color(palette.border)
                 .bg(palette.sidebar)
@@ -1577,7 +1582,9 @@ pub(super) fn settings_surface(
                             "搜索设置…"
                         } else {
                             "Search settings…"
-                        }),
+                        })
+                        .child(div().flex_1())
+                        .child(div().text_size(px(9.)).child("⌘F")),
                 )
                 .children(nav_groups.into_iter().map(|(group, entries)| {
                     div()
@@ -1635,7 +1642,7 @@ pub(super) fn settings_surface(
                 .when(section == "catalog", |content| content.overflow_hidden())
                 .when(section != "catalog", |content| content.overflow_y_scroll())
                 .px(px(48.))
-                .pt(px(42.))
+                .pt(px(28.))
                 .pb(px(if section == "catalog" { 16. } else { 64. }))
                 .flex()
                 .flex_col()
@@ -1737,7 +1744,7 @@ fn settings_navigation_item(
         .aria_label(label)
         .aria_selected(selected)
         .tab_stop(true)
-        .h(px(34.))
+        .h(px(40.))
         .px_2()
         .rounded(px(8.))
         .bg(pick(selected, palette.hover, palette.sidebar))
@@ -1760,7 +1767,7 @@ fn settings_navigation_item(
         .child(icon(
             icon_name,
             15.,
-            pick(selected, palette.ink, palette.faint),
+            pick(selected, palette.accent, palette.faint),
         ))
         .child(label)
         .into_any_element()
@@ -1975,6 +1982,10 @@ fn settings_catalog_body(
             .get("enabled")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        let subscription = provider
+            .get("subscription")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         let quota_available = provider
             .get("quotaAvailable")
             .and_then(serde_json::Value::as_bool)
@@ -2038,25 +2049,14 @@ fn settings_catalog_body(
                     .get("disabled")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
-                let capabilities = model
-                    .get("capabilities")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .take(8)
-                            .map(str::to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let capabilities = model_capability_keys(model, subscription);
                 let provider_target = provider_id.clone();
                 let model_target = model_id.clone();
                 let session_target = session_id.clone();
                 div()
                     .id(("provider-model-card", index))
                     .w(px(302.))
-                    .h(px(118.))
+                    .h(px(110.))
                     .p_3()
                     .rounded(px(11.))
                     .border_1()
@@ -2440,7 +2440,7 @@ fn settings_catalog_body(
                         div()
                             .id("provider-model-grid")
                             .track_scroll(&model_scroll)
-                            .h(px(402.))
+                            .h(px(380.))
                             .overflow_y_scroll()
                             .p_3()
                             .flex()
@@ -2525,7 +2525,7 @@ fn settings_catalog_body(
                     div()
                         .id("provider-list-scroll")
                         .track_scroll(&provider_scroll)
-                        .h(px(610.))
+                        .h(px(580.))
                         .overflow_y_scroll()
                         .flex()
                         .flex_col()
@@ -2707,13 +2707,14 @@ fn settings_model_capabilities(capabilities: &[String], palette: ThemePalette) -
         .children(capabilities.iter().map(|capability| {
             let icon_name = match capability.as_str() {
                 "tools" | "tool_call" | "tool-call" => "wrench",
+                "parallel-tools" => "layers",
                 "reasoning" => "brain",
                 "structured_output" | "structured-output" => "braces",
-                "temperature" => "type",
-                "chat" | "messages" => "message-square-text",
-                "image" | "vision" => "image",
-                "audio" => "audio-lines",
-                _ => "layers",
+                "in:image" | "out:image" | "in:video" | "out:video" => "image",
+                "in:audio" | "out:audio" => "audio-lines",
+                "in:text" => "type",
+                "out:text" => "message-square-text",
+                _ => "wrench",
             };
             div()
                 .size(px(22.))
@@ -2724,6 +2725,44 @@ fn settings_model_capabilities(capabilities: &[String], palette: ThemePalette) -
                 .justify_center()
                 .child(icon(icon_name, 12., palette.faint))
         }))
+}
+
+fn model_capability_keys(model: &serde_json::Value, subscription: bool) -> Vec<String> {
+    let mut keys = Vec::new();
+    if subscription {
+        for key in [
+            "tools",
+            "reasoning",
+            "structured-output",
+            "in:text",
+            "out:text",
+        ] {
+            push_unique(&mut keys, key);
+        }
+    }
+    for key in ["capabilities", "inputModalities", "outputModalities"] {
+        let prefix = match key {
+            "inputModalities" => "in:",
+            "outputModalities" => "out:",
+            _ => "",
+        };
+        for value in model
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            push_unique(&mut keys, &format!("{prefix}{value}"));
+        }
+    }
+    keys
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
 }
 
 fn localized(zh: bool, chinese: &'static str, english: &'static str) -> &'static str {
@@ -4765,6 +4804,54 @@ pub(super) fn work_surface(state: &AppState, runtime: &RuntimeConnection) -> gpu
                     ))
                 }),
         )
+        .children(
+            state
+                .runtime
+                .agent_blocks
+                .iter()
+                .enumerate()
+                .map(|(index, block)| agent_activity_card(index, block)),
+        )
+        .into_any_element()
+}
+
+fn agent_activity_card(index: usize, block: &serde_json::Value) -> gpui::AnyElement {
+    let agent = block
+        .get("agentId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("agent");
+    let kind = block
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("activity");
+    let content = block
+        .get("text")
+        .or_else(|| block.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    div()
+        .id(("agent-activity", index))
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(0xecedef))
+        .p_4()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(format!("{agent} · {kind}")),
+        )
+        .when(!content.is_empty(), |card| {
+            card.child(
+                div()
+                    .whitespace_normal()
+                    .text_sm()
+                    .child(content.to_string()),
+            )
+        })
         .into_any_element()
 }
 

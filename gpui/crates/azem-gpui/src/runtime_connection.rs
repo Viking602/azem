@@ -2,6 +2,7 @@ use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, RwLock},
     thread,
     time::Duration,
 };
@@ -50,6 +51,7 @@ pub struct RuntimeConnection {
     commands: Sender<RuntimeCommand>,
     message_tx: Sender<RuntimeMessage>,
     pub messages: Receiver<RuntimeMessage>,
+    snapshot_session: Arc<RwLock<String>>,
 }
 
 impl RuntimeConnection {
@@ -57,6 +59,9 @@ impl RuntimeConnection {
         let (commands_tx, commands_rx) = async_channel::bounded(256);
         let (messages_tx, messages_rx) = async_channel::bounded(4096);
         let supervisor_messages = messages_tx.clone();
+        let snapshot_session =
+            Arc::new(RwLock::new(options.session_id.clone().unwrap_or_default()));
+        let supervisor_snapshot_session = snapshot_session.clone();
         thread::Builder::new()
             .name("azem-ipc".into())
             .spawn(move || {
@@ -65,13 +70,19 @@ impl RuntimeConnection {
                     .enable_all()
                     .build()
                     .expect("create Azem IPC runtime");
-                runtime.block_on(supervise(options, commands_rx, supervisor_messages));
+                runtime.block_on(supervise(
+                    options,
+                    commands_rx,
+                    supervisor_messages,
+                    supervisor_snapshot_session,
+                ));
             })
             .expect("start Azem IPC thread");
         Self {
             commands: commands_tx,
             message_tx: messages_tx,
             messages: messages_rx,
+            snapshot_session,
         }
     }
 
@@ -113,6 +124,11 @@ impl RuntimeConnection {
         id
     }
 
+    pub fn set_snapshot_session(&self, session_id: impl Into<String>) {
+        if let Ok(mut current) = self.snapshot_session.write() {
+            *current = session_id.into();
+        }
+    }
     pub fn disconnect(&self) {
         let _ = self.commands.try_send(RuntimeCommand::Disconnect);
     }
@@ -131,12 +147,9 @@ async fn supervise(
     options: RuntimeOptions,
     commands: Receiver<RuntimeCommand>,
     messages: Sender<RuntimeMessage>,
+    snapshot_session: Arc<RwLock<String>>,
 ) {
     let client_id = Uuid::new_v4().to_string();
-    let snapshot_request = serde_json::json!({
-        "sessionId": options.session_id.clone().unwrap_or_default(),
-        "refresh": true
-    });
     let mut last_sequence = 0_u64;
     let mut backoff = Duration::from_millis(100);
     loop {
@@ -173,15 +186,26 @@ async fn supervise(
                 }
             };
         backoff = Duration::from_millis(100);
+        let mut forward_after = acknowledgement.current_sequence;
         let _ = messages
             .send(RuntimeMessage::Connected {
                 pid: endpoint.pid,
                 sequence: acknowledgement.current_sequence,
             })
             .await;
-        match client
-            .request(Method::ReconnectSnapshot, &snapshot_request)
-            .await
+        let snapshot_request = serde_json::json!({
+            "sessionId": read_snapshot_session(&snapshot_session),
+            "refresh": true
+        });
+        match request_snapshot_while_forwarding(
+            &client,
+            &mut events,
+            &messages,
+            &snapshot_request,
+            &mut forward_after,
+            &mut last_sequence,
+        )
+        .await
         {
             Ok(snapshot) => {
                 let _ = messages.send(RuntimeMessage::Snapshot(snapshot)).await;
@@ -201,16 +225,36 @@ async fn supervise(
                 event = events.recv() => match event {
                     Ok(ClientEvent::Envelope(envelope)) => {
                         last_sequence = last_sequence.max(envelope.sequence);
-                        let _ = messages.send(RuntimeMessage::Event(ClientEvent::Envelope(envelope))).await;
+                        if should_forward_envelope(&envelope, forward_after) {
+                            let _ = messages.send(RuntimeMessage::Event(ClientEvent::Envelope(envelope))).await;
+                        }
                     }
                     Ok(ClientEvent::Binary(metadata, data)) => {
                         last_sequence = last_sequence.max(metadata.sequence);
-                        let _ = messages.send(RuntimeMessage::Event(ClientEvent::Binary(metadata, data))).await;
+                        if metadata.sequence > forward_after {
+                            let _ = messages.send(RuntimeMessage::Event(ClientEvent::Binary(metadata, data))).await;
+                        }
                     }
                     Ok(ClientEvent::ResyncRequired { sequence, reason }) => {
-                        last_sequence = sequence;
-                        match client.request(Method::ReconnectSnapshot, &snapshot_request).await {
-                            Ok(snapshot) => { let _ = messages.send(RuntimeMessage::Snapshot(snapshot)).await; }
+                        let snapshot_request = serde_json::json!({
+                            "sessionId": read_snapshot_session(&snapshot_session),
+                            "refresh": true
+                        });
+                        last_sequence = last_sequence.max(sequence);
+                        forward_after = forward_after.max(sequence);
+                        match request_snapshot_while_forwarding(
+                            &client,
+                            &mut events,
+                            &messages,
+                            &snapshot_request,
+                            &mut forward_after,
+                            &mut last_sequence,
+                        )
+                        .await
+                        {
+                            Ok(snapshot) => {
+                                let _ = messages.send(RuntimeMessage::Snapshot(snapshot)).await;
+                            }
                             Err(error) => {
                                 let _ = messages.send(RuntimeMessage::Connecting(format!("Resync failed ({reason}): {error}"))).await;
                                 break;
@@ -226,10 +270,9 @@ async fn supervise(
                         break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        match client.request(Method::ReconnectSnapshot, &snapshot_request).await {
-                            Ok(snapshot) => { let _ = messages.send(RuntimeMessage::Snapshot(snapshot)).await; }
-                            Err(_) => break,
-                        }
+                        last_sequence = 0;
+                        let _ = client.close().await;
+                        break;
                     }
                 },
                 command = commands.recv() => match command {
@@ -258,6 +301,80 @@ async fn supervise(
         }
         let _ = client.close().await;
     }
+}
+
+fn read_snapshot_session(snapshot_session: &RwLock<String>) -> String {
+    snapshot_session
+        .read()
+        .map(|session_id| session_id.clone())
+        .unwrap_or_default()
+}
+
+async fn request_snapshot_while_forwarding(
+    client: &Client,
+    events: &mut tokio::sync::broadcast::Receiver<ClientEvent>,
+    messages: &Sender<RuntimeMessage>,
+    snapshot_request: &Value,
+    forward_after: &mut u64,
+    last_sequence: &mut u64,
+) -> Result<Value> {
+    let request = client.request(Method::ReconnectSnapshot, snapshot_request);
+    tokio::pin!(request);
+    loop {
+        tokio::select! {
+            result = &mut request => return result,
+            event = events.recv() => match event {
+                Ok(ClientEvent::Envelope(envelope)) => {
+                    *last_sequence = (*last_sequence).max(envelope.sequence);
+                    if should_forward_envelope(&envelope, *forward_after) {
+                        let _ = messages.send(RuntimeMessage::Event(ClientEvent::Envelope(envelope))).await;
+                    }
+                }
+                Ok(ClientEvent::Binary(metadata, data)) => {
+                    *last_sequence = (*last_sequence).max(metadata.sequence);
+                    if metadata.sequence > *forward_after {
+                        let _ = messages.send(RuntimeMessage::Event(ClientEvent::Binary(metadata, data))).await;
+                    }
+                }
+                Ok(ClientEvent::ResyncRequired { sequence, .. }) => {
+                    *last_sequence = (*last_sequence).max(sequence);
+                    *forward_after = (*forward_after).max(sequence);
+                }
+                Ok(ClientEvent::Disconnected(reason)) => {
+                    return Err(anyhow!("disconnected while loading snapshot: {reason}"));
+                }
+                Err(error) => return Err(anyhow!("event stream failed while loading snapshot: {error}")),
+            }
+        }
+    }
+}
+
+fn should_forward_envelope(envelope: &azem_ipc::Envelope, baseline: u64) -> bool {
+    if envelope.sequence > baseline {
+        return true;
+    }
+    if envelope.channel != "runtime" {
+        return false;
+    }
+    if envelope
+        .payload
+        .get("agentId")
+        .and_then(Value::as_str)
+        .is_some_and(|agent_id| !agent_id.is_empty())
+    {
+        return true;
+    }
+    matches!(
+        envelope.payload.get("kind").and_then(Value::as_str),
+        Some(
+            "approval_requested"
+                | "approval_resolved"
+                | "user_input_requested"
+                | "user_input_resolved"
+                | "plan_proposed"
+                | "plan_resolved"
+        )
+    )
 }
 
 async fn ensure_daemon(options: &RuntimeOptions) -> Result<Endpoint> {
@@ -383,13 +500,18 @@ fn detach_command(command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        sync::{Arc, RwLock},
+    };
 
-    use azem_ipc::Method;
+    use azem_ipc::{Envelope, Method};
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{RuntimeConnection, RuntimeMessage, RuntimeOptions, endpoint_path};
+    use super::{
+        RuntimeConnection, RuntimeMessage, RuntimeOptions, endpoint_path, should_forward_envelope,
+    };
 
     #[test]
     fn endpoint_path_is_stable_and_workspace_scoped() {
@@ -421,6 +543,7 @@ mod tests {
             commands,
             message_tx,
             messages: messages.clone(),
+            snapshot_session: Arc::new(RwLock::new(String::new())),
         };
         connection.request(Method::Initialise, json!({}));
         let rejected_id = connection.request(Method::Initialise, json!({}));
@@ -431,6 +554,36 @@ mod tests {
             }
             message => panic!("unexpected message: {message:?}"),
         }
+    }
+
+    #[test]
+    fn replay_sequence_boundary_distinguishes_live_events() {
+        let event = Envelope {
+            version: 1,
+            kind: "event".into(),
+            id: String::new(),
+            client_id: String::new(),
+            workspace_id: String::new(),
+            method: None,
+            channel: "daemon".into(),
+            sequence: 42,
+            payload: json!({"workspace": "/workspace/other", "sessionId": "session-1"}),
+            error: None,
+            binary: None,
+        };
+        assert!(!should_forward_envelope(&event, 42));
+        assert!(should_forward_envelope(&event, 41));
+        let actionable = Envelope {
+            channel: "runtime".into(),
+            payload: json!({"kind": "approval_requested"}),
+            ..event
+        };
+        assert!(should_forward_envelope(&actionable, 42));
+        let child = Envelope {
+            payload: json!({"kind": "text_delta", "agentId": "agent-1"}),
+            ..actionable
+        };
+        assert!(should_forward_envelope(&child, 42));
     }
 }
 

@@ -219,6 +219,8 @@ struct DesktopEvent {
     #[serde(default)]
     run_id: String,
     #[serde(default)]
+    agent_id: String,
+    #[serde(default)]
     approval_id: String,
     #[serde(default)]
     user_input_id: String,
@@ -324,12 +326,14 @@ impl AppState {
         let active_session_id = value_str(&snapshot, "activeSessionId");
         let active_run_id = value_str(&snapshot, "activeRunId");
         self.runtime.active_session_id = active_session_id.clone();
-        if !active_run_id.is_empty() {
-            self.runtime.running = active_session_id == self.navigation.current_session_id;
-            self.runtime.run_id = active_run_id;
-            for session in &mut self.navigation.sessions {
-                session.running = session.id == active_session_id;
-            }
+        self.runtime.run_id = active_run_id.clone();
+        self.runtime.running =
+            !active_run_id.is_empty() && active_session_id == self.navigation.current_session_id;
+        if active_run_id.is_empty() {
+            self.runtime.activity = "".into();
+        }
+        for session in &mut self.navigation.sessions {
+            session.running = !active_run_id.is_empty() && session.id == active_session_id;
         }
         if let Some(session) = snapshot.get("session")
             && let Ok(event) = decode_desktop_event(session.clone())
@@ -350,6 +354,13 @@ impl AppState {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        if let Some(controls) = snapshot.get("pendingControls").and_then(Value::as_array) {
+            for control in controls {
+                if let Ok(event) = decode_desktop_event(control.clone()) {
+                    self.apply_desktop_event(event);
+                }
+            }
+        }
         self.connection.connected = true;
         self.connection.reconnecting = false;
         self.connection.message = "Connected".into();
@@ -385,6 +396,38 @@ impl AppState {
 
     fn apply_desktop_event(&mut self, event: DesktopEvent) {
         self.sequence = self.sequence.max(event.sequence);
+        let foreign_session = !event.session_id.is_empty()
+            && !self.navigation.current_session_id.is_empty()
+            && event.session_id != self.navigation.current_session_id.as_ref();
+        if foreign_session && !matches!(event.kind.as_str(), "session_loaded" | "projection_resync")
+        {
+            match event.kind.as_str() {
+                "run_started" => {
+                    set_session_running(&mut self.navigation.sessions, &event.session_id, true)
+                }
+                "run_finished" | "run_failed" | "run_cancelled" => {
+                    set_session_running(&mut self.navigation.sessions, &event.session_id, false)
+                }
+                _ => {}
+            }
+            return;
+        }
+        if !event.agent_id.is_empty()
+            && matches!(
+                event.kind.as_str(),
+                "text_delta"
+                    | "thinking_delta"
+                    | "tool_started"
+                    | "tool_update"
+                    | "tool_finished"
+                    | "diff_ready"
+                    | "todo_updated"
+                    | "context_usage"
+            )
+        {
+            self.apply_agent_stream_event(event);
+            return;
+        }
         match event.kind.as_str() {
             "session_loaded" | "projection_resync" => self.load_session(event),
             "run_started" => {
@@ -416,6 +459,7 @@ impl AppState {
                 }
                 if is_current {
                     self.runtime.running = false;
+                    self.runtime.run_id = "".into();
                     self.runtime.activity = event.state.into();
                     for block in self.transcript.blocks.borrow_mut().iter_mut() {
                         if block.state.as_ref() == "streaming" {
@@ -430,23 +474,58 @@ impl AppState {
             "tool_started" | "tool_update" | "tool_finished" => self.apply_tool_event(event),
             "diff_ready" => self.append_event_block(event, "diff"),
             "todo_updated" => self.runtime.todo = event.todo,
-            "approval_requested" => self.runtime.approvals.push(event_value(&event)),
+            "approval_requested" => {
+                let value = event_value(&event);
+                upsert_pending(
+                    &mut self.runtime.approvals,
+                    "approvalId",
+                    &event.approval_id,
+                    value,
+                );
+            }
             "approval_resolved" => retain_unresolved(
                 &mut self.runtime.approvals,
                 "approvalId",
                 &event.approval_id,
             ),
-            "user_input_requested" => self.runtime.questions.push(event_value(&event)),
+            "user_input_requested" => {
+                let value = event_value(&event);
+                upsert_pending(
+                    &mut self.runtime.questions,
+                    "userInputId",
+                    &event.user_input_id,
+                    value,
+                );
+            }
             "user_input_resolved" => retain_unresolved(
                 &mut self.runtime.questions,
                 "userInputId",
                 &event.user_input_id,
             ),
-            "plan_proposed" => self.runtime.plans.push(event_value(&event)),
+            "plan_proposed" => {
+                let value = event_value(&event);
+                upsert_pending(&mut self.runtime.plans, "planId", &event.plan_id, value);
+            }
             "plan_resolved" => retain_unresolved(&mut self.runtime.plans, "planId", &event.plan_id),
             "agent_state" => {
-                if !event.agent.is_null() {
-                    self.runtime.agents.push(event.agent)
+                if !event.agent.is_null() && !event.agent_id.is_empty() {
+                    let mut agent = event.agent;
+                    if let Some(fields) = agent.as_object_mut() {
+                        fields.insert("id".to_string(), Value::String(event.agent_id.clone()));
+                        fields.insert("agentId".to_string(), Value::String(event.agent_id.clone()));
+                    }
+                    if let Some(existing) = self.runtime.agents.iter_mut().find(|candidate| {
+                        candidate.get("id").and_then(Value::as_str) == Some(event.agent_id.as_str())
+                    }) {
+                        *existing = agent;
+                    } else {
+                        self.runtime.agents.push(agent);
+                    }
+                    const MAX_AGENTS: usize = 64;
+                    if self.runtime.agents.len() > MAX_AGENTS {
+                        let excess = self.runtime.agents.len() - MAX_AGENTS;
+                        self.runtime.agents.drain(..excess);
+                    }
                 }
             }
             "agent_detail" => {
@@ -508,7 +587,6 @@ impl AppState {
             "security_finding_list" => self.security.findings = event.security_findings,
             "security_finding_detail" => self.security.selected_finding = event.security_finding,
             "security_patch_state" => self.security.patch = event.security_patch,
-            "bridge_error" => self.settings.error = event.text.into(),
             "bootstrap_done" => {}
             _ => {}
         }
@@ -523,6 +601,10 @@ impl AppState {
             }
             return;
         }
+        let loaded_session_id = event.session_id.clone();
+        retain_session_values(&mut self.runtime.approvals, &loaded_session_id);
+        retain_session_values(&mut self.runtime.questions, &loaded_session_id);
+        retain_session_values(&mut self.runtime.plans, &loaded_session_id);
         self.navigation.current_session_id = event.session_id.into();
         for session in &mut self.navigation.sessions {
             if session.id == self.navigation.current_session_id {
@@ -530,7 +612,18 @@ impl AppState {
             }
         }
         self.navigation.current_title = event.data.get("title").cloned().unwrap_or_default().into();
-        *self.transcript.blocks.borrow_mut() = parse_string_json(event.data.get("blocks"));
+        self.settings.provider = value_str_map(&event.data, "provider");
+        self.settings.model = value_str_map(&event.data, "model");
+        self.settings.reasoning = value_str_map(&event.data, "reasoning");
+        self.settings.agent_mode = value_str_map(&event.data, "agentMode");
+        let blocks = restored_session_blocks(&event.data);
+        restore_durable_controls(
+            &blocks,
+            self.navigation.current_session_id.as_ref(),
+            &mut self.runtime.questions,
+            &mut self.runtime.plans,
+        );
+        *self.transcript.blocks.borrow_mut() = blocks;
         self.transcript.rebuild_index();
         self.runtime.todo = event.todo;
         self.runtime.recap = event.recap;
@@ -549,6 +642,72 @@ impl AppState {
             .into();
         self.runtime.agents = event.agent_snapshots;
         self.runtime.agent_blocks = event.agent_blocks;
+    }
+
+    fn apply_agent_stream_event(&mut self, event: DesktopEvent) {
+        let value = event_value(&event);
+        let replace = match event.kind.as_str() {
+            "text_delta" | "thinking_delta" => {
+                self.runtime
+                    .agent_blocks
+                    .iter_mut()
+                    .rev()
+                    .find(|candidate| {
+                        candidate.get("agentId").and_then(Value::as_str)
+                            == Some(event.agent_id.as_str())
+                            && candidate.get("runId").and_then(Value::as_str)
+                                == Some(event.run_id.as_str())
+                            && candidate.get("kind").and_then(Value::as_str)
+                                == Some(event.kind.as_str())
+                    })
+            }
+            "tool_update" | "tool_finished" => {
+                self.runtime
+                    .agent_blocks
+                    .iter_mut()
+                    .rev()
+                    .find(|candidate| {
+                        candidate.get("toolCallId").and_then(Value::as_str)
+                            == Some(event.tool_call_id.as_str())
+                    })
+            }
+            "todo_updated" | "context_usage" => {
+                self.runtime
+                    .agent_blocks
+                    .iter_mut()
+                    .rev()
+                    .find(|candidate| {
+                        candidate.get("agentId").and_then(Value::as_str)
+                            == Some(event.agent_id.as_str())
+                            && candidate.get("kind").and_then(Value::as_str)
+                                == Some(event.kind.as_str())
+                    })
+            }
+            _ => None,
+        };
+        if let Some(existing) = replace {
+            if matches!(event.kind.as_str(), "text_delta" | "thinking_delta") {
+                let combined = format!(
+                    "{}{}",
+                    existing
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    event.text
+                );
+                *existing = value;
+                existing["text"] = Value::String(combined);
+            } else {
+                *existing = value;
+            }
+        } else {
+            self.runtime.agent_blocks.push(value);
+        }
+        const MAX_AGENT_BLOCKS: usize = 256;
+        if self.runtime.agent_blocks.len() > MAX_AGENT_BLOCKS {
+            let excess = self.runtime.agent_blocks.len() - MAX_AGENT_BLOCKS;
+            self.runtime.agent_blocks.drain(..excess);
+        }
     }
 
     fn append_event_block(&mut self, event: DesktopEvent, kind: &str) {
@@ -694,6 +853,165 @@ fn parse_string_json<T: for<'de> Deserialize<'de>>(value: Option<&String>) -> Ve
         .unwrap_or_default()
 }
 
+fn value_str_map(values: &HashMap<String, String>, key: &str) -> Arc<str> {
+    values.get(key).cloned().unwrap_or_default().into()
+}
+
+fn restored_session_blocks(data: &HashMap<String, String>) -> Vec<Block> {
+    let blocks: Vec<Block> = parse_string_json(data.get("blocks"));
+    let sequences: Vec<i64> = parse_string_json(data.get("blockSequences"));
+    let tools: Vec<Value> = parse_string_json(data.get("toolRecords"));
+    if sequences.len() != blocks.len() {
+        return append_restored_tools(blocks, tools);
+    }
+    let mut ordered = blocks
+        .into_iter()
+        .zip(sequences)
+        .enumerate()
+        .map(|(index, (mut block, sequence))| {
+            block
+                .extra
+                .insert("sequence".to_string(), Value::Number(sequence.into()));
+            (sequence, 0_u8, index, block)
+        })
+        .collect::<Vec<_>>();
+    for (index, tool) in tools.into_iter().enumerate() {
+        if let Some(block) = restored_tool_block(&tool) {
+            let anchor = tool
+                .get("anchorSequence")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MAX);
+            ordered.push((anchor, 1, index, block));
+        }
+    }
+    ordered.sort_by_key(|(sequence, priority, index, _)| (*sequence, *priority, *index));
+    ordered.into_iter().map(|(_, _, _, block)| block).collect()
+}
+
+fn append_restored_tools(mut blocks: Vec<Block>, tools: Vec<Value>) -> Vec<Block> {
+    for tool in tools {
+        if let Some(block) = restored_tool_block(&tool)
+            && !blocks
+                .iter()
+                .any(|existing| existing.tool_call_id == block.tool_call_id)
+        {
+            blocks.push(block);
+        }
+    }
+    blocks
+}
+
+fn restored_tool_block(tool: &Value) -> Option<Block> {
+    let tool_call_id = tool.get("toolCallId").and_then(Value::as_str)?.to_string();
+    let mut extra = HashMap::new();
+    if let Some(fields) = tool.as_object() {
+        extra.extend(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
+    Some(Block {
+        id: tool_call_id.clone().into(),
+        kind: "tool".into(),
+        run_id: tool
+            .get("runId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+            .into(),
+        tool_call_id: tool_call_id.into(),
+        title: tool
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("Tool")
+            .to_string()
+            .into(),
+        content: tool
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        state: tool
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("complete")
+            .to_string()
+            .into(),
+        extra,
+        ..Default::default()
+    })
+}
+
+fn restore_durable_controls(
+    blocks: &[Block],
+    session_id: &str,
+    questions: &mut Vec<Value>,
+    plans: &mut Vec<Value>,
+) {
+    for block in blocks {
+        let data = block.extra.get("data").and_then(Value::as_object);
+        if block.kind.as_ref() == "question"
+            && matches!(block.state.as_ref(), "pending" | "interrupted")
+        {
+            let id = data
+                .and_then(|data| data.get("userInputId"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let encoded = data
+                .and_then(|data| data.get("questions"))
+                .and_then(Value::as_str)
+                .unwrap_or("[]");
+            upsert_pending(
+                questions,
+                "userInputId",
+                id,
+                serde_json::json!({
+                    "kind": "user_input_requested",
+                    "sessionId": session_id,
+                    "runId": block.run_id,
+                    "userInputId": id,
+                    "state": block.state,
+                    "data": {"questions": encoded},
+                }),
+            );
+        }
+        if block.kind.as_ref() == "plan" && block.state.as_ref() == "proposed" {
+            let id = data
+                .and_then(|data| data.get("planId"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            upsert_pending(
+                plans,
+                "planId",
+                id,
+                serde_json::json!({
+                    "kind": "plan_proposed",
+                    "sessionId": session_id,
+                    "runId": block.run_id,
+                    "planId": id,
+                    "state": block.state,
+                    "text": block.content,
+                    "data": {"title": block.title},
+                }),
+            );
+        }
+    }
+}
+
+fn set_session_running(sessions: &mut [SessionSummary], session_id: &str, running: bool) {
+    if let Some(session) = sessions
+        .iter_mut()
+        .find(|session| session.id.as_ref() == session_id)
+    {
+        session.running = running;
+    }
+}
+
+fn retain_session_values(values: &mut Vec<Value>, session_id: &str) {
+    values.retain(|value| value.get("sessionId").and_then(Value::as_str) == Some(session_id));
+}
+
 fn parse_i64(value: Option<&String>) -> i64 {
     value
         .and_then(|value| value.parse().ok())
@@ -703,11 +1021,14 @@ fn parse_i64(value: Option<&String>) -> i64 {
 fn event_value(event: &DesktopEvent) -> Value {
     serde_json::json!({
         "kind": event.kind,
+        "sessionId": event.session_id,
+        "agentId": event.agent_id,
         "runId": event.run_id,
         "state": event.state,
         "approvalId": event.approval_id,
         "userInputId": event.user_input_id,
         "planId": event.plan_id,
+        "toolCallId": event.tool_call_id,
         "text": event.text,
         "data": event.data,
     })
@@ -717,6 +1038,14 @@ fn retain_unresolved(values: &mut Vec<Value>, key: &str, id: &str) {
     if !id.is_empty() {
         values.retain(|value| value.get(key).and_then(Value::as_str) != Some(id));
     }
+}
+
+fn upsert_pending(values: &mut Vec<Value>, key: &str, id: &str, value: Value) {
+    if id.is_empty() {
+        return;
+    }
+    values.retain(|candidate| candidate.get(key).and_then(Value::as_str) != Some(id));
+    values.push(value);
 }
 
 #[cfg(test)]
@@ -764,7 +1093,14 @@ mod tests {
                 "updatedAt": "2026-08-25T00:00:00Z"
             }],
             "skills": {"entries": [{"name": "check"}]},
-            "terminals": [{"id": "terminal-1"}]
+            "terminals": [{"id": "terminal-1"}],
+            "pendingControls": [{
+                "kind": "approval_requested",
+                "sessionId": "session-1",
+                "runId": "run-1",
+                "approvalId": "approval-1",
+                "state": "pending"
+            }],
         }));
         assert_eq!(state.workspace.root.as_ref(), "/workspace");
         assert_eq!(state.navigation.current_title.as_ref(), "Session");
@@ -777,6 +1113,7 @@ mod tests {
         assert_eq!(state.navigation.sessions[0].title.as_ref(), "Session");
         assert_eq!(state.navigation.projects.len(), 1);
         assert_eq!(state.navigation.projects[0].path.as_ref(), "/workspace");
+        assert_eq!(state.runtime.approvals.len(), 1);
     }
 
     #[test]
@@ -800,6 +1137,190 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("openrouter")
         );
+    }
+
+    #[test]
+    fn reconnect_without_active_run_clears_stale_runtime_state() {
+        let mut state = AppState::default();
+        state.navigation.current_session_id = "session-1".into();
+        state.runtime.running = true;
+        state.runtime.run_id = "stale-run".into();
+        state.runtime.activity = "running".into();
+        state.apply_reconnect_snapshot(json!({
+            "base": {"sessionId": "session-1"},
+            "sessions": [{"id": "session-1", "title": "One"}],
+            "projects": [],
+            "activeSessionId": "",
+            "activeRunId": "",
+            "terminals": []
+        }));
+        assert!(!state.runtime.running);
+        assert!(state.runtime.run_id.is_empty());
+        assert!(state.runtime.activity.is_empty());
+        assert!(!state.navigation.sessions[0].running);
+    }
+
+    #[test]
+    fn session_load_restores_preferences_and_durable_tools_in_order() {
+        let mut state = AppState::default();
+        state.apply_direct_event(json!({
+            "kind": "session_loaded",
+            "sessionId": "session-1",
+            "state": "loaded",
+            "data": {
+                "title": "Restored",
+                "provider": "grok",
+                "model": "grok-4.20",
+                "reasoning": "high",
+                "agentMode": "team",
+
+                "blocks": "[{\"id\":\"u1\",\"kind\":\"user\",\"content\":\"ask\"},{\"id\":\"a1\",\"kind\":\"assistant\",\"content\":\"done\"}]",
+                "blockSequences": "[1,3]",
+                "toolRecords": "[{\"runId\":\"run-1\",\"toolCallId\":\"tool-1\",\"anchorSequence\":1,\"name\":\"coding.read_file\",\"state\":\"completed\",\"content\":\"ok\"}]"
+            }
+        }));
+        assert_eq!(state.settings.provider.as_ref(), "grok");
+        assert_eq!(state.settings.model.as_ref(), "grok-4.20");
+        assert_eq!(state.settings.reasoning.as_ref(), "high");
+        assert_eq!(state.settings.agent_mode.as_ref(), "team");
+        let blocks = state.transcript.blocks.borrow();
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.kind.as_ref())
+                .collect::<Vec<_>>(),
+            ["user", "tool", "assistant"]
+        );
+        assert_eq!(blocks[1].tool_call_id.as_ref(), "tool-1");
+    }
+    #[test]
+    fn session_load_keeps_only_matching_pending_controls() {
+        let mut state = AppState::default();
+        state.navigation.current_session_id = "session-a".into();
+        state.apply_direct_event(json!({
+            "kind": "approval_requested",
+            "sessionId": "session-a",
+            "approvalId": "approval-a"
+        }));
+        state.apply_direct_event(json!({
+            "kind": "approval_requested",
+            "sessionId": "session-b",
+            "approvalId": "approval-b"
+        }));
+        state.apply_direct_event(json!({
+            "kind": "session_loaded",
+            "sessionId": "session-b",
+            "state": "loaded",
+            "data": {"blocks": "[]"}
+        }));
+        assert!(state.runtime.approvals.is_empty());
+
+        state.navigation.current_session_id = "".into();
+        state.apply_direct_event(json!({
+            "kind": "approval_requested",
+            "sessionId": "session-b",
+            "approvalId": "approval-b"
+        }));
+        state.apply_direct_event(json!({
+            "kind": "session_loaded",
+            "sessionId": "session-b",
+            "state": "loaded",
+            "data": {"blocks": "[]"}
+        }));
+        assert_eq!(state.runtime.approvals.len(), 1);
+        assert_eq!(
+            state.runtime.approvals[0]
+                .get("approvalId")
+                .and_then(serde_json::Value::as_str),
+            Some("approval-b")
+        );
+    }
+
+    #[test]
+    fn foreign_session_events_do_not_contaminate_visible_transcript() {
+        let mut state = AppState::default();
+        state.navigation.current_session_id = "visible".into();
+        state.navigation.sessions = vec![
+            super::SessionSummary {
+                id: "visible".into(),
+                ..Default::default()
+            },
+            super::SessionSummary {
+                id: "background".into(),
+                ..Default::default()
+            },
+        ];
+        state.apply_direct_event(json!({
+            "kind": "text_delta",
+            "sessionId": "background",
+            "runId": "run-bg",
+            "text": "foreign"
+        }));
+        assert!(state.transcript.blocks.borrow().is_empty());
+        state.apply_direct_event(json!({
+            "kind": "text_delta",
+            "sessionId": "visible",
+            "runId": "run-child",
+            "agentId": "agent-1",
+            "text": "child"
+        }));
+        assert!(state.transcript.blocks.borrow().is_empty());
+        assert_eq!(state.runtime.agent_blocks.len(), 1);
+        state.apply_direct_event(json!({
+            "kind": "run_started",
+
+            "sessionId": "background",
+            "runId": "run-bg"
+        }));
+        assert!(state.navigation.sessions[1].running);
+        assert!(!state.runtime.running);
+    }
+    #[test]
+    fn child_activity_coalesces_and_stays_bounded() {
+        let mut state = AppState::default();
+        state.navigation.current_session_id = "session-1".into();
+        for _ in 0..300 {
+            state.apply_direct_event(json!({
+                "kind": "text_delta",
+                "sessionId": "session-1",
+                "runId": "run-child",
+                "agentId": "agent-1",
+                "text": "x"
+            }));
+        }
+        assert_eq!(state.runtime.agent_blocks.len(), 1);
+        assert_eq!(
+            state.runtime.agent_blocks[0]
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::len),
+            Some(300)
+        );
+        for index in 0..300 {
+            state.apply_direct_event(json!({
+                "kind": "diff_ready",
+                "sessionId": "session-1",
+                "runId": "run-child",
+                "agentId": "agent-1",
+                "toolCallId": format!("diff-{index}")
+            }));
+        }
+        assert_eq!(state.runtime.agent_blocks.len(), 256);
+        for index in 0..70 {
+            state.apply_direct_event(json!({
+                "kind": "agent_state",
+                "sessionId": "session-1",
+                "agentId": format!("agent-{index}"),
+                "agent": {"state": "running"}
+            }));
+        }
+        assert_eq!(state.runtime.agents.len(), 64);
+        assert!(state.runtime.agents.iter().all(|agent| {
+            agent
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        }));
     }
     #[test]
     fn incremental_text_keeps_phase_boundaries_and_terminal_identity() {

@@ -128,6 +128,7 @@ type ReconnectSnapshot struct {
 	Sessions        []session.Session                  `json:"sessions"`
 	Projects        []session.Project                  `json:"projects"`
 	ActiveRunID     string                             `json:"activeRunId,omitempty"`
+	PendingControls []Event                            `json:"pendingControls,omitempty"`
 }
 
 type Event struct {
@@ -344,6 +345,9 @@ func (b *Bridge) ReconnectSnapshot(sessionID string) (ReconnectSnapshot, error) 
 		}
 	} else if sessionID != base.SessionID || !errors.Is(err, session.ErrSessionNotFound) {
 		return ReconnectSnapshot{}, err
+	}
+	for _, control := range b.runtime.PendingControlEvents(sessionID) {
+		snapshot.PendingControls = append(snapshot.PendingControls, eventDTO(control))
 	}
 	// Optional catalogs are deliberately excluded from the first reconnect
 	// response. Dispatcher starts RefreshProjection after this durable snapshot

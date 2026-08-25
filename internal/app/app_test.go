@@ -2726,3 +2726,33 @@ func TestDesktopSecurityConfigActionsPersistAndProject(t *testing.T) {
 		t.Fatalf("persisted security config = %+v", persisted.Security)
 	}
 }
+
+func TestPendingControlEventsProjectsLiveSessionActions(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	service.liveApprovals["approval-1"] = &liveApproval{
+		approvalID: "approval-1", sessionID: "session-1", runID: "run-1",
+		callID: "call-1", agentType: "main",
+		request: approvalReviewRequest{
+			ToolName: "coding.write_file", Target: "file.txt", Risk: "medium",
+			Effect: "write", RequestedAction: "write file",
+		},
+	}
+	service.liveUserInputs["question-1"] = &liveUserInput{
+		id: "question-1", sessionID: "session-1", runID: "run-1", callID: "call-2",
+		questions: []askQuestion{{ID: "q1", Question: "Continue?"}},
+	}
+	events := service.PendingControlEvents("session-1")
+	if len(events) != 2 {
+		t.Fatalf("pending controls = %+v", events)
+	}
+	kinds := map[EventKind]bool{}
+	for _, event := range events {
+		kinds[event.Kind] = true
+		if event.SessionID != "session-1" || event.State != "pending" {
+			t.Fatalf("pending event = %+v", event)
+		}
+	}
+	if !kinds[EventApprovalRequested] || !kinds[EventUserInputRequested] {
+		t.Fatalf("pending kinds = %+v", kinds)
+	}
+}

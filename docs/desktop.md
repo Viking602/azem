@@ -81,11 +81,16 @@ replaceable snapshots coalesce only while pending. Eviction or client
 backpressure sends `resync_required` instead of silently dropping lifecycle
 state. The GPUI client then requests `ReconnectSnapshot`, which restores the
 durable session projection, session tree, session/project catalogs, active-run
-identity, and terminal roster. Optional provider, Skill, Hook, plugin,
-marketplace, MCP, and pull-request catalogs stream after first paint through
-`RefreshProjection`; remote model refresh can no longer delay the durable
-snapshot. Per-terminal raw replay is separately bounded to 4 MiB and is parsed
-by Alacritty's VTE state machine rather than painted as ANSI text.
+identity, terminal roster, and live pending approvals/questions. Events that
+arrive while the snapshot request is in flight are applied first, then the
+snapshot replaces durable state; replayed actionable controls and child-agent
+streams remain visible, while stale transcript/binary replay is suppressed by
+the connection high-water. Resync uses the same ordering, and the current
+session target is held atomically across reconnects. Optional provider, Skill,
+Hook, plugin, marketplace, MCP, and pull-request catalogs stream after first
+paint through `RefreshProjection`; remote model refresh cannot delay the
+durable snapshot. Per-terminal raw replay is bounded to 4 MiB and written as
+one connection-serialized transfer before live PTY frames resume.
 
 Closing a GPUI window sends `client_detach` and drops only that IPC connection.
 The daemon, provider stream, tools, subagents, leases, SQLite state, and PTYs

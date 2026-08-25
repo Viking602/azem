@@ -208,15 +208,12 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 				} else {
 					response.Payload = mustJSON(map[string]int{"chunks": len(chunks)})
 				}
-				if err := codec.WriteEnvelope(response); err != nil {
-					return
-				}
-				if replayErr == nil {
-					for _, chunk := range chunks {
-						if err := codec.WriteBinary(chunk.metadata, chunk.data); err != nil {
-							return
-						}
+				if replayErr != nil {
+					if err := codec.WriteEnvelope(response); err != nil {
+						return
 					}
+				} else if err := codec.WriteTerminalReplay(response, chunks); err != nil {
+					return
 				}
 				continue
 			}

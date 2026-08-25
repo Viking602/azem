@@ -110,13 +110,54 @@ func (codec *Codec) WriteBinary(metadata BinaryMetadata, data []byte) error {
 	return codec.writeFrame(wireBinary, append(prefix[:], header...), data)
 }
 
+func (codec *Codec) WriteTerminalReplay(response Envelope, chunks []terminalChunk) error {
+	if err := response.Validate(); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	headers := make([][]byte, len(chunks))
+	for index, chunk := range chunks {
+		if chunk.metadata.TransferID == "" || len(chunk.data) > MaxBinaryChunkBytes {
+			return errors.New("IPC terminal replay chunk is invalid")
+		}
+		header, headerErr := json.Marshal(chunk.metadata)
+		if headerErr != nil {
+			return headerErr
+		}
+		if len(header) > maxBinaryHeaderBytes {
+			return errors.New("IPC binary metadata is too large")
+		}
+		var prefix [2]byte
+		binary.BigEndian.PutUint16(prefix[:], uint16(len(header)))
+		headers[index] = append(prefix[:], header...)
+	}
+	codec.mu.Lock()
+	defer codec.mu.Unlock()
+	if err := codec.writeFrameLocked(wireControl, nil, encoded); err != nil {
+		return err
+	}
+	for index, chunk := range chunks {
+		if err := codec.writeFrameLocked(wireBinary, headers[index], chunk.data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (codec *Codec) writeFrame(kind byte, header, payload []byte) error {
+	codec.mu.Lock()
+	defer codec.mu.Unlock()
+	return codec.writeFrameLocked(kind, header, payload)
+}
+
+func (codec *Codec) writeFrameLocked(kind byte, header, payload []byte) error {
 	size := 1 + len(header) + len(payload)
 	if size > MaxControlFrameBytes {
 		return fmt.Errorf("IPC physical frame exceeds %d bytes", MaxControlFrameBytes)
 	}
-	codec.mu.Lock()
-	defer codec.mu.Unlock()
 	var sizeBuffer [4]byte
 	binary.BigEndian.PutUint32(sizeBuffer[:], uint32(size))
 	if _, err := codec.writer.Write(sizeBuffer[:]); err != nil {
