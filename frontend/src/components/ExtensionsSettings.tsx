@@ -171,13 +171,20 @@ function MarketplacePanel({ language, catalog, run }: {
     const snapshot = await listMarketplaceCatalog();
     useRuntimeStore.getState().applyEvents([{ sequence: 0, kind: "marketplace_catalog", state: "listed", marketplaceCatalog: snapshot }]);
   };
-  const mutate = async (key: string, request: ActionRequest) => {
+  const mutate = async (key: string, request: ActionRequest): Promise<boolean> => {
     setBusy((current) => new Set(current).add(key));
     try {
-      await run(request);
-      await refresh();
-    } catch {
-      // run reports the failure through the settings alert.
+      try {
+        await run(request);
+      } catch {
+        return false;
+      }
+      try {
+        await refresh();
+      } catch (cause) {
+        useRuntimeStore.getState().setError(cause instanceof Error ? cause.message : String(cause));
+      }
+      return true;
     } finally {
       setBusy((current) => {
         const next = new Set(current);
@@ -205,10 +212,10 @@ function MarketplacePanel({ language, catalog, run }: {
     event.preventDefault();
     const value = source.trim();
     if (!value) return;
-    void mutate(`source:${value}`, { kind: "marketplace_add", target: value }).then(() => setSource(""));
+    void mutate(`source:${value}`, { kind: "marketplace_add", target: value }).then((saved) => { if (saved) setSource(""); });
   };
   return <section className="extension-panel marketplace-panel" role="tabpanel">
-    <header className="extension-panel-header"><div><h2>{zh ? "插件市场" : "Plugin marketplace"}</h2><p>{zh ? "从 Git、目录或目录 JSON 中浏览和安装 OMP / Claude 兼容插件。" : "Browse and install OMP or Claude-compatible plugins from Git, directories, or catalog JSON."}</p></div><button type="button" className="subtle-button" onClick={() => void refresh()}><RefreshCw size={13} />{zh ? "刷新" : "Refresh"}</button></header>
+    <header className="extension-panel-header"><div><h2>{zh ? "插件市场" : "Plugin marketplace"}</h2><p>{zh ? "从 Git、目录或目录 JSON 中浏览和安装 OMP / Claude 兼容插件。" : "Browse and install OMP or Claude-compatible plugins from Git, directories, or catalog JSON."}</p></div><button type="button" className="subtle-button" onClick={() => void refresh().catch((cause) => useRuntimeStore.getState().setError(cause instanceof Error ? cause.message : String(cause)))}><RefreshCw size={13} />{zh ? "刷新" : "Refresh"}</button></header>
     <form className="marketplace-source-form" onSubmit={addSource}>
       <label><span>{zh ? "添加市场源" : "Add marketplace source"}</span><input value={source} onChange={(event) => setSource(event.target.value)} placeholder="owner/repo, https://…, ./path" /></label>
       <button type="submit" className="primary-button" disabled={!source.trim() || busy.has(`source:${source.trim()}`)}><Plus size={13} />{zh ? "添加" : "Add"}</button>
@@ -221,7 +228,7 @@ function MarketplacePanel({ language, catalog, run }: {
           <div><strong>{marketplace.name}</strong><small>{marketplace.source}</small></div>
           <span>{marketplace.type}</span>
           <button type="button" disabled={busy.has(key)} aria-label={zh ? `更新 ${marketplace.name}` : `Update ${marketplace.name}`} onClick={() => void mutate(key, { kind: "marketplace_update", target: marketplace.name })}><RotateCw size={13} /></button>
-          {removing ? <><button type="button" className="danger-text" onClick={() => void mutate(key, { kind: "marketplace_remove", target: marketplace.name }).then(() => setConfirming(""))}>{zh ? "确认" : "Confirm"}</button><button type="button" aria-label={zh ? "取消移除" : "Cancel removal"} onClick={() => setConfirming("")}><X size={13} /></button></> : <button type="button" aria-label={zh ? `移除 ${marketplace.name}` : `Remove ${marketplace.name}`} onClick={() => setConfirming(key)}><Trash2 size={13} /></button>}
+          {removing ? <><button type="button" className="danger-text" onClick={() => void mutate(key, { kind: "marketplace_remove", target: marketplace.name }).then((removed) => { if (removed) setConfirming(""); })}>{zh ? "确认" : "Confirm"}</button><button type="button" aria-label={zh ? "取消移除" : "Cancel removal"} onClick={() => setConfirming("")}><X size={13} /></button></> : <button type="button" aria-label={zh ? `移除 ${marketplace.name}` : `Remove ${marketplace.name}`} onClick={() => setConfirming(key)}><Trash2 size={13} /></button>}
         </div>;
       })}
     </div> : <p className="marketplace-empty">{zh ? "还没有市场。添加目录源后即可浏览插件。" : "No marketplaces yet. Add a catalog source to browse plugins."}</p>}
@@ -253,7 +260,7 @@ function MarketplacePluginRow({ plugin, installs, upgrades, language, installSco
   busy: Set<string>;
   confirming: string;
   onConfirm: (key: string) => void;
-  onMutate: (key: string, request: ActionRequest) => Promise<void>;
+  onMutate: (key: string, request: ActionRequest) => Promise<boolean>;
 }) {
   const zh = language === "zh-CN";
   return <article className="marketplace-plugin-row">
@@ -268,7 +275,7 @@ function MarketplacePluginRow({ plugin, installs, upgrades, language, installSco
         <span><b>{installed.scope === "user" ? zh ? "用户" : "User" : zh ? "项目" : "Project"}</b>{installed.version}{upgrade ? ` → ${upgrade.latest}` : ""}</span>
         <button type="button" disabled={busy.has(key)} onClick={() => void onMutate(key, { kind: installed.enabled ? "marketplace_disable" : "marketplace_enable", target: installed.id, decision: installed.scope, payload: { scope: installed.scope } })}>{installed.enabled ? zh ? "停用" : "Disable" : zh ? "启用" : "Enable"}</button>
         {upgrade ? <button type="button" disabled={busy.has(key)} onClick={() => void onMutate(key, { kind: "marketplace_upgrade", target: installed.id, decision: installed.scope, payload: { scope: installed.scope } })}>{zh ? "升级" : "Upgrade"}</button> : null}
-        {removing ? <><button type="button" className="danger-text" onClick={() => void onMutate(key, { kind: "marketplace_uninstall", target: installed.id, decision: installed.scope, payload: { scope: installed.scope } }).then(() => onConfirm(""))}>{zh ? "确认卸载" : "Confirm"}</button><button type="button" aria-label={zh ? "取消卸载" : "Cancel uninstall"} onClick={() => onConfirm("")}><X size={12} /></button></> : <button type="button" aria-label={zh ? `卸载 ${plugin.name}` : `Uninstall ${plugin.name}`} onClick={() => onConfirm(key)}><Trash2 size={12} /></button>}
+        {removing ? <><button type="button" className="danger-text" onClick={() => void onMutate(key, { kind: "marketplace_uninstall", target: installed.id, decision: installed.scope, payload: { scope: installed.scope } }).then((removed) => { if (removed) onConfirm(""); })}>{zh ? "确认卸载" : "Confirm"}</button><button type="button" aria-label={zh ? "取消卸载" : "Cancel uninstall"} onClick={() => onConfirm("")}><X size={12} /></button></> : <button type="button" aria-label={zh ? `卸载 ${plugin.name}` : `Uninstall ${plugin.name}`} onClick={() => onConfirm(key)}><Trash2 size={12} /></button>}
       </div>;
     })}</div>}
   </article>;

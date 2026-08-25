@@ -73,7 +73,7 @@ export function SessionTreePanel({ tree, language, running, busyEntry, onNavigat
         <button type="button" className="session-tree-edit" aria-label={zh ? "编辑标签" : "Edit label"} onClick={() => beginLabel(entry)}><Pencil size={11} /></button>
         {editing === entry.id ? <form className="session-tree-label-form" onSubmit={(event) => {
           event.preventDefault();
-          void onLabel(entry.id, label).then(() => setEditing(null));
+          void onLabel(entry.id, label).then(() => setEditing(null), () => undefined);
         }}>
           <label><span>{zh ? "条目标签" : "Entry label"}</span><input value={label} maxLength={128} autoFocus onChange={(event) => setLabel(event.target.value)} /></label>
           <button type="submit">{zh ? "保存" : "Save"}</button>
@@ -86,7 +86,7 @@ export function SessionTreePanel({ tree, language, running, busyEntry, onNavigat
         event.preventDefault();
         const target = targetId.trim();
         if (!target) return;
-        void onFork(target, tree.activeLeafEntryId ?? "").then(() => { setTargetId(""); setForkOpen(false); });
+        void onFork(target, tree.activeLeafEntryId ?? "").then(() => { setTargetId(""); setForkOpen(false); }, () => undefined);
       }}>
         <label><span>{zh ? "新会话 ID" : "New session ID"}</span><input value={targetId} maxLength={200} required autoFocus onChange={(event) => setTargetId(event.target.value)} /></label>
         <button type="submit" disabled={!targetId.trim()}>{zh ? "创建" : "Create"}</button>

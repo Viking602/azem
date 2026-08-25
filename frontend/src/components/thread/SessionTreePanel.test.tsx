@@ -84,4 +84,28 @@ describe("SessionTreePanel", () => {
     await act(async () => container!.querySelector<HTMLFormElement>(".session-tree-fork form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     expect(onFork).toHaveBeenCalledWith("session-fork", "a2");
   });
+
+  it("keeps label and fork forms open when the backend rejects a mutation", async () => {
+    const onLabel = vi.fn(async () => { throw new Error("label failed"); });
+    const onFork = vi.fn(async () => { throw new Error("fork failed"); });
+    await renderPanel({ onLabel, onFork });
+
+    await act(async () => container!.querySelectorAll<HTMLButtonElement>(".session-tree-edit")[1].click());
+    const labelInput = container!.querySelector<HTMLInputElement>(".session-tree-label-form input")!;
+    await act(async () => fill(labelInput, "Rejected label"));
+    await act(async () => {
+      container!.querySelector<HTMLFormElement>(".session-tree-label-form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(container!.querySelector(".session-tree-label-form")).not.toBeNull();
+
+    await act(async () => container!.querySelector<HTMLButtonElement>(".session-tree-fork > button")!.click());
+    const target = container!.querySelector<HTMLInputElement>(".session-tree-fork input")!;
+    await act(async () => fill(target, "rejected-fork"));
+    await act(async () => {
+      container!.querySelector<HTMLFormElement>(".session-tree-fork form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(container!.querySelector(".session-tree-fork form")).not.toBeNull();
+  });
 });

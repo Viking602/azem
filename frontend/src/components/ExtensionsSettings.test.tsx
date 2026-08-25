@@ -456,6 +456,31 @@ describe("ExtensionsSettings", () => {
 			kind: "marketplace_install", target: "review@official", decision: "project", sessionId: "session-1",
 		}));
 	});
+
+	it("keeps a marketplace source draft when the backend rejects the add", async () => {
+		useRuntimeStore.setState({
+			mcpServers: [], skills: [], plugins: [],
+			marketplaceCatalog: { marketplaces: [], available: [], installed: [], upgrades: [] },
+		});
+		const executeAction = vi.fn(async (request: ActionRequest) => {
+			if (request.kind === "marketplace_add") throw new Error("catalog add failed");
+		});
+		const view = renderSettings(executeAction);
+		await view.render();
+		const marketplace = Array.from(view.host.querySelectorAll<HTMLButtonElement>('.extension-tabbar [role="tab"]')).find((button) => button.textContent?.includes("市场"))!;
+		await act(async () => marketplace.click());
+		await act(async () => {
+			await vi.waitFor(() => expect(useRuntimeStore.getState().marketplaceCatalog.available).toHaveLength(1));
+		});
+		const input = view.host.querySelector<HTMLInputElement>(".marketplace-source-form input")!;
+		await setInput(input, "owner/rejected");
+		await act(async () => {
+			view.host.querySelector<HTMLFormElement>(".marketplace-source-form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+			await Promise.resolve();
+		});
+		expect(input.value).toBe("owner/rejected");
+		expect(view.host.querySelector('[role="alert"]')?.textContent).toContain("catalog add failed");
+	});
 });
 
 async function setInput(input: HTMLInputElement, value: string) {

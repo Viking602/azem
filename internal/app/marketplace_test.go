@@ -44,7 +44,8 @@ func TestMarketplaceActionsInstallReloadAndProjectCatalog(t *testing.T) {
 	}
 	snapshot, err := service.MarketplaceCatalogSnapshot()
 	if err != nil || len(snapshot.Marketplaces) != 1 || len(snapshot.Available) != 1 || len(snapshot.Installed) != 1 ||
-		snapshot.Available[0].ID != "demo@action-market" || snapshot.Installed[0].Scope != plugins.MarketplaceScopeProject {
+		snapshot.Available[0].ID != "demo@action-market" || snapshot.Installed[0].Scope != plugins.MarketplaceScopeProject ||
+		snapshot.Marketplaces[0].CachePath != "" || snapshot.Installed[0].Path != "" {
 		t.Fatalf("marketplace snapshot = %#v, %v", snapshot, err)
 	}
 	cloned := (Event{Kind: EventMarketplaceCatalog, MarketplaceCatalog: snapshot}).Clone()

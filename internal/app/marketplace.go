@@ -120,6 +120,9 @@ func (s *Service) marketplaceCatalogSnapshot(marketplace string) (*MarketplaceCa
 	if err != nil {
 		return nil, err
 	}
+	for index := range records {
+		records[index].CachePath = ""
+	}
 	available, err := s.marketplace.Discover(marketplace)
 	if err != nil {
 		return nil, err
@@ -131,6 +134,12 @@ func (s *Service) marketplaceCatalogSnapshot(marketplace string) (*MarketplaceCa
 	upgrades, err := s.marketplace.AvailableUpgrades()
 	if err != nil {
 		return nil, err
+	}
+	for index := range installed {
+		installed[index].Path = ""
+	}
+	for index := range upgrades {
+		upgrades[index].Plugin.Path = ""
 	}
 	return &MarketplaceCatalogPayload{
 		Marketplaces: records,

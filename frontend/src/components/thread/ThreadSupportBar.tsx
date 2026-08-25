@@ -111,6 +111,7 @@ export function ThreadEnvironmentPanel({ open }: ThreadEnvironmentPanelProps) {
       setSessionTree(await setSessionEntryLabel(currentSessionId, entryId, label));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      throw cause;
     } finally {
       setBusyEntry(undefined);
     }
@@ -121,6 +122,7 @@ export function ThreadEnvironmentPanel({ open }: ThreadEnvironmentPanelProps) {
       setSessionTree(await createSessionFork(currentSessionId, targetId, entryId));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      throw cause;
     } finally {
       setBusyEntry(undefined);
     }
