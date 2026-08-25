@@ -19,7 +19,6 @@ import (
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/memory"
-	"github.com/Viking602/azem/internal/netproxy"
 	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
@@ -52,17 +51,6 @@ func BootstrapDesktop(ctx context.Context, startupWorkspace string, configFile s
 
 func BootstrapDesktopAtWorkspace(ctx context.Context, startupWorkspace string, configFile string) (BootstrapResult, error) {
 	return bootstrap(ctx, startupWorkspace, configFile, true, true)
-}
-
-func bootstrap(ctx context.Context, startupWorkspace, configFile string, forceWorkspace, desktopMode bool) (BootstrapResult, error) {
-	netproxy.InstallDefaultTransport()
-	assembly := bootstrapAssembly{ctx: ctx}
-	result, err := assembly.build(startupWorkspace, configFile, forceWorkspace, desktopMode)
-	if err != nil {
-		assembly.close()
-		return BootstrapResult{}, err
-	}
-	return result, nil
 }
 
 func (b *bootstrapAssembly) build(startupWorkspace, configFile string, forceWorkspace, desktopMode bool) (BootstrapResult, error) {
