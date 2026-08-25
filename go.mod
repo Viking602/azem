@@ -14,6 +14,7 @@ require (
 require (
 	charm.land/glamour/v2 v2.0.1
 	github.com/BurntSushi/toml v1.6.0
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/Viking602/venat v0.15.4
 	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/atotto/clipboard v0.1.4

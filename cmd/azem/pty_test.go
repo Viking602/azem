@@ -52,7 +52,7 @@ func TestPTYStreamResizeCancelAndExit(t *testing.T) {
 	go readPTY(terminal, reads)
 
 	output := &bytes.Buffer{}
-	readUntil(t, reads, output, "READY FOR A TASK", 15*time.Second)
+	readUntil(t, reads, output, "Build anything", 15*time.Second)
 	if _, err := terminal.Write([]byte("\x1b[Z")); err != nil {
 		t.Fatalf("enable automatic review mode: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 	reads := make(chan ptyRead, 16)
 	go readPTY(terminal, reads)
 	output := &bytes.Buffer{}
-	readUntil(t, reads, output, "READY FOR A TASK", 15*time.Second)
+	readUntil(t, reads, output, "Build anything", 15*time.Second)
 	output.Reset()
 	if _, err := terminal.Write([]byte("/skills\r")); err != nil {
 		t.Fatalf("open skills overlay: %v", err)

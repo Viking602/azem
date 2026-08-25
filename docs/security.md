@@ -1,6 +1,6 @@
 # Security
 
-Last verified: 2026-08-24
+Last verified: 2026-08-25
 
 Azem is a local development agent. Its approvals, typed Bridge, credential
 stores, and durable action ledger are governance boundaries, not an operating-
@@ -9,19 +9,32 @@ matches the work you intend to authorize.
 
 ## Trust boundaries
 
-- The TUI and React desktop UI request operations; `internal/app` validates
-  them and owns durable state.
-- The Wails Bridge exposes a closed action allowlist. Its workspace viewer has
-  only bounded read methods; it does not expose an arbitrary shell, write, or
-  unrestricted filesystem method.
+- The TUI, React desktop, and GPUI desktop request operations;
+  `internal/app` validates them and owns durable state.
+- The desktop Bridge exposes a closed action allowlist. Its workspace viewer
+  has only bounded read methods; it does not expose an arbitrary shell, write,
+  or unrestricted filesystem method. GPUI's IPC dispatcher calls this same
+  allowlist and does not create another mutation boundary.
+- Native IPC is local and per-workspace. Endpoint and token files are
+  owner-only; Unix sockets are mode 0600 and Windows named pipes allow only the
+  owner and LocalSystem. HMAC authentication binds nonce, client, workspace,
+  and protocol version. Control and binary frames are length-bounded before
+  allocation, attachment order/size/SHA-256 are verified before import, and
+  duplicate or unknown fields remain rejected at the typed dispatcher.
+- IPC disconnect is intentionally not runtime authority. A renderer cannot
+  cancel a run merely by closing or crashing. Explicit daemon stop is a
+  separate authenticated frame; the CLI refuses it while a main run is active
+  unless the person supplies `--include-active`.
 - The embedded desktop terminal is a separate human-only Bridge surface
   (`CreateTerminal`, `WriteTerminal`, `ResizeTerminal`, `CloseTerminal`,
   `ListTerminals`). Those methods are not `ActionKind` values, are not on the
   Execute allowlist, and are not agent tools. The model cannot inject
   keystrokes into this PTY. Spawn uses a process argv for the user shell;
   typed input is written as bytes to the PTY. The initial `cwd` is the
-  window's project workspace; the user may `cd` afterwards. Closing the
-  window reaps every PTY. This does not replace `coding.shell` approvals.
+  workspace; the user may `cd` afterwards. Wails reaps PTYs when its owning
+  runtime closes. GPUI keeps PTYs in the daemon across renderer detach and
+  reaps them on typed close or daemon shutdown. This does not replace
+  `coding.shell` approvals.
 - Global session search is a separate read-only Bridge method. It accepts at
   most 200 characters and returns at most 30 title/message matches. Message
   content remains in SQLite; the WebView receives only a short FTS snippet,

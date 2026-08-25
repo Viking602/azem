@@ -1,6 +1,22 @@
 # Changelog
 
 ## Unreleased
+- Added an optional native GPUI desktop client built with `make gpui`. It uses
+  virtualized transcript rendering, system light/dark appearance, AccessKit
+  semantics, IME input, ANSI-aware terminal output, binary attachment
+  streaming, and native surfaces for conversations, run controls, workspace
+  review, pull requests, security, extensions/settings, usage, and terminals.
+
+- Added one workspace-scoped `azem-daemon` and a versioned authenticated local
+  IPC protocol shared with the existing desktop Bridge. Closing or restarting
+  GPUI no longer terminates active runs: the daemon retains the Go runtime,
+  SQLite state, subagents, tools, and PTYs, then restores a durable snapshot and
+  bounded event/terminal replay on reconnect. Unix sockets and state files are
+  owner-only; Windows named pipes use owner/System ACLs; attachments are
+  chunked and SHA-256 verified. No database schema, runtime configuration
+  default, executable prompt, static provider prefix, or provider message order
+  changed.
+
 - Completed the frozen OMP v18.0.3 behavioral-parity program at commit
   `160ed439ac0df594347e7d7018b813a7ffdb5e81`. The executable parity manifest
   now records all 71 in-scope coding-agent and operator capabilities as

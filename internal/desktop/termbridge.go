@@ -85,7 +85,7 @@ func (b *Bridge) terminalHost() (*termhost.Host, error) {
 }
 
 func (b *Bridge) emitTerminal(event termhost.Event) {
-	if b.emit == nil {
+	if b.emit == nil && b.rawTerminal == nil {
 		return
 	}
 	payload := TerminalEvent{
@@ -94,6 +94,12 @@ func (b *Bridge) emitTerminal(event termhost.Event) {
 		Session:  terminalSessionDTO(event.Session),
 		ExitCode: event.ExitCode,
 		At:       time.Now().UTC(),
+	}
+	if b.rawTerminal != nil {
+		b.rawTerminal(payload, event.Data)
+	}
+	if b.emit == nil {
+		return
 	}
 	if len(event.Data) > 0 {
 		payload.Data = base64.StdEncoding.EncodeToString(event.Data)

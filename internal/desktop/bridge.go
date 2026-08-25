@@ -115,6 +115,18 @@ type PullRequestDetail struct {
 	PullRequest githubpr.PullRequest  `json:"pullRequest"`
 	Monitor     githubpr.MonitorState `json:"monitor"`
 }
+type ReconnectSnapshot struct {
+	Base            Snapshot                           `json:"base"`
+	Session         *Event                             `json:"session,omitempty"`
+	Tree            *session.SessionTree               `json:"tree,omitempty"`
+	Skills          SkillCatalogSnapshot               `json:"skills"`
+	Hooks           *azemapp.HookCatalogSnapshot       `json:"hooks"`
+	Marketplace     *azemapp.MarketplaceCatalogPayload `json:"marketplace"`
+	PullRequests    *githubpr.Dashboard                `json:"pullRequests,omitempty"`
+	Terminals       []TerminalSession                  `json:"terminals"`
+	ActiveSessionID string                             `json:"activeSessionId,omitempty"`
+	ActiveRunID     string                             `json:"activeRunId,omitempty"`
+}
 
 type Event struct {
 	Sequence           uint64                             `json:"sequence"`
@@ -167,6 +179,7 @@ type Bridge struct {
 	sessionID    string
 	openProject  func(string, string, int64) error
 	emit         EventEmitter
+	rawTerminal  func(TerminalEvent, []byte)
 	ctx          context.Context
 	cancel       context.CancelFunc
 	start        sync.Once
@@ -188,6 +201,13 @@ func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventE
 	bridge.prMonitor = githubpr.NewMonitor(ctx, bridge.pullRequests, statePath, bridge.startPullRequestRepair, bridge.emitPullRequestMonitor)
 	bridge.terminals = termhost.New(bridge.workspace, bridge.emitTerminal)
 	return bridge
+}
+
+// SetRawTerminalSink installs a binary-safe terminal output consumer.
+func (b *Bridge) SetRawTerminalSink(sink func(TerminalEvent, []byte)) {
+	if b != nil {
+		b.rawTerminal = sink
+	}
 }
 
 func pullRequestMonitorStatePath(stateDir, workspace string) string {
@@ -269,6 +289,49 @@ func (b *Bridge) UsageReport(scope string) (session.UsageReport, error) {
 	return b.runtime.UsageReport(ctx, scope)
 }
 
+func (b *Bridge) ReconnectSnapshot(sessionID string) (ReconnectSnapshot, error) {
+	if b.runtime == nil || b.runtime.Sessions() == nil {
+		return ReconnectSnapshot{}, fmt.Errorf("runtime is unavailable")
+	}
+	base := b.Initialise()
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = base.SessionID
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+	defer cancel()
+	snapshot := ReconnectSnapshot{Base: base, Terminals: b.ListTerminals()}
+	snapshot.ActiveSessionID, snapshot.ActiveRunID = b.runtime.ActiveRun()
+	projection, err := b.runtime.SessionProjection(ctx, sessionID)
+	if err == nil {
+		sessionEvent := eventDTO(projection)
+		snapshot.Session = &sessionEvent
+		if tree, treeErr := b.runtime.Sessions().LoadSessionTree(ctx, sessionID); treeErr == nil {
+			snapshot.Tree = &tree
+		}
+	} else if sessionID != base.SessionID || !errors.Is(err, session.ErrSessionNotFound) {
+		return ReconnectSnapshot{}, err
+	}
+	if skills, skillsErr := b.SkillCatalog(); skillsErr == nil {
+		snapshot.Skills = skills
+	}
+	snapshot.Hooks = b.runtime.HookCatalogSnapshot()
+	if marketplace, marketplaceErr := b.MarketplaceCatalog(); marketplaceErr == nil {
+		snapshot.Marketplace = marketplace
+	}
+	if dashboard, dashboardErr := b.PullRequestDashboard(); dashboardErr == nil {
+		snapshot.PullRequests = &dashboard
+	}
+	return snapshot, nil
+}
+
+// RefreshProjection re-emits non-durable catalogs after a renderer reconnects.
+func (b *Bridge) RefreshProjection() {
+	if b != nil {
+		go b.prime()
+	}
+}
+
 func currentGitBranch(ctx context.Context, workspace string) string {
 	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
@@ -297,6 +360,11 @@ func (b *Bridge) ImportAttachment(sessionID, name, mimeType, encoded string) (At
 	if err != nil {
 		return Attachment{}, fmt.Errorf("decode attachment: %w", err)
 	}
+	return b.ImportAttachmentBytes(sessionID, name, mimeType, data)
+}
+
+// ImportAttachmentBytes imports a validated image without base64 transport.
+func (b *Bridge) ImportAttachmentBytes(sessionID, name, mimeType string, data []byte) (Attachment, error) {
 	item, err := b.runtime.ImportImageBytes(sessionID, name, mimeType, data)
 	if err != nil {
 		return Attachment{}, err
@@ -543,11 +611,23 @@ func (b *Bridge) prime() {
 	actions := []azemapp.Action{
 		{Kind: azemapp.ActionListSessions},
 		{Kind: azemapp.ActionListGitBranches},
+		{Kind: azemapp.ActionListModels, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListModelProviders, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListModelRoutes},
 		{Kind: azemapp.ActionListAgentTypes, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListPersonas, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListSkills, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListPlugins, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListHooks, SessionID: b.sessionID},
+		{Kind: azemapp.ActionMarketplaceList, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListCustomCommands, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListThemes, SessionID: b.sessionID},
+		{Kind: azemapp.ActionRefreshMCP, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListBackground, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListMemories, SessionID: b.sessionID},
+		{Kind: azemapp.ActionShowRecap, SessionID: b.sessionID},
+		{Kind: azemapp.ActionGetSecurityConfig, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListSecurityScans, SessionID: b.sessionID},
 	}
 	for _, action := range actions {
 		if err := b.runtime.ExecuteAction(b.ctx, action); err != nil && !errors.Is(err, context.Canceled) {

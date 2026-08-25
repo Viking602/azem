@@ -1196,6 +1196,17 @@ func (s *Service) CancelActive() bool {
 	return s.CancelActiveWithChildren(false)
 }
 
+// ActiveRun returns the current process-owned main run without mutating it.
+func (s *Service) ActiveRun() (sessionID, runID string) {
+	if s == nil {
+		return "", ""
+	}
+	s.mu.Lock()
+	sessionID, runID = s.activeSession, s.activeRun
+	s.mu.Unlock()
+	return sessionID, runID
+}
+
 func (s *Service) cancellationIntent(runID string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

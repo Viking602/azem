@@ -1,19 +1,20 @@
 # Architecture
 
-Last verified: 2026-08-24
+Last verified: 2026-08-25
 
-Azem is a local-first coding agent with two user interfaces over one Go
-runtime. The terminal and desktop applications share configuration, agent
-execution, provider routing, approvals, durable state, Skills, MCP servers,
-subagents, and recovery. The UI layers project that runtime; they do not own a
-second execution engine.
+Azem is a local-first coding agent with a terminal UI and two desktop clients
+over one Go runtime. Bubble Tea, Wails/React, and native GPUI share
+configuration, agent execution, provider routing, approvals, durable state,
+Skills, MCP servers, subagents, and recovery. The presentation layers project
+that runtime; they do not own another execution engine.
 
 ## Runtime overview
 
 ```mermaid
 flowchart LR
     TUI["Bubble Tea TUI"] --> APP["internal/app Service"]
-    GUI["React desktop"] --> BRIDGE["Bounded Wails Bridge"] --> APP
+    GUI["React desktop"] --> BRIDGE["Closed desktop Bridge"] --> APP
+    GPUI["Native GPUI client"] --> IPC["Authenticated local IPC"] --> DAEMON["Workspace daemon"] --> BRIDGE
     APP --> PROVIDERS["ChatGPT / Grok subscription drivers"]
     APP --> LLMUX["llmux provider adapter"]
     APP --> AGENT["Venat-backed agent runtime"]
@@ -28,7 +29,9 @@ flowchart LR
 
 `cmd/azem/main.go` starts the Bubble Tea application. `cmd/azem-gui/main.go`
 starts Wails, embeds the built React application, and registers the desktop
-Bridge. Both paths call the composition root in `internal/app/bootstrap.go`.
+Bridge in-process. `cmd/azem-daemon/main.go` starts the same desktop composition
+root without a renderer; `gpui/crates/azem-gpui` connects to it through
+`internal/desktopipc`. All three paths call `internal/app/bootstrap.go`.
 
 Bootstrap has four ordered stages:
 
@@ -45,8 +48,9 @@ Bootstrap has four ordered stages:
    initial runtime projection.
 
 If construction fails, bootstrap closes every component it already opened.
-Do not bypass this composition root with package globals or a second desktop
-runtime.
+Do not bypass this composition root with package globals or another execution
+runtime. The GPUI daemon is the composition root moved behind IPC, not a second
+implementation of agents, providers, approvals, or persistence.
 
 ## Package boundaries
 
@@ -54,6 +58,9 @@ runtime.
 |---|---|---|
 | `cmd/azem` | CLI flags, signals, TUI startup and shutdown | Agent or persistence behavior |
 | `cmd/azem-gui` | Wails lifecycle, windows, deep links, desktop startup | Arbitrary filesystem or shell APIs |
+| `cmd/azem-daemon` / `internal/daemon` | One workspace-scoped desktop runtime, endpoint publication, and explicit shutdown | UI rendering or alternate application semantics |
+| `gpui/crates/azem-gpui` | Native window lifecycle, granular projection state, virtualized rendering, and user input | Provider execution or authoritative durable state |
+| `gpui/crates/azem-ipc` / `internal/desktopipc` | Versioned authenticated framing, bounded replay, binary streams, and closed Bridge dispatch | New product actions or transport-specific business logic |
 | `frontend/src` | React projection, interaction state, typed Bridge calls | Provider execution or authoritative durable state |
 | `internal/desktop` | Closed Bridge operation set and event forwarding | Agent shell execution or a generic `sh -c` API |
 | `internal/desktop/termhost` | Human-only PTY sessions for the desktop window | Venat tools, approvals, or model-driven stdin |
@@ -86,10 +93,10 @@ TUI command or desktop TurnRequest
   -> approval policy governs file, shell, MCP, and external actions
   -> durable run, action attempts, tool records, and projections are persisted
   -> eventBroker emits ordered runtime events
-  -> TUI update loop or desktop Bridge receives the projection
-  -> React store reducer updates timeline, approvals, Todos, and subagents
-  -> subagent evidence status is derived from durable disposition/verification records
-  -> the same `agent_state` payload projects that status to TUI and React
+  -> TUI receives directly; Wails receives through Bridge; GPUI receives Bridge events through IPC
+  -> the renderer reducer updates timeline, approvals, Todos, subagents, terminals, and settings
+  -> subagent evidence status remains derived from durable disposition/verification records
+  -> the same `agent_state` payload projects that status to every renderer
 
 ```
 
@@ -103,17 +110,21 @@ does not register a tool. A separately approved adapter may be attached through
 model before `ProviderRuntime.resolveDriverForAccount` continues through the
 existing account, catalog, and provider checks.
 
-The desktop Bridge exposes named methods and a bounded runtime projection. Add
-a Bridge method only when a desktop feature needs a real application operation;
-never expose an arbitrary command runner or general filesystem API. The
-workspace browser and workspace change review are deliberate read-only
-exceptions with relative-path, resolved-symlink, entry-count, file-size,
-Git-output, timeout, and binary-content enforcement in
+The desktop Bridge exposes named methods and a bounded runtime projection. Wails
+invokes that operation set in-process. GPUI uses the same set through an
+authenticated, versioned local IPC dispatcher; the transport adds no new
+actions. Control frames are length-bounded JSON, attachments and terminal
+output are bounded binary frames, and reconnect uses a durable snapshot plus a
+byte-bounded sequence replay. Add a Bridge method only when a desktop feature
+needs a real application operation; never expose an arbitrary command runner or
+general filesystem API. The workspace browser and workspace change review are
+deliberate read-only exceptions with relative-path, resolved-symlink,
+entry-count, file-size, Git-output, timeout, and binary-content enforcement in
 `internal/desktop/workspace_files.go` and
-`internal/desktop/workspace_changes.go`; React cannot weaken those boundaries.
-The embedded terminal is a second deliberate exception: Go owns the PTY, the
-renderer only displays xterm output and forwards keystrokes through named
-Bridge methods, and the agent tool catalog cannot write to those sessions.
+`internal/desktop/workspace_changes.go`; neither renderer can weaken those
+boundaries. The embedded terminal is a second deliberate exception: Go owns the
+PTY, the renderer displays bounded output and forwards human keystrokes through
+named Bridge methods, and the agent tool catalog cannot write to those sessions.
 
 ## Planning lifecycle
 

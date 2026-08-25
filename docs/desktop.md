@@ -1,10 +1,11 @@
 # Desktop application
 
-Last verified: 2026-08-24
+Last verified: 2026-08-25
 
-Azem's desktop application is a Wails window over the same Go runtime used by
-the TUI. React owns presentation state; it does not duplicate provider,
-approval, session, or persistence behavior.
+Azem ships the established Wails/React desktop and an optional native GPUI
+client. Both use the same Go runtime, typed desktop Bridge, SQLite stores,
+approval rules, and recovery behavior as the TUI. React and GPUI own
+presentation state only.
 
 ## Startup and Bridge
 
@@ -34,13 +35,14 @@ internal/app event broker
   -> timeline and control surfaces
 ```
 
-Session restoration and project ownership remain durable SQLite state. One
-desktop window owns one workspace-scoped runtime; opening a session from a
-different project opens it with that project's workspace. All windows retain a
-shared process-lifetime recovery fence. Starting the new workspace runtime does
-not run crash recovery against a conversation still executing in an existing
-window. Merely selecting another conversation also does not emit `SessionEnd`;
-session hooks close once when their owning application process shuts down.
+Session restoration and project ownership remain durable SQLite state. A Wails
+window owns one workspace-scoped runtime in-process. GPUI connects to one
+workspace-scoped daemon that may outlive any individual renderer connection.
+Opening a session from a different project selects that project's runtime and
+workspace. Every runtime retains the process-lifetime recovery fence. Starting
+another workspace must not run crash recovery against a conversation still
+executing elsewhere. Merely selecting another conversation also does not emit
+`SessionEnd`; session hooks close once when their owning runtime shuts down.
 
 Desktop bootstrap also installs the shared outbound proxy resolver before any
 provider, authentication, model-catalog, MCP, or plugin client is constructed.
@@ -49,6 +51,66 @@ uses the same active system proxy as Codex/Electron even though no terminal
 environment variables are inherited. The resolver refreshes native settings
 without restarting the app; matching environment variables remain explicit
 per-process overrides.
+
+## Native GPUI client and daemon
+
+`make gpui` builds and signs `dist/Azem-GPUI.app` on macOS. The bundle contains
+the Rust `Azem` renderer and the Go `azem-daemon`; the renderer discovers that
+sibling before falling back to `AZEM_DAEMON_BINARY` or `azem daemon serve`.
+`--workspace`, `--session`, `--config`, `--daemon`, and `--state-dir` select
+startup state without changing the user's persisted workspace configuration.
+
+Each canonical workspace maps to
+`<stateDir>/gpui-daemons/<workspace-hash>/`. The daemon publishes
+`endpoint.json` and an independent 256-bit token there with owner-only
+permissions. Unix uses a mode-0600 domain socket. Windows uses a named pipe
+whose ACL permits only the current owner and LocalSystem. Authentication is an
+HMAC-SHA256 challenge bound to the nonce, client ID, workspace ID, and protocol
+version; a copied response cannot authenticate another client or workspace.
+
+The version-1 wire protocol uses a four-byte big-endian frame length and a wire
+kind. JSON control frames are capped at 16 MiB. Attachments and PTY output use
+binary chunks capped at 256 KiB; one attachment may reassemble to at most
+256 MiB and must match its declared size, chunk order, and SHA-256 digest.
+Secrets never enter event payloads. The dispatcher exposes exactly the
+existing Bridge methods and rejects unknown JSON fields.
+
+Daemon events carry one monotonic workspace sequence. The replay ring and each
+client queue have byte budgets. Incremental text and thinking remain lossless;
+replaceable snapshots coalesce only while pending. Eviction or client
+backpressure sends `resync_required` instead of silently dropping lifecycle
+state. The GPUI client then requests `ReconnectSnapshot`, which restores the
+durable session projection, session tree, catalogs, PR dashboard, and terminal
+roster. Per-terminal raw replay is separately bounded to 4 MiB and is parsed by
+Alacritty's VTE state machine rather than painted as ANSI text.
+
+Closing a GPUI window sends `client_detach` and drops only that IPC connection.
+The daemon, provider stream, tools, subagents, leases, SQLite state, and PTYs
+continue. GPUI uses explicit quit mode, so reopening the application recreates
+the window; restarting the renderer reconnects to the same daemon. Only
+`azem daemon stop` terminates the daemon, and it refuses an active main run
+unless `--include-active` is explicit.
+
+The GPUI state model is split by connection, navigation, transcript, runtime
+controls, catalogs, workspace, pull requests, security, terminals, and
+settings. The transcript uses GPUI `ListState` bottom virtualization. The
+native surfaces cover conversations and attachments, approvals/plans/Todo and
+agents, files and changes, projects, PRs, security scans, settings/extensions,
+usage/context/archive state, and an embedded terminal. GPUI follows the system
+light/dark appearance, exposes AccessKit roles and labels, supports keyboard
+focus and IME text input, and contains no animation when reduced motion is
+preferred.
+
+Native event flow:
+
+```text
+internal/app event broker
+  -> internal/desktop Bridge
+  -> internal/desktopipc EventHub
+  -> authenticated framed IPC
+  -> azem-ipc reconnect supervisor
+  -> granular GPUI state and virtualized surfaces
+```
 
 ## Application shell and navigation
 

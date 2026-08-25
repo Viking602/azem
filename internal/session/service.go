@@ -18,6 +18,8 @@ import (
 	"github.com/Viking602/venat/message"
 )
 
+var ErrSessionNotFound = errors.New("session not found")
+
 type Session struct {
 	ID         string    `json:"id"`
 	Workspace  string    `json:"workspace"`
@@ -594,7 +596,7 @@ func (s *Service) Ensure(ctx context.Context, value Session) (Session, error) {
 func (s *Service) LoadSession(ctx context.Context, id string) (Session, error) {
 	row, err := dbgen.New(s.db).GetSession(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Session{}, fmt.Errorf("session %q not found", id)
+		return Session{}, fmt.Errorf("%w: %q", ErrSessionNotFound, id)
 	}
 	if err != nil {
 		return Session{}, fmt.Errorf("load session: %w", err)

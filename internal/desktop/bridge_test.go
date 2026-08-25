@@ -156,6 +156,31 @@ func TestBridgeResumeSessionReturnsDurableProjectionDirectly(t *testing.T) {
 	}
 }
 
+func TestReconnectSnapshotAllowsFreshUnpersistedSession(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "fresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	cfg := config.Default()
+	runtime := azemapp.NewService(ctx, cfg)
+	runtime.AttachDurable(sessions, nil)
+	bridge := NewBridge(ctx, azemapp.BootstrapResult{
+		Config: cfg, SessionID: "session-fresh", Service: runtime,
+		Paths: config.Paths{Workspace: t.TempDir(), StateDir: t.TempDir()},
+	}, nil, nil)
+	t.Cleanup(bridge.Close)
+	snapshot, err := bridge.ReconnectSnapshot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Base.SessionID != "session-fresh" || snapshot.Session != nil {
+		t.Fatalf("fresh reconnect snapshot = %#v", snapshot)
+	}
+}
+
 func TestBridgeSessionTreeNavigationForkLabelAndExport(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "tree.db"))

@@ -20,7 +20,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 
 | Capability | What it provides |
 |---|---|
-| **Terminal and desktop workflows** | A fast Bubble Tea TUI plus a Wails desktop workspace with frame-paced streaming output, inline approvals and diffs, Agent inspection, recovery, and role-model settings |
+| **Terminal and desktop workflows** | A fast Bubble Tea TUI, the established Wails/React desktop, and an optional native GPUI client with virtualized streaming output, inline approvals and diffs, Agent inspection, recovery, and role-model settings |
 | **Governed execution** | Prompt, Auto Review, and YOLO approval modes for file, shell, and external actions |
 | **Durable state** | SQLite-backed sessions, runs, approvals, leases, side-effect reconciliation, and Team resume |
 | **Multiple providers** | ChatGPT through Codex-compatible OAuth, Grok through API or CLI-proxy transport, Cursor through its native agent service, and configurable llmux providers |
@@ -38,6 +38,7 @@ Requirements:
 - Go 1.25.8 or later; the project recommends the Go 1.25.12 toolchain
 - A supported ChatGPT or Grok account or existing credential
 - Git when using subagent worktree isolation
+- Rust 1.97.1 when building the native GPUI desktop client; `gpui/rust-toolchain.toml` selects it automatically
 
 ```bash
 git clone https://github.com/Viking602/azem.git
@@ -52,6 +53,19 @@ make gui
 open dist/Azem.app
 ```
 
+To build the native GPUI desktop and its workspace daemon on macOS, run:
+
+```bash
+make gpui
+open dist/Azem-GPUI.app
+```
+
+The GPUI window is an IPC client. Each workspace has one authenticated local
+`azem-daemon` process that owns the Go runtime and SQLite stores. Closing or
+restarting the window disconnects only the renderer; active runs continue and
+the next window restores a durable snapshot plus bounded event and terminal
+replay. The Wails app remains available through `make gui`.
+
 For Windows, build the native executable with:
 
 ```powershell
@@ -64,7 +78,7 @@ background commands. PowerShell 7 (`pwsh.exe`) is preferred when installed;
 the built-in Windows PowerShell is the fallback. Bash hooks additionally
 require Git Bash.
 
-The desktop app and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. The React UI receives a bounded event projection; it does not expose arbitrary shell or filesystem bindings.
+The desktop clients and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. Wails uses its bounded Bridge directly. GPUI reaches the same closed Bridge operation set through an owner-only, authenticated local IPC protocol; neither renderer exposes arbitrary shell or filesystem bindings.
 
 Desktop global search (`Cmd+K` on macOS or `Ctrl+K` elsewhere) searches application actions, every settings control and configured model/MCP/Skill/plugin name, session titles, and durable user/assistant conversation content across projects. Settings results open and focus the exact control. Conversation-content results return a short SQLite FTS snippet and jump to the durable matching message; cross-project results open the owning project first. Input is debounced, stale responses are discarded, and complete transcripts are never copied into the frontend search index.
 
@@ -663,6 +677,9 @@ Azem's approvals and persistent action boundaries help reduce accidental operati
 - In the TUI, `workspace.root` sets the initial shell directory. Desktop windows
   use the selected project from the SQLite catalog instead. Neither mode is an
   OS sandbox: shell commands can still access paths outside the project.
+- GPUI uses an owner-only local socket or named pipe plus a per-workspace
+  HMAC token. Renderer close is not cancellation authority: the daemon keeps
+  active work until normal completion or an explicit authenticated stop.
 - `allow_write: false` removes built-in write tools but cannot stop an approved shell command from writing files.
 - `allow_network` relies on tools declaring network use and does not enforce OS-level network isolation.
 - `shell_policy: allow` and YOLO mode remove important confirmation points.
@@ -683,12 +700,16 @@ For strict isolation, run Azem inside a container, virtual machine, or restricte
 ```text
 cmd/azem/               Terminal application entry point
 cmd/azem-gui/           Wails desktop application entry point
+cmd/azem-daemon/        Workspace-scoped runtime daemon for native IPC clients
 frontend/               React desktop interface and Wails bindings
+gpui/                   Rust GPUI desktop client and shared generated IPC contracts
 internal/agent/         Tool governance, persistent runs, and team agents
 internal/app/           Application orchestration, providers, and subagents
 internal/auth/          OAuth, credential import, and credential storage
 internal/config/        Configuration, paths, roles, and personas
 internal/desktop/       Bounded Wails bridge and desktop lifecycle
+internal/daemon/        Workspace daemon composition, endpoint publication, and shutdown
+internal/desktopipc/    Authenticated framed IPC, replay, binary streaming, and dispatch
 internal/desktop/termhost/ Human-only PTY host for the embedded desktop terminal
 internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/authbroker/    Multi-process credential snapshots, refresh, account pools, and usage
@@ -734,6 +755,12 @@ Run frontend and desktop checks:
 
 ```bash
 make test-gui
+```
+
+Run native GPUI protocol, daemon, Rust, and UI-model checks:
+
+```bash
+make test-gpui
 ```
 
 Run the architecture policy gate:

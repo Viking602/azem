@@ -2,7 +2,7 @@
 // The Go source of truth is internal/app/contracts.go (plus the desktop
 // bridge-local event kinds). Regenerate with: make contracts
 
-/** Every action kind accepted by the runtime (internal/app AllActionKinds). */
+/** Every action kind accepted by the runtime. */
 export type ActionKind =
   | "login"
   | "logout"
@@ -103,7 +103,7 @@ export type ActionKind =
   | "reconcile_security_publication"
 ;
 
-/** Every runtime event kind (internal/app AllEventKinds) plus desktop bridge-local kinds. */
+/** Every runtime and desktop-local event kind. */
 export type EventKind =
   | "bootstrap_done"
   | "session_loaded"

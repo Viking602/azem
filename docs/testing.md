@@ -1,16 +1,17 @@
 # Testing
 
-Last verified: 2026-08-24
+Last verified: 2026-08-25
 
-Azem spans a Go runtime, SQLite, Bubble Tea, Wails, and a React frontend. Passing
-one package is not enough when a change crosses those boundaries. Start with
-the narrowest relevant check, then run the complete check for the affected
-surface.
+Azem spans a Go runtime, SQLite, Bubble Tea, Wails/React, native GPUI, and a
+versioned local IPC boundary. Passing one package is not enough when a change
+crosses those boundaries. Start with the narrowest relevant check, then run the
+complete check for the affected surface.
 
 ## Required tools
 
 - Go 1.25.8 or later; `go.mod` selects toolchain 1.25.12.
 - Bun 1.3.14 for the frontend lockfile and scripts.
+- Rust 1.97.1 for GPUI; `gpui/rust-toolchain.toml` selects the pinned toolchain.
 - macOS or Windows for the Wails desktop entry point; the current packaged
   smoke procedure is documented for macOS.
 - Sentrux 0.5.7 for repository architecture rules.
@@ -28,6 +29,19 @@ Frontend typecheck, unit tests, production build, and desktop Go tests:
 
 ```bash
 make test-gui
+```
+
+Native IPC, daemon, Rust formatting, strict Clippy, protocol tests, and GPUI
+state/UI-model tests:
+
+```bash
+make test-gpui
+```
+
+IPC throughput and allocation benchmarks:
+
+```bash
+GOWORK=off go test -run '^$' -bench 'Benchmark(EventHub|Codec)' -benchmem -count=3 ./internal/desktopipc
 ```
 
 Headless Terminal-Bench runner (Harbor):
@@ -55,10 +69,11 @@ GOWORK=off go test ./internal/parity
 GOWORK=off go test ./internal/provider/... ./internal/auth/...
 ```
 
-Packaged desktop application:
+Packaged desktop applications:
 
 ```bash
 make gui
+make gpui
 ```
 
 Windows desktop cross-build (amd64 by default; set `WINDOWS_ARCH=arm64` for
@@ -76,6 +91,8 @@ make gui-windows
 | Go formatting | `gofmt -w <changed.go>` | `git diff --check` |
 | React component/store/style | Run the matching Vitest file during iteration | `make test-gui` |
 | Desktop Bridge or Wails lifecycle | `go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui` | `make test-gui`, `make gui`, real app launch |
+| GPUI IPC or daemon lifecycle | `GOWORK=off go test ./internal/desktopipc ./internal/daemon` | `make test-gpui`, `make gpui`, renderer detach/reconnect smoke |
+| GPUI renderer/state | Matching `cargo test -p azem-gpui <test>` from `gpui/` | `make test-gpui`, `make gpui`, real native window launch |
 | Workspace file browser | `go test ./internal/desktop -run Workspace` and `cd frontend && bun run test -- WorkspaceFilesPage.test.tsx` | `make test-gui`, `make gui`, real tree/text/image/binary smoke |
 | SQLite migration/adapter | `go test ./internal/store/sqlite` | `GOWORK=off go test ./...` plus real upgrade/reopen evidence |
 | Venat version/contract | Affected agent and adapter packages | `GOWORK=off go mod tidy`, `GOWORK=off go test ./...`, `GOWORK=off make gui` |
@@ -125,6 +142,23 @@ starts. On macOS:
 For visual-only changes, also check light/dark appearance, narrow layout,
 keyboard focus, reduced motion where relevant, and readable approval/error
 states.
+
+For the native GPUI client:
+
+1. Run `make gpui`; the target signs and verifies
+   `dist/Azem-GPUI.app`, including its bundled `azem-daemon`.
+2. Launch `open dist/Azem-GPUI.app` or
+   `dist/Azem-GPUI.app/Contents/MacOS/Azem --workspace "$PWD"`.
+3. Confirm the window reaches `Azem GPUI window ready`, the daemon endpoint is
+   created under `~/.azem/gpui-daemons/<workspace-hash>/`, and the current
+   project/session snapshot renders.
+4. Start a turn, close the window, and reconnect. The daemon PID and active run
+   must remain; transcript and terminal state must restore.
+5. Exercise conversation, approval/Todo/agent, file/change, PR/security,
+   settings/extension/usage, attachment, and terminal navigation as applicable.
+6. Run `azem daemon status --workspace "$PWD"`, then stop only after the run is
+   terminal. `azem daemon stop` must refuse an active run without
+   `--include-active`.
 
 On Windows, launch `dist\windows-amd64\Azem.exe` and repeat steps 4–8. Also
 verify one foreground PowerShell command, cancellation of a command that has a

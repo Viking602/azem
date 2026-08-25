@@ -1,0 +1,29 @@
+[package]
+name = "azem-gpui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "azem-gpui"
+path = "src/main.rs"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+async-channel.workspace = true
+anyhow.workspace = true
+azem-ipc = { path = "../azem-ipc" }
+dirs.workspace = true
+sha2.workspace = true
+gpui.workspace = true
+gpui-platform = { workspace = true, features = ["font-kit"] }
+rfd = "0.17.2"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+unicode-segmentation.workspace = true
+uuid.workspace = true

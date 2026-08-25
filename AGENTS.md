@@ -1,6 +1,6 @@
 # Azem Agent Guide
 
-Last verified: 2026-08-24
+Last verified: 2026-08-25
 
 ## Scope
 
@@ -36,6 +36,7 @@ state changes; do not use it for temporary task progress.
 | Agent and scheduler runtime | `internal/agent/`, `internal/app/`, Venat API |
 | Sessions and durable timeline | `internal/session/`, `internal/app/tool_timeline.go` |
 | Desktop bridge | `internal/desktop/`, `internal/desktop/termhost/`, `cmd/azem-gui/`, `frontend/src/bridge.ts` |
+| Native GPUI and desktop IPC | `gpui/`, `internal/desktopipc/`, `internal/daemon/`, `cmd/azem-daemon/` |
 | GitHub PR capability | `internal/githubpr/`, `frontend/src/components/PullRequestPanel.tsx`, `frontend/src/components/PullRequestsPage.tsx` |
 | Native security scanning | `internal/securityscan/`, `docs/security-scanning.md` |
 | TUI | `internal/tui/` |
@@ -140,6 +141,7 @@ Status values:
 | UI-029 | Fixed, guarded | ComposerContext collapsed provider-reported usage into fixed `System 0k`, `Tools 0k`, and `Messages 251.2k` rows even though Inspector correctly showed `模型输入 251k` and `当前输出 488`. The UI therefore mislabeled real provider input as conversation messages. | User comparison screenshots, shared `contextCategoryLabel`, `composerContextUsage` category tests, ComposerContext DOM assertions, and packaged hover verification. | Derive ComposerContext segments directly from `contextComposition`, preserve their order and token counts, reuse Inspector localization, and calculate each row's percentage against actual used tokens. Show used and total tokens in the header/footer. Only the ring/progress share uses the context-window limit. Never invent empty categories or relabel `provider_input` as messages. |
 | UI-030 | Fixed, guarded | The composer model picker accumulated dismissal failures across React, Portal, and macOS input boundaries. Real macOS tap-to-click can omit `pointerdown` or `click` and, in the reproduced failure, delivered `pointerup`/`mouseup` before a later-dispatched `pointerdown`/`mousedown` whose earlier timestamp and `buttons=0` showed that it was not an active press. Treating that false press as activation reopened the picker or left the release-only close attempt unhandled. An attempted native repair also installed `acceptsFirstMouse:` on the complete WKWebView/hit-view class, allowing the click that activates an inactive window to trigger unrelated Stop, approval, delete, or navigation controls. | Repeated user reports/screenshots, browser-versus-packaged classification, raw timestamped WKWebView capture of the release-first sequence, click-only/pointerdown-only/reordered/mismatched-timestamp/window-blur regressions in `SettingsDialog.test.tsx`, native click-through security review, complete frontend verification, and two user-confirmed 50-cycle real-trackpad runs. | Keep standard macOS activation-only behavior; never install a WebView-wide `acceptsFirstMouse:` override. Losing window focus closes the picker. In an active window, a press start is valid only while the primary button is held (`buttons & 1`), and an unpaired primary release is a fallback activation. Mouse-only and click-only paths remain valid. Deduplicate compatibility events through click or the next event-loop task, never by timestamp thresholds or assumed down-before-up order. Preserve persistent hidden-Portal and outside/Escape/model/run/session dismissal coverage. |
 | UI-031 | Fixed, guarded | The project tree spent two lines on every project and session, adding a decorative project monogram, branch/path subtitle, project session-count badge, and relative session age. In a narrow sidebar this duplicated context already available in the title bar and Inspector while reducing the number of visible conversations. | User screenshot, `Sidebar` compact-row DOM regression, sidebar source/CSS absence assertions, and packaged desktop verification. | Keep project rows single-line with only expand/collapse, project name, and project-scoped new-conversation action. Keep session rows single-line with status dot, title, and real running/unread state. Do not restore project monograms, branch/path subtitles, project count badges, or session-age labels; Pull Request rows retain their own explicit status. |
+| IPC-001 | Fixed, guarded | A renderer-owned desktop runtime necessarily stopped active provider streams, tools, subagents, and PTYs when that renderer process closed; a native replacement also needed to avoid base64 attachment/terminal copies and unbounded replay. | `TestClientDetachLeavesDaemonAvailableForReconnect`, IPC authentication/codec/replay/transfer/terminal tests, Rust reconnect/state tests, strict Clippy, IPC benchmarks, signed `Azem-GPUI.app`, and packaged launch verification. | Keep one daemon per canonical workspace, the existing Bridge as the only desktop operation set, owner-only endpoint/token/Unix socket or owner/System Windows pipe, nonce/client/workspace/version HMAC authentication, bounded control/binary frames, SHA-256 attachment commit, lossless incremental text, byte-bounded replay with explicit resync, terminal replay, durable reconnect snapshots, and detach-without-cancel semantics. Explicit daemon stop must refuse an active main run unless `--include-active` is supplied. |
 | UI-008 | Fixed, guarded | Providers could start single or batched tools without first giving the user a progress update, while adjacent reasoning rendered as separate zero-second rows instead of part of the announced step. After the host fallback was hidden, each thinking span or fallback-glued batch became its own ✦ 思考了 row and replaced the model's 「我准备…」 prose. | Main prompt contract, provider sink fallback/order test, `groupProcessTimelineBlocks`, and active Timeline regression. | Visible commentary is only model-authored ordinary prose (`TextPhase=commentary`). Never invent 「我准备」 or un-hide `synthetic=tool_announcement`. Group adjacent thinking/tools/diffs under that announcement, or into one thinking trail when the model omitted commentary. Adjacent thinking spans share one ✦ 思考了 row when there are no tools (sum of thinking time or the group span), not one row per span. While that step is live, search/tools only retitle the same sparkle bar. After it completes, expand to one chip list with thinking as the first chip. Keep nested work visible. Do not render commentary as a titled duration card. Live wait between tool batches must stay visible without host boilerplate (UI-016). |
 | UI-009 | Fixed, guarded | Durable session recaps were emitted by the backend but discarded by the desktop reducer, so the right Inspector could not restore or live-update continuity state; recap generation also reused the old semantic compaction route. | Recap reducer/Inspector tests, independent model-route configuration tests, and provider runtime route tests. | Keep `session_loaded` and `recap_state` projected into one current-session recap card. Preserve an independent `agents.recap` route; changing the recap writer never changes the current conversation or deterministic context archive. |
 | UI-010 | Fixed, guarded | Thinking, tool-step, and tool-summary markers kept a paper-colored rail mask while their parent row switched to the muted hover surface, producing a detached white circle around the marker. | Process-rail CSS regression test and real browser hover verification. | Preserve the rail mask at rest, but remove its background and shadow for every highlighted process-row marker. |
@@ -355,6 +357,31 @@ provider stream
   the main agent. Subagent `context_usage` and child `context_profile` events
   must not replace those totals (UI-014).
 
+### Native GPUI IPC
+
+- `internal/daemon` owns one `internal/app` desktop composition per canonical
+  workspace. GPUI is a renderer over that runtime; it must never implement a
+  second provider, agent, approval, persistence, or recovery path.
+- IPC protocol version, methods, actions, event kinds, frame limits, and Rust
+  contracts come from `internal/desktopipc/protocol.go` and
+  `cmd/gen-contracts`. `make contracts-check` must stay clean.
+- Endpoint/token files and Unix sockets are owner-only. Windows named pipes
+  allow only the current owner and LocalSystem. Authentication binds nonce,
+  client ID, workspace ID, and protocol version with HMAC-SHA256.
+- Control frames remain at most 16 MiB. Binary chunks remain at most 256 KiB;
+  attachment reassembly remains at most 256 MiB with exact chunk order, size,
+  and SHA-256 verification.
+- Incremental text and thinking are lossless. Only cumulative snapshots may
+  coalesce while pending. Replay and client queues are byte-bounded; overflow
+  emits `resync_required` and reconnect restores durable projection state.
+- `client_detach`, window close, and renderer crash never cancel the runtime.
+  Explicit daemon stop is separate and refuses an active main run without
+  `--include-active`. Daemon shutdown still closes PTYs, Bridge, agents, and
+  persistence in order.
+- Terminal output stays binary, is parsed through Alacritty VTE state, and has
+  an independent 4 MiB replay bound per terminal. Attachments never use base64
+  on the GPUI wire.
+
 ### Plugins
 
 - `.codex-plugin/plugin.json` is the required plugin entry point; every
@@ -492,6 +519,7 @@ surface before delivery.
 | Global Go/runtime/dependency | `GOWORK=off go test ./...` |
 | React/frontend | `cd frontend && bun run typecheck && bun run test && bun run build` |
 | Desktop Bridge/Wails | `make test-gui`; `make gui`; launch `dist/Azem.app/Contents/MacOS/Azem` and exercise the path |
+| Native GPUI/IPC | `make test-gpui`; IPC benchmarks; Windows IPC cross-compile; `make gpui`; launch `dist/Azem-GPUI.app/Contents/MacOS/Azem` and verify detach/reconnect |
 | SQLite migration | `go test ./internal/store/sqlite`; verify previous-schema upgrade, current reopen, retained data, future rejection |
 | Venat upgrade | `GOWORK=off go mod tidy`; adapter/agent tests; `GOWORK=off go test ./...`; `GOWORK=off make gui` |
 | GitHub PR backend | `go test ./internal/githubpr ./internal/desktop ./cmd/azem-gui`; cover missing/logged-out `gh`, no remote, permission, network failure |

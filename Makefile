@@ -4,7 +4,7 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X 'main.version=$(VERSION)' -X 'main.gitCommit=$(GIT_COMMIT)' -X 'main.buildTime=$(BUILD_TIME)'
 
-.PHONY: build azem-eval azem-eval-linux gui gui-windows frontend test test-gui sqlc architecture-check contracts contracts-check
+.PHONY: build azem-eval azem-eval-linux daemon gpui gui gui-windows frontend test test-gpui test-gui sqlc architecture-check contracts contracts-check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/azem
@@ -16,6 +16,28 @@ azem-eval-linux: azem-eval
 	mkdir -p dist/eval
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval-linux-amd64 ./cmd/azem-eval
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval-linux-arm64 ./cmd/azem-eval
+
+daemon:
+	mkdir -p dist/bin
+	GOWORK=off go build -ldflags "$(LDFLAGS)" -o dist/bin/azem-daemon ./cmd/azem-daemon
+
+gpui: daemon
+	cd gpui && cargo build --locked --release -p azem-gpui
+ifeq ($(shell uname -s),Darwin)
+	mkdir -p dist/Azem-GPUI.app/Contents/MacOS dist/Azem-GPUI.app/Contents/Resources
+	cp gpui/macos/Info.plist dist/Azem-GPUI.app/Contents/Info.plist
+	cp cmd/azem-gui/AppIcon.icns dist/Azem-GPUI.app/Contents/Resources/AppIcon.icns
+	cp gpui/target/release/azem-gpui dist/Azem-GPUI.app/Contents/MacOS/Azem
+	cp dist/bin/azem-daemon dist/Azem-GPUI.app/Contents/MacOS/azem-daemon
+	codesign --force --sign - --timestamp=none dist/Azem-GPUI.app/Contents/MacOS/azem-daemon
+	codesign --force --sign - --timestamp=none dist/Azem-GPUI.app/Contents/MacOS/Azem
+	codesign --force --sign - --timestamp=none dist/Azem-GPUI.app
+	codesign --verify --deep --strict --verbose=2 dist/Azem-GPUI.app
+else
+	mkdir -p dist/gpui
+	cp gpui/target/release/azem-gpui dist/gpui/azem-gpui
+	cp dist/bin/azem-daemon dist/gpui/azem-daemon
+endif
 
 frontend:
 	cd frontend && bun install --frozen-lockfile && bun run build
@@ -55,6 +77,12 @@ ifeq ($(shell uname -s),Darwin)
 else
 	go test ./...
 endif
+
+test-gpui: contracts-check
+	GOWORK=off go test ./internal/desktopipc ./internal/daemon ./internal/desktop ./cmd/azem-daemon
+	cd gpui && cargo fmt --all --check
+	cd gpui && cargo clippy --workspace --all-targets -- -D warnings
+	cd gpui && cargo test --workspace --all-targets
 
 test-gui:
 	cd frontend && bun run typecheck && bun run test && bun run build

@@ -10,6 +10,8 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ4pzQ=
 github.com/MakeNowJust/heredoc v1.0.0/go.mod h1:mG5amYoWBHf8vpLOuehzbGGw0EHxpZZ6lCpQ4fNJ8LE=
+github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
+github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/Viking602/llmux v0.3.1 h1:40XJVOfBO8/dG21erwgh6UIlGvVZvkQmoalV8Nkv1NE=
 github.com/Viking602/llmux v0.3.1/go.mod h1:0m26z1MqRU4LcJQfspZ8yWZVH6y3ofIUEs9Gt4gMTCw=
 github.com/Viking602/venat v0.15.4 h1:XRBCeP7mSoietdK/4ZrACOElu1dnKg2HH51pPn8mA/Q=
