@@ -53,7 +53,7 @@ func runWithArgs(args []string) error {
 	return runLaunch(args)
 }
 
-func runLaunch(args []string) error {
+func runLaunch(args []string) (returnErr error) {
 	options, err := parseCLI(args, os.Stderr)
 	if err != nil {
 		return err
@@ -82,6 +82,15 @@ func runLaunch(args []string) error {
 	if err != nil {
 		return err
 	}
+	shutdownOwned := true
+	defer func() {
+		if !shutdownOwned {
+			return
+		}
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		returnErr = errors.Join(returnErr, boot.Service.Shutdown(shutdownCtx))
+	}()
 	if err := boot.Validate(); err != nil {
 		return err
 	}
@@ -108,6 +117,7 @@ func runLaunch(args []string) error {
 		if err != nil {
 			return err
 		}
+		shutdownOwned = false
 		serveErr := server.Serve(ctx)
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
@@ -128,6 +138,7 @@ func runLaunch(args []string) error {
 		if err != nil {
 			return err
 		}
+		shutdownOwned = false
 		serveErr := server.Serve(ctx)
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
@@ -152,6 +163,7 @@ func runLaunch(args []string) error {
 			AgentMode: firstNonempty(options.agentMode, boot.Config.Defaults.AgentMode), Prompts: prompts,
 			PrintThinking: options.printThinking, AutoApprove: options.autoApprove, Output: os.Stdout, Diagnostics: os.Stderr,
 		})
+		shutdownOwned = false
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 		shutdownErr := boot.Service.Shutdown(shutdownCtx)
@@ -172,13 +184,11 @@ func runLaunch(args []string) error {
 	program := tea.NewProgram(model, tea.WithoutSignalHandler())
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer shutdownCancel()
-		_ = boot.Service.Shutdown(shutdownCtx)
 		program.Quit()
 	}()
 	_, runErr := program.Run()
 
+	shutdownOwned = false
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	shutdownErr := boot.Service.Shutdown(shutdownCtx)

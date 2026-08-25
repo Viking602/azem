@@ -38,6 +38,7 @@ type Run struct {
 	runID     string
 	events    chan Event
 	done      chan struct{}
+	cancel    func() bool
 
 	mu     sync.RWMutex
 	result RunResult
@@ -72,6 +73,7 @@ func (runtime *Runtime) Start(ctx context.Context, turn Turn) (*Run, error) {
 	}
 	run := &Run{
 		runtime: runtime, sessionID: turn.SessionID, runID: runID, events: make(chan Event, 256), done: make(chan struct{}),
+		cancel: func() bool { return runtime.service.CancelActiveWithChildren(true) },
 		result: RunResult{SessionID: turn.SessionID, RunID: runID},
 	}
 	go run.consume(ctx, subscription)
@@ -101,6 +103,7 @@ func (run *Run) Wait(ctx context.Context) (RunResult, error) {
 		defer run.mu.RUnlock()
 		return run.result, run.result.Err
 	case <-ctx.Done():
+		run.Cancel()
 		return RunResult{}, ctx.Err()
 	}
 }
@@ -120,15 +123,21 @@ func (run *Run) FollowUp(ctx context.Context, text string) error {
 }
 
 func (run *Run) Cancel() bool {
-	if run == nil || run.runtime == nil {
+	if run == nil {
 		return false
 	}
 	select {
 	case <-run.done:
 		return false
 	default:
-		return run.runtime.service.CancelActiveWithChildren(true)
 	}
+	if run.cancel != nil {
+		return run.cancel()
+	}
+	if run.runtime == nil || run.runtime.service == nil {
+		return false
+	}
+	return run.runtime.service.CancelActiveWithChildren(true)
 }
 
 func (run *Run) consume(ctx context.Context, subscription *Subscription) {

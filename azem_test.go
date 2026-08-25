@@ -2,6 +2,7 @@ package azem
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -67,6 +68,22 @@ func TestPublicRunWaitCollectsFinalTextAndTerminalState(t *testing.T) {
 	result, err := run.Wait(ctx)
 	if err != nil || result.FinalText != "done" || result.Terminal != app.EventRunFinished || result.State != "completed" {
 		t.Fatalf("run result=%#v error=%v", result, err)
+	}
+}
+
+func TestPublicRunWaitCancelsActiveRunWhenWaitContextEnds(t *testing.T) {
+	called := 0
+	run := &Run{
+		sessionID: "session", runID: "run", events: make(chan Event, 1), done: make(chan struct{}),
+		cancel: func() bool { called++; return true },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := run.Wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("cancel calls = %d, want 1", called)
 	}
 }
 

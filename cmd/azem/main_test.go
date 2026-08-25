@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Viking602/azem/internal/app"
 )
 
 func TestPrintVersion(t *testing.T) {
@@ -55,5 +59,26 @@ func TestReadPipedInputAndPromptCombination(t *testing.T) {
 	prompts := combinePrompts(piped, []string{"positional", "next"})
 	if len(prompts) != 2 || prompts[0] != "piped context\npositional" || prompts[1] != "next" {
 		t.Fatalf("prompts=%#v", prompts)
+	}
+}
+
+func TestRunLaunchShutsDownBootstrapOnProtocolValidationError(t *testing.T) {
+	home, workspace := t.TempDir(), t.TempDir()
+	t.Setenv("AZEM_HOME", home)
+	t.Chdir(workspace)
+	err := runLaunch([]string{"--mode", "rpc", "unexpected"})
+	if err == nil || !strings.Contains(err.Error(), "does not accept positional prompts") {
+		t.Fatalf("runLaunch error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	boot, err := app.Bootstrap(ctx, workspace, "")
+	if err != nil {
+		t.Fatalf("bootstrap after rejected protocol mode: %v", err)
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := boot.Service.Shutdown(shutdownCtx); err != nil {
+		t.Fatal(err)
 	}
 }

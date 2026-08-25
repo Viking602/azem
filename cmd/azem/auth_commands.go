@@ -196,18 +196,24 @@ func gatewayRoutes(ctx context.Context, cfg config.Config, store *sqlitestore.Pr
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var provider string
 		var payload []byte
-		if rows.Scan(&provider, &payload) != nil {
-			continue
+		if err := rows.Scan(&provider, &payload); err != nil {
+			return nil, fmt.Errorf("scan llmux gateway model: %w", err)
 		}
 		var model config.LLMuxModelConfig
-		if json.Unmarshal(payload, &model) == nil && model.ID != "" && !model.Disabled {
+		if err := json.Unmarshal(payload, &model); err != nil {
+			return nil, fmt.Errorf("decode llmux gateway model for %s: %w", provider, err)
+		}
+		if model.ID != "" && !model.Disabled {
 			models[provider] = append(models[provider], model.ID)
 		}
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate llmux gateway models: %w", err)
+	}
 	routes := make([]authgateway.Route, 0)
 	for provider, value := range cfg.Providers.LLMux {
 		providerModels := uniqueSorted(models[provider])
