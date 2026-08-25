@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/recap"
+	"github.com/Viking602/azem/internal/securityscan"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -210,6 +212,35 @@ func (m *AppModel) applyEvent(event app.Event) {
 				}
 			}
 		}
+	case app.EventPluginCatalog:
+		lines := make([]string, 0, len(event.PluginCatalog)+1)
+		lines = append(lines, "Extensions")
+		for _, plugin := range event.PluginCatalog {
+			state := "disabled"
+			if plugin.Enabled {
+				state = first(plugin.Status, "enabled")
+			}
+			lines = append(lines, fmt.Sprintf("- %s · %s · %s", first(plugin.DisplayName, plugin.Name, plugin.ID), first(plugin.Version, "unversioned"), state))
+		}
+		m.transcript = append(m.transcript, Block{Kind: BlockAssistant, Title: "Extensions", Content: strings.Join(lines, "\n"), State: "completed"})
+		m.invalidateTranscriptLayout()
+	case app.EventMarketplaceCatalog:
+		if event.MarketplaceCatalog == nil {
+			if event.Text != "" {
+				m.errorBanner = event.Text
+			}
+			break
+		}
+		catalog := event.MarketplaceCatalog
+		lines := []string{fmt.Sprintf("Marketplaces: %d · Available: %d · Installed: %d · Upgrades: %d", len(catalog.Marketplaces), len(catalog.Available), len(catalog.Installed), len(catalog.Upgrades))}
+		for _, marketplace := range catalog.Marketplaces {
+			lines = append(lines, fmt.Sprintf("- %s · %s", marketplace.Name, marketplace.Source))
+		}
+		for _, plugin := range catalog.Available {
+			lines = append(lines, fmt.Sprintf("- %s · %s", plugin.ID, first(plugin.Version, "unversioned")))
+		}
+		m.transcript = append(m.transcript, Block{Kind: BlockAssistant, Title: "Marketplace", Content: strings.Join(lines, "\n"), State: "completed"})
+		m.invalidateTranscriptLayout()
 	case app.EventSkillCatalog:
 		m.skills = append([]SkillCatalogView(nil), event.SkillCatalog...)
 		m.skillDiagnostics = append([]app.SkillDiagnostic(nil), event.SkillDiagnostics...)
@@ -270,6 +301,55 @@ func (m *AppModel) applyEvent(event app.Event) {
 		}
 		if m.backgroundFollow {
 			m.overlayScroll = m.backgroundLogScrollLimit()
+		}
+	case app.EventSecurityScanState:
+		if event.Security != nil {
+			projection := *event.Security
+			projection.Workers = append([]securityscan.Worker(nil), event.Security.Workers...)
+			projection.Findings = append([]securityscan.Finding(nil), event.Security.Findings...)
+			m.securityScans = upsertSecurityScan(m.securityScans, projection.Scan)
+			if m.securitySelectedScanID == "" || m.securitySelectedScanID == projection.Scan.ID {
+				m.securityProjection = &projection
+				m.securityFindings = append([]securityscan.Finding(nil), projection.Findings...)
+			}
+		}
+		if event.State == "exported" && event.Data["path"] != "" {
+			m.securityExportPath = event.Data["path"]
+			m.status = m.tr("security.export_saved", map[string]string{"path": event.Data["path"]})
+		}
+	case app.EventSecurityScanList:
+		m.securityScans = append([]securityscan.Scan(nil), event.SecurityScans...)
+		m.openOverlay(OverlaySecurity)
+	case app.EventSecurityFindings:
+		if scanID := event.Data["scanId"]; m.securitySelectedScanID == "" || scanID == "" || m.securitySelectedScanID == scanID {
+			m.securityFindings = append([]securityscan.Finding(nil), event.SecurityFindings...)
+		}
+	case app.EventSecurityFinding:
+		if event.SecurityFinding != nil {
+			finding := *event.SecurityFinding
+			m.securityFinding = &finding
+		}
+	case app.EventSecurityPatch:
+		if event.SecurityPatch != nil {
+			result := *event.SecurityPatch
+			result.Files = append([]string(nil), event.SecurityPatch.Files...)
+			m.securityPatch = &result
+		}
+	case app.EventSecurityPublish:
+		if event.State == "published" {
+			m.securityPublication = event.Data["externalUrl"]
+			if m.securityPublication == "" {
+				m.securityPublication = event.Data["externalId"]
+			}
+			if m.securityPublication == "" {
+				m.securityPublication = "published"
+			}
+			m.status = m.tr("security.publication_saved", map[string]string{"value": m.securityPublication})
+		} else if strings.HasPrefix(event.State, "reconciled_") {
+			m.status = m.tr("security.publication_reconciled", map[string]string{"decision": strings.TrimPrefix(event.State, "reconciled_")})
+			if event.State == "reconciled_retry" {
+				m.securityPublication = ""
+			}
 		}
 	case app.EventRecoveryState:
 		m.loadRecoveryEvent(event)

@@ -65,6 +65,17 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
       { name: "grep", removable: false, enabled: true, state: "ready", transport: "streamable_http", target: "https://mcp.grep.app", url: "https://mcp.grep.app", args: [], inheritEnv: false, approval: "never", maxConcurrency: 2, toolCount: 1, tools: [{ name: "searchGitHub", description: "Search public GitHub code", effect: "read_only", requiresApproval: false }], error: "" },
       { name: "local-docs", removable: true, enabled: false, state: "disabled", transport: "stdio", target: "npx -y @modelcontextprotocol/server-filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem"], inheritEnv: true, approval: "always", maxConcurrency: 1, toolCount: 0, tools: [], error: "" },
     ],
+    securityConfig: {
+      enabled: true, defaultMode: "standard", workers: 4, subagents: 3,
+      stopAfterNoNew: 4, stopAfterConsecutiveErrors: 3, maxDiscoveryRuns: 40,
+      maxTimeHours: 96,
+      routes: {
+        audit: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" },
+        reducer: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" },
+        fixer: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" },
+        verifier: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" },
+      },
+    },
     plugins: [
       { id: "waza@demo", name: "waza", displayName: "Waza", version: "3.33.0", marketplace: "openai", origin: "codex", description: "工程健康、研究、UI 与写作工作流", developerName: "OpenAI", category: "Developer Tools", brandColor: "#3278ef", logoPath: "", enabled: true, skillCount: 6, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "ready", warning: "" },
       { id: "github@demo", name: "github", displayName: "GitHub", version: "0.1.9", marketplace: "openai", origin: "codex", description: "仓库、PR、Issue、Review 与 CI", developerName: "GitHub", category: "Developer Tools", brandColor: "#181717", logoPath: "", enabled: true, skillCount: 2, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: true, capabilities: ["Skills", "MCP"], status: "degraded", warning: "OAuth 等待授权" },
@@ -72,6 +83,7 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
       { id: "custom@demo", name: "custom", displayName: "Custom Toolkit", version: "0.8.0", marketplace: "local", origin: "local", description: "包含未信任的生命周期 Hooks", developerName: "Azem", category: "Local", brandColor: "#ff6a3d", logoPath: "", enabled: true, skillCount: 3, mcpServerCount: 0, integratedMCPCount: 0, hookCount: 2, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "Hooks"], status: "degraded", warning: "Hooks 等待显式信任" },
       { id: "disabled@demo", name: "disabled", displayName: "实验扩展", version: "0.1.0", marketplace: "local", origin: "local", description: "未启用的实验能力", developerName: "Azem", category: "Experimental", brandColor: "#8b8b84", logoPath: "", enabled: false, skillCount: 1, mcpServerCount: 1, integratedMCPCount: 1, hookCount: 0, hooksTrusted: false, hasApp: false, capabilities: ["Skills", "MCP"], status: "disabled", warning: "" },
     ],
+    extensionThemes: [{ name: "demo-night", path: "demo://theme", vars: { accent: "#7aa2f7" }, colors: { accent: "accent", text: "#f4f4f1", muted: "#b3b4ae", selectedBg: "#2a2f45", userMessageBg: "#1f2335" }, source: "demo" }],
     hookCatalog: {
       enabled: true, trustHooks: false,
       sources: [{ id: "custom@demo", name: "Custom Toolkit", origin: "plugin", pluginId: "custom@demo", source: "", hookCount: 2, trusted: false, warning: "Hooks 等待显式信任" }],
@@ -83,6 +95,10 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
       { scope: "approval", role: "", label: "审批", route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
       { scope: "vision", role: "", label: "视觉", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
       { scope: "recap", role: "", label: "会话回顾", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
+      { scope: "security", role: "audit", label: "Security audit", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
+      { scope: "security", role: "reducer", label: "Security reducer", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
+      { scope: "security", role: "fixer", label: "Security fixer", route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
+      { scope: "security", role: "verifier", label: "Security verifier", route: { provider: "chatgpt", model: "gpt-5.6", reasoning: "high" } },
       { scope: "subagent", role: "research", label: "Research", route: { provider: "chatgpt", model: "gpt-5.3-spark", reasoning: "medium" } },
       { scope: "subagent", role: "review", label: "Review", route: { provider: "chatgpt", model: "gpt-5.5-codex", reasoning: "high" } },
     ],
@@ -95,6 +111,31 @@ export function hydrateData(snapshot: Snapshot, demo: boolean): Partial<RuntimeD
       grok: [
         { id: "grok-4.20", name: "Grok 4.20", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
         { id: "grok-code-fast", name: "Grok Code Fast", reasoningLevels: ["low", "medium"], defaultReasoning: "medium", capabilities: ["tools", "code", "fast"] },
+      ],
+      cursor: [
+        { id: "gpt-5.2-low", name: "GPT-5.2 Low", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-low-fast", name: "GPT-5.2 Low Fast", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-high", name: "GPT-5.2 High", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-low-thinking", name: "GPT-5.2 Low Thinking", reasoningLevels: ["low"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-high-thinking", name: "GPT-5.2 High Thinking", reasoningLevels: ["high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-high-fast", name: "GPT-5.2 High Fast", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-xhigh", name: "GPT-5.2 Extra High", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-xhigh-fast", name: "GPT-5.2 Extra High Fast", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-xhigh-thinking", name: "GPT-5.2 Extra High Thinking", reasoningLevels: ["xhigh"], defaultReasoning: "xhigh", capabilities: ["reasoning", "tools", "image"] },
+        { id: "gpt-5.2-low-thinking-fast", name: "GPT-5.2 Low Thinking Fast", reasoningLevels: ["low"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-high-thinking-fast", name: "GPT-5.2 High Thinking Fast", reasoningLevels: ["high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "gpt-5.2-xhigh-thinking-fast", name: "GPT-5.2 Extra High Thinking Fast", reasoningLevels: ["xhigh"], defaultReasoning: "xhigh", capabilities: ["reasoning", "tools", "image", "fast"] },
+        { id: "claude-fable-5-low", name: "Claude Fable 5 1M Low (NO ZDR)", reasoningLevels: ["low"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-medium", name: "Claude Fable 5 1M Medium (NO ZDR)", reasoningLevels: ["medium"], defaultReasoning: "medium", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-high", name: "Claude Fable 5 1M (NO ZDR)", reasoningLevels: ["high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-xhigh", name: "Claude Fable 5 1M Extra High (NO ZDR)", reasoningLevels: ["xhigh"], defaultReasoning: "xhigh", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-max", name: "Claude Fable 5 1M Max (NO ZDR)", reasoningLevels: ["max"], defaultReasoning: "max", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-low", name: "Claude Fable 5 1M Low Thinking (NO ZDR)", reasoningLevels: ["low"], defaultReasoning: "low", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-medium", name: "Claude Fable 5 1M Medium Thinking (NO ZDR)", reasoningLevels: ["medium"], defaultReasoning: "medium", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-high", name: "Claude Fable 5 1M Thinking (NO ZDR)", reasoningLevels: ["high"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-xhigh", name: "Claude Fable 5 1M Extra High Thinking (NO ZDR)", reasoningLevels: ["xhigh"], defaultReasoning: "xhigh", capabilities: ["reasoning", "tools", "image"] },
+        { id: "claude-fable-5-thinking-max", name: "Claude Fable 5 1M Max Thinking (NO ZDR)", reasoningLevels: ["max"], defaultReasoning: "max", capabilities: ["reasoning", "tools", "image"] },
+        { id: "composer-2", name: "Composer 2", reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools"] },
       ],
       openrouter: [
         { id: "claude-sonnet-4.5", name: "Claude Sonnet 4.5", reasoningLevels: ["low", "medium", "high", "xhigh"], defaultReasoning: "high", capabilities: ["reasoning", "tools", "image"] },
@@ -180,7 +221,7 @@ function demoReviewAgents(): AgentState[] {
 function demoBlocks(review: boolean): Block[] {
   const blocks: Block[] = [
     { id: "user-demo", kind: "user", runId: "demo-run", content: "给我一个具体优化这个项目 UI 的方案，页面切换和文字流式输出的动效都要有。", state: "submitted" },
-    { id: "progress-structure", kind: "commentary", runId: "demo-run", title: "progress", content: "**读取当前前端结构**\nApp、Sidebar、Timeline 与 Inspector", textPhase: "commentary", state: "completed", data: { startedAt: "1000", completedAt: "1100" } },
+    { id: "progress-structure", kind: "commentary", runId: "demo-run", title: "progress", content: "**读取当前前端结构**\nApp、Sidebar、Timeline 与顶部任务计划", textPhase: "commentary", state: "completed", data: { startedAt: "1000", completedAt: "1100" } },
     { id: "tool-structure", kind: "tool", runId: "demo-run", title: "coding.read_file", content: "{\"path\":\"frontend/src/components/Timeline.tsx\"}", state: "completed", data: { startedAt: "1100", completedAt: "2200", elapsedMs: "1100" } },
     { id: "progress-baseline", kind: "commentary", runId: "demo-run", title: "progress", content: "**提取视觉与动效基线**\n暖白纸面 · 8 个流式尾部节点 · reduced motion", textPhase: "commentary", state: "completed", data: { startedAt: "2300", completedAt: "2400" } },
     { id: "tool-baseline", kind: "tool", runId: "demo-run", title: "coding.search", content: "{\"query\":\"reduced-motion\",\"path\":\"frontend/src\"}", state: "completed", data: { startedAt: "2400", completedAt: "3100", elapsedMs: "700" } },
@@ -207,6 +248,10 @@ function demoBlocks(review: boolean): Block[] {
 }
 
 function demoModelProviders(): ModelProvider[] {
+  const now = Date.now();
+  const cursorCycleStart = Math.floor((now-(6*24+4)*60*60*1000)/1000);
+  const cursorCycleEnd = Math.floor((now+(24*24+20)*60*60*1000)/1000);
+  const cursorQuotaUpdatedAt = new Date(now-60_000).toISOString();
   return [
     {
       id: "chatgpt", displayName: "ChatGPT", backend: "subscription", defaultBaseUrl: "", baseUrl: "", envKey: "", enabled: true,
@@ -225,6 +270,16 @@ function demoModelProviders(): ModelProvider[] {
       models: [
         { id: "grok-4.20", name: "Grok 4.20", contextWindow: 256000, reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools"], inputModalities: ["text", "image"], outputModalities: ["text"] },
         { id: "grok-code-fast", name: "Grok Code Fast", contextWindow: 128000, reasoningLevels: ["low", "medium"], defaultReasoning: "medium", capabilities: ["tools"], inputModalities: ["text"], outputModalities: ["text"] },
+      ],
+    },
+    {
+      id: "cursor", displayName: "Cursor", backend: "subscription", defaultBaseUrl: "", baseUrl: "", envKey: "", enabled: true,
+      credentialConfigured: true, credentialSource: "stored", subscription: true, accountLabel: "viking@example.com", accountPlan: "ultra",
+      quotaAvailable: true, quotaPeriod: "monthly", quotaStartedAt: cursorCycleStart, quotaUsedPercent: 28,
+      quotaBreakdown: [{ id: "cursor", usedPercent: 16 }, { id: "third_party", usedPercent: 74 }],
+      quotaResetsAt: cursorCycleEnd, quotaUpdatedAt: cursorQuotaUpdatedAt, modelsDevId: "cursor", modelsSource: "subscription",
+      models: [
+        { id: "composer-2", name: "Composer 2", contextWindow: 200000, reasoningLevels: ["low", "medium", "high"], defaultReasoning: "high", capabilities: ["reasoning", "tools"], inputModalities: ["text"], outputModalities: ["text"] },
       ],
     },
     {

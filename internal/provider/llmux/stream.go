@@ -6,22 +6,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 
 	sdk "github.com/Viking602/llmux"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/auth"
-	"github.com/Viking602/azem/internal/provider/responses"
 )
 
 type streamAdapter struct {
-	inner     sdk.Stream
-	reporter  responses.UsageReporter
-	names     *toolNames
-	provider  string
-	requestID string
-	toolUse   bool
+	inner    sdk.Stream
+	names    *toolNames
+	response sdk.ResponseMetadata
+	toolUse  bool
 }
 
 func (s *streamAdapter) Recv() (hyprovider.Event, error) {
@@ -35,10 +33,13 @@ func (s *streamAdapter) Recv() (hyprovider.Event, error) {
 		}
 		switch part.Kind {
 		case sdk.PartResponseMetadata:
-			s.requestID = part.Response.ID
+			s.response = part.Response
 		case sdk.PartTextDelta:
 			if part.Delta != "" {
-				return hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: part.Delta}, nil
+				return hyprovider.Event{
+					Kind: hyprovider.EventTextDelta, Text: part.Delta,
+					TextPhase: textPhase(part.TextPhase),
+				}, nil
 			}
 		case sdk.PartReasoningDelta:
 			if part.Delta != "" {
@@ -64,41 +65,38 @@ func (s *streamAdapter) Recv() (hyprovider.Event, error) {
 }
 
 func (s *streamAdapter) finish(part sdk.Part) hyprovider.Event {
-	part.Usage = normalizeProviderUsage(s.provider, part.Usage)
 	usage := hyprovider.Usage{
-		InputTokens: part.Usage.InputTokens, CachedInputTokens: part.Usage.CachedInputTokens,
-		CacheWriteInputTokens: part.Usage.CacheWriteInputTokens, OutputTokens: part.Usage.OutputTokens,
-		TotalTokens: part.Usage.TotalTokens,
-	}
-	if s.reporter != nil {
-		s.reporter(responses.UsageDetails{
-			ProviderRequestID: s.requestID, InputTokens: part.Usage.InputTokens,
-			CachedTokens: part.Usage.CachedInputTokens, CacheReported: part.Usage.CachedInputTokensReported,
-			CacheWriteTokens: part.Usage.CacheWriteInputTokens, CacheWriteReported: part.Usage.CacheWriteInputTokensReported,
-			OutputTokens: part.Usage.OutputTokens, ReasoningTokens: part.Usage.ReasoningTokens, TotalTokens: part.Usage.TotalTokens,
-		})
+		InputTokens:                   part.Usage.InputTokens,
+		CachedInputTokens:             part.Usage.CachedInputTokens,
+		CachedInputTokensReported:     part.Usage.CachedInputTokensReported,
+		CacheWriteInputTokens:         part.Usage.CacheWriteInputTokens,
+		CacheWriteInputTokensReported: part.Usage.CacheWriteInputTokensReported,
+		OutputTokens:                  part.Usage.OutputTokens,
+		ReasoningTokens:               part.Usage.ReasoningTokens,
+		TotalTokens:                   part.Usage.TotalTokens,
 	}
 	reason := stopReason(part.FinishReason)
 	if s.toolUse {
 		reason = hyprovider.StopReasonToolUse
 	}
-	return hyprovider.Event{Kind: hyprovider.EventDone, StopReason: reason, Usage: usage, ProviderState: append(json.RawMessage(nil), part.ProviderState...)}
+	return hyprovider.Event{
+		Kind: hyprovider.EventDone, StopReason: reason, Usage: usage,
+		ProviderState: append(json.RawMessage(nil), part.ProviderState...),
+		Response: hyprovider.ResponseMetadata{
+			ID: s.response.ID, Model: s.response.ModelID, Headers: maps.Clone(s.response.Headers),
+		},
+	}
 }
 
-// normalizeProviderUsage translates provider wire accounting into Venat's
-// inclusive input-token convention. DeepSeek's Anthropic-compatible response
-// reports cache misses in input_tokens and cache hits separately in
-// cache_read_input_tokens. llmux v0.2.4 preserves the values but neither adds
-// them nor marks the cache field as reported, which makes a real hit appear as
-// an unsupported metric in the desktop.
-func normalizeProviderUsage(provider string, usage sdk.Usage) sdk.Usage {
-	if provider != "deepseek" {
-		return usage
+func textPhase(phase sdk.TextPhase) hyprovider.TextPhase {
+	switch phase {
+	case sdk.TextPhaseCommentary:
+		return hyprovider.TextPhaseCommentary
+	case sdk.TextPhaseFinalAnswer, sdk.TextPhaseUnspecified:
+		return hyprovider.TextPhaseFinalAnswer
+	default:
+		return ""
 	}
-	usage.InputTokens += usage.CachedInputTokens + usage.CacheWriteInputTokens
-	usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-	usage.CachedInputTokensReported = true
-	return usage
 }
 
 func (s *streamAdapter) Close() error { return s.inner.Close() }
@@ -110,10 +108,12 @@ func stopReason(reason sdk.FinishReason) hyprovider.StopReason {
 	case sdk.FinishToolCalls:
 		return hyprovider.StopReasonToolUse
 	case sdk.FinishLength:
-		return hyprovider.StopReasonMaxTurns
+		return hyprovider.StopReasonLength
+	case sdk.FinishContent:
+		return hyprovider.StopReasonContentFilter
 	case sdk.FinishCancelled:
 		return hyprovider.StopReasonAborted
-	case sdk.FinishError, sdk.FinishContent:
+	case sdk.FinishError:
 		return hyprovider.StopReasonError
 	default:
 		return hyprovider.StopReasonUnknown

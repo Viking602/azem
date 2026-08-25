@@ -33,7 +33,7 @@ canonical transcript + live model history
 normalize oversized tool results
                  |
                  v
-compute OMP-style safe cut
+compute Snapcompact safe cut
   - keep system prefix
   - keep latest 3 complete shared user turns
   - keep assistant tool call + results atomic
@@ -57,18 +57,26 @@ Automatic, manual, rebuild, Main, Team 和 subagent 都调用这条路径，没�
 
 ## 4. 触发与预算
 
-自动归档阈值为：
+自动归档采用两个保守信号：
 
 ```text
-trigger = model_context_window - tool_definition_tokens - reserve_tokens
+effective_reserve = max(reserve_tokens, floor(model_context_window * 15%))
+trigger = model_context_window - tool_definition_tokens - effective_reserve
+pressure = max(local_history_estimate,
+               last_completed_provider_input - tool_definition_tokens)
 ```
+
+`pressure > trigger` 时归档。provider 实报值只负责纠正本地 `bytes/4`
+估算偏低的问题；reducer 的目标大小仍由本地消息估算决定。成功激活新
+archive/checkpoint 后清除旧 provider 压力，防止新 cache epoch 被旧峰值
+重复触发。
 
 当前默认值：
 
 |字段|默认值|含义|
 |---|---:|---|
 |`enabled`|`true`|启用自动和显式归档|
-|`reserve_tokens`|`16384`|为下一次模型输出保留的固定 headroom|
+|`reserve_tokens`|`16384`|最小 headroom；有效值至少为上下文窗口的 15%|
 |`keep_recent_tokens`|`20000`|优先保留的原始 hot-tail token 下限|
 |`large_tool_result_tokens`|`12000`|大工具结果 artifact offload 阈值|
 |`history_retrieval_tokens`|`4096`|私有 session history FTS 证据预算|
@@ -126,7 +134,7 @@ Bitmap 只是便宜的模型输入载体，不是恢复副本。任何缺失或�
 - archive carrier message；
 - canonical high-water、Todo revision、source/exclusion refs 和 manifest hash。
 
-`SaveRunCheckpoint` 保持现有事务和 source high-water CAS。若 canonical transcript 在准备后变化，旧结果不能覆盖新 user turn。恢复时校验 wire version、static identity、manifest hash、source SHA 和 frame attachment；不兼容的 derived checkpoint 被丢弃并从 canonical transcript 重建。
+`SaveRunCheckpoint` 保持现有事务和 source high-water CAS。自动压缩和恢复运行直接使用当前 run 已持久化 user block 的 canonical sequence；不得从 `ProviderState` 或 provider-facing message metadata 反推。手动压缩使用 durable projection high-water。若 canonical transcript 在准备后变化，旧结果不能覆盖新 user turn。恢复时校验 wire version、static identity、manifest hash、source SHA 和 frame attachment；不兼容的 derived checkpoint 被丢弃并从 canonical transcript 重建。
 
 Fork 只复制 canonical transcript、终态 tool records、Todo/Recap 与普通 artifact。`ModelHistory`、provider cache、context manifest 和 `context_archive` 都是 session-scoped derived state，在目标 session 中清零，避免跨 session 复用 archive ID 或 provider state。
 
@@ -152,7 +160,7 @@ wire version 3、policy version 3 和 archive carrier 会让旧 derived cache id
 
 ## 11. 参考来源
 
-- Oh My Pi compaction design: <https://github.com/can1357/oh-my-pi/blob/main/docs/compaction.md>
+- Oh My Pi Snapcompact implementation: <https://github.com/can1357/oh-my-pi/blob/main/docs/compaction.md>
 - Can Bölük, “Snapcompact: SotA compaction - instant, local, free. Pick 3”: <https://blog.can.ac/2026/06/10/snapcompact/>
 
-Azem 采用 OMP 的关键结构：安全切点、原始历史持久化、机械 reducer、文本/视觉 carrier 分离和重复压缩先展开旧 source。Azem 额外保留 SQLite checkpoint CAS、session ownership、artifact/blob 生命周期和明确的 text-only provider 支持。
+Azem 采用 Snapcompact 的关键结构：安全切点、原始历史持久化、机械 reducer、文本/视觉 carrier 分离和重复压缩先展开旧 source。Azem 额外保留 SQLite checkpoint CAS、session ownership、artifact/blob 生命周期和明确的 text-only provider 支持。

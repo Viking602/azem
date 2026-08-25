@@ -1,6 +1,386 @@
 # Changelog
 
 ## Unreleased
+- Completed the frozen OMP v18.0.3 behavioral-parity program at commit
+  `160ed439ac0df594347e7d7018b813a7ffdb5e81`. The executable parity manifest
+  now records all 71 in-scope coding-agent and operator capabilities as
+  `complete` or `stronger`; public-library API compatibility and OMP visual
+  identity remain outside that frozen scope.
+
+- Upgraded the shared runtimes to Venat v0.15.4 and llmux v0.3.1. Provider
+  streams now preserve commentary/final phases, terminal state, stop reason,
+  reported usage/cache flags, sources/files/warnings, modalities, and
+  compatibility descriptors. Venat adds validated tool arguments, duplicate
+  registration rejection, per-tool concurrency, durable turn control,
+  replay-safe Skill authorization, and unified subagent scheduling.
+
+- Added OMP-compatible read/write/Hashline/glob/grep/AST/LSP/DAP/eval/browser/
+  computer/web/GitHub/SSH/process/media/memory tools. Eval supports persistent
+  Python, JavaScript, Ruby, and Julia kernels when the host runtime exists.
+  Custom extensions may broker only permission-failed workspace-local ordinary
+  file writes/deletes; non-permission failures, unresolved symlinks, escapes,
+  archives, SQLite, and subprocess writes remain outside that seam.
+
+- Added Goal, Advisor, TTSR, prewalk, Plan YOLO, Vibe, checkpoint/rewind,
+  repeated-loop and unexpected-stop guards, batch structured subagents, Hub
+  peer messaging/process supervision, and parked-agent revival. `ask` is now
+  available in ordinary interactive single-agent turns; `submit_plan` remains
+  plan-only.
+
+- Added cross-harness context/rule/Skill/MCP/Hook discovery; MCP OAuth,
+  resources, templates, prompts, subscriptions, and notifications; staged
+  marketplace lifecycle; custom Bun tools, commands, providers, agents,
+  themes, and file fallbacks; and managed automatic Skill learning. Desktop
+  Extensions now includes a searchable marketplace with user/project scope,
+  direct catalog readback, update/upgrade/enable/uninstall controls, and
+  confirmation for destructive operations. TUI adds `/extensions` and
+  `/marketplace`.
+
+- Added parent-linked session trees, branches, labels, forks, Claude/Codex JSONL
+  import, HTML/text/lossless JSON export, AES-256-GCM session sharing, and
+  encrypted live collaboration. Desktop Environment exposes accessible session
+  history navigation and labels. TUI adds `/tree`, `/branch`, `/fork`,
+  `/label`, `/import`, `/export`, `/share`, `/usage`, and `/collab`.
+
+- Added normal text/NDJSON headless operation, JSON-RPC v1/v2, ACP v2, and the
+  supported root Go embedding API. The operator registry now owns shell
+  completion, setup/update/GC, auth broker/gateway services, usage reports,
+  benchmark workflows, and signed GitHub webhook repair triggers.
+
+- SQLite schema 24 adds session graphs/branches/labels; schema 25 adds
+  auth-broker tokens, disable/block state, and usage observations; schema 26
+  adds idempotent signed-webhook delivery receipts. Runtime migrations and the
+  SQLC schema remain synchronized, preserve user data, and reject unknown future
+  versions.
+
+- These changes intentionally expand the static tool/instruction prefix and
+  therefore start one new provider cache epoch. Stable tool order and message
+  order are preserved afterward. Replaying an activated Skill now restores only
+  resource-read authorization; it no longer changes the static Skill/tool
+  prefix on the following turn.
+- Restored the complete Subagents drawer/page/glyph stylesheet after the
+  Inspector removal, kept the composer inside the Environment panel's reserved
+  width at medium desktop sizes, routed Environment source attachment through
+  the registry Composer control, and read live workspace change counts from the
+  shared store so an open panel cannot go stale.
+
+
+- Added native Azem Security scanning. Standard, scoped, committed-diff,
+  working-tree, and Deep scans use host-resolved Azem routes and constrained
+  read-only security subagents against immutable snapshots. Schema 23 stores
+  durable scans, workers, usage, findings, triage, remediation, matching,
+  artifacts, and at-most-once publication receipts. The host binds read
+  receipts and finding locations to scope, preserves deleted-file diff evidence,
+  and seals canonical manifest/findings/coverage/report/SARIF output. Desktop
+  and TUI expose scan progress, blocked-scan resume, finding detail, export, and
+  isolated independently verified patches; configured MCP publication remains
+  an explicit governed TUI action. Desktop Settings now includes a Security
+  scans section for execution limits, the run deadline, and model routes while
+  keeping MCP publication arguments administrator-only and redacted. Native
+  scans impose no Token/tool-call hard ceiling. No Codex CLI, Node, or Python
+  runtime is added.
+
+- Open Todo items (`pending` / `in_progress`) block a model-initiated finish
+  even when the run did not mutate files. The host keeps retrying until those
+  items are completed or cancelled. User stop still cancels. This injects a
+  per-retry host user message and does not change the static instruction prefix.
+
+- Desktop stop now signals the durable coordinator before returning, so a
+  provider cannot finish in the gap and turn an explicit user cancellation
+  into a failed run. Durable tool/provider cleanup still converges in the
+  background, keeping the stop control responsive. Static instructions,
+  provider messages, and tool schemas are unchanged.
+
+- Desktop conversation UI now vendors assistant-ui Elements source components
+  under `frontend/src/components/assistant-ui/` and shadcn registry output under
+  `components/elements/`, without adding the assistant-ui runtime. Tailwind v4
+  and shadcn compile the copied source; Azem remains the only event, state,
+  approval, and persistence runtime. Registry `MessagePair` owns the turn plus
+  user, assistant, progress, and error surfaces; registry `Composer` owns input,
+  attachment, context, toolbar, and send chrome. ReasoningPanel, ToolTimeline,
+  ApprovalCard, AgentPlan, and CodeBlock replace every runtime import from the
+  former `beautiful-ui` directory. Official `data-slot` contracts and `aui-*`
+  classes share the Azem token bridge. Plan cards expose real checklist
+  progress, and the Inspector keeps a short 「任务计划」 heading with subordinate
+  goal text.
+
+- Chat file diffs now render through the registry-installed
+  `@assistant-ui/elements-code-diff` component. A thin adapter maps durable
+  `FileChange` data and removes duplicated file headers. Rows enter in 200ms
+  with a 32ms stagger capped at six. The old table, line-number gutter, syntax
+  highlighting, copy control, and vertical diff scroller are removed.
+
+- Completed `coding.replace` and `coding.delete_file` calls now use the same
+  structured live/replay file-change projection as hashline edits and writes.
+  Deleted paths remain visible even without reconstructable diff lines, and
+  replace/delete completion refreshes Git/workspace counts immediately.
+
+- Messages and Composer now use the exact registry sources installed with
+  `bunx --bun shadcn@latest add "@assistant-ui/elements-message-pair"` and
+  `bunx --bun shadcn@latest add "@assistant-ui/elements-composer"`. Azem maps
+  durable turn blocks into MessagePair slots and supplies ComposerContext with
+  the actual ordered context groups and the same localized labels as Inspector.
+  Provider input and current output are no longer mislabeled as fixed
+  System/Tools/Messages buckets. IME, slash, attachment, approval, plan, model,
+  queue/guide, and cancellation behavior remain Azem-owned.
+
+- The macOS model picker now handles WKWebView's real tap-to-click ordering.
+  Trackpad input can omit `pointerdown` or `click`, and can deliver release
+  before a later-dispatched `buttons=0` press pair. The whole-chip toggle now
+  accepts valid primary presses, unpaired primary releases, mouse-only
+  sequences, click-only activation, keyboard, and assistive input, while
+  deduplicating the remaining compatibility events. It does not infer a press
+  from `button` alone, assume down-before-up order, or correlate timestamps.
+  An inactive macOS window keeps the standard activation-only first click;
+  losing focus closes the picker instead of enabling WebView-wide click-through.
+  The persistent Portal, search, outside-click, Escape, model, run, and session
+  dismissal paths remain intact.
+
+- Desktop project and conversation rows are now compact single-line entries.
+  Project headings keep only expand/collapse, the project name, and the
+  project-scoped new-conversation action; monograms, branch/path subtitles, and
+  session-count badges are removed. Session rows keep title and real
+  running/unread state without relative-age labels.
+
+- Expanding a completed pre-answer process no longer opens a second
+  `56vh`/`520px` scroll pane. The elapsed-time row still folds the work, but
+  opening it restores the complete process to the ordinary transcript flow
+  immediately before the final answer, matching Codex.app. The transcript
+  viewport remains the only conversation scrollbar.
+
+- Assistant answers and progress prose now use the complete bounded transcript
+  column instead of imposing a second `68ch` limit that left a large empty
+  strip on the right. The transcript remains the single responsive width owner.
+
+- Verification guardrail `uncertain` / `fail` verdicts remain durable internal
+  state and now make the run terminally fail after the one allowed evidence
+  retry. The host-owned reason is not inserted into the model's final answer.
+  The desktop also strips the two exact legacy host-notice suffixes from
+  existing assistant blocks, preserving real model text and hiding notice-only
+  blocks.
+
+- Core agent tool guidance now reuses completed search/read results for
+  unchanged files, accepts hashline anchors from search, read, and successful
+  edit results, batches same-snapshot changes, and re-reads only missing,
+  changed, renumbered, or stale/conflicting ranges. Updating
+  `internal/app/prompts/main.md` advances the static instruction fingerprint
+  and provider cache epoch once; later turns reuse the stable new prefix.
+  Tool schemas and provider message order are unchanged.
+
+- Providers: upgrade to llmux v0.2.5. OpenRouter Responses streams that expose
+  one tool call first as `fc_tmp_*` and then as a final UUID now produce one
+  canonical SDK tool call. llmux correlates output indexes and raw/prefixed
+  IDs, preserves progressive input events and distinct/id-less calls, makes
+  duplicate terminal frames idempotent across every streaming protocol, and
+  fails closed on conflicting identities, post-terminal calls, or bounded
+  frame/state limits. Azem removes its temporary local alias deduplicator.
+  Static instructions and provider message order are unchanged; canonical
+  history now omits the phantom duplicate tail, so the cache epoch does not
+  advance.
+
+- Shell supervision distinguishes foreground descriptor/pipeline syntax such as
+  `2>&1`, `<&`, `&>`, `|&`, and `&&`, but rejects every POSIX background
+  operator. A new session can escape process-group cleanup even with a bounded
+  wall clock, so foreground-only execution is the fail-closed boundary.
+  Quote/backslash-concatenated detach primitives such as `set''sid` are also
+  rejected. The advertised `coding.shell` definition changes, advancing static
+  tool-definition cache identity once; instructions and provider message order
+  are unchanged.
+
+- llmux model catalogs now live in SQLite (`llmux_provider_models`, schema 22)
+  instead of `config.yaml`. YAML keeps only provider `enabled` and `base_url`.
+  Existing YAML `models:` lists import once on launch. Discover, enable, and
+  disable update SQLite so OpenRouter-sized catalogs no longer bloat the
+  config file. This does not change the static instruction prefix or provider
+  message order.
+  Startup also forwards the hydrated SQLite catalog into the provider runtime
+  before the first turn, so a visible OpenRouter model is not rejected as
+  unconfigured. Synchronous start failures render one timeline card instead
+  of repeating below the transcript. This does not change the static
+  instruction prefix or provider message order.
+
+- Cursor model catalog now lists one family row. Thinking and Fast variants
+  stay in that family's inventory caption and search aliases; they are not
+  shown as independent cards or an exact-variant menu. A family switch still
+  writes every raw ID atomically. This does not change the static instruction
+  prefix or provider message order.
+
+- Cursor's authenticated `GetUsableModels` response is fail-closed: HTTP,
+  authentication, decode, and empty-catalog failures no longer become fresh
+  bundled model rows. Existing successfully authenticated cached rows may still
+  be surfaced through the catalog's explicit stale path.
+
+- Settings 「从 API 获取」 is now a read-only probe. It projects discovered
+  models into the current UI without storing the pending API key, SQLite
+  catalog, YAML, or runtime provider configuration; only 「保存提供商」 persists
+  those values.
+
+- `coding.delete_file` now removes Unix files through root-anchored,
+  no-symlink `openat`/`unlinkat` traversal. A repository symlink cannot redirect
+  deletion outside the workspace; unsupported platforms fail closed.
+
+- Subagents: the parent can no longer finish while any child of the current
+  run is still running, queued, or initializing. `pending-background-children`
+  keeps retrying until every child is terminal. The host still does not
+  cancel a slow child; `idle_timeout` may cancel a silent one. A successful
+  parent finish marks that run's terminal children delivered so auto-wake
+  does not start a second stream. Changing `internal/app/prompts/main.md`
+  rewrites the static instruction prefix, so provider prefix-cache hits
+  reset once and then stay stable for later turns.
+
+- Subagents no longer inherit the parent session's unfinished Todo completion
+  gate. A child can finish its assigned read/review task after its own evidence
+  checks; the parent still cannot finish until `pending-background-children`
+  observes that child as terminal.
+
+- Cold-start sidebar session clicks now use the same direct durable
+  `ResumeSession` readback as global search. The initiating window applies the
+  returned projection immediately instead of waiting only for a broadcast event
+  racing bootstrap catalog/session requests.
+
+
+- `coding.search` now scans every Git-tracked and unignored untracked text file
+  instead of stopping after the first 1,000 walker entries. Dependency/build
+  trees no longer crowd real source files out of the search set, `maxResults`
+  caps matched lines rather than files examined, and matched files still enter
+  the shared Hashline snapshot store for safe follow-up edits.
+
+- Verification guardrails now accept current-SHA evidence from dedicated
+  `coding.gofmt` calls instead of requiring the model to repeat the same work
+  as a literal `gofmt -d` shell command. A no-op formatter no longer advances
+  the mutation boundary, so valid final answers are not followed by a false
+  verification retry.
+
+- Timeline process totals inspect formatter results: `coding.gofmt` with
+  `changed=false` remains visible as a tool step but no longer claims that a
+  file was edited.
+
+
+- Coding tools: `coding.glob`, `coding.replace`, and `coding.delete_file` are
+  now first-class workspace tools for every provider. Hashline remains the
+  default edit path; `coding.replace` applies unique `old_text`/`new_text`
+  pairs through hashline. `coding.delete_file` removes one regular file after
+  write approval. Cursor `pi_find`/`pi_edit`/`delete` map onto these names.
+  Changing `internal/app/prompts/main.md` rewrites the static instruction
+  prefix, so provider prefix-cache hits reset once and then stay stable.
+
+- Coding tool adapters now preserve the outer call identity and exact trailing
+  bytes. `coding.replace` refuses to rewrite from a truncated read,
+  unsuccessful `coding.go_test` executions are tool errors, and successful
+  replace/delete operations enter both durable file observations and completed
+  change projections. A completed delete records expected absence without a
+  false capture error; continuity verifies continued absence and marks a
+  recreated path stale.
+
+- Governed tool calls now reject duplicate JSON argument keys before approval
+  or execution, including duplicates nested in arrays/objects or spelled with
+  equivalent escapes. Ambiguous provider output returns a recoverable tool
+  error with the original call identity and cannot select an unintended target.
+  This host-side check does not change the static instruction prefix, message
+  order, or provider cache identity.
+
+- Todo initialization now matches the host-owned OMP lifecycle: the model
+  supplies only a goal, phase titles, and item content. Azem assigns every
+  phase/item ID and status, so a phase/item naming collision cannot invalidate
+  the first durable snapshot. A complete goal-plus-phases payload is also
+  treated as `init` when a provider omits only that discriminator; no other
+  missing operation is inferred. The tool schema and executable prompt change
+  the static prefix once; later turns retain the new stable prefix and cache
+  identity.
+
+- Trajectory export now recognizes schema-21's `{}` JSON spill sentinel as
+  externalized data, loads the referenced BlobStore payload, and verifies its
+  SHA-256. Real session exports no longer fail with a false inline-digest
+  mismatch; non-sentinel mismatches and missing/corrupt blobs still fail closed.
+
+- Desktop and TUI now treat Cursor as a reserved subscription like ChatGPT
+  and Grok. Login uses Oh My Pi's `loginDeepControl` PKCE poll against
+  `api2.cursor.sh`; models come from `GetUsableModels` with a bundled
+  fallback; turns stream over Connect protobuf `AgentService/Run`. Native
+  Cursor `read`/`bash`/`write`/`delete`/`grep`/`ls` and `pi_*` execs run
+  on that same stream: Azem answers `request_context`, executes mapped
+  coding tools through the existing approval path, and writes typed
+  results. Existing-file writes become `coding.edit_hashline`. Native
+  `delete` removes a regular workspace file only after write approval.
+  `pi_edit` applies unique replace pairs then hashline; `pi_find` lists
+  files by glob. Fetch, diagnostics, and other unknown execs are rejected
+  on the Cursor stream so they cannot fail the Venat run as an unknown tool.
+  Cursor now derives `conversation_id` from Azem's existing main, Team-role,
+  subagent, title, recap, and vision cache keys; reuses checkpoints and blobs
+  across driver instances; answers both KV get/set operations; rebuilds
+  structured turns from canonical history; and sends `resume_action` after
+  assistant/tool output. A shared user task remains the active action when
+  private historical or vision evidence follows it, so that evidence stays
+  context instead of replacing the request.
+  Native execs now keep approval waits, durable tool records, file
+  observations, live events, and exact call/result replay instead of
+  disappearing inside the provider stream. Team roles and subagents bind
+  request-scoped tool hosts, preventing one shared Cursor driver from routing
+  calls to the wrong run. Server-confirmed Todo snapshots mirror into durable
+  Todo state. Validated image and image-only messages use Cursor's native
+  selected-image protocol, while Kimi K3 reasoning replays only from the same
+  Cursor model. Local conversation state is account-scoped; frame, protobuf,
+  checkpoint, and server-set blob validation prevents malformed remote state
+  from replacing the last known good checkpoint. Remote protobuf decoding now
+  caps field descriptors, aggregate decoded bytes, and nested Value depth
+  before provider-controlled frames allocate maps/slices or recurse. A poisoned
+  `resource_exhausted` conversation rotates its wire ID once without dropping
+  validated state.
+  Token deltas count as output, while checkpoint occupancy feeds context
+  pressure without being recorded as billable input. Cursor does not expose
+  cache-read tokens, so completed cache cards now say 未上报 / Not reported
+  rather than waiting forever or retaining another provider's value. Cursor
+  transport metadata advances to version 3,
+  resetting only Cursor's derived cache identity once; subsequent turns keep
+  an append-stable root prefix.
+  Cursor settings read account email and membership tier from the dashboard,
+  show Total, Cursor, and Third Party remaining lanes from `usage-summary`,
+  and derive reset countdowns plus deficit/reserve and exhaustion forecasts
+  from the billing-cycle boundary. They fall back to
+  `api2.cursor.sh/auth/usage` when that dashboard request is unavailable.
+  Cursor's raw tier, Thinking, and Fast model IDs now collapse into one
+  base-model row in the composer and route selectors, matching Cursor's
+  model-first interaction. Thinking now defaults on whenever the family has a
+  matching same-tier variant and is no longer shown as a separate control or
+  label. Reasoning depth chooses the tier and Fast remains optional; a family
+  with no Thinking variants continues to use its standard IDs. Every change
+  still persists and sends the selected raw Cursor ID. The model catalog card
+  retains its exact-variant menu so individual raw IDs can still be managed.
+  Fast remains configurable inside the model picker but the separate composer
+  lightning button is removed; both Cursor and ChatGPT/Codex subscriptions show
+  active Fast state only as `· Fast` in the selected-model summary. One-level
+  reasoning ladders render full, align their sole label to the maximum end, and
+  are removed from pointer and keyboard interaction.
+  Folded rows now report both base-family and exact-variant counts, retain every
+  raw ID as a search alias, and show tier/Fast availability. Cursor's
+  account-scoped `GetUsableModels` response remains authoritative; static OMP
+  rows absent from that response are not injected as potentially unusable
+  models. Raw `(NO ZDR)` text is removed from the model name and replaced with
+  a localized data-retention warning and explanation.
+  Model catalog search matches a family name, variant label, alias, or exact raw
+  ID while retaining the complete matching family. A family switch now changes
+  every variant in one atomic configuration update; partial families show an
+  explicit enabled count. The variant panel separates current version, family
+  capabilities, availability, and a searchable exact-version selector.
+  Grok OAuth now overlays and injects the nine current chat-capable curated
+  models instead of replacing the catalog with a partial two-row response.
+  Reasoning tiers are normalized when cached rows load, so restarting no
+  longer disables the depth control until a manual model refresh. A later
+  subscription catalog refresh also no longer wipes a live quota card.
+  These catalog and projection changes do not alter the static instruction
+  prefix or provider message order. Choosing a different Cursor tier changes
+  the model identity intentionally; later turns on that exact tier keep the
+  same cache identity.
+- Reading an undeclared skill resource such as `SKILL.md`, or a resource
+  from a skill that is not active, now returns an error tool result instead
+  of aborting the Main, Team, or subagent run. The model sees the miss and
+  can continue; the desktop no longer shows `missing tool result` for that
+  call. Requires Venat v0.14.2.
+
+- Live assistant text now sharpens from a readable blur tail, matching the
+  Meta AI stream: newest increments fade in over 260ms with a 5px blur, up
+  to eight in-flight ranges stay visible, and Markdown reparse resumes the
+  same motion instead of replaying settled lines.
 
 - Context compaction now has one deterministic host path across automatic,
   `/compact`, `/rebuild`, Main, Team, and subagent runs. It serializes omitted
@@ -17,6 +397,33 @@
   wire version 3 and archive policy version 3 reset old derived cache identity
   once; later archives retain the stable system prefix and message ordering.
 
+- Fixed automatic archiving that could remain idle while the provider reported
+  98% context occupancy because the trigger trusted only the lower local
+  `bytes/4` estimate and a fixed 16,384-token reserve. The trigger now uses the
+  larger of local history pressure and current-run provider-reported input
+  after tool definitions, and reserves at least 15% of every model context
+  window. Successful archive activation clears the prior provider pressure.
+  Static instructions and provider message order are unchanged; only an
+  earlier archive carrier can start a new cache epoch.
+
+- Fixed deterministic context activation after manifest-free pruning. The
+  checkpoint CAS boundary now comes directly from the current run's persisted
+  canonical user block, including resumed runs, rather than the pre-turn
+  checkpoint or provider-facing message metadata. This prevents healthy long
+  runs from failing with a stale checkpoint while preserving CAS rejection
+  when another canonical message is appended after preparation. Static
+  instructions, message order, and provider payloads are unchanged, so existing
+  prefix cache hits survive.
+
+- Manual context compaction now repairs legacy tool history before Snapcompact
+  archiving. When both the call and result are absent from an older
+  ModelHistory but the terminal durable tool record still exists, Azem restores
+  the pair at its canonical anchor, including full artifact-backed output and
+  failed state. Partial pairs, name mismatches, missing artifacts, and invalid
+  records still fail closed. Static instructions are unchanged; a successful
+  manual archive intentionally replaces only the derived history tail, so the
+  stable provider prefix remains reusable.
+
 - Evaluation and adaptation now use a versioned, evidence-bound offline
   pipeline. `azem-eval` exports deterministic durable trajectories and baseline
   identities; replay/noise fixtures, verification plans, structural retrieval,
@@ -32,6 +439,13 @@
 - Settings usage now has a Lody-style skyline: a model donut beside the year
   heatmap, a stacked by-model bar, and a click-to-open day panel. Totals snap
   on first paint and ease on later refreshes. No invented cost figures.
+
+- Settings layout now uses one enlarged typography scale across navigation,
+  cards, route rows, controls, model catalogs, and Usage. Model route controls
+  use bounded grid columns and clipped card geometry so Fast/reasoning controls
+  cannot leave the card. The Usage activity heatmap uses responsive square
+  cells across the full report width instead of a fixed 10px grid with a large
+  empty right side.
 
 - Persistence: schema 21 keeps SQLite as the catalog, FTS index, and Venat
   control plane, and stores large payloads as content-addressed files under
@@ -206,14 +620,11 @@
   content-visibility was dropping padding-bottom from scroll height),
   and the overlay fallback is tall enough for the resting input card.
 
-- Desktop transcript: fenced code in answers uses the Beautiful UI
-  Code Block card — white elevated paper, filename + language, Copy,
-  and a line-number gutter. Keywords stay blue and strings stay green.
-
-- Desktop transcript: a completed tool step is one gray Tool Chip card.
-  The first row is the 思考 chip (preview capsule), then write/shell/read
-  chips, then file-change pills. Live wait/thinking stays the sparkle bar
-  plus prose and is not turned into that chip.
+- Desktop transcript: fenced code in answers uses the assistant-ui `CodeBlock`
+  component with elevated paper, filename/language, Copy, and a line-number
+  gutter. A completed tool step opens one flat `ToolTimeline`: reasoning first,
+  then write/shell/read items and file statistics. Live wait and reasoning stay
+  on the shared `ReasoningPanel` bar.
 
 - Desktop frontend: the production bundle no longer ships one 666 kB
   entry chunk. xterm loads only after the terminal is first opened,
@@ -225,16 +636,14 @@
   Page titles sit on a compact bar. Change review no longer invents an
   architecture-violation count.
 
-- Desktop transcript: first-token wait, live reasoning, and live
-  search/tools now share one left-aligned sparkle row. Only the label
-  changes; the header does not remount or reset its clock. The old wait
-  capsule is gone. A thinking-only trail is still 「思考」 plus the
-  reasoning prose; while the run is live the elapsed clock sits on that
-  sparkle bar, not on individual tool rows. Each completed tool row keeps its own duration
-  instead of repeating the step's total. After the current step completes with tools, it expands
-  to one chip list: thinking as the first chip, then tool chips and
-  file-change pills, with an honest `N tool calls, N messages` header.
-  There is no Steps / Reasoning / Search / Coding switcher.
+- Desktop transcript: first-token wait, live reasoning, and live search/tools
+  share one left-aligned `ReasoningPanel` bar. Only the label changes; the
+  element does not remount or reset its clock. A thinking-only trail remains
+  「思考」 plus reasoning prose, while individual tool rows retain only their own
+  completed duration. A settled tool step opens one `ToolTimeline` containing
+  reasoning, tool items, and file statistics with an honest
+  `N tool calls, N messages` header. There is no Steps / Reasoning / Search /
+  Coding switcher.
 
 - Embedded terminal: every PTY host wait is now bounded. Closing a tab or the
   window kills and reaps sessions in parallel under a fixed budget, a child
@@ -277,9 +686,9 @@
   rewrites the static instruction prefix, so provider prefix-cache hits reset
   once and then stay stable for later turns.
 
-- Desktop transcript: expanding a large completed 已处理 fold first paints
-  collapsed tool/progress chips and only mounts that row’s diff, Markdown,
-  Thinking panel, or Subagent list when the row is opened.
+- Desktop transcript: expanding a large completed process first paints
+  collapsed ToolTimeline rows and mounts each row's diff, Markdown, reasoning,
+  or Subagent detail only when that row is opened.
 
 - Subagents: a child that stays `运行中` with no thinking, text, or tool
   activity is now cancelled after `agents.subagents.idle_timeout` (default
@@ -311,55 +720,38 @@
   thread surface and subagent side-chat transcript. Sidebar, Settings chrome,
   and Inspector chrome keep the existing global interface font size.
 
-- Desktop transcript: first-token wait uses the Thinking sparkle pill
-  (`思考` / `思考 0.3s`), not the pixel-grid Loading icon. The wait pill
-  keeps the same `--ink` charcoal as the later 「思考了 Xs」 header from
-  first paint; a disabled summary no longer inherits the global
-  `button:disabled` 45% fade. Live reasoning and process traces keep
-  expandable Thinking. Reasoning, search, and other tools stack as
-  separate sparkle rows instead of a tab switcher.
+- Desktop transcript: first-token wait uses the shared `ReasoningPanel`
+  (`思考` / `思考 0.3s`), not the pixel-grid LoadingState. The disabled wait
+  trigger keeps the same charcoal ink as its settled label. Live reasoning,
+  search, and tool states update that one mounted panel instead of creating a
+  tab switcher.
   Completing a stream keeps the same mounted Markdown tree and only stops
   reveal/caret motion; the idle caret uses `content: none` so it cannot
   remain as a hairline between settled paragraphs. Elapsed time still
   starts at `0.1s` and never shows `0s`.
 
-- Desktop transcript: tool calls use Beautiful UI Tool Chips (icon, bold
-  label, mono path/command/query chip). Process folds keep 已处理 / 处理中
-  and may append honest tool/progress counts. Executed file edits add white
-  `+N`/`-N` pills. Reasoning is unchanged. Queued and approval-bound writes
-  stay out of file-change pills until they run.
+- Desktop transcript: tool calls render through assistant-ui
+  `ToolTimelineItem` disclosures with an icon, verb, target, and status.
+  Process folds may append honest tool/progress counts; executed file edits add
+  compact `path +N -N` statistics only after execution.
 
-- Desktop transcript: fenced Markdown code now uses the Beautiful UI Code
-  Block card (filename or language, copy, line numbers) while the agent is
-  still streaming and after the answer settles. File-change diffs are
-  unchanged.
+- Desktop transcript: fenced Markdown code uses the assistant-ui `CodeBlock`
+  component while streaming and after settlement. File-change diffs retain
+  their existing review surface.
 
-- Desktop Inspector: the task plan uses Beautiful UI Task Row capsules. Each
-  Todo phase is a white rounded card with a status mark (green check or
-  numbered progress ring), title, honest `done/total` count, status badge, and
-  an expand rail for the phase items. Commentary and thinking chrome are
-  unchanged.
-
-- Desktop transcript: highlighting assistant, commentary, or user prose opens
-  a Beautiful UI Select Action island. 解释, 改进, and a custom 描述编辑 send
-  a normal user turn through the existing composer path with the quoted
-  passage. Thinking, tool dumps, and wake notices are ignored. An active run
-  still follows queue / steer rules.
+- Desktop Inspector: the task plan uses the assistant-ui AgentPlan hierarchy:
+  a fixed short heading, bounded goal, honest `done/total` rule, phase labels,
+  and completed/running/pending/cancelled marks.
 
 - Desktop stop now cancels the active run and its subagents together. The
   previous stop left children running in the background after the parent
   ended. TUI still offers a parent-only choice when children are active.
 
-- Desktop session: Beautiful UI cool-gray / blue tokens stay global so the
-  chrome does not fall back to the prototype warm palette. Progress
-  commentary is ordinary prose instead of a titled duration card, and it is
-  not laid out on the old 15px marker grid. Subagent run cards keep their
-  full-width frame. The first-token wait uses the Thinking sparkle pill;
-  live reasoning uses the expandable Thinking row. Elapsed time stays in that
-  label, appears only after the first tenth of a second, and never shows
-  `0s`. Changing
-  `internal/app/prompts/main.md` rewrites the static instruction prefix, so
-  provider prefix-cache hits reset once and then stay stable for later turns.
+- Desktop session: the assistant-ui Elements token layer stays global so chrome
+  does not fall back to the prototype warm palette. Progress is ordinary
+  `ProgressMessage` prose, not a duration card or old marker grid; user and
+  assistant blocks use `Message` components. First-token wait and live
+  reasoning use `ReasoningPanel`, with elapsed time in the same stable label.
 
 - Subagents: Settings and `agents.subagents.idle_timeout` can cancel a
   running child that produces no thinking, output, or tool activity for a
@@ -466,9 +858,6 @@
   the sidebar, and inspect or restore them in Settings grouped by project.
   Opening an archived conversation restores it.
 
-- Desktop sidebar: session ages use minutes and update on the next label
-  boundary with a single timeout. Hidden windows do not tick.
-
 - Grok subscription catalog: fetch models from the Grok CLI proxy instead of
   api.x.ai, keep optional language-model metadata best-effort, and add a
   Fetch models button on the subscription catalog page.
@@ -496,9 +885,8 @@
   rows only show the file name; Hashline bodies and write payloads stay
   hidden until the edit actually runs.
 
-- Desktop sidebar: session titles, timestamps, and the project heading now
-  follow the Appearance font size. The desktop layout pass no longer pins
-  those labels to 11px / 9px.
+- Desktop sidebar session titles and project headings follow the Appearance
+  font size. The desktop layout pass no longer pins those labels to 11px.
 
 - Subagent scheduling: raise the default concurrency to 32, accept zero
   as unbounded, and support recursive delegation with a default depth of

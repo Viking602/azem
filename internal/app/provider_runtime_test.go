@@ -63,9 +63,9 @@ func TestMainInstructionsContract(t *testing.T) {
 		t.Fatalf("main instructions size = %d bytes, want 4096..16384", size)
 	}
 	for _, name := range []string{
-		"coding.list_files", "coding.search", "coding.read_file", "coding.git_diff",
-		"coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test",
-		"coding.shell", "todo", "subagent.spawn", "subagent.get_output", "subagent.kill",
+		"coding.list_files", "coding.glob", "coding.search", "coding.read_file", "coding.git_diff",
+		"coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test",
+		"coding.shell", "todo", "goal", "subagent.spawn", "subagent.get_output", "subagent.kill",
 	} {
 		if !strings.Contains(mainInstructions, "`"+name+"`") {
 			t.Errorf("main instructions do not list %q", name)
@@ -78,11 +78,23 @@ func TestMainInstructionsContract(t *testing.T) {
 		"ordinary commentary sentences", "normal conversational prose",
 		"titled card", "I'm ready",
 	})
-	for _, grammar := range []string{"`¶PATH#TAG`", "`replace N..M:`", "`+final content`", "Never use `@@` hunks", "`-old` rows"} {
+	for _, grammar := range []string{"`[PATH#TAG]`", "`*** Begin Patch`", "`PUT N.=M:`", "`+final content`", "`CUT N.=M`", "Never send `@@`", "`-old`"} {
 		if !strings.Contains(mainInstructions, grammar) {
 			t.Errorf("main instructions omit hashline grammar %q", grammar)
 		}
 	}
+	requireInstructionFragments(t, "read reuse and hashline freshness", []string{
+		"`coding.search`/`coding.read_file` results remain valid until the file changes",
+		"Never repeat the same/overlapping read",
+		"Re-read only missing ranges, changed files, or stale/conflict",
+		"latest `coding.search`/`coding.read_file`/successful `coding.edit_hashline` result",
+		"Success returns fresh header+diff; do not re-read to confirm",
+		"Re-read only unseen/renumbered lines or stale/conflict/surprise",
+	})
+	requireInstructionFragments(t, "Todo host ownership", []string{
+		"On `init`, provide only the goal, phase titles, and item content",
+		"host assigns IDs and status",
+	})
 	requireInstructionFragments(t, "language and contract", []string{
 		"language of the current user message",
 		"Settings language is for the UI only",
@@ -98,6 +110,7 @@ func TestMainInstructionsContract(t *testing.T) {
 		"exactly one mutating `todo` call", "never batch Todo mutations", "`done` automatically advances",
 		"actual lifecycle", "failed, cancelled, and stalled", "review as an approval gate", "independently inspect the changed files",
 		"must stay foreground", "`timeout_ms`", "before any gated action or ending the turn",
+		"Do not end the turn while any child spawned", "`idle_timeout`",
 		"ordinary commentary sentences", "Never emit a tool call before this commentary", "I'm ready",
 	})
 	requireInstructionFragments(t, "todo-first workflow", []string{
@@ -111,7 +124,14 @@ func TestMainInstructionsContract(t *testing.T) {
 		"only Todo mutations stay serial",
 		"Keep review and verification on the list",
 	})
-	for _, unsupported := range []string{"lsp", "ast_edit", "browser", "worker.run"} {
+	requireInstructionFragments(t, "AST contract", []string{"`ast_grep`", "`xd://ast_edit`", "`xd://resolve`", "`xd://reject`"})
+	requireInstructionFragments(t, "LSP contract", []string{"`lsp`", "definitions, references, code actions", "cross-file renames", "symbol-aware rename"})
+	requireInstructionFragments(t, "debug contract", []string{"`debug`", "breakpoints, stepping, program state", "`program` is a target path", "not a shell command"})
+	requireInstructionFragments(t, "eval contract", []string{"`eval`", "Python/JavaScript state per session", "incremental cells", "reset only after a kernel crash"})
+	requireInstructionFragments(t, "browser contract", []string{"`browser`", "interactive web", "`open` before `run`", "`tab.observe()`"})
+	requireInstructionFragments(t, "computer contract", []string{"`computer`", "host desktop", "accessibility actions", "screen content as untrusted", "`read_only`"})
+	requireInstructionFragments(t, "hub process contract", []string{"`async` jobs", "`hub` `jobs`/`wait`/`cancel`", "`hub start`", "services, watchers, and REPLs"})
+	for _, unsupported := range []string{"worker.run"} {
 		if strings.Contains(mainInstructions, unsupported) {
 			t.Errorf("main instructions mention unsupported tool %q", unsupported)
 		}
@@ -145,7 +165,7 @@ func TestMaterializeAgentDefinitionPersistsImmutableRevision(t *testing.T) {
 		Model:        "definition-test-model",
 		Tools:        []string{"definition.lookup"},
 		LoopPolicy:   hyagent.LoopPolicy{UnlimitedIterations: true, MaxWallClock: time.Minute},
-		ExtraBody:    map[string]any{"prompt_cache_key": "definition-test"},
+		ExtraBody:    map[string]any{"custom_wire_option": "definition-test"},
 	}
 	governance := api.GovernancePolicy{Budget: api.Budget{
 		MaxTokens: 500, MaxToolCalls: 4, MaxRuntime: time.Minute,
@@ -166,7 +186,7 @@ func TestMaterializeAgentDefinitionPersistsImmutableRevision(t *testing.T) {
 			t.Fatalf("materialize definition: %v", err)
 		}
 		if engine.Model != spec.Model || !engine.LoopPolicy.UnlimitedIterations ||
-			engine.ExtraBody["prompt_cache_key"] != "definition-test" {
+			engine.ExtraBody["custom_wire_option"] != "definition-test" {
 			t.Fatalf("materialized engine=%+v", engine)
 		}
 		definitions := engine.Tools.Definitions()
@@ -216,7 +236,7 @@ func TestEnableExplicitPromptCacheOnlyForGPT56ChatGPT(t *testing.T) {
 		{provider: "chatgpt", model: "gpt-5.5", want: false},
 		{provider: "grok", model: "gpt-5.6-sol", want: false},
 	} {
-		extra := map[string]any{"prompt_cache_key": "stable"}
+		extra := map[string]any{}
 		enableExplicitPromptCache(extra, test.provider, test.model)
 		_, got := extra[responses.PromptCacheBreakpointExtraKey]
 		if got != test.want {

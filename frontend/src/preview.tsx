@@ -4,7 +4,7 @@ import { TimelineFeed } from "./components/Timeline";
 import type { Block } from "./types";
 import "./styles.css";
 import "./prototype.css";
-import "./components/beautiful-ui/beautiful-ui.css";
+import "./components/assistant-ui/elements.css";
 
 function Preview() {
   useEffect(() => {
@@ -40,6 +40,10 @@ const settled: Block[] = [
   {
     id: "th", kind: "thinking", runId: "run", state: "completed", data: { elapsedMs: "18500" },
     content: "The user wants me to analyze the package structure, context rebuild evidence, and the frontend store.",
+  },
+  {
+    id: "diff", kind: "diff", runId: "run", state: "completed", title: "frontend/src/thread.tsx",
+    content: "@@ -1,3 +1,4 @@\n export function Composer() {\n-  const [draft, setDraft] = useState(\"\");\n+  const draft = useDraft(threadId);\n+  useEffect(() => hydrate(draft), [threadId]);\n }",
   },
   {
     id: "a", kind: "assistant", runId: "run", state: "completed",

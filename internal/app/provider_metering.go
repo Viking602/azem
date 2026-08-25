@@ -20,6 +20,7 @@ type meteredProviderDriver struct {
 	store                                              *session.Service
 	host                                               providerHost
 	sessionID, runID, kind, provider, model, transport string
+	reportInputTokens                                  func(int)
 }
 
 func (d *meteredProviderDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }
@@ -37,24 +38,31 @@ func (d *meteredProviderDriver) Stream(ctx context.Context, request hyprovider.R
 	if model == "" {
 		model = d.model
 	}
-	fact := session.ProviderRequestFact{RequestID: id, SessionID: d.sessionID, RunID: d.runID, RequestKind: d.kind,
+	fact := session.ProviderRequestFact{
+		RequestID: id, SessionID: d.sessionID, RunID: d.runID, RequestKind: d.kind,
 		Provider: d.provider, Model: model, Transport: d.transport, CacheEpoch: projection.CacheEpoch,
-		CheckpointGeneration: projection.CheckpointGeneration, Status: "started", StartedAt: time.Now().UTC()}
+		CheckpointGeneration: projection.CheckpointGeneration, Status: "started", StartedAt: time.Now().UTC(),
+	}
 	if err := d.store.UpsertProviderRequest(context.WithoutCancel(ctx), fact); err != nil {
 		return nil, err
 	}
 	state := &meteredRequestState{driver: d, fact: fact}
-	if request.ExtraBody == nil {
-		request.ExtraBody = make(map[string]any)
+	if d.provider == "cursor" && d.reportInputTokens != nil {
+		previous := request.ContextUsage
+		request.ContextUsage = func(usage hyprovider.ContextUsage) {
+			if previous != nil {
+				previous(usage)
+			}
+			d.reportInputTokens(usage.UsedTokens)
+		}
 	}
-	// Fact metering owns all usage/detail accounting. Calling the old reporter
-	// here would add the same request to the legacy projection a second time.
-	request.ExtraBody[responses.UsageReporterExtraKey] = responses.UsageReporter(state.details)
 	stream, err := d.inner.Stream(ctx, request)
 	if err != nil {
 		if persistErr := state.finish("failed", hyprovider.Usage{}); persistErr != nil && d.host != nil {
-			d.host.EmitEvent(d.host.BaseContext(), Event{Kind: EventContextUsage, SessionID: d.sessionID, RunID: d.runID, State: "failed",
-				Data: map[string]string{"factPersistenceError": persistErr.Error(), "requestKind": d.kind}})
+			d.host.EmitEvent(d.host.BaseContext(), Event{
+				Kind: EventContextUsage, SessionID: d.sessionID, RunID: d.runID, State: "failed",
+				Data: map[string]string{"factPersistenceError": persistErr.Error(), "requestKind": d.kind},
+			})
 		}
 		return nil, err
 	}
@@ -77,6 +85,7 @@ func (s *meteredRequestState) details(d responses.UsageDetails) {
 	s.detail = d
 	s.mu.Unlock()
 }
+
 func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,6 +107,9 @@ func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) erro
 			// Durable facts must not retain write-token noise for automatic caches.
 			f.CacheWriteTokens = 0
 			f.CacheWriteReported = false
+		}
+		if f.InputTokens > 0 && s.driver.reportInputTokens != nil {
+			s.driver.reportInputTokens(f.InputTokens)
 		}
 		s.terminal = &f
 	}
@@ -134,14 +146,18 @@ func (s *meteredRequestState) finish(status string, usage hyprovider.Usage) erro
 		eventState = "reported"
 	}
 	if s.driver.host != nil {
-		s.driver.host.EmitEvent(ctx, Event{Kind: EventContextUsage, SessionID: f.SessionID, RunID: f.RunID, State: eventState,
-			Data: map[string]string{"factSnapshot": "true", "usageSnapshot": string(encoded), "requestKind": f.RequestKind,
+		s.driver.host.EmitEvent(ctx, Event{
+			Kind: EventContextUsage, SessionID: f.SessionID, RunID: f.RunID, State: eventState,
+			Data: map[string]string{
+				"factSnapshot": "true", "usageSnapshot": string(encoded), "requestKind": f.RequestKind,
 				"inputTokens": fmt.Sprint(f.InputTokens), "cachedInputTokens": fmt.Sprint(f.CachedTokens), "outputTokens": fmt.Sprint(f.OutputTokens),
 				"totalTokens": fmt.Sprint(f.TotalTokens), "cacheWriteTokens": fmt.Sprint(f.CacheWriteTokens), "reasoningTokens": fmt.Sprint(f.ReasoningTokens),
 				"provider": f.Provider, "model": f.Model, "transport": f.Transport,
 				"cacheModel":       cacheModelForProvider(f.Provider, s.detail.CacheModel),
 				"cacheStatus":      map[bool]string{true: "reported", false: "unreported"}[f.CacheReported],
-				"cacheWriteStatus": map[bool]string{true: "reported", false: "unreported"}[f.CacheWriteReported]}})
+				"cacheWriteStatus": map[bool]string{true: "reported", false: "unreported"}[f.CacheWriteReported],
+			},
+		})
 	}
 	s.finished = true
 	s.finishErr = nil
@@ -155,7 +171,7 @@ func cacheModelForProvider(provider, tagged string) string {
 		return tagged
 	}
 	switch provider {
-	case "grok":
+	case "grok", "cursor":
 		return responses.CacheModelAutomatic
 	case "chatgpt":
 		return responses.CacheModelWriteTokens
@@ -178,6 +194,17 @@ func (s *meteredProviderStream) Recv() (hyprovider.Event, error) {
 		return e, err
 	}
 	if e.Kind == hyprovider.EventDone {
+		s.state.details(responses.NormalizeUsage(responses.UsageDetails{
+			ProviderRequestID:  e.Response.ID,
+			InputTokens:        e.Usage.InputTokens,
+			CachedTokens:       e.Usage.CachedInputTokens,
+			CacheReported:      e.Usage.CachedInputTokensReported,
+			CacheWriteTokens:   e.Usage.CacheWriteInputTokens,
+			CacheWriteReported: e.Usage.CacheWriteInputTokensReported,
+			OutputTokens:       e.Usage.OutputTokens,
+			ReasoningTokens:    e.Usage.ReasoningTokens,
+			TotalTokens:        e.Usage.TotalTokens,
+		}, cacheModelForProvider(s.state.fact.Provider, "")))
 		// length / max_turns means the provider hit an output or iteration
 		// ceiling. Persist that distinctly so metering and UI do not treat a
 		// truncated stream as a normal completed request.
@@ -185,7 +212,7 @@ func (s *meteredProviderStream) Recv() (hyprovider.Event, error) {
 		switch e.StopReason {
 		case hyprovider.StopReasonAborted, hyprovider.StopReasonError:
 			status = "unknown"
-		case hyprovider.StopReasonMaxTurns:
+		case hyprovider.StopReasonLength, hyprovider.StopReasonMaxTurns:
 			status = "length"
 		}
 		if err := s.state.finish(status, e.Usage); err != nil {

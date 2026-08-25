@@ -1,0 +1,10 @@
+Azem Security Scan includes JSON Schema contract assets derived from OpenAI Codex Security.
+
+Upstream project: https://github.com/openai/codex-security
+Reviewed package version: 0.1.16
+Reviewed bundled plugin version: 0.1.22
+Upstream license: Apache License 2.0
+
+The schemas are retained as compatibility inputs. Azem owns model execution,
+scan orchestration, persistence, finalization, and artifact production, and
+identifies generated scans with producer name "azem-security".

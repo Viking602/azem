@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/Viking602/venat/message"
@@ -31,8 +30,6 @@ type ImageAttachment struct {
 }
 
 const (
-	UsageReporterExtraKey          = "azem_usage_reporter"
-	AttachmentRootExtraKey         = "azem_attachment_root"
 	PromptCacheBreakpointExtraKey  = "azem_prompt_cache_breakpoint"
 	PromptCacheBreakpointLastUser  = "last-user"
 	PromptCacheBreakpointFirstItem = "first-item"
@@ -60,11 +57,19 @@ type UsageDetails struct {
 	TotalTokens     int
 }
 
-type UsageReporter func(UsageDetails)
+type (
+	UsageReporter          func(UsageDetails)
+	AttachmentRootProvider interface {
+		AttachmentRoot() string
+	}
+)
 
-func RequestUsageReporter(request hyprovider.Request) UsageReporter {
-	reporter, _ := request.ExtraBody[UsageReporterExtraKey].(UsageReporter)
-	return reporter
+func RequestAttachmentRoot(request hyprovider.Request) string {
+	host, _ := request.NativeToolHost.(AttachmentRootProvider)
+	if host == nil {
+		return ""
+	}
+	return strings.TrimSpace(host.AttachmentRoot())
 }
 
 // NormalizeUsage applies provider cache semantics to a parsed usage detail.
@@ -76,17 +81,6 @@ func NormalizeUsage(details UsageDetails, cacheModel string) UsageDetails {
 		details.CacheWriteReported = false
 	}
 	return details
-}
-
-// WrapUsageReporter tags and normalizes usage reports for a specific cache model.
-// A nil reporter stays nil so callers can pass RequestUsageReporter results through.
-func WrapUsageReporter(reporter UsageReporter, cacheModel string) UsageReporter {
-	if reporter == nil {
-		return nil
-	}
-	return func(details UsageDetails) {
-		reporter(NormalizeUsage(details, cacheModel))
-	}
 }
 
 type wireRequest struct {
@@ -118,7 +112,7 @@ func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
 			return nil, fmt.Errorf("model %q does not support explicit prompt cache breakpoints", request.Model)
 		}
 	}
-	instructions, input, err := buildInput(request.Messages, options.ToolCallItemID, strings.TrimSpace(stringExtra(request, AttachmentRootExtraKey)), breakpoint)
+	instructions, input, err := buildInput(request.Messages, options.ToolCallItemID, RequestAttachmentRoot(request), breakpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -130,20 +124,24 @@ func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
 		})
 	}
 	parallel := options.DefaultParallelTools
-	if value, ok := boolExtra(request, "parallel_tool_calls"); ok {
-		parallel = value
+	if request.ParallelToolCalls != nil {
+		parallel = *request.ParallelToolCalls
 	}
-	effort := firstString(request.Metadata["reasoning_effort"], stringExtra(request, "reasoning_effort"), options.DefaultReasoningEffort)
+	effort := firstString(request.Metadata["reasoning_effort"], options.DefaultReasoningEffort)
 	var reasoning map[string]any
 	if effort != "" {
 		reasoning = map[string]any{"effort": effort, "summary": "auto"}
 	}
-	maxOutput := intExtra(request, "max_output_tokens")
+	maxOutput := request.MaxTokens
+	serviceTier := strings.TrimSpace(request.ServiceTier)
+	if serviceTier == "" {
+		serviceTier = strings.TrimSpace(options.ServiceTier)
+	}
 	wire := wireRequest{
-		Model: request.Model, PromptCacheKey: strings.TrimSpace(stringExtra(request, "prompt_cache_key")),
+		Model: request.Model, PromptCacheKey: strings.TrimSpace(request.PromptCacheKey),
 		Instructions: instructions, Input: input, Tools: tools,
 		ParallelToolCalls: parallel, Reasoning: reasoning, MaxOutputTokens: maxOutput,
-		Store: false, Stream: true, Metadata: sanitizedMetadata(request.Metadata), ServiceTier: strings.TrimSpace(options.ServiceTier),
+		Store: false, Stream: true, Metadata: sanitizedMetadata(request.Metadata), ServiceTier: serviceTier,
 	}
 	if len(tools) > 0 {
 		wire.ToolChoice = "auto"
@@ -417,39 +415,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func boolExtra(request hyprovider.Request, key string) (bool, bool) {
-	value, ok := request.ExtraBody[key]
-	if !ok {
-		return false, false
-	}
-	switch typed := value.(type) {
-	case bool:
-		return typed, true
-	case string:
-		parsed, err := strconv.ParseBool(typed)
-		return parsed, err == nil
-	default:
-		return false, false
-	}
-}
-
-func intExtra(request hyprovider.Request, key string) int {
-	value := request.ExtraBody[key]
-	switch typed := value.(type) {
-	case int:
-		return typed
-	case int64:
-		return int(typed)
-	case float64:
-		return int(typed)
-	case json.Number:
-		parsed, _ := typed.Int64()
-		return int(parsed)
-	default:
-		return 0
-	}
 }
 
 func stringExtra(request hyprovider.Request, key string) string {

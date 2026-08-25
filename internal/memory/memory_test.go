@@ -31,6 +31,19 @@ func TestCRUDSearchScopeAndLimits(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].ID != item.ID || got[0].Content != "durable alpha evidence" {
 		t.Fatalf("search = %#v, %v", got, err)
 	}
+	loaded, err := one.Get(ctx, item.ID)
+	if err != nil || loaded.Content != item.Content {
+		t.Fatalf("get = %#v, %v", loaded, err)
+	}
+	updatedContent, updatedImportance := "durable beta evidence", 80
+	updated, err := one.Update(ctx, item.ID, &updatedContent, &updatedImportance)
+	if err != nil || updated.Content != updatedContent || updated.Importance != updatedImportance {
+		t.Fatalf("update = %#v, %v", updated, err)
+	}
+	got, err = one.List(ctx, "beta", 5)
+	if err != nil || len(got) != 1 || got[0].ID != item.ID {
+		t.Fatalf("updated search = %#v, %v", got, err)
+	}
 	if err := one.Forget(ctx, item.ID); err != nil {
 		t.Fatal(err)
 	}

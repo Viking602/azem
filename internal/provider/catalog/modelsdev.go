@@ -169,6 +169,30 @@ func (c ModelsDevCatalog) match(providerID string, model Model) (modelsDevModel,
 			}
 		}
 	}
+	if bestScore >= 0 {
+		return best, true
+	}
+	want := catalogNameKey(model.Name)
+	if want == "" {
+		return modelsDevModel{}, false
+	}
+	for id, provider := range c.providers {
+		for _, metadata := range provider.Models {
+			if catalogNameKey(metadata.Name) != want {
+				continue
+			}
+			score := 40 + friendlyNameScore(metadata.Name, metadata.ID)
+			if id == providerID {
+				score += 100
+			}
+			if lab != "" && id == lab {
+				score += 200
+			}
+			if score > bestScore {
+				bestScore, best = score, metadata
+			}
+		}
+	}
 	return best, bestScore >= 0
 }
 
@@ -273,6 +297,28 @@ func friendlyNameScore(name, id string) int {
 		score += 5
 	}
 	return score
+}
+
+func catalogNameKey(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.ReplaceAll(name, "(no zdr)", " ")
+	fields := strings.Fields(name)
+	skip := map[string]bool{
+		"thinking": true, "fast": true, "high": true, "low": true, "medium": true,
+		"max": true, "minimal": true, "none": true, "xhigh": true, "1m": true,
+	}
+	for len(fields) > 1 {
+		last := fields[len(fields)-1]
+		if last == "high" && fields[len(fields)-2] == "extra" {
+			fields = fields[:len(fields)-2]
+			continue
+		}
+		if !skip[last] {
+			break
+		}
+		fields = fields[:len(fields)-1]
+	}
+	return strings.Join(fields, " ")
 }
 
 func sameCatalogEndpoint(left, right string) bool {

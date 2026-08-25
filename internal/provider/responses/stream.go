@@ -69,6 +69,7 @@ type streamItem struct {
 
 type completedResponse struct {
 	ID     string          `json:"id"`
+	Model  string          `json:"model"`
 	Output json.RawMessage `json:"output"`
 	Status string          `json:"status"`
 	Usage  struct {
@@ -253,8 +254,14 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 			cacheWriteTokens = *response.Usage.InputTokensDetails.CacheWriteTokens
 		}
 		usage := hyprovider.Usage{
-			InputTokens: response.Usage.InputTokens, CachedInputTokens: cachedTokens,
-			OutputTokens: response.Usage.OutputTokens, TotalTokens: response.Usage.TotalTokens,
+			InputTokens:                   response.Usage.InputTokens,
+			CachedInputTokens:             cachedTokens,
+			CachedInputTokensReported:     cacheReported,
+			CacheWriteInputTokens:         cacheWriteTokens,
+			CacheWriteInputTokensReported: cacheWriteReported,
+			OutputTokens:                  response.Usage.OutputTokens,
+			ReasoningTokens:               response.Usage.OutputTokensDetails.ReasoningTokens,
+			TotalTokens:                   response.Usage.TotalTokens,
 		}
 		if s.reportUsage != nil {
 			s.reportUsage(UsageDetails{
@@ -266,6 +273,7 @@ func (s *Stream) mapEvent(event streamEvent, raw []byte) (hyprovider.Event, bool
 		}
 		return hyprovider.Event{
 			Kind: hyprovider.EventDone, StopReason: reason, Usage: usage, ProviderState: providerState,
+			Response: hyprovider.ResponseMetadata{ID: response.ID, Model: response.Model},
 		}, true, false
 	case "response.failed", "response.incomplete", "error":
 		return s.errorEvent(streamError(raw)), true, true

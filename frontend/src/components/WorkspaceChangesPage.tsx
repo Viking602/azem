@@ -7,7 +7,7 @@ import { isDesktopRuntime, listWorkspaceChanges, readWorkspaceChange } from "../
 import { tFormat, translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 import type { WorkspaceChange, WorkspaceChangeFile, WorkspaceChangeSet } from "../types";
-import { syntaxTokens } from "./CodeDiff";
+import { syntaxTokens } from "./syntaxTokens";
 import FileTypeIcon, { fileBasename } from "./FileTypeIcon";
 
 const AUTO_EXPAND_LIMIT = 24;

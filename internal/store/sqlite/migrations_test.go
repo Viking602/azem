@@ -372,6 +372,65 @@ func TestMigrationV18AddsControlPlaneStoresAndReopens(t *testing.T) {
 	}
 }
 
+func TestMigrationV22AddsLLMuxProviderModelsAndReopens(t *testing.T) {
+	if len(migrations) != schemaVersion {
+		t.Fatalf("migration count = %d, schema version = %d", len(migrations), schemaVersion)
+	}
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "llmux-models.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 21; version++ {
+		if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
+			t.Fatalf("apply fixture migration %d: %v", version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA user_version=21`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := provider.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
+	}
+	for _, name := range []string{"llmux_provider_models", "llmux_provider_models_provider"} {
+		var found string
+		if err := provider.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE name=?`, name).Scan(&found); err != nil {
+			t.Fatalf("missing migration 22 object %s: %v", name, err)
+		}
+	}
+	if _, err := provider.db.ExecContext(ctx, `INSERT INTO llmux_provider_models(provider_id,model_id,payload,updated_at) VALUES(?,?,?,?)`,
+		"openrouter", "stealth/ox-alpha", []byte(`{"id":"stealth/ox-alpha","disabled":true}`), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(ctx)
+	var modelID, payload string
+	if err := reopened.db.QueryRowContext(ctx, `SELECT model_id, payload FROM llmux_provider_models WHERE provider_id=?`, "openrouter").Scan(&modelID, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if modelID != "stealth/ox-alpha" || payload != `{"id":"stealth/ox-alpha","disabled":true}` {
+		t.Fatalf("retained catalog = %s %s", modelID, payload)
+	}
+}
+
 func TestMigrationV19BackfillsDesktopProjectOwnershipAndReopens(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "projects.db")

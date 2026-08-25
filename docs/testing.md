@@ -1,6 +1,6 @@
 # Testing
 
-Last verified: 2026-08-17
+Last verified: 2026-08-24
 
 Azem spans a Go runtime, SQLite, Bubble Tea, Wails, and a React frontend. Passing
 one package is not enough when a change crosses those boundaries. Start with
@@ -46,6 +46,15 @@ Architecture constraints:
 make architecture-check
 ```
 
+Frozen OMP parity and cross-repository provider contracts:
+
+```bash
+GOWORK=off go test ./internal/parity
+(cd ../llmux && GOWORK=off go test ./...)
+(cd ../venat && GOWORK=off go test ./...)
+GOWORK=off go test ./internal/provider/... ./internal/auth/...
+```
+
 Packaged desktop application:
 
 ```bash
@@ -73,6 +82,13 @@ make gui-windows
 | Provider streaming | Provider parser and driver tests | App runtime, session persistence, frontend reducer/timeline tests |
 | GitHub PR backend | `go test ./internal/githubpr ./internal/desktop ./cmd/azem-gui` | Success and failure paths with authenticated `gh` when mutations change |
 | Prompt or bundled Skill | Matching app/agent/config/Skills tests | Real conversation path |
+| Native security scan | `go test ./internal/securityscan ./internal/app ./internal/store/sqlite` and the matching SecurityPage Vitest | `GOWORK=off go test ./...`, `make test-gui`, `make gui`, real Standard scan/start/cancel/finding/export keyboard smoke |
+| OMP parity manifest | `GOWORK=off go test ./internal/parity` | Every frozen v18.0.3 capability is `complete` or `stronger`; then run all relevant surface checks |
+| Coding tools / extension broker | Matching `internal/agent` and `internal/customtools` cases | Real read/write/Hashline/AST/shell fixtures plus browser/DAP/LSP smoke |
+| Session tree/import/export/share | `go test ./internal/session ./internal/sessionimport ./internal/sessionexport ./internal/sessionshare` | SQLite migration/reopen and collaboration/protocol suites |
+| JSON-RPC / ACP / headless / Go API | `go test . ./internal/rpc ./internal/acp ./internal/headless` | Actual CLI startup or client fixture for the changed transport |
+| Marketplace | `go test ./internal/plugins ./internal/app` plus `ExtensionsSettings.test.tsx` | Desktop/TUI source, discover, scoped install, update, upgrade, disable, and uninstall paths |
+| Auth broker/gateway/webhook | Matching `internal/authbroker`, `authgateway`, or `githubwebhook` package | Bearer/HMAC failure, redelivery/cache, refresh/block, and successful forwarding/trigger paths |
 | Harbor eval adapter | `PYTHONPATH="$PWD" python3 -m unittest eval.harbor.timeout_test` | `make azem-eval-linux` and a real `harbor run` when the adapter command or timeout wiring changes |
 | Adaptive eval / learning | `GOWORK=off go test ./internal/eval ./internal/workrevision ./internal/evidence ./internal/codingmemory ./internal/assets ./internal/routeeval ./internal/training ./internal/toollab ./internal/adapterdeployment` | Add `./internal/app ./internal/tui` when adapter routing or evidence-status projection changes; production routing must remain unchanged unless a validated registry is explicitly attached |
 | Documentation/build command | Link/path check and run every documented command | `git diff --check` |
@@ -156,6 +172,10 @@ per failure fingerprint.
 worse than B, and no God Files. `session_end` compares the current structural
 signal with the task baseline. Neither replaces compilation, behavioral tests,
 or real GUI validation.
+
+The final parity gate also runs Sentrux `scan`, `check_rules`, and `session_end`.
+`check_rules` must report zero violations and `session_end` must report no new
+cycle or rule regression. `internal/parity.OpenCapabilities()` must be empty.
 
 ## Delivery checklist
 

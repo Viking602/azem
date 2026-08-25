@@ -127,9 +127,9 @@ func TestMergePluginsRestoresManagedOwnershipForPersistedOverride(t *testing.T) 
 		cfg: config.Config{MCP: config.MCPConfig{Servers: map[string]config.MCPServerConfig{
 			"review-tools": {Enabled: false, Transport: "stdio", Command: "review"},
 		}}},
-		pluginCatalog: plugins.Integration{MCPServers: map[string]config.MCPServerConfig{
+		bootstrapExtensionState: bootstrapExtensionState{pluginCatalog: plugins.Integration{MCPServers: map[string]config.MCPServerConfig{
 			"review-tools": {Enabled: true, Transport: "stdio", Command: "review", Managed: true},
-		}},
+		}}},
 	}
 	assembly.mergePlugins()
 	server := assembly.cfg.MCP.Servers["review-tools"]

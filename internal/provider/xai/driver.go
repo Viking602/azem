@@ -60,10 +60,6 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 	if err != nil {
 		return nil, err
 	}
-	// xAI prompt caching is automatic: route with prompt_cache_key, report hits via
-	// cached_tokens only. Drop cache_write_tokens so shared metering/UI do not
-	// pretend Anthropic/Codex-style writes exist for Grok.
-	reporter := responses.WrapUsageReporter(responses.RequestUsageReporter(request), responses.CacheModelAutomatic)
 	open := func() (hyprovider.Stream, error) {
 		streamContext, cancel := context.WithCancel(ctx)
 		response, err := d.transport.Post(streamContext, payload)
@@ -71,7 +67,7 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 			cancel()
 			return nil, err
 		}
-		return responses.Open(response, streamContext, cancel, reporter)
+		return responses.Open(response, streamContext, cancel, nil)
 	}
 	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
 		Delay: d.retryDelay, MaxDelay: d.maxRetryDelay, Observer: d.retryObserver,

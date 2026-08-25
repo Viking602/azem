@@ -31,44 +31,68 @@ const (
 )
 
 const (
-	ActionLogin                  = app.ActionLogin
-	ActionLogout                 = app.ActionLogout
-	ActionNewSession             = app.ActionNewSession
-	ActionListSessions           = app.ActionListSessions
-	ActionResumeSession          = app.ActionResumeSession
-	ActionRefreshSession         = app.ActionRefreshSession
-	ActionCompact                = app.ActionCompact
-	ActionResolveApproval        = app.ActionResolveApproval
-	ActionResolveUserInput       = app.ActionResolveUserInput
-	ActionResolvePlan            = app.ActionResolvePlan
-	ActionSetApprovalMode        = app.ActionSetApprovalMode
-	ActionSetLanguage            = app.ActionSetLanguage
-	ActionReconcileAttempt       = app.ActionReconcileAttempt
-	ActionInspectAgent           = app.ActionInspectAgent
-	ActionListAgentTypes         = app.ActionListAgentTypes
-	ActionListPersonas           = app.ActionListPersonas
-	ActionCancelAgent            = app.ActionCancelAgent
-	ActionRefreshMCP             = app.ActionRefreshMCP
-	ActionReconnectMCP           = app.ActionReconnectMCP
-	ActionListSkills             = app.ActionListSkills
-	ActionReloadSkills           = app.ActionReloadSkills
-	ActionListMemories           = app.ActionListMemories
-	ActionRemember               = app.ActionRemember
-	ActionForgetMemory           = app.ActionForgetMemory
-	ActionShowRecap              = app.ActionShowRecap
-	ActionListModelRoutes        = app.ActionListModelRoutes
-	ActionSetModelRoute          = app.ActionSetModelRoute
-	ActionResetModelRoute        = app.ActionResetModelRoute
-	ActionSetSubagentConcurrency = app.ActionSetSubagentConcurrency
-	ActionSetChatGPTFastMode     = app.ActionSetChatGPTFastMode
-	ActionSetSessionPreferences  = app.ActionSetSessionPreferences
-	ActionListBackground         = app.ActionListBackground
-	ActionStartBackground        = app.ActionStartBackground
-	ActionStopBackground         = app.ActionStopBackground
-	ActionLogsBackground         = app.ActionLogsBackground
-	ActionListGitBranches        = app.ActionListGitBranches
-	ActionSwitchGitBranch        = app.ActionSwitchGitBranch
-	ActionCreateGitBranch        = app.ActionCreateGitBranch
+	ActionLogin                    = app.ActionLogin
+	ActionLogout                   = app.ActionLogout
+	ActionNewSession               = app.ActionNewSession
+	ActionListSessions             = app.ActionListSessions
+	ActionResumeSession            = app.ActionResumeSession
+	ActionRefreshSession           = app.ActionRefreshSession
+	ActionCompact                  = app.ActionCompact
+	ActionResolveApproval          = app.ActionResolveApproval
+	ActionResolveUserInput         = app.ActionResolveUserInput
+	ActionResolvePlan              = app.ActionResolvePlan
+	ActionSetApprovalMode          = app.ActionSetApprovalMode
+	ActionSetLanguage              = app.ActionSetLanguage
+	ActionReconcileAttempt         = app.ActionReconcileAttempt
+	ActionInspectAgent             = app.ActionInspectAgent
+	ActionListAgentTypes           = app.ActionListAgentTypes
+	ActionListPersonas             = app.ActionListPersonas
+	ActionCancelAgent              = app.ActionCancelAgent
+	ActionRefreshMCP               = app.ActionRefreshMCP
+	ActionReconnectMCP             = app.ActionReconnectMCP
+	ActionListSkills               = app.ActionListSkills
+	ActionReloadSkills             = app.ActionReloadSkills
+	ActionListMemories             = app.ActionListMemories
+	ActionRemember                 = app.ActionRemember
+	ActionForgetMemory             = app.ActionForgetMemory
+	ActionShowRecap                = app.ActionShowRecap
+	ActionListModelRoutes          = app.ActionListModelRoutes
+	ActionSetModelRoute            = app.ActionSetModelRoute
+	ActionResetModelRoute          = app.ActionResetModelRoute
+	ActionSetSubagentConcurrency   = app.ActionSetSubagentConcurrency
+	ActionSetChatGPTFastMode       = app.ActionSetChatGPTFastMode
+	ActionSetSessionPreferences    = app.ActionSetSessionPreferences
+	ActionListBackground           = app.ActionListBackground
+	ActionStartBackground          = app.ActionStartBackground
+	ActionStopBackground           = app.ActionStopBackground
+	ActionLogsBackground           = app.ActionLogsBackground
+	ActionListGitBranches          = app.ActionListGitBranches
+	ActionSwitchGitBranch          = app.ActionSwitchGitBranch
+	ActionCreateGitBranch          = app.ActionCreateGitBranch
+	ActionListPlugins              = app.ActionListPlugins
+	ActionMarketplaceAdd           = app.ActionMarketplaceAdd
+	ActionMarketplaceRemove        = app.ActionMarketplaceRemove
+	ActionMarketplaceUpdate        = app.ActionMarketplaceUpdate
+	ActionMarketplaceList          = app.ActionMarketplaceList
+	ActionMarketplaceDiscover      = app.ActionMarketplaceDiscover
+	ActionMarketplaceInstall       = app.ActionMarketplaceInstall
+	ActionMarketplaceUninstall     = app.ActionMarketplaceUninstall
+	ActionMarketplaceUpgrade       = app.ActionMarketplaceUpgrade
+	ActionMarketplaceEnable        = app.ActionMarketplaceEnable
+	ActionMarketplaceDisable       = app.ActionMarketplaceDisable
+	ActionStartSecurityScan        = app.ActionStartSecurityScan
+	ActionCancelSecurityScan       = app.ActionCancelSecurityScan
+	ActionResumeSecurityScan       = app.ActionResumeSecurityScan
+	ActionListSecurityScans        = app.ActionListSecurityScans
+	ActionGetSecurityScan          = app.ActionGetSecurityScan
+	ActionListSecurityFindings     = app.ActionListSecurityFindings
+	ActionGetSecurityFinding       = app.ActionGetSecurityFinding
+	ActionPatchSecurityFinding     = app.ActionPatchSecurityFindings
+	ActionSetSecurityTriage        = app.ActionSetSecurityTriage
+	ActionPatchSecurityWithPR      = app.ActionPatchSecurityWithPR
+	ActionExportSecurityScan       = app.ActionExportSecurityScan
+	ActionPublishSecurityScan      = app.ActionPublishSecurityScan
+	ActionReconcileSecurityPublish = app.ActionReconcileSecurityPublish
 )
 
 type (
@@ -95,15 +119,18 @@ var slashCommands = []SlashCommand{
 	{Name: "models", Usage: "/models"},
 	{Name: "model-routing", Usage: "/model-routing"},
 	{Name: "skills", Usage: "/skills [reload]"},
+	{Name: "extensions", Usage: "/extensions"},
+	{Name: "marketplace", Usage: "/marketplace [list|discover [market]|add <source>|remove <name>|update [name]|install <id> [user|project]|uninstall <id> <user|project>|upgrade [id] [user|project]|enable <id> <user|project>|disable <id> <user|project>]"},
 	{Name: "skill", Usage: "/skill <name> [instruction]"},
-	{Name: "provider", Usage: "/provider [chatgpt|grok]"},
+	{Name: "provider", Usage: "/provider [chatgpt|grok|cursor]"},
 	{Name: "reasoning", Usage: "/reasoning [level]"},
-	{Name: "login", Usage: "/login [chatgpt|grok]"},
-	{Name: "logout", Usage: "/logout [chatgpt|grok]"},
+	{Name: "login", Usage: "/login [chatgpt|grok|cursor]"},
+	{Name: "logout", Usage: "/logout [chatgpt|grok|cursor]"},
 	{Name: "plan", Usage: "/plan [on|off]"},
 	{Name: "team", Usage: "/team on|off"},
 	{Name: "agents", Usage: "/agents [cancel <id>]"},
 	{Name: "background", Usage: "/background [start [--name NAME] [--cwd DIR] -- COMMAND | stop <id> | logs <id>]"},
+	{Name: "security", Usage: "/security [scan [standard|deep] | scans | findings <scan-id> | show <scan-id> | cancel <scan-id> | resume <scan-id> | patch <occurrence-id> | patch-pr <occurrence-id> | triage <occurrence-id> <open|false-positive|already-fixed|wont-fix> | export <scan-id> <json|csv|sarif> | publish <scan-id> | reconcile-publication <scan-id> <occurrence-id> <published|retry>]"},
 	{Name: "todos", Usage: "/todos"},
 	{Name: "todo", Usage: "/todo"},
 	{Name: "agent-types", Usage: "/agent-types"},
@@ -111,6 +138,15 @@ var slashCommands = []SlashCommand{
 	{Name: "new", Usage: "/new"},
 	{Name: "sessions", Usage: "/sessions"},
 	{Name: "resume", Usage: "/resume"},
+	{Name: "tree", Usage: "/tree"},
+	{Name: "branch", Usage: "/branch <entry-id>"},
+	{Name: "fork", Usage: "/fork <target-session-id> [entry-id]"},
+	{Name: "label", Usage: "/label <entry-id> [label]"},
+	{Name: "export", Usage: "/export <path> [html|text|json]"},
+	{Name: "share", Usage: "/share <server-url> [blob|gist]"},
+	{Name: "import", Usage: "/import <claude|codex> <jsonl-path> <target-session-id>"},
+	{Name: "usage", Usage: "/usage [all]"},
+	{Name: "collab", Usage: "/collab [host [relay-url] | join <link> | stop | status]"},
 	{Name: "compact", Usage: "/compact"},
 	{Name: "rebuild", Usage: "/rebuild"},
 	{Name: "mcp", Usage: "/mcp [refresh|reconnect <server>]"},

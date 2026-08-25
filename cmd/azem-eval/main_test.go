@@ -26,6 +26,23 @@ func TestWriteEvalConfigLoads(t *testing.T) {
 	}
 }
 
+func TestWriteEvalConfigEnablesLLMuxProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := writeEvalConfig(path, dir, "openrouter", "stealth/ox-alpha", "max"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadAtWorkspace(path, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, ok := cfg.Providers.LLMux["openrouter"]
+	if !ok || !provider.Enabled || cfg.Defaults.Provider != "openrouter" ||
+		cfg.Defaults.Model != "stealth/ox-alpha" || cfg.Defaults.Reasoning != "max" {
+		t.Fatalf("eval llmux config = %+v", cfg)
+	}
+}
+
 func TestLoadPromptRequiresExactlyOneSource(t *testing.T) {
 	if _, err := loadPrompt("hello", "x"); err == nil {
 		t.Fatal("expected both-source error")
@@ -57,6 +74,10 @@ func TestExportAuthCopiesAccountsAndCredentials(t *testing.T) {
 		VALUES('chatgpt', 'acct', '{"token":"secret"}', 1, 1)`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := src.DB().ExecContext(ctx, `INSERT INTO llmux_provider_models(provider_id, model_id, payload, updated_at)
+		VALUES('openrouter', 'stealth/ox-alpha', '{"id":"stealth/ox-alpha","contextWindow":1048576}', 1)`); err != nil {
+		t.Fatal(err)
+	}
 	if err := src.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -69,15 +90,18 @@ func TestExportAuthCopiesAccountsAndCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dest.Close(ctx)
-	var email, data string
+	var email, data, modelPayload string
 	if err := dest.DB().QueryRowContext(ctx, `SELECT email FROM accounts WHERE id = 'acct'`).Scan(&email); err != nil {
 		t.Fatal(err)
 	}
 	if err := dest.DB().QueryRowContext(ctx, `SELECT data FROM auth_credentials WHERE account_id = 'acct'`).Scan(&data); err != nil {
 		t.Fatal(err)
 	}
-	if email != "eval@example.com" || !strings.Contains(data, "secret") {
-		t.Fatalf("email=%q data=%q", email, data)
+	if err := dest.DB().QueryRowContext(ctx, `SELECT CAST(payload AS TEXT) FROM llmux_provider_models WHERE provider_id = 'openrouter' AND model_id = 'stealth/ox-alpha'`).Scan(&modelPayload); err != nil {
+		t.Fatal(err)
+	}
+	if email != "eval@example.com" || !strings.Contains(data, "secret") || !strings.Contains(modelPayload, "1048576") {
+		t.Fatalf("email=%q data=%q model=%q", email, data, modelPayload)
 	}
 	info, err := os.Stat(destPath)
 	if err != nil {

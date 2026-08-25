@@ -157,7 +157,6 @@
 .inline-error { margin-top: 10px; padding: 9px 11px; border-radius: 9px; color: var(--red); background: color-mix(in srgb, var(--red) 8%, var(--paper)); }
 .jump-latest { position: absolute; z-index: 7; left: 50%; top: -44px; width: 34px; height: 34px; transform: translateX(-50%); display: grid; place-items: center; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--paper); box-shadow: var(--shadow); color: var(--muted); }
 .jump-latest:hover { background: var(--paper-muted); color: var(--ink); }
-.workspace-grid[data-inspector="open"] .jump-latest { left: calc((100% - var(--inspector-reserve)) / 2); }
 
 .plus { color: var(--green) !important; }
 .minus { color: var(--red) !important; }
@@ -200,71 +199,6 @@
   width: calc(100% - 20px);
   margin-inline-start: 20px;
 }
-.code-diff {
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--paper);
-}
-.code-diff > header {
-  min-height: 34px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 0 8px 0 11px;
-  border-bottom: 1px solid var(--line);
-  background: var(--paper-muted);
-}
-.code-diff > header strong {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  color: var(--muted);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: var(--text-sm);
-  font-weight: 520;
-  white-space: normal;
-}
-.code-diff .diff-count { font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
-.code-diff > header button {
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  margin-left: auto;
-  border-radius: 6px;
-  color: var(--faint);
-}
-.code-diff > header button:hover { background: var(--hover); color: var(--ink); }
-.code-diff-scroll { max-height: min(440px, 55vh); overflow: auto; outline: none; }
-.code-diff-scroll:focus-visible { outline: 2px solid color-mix(in srgb, var(--blue) 75%, white); outline-offset: -2px; }
-.code-diff table { min-width: 100%; border-collapse: collapse; border-spacing: 0; font-size: var(--text-sm); line-height: 1.58; }
-.code-diff tr { height: 22px; }
-.code-diff tr.added { background: color-mix(in srgb, var(--green) 10%, var(--paper)); box-shadow: inset 3px 0 var(--green); }
-.code-diff tr.deleted { background: color-mix(in srgb, var(--red) 9%, var(--paper)); box-shadow: inset 3px 0 var(--red); }
-.diff-line-number {
-  width: 52px;
-  min-width: 52px;
-  padding: 0 9px 0 5px;
-  border-right: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
-  color: var(--faint);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  user-select: none;
-}
-.diff-marker {
-  width: 22px;
-  min-width: 22px;
-  padding: 0;
-  color: var(--faint);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  text-align: center;
-  user-select: none;
-}
-.added .diff-line-number, .added .diff-marker { color: var(--green); }
-.deleted .diff-line-number, .deleted .diff-marker { color: var(--red); }
-.diff-code { min-width: 620px; padding: 0 12px 0 2px; white-space: pre; }
-.diff-code code { color: var(--ink); font-size: inherit; }
 .syntax-comment { color: var(--faint); font-style: italic; }
 .syntax-string { color: color-mix(in srgb, var(--green) 80%, var(--ink)); }
 .syntax-number { color: var(--amber); }

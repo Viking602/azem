@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/session"
@@ -155,6 +156,67 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errorBanner = m.tr("error.copy_selection", map[string]string{"detail": msg.err.Error()})
 		}
 		return m, nil
+	case sessionOperationResultMsg:
+		if msg.Err != nil {
+			m.errorBanner = msg.Err.Error()
+			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: "Session operation", Content: msg.Err.Error(), State: "failed"})
+		} else {
+			m.errorBanner = ""
+			m.transcript = append(m.transcript, Block{Kind: BlockAssistant, Title: msg.Title, Content: msg.Content, State: "completed"})
+		}
+		m.invalidateTranscriptLayout()
+		m.transcriptTop = 0
+		if msg.Refresh {
+			return m.beginAction(Action{Kind: ActionRefreshSession, Target: m.sessionID, SessionID: m.sessionID})
+		}
+		return m, nil
+	case collabOperationResultMsg:
+		if msg.Err != nil {
+			m.errorBanner = msg.Err.Error()
+			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: "Collaboration", Content: msg.Err.Error(), State: "failed"})
+			return m, nil
+		}
+		m.collabHost, m.collabGuest = msg.Host, msg.Guest
+		if msg.Replica != nil {
+			m.applyCollabReplica(*msg.Replica)
+		}
+		m.transcript = append(m.transcript, Block{Kind: BlockAssistant, Title: "Collaboration", Content: msg.Content, State: "completed"})
+		m.invalidateTranscriptLayout()
+		if m.collabGuest != nil {
+			return m, waitCollabGuest(m.collabGuest)
+		}
+		return m, nil
+	case collabGuestEventMsg:
+		if m.collabGuest == nil || msg.Guest != m.collabGuest {
+			return m, nil
+		}
+		if !msg.OK {
+			m.collabGuest = nil
+			m.status = "Ready"
+			return m, nil
+		}
+		switch msg.Event.Kind {
+		case "snapshot":
+			if msg.Event.Replica != nil {
+				m.applyCollabReplica(*msg.Event.Replica)
+			}
+		case "entry":
+			if msg.Event.Block != nil {
+				m.transcript = append(m.transcript, replicatedBlock(*msg.Event.Block))
+				m.invalidateTranscriptLayout()
+			}
+		case "event":
+			if event, ok := decodeCollabAppEvent(msg.Event.Event); ok {
+				m.applyEvent(event)
+			}
+		case "error":
+			m.errorBanner = msg.Event.Message
+		case "closed":
+			m.collabGuest = nil
+			m.status = "Ready"
+			return m, nil
+		}
+		return m, waitCollabGuest(m.collabGuest)
 	case clipboardImageResultMsg:
 		if msg.err != nil {
 			m.errorBanner = m.tr("error.paste_image", map[string]string{"detail": msg.err.Error()})
@@ -179,6 +241,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.transcriptTop > 0 {
 			previousMaxOffset = m.transcriptMaxOffset()
 		}
+		broadcastCollabEvent(m.collabHost, msg.Event)
 		m.applyEvent(msg.Event)
 		if m.transcriptTop > 0 {
 			currentMaxOffset := m.transcriptMaxOffset()
@@ -1407,7 +1470,7 @@ func (m AppModel) overlayOptionCount() int {
 	case OverlayCommand:
 		return len(commandPaletteOptions)
 	case OverlayProvider:
-		return 2
+		return 3
 	case OverlayModel:
 		return len(m.modelPickerEntries())
 	case OverlayModelRoutes:
@@ -1458,6 +1521,8 @@ func (m AppModel) overlayOptionCount() int {
 		return len(m.mcpServers)
 	case OverlayBackground:
 		return len(m.background)
+	case OverlaySecurity:
+		return len(m.securityScans)
 	case OverlayRecovery:
 		return len(m.recovery)
 	default:
@@ -1470,7 +1535,7 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 	case OverlayCommand:
 		return m.activatePaletteOption()
 	case OverlayProvider:
-		providers := []string{"chatgpt", "grok"}
+		providers := []string{"chatgpt", "grok", "cursor"}
 		if m.overlayCursor >= len(providers) {
 			return m, nil
 		}
@@ -1680,6 +1745,13 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 			return m.beginAction(Action{Kind: ActionLogsBackground, Target: process.ID, Offset: -1, Limit: 400})
 		}
 		return m, nil
+	case OverlaySecurity:
+		if m.overlayCursor >= 0 && m.overlayCursor < len(m.securityScans) {
+			scanID := m.securityScans[m.overlayCursor].ID
+			m.securitySelectedScanID = scanID
+			return m.beginAction(Action{Kind: ActionGetSecurityScan, Target: scanID})
+		}
+		return m, nil
 	case OverlayRecovery:
 		if m.overlayCursor >= len(m.recovery) {
 			return m, nil
@@ -1809,6 +1881,12 @@ func (m AppModel) requestTurnCancellation() (tea.Model, tea.Cmd) {
 func (m AppModel) beginShutdown() (tea.Model, tea.Cmd) {
 	if m.quitting {
 		return m, nil
+	}
+	if m.collabHost != nil {
+		m.collabHost.Stop("application shutdown")
+	}
+	if m.collabGuest != nil {
+		m.collabGuest.Leave("application shutdown")
 	}
 	m.quitting = true
 	m.status = "Shutting down"
@@ -2036,6 +2114,22 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 		}
 		return m.executeCommand(command)
 	}
+	if m.collabGuest != nil {
+		if len(images) > 0 {
+			m.errorBanner = "Collaboration prompts do not support local attachment paths."
+			return m, nil
+		}
+		if err := m.collabGuest.SendPrompt(context.Background(), input); err != nil {
+			m.errorBanner = err.Error()
+			return m, nil
+		}
+		m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: m.tr("block.you"), Content: input, State: "submitted"})
+		m.composer.Reset()
+		m.commandCursor = 0
+		m.errorBanner = ""
+		m.invalidateTranscriptLayout()
+		return m, nil
+	}
 	if m.canGuideActiveRun() {
 		if len(images) > 0 {
 			m.errorBanner = m.tr("error.guidance_images")
@@ -2193,7 +2287,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		provider := strings.ToLower(command.Args[0])
-		if provider != "chatgpt" && provider != "grok" {
+		if !config.IsSubscriptionProvider(provider) {
 			m.errorBanner = m.tr("provider.invalid")
 			break
 		}
@@ -2205,13 +2299,13 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		}
 		if len(command.Args) >= 1 {
 			provider := strings.ToLower(command.Args[0])
-			if provider != "chatgpt" && provider != "grok" {
+			if !config.IsSubscriptionProvider(provider) {
 				m.errorBanner = m.tr("provider.invalid")
 				break
 			}
 			target := provider
 			if len(command.Args) == 2 {
-				if (provider == "chatgpt" && command.Args[1] != "--import-codex") || (provider == "grok" && command.Args[1] != "--import") {
+				if (provider == "chatgpt" && command.Args[1] != "--import-codex") || ((provider == "grok" || provider == "cursor") && command.Args[1] != "--import") {
 					m.errorBanner = m.tr("command.usage.login_import")
 					break
 				}
@@ -2238,6 +2332,14 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			return m.beginAction(Action{Kind: ActionReloadSkills})
 		}
 		m.errorBanner = m.tr("command.usage.skills")
+	case "extensions":
+		if len(command.Args) != 0 {
+			m.errorBanner = "/extensions"
+			break
+		}
+		return m.beginAction(Action{Kind: ActionListPlugins})
+	case "marketplace":
+		return m.executeMarketplaceCommand(command.Args)
 	case "skill":
 		if len(command.Args) == 0 {
 			m.errorBanner = m.tr("command.usage.skill")
@@ -2284,6 +2386,27 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		return m.beginAction(Action{Kind: ActionListSessions})
+	case "tree", "branch", "fork", "label", "export", "share", "import", "usage":
+		if m.isRunning() && (command.Name == "branch" || command.Name == "fork" || command.Name == "import") {
+			m.errorBanner = m.tr("error.agent_idle")
+			break
+		}
+		return m, runSessionOperation(m.runtime, m.sessionID, command, m.workspace)
+	case "collab":
+		if len(command.Args) > 0 && command.Args[0] == "stop" {
+			if m.collabHost != nil {
+				m.collabHost.Stop("stopped by host")
+			}
+			if m.collabGuest != nil {
+				m.collabGuest.Leave("left by guest")
+			}
+			m.collabHost, m.collabGuest = nil, nil
+			m.status = "Ready"
+			m.transcript = append(m.transcript, Block{Kind: BlockAssistant, Title: "Collaboration", Content: "Collaboration stopped.", State: "completed"})
+			m.invalidateTranscriptLayout()
+			return m, nil
+		}
+		return m, runCollabOperation(m.runtime, m.sessionID, command, m.collabHost, m.collabGuest)
 	case "compact", "rebuild":
 		return m.beginAction(Action{Kind: ActionCompact, Target: m.sessionID})
 	case "memory":
@@ -2309,6 +2432,8 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		return m.beginAction(Action{Kind: ActionShowRecap})
 	case "background":
 		return m.executeBackgroundCommand(command.Args)
+	case "security":
+		return m.executeSecurityCommand(command.Args)
 	case "agents":
 		if len(command.Args) == 0 {
 			m.openOverlay(OverlayAgents)
@@ -2361,6 +2486,94 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		m.errorBanner = m.tr("command.unknown", map[string]string{"name": command.Name})
 	}
 	return m, nil
+}
+
+func (m AppModel) executeMarketplaceCommand(args []string) (tea.Model, tea.Cmd) {
+	const usage = "/marketplace [list|discover [market]|add <source>|remove <name>|update [name]|install <id> [user|project]|uninstall <id> <user|project>|upgrade [id] [user|project]|enable <id> <user|project>|disable <id> <user|project>]"
+	fail := func() (tea.Model, tea.Cmd) {
+		m.errorBanner = usage
+		return m, nil
+	}
+	if len(args) == 0 || (len(args) == 1 && args[0] == "list") {
+		return m.beginAction(Action{Kind: ActionMarketplaceList})
+	}
+	switch strings.ToLower(args[0]) {
+	case "discover":
+		if len(args) > 2 {
+			return fail()
+		}
+		target := ""
+		if len(args) == 2 {
+			target = args[1]
+		}
+		return m.beginAction(Action{Kind: ActionMarketplaceDiscover, Target: target})
+	case "add", "remove":
+		if len(args) != 2 {
+			return fail()
+		}
+		kind := ActionMarketplaceAdd
+		if args[0] == "remove" {
+			kind = ActionMarketplaceRemove
+		}
+		return m.beginAction(Action{Kind: kind, Target: args[1]})
+	case "update":
+		if len(args) > 2 {
+			return fail()
+		}
+		target := ""
+		if len(args) == 2 {
+			target = args[1]
+		}
+		return m.beginAction(Action{Kind: ActionMarketplaceUpdate, Target: target})
+	case "install":
+		if len(args) < 2 || len(args) > 3 {
+			return fail()
+		}
+		scope := "user"
+		if len(args) == 3 {
+			scope = strings.ToLower(args[2])
+		}
+		if scope != "user" && scope != "project" {
+			return fail()
+		}
+		return m.beginAction(Action{Kind: ActionMarketplaceInstall, Target: args[1], Decision: scope})
+	case "uninstall", "enable", "disable":
+		if len(args) != 3 {
+			return fail()
+		}
+		scope := strings.ToLower(args[2])
+		if scope != "user" && scope != "project" {
+			return fail()
+		}
+		kind := ActionMarketplaceUninstall
+		if args[0] == "enable" {
+			kind = ActionMarketplaceEnable
+		} else if args[0] == "disable" {
+			kind = ActionMarketplaceDisable
+		}
+		return m.beginAction(Action{Kind: kind, Target: args[1], Decision: scope})
+	case "upgrade":
+		if len(args) > 3 {
+			return fail()
+		}
+		target, scope := "", ""
+		if len(args) >= 2 {
+			if args[1] == "user" || args[1] == "project" {
+				scope = args[1]
+			} else {
+				target = args[1]
+			}
+		}
+		if len(args) == 3 {
+			scope = strings.ToLower(args[2])
+		}
+		if scope != "" && scope != "user" && scope != "project" {
+			return fail()
+		}
+		return m.beginAction(Action{Kind: ActionMarketplaceUpgrade, Target: target, Decision: scope})
+	default:
+		return fail()
+	}
 }
 
 func (m AppModel) executeBackgroundCommand(args []string) (tea.Model, tea.Cmd) {

@@ -231,6 +231,13 @@ hooks:
   default_timeout: 5s
   failure_policy: open
 `, provider, model, reasoning, workspace)
+	if !config.IsSubscriptionProvider(provider) {
+		body += fmt.Sprintf(`providers:
+  llmux:
+    %q:
+      enabled: true
+`, provider)
+	}
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		return err
 	}
@@ -502,6 +509,11 @@ func exportAuth(from, to string) error {
 	}
 	if err := copyTable(ctx, src, dest.DB(), "auth_credentials", []string{
 		"provider_id", "account_id", "data", "created_at", "updated_at",
+	}); err != nil {
+		return err
+	}
+	if err := copyTable(ctx, src, dest.DB(), "llmux_provider_models", []string{
+		"provider_id", "model_id", "payload", "updated_at",
 	}); err != nil {
 		return err
 	}

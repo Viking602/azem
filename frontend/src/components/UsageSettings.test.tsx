@@ -216,6 +216,10 @@ describe("UsageSettings", () => {
     expect(heatmap).not.toBeNull();
     expect(container.querySelector(".usage-activity-visual")?.contains(heatmap)).toBe(true);
     expect(heatmap?.getAttribute("data-grain")).toBe("daily");
+    expect(settingsCss).toMatch(/\.usage-activity-visual\s*\{[^}]*width:\s*100%;[^}]*min-height:\s*250px;/s);
+    expect(settingsCss).toMatch(/\.usage-heatmap-grid,\s*\.usage-heatmap-months\s*\{[^}]*width:\s*100%;[^}]*grid-template-columns:\s*repeat\(var\(--weeks\), minmax\(0, 1fr\)\);/s);
+    expect(settingsCss).toMatch(/\.usage-heat-cell,\s*\.usage-legend > i\s*\{[^}]*width:\s*100%;[^}]*aspect-ratio:\s*1;/s);
+    expect(settingsCss).not.toMatch(/--heat-size:\s*10px/);
     const weeks = container.querySelectorAll(".usage-heatmap-week");
     expect(weeks.length).toBeGreaterThan(1);
     weeks.forEach((week) => expect(week.querySelectorAll(".usage-heat-cell")).toHaveLength(7));
@@ -262,16 +266,16 @@ describe("UsageSettings", () => {
     container.remove();
   });
 
-  it("keeps Codex-sized heat cells and shows a custom usage tip on hover and focus", async () => {
-    expect(settingsCss).toMatch(/--heat-size:\s*10px/);
-    expect(settingsCss).toMatch(/--heat-gap:\s*2px/);
-    expect(settingsCss).toMatch(/\.usage-heat-cell[\s\S]*?border-radius:\s*2px/);
-    expect(settingsCss).toMatch(/\.usage-activity-visual\s*\{[^}]*width:\s*100%[^}]*\}\s*\/\*\s*活动区铺满报告宽度\s*\*\//);
-    expect(settingsCss).not.toMatch(/活动网格居中/);
-    expect(settingsCss).not.toMatch(/\.usage-heatmap-grid[^{]*\{[^}]*minmax\(0,\s*1fr\)/);
+  it("fills the available activity width with responsive heat cells and shows a custom usage tip", async () => {
+    expect(settingsCss).not.toMatch(/--heat-size:\s*10px/);
+    expect(settingsCss).toMatch(/--heat-gap:\s*clamp\(2px,\s*\.18vw,\s*4px\)/);
+    expect(settingsCss).toMatch(/\.usage-heat-cell,\s*\.usage-legend > i\s*\{[^}]*width:\s*100%;[^}]*aspect-ratio:\s*1;/s);
+    expect(settingsCss).toMatch(/border-radius:\s*clamp\(2px,\s*\.22vw,\s*4px\)/);
+    expect(settingsCss).toMatch(/\.usage-activity-visual\s*\{[^}]*width:\s*100%;[^}]*min-height:\s*250px;/s);
+    expect(settingsCss).toMatch(/\.usage-heatmap-grid,\s*\.usage-heatmap-months\s*\{[^}]*width:\s*100%;[^}]*grid-template-columns:\s*repeat\(var\(--weeks\), minmax\(0, 1fr\)\);/s);
     expect(settingsCss).not.toMatch(/#2ea44f|#3fb950|#216e39|github.*green/i);
-    expect(settingsCss).toMatch(/\.usage-skyline\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\)/);
-    expect(settingsCss).toMatch(/\.usage-donut\s*\{/);
+    expect(settingsCss).toMatch(/\.usage-skyline\s*\{[^}]*grid-template-columns:\s*112px minmax\(0,\s*1fr\)/);
+    expect(settingsCss).toMatch(/\.usage-donut\s*\{[^}]*width:\s*104px;[^}]*height:\s*104px;/s);
     expect(settingsCss).toMatch(/usage-day-in/);
     expect(settingsCss).toMatch(/usage-share-in/);
 

@@ -3,8 +3,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 // @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
 import { readFileSync } from "node:fs";
-import App, { isHighPriorityEvent, takeRuntimeEventFrame } from "./App";
-import { execute } from "./bridge";
+import App, { isHighPriorityEvent, takeRuntimeEventFrame, toolCompletionRefreshesWorkspace } from "./App";
+import { execute, listWorkspaceChanges } from "./bridge";
 import { useRuntimeStore } from "./store";
 import { useTerminalStore } from "./terminalStore";
 import type { RuntimeEvent, Session, Snapshot } from "./types";
@@ -39,6 +39,7 @@ vi.mock("./bridge", async (importOriginal) => {
   return {
     ...original,
     execute: vi.fn(original.execute),
+    listWorkspaceChanges: vi.fn(async () => ({ repository: true, branch: "feature/environment", additions: 12, deletions: 3, files: [] })),
     subscribe: vi.fn((listener: (event: RuntimeEvent) => void) => {
       bridgeRuntime.listener = listener;
       return () => { if (bridgeRuntime.listener === listener) bridgeRuntime.listener = null; };
@@ -48,6 +49,20 @@ vi.mock("./bridge", async (importOriginal) => {
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
+
+async function dispatchReleaseFirstActivation(target: HTMLElement, detail: number, timeStamp: number) {
+  const eventAt = <T extends Event>(event: T, value: number) => {
+    Object.defineProperty(event, "timeStamp", { value });
+    return event;
+  };
+  await act(async () => {
+    target.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp + 4));
+    target.dispatchEvent(eventAt(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp + 4));
+    target.dispatchEvent(eventAt(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp));
+    target.dispatchEvent(eventAt(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp));
+  });
+  await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+}
 
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
@@ -106,7 +121,7 @@ describe("application interactions", () => {
     expect(container.querySelector(".command-dialog")).not.toBeNull();
   });
 
-  it("renders one 终端 label on the thread header control", async () => {
+  it("renders Synara-style environment and terminal icon controls in the thread header", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -122,22 +137,25 @@ describe("application interactions", () => {
       });
     });
 
-    const toggle = container.querySelector<HTMLButtonElement>(".thread-header .terminal-toggle");
-    expect(toggle).not.toBeNull();
-    expect(toggle?.textContent).toBe("终端");
-    expect(toggle?.childNodes).toHaveLength(1);
-    expect(toggle?.firstChild?.nodeType).toBe(Node.TEXT_NODE);
-    expect(toggle?.querySelector(".streaming-text")).toBeNull();
-    expect(toggle?.getAttribute("aria-label")).toBeNull();
-    expect(toggle?.getAttribute("title")).toBe("打开或收起终端");
-    expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+    const environment = container.querySelector<HTMLButtonElement>(".thread-header .thread-environment-toggle");
+    const terminal = container.querySelector<HTMLButtonElement>(".thread-header .terminal-toggle");
+    expect(environment?.querySelector("svg")).not.toBeNull();
+    expect(environment?.textContent).toBe("");
+    expect(environment?.getAttribute("aria-label")).toBe("环境");
+    expect(environment?.getAttribute("aria-pressed")).toBe("true");
+    expect(terminal?.querySelector("svg")).not.toBeNull();
+    expect(terminal?.textContent).toBe("");
+    expect(terminal?.querySelector(".streaming-text")).toBeNull();
+    expect(terminal?.getAttribute("aria-label")).toBe("打开或收起终端");
+    expect(terminal?.getAttribute("title")).toBe("打开或收起终端");
+    expect(terminal?.getAttribute("aria-pressed")).toBe("false");
 
     const status = container.querySelector(".thread-header .thread-runtime-status");
     expect(status?.textContent).toBe("就绪");
-    expect(toggle?.contains(status)).toBe(false);
+    expect(terminal?.contains(status)).toBe(false);
     expect(status?.closest(".thread-header-end")).not.toBeNull();
-    expect(toggle?.closest(".thread-header-end")).toBe(status?.closest(".thread-header-end"));
-    expect(status?.nextElementSibling).toBe(toggle?.closest(".thread-actions"));
+    expect(terminal?.closest(".thread-header-end")).toBe(status?.closest(".thread-header-end"));
+    expect(status?.nextElementSibling).toBe(terminal?.closest(".thread-actions"));
   });
 
   it("toggles the embedded terminal with the primary backtick shortcut", async () => {
@@ -189,7 +207,15 @@ describe("application interactions", () => {
     expect(container.textContent).not.toContain("Replay stream");
   });
 
-  it("keeps the empty launcher title without a logo", async () => {
+  it("refreshes Git after every file mutation tool", () => {
+    for (const tool of ["coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt"]) {
+      expect(toolCompletionRefreshesWorkspace("tool_finished", tool)).toBe(true);
+    }
+    expect(toolCompletionRefreshesWorkspace("tool_started", "coding.replace")).toBe(false);
+    expect(toolCompletionRefreshesWorkspace("tool_finished", "coding.read_file")).toBe(false);
+  });
+
+  it("renders the compact reference-led launcher without suggestion cards", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -197,29 +223,128 @@ describe("application interactions", () => {
     await act(async () => root?.render(<App />));
     await act(async () => useRuntimeStore.setState({ view: "thread", blocks: [], running: false }));
 
-    expect(container.querySelector(".empty-composer-heading h1")?.textContent).toBe("准备开始什么？");
+    const launchStage = container.querySelector(".empty-launch-stage");
+    expect(launchStage?.querySelector(".empty-composer-heading h1")?.textContent).toBe("准备开始什么？");
+    expect(launchStage?.querySelector("#azem-composer")).not.toBeNull();
+    expect(container.querySelector(".empty-task-suggestions")).toBeNull();
+    expect(container.textContent).not.toContain("检查代码改动");
     expect(container.querySelector(".empty-launch-mark")).toBeNull();
+    expect(container.querySelector(".thread-header .titlebar-project")).toBeNull();
+    expect(container.querySelector(".thread-heading-rule")).toBeNull();
   });
 
-  it("uses the titlebar control for branches and keeps the project label intact", async () => {
+  it("mounts a fixed Synara Environment panel and reserves plan, recap, and sources inside it", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+    await act(async () => useRuntimeStore.setState({
+      view: "thread",
+      currentSessionId: "session-demo",
+      blocks: [
+        { id: "user-source", kind: "user", content: "参考 https://example.com/design" },
+        { id: "answer-plan", kind: "assistant", content: "主会话保持全宽" },
+      ],
+      running: false,
+      todo: {
+        goal: "迁移任务计划",
+        revision: 1,
+        phases: [{ id: "phase", title: "实现", items: [
+          { id: "done", content: "移除右栏", status: "completed" },
+          { id: "current", content: "添加输入框支撑栏", status: "in_progress" },
+          { id: "next", content: "验证响应式", status: "pending" },
+        ] }],
+      },
+      recap: { sessionId: "session-demo", revision: 4, summary: "回顾摘要", goal: "当前目标", openItems: "未完成事项", updatedAt: "2026-08-23T00:00:00Z" },
+    }));
+    await act(async () => Promise.resolve());
+
+    const thread = container.querySelector<HTMLElement>(".thread-surface")!;
+    const viewport = thread.querySelector(".thread-session-viewport")!;
+    const overlay = viewport.querySelector<HTMLElement>(".thread-environment-overlay")!;
+    const environment = overlay.querySelector<HTMLElement>(".thread-environment-card")!;
+    const toggle = thread.querySelector<HTMLButtonElement>(".thread-environment-toggle")!;
+    expect(thread.dataset.environmentOpen).toBe("true");
+    expect(environment.parentElement).toBe(overlay);
+    expect(environment.textContent).toContain("环境");
+    expect(environment.textContent).toContain("计划1 / 3");
+    expect(environment.textContent).toContain("回顾r4");
+    expect(environment.textContent).toContain("来源1");
+    expect(environment.querySelector(".thread-reference-drag")).toBeNull();
+    expect(thread.querySelector(".composer-stack .thread-plan-control-trigger")).toBeNull();
+    expect(thread.querySelectorAll(".thread-header-action")).toHaveLength(0);
+    expect(thread.textContent).not.toContain("协作");
+    expect(thread.textContent).not.toContain("添加来源");
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => toggle.click());
+    expect(thread.dataset.environmentOpen).toBe("false");
+    expect(overlay.dataset.open).toBe("false");
+    expect(environment.hasAttribute("inert")).toBe(true);
+    expect(thread.querySelector(".composer-workbench")).toBeNull();
+    expect(container.querySelector(".workspace-grid")?.getAttribute("data-panel")).toBe("closed");
+    expect(container.querySelector(".context-inspector")).toBeNull();
+  });
+
+  it("normalizes the new-conversation branch menu across trackpad event orderings", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root?.render(<App />));
+    await act(async () => useRuntimeStore.setState({
+      view: "thread", blocks: [], running: false,
+      branches: [{ name: "main", current: true }, { name: "feature", current: false }],
+    }));
+
+    const details = container.querySelector<HTMLDetailsElement>(".composer-branch-menu")!;
+    const summary = details.querySelector<HTMLElement>("summary")!;
+    await act(async () => summary.click());
+    expect(details.open).toBe(true);
+    await dispatchReleaseFirstActivation(summary, 2, 500);
+    expect(details.open).toBe(false);
+    await act(async () => summary.click());
+    await act(async () => window.dispatchEvent(new Event("blur")));
+    expect(details.open).toBe(false);
+    await act(async () => summary.click());
+    const currentBranch = details.querySelector<HTMLButtonElement>('[role="option"][aria-selected="true"]')!;
+    await act(async () => currentBranch.click());
+    expect(details.open).toBe(false);
+  });
+
+  it("uses the thread header control for branches and keeps the project label intact", async () => {
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
 
     await act(async () => root?.render(<App />));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    await act(async () => useRuntimeStore.setState({
+      view: "thread",
+      currentTitle: "统一工具调用展示样式",
+      blocks: [{ id: "answer-1", kind: "assistant", content: "已完成" }],
+    }));
 
-    const trigger = container.querySelector<HTMLButtonElement>(".titlebar-project");
+    expect(container.querySelector(".app-titlebar .titlebar-project")).toBeNull();
+    const heading = container.querySelector(".thread-heading-copy");
+    expect(heading?.querySelector("strong")?.textContent).toBe("统一工具调用展示样式");
+    expect(heading?.querySelector(".thread-heading-rule")?.textContent).toBe("|");
+    const trigger = container.querySelector<HTMLButtonElement>(".thread-header .titlebar-project");
     expect(trigger?.getAttribute("aria-label")).toBe("切换分支");
     expect(trigger?.getAttribute("title")).toBeNull();
     expect(trigger?.querySelector("strong")?.textContent).toBe("azem");
-
+    expect(heading?.querySelector(".thread-heading-rule")?.nextElementSibling).toBe(trigger?.closest(".titlebar-project-switch"));
     await act(async () => trigger?.click());
-    const popover = container.querySelector<HTMLElement>(".titlebar-project-popover");
+    let popover = container.querySelector<HTMLElement>(".titlebar-project-popover");
     expect(popover?.getAttribute("aria-label")).toBe("切换分支");
     expect(popover?.textContent).not.toContain("项目与分支");
     expect(popover?.textContent).not.toContain("llmux");
     expect(popover?.textContent).toContain("feat/usage-store");
+    await dispatchReleaseFirstActivation(trigger!, 2, 500);
+    expect(container.querySelector(".titlebar-project-popover")).toBeNull();
+    await act(async () => trigger?.click());
+    popover = container.querySelector<HTMLElement>(".titlebar-project-popover");
 
     vi.mocked(execute).mockClear();
     const branchOption = Array.from(popover?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? [])
@@ -231,6 +356,7 @@ describe("application interactions", () => {
   it("keeps long branch catalogs inside a scrollable viewport", () => {
     expect(applicationStyles).toMatch(/\.titlebar-project-popover\s*\{[^}]*max-height:\s*min\(540px,\s*calc\(100vh - 58px\)\);[^}]*overflow:\s*hidden;/s);
     expect(applicationStyles).toMatch(/\.titlebar-project-options\s*\{[^}]*max-height:\s*min\(420px,\s*calc\(100vh - 160px\)\);[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain;/s);
+    expect(prototypeStyles).toMatch(/\.thread-heading-copy \.titlebar-project-switch,\s*\.desktop-shell\[data-runtime="true"\]\[data-platform\*="mac" i\] \.thread-heading-copy \.titlebar-project-switch\s*\{[^}]*padding-left:\s*0;/s);
   });
 
   it("paces streaming text without breaking Unicode or event order", () => {
@@ -326,20 +452,21 @@ describe("application interactions", () => {
     expect(document.documentElement.style.getPropertyValue("--chat-code-font-size")).toBe("14px");
   });
 
-  it("lets the sidebar session tree follow the interface font size", () => {
+  it("lets the single-line sidebar labels follow the interface font size", () => {
     const desktopBlocks = [...applicationStyles.matchAll(/@media \(min-width: 981px\) \{[\s\S]*?\n\}/g)].map((match) => match[0]);
     expect(desktopBlocks.length).toBeGreaterThan(0);
     for (const block of desktopBlocks) {
       expect(block).not.toMatch(/\.session-copy strong\s*\{[^}]*font-size:\s*\d+px/);
-      expect(block).not.toMatch(/\.session-copy small\s*\{[^}]*font-size:\s*\d+px/);
       expect(block).not.toMatch(/\.project-heading-copy strong\s*\{[^}]*font-size:\s*\d+px/);
     }
     expect(applicationStyles).toMatch(/\.session-copy strong\s*\{[^}]*font-size:\s*var\(--text-sm\)/);
-    expect(applicationStyles).toMatch(/\.session-copy small\s*\{[^}]*font-size:\s*var\(--text-2xs\)/);
+    expect(applicationStyles).not.toMatch(/\.session-copy small/);
+    expect(applicationStyles).not.toMatch(/\.project-heading-copy small/);
+    expect(applicationStyles).not.toMatch(/\.project-initial/);
   });
 
   it("keeps sidebar session titles on one line with ellipsis and no wrap", () => {
-    expect(applicationStyles).toMatch(/\.session-copy strong(?:,\s*\.session-copy small)?\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/s);
+    expect(applicationStyles).toMatch(/\.session-copy strong\s*\{[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/s);
     expect(applicationStyles).not.toMatch(/\.thread-list button \.session-copy\s*\{[^}]*white-space:\s*normal/);
     expect(applicationStyles).not.toMatch(/\.session-copy strong\s*\{[^}]*white-space:\s*normal/);
     expect(applicationStyles).not.toMatch(/\.session-copy strong\s*\{[^}]*overflow-wrap:\s*anywhere/);
@@ -406,7 +533,7 @@ describe("application interactions", () => {
     await vi.waitFor(() => expect(container?.querySelector(".subagents-drawer-layer")).toBeNull());
     await vi.waitFor(() => expect(container?.querySelector(".subagent-detail-drawer-layer")).not.toBeNull());
     await vi.waitFor(() => expect(container?.querySelector(".agent-side-chat")).not.toBeNull());
-    expect(container.querySelector(".workspace-grid")?.getAttribute("data-inspector")).not.toBe("agent");
+    expect(container.querySelector(".workspace-grid")?.getAttribute("data-panel")).not.toBe("agent");
     expect(container.querySelector(".agent-side-chat .subagent-evidence-status")?.textContent).toBe("证据已验证");
     const agentTabs = [...container.querySelectorAll<HTMLButtonElement>(".agent-side-chat-tabs button")];
     expect(agentTabs).toHaveLength(3);
@@ -417,61 +544,6 @@ describe("application interactions", () => {
     expect(useRuntimeStore.getState().view).toBe("thread");
   });
 
-  it("expands the inspector roster before opening a subagent conversation drawer", async () => {
-    const snapshot: Snapshot = {
-      workspace: "/tmp/azem", sessionId: "s1", provider: "chatgpt", model: "gpt-5.6-sol",
-      reasoning: "high", agentMode: "single", language: "zh-CN", approvalMode: "prompt",
-      queueMode: "queue", subagentConcurrency: 2, chatgptFastMode: false, sequence: 0,
-    };
-    const agent = {
-      id: "agent-direct", type: "review", description: "审查前端改动", model: "gpt-5.6-sol",
-      background: true, capabilityMode: "read-only", isolation: "none", cwd: "/tmp/azem",
-      activity: "正在核对交互状态", warning: "", worktreePath: "", toolCalls: 1, turns: 1, tokensUsed: 20,
-      elapsedMs: 1000, state: "running", summary: "", preview: "正在核对交互状态",
-      previewKind: "thinking", previewRunId: "child-direct", elapsedObservedAt: Date.now(),
-    } as const;
-    useRuntimeStore.setState({ snapshot });
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-
-    await act(async () => root?.render(<App />));
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
-    await act(async () => useRuntimeStore.setState({
-      snapshot,
-      view: "thread",
-      currentSessionId: "s1",
-      blocks: [{ id: "answer-direct", kind: "assistant", content: "主会话" }],
-      inspectorOpen: true,
-      selectedAgentId: "",
-      agents: [agent],
-    }));
-
-    await vi.waitFor(() => expect(container?.querySelector(".subagent-summary-button")).not.toBeNull());
-    const summary = container!.querySelector<HTMLButtonElement>(".subagent-summary-button")!;
-    const inspectorList = container!.querySelector<HTMLDivElement>(".inspector-subagent-list")!;
-    expect(summary.getAttribute("aria-expanded")).toBe("false");
-    expect(inspectorList.hidden).toBe(true);
-    await act(async () => summary.click());
-    expect(summary.getAttribute("aria-expanded")).toBe("true");
-    expect(inspectorList.hidden).toBe(false);
-
-    await act(async () => container?.querySelector<HTMLButtonElement>(".inspector-subagent-row")?.click());
-    await vi.waitFor(() => expect(container?.querySelector(".subagent-detail-drawer-layer")).not.toBeNull());
-    await vi.waitFor(() => expect(container?.querySelector(".agent-side-chat")).not.toBeNull());
-    expect(useRuntimeStore.getState()).toMatchObject({ view: "thread", selectedAgentId: "agent-direct" });
-    expect(execute).toHaveBeenCalledWith({ kind: "inspect_agent", target: "agent-direct", sessionId: "s1" });
-    await act(async () => useRuntimeStore.setState({
-      agentBlocks: [{
-        id: "child-progress", kind: "commentary", runId: "child-direct", title: "progress",
-        content: "正在核对交互状态", state: "completed", data: { elapsedMs: "1000" },
-      }],
-    }));
-    // UI-007: live commentary stays readable; it must not fold into 处理中.
-    expect(container?.querySelector(".agent-side-chat")?.textContent).not.toContain("处理中");
-    expect(container?.querySelector(".agent-side-chat .commentary-block")?.textContent)
-      .toContain("正在核对交互状态");
-  });
 
   it("renders a completed subagent transcript like the main conversation and folds only its process trail", async () => {
     const snapshot: Snapshot = {
@@ -521,15 +593,8 @@ describe("application interactions", () => {
     expect(container?.querySelector(".agent-side-chat-meta")).toBeNull();
     expect(user?.closest(".process-fold")).toBeNull();
     expect(answer?.closest(".process-fold")).toBeNull();
-    const bar = process?.querySelector<HTMLButtonElement>(".process-fold-summary");
-    expect(bar?.getAttribute("aria-expanded")).toBe("false");
-    expect(bar?.textContent).toContain("已处理");
+    expect(process?.getAttribute("data-folded")).toBe("true");
     expect(process?.querySelector(".commentary-block")).toBeNull();
-
-    await act(async () => bar?.click());
-    expect(bar?.getAttribute("aria-expanded")).toBe("true");
-    expect(process?.textContent).toContain("核对安全边界");
-    expect(process?.querySelector(".process-step-count")?.getAttribute("aria-expanded")).toBe("false");
     expect(process?.querySelector(".timeline-step")).toBeNull();
 
 
@@ -575,7 +640,7 @@ describe("application interactions", () => {
     expect(drawer.textContent).toContain("运行中");
     expect(drawer.textContent).toContain("先核对模块边界");
     expect(drawer.querySelector(".reasoning-placeholder")).toBeNull();
-    expect(drawer.querySelector(".bui-thinking-state, .reasoning-summary, [data-testid='timeline-prose']")).not.toBeNull();
+    expect(drawer.querySelector(".aui-reasoning-panel, .reasoning-summary, [data-testid='timeline-prose']")).not.toBeNull();
   });
 
   it("shows the thinking wait pill while a running subagent has no tokens yet", async () => {
@@ -611,7 +676,7 @@ describe("application interactions", () => {
     const drawer = container!.querySelector(".agent-side-chat")!;
     expect(drawer.querySelector(".agent-side-chat-empty")).toBeNull();
     // SUBAGENT-005: the wait is the running step's own bar, not a bare 运行中.
-    expect(drawer.querySelector(".process-fold .bui-thinking-state.streaming")).not.toBeNull();
+    expect(drawer.querySelector(".process-fold .aui-reasoning-panel.streaming")).not.toBeNull();
     expect(drawer.textContent).toContain("正在思考");
   });
 

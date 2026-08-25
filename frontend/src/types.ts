@@ -2,8 +2,7 @@ import type { ActionKind, EventKind } from "./contracts";
 
 export type { ActionKind, EventKind } from "./contracts";
 
-export type View = "thread" | "projects" | "files" | "changes" | "pullRequests" | "runs" | "agents" | "extensions" | "recovery";
-export type InspectorTab = "environment" | "changes" | "agents" | "context";
+export type View = "thread" | "projects" | "files" | "changes" | "pullRequests" | "runs" | "agents" | "extensions" | "recovery" | "security";
 export type DeliveryMode = "queue" | "guide";
 export type TextPhase = "commentary" | "final_answer";
 
@@ -76,6 +75,9 @@ export interface TurnRequest {
   reasoning: string;
   agentMode: string;
   planMode: boolean;
+  prewalk?: ModelRouteConfig;
+  planYolo?: ModelRouteConfig;
+  vibeMode?: boolean;
   disableSubagents: boolean;
   activeSkills: string[];
   images: Attachment[];
@@ -192,7 +194,7 @@ export interface Block {
   attachments?: Attachment[];
 }
 
-export type SettingsSection = "catalog" | "models" | "subagents" | "governance" | "appearance" | "extensions" | "archive" | "usage";
+export type SettingsSection = "catalog" | "models" | "subagents" | "security" | "governance" | "appearance" | "extensions" | "archive" | "usage";
 
 export type UsageScope = "project" | "all";
 
@@ -329,11 +331,22 @@ export interface AgentCatalogEntry {
   enabled: boolean;
 }
 
+export interface ExtensionTheme {
+  name: string;
+  path: string;
+  vars?: Record<string, unknown>;
+  colors: Record<string, unknown>;
+  symbols?: Record<string, unknown>;
+  source: string;
+  dark?: boolean;
+}
+
 export interface SkillEntry {
   name: string;
   description: string;
   sourcePath: string;
   logoPath?: string;
+  managed?: boolean;
   bundled: boolean;
   eager: boolean;
   disabled: boolean;
@@ -347,6 +360,29 @@ export interface MCPToolEntry {
   effect: string;
   requiresApproval: boolean;
 }
+export interface MCPResourceEntry {
+  server: string;
+  uri: string;
+  name: string;
+  description?: string;
+  mediaType?: string;
+}
+export interface MCPResourceTemplateEntry {
+  server: string;
+  uriTemplate: string;
+  name: string;
+  description?: string;
+  mediaType?: string;
+}
+
+
+export interface MCPPromptEntry {
+  server: string;
+  name: string;
+  description?: string;
+  arguments: Array<{ name: string; description?: string; required?: boolean }>;
+}
+
 
 export interface MCPServerEntry {
   name: string;
@@ -364,6 +400,12 @@ export interface MCPServerEntry {
   maxConcurrency: number;
   toolCount: number;
   tools: MCPToolEntry[];
+  resourceCount?: number;
+  promptCount?: number;
+  resources?: MCPResourceEntry[];
+  resourceTemplateCount?: number;
+  resourceTemplates?: MCPResourceTemplateEntry[];
+  prompts?: MCPPromptEntry[];
   error: string;
   icon?: string;
 }
@@ -429,6 +471,7 @@ export interface PluginEntry {
   version: string;
   marketplace: string;
   origin: "codex" | "local" | string;
+  scope?: "user" | "project" | string;
   description: string;
   developerName: string;
   category: string;
@@ -441,10 +484,59 @@ export interface PluginEntry {
   hookCount: number;
   hooksTrusted: boolean;
   hasApp: boolean;
+  toolCount?: number;
+  commandCount?: number;
+  agentCount?: number;
+  themeCount?: number;
+  extensionCount?: number;
   capabilities: string[];
   status: string;
   warning: string;
 	imported?: boolean;
+}
+
+export interface MarketplaceRecord {
+  name: string;
+  source: string;
+  type: string;
+  cachePath: string;
+  updatedAt: string;
+}
+
+export interface MarketplacePlugin {
+  id: string;
+  name: string;
+  marketplace: string;
+  version: string;
+  description: string;
+  category: string;
+  homepage: string;
+  license: string;
+  keywords: string[];
+  tags: string[];
+}
+
+export interface MarketplaceInstalledPlugin {
+  id: string;
+  name: string;
+  marketplace: string;
+  version: string;
+  scope: "user" | "project";
+  enabled: boolean;
+  path: string;
+}
+
+export interface MarketplaceUpgrade {
+  plugin: MarketplaceInstalledPlugin;
+  current: string;
+  latest: string;
+}
+
+export interface MarketplaceCatalog {
+  marketplaces: MarketplaceRecord[];
+  available: MarketplacePlugin[];
+  installed: MarketplaceInstalledPlugin[];
+  upgrades: MarketplaceUpgrade[];
 }
 
 export interface GitBranch {
@@ -649,6 +741,11 @@ export interface LLMuxModelConfig {
 	outputModalities?: string[];
 }
 
+export interface ModelProviderQuotaBreakdown {
+	id: string;
+	usedPercent: number;
+}
+
 export interface ModelProvider {
 	id: string;
 	displayName: string;
@@ -665,8 +762,11 @@ export interface ModelProvider {
 	accountPlan?: string;
 	quotaAvailable?: boolean;
 	quotaPeriod?: "weekly" | "monthly" | "credits" | string;
+	quotaStartedAt?: number;
 	quotaUsedPercent?: number;
+	quotaBreakdown?: ModelProviderQuotaBreakdown[];
 	quotaResetsAt?: number;
+	quotaUpdatedAt?: string;
 	quotaBalance?: string;
 	quotaUnlimited?: boolean;
 	quotaWarning?: string;
@@ -720,6 +820,162 @@ export interface SessionRecap {
   updatedAt: string;
 }
 
+export interface SecurityRoute {
+  provider: string;
+  accountId?: string;
+  model: string;
+  reasoning: string;
+}
+
+export interface SecurityTarget {
+  kind: "repository" | "paths" | "git_refs" | "working_tree";
+  repository: string;
+  targetId: string;
+  displayName: string;
+  remote?: string;
+  revision?: string;
+  baseRevision?: string;
+  headRevision?: string;
+  snapshotDigest: string;
+  includePaths: string[];
+  excludePaths: string[];
+  inventory?: string[];
+}
+
+export interface SecurityRoutesConfig {
+  audit: ModelRouteConfig;
+  reducer: ModelRouteConfig;
+  fixer: ModelRouteConfig;
+  verifier: ModelRouteConfig;
+}
+
+export interface SecurityConfig {
+  enabled: boolean;
+  defaultMode: "standard" | "deep";
+  workers: number;
+  subagents: number;
+  stopAfterNoNew: number;
+  stopAfterConsecutiveErrors: number;
+  maxDiscoveryRuns: number;
+  maxTimeHours: number;
+  publicationTool?: string;
+  publicationDestination?: string;
+  publicationArguments?: Record<string, unknown>;
+  publicationTitleField?: string;
+  publicationDescriptionField?: string;
+  routes: SecurityRoutesConfig;
+}
+
+export interface SecurityScan {
+  id: string;
+  projectId: string;
+  requestedBySessionId?: string;
+  rootRunId?: string;
+  parentScanId?: string;
+  mode: "standard" | "deep";
+  status: "queued" | "running" | "blocked" | "complete" | "failed" | "canceled";
+  phase: string;
+  completeness?: "complete" | "partial" | "unknown";
+  target: SecurityTarget;
+  route: SecurityRoute;
+  outputDirectory: string;
+  failureMessage?: string;
+  blockingReason?: string;
+  warning?: string;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  estimatedCostUsd?: number;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+}
+
+export interface SecurityProgress {
+  scanId: string;
+  phase: string;
+  filesCompleted: number;
+  filesTotal: number;
+  reviewedPaths?: string[];
+  workersPlanned?: number;
+  workersRunning?: number;
+  workersDone?: number;
+  message?: string;
+  updatedAt: string;
+}
+
+export interface SecurityFindingLocation {
+  path: string;
+  startLine: number;
+  endLine?: number;
+  role: string;
+}
+
+export interface SecurityFinding {
+  findingId: string;
+  occurrenceId: string;
+  ruleId: string;
+  title: string;
+  summary: string;
+  severity: { level: string; score?: number; rationale?: string };
+  confidence: { level: string; rationale: string };
+  taxonomy: { category: string; cwe: string[] };
+  locations: SecurityFindingLocation[];
+  remediation: string;
+  remediationTests?: string[];
+  preventiveControls?: string[];
+  validation?: unknown;
+  attackPath?: unknown;
+}
+
+export interface SecurityWorker {
+  id: string;
+  scanId: string;
+  runId?: string;
+  kind: string;
+  status: string;
+  sequence: number;
+  attempt: number;
+  error?: string;
+}
+
+export interface SecurityArtifact {
+  scanId: string;
+  kind: string;
+  path: string;
+  mediaType: string;
+  sha256: string;
+  bytes: number;
+}
+
+export interface SecurityTriage {
+  occurrenceId: string;
+  status: string;
+  closeReason?: string;
+  note?: string;
+  updatedAt?: string;
+}
+
+export interface SecurityProjection {
+  scan: SecurityScan;
+  progress: SecurityProgress;
+  workers?: SecurityWorker[];
+  findings?: SecurityFinding[];
+  artifacts?: SecurityArtifact[];
+  triage?: Record<string, SecurityTriage>;
+}
+
+export interface SecurityPatchResult {
+  occurrenceId: string;
+  status: string;
+  files: string[];
+  verification?: string;
+  reason?: string;
+  branch?: string;
+  commit?: string;
+}
+
 export interface RuntimeEvent {
   sequence: number;
   kind: EventKind;
@@ -740,8 +996,10 @@ export interface RuntimeEvent {
   agentSnapshots?: Array<Record<string, unknown>>;
   skillCatalog?: Array<Record<string, unknown>>;
   pluginCatalog?: Array<Record<string, unknown>>;
+  marketplaceCatalog?: MarketplaceCatalog;
   hookCatalog?: Record<string, unknown>;
   usageReport?: UsageReport;
+  securityConfig?: SecurityConfig;
   contextProfile?: ContextProfile;
   todo?: TodoList;
   recap?: SessionRecap;
@@ -750,5 +1008,54 @@ export interface RuntimeEvent {
   background?: Array<Record<string, unknown>>;
   gitBranches?: Array<Record<string, unknown>>;
   workspaceDirty?: boolean;
+  security?: SecurityProjection;
+  securityScans?: SecurityScan[];
+  securityFindings?: SecurityFinding[];
+  securityFinding?: SecurityFinding;
+  securityPatch?: SecurityPatchResult;
   at?: string;
+}
+
+export interface SessionGraphEntry {
+  id: string;
+  sourceId?: string;
+  parentId?: string;
+  sequence: number;
+  kind: string;
+  label?: string;
+  createdAt: string;
+}
+
+export interface SessionTreeNode {
+  entry: SessionGraphEntry;
+  children?: SessionTreeNode[];
+}
+
+export interface SessionBranch {
+  name: string;
+  headEntryId?: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SessionTree {
+  sessionId: string;
+  rootSessionId: string;
+  parentSessionId?: string;
+  forkedFromEntryId?: string;
+  sourceKind: string;
+  sourceRef?: string;
+  activeBranch: string;
+  activeLeafEntryId?: string;
+  roots: SessionTreeNode[];
+  branches: SessionBranch[];
+}
+
+export interface SessionShareResult {
+  url: string;
+  method: "server" | "gist";
+  gistUrl?: string;
+  truncated: boolean;
+  sealedBytes: number;
 }

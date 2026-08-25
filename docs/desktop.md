@@ -1,6 +1,6 @@
 # Desktop application
 
-Last verified: 2026-08-17
+Last verified: 2026-08-24
 
 Azem's desktop application is a Wails window over the same Go runtime used by
 the TUI. React owns presentation state; it does not duplicate provider,
@@ -15,14 +15,14 @@ actions; read-only desktop integrations use focused methods with their own
 input and output limits.
 
 Desktop bootstrap primes sessions, git branches, model routes, agent types,
-Skills, plugins, and Hooks. Skills and Hooks also expose direct read-only
-Bridge methods (`SkillCatalog()`, `HookCatalog()`) so Settings can project the
-current snapshot after subscribe, without waiting for a `list_*` event that
-may have been emitted before the frontend listener. Usage is not primed:
-Settings → Usage calls `Bridge.UsageReport(scope)` only when that page opens
-or the user refreshes, so the event broker is not polled. `hook_catalog`,
-`skill_catalog`, `plugin_catalog`, and `usage_report` remain replaceable: a
-later sequence must not drop a catalog snapshot that the renderer still needs.
+Skills, plugins, marketplaces, and Hooks. Skills, Hooks, and marketplaces also
+expose direct read-only Bridge methods (`SkillCatalog()`, `HookCatalog()`,
+`MarketplaceCatalog()`) so Settings can project the current snapshot after
+subscribe without waiting for an event emitted before the frontend listener.
+`SessionTree()` provides the same direct readback for the Environment panel.
+Usage is not primed: Settings → Usage calls `Bridge.UsageReport(scope)` only
+when that page opens or the user refreshes. Catalog events remain replaceable:
+a later sequence must not drop a snapshot the renderer still needs.
 
 Runtime events follow this path:
 
@@ -57,12 +57,24 @@ bar. The sidebar has two stable scopes: **Conversations** for project-owned
 session history and **Workspace** for the active repository overview. Every
 project row exposes a project-scoped new-conversation action; Pull Request state
 stays attached to the owning project instead of becoming a global empty page.
+Project headings are single-line rows containing only expand/collapse, the
+project name, and the project-scoped new-conversation action. Conversation rows
+show the status dot, title, and real running/unread state on one line. The
+sidebar does not repeat branch/path context, project counts, monograms, or
+relative ages; the title bar and Inspector own that supporting context.
 The Workspace header also exposes a focused **Open terminal** action. Its Bridge
 method launches the operating-system terminal with the active workspace as the
 working directory by passing an argv-style command directly to the platform;
 it does not expose a generic shell executor to the WebView. The in-app bottom
 panel is a separate human-only PTY and does not replace that host-terminal
 action.
+
+Same-workspace session navigation is deterministic: Sidebar rows and global
+search call `Bridge.ResumeSession` and apply the returned sequence-0 durable
+projection directly in the initiating window. Bootstrap may still list
+sessions, models, routes, and branches concurrently, but those event timings
+cannot make the first session click a no-op. A different project's session
+continues through `OpenProjectSession` so it opens under its owning workspace.
 
 The Workspace overview is the parent route for repository work. It combines the
 current branch, bounded working-tree summary, current Pull Request, repository
@@ -117,18 +129,31 @@ or unrelated runs. `internal/tui` projects the same field in its agent detail
 line, so GUI and TUI cannot disagree about stale work.
 
 Settings use one Codex-style full-window layout with a searchable left
-navigation and a consistent content column. Opening Settings focuses the dialog
-surface rather than 返回工作台, so the WebView does not draw a default focus
-ring on that control. Escape and the back control still close Settings; Tab
-still reaches the back control and uses the product `:focus-visible` ring. Model catalog, model routing,
-Subagents, Approvals, Appearance, Extensions, Archive, and Usage remain
-complete sections rather than separate modal variants. Usage is a read-only
-ledger of completed `provider_requests` (and completed skill activations when
-those rows exist). The query is bounded to the last 366 local-calendar days
-and at most 20 models and 20 skills. Cache read/write follow the inclusive
-reported-fact rule: unknown providers stay unreported instead of becoming
-zero. Missing metrics render as —; an empty database does not invent a
-heatmap. Archive lists archived
+navigation, a consistent enlarged typography scale, and a bounded content
+column. Opening Settings focuses the dialog surface rather than 返回工作台, so
+the WebView does not draw a default focus ring on that control. Escape and the
+back control still close Settings; Tab still reaches the back control and uses
+the product `:focus-visible` ring. Model catalog, model routing, Subagents,
+Approvals, Appearance, Extensions, Archive, and Usage remain complete sections
+rather than separate modal variants. Route cards use bounded responsive grid
+columns and contain their model, reasoning, and Fast controls inside the card.
+Usage is a read-only ledger of completed `provider_requests` (and completed
+skill activations when those rows exist). The query is bounded to the last 366
+local-calendar days and at most 20 models and 20 skills. Its activity cells
+scale across the complete report width instead of leaving a fixed-grid gap.
+Cache read/write follow the inclusive reported-fact rule: unknown providers
+stay unreported instead of becoming zero. Missing metrics render as —; an empty
+database does not invent a heatmap.
+
+The Cursor provider header shows the refreshed account email and normalized
+subscription tier. Its quota section renders Total, Cursor, and Third Party
+remaining lanes with one reset countdown and cycle-pace forecast. Cursor's raw
+reasoning, Thinking, and Fast model IDs are grouped into searchable base-model
+cards. The version panel can inspect one exact raw ID, while the family switch
+enables or disables every grouped variant in one backend configuration update.
+Partial family availability remains visible as an enabled count.
+
+Archive lists archived
 conversations grouped by owning project; groups start collapsed and paginate
 rows, and each row shows its project. It can bulk-archive unpinned
 sessions that have been idle for a chosen number of days, and restores a
@@ -190,6 +215,14 @@ Codex cache path as an active runtime source. Opening Settings explicitly reques
 current plugin snapshot, so startup event timing cannot leave a populated
 runtime looking like an empty catalog.
 
+The Marketplace tab reads configured Git/local/direct-JSON catalogs, searches
+available entries, and exposes explicit user/project install scope. Add,
+remove, update, install, upgrade, enable/disable, and uninstall use validated
+`marketplace_*` actions. Destructive remove/uninstall requires an inline
+confirmation. The UI never receives credentials or executes a catalog path.
+After a mutation it reads `MarketplaceCatalog()` directly so event timing
+cannot leave stale inventory.
+
 Live assistant text renders new grapheme clusters as a bounded per-character
 fade-and-rise tail. The already settled prefix becomes plain text, so long
 streams do not accumulate animation nodes. `prefers-reduced-motion` bypasses the
@@ -218,12 +251,63 @@ shows the bounded summary, current goal, open items, covered run boundary, and
 revision; an empty session renders an explicit not-yet-generated state instead
 of silently omitting the capability.
 
-The Inspector task plan renders each durable Todo phase as a Beautiful UI Task
-Row capsule: status mark, title, completed/total metric from the phase items,
-status badge, and an expand rail for those items. Item status stays
-`pending` / `in_progress` / `completed` / `cancelled`. The section still shows
-the plan-level `done / total` progress bar. Commentary and thinking chrome are
-unchanged.
+Conversation presentation vendors assistant-ui Elements source components under
+`frontend/src/components/assistant-ui/` and shadcn registry output under
+`frontend/src/components/elements/`. The assistant-ui runtime is not installed;
+Tailwind v4 and shadcn compile copied source while Azem remains the owner of
+durable events, store projection, tools, approvals, session navigation, and
+submission. Session turns use registry `MessagePairRoot` and its user,
+assistant, progress, and error slots. The input uses registry Composer,
+ComposerBar, ComposerMenu, ComposerAttachments, ComposerTextarea,
+ComposerToolbar, ComposerAttachButton, ComposerContext, and ComposerSend.
+Official `data-slot` attributes identify every surface. Assistant prose remains
+the primary reading layer; quiet work rows remain in normal transcript flow.
+
+ComposerContext uses the same `contextComposition` groups and
+`contextCategoryLabel` localization as Inspector. A provider-only report
+therefore renders **模型输入 / Provider input** and **当前输出 / Current
+output** with their actual token counts and used-token percentages. Detailed
+profiles render their real core, conversation, tool, Skill, MCP, output, and
+other groups in the same order as Inspector. It never fills absent categories
+with zero or relabels provider input as messages.
+
+The composer model/reasoning picker uses one whole-chip button with no separate
+chevron. macOS keeps the standard activation-only first click for an inactive
+window; Azem does not install a WebView-wide click-through override that could
+activate unrelated mutating controls. Losing window focus closes an open picker.
+Within an active window the trigger accepts valid primary presses, unpaired
+primary releases, mouse-only sequences, click-only activation, keyboard, and
+assistive input while deduplicating compatibility events. The persistent opaque
+Portal closes through `hidden`/`display:none` without blur or transform
+animation. Outside click, Escape, model selection, run transition, component
+teardown, and session transition also dismiss it.
+
+Within that reading column, assistant answers and progress prose use the full
+available width. The transcript container owns responsive line length; message
+children do not add a second `ch`-based maximum that leaves a dead strip on the
+right.
+
+Assistant-ui `Message` components never present host verification verdicts as
+model prose. After the one allowed retry, a new uncertain/failed verification
+decision makes the run terminally fail with a host-owned reason while leaving
+the model-authored stream untouched. For legacy durable sessions, the Timeline
+removes only the two exact historical verification suffixes, retains preceding
+model text, and omits a notice-only answer together with its final-answer
+marker.
+
+A completed process before a final answer may collapse under its elapsed-time
+row. Opening that row restores all commentary, reasoning, tools, and diffs to
+ordinary transcript flow immediately before the answer. The outer transcript
+viewport is the only conversation scroll owner; the expanded fold has no
+height clamp, nested scrollbar, or contained overscroll.
+
+The Inspector task plan uses the Elements-style agent-plan hierarchy rather
+than phase capsules. Its heading is the fixed localized **Task plan** label;
+the potentially long durable goal sits below it as bounded subordinate text.
+The header retains the honest `done / total` count, followed by a one-pixel
+progress rule and phase/task rows with completed, active, pending, or cancelled
+marks. Item state remains `pending` / `in_progress` / `completed` /
+`cancelled`; the UI does not invent task metrics.
 
 ## Workspace file browser
 
@@ -246,6 +330,19 @@ The backend, not the React client, enforces the file boundary:
 The tree is a browsing surface, not an agent tool. It cannot write files and
 does not bypass tool approval rules. Editing remains on the governed tool path.
 
+## Session tree and portability
+
+The Environment panel's **Session history** row calls `SessionTree()` only when
+expanded. It renders a semantic nested-history list with the active path,
+branch inventory, native-button navigation, entry labels, and an explicit fork
+target. Navigation is disabled during a live run and applies the
+`NavigateSessionTree` durable projection returned directly by the Bridge.
+`CreateSessionFork` and `SetSessionEntryLabel` return the updated tree.
+
+`ExportSession` supports HTML, text, or lossless JSON. `ShareSession` seals the
+redacted snapshot before blob/gist publication. These methods accept a session
+ID owned by the active runtime and do not expose raw database or blob paths.
+
 ## Workspace change review
 
 The Environment panel's Changes row opens a dedicated read-only review page.
@@ -267,6 +364,33 @@ single-file endpoint accepts only a path currently reported by Git status;
 absolute paths, NUL bytes, parent traversal, and unchanged paths are rejected.
 Both methods are read-only and never stage, restore, commit, or mutate files.
 
+## Security page
+
+The project-level Security route lists durable scans and projects live
+`security_*` events without occupying the foreground conversation. It offers
+Standard/Deep start controls, blocked-scan resume, textual status plus redundant
+severity markers, coverage/file/worker progress, finding list/detail and
+triage, SARIF export with the saved path, explicit cancellation, and isolated
+patch/verification actions. Errors remain visible on the page. Semantic lists,
+buttons and `progress`, a short status-only live region, visible keyboard focus,
+independent finding/detail scrolling, reduced-motion behavior, and
+forced-colors fallbacks cover keyboard and assistive-technology use.
+
+`frontend/src/components/security/SecurityPage.tsx` owns this surface;
+`store/reduceSecurity.ts` owns per-scan projections so a live update cannot
+replace the scan a user is inspecting. Escape and the visible back link return
+to the Workspace parent route. Patch remains a typed desktop action. External
+MCP publication is deliberately absent from the WebView allowlist and requires
+the explicit configured TUI command.
+
+**Settings → Security scans** is the Desktop configuration surface. It exposes
+the new-scan enable switch, Standard/Deep default, Deep worker/subagent and
+stopping limits, the absolute deadline, and audit/reducer/fixer/verifier model
+routes. It does not expose or send Token/tool-call hard ceilings. Saving uses
+the typed `set_security_config` action and node-preserving atomic YAML writer;
+active scans are not mutated. MCP publication arguments remain administrator-only
+YAML and are redacted from Desktop events.
+
 ## Frontend ownership
 
 - `frontend/src/App.tsx` owns top-level navigation and keeps the session surface
@@ -282,6 +406,8 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   folding, lazy patch loading, hunk parsing, and review rendering.
 - `frontend/src/components/WorkspaceOverviewPage.tsx` owns the repository
   overview and routes into Files, Changes, Pull Requests, and project sessions.
+- `frontend/src/components/security/SecurityPage.tsx` owns scan history,
+  progress, finding detail, export, cancellation, and remediation controls.
 - `frontend/src/components/TerminalPanel.tsx` owns the bottom PTY panel, tabs,
   and one xterm instance per session. Session state lives in
   `frontend/src/terminalStore.ts`, not the runtime transcript store.
@@ -297,26 +423,30 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   tool card keeps a clear gap above the input; the empty welcome composer
   does not use that overlay gap. Inspector, when open, stays a normal
   right-hand panel.
--   `frontend/src/components/Timeline.tsx` owns bounded streaming reveal and live
+- `frontend/src/components/Timeline.tsx` owns bounded streaming reveal and live
   Markdown rendering. The production renderer keeps the latest eight provider
   deltas as short fade/blur ranges inside the parsed Markdown tree, so headings,
   lists, emphasis, and code render immediately while only newly appended text
-  animates.   Completion leaves that same mounted tree in place and only stops
+  animates. Completion leaves that same mounted tree in place and only stops
   reveal/caret CSS (`content: none` on the idle caret, not an opacity-only
-  leftover); it does not swap to a second Markdown renderer. Fenced
-  code uses the Beautiful UI Code Block card (filename when
-  the info-string looks like a path, otherwise a language label, plus copy and
-  a line-number gutter) through the shared `StreamingMarkdown`
-  renderer. File-change diffs stay on the existing diff view. Full-response
+  leftover); it does not swap to a second Markdown renderer. Fenced code uses
+  the assistant-ui `CodeBlock` component (filename when the info-string looks
+  like a path, otherwise a language label, plus copy and a line-number gutter)
+  through the shared `StreamingMarkdown` renderer. File changes use the
+  registry-installed `@assistant-ui/elements-code-diff` source through
+  `assistant-ui/CodeDiff.tsx`, which maps durable file records and removes
+  duplicated file headers. The element owns tinted rows and horizontal code
+  overflow; it does not create another vertical scroll pane. Full-response
   replay remains restricted to the development demo.
-  Session progress commentary is ordinary prose in the transcript; the host
-  fallback announcement (`data.synthetic=tool_announcement`) stays as a
-  grouping anchor and is not rendered as visible prose. Tool rows stay
-  underneath that announcement as Beautiful UI Tool Chips (icon, bold
-  label, mono detail chip). Completed process folds keep the 已处理 label and
-  may show honest tool-call and commentary counts. Executed file changes
-  also render compact white `path +N -N` pills; queued and approval-bound
-  writes do not. ChatGPT.app does not draw a turn-level `正在处理`
+  Session progress commentary is an assistant-ui `ProgressMessage` in the
+  ordinary transcript flow; the host fallback announcement
+  (`data.synthetic=tool_announcement`) stays as a grouping anchor and is not
+  rendered as visible prose. Tool rows stay underneath as `ToolTimelineItem`
+  disclosures with an icon, verb, target, and honest status. Completed process
+  folds keep the elapsed-time label and may show real tool-call and commentary
+  counts. Executed file changes render compact `path +N -N` statistics; queued
+  and approval-bound writes do not.
+  ChatGPT.app does not draw a turn-level `正在处理`
   rule and does not invent an empty Thinking row on send. Azem waits
   until the model emits thinking or tools, then keeps one sparkle row
   (`思考` / `搜索了代码` / `运行命令`) under the user message.
@@ -327,17 +457,16 @@ Both methods are read-only and never stage, restore, commit, or mutate files.
   text frames and the hidden host fallback do not count as live progress.
   While that run is active the composer placeholder says the model is thinking
   instead of looking idle. A thinking-only trail stays that header plus
-  reasoning prose. After the current step completes with tools, it expands
-  to one chip list: thinking as the first chip (sparkle + preview capsule),
-  then tool chips, then file-change pills. The group header may show
-  `N tool calls, N messages`.
+  reasoning prose. After the current step completes with tools, it expands to
+  one `ToolTimeline`: reasoning first, then tool items, then file statistics.
+  The group header may show `N tool calls, N messages`.
   Elapsed time sits after the sparkle label,
   appears only after the first tenth of a second (`0.1s`, `1.2s`, then
   `1m05s`), and never shows `0s`. After the turn settles, thinking-only
   trails keep the clock on the 思考 header and tool trails fold under 已处理.
-  `beautiful-ui.css` is imported last so its cool-gray /
-  blue tokens and the full-width subagent run card win over the prototype
-  warm palette and the old 15px commentary marker grid.
+  `frontend/src/components/assistant-ui/elements.css` is imported last so the
+  Elements token layer and full-width subagent run card win over the prototype
+  warm palette and old commentary marker grid.
 - `frontend/src/components/AttachmentPreview.tsx` owns image thumbnails in the
   composer and user transcript plus the full-size local viewer. Preview bytes
   come from the focused `AttachmentDataURL` Bridge method after the application
@@ -422,7 +551,7 @@ Run the focused checks first:
 
 ```bash
 GOWORK=off go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui
-cd frontend && bun run typecheck && bun run test -- WorkspaceOverviewPage.test.tsx WorkspaceFilesPage.test.tsx WorkspaceChangesPage.test.tsx Inspector.test.tsx Timeline.test.tsx TerminalPanel.test.tsx terminal.test.ts
+cd frontend && bun run typecheck && bun run test -- WorkspaceOverviewPage.test.tsx WorkspaceFilesPage.test.tsx WorkspaceChangesPage.test.tsx Inspector.test.tsx Timeline.test.tsx TerminalPanel.test.tsx SecurityPage.test.tsx terminal.test.ts
 ```
 
 Then run the complete desktop gate and package the app:
@@ -436,9 +565,13 @@ Packaged windows append the build timestamp to the `wails://` document URL.
 This invalidates WKWebView's document cache between builds while Vite's hashed
 asset names continue to provide immutable JavaScript and CSS resources.
 
-Launch `dist/Azem.app/Contents/MacOS/Azem`, open Workspace, expand nested
-directories, preview a text file and an image, verify binary and oversized
-states, switch tabs, and confirm the file viewer and sidebar scroll
+Launch `dist/Azem.app/Contents/MacOS/Azem`. On a cold launch, click a
+non-current session in the active project's sidebar before background catalog
+refreshes settle and confirm its transcript opens on the first click.
+
+Then open Workspace, expand nested directories, preview a text file and an
+image, verify binary and oversized states, switch tabs, and confirm the file
+viewer and sidebar scroll
 independently. Then open Environment, click Changes, filter and expand a changed
 file, verify added/deleted lines, and confirm a large change set starts folded.
 Verify every child route returns to Workspace, each project can create a new

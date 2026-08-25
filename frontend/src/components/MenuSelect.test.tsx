@@ -1,9 +1,13 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
+// @ts-expect-error Vitest runs in Node; production TypeScript intentionally excludes Node types.
+import { readFileSync } from "node:fs";
 import MenuSelect from "./MenuSelect";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const prototypeStyles = readFileSync("src/prototype.css", "utf8");
 
 async function openMenu(details: HTMLDetailsElement) {
   details.open = true;
@@ -111,5 +115,66 @@ describe("MenuSelect", () => {
     expect(panel.style.top).toBe("406px");
     await act(async () => root.unmount());
     dialog.remove();
+  });
+
+  it("keeps route controls contained and governance typography token-driven", () => {
+    expect(prototypeStyles).toMatch(/\.route-reasoning-menu > summary\s*\{[^}]*min-width:\s*0;/s);
+    const governanceStart = prototypeStyles.indexOf(".governance-pane");
+    const governanceEnd = prototypeStyles.indexOf(".workspace-overview-page", governanceStart);
+    const governanceStyles = prototypeStyles.slice(governanceStart, governanceEnd);
+    expect(governanceStart).toBeGreaterThanOrEqual(0);
+    expect(governanceEnd).toBeGreaterThan(governanceStart);
+    expect(governanceStyles).toContain("font-size: var(--text-");
+    expect(governanceStyles).not.toMatch(/font-size:\s*\d+px/);
+  });
+
+  it("toggles once when WKWebView delivers a release-first trackpad sequence", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(
+      <MenuSelect
+        value="model-a"
+        options={[{ value: "model-a", label: "Model A" }, { value: "model-b", label: "Model B" }]}
+        onChange={() => {}}
+        ariaLabel="Model route"
+      />,
+    ));
+
+    const details = container.querySelector<HTMLDetailsElement>("details")!;
+    const summary = details.querySelector<HTMLElement>("summary")!;
+    const releaseFirst = async (detail: number, timeStamp: number) => {
+      const eventAt = <T extends Event>(event: T, value: number) => {
+        Object.defineProperty(event, "timeStamp", { value });
+        return event;
+      };
+      await act(async () => {
+        summary.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp + 4));
+        summary.dispatchEvent(eventAt(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp + 4));
+        summary.dispatchEvent(eventAt(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp));
+        summary.dispatchEvent(eventAt(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp));
+      });
+      await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+    };
+
+    await act(async () => summary.click());
+    expect(details.open).toBe(true);
+    await act(async () => summary.click());
+    expect(details.open).toBe(false);
+
+    await releaseFirst(2, 500);
+    expect(details.open).toBe(true);
+    expect(document.body.querySelector(".menu-select-options-portal")).not.toBeNull();
+    await act(async () => window.dispatchEvent(new Event("blur")));
+    expect(details.open).toBe(false);
+
+    await releaseFirst(3, 700);
+    expect(details.open).toBe(true);
+    await releaseFirst(4, 900);
+    expect(details.open).toBe(false);
+    expect(document.body.querySelector(".menu-select-options-portal")).toBeNull();
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 });

@@ -1,4 +1,4 @@
-import { isWebResearchTool } from "../inspectorSources";
+import { isWebResearchTool } from "../webResearchTool";
 import { tFormat, translator, type Language } from "../../i18n";
 import type { Block } from "../../types";
 import {
@@ -152,8 +152,9 @@ export function activityBarLabel(
   const running = parts.steps.filter(isSparkleRunning);
   if (running.length) {
     const current = running[running.length - 1]!;
-    if (parts.search.includes(current) && thinkingSearchIsWeb(parts)) return t("thinkingSearchedWeb");
-    return toolChipModel(current, language).label;
+    const model = toolChipModel(current, language);
+    const detail = model.chip ? `${model.label} "${model.chip}"` : model.label;
+    return tFormat(language, "thinkingRunning", { detail });
   }
   if (!live && parts.steps.length) {
     if (!thinkingWorkBlocks(parts).length) {

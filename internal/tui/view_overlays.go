@@ -64,7 +64,7 @@ func (m AppModel) genericOverlayFrame(width, height int) overlayFrameLayout {
 	maxBoxWidth := 82
 	switch m.overlay {
 	case OverlayAgentTypes, OverlayPersonas, OverlaySkills, OverlayMemory, OverlayRecap,
-		OverlayModelRoutes, OverlaySettings, OverlayStatus, OverlayContext, OverlayBackground, OverlayUserInput, OverlayPlan:
+		OverlayModelRoutes, OverlaySettings, OverlayStatus, OverlayContext, OverlayBackground, OverlaySecurity, OverlayUserInput, OverlayPlan:
 		maxBoxWidth = 110
 	}
 	boxWidth := min(maxBoxWidth, max(3, width-2))
@@ -221,7 +221,11 @@ func (m AppModel) renderOverlay(width int, height int) string {
 		descriptionOffset = min(max(0, m.overlayScroll), maxOffset)
 		descriptionLines = descriptionLines[descriptionOffset:min(descriptionTotal, descriptionOffset+maxDescription)]
 	} else {
-		maxDescription = min(maxDescription, 4)
+		if m.overlay == OverlaySecurity {
+			maxDescription = min(maxDescription, max(8, contentRows/2))
+		} else {
+			maxDescription = min(maxDescription, 4)
+		}
 		descriptionViewport = maxDescription
 		if len(descriptionLines) > maxDescription {
 			descriptionLines = append(descriptionLines[:max(0, maxDescription-1)], "…")
@@ -900,6 +904,8 @@ func (m AppModel) overlayHeading() (string, string) {
 			return m.tr("overlay.background_detail.title"), m.tr("overlay.background_detail.unavailable")
 		}
 		return m.tr("overlay.background_detail.title"), process.Name + " · " + m.displayState(process.State)
+	case OverlaySecurity:
+		return m.tr("overlay.security.title"), m.tr("overlay.security.subtitle")
 	case OverlayRecovery:
 		return m.tr("overlay.recovery.title"), m.tr("overlay.recovery.subtitle")
 	case OverlayError:
@@ -917,6 +923,8 @@ func (m AppModel) overlayDescription() []string {
 		return []string{m.tr("overlay.settings.description")}
 	case OverlaySubagentConcurrency:
 		return []string{m.tr("overlay.subagent_concurrency.description")}
+	case OverlaySecurity:
+		return m.securityDescription()
 	case OverlayMemory:
 		if len(m.memories) == 0 {
 			return []string{m.tr("overlay.memory.empty")}
@@ -944,7 +952,7 @@ func (m AppModel) overlayDescription() []string {
 	case OverlayProvider:
 		if m.overlayPurpose == "login" {
 			return []string{
-				m.tr("overlay.signin.chatgpt"), m.tr("overlay.signin.grok"), m.tr("overlay.signin.existing"),
+				m.tr("overlay.signin.chatgpt"), m.tr("overlay.signin.grok"), m.tr("overlay.signin.cursor"), m.tr("overlay.signin.existing"),
 			}
 		}
 	case OverlayModel:
@@ -1127,6 +1135,8 @@ func (m AppModel) overlayOptions() []overlayOption {
 			})
 		}
 		return options
+	case OverlaySecurity:
+		return m.securityOptions()
 	case OverlayModelRoutes:
 		options := make([]overlayOption, 0, len(m.modelRoutes))
 		for _, entry := range m.modelRoutes {
@@ -1157,8 +1167,8 @@ func (m AppModel) overlayOptions() []overlayOption {
 		}
 		return options
 	case OverlayProvider:
-		options := make([]overlayOption, 0, 2)
-		for _, provider := range []string{"chatgpt", "grok"} {
+		options := make([]overlayOption, 0, 3)
+		for _, provider := range []string{"chatgpt", "grok", "cursor"} {
 			auth := m.auth[provider]
 			detail := m.tr("provider.not_signed_in")
 			state := auth.State

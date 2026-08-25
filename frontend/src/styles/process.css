@@ -27,7 +27,7 @@
 
 /* UI-016: one step is one sparkle bar. The trail wrapper only owns spacing;
    every bar below it belongs to the message it follows. */
-  .process-fold { margin: 4px 0; }
+  .process-fold { margin: 2px 0 0; }
 .process-fold-summary {
   display: flex;
   align-items: center;
@@ -35,7 +35,7 @@
   width: 100%;
   max-width: 100%;
   min-height: 0;
-    margin: 4px 0 8px;
+    margin: 2px 0 0;
   padding: 0;
   border: 0;
   background: transparent;
@@ -46,30 +46,47 @@
   cursor: pointer;
 }
 .process-fold-label { font-weight: 400; }
-.process-fold-chevron { flex: 0 0 auto; color: var(--faint); opacity: .7; }
+.process-fold-chevron { flex: 0 0 auto; color: var(--faint); opacity: .7; transition: transform .22s cubic-bezier(.22, 1, .36, 1), color .14s ease, opacity .14s ease; }
 .process-fold:not([data-open]) > .process-fold-summary .process-fold-chevron { transform: rotate(-90deg); }
-.process-fold[data-folded] .process-fold-summary::after {
-  content: "";
-  flex: 1 1 auto;
-  height: 1px;
-  margin-left: 8px;
-  background: var(--line);
-}
 .process-fold-thinking { margin: 2px 0 12px; color: color-mix(in srgb, var(--muted) 82%, var(--faint)); font-size: var(--text-chat); line-height: var(--leading-chat); }
 .process-fold-thinking .reasoning-step { margin: 0 0 .68em; }
 .process-fold-thinking .reasoning-step:last-child { margin-bottom: 0; }
 .process-fold-summary:hover,
 .process-fold-summary:hover .process-fold-chevron { color: var(--muted); opacity: 1; }
+.process-fold-clip {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows .22s cubic-bezier(.22, 1, .36, 1);
+}
+.process-fold-clip[data-open="true"] { grid-template-rows: 1fr; }
+.process-fold-body { min-height: 0; overflow: hidden; }
+/* Expanded work remains ordinary transcript content. The viewport already
+   owns scrolling; a second max-height/overflow pane traps the wheel and makes
+   the pre-answer process look detached from the final response. */
+.process-fold-clip[data-open="true"] > .process-fold-body {
+  overflow: visible;
+}
+@media (prefers-reduced-motion: reduce) {
+  .process-fold-clip { transition: none; }
+  .process-fold-chevron { transition: none; }
+}
 
 
   .process-step { margin: 2px 0 4px; }
+
+.process-step[data-step="reasoning"] {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+  height: auto;
+  min-height: 0;
+}
 .process-fold > .process-fold-summary:not(button) { cursor: default; }
 .process-step-count { margin: 2px 0 6px; }
 .process-step:not([data-open]) > .process-step-count .process-fold-chevron { transform: rotate(-90deg); }
 
 .process-step[data-settled] { margin: 4px 0 6px; }
 .process-step[data-settled] + .model-progress-prose { margin-top: 4px; }
-.process-step.bui-tool-chip-group > .process-step-body { margin-top: 2px; }
+.process-step.aui-tool-timeline > .process-step-body { margin-top: 2px; }
 /* The rows carry their own step rail, so the reasoning quote line would be a
    second competing vertical. The body opens from under the bar: reasoning prose
    first, then the tools it led to. */
@@ -88,15 +105,15 @@
 .process-step-body > .model-progress-tools { margin: 0; padding: 0; }
 /* Reasoning sits under the sparkle label, not under the tool text, so the
    old 36px quote-rail indent does not leave an empty gutter. */
-  .process-step-body .bui-thinking-panel[data-tab="reasoning"] {
+  .process-step-body .aui-reasoning-content[data-tab="reasoning"] {
     margin: 1px 0 0;
     padding: 0 0 2px;
   color: color-mix(in srgb, var(--muted) 88%, var(--faint));
   font-size: var(--text-chat);
   line-height: 1.5;
 }
-.process-step-body .bui-thinking-panel[data-tab="reasoning"] .reasoning-step { margin: 0; }
-.process-step-body .bui-thinking-panel[data-tab="reasoning"] .reasoning-step + .reasoning-step { margin-top: .45em; }
+.process-step-body .aui-reasoning-content[data-tab="reasoning"] .reasoning-step { margin: 0; }
+.process-step-body .aui-reasoning-content[data-tab="reasoning"] .reasoning-step + .reasoning-step { margin-top: .45em; }
 .process-step-body > * + *,
 .process-step-body > .model-progress-tools > * + * { margin-top: 6px; }
 @keyframes process-step-open {
@@ -222,11 +239,13 @@ button.reasoning-summary:disabled { cursor: default; opacity: 1; color: var(--th
   grid-template-columns: minmax(0, max-content);
   justify-items: start;
   align-items: center;
+  overflow: hidden;
+  line-height: 1.2;
 }
 .reasoning-label-out,
 .reasoning-label-base {
   grid-area: 1 / 1;
-  line-height: 1.2;
+  line-height: inherit;
   color: currentColor;
 }
 /* Action labels roll like a page: outgoing up, incoming up from below. */
@@ -273,8 +292,16 @@ button.reasoning-summary:disabled { cursor: default; opacity: 1; color: var(--th
 }
 .reasoning-trace:not(.open) .reasoning-chevron { transform: rotate(-90deg); }
   .process-activity { margin-top: 4px; }
+.reasoning-body-clip {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows .22s cubic-bezier(.22, 1, .36, 1);
+}
+.reasoning-body-clip[data-open="true"] { grid-template-rows: 1fr; }
 .reasoning-body {
   position: relative;
+  min-height: 0;
+  overflow: hidden;
   margin: 3px 0 3px 6px;
   padding: 5px 0 3px 18px;
   border-left: 1px solid color-mix(in srgb, #0785ff 24%, var(--line));
@@ -282,13 +309,23 @@ button.reasoning-summary:disabled { cursor: default; opacity: 1; color: var(--th
   font-size: calc(var(--text-chat) - 1px);
   line-height: 1.55;
 }
+.reasoning-body-clip[data-open="true"] > .reasoning-body {
+  max-height: min(42vh, 360px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.reasoning-body[hidden],
+.aui-reasoning-body[hidden] {
+  display: none !important;
+}
 .reasoning-step {
   position: relative;
   margin: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   font-weight: 440;
-  animation: reasoning-step-in .2s cubic-bezier(0, 0, .2, 1) both;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2.6em;
 }
 .reasoning-step::before {
   content: "";
@@ -303,9 +340,8 @@ button.reasoning-summary:disabled { cursor: default; opacity: 1; color: var(--th
 }
 .reasoning-step + .reasoning-step { margin-top: 10px; }
   .reasoning-placeholder { margin-top: 4px; }
-@keyframes reasoning-step-in {
-  from { opacity: 0; transform: translateY(3px); }
-  to { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-body-clip { transition: none; }
 }
 @keyframes azem-thinking-pulse {
   0%, 100% { filter: brightness(1); }

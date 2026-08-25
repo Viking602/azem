@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
-import {
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { describe, expect, it, vi } from "vitest";
+import ReasoningEffortSlider, {
   CODEX_BURST_COUNT,
   effortIntensity,
   fillWidthStyle,
@@ -7,9 +9,12 @@ import {
   isHighCostReasoning,
   ratioFromClientX,
   reasoningLevelIndex,
+  reasoningVisualRatio,
   stopStyle,
   THUMB_INSET_PX,
 } from "./ReasoningEffortSlider";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("ReasoningEffortSlider helpers", () => {
   it("maps ladder values to indices and falls back safely", () => {
@@ -17,6 +22,39 @@ describe("ReasoningEffortSlider helpers", () => {
     expect(reasoningLevelIndex(levels, "high")).toBe(2);
     expect(reasoningLevelIndex(levels, "missing")).toBe(0);
     expect(reasoningLevelIndex([], "low")).toBe(0);
+  });
+
+  it("renders a one-level ladder at full width and removes all interaction", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onChange = vi.fn();
+    await act(async () => root.render(createElement(ReasoningEffortSlider, {
+      levels: ["high"], value: "high", onChange, labels: { high: "高" },
+      fasterLabel: "更高效", smarterLabel: "更智能", highCostHint: "更快消耗使用额度",
+    })));
+    const wrapper = container.querySelector<HTMLElement>(".effort-slider")!;
+    const track = container.querySelector<HTMLElement>('[role="slider"]')!;
+    const thumb = container.querySelector<HTMLElement>(".effort-slider-thumb-wrap")!;
+    const tick = container.querySelector<HTMLElement>(".effort-slider-tick")!;
+    expect(wrapper.dataset.fixed).toBe("true");
+    expect(wrapper.dataset.disabled).toBe("false");
+    expect(track.tabIndex).toBe(-1);
+    expect(track.getAttribute("aria-disabled")).toBe("true");
+    expect(thumb.style.left).toContain("100% - 36px");
+    expect(tick.style.left).toContain("100% - 36px");
+    expect(thumb.style.left).not.toBe(stopStyle(0).left);
+    track.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    track.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(onChange).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("uses the full endpoint only for a fixed one-level ladder", () => {
+    expect(reasoningVisualRatio(0, 0)).toBe(0);
+    expect(reasoningVisualRatio(1, 0)).toBe(1);
+    expect(reasoningVisualRatio(5, 2)).toBe(0.5);
   });
 
   it("maps continuous pointer ratios on the inset usable range", () => {

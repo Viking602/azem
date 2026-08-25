@@ -53,3 +53,22 @@ func TestProjectToolRecordsAttachesFileChangeSummaries(t *testing.T) {
 		t.Fatal("non file-change tools must not project file changes")
 	}
 }
+
+func TestReplaceAndDeleteProduceDurableFileObservations(t *testing.T) {
+	replace := requestedFileObservations(
+		"coding.replace",
+		json.RawMessage(`{"path":"a.go"}`),
+		json.RawMessage(`{"sections":[{"path":"a.go"}]}`),
+	)
+	if len(replace) != 1 || replace[0].Path != "a.go" || replace[0].Operation != "edit" {
+		t.Fatalf("replace observations = %+v", replace)
+	}
+	deleted := requestedFileObservations(
+		"coding.delete_file",
+		json.RawMessage(`{"path":"gone.txt"}`),
+		nil,
+	)
+	if len(deleted) != 1 || deleted[0].Path != "gone.txt" || deleted[0].Operation != "delete" {
+		t.Fatalf("delete observations = %+v", deleted)
+	}
+}

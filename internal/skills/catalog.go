@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -39,6 +40,8 @@ type LoadOptions struct {
 	ConfigDir    string
 	WorkspaceDir string
 	Config       config.SkillsConfig
+	ManagedDir   string
+	Discovery    config.DiscoveryConfig
 }
 
 type Entry struct {
@@ -47,6 +50,7 @@ type Entry struct {
 	SourcePath    string
 	LogoPath      string
 	Bundled       bool
+	Managed       bool
 	Eager         bool
 	Disabled      bool
 	ModelVisible  bool
@@ -151,6 +155,7 @@ func (c *Catalog) Snapshot() Snapshot {
 
 type catalogCandidate struct {
 	skill   skill.Skill
+	managed bool
 	bundled bool
 }
 
@@ -168,19 +173,20 @@ func buildCatalog(options LoadOptions) (catalogState, error) {
 		return catalogState{}, err
 	}
 	discovered, err := skill.Discover(skill.DiscoveryOptions{
-		UserDir:        options.HomeDir,
-		ProjectDir:     options.WorkspaceDir,
-		TrustProject:   options.Config.TrustProject,
+		UserDir:        "",
+		ProjectDir:     "",
+		TrustProject:   false,
 		AdditionalDirs: roots,
 	})
 	if err != nil {
 		return catalogState{}, err
 	}
 	state.diagnostics = append(state.diagnostics, discovered.Diagnostics...)
+	state.diagnostics = append(state.diagnostics, legacySkillDiagnostics(options)...)
 
 	candidates := make(map[string]catalogCandidate, len(discovered.Skills)+len(bundledSkillPaths))
 	for _, current := range discovered.Skills {
-		candidates[current.Name] = catalogCandidate{skill: current}
+		candidates[current.Name] = catalogCandidate{skill: current, managed: pathWithinDirectory(options.ManagedDir, current.SourcePath)}
 	}
 	for _, path := range bundledSkillPaths {
 		content, readErr := bundledSkills.ReadFile(path)
@@ -228,6 +234,7 @@ func buildCatalog(options LoadOptions) (catalogState, error) {
 			Eager:         isEager && !isDisabled,
 			Disabled:      isDisabled,
 			ResourceCount: len(candidate.skill.Resources),
+			Managed:       candidate.managed,
 		}
 		state.entries = append(state.entries, entry)
 		if isDisabled {
@@ -283,24 +290,68 @@ func discoveryRoots(options LoadOptions) ([]string, error) {
 		path     string
 		optional bool
 	}
+	disabled := make(map[string]bool, len(options.Discovery.DisabledProviders))
+	for _, provider := range options.Discovery.DisabledProviders {
+		disabled[strings.ToLower(strings.TrimSpace(provider))] = true
+	}
 	var candidates []rootCandidate
-	appendConventional := func(base string, directories ...string) {
-		if base == "" {
-			return
-		}
-		for _, directory := range directories {
-			candidates = append(candidates, rootCandidate{path: filepath.Join(base, directory, "skills"), optional: true})
+	appendRoot := func(provider, path string) {
+		if path != "" && !disabled[provider] {
+			candidates = append(candidates, rootCandidate{path: path, optional: true})
 		}
 	}
-	// Venat owns the shared .agents and .venat roots through UserDir. Keep
-	// Azem-specific compatibility roots here so the same path is never scanned
-	// twice and reported as shadowing itself.
-	appendConventional(options.HomeDir, ".claude")
+	discoveryEnabled := options.Discovery.Skills ||
+		!options.Discovery.ContextFiles && !options.Discovery.Rules && !options.Discovery.MCP && !options.Discovery.Hooks &&
+			len(options.Discovery.DisabledProviders) == 0
+	if options.ManagedDir != "" {
+		candidates = append(candidates, rootCandidate{path: options.ManagedDir, optional: true})
+	}
+	appendRoot("venat", filepath.Join(options.HomeDir, ".venat", "skills"))
+	if options.Config.TrustProject {
+		appendRoot("venat", filepath.Join(options.WorkspaceDir, ".venat", "skills"))
+	}
+	if discoveryEnabled {
+		if options.Config.TrustProject && options.WorkspaceDir != "" {
+			appendRoot("github", filepath.Join(options.WorkspaceDir, ".github", "skills"))
+		}
+		appendRoot("opencode", filepath.Join(options.HomeDir, ".config", "opencode", "skills"))
+		if options.Config.TrustProject {
+			appendRoot("opencode", filepath.Join(options.WorkspaceDir, ".opencode", "skills"))
+		}
+		appendRoot("codex", filepath.Join(options.HomeDir, ".codex", "skills"))
+		if options.Config.TrustProject {
+			appendRoot("codex", filepath.Join(options.WorkspaceDir, ".codex", "skills"))
+		}
+		if options.Config.TrustProject {
+			ancestors := projectAncestors(options.WorkspaceDir, repositoryRoot(options.WorkspaceDir), options.HomeDir)
+			for index := len(ancestors) - 1; index >= 0; index-- {
+				appendRoot("agents", filepath.Join(ancestors[index], ".agent", "skills"))
+				appendRoot("agents", filepath.Join(ancestors[index], ".agents", "skills"))
+			}
+		}
+		appendRoot("agents", filepath.Join(options.HomeDir, ".agent", "skills"))
+		appendRoot("agents", filepath.Join(options.HomeDir, ".agents", "skills"))
+		appendRoot("claude", filepath.Join(options.HomeDir, ".claude", "skills"))
+		if options.Config.TrustProject {
+			appendRoot("claude", filepath.Join(options.WorkspaceDir, ".claude", "skills"))
+		}
+		nativeAgentDir := strings.TrimSpace(os.Getenv("PI_CODING_AGENT_DIR"))
+		if nativeAgentDir == "" {
+			nativeAgentDir = filepath.Join(options.HomeDir, ".omp", "agent")
+		}
+		appendRoot("native", filepath.Join(nativeAgentDir, "skills"))
+		if options.Config.TrustProject {
+			ancestors := projectAncestors(options.WorkspaceDir, repositoryRoot(options.WorkspaceDir), options.HomeDir)
+			for index := len(ancestors) - 1; index >= 0; index-- {
+				appendRoot("native", filepath.Join(ancestors[index], ".omp", "skills"))
+			}
+		}
+	}
+	if options.Config.TrustProject {
+		candidates = append(candidates, rootCandidate{path: filepath.Join(options.WorkspaceDir, ".azem", "skills"), optional: true})
+	}
 	if options.ConfigDir != "" {
 		candidates = append(candidates, rootCandidate{path: filepath.Join(options.ConfigDir, "skills"), optional: true})
-	}
-	if options.Config.TrustProject && options.WorkspaceDir != "" {
-		appendConventional(options.WorkspaceDir, ".claude", ".azem")
 	}
 	for _, directory := range options.Config.AdditionalDirs {
 		candidates = append(candidates, rootCandidate{path: directory})
@@ -329,7 +380,67 @@ func discoveryRoots(options LoadOptions) ([]string, error) {
 		seen[absolute] = struct{}{}
 		roots = append(roots, absolute)
 	}
+	if len(roots) > 64 {
+		roots = roots[len(roots)-64:]
+	}
 	return roots, nil
+}
+
+func repositoryRoot(workspace string) string {
+	output, err := exec.Command("git", "-C", workspace, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(strings.TrimSpace(string(output)))
+}
+
+func projectAncestors(workspace, repoRoot, home string) []string {
+	boundary := repoRoot
+	if boundary == "" && home != "" {
+		boundary = home
+	}
+	var result []string
+	for current := filepath.Clean(workspace); ; current = filepath.Dir(current) {
+		result = append(result, current)
+		if current == boundary || filepath.Dir(current) == current {
+			break
+		}
+	}
+	return result
+}
+
+func legacySkillDiagnostics(options LoadOptions) []skill.Diagnostic {
+	var diagnostics []skill.Diagnostic
+	check := func(base string) {
+		if base == "" {
+			return
+		}
+		legacy := filepath.Join(base, ".hydaelyn", "skills")
+		if _, err := os.Lstat(legacy); err == nil {
+			diagnostics = append(diagnostics, skill.Diagnostic{
+				Path: legacy, Message: fmt.Sprintf("legacy discovery root is ignored; move skills to %s", filepath.Join(base, ".venat", "skills")),
+			})
+		}
+	}
+	check(options.HomeDir)
+	if options.Config.TrustProject {
+		check(options.WorkspaceDir)
+	}
+	return diagnostics
+}
+
+func pathWithinDirectory(root, path string) bool {
+	if strings.TrimSpace(root) == "" || strings.TrimSpace(path) == "" {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func selectModelVisible(state *catalogState, candidates map[string]catalogCandidate, eager, disabled map[string]struct{}) {
@@ -387,6 +498,9 @@ func truncateRunes(value string, limit int) string {
 
 func cloneLoadOptions(options LoadOptions) LoadOptions {
 	options.Config = cloneSkillsConfig(options.Config)
+	options.Discovery.DisabledProviders = append([]string(nil), options.Discovery.DisabledProviders...)
+	options.Discovery.DisabledRules = append([]string(nil), options.Discovery.DisabledRules...)
+	options.Discovery.AdditionalContextFiles = append([]string(nil), options.Discovery.AdditionalContextFiles...)
 	return options
 }
 

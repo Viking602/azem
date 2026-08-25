@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { ArrowDown } from "lucide-react";
-import { cancelActive, execute, guide, importAttachment, importClipboardImage, startTurn } from "../bridge";
+import { ArrowDown, Check, ChevronDown, GitBranch, PanelsTopLeft, Search, SquareTerminal } from "lucide-react";
+import { cancelActive, execute, followUp, guide, importAttachment, importClipboardImage, startTurn } from "../bridge";
 import { chatTypographyVars } from "../chatTypography";
-import { translator } from "../i18n";
+import { tFormat, translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 import type { Attachment, DeliveryMode, QueuedPrompt, Snapshot } from "../types";
 import { useTerminalStore } from "../terminalStore";
-import { SelectActionHost } from "./SelectActionHost";
 import { TimelineFeed } from "./Timeline";
 import { Composer } from "./thread/Composer";
 import { QueuedPrompts } from "./thread/QueueBar";
+import { ThreadEnvironmentPanel } from "./thread/ThreadSupportBar";
 import { namedClipboardImage } from "./thread/clipboard";
 import { parseSkillPrompt } from "./thread/slash";
+import usePressActivation from "./usePressActivation";
 
 const SESSION_STAGE_EASE = [0.16, 1, 0.3, 1] as const;
 
@@ -34,11 +35,13 @@ export function transcriptFollowBehavior(running: boolean, sessionOpen = false):
 export function pinTranscriptTail(viewport: HTMLElement, behavior: ScrollBehavior = "instant") {
   const top = Math.max(0, viewport.scrollHeight);
   // WKWebView ignores scrollTo({ behavior: "instant" }), so instant pins must
-  // assign scrollTop. Otherwise session switch and send stay on the first line.
+  // assign scrollTop. CSS scroll-behavior:smooth would still animate that
+  // assignment and slide from the first line on session switch.
   if (behavior === "smooth") {
     viewport.scrollTo({ top, behavior: "smooth" });
     return;
   }
+  viewport.style.scrollBehavior = "auto";
   viewport.scrollTop = top;
 }
 
@@ -90,6 +93,7 @@ export default function ThreadSurface() {
   const agentMode = "single";
   const setAgentMode = (_value: string) => undefined;
   const [following, setFollowing] = useState(true);
+  const [environmentOpen, setEnvironmentOpen] = useState(true);
   const viewport = useRef<HTMLDivElement>(null);
   const dock = useRef<HTMLDivElement>(null);
   const followingRef = useRef(following);
@@ -119,6 +123,7 @@ export default function ThreadSurface() {
       pinTranscriptTail(node, "instant");
       requestAnimationFrame(() => {
         pinning.current = false;
+        if (node.scrollHeight - node.scrollTop - node.clientHeight < 72) pinInstant.current = false;
       });
     };
     // Opening a session remounts the stage at scrollTop 0. History turns start
@@ -128,7 +133,6 @@ export default function ThreadSurface() {
     if (!(transcript instanceof HTMLElement) || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
       pin();
-      pinInstant.current = false;
     });
     observer.observe(transcript);
     const retry = requestAnimationFrame(() => {
@@ -161,6 +165,7 @@ export default function ThreadSurface() {
     setPrompt("");
     clearAttachments();
     setEditingQueuedId(null);
+    setEnvironmentOpen(true);
   }, [clearAttachments, currentSessionId]);
   useLayoutEffect(() => {
     const node = dock.current;
@@ -169,6 +174,10 @@ export default function ThreadSurface() {
     if (!stage) return;
     const sync = () => {
       stage.style.setProperty("--transcript-bottom-gap", `${composerOverlayGap(node.offsetHeight)}px`);
+      if (!followingRef.current || !viewport.current) return;
+      pinning.current = true;
+      pinTranscriptTail(viewport.current, "instant");
+      requestAnimationFrame(() => { pinning.current = false; });
     };
     sync();
     if (typeof ResizeObserver === "undefined") {
@@ -223,17 +232,18 @@ export default function ThreadSurface() {
       if (source === "composer") resetComposer();
       return void beginTurn(trimmed, images);
     }
-    // Starting (the bridge has not returned runId yet), another session is active,
-    // or Queue is selected: never attempt a concurrent turn.
-    if (!running || !runId || (modeOverride ?? deliveryMode) === "queue") {
+    // Starting, a foreign session, or an unavailable run id cannot accept
+    // run-scoped control; keep those prompts in the local cross-run queue.
+    if (!running || !runId) {
       if (source === "composer") resetComposer();
       enqueuePrompt(trimmed, images);
       setFollowing(true);
       return;
     }
     const sessionId = currentSessionId;
+    const mode = modeOverride ?? deliveryMode;
     if (source === "composer") resetComposer();
-    await sendGuidance(sessionId, runId, trimmed, images, () => {
+    await sendTurnControl(mode, sessionId, runId, trimmed, images, () => {
       if (!isCurrentSession(sessionId)) return;
       addOptimisticUser(trimmed, images);
       setFollowing(true);
@@ -255,10 +265,6 @@ export default function ThreadSurface() {
     await submitTurn(prompt.trim(), [...attachments], modeOverride, "composer");
   };
 
-  const sendSelectAction = useCallback((text: string) => {
-    void submitTurn(text, [], undefined, "select-action");
-  }, [submitTurn]);
-
   const editQueued = (item: QueuedPrompt) => {
     if (item.sessionId !== currentSessionId) return;
     setEditingQueuedId(item.id);
@@ -275,7 +281,7 @@ export default function ThreadSurface() {
   const guideQueued = async (item: QueuedPrompt) => {
     if (!running || !runId || item.sessionId !== currentSessionId) return;
     const sessionId = item.sessionId;
-    await sendGuidance(sessionId, runId, item.text, item.attachments, () => {
+    await sendTurnControl("guide", sessionId, runId, item.text, item.attachments, () => {
       removeQueuedPrompt(sessionId, item.id);
       if (isCurrentSession(sessionId)) addOptimisticUser(item.text, item.attachments);
     }, (message) => {
@@ -332,8 +338,8 @@ export default function ThreadSurface() {
   /> : null;
 
   return (
-    <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`} style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
-      <ThreadHeader empty={empty} />
+    <section className={`thread-surface ${empty ? "empty-thread" : "active-thread"}`} data-slot="thread" data-environment-open={String(!empty && environmentOpen)} style={chatTypographyVars(chatFontSize, chatCodeFontSize) as CSSProperties}>
+      <ThreadHeader empty={empty} environmentOpen={environmentOpen} onEnvironmentOpenChange={setEnvironmentOpen} />
       <div className="thread-session-viewport">
         <motion.div
           key={currentSessionId}
@@ -342,35 +348,34 @@ export default function ThreadSurface() {
           animate={sessionMotion.animate}
         >
             {empty ? (
-              <div className="empty-composer-wrap">
-                <div className="empty-composer-heading"><h1>{t("promptTitle")}</h1><p>{t("promptSubtitle")}</p></div>
-                <div className="composer-stack">
-                  {queue}
-                  <Composer
-                    prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
-                    agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
-                    running={running}
-                    busy={runtimeBusy}
-                    deliveryMode={deliveryMode}
-                    showContextBar
-                  />
-                  <div className="empty-task-suggestions" aria-label={t("taskSuggestions")}>
-                    {emptySuggestions(snapshot.language).map((suggestion) => <button type="button" key={suggestion.title} onClick={() => {
-                      setPrompt(suggestion.prompt);
-                      requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("#azem-composer")?.focus());
-                    }}><strong>{suggestion.title}</strong><span>{suggestion.detail}</span></button>)}
+              <div className="empty-composer-wrap" data-slot="empty-state">
+                <div className="empty-launch-stage">
+                  <header className="empty-composer-heading">
+                    <h1>{t("promptTitle")}</h1>
+                    <p>{t("promptSubtitle")}</p>
+                  </header>
+                  <div className="composer-stack">
+                    {queue}
+                    <Composer
+                      prompt={prompt} setPrompt={setPrompt} submit={submit} attach={attach} attachClipboard={attachClipboard}
+                      agentMode={agentMode} setAgentMode={setAgentMode} planMode={planMode} setPlanMode={setPlanMode}
+                      running={running}
+                      busy={runtimeBusy}
+                      deliveryMode={deliveryMode}
+                      showContextBar
+                    />
                   </div>
                 </div>
               </div>
             ) : (
               <>
                 <div className="transcript-viewport" ref={viewport} onScroll={(event) => {
-                  if (pinning.current) return;
+                  if (pinning.current || pinInstant.current) return;
                   const node = event.currentTarget;
                   setFollowing(node.scrollHeight - node.scrollTop - node.clientHeight < 72);
                 }}>
 
-                  <div className="transcript">
+                  <div className="transcript" data-slot="thread-messages">
                     <TimelineFeed
                       blocks={blocks}
                       language={snapshot.language}
@@ -380,12 +385,6 @@ export default function ThreadSurface() {
                       collapseCompletedProcess
                     />
                     {error && <div className="inline-error" role="alert">{error}</div>}
-                    <SelectActionHost
-                      rootRef={viewport}
-                      composerRef={dock}
-                      language={snapshot.language}
-                      onSubmit={sendSelectAction}
-                    />
                     <div className="transcript-composer-clearance" aria-hidden="true" />
                   </div>
                 </div>
@@ -405,6 +404,7 @@ export default function ThreadSurface() {
               </>
             )}
         </motion.div>
+        {!empty ? <ThreadEnvironmentPanel open={environmentOpen} /> : null}
       </div>
     </section>
   );
@@ -415,7 +415,8 @@ function isCurrentSession(sessionId: string): boolean {
   return (state.currentSessionId || state.snapshot?.sessionId || "") === sessionId;
 }
 
-async function sendGuidance(
+async function sendTurnControl(
+  mode: DeliveryMode,
   sessionId: string,
   runId: string,
   text: string,
@@ -424,7 +425,8 @@ async function sendGuidance(
   onError: (message: string) => void,
 ) {
   try {
-    await guide(sessionId, runId, text, attachments);
+    if (mode === "queue") await followUp(sessionId, runId, text, attachments);
+    else await guide(sessionId, runId, text, attachments);
     onSuccess();
   } catch (cause) {
     onError(cause instanceof Error ? cause.message : String(cause));
@@ -491,57 +493,137 @@ function useQueuedTurnRunner(
   }, [beginTurn, busy, editingQueuedId, failQueuedPrompt, pauseReason, queuedPrompts, removeQueuedPrompt]);
 }
 
-function ThreadHeader({ empty }: { empty: boolean }) {
+function ThreadHeader({ empty, environmentOpen, onEnvironmentOpenChange }: {
+  empty: boolean;
+  environmentOpen: boolean;
+  onEnvironmentOpenChange: (open: boolean) => void;
+}) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
   const title = useRuntimeStore((state) => state.currentTitle);
   const running = useRuntimeStore((state) => state.running);
-  const branches = useRuntimeStore((state) => state.branches);
   const t = translator(snapshot.language);
-  if (empty) return null;
   const heading = title || t("newSession");
   const status = headerStatus(running, t);
-  const stage = threadHeaderStage(running);
-  const branch = branches.find((item) => item.current)?.name || snapshot.currentBranch || t("noBranches");
-  const projectName = snapshot.workspace.split(/[\\/]/).filter(Boolean).at(-1) || t("workingTree");
   return <header className="thread-header titlebar-region">
-    <div className="thread-heading-copy"><span className="thread-eyebrow">{heading.includes("UI") ? "DESIGN TASK" : "TASK"}</span><strong>{heading}</strong><small>{projectName} · {branch}</small></div>
-    <div className="thread-stage" role="status" aria-label={status}>
-      <span data-active={String(stage === "in-progress")}>{t("inProgress")}</span>
-      <span data-active={String(stage === "completed")}>{t("completed")}</span>
+    <div className="thread-heading-copy">
+      {empty ? null : <>
+        <span className="thread-eyebrow">{heading.includes("UI") ? "DESIGN TASK" : "TASK"}</span>
+        <strong>{heading}</strong>
+        <span className="thread-heading-rule" aria-hidden="true">|</span>
+        <BranchSwitch />
+      </>}
     </div>
-    <div className="thread-header-end">
+    {empty ? null : <div className="thread-header-end">
       <span className="thread-runtime-status" data-running={String(running)}>{status}</span>
-      <HeaderActions empty={empty} />
-    </div>
+      <HeaderActions environmentOpen={environmentOpen} onEnvironmentOpenChange={onEnvironmentOpenChange} />
+    </div>}
   </header>;
 }
 
-export function threadHeaderStage(running: boolean): "in-progress" | "completed" {
-  return running ? "in-progress" : "completed";
-}
-
-function headerStatus(running: boolean, t: ReturnType<typeof translator>) { return running ? t("running") : t("ready"); }
-
-function HeaderActions({ empty }: { empty: boolean }) {
+function BranchSwitch() {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
-  const inspectorOpen = useRuntimeStore((state) => state.inspectorOpen);
-  const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
-  const terminalOpen = useTerminalStore((state) => state.open);
+  const branches = useRuntimeStore((state) => state.branches);
+  const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
+  const setError = useRuntimeStore((state) => state.setError);
+  const [branchOpen, setBranchOpen] = useState(false);
+  const [branchSearch, setBranchSearch] = useState("");
+  const branchSwitch = useRef<HTMLDivElement>(null);
+  const closeBranch = useCallback(() => {
+    setBranchOpen(false);
+    setBranchSearch("");
+  }, []);
+  const toggleBranch = useCallback(() => setBranchOpen((open) => !open), []);
+  const branchPressActivation = usePressActivation<HTMLButtonElement>(toggleBranch);
   const t = translator(snapshot.language);
-  return <div className="thread-actions">
-    <button hidden={empty} type="button" className="square-button terminal-toggle" data-open={String(terminalOpen)} aria-pressed={terminalOpen} title={t("toggleTerminal")} onClick={() => useTerminalStore.getState().toggle()}>{t("terminal")}</button>
-    <button hidden={empty} className="square-button inspector-toggle" data-open={String(inspectorOpen)} aria-label={t("inspector")} onClick={() => setInspectorOpen(!inspectorOpen)}>{snapshot.language === "zh-CN" ? "侧栏" : "Panel"}</button>
+  const project = snapshot.workspace.split(/[\\/]/).filter(Boolean).at(-1) || t("workingTree");
+  const branch = branches.find((item) => item.current)?.name || snapshot.currentBranch || t("noBranches");
+  const visibleBranches = branches
+    .filter((item) => !branchSearch.trim() || item.name.toLowerCase().includes(branchSearch.trim().toLowerCase()))
+    .slice()
+    .sort((left, right) => Number(right.current) - Number(left.current) || left.name.localeCompare(right.name));
+
+  useEffect(() => {
+    if (!branchOpen) return;
+    const close = (event: PointerEvent) => {
+      if (branchSwitch.current && !branchSwitch.current.contains(event.target as Node)) closeBranch();
+    };
+    const closeWithKeyboard = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeBranch();
+    };
+    document.addEventListener("pointerdown", close, true);
+    document.addEventListener("keydown", closeWithKeyboard);
+    window.addEventListener("blur", closeBranch);
+    return () => {
+      document.removeEventListener("pointerdown", close, true);
+      document.removeEventListener("keydown", closeWithKeyboard);
+      window.removeEventListener("blur", closeBranch);
+    };
+  }, [branchOpen, closeBranch]);
+
+  const switchBranch = async (name: string, confirmDirty = false) => {
+    if (!name || name === branch) {
+      closeBranch();
+      return;
+    }
+    try {
+      await execute({
+        kind: "switch_git_branch",
+        target: name,
+        decision: confirmDirty ? "confirm_dirty" : undefined,
+      });
+      closeBranch();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!confirmDirty && /uncommitted changes/i.test(message)) {
+        if (window.confirm(tFormat(snapshot.language, "dirtySwitchConfirm", { branch: name }))) {
+          await switchBranch(name, true);
+        }
+        return;
+      }
+      setError(message);
+    }
+  };
+
+  return <div className="titlebar-project-switch" ref={branchSwitch}>
+    <button type="button" className="titlebar-project" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"} aria-haspopup="listbox" aria-expanded={branchOpen} {...branchPressActivation}>
+      <strong>{project}</strong><b aria-hidden="true">·</b><span>{branch}</span><ChevronDown size={14} />
+    </button>
+    {branchOpen && <section className="titlebar-project-popover" aria-label={snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}>
+      <header><strong>{snapshot.language === "zh-CN" ? "切换分支" : "Switch branch"}</strong><span>{project}</span></header>
+      <label className="titlebar-project-search"><Search size={14} /><input autoFocus value={branchSearch} onChange={(event) => setBranchSearch(event.target.value)} placeholder={`${t("searchBranches")}…`} aria-label={t("searchBranches")} /></label>
+      <div className="titlebar-project-options" role="listbox">
+        {visibleBranches.map((item) => {
+          const currentDetail = workspaceChangedFiles > 0
+            ? tFormat(snapshot.language, "uncommittedFiles", { count: workspaceChangedFiles })
+            : t("clean");
+          return <button key={item.name} type="button" role="option" aria-selected={item.current} onClick={() => void switchBranch(item.name)}>
+            <span className="titlebar-project-letter"><GitBranch size={14} /></span>
+            <span><strong>{item.name}</strong><small>{item.current ? currentDetail : t("local")}</small></span>
+            <em>{item.current ? snapshot.language === "zh-CN" ? "当前" : "Current" : ""}</em>
+            <Check size={14} />
+          </button>;
+        })}
+      </div>
+      {visibleBranches.length === 0 && <p>{t("noMatchingBranches")}</p>}
+      <footer><span>↵ {snapshot.language === "zh-CN" ? "切换" : "Switch"}</span><span>esc {snapshot.language === "zh-CN" ? "关闭" : "Close"}</span></footer>
+    </section>}
   </div>;
 }
 
-function emptySuggestions(language: Snapshot["language"]) {
-  return language === "zh-CN" ? [
-    { title: "检查代码改动", detail: "查看当前工作树的风险", prompt: "分析当前项目的代码改动，按风险高低给出结论" },
-    { title: "修复失败检查", detail: "定位测试与 CI 问题", prompt: "定位当前项目失败的测试或 CI 检查，并修复根因" },
-    { title: "制定实现计划", detail: "拆分步骤与验收标准", prompt: "理解当前需求并整理一份可以直接执行的实现计划" },
-  ] : [
-    { title: "Review changes", detail: "Assess working tree risk", prompt: "Review the current project changes and rank findings by risk." },
-    { title: "Fix checks", detail: "Trace test and CI failures", prompt: "Find the failed tests or CI checks and fix the root cause." },
-    { title: "Build a plan", detail: "Define steps and acceptance", prompt: "Turn the current requirement into an executable implementation plan." },
-  ];
+
+function headerStatus(running: boolean, t: ReturnType<typeof translator>) { return running ? t("running") : t("ready"); }
+
+function HeaderActions({ environmentOpen, onEnvironmentOpenChange }: {
+  environmentOpen: boolean;
+  onEnvironmentOpenChange: (open: boolean) => void;
+}) {
+  const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const terminalOpen = useTerminalStore((state) => state.open);
+  const t = translator(snapshot.language);
+  const environmentLabel = t("environment");
+  return <div className="thread-actions">
+    <button type="button" className="square-button thread-environment-toggle" data-open={String(environmentOpen)} aria-label={environmentLabel} aria-pressed={environmentOpen} title={environmentLabel} onClick={() => onEnvironmentOpenChange(!environmentOpen)}><PanelsTopLeft size={15} aria-hidden="true" /></button>
+    <button type="button" className="square-button terminal-toggle" data-open={String(terminalOpen)} aria-label={t("toggleTerminal")} aria-pressed={terminalOpen} title={t("toggleTerminal")} onClick={() => useTerminalStore.getState().toggle()}><SquareTerminal size={15} aria-hidden="true" /></button>
+  </div>;
 }
+

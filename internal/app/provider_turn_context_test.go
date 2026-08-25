@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
@@ -19,6 +20,7 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/contextarchive"
 	"github.com/Viking602/azem/internal/session"
+	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
 func TestTurnContextBuildFallsBackWhenInstructionFingerprintDiffers(t *testing.T) {
@@ -94,8 +96,19 @@ func TestTurnContextBuildsPriorConversationBeforeCurrentRequest(t *testing.T) {
 	}
 }
 
-func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
+func TestLiveTurnControlDistinguishesSteerAndFollowUpFIFO(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
+	store, err := sqlitestore.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(context.Background())
+	sessions := session.NewService(store.DB(), store.Blobs())
+	if _, err := sessions.Ensure(context.Background(), session.Session{ID: "session-guided", Title: "Guided"}); err != nil {
+		t.Fatal(err)
+	}
+	service.AttachDurable(sessions, nil)
+	control := service.TurnControl("run-guided")
 	service.mu.Lock()
 	service.activeRun = "run-guided"
 	service.activeSession = "session-guided"
@@ -107,110 +120,75 @@ func TestActiveGuidanceIsFIFOAndInjectedAtModelBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	inner := guidanceContextStub{compactTo: func(history []message.Message, _ int) ([]message.Message, error) { return history, nil }}
-	manager := activeGuidanceContext{
-		inner: inner,
-		peek:  func() activeGuidanceSnapshot { return service.peekActiveGuidance("session-guided", "run-guided") },
-		acknowledge: func(snapshot activeGuidanceSnapshot) {
-			service.acknowledgeActiveGuidance("session-guided", "run-guided", snapshot)
-		},
+	for _, text := range []string{"first follow-up", "second follow-up"} {
+		if err := service.FollowUpActiveTurn("session-guided", "run-guided", text); err != nil {
+			t.Fatal(err)
+		}
 	}
-	history := []message.Message{
-		message.NewText(message.RoleSystem, "rules"),
-		message.NewText(message.RoleUser, strings.Repeat("old context ", 500)),
-		message.NewText(message.RoleAssistant, "old answer"),
-		message.NewText(message.RoleUser, "follow up one"),
-		message.NewText(message.RoleAssistant, "answer one"),
-		message.NewText(message.RoleUser, "follow up two"),
-		message.NewText(message.RoleAssistant, "answer two"),
-		message.NewText(message.RoleUser, "latest"),
-	}
-	prepared, err := manager.CompactTo(context.Background(), history, 300)
+	steers, err := control.Drain(context.Background(), hyagent.TurnBoundaryBeforeModel)
 	if err != nil {
 		t.Fatal(err)
 	}
-	latest := prepared[len(prepared)-1]
-	firstIndex, secondIndex := strings.Index(latest.Text, "first correction"), strings.Index(latest.Text, "second correction")
-	if latest.Role != message.RoleUser || firstIndex < 0 || secondIndex <= firstIndex {
-		t.Fatalf("prepared guidance context = %#v", prepared)
+	if len(steers) != 2 || steers[0].Kind != hyagent.ControlSteer || steers[0].Message.Text != "first correction" || steers[1].Message.Text != "second correction" {
+		t.Fatalf("steer controls = %#v", steers)
 	}
-	if remaining := service.drainActiveGuidance("session-guided", "run-guided"); len(remaining) != 0 {
-		t.Fatalf("guidance was not drained exactly once: %#v", remaining)
-	}
-	if err := service.GuideActiveTurn("session-guided", "run-guided", "terminal correction"); err != nil {
+	if err := control.Acknowledge(context.Background(), []string{steers[0].ID, steers[1].ID}); err != nil {
 		t.Fatal(err)
 	}
-	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0].Text != "terminal correction" {
-		t.Fatalf("terminal guidance = %#v", pending)
+	beforeAnswer, err := control.Drain(context.Background(), hyagent.TurnBoundaryAfterTools)
+	if err != nil || len(beforeAnswer) != 0 {
+		t.Fatalf("follow-up drained before answer = %#v, %v", beforeAnswer, err)
 	}
-	if err := service.GuideActiveTurn("session-guided", "run-guided", "accepted after retry"); err != nil {
-		t.Fatalf("guidance closed while terminal retry was required: %v", err)
+	followUps, err := control.Drain(context.Background(), hyagent.TurnBoundaryAfterAnswer)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 1 || pending[0].Text != "accepted after retry" {
-		t.Fatalf("guidance after terminal retry = %#v", pending)
+	if len(followUps) != 2 || followUps[0].Kind != hyagent.ControlFollowUp || followUps[0].Message.Text != "first follow-up" || followUps[1].Message.Text != "second follow-up" {
+		t.Fatalf("follow-up controls = %#v", followUps)
 	}
-	if pending := service.finishActiveGuidance("session-guided", "run-guided"); len(pending) != 0 {
-		t.Fatalf("terminal close unexpectedly drained guidance: %#v", pending)
+	projection, err := sessions.LoadProjection(context.Background(), "session-guided")
+	if err != nil {
+		t.Fatal(err)
 	}
+	if len(projection.Blocks) != 4 ||
+		projection.Blocks[0].State != "guidance" || projection.Blocks[1].State != "guidance" ||
+		projection.Blocks[2].State != "follow_up" || projection.Blocks[3].State != "follow_up" {
+		t.Fatalf("persisted turn controls = %#v", projection.Blocks)
+	}
+	service.mu.Lock()
+	service.guidanceOpen = false
+	service.mu.Unlock()
 	if err := service.GuideActiveTurn("session-guided", "run-guided", "too late"); err == nil {
-		t.Fatal("finishing run accepted late guidance")
+		t.Fatal("finishing run accepted late steer")
 	}
-	if err := service.GuideActiveTurn("session-guided", "stale-run", "wrong run"); err == nil {
-		t.Fatal("stale run accepted guidance")
+	if err := service.FollowUpActiveTurn("session-guided", "stale-run", "wrong run"); err == nil {
+		t.Fatal("stale run accepted follow-up")
 	}
 }
 
-func TestActiveGuidanceKeepsImageAttachments(t *testing.T) {
+func TestLiveTurnControlKeepsImageAttachments(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
 	service.AttachAttachments(filepath.Join(t.TempDir(), "attachments"))
 	image, err := service.ImportImageBytes("session-guided", "guidance.png", "image/png", minimalPNG())
 	if err != nil {
 		t.Fatal(err)
 	}
+	control := service.TurnControl("run-guided")
 	service.mu.Lock()
 	service.activeRun = "run-guided"
 	service.activeSession = "session-guided"
 	service.guidanceOpen = true
 	service.mu.Unlock()
-	if err := service.GuideActiveTurnWithAttachments("session-guided", "run-guided", "inspect this update", []session.Attachment{image}); err != nil {
+	if err := service.FollowUpActiveTurnWithAttachments("session-guided", "run-guided", "inspect this update", []session.Attachment{image}); err != nil {
 		t.Fatal(err)
 	}
-	pending := service.finishActiveGuidance("session-guided", "run-guided")
-	messages := guidanceMessages(pending)
-	if len(messages) != 1 || messages[0].Text != "inspect this update" {
-		t.Fatalf("guidance messages = %#v", messages)
+	pending, err := control.Drain(context.Background(), hyagent.TurnBoundaryAfterAnswer)
+	if err != nil || len(pending) != 1 || pending[0].Message.Text != "inspect this update" {
+		t.Fatalf("follow-up controls = %#v, %v", pending, err)
 	}
-	attachments := AttachmentsFromMessage(messages[0])
+	attachments := AttachmentsFromMessage(pending[0].Message)
 	if len(attachments) != 1 || attachments[0] != image {
-		t.Fatalf("guidance attachments = %#v", attachments)
-	}
-}
-
-func TestActiveGuidanceAppearsAtEveryPendingModelBoundary(t *testing.T) {
-	service := NewService(context.Background(), config.Default())
-	service.mu.Lock()
-	service.activeRun = "run-guided"
-	service.activeSession = "session-guided"
-	service.guidanceOpen = true
-	service.activeGuidance = []activeGuidanceMessage{{Text: "change direction"}}
-	service.mu.Unlock()
-	hook := activeGuidanceModelHook{
-		peek: func() activeGuidanceSnapshot {
-			return service.peekActiveGuidance("session-guided", "run-guided")
-		},
-	}
-	history := []message.Message{message.NewText(message.RoleUser, "original task")}
-	for boundary := range 2 {
-		got, err := hook.TransformContext(context.Background(), history)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(got) != 2 || got[1].Role != message.RoleUser || got[1].Text != "change direction" {
-			t.Fatalf("boundary %d messages = %#v", boundary, got)
-		}
-		if len(history) != 1 {
-			t.Fatalf("hook mutated engine history: %#v", history)
-		}
+		t.Fatalf("follow-up attachments = %#v", attachments)
 	}
 }
 
@@ -590,6 +568,42 @@ func TestTurnContextBuildFallsBackWhenModelHistoryScopeDiffers(t *testing.T) {
 	}
 }
 
+func TestForkedMainTurnInheritsPromptCacheKey(t *testing.T) {
+	var promptCacheKey string
+	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(_ int, body string, writer http.ResponseWriter) {
+		var request struct {
+			PromptCacheKey string `json:"prompt_cache_key"`
+		}
+		if err := json.Unmarshal([]byte(body), &request); err != nil {
+			t.Errorf("decode fork request: %v", err)
+		}
+		promptCacheKey = request.PromptCacheKey
+		_, _ = fmt.Fprint(writer, `data: {"type":"response.output_text.delta","delta":"fork answer"}`+"\n\n")
+		_, _ = fmt.Fprint(writer, `data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","id":"msg_fork","role":"assistant","content":[{"type":"output_text","text":"fork answer"}]}]}}`+"\n\n")
+	})
+	ctx := context.Background()
+	sessions := harness.service.sessions
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "source-cache-session", Title: "Source", ProviderID: "chatgpt", ModelID: "gpt-skill", Reasoning: "minimal", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.Fork(ctx, "source-cache-session", "fork-cache-session"); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "fork-cache-session", Prompt: "fork request", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, runID)
+	if promptCacheKey != "source-cache-session" {
+		t.Fatalf("fork prompt cache key=%q", promptCacheKey)
+	}
+}
+
 func TestMainTurnsKeepSerializedPrefixStableAndAppendRawOutputAndNewTail(t *testing.T) {
 	const firstOutput = `[{"type":"reasoning","id":"rs_first","encrypted_content":"opaque"},{"type":"message","id":"msg_first","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}]`
 	const secondOutput = `[{"type":"message","id":"msg_second","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}]`
@@ -685,6 +699,103 @@ func TestMainTurnsKeepSerializedPrefixStableAndAppendRawOutputAndNewTail(t *test
 		len(projection.ModelHistory.Messages) == 0 ||
 		string(projection.ModelHistory.Messages[len(projection.ModelHistory.Messages)-1].ProviderState) != secondOutput {
 		t.Fatalf("persisted exact history = %#v", projection.ModelHistory)
+	}
+}
+
+func TestCompactionUsesDurableRunUserBoundaryWithoutMessageMetadata(t *testing.T) {
+	blocks := []session.Block{
+		{Sequence: 444, Kind: "assistant", RunID: "prior-run"},
+		{Sequence: 445, Kind: "user", RunID: "current-run"},
+		{Sequence: 446, Kind: "commentary", RunID: "current-run"},
+		{Sequence: 447, Kind: "user", RunID: "other-run"},
+	}
+	boundary := canonicalRunUserHighWater(blocks, "current-run")
+	if boundary == nil || *boundary != 445 {
+		t.Fatalf("current run boundary = %v, want 445", boundary)
+	}
+	source := []message.Message{
+		message.NewText(message.RoleSystem, mainInstructions),
+		message.NewText(message.RoleUser, "current request"),
+	}
+	if got := canonicalMessageHighWater(source); got != -1 {
+		t.Fatalf("provider-facing message high-water = %d, want unavailable", got)
+	}
+	manifest := newArchiveContextManifest(
+		turnContext{runID: "current-run", canonicalHighWater: boundary},
+		"automatic",
+		source,
+		source,
+		nil,
+		contextarchive.Manifest{},
+		1000,
+	)
+	if manifest.CanonicalHighWater != 445 {
+		t.Fatalf("manifest canonical high-water = %d, want 445", manifest.CanonicalHighWater)
+	}
+}
+
+func TestMainTurnPrunedCheckpointCoversCurrentUser(t *testing.T) {
+	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, _ string, writer http.ResponseWriter) {
+		if call != 1 {
+			t.Errorf("unexpected provider request %d", call)
+		}
+		writeProviderText(writer, "resp-pruned-checkpoint", "continued after pruning")
+	})
+	ctx := context.Background()
+	sessions := harness.service.sessions
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "pruned-checkpoint", Title: "Pruned checkpoint", ProviderID: "chatgpt", ModelID: "gpt-skill", Reasoning: "minimal", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "pruned-checkpoint", session.Block{
+		Kind: "user", RunID: "seed-run", Content: "seed request",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	history := []message.Message{
+		message.NewText(message.RoleSystem, mainInstructions),
+		message.NewText(message.RoleUser, "seed request"),
+	}
+	for index := range 20 {
+		callID := fmt.Sprintf("seed-tool-%d", index)
+		history = append(history,
+			message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: "seed_tool"}}},
+			message.NewToolResult(message.ToolResult{
+				ToolCallID: callID,
+				Name:       "seed_tool",
+				Content:    strings.Repeat("x", 40_000),
+			}),
+		)
+	}
+	for index := range 3 {
+		history = append(history,
+			message.NewText(message.RoleUser, fmt.Sprintf("recent request %d", index)),
+			message.NewText(message.RoleAssistant, fmt.Sprintf("recent answer %d", index)),
+		)
+	}
+	if err := sessions.CompleteTurn(ctx, "pruned-checkpoint", session.Block{
+		Kind: "assistant", RunID: "seed-run", Content: "seed answer",
+	}, session.ModelHistory{
+		ProviderID: "chatgpt", ModelID: "gpt-skill",
+		InstructionFingerprint: mainInstructionFingerprint,
+		StaticPrefixHash:       mainInstructionFingerprint,
+		WireVersion:            session.CurrentWireVersion,
+		Messages:               history,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "pruned-checkpoint", Prompt: "current request", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProviderRun(t, harness.service, runID)
+	if got := harness.calls.Load(); got != 1 {
+		t.Fatalf("provider requests = %d, want 1", got)
 	}
 }
 

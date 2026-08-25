@@ -15,7 +15,6 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/errcode"
-	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/toolview"
 	hyagent "github.com/Viking602/venat/agent"
@@ -359,7 +358,9 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	if request.resuming {
 		state = "resuming"
 	}
-	s.emit(ctx, Event{Kind: EventRunStarted, SessionID: request.SessionID, RunID: run.RunID, State: state, Data: map[string]string{"preserveUsage": fmt.Sprint(request.resuming)}})
+	if request.origin != turnOriginAutoLearn {
+		s.emit(ctx, Event{Kind: EventRunStarted, SessionID: request.SessionID, RunID: run.RunID, State: state, Data: map[string]string{"preserveUsage": fmt.Sprint(request.resuming)}})
+	}
 	startedAt := time.Now().UTC()
 	var streamed strings.Builder
 	var reasoningTrace reasoningTraceCollector
@@ -370,8 +371,14 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	var runErr error
 	restartingAttempt := false
 	guardRetryPending := false
-	uiSink := s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
+	var uiSink stream.Sink = stream.SinkFunc(func(context.Context, stream.Frame) error { return nil })
+	if request.origin != turnOriginAutoLearn {
+		uiSink = s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
+	}
 	sink := stream.SinkFunc(func(ctx context.Context, frame stream.Frame) error {
+		if request.origin == turnOriginAutoLearn {
+			return nil
+		}
 		if (restartingAttempt || guardRetryPending) && frame.Kind != stream.FrameError {
 			scope := "attempt"
 			if guardRetryPending && !restartingAttempt {
@@ -417,6 +424,11 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	executionOutcome, runErr = executeMainRunUntilAvailable(ctx, func() (hyworker.ExecutionOutcome, error) {
 		return s.coding.ExecuteRun(workerCtx, run, engine, sink)
 	})
+	s.mu.Lock()
+	if s.activeRun == run.RunID {
+		s.guidanceOpen = false
+	}
+	s.mu.Unlock()
 	reasoningTrace.commit(false)
 	result = executionOutcome.Result
 	finalText := sanitizeFinalAnswerText(finalAnswer.resolve(result.Text))
@@ -467,7 +479,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		})
 		return
 	}
-	if runErr != nil && ctx.Err() == nil && s.sessions != nil {
+	if request.origin != turnOriginAutoLearn && runErr != nil && ctx.Err() == nil && s.sessions != nil {
 		content := strings.TrimSpace(streamed.String())
 		if content == "" {
 			content = strings.TrimSpace(finalText)
@@ -492,9 +504,9 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			runErr = fmt.Errorf("%v; persist failed turn: %w", runErr, err)
 		}
 	}
-	if runErr == nil && ctx.Err() == nil && s.sessions != nil &&
+	if request.origin != turnOriginAutoLearn && runErr == nil && ctx.Err() == nil && s.sessions != nil &&
 		(strings.TrimSpace(finalText) != "" || strings.TrimSpace(result.Thinking) != "" || reasoningTrace.len() > 0 || len(result.Messages) > 0) {
-		_, instructionFingerprint := turnInstructions(request.PlanMode)
+		_, instructionFingerprint := turnInstructionsWithProject(request.PlanMode, request.projectContext)
 		manifest := extractArchiveContextManifest(result.Messages)
 		history := session.ModelHistory{
 			ProviderID: request.Provider, ModelID: engine.Model,
@@ -526,12 +538,23 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		}
 		cancel()
 	}
+	if request.origin == turnOriginAutoLearn {
+		return
+	}
 	if ctx.Err() != nil && s.cancellationIntent(run.RunID) == "shutdown" {
 		return
 	}
 	if ctx.Err() != nil {
+		pauseText := ""
+		if s.cancellationIntent(run.RunID) == "user" && s.sessions != nil {
+			pauseCtx, pauseCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := pauseSessionGoal(pauseCtx, s.sessions, request.SessionID, run.RunID); err != nil {
+				pauseText = "pause Goal mode: " + err.Error()
+			}
+			pauseCancel()
+		}
 		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "cancelled", ctx.Err())
-		s.emitTerminal(s.ctx, Event{Kind: EventRunCancelled, SessionID: request.SessionID, RunID: run.RunID, State: "cancelled"})
+		s.emitTerminal(s.ctx, Event{Kind: EventRunCancelled, SessionID: request.SessionID, RunID: run.RunID, State: "cancelled", Text: pauseText})
 		return
 	}
 	if runErr != nil {
@@ -548,6 +571,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
 	}
 	s.emitTerminal(ctx, Event{Kind: EventRunFinished, SessionID: request.SessionID, RunID: run.RunID, State: "completed"})
+	s.maybeScheduleAutoLearn(request, result.ToolCallsUsed)
 }
 
 func resourceClaimRetryDelay(now time.Time, decision api.ResourceClaimDecision) time.Duration {
@@ -594,6 +618,7 @@ func teamPrompt(request TurnRequest) string {
 
 type teamExecutionPolicy struct {
 	contextBudget  ContextBudget
+	toolTokens     int
 	attachmentRoot string
 	images         []session.Attachment
 	resourceClaims []api.ResourceClaimSpec
@@ -614,7 +639,7 @@ func (s *Service) teamExecutionPolicy(request TurnRequest, parentRunID string, c
 	if err != nil {
 		return teamExecutionPolicy{}, err
 	}
-	policy := teamExecutionPolicy{contextBudget: budget, attachmentRoot: s.attachments.Root, images: effectiveTurnImages(request)}
+	policy := teamExecutionPolicy{contextBudget: budget, toolTokens: toolTokens, attachmentRoot: s.attachments.Root, images: effectiveTurnImages(request)}
 	policy.resourceClaims, err = topLevelWorkspaceWriteClaims(
 		s.cfg.Workspace.AllowWrite, s.cfg.Workspace.ShellPolicy, s.cfg.Workspace.Root,
 	)
@@ -731,16 +756,23 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 			engine.Tools = tool.NewBus(drivers...)
 		}
 		roleCacheKey := strings.Join([]string{sessionID, "team", request.Provider, request.Model, class.Name}, ":")
-		extraBody := make(map[string]any, len(engine.ExtraBody)+3)
+		extraBody := make(map[string]any, len(engine.ExtraBody)+1)
 		for key, value := range engine.ExtraBody {
 			extraBody[key] = value
 		}
-		extraBody["prompt_cache_key"] = roleCacheKey
 		enableExplicitPromptCache(extraBody, request.Provider, request.Model)
-		if strings.TrimSpace(policy.attachmentRoot) != "" {
-			extraBody[responses.AttachmentRootExtraKey] = policy.attachmentRoot
-		}
 		engine.ExtraBody = extraBody
+		engine.PromptCacheKey = roleCacheKey
+		if engine.ParallelToolCalls == nil {
+			parallel := true
+			engine.ParallelToolCalls = &parallel
+		}
+		engine.NativeToolHost = newAttachmentRequestHostRoot(policy.attachmentRoot)
+		if request.Provider == "cursor" {
+			engine.NativeToolHost = newCursorExecHost(
+				s, s.cfg.Workspace.Root, sessionID, dispatch.Task.RunID, parentRunID, dispatch.To, engine.Tools,
+			)
+		}
 		decision := s.hooks.Dispatch(ctx, hooks.Envelope{
 			SessionID: sessionID, RunID: dispatch.Task.RunID, AgentID: dispatch.To,
 			AgentType: class.Name, ParentRunID: parentRunID, CWD: metadata.CWD, HookEventName: hooks.SubagentStart,
@@ -754,7 +786,7 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 				additional = append(additional, text)
 			}
 		}
-		contextParts := append([]string{strings.TrimSpace(request.privateContext)}, additional...)
+		contextParts := append([]string{strings.TrimSpace(request.projectContext), strings.TrimSpace(request.privateContext)}, additional...)
 		contextText := strings.TrimSpace(strings.Join(contextParts, "\n"))
 		historical := ""
 		var history []session.Block
@@ -776,6 +808,7 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 		if !s.cfg.Agents.Context.Enabled {
 			contextTarget = 0
 		}
+		providerPressure := &providerContextPressure{toolTokens: policy.toolTokens}
 		requestPreparer := &teamRequestPreparer{
 			context: requestContext, images: images, todo: request.Todo, loadTodo: loadTodo, runID: dispatch.Task.RunID,
 			target: contextTarget,
@@ -786,6 +819,7 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 			largeToolTokens:  s.cfg.Agents.Context.LargeToolResultTokens,
 			keepRecentTokens: policy.contextBudget.KeepRecent,
 			coordinator:      &compactionCoordinator{},
+			providerPressure: providerPressure,
 			compactHooks:     s.autoCompactHooks(metadata),
 			reportContextTokens: func(_ context.Context, tokens int) {
 				s.emit(s.ctx, Event{
@@ -811,6 +845,7 @@ func (s *Service) teamHooks(request TurnRequest, parentRunID string, policy team
 				inner = &meteredProviderDriver{
 					inner: inner, store: s.sessions, host: s, sessionID: sessionID,
 					runID: parentRunID, kind: "team", provider: request.Provider, model: request.Model, transport: transport,
+					reportInputTokens: providerPressure.observeInputTokens,
 				}
 			}
 			engine.Provider = &teamUsageDriver{

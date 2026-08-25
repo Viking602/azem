@@ -33,6 +33,7 @@ type Model struct {
 	Description          string         `json:"description,omitempty"`
 	ContextWindow        int            `json:"contextWindow,omitempty"`
 	MaxOutputTokens      int            `json:"maxOutputTokens,omitempty"`
+	CursorMaxMode        bool           `json:"cursorMaxMode,omitempty"`
 	ReasoningLevels      []string       `json:"reasoningLevels,omitempty"`
 	DefaultReasoning     string         `json:"defaultReasoning,omitempty"`
 	SupportsTools        bool           `json:"supportsTools"`
@@ -97,6 +98,7 @@ type Service struct {
 	TTL                 map[string]time.Duration
 	Endpoints           map[string]string
 	AdditionalEndpoints map[string][]string
+	Fetchers            map[string]func(context.Context, string) ([]Model, error)
 	ModelsDevURL        string
 	ModelsDevTTL        time.Duration
 	ModelsDevClient     *http.Client
@@ -108,9 +110,10 @@ type Service struct {
 func NewService(db *sql.DB, authentication *auth.Service) *Service {
 	return &Service{
 		db: db, auth: authentication,
-		TTL:                 map[string]time.Duration{"chatgpt": 5 * time.Minute, "grok": 5 * time.Minute},
+		TTL:                 map[string]time.Duration{"chatgpt": 5 * time.Minute, "grok": 5 * time.Minute, "cursor": 5 * time.Minute},
 		Endpoints:           map[string]string{"chatgpt": DefaultChatGPTCatalogURL, "grok": DefaultGrokCatalogURL},
 		AdditionalEndpoints: map[string][]string{"grok": {DefaultGrokLanguageModelsURL}},
+		Fetchers:            map[string]func(context.Context, string) ([]Model, error){},
 		ModelsDevURL:        DefaultModelsDevURL,
 		ModelsDevTTL:        15 * time.Minute,
 	}
@@ -120,13 +123,23 @@ func (s *Service) EnrichWithModelsDev(ctx context.Context, result Result) Result
 	metadata, err := s.modelsDev(ctx)
 	if err != nil {
 		result.Warning = joinWarnings(result.Warning, "models.dev metadata unavailable: "+err.Error())
+		result.Models = applyCursorCapabilityFallback(result.Provider, result.Models)
 		return result
 	}
-	_, matched := metadata.Enrich(ModelsDevProviderHint{ID: result.Provider}, result.Models)
-	if unmatched := len(result.Models) - matched; unmatched > 0 {
-		result.Warning = joinWarnings(result.Warning, fmt.Sprintf("models.dev metadata did not match %d model(s)", unmatched))
-	}
+	metadata.Enrich(ModelsDevProviderHint{ID: result.Provider}, result.Models)
+	result.Models = applyCursorCapabilityFallback(result.Provider, result.Models)
+	result.Models = normalizeProviderModels(result.Provider, result.Models)
 	return result
+}
+
+func applyCursorCapabilityFallback(provider string, models []Model) []Model {
+	if !strings.EqualFold(strings.TrimSpace(provider), "cursor") {
+		return models
+	}
+	for index := range models {
+		models[index] = EnsureCursorModalities(models[index])
+	}
+	return models
 }
 
 func (s *Service) modelsDev(ctx context.Context) (ModelsDevCatalog, error) {
@@ -203,6 +216,24 @@ func (s *Service) ValidateSelection(ctx context.Context, provider string, accoun
 }
 
 func (s *Service) fetch(ctx context.Context, provider string, accountID string, cached Result) (Result, error) {
+	if fetch := s.Fetchers[provider]; fetch != nil {
+		models, err := fetch(ctx, accountID)
+		if err != nil {
+			return Result{}, err
+		}
+		if len(models) == 0 {
+			return Result{}, fmt.Errorf("%s catalog returned no models", provider)
+		}
+		sort.SliceStable(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+		models = mergeDuplicates(models)
+		models = normalizeProviderModels(provider, models)
+		now := time.Now().UTC()
+		result := Result{Provider: provider, AccountID: accountID, Models: models, FetchedAt: now, ExpiresAt: now.Add(s.ttl(provider))}
+		if err := s.save(ctx, result, ""); err != nil {
+			return Result{}, err
+		}
+		return result, nil
+	}
 	primary := s.Endpoints[provider]
 	if primary == "" {
 		return Result{}, fmt.Errorf("unsupported provider %q", provider)
@@ -301,6 +332,7 @@ func (s *Service) fetch(ctx context.Context, provider string, accountID string, 
 	}
 	sort.SliceStable(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	models = mergeDuplicates(models)
+	models = normalizeProviderModels(provider, models)
 	now := time.Now().UTC()
 	result := Result{Provider: provider, AccountID: accountID, Models: models, FetchedAt: now, ExpiresAt: now.Add(s.ttl(provider))}
 	if err := s.save(ctx, result, etag); err != nil {
@@ -494,6 +526,7 @@ func (s *Service) load(ctx context.Context, provider string, accountID string) (
 		result.Models = append(result.Models, model)
 		result.FetchedAt, result.ExpiresAt = time.Unix(0, row.FetchedAt).UTC(), time.Unix(0, row.ExpiresAt).UTC()
 	}
+	result.Models = normalizeProviderModels(provider, result.Models)
 	return result, len(result.Models) > 0, nil
 }
 

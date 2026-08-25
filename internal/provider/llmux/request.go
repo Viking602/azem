@@ -29,7 +29,7 @@ func convertRequest(request hyprovider.Request, defaultReasoningEffort, provider
 	}
 	messages, instructions, err := convertMessages(
 		request.Messages,
-		stringExtra(request.ExtraBody, responses.AttachmentRootExtraKey),
+		responses.RequestAttachmentRoot(request),
 		names,
 		anthropicProtocol,
 		developerMessages,
@@ -47,22 +47,21 @@ func convertRequest(request hyprovider.Request, defaultReasoningEffort, provider
 		tools = append(tools, sdk.ToolDefinition{Name: names.Wire(definition.Name), Description: definition.Description, InputSchema: schema})
 	}
 	zeroRetries, parallel := 0, true
-	if value, ok := boolExtra(request.ExtraBody, "parallel_tool_calls"); ok {
-		parallel = value
+	if request.ParallelToolCalls != nil {
+		parallel = *request.ParallelToolCalls
 	}
-	options := sdk.CallOptions{StopSequences: request.StopSequences, Tools: tools, ParallelToolCalls: &parallel, MaxRetries: &zeroRetries}
+	options := sdk.CallOptions{
+		StopSequences: request.StopSequences, Tools: tools, ParallelToolCalls: &parallel,
+		PromptCacheKey: request.PromptCacheKey, ServiceTier: request.ServiceTier, MaxRetries: &zeroRetries,
+	}
 	if len(tools) > 0 {
 		options.ToolChoice = &sdk.ToolChoice{Mode: sdk.ToolChoiceAuto}
 	}
-	if maxOutput := intExtra(request.ExtraBody, "max_output_tokens"); maxOutput > 0 {
-		options.MaxOutputTokens = &maxOutput
-	} else if request.MaxTokens > 0 {
-		// Venat ModelMaxTokens lands on Request.MaxTokens; honor it when the
-		// host did not also put max_output_tokens in ExtraBody.
+	if request.MaxTokens > 0 {
 		maxOutput := request.MaxTokens
 		options.MaxOutputTokens = &maxOutput
 	}
-	effort := firstNonempty(request.Metadata["reasoning_effort"], stringExtra(request.ExtraBody, "reasoning_effort"), defaultReasoningEffort)
+	effort := firstNonempty(request.Metadata["reasoning_effort"], defaultReasoningEffort)
 	if effort != "" {
 		options.Reasoning = &sdk.ReasoningOptions{Effort: effort, Summary: "auto"}
 	}

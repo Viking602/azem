@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -75,6 +77,9 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 func (execRunner) Run(ctx context.Context, cwd, stdin, name string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
 	command.Dir = cwd
+	if name == "git" {
+		command.Env = hardenedGitEnvironment()
+	}
 	if stdin != "" {
 		command.Stdin = strings.NewReader(stdin)
 	}
@@ -90,19 +95,165 @@ func (execRunner) Run(ctx context.Context, cwd, stdin, name string, args ...stri
 
 // Client projects GitHub CLI data into stable desktop contracts.
 type Client struct {
-	workspace string
-	runner    Runner
+	workspace           string
+	runner              Runner
+	gitCredentialHelper string
 }
 
 func NewClient(workspace string) *Client {
-	return NewClientWithRunner(workspace, execRunner{})
+	client := NewClientWithRunner(workspace, execRunner{})
+	ghPath, err := exec.LookPath("gh")
+	if err != nil {
+		client.gitCredentialHelper = ""
+		return client
+	}
+	ghPath, err = filepath.EvalSymlinks(ghPath)
+	if err != nil {
+		client.gitCredentialHelper = ""
+		return client
+	}
+	ghPath, err = filepath.Abs(ghPath)
+	if err != nil || pathInside(client.workspace, ghPath) {
+		client.gitCredentialHelper = ""
+		return client
+	}
+	client.gitCredentialHelper = "!" + quoteShellWord(ghPath) + " auth git-credential"
+	return client
 }
 
 func NewClientWithRunner(workspace string, runner Runner) *Client {
 	if runner == nil {
 		runner = execRunner{}
 	}
-	return &Client{workspace: strings.TrimSpace(workspace), runner: runner}
+	return &Client{workspace: strings.TrimSpace(workspace), runner: runner, gitCredentialHelper: "!gh auth git-credential"}
+}
+func (c *Client) Create(ctx context.Context, request CreateRequest) (CreateResult, error) {
+	branch := strings.TrimSpace(request.Branch)
+	if !validBranch(branch) || !oidPattern.MatchString(request.ExpectedCommit) {
+		return CreateResult{}, fmt.Errorf("invalid patch branch or expected commit")
+	}
+	if strings.TrimSpace(request.Title) == "" || len(request.Title) > 240 || len(request.Body) > 64*1024 {
+		return CreateResult{}, fmt.Errorf("pull request title or body is invalid")
+	}
+	repository, err := c.resolveRepository(ctx)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	readCtx, cancelRead := context.WithTimeout(ctx, defaultReadTimeout)
+	headOutput, err := c.runner.Run(readCtx, c.workspace, "", "git", securityGitArgs("rev-parse", "--verify", "refs/heads/"+branch)...)
+	cancelRead()
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("resolve patch branch: %w", err)
+	}
+	head := strings.TrimSpace(string(headOutput))
+	if !strings.EqualFold(head, request.ExpectedCommit) {
+		return CreateResult{}, fmt.Errorf("patch branch changed after verification")
+	}
+	pushURL, err := c.validatedPushURL(ctx, repository.NameWithOwner)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	writeCtx, cancelWrite := context.WithTimeout(ctx, defaultWriteTimeout)
+	defer cancelWrite()
+	existing, err := c.runner.Run(writeCtx, c.workspace, "", "gh", "pr", "list", "--repo", repository.NameWithOwner, "--head", branch, "--state", "all", "--json", "url", "--jq", ".[0].url // empty")
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("look up patch pull request: %w", err)
+	}
+	if urlValue := strings.TrimSpace(string(existing)); urlValue != "" {
+		return CreateResult{Branch: branch, Commit: head, URL: urlValue}, nil
+	}
+	pushArguments, err := c.securityPushArgs(pushURL, "push", pushURL, "refs/heads/"+branch+":refs/heads/"+branch)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	if _, err := c.runner.Run(writeCtx, c.workspace, "", "git", pushArguments...); err != nil {
+		return CreateResult{}, fmt.Errorf("push patch branch: %w", err)
+	}
+	created, err := c.runner.Run(writeCtx, c.workspace, "", "gh", "pr", "create", "--repo", repository.NameWithOwner, "--head", branch, "--title", request.Title, "--body", request.Body)
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("create patch pull request: %w", err)
+	}
+	urlValue := strings.TrimSpace(string(created))
+	parsed, parseErr := url.Parse(urlValue)
+	if parseErr != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return CreateResult{}, fmt.Errorf("GitHub returned an invalid pull request URL")
+	}
+	return CreateResult{Branch: branch, Commit: head, URL: urlValue}, nil
+}
+
+func (c *Client) validatedPushURL(ctx context.Context, expectedRepository string) (string, error) {
+	readCtx, cancel := context.WithTimeout(ctx, defaultReadTimeout)
+	defer cancel()
+	fetchOutput, err := c.runner.Run(readCtx, c.workspace, "", "git", securityGitArgs("remote", "get-url", "origin")...)
+	if err != nil {
+		return "", fmt.Errorf("resolve origin fetch URL: %w", err)
+	}
+	pushOutput, err := c.runner.Run(readCtx, c.workspace, "", "git", securityGitArgs("remote", "get-url", "--push", "origin")...)
+	if err != nil {
+		return "", fmt.Errorf("resolve origin push URL: %w", err)
+	}
+	fetchURL, pushURL := strings.TrimSpace(string(fetchOutput)), strings.TrimSpace(string(pushOutput))
+	fetchRepository := githubRepositoryFromRemote(fetchURL)
+	pushRepository := githubRepositoryFromRemote(pushURL)
+	if fetchRepository == "" || pushRepository == "" || !strings.EqualFold(fetchRepository, expectedRepository) || !strings.EqualFold(pushRepository, expectedRepository) {
+		return "", fmt.Errorf("origin fetch/push URLs do not match verified GitHub repository %q", expectedRepository)
+	}
+	return pushURL, nil
+}
+
+func securityGitArgs(arguments ...string) []string {
+	return append(securityGitConfig(), arguments...)
+}
+
+func securityGitConfig() []string {
+	return []string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.pager=cat", "-c", "core.sshCommand=ssh -oBatchMode=yes"}
+}
+
+func (c *Client) securityPushArgs(pushURL string, arguments ...string) ([]string, error) {
+	config := append(securityGitConfig(), "-c", "credential.helper=", "-c", "core.askPass=")
+	if strings.HasPrefix(strings.ToLower(pushURL), "https://") {
+		if c.gitCredentialHelper == "" {
+			return nil, fmt.Errorf("HTTPS GitHub push requires the host-resolved gh credential helper")
+		}
+		config = append(config, "-c", "credential.helper="+c.gitCredentialHelper)
+	}
+	return append(config, arguments...), nil
+}
+
+func quoteShellWord(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func pathInside(root, candidate string) bool {
+	root, rootErr := filepath.EvalSymlinks(root)
+	if rootErr != nil {
+		return true
+	}
+	root, rootErr = filepath.Abs(root)
+	candidate, candidateErr := filepath.Abs(candidate)
+	if rootErr != nil || candidateErr != nil {
+		return true
+	}
+	relative, err := filepath.Rel(root, candidate)
+	return err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)))
+}
+
+func hardenedGitEnvironment() []string {
+	blocked := map[string]struct{}{
+		"GIT_DIR": {}, "GIT_WORK_TREE": {}, "GIT_INDEX_FILE": {}, "GIT_OBJECT_DIRECTORY": {},
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES": {}, "GIT_COMMON_DIR": {}, "GIT_GRAFT_FILE": {},
+		"GIT_NAMESPACE": {}, "GIT_PREFIX": {}, "GIT_SHALLOW_FILE": {}, "GIT_SSH": {}, "GIT_SSH_COMMAND": {},
+		"GIT_ASKPASS": {}, "SSH_ASKPASS": {}, "SSH_ASKPASS_REQUIRE": {},
+	}
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		name := strings.ToUpper(strings.SplitN(entry, "=", 2)[0])
+		if _, denied := blocked[name]; denied {
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment, "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL=https:ssh")
 }
 
 func (c *Client) Dashboard(ctx context.Context) (Dashboard, error) {
@@ -426,15 +577,29 @@ func (c *Client) workspaceState(ctx context.Context) (workspaceState, error) {
 }
 
 func githubRepositoryFromRemote(remote string) string {
-	remote = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(remote, "/"), ".git"))
+	remote = strings.TrimSpace(remote)
+	path := ""
 	if strings.HasPrefix(remote, "git@github.com:") {
-		return validGitHubRepositoryName(strings.TrimPrefix(remote, "git@github.com:"))
+		path = strings.TrimPrefix(remote, "git@github.com:")
+	} else {
+		parsed, err := url.Parse(remote)
+		if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") || (parsed.Scheme != "https" && parsed.Scheme != "ssh") {
+			return ""
+		}
+		path = strings.TrimPrefix(parsed.Path, "/")
 	}
-	parsed, err := url.Parse(remote)
-	if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") {
-		return ""
-	}
-	return validGitHubRepositoryName(strings.TrimPrefix(parsed.Path, "/"))
+	path = strings.TrimSuffix(strings.TrimSuffix(path, "/"), ".git")
+	return validGitHubRepositoryName(path)
+}
+
+var (
+	reviewerPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:/[A-Za-z0-9](?:[A-Za-z0-9-]{0,99}))?$`)
+	oidPattern      = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+	branchPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$`)
+)
+
+func validBranch(value string) bool {
+	return branchPattern.MatchString(value) && !strings.Contains(value, "..") && !strings.Contains(value, "//") && !strings.HasSuffix(value, "/")
 }
 
 func validGitHubRepositoryName(value string) string {
@@ -475,11 +640,6 @@ func capabilityFromError(err error) Capability {
 	}
 	return capability
 }
-
-var (
-	reviewerPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:/[A-Za-z0-9](?:[A-Za-z0-9-]{0,99}))?$`)
-	oidPattern      = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
-)
 
 func validReviewer(value string) bool { return reviewerPattern.MatchString(value) }
 func validOID(value string) bool      { return oidPattern.MatchString(value) }

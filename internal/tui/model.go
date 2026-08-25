@@ -13,10 +13,12 @@ import (
 
 	"github.com/Viking602/azem/internal/app"
 	backgroundservice "github.com/Viking602/azem/internal/background"
+	"github.com/Viking602/azem/internal/collab"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/recap"
+	"github.com/Viking602/azem/internal/securityscan"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -190,6 +192,7 @@ const (
 	OverlayBackground          Overlay = "background"
 	OverlayBackgroundDetail    Overlay = "background_detail"
 	OverlayRecovery            Overlay = "recovery"
+	OverlaySecurity            Overlay = "security"
 	OverlayError               Overlay = "error"
 )
 
@@ -423,6 +426,8 @@ type AppModel struct {
 	workspace                string
 	branch                   string
 	branches                 []app.GitBranchEntry
+	collabHost               *collab.Host
+	collabGuest              *collab.Guest
 	branchDirty              bool
 	pendingBranch            string
 	status                   string
@@ -463,6 +468,14 @@ type AppModel struct {
 	pendingSessionModel      *pendingSessionModel
 	sessions                 []SessionChoice
 	recovery                 []RecoveryView
+	securityScans            []securityscan.Scan
+	securitySelectedScanID   string
+	securityProjection       *securityscan.Projection
+	securityFindings         []securityscan.Finding
+	securityFinding          *securityscan.Finding
+	securityPatch            *securityscan.PatchResult
+	securityExportPath       string
+	securityPublication      string
 	auth                     map[string]AuthView
 	approval                 *ApprovalView
 	pendingApprovals         []ApprovalView

@@ -18,7 +18,6 @@ import (
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
-	"github.com/Viking602/azem/internal/provider/responses"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -86,16 +85,14 @@ func TestDriverReportsRateLimitRetriesThroughGenericObserver(t *testing.T) {
 	}
 }
 
-func TestDriverNormalizesAutomaticCacheUsage(t *testing.T) {
+func TestDriverPreservesReportedCacheUsage(t *testing.T) {
 	transport := &cacheUsageTransport{body: `data: {"type":"response.completed","response":{"id":"response-1","status":"completed","usage":{"input_tokens":20,"output_tokens":4,"total_tokens":24,"input_tokens_details":{"cached_tokens":12,"cache_write_tokens":8},"output_tokens_details":{"reasoning_tokens":2}}}}` + "\n\n"}
 	driver, err := New(transport, []string{"grok-test"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var details responses.UsageDetails
 	stream, err := driver.Stream(context.Background(), hyprovider.Request{
 		Model: "grok-test", Messages: []message.Message{message.NewText(message.RoleUser, "hello")},
-		ExtraBody: map[string]any{responses.UsageReporterExtraKey: responses.UsageReporter(func(d responses.UsageDetails) { details = d })},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -104,11 +101,9 @@ func TestDriverNormalizesAutomaticCacheUsage(t *testing.T) {
 	if err != nil || event.Kind != hyprovider.EventDone {
 		t.Fatalf("event=%#v err=%v", event, err)
 	}
-	if details.CacheModel != responses.CacheModelAutomatic || details.CacheWriteTokens != 0 || details.CachedTokens != 12 || !details.CacheReported {
-		t.Fatalf("xAI automatic cache details=%+v", details)
-	}
-	if event.Usage.CachedInputTokens != 12 {
-		t.Fatalf("stream cached tokens=%d", event.Usage.CachedInputTokens)
+	if event.Usage.CachedInputTokens != 12 || !event.Usage.CachedInputTokensReported ||
+		event.Usage.CacheWriteInputTokens != 8 || !event.Usage.CacheWriteInputTokensReported {
+		t.Fatalf("stream cache usage=%#v", event.Usage)
 	}
 }
 
@@ -182,7 +177,7 @@ func TestStandardTransportUsesOnlyXAIHeaders(t *testing.T) {
 	}
 	stream, err := driver.Stream(ctx, hyprovider.Request{
 		Model: "grok-test", Messages: []message.Message{message.NewText(message.RoleUser, "hello")},
-		ExtraBody: map[string]any{"prompt_cache_key": "session-1"},
+		PromptCacheKey: "session-1",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +193,7 @@ func TestStandardTransportUsesOnlyXAIHeaders(t *testing.T) {
 	assistant.ProviderState = event.ProviderState
 	second, err := driver.Stream(ctx, hyprovider.Request{
 		Model: "grok-test", Messages: []message.Message{message.NewText(message.RoleUser, "hello"), assistant, message.NewText(message.RoleUser, "next")},
-		ExtraBody: map[string]any{"prompt_cache_key": "session-1"},
+		PromptCacheKey: "session-1",
 	})
 	if err != nil {
 		t.Fatal(err)

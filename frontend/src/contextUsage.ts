@@ -1,4 +1,5 @@
 import type { ContextUsage } from "./store";
+import { translator, type Language } from "./i18n";
 import type { ContextProfile } from "./types";
 
 export interface ContextCompositionItem {
@@ -11,6 +12,20 @@ export interface ContextCompositionGroup {
   tokens: number;
   percentage: number;
   items: ContextCompositionItem[];
+}
+
+export function contextCategoryLabel(category: string, language: Language) {
+  const t = translator(language);
+  return ({
+    core: t("contextCore"),
+    conversation: t("contextConversation"),
+    builtin_tools: t("contextBuiltinTools"),
+    skills: t("contextSkills"),
+    mcp: t("contextMCP"),
+    current_output: t("contextCurrentOutput"),
+    provider_input: t("contextProviderInput"),
+    other: t("contextOther"),
+  } as Record<string, string>)[category] ?? category.replaceAll("_", " ");
 }
 
 export function contextOccupancy(usage: ContextUsage, profile: ContextProfile | null) {
@@ -28,23 +43,6 @@ export function contextOccupancy(usage: ContextUsage, profile: ContextProfile | 
   return { used, limit, percentage, remaining: Math.max(0, limit - used), estimated };
 }
 
-export function contextCacheMetrics(usage: ContextUsage) {
-  const reported = usage.mainCacheReported === true && usage.uncachedInputTokens !== undefined;
-  const requestInputTokens = Math.max(0, usage.inputTokens);
-  const cachedTokens = reported
-    ? Math.max(0, requestInputTokens - Math.min(requestInputTokens, Math.max(0, usage.uncachedInputTokens ?? 0)))
-    : 0;
-  return {
-    reported,
-    hitRate: reported && requestInputTokens > 0 ? cacheHitPercentage(cachedTokens, requestInputTokens) : null,
-    cachedTokens,
-    totalCacheTokens: requestInputTokens,
-  };
-}
-
-function cacheHitPercentage(cachedTokens: number, inputTokens: number) {
-  return Math.min(100, Math.trunc(cachedTokens * 10_000 / inputTokens) / 100);
-}
 
 export function contextComposition(usage: ContextUsage, profile: ContextProfile | null) {
   const grouped = new Map<string, ContextCompositionItem[]>();

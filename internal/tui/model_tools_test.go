@@ -524,7 +524,7 @@ func TestReadAndSkillToolResultsUseDisplaySummaries(t *testing.T) {
 	if got := summarizeToolArguments("coding.search", `{"query":"SessionGrants","regexp":true,"glob":"internal/**/*.go"}`); strings.ContainsAny(got, "{}") || !strings.Contains(got, "query: SessionGrants") {
 		t.Fatalf("generic running arguments were not parsed: %q", got)
 	}
-	editArguments := `{"dryRun":true,"input":"¶README.md#720F\nreplace 1-2:\n+` + strings.Repeat("long content ", 200) + `"}`
+	editArguments := `{"dryRun":true,"input":"*** Begin Patch\n[README.md#720F]\nPUT 1.=2:\n+` + strings.Repeat("long content ", 200) + `\n*** End Patch\n"}`
 	if got := summarizeToolArguments("coding.edit_hashline", editArguments); got != "Preview README.md" {
 		t.Fatalf("edit arguments exposed raw patch: %q", got)
 	}
@@ -535,7 +535,7 @@ func TestReadAndSkillToolResultsUseDisplaySummaries(t *testing.T) {
 
 func TestFailedEditReplacesRawPatchWithTargetAndError(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
-	arguments := `{"dryRun":true,"input":"¶README.md#720F\nreplace 1:\n+` + strings.Repeat("README body ", 200) + `"}`
+	arguments := `{"dryRun":true,"input":"*** Begin Patch\n[README.md#720F]\nPUT 1.=1:\n+` + strings.Repeat("README body ", 200) + `\n*** End Patch\n"}`
 	model.updateTool(app.Event{
 		Kind: app.EventToolStarted, RunID: "run", ToolCallID: "edit", Data: map[string]string{
 			"name": "coding.edit_hashline", "arguments": arguments,
@@ -555,7 +555,7 @@ func TestFailedEditReplacesRawPatchWithTargetAndError(t *testing.T) {
 }
 
 func TestPersistedFailedAgentEditHidesRawPatch(t *testing.T) {
-	arguments := `{"dryRun":false,"input":"¶internal/app.go#ABCD\nreplace 1:\n+` + strings.Repeat("source ", 200) + `"}`
+	arguments := `{"input":"*** Begin Patch\n[internal/app.go#ABCD]\nPUT 1.=1:\n+` + strings.Repeat("source ", 200) + `\n*** End Patch\n"}`
 	blocks := agentTranscriptBlocks([]app.AgentTranscriptBlock{{
 		ID: "edit", Kind: "tool", ToolCallID: "edit", Title: "coding.edit_hashline", State: "failed",
 		Content: arguments + "\ncoding.edit_hashline failed: stale tag; re-read the file",

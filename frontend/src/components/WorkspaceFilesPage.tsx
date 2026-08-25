@@ -8,7 +8,7 @@ import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 import type { WorkspaceDirectory, WorkspaceEntry, WorkspaceFile } from "../types";
 import FileTypeIcon, { fileBasename } from "./FileTypeIcon";
-import { syntaxTokens } from "./CodeDiff";
+import { syntaxTokens } from "./syntaxTokens";
 
 const MAX_OPEN_TABS = 8;
 const LINE_HEIGHT = 22;

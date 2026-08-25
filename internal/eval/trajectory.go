@@ -3,6 +3,7 @@
 package eval
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -262,15 +263,23 @@ type payloadDigestMapping struct {
 	digestColumn string
 	inlineColumn string
 	requiredBlob bool
+	jsonSentinel bool
 }
 
 var payloadDigestMappings = map[string][]payloadDigestMapping{
 	"context_artifacts":    {{digestColumn: "sha256", requiredBlob: true}},
-	"session_blocks":       {{digestColumn: "data_sha256", inlineColumn: "data"}},
+	"session_blocks":       {{digestColumn: "data_sha256", inlineColumn: "data", jsonSentinel: true}},
 	"session_tool_records": {{digestColumn: "content_sha256", inlineColumn: "content"}, {digestColumn: "structured_sha256", inlineColumn: "structured"}},
 	"subagent_runs":        {{digestColumn: "transcript_sha256", inlineColumn: "transcript"}, {digestColumn: "output_sha256", inlineColumn: "output"}},
-	"events":               {{digestColumn: "data_sha256", inlineColumn: "data"}},
-	"records":              {{digestColumn: "data_sha256", inlineColumn: "data"}},
+	"events":               {{digestColumn: "data_sha256", inlineColumn: "data", jsonSentinel: true}},
+	"records":              {{digestColumn: "data_sha256", inlineColumn: "data", jsonSentinel: true}},
+}
+
+func isSpilledInlineSentinel(payload []byte, mapping payloadDigestMapping) bool {
+	if mapping.jsonSentinel {
+		return bytes.Equal(payload, []byte("{}"))
+	}
+	return len(payload) == 0
 }
 
 func collectTrajectoryBlobs(ctx context.Context, tables []TrajectoryTableV1, blobs blobstore.Store) ([]TrajectoryBlobV1, error) {
@@ -295,12 +304,11 @@ func collectTrajectoryBlobs(ctx context.Context, tables []TrajectoryTableV1, blo
 					}
 					if present {
 						inlineDigest := sumHex(inline)
-						if len(inline) == 0 && inlineDigest != digest {
-							// Schema 21 leaves an empty sentinel after moving the payload to BlobStore.
-						} else if inlineDigest != digest {
-							return nil, fmt.Errorf("eval: inline payload %s.%s disagrees with stored digest", table.Name, mapping.inlineColumn)
-						} else {
+						if inlineDigest == digest {
 							continue
+						}
+						if !isSpilledInlineSentinel(inline, mapping) {
+							return nil, fmt.Errorf("eval: inline payload %s.%s disagrees with stored digest", table.Name, mapping.inlineColumn)
 						}
 					}
 				}
@@ -444,12 +452,12 @@ func validateTrajectoryPayloads(trajectory TrajectoryV1) error {
 					}
 					if present {
 						inlineDigest := sumHex(inline)
-						if len(inline) == 0 && inlineDigest != digest {
-							requiresBlob = true
-						} else if inlineDigest != digest {
-							return fmt.Errorf("eval: inline payload %s.%s disagrees with stored digest", table.Name, mapping.inlineColumn)
-						} else {
+						if inlineDigest == digest {
 							requiresBlob = false
+						} else if isSpilledInlineSentinel(inline, mapping) {
+							requiresBlob = true
+						} else {
+							return fmt.Errorf("eval: inline payload %s.%s disagrees with stored digest", table.Name, mapping.inlineColumn)
 						}
 					} else {
 						requiresBlob = true

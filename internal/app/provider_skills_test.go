@@ -136,13 +136,18 @@ func TestProviderRuntimeSkillResourceRequiresActivation(t *testing.T) {
 				}
 				writeProviderToolCall(writer, "resource-1", "read-before", "hydaelyn_read_skill_resource", `{"skill":"demo","path":"reference.txt"}`)
 			case 2:
+				if !strings.Contains(body, "is not active") || !strings.Contains(body, "demo") {
+					t.Errorf("inactive skill miss did not reach the model: %s", body)
+				}
+				writeProviderText(writer, "resource-blocked", "cannot read yet")
+			case 3:
 				if !strings.Contains(body, "DEMO_BODY_SECRET") {
-					t.Errorf("manually activated body missing from second request: %s", body)
+					t.Errorf("manually activated body missing from later request: %s", body)
 				}
 				writeProviderToolCall(writer, "resource-2", "read-after", "hydaelyn_read_skill_resource", `{"skill":"demo","path":"reference.txt"}`)
-			case 3:
+			case 4:
 				if !strings.Contains(body, fixture) {
-					t.Errorf("resource fixture missing from third request: %s", body)
+					t.Errorf("resource fixture missing from later request: %s", body)
 				}
 				writeProviderText(writer, "resource-3", "resource read")
 			default:
@@ -158,26 +163,7 @@ func TestProviderRuntimeSkillResourceRequiresActivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	for {
-		event, nextErr := harness.service.NextEvent(ctx)
-		if nextErr != nil {
-			t.Fatal(nextErr)
-		}
-		if event.RunID != blockedRunID {
-			continue
-		}
-		if event.Kind == EventRunFailed {
-			if !strings.Contains(event.Text, `skill "demo" is not active`) {
-				t.Fatalf("resource guard error = %q", event.Text)
-			}
-			break
-		}
-		if event.Kind == EventRunFinished || event.Kind == EventRunCancelled {
-			t.Fatalf("unactivated resource run ended as %s", event.Kind)
-		}
-	}
+	waitForProviderRun(t, harness.service, blockedRunID)
 	activeRunID, err := harness.service.StartConfiguredTurn(TurnRequest{
 		SessionID: "resource-active", Prompt: "read the reference", Provider: "chatgpt", Model: "gpt-skill",
 		Reasoning: "minimal", AgentMode: "single", ActiveSkills: []string{"demo"},
@@ -186,6 +172,68 @@ func TestProviderRuntimeSkillResourceRequiresActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForProviderRun(t, harness.service, activeRunID)
+	if harness.calls.Load() != 4 {
+		t.Fatalf("provider calls = %d, want 4", harness.calls.Load())
+	}
+}
+
+func TestProviderRuntimeSkillMDResourceDoesNotFailRun(t *testing.T) {
+	const fixture = "REFERENCE_FIXTURE"
+	var failedTool Event
+	harness := newSkillRuntimeHarness(
+		t,
+		"---\nname: demo\ndescription: demo catalog\n---\nDEMO_BODY_SECRET\n",
+		map[string]string{"reference.txt": fixture},
+		func(call int, body string, writer http.ResponseWriter) {
+			switch call {
+			case 1:
+				writeProviderToolCall(writer, "skill-md-1", "read-skill-md", "hydaelyn_read_skill_resource", `{"skill":"demo","path":"SKILL.md"}`)
+			case 2:
+				if !strings.Contains(body, "resource not found") || !strings.Contains(body, "SKILL.md") {
+					t.Errorf("SKILL.md miss did not reach the model: %s", body)
+				}
+				writeProviderToolCall(writer, "skill-md-2", "read-reference", "hydaelyn_read_skill_resource", `{"skill":"demo","path":"reference.txt"}`)
+			case 3:
+				if !strings.Contains(body, fixture) {
+					t.Errorf("declared resource missing after SKILL.md miss: %s", body)
+				}
+				writeProviderText(writer, "skill-md-3", "read the declared resource")
+			default:
+				t.Errorf("unexpected provider call %d", call)
+				writeProviderText(writer, "skill-md-extra", "unexpected")
+			}
+		},
+	)
+	runID, err := harness.service.StartConfiguredTurn(TurnRequest{
+		SessionID: "resource-skill-md", Prompt: "read the skill files", Provider: "chatgpt", Model: "gpt-skill",
+		Reasoning: "minimal", AgentMode: "single", ActiveSkills: []string{"demo"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		event, nextErr := harness.service.NextEvent(ctx)
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		if event.RunID != runID {
+			continue
+		}
+		if event.Kind == EventToolFinished && event.ToolCallID == "read-skill-md" {
+			failedTool = event
+		}
+		if event.Kind == EventRunFinished {
+			break
+		}
+		if event.Kind == EventRunFailed || event.Kind == EventRunCancelled {
+			t.Fatalf("SKILL.md resource miss ended the run as %s: %s", event.Kind, event.Text)
+		}
+	}
+	if failedTool.State != "failed" || !strings.Contains(failedTool.Text, "SKILL.md") {
+		t.Fatalf("SKILL.md tool finish = %#v", failedTool)
+	}
 	if harness.calls.Load() != 3 {
 		t.Fatalf("provider calls = %d, want 3", harness.calls.Load())
 	}

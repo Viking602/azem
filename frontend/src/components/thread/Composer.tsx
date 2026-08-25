@@ -1,20 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ArrowUp, Check, ChevronDown, CircleStop, Folder, GitBranch, HardDrive, Lightbulb, Plus, Search, WandSparkles, Zap,
+  Check, ChevronDown, Folder, GitBranch, HardDrive, Lightbulb, Plus, Search, WandSparkles,
 } from "lucide-react";
 import { execute, openProject, selectProjectFolder } from "../../bridge";
-import { contextOccupancy } from "../../contextUsage";
+import { contextCategoryLabel, contextComposition, contextOccupancy } from "../../contextUsage";
 import { tFormat, translator, type Language, type MessageKey } from "../../i18n";
 import { useRuntimeStore } from "../../store";
 import type { DeliveryMode } from "../../types";
 import AttachmentPreview from "../AttachmentPreview";
 import ComposerModelPicker from "../ComposerModelPicker";
+import usePressActivation from "../usePressActivation";
 import { ApprovalPicker } from "./ApprovalPicker";
-import { ContextMeter } from "./ContextMeter";
 import { namedClipboardImage, pastedImages, shouldReadNativeClipboard } from "./clipboard";
 import { effectiveComposerRoute, useComposerModels } from "./composerModels";
 import { parseSkillPrompt, slashSuggestions, type SlashSuggestion } from "./slash";
-import { PromptBar } from "../beautiful-ui/Primitives";
+import {
+  Composer as ComposerElement,
+  ComposerAttachButton,
+  ComposerAttachments,
+  ComposerBar,
+  ComposerContext,
+  ComposerMenu,
+  ComposerSend,
+  ComposerTextarea,
+  ComposerToolbar,
+  type ComposerUsage,
+} from "../elements/composer";
 
 export function composerPromptPlaceholder(
   t: (key: MessageKey) => string,
@@ -61,7 +72,6 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
   const approvalMode = useRuntimeStore((state) => state.approvalMode) || snapshot.approvalMode;
   const contextUsage = useRuntimeStore((state) => state.contextUsage);
   const contextProfile = useRuntimeStore((state) => state.contextProfile);
-  const setInspectorOpen = useRuntimeStore((state) => state.setInspectorOpen);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId) || snapshot.sessionId;
   const removeAttachment = useRuntimeStore((state) => state.removeAttachment);
   const setError = useRuntimeStore((state) => state.setError);
@@ -69,20 +79,33 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
   const setSettingsOpen = useRuntimeStore((state) => state.setSettingsOpen);
   const modelRoutes = useRuntimeStore((state) => state.modelRoutes);
   const slashMenu = useRef<HTMLDivElement>(null);
+  const attachmentInput = useRef<HTMLInputElement>(null);
+  const imeEndedAt = useRef(-Infinity);
   const [slashCursor, setSlashCursor] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const t = translator(snapshot.language);
   const composerRoute = effectiveComposerRoute(snapshot, planMode, modelRoutes);
-  const { modelChoices, reasoningLevels, selectedModel, selectedModelName, fastAvailable, changeModel, changeReasoning, changeSpeed } = useComposerModels(snapshot, composerRoute, planMode ? "plan" : "");
+  const { modelChoices, reasoningLevels, selectedModel, selectedModelName, selectedReasoning, fast, fastAvailable, changeModel, changeReasoning, changeSpeed } = useComposerModels(snapshot, composerRoute, planMode ? "plan" : "");
   const reasoningNames: Record<string, string> = {
+    default: snapshot.language === "zh-CN" ? "默认" : "Default",
+    none: snapshot.language === "zh-CN" ? "无思考" : "No reasoning",
     minimal: t("reasoningMinimal"), low: t("reasoningLow"), medium: t("reasoningMedium"),
     high: t("reasoningHigh"), xhigh: t("reasoningXHigh"), max: t("reasoningMax"), ultra: t("reasoningUltra"),
   };
   const approvalLabels: Record<string, string> = {
     prompt: t("promptApproval"), auto_review: t("autoReview"), yolo: t("yolo"),
   };
-  const selectedReasoningName = reasoningNames[composerRoute.reasoning] ?? composerRoute.reasoning;
+  const cursorSelected = composerRoute.provider === "cursor";
+  const selectedReasoningName = [
+    reasoningNames[selectedReasoning] ?? selectedReasoning,
+    fast ? "Fast" : "",
+  ].filter(Boolean).join(" · ");
+  const fastModeTitle = cursorSelected ? "Cursor Fast" : t("fastBoostTitle");
+  const fastModeDetail = cursorSelected
+    ? (snapshot.language === "zh-CN" ? "切换到当前档位对应的 Fast 变体" : "Use the matching Fast variant for this tier")
+    : t("fastBoostDetail");
   const contextPercent = contextOccupancy(contextUsage, contextProfile).percentage;
+  const assistantContextUsage = composerContextUsage(contextUsage, contextProfile, snapshot.language);
   const skillInvocation = parseSkillPrompt(prompt, snapshot.language);
   const selectedSkill = skillInvocation
     ? skills.find((skill) => !skill.disabled && skill.name.toLowerCase() === skillInvocation.name.toLowerCase())
@@ -137,7 +160,6 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
         case "fast": changeSpeed(snapshot.chatgptFastMode ? "standard" : "fast"); break;
         case "reasoning": cycleReasoning(); break;
         case "mcp": await execute({ kind: "refresh_mcp" }); break;
-        case "inspector": setView("thread"); setInspectorOpen(true); break;
       }
     };
     void run().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
@@ -149,10 +171,10 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
   const submitOrChooseSlash = (modeOverride?: DeliveryMode) => slashOpen ? chooseCurrentSlash() : submit(modeOverride);
 
   return (
-    <div className="composer-shell">
-      <PromptBar className="composer-card">
+    <ComposerElement className="composer-shell max-w-none">
+      <ComposerBar className="composer-card gap-0 p-0">
         {showContextBar ? <ComposerContextBar /> : null}
-        {slashOpen && <div id="slash-menu" ref={slashMenu} className="slash-menu" role="listbox" aria-label={t("slashCommands")}>
+        {slashOpen && <ComposerMenu open id="slash-menu" ref={slashMenu} className="slash-menu" role="listbox" aria-label={t("slashCommands")}>
           {commandItems.length > 0 && <section className="slash-commands">
             {commandItems.map(({ item, index }) => {
               const Icon = item.icon;
@@ -174,10 +196,10 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
               ><Icon size={15} /><span className="slash-skill-main"><span className="slash-label">{item.label}</span><span className="slash-detail">{item.detail}</span></span>{item.badge && <em className="slash-badge">{item.badge}</em>}</button>;
             })}
           </section>}
-        </div>}
+        </ComposerMenu>}
         {selectedSkill && <div className="composer-skill"><WandSparkles size={17} aria-hidden="true" /><span>{selectedSkill.name}</span></div>}
-        {attachments.length > 0 && <div className="attachment-row">{attachments.map((item) => <AttachmentPreview key={item.id} attachment={item} sessionId={currentSessionId} language={snapshot.language} variant="composer" onRemove={() => removeAttachment(item.id)} />)}</div>}
-        <textarea id="azem-composer" value={visiblePrompt} onChange={(event) => setPrompt(skillPrefix + event.target.value)} onPaste={(event) => {
+        {attachments.length > 0 && <ComposerAttachments className="attachment-row">{attachments.map((item) => <AttachmentPreview key={item.id} attachment={item} sessionId={currentSessionId} language={snapshot.language} variant="composer" onRemove={() => removeAttachment(item.id)} />)}</ComposerAttachments>}
+        <ComposerTextarea id="azem-composer" value={visiblePrompt} onChange={(event) => setPrompt(skillPrefix + event.target.value)} onPaste={(event) => {
           const images = pastedImages(event.clipboardData);
           if (images.length > 0) {
             event.preventDefault();
@@ -190,7 +212,10 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
           void attachClipboard([]);
         }} onFocus={() => setSlashDismissed(false)} onBlur={() => setSlashDismissed(true)}
           aria-autocomplete="list" aria-expanded={slashOpen} aria-controls={slashOpen ? "slash-menu" : undefined} aria-activedescendant={slashOpen ? `slash-option-${slashCursor}` : undefined}
-          placeholder={composerPromptPlaceholder(t, { busy, running, deliveryMode, showContextBar, language: snapshot.language })} rows={2} onKeyDown={(event) => {
+          placeholder={composerPromptPlaceholder(t, { busy, running, deliveryMode, showContextBar, language: snapshot.language })} rows={2} onCompositionEnd={(event) => { imeEndedAt.current = event.timeStamp; }} onKeyDown={(event) => {
+          // WebKit/WKWebView 下选字确认的回车，keydown 在 compositionend 之后触发且 isComposing 已复位，
+          // 只能按时间窗补判：紧随组合结束的这一次 Enter 属于同一次按键，人手连按远慢于此间隔。
+          if (event.nativeEvent.isComposing || event.timeStamp - imeEndedAt.current < 100) return;
           if (selectedSkill && event.key === "Backspace" && !visiblePrompt) {
             event.preventDefault();
             setPrompt("");
@@ -204,7 +229,6 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
             else chooseCurrentSlash();
             return;
           }
-          if (event.nativeEvent.isComposing) return;
           // Codex-style one-shot inversion: Cmd/Ctrl+Shift+Enter uses the opposite active-run mode.
           if (running && event.key === "Enter" && event.shiftKey && (event.metaKey || event.ctrlKey) && !event.altKey) {
             event.preventDefault();
@@ -217,11 +241,9 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
             submitOrChooseSlash();
           }
         }} />
-        <div className="composer-toolbar">
-          <label className="icon-button attach-button" aria-label={t("attach")}>
-            <Plus size={15} />
-            <input type="file" accept="image/*" multiple onChange={(event) => { attach(event.target.files); event.target.value = ""; }} />
-          </label>
+        <ComposerToolbar className="composer-toolbar">
+          <ComposerAttachButton onClick={() => attachmentInput.current?.click()} aria-label={t("attach")} />
+          <input ref={attachmentInput} type="file" accept="image/*" multiple hidden onChange={(event) => { attach(event.target.files); event.target.value = ""; }} />
           <ApprovalPicker value={approvalMode} disabled={running} language={snapshot.language} onChange={(mode) => void execute({ kind: "set_approval_mode", target: mode }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))} />
           <button
             type="button"
@@ -236,29 +258,45 @@ export function Composer({ prompt, setPrompt, submit, attach, attachClipboard, a
             <span>{t("planLabel")}</span>
           </button>
           <span className="toolbar-spacer" />
-          <ContextMeter />
-          {fastAvailable ? <span className={`composer-fast-mode ${snapshot.chatgptFastMode ? "active" : ""}`}>
-            <button
-              type="button"
-              aria-label={snapshot.language === "zh-CN" ? "Fast 模式" : "Fast mode"}
-              aria-pressed={snapshot.chatgptFastMode}
-              disabled={running}
-              onClick={() => changeSpeed(snapshot.chatgptFastMode ? "standard" : "fast")}
-            ><Zap size={15} /></button>
-            <span role="tooltip"><strong>{t("fastBoostTitle")}</strong><small>{t("fastBoostDetail")}</small></span>
-          </span> : null}
+          <ComposerContext usage={assistantContextUsage} label={t("contextComposition")} totalLabel={t("quotaTotal")} className="composer-context-element" />
           <ComposerModelPicker
             running={running} models={modelChoices} selectedModel={selectedModel} selectedModelName={selectedModelName} selectedProvider={composerRoute.provider}
-            reasoningLevels={reasoningLevels} selectedReasoning={composerRoute.reasoning} selectedReasoningName={selectedReasoningName}
-            fast={snapshot.chatgptFastMode} fastAvailable={fastAvailable} reasoningNames={reasoningNames} onModelChange={changeModel} onReasoningChange={changeReasoning} onSpeedChange={changeSpeed}
+            reasoningLevels={reasoningLevels} selectedReasoning={selectedReasoning} selectedReasoningName={selectedReasoningName}
+            fast={fast} fastAvailable={fastAvailable} reasoningNames={reasoningNames} onModelChange={changeModel} onReasoningChange={changeReasoning} onSpeedChange={changeSpeed}
             fasterLabel={t("reasoningFaster")} smarterLabel={t("reasoningSmarter")}
-            highCostHint={t("reasoningMaxHint")} fastBoostTitle={t("fastBoostTitle")} fastBoostDetail={t("fastBoostDetail")} language={snapshot.language}
+            highCostHint={t("reasoningMaxHint")} fastBoostTitle={fastModeTitle} fastBoostDetail={fastModeDetail} language={snapshot.language}
           />
-          {showCancel ? <button className="cancel-button" data-cancel-run onClick={cancel} aria-label={t("cancel")}><CircleStop size={16} /></button> : <button className="send-button" onClick={() => submitOrChooseSlash()} disabled={!prompt.trim() && attachments.length === 0} aria-label={busy ? running && deliveryMode === "guide" ? t("guide") : t("queue") : t("send")}><ArrowUp size={17} strokeWidth={2.25} /></button>}
-        </div>
-      </PromptBar>
-    </div>
+          <ComposerSend
+            streaming={showCancel}
+            idle={!prompt.trim() && attachments.length === 0}
+            className={showCancel ? "cancel-button" : "send-button"}
+            data-cancel-run={showCancel || undefined}
+            onClick={showCancel ? cancel : () => submitOrChooseSlash()}
+            disabled={!showCancel && !prompt.trim() && attachments.length === 0}
+            aria-label={showCancel ? t("cancel") : busy ? running && deliveryMode === "guide" ? t("guide") : t("queue") : t("send")}
+          />
+        </ComposerToolbar>
+      </ComposerBar>
+    </ComposerElement>
   );
+}
+
+export function composerContextUsage(
+  usage: Parameters<typeof contextComposition>[0],
+  profile: Parameters<typeof contextComposition>[1],
+  language: Language,
+): ComposerUsage {
+  const occupancy = contextOccupancy(usage, profile);
+  const composition = contextComposition(usage, profile);
+  return {
+    segments: composition.groups.map((group, index) => ({
+      key: group.category,
+      label: contextCategoryLabel(group.category, language),
+      tokens: group.tokens,
+      tone: group.category === "current_output" ? "secondary" : index === 0 ? "primary" : "tertiary",
+    })),
+    total: occupancy.limit,
+  };
 }
 
 function workspaceBasename(path: string) {
@@ -284,6 +322,16 @@ function ComposerContextBar() {
   const branchMenu = useRef<HTMLDetailsElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const createRef = useRef<HTMLInputElement>(null);
+  const closeBranchMenu = useCallback(() => {
+    if (branchMenu.current) branchMenu.current.open = false;
+    setQuery("");
+    setCreating(false);
+    setNewBranch("");
+  }, []);
+  const toggleBranchMenu = useCallback(() => {
+    if (branchMenu.current) branchMenu.current.open = !branchMenu.current.open;
+  }, []);
+  const branchPressActivation = usePressActivation<HTMLElement>(toggleBranchMenu);
 
   const updateBranchLayout = useCallback(() => {
     const node = branchMenu.current;
@@ -302,14 +350,15 @@ function ComposerContextBar() {
     const close = (event: PointerEvent) => {
       const node = branchMenu.current;
       if (!node?.open || node.contains(event.target as Node)) return;
-      node.open = false;
-      setQuery("");
-      setCreating(false);
-      setNewBranch("");
+      closeBranchMenu();
     };
     document.addEventListener("pointerdown", close, true);
-    return () => document.removeEventListener("pointerdown", close, true);
-  }, []);
+    window.addEventListener("blur", closeBranchMenu);
+    return () => {
+      document.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("blur", closeBranchMenu);
+    };
+  }, [closeBranchMenu]);
 
   useEffect(() => {
     const node = branchMenu.current;
@@ -358,15 +407,17 @@ function ComposerContextBar() {
   };
 
   const switchBranch = async (name: string, confirmDirty = false) => {
-    if (!name || name === currentBranch) return;
+    if (!name || name === currentBranch) {
+      closeBranchMenu();
+      return;
+    }
     try {
       await execute({
         kind: "switch_git_branch",
         target: name,
         decision: confirmDirty ? "confirm_dirty" : undefined,
       });
-      if (branchMenu.current) branchMenu.current.open = false;
-      setQuery("");
+      closeBranchMenu();
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       if (!confirmDirty && /uncommitted changes/i.test(message)) {
@@ -384,10 +435,7 @@ function ComposerContextBar() {
     setCreatingBusy(true);
     try {
       await execute({ kind: "create_git_branch", target: name });
-      if (branchMenu.current) branchMenu.current.open = false;
-      setCreating(false);
-      setNewBranch("");
-      setQuery("");
+      closeBranchMenu();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -407,7 +455,14 @@ function ComposerContextBar() {
       </span>
       {branches.length > 0 ? (
         <details ref={branchMenu} className="composer-branch-menu">
-          <summary className="composer-chip composer-chip-action">
+          <summary
+            className="composer-chip composer-chip-action"
+            {...branchPressActivation}
+            onClick={(event) => {
+              event.preventDefault();
+              branchPressActivation.onClick(event);
+            }}
+          >
             <GitBranch size={13} />
             <span>{currentBranch || t("branch")}</span>
             <ChevronDown size={11} />

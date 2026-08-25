@@ -1,6 +1,6 @@
 # Provider Streaming
 
-Last verified: 2026-08-15
+Last verified: 2026-08-24
 
 Azem normalizes every provider into Venat's `provider.Driver` contract. The
 application runtime owns provider/model selection, retries, usage persistence,
@@ -13,16 +13,64 @@ parsing.
 |---|---|
 | `chatgpt` | Existing Codex Responses subscription driver |
 | `grok` | Existing xAI API or CLI-proxy subscription driver |
-| llmux profile IDs | `internal/provider/llmux`, backed by llmux v0.2.4 |
+| `cursor` | Oh My Pi-compatible `api2.cursor.sh` Connect protobuf agent driver |
+| llmux profile IDs | `internal/provider/llmux`, backed by llmux v0.3.1 |
+
+Cursor still advertises Azem tools as MCP definitions. Composer also emits
+built-in execs (`read`/`shell`/`write`/`delete`/`grep`/`ls` and `pi_*`
+aliases) on the open `AgentService/Run` stream. The driver answers
+`request_context` on that same stream and maps those execs onto the
+global coding tools: `coding.read_file`, `coding.shell`,
+`coding.write_file`, `coding.search`, `coding.list_files`,
+`coding.glob`, `coding.replace`, and `coding.delete_file`. Existing-file
+writes are rewritten to `coding.edit_hashline`. Hashline remains the
+default edit path. Results are typed `ExecClientMessage`s plus
+`stream_close`. Native execs use the same approval-aware governed drivers as
+ordinary Venat tools, persist start/result records and file observations, and
+project live tool events. Resolved native calls are also carried in Cursor
+provider state so a restart rebuilds the exact call/result pairs. Server-owned
+Todo completion snapshots replace the durable Cursor phase. Unmapped execs
+(`fetch`, `diagnostics`, and others) return a typed reject or throw and never
+become Venat `EventToolCall`s.
+Cursor binds `conversation_id` to the existing logical prompt-cache key:
+the main session ID, one key per Team role, one key per subagent run, and
+operation-scoped keys for title, recap, and vision requests. Local checkpoint
+and blob state is additionally scoped by Cursor account. A runtime-owned
+conversation cache retains that state across short-lived provider-driver
+instances. Each request rebuilds `root_prompt_messages_json` and `turns` from
+canonical Venat history while preserving checkpoint-owned todos, file state,
+summaries, and other non-history fields when the leading system prompt is
+unchanged.
+
+Only the active non-private user message becomes `user_message_action`.
+Private hook, historical, vision, Todo, and deadline tail messages keep their
+relative order in root immediately before that action. The same normalization
+is replayed when the turn becomes history, so appending the next turn does not
+rewrite the prior wire prefix. A trailing assistant or tool result uses
+`resume_action`. The KV bridge handles both `get_blob` and `set_blob`.
+Image-capable Cursor routes receive validated text-plus-image or image-only
+messages through the shared trusted attachment loader. Kimi K3 reasoning is
+replayed only when the source provider state identifies the same Cursor model.
+Connect frames, protobuf lengths, server-set blobs, decoded field counts,
+aggregate decoded bytes, and nested protobuf Value depth are bounded before
+state is committed or provider-controlled values become Go maps/slices. A
+per-conversation `resource_exhausted` rotates the wire ID once while retaining
+the validated checkpoint.
+Cursor token deltas count as output, while checkpoint `used_tokens` feed
+context-pressure decisions without being recorded as billable input. Cursor
+controls prompt caching automatically but does not report cache-read tokens,
+so the Inspector shows **Not reported**, never a fabricated 0% hit rate.
+Changing the advertised coding tools or the Cursor wire version resets the
+Cursor cache identity once; later turns extend the stable root prefix.
 
 The llmux adapter supports its native OpenAI, Anthropic, Google, Mistral,
-Cohere, and xAI providers plus its OpenAI-compatible registry. ChatGPT and Grok
+Cohere, and xAI providers plus its OpenAI-compatible registry. ChatGPT, Grok, and Cursor
 IDs remain reserved so an existing subscription configuration cannot silently
 change authentication or protocol.
 
 Those reserved subscription transports still appear in desktop Model settings
-as login cards. Their actions call the existing ChatGPT browser OAuth and Grok
-device authorization flows; successful login refreshes the authenticated model
+as login cards. Their actions call ChatGPT browser OAuth, Grok device authorization,
+or Cursor's `loginDeepControl` poll; successful login refreshes the authenticated model
 catalog, while logout removes the active account projection.
 
 The desktop catalog loads provider profiles in 24-item batches as its directory
@@ -33,7 +81,8 @@ falling through to OpenAI Chat Completions.
 
 After a provider is enabled, Model settings can call its authenticated model
 listing endpoint. OpenAI-compatible, Anthropic, Google, Cohere, Mistral, and
-xAI shapes are normalized into the shared catalog. Pagination is bounded to 20
+xAI shapes are normalized into the shared catalog. Cursor lists models through
+`GetUsableModels` rather than REST `/v1/models`. Pagination is bounded to 20
 pages and response bodies to 8 MiB. A successful API list is matched against
 the public `https://models.dev/api.json` catalog by provider ID, model ID,
 slug, aliases, vendor-qualified ID, and canonical model family. The same
@@ -42,6 +91,47 @@ descriptions, token limits, input/output modalities, tool use, structured
 output, and advertised reasoning-effort values. The picker displays the
 models.dev name while requests retain the provider's actual model ID. API keys
 are sent only to the configured provider endpoint and never to models.dev.
+
+Grok OAuth treats the provider response as an availability overlay, not the
+complete product catalog. Azem keeps the same nine chat-capable curated models
+as the current Oh My Pi catalog, overlays live rows, injects missing curated
+rows, and removes image, speech, and voice-only IDs from the chat picker.
+Provider-specific reasoning policy is applied both when fresh rows are saved
+and when legacy SQLite rows are loaded, so a restart cannot temporarily remove
+the Grok 4.5/4.6 effort control while a background refresh is pending.
+
+`GetUsableModels` does not publish a context-window field. Cursor metadata
+therefore follows the protocol signals used by Oh My Pi: a `1M` display label,
+native Kimi K3 or GLM 5.2+ identity, or Claude/Gemini `max_mode` raises the
+effective window to 1,000,000 tokens; other unknown rows stay at 200,000.
+Azem preserves Cursor's returned `max_mode` bit and writes it to both
+`ModelDetails.max_mode` and `RequestedModel.max_mode`. Model IDs that encode
+`none`/`low`/`medium`/`high`/`xhigh`/`max` remain the wire source of truth.
+Desktop composer and route pickers collapse every tier/Thinking/Fast sibling
+into one base-model row. Thinking is implicit: when a family exposes a
+same-tier Thinking variant, selection, tier changes, and Fast changes use that
+raw ID by default. Families without Thinking variants continue to use standard
+IDs. The UI exposes only reasoning depth and optional Fast controls; there is
+no separate Thinking label or toggle. Provider settings list one family row.
+Availability remains an atomic write of that family's raw IDs.
+
+The family row reports how many enabled raw variants it contains and keeps
+every raw ID as a search alias, so folding does not make inventory invisible.
+The authenticated account's `GetUsableModels` response is authoritative.
+Azem does not inject legacy static OMP rows that the account endpoint omitted,
+because selecting one could fail at request time.
+Authentication, network, protobuf/decode, and empty-response failures are not
+converted into bundled rows. The catalog service may retain the last successful
+account-scoped result and surface it explicitly as stale; a failed refresh
+never becomes fresh model authority.
+
+Cursor marks retention exceptions with `(NO ZDR)`. Azem removes that acronym
+from the primary model name and shows a localized retention warning instead.
+It means the model does not have a zero-data-retention guarantee; inputs and
+outputs may be retained under Cursor or the upstream provider's policy. Cursor
+documents Claude Fable 5 specifically as a retained-data model used for
+automated and human harm-prevention review:
+<https://prod.cursor.com/docs/enterprise/privacy-and-data-governance#models-with-data-retention>.
 
 ## Request mapping
 
@@ -103,6 +193,17 @@ normalizes them into Azem's inclusive input total and treats a reported zero as
 a real zero-percent hit rather than an unsupported metric. Encrypted or opaque
 provider continuation state is returned to the runtime without exposing it as
 visible text.
+
+Some OpenAI Responses-compatible streams expose one logical tool call first
+with a provisional `item_id` such as `fc_tmp_*`, then with the final
+`call_id`. llmux v0.2.5 owns this protocol boundary: it correlates output
+indexes, item IDs, canonical call IDs, raw/prefixed aliases, and custom-tool
+inputs before emitting one executable call. The same release makes duplicate
+terminal frames idempotent across Chat Completions, Anthropic, Bedrock, Cohere,
+and Google, fails closed on conflicting identity reuse or post-terminal calls,
+and bounds SSE frames plus per-stream tool identity state. Azem now forwards
+the canonical llmux tool event directly; it does not maintain a second local
+deduplication path and never suppresses a legitimate later model turn.
 
 ## UI projection backpressure
 
@@ -196,6 +297,27 @@ a retry cause is known. Consumers use the code for presentation only — the
 desktop titles the failure block from the code and the block keeps the
 original error text — while Venat remains the single retry owner;
 `errcode.Retryable` is UI guidance, never a runtime retry decision.
+
+## Portable provider contract
+
+Azem pins Venat v0.15.4 and llmux v0.3.1. The shared contract preserves
+commentary/final text phase, terminal state, distinct length/error stop reasons,
+reported usage flags, cache reads/writes, sources, files, warnings, portable
+modality metadata, and provider compatibility descriptors. Tool argument
+objects are duplicate-key checked before approval or execution.
+
+llmux protocol parsers own provisional/canonical tool identity correlation and
+at-most-once finalization. Azem forwards canonical calls and never deduplicates
+across streams or model turns. Venat remains the only retry owner and rejects
+duplicate tool registrations, invalid arguments, or post-terminal frames.
+
+Cross-repository release verification is:
+
+```bash
+(cd ../llmux && GOWORK=off go test ./...)
+(cd ../venat && GOWORK=off go test ./...)
+GOWORK=off go test ./internal/provider/... ./internal/auth/...
+```
 
 ## Verification
 

@@ -119,6 +119,14 @@ func (s *Service) ProviderRunHasUncheckpointedCompletion(ctx context.Context, se
 	return count > 0, err
 }
 
+func (s *Service) GoalTokenUsageSnapshot(ctx context.Context, sessionID, runID string) (int, error) {
+	usage, err := s.aggregateUsage(ctx, sessionID, `AND request_kind='main' AND run_id=?`, runID)
+	if err != nil {
+		return 0, err
+	}
+	return max(0, usage.reportedInput-usage.cached) + usage.write + usage.output, nil
+}
+
 // ProviderUsageSnapshot derives all cache KPIs from persisted facts.
 func (s *Service) ProviderUsageSnapshot(ctx context.Context, sessionID, runID string) (Usage, error) {
 	p, err := s.LoadProjection(ctx, sessionID)

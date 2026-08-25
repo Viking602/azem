@@ -1,8 +1,8 @@
 import { Children, cloneElement, isValidElement, memo, useMemo, useRef, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { CodeBlock, parseCodeFenceInfo } from "./beautiful-ui/CodeBlock";
-import { syntaxTokens } from "./CodeDiff";
+import { CodeBlock, parseCodeFenceInfo } from "./assistant-ui/CodeBlock";
+import { syntaxTokens } from "./syntaxTokens";
 import { translator } from "../i18n";
 import { useRuntimeStore } from "../store";
 
@@ -10,7 +10,10 @@ import { useRuntimeStore } from "../store";
 // only children/components change, so the plugin array must never be recreated.
 const GFM_PLUGINS: ComponentProps<typeof ReactMarkdown>["remarkPlugins"] = [remarkGfm, attachCodeFenceInfo];
 
-export type StreamingRevealRange = { id: number; start: number; end: number };
+export type StreamingRevealRange = { id: number; start: number; end: number; bornAt?: number };
+
+export const STREAM_REVEAL_MS = 260;
+export const MAX_LIVE_REVEAL_RANGES = 8;
 
 export function sameRevealRanges(
   left: readonly StreamingRevealRange[],
@@ -22,10 +25,24 @@ export function sameRevealRanges(
   });
 }
 
-/** Only the newest provider range may carry enter motion. Older ranges stay settled text. */
-export function liveRevealRanges(ranges: readonly StreamingRevealRange[]): StreamingRevealRange[] {
+/** Newest unsettled increments may still be sharpening. Expired and older siblings stay plain text. */
+export function liveRevealRanges(
+  ranges: readonly StreamingRevealRange[],
+  now = Date.now(),
+): StreamingRevealRange[] {
   if (!ranges.length) return [];
-  return [ranges.reduce((latest, range) => range.id >= latest.id ? range : latest)];
+  return [...ranges]
+    .sort((left, right) => left.id - right.id)
+    .slice(-MAX_LIVE_REVEAL_RANGES)
+    .filter((range) => now - (range.bornAt ?? now) < STREAM_REVEAL_MS)
+    .sort((left, right) => left.start - right.start);
+}
+
+function revealResumeStyle(range: StreamingRevealRange, now: number): { animationDelay: string } | undefined {
+  if (range.bornAt === undefined) return undefined;
+  const elapsed = now - range.bornAt;
+  if (elapsed <= 0) return undefined;
+  return { animationDelay: `-${elapsed}ms` };
 }
 
 type MarkdownSyntaxNode = {
@@ -38,11 +55,11 @@ type MarkdownSyntaxNode = {
   data?: { hName?: string; hProperties?: Record<string, unknown> };
 };
 
-function wrapStreamingRanges(parent: MarkdownSyntaxNode, ranges: readonly StreamingRevealRange[]) {
+function wrapStreamingRanges(parent: MarkdownSyntaxNode, ranges: readonly StreamingRevealRange[], now: number) {
   if (!parent.children) return;
   parent.children = parent.children.flatMap((child) => {
     if (child.children) {
-      wrapStreamingRanges(child, ranges);
+      wrapStreamingRanges(child, ranges, now);
       return [child];
     }
     const start = child.position?.start?.offset;
@@ -67,6 +84,7 @@ function wrapStreamingRanges(parent: MarkdownSyntaxNode, ranges: readonly Stream
             ...child.data?.hProperties,
             className: ["streaming-text-reveal"],
             "data-stream-reveal": String(range.id),
+            style: revealResumeStyle(range, now),
           },
         },
       });
@@ -78,9 +96,11 @@ function wrapStreamingRanges(parent: MarkdownSyntaxNode, ranges: readonly Stream
 }
 
 function streamingRevealPlugin(ranges: readonly StreamingRevealRange[]) {
-  const live = liveRevealRanges(ranges);
-  return () => (tree: MarkdownSyntaxNode) => wrapStreamingRanges(tree, live);
+  const now = Date.now();
+  const live = liveRevealRanges(ranges, now);
+  return () => (tree: MarkdownSyntaxNode) => wrapStreamingRanges(tree, live, now);
 }
+
 
 function visitMarkdown(node: MarkdownSyntaxNode, visit: (node: MarkdownSyntaxNode) => void) {
   visit(node);
@@ -176,11 +196,11 @@ export const Markdown = memo(MarkdownBase, (previous, next) =>
 );
 
 /**
- * Renders the current Markdown structure immediately while marking only the
- * newest provider range for a short visual reveal. Earlier ranges stay as
- * ordinary text in the same Markdown tree, so already-written lines do not
- * replay enter motion when the source grows. Memoized so a just-settled live
- * tree is not remounted or re-parsed.
+ * Renders the current Markdown structure immediately while marking the
+ * newest unsettled increments for a short visual reveal. Expired ranges stay
+ * ordinary text in the same Markdown tree. In-flight spans resume via a
+ * negative animation-delay so reparse cannot replay enter motion. Memoized
+ * so a just-settled live tree is not remounted or re-parsed.
  */
 function StreamingMarkdownView({ children, ranges }: { children: string; ranges: readonly StreamingRevealRange[] }) {
   const stableRanges = useRef(ranges);

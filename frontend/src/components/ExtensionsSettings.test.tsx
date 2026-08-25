@@ -1,7 +1,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { listHookCatalog } from "../bridge";
+import { listHookCatalog, listMarketplaceCatalog } from "../bridge";
 import { useRuntimeStore } from "../store";
 import type { ActionRequest } from "../types";
 import ExtensionsSettings from "./ExtensionsSettings";
@@ -11,6 +11,13 @@ vi.mock("../bridge", () => ({
 	listHookCatalog: vi.fn(() => Promise.resolve({
 		enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [],
 	})),
+	listMarketplaceCatalog: vi.fn(() => Promise.resolve({
+		marketplaces: [{ name: "official", source: "owner/repo", type: "github", cachePath: "/cache", updatedAt: "2026-08-23T00:00:00Z" }],
+		available: [{ id: "review@official", name: "review", marketplace: "official", version: "1.2.0", description: "Review repositories", category: "development", homepage: "https://example.com/review", license: "MIT", keywords: ["review"], tags: ["quality"] }],
+		installed: [],
+		upgrades: [],
+	})),
+	openExternalURL: vi.fn(() => Promise.resolve()),
 }));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -56,7 +63,7 @@ describe("ExtensionsSettings", () => {
     expect(view.host.querySelector('.mcp-server-icon img[src^="data:image/png;base64,"]')).not.toBeNull();
     expect(view.host.textContent).toContain("3 个工具");
 		const tabs = view.host.querySelectorAll<HTMLButtonElement>('.extension-tabbar [role="tab"]');
-		expect(tabs).toHaveLength(4);
+		expect(tabs).toHaveLength(5);
 		expect(tabs[0]?.textContent).toContain("1/1");
 		expect(tabs[0]?.querySelector("em")?.getAttribute("title")).toBeNull();
 		expect(tabs[0]?.getAttribute("aria-label")).toContain("已连接 MCP");
@@ -419,6 +426,60 @@ describe("ExtensionsSettings", () => {
 		expect(view.host.textContent).toContain("config write failed");
 		expect(view.host.querySelector('[role="alertdialog"]')).not.toBeNull();
 		expect(view.host.querySelector<HTMLButtonElement>(".hook-trust-confirm")?.disabled).toBe(false);
+	});
+
+	it("browses marketplace catalogs and installs into the selected scope", async () => {
+		useRuntimeStore.setState({
+			mcpServers: [], skills: [], plugins: [],
+			marketplaceCatalog: { marketplaces: [], available: [], installed: [], upgrades: [] },
+		});
+		const executeAction = vi.fn(async (_request: ActionRequest) => undefined);
+		const view = renderSettings(executeAction);
+		await view.render();
+		const marketplace = Array.from(view.host.querySelectorAll<HTMLButtonElement>('.extension-tabbar [role="tab"]')).find((button) => button.textContent?.includes("市场"))!;
+		await act(async () => marketplace.click());
+		await act(async () => {
+			await vi.waitFor(() => expect(useRuntimeStore.getState().marketplaceCatalog.available).toHaveLength(1));
+		});
+
+		expect(listMarketplaceCatalog).toHaveBeenCalled();
+		expect(view.host.textContent).toContain("official");
+		expect(view.host.textContent).toContain("Review repositories");
+		const scope = view.host.querySelector<HTMLSelectElement>(".marketplace-scope select")!;
+		await act(async () => {
+			scope.value = "project";
+			scope.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		const install = view.host.querySelector<HTMLButtonElement>(".marketplace-install")!;
+		await act(async () => { install.click(); await Promise.resolve(); });
+		expect(executeAction).toHaveBeenCalledWith(expect.objectContaining({
+			kind: "marketplace_install", target: "review@official", decision: "project", sessionId: "session-1",
+		}));
+	});
+
+	it("keeps a marketplace source draft when the backend rejects the add", async () => {
+		useRuntimeStore.setState({
+			mcpServers: [], skills: [], plugins: [],
+			marketplaceCatalog: { marketplaces: [], available: [], installed: [], upgrades: [] },
+		});
+		const executeAction = vi.fn(async (request: ActionRequest) => {
+			if (request.kind === "marketplace_add") throw new Error("catalog add failed");
+		});
+		const view = renderSettings(executeAction);
+		await view.render();
+		const marketplace = Array.from(view.host.querySelectorAll<HTMLButtonElement>('.extension-tabbar [role="tab"]')).find((button) => button.textContent?.includes("市场"))!;
+		await act(async () => marketplace.click());
+		await act(async () => {
+			await vi.waitFor(() => expect(useRuntimeStore.getState().marketplaceCatalog.available).toHaveLength(1));
+		});
+		const input = view.host.querySelector<HTMLInputElement>(".marketplace-source-form input")!;
+		await setInput(input, "owner/rejected");
+		await act(async () => {
+			view.host.querySelector<HTMLFormElement>(".marketplace-source-form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+			await Promise.resolve();
+		});
+		expect(input.value).toBe("owner/rejected");
+		expect(view.host.querySelector('[role="alert"]')?.textContent).toContain("catalog add failed");
 	});
 });
 

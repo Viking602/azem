@@ -71,7 +71,7 @@ export function reduceSessionEvent(next: RuntimeData, event: RuntimeEvent): void
         next.contextProfile = null;
 		const contextLimit = findModelOption(next.modelsByProvider[data.provider] ?? [], data.model)?.contextWindow ?? 0;
         next.contextUsage = parseContextUsage(data.usage, contextLimit);
-        if ((data.provider === "chatgpt" || data.provider === "grok") && contextLimit > 0) {
+        if ((data.provider === "chatgpt" || data.provider === "grok" || data.provider === "cursor") && contextLimit > 0) {
           next.contextUsage.contextLimit = contextLimit;
         }
       }

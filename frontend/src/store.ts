@@ -3,7 +3,6 @@ import { translator } from "./i18n";
 import type {
   Attachment,
   DeliveryMode,
-  InspectorTab,
   PullRequestDashboard,
   PullRequestDetailResponse,
   PullRequestMonitorState,
@@ -27,6 +26,7 @@ import { hydrateData } from "./store/hydrate";
 import { reduceAgentEvent } from "./store/reduceAgents";
 import { reduceCatalogEvent } from "./store/reduceCatalog";
 import { reduceRunEvent } from "./store/reduceRun";
+import { reduceSecurityEvent } from "./store/reduceSecurity";
 import { reduceSessionEvent } from "./store/reduceSession";
 import { reduceTextEvent } from "./store/reduceText";
 import { reduceToolEvent } from "./store/reduceTools";
@@ -48,8 +48,6 @@ interface RuntimeActions {
   applyEvents: (events: RuntimeEvent[]) => void;
   setView: (view: View) => void;
   startLocalDraft: () => void;
-  setInspectorTab: (tab: InspectorTab) => void;
-  setInspectorOpen: (open: boolean) => void;
   selectAgent: (agentId: string) => void;
   setSettingsOpen: (open: boolean, target?: SettingsSearchTarget) => void;
   setCommandOpen: (open: boolean) => void;
@@ -103,6 +101,8 @@ const initialData: RuntimeData = {
   skills: [],
   mcpServers: [],
   plugins: [],
+  marketplaceCatalog: { marketplaces: [], available: [], installed: [], upgrades: [] },
+  extensionThemes: [],
   hookCatalog: { enabled: true, trustHooks: false, sources: [], commands: [], diagnostics: [] },
   usageReport: null,
   branches: [],
@@ -120,6 +120,17 @@ const initialData: RuntimeData = {
   contextUsage: emptyContextUsage(),
   todo: null,
   recap: null,
+  securityScans: [],
+  securityConfig: null,
+  securityScansLoaded: false,
+  securityProjection: null,
+  securityProjections: {},
+  securityFindings: [],
+  selectedSecurityFinding: null,
+  securityPatch: null,
+  securityFindingsByScan: {},
+  securityExportPath: "",
+  securityPublication: null,
   recovery: [],
   runId: "",
   running: false,
@@ -135,8 +146,6 @@ const initialData: RuntimeData = {
   lastSequence: 0,
   error: "",
   view: "thread",
-  inspectorTab: "environment",
-  inspectorOpen: true,
   settingsOpen: false,
   settingsTarget: null,
   commandOpen: false,
@@ -181,13 +190,10 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
     pullRequestDetail: null,
     view: "thread",
   }),
-  setInspectorTab: (inspectorTab) => set({ inspectorTab, inspectorOpen: true }),
-  setInspectorOpen: (inspectorOpen) => set({ inspectorOpen }),
   selectAgent: (selectedAgentId) => set((state) => ({
     selectedAgentId,
     selectedPullRequestNumber: selectedAgentId ? null : state.selectedPullRequestNumber,
     agentBlocks: selectedAgentId && selectedAgentId === state.selectedAgentId ? state.agentBlocks : [],
-    inspectorTab: selectedAgentId ? "agents" : state.inspectorTab,
   })),
   setSettingsOpen: (settingsOpen, settingsTarget) => set({
     settingsOpen,
@@ -284,7 +290,7 @@ export const useRuntimeStore = create<RuntimeData & RuntimeActions>((set) => ({
   setRunId: (runId) => set({ runId }),
   failRun: (message) => set((state) => ({
     running: false,
-    error: message,
+    error: "",
     blocks: [...state.blocks, { id: `error-${Date.now()}`, kind: "error", title: translator(state.snapshot?.language === "en" ? "en" : "zh-CN")("runFailed"), content: message, state: "failed" }],
   })),
   setError: (error) => set({ error }),
@@ -462,7 +468,9 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
       break;
     case "skill_catalog":
     case "plugin_catalog":
+    case "marketplace_catalog":
     case "hook_catalog":
+    case "theme_catalog":
     case "usage_report":
     case "mcp_state":
     case "model_routes":
@@ -472,6 +480,15 @@ function reduceEvent<T extends RuntimeData>(state: T, event: RuntimeEvent): T {
     case "git_branches":
     case "recovery_state":
       reduceCatalogEvent(next, event);
+      break;
+    case "security_config_state":
+    case "security_scan_state":
+    case "security_scan_list":
+    case "security_finding_list":
+    case "security_finding_detail":
+    case "security_patch_state":
+    case "security_publication_state":
+      reduceSecurityEvent(next, event);
       break;
   }
   return next;

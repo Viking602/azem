@@ -24,7 +24,7 @@ func TestCompletedFileChangesFromStructuredSections(t *testing.T) {
 }
 
 func TestCompletedFileChangesFallsBackToCompactOutput(t *testing.T) {
-	output := "¶main.go#a1b2\nfirstChangedLine: 7\n--- compact diff ---\n-return nil\n+return err\n"
+	output := "[main.go#a1b2]\nfirstChangedLine: 7\n--- compact diff ---\n-return nil\n+return err\n"
 	summary, ok := CompletedFileChanges("coding.edit_hashline", "", "not json", output)
 	if !ok || len(summary.Files) != 1 {
 		t.Fatalf("expected compact fallback projection, got ok=%v files=%d", ok, len(summary.Files))
@@ -50,6 +50,20 @@ func TestCompletedFileChangesPreservesEmptyWrite(t *testing.T) {
 	summary, ok := CompletedFileChanges("coding.write_file", `{"path":"empty.txt","content":""}`, "", "")
 	if !ok || len(summary.Files) != 1 || summary.Files[0].Diff != "" || summary.Additions != 0 {
 		t.Fatalf("empty writes must keep an empty-diff file entry: ok=%v %+v", ok, summary)
+	}
+}
+
+func TestCompletedFileChangesIncludesReplaceAndDelete(t *testing.T) {
+	replace, ok := CompletedFileChanges("coding.replace", `{"path":"a.go"}`, `{"sections":[{"path":"a.go","diff":"-old\n+new"}]}`, "")
+	if !ok || len(replace.Files) != 1 || replace.Files[0].Path != "a.go" || replace.Additions != 1 || replace.Deletions != 1 {
+		t.Fatalf("replace summary = %+v, ok=%v", replace, ok)
+	}
+	deleted, ok := CompletedFileChanges("coding.delete_file", `{"path":"gone.txt"}`, "", `{"path":"gone.txt","size":4}`)
+	if !ok || len(deleted.Files) != 1 || deleted.Files[0].Path != "gone.txt" {
+		t.Fatalf("delete summary = %+v, ok=%v", deleted, ok)
+	}
+	if !IsFileChangeTool("coding.replace") || !IsFileChangeTool("coding.delete_file") {
+		t.Fatal("replace/delete were not classified as file-change tools")
 	}
 }
 

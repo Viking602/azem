@@ -7,6 +7,8 @@ import { execute, listHookCatalog, listSkillCatalog, listSystemFonts, listUsageR
 import { useRuntimeStore } from "../store";
 import type { Snapshot } from "../types";
 import SettingsDialog from "./SettingsDialog";
+import ComposerModelPicker from "./ComposerModelPicker";
+import { filterProviderCatalogModels } from "./ModelProviderSettings";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
@@ -59,6 +61,175 @@ describe("SettingsDialog", () => {
     document.documentElement.style.removeProperty("--chat-ui-font-size");
     document.documentElement.style.removeProperty("--chat-code-font-size");
   });
+
+	it("searches Cursor families by exact variant while preserving the complete family", () => {
+		const models = [
+			{ id: "gpt-5.2-low", name: "GPT-5.2 Low" },
+			{ id: "gpt-5.2-low-fast", name: "GPT-5.2 Low Fast" },
+			{ id: "gpt-5.2-xhigh", name: "GPT-5.2 Extra High" },
+			{ id: "gpt-5.2-xhigh-fast", name: "GPT-5.2 Extra High Fast" },
+			{ id: "composer-2", name: "Composer 2" },
+		];
+		expect(filterProviderCatalogModels("cursor", models, "gpt-5.2-xhigh-fast").map((model) => model.id)).toEqual([
+			"gpt-5.2-low", "gpt-5.2-low-fast", "gpt-5.2-xhigh", "gpt-5.2-xhigh-fast",
+		]);
+		expect(filterProviderCatalogModels("cursor", models, "composer").map((model) => model.id)).toEqual(["composer-2"]);
+		expect(filterProviderCatalogModels("cursor", models, "missing")).toEqual([]);
+	});
+
+	it("keeps the entire model chip as the sole repeated dismissal target", async () => {
+		const container = document.createElement("div");
+		document.body.append(container);
+		const root = createRoot(container);
+		const renderPicker = (running: boolean) => root.render(<ComposerModelPicker
+			running={running}
+			models={[{
+				provider: "cursor", id: "claude-fable-5-high", name: "Claude Fable 5 1M",
+				aliases: ["claude-fable-5-low", "claude-fable-5-thinking-high"],
+				reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+				capabilities: ["reasoning", "tools"], inputModalities: ["text", "image"],
+				cursorVariantCount: 10, cursorTierCount: 5, cursorHasFast: false, cursorNoZDR: true,
+			}]}
+			selectedModel="cursor/claude-fable-5-high"
+			selectedModelName="Claude Fable 5 1M"
+			selectedProvider="cursor"
+			reasoningLevels={["low", "medium", "high", "xhigh", "max"]}
+			selectedReasoning="high"
+			selectedReasoningName="高"
+			fast={false}
+			fastAvailable={false}
+			reasoningNames={{ low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" }}
+			onModelChange={vi.fn()}
+			onReasoningChange={vi.fn()}
+			onSpeedChange={vi.fn()}
+			fasterLabel="更高效"
+			smarterLabel="更智能"
+			highCostHint="更快消耗使用额度"
+			fastBoostTitle="Cursor Fast"
+			fastBoostDetail="Fast"
+			language="zh-CN"
+		/>);
+		await act(async () => renderPicker(false));
+		const picker = container.querySelector<HTMLElement>(".model-controls")!;
+		const trigger = picker.querySelector<HTMLButtonElement>(".model-controls-trigger")!;
+		expect(picker.querySelector(".model-controls-chevron")).toBeNull();
+		expect(picker.tagName).toBe("DIV");
+		expect(trigger.tagName).toBe("BUTTON");
+		expect(picker.querySelector("summary")).toBeNull();
+		expect(picker.dataset.open).toBe("false");
+		const eventAt = <T extends Event>(event: T, timeStamp?: number) => {
+			if (timeStamp !== undefined) Object.defineProperty(event, "timeStamp", { value: timeStamp });
+			return event;
+		};
+		const pointerDownTrigger = async (timeStamp?: number) => {
+			await act(async () => trigger.dispatchEvent(eventAt(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 1, pointerType: "mouse", isPrimary: true }), timeStamp)));
+		};
+		const pointerUpTrigger = async (timeStamp?: number) => {
+			await act(async () => trigger.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true }), timeStamp)));
+		};
+		const pointerUpAndClickTrigger = async (pointerTimeStamp?: number, clickTimeStamp?: number, detail = 1) => {
+			await act(async () => {
+				trigger.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true }), pointerTimeStamp));
+				trigger.dispatchEvent(eventAt(new MouseEvent("click", { bubbles: true, cancelable: true, detail }), clickTimeStamp));
+			});
+		};
+		const clickTrigger = async () => {
+			await pointerDownTrigger();
+			await pointerUpAndClickTrigger();
+		};
+		const clickOnlyTrigger = async (detail: number) => {
+			await act(async () => trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail })));
+		};
+		const keyboardClickTrigger = async () => clickOnlyTrigger(0);
+		const releaseFirstTrackpadTrigger = async (detail: number, timeStamp: number) => {
+			await act(async () => {
+				trigger.dispatchEvent(eventAt(new PointerEvent("pointerup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp + 4));
+				trigger.dispatchEvent(eventAt(new MouseEvent("mouseup", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp + 4));
+				trigger.dispatchEvent(eventAt(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail, pointerType: "mouse", isPrimary: true }), timeStamp));
+				trigger.dispatchEvent(eventAt(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0, buttons: 0, detail }), timeStamp));
+			});
+			await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+		};
+		await clickTrigger();
+		await vi.waitFor(() => {
+			expect(document.body.querySelector(".composer-model-popover")).not.toBeNull();
+		});
+		const popover = document.body.querySelector<HTMLElement>(".composer-model-popover")!;
+		expect(popover.querySelector(".composer-model-inventory")).toBeNull();
+		expect(popover.textContent).not.toContain("个基础模型");
+		expect(popover.textContent).not.toContain("个可用版本");
+		expect(popover.querySelector(".composer-model-name strong")?.textContent).toBe("Claude Fable 5 1M");
+		expect(popover.querySelector(".model-retention-warning")?.textContent).toBe("数据保留");
+		expect(popover.querySelector(".model-retention-warning")?.getAttribute("title")).toContain("不提供零数据保留");
+		expect(popover.querySelector(".composer-model-list small")?.textContent).toContain("推理 · 图像 · 工具");
+		expect(popover.querySelector(".composer-model-list small")?.textContent).not.toContain("个版本");
+		expect(popover.querySelector('[data-mode="thinking"]')).toBeNull();
+		expect(popover.textContent).not.toContain("(NO ZDR)");
+		expect(popover.hidden).toBe(false);
+		// WKWebView can omit Pointer Events for a trackpad activation while still
+		// delivering click. That sequence must remain a complete toggle path.
+		await clickOnlyTrigger(1);
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		await clickOnlyTrigger(1);
+		expect(picker.dataset.open).toBe("true");
+		expect(popover.hidden).toBe(false);
+		// macOS tap-to-click may deliver release before a buttons=0 press pair and
+		// omit click. Treat the release as one activation and ignore the false press.
+		await releaseFirstTrackpadTrigger(2, 500);
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		await releaseFirstTrackpadTrigger(3, 700);
+		expect(picker.dataset.open).toBe("true");
+		expect(popover.hidden).toBe(false);
+		// WKWebView can deliver pointerdown without a later click. Dismissal must
+		// complete on that event, while a paired click with another timestamp is inert.
+		await pointerDownTrigger(100);
+		expect(picker.dataset.open).toBe("false");
+		expect(document.body.querySelector(".composer-model-popover")).toBe(popover);
+		expect(popover.hidden).toBe(true);
+		await pointerUpAndClickTrigger(120, 2200);
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		// A pointer sequence without click must release its dedupe marker before a
+		// later click-only trackpad activation.
+		await pointerDownTrigger(300);
+		expect(picker.dataset.open).toBe("true");
+		await pointerUpTrigger(320);
+		await act(async () => new Promise((resolve) => window.setTimeout(resolve, 0)));
+		await clickOnlyTrigger(1);
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		for (let index = 0; index < 12; index += 1) {
+			await clickTrigger();
+			expect(picker.dataset.open).toBe("true");
+			expect(document.body.querySelector(".composer-model-popover")).toBe(popover);
+			expect(popover.hidden).toBe(false);
+			await clickTrigger();
+			expect(picker.dataset.open).toBe("false");
+			expect(document.body.querySelector(".composer-model-popover")).toBe(popover);
+			expect(popover.hidden).toBe(true);
+		}
+		await keyboardClickTrigger();
+		expect(picker.dataset.open).toBe("true");
+		expect(popover.hidden).toBe(false);
+		await keyboardClickTrigger();
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		await clickTrigger();
+		expect(picker.dataset.open).toBe("true");
+		await act(async () => window.dispatchEvent(new Event("blur")));
+		expect(picker.dataset.open).toBe("false");
+		expect(popover.hidden).toBe(true);
+		await clickTrigger();
+		await act(async () => renderPicker(true));
+		expect(picker.dataset.open).toBe("false");
+		expect(document.body.querySelector(".composer-model-popover")).toBe(popover);
+		expect(popover.hidden).toBe(true);
+		await act(async () => root.unmount());
+		expect(document.body.querySelector(".composer-model-popover")).toBeNull();
+		container.remove();
+	});
 
 	it("reads the current skill catalog directly when settings opens", async () => {
 		vi.mocked(listSkillCatalog).mockResolvedValueOnce({
@@ -126,6 +297,15 @@ describe("SettingsDialog", () => {
 		  { id: "gpt-5.6-luna", name: "5.6 Luna", aliases: ["codex-fast"], reasoningLevels: ["low", "medium"], defaultReasoning: "medium", inputModalities: ["text", "image"] },
 		  { id: "gpt-text-only", name: "Text only", reasoningLevels: ["low"], defaultReasoning: "low", inputModalities: ["text"] },
         ],
+        cursor: [
+          { id: "gpt-5.2-low", name: "GPT-5.2 Low", reasoningLevels: ["low"] },
+          { id: "gpt-5.2-xhigh", name: "GPT-5.2 Extra High", reasoningLevels: ["xhigh"] },
+          { id: "gpt-5.2-low-thinking", name: "GPT-5.2 Low Thinking", reasoningLevels: ["low"] },
+          { id: "gpt-5.2-xhigh-thinking", name: "GPT-5.2 Extra High Thinking", reasoningLevels: ["xhigh"] },
+          { id: "gpt-5.2-low-fast", name: "GPT-5.2 Low Fast", reasoningLevels: ["low"] },
+          { id: "gpt-5.2-low-thinking-fast", name: "GPT-5.2 Low Thinking Fast", reasoningLevels: ["low"] },
+          { id: "gpt-5.2-xhigh-thinking-fast", name: "GPT-5.2 Extra High Thinking Fast", reasoningLevels: ["xhigh"] },
+        ],
       },
 	  modelProviders: [{
 		id: "openrouter", displayName: "OpenRouter", backend: "openai_compat",
@@ -145,6 +325,8 @@ describe("SettingsDialog", () => {
 	const catalogNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("模型目录"))!;
 	expect(catalogNav.querySelector("em")).toBeNull();
     const routesNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("模型路由"))!;
+    const securityNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.querySelector("strong")?.textContent === "安全扫描");
+    expect(securityNav).toBeTruthy();
     await act(async () => routesNav.click());
     expect(execute).toHaveBeenCalledWith({ kind: "list_model_routes", sessionId: "session-1" });
     expect(execute).toHaveBeenCalledWith({ kind: "list_agent_types", sessionId: "session-1" });
@@ -203,6 +385,35 @@ describe("SettingsDialog", () => {
     expect(execute).toHaveBeenCalledWith({
       kind: "set_model_route", target: "", sessionId: "session-1",
       route: { scope: "subagent", role: "explore", label: "Explore", route: { provider: "chatgpt", model: "gpt-5.6-luna", reasoning: "low" } },
+    });
+    vi.mocked(execute).mockClear();
+    modelMenu.open = true;
+    await act(async () => modelMenu.dispatchEvent(new Event("toggle", { bubbles: true })));
+    expect(container.querySelector('.menu-select-options-portal [data-value="cursor::gpt-5.2-low"]')).toBeNull();
+    const cursorModel = container.querySelector<HTMLButtonElement>('.menu-select-options-portal [data-value="cursor::gpt-5.2-low-thinking"]')!;
+    expect(cursorModel.textContent).toContain("GPT-5.2");
+    await act(async () => cursorModel.click());
+    expect(execute).toHaveBeenCalledWith({
+      kind: "set_model_route", target: "", sessionId: "session-1",
+      route: { scope: "subagent", role: "explore", label: "Explore", route: { provider: "cursor", model: "gpt-5.2-low-thinking", reasoning: "low" } },
+    });
+    expect(explore.querySelector('button[aria-label="explore Thinking"]')).toBeNull();
+    vi.mocked(execute).mockClear();
+    const fastMode = explore.querySelector<HTMLButtonElement>('button[aria-label="explore Fast"]')!;
+    expect(fastMode.disabled).toBe(false);
+    await act(async () => fastMode.click());
+    expect(execute).toHaveBeenCalledWith({
+      kind: "set_model_route", target: "", sessionId: "session-1",
+      route: { scope: "subagent", role: "explore", label: "Explore", route: { provider: "cursor", model: "gpt-5.2-low-thinking-fast", reasoning: "low" } },
+    });
+    vi.mocked(execute).mockClear();
+    const cursorReasoningMenu = explore.querySelector<HTMLDetailsElement>(".route-reasoning-menu")!;
+    cursorReasoningMenu.open = true;
+    await act(async () => cursorReasoningMenu.dispatchEvent(new Event("toggle", { bubbles: true })));
+    await act(async () => container.querySelector<HTMLButtonElement>('.menu-select-options-portal [data-value="xhigh"]')!.click());
+    expect(execute).toHaveBeenCalledWith({
+      kind: "set_model_route", target: "", sessionId: "session-1",
+      route: { scope: "subagent", role: "explore", label: "Explore", route: { provider: "cursor", model: "gpt-5.2-xhigh-thinking-fast", reasoning: "xhigh" } },
     });
 	const subagentsNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.querySelector("strong")?.textContent === "子智能体")!;
 	await act(async () => subagentsNav.click());
@@ -308,6 +519,9 @@ describe("SettingsDialog", () => {
 	});
 
 	it("shows subscription providers in model settings and starts the existing login flow", async () => {
+		const quotaNow = Date.now();
+		const cursorCycleStart = Math.floor((quotaNow-(6*24+4)*60*60*1000)/1000);
+		const cursorCycleEnd = Math.floor((quotaNow+(24*24+20)*60*60*1000)/1000);
 		useRuntimeStore.setState({
 			snapshot, approvalMode: snapshot.approvalMode, modelRoutes: [
 				{ scope: "approval", role: "", label: "Approval", route: { provider: "chatgpt", model: "codex-auto-review", reasoning: "high" } },
@@ -320,6 +534,13 @@ describe("SettingsDialog", () => {
 					{ id: "gpt-review-worker", name: "GPT Review Worker", reasoningLevels: ["medium", "high"] },
 				],
 				grok: [{ id: "grok-4.20", name: "Grok 4.20", reasoningLevels: ["low", "medium", "high"] }],
+				cursor: [
+					{ id: "gpt-5.2-low", name: "GPT-5.2 Low", reasoningLevels: ["low", "medium", "high"] },
+					{ id: "gpt-5.2-low-fast", name: "GPT-5.2 Low Fast", reasoningLevels: ["low", "medium", "high"] },
+					{ id: "gpt-5.2-xhigh", name: "GPT-5.2 Extra High", reasoningLevels: ["low", "medium", "high"] },
+					{ id: "gpt-5.2-xhigh-fast", name: "GPT-5.2 Extra High Fast", reasoningLevels: ["low", "medium", "high"] },
+					{ id: "composer-2", name: "Composer 2", reasoningLevels: ["low", "medium", "high"] },
+				],
 			}, agentCatalog: [], skills: [], settingsOpen: true,
 			modelProviders: [{
 				id: "chatgpt", displayName: "OpenAI / ChatGPT 订阅", backend: "subscription", subscription: true,
@@ -328,6 +549,12 @@ describe("SettingsDialog", () => {
 			}, {
 				id: "grok", displayName: "Grok 订阅", backend: "subscription", subscription: true,
 				defaultBaseUrl: "", baseUrl: "", envKey: "", enabled: true, credentialConfigured: true, credentialSource: "stored", accountId: "account-2", accountLabel: "grok@example.com", modelsDevId: "xai", models: [], quotaWarning: "grok quota returned HTTP 500",
+			}, {
+				id: "cursor", displayName: "Cursor 订阅", backend: "subscription", subscription: true,
+				defaultBaseUrl: "", baseUrl: "", envKey: "", enabled: true, credentialConfigured: true, credentialSource: "stored", accountId: "user-1", accountLabel: "owner@example.com", accountPlan: "ultra", modelsDevId: "cursor", models: [],
+				quotaAvailable: true, quotaPeriod: "monthly", quotaStartedAt: cursorCycleStart, quotaUsedPercent: 28,
+				quotaBreakdown: [{ id: "cursor", usedPercent: 16 }, { id: "third_party", usedPercent: 74 }],
+				quotaResetsAt: cursorCycleEnd, quotaUpdatedAt: new Date(quotaNow-60_000).toISOString(), quotaBalance: "47.50",
 			}],
 		});
 		const container = document.createElement("div");
@@ -336,9 +563,9 @@ describe("SettingsDialog", () => {
 		await act(async () => root.render(<SettingsDialog />));
 		const catalogNav = Array.from(container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")).find((button) => button.textContent?.includes("模型目录"))!;
 		await act(async () => catalogNav.click());
-		expect(container.querySelector(".subscription-provider")?.textContent).toContain("每周额度");
-		expect(container.querySelector(".subscription-provider")?.textContent).toContain("订阅驱动 · Pro 20x");
-		expect(container.querySelector(".subscription-provider")?.textContent).toContain("剩余 38.5%");
+		expect(container.querySelector(".subscription-provider")?.textContent).toContain("每周额度 39% 剩余");
+		expect(container.querySelector(".subscription-account-identity")?.textContent).toContain("user@example.com");
+		expect(container.querySelector(".subscription-account-identity")?.textContent).toContain("Pro 20x");
 		expect(container.querySelector(".subscription-provider")?.textContent).toContain("US$12.50");
 		expect(container.querySelector(".subscription-model-note")?.textContent).toContain("GPT-5.6 Sol");
 		expect(container.querySelector(".subscription-provider")?.closest(".provider-workspace")?.querySelector(".provider-model-catalog")).not.toBeNull();
@@ -366,18 +593,76 @@ describe("SettingsDialog", () => {
 		await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="禁用 GPT-5.6 Sol"]')!.click());
 		expect(execute).toHaveBeenCalledWith({ kind: "set_model_enabled", sessionId: "session-1", target: "chatgpt", name: "gpt-5.6-sol", decision: "false" });
 		await act(async () => useRuntimeStore.setState({ modelProviders: useRuntimeStore.getState().modelProviders.map((provider) => provider.id === "chatgpt" ? { ...provider, accountPlan: "prolite" } : provider) }));
-		expect(container.querySelector(".subscription-provider")?.textContent).toContain("订阅驱动 · Pro 5x");
+		expect(container.querySelector(".subscription-account-identity")?.textContent).toContain("Pro 5x");
 		const grok = Array.from(container.querySelectorAll<HTMLButtonElement>(".provider-list button")).find((button) => button.textContent?.includes("Grok 订阅"))!;
 		await act(async () => grok.click());
-		expect(container.querySelector(".subscription-provider")?.textContent).toContain("已连接 · grok@example.com");
+		expect(container.querySelector(".subscription-account-identity")?.textContent).toContain("grok@example.com");
 		expect(container.querySelector(".subscription-quota-error")?.textContent).toContain("获取失败：grok quota returned HTTP 500");
-		expect(container.querySelector(".subscription-quota-heading")?.textContent).toContain("来自订阅服务的实时额度");
 		expect(container.querySelector(".subscription-model-note")?.textContent).toContain("Grok 4.20");
 		const refreshModels = Array.from(container.querySelectorAll<HTMLButtonElement>(".provider-model-actions button")).find((button) => button.textContent?.includes("获取模型"));
 		expect(refreshModels).not.toBeNull();
 		vi.mocked(execute).mockClear();
 		await act(async () => refreshModels!.click());
 		expect(execute).toHaveBeenCalledWith({ kind: "discover_provider_models", sessionId: "session-1", target: "grok" });
+		const cursor = Array.from(container.querySelectorAll<HTMLButtonElement>(".provider-list button")).find((button) => button.textContent?.includes("Cursor 订阅"))!;
+		expect(cursor.querySelector("svg.provider-icon")).not.toBeNull();
+		expect(cursor.querySelector('img[src*="models.dev/logos/cursor"]')).toBeNull();
+		await act(async () => cursor.click());
+		const cursorPanel = container.querySelector(".subscription-provider")!;
+		expect(cursorPanel.querySelector(".provider-heading")?.textContent).toContain("Cursor1分钟前已更新");
+		expect(cursorPanel.querySelector(".subscription-account-identity")?.textContent).toContain("owner@example.comCursor Ultra");
+		expect(cursorPanel.querySelector('[data-quota="total"]')?.textContent).toContain("总计 72% 剩余");
+		expect(cursorPanel.querySelector('[data-quota="total"]')?.textContent).toContain("超额 8%");
+		expect(cursorPanel.querySelector('[data-quota="total"]')?.textContent).toContain("预计");
+		expect(cursorPanel.querySelector('[data-quota="cursor"]')?.textContent).toContain("Cursor 84% 剩余");
+		expect(cursorPanel.querySelector('[data-quota="cursor"]')?.textContent).toContain("余量 4%");
+		expect(cursorPanel.querySelector('[data-quota="cursor"]')?.textContent).toContain("持续到重置");
+		expect(cursorPanel.querySelector('[data-quota="third_party"]')?.textContent).toContain("Third Party 26% 剩余");
+		expect(cursorPanel.querySelector('[data-quota="third_party"]')?.textContent).toContain("超额 54%");
+		expect(cursorPanel.querySelector('[data-quota="third_party"]')?.textContent).toContain("后耗尽");
+		expect(cursorPanel.querySelectorAll(".subscription-quota-track")).toHaveLength(3);
+		expect(cursorPanel.querySelectorAll(".subscription-quota-marker.threshold")).toHaveLength(9);
+		expect(cursorPanel.querySelectorAll(".subscription-quota-marker.pace")).toHaveLength(3);
+		expect(cursorPanel.textContent).toContain("US$47.50");
+		const prototypeStyles = readFileSync("src/prototype.css", "utf8");
+		const settingsStyles = readFileSync("src/styles/settings.css", "utf8");
+		expect(prototypeStyles).toMatch(/\.provider-workspace \.subscription-quota-grid\s*\{[^}]*grid-template-columns:\s*1fr;/s);
+		expect(settingsStyles).toMatch(/\.subscription-quota-marker\.pace\[data-state="deficit"\]\s*\{[^}]*background:\s*var\(--red\);/s);
+		expect(settingsStyles).toMatch(/\.subscription-quota-marker\.pace\[data-state="reserve"\]\s*\{[^}]*background:\s*var\(--green\);/s);
+		expect(prototypeStyles).toMatch(/\.provider-model-catalog \.cursor-model-groups\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s);
+		expect(prototypeStyles).toMatch(/\.provider-workspace \.cursor-family-row\s*\{[^}]*flex:\s*0 0 auto;[^}]*min-height:\s*58px;[^}]*overflow:\s*visible;/s);
+		expect(prototypeStyles).toMatch(/\.settings-main\[data-section="catalog"\] \.provider-workspace > \.provider-model-catalog\s*\{[^}]*grid-template-rows:\s*auto auto minmax\(0, 1fr\);/s);
+		expect(container.querySelector(".subscription-model-note")?.textContent).toContain("Composer 2");
+		expect(container.querySelector<HTMLElement>(".cursor-model-groups")?.dataset.modelGroups).toBe("2");
+		expect(container.querySelectorAll(".cursor-family-row")).toHaveLength(2);
+		expect(container.querySelector(".cursor-model-variant-select")).toBeNull();
+		expect(container.querySelector(".provider-model-card")).toBeNull();
+		const catalogSearch = container.querySelector<HTMLInputElement>('.provider-model-catalog-search input[aria-label="搜索模型目录"]')!;
+		expect(catalogSearch).not.toBeNull();
+		await enterInput(catalogSearch, "gpt-5.2-xhigh-fast");
+		const cursorGroups = container.querySelector<HTMLElement>(".cursor-model-groups")!;
+		expect(cursorGroups.dataset.modelGroups).toBe("1");
+		expect(cursorGroups.querySelectorAll(".cursor-family-row")).toHaveLength(1);
+		const gptGroup = cursorGroups.querySelector<HTMLElement>('[data-model-group="gpt-5.2"]')!;
+		expect(gptGroup.textContent).toContain("GPT-5.2");
+		expect(gptGroup.textContent).not.toContain("GPT-5.2 Low");
+		expect(gptGroup.textContent).not.toContain("极高 · Fast");
+		expect(gptGroup.querySelector(".cursor-model-inventory")?.textContent).toBe("推理 · 图像");
+		expect(gptGroup.textContent).not.toContain("个版本");
+		expect(gptGroup.dataset.variantCount).toBe("4");
+		expect(gptGroup.dataset.modelId).toBe("gpt-5.2-low");
+		expect(gptGroup.querySelector(".model-toggle-label")?.textContent).toBe("全部启用");
+		expect(container.querySelector(".provider-model-summary")?.textContent).toContain("2 个系列 · 5 / 5 已启用");
+		expect(gptGroup.querySelector(".cursor-model-variant-select")).toBeNull();
+		expect(container.querySelector(".cursor-model-variant-options")).toBeNull();
+		vi.mocked(execute).mockClear();
+		await act(async () => gptGroup.querySelector<HTMLButtonElement>(".model-card-toggle")!.click());
+		expect(execute).toHaveBeenCalledWith({
+			kind: "set_model_enabled", sessionId: "session-1", target: "cursor",
+			name: "gpt-5.2-low", decision: "false",
+			payload: { modelIds: ["gpt-5.2-low", "gpt-5.2-low-fast", "gpt-5.2-xhigh", "gpt-5.2-xhigh-fast"] },
+		});
+		expect(container.querySelector(".provider-workspace-header svg.provider-icon")).not.toBeNull();
 		const chatgpt = Array.from(container.querySelectorAll<HTMLButtonElement>(".provider-list button")).find((button) => button.textContent?.includes("ChatGPT 订阅"))!;
 		await act(async () => chatgpt.click());
 		vi.mocked(execute).mockClear();
@@ -933,4 +1218,57 @@ describe("SettingsDialog", () => {
 		await act(async () => root.unmount());
 		container.remove();
 	});
+});
+
+it("guards unsaved Security settings when leaving the pane", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  useRuntimeStore.setState({
+    snapshot,
+    approvalMode: snapshot.approvalMode,
+    settingsOpen: true,
+    settingsTarget: null,
+    securityConfig: {
+      enabled: true, defaultMode: "standard", workers: 4, subagents: 3,
+      stopAfterNoNew: 4, stopAfterConsecutiveErrors: 3, maxDiscoveryRuns: 40,
+      maxTimeHours: 96,
+      routes: { audit: {}, reducer: {}, fixer: {}, verifier: {} },
+    },
+    modelRoutes: [
+      { scope: "security", role: "audit", label: "Security audit", route: {} },
+      { scope: "security", role: "reducer", label: "Security reducer", route: {} },
+      { scope: "security", role: "fixer", label: "Security fixer", route: {} },
+      { scope: "security", role: "verifier", label: "Security verifier", route: {} },
+    ],
+    modelsByProvider: {},
+    modelProviders: [],
+    agentCatalog: [],
+    mcpServers: [],
+    skills: [],
+    plugins: [],
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => root.render(<SettingsDialog />));
+  const securityNav = [...container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")]
+    .find((button) => button.querySelector("strong")?.textContent === "安全扫描")!;
+  await act(async () => securityNav.click());
+  expect(container.querySelectorAll(".security-route-card .route-row")).toHaveLength(4);
+  const workers = [...container.querySelectorAll<HTMLLabelElement>(".security-number-field")]
+    .find((label) => label.textContent?.includes("深度扫描 Worker"))!.querySelector("input")!;
+  await enterInput(workers, "6");
+  expect(container.querySelector(".settings-sidebar footer")?.textContent).toContain("执行与预算需保存");
+
+  const appearance = [...container.querySelectorAll<HTMLButtonElement>(".settings-nav-group button")]
+    .find((button) => button.querySelector("strong")?.textContent === "外观")!;
+  await act(async () => appearance.click());
+  expect(confirm).toHaveBeenCalled();
+  expect(container.querySelector(".settings-main")?.getAttribute("data-section")).toBe("security");
+
+  confirm.mockReturnValue(true);
+  await act(async () => appearance.click());
+  expect(container.querySelector(".settings-main")?.getAttribute("data-section")).toBe("appearance");
+  confirm.mockRestore();
+  await act(async () => root.unmount());
+  container.remove();
 });

@@ -1,5 +1,5 @@
 import { ChevronDown } from "lucide-react";
-import { startTransition, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { tFormat, translator } from "../../i18n";
 import { useRuntimeStore } from "../../store";
 import type { Block, Snapshot } from "../../types";
@@ -8,10 +8,9 @@ import {
   isActiveProcessBlock, isHostFallbackCommentary, isRunningTool, summarizeToolGroup,
   type ModelProgressPresentation, type ProcessTimelineEntry,
 } from "../toolTimeline";
-import { fileChangePillsForBlocks, formatProcessGroupCount, processGroupCounts } from "../toolChip";
-import { ThinkingState } from "../beautiful-ui/Primitives";
-import { StepRow } from "../beautiful-ui/StepRow";
-import { FileChangePills, ToolChip } from "../beautiful-ui/ToolChip";
+import { fileChangePillsForBlocks, formatProcessGroupCount, processGroupCounts, toolChipModel } from "../toolChip";
+import { ReasoningPanel } from "../assistant-ui/Elements";
+import { ToolTimelineFiles, ToolTimelineIcon, ToolTimelineItem, ToolTimelineStep } from "../assistant-ui/ToolTimeline";
 import {
   isActiveFileChangeBlock, isFileChangeTool, isPendingFileChangeBlock,
 } from "../fileChanges";
@@ -27,15 +26,15 @@ import {
 } from "./processDefer";
 import { blocksMarkState, stepEdge, stepMarkState, type StepEdge } from "./stepRail";
 import { activityBarLabel, processActivityVisibility } from "./thinkingTabs";
-import { ReasoningPanel, ThinkingTrace } from "./ThinkingTrace";
+import { ReasoningSteps, ThinkingTrace } from "./ThinkingTrace";
 import { ProcessChipList, ThinkingChip } from "./processChips";
 import { isSubagentSpawnBlock, SubagentRunCard } from "./subagentRunCard";
 export { isSubagentSpawnBlock } from "./subagentRunCard";
 
 /**
- * Codex: after the turn finishes, 耗时 hides the process. Opening it shows
- * commentary plus folded tool summaries. Thinking stays inside the duration
- * label and is not dumped as prose.
+ * Codex-style: a completed turn's whole process — narration, tools, and
+ * thinking — folds under 耗时 so only the answer stays primary. Expanding
+ * reveals the trail; live/waiting runs never fold.
  */
 export function ProcessFold({
   blocks, elapsedMs = 0, language, featured, active = false, collapseCompleted = false, waiting = false,
@@ -49,7 +48,10 @@ export function ProcessFold({
   waiting?: boolean;
 }) {
   const hasTools = hasProcessTools(blocks);
-  const foldCompleted = Boolean(collapseCompleted && !active && !waiting && hasTools);
+  const hasFoldableWork = hasTools
+    || blocks.some((block) => block.kind === "thinking" && Boolean(block.content?.trim()))
+    || blocks.some((block) => block.kind === "commentary" && !isHostFallbackCommentary(block) && Boolean(block.content?.trim()));
+  const foldCompleted = Boolean(collapseCompleted && !active && !waiting && hasFoldableWork);
   const [open, setOpen] = useState(false);
   const t = translator(language);
   const duration = elapsedMs > 0 ? formatWorkedDuration(elapsedMs, language) : "";
@@ -63,6 +65,7 @@ export function ProcessFold({
   />;
   return <div
     className="process-fold"
+    data-slot={hasTools ? "tool-timeline" : undefined}
     data-featured={featured || undefined}
     data-state={active ? "running" : "completed"}
     data-step={hasTools ? "tools" : "reasoning"}
@@ -80,8 +83,26 @@ export function ProcessFold({
         <span className="process-fold-label">{foldLabel}</span>
         <ChevronDown className="process-fold-chevron" size={12} aria-hidden="true" />
       </button>
-      {open ? entries : null}
+      <FoldClip open={open}>{entries}</FoldClip>
     </> : entries}
+  </div>;
+}
+function FoldClip({ open, children }: { open: boolean; children: ReactNode }) {
+  const [present, setPresent] = useState(open);
+  const [expanded, setExpanded] = useState(open);
+  useLayoutEffect(() => {
+    if (open) {
+      setPresent(true);
+      const frame = requestAnimationFrame(() => setExpanded(true));
+      return () => cancelAnimationFrame(frame);
+    }
+    setExpanded(false);
+    const timer = window.setTimeout(() => setPresent(false), 220);
+    return () => window.clearTimeout(timer);
+  }, [open]);
+  if (!present) return null;
+  return <div className="process-fold-clip" data-open={expanded ? "true" : "false"}>
+    <div className="process-fold-body">{children}</div>
   </div>;
 }
 
@@ -109,15 +130,18 @@ function ProcessStep({
 }) {
   const hasTools = hasProcessTools(blocks);
   const running = waiting || (live && blocks.some(isActiveProcessBlock));
+  const reasoningLive = blocks.some((block) => (
+    block.kind === "thinking" && isActiveProcessBlock(block) && Boolean(block.content?.trim())
+  ));
   const [choice, setChoice] = useState<boolean | null>(null);
-  const expanded = choice ?? (running && !hasTools && blocks.length > 0);
+  const expanded = choice ?? (running && !hasTools && reasoningLive);
   const panelId = `process-step-${(blocks[0]?.id || "pending").replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
   if (!stepBarVisible(blocks, waiting, running)) return <>{children}</>;
   if (!running && canSettle && hasTools) {
     const open = choice === true;
     const tools = blocks.filter((block) => block.kind === "tool" || block.kind === "diff");
     const label = summarizeToolGroup(tools, language) || formatProcessGroupCount(tools.length, 0, language);
-    return <div className="process-step" data-state="completed" data-step="tools" data-settled="" data-open={open || undefined}>
+    return <div className="process-step" data-slot="tool-timeline" data-state="completed" data-step="tools" data-settled="" data-open={open || undefined}>
 
       <button
         type="button"
@@ -138,6 +162,7 @@ function ProcessStep({
   }
   return <div
     className="process-step"
+    data-slot={hasTools ? "tool-timeline" : undefined}
     data-state={running ? "running" : "completed"}
     data-step={hasTools ? "tools" : "reasoning"}
   >
@@ -187,12 +212,16 @@ function ProcessStepBar({
     live: (ticking || waiting || live) && !settledThinking,
   });
   const expandable = hasTools || reasoning.some((block) => Boolean(block.content?.trim()));
-  return <ThinkingState
+  const running = blocks.filter((block) => (block.kind === "tool" || block.kind === "diff") && isRunningTool(block));
+  const runningKind = running.length ? toolChipModel(running[running.length - 1]!, language).kind : undefined;
+  return <ReasoningPanel
     active={ticking}
     expanded={expanded}
     label={label}
     labelKey={label}
     quiet
+    quietMark={Boolean(runningKind)}
+    mark={runningKind ? <span className="aui-tool-timeline-icon" data-icon={runningKind} aria-hidden="true"><ToolTimelineIcon kind={runningKind} /></span> : undefined}
     expandable={expandable}
     panelId={panelId}
     onToggle={onToggle}
@@ -308,7 +337,7 @@ function DeferredProcessEntries({ blocks, language, rows }: {
       />)}
       {end < rows.length ? <div className="deferred-process-spacer" style={{ height: (rows.length - end) * DEFERRED_PROCESS_ROW_PX }} aria-hidden="true" /> : null}
     </div>
-    {pills.files.length ? <FileChangePills files={pills.files} language={language} /> : null}
+    {pills.files.length ? <ToolTimelineFiles files={pills.files} language={language} /> : null}
   </div>;
 }
 
@@ -355,25 +384,25 @@ function DeferredProcessRowView({ row, language, siblings, edge }: {
   edge: StepEdge;
 }) {
   if (row.kind === "progress") {
-    return <StepRow mark="note" edge={edge}>
+    return <ToolTimelineStep mark="note" edge={edge}>
       <DeferredProgressRow block={row.block} presentation={row.presentation} language={language} siblings={siblings} />
-    </StepRow>;
+    </ToolTimelineStep>;
   }
   if (row.kind === "thinking") {
-    return <StepRow mark={blocksMarkState(row.blocks)} edge={edge}>
+    return <ToolTimelineStep mark={blocksMarkState(row.blocks)} edge={edge}>
       <DeferredThinkingRow blocks={row.blocks} language={language} />
-    </StepRow>;
+    </ToolTimelineStep>;
   }
   if (row.kind === "subagent") {
-    return <StepRow mark={blocksMarkState(row.blocks)} edge={edge}>
+    return <ToolTimelineStep mark={blocksMarkState(row.blocks)} edge={edge}>
       <div data-deferred-row="subagent"><SubagentRunCard blocks={row.blocks} language={language} /></div>
-    </StepRow>;
+    </ToolTimelineStep>;
   }
-  return <StepRow mark={stepMarkState(row.block.state)} edge={edge}>
+  return <ToolTimelineStep mark={stepMarkState(row.block.state)} edge={edge}>
     <div data-deferred-row="tool">
       <ToolTimelineBlock block={row.block} language={language} compact nested siblings={siblings} />
     </div>
-  </StepRow>;
+  </ToolTimelineStep>;
 }
 
 function DeferredProgressRow({ block, presentation, language, siblings }: {
@@ -386,7 +415,7 @@ function DeferredProgressRow({ block, presentation, language, siblings }: {
   const t = translator(language);
   const chip = deferredProgressChip(presentation, t("progressUpdate"));
   return <div data-deferred-row="progress">
-    <ToolChip
+    <ToolTimelineItem
       className="deferred-progress-row"
       kind="other"
       label={chip.title}
@@ -394,7 +423,7 @@ function DeferredProgressRow({ block, presentation, language, siblings }: {
       onToggle={(event) => setOpened(event.currentTarget.open)}
     >
       {opened ? <TimelineBlock block={block} language={language} siblings={siblings} /> : null}
-    </ToolChip>
+    </ToolTimelineItem>
   </div>;
 }
 
@@ -558,6 +587,7 @@ function hasProcessTools(blocks: Block[]) {
   return blocks.some((block) => block.kind === "tool" || block.kind === "diff");
 }
 
+
 function isFileChangePresentation(block: Block) {
   return block.kind === "diff"
     || isFileChangeTool(block.title || block.data?.name || "")
@@ -613,13 +643,13 @@ export function ProcessActivity({
   return <div
     className={[
       placeholder ? "reasoning-placeholder" : "process-activity",
-      !hasTools && hasReasoning ? "bui-thinking-stack" : "",
+      !hasTools && hasReasoning ? "aui-reasoning-stack" : "",
     ].filter(Boolean).join(" ")}
     data-thinking-row={!hasTools && hasReasoning ? "reasoning" : undefined}
     role={placeholder ? "status" : undefined}
     aria-live={placeholder ? "polite" : undefined}
   >
-    <ThinkingState
+    <ReasoningPanel
       active={clockActive}
       expanded={open && expandable}
       label={label}
@@ -630,10 +660,10 @@ export function ProcessActivity({
       panelId={panelId}
       onToggle={expandable ? () => setOpen((value) => !value) : undefined}
     >
-      {expandable ? <div className="bui-thinking-panel" data-tab="reasoning">
-        <ReasoningPanel blocks={reasoning} />
+      {expandable ? <div className="aui-reasoning-content" data-tab="reasoning">
+        <ReasoningSteps blocks={reasoning} />
       </div> : null}
-    </ThinkingState>
+    </ReasoningPanel>
   </div>;
 }
 
@@ -680,7 +710,7 @@ function ProcessTrail({
 function SummarizedReasoning({ blocks }: { blocks: Block[] }) {
   const reasoning = blocks.filter((block) => block.kind === "thinking");
   if (!reasoning.length) return null;
-  return <div className="bui-thinking-panel" data-tab="reasoning">
-    <ReasoningPanel blocks={reasoning} />
+  return <div className="aui-reasoning-content" data-tab="reasoning">
+    <ReasoningSteps blocks={reasoning} />
   </div>;
 }

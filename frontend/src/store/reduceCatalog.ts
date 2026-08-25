@@ -23,9 +23,28 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
     case "plugin_catalog":
       next.plugins = (event.pluginCatalog ?? []).map(normalizePlugin);
       break;
+    case "marketplace_catalog": {
+      const catalog = event.marketplaceCatalog;
+      next.marketplaceCatalog = catalog ? {
+        marketplaces: (catalog.marketplaces ?? []).map((item) => ({ ...item })),
+        available: (catalog.available ?? []).map((item) => ({ ...item, keywords: item.keywords ?? [], tags: item.tags ?? [] })),
+        installed: (catalog.installed ?? []).map((item) => ({ ...item })),
+        upgrades: (catalog.upgrades ?? []).map((item) => ({ ...item, plugin: { ...item.plugin } })),
+      } : { marketplaces: [], available: [], installed: [], upgrades: [] };
+      break;
+    }
     case "hook_catalog":
       next.hookCatalog = normalizeHookCatalog(event.hookCatalog);
       break;
+    case "theme_catalog": {
+      try {
+        const themes = JSON.parse(data.themes ?? "[]");
+        next.extensionThemes = Array.isArray(themes) ? themes.filter((theme) => theme && typeof theme === "object") : [];
+      } catch {
+        next.extensionThemes = [];
+      }
+      break;
+    }
     case "usage_report":
       next.usageReport = normalizeUsageReport(event.usageReport);
       break;
@@ -34,6 +53,7 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
         next.mcpServers = parseMCPServers(data.servers);
         break;
       }
+      if (event.state === "notification" || event.state === "prompt") break;
       const name = data.server?.trim();
       if (!name) break;
       const index = next.mcpServers.findIndex((server) => server.name === name);
@@ -61,7 +81,10 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
 	case "model_providers":
 	  next.modelProviders = (event.modelProviders ?? []).map((provider) => ({ ...provider, models: provider.models ?? [] }));
 	  for (const provider of next.modelProviders) {
-		if (provider.enabled && provider.models.length > 0) next.modelsByProvider = {
+		if (!provider.enabled || provider.models.length === 0) continue;
+		const existing = next.modelsByProvider[provider.id] ?? [];
+		if (provider.subscription && existing.length > 0) continue;
+		next.modelsByProvider = {
 		  ...next.modelsByProvider,
 		  [provider.id]: provider.models.map((model) => normalizeModel(model as unknown as Record<string, unknown>)),
 		};
@@ -76,7 +99,7 @@ export function reduceCatalogEvent(next: RuntimeData, event: RuntimeEvent): void
       next.modelsByProvider = { ...next.modelsByProvider, [provider]: models };
       if (next.snapshot?.provider === provider) {
         const contextLimit = findModelOption(next.modelsByProvider[provider] ?? [], next.snapshot?.model ?? "")?.contextWindow ?? 0;
-        const subscription = provider === "chatgpt" || provider === "grok";
+        const subscription = provider === "chatgpt" || provider === "grok" || provider === "cursor";
         if (contextLimit > 0 && (subscription || next.contextUsage.contextLimit === 0)) next.contextUsage = { ...next.contextUsage, contextLimit };
       }
       break;

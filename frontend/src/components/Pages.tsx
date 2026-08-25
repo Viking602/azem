@@ -11,6 +11,7 @@ import WorkspaceFilesPage from "./WorkspaceFilesPage";
 import WorkspaceChangesPage from "./WorkspaceChangesPage";
 import WorkspaceOverviewPage from "./WorkspaceOverviewPage";
 import ExtensionsSettings from "./ExtensionsSettings";
+import SecurityPage from "./security/SecurityPage";
 
 export default function Pages({ view }: { view: Exclude<View, "thread"> }) {
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
@@ -29,6 +30,7 @@ export default function Pages({ view }: { view: Exclude<View, "thread"> }) {
   if (view === "projects") return <WorkspaceOverviewPage />;
   if (view === "files") return <WorkspaceFilesPage />;
   if (view === "changes") return <WorkspaceChangesPage />;
+  if (view === "security") return <SecurityPage />;
   return <RunsPage open={() => setView("thread")} title={t("runs")} />;
 }
 

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -31,7 +32,7 @@ func (d *compactionTestDriver) Stream(_ context.Context, request hyprovider.Requ
 	return hyprovider.NewSliceStream(events), nil
 }
 
-func TestContextBudgetUsesOMPReserveAndRecentFloor(t *testing.T) {
+func TestContextBudgetUsesSnapcompactReserveAndRecentFloor(t *testing.T) {
 	got, err := calculateContextBudget("model", 100_000, 300, config.ContextConfig{
 		ReserveTokens:    1_000,
 		KeepRecentTokens: 20_000,
@@ -39,8 +40,35 @@ func TestContextBudgetUsesOMPReserveAndRecentFloor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ContextWindow != 100_000 || got.Trigger != 98_700 || got.KeepRecent != 20_000 {
+	if got.ContextWindow != 100_000 || got.Trigger != 84_700 || got.KeepRecent != 20_000 {
 		t.Fatalf("budget=%+v", got)
+	}
+}
+
+func TestContextBudgetTriggersBeforeReproducedGrok98PercentOccupancy(t *testing.T) {
+	const (
+		contextWindow        = 500_000
+		toolDefinitionTokens = 3_685
+		localEstimate        = 476_653
+		providerInput        = 489_188
+	)
+	budget, err := calculateContextBudget("grok-4.6", contextWindow, toolDefinitionTokens, config.ContextConfig{
+		ReserveTokens:    16_384,
+		KeepRecentTokens: 20_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if budget.Trigger != 421_315 {
+		t.Fatalf("trigger=%d, want 421315", budget.Trigger)
+	}
+	pressure := &providerContextPressure{toolTokens: toolDefinitionTokens}
+	pressure.observeInputTokens(providerInput)
+	if got := pressure.tokens(localEstimate); got != providerInput-toolDefinitionTokens {
+		t.Fatalf("pressure=%d, want %d", got, providerInput-toolDefinitionTokens)
+	}
+	if localEstimate <= budget.Trigger {
+		t.Fatalf("reproduced local estimate %d did not cross safe trigger %d", localEstimate, budget.Trigger)
 	}
 }
 
@@ -137,5 +165,97 @@ func TestManualCompactionArchivesDurableToolMessages(t *testing.T) {
 	if _, err := manualCompactionMessages(ctx, manager, incompatible); err == nil ||
 		!strings.Contains(err.Error(), "current model history is unavailable") {
 		t.Fatalf("incompatible tool history error = %v", err)
+	}
+}
+
+func TestManualCompactionRestoresDurableToolPairMissingFromLegacyHistory(t *testing.T) {
+	ctx := t.Context()
+	user := session.Block{Sequence: 1, Kind: "user", RunID: "legacy-run", Content: "inspect old state"}
+	assistant := session.Block{Sequence: 2, Kind: "assistant", RunID: "legacy-run", Content: "old answer"}
+	userMessage, _ := blockMessage(user)
+	assistantMessage, _ := blockMessage(assistant)
+	boundary := int64(2)
+	record := session.ToolRecord{
+		RunID: "legacy-run", ToolCallID: "legacy-read", AnchorSequence: 1, Name: "coding.read_file",
+		Arguments: json.RawMessage(`{"path":"old.txt"}`), State: session.ToolCompleted,
+		Content: "durable result", Structured: json.RawMessage(`{"path":"old.txt"}`),
+	}
+	artifactRecord := session.ToolRecord{
+		RunID: "legacy-run", ToolCallID: "legacy-shell", AnchorSequence: 1, Name: "coding.shell",
+		Arguments: json.RawMessage(`{"command":"printf old"}`), State: session.ToolCompleted,
+		Content: "preview", ArtifactID: "legacy-tool-result",
+	}
+	projection := session.Projection{
+		Session:     session.Session{ID: "legacy-tools", ProviderID: "provider", ModelID: "model"},
+		Blocks:      []session.Block{user, assistant},
+		ToolRecords: []session.ToolRecord{record, artifactRecord},
+		ModelHistory: session.ModelHistory{
+			ProviderID: "provider", ModelID: "model", InstructionFingerprint: mainInstructionFingerprint,
+			StaticPrefixHash: mainInstructionFingerprint, WireVersion: session.CurrentWireVersion,
+			CoveredThroughSequence: &boundary,
+			Messages:               []message.Message{message.NewText(message.RoleSystem, mainInstructions), userMessage, assistantMessage},
+		},
+	}
+	manager := turnContext{
+		sessionID: "legacy-tools", runID: "manual-compaction", providerID: "provider", modelID: "model",
+		instructions: mainInstructions, instructionFingerprint: mainInstructionFingerprint,
+		history: projection.Blocks, modelHistory: projection.ModelHistory, checkpointBoundary: &boundary,
+		staticIdentity: mainInstructionFingerprint, toolRecords: projection.ToolRecords,
+	}
+	manager.loadArchiveSource = func(_ context.Context, artifactID string) ([]byte, error) {
+		if artifactID != artifactRecord.ArtifactID {
+			t.Fatalf("unexpected artifact %q", artifactID)
+		}
+		return []byte(`{"content":"full durable output","structured":{"exitCode":0}}`), nil
+	}
+
+	messages, err := manualCompactionMessages(ctx, manager, projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := message.ValidateCompleteTurns(messages); err != nil {
+		t.Fatalf("restored history is invalid: %v", err)
+	}
+	calls, results := manualCompactionToolNames(messages)
+	for _, current := range []session.ToolRecord{record, artifactRecord} {
+		if calls[current.ToolCallID] != current.Name || results[current.ToolCallID] != current.Name {
+			t.Fatalf("restored pair %q calls=%v results=%v", current.ToolCallID, calls, results)
+		}
+	}
+	var restoredOrder []string
+	for _, current := range messages {
+		for _, call := range current.ToolCalls {
+			if call.ID == record.ToolCallID || call.ID == artifactRecord.ToolCallID {
+				restoredOrder = append(restoredOrder, "call:"+call.ID)
+			}
+		}
+		if current.ToolResult != nil && (current.ToolResult.ToolCallID == record.ToolCallID || current.ToolResult.ToolCallID == artifactRecord.ToolCallID) {
+			restoredOrder = append(restoredOrder, "result:"+current.ToolResult.ToolCallID)
+		}
+	}
+	wantOrder := []string{
+		"call:" + record.ToolCallID, "result:" + record.ToolCallID,
+		"call:" + artifactRecord.ToolCallID, "result:" + artifactRecord.ToolCallID,
+	}
+	if !reflect.DeepEqual(restoredOrder, wantOrder) {
+		t.Fatalf("same-anchor restored order=%v want=%v", restoredOrder, wantOrder)
+	}
+	var restoredArtifact *message.ToolResult
+	for _, current := range messages {
+		if current.ToolResult != nil && current.ToolResult.ToolCallID == artifactRecord.ToolCallID {
+			restoredArtifact = current.ToolResult
+			break
+		}
+	}
+	if restoredArtifact == nil || restoredArtifact.Content != "full durable output" ||
+		string(restoredArtifact.Structured) != `{"exitCode":0}` {
+		t.Fatalf("restored artifact result = %#v", restoredArtifact)
+	}
+	repeated, err := manualCompactionMessages(ctx, manager, projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(messages, repeated) {
+		t.Fatal("legacy tool restoration is not deterministic")
 	}
 }

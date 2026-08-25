@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -195,6 +197,10 @@ func manualCompactionMessages(ctx context.Context, manager turnContext, projecti
 	if err != nil {
 		return nil, err
 	}
+	messages, err = restoreMissingManualCompactionToolMessages(ctx, source, messages, projection.ToolRecords)
+	if err != nil {
+		return nil, err
+	}
 	return messages, validateManualCompactionToolMessages(messages, projection.ToolRecords)
 }
 
@@ -212,6 +218,129 @@ func expandManualCompactionMessages(ctx context.Context, source turnContext, mes
 	}
 	expanded, err := source.expandArchiveMessages(ctx, messages[prefixEnd:], make(map[string]struct{}))
 	return append(append([]message.Message(nil), messages[:prefixEnd]...), expanded...), err
+}
+
+func restoreMissingManualCompactionToolMessages(
+	ctx context.Context,
+	source turnContext,
+	messages []message.Message,
+	records []session.ToolRecord,
+) ([]message.Message, error) {
+	calls, results := manualCompactionToolNames(messages)
+	restored := append([]message.Message(nil), messages...)
+	for _, record := range records {
+		if !manualToolRecordRequiresPair(record) {
+			continue
+		}
+		callName, hasCall := calls[record.ToolCallID]
+		resultName, hasResult := results[record.ToolCallID]
+		if hasCall || hasResult {
+			if hasCall && hasResult && callName == record.Name && resultName == record.Name {
+				continue
+			}
+			return nil, fmt.Errorf(
+				"manual compaction cannot restore partial durable tool message %q from run %q",
+				record.ToolCallID,
+				record.RunID,
+			)
+		}
+		call, result, err := manualCompactionToolPair(ctx, source, record)
+		if err != nil {
+			return nil, err
+		}
+		insertAt := manualCompactionToolInsertionIndex(restored, record.AnchorSequence)
+		restored = slices.Insert(restored, insertAt, call, result)
+		calls[record.ToolCallID] = record.Name
+		results[record.ToolCallID] = record.Name
+	}
+	return restored, nil
+}
+
+func manualCompactionToolPair(
+	ctx context.Context,
+	source turnContext,
+	record session.ToolRecord,
+) (message.Message, message.Message, error) {
+	if strings.TrimSpace(record.ToolCallID) == "" || strings.TrimSpace(record.Name) == "" {
+		return message.Message{}, message.Message{}, fmt.Errorf(
+			"manual compaction cannot restore invalid durable tool message from run %q",
+			record.RunID,
+		)
+	}
+	content := record.Content
+	structured := append(json.RawMessage(nil), record.Structured...)
+	if record.ArtifactID != "" {
+		if source.loadArchiveSource == nil {
+			return message.Message{}, message.Message{}, fmt.Errorf(
+				"manual compaction cannot load durable tool result artifact %q",
+				record.ArtifactID,
+			)
+		}
+		payload, err := source.loadArchiveSource(ctx, record.ArtifactID)
+		if err != nil {
+			return message.Message{}, message.Message{}, fmt.Errorf(
+				"load durable tool result artifact %q: %w",
+				record.ArtifactID,
+				err,
+			)
+		}
+		var durable struct {
+			Content    string          `json:"content"`
+			Structured json.RawMessage `json:"structured,omitempty"`
+		}
+		if err := json.Unmarshal(payload, &durable); err != nil {
+			return message.Message{}, message.Message{}, fmt.Errorf(
+				"decode durable tool result artifact %q: %w",
+				record.ArtifactID,
+				err,
+			)
+		}
+		content = durable.Content
+		structured = append(json.RawMessage(nil), durable.Structured...)
+	}
+	call := message.Message{
+		Role: message.RoleAssistant,
+		Kind: message.KindStandard,
+		ToolCalls: []message.ToolCall{{
+			ID:        record.ToolCallID,
+			Name:      record.Name,
+			Arguments: append(json.RawMessage(nil), record.Arguments...),
+		}},
+		RunID:      record.RunID,
+		Visibility: message.VisibilityShared,
+		CreatedAt:  record.StartedAt.UTC(),
+	}
+	result := message.NewToolResult(message.ToolResult{
+		ToolCallID: record.ToolCallID,
+		Name:       record.Name,
+		Content:    content,
+		Structured: structured,
+		IsError:    record.State == session.ToolFailed,
+	})
+	result.RunID = record.RunID
+	result.CreatedAt = record.CompletedAt.UTC()
+	if record.AnchorSequence >= 0 {
+		call.Metadata = copyMessageMetadata(call.Metadata, record.AnchorSequence)
+		result.Metadata = copyMessageMetadata(result.Metadata, record.AnchorSequence)
+	}
+	return call, result, nil
+}
+
+func manualCompactionToolInsertionIndex(messages []message.Message, anchor int64) int {
+	prefixEnd := 0
+	for prefixEnd < len(messages) && messages[prefixEnd].Role == message.RoleSystem {
+		prefixEnd++
+	}
+	if anchor < 0 {
+		return prefixEnd
+	}
+	for index := prefixEnd; index < len(messages); index++ {
+		sequence, err := strconv.ParseInt(messages[index].Metadata[sourceSequenceMetadataKey], 10, 64)
+		if err == nil && sequence > anchor {
+			return index
+		}
+	}
+	return len(messages)
 }
 
 func validateManualCompactionToolMessages(messages []message.Message, records []session.ToolRecord) error {
@@ -277,7 +406,8 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 		sessionID: projection.Session.ID, runID: "manual-compaction", providerID: projection.Session.ProviderID, modelID: projection.Session.ModelID,
 		instructions: mainInstructions, instructionFingerprint: mainInstructionFingerprint,
 		history: projection.Blocks, modelHistory: projection.ModelHistory, checkpointBoundary: projection.ModelHistory.CoveredThroughSequence,
-		staticIdentity: mainInstructionFingerprint, todo: todo, toolRecords: projection.ToolRecords,
+		canonicalHighWater: canonicalProjectionHighWater(projection.Blocks),
+		staticIdentity:     mainInstructionFingerprint, todo: todo, toolRecords: projection.ToolRecords,
 		largeToolTokens: r.cfg.Agents.Context.LargeToolResultTokens, keepRecentTokens: manualBudget.KeepRecent,
 	}
 	configureArchiveStorage(&manager, r.host, projection.Session.ID, "manual-compaction")

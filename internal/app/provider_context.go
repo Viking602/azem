@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/contextarchive"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
+	"github.com/Viking602/venat/tool"
 )
 
 //go:embed prompts/main.md
@@ -42,11 +45,36 @@ func turnInstructions(planMode bool) (string, string) {
 	return instructions, hex.EncodeToString(sum[:])
 }
 
+func turnInstructionsWithProject(planMode bool, projectContext string) (string, string) {
+	instructions, _ := turnInstructions(planMode)
+	if projectContext = strings.TrimSpace(projectContext); projectContext != "" {
+		instructions += "\n\n" + projectContext
+	}
+	sum := sha256.Sum256([]byte(instructions))
+	return instructions, hex.EncodeToString(sum[:])
+}
+
 // InstructionFingerprint returns the stable identity of the executable prompt
 // selected for a turn without exposing or duplicating its contents.
 func InstructionFingerprint(planMode bool) string {
 	_, fingerprint := turnInstructions(planMode)
 	return fingerprint
+}
+
+type automationTurn struct {
+	Kind                 string
+	Version              string
+	WorkspaceRoot        string
+	Instructions         string
+	AllowedTools         map[string]bool
+	AllowedSubagentTypes map[string]bool
+	MaxSubagents         int
+	Drivers              []tool.Driver
+	Metadata             map[string]string
+	Budget               api.TaskBudget
+	ChildBudget          api.TaskBudget
+	ObservePath          func(string)
+	ObserveTool          func(string)
 }
 
 type TurnRequest struct {
@@ -58,10 +86,14 @@ type TurnRequest struct {
 	Reasoning              string
 	AgentMode              string
 	PlanMode               bool
+	Prewalk                *config.ModelRouteConfig
+	PlanYolo               *config.ModelRouteConfig
+	VibeMode               bool
 	DisableSubagents       bool
 	ActiveSkills           []string
 	Images                 []session.Attachment
 	Todo                   session.TodoList
+	projectContext         string
 	privateContext         string
 	visionContext          string
 	approvedPlanArtifactID string
@@ -82,12 +114,39 @@ type TurnRequest struct {
 	immutableIdentity      string
 	origin                 string
 	wakeData               map[string]string
+	automation             *automationTurn
 }
 
 const (
 	turnOriginSubagentWake = "subagent_wake"
+	turnOriginAutoLearn    = "autolearn_capture"
 	subagentWakeBlockState = "subagent_wake"
 )
+
+type providerContextPressure struct {
+	toolTokens            int
+	reportedHistoryTokens atomic.Int64
+}
+
+func (p *providerContextPressure) observeInputTokens(inputTokens int) {
+	if p == nil || inputTokens <= 0 {
+		return
+	}
+	p.reportedHistoryTokens.Store(int64(max(0, inputTokens-max(0, p.toolTokens))))
+}
+
+func (p *providerContextPressure) tokens(localEstimate int) int {
+	if p == nil {
+		return localEstimate
+	}
+	return max(localEstimate, int(p.reportedHistoryTokens.Load()))
+}
+
+func (p *providerContextPressure) reset() {
+	if p != nil {
+		p.reportedHistoryTokens.Store(0)
+	}
+}
 
 type turnContext struct {
 	sessionID                 string
@@ -108,6 +167,8 @@ type turnContext struct {
 	workspaceRoot             string
 	images                    []session.Attachment
 	checkpointBoundary        *int64
+	canonicalHighWater        *int64
+	providerPressure          *providerContextPressure
 	reportContextTokens       func(context.Context, int)
 	compactHooks              func(context.Context, []message.Message, []message.Message, error) error
 	putArtifact               func(context.Context, string, []byte, string) (session.ContextArtifact, error)
@@ -256,13 +317,11 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	}
 	goal := strings.TrimSpace(task.Goal)
 	images := c.images
-	if c.resuming {
-		for _, block := range c.history {
-			if block.RunID == c.runID && block.Kind == "user" {
-				goal = ""
-				images = nil
-				break
-			}
+	for _, block := range c.history {
+		if c.runID != "" && block.RunID == c.runID && block.Kind == "user" {
+			goal = ""
+			images = nil
+			break
 		}
 	}
 	if goal != "" || len(images) > 0 {
@@ -359,6 +418,14 @@ func modelHistoryHasProviderState(messages []message.Message) bool {
 }
 
 func blockMessage(block session.Block) (message.Message, bool) {
+	if len(block.ImportedMessage) > 0 {
+		var imported message.Message
+		if err := json.Unmarshal(block.ImportedMessage, &imported); err == nil && imported.HasContent() {
+			imported.SyncLegacyContent()
+			imported.Metadata = copyMessageMetadata(imported.Metadata, block.Sequence)
+			return imported, true
+		}
+	}
 	text := strings.TrimSpace(block.Content)
 	if text == "" && len(block.Attachments) == 0 {
 		return message.Message{}, false

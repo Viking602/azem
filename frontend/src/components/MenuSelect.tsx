@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Search } from "lucide-react";
+import usePressActivation from "./usePressActivation";
 
 export type MenuSelectOption = { value: string; label: string; caption?: string; keywords?: string[]; icon?: ReactNode; disabled?: boolean };
 
@@ -87,25 +88,49 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
       : { position: inDialog ? "absolute" : "fixed", bottom: boundaryBottom - rect.top + gap, left, width, maxHeight });
   }, [fit, menuAlign, menuWidth, placement]);
 
+  const setClosed = useCallback(() => {
+    if (!details.current) return;
+    details.current.open = false;
+    setOpen(false);
+    setCoords(null);
+    setQuery("");
+  }, []);
+
+  const toggleMenu = useCallback(() => {
+    const root = details.current;
+    if (!root || disabled) return;
+    const next = !root.open;
+    root.open = next;
+    setOpen(next);
+    if (next) requestAnimationFrame(updatePosition);
+    else {
+      setCoords(null);
+      setQuery("");
+    }
+  }, [disabled, updatePosition]);
+
+  const pressActivation = usePressActivation<HTMLElement>(toggleMenu, disabled);
+
   useEffect(() => {
     const close = (event: PointerEvent) => {
       const target = event.target as Node;
       if (details.current?.contains(target) || optionsRef.current?.contains(target)) return;
-      if (details.current) details.current.open = false;
-      setOpen(false);
-      setCoords(null);
-      setQuery("");
+      setClosed();
     };
     document.addEventListener("pointerdown", close, true);
-    return () => document.removeEventListener("pointerdown", close, true);
-  }, []);
+    window.addEventListener("blur", setClosed);
+    return () => {
+      document.removeEventListener("pointerdown", close, true);
+      window.removeEventListener("blur", setClosed);
+    };
+  }, [setClosed]);
 
   useEffect(() => {
     if (!open) return;
     updatePosition();
     const onReposition = () => updatePosition();
     window.addEventListener("resize", onReposition);
-    // Capture scroll from any ancestor (inspector-scroll, transcript, etc.).
+    // Capture scroll from any ancestor (settings, transcript, or nested panels).
     window.addEventListener("scroll", onReposition, true);
     return () => {
       window.removeEventListener("resize", onReposition);
@@ -123,12 +148,8 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
     target?.focus();
   });
   const close = () => {
-    if (!details.current) return;
-    details.current.open = false;
-    setOpen(false);
-    setCoords(null);
-    setQuery("");
-    details.current.querySelector<HTMLElement>("summary")?.focus();
+    setClosed();
+    details.current?.querySelector<HTMLElement>("summary")?.focus();
   };
   const choose = (next: string) => { onChange(next); close(); };
   const move = (event: React.KeyboardEvent, offset: number) => {
@@ -205,11 +226,15 @@ export default function MenuSelect({ value, options, onChange, ariaLabel, classN
       }}
     >
       <summary
+        {...pressActivation}
         aria-label={ariaLabel}
         aria-disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
-        onClick={(event) => { if (disabled) event.preventDefault(); }}
+        onClick={(event) => {
+          event.preventDefault();
+          pressActivation.onClick(event);
+        }}
         onKeyDown={(event) => {
           if (disabled || !["ArrowDown", "ArrowUp"].includes(event.key)) return;
           event.preventDefault();

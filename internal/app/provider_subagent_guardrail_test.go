@@ -9,7 +9,7 @@ import (
 	"github.com/Viking602/venat/message"
 )
 
-func TestPendingBackgroundChildrenGuardrailPromptsOnce(t *testing.T) {
+func TestPendingBackgroundChildrenGuardrailKeepsRetryingUntilTerminal(t *testing.T) {
 	children := []backgroundChildStatus{{
 		ID: "child-review", Type: "review", Description: "review the diff", State: "running",
 	}}
@@ -22,16 +22,25 @@ func TestPendingBackgroundChildrenGuardrailPromptsOnce(t *testing.T) {
 	}
 	prompt := first.RetryMessages[0].Text
 	for _, fragment := range []string{
-		"child-review", "review", "subagent.get_output", "timeout_ms", "independent of the current conclusion",
+		"child-review", "review", "subagent.get_output", "timeout_ms", "may not finish", "idle_timeout",
 	} {
 		if !strings.Contains(prompt, fragment) {
 			t.Fatalf("retry prompt omitted %q: %s", fragment, prompt)
 		}
 	}
+	if strings.Contains(prompt, "independent of the current conclusion") {
+		t.Fatalf("retry prompt still allows an independence claim: %s", prompt)
+	}
 
 	second, err := guardrail.Check(context.Background(), input)
-	if err != nil || second.Action != hyagent.OutputGuardrailActionAllow {
+	if err != nil || second.Action != hyagent.OutputGuardrailActionRetry {
 		t.Fatalf("second decision = %#v, %v", second, err)
+	}
+
+	children = nil
+	third, err := guardrail.Check(context.Background(), input)
+	if err != nil || third.Action != hyagent.OutputGuardrailActionAllow {
+		t.Fatalf("cleared decision = %#v, %v", third, err)
 	}
 }
 

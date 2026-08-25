@@ -267,7 +267,7 @@ export function normalizeAgentCatalog(raw: Record<string, unknown>): AgentCatalo
 export function normalizeSkill(raw: Record<string, unknown>): SkillEntry {
   return {
     name: stringValue(raw, "name"), description: stringValue(raw, "description"),
-    sourcePath: stringValue(raw, "sourcePath"), logoPath: stringValue(raw, "logoPath"), bundled: Boolean(raw.bundled),
+    sourcePath: stringValue(raw, "sourcePath"), logoPath: stringValue(raw, "logoPath"), bundled: Boolean(raw.bundled), managed: Boolean(raw.managed),
     eager: Boolean(raw.eager), disabled: Boolean(raw.disabled),
     modelVisible: Boolean(raw.modelVisible),
     resourceCount: numberValue(raw.resourceCount),
@@ -288,12 +288,14 @@ export function normalizePlugin(raw: Record<string, unknown>): PluginEntry {
   return {
     id: pluginImportID({ id: stringValue(raw, "id"), name, marketplace }),
     name, displayName: stringValue(raw, "displayName"), version: stringValue(raw, "version"),
-    marketplace, origin: stringValue(raw, "origin") || "local", description: stringValue(raw, "description"),
+    marketplace, origin: stringValue(raw, "origin") || "local", scope: stringValue(raw, "scope") || undefined, description: stringValue(raw, "description"),
     developerName: stringValue(raw, "developerName"), category: stringValue(raw, "category"),
     brandColor: stringValue(raw, "brandColor"), logoPath: stringValue(raw, "logoPath"),
     enabled: Boolean(raw.enabled), skillCount: numberValue(raw.skillCount),
     mcpServerCount: numberValue(raw.mcpServerCount), integratedMCPCount: numberValue(raw.integratedMCPCount),
     hookCount: numberValue(raw.hookCount), hooksTrusted: Boolean(raw.hooksTrusted),
+    toolCount: numberValue(raw.toolCount), commandCount: numberValue(raw.commandCount),
+    agentCount: numberValue(raw.agentCount), themeCount: numberValue(raw.themeCount), extensionCount: numberValue(raw.extensionCount),
     hasApp: Boolean(raw.hasApp), capabilities: ((raw.capabilities ?? []) as unknown[]).map(String),
     status: stringValue(raw, "status"), warning: stringValue(raw, "warning"),
 		imported: Boolean(raw.imported),
@@ -406,6 +408,9 @@ export function normalizeUsageReport(raw?: UsageReport | Record<string, unknown>
 
 function normalizeMCPServer(raw: Record<string, unknown>): MCPServerEntry {
   const rawTools = (raw.tools ?? []) as Array<Record<string, unknown>>;
+  const rawResources = (raw.resources ?? []) as Array<Record<string, unknown>>;
+  const rawResourceTemplates = (raw.resourceTemplates ?? []) as Array<Record<string, unknown>>;
+  const rawPrompts = (raw.prompts ?? []) as Array<Record<string, unknown>>;
   return {
     name: stringValue(raw, "name"), removable: Boolean(raw.removable), enabled: Boolean(raw.enabled),
     state: stringValue(raw, "state"), transport: stringValue(raw, "transport"),
@@ -417,6 +422,25 @@ function normalizeMCPServer(raw: Record<string, unknown>): MCPServerEntry {
     tools: rawTools.map((tool) => ({
       name: stringValue(tool, "name"), description: stringValue(tool, "description"),
       effect: stringValue(tool, "effect"), requiresApproval: Boolean(tool.requiresApproval),
+    })),
+    resourceCount: numberValue(raw.resourceCount),
+    promptCount: numberValue(raw.promptCount),
+    resources: rawResources.map((resource) => ({
+      server: stringValue(resource, "server"), uri: stringValue(resource, "uri"), name: stringValue(resource, "name"),
+      description: stringValue(resource, "description") || undefined, mediaType: stringValue(resource, "mediaType") || undefined,
+    })),
+    resourceTemplateCount: numberValue(raw.resourceTemplateCount),
+    resourceTemplates: rawResourceTemplates.map((template) => ({
+      server: stringValue(template, "server"), uriTemplate: stringValue(template, "uriTemplate"), name: stringValue(template, "name"),
+      description: stringValue(template, "description") || undefined, mediaType: stringValue(template, "mediaType") || undefined,
+    })),
+    prompts: rawPrompts.map((prompt) => ({
+      server: stringValue(prompt, "server"), name: stringValue(prompt, "name"),
+      description: stringValue(prompt, "description") || undefined,
+      arguments: ((prompt.arguments ?? []) as Array<Record<string, unknown>>).map((argument) => ({
+        name: stringValue(argument, "name"), description: stringValue(argument, "description") || undefined,
+        required: Boolean(argument.required),
+      })),
     })),
     error: stringValue(raw, "error"), icon: stringValue(raw, "icon") || undefined,
   };
@@ -479,7 +503,7 @@ export function modelDisplayName(id: string, name = "") {
 }
 
 export function providerDisplayName(id: string, providers: ModelProvider[]) {
-	return providers.find((provider) => provider.id === id)?.displayName ?? (id === "chatgpt" ? "ChatGPT" : id === "grok" ? "Grok" : id);
+	return providers.find((provider) => provider.id === id)?.displayName ?? (id === "chatgpt" ? "ChatGPT" : id === "grok" ? "Grok" : id === "cursor" ? "Cursor" : id);
 }
 
 export function emptyContextUsage(contextLimit = 0): ContextUsage {
@@ -519,9 +543,9 @@ export function parseContextUsage(raw: string | undefined, fallbackLimit = 0): C
 }
 
 export function projectContextUsage(current: ContextUsage, data: Record<string, string>, state?: string): ContextUsage {
-  if (data.factSnapshot === "true" && data.usageSnapshot) return parseContextUsage(data.usageSnapshot, current.contextLimit);
   const requestKind = data.requestKind || "main";
-  if (requestKind === "subagent") return current;
+  if (requestKind === "subagent" || requestKind === "autolearn") return current;
+  if (data.factSnapshot === "true" && data.usageSnapshot) return parseContextUsage(data.usageSnapshot, current.contextLimit);
   const cacheReported = data.cacheStatus === "reported";
   const cacheWriteReported = data.cacheWriteStatus === "reported";
   const next: ContextUsage = {

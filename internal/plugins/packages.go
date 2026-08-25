@@ -22,6 +22,7 @@ type packageMetadata struct {
 	Version     string `json:"version"`
 	Enabled     bool   `json:"enabled"`
 	Origin      string `json:"origin"`
+	Scope       string `json:"scope,omitempty"`
 }
 
 func ensurePackageDirectory(options Options) (string, error) {
@@ -449,6 +450,8 @@ func installedPackage(root string) (installedPlugin, error) {
 	metadata.Marketplace = firstNonEmpty(metadata.Marketplace, "local")
 	metadata.Version = firstNonEmpty(metadata.Version, value.Version)
 	metadata.Origin = firstNonEmpty(metadata.Origin, "local")
-	return installedPlugin{PluginID: metadata.PluginID, Name: value.Name, Marketplace: metadata.Marketplace, Version: metadata.Version,
-		Installed: true, Enabled: metadata.Enabled, Origin: metadata.Origin, Source: pluginSource{Path: root}}, nil
+	return installedPlugin{
+		PluginID: metadata.PluginID, Name: value.Name, Marketplace: metadata.Marketplace, Version: metadata.Version,
+		Installed: true, Enabled: metadata.Enabled, Origin: metadata.Origin, Scope: metadata.Scope, Source: pluginSource{Path: root},
+	}, nil
 }

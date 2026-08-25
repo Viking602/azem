@@ -1,12 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown, ChevronRight, CircleDotDashed, FolderOpen, FolderPlus,
-  GitPullRequest, Plus, Search, Settings, X,
+  GitPullRequest, Plus, Search, Settings, ShieldCheck, X,
 } from "lucide-react";
-import { createProject, execute, isDesktopRuntime, openProject, openProjectSession, selectProjectFolder, subscribeSessionMenu } from "../bridge";
+import { createProject, execute, isDesktopRuntime, openProject, openProjectSession, resumeSession, selectProjectFolder, subscribeSessionMenu } from "../bridge";
 import { translator } from "../i18n";
-import { formatRelativeTime, useRelativeNow } from "../relativeTime";
 import { openPullRequest, refreshPullRequestDashboard } from "../pullRequests";
 import { useRuntimeStore } from "../store";
 import type { ActionKind, View } from "../types";
@@ -16,6 +15,7 @@ export default function Sidebar() {
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const snapshot = useRuntimeStore((state) => state.snapshot)!;
+  const applyEvents = useRuntimeStore((state) => state.applyEvents);
   const sessions = useRuntimeStore((state) => state.sessions);
   const projects = useRuntimeStore((state) => state.projects);
   const currentSessionId = useRuntimeStore((state) => state.currentSessionId);
@@ -29,18 +29,13 @@ export default function Sidebar() {
   const setCommandOpen = useRuntimeStore((state) => state.setCommandOpen);
   const setError = useRuntimeStore((state) => state.setError);
   const pullRequestDashboard = useRuntimeStore((state) => state.pullRequestDashboard);
-  const branches = useRuntimeStore((state) => state.branches);
-  const workspaceChangedFiles = useRuntimeStore((state) => state.workspaceChangedFiles);
   const selectPullRequest = useRuntimeStore((state) => state.selectPullRequest);
   const t = translator(snapshot.language);
   const catalog = projects.some((project) => project.workspace === snapshot.workspace)
     ? projects
     : [{ workspace: snapshot.workspace, updatedAt: "" }, ...projects];
-  const currentBranch = pullRequestDashboard?.currentBranch || branches.find((branch) => branch.current)?.name || "";
   const currentPullRequest = pullRequestDashboard?.current;
   const runningSessionId = globalRunSessionId || (running ? currentSessionId : "");
-  const sessionTimes = useMemo(() => sessions.map((session) => session.updatedAt).filter(Boolean), [sessions]);
-  const now = useRelativeNow(sessionTimes);
 
   useEffect(() => subscribeSessionMenu((event) => {
     if (event.action === "error") {
@@ -72,9 +67,23 @@ export default function Sidebar() {
         window.location.assign(url);
         return;
       }
-      await execute({ kind, target, sessionId: currentSessionId });
+      if (kind === "resume_session" && isDesktopRuntime()) {
+        const projection = await resumeSession(target);
+        if (projection) applyEvents([projection]);
+      } else {
+        await execute({ kind, target, sessionId: currentSessionId });
+      }
       selectPullRequest(null);
       setView("thread");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    }
+  };
+  const openSecurity = async () => {
+    try {
+      await execute({ kind: "list_security_scans", target: snapshot.workspace, limit: 100, sessionId: currentSessionId });
+      selectPullRequest(null);
+      setView("security");
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     }
@@ -107,6 +116,7 @@ export default function Sidebar() {
       <nav className="primary-nav" aria-label="Primary">
         <button className={view === "thread" && blocks.length === 0 && !running ? "active" : ""} onClick={() => run("new_session")}><Plus size={15} />{t("newSession")}<kbd>⌘N</kbd></button>
         <button onClick={() => setCommandOpen(true)}><Search size={15} />{t("search")}<kbd>⌘K</kbd></button>
+        <button className={view === "security" ? "active" : ""} onClick={() => void openSecurity()}><ShieldCheck size={15} />{snapshot.language === "zh-CN" ? "安全扫描" : "Security"}</button>
       </nav>
       <section className="project-tree">
         <div className="sidebar-section-header">
@@ -118,7 +128,6 @@ export default function Sidebar() {
           const projectName = basename(item.workspace);
           const projectOpen = openProjects[item.workspace] ?? (active || projectName === "llmux");
           const projectSessions = sessions.filter((session) => !session.archived && (session.workspace === item.workspace || (!session.workspace && active)));
-          const demoPRCount = projectName === "llmux" ? 1 : projectName === "venat" ? 2 : 0;
           const prototypeDemo = snapshot.workspace.endsWith("/azem");
           const prototypePR = active && currentPullRequest ? {
             title: currentPullRequest.title,
@@ -146,9 +155,7 @@ export default function Sidebar() {
             <div className="project-heading">
               <button className="project-toggle" aria-expanded={projectOpen} onClick={() => setOpenProjects((open) => ({ ...open, [item.workspace]: !projectOpen }))}>
                 {projectOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                <span className="project-initial" aria-hidden="true">{projectName.slice(0, 1).toUpperCase()}</span>
-                <span className="project-heading-copy"><strong>{projectName}</strong><small>{active ? `${currentBranch || t("noBranches")}${workspaceChangedFiles > 0 ? ` · ${workspaceChangedFiles} 个改动` : ` · ${t("workingTreeClean")}`}` : projectName === "llmux" ? "feat/usage-store" : projectName === "venat" ? `main · ${t("workingTreeClean")}` : compactProjectPath(item.workspace)}</small></span>
-                <em>{active ? projectSessions.length || "" : demoPRCount ? `${demoPRCount} PR` : projectSessions.length || ""}</em>
+                <span className="project-heading-copy"><strong>{projectName}</strong></span>
               </button>
               <button className="project-action project-new-session" aria-label={t("newSession")} onClick={startProjectSession}><Plus size={15} /></button>
             </div>
@@ -172,7 +179,7 @@ export default function Sidebar() {
                     aria-busy={session.id === runningSessionId}
                     style={{ "--custom-contextmenu": session.pinned ? "session-pinned" : "session", "--custom-contextmenu-data": session.id } as CSSProperties}>
                     <span className="session-state-dot" data-running={String(session.id === runningSessionId)} aria-hidden="true" />
-                    <span className="session-copy"><strong>{session.title || t("newSession")}</strong><small>{sidebarSessionLabel(session.title, session.updatedAt, session.id === runningSessionId, snapshot.language, now)}</small></span>
+                    <span className="session-copy"><strong>{session.title || t("newSession")}</strong></span>
                     {session.id === runningSessionId && <i className="session-running-indicator" aria-hidden="true" />}
                     {session.unread && <i className="session-unread" aria-label={t("unread")} />}
                   </button>
@@ -192,22 +199,6 @@ export default function Sidebar() {
 
 function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) || "workspace";
-}
-
-function compactProjectPath(path: string) {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts.slice(-2, -1)[0] || path;
-}
-
-function sidebarSessionLabel(title: string, updatedAt: string, running: boolean, language: "en" | "zh-CN", now: number) {
-  if (language === "zh-CN" && !isDesktopRuntime()) {
-    if (title === "插件兼容设计") return "昨天 · 已完成";
-    if (title === "语义上下文重建") return "8 月 7 日 · 已完成";
-    if (title === "发布 v0.2.4") return "周五 · 等待检查";
-  }
-  const time = formatRelativeTime(updatedAt, language, now);
-  if (running) return language === "zh-CN" ? `${time} · 运行中` : `${time} · Running`;
-  return time;
 }
 
 function ProjectLauncher({ language, setError }: { language: "en" | "zh-CN"; setError: (message: string) => void }) {

@@ -21,6 +21,18 @@ import (
 	"github.com/Viking602/venat/transport/mcpcontract"
 )
 
+func hookSourcesForDiscovery(cfg config.HooksConfig, discovery config.DiscoveryConfig, configDir, homeDir, workspace string) []hooks.Source {
+	disabledClaude := false
+	for _, provider := range discovery.DisabledProviders {
+		if strings.EqualFold(strings.TrimSpace(provider), "claude") {
+			disabledClaude = true
+			break
+		}
+	}
+	cfg.ClaudeCompatibility = cfg.ClaudeCompatibility && discovery.Hooks && !disabledClaude
+	return hookSources(cfg, configDir, homeDir, workspace)
+}
+
 func hookSources(cfg config.HooksConfig, configDir, homeDir, workspace string) []hooks.Source {
 	if !cfg.Enabled {
 		return nil

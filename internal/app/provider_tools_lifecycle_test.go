@@ -97,6 +97,72 @@ func TestDurableToolTimelineCapturesCompletedReadObservation(t *testing.T) {
 	}
 }
 
+func TestDurableToolTimelineCapturesCompletedDeleteObservation(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	path := filepath.Join(root, "gone.txt")
+	if err := os.WriteFile(path, []byte("remove me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Timeline"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "session", session.Block{Kind: "user", RunID: "run", Content: "delete file"}); err != nil {
+		t.Fatal(err)
+	}
+	arguments := json.RawMessage(`{"path":"gone.txt"}`)
+	timeline := newDurableToolTimeline(sessions, root, "session", "run")
+	if err := timeline.start(ctx, tool.Call{ID: "delete-1", Name: agentservice.ToolDeleteFile, Arguments: arguments}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := timeline.finish(ctx, tool.Result{ToolCallID: "delete-1", Name: agentservice.ToolDeleteFile, Content: `{"path":"gone.txt"}`}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := sessions.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.ToolRecords) != 1 || len(projection.ToolRecords[0].Observations) != 1 {
+		t.Fatalf("durable delete record=%#v", projection.ToolRecords)
+	}
+	observation := projection.ToolRecords[0].Observations[0]
+	if observation.Path != "gone.txt" || observation.Operation != "delete" || observation.SHA256 != "" || observation.ErrorCode != "" {
+		t.Fatalf("durable delete observation=%#v", observation)
+	}
+}
+
+func TestDurableToolContinuityVerifiesDeletedPath(t *testing.T) {
+	root := t.TempDir()
+	manager := turnContext{
+		workspaceRoot: root,
+		toolRecords: []session.ToolRecord{{
+			RunID: "run", ToolCallID: "delete-1", Name: agentservice.ToolDeleteFile, State: session.ToolCompleted,
+			Observations: []session.FileObservation{{Path: "gone.txt", Operation: "delete"}},
+		}},
+	}
+	messages := manager.toolContinuityMessages(context.Background())
+	if len(messages) != 2 || !strings.Contains(messages[1].Text, `"operation":"delete"`) ||
+		!strings.Contains(messages[1].Text, `"state":"verified_unchanged"`) {
+		t.Fatalf("deleted file evidence=%#v", messages)
+	}
+	if err := os.WriteFile(filepath.Join(root, "gone.txt"), []byte("recreated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	messages = manager.toolContinuityMessages(context.Background())
+	if len(messages) != 2 || !strings.Contains(messages[1].Text, `"state":"stale"`) {
+		t.Fatalf("recreated deleted path evidence=%#v", messages)
+	}
+}
+
 func TestShellArtifactSinkPersistsAfterExecutionCancellation(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "shell-artifact.db"))
@@ -328,7 +394,7 @@ func TestAutoReviewReviewsWorkspaceFileEdits(t *testing.T) {
 	})
 	_ = nextApprovalEvent(t, harness.host, EventApprovalMode)
 	driver := namedApprovalDriver{name: "coding.edit_hashline", executions: &atomic.Int32{}}
-	call := tool.Call{ID: "edit-1", Name: "coding.edit_hashline", Arguments: json.RawMessage(`{"input":"¶src/main.go#ABCD replace 1:\n-old\n+new"}`)}
+	call := tool.Call{ID: "edit-1", Name: "coding.edit_hashline", Arguments: json.RawMessage(`{"input":"*** Begin Patch\n[src/main.go#ABCD]\nPUT 1.=1:\n+new\n*** End Patch\n"}`)}
 	execution, err := harness.coding.ExecuteDriver(context.Background(), harness.run, driver, call, nil)
 	if err != nil || execution.Approval == nil {
 		t.Fatalf("prepare workspace edit=%+v error=%v", execution, err)
@@ -358,8 +424,8 @@ func TestAutoReviewPrefetchesWorkspaceEditsInParallel(t *testing.T) {
 		writeAutomaticReviewWithUsage(writer, "```json\n"+`{"risk_level":"medium","user_authorization":"high","outcome":"allow","rationale":"authorized"}`+"\n```")
 	})
 	_ = nextApprovalEvent(t, harness.host, EventApprovalMode)
-	first := json.RawMessage(`{"input":"¶src/a.go#AAAA replace 1:\n-old\n+new"}`)
-	second := json.RawMessage(`{"input":"¶src/b.go#BBBB replace 1:\n-old\n+new"}`)
+	first := json.RawMessage(`{"input":"*** Begin Patch\n[src/a.go#AAAA]\nPUT 1.=1:\n+new\n*** End Patch\n"}`)
+	second := json.RawMessage(`{"input":"*** Begin Patch\n[src/b.go#BBBB]\nPUT 1.=1:\n+new\n*** End Patch\n"}`)
 	harness.host.prefetchAutoReview(context.Background(), "session", harness.run.RunID, "edit-1", coding.ToolEditHashline, first)
 	harness.host.prefetchAutoReview(context.Background(), "session", harness.run.RunID, "edit-2", coding.ToolEditHashline, second)
 	deadline := time.After(2 * time.Second)

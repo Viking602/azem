@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Language } from "../../i18n";
 import type { Block } from "../../types";
-import { ThinkingState } from "../beautiful-ui/Primitives";
+import { ReasoningPanel } from "../assistant-ui/Elements";
 import { isActiveProcessBlock, thinkingStateLabel, thinkingTraceElapsedMs } from "../toolTimeline";
 import { normalizeThinkingText, plainStreamingText } from "./streaming";
 import { collectThinkingTrace } from "./thinkingTabs";
@@ -26,8 +26,8 @@ export function ThinkingTrace({
 
   if (!hasReasoningText) return null;
 
-  return <div className="bui-thinking-stack" data-live={live || reasoningRunning || undefined} data-thinking-row="reasoning">
-    <ThinkingState
+  return <div className="aui-reasoning-stack" data-live={live || reasoningRunning || undefined} data-thinking-row="reasoning">
+    <ReasoningPanel
       active={reasoningRunning}
       expanded={open}
       label={thinkingStateLabel(language, reasoningRunning, reasoningRunning ? 0 : thinkingTraceElapsedMs(parts.reasoning))}
@@ -35,14 +35,14 @@ export function ThinkingTrace({
       panelId={`thinking-reason-${blocks[0]?.id.replace(/[^a-zA-Z0-9_-]/gu, "-") || "group"}`}
       onToggle={() => setOpen((value) => !value)}
     >
-      <div className="bui-thinking-panel" data-tab="reasoning">
-        <ReasoningPanel blocks={parts.reasoning} />
+      <div className="aui-reasoning-content" data-tab="reasoning">
+        <ReasoningSteps blocks={parts.reasoning} />
       </div>
-    </ThinkingState>
+    </ReasoningPanel>
   </div>;
 }
 
-export function ReasoningPanel({ blocks }: { blocks: Block[] }) {
+export function ReasoningSteps({ blocks }: { blocks: Block[] }) {
   const steps = blocks.flatMap((block) =>
     normalizeThinkingText(block.content || "").split(/\n{2,}/u).map(plainStreamingText).filter(Boolean));
   if (!steps.length) return null;

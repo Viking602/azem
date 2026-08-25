@@ -105,6 +105,23 @@ func NewClient() *Client {
 	}
 }
 
+func (c *Client) WithClientID(clientID string) *Client {
+	if clientID == "" {
+		return c
+	}
+	c.httpMu.Lock()
+	defer c.httpMu.Unlock()
+	return &Client{
+		HTTP:          c.HTTP,
+		DiscoveryURL:  c.DiscoveryURL,
+		UserURL:       c.UserURL,
+		ClientID:      clientID,
+		Scope:         c.Scope,
+		AllowInsecure: c.AllowInsecure,
+		Wait:          c.Wait,
+	}
+}
+
 func (c *Client) Discover(ctx context.Context) (Discovery, error) {
 	if err := c.validateEndpoint(c.DiscoveryURL); err != nil {
 		return Discovery{}, err

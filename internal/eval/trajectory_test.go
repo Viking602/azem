@@ -43,7 +43,7 @@ func TestExportTrajectoryPreservesDurableRowsAndExternalPayloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustExec(`INSERT INTO context_artifacts(id, session_id, run_id, kind, sha256, preview, created_at) VALUES('artifact-1', 'session-1', 'archive-run', 'tool_result', ?, '{}', 8)`, externalDigest)
-	mustExec(`INSERT INTO events(run_id, sequence, recorded_at, data, data_sha256) VALUES('run-1', 1, 9, X'', ?), ('archive-run', 1, 9, '{}', ''), ('other-run', 1, 9, '{}', '')`, externalDigest)
+	mustExec(`INSERT INTO events(run_id, sequence, recorded_at, data, data_sha256) VALUES('run-1', 1, 9, '{}', ?), ('archive-run', 1, 9, '{}', ''), ('other-run', 1, 9, '{}', '')`, externalDigest)
 	mustExec(`INSERT INTO records(kind, key1, run_id, created_at, data, data_sha256) VALUES('run', 'record-1', 'run-1', 10, ?, ?), ('run', 'archive-record', 'archive-run', 10, '{}', ''), ('run', 'record-2', 'other-run', 10, '{}', '')`, external, externalDigest)
 
 	trajectory, err := ExportTrajectory(ctx, db, provider.Blobs(), "session-1")
@@ -134,6 +134,30 @@ func TestExportRejectsInlinePayloadDigestMismatchEvenWhenBlobExists(t *testing.T
 	if err := validateTrajectoryPayloads(trajectory); err == nil {
 		t.Fatal("accepted inline payload with mismatched stored digest")
 	}
+}
+
+func TestTrajectoryRejectsJSONSentinelForTextPayload(t *testing.T) {
+	trajectory := emptyValidTrajectory()
+	payload := []byte("external text payload")
+	digest := sumHex(payload)
+	for index := range trajectory.Tables {
+		if trajectory.Tables[index].Name != "session_tool_records" {
+			continue
+		}
+		values := make(map[string]StoredValueV1, len(trajectory.Tables[index].Columns))
+		for _, column := range trajectory.Tables[index].Columns {
+			values[column] = StoredValueV1{Kind: "null"}
+		}
+		values["content"] = StoredValueV1{Kind: "text", Base64: base64.StdEncoding.EncodeToString([]byte("{}"))}
+		values["content_sha256"] = StoredValueV1{Kind: "text", Base64: base64.StdEncoding.EncodeToString([]byte(digest))}
+		trajectory.Tables[index].Rows = []TrajectoryRowV1{{Values: values}}
+		trajectory.Blobs = []TrajectoryBlobV1{{SHA256: digest, Base64: base64.StdEncoding.EncodeToString(payload)}}
+		if err := validateTrajectoryPayloads(trajectory); err == nil {
+			t.Fatal("accepted JSON sentinel for text payload")
+		}
+		return
+	}
+	t.Fatal("session_tool_records table is unavailable")
 }
 
 func emptyValidTrajectory() TrajectoryV1 {

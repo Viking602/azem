@@ -153,6 +153,54 @@ func TestHardArchiveCompactionPreservesTailWithinHardLimit(t *testing.T) {
 	}
 }
 
+func TestArchiveCompactionUsesProviderReportedPressureWhenLocalEstimateIsLow(t *testing.T) {
+	var archivedSource []byte
+	pressure := &providerContextPressure{toolTokens: 100}
+	pressure.observeInputTokens(2_600)
+	manager := turnContext{
+		archiveEnabled:   true,
+		keepRecentTokens: 100,
+		providerPressure: pressure,
+	}
+	manager.storeArchive = func(_ context.Context, result contextarchive.Result) (contextarchive.Manifest, []session.Attachment, error) {
+		archivedSource = append([]byte(nil), result.Source...)
+		manifest := result.Manifest
+		manifest.SourceArtifactID = "provider-pressure"
+		return manifest, nil, nil
+	}
+	manager.loadArchiveSource = func(context.Context, string) ([]byte, error) {
+		return append([]byte(nil), archivedSource...), nil
+	}
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "system rules"),
+		message.NewText(message.RoleUser, "user-0"),
+		message.NewText(message.RoleAssistant, strings.Repeat("old evidence ", 500)),
+		message.NewText(message.RoleUser, "user-1"),
+		message.NewText(message.RoleAssistant, "answer-1"),
+		message.NewText(message.RoleUser, "user-2"),
+		message.NewText(message.RoleAssistant, "answer-2"),
+		message.NewText(message.RoleUser, "user-3"),
+		message.NewText(message.RoleAssistant, "answer-3"),
+	}
+	if estimated := estimateContextTokens(history); estimated >= 2_000 {
+		t.Fatalf("test requires a low local estimate, got %d", estimated)
+	}
+	compacted, err := manager.CompactTo(context.Background(), history, 2_000)
+	mustTestNoError(t, err)
+	manifest := archiveManifestInMessages(t, compacted)
+	if manifest.SourceArtifactID != "provider-pressure" {
+		t.Fatalf("archive manifest=%+v", manifest)
+	}
+	source, err := contextarchive.DecodeSource(archivedSource)
+	mustTestNoError(t, err)
+	if markers := archiveUserMarkers(source.Messages); !strings.Contains(markers, "user-0") {
+		t.Fatalf("archive source users=%q", markers)
+	}
+	if reported := pressure.reportedHistoryTokens.Load(); reported != 0 {
+		t.Fatalf("provider pressure remained after activation: %d", reported)
+	}
+}
+
 func TestArchiveCompactionRelaxesOptionalTokenReserveButKeepsLatestThreeTurns(t *testing.T) {
 	var archivedSource []byte
 	manager := turnContext{archiveEnabled: true, keepRecentTokens: 20_000}

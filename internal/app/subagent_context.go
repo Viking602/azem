@@ -77,12 +77,12 @@ func (c subagentTurnContext) CompactTo(ctx context.Context, history []message.Me
 }
 
 func effectiveSubagentTools(roleTools []string, capability string) map[string]bool {
-	readOnly := map[string]bool{"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true}
+	readOnly := map[string]bool{"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolASTGrep: true, agentservice.ToolLSP: true, agentservice.ToolWebSearch: true, agentservice.ToolGitHub: true, agentservice.ToolRecall: true, "coding.git_diff": true}
 	modes := map[string]map[string]bool{
 		"read-only":  readOnly,
-		"read-write": {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.write_file": true, "coding.gofmt": true},
-		"execute":    {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.go_test": true, "coding.shell": true},
-		"all":        {"coding.list_files": true, "coding.read_file": true, "coding.search": true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.write_file": true, "coding.gofmt": true, "coding.go_test": true, "coding.shell": true},
+		"read-write": {"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolASTGrep: true, agentservice.ToolLSP: true, agentservice.ToolWebSearch: true, agentservice.ToolGitHub: true, agentservice.ToolRecall: true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.replace": true, "coding.write_file": true, "coding.delete_file": true, "coding.gofmt": true},
+		"execute":    {"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolASTGrep: true, agentservice.ToolLSP: true, agentservice.ToolWebSearch: true, agentservice.ToolGitHub: true, agentservice.ToolRecall: true, "coding.git_diff": true, "coding.go_test": true, "coding.shell": true, agentservice.ToolDebug: true, agentservice.ToolEval: true, agentservice.ToolBrowser: true, agentservice.ToolComputer: true, agentservice.ToolHub: true},
+		"all":        {"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolASTGrep: true, agentservice.ToolLSP: true, agentservice.ToolWebSearch: true, agentservice.ToolGitHub: true, agentservice.ToolRecall: true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.replace": true, "coding.write_file": true, "coding.delete_file": true, "coding.gofmt": true, "coding.go_test": true, "coding.shell": true, agentservice.ToolDebug: true, agentservice.ToolEval: true, agentservice.ToolBrowser: true, agentservice.ToolComputer: true, agentservice.ToolHub: true, agentservice.ToolGenerateImage: true, agentservice.ToolTTS: true, agentservice.ToolRetain: true, agentservice.ToolMemoryEdit: true},
 	}
 	allowed := make(map[string]bool)
 	for _, name := range roleTools {
@@ -95,8 +95,8 @@ func effectiveSubagentTools(roleTools []string, capability string) map[string]bo
 
 func subagentMayMutateWorkspace(profile effectiveSubagentProfile) bool {
 	tools := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
-	return tools["coding.edit_hashline"] || tools["coding.write_file"] ||
-		tools["coding.gofmt"] || tools["coding.shell"]
+	return tools["coding.edit_hashline"] || tools["coding.replace"] || tools["coding.write_file"] ||
+		tools["coding.delete_file"] || tools["coding.gofmt"] || tools["coding.shell"]
 }
 
 func subagentMayRunInBackground(profile effectiveSubagentProfile) bool {
@@ -357,6 +357,7 @@ func snapshotFromRun(run agentservice.SubagentRun) agentservice.SubagentSnapshot
 
 func cloneSubagentRun(run agentservice.SubagentRun) agentservice.SubagentRun {
 	run.Transcript = append(json.RawMessage(nil), run.Transcript...)
+	run.StructuredOutput = append(json.RawMessage(nil), run.StructuredOutput...)
 	run.ToolsUsed = append([]string(nil), run.ToolsUsed...)
 	return run
 }

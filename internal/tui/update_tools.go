@@ -117,11 +117,16 @@ func summarizeEditArguments(input string, dryRun bool, catalogs ...i18n.Catalog)
 	seen := make(map[string]bool)
 	for _, line := range strings.Split(input, "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "¶") {
+		if !strings.HasPrefix(line, "[") || !strings.HasSuffix(line, "]") {
 			continue
 		}
-		path := strings.TrimPrefix(strings.SplitN(line, "#", 2)[0], "¶")
-		if path != "" && !seen[path] {
+		inner := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+		marker := strings.LastIndex(inner, "#")
+		if marker <= 0 {
+			continue
+		}
+		path := inner[:marker]
+		if !seen[path] {
 			seen[path] = true
 			paths = append(paths, path)
 		}
@@ -437,7 +442,7 @@ func summarizeReadFile(arguments, output string, catalogs ...i18n.Catalog) strin
 	_ = json.Unmarshal([]byte(arguments), &input)
 	// Preserve governed source output for syntax highlighting, but retain the
 	// compact summary for plain-text/error results that have no line protocol.
-	if strings.Contains(output, "\n") && (strings.Contains(output, "\n¶") || strings.HasPrefix(output, "¶")) {
+	if strings.Contains(output, "\n") && (strings.Contains(output, "\n[") || strings.HasPrefix(output, "[") || strings.Contains(output, "\n¶") || strings.HasPrefix(output, "¶")) {
 		return output
 	}
 	if input.Path == "" {

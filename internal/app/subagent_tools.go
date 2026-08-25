@@ -18,23 +18,29 @@ const (
 )
 
 type subagentSpawnInput struct {
-	Prompt            string
-	Description       string
-	TodoItemID        string
-	SubagentType      string
-	SubagentTypeSet   bool
-	Background        bool
-	BackgroundSet     bool
-	CapabilityMode    string
-	CapabilityModeSet bool
-	Isolation         string
-	IsolationSet      bool
-	ResumeFrom        string
-	CWD               string
-	CWDSet            bool
-	Model             string
-	ModelSet          bool
-	parentToolCallID  string
+	Name                string
+	Prompt              string
+	Description         string
+	TodoItemID          string
+	SubagentType        string
+	SubagentTypeSet     bool
+	Background          bool
+	BackgroundSet       bool
+	CapabilityMode      string
+	CapabilityModeSet   bool
+	Isolation           string
+	IsolationSet        bool
+	ResumeFrom          string
+	CWD                 string
+	CWDSet              bool
+	Model               string
+	ModelSet            bool
+	Provider            string
+	Reasoning           string
+	OutputSchema        json.RawMessage
+	SchemaMode          string
+	parentToolCallID    string
+	initialPeerMessages []hubPeerMessage
 }
 
 type subagentSpawnDriver struct {
@@ -44,13 +50,20 @@ type subagentSpawnDriver struct {
 
 func (d *subagentSpawnDriver) Definition() tool.Definition {
 	additional := false
-	description := "Spawn one supervised subagent task. Read-only and isolated worktree tasks may run in the background. The parent waits for a foreground child until it completes unless a positive await_timeout is configured. That wait window never limits task runtime: when it ends, safe work continues in the background and can be checked with subagent.get_output; shared-workspace writes keep the foreground wait instead of being cancelled."
+	description := "Spawn one supervised subagent or a concurrent batch. Batch form uses non-empty shared `context` plus `tasks[]`; every task needs complete self-contained instructions and optional unique name, role, isolation, and structured output schema. All batch children are enqueued before foreground waits begin, so independent work actually runs concurrently. Read-only and isolated worktree tasks may run in the background. A positive await_timeout releases only safe work; it never limits child runtime."
 	subagentType := tool.Schema{
 		Type:        "string",
 		Description: "Enabled role; omit only when enabled `worker` is desired, otherwise select an advertised role explicitly.",
 	}
 	if d != nil && d.runtime != nil {
 		roles, toggle := d.runtime.roleCatalogSnapshot()
+		if d.parent.AllowedRoles != nil {
+			for name := range roles {
+				if !d.parent.AllowedRoles[name] {
+					delete(roles, name)
+				}
+			}
+		}
 		names := sortedRoleNames(roles, toggle)
 		if len(names) > maxAdvertisedSubagentRoles {
 			names = names[:maxAdvertisedSubagentRoles]
@@ -74,50 +87,58 @@ func (d *subagentSpawnDriver) Definition() tool.Definition {
 			}
 		}
 	}
+	taskItemAdditional := false
+	taskItem := tool.Schema{Type: "object", Required: []string{"task"}, AdditionalProperties: &taskItemAdditional, Properties: map[string]tool.Schema{
+		"name":         {Type: "string", Description: "Stable unique name within this batch."},
+		"agent":        subagentType,
+		"task":         {Type: "string", Description: "Complete self-contained assignment."},
+		"outputSchema": {Description: "Optional JSON Schema object, boolean, JSON string, or null."},
+		"schemaMode":   {Type: "string", Description: "Validation enforcement after retry exhaustion.", Enum: []string{"permissive", "strict"}},
+		"isolated":     {Type: "boolean", Description: "Run in an isolated worktree."},
+	}}
 	return tool.Definition{
 		Name: subagentSpawnTool, Description: description,
 		InputSchema: tool.Schema{
-			Type: "object", Required: []string{"prompt", "description"}, AdditionalProperties: &additional,
+			Type: "object", AdditionalProperties: &additional,
 			Properties: map[string]tool.Schema{
+				"context": {Type: "string", Description: "Shared batch background: goal, constraints, and contracts."},
+				"tasks":   {Type: "array", Items: &taskItem, Description: "One to thirty-two concurrent subagent assignments."},
+				"name":    {Type: "string", Description: "Optional stable single-spawn name."},
 				"prompt": {
 					Type:        "string",
-					Description: "Complete handoff using `Goal`, `Scope`, `Requirements`, `Constraints`, `Acceptance`, and `Expected evidence`.",
+					Description: "Legacy single-spawn assignment using `Goal`, `Scope`, `Requirements`, `Constraints`, `Acceptance`, and `Expected evidence`.",
 				},
 				"description": {
 					Type:        "string",
-					Description: "Short imperative task label, not a substitute for the prompt.",
+					Description: "Short imperative single-spawn task label.",
 				},
 				"subagent_type": subagentType,
 				"todo_item_id": {
 					Type:        "string",
-					Description: "Open durable todo item to bind.",
+					Description: "Open durable todo item to bind for a single spawn.",
 				},
 				"background": {
 					Type:        "boolean",
-					Description: "Defaults false. Detached execution is available for read-only tasks and write-capable tasks with isolation=worktree. Shared-workspace writes stay foreground for mutation safety.",
+					Description: "Detached single-spawn execution; safe read-only or isolated work only.",
 				},
 				"capability_mode": {
 					Type:        "string",
-					Description: "Optional capability ceiling that cannot expand the role tool allowlist.",
+					Description: "Optional single-spawn capability ceiling.",
 					Enum:        []string{"read-only", "read-write", "execute", "all"},
 				},
 				"isolation": {
 					Type:        "string",
-					Description: "`worktree` provides isolated writes and is incompatible with `cwd`.",
+					Description: "Single-spawn isolation; worktree is incompatible with cwd.",
 					Enum:        []string{"none", "worktree"},
 				},
 				"resume_from": {
 					Type:        "string",
-					Description: "Continue a terminal task in the same session; fresh role, model, capability, cwd, and isolation selections are ignored.",
+					Description: "Continue one terminal task in the same session.",
 				},
-				"cwd": {
-					Type:        "string",
-					Description: "Existing directory inside the parent workspace.",
-				},
-				"model": {
-					Type:        "string",
-					Description: "Optional model override on the inherited parent provider.",
-				},
+				"cwd":          {Type: "string", Description: "Existing directory inside the parent workspace."},
+				"model":        {Type: "string", Description: "Optional model override on the inherited parent provider."},
+				"outputSchema": {Description: "Optional single-spawn JSON Schema object, boolean, JSON string, or null."},
+				"schemaMode":   {Type: "string", Description: "Validation enforcement after retry exhaustion.", Enum: []string{"permissive", "strict"}},
 			},
 		},
 		EffectType: tool.EffectReadOnly, PolicyTags: []string{"subagent", "spawn"},
@@ -125,14 +146,49 @@ func (d *subagentSpawnDriver) Definition() tool.Definition {
 }
 
 func (d *subagentSpawnDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
-	input, err := decodeSubagentSpawnInput(call.Arguments)
+	request, err := decodeSubagentSpawnRequest(call.Arguments)
 	if err != nil {
 		return subagentToolError(call, err), nil
 	}
-	input.parentToolCallID = call.ID
+	type spawnedTask struct {
+		input subagentSpawnInput
+		run   agentservice.SubagentRun
+		err   error
+	}
+	spawned := make([]spawnedTask, len(request.Inputs))
+	for index, input := range request.Inputs {
+		input.parentToolCallID = call.ID
+		run, spawnErr := d.spawnOne(ctx, input)
+		spawned[index] = spawnedTask{input: input, run: run, err: spawnErr}
+		if !request.Batch && spawnErr != nil {
+			return subagentToolError(call, spawnErr), nil
+		}
+	}
+	if !request.Batch {
+		run := spawned[0].run
+		if run.Background {
+			return subagentJSONResult(call, map[string]any{"task_id": run.ID, "status": string(run.State), "description": run.Description, "type": run.Type, "warning": run.Warning}), nil
+		}
+		return subagentJSONResult(call, d.waitForForeground(ctx, run)), nil
+	}
+	results := make([]map[string]any, len(spawned))
+	for index, current := range spawned {
+		if current.err != nil {
+			results[index] = map[string]any{"index": index, "name": current.input.Name, "status": "failed", "error": current.err.Error()}
+			continue
+		}
+		result := d.waitForForeground(ctx, current.run)
+		result["index"] = index
+		result["name"] = current.input.Name
+		results[index] = result
+	}
+	return subagentJSONResult(call, map[string]any{"results": results, "total": len(results)}), nil
+}
+
+func (d *subagentSpawnDriver) spawnOne(ctx context.Context, input subagentSpawnInput) (agentservice.SubagentRun, error) {
 	todoRevision, err := prepareSubagentTodoBinding(ctx, d.parent, input.TodoItemID)
 	if err != nil {
-		return subagentToolError(call, err), nil
+		return agentservice.SubagentRun{}, err
 	}
 	var beforeEnqueue func(agentservice.SubagentRun) error
 	if input.TodoItemID != "" {
@@ -140,21 +196,16 @@ func (d *subagentSpawnDriver) Execute(ctx context.Context, call tool.Call, _ too
 			return commitSubagentTodoBinding(ctx, d.parent, input.TodoItemID, run.ID, todoRevision)
 		}
 	}
-	run, err := d.runtime.spawn(input, d.parent, beforeEnqueue)
-	if err != nil {
-		return subagentToolError(call, err), nil
-	}
-	if run.Background {
-		return subagentJSONResult(call, map[string]any{"task_id": run.ID, "status": string(run.State), "description": run.Description, "type": run.Type, "warning": run.Warning}), nil
-	}
-	return subagentJSONResult(call, d.waitForForeground(ctx, run)), nil
+	return d.runtime.spawn(input, d.parent, beforeEnqueue)
 }
 
 func (d *subagentSpawnDriver) waitForForeground(ctx context.Context, run agentservice.SubagentRun) map[string]any {
 	snapshot := d.runtime.waitForForegroundStart(ctx, run.SessionID, run.ID)
 	if snapshot.Found && subagentTerminal(snapshot.Run.State) {
 		_ = d.runtime.store.SetCompletionDelivered(d.runtime.ctx, run.ID, true)
-		return foregroundSubagentResult(snapshot)
+		result := foregroundSubagentResult(snapshot)
+		d.runtime.releaseDeliveredStructuredFallback(snapshot.Run)
+		return result
 	}
 	done := d.runtime.parentDone(run.ID)
 	waitWindow := d.runtime.foregroundWaitWindow()
@@ -186,7 +237,9 @@ func (d *subagentSpawnDriver) foregroundCompletion(run agentservice.SubagentRun)
 	if snapshot.Found && subagentTerminal(snapshot.Run.State) {
 		_ = d.runtime.store.SetCompletionDelivered(d.runtime.ctx, run.ID, true)
 	}
-	return foregroundSubagentResult(snapshot)
+	result := foregroundSubagentResult(snapshot)
+	d.runtime.releaseDeliveredStructuredFallback(snapshot.Run)
+	return result
 }
 
 func (d *subagentSpawnDriver) detachAfterParentWait(run agentservice.SubagentRun) map[string]any {
@@ -301,11 +354,139 @@ func (d *subagentGetOutputDriver) Execute(ctx context.Context, call tool.Call, _
 	tasks := make([]any, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		tasks = append(tasks, subagentSnapshotJSON(snapshot))
+		d.runtime.releaseDeliveredStructuredFallback(snapshot.Run)
 		if snapshot.Found && subagentTerminal(snapshot.Run.State) {
 			_ = d.runtime.store.SetCompletionDelivered(d.runtime.ctx, snapshot.Run.ID, true)
 		}
 	}
 	return subagentJSONResult(call, map[string]any{"tasks": tasks}), nil
+}
+
+func (r *subagentRuntime) releaseDeliveredStructuredFallback(run agentservice.SubagentRun) {
+	if r == nil || run.StructuredSource == "" || strings.Contains(run.Warning, "persist terminal subagent") {
+		return
+	}
+	r.mu.Lock()
+	delete(r.terminalFallback, run.ID)
+	r.mu.Unlock()
+}
+
+type decodedSubagentSpawnRequest struct {
+	Inputs []subagentSpawnInput
+	Batch  bool
+}
+
+func decodeSubagentSpawnRequest(arguments json.RawMessage) (decodedSubagentSpawnRequest, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(arguments, &raw); err != nil {
+		return decodedSubagentSpawnRequest{}, fmt.Errorf("decode arguments: %w", err)
+	}
+	tasksRaw, hasTasks := raw["tasks"]
+	if !hasTasks {
+		if _, hasContext := raw["context"]; hasContext {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("context is accepted only with tasks")
+		}
+		input, err := decodeSubagentSpawnInput(arguments)
+		if err != nil {
+			return decodedSubagentSpawnRequest{}, err
+		}
+		if _, err := compileStructuredSubagentContract(input.OutputSchema, input.SchemaMode); err != nil {
+			return decodedSubagentSpawnRequest{}, err
+		}
+		return decodedSubagentSpawnRequest{Inputs: []subagentSpawnInput{input}}, nil
+	}
+	for _, field := range []string{"name", "prompt", "description", "subagent_type", "todo_item_id", "background", "capability_mode", "isolation", "resume_from", "cwd", "model", "outputSchema", "schemaMode"} {
+		if _, present := raw[field]; present {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("top-level %s is not accepted with tasks", field)
+		}
+	}
+	contextText, err := requiredRawString(raw, "context")
+	if err != nil {
+		return decodedSubagentSpawnRequest{}, err
+	}
+	if len([]rune(contextText)) > 20_000 {
+		return decodedSubagentSpawnRequest{}, fmt.Errorf("context exceeds 20000 characters")
+	}
+	var tasks []map[string]json.RawMessage
+	if err := json.Unmarshal(tasksRaw, &tasks); err != nil {
+		return decodedSubagentSpawnRequest{}, fmt.Errorf("tasks must be an array of objects")
+	}
+	if len(tasks) < 1 || len(tasks) > 32 {
+		return decodedSubagentSpawnRequest{}, fmt.Errorf("tasks must contain 1 to 32 items")
+	}
+	seenNames := make(map[string]bool, len(tasks))
+	inputs := make([]subagentSpawnInput, len(tasks))
+	for index, item := range tasks {
+		taskText, taskErr := requiredRawString(item, "task")
+		if taskErr != nil {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("task %d: %w", index+1, taskErr)
+		}
+		if len([]rune(taskText)) > 100_000 {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("task %d exceeds 100000 characters", index+1)
+		}
+		name, present, nameErr := optionalRawString(item, "name")
+		if nameErr != nil {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("task %d: %w", index+1, nameErr)
+		}
+		if !present {
+			name = fmt.Sprintf("Task%d", index+1)
+		}
+		if !validSubagentBatchName(name) {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("task %d name must contain 1-48 letters, numbers, underscores, or hyphens", index+1)
+		}
+		normalizedName := strings.ToLower(name)
+		if seenNames[normalizedName] {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("duplicate task name %q", name)
+		}
+		seenNames[normalizedName] = true
+		agentName, agentSet, agentErr := optionalRawString(item, "agent")
+		if agentErr != nil {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("task %d: %w", index+1, agentErr)
+		}
+		input := subagentSpawnInput{
+			Name: name, Prompt: "# Shared context\n" + contextText + "\n\n# Assignment\n" + taskText,
+			Description: name, SubagentType: agentName, SubagentTypeSet: agentSet,
+			Isolation: "none", IsolationSet: true,
+		}
+		if !input.SubagentTypeSet {
+			input.SubagentType = "worker"
+		}
+		if encoded, present := item["isolated"]; present && string(encoded) != "null" {
+			var isolated bool
+			if err := json.Unmarshal(encoded, &isolated); err != nil {
+				return decodedSubagentSpawnRequest{}, fmt.Errorf("task %d isolated must be a boolean", index+1)
+			}
+			if isolated {
+				input.Isolation = "worktree"
+			}
+		}
+		if encoded, present := item["outputSchema"]; present {
+			input.OutputSchema = append(json.RawMessage(nil), encoded...)
+		}
+		if mode, present, modeErr := optionalRawString(item, "schemaMode"); modeErr != nil {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("task %d: %w", index+1, modeErr)
+		} else if present {
+			input.SchemaMode = mode
+		}
+		if _, err := compileStructuredSubagentContract(input.OutputSchema, input.SchemaMode); err != nil {
+			return decodedSubagentSpawnRequest{}, fmt.Errorf("task %d: %w", index+1, err)
+		}
+		inputs[index] = input
+	}
+	return decodedSubagentSpawnRequest{Inputs: inputs, Batch: true}, nil
+}
+
+func validSubagentBatchName(value string) bool {
+	if len(value) < 1 || len(value) > 48 {
+		return false
+	}
+	for _, current := range value {
+		if current >= 'a' && current <= 'z' || current >= 'A' && current <= 'Z' || current >= '0' && current <= '9' || current == '_' || current == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 type subagentKillDriver struct {
@@ -354,7 +535,26 @@ func decodeSubagentSpawnInput(arguments json.RawMessage) (subagentSpawnInput, er
 	if err != nil {
 		return subagentSpawnInput{}, err
 	}
+	if len([]rune(prompt)) > 100_000 {
+		return subagentSpawnInput{}, fmt.Errorf("prompt exceeds 100000 characters")
+	}
 	input := subagentSpawnInput{Prompt: prompt, Description: description}
+	if name, present, err := optionalRawString(raw, "name"); err != nil {
+		return subagentSpawnInput{}, err
+	} else if present {
+		if !validSubagentBatchName(name) {
+			return subagentSpawnInput{}, fmt.Errorf("name must contain 1-48 letters, numbers, underscores, or hyphens")
+		}
+		input.Name = name
+	}
+	if encoded, present := raw["outputSchema"]; present {
+		input.OutputSchema = append(json.RawMessage(nil), encoded...)
+	}
+	if mode, present, err := optionalRawString(raw, "schemaMode"); err != nil {
+		return subagentSpawnInput{}, err
+	} else if present {
+		input.SchemaMode = mode
+	}
 	if encoded, present := raw["subagent_type"]; present && string(encoded) != "null" {
 		var value string
 		if err := json.Unmarshal(encoded, &value); err != nil {
@@ -487,6 +687,7 @@ func foregroundSubagentResult(snapshot agentservice.SubagentSnapshot) map[string
 		"task_id": run.ID, "status": string(run.State), "output": run.Output, "error": run.Error, "warning": run.Warning,
 		"usage": map[string]any{"tool_calls": run.ToolCalls, "turns": run.Turns, "tokens_used": run.TokensUsed},
 	}
+	addStructuredSubagentResult(result, run)
 	if run.Background {
 		result["background"] = true
 	}
@@ -498,7 +699,7 @@ func subagentSnapshotJSON(snapshot agentservice.SubagentSnapshot) map[string]any
 		return map[string]any{"task_id": snapshot.Run.ID, "status": "not_found"}
 	}
 	run := snapshot.Run
-	return map[string]any{
+	result := map[string]any{
 		"task_id": run.ID, "status": string(run.State), "description": run.Description, "type": run.Type,
 		"model": run.Model, "background": run.Background, "capability_mode": run.CapabilityMode,
 		"requested_isolation": run.RequestedIsolation, "isolation": run.Isolation, "cwd": run.CWD,
@@ -506,6 +707,24 @@ func subagentSnapshotJSON(snapshot agentservice.SubagentSnapshot) map[string]any
 		"tokens_used": run.TokensUsed, "tools_used": run.ToolsUsed, "output": run.Output, "error": run.Error,
 		"warning": run.Warning, "worktree_path": run.WorktreePath,
 	}
+	addStructuredSubagentResult(result, run)
+	return result
+}
+
+func addStructuredSubagentResult(result map[string]any, run agentservice.SubagentRun) {
+	if run.StructuredSource == "" {
+		return
+	}
+	structured := map[string]any{
+		"source": run.StructuredSource, "mode": run.StructuredMode, "status": run.StructuredStatus,
+	}
+	if len(run.StructuredOutput) > 0 {
+		structured["data"] = json.RawMessage(append([]byte(nil), run.StructuredOutput...))
+	}
+	if run.StructuredError != "" {
+		structured["error"] = run.StructuredError
+	}
+	result["structured"] = structured
 }
 
 func subagentJSONResult(call tool.Call, value any) tool.Result {

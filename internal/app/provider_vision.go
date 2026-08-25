@@ -11,7 +11,6 @@ import (
 
 	"github.com/Viking602/azem/internal/config"
 	llmuxdriver "github.com/Viking602/azem/internal/provider/llmux"
-	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 )
 
@@ -50,7 +49,7 @@ func (r *ProviderRuntime) modelImageInputSupport(ctx context.Context, providerID
 
 func (r *ProviderRuntime) modelInputModalities(ctx context.Context, providerID, accountID, modelID string) ([]string, error) {
 	providerID = llmuxdriver.CanonicalProviderID(providerID)
-	if providerID != "chatgpt" && providerID != "grok" {
+	if !config.IsSubscriptionProvider(providerID) {
 		r.mu.RLock()
 		provider, ok := r.cfg.Providers.LLMux[providerID]
 		r.mu.RUnlock()
@@ -166,16 +165,20 @@ func (r *ProviderRuntime) configuredVisionRoute(mainModelID string) (config.Mode
 
 func (r *ProviderRuntime) runVisionAssistant(ctx context.Context, assistant visionAssistantRun, request TurnRequest, runID string) (string, error) {
 	maxOutputTokens := r.visionMaxOutputTokens(assistant)
-	extraBody := r.visionExtraBody(assistant, request, runID, maxOutputTokens)
+	requestMaxOutput := maxOutputTokens
+	if llmuxdriver.CanonicalProviderID(assistant.route.Provider) == "chatgpt" {
+		requestMaxOutput = 0
+	}
 	output, err := collectProviderText(ctx, assistant.driver, hyprovider.Request{
 		Model: assistant.modelID,
 		Messages: []message.Message{
 			message.NewText(message.RoleSystem, visionAssistantPrompt),
 			UserMessageWithAttachments(visionUserPrompt(request.Prompt), request.Images),
 		},
-		MaxTokens: maxOutputTokens,
-		Metadata:  map[string]string{"reasoning_effort": assistant.reasoning},
-		ExtraBody: extraBody,
+		MaxTokens:      requestMaxOutput,
+		Metadata:       map[string]string{"reasoning_effort": assistant.reasoning},
+		PromptCacheKey: request.SessionID + ":vision:" + runID,
+		NativeToolHost: newAttachmentRequestHost(assistant.host),
 	}, "vision assistance")
 	if err != nil {
 		return "", fmt.Errorf("vision assistant failed: %w", err)
@@ -189,20 +192,6 @@ func (r *ProviderRuntime) visionMaxOutputTokens(assistant visionAssistantRun) in
 		maxOutputTokens = min(maxOutputTokens, configured)
 	}
 	return maxOutputTokens
-}
-
-func (r *ProviderRuntime) visionExtraBody(assistant visionAssistantRun, request TurnRequest, runID string, maxOutputTokens int) map[string]any {
-	extraBody := map[string]any{"prompt_cache_key": request.SessionID + ":vision:" + runID}
-	if assistant.host != nil && strings.TrimSpace(assistant.host.AttachmentRoot()) != "" {
-		extraBody[responses.AttachmentRootExtraKey] = assistant.host.AttachmentRoot()
-	}
-	if reporter := r.responseUsageReporter(assistant.host, request.SessionID, runID, "vision", assistant.route.Provider, assistant.modelID, assistant.driver.Metadata().Name); reporter != nil && (assistant.host == nil || assistant.host.Sessions() == nil) {
-		extraBody[responses.UsageReporterExtraKey] = reporter
-	}
-	if llmuxdriver.CanonicalProviderID(assistant.route.Provider) != "chatgpt" {
-		extraBody["max_output_tokens"] = maxOutputTokens
-	}
-	return extraBody
 }
 
 func visionUserPrompt(prompt string) string {

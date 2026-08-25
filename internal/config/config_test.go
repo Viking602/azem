@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,6 +63,7 @@ func TestPluginsConfigDefaultsAndLoad(t *testing.T) {
 	if !cfg.Plugins.Enabled || !cfg.Plugins.ImportCodex || cfg.Plugins.TrustHooks {
 		t.Fatalf("plugin defaults = %#v", cfg.Plugins)
 	}
+
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
 	if err := os.WriteFile(path, []byte("version: 1\nplugins:\n  enabled: true\n  import_codex: false\n  codex_imports: [demo@market]\n  trust_hooks: true\n"), 0o600); err != nil {
@@ -73,6 +75,29 @@ func TestPluginsConfigDefaultsAndLoad(t *testing.T) {
 	}
 	if !loaded.Plugins.Enabled || loaded.Plugins.ImportCodex || !loaded.Plugins.TrustHooks || !reflect.DeepEqual(loaded.Plugins.CodexImports, []string{"demo@market"}) {
 		t.Fatalf("loaded plugins = %#v", loaded.Plugins)
+	}
+}
+
+func TestAuthBrokerConfigurationDefaultsAndValidation(t *testing.T) {
+	cfg := Default()
+	if cfg.Auth.Broker.SnapshotTTLParsed != time.Hour || cfg.Auth.Broker.SnapshotTTL != "1h" {
+		t.Fatalf("broker defaults=%#v", cfg.Auth.Broker)
+	}
+	cfg.Auth.Broker.URL = "http://broker.example.com"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("accepted insecure remote broker URL")
+	}
+	cfg.Auth.Broker.URL = "http://127.0.0.1:8765"
+	cfg.Auth.Broker.Token = "secret-that-must-not-be-projected"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(cfg.Auth.Broker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), cfg.Auth.Broker.Token) {
+		t.Fatalf("broker token projected in JSON: %s", encoded)
 	}
 }
 
@@ -756,6 +781,106 @@ func TestUpdateRecapModelRoutePersistsAndResets(t *testing.T) {
 	}
 }
 
+func TestTTSRConfigValidation(t *testing.T) {
+	valid := Default()
+	valid.TTSR.Rules = []StreamRuleConfig{{
+		Name: "safe-write", Content: "Use the safe writer.", Conditions: []string{`danger\s+write`},
+		ASTConditions: []string{"console.log($MSG)"}, Scope: []string{"text", "tool:coding.write_file(*.ts)"}, Globs: []string{"*.ts"},
+	}}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid TTSR config: %v", err)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"context mode":   func(cfg *Config) { cfg.TTSR.ContextMode = "unknown" },
+		"interrupt mode": func(cfg *Config) { cfg.TTSR.InterruptMode = "sometimes" },
+		"repeat gap":     func(cfg *Config) { cfg.TTSR.RepeatGap = 0 },
+		"invalid regex": func(cfg *Config) {
+			cfg.TTSR.Rules = []StreamRuleConfig{{Name: "bad", Content: "bad", Conditions: []string{"("}}}
+		},
+		"duplicate": func(cfg *Config) {
+			cfg.TTSR.Rules = []StreamRuleConfig{
+				{Name: "Rule", Content: "one", Conditions: []string{"one"}},
+				{Name: "rule", Content: "two", Conditions: []string{"two"}},
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid TTSR config accepted")
+			}
+		})
+	}
+}
+
+func TestLoopGuardConfigValidation(t *testing.T) {
+	for name, mutate := range map[string]func(*Config){
+		"threshold":       func(cfg *Config) { cfg.Agents.LoopGuards.ToolCallThreshold = 1 },
+		"unexpected mode": func(cfg *Config) { cfg.Agents.LoopGuards.UnexpectedStop = "guess" },
+		"retry count":     func(cfg *Config) { cfg.Agents.LoopGuards.UnexpectedStopRetries = 11 },
+		"empty exemption": func(cfg *Config) { cfg.Agents.LoopGuards.ToolCallExemptTools = []string{""} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid loop guard config accepted")
+			}
+		})
+	}
+}
+
+func TestUpdateAdvisorModelRoutePreservesAdvisorSettings(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\nagents:\n  advisor:\n    enabled: true\n    catchup_timeout: 12s\n    instructions: review rollback\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "deepseek", Model: "deepseek-v4-flash", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "advisor", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Advisor.Route() != route || !loaded.Agents.Advisor.Enabled ||
+		loaded.Agents.Advisor.CatchupTimeout != "12s" || loaded.Agents.Advisor.Instructions != "review rollback" {
+		t.Fatalf("advisor config = %#v, error=%v", loaded.Agents.Advisor, err)
+	}
+	if err := ResetModelRoute(path, "advisor", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Advisor.Route() != (ModelRouteConfig{}) || !loaded.Agents.Advisor.Enabled {
+		t.Fatalf("reset advisor config = %#v, error=%v", loaded.Agents.Advisor, err)
+	}
+}
+
+func TestUpdateVibeModelRoutes(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fast := ModelRouteConfig{Provider: "deepseek", Model: "deepseek-v4-flash", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "vibe", "fast", fast); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Vibe.Fast != fast {
+		t.Fatalf("Vibe fast route = %#v, %v", loaded.Agents.Vibe.Fast, err)
+	}
+	if err := ResetModelRoute(path, "vibe", "fast"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Vibe.Fast != (ModelRouteConfig{}) {
+		t.Fatalf("reset Vibe fast route = %#v, %v", loaded.Agents.Vibe.Fast, err)
+	}
+	if err := UpdateModelRoute(path, "vibe", "other", fast); err == nil {
+		t.Fatal("invalid Vibe role accepted")
+	}
+}
+
 func TestUpdateTitleModelRoutePersistsAndResetsToInherited(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -1015,7 +1140,7 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 		subagents.Budget.MaxTurns != 0 || subagents.Budget.MaxWallClockDuration != 0 {
 		t.Fatalf("subagent budget = %#v", subagents.Budget)
 	}
-	wantRoles := []string{"worker", "explore", "plan", "review", "verify"}
+	wantRoles := []string{"worker", "explore", "plan", "review", "verify", "security-baseline", "security-investigator"}
 	if len(subagents.Roles) != len(wantRoles) {
 		t.Fatalf("built-in roles = %#v, want exactly %q", subagents.Roles, wantRoles)
 	}
@@ -1147,9 +1272,9 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 
 func TestBuiltInSubagentRoleContracts(t *testing.T) {
 	roles := builtInSubagentRoles()
-	readOnly := []string{"coding.list_files", "coding.read_file", "coding.search", "coding.git_diff"}
-	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.write_file", "coding.gofmt", "coding.go_test", "coding.shell")
-	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell")
+	readOnly := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "ast_grep", "lsp", "web_search", "github", "recall", "coding.git_diff"}
+	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell", "debug", "eval", "browser", "computer", "hub", "generate_image", "tts", "retain", "memory_edit")
+	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell", "debug", "eval", "browser", "computer", "hub")
 	want := map[string]struct {
 		description string
 		capability  string
@@ -1171,6 +1296,14 @@ func TestBuiltInSubagentRoleContracts(t *testing.T) {
 		"review": {
 			"Review a delegated change for requirement, correctness, and regression risks without editing.",
 			"read-only", readOnly, "Review the delegated change",
+		},
+		"security-baseline": {
+			"Run one independent read-only source-backed security audit.",
+			"read-only", readOnly, "Perform one independent, source-backed security audit",
+		},
+		"security-investigator": {
+			"Investigate one concrete security packet with exact source evidence.",
+			"read-only", readOnly, "Investigate only the concrete security packet",
 		},
 		"verify": {
 			"Run governed checks without editing and report exact outcomes.",

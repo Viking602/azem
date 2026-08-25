@@ -17,13 +17,18 @@ func TestDiscoverImportsEnabledPluginCapabilities(t *testing.T) {
 	sourceRoot := filepath.Join(home, ".codex", "plugins", "cache", "market", "demo", "1.2.3")
 	mustWrite(t, filepath.Join(sourceRoot, ".codex-plugin", "plugin.json"), `{
   "name":"demo","version":"1.2.3","description":"Demo plugin",
-  "skills":"./skills/","mcpServers":"./.mcp.json","hooks":"./hooks.json","apps":"./.app.json",
+  "skills":"./skills/","mcpServers":"./.mcp.json","hooks":"./hooks.json","apps":"./.app.json","tools":"./tools","commands":"./commands",
   "interface":{"displayName":"Demo Plugin","developerName":"Azem","category":"Developer Tools","capabilities":["Read","Write"],"logo":"./assets/logo.svg"}
 }`)
 	mustWrite(t, filepath.Join(sourceRoot, "skills", "review", "SKILL.md"), "# Review\n")
 	mustWrite(t, filepath.Join(sourceRoot, "assets", "logo.svg"), "<svg/>")
 	mustWrite(t, filepath.Join(sourceRoot, "hooks.json"), `{"hooks":{}}`)
 	mustWrite(t, filepath.Join(sourceRoot, ".app.json"), `{}`)
+	mustWrite(t, filepath.Join(sourceRoot, "tools", "stats.ts"), `export default () => ({name:"stats",execute(){return "ok"}})`)
+	mustWrite(t, filepath.Join(sourceRoot, "commands", "review.md"), "Review $ARGUMENTS")
+	mustWrite(t, filepath.Join(sourceRoot, "agents", "reviewer.md"), "---\nname: reviewer\ndescription: Reviewer\n---\nReview code.\n")
+	mustWrite(t, filepath.Join(sourceRoot, "themes", "demo.json"), `{"name":"demo","colors":{"accent":"#fff"}}`)
+	mustWrite(t, filepath.Join(sourceRoot, "extensions", "register.ts"), `export default () => {};`)
 	mustWrite(t, filepath.Join(sourceRoot, ".mcp.json"), `{"mcpServers":{
   "local":{"command":"tool","args":["serve"],"cwd":".","env":{"MODE":"plugin"}},
   "oauth":{"type":"http","url":"https://example.com/mcp"},
@@ -68,10 +73,12 @@ func assertPluginEntry(t *testing.T, result Integration) {
 	if entry.SkillCount != 1 || entry.MCPServerCount != 3 || entry.IntegratedMCPCount != 2 {
 		t.Fatalf("model capability counts = %#v", entry)
 	}
-	if entry.HookCount != 1 || entry.HooksTrusted || !entry.HasApp {
+	if entry.HookCount != 1 || entry.HooksTrusted || !entry.HasApp || entry.ToolCount != 1 || entry.CommandCount != 1 ||
+		entry.AgentCount != 1 || entry.ThemeCount != 1 || entry.ExtensionCount != 1 {
 		t.Fatalf("extension capability counts = %#v", entry)
 	}
-	if len(result.SkillDirs) != 1 || len(result.HookSources) != 1 {
+	if len(result.SkillDirs) != 1 || len(result.HookSources) != 1 || len(result.ToolPaths) != 1 || len(result.CommandDirs) != 1 ||
+		len(result.AgentDirs) != 1 || len(result.ThemeDirs) != 1 || len(result.ExtensionPaths) != 1 {
 		t.Fatalf("integration = %#v", result)
 	}
 }

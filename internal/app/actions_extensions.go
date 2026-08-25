@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -9,6 +10,12 @@ import (
 )
 
 var extensionActionHandlers = map[ActionKind]actionHandler{
+	ActionListCustomCommands: func(s *Service, ctx context.Context, _ Action) error {
+		return s.emitCommandCatalog(ctx, "listed")
+	},
+	ActionListThemes: func(s *Service, ctx context.Context, _ Action) error {
+		return s.emitThemeCatalog(ctx, "listed")
+	},
 	ActionListSkills: func(s *Service, ctx context.Context, action Action) error {
 		return s.emitSkillCatalog(ctx, "listed")
 	},
@@ -88,5 +95,89 @@ var extensionActionHandlers = map[ActionKind]actionHandler{
 	},
 	ActionDeleteMCPServer: func(s *Service, ctx context.Context, action Action) error {
 		return s.deleteMCPServer(ctx, action.Target)
+	},
+	ActionGetMCPPrompt: func(s *Service, ctx context.Context, action Action) error {
+		if s.mcp == nil {
+			return fmt.Errorf("no MCP manager is attached")
+		}
+		var request struct {
+			Server    string            `json:"server"`
+			Name      string            `json:"name"`
+			Arguments map[string]string `json:"arguments,omitempty"`
+		}
+		if err := json.Unmarshal(action.Payload, &request); err != nil {
+			return fmt.Errorf("decode MCP prompt request: %w", err)
+		}
+		messages, err := s.mcp.GetPrompt(ctx, request.Server, request.Name, request.Arguments)
+		if err != nil {
+			return err
+		}
+		encoded, err := json.Marshal(messages)
+		if err != nil {
+			return err
+		}
+		s.emit(ctx, Event{Kind: EventMCPState, State: "prompt", Data: map[string]string{
+			"server": request.Server, "prompt": request.Name, "messages": string(encoded),
+		}})
+		return nil
+	},
+	ActionSubscribeMCPResource: func(s *Service, ctx context.Context, action Action) error {
+		if s.mcp == nil {
+			return fmt.Errorf("no MCP manager is attached")
+		}
+		return s.mcp.SubscribeResource(ctx, action.Target, action.Decision)
+	},
+	ActionUnsubscribeMCPResource: func(s *Service, ctx context.Context, action Action) error {
+		if s.mcp == nil {
+			return fmt.Errorf("no MCP manager is attached")
+		}
+		return s.mcp.UnsubscribeResource(ctx, action.Target, action.Decision)
+	},
+	ActionAuthenticateMCPServer: func(s *Service, ctx context.Context, action Action) error {
+		if s.mcp == nil {
+			return fmt.Errorf("no MCP manager is attached")
+		}
+		authErr := s.mcp.Authenticate(ctx, action.Target, openBrowserURL)
+		return errors.Join(authErr, s.emitMCPSnapshot(ctx))
+	},
+	ActionUnauthenticateMCPServer: func(s *Service, ctx context.Context, action Action) error {
+		if s.mcp == nil {
+			return fmt.Errorf("no MCP manager is attached")
+		}
+		authErr := s.mcp.Unauthenticate(ctx, action.Target)
+		return errors.Join(authErr, s.emitMCPSnapshot(ctx))
+	},
+	ActionMarketplaceAdd: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceRemove: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceUpdate: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceList: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceDiscover: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceInstall: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceUninstall: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceInstalled: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceUpgrade: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceEnable: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
+	},
+	ActionMarketplaceDisable: func(s *Service, ctx context.Context, action Action) error {
+		return s.executeMarketplaceAction(ctx, action)
 	},
 }

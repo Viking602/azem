@@ -188,7 +188,7 @@ function shorten(text: string, max: number) {
 }
 
 function looksLikeHashline(text: string) {
-  return /¶|[^\n]*#\w+\s+(?:replace|delete|insert)\b/u.test(text);
+  return /(?:\[[^\n#]+#[0-9A-F]{4}\]|¶)|(?:^|\n)(?:PUT|CUT|REM|MV)\b/u.test(text);
 }
 
 function looksLikeJson(text: string) {
@@ -305,7 +305,7 @@ export function isCollapsibleTool(block: Block) {
 export function classifyToolCategory(title = ""): ToolCategory {
   const raw = title.trim().toLowerCase();
   if (!raw) return "other";
-  if (raw.includes("search") || raw.includes("搜索") || raw === "coding.search") return "search";
+  if (raw.includes("search") || raw.includes("搜索") || raw === "coding.search" || raw === "ast_grep") return "search";
   if (
     raw.includes("read") || raw.includes("list") || raw.includes("读取") || raw.includes("列出")
     || raw.includes("read_file") || raw.includes("list_files") || raw.includes("read_artifact")
@@ -322,17 +322,37 @@ export function classifyToolCategory(title = ""): ToolCategory {
     || raw.includes("差异") || raw.includes("diff")
   ) return "diff";
   if (
-    raw.includes("shell") || raw.includes("test") || raw.includes("command")
+    raw.includes("shell") || raw.includes("test") || raw.includes("command") || raw === "debug" || raw === "eval" || raw === "browser" || raw === "computer"
     || raw.includes("运行") || raw.includes("命令")
   ) return "shell";
-  if (raw.includes("subagent") || raw.includes("spawn") || raw.includes("子智能体") || raw.includes("agent")) return "agent";
+  if (raw === "hub" || raw.includes("subagent") || raw.includes("spawn") || raw.includes("子智能体") || raw.includes("agent")) return "agent";
   return "other";
 }
+
+function classifyToolBlockCategory(block: Block): ToolCategory {
+  const title = block.title || block.data?.tool || block.data?.name || "";
+  const normalized = title.trim().toLowerCase().replaceAll("_", ".");
+  if (normalized === "coding.gofmt") {
+    if (block.state && block.state !== "completed") return "other";
+    const structured = block.data?.structured || "";
+    if (structured) {
+      try {
+        const result = JSON.parse(structured) as { changed?: unknown };
+        if (result.changed === false) return "other";
+      } catch {
+        // Legacy projections may not carry structured formatter output.
+      }
+    }
+    if (/\balready formatted\b/iu.test(block.content || "")) return "other";
+  }
+  return classifyToolCategory(title);
+}
+
 
 export function summarizeToolGroup(blocks: Block[], language: Language) {
   const counts = new Map<ToolCategory, number>();
   for (const block of blocks) {
-    const category = classifyToolCategory(block.title || block.data?.tool || "");
+    const category = classifyToolBlockCategory(block);
     counts.set(category, (counts.get(category) ?? 0) + 1);
   }
   const order: ToolCategory[] = ["search", "read", "edit", "diff", "shell", "agent", "other"];

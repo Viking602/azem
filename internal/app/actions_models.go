@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -23,7 +24,7 @@ var modelActionHandlers = map[ActionKind]actionHandler{
 		return s.emitModelProviders(ctx, "listed")
 	},
 	ActionDiscoverProviderModels: func(s *Service, ctx context.Context, action Action) error {
-		if target := strings.TrimSpace(action.Target); target == "chatgpt" || target == "grok" {
+		if target := strings.TrimSpace(action.Target); config.IsSubscriptionProvider(target) {
 			return s.refreshSubscriptionCatalog(ctx, target)
 		}
 		return s.discoverModelProvider(ctx, action.Provider, action.Secret)
@@ -36,7 +37,17 @@ var modelActionHandlers = map[ActionKind]actionHandler{
 		if err != nil {
 			return fmt.Errorf("model enabled state must be true or false")
 		}
-		return s.setModelEnabled(ctx, action.Target, action.Name, enabled)
+		modelIDs := []string{action.Name}
+		if len(action.Payload) > 0 {
+			var batch struct {
+				ModelIDs []string `json:"modelIds"`
+			}
+			if err := json.Unmarshal(action.Payload, &batch); err != nil {
+				return fmt.Errorf("decode model availability batch: %w", err)
+			}
+			modelIDs = batch.ModelIDs
+		}
+		return s.setModelsEnabled(ctx, action.Target, modelIDs, enabled)
 	},
 	ActionSetModelRoute: func(s *Service, ctx context.Context, action Action) error {
 		return s.updateModelRoute(ctx, action.Route, false)

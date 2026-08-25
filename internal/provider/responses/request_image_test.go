@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,13 @@ import (
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
+
+type imageRequestHost struct{ root string }
+
+func (host imageRequestHost) AttachmentRoot() string { return host.root }
+func (imageRequestHost) ExecuteNativeTool(context.Context, message.ToolCall) (message.ToolResult, error) {
+	return message.ToolResult{}, nil
+}
 
 func TestBuildUserMessageWithImageAttachment(t *testing.T) {
 	dir := t.TempDir()
@@ -31,11 +39,9 @@ func TestBuildUserMessageWithImageAttachment(t *testing.T) {
 		"azem.attachments": `[{"id":"img1","name":"shot.png","mime":"image/png","path":` + jsonString(path) + `}]`,
 	}
 	data, err := Build(hyprovider.Request{
-		Model:    "gpt-test",
-		Messages: []message.Message{user},
-		ExtraBody: map[string]any{
-			AttachmentRootExtraKey: dir,
-		},
+		Model:          "gpt-test",
+		Messages:       []message.Message{user},
+		NativeToolHost: imageRequestHost{root: dir},
 	}, BuildOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +90,7 @@ func TestBuildAllowsImagesBeyondLegacyLimits(t *testing.T) {
 	user.Metadata = map[string]string{"azem.attachments": string(encodedAttachments)}
 	data, err := Build(hyprovider.Request{
 		Model: "gpt-test", Messages: []message.Message{user},
-		ExtraBody: map[string]any{AttachmentRootExtraKey: dir},
+		NativeToolHost: imageRequestHost{root: dir},
 	}, BuildOptions{})
 	if err != nil {
 		t.Fatalf("build request with more than six images: %v", err)
@@ -127,9 +133,9 @@ func TestBuildRejectsImageOutsideTrustedAttachmentRoot(t *testing.T) {
 	}
 	user := imageMessage(outside)
 	_, err := Build(hyprovider.Request{
-		Model:     "gpt-test",
-		Messages:  []message.Message{user},
-		ExtraBody: map[string]any{AttachmentRootExtraKey: root},
+		Model:          "gpt-test",
+		Messages:       []message.Message{user},
+		NativeToolHost: imageRequestHost{root: root},
 	}, BuildOptions{})
 	if err == nil || !strings.Contains(err.Error(), "outside the trusted attachment root") {
 		t.Fatalf("Build error = %v, want trusted-root rejection", err)
@@ -148,9 +154,9 @@ func TestBuildRejectsImageSymlinkOutsideTrustedAttachmentRoot(t *testing.T) {
 	}
 	user := imageMessage(link)
 	_, err := Build(hyprovider.Request{
-		Model:     "gpt-test",
-		Messages:  []message.Message{user},
-		ExtraBody: map[string]any{AttachmentRootExtraKey: root},
+		Model:          "gpt-test",
+		Messages:       []message.Message{user},
+		NativeToolHost: imageRequestHost{root: root},
 	}, BuildOptions{})
 	if err == nil || !strings.Contains(err.Error(), "outside the trusted attachment root") {
 		t.Fatalf("Build error = %v, want symlink escape rejection", err)

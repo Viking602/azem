@@ -22,6 +22,27 @@ func TestDefaultClientFollowsProxyResolver(t *testing.T) {
 	}
 }
 
+func TestWithClientIDPreservesDependenciesWithoutMutatingDefault(t *testing.T) {
+	client := NewClient()
+	client.UserURL = "https://example.com/user"
+	client.Wait = func(context.Context, time.Duration) error { return nil }
+
+	override := client.WithClientID("imported-client")
+	if override == client {
+		t.Fatal("client ID override reused the mutable default client")
+	}
+	if override.ClientID != "imported-client" || client.ClientID != DefaultClientID {
+		t.Fatalf("override=%q default=%q", override.ClientID, client.ClientID)
+	}
+	if override.HTTP != client.HTTP || override.DiscoveryURL != client.DiscoveryURL ||
+		override.UserURL != client.UserURL || override.Scope != client.Scope || override.Wait == nil {
+		t.Fatalf("override did not retain client dependencies: %+v", override)
+	}
+	if client.WithClientID("") != client {
+		t.Fatal("empty client ID should reuse the default client")
+	}
+}
+
 func TestRefreshSendsClientHeadersAndIncludesErrorBody(t *testing.T) {
 	var sawVersion, sawSurface bool
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -46,6 +46,7 @@ type Block struct {
 	Collapsed        bool              `json:"collapsed,omitempty"`
 	Attachments      []Attachment      `json:"attachments,omitempty"`
 	Data             map[string]string `json:"data,omitempty"`
+	ImportedMessage  json.RawMessage   `json:"importedMessage,omitempty"`
 	Thinking         string            `json:"-"`
 }
 
@@ -744,7 +745,17 @@ func (s *Service) ArchiveInactive(ctx context.Context, olderThan time.Duration, 
 	return archived, nil
 }
 
-func (s *Service) Fork(ctx context.Context, sourceID, targetID string) (err error) {
+func (s *Service) Fork(ctx context.Context, sourceID, targetID string) error {
+	return s.fork(ctx, sourceID, targetID, "", false)
+}
+
+// ForkAt creates an independent session containing only the root-to-entry path.
+// An empty entry starts the fork at the graph root with no transcript blocks.
+func (s *Service) ForkAt(ctx context.Context, sourceID, targetID, entryID string) error {
+	return s.fork(ctx, sourceID, targetID, entryID, true)
+}
+
+func (s *Service) fork(ctx context.Context, sourceID, targetID, entryID string, pathOnly bool) (err error) {
 	ctx, tracker, trackerOwner := beginBlobInstallTracking(ctx)
 	defer s.finishBlobInstalls(tracker, trackerOwner, &err)
 	if err := validateSessionForkIDs(sourceID, targetID); err != nil {
@@ -758,6 +769,11 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) (err erro
 	if err := lockBlobCatalog(ctx, tx); err != nil {
 		return err
 	}
+	if pathOnly {
+		if err := requireGraphEntry(ctx, tx, sourceID, entryID); err != nil {
+			return err
+		}
+	}
 	now := time.Now().UTC().UnixNano()
 	result, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at)
 		SELECT ?,title,provider_id,model_id,reasoning,agent_mode,?,? FROM sessions WHERE id=?`, targetID, now, now, sourceID)
@@ -767,6 +783,37 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) (err erro
 	if err := requireOneSession(result, sourceID); err != nil {
 		return err
 	}
+	blockCopy := `INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data,data_sha256)
+		SELECT ?,sequence,kind,run_id,agent_id,data,data_sha256 FROM session_blocks WHERE session_id=? ORDER BY sequence`
+	blockArgs := []any{targetID, sourceID}
+	toolCopy := `INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256)
+		SELECT ?,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256
+		FROM session_tool_records WHERE session_id=? AND state<>'running'`
+	toolArgs := []any{targetID, sourceID}
+	if pathOnly {
+		blockCopy = `WITH RECURSIVE branch(entry_id,parent_entry_id,block_sequence) AS (
+				SELECT entry_id,parent_entry_id,block_sequence FROM session_graph_entries WHERE session_id=? AND entry_id=?
+				UNION ALL
+				SELECT entry.entry_id,entry.parent_entry_id,entry.block_sequence
+				FROM session_graph_entries entry JOIN branch ON entry.entry_id=branch.parent_entry_id WHERE entry.session_id=?
+			)
+			INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data,data_sha256)
+			SELECT ?,block.sequence,block.kind,block.run_id,block.agent_id,block.data,block.data_sha256
+			FROM session_blocks block JOIN branch ON branch.block_sequence=block.sequence
+			WHERE block.session_id=? ORDER BY block.sequence`
+		blockArgs = []any{sourceID, entryID, sourceID, targetID, sourceID}
+		toolCopy = `WITH RECURSIVE branch(entry_id,parent_entry_id,block_sequence) AS (
+				SELECT entry_id,parent_entry_id,block_sequence FROM session_graph_entries WHERE session_id=? AND entry_id=?
+				UNION ALL
+				SELECT entry.entry_id,entry.parent_entry_id,entry.block_sequence
+				FROM session_graph_entries entry JOIN branch ON entry.entry_id=branch.parent_entry_id WHERE entry.session_id=?
+			)
+			INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256)
+			SELECT ?,record.run_id,record.tool_call_id,record.anchor_sequence,record.name,record.arguments,record.state,record.content,record.structured,record.artifact_id,record.observations,record.started_at,record.completed_at,record.content_sha256,record.structured_sha256
+			FROM session_tool_records record JOIN branch ON branch.block_sequence=record.anchor_sequence
+			WHERE record.session_id=? AND record.state<>'running'`
+		toolArgs = []any{sourceID, entryID, sourceID, targetID, sourceID}
+	}
 	copies := []struct {
 		name  string
 		query string
@@ -774,22 +821,34 @@ func (s *Service) Fork(ctx context.Context, sourceID, targetID string) (err erro
 	}{
 		{"projection", `INSERT INTO session_projections(session_id,last_run_id,updated_at,model_history,usage,checkpoint_generation,cache_epoch,cache_identity_hash,model_history_sha256)
 			SELECT ?,'',?,'{}','{}',0,0,'','' FROM session_projections WHERE session_id=?`, []any{targetID, now, sourceID}},
-		{"blocks", `INSERT INTO session_blocks(session_id,sequence,kind,run_id,agent_id,data,data_sha256)
-			SELECT ?,sequence,kind,run_id,agent_id,data,data_sha256 FROM session_blocks WHERE session_id=?`, []any{targetID, sourceID}},
-		{"todo", `INSERT INTO session_todos(session_id,goal,revision,phases,updated_at)
-			SELECT ?,goal,revision,phases,? FROM session_todos WHERE session_id=?`, []any{targetID, now, sourceID}},
-		{"recap", `INSERT INTO recaps(session_id,anchor,covered_boundary,revision,goal,summary,open_items,updated_at)
-			SELECT ?,anchor,covered_boundary,revision,goal,summary,open_items,? FROM recaps WHERE session_id=?`, []any{targetID, now, sourceID}},
-		{"tools", `INSERT INTO session_tool_records(session_id,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256)
-			SELECT ?,run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256
-			FROM session_tool_records WHERE session_id=? AND state<>'running'`, []any{targetID, sourceID}},
+		{"blocks", blockCopy, blockArgs},
+		{"tools", toolCopy, toolArgs},
 		{"project", `INSERT INTO session_workspaces(session_id,workspace,assigned_at)
 			SELECT ?,workspace,? FROM session_workspaces WHERE session_id=?`, []any{targetID, now, sourceID}},
+	}
+	if !pathOnly {
+		copies = append(copies,
+			struct {
+				name  string
+				query string
+				args  []any
+			}{"todo", `INSERT INTO session_todos(session_id,goal,revision,phases,updated_at)
+				SELECT ?,goal,revision,phases,? FROM session_todos WHERE session_id=?`, []any{targetID, now, sourceID}},
+			struct {
+				name  string
+				query string
+				args  []any
+			}{"recap", `INSERT INTO recaps(session_id,anchor,covered_boundary,revision,goal,summary,open_items,updated_at)
+				SELECT ?,anchor,covered_boundary,revision,goal,summary,open_items,? FROM recaps WHERE session_id=?`, []any{targetID, now, sourceID}},
+		)
 	}
 	for _, copy := range copies {
 		if _, err := tx.ExecContext(ctx, copy.query, copy.args...); err != nil {
 			return fmt.Errorf("fork session %s: %w", copy.name, err)
 		}
+	}
+	if err := configureForkGraph(ctx, tx, sourceID, targetID, entryID, pathOnly, now); err != nil {
+		return err
 	}
 	artifactIDs, err := s.cloneForkArtifacts(ctx, tx, sourceID, targetID)
 	if err != nil {
@@ -1021,6 +1080,10 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 		return Projection{}, err
 	}
 	blocks, err := s.loadSessionBlocks(ctx, s.db, id)
+	if err != nil {
+		return Projection{}, err
+	}
+	blocks, err = filterBlocksToActiveSessionBranch(ctx, s.db, id, blocks)
 	if err != nil {
 		return Projection{}, err
 	}
@@ -1397,7 +1460,22 @@ func (s *Service) appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID 
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, false, fmt.Errorf("load latest session block: %w", err)
 	}
+	coalesceAssistant := false
 	if err == nil && block.Kind == "assistant" {
+		var activeLeafSequence int64
+		activeErr := tx.QueryRowContext(ctx, `
+			SELECT entry.block_sequence
+			FROM session_graphs graph
+			JOIN session_graph_entries entry
+				ON entry.session_id=graph.session_id AND entry.entry_id=graph.active_leaf_entry_id
+			WHERE graph.session_id=?
+		`, sessionID).Scan(&activeLeafSequence)
+		if activeErr != nil && !errors.Is(activeErr, sql.ErrNoRows) {
+			return 0, false, fmt.Errorf("load active session leaf: %w", activeErr)
+		}
+		coalesceAssistant = activeErr == nil && activeLeafSequence == row.Sequence
+	}
+	if coalesceAssistant {
 		payload, loadErr := s.decodeBlockJSON(ctx, row.Data, row.DataSha256)
 		if loadErr != nil {
 			return 0, false, fmt.Errorf("load latest session block: %w", loadErr)

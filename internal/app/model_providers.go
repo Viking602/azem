@@ -8,12 +8,18 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	llmuxdriver "github.com/Viking602/azem/internal/provider/llmux"
+)
+
+const (
+	subscriptionQuotaRetryInitialDelay = 3 * time.Second
+	subscriptionQuotaRetryMaxDelay     = time.Minute
 )
 
 func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntry, error) {
@@ -33,7 +39,7 @@ func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntr
 			stored[providerID] = true
 		}
 	}
-	for _, providerID := range []string{"chatgpt", "grok"} {
+	for _, providerID := range []string{"chatgpt", "grok", "cursor"} {
 		if account, ok := s.activeSubscriptionAccount(ctx, providerID); ok {
 			activeAccounts[providerID] = subscriptionAccount{account.ID, firstNonEmpty(account.DisplayName, account.Email, account.ID)}
 			stored[providerID] = true
@@ -45,13 +51,14 @@ func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntr
 		configured[llmuxdriver.CanonicalProviderID(id)] = provider
 	}
 	s.mu.Unlock()
-	profiles := llmuxdriver.Profiles()
+	profiles := llmuxdriver.ProfilesWithConfig(configured)
 	entries := make([]ModelProviderEntry, 0, len(profiles)+2)
 	// Subscription quota is loaded asynchronously after the catalog is emitted so
 	// list_model_providers never blocks the settings UI on external HTTP calls.
 	for _, subscription := range []struct{ id, name, logo string }{
 		{"chatgpt", "OpenAI / ChatGPT 订阅", "openai"},
 		{"grok", "Grok 订阅", "xai"},
+		{"cursor", "Cursor 订阅", "cursor"},
 	} {
 		account := activeAccounts[subscription.id]
 		source := "none"
@@ -83,18 +90,33 @@ func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntr
 			DefaultBaseURL: profile.BaseURL, BaseURL: baseURL, EnvKey: profile.EnvKey,
 			Enabled: provider.Enabled, CredentialConfigured: source != "none" || profile.AllowEmptyKey,
 			CredentialSource: source, ModelsDevID: llmuxdriver.ModelsDevID(profile.ID), ModelsSource: "configured",
-			Models: cloneLLMuxModels(provider.Models),
+			Models: s.llmuxConfiguredModels(ctx, profile.ID, provider.Models),
 		})
 	}
 	return entries, nil
 }
 
 func (s *Service) discoverModelProvider(ctx context.Context, entry *ModelProviderEntry, secret string) error {
+	return s.discoverModelProviderWith(ctx, entry, secret, llmuxdriver.DiscoverModels)
+}
+
+func (s *Service) discoverModelProviderWith(
+	ctx context.Context,
+	entry *ModelProviderEntry,
+	secret string,
+	discover func(context.Context, llmuxdriver.DiscoveryConfig) ([]catalog.Model, string, string, error),
+) error {
 	if entry == nil {
 		return fmt.Errorf("model provider is required")
 	}
 	id := llmuxdriver.CanonicalProviderID(entry.ID)
-	profile, ok := llmuxdriver.LookupProfile(id)
+	s.mu.Lock()
+	configuredProfiles := make(map[string]config.LLMuxProviderConfig, len(s.cfg.Providers.LLMux))
+	for providerID, provider := range s.cfg.Providers.LLMux {
+		configuredProfiles[providerID] = provider
+	}
+	s.mu.Unlock()
+	profile, ok := llmuxdriver.LookupProfileWithConfig(id, configuredProfiles)
 	if !ok {
 		return fmt.Errorf("unsupported llmux provider %q", id)
 	}
@@ -108,11 +130,11 @@ func (s *Service) discoverModelProvider(ctx context.Context, entry *ModelProvide
 	if err := config.ValidateLLMuxProvider(id, probe); err != nil {
 		return err
 	}
-	apiKey, source, err := s.modelProviderAPIKey(ctx, profile, secret)
+	apiKey, credentialSource, err := s.modelProviderAPIKey(ctx, profile, secret)
 	if err != nil {
 		return err
 	}
-	models, modelsDevID, warning, err := llmuxdriver.DiscoverModels(ctx, llmuxdriver.DiscoveryConfig{
+	models, _, _, err := discover(ctx, llmuxdriver.DiscoveryConfig{
 		Profile: profile, BaseURL: probe.BaseURL, APIKey: apiKey,
 	})
 	if err != nil {
@@ -140,28 +162,36 @@ func (s *Service) discoverModelProvider(ctx context.Context, entry *ModelProvide
 			Capabilities: capabilities, InputModalities: append([]string(nil), model.InputModalities...), OutputModalities: append([]string(nil), model.OutputModalities...),
 		})
 	}
+	if len(discovered) > 10 {
+		for index := range discovered {
+			discovered[index].Disabled = true
+		}
+	}
+	entry.ID = id
+	entry.Models = discovered
+	entry.ModelsSource = "provider_api_preview"
+	entry.CredentialConfigured = credentialSource != "none" || profile.AllowEmptyKey
+	entry.CredentialSource = credentialSource
 	entries, err := s.modelProviderEntries(ctx)
 	if err != nil {
 		return err
 	}
+	replaced := false
 	for index := range entries {
-		if entries[index].ID != id {
-			continue
+		if entries[index].ID == id {
+			entries[index] = *entry
+			replaced = true
+			break
 		}
-		entries[index].Enabled = entry.Enabled
-		entries[index].BaseURL = entry.BaseURL
-		entries[index].Models = discovered
-		entries[index].ModelsSource = "provider_api"
-		if warning == "" && modelsDevID != "" {
-			entries[index].ModelsSource += "+models.dev"
-		}
-		entries[index].ModelsWarning = warning
-		entries[index].ModelsDevID = firstNonEmpty(modelsDevID, entries[index].ModelsDevID)
-		entries[index].CredentialConfigured = apiKey != "" || profile.AllowEmptyKey
-		entries[index].CredentialSource = source
-		break
 	}
-	s.emit(ctx, Event{Kind: EventModelProviders, State: "discovered", Data: map[string]string{"provider": id}, ModelProviders: entries})
+	if !replaced {
+		entries = append(entries, *entry)
+	}
+	s.emit(ctx, Event{Kind: EventModelProviders, State: "discovered", ModelProviders: entries})
+	encoded, _ := json.Marshal(discovered)
+	s.emit(ctx, Event{Kind: EventModelCatalog, State: "discovered", Data: map[string]string{
+		"provider": id, "models": string(encoded),
+	}})
 	return nil
 }
 
@@ -242,6 +272,7 @@ func (s *Service) emitModelProviders(ctx context.Context, state string) error {
 	if err != nil {
 		return err
 	}
+	s.applySubscriptionQuotas(entries)
 	s.emit(ctx, Event{Kind: EventModelProviders, State: state, ModelProviders: entries})
 	for _, entry := range entries {
 		if entry.Enabled && !entry.Subscription {
@@ -296,6 +327,7 @@ func (s *Service) cachedSubscriptionModels(ctx context.Context, providerID, acco
 	if !found {
 		return []config.LLMuxModelConfig{}, "", "subscription"
 	}
+	cached = s.catalog.EnrichWithModelsDev(ctx, cached)
 	models := subscriptionModelsFromCatalog(s.catalogModelsWithAvailability(providerID, cached.Models))
 	source := "subscription"
 	if cached.Stale {
@@ -350,71 +382,152 @@ func (s *Service) refreshSubscriptionCatalogs(targets []ModelProviderEntry) {
 	if err != nil {
 		return
 	}
+	s.applySubscriptionQuotas(entries)
 	s.emit(ctx, Event{Kind: EventModelProviders, State: "catalog_updated", ModelProviders: entries})
 }
 
 func (s *Service) scheduleSubscriptionQuotaRefresh(entries []ModelProviderEntry) {
-	targets := make([]ModelProviderEntry, 0, 2)
-	for _, entry := range entries {
-		if entry.Subscription && entry.AccountID != "" {
-			targets = append(targets, entry)
-		}
-	}
-	if len(targets) == 0 || s.authentication == nil {
+	if len(entries) == 0 || s.authentication == nil {
 		return
 	}
-	go s.refreshSubscriptionQuotas(targets)
+	for _, entry := range entries {
+		if !entry.Subscription || entry.AccountID == "" || !s.beginSubscriptionQuotaRefresh(entry.ID, entry.AccountID) {
+			continue
+		}
+		target := entry
+		go s.refreshSubscriptionQuota(target)
+	}
 }
 
-func (s *Service) refreshSubscriptionQuotas(targets []ModelProviderEntry) {
+func (s *Service) beginSubscriptionQuotaRefresh(providerID, accountID string) bool {
+	if s == nil || providerID == "" || accountID == "" {
+		return false
+	}
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	if s.subscriptionQuotas == nil {
+		s.subscriptionQuotas = map[string]subscriptionQuotaSnapshot{}
+	}
+	snapshot, ok := s.subscriptionQuotas[providerID]
+	if ok && snapshot.AccountID == accountID && snapshot.Refreshing {
+		return false
+	}
+	if !ok || snapshot.AccountID != accountID {
+		snapshot = subscriptionQuotaSnapshot{AccountID: accountID}
+	}
+	snapshot.Refreshing = true
+	snapshot.QuotaWarning = ""
+	s.subscriptionQuotas[providerID] = snapshot
+	return true
+}
+
+func (s *Service) refreshSubscriptionQuota(target ModelProviderEntry) {
 	ctx := s.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// Rebuild the full catalog so a late quota update cannot drop concurrent provider edits.
+	defer s.finishSubscriptionQuotaRefresh(target.ID, target.AccountID)
+	retryAttempt := 0
+	for {
+		if !s.markSubscriptionQuotaRefreshing(target.ID, target.AccountID) ||
+			!s.emitSubscriptionQuotaState(ctx, target, "quota_refreshing") {
+			return
+		}
+		quota, quotaErr := s.loadSubscriptionQuota(ctx, target.ID, target.AccountID)
+		snapshot := s.rememberSubscriptionQuota(target.ID, target.AccountID, quota, quotaErr)
+		if !s.emitSubscriptionQuotaState(ctx, target, "quota_updated") {
+			return
+		}
+		if quotaErr == nil || !snapshot.Refreshing {
+			return
+		}
+		retryAttempt++
+		if !s.waitForSubscriptionQuotaRetry(ctx, retryAttempt) {
+			return
+		}
+	}
+}
+
+func (s *Service) loadSubscriptionQuota(ctx context.Context, providerID, accountID string) (authservice.SubscriptionQuota, error) {
+	if s.subscriptionQuotaLookup != nil {
+		return s.subscriptionQuotaLookup(ctx, providerID, accountID)
+	}
+	return s.authentication.SubscriptionQuota(ctx, providerID, accountID)
+}
+
+func (s *Service) emitSubscriptionQuotaState(ctx context.Context, target ModelProviderEntry, state string) bool {
 	entries, err := s.modelProviderEntries(ctx)
 	if err != nil {
-		return
+		return false
 	}
-	changed := false
-	for _, target := range targets {
-		for index := range entries {
-			if entries[index].ID != target.ID || !entries[index].Subscription || entries[index].AccountID == "" {
-				continue
-			}
-			quota, quotaErr := s.authentication.SubscriptionQuota(ctx, entries[index].ID, entries[index].AccountID)
-			if label := firstNonEmpty(quota.DisplayName, quota.Email); label != "" {
-				entries[index].AccountLabel = label
-			}
-			if quota.Plan != "" {
-				entries[index].AccountPlan = quota.Plan
-			}
-			if quotaErr != nil {
-				entries[index].QuotaWarning = quotaErr.Error()
-				entries[index].QuotaAvailable = false
-				entries[index].QuotaPeriod = ""
-				entries[index].QuotaUsedPercent = 0
-				entries[index].QuotaResetsAt = 0
-				entries[index].QuotaBalance = ""
-				entries[index].QuotaUnlimited = false
-			} else {
-				entries[index].QuotaAvailable = true
-				entries[index].QuotaPeriod = quota.Period
-				entries[index].QuotaUsedPercent = quota.UsedPercent
-				entries[index].QuotaResetsAt = quota.ResetsAt
-				entries[index].QuotaBalance = quota.Balance
-				entries[index].AccountPlan = quota.Plan
-				entries[index].QuotaUnlimited = quota.Unlimited
-				entries[index].QuotaWarning = ""
-			}
-			changed = true
+	found := false
+	for index := range entries {
+		if entries[index].ID == target.ID && entries[index].Subscription && entries[index].AccountID == target.AccountID {
+			found = true
 			break
 		}
 	}
-	if !changed {
+	if !found {
+		return false
+	}
+	s.applySubscriptionQuotas(entries)
+	s.emit(ctx, Event{Kind: EventModelProviders, State: state, ModelProviders: entries})
+	return true
+}
+
+func (s *Service) markSubscriptionQuotaRefreshing(providerID, accountID string) bool {
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	snapshot, ok := s.subscriptionQuotas[providerID]
+	if !ok || snapshot.AccountID != accountID || !snapshot.Refreshing {
+		return false
+	}
+	snapshot.QuotaWarning = ""
+	s.subscriptionQuotas[providerID] = snapshot
+	return true
+}
+
+func (s *Service) finishSubscriptionQuotaRefresh(providerID, accountID string) {
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	snapshot, ok := s.subscriptionQuotas[providerID]
+	if !ok || snapshot.AccountID != accountID {
 		return
 	}
-	s.emit(ctx, Event{Kind: EventModelProviders, State: "quota_updated", ModelProviders: entries})
+	snapshot.Refreshing = false
+	s.subscriptionQuotas[providerID] = snapshot
+}
+
+func (s *Service) waitForSubscriptionQuotaRetry(ctx context.Context, attempt int) bool {
+	delay := defaultSubscriptionQuotaRetryDelay(attempt)
+	if s.subscriptionQuotaRetryDelay != nil {
+		delay = s.subscriptionQuotaRetryDelay(attempt)
+	}
+	if delay <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func defaultSubscriptionQuotaRetryDelay(attempt int) time.Duration {
+	delay := subscriptionQuotaRetryInitialDelay
+	for step := 1; step < attempt && delay < subscriptionQuotaRetryMaxDelay; step++ {
+		if delay >= subscriptionQuotaRetryMaxDelay/2 {
+			return subscriptionQuotaRetryMaxDelay
+		}
+		delay *= 2
+	}
+	if delay > subscriptionQuotaRetryMaxDelay {
+		return subscriptionQuotaRetryMaxDelay
+	}
+	return delay
 }
 
 func (s *Service) updateModelProvider(ctx context.Context, entry *ModelProviderEntry, secret string) error {
@@ -422,17 +535,30 @@ func (s *Service) updateModelProvider(ctx context.Context, entry *ModelProviderE
 		return fmt.Errorf("model provider is required")
 	}
 	id := llmuxdriver.CanonicalProviderID(entry.ID)
-	profile, ok := llmuxdriver.LookupProfile(id)
+	s.mu.Lock()
+	configuredProfiles := make(map[string]config.LLMuxProviderConfig, len(s.cfg.Providers.LLMux))
+	for providerID, provider := range s.cfg.Providers.LLMux {
+		configuredProfiles[providerID] = provider
+	}
+	s.mu.Unlock()
+	profile, ok := llmuxdriver.LookupProfileWithConfig(id, configuredProfiles)
 	if !ok {
 		return fmt.Errorf("unsupported llmux provider %q", id)
 	}
+	provider := configuredProfiles[id]
 	baseURL := strings.TrimSpace(entry.BaseURL)
 	if profile.BaseURL != "" {
-		baseURL = ""
+		if provider.Backend != "" {
+			baseURL = provider.BaseURL
+		} else {
+			baseURL = ""
+		}
 	} else if entry.Enabled && baseURL == "" {
 		return fmt.Errorf("%s requires a custom API base URL", profile.DisplayName)
 	}
-	provider := config.LLMuxProviderConfig{Enabled: entry.Enabled, BaseURL: baseURL, Models: cloneLLMuxModels(entry.Models)}
+	provider.Enabled = entry.Enabled
+	provider.BaseURL = baseURL
+	provider.Models = cloneLLMuxModels(entry.Models)
 	if err := config.ValidateLLMuxProvider(id, provider); err != nil {
 		return err
 	}
@@ -454,9 +580,18 @@ func (s *Service) updateModelProvider(ctx context.Context, entry *ModelProviderE
 			return err
 		}
 	}
+	if s.catalog != nil {
+		if err := s.catalog.ReplaceConfiguredModels(ctx, id, provider.Models); err != nil {
+			return err
+		}
+	}
 	if s.configPath != "" {
+		yamlProvider := provider
+		if s.catalog != nil {
+			yamlProvider.Models = nil
+		}
 		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
-			return config.UpdateLLMuxProvider(s.configPath, id, provider)
+			return config.UpdateLLMuxProvider(s.configPath, id, yamlProvider)
 		}); err != nil {
 			return err
 		}
@@ -473,16 +608,31 @@ func (s *Service) updateModelProvider(ctx context.Context, entry *ModelProviderE
 	return s.emitModelProviders(ctx, "updated")
 }
 
-func (s *Service) setModelEnabled(ctx context.Context, providerID, modelID string, enabled bool) error {
+func (s *Service) setModelsEnabled(ctx context.Context, providerID string, modelIDs []string, enabled bool) error {
 	providerID = llmuxdriver.CanonicalProviderID(providerID)
-	modelID = strings.TrimSpace(modelID)
-	if modelID == "" || len(modelID) > 256 {
-		return fmt.Errorf("model ID is required and must not exceed 256 characters")
+	if len(modelIDs) == 0 || len(modelIDs) > 2048 {
+		return fmt.Errorf("model availability batch must contain between 1 and 2048 models")
 	}
-	if providerID != "chatgpt" && providerID != "grok" {
-		return s.setLLMuxModelEnabled(ctx, providerID, modelID, enabled)
+	seen := make(map[string]struct{}, len(modelIDs))
+	cleaned := make([]string, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" || len(modelID) > 256 {
+			return fmt.Errorf("model ID is required and must not exceed 256 characters")
+		}
+		if _, exists := seen[modelID]; exists {
+			continue
+		}
+		seen[modelID] = struct{}{}
+		cleaned = append(cleaned, modelID)
 	}
-	return s.setSubscriptionModelEnabled(ctx, providerID, modelID, enabled)
+	if !config.IsSubscriptionProvider(providerID) {
+		if len(cleaned) != 1 {
+			return fmt.Errorf("batch model availability is supported only for subscription providers")
+		}
+		return s.setLLMuxModelEnabled(ctx, providerID, cleaned[0], enabled)
+	}
+	return s.setSubscriptionModelsEnabled(ctx, providerID, cleaned, enabled)
 }
 
 func (s *Service) setLLMuxModelEnabled(ctx context.Context, providerID, modelID string, enabled bool) error {
@@ -495,17 +645,37 @@ func (s *Service) setLLMuxModelEnabled(ctx context.Context, providerID, modelID 
 			continue
 		}
 		for modelIndex := range entries[index].Models {
-			if entries[index].Models[modelIndex].ID == modelID {
-				entries[index].Models[modelIndex].Disabled = !enabled
-				return s.updateModelProvider(ctx, &entries[index], "")
+			if entries[index].Models[modelIndex].ID != modelID {
+				continue
 			}
+			entries[index].Models[modelIndex].Disabled = !enabled
+			if s.catalog != nil {
+				if err := s.catalog.SetConfiguredModelDisabled(ctx, providerID, modelID, !enabled); err != nil {
+					return err
+				}
+				s.mu.Lock()
+				if s.cfg.Providers.LLMux == nil {
+					s.cfg.Providers.LLMux = map[string]config.LLMuxProviderConfig{}
+				}
+				provider := s.cfg.Providers.LLMux[providerID]
+				provider.Enabled = entries[index].Enabled
+				provider.BaseURL = entries[index].BaseURL
+				provider.Models = cloneLLMuxModels(entries[index].Models)
+				s.cfg.Providers.LLMux[providerID] = provider
+				s.mu.Unlock()
+				if s.providers != nil {
+					s.providers.UpdateLLMuxProvider(providerID, provider)
+				}
+				return s.emitModelProviders(ctx, "model_availability_updated")
+			}
+			return s.updateModelProvider(ctx, &entries[index], "")
 		}
 		return fmt.Errorf("model %q is not configured for %s", modelID, providerID)
 	}
 	return fmt.Errorf("unsupported model provider %q", providerID)
 }
 
-func (s *Service) setSubscriptionModelEnabled(ctx context.Context, providerID, modelID string, enabled bool) error {
+func (s *Service) setSubscriptionModelsEnabled(ctx context.Context, providerID string, modelIDs []string, enabled bool) error {
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
 	s.mu.Lock()
@@ -513,11 +683,13 @@ func (s *Service) setSubscriptionModelEnabled(ctx context.Context, providerID, m
 	var disabled []string
 	if providerID == "chatgpt" {
 		disabled = append([]string(nil), s.cfg.Providers.ChatGPT.DisabledModels...)
-	} else {
+	} else if providerID == "grok" {
 		disabled = append([]string(nil), s.cfg.Providers.Grok.DisabledModels...)
+	} else {
+		disabled = append([]string(nil), s.cfg.Providers.Cursor.DisabledModels...)
 	}
 	s.mu.Unlock()
-	disabled = setModelDisabled(disabled, modelID, !enabled)
+	disabled = setModelsDisabled(disabled, modelIDs, !enabled)
 	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
 		e.Source, e.FilePath = "user_settings", s.configPath
 	}); err != nil {
@@ -533,8 +705,10 @@ func (s *Service) setSubscriptionModelEnabled(ctx context.Context, providerID, m
 	s.mu.Lock()
 	if providerID == "chatgpt" {
 		s.cfg.Providers.ChatGPT.DisabledModels = append([]string(nil), disabled...)
-	} else {
+	} else if providerID == "grok" {
 		s.cfg.Providers.Grok.DisabledModels = append([]string(nil), disabled...)
+	} else {
+		s.cfg.Providers.Cursor.DisabledModels = append([]string(nil), disabled...)
 	}
 	s.mu.Unlock()
 	if s.providers != nil {
@@ -544,15 +718,19 @@ func (s *Service) setSubscriptionModelEnabled(ctx context.Context, providerID, m
 	return s.emitModelProviders(ctx, "model_availability_updated")
 }
 
-func setModelDisabled(models []string, modelID string, disabled bool) []string {
-	result := make([]string, 0, len(models)+1)
+func setModelsDisabled(models, modelIDs []string, disabled bool) []string {
+	targets := make(map[string]struct{}, len(modelIDs))
+	for _, modelID := range modelIDs {
+		targets[modelID] = struct{}{}
+	}
+	result := make([]string, 0, len(models)+len(modelIDs))
 	for _, existing := range models {
-		if existing != modelID {
+		if _, changed := targets[existing]; !changed {
 			result = append(result, existing)
 		}
 	}
 	if disabled {
-		result = append(result, modelID)
+		result = append(result, modelIDs...)
 		sort.Strings(result)
 	}
 	return result
@@ -565,6 +743,8 @@ func (s *Service) catalogModelsWithAvailability(provider string, models []catalo
 		disabled = append([]string(nil), s.cfg.Providers.ChatGPT.DisabledModels...)
 	} else if provider == "grok" {
 		disabled = append([]string(nil), s.cfg.Providers.Grok.DisabledModels...)
+	} else if provider == "cursor" {
+		disabled = append([]string(nil), s.cfg.Providers.Cursor.DisabledModels...)
 	}
 	s.mu.Unlock()
 	result := append([]catalog.Model(nil), models...)
@@ -638,6 +818,57 @@ func cloneLLMuxModels(models []config.LLMuxModelConfig) []config.LLMuxModelConfi
 	return cloned
 }
 
+func (s *Service) llmuxConfiguredModels(ctx context.Context, providerID string, fallback []config.LLMuxModelConfig) []config.LLMuxModelConfig {
+	if s.catalog == nil {
+		return cloneLLMuxModels(fallback)
+	}
+	models, err := s.catalog.ConfiguredModels(ctx, providerID)
+	if err != nil || len(models) == 0 {
+		return cloneLLMuxModels(fallback)
+	}
+	return cloneLLMuxModels(models)
+}
+
+func (s *Service) hydrateLLMuxModels(ctx context.Context) {
+	if s.catalog == nil {
+		return
+	}
+	s.mu.Lock()
+	providers := cloneLLMuxProviders(s.cfg.Providers.LLMux)
+	s.mu.Unlock()
+	for id, provider := range providers {
+		stored, err := s.catalog.ConfiguredModels(ctx, id)
+		if err != nil {
+			continue
+		}
+		legacy := len(provider.Models) > 0
+		if len(stored) == 0 && legacy {
+			if err := s.catalog.ReplaceConfiguredModels(ctx, id, provider.Models); err != nil {
+				continue
+			}
+			stored = cloneLLMuxModels(provider.Models)
+		}
+		if len(stored) > 0 {
+			provider.Models = cloneLLMuxModels(stored)
+			s.mu.Lock()
+			if s.cfg.Providers.LLMux == nil {
+				s.cfg.Providers.LLMux = map[string]config.LLMuxProviderConfig{}
+			}
+			s.cfg.Providers.LLMux[id] = provider
+			s.mu.Unlock()
+			if s.providers != nil {
+				s.providers.UpdateLLMuxProvider(id, provider)
+			}
+		}
+		if !legacy || s.configPath == "" {
+			continue
+		}
+		stripped := provider
+		stripped.Models = nil
+		_ = config.UpdateLLMuxProvider(s.configPath, id, stripped)
+	}
+}
+
 func hasCapability(capabilities []string, wanted string) bool {
 	for _, capability := range capabilities {
 		if capability == wanted {
@@ -656,10 +887,132 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+type subscriptionQuotaSnapshot struct {
+	AccountID        string
+	AccountLabel     string
+	AccountPlan      string
+	QuotaAvailable   bool
+	QuotaPeriod      string
+	QuotaStartedAt   int64
+	QuotaUsedPercent float64
+	QuotaBreakdown   []ModelProviderQuotaBreakdown
+	QuotaResetsAt    int64
+	QuotaUpdatedAt   string
+	QuotaBalance     string
+	QuotaUnlimited   bool
+	QuotaWarning     string
+	Refreshing       bool
+}
+
+func (s *Service) rememberSubscriptionQuota(providerID, accountID string, quota authservice.SubscriptionQuota, quotaErr error) subscriptionQuotaSnapshot {
+	if s == nil || providerID == "" || accountID == "" {
+		return subscriptionQuotaSnapshot{}
+	}
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	if s.subscriptionQuotas == nil {
+		s.subscriptionQuotas = map[string]subscriptionQuotaSnapshot{}
+	}
+	snapshot, ok := s.subscriptionQuotas[providerID]
+	if !ok || snapshot.AccountID != accountID {
+		snapshot = subscriptionQuotaSnapshot{AccountID: accountID}
+	}
+	snapshot.AccountID = accountID
+	snapshot.QuotaUpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if label := firstNonEmpty(quota.DisplayName, quota.Email); label != "" {
+		snapshot.AccountLabel = label
+	}
+	if quota.Plan != "" {
+		snapshot.AccountPlan = quota.Plan
+	}
+	if quotaErr != nil {
+		snapshot.QuotaWarning = quotaErr.Error()
+		snapshot.Refreshing = authservice.IsRetryableSubscriptionQuotaError(quotaErr)
+	} else {
+		snapshot.QuotaAvailable = true
+		snapshot.QuotaPeriod = quota.Period
+		snapshot.QuotaStartedAt = quota.StartsAt
+		snapshot.QuotaUsedPercent = quota.UsedPercent
+		snapshot.QuotaBreakdown = quotaBreakdownEntries(quota.Breakdown)
+		snapshot.QuotaResetsAt = quota.ResetsAt
+		snapshot.QuotaBalance = quota.Balance
+		snapshot.QuotaUnlimited = quota.Unlimited
+		snapshot.QuotaWarning = ""
+		snapshot.Refreshing = false
+	}
+	s.subscriptionQuotas[providerID] = snapshot
+	return snapshot
+}
+
+func quotaBreakdownEntries(breakdown []authservice.SubscriptionQuotaBreakdown) []ModelProviderQuotaBreakdown {
+	if len(breakdown) == 0 {
+		return nil
+	}
+	entries := make([]ModelProviderQuotaBreakdown, len(breakdown))
+	for index, item := range breakdown {
+		entries[index] = ModelProviderQuotaBreakdown{ID: item.ID, UsedPercent: item.UsedPercent}
+	}
+	return entries
+}
+
+func (s *Service) forgetSubscriptionQuota(providerID, accountID string) {
+	if s == nil || providerID == "" {
+		return
+	}
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	current, ok := s.subscriptionQuotas[providerID]
+	if !ok {
+		return
+	}
+	if accountID != "" && current.AccountID != accountID {
+		return
+	}
+	delete(s.subscriptionQuotas, providerID)
+}
+
+func (s *Service) applySubscriptionQuotas(entries []ModelProviderEntry) {
+	if s == nil || len(entries) == 0 {
+		return
+	}
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	for index := range entries {
+		snapshot, ok := s.subscriptionQuotas[entries[index].ID]
+		if !ok || !entries[index].Subscription || entries[index].AccountID == "" || entries[index].AccountID != snapshot.AccountID {
+			continue
+		}
+		applySubscriptionQuotaSnapshot(&entries[index], snapshot)
+	}
+}
+
+func applySubscriptionQuotaSnapshot(entry *ModelProviderEntry, snapshot subscriptionQuotaSnapshot) {
+	if entry == nil {
+		return
+	}
+	if snapshot.AccountLabel != "" {
+		entry.AccountLabel = snapshot.AccountLabel
+	}
+	if snapshot.AccountPlan != "" {
+		entry.AccountPlan = snapshot.AccountPlan
+	}
+	entry.QuotaAvailable = snapshot.QuotaAvailable
+	entry.QuotaPeriod = snapshot.QuotaPeriod
+	entry.QuotaStartedAt = snapshot.QuotaStartedAt
+	entry.QuotaUsedPercent = snapshot.QuotaUsedPercent
+	entry.QuotaBreakdown = append([]ModelProviderQuotaBreakdown(nil), snapshot.QuotaBreakdown...)
+	entry.QuotaResetsAt = snapshot.QuotaResetsAt
+	entry.QuotaUpdatedAt = snapshot.QuotaUpdatedAt
+	entry.QuotaBalance = snapshot.QuotaBalance
+	entry.QuotaUnlimited = snapshot.QuotaUnlimited
+	entry.QuotaWarning = snapshot.QuotaWarning
+}
+
 func cloneLLMuxProviders(providers map[string]config.LLMuxProviderConfig) map[string]config.LLMuxProviderConfig {
 	cloned := make(map[string]config.LLMuxProviderConfig, len(providers))
 	for id, provider := range providers {
 		provider.Models = cloneLLMuxModels(provider.Models)
+		provider.RuntimeHeaders = cloneMCPStringMap(provider.RuntimeHeaders)
 		cloned[id] = provider
 	}
 	return cloned

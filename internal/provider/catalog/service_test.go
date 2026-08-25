@@ -114,8 +114,18 @@ func TestCachedReturnsPersistedCatalogWithoutNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	cached, found, err := catalog.Cached(ctx, "grok", "acct")
-	if err != nil || !found || len(cached.Models) != 1 || cached.Models[0].ID != "grok-4.6" {
+	if err != nil || !found || len(cached.Models) != len(grokOAuthCuratedModels) {
 		t.Fatalf("cached=%+v found=%v err=%v", cached, found, err)
+	}
+	var grok46 Model
+	for _, model := range cached.Models {
+		if model.ID == "grok-4.6" {
+			grok46 = model
+			break
+		}
+	}
+	if grok46.ContextWindow != 500_000 || strings.Join(grok46.ReasoningLevels, ",") != "low,medium,high,xhigh" {
+		t.Fatalf("cold-start Grok metadata=%+v", grok46)
 	}
 }
 
@@ -173,7 +183,7 @@ func TestGrokCatalogUsesCLIProxyHeadersAndIgnoresOptionalSourceFailure(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Models) != 1 || result.Models[0].ID != "grok-4" || !result.Models[0].SupportsTools {
+	if len(result.Models) != len(grokOAuthCuratedModels)+1 || result.Models[0].ID != "grok-4" || !result.Models[0].SupportsTools {
 		t.Fatalf("grok catalog=%+v", result)
 	}
 	if strings.Join(paths, ",") != "/models,/language-models" {
@@ -239,6 +249,23 @@ func TestReasoningLevelsFollowCatalogAndProviderCapabilities(t *testing.T) {
 	}
 	if got, err := ResolveReasoningEffort("grok", grok46, "xhigh"); err != nil || got != "xhigh" {
 		t.Fatalf("Grok 4.6 xhigh = %q, %v", got, err)
+	}
+
+	grokBuild := Model{ID: "grok-build", SupportsReasoning: true, ReasoningLevels: []string{"low", "high"}}
+	if got := AvailableReasoningLevels("grok", grokBuild); len(got) != 0 {
+		t.Fatalf("Grok Build exposed unsupported wire effort = %v", got)
+	}
+	if got, err := ResolveReasoningEffort("grok", grokBuild, "high"); err != nil || got != "" {
+		t.Fatalf("Grok Build wire effort = %q, %v", got, err)
+	}
+
+	cursor := NormalizeCursorModel(Model{ID: "gpt-5.6-sol-xhigh", Name: "GPT-5.6 Sol 1M Extra High"})
+	if cursor.ContextWindow != 1_000_000 || strings.Join(cursor.ReasoningLevels, ",") != "xhigh" || cursor.DefaultReasoning != "xhigh" {
+		t.Fatalf("Cursor normalized metadata = %+v", cursor)
+	}
+	cursorFast := NormalizeCursorModel(Model{ID: "gpt-5.6-sol-xhigh-fast", Name: "GPT-5.6 Sol Extra High Fast"})
+	if cursorFast.ContextWindow != 200_000 {
+		t.Fatalf("Cursor fast context = %+v", cursorFast)
 	}
 
 	if got, err := ResolveReasoningEffort("chatgpt", Model{ID: "plain"}, "high"); err != nil || got != "" {

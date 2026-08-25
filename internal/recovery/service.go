@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Viking602/venat/api"
@@ -114,6 +115,9 @@ func (s *Service) Recover(ctx context.Context) (Summary, error) {
 	}
 	candidates := make([]runCandidate, 0, len(runs))
 	for _, run := range runs {
+		if strings.HasPrefix(run.Metadata["automation_kind"], "security_") {
+			continue
+		}
 		if terminalRunStatus(run.Status) {
 			continue
 		}

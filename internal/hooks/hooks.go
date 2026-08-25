@@ -94,6 +94,7 @@ type Command struct {
 	FailurePolicy FailurePolicy
 	Source        string
 	Environment   map[string]string
+	direct        bool
 	matcher       *regexp.Regexp
 	exact         []string
 }

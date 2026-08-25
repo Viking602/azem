@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -16,13 +17,17 @@ import (
 
 func (r *ProviderRuntime) resolveLLMuxDriverForAccount(ctx context.Context, providerID, modelID, requestedReasoning, accountID string) (auth.Account, string, int, hyprovider.Driver, error) {
 	providerID = llmuxdriver.CanonicalProviderID(providerID)
-	profile, ok := llmuxdriver.LookupProfile(providerID)
+	r.mu.RLock()
+	configuredProviders := make(map[string]config.LLMuxProviderConfig, len(r.cfg.Providers.LLMux))
+	for id, current := range r.cfg.Providers.LLMux {
+		configuredProviders[id] = current
+	}
+	provider, configured := configuredProviders[providerID]
+	r.mu.RUnlock()
+	profile, ok := llmuxdriver.LookupProfileWithConfig(providerID, configuredProviders)
 	if !ok {
 		return auth.Account{}, "", 0, nil, fmt.Errorf("unsupported provider %q", providerID)
 	}
-	r.mu.RLock()
-	provider, configured := r.cfg.Providers.LLMux[providerID]
-	r.mu.RUnlock()
 	if !configured || !provider.Enabled {
 		return auth.Account{}, "", 0, nil, fmt.Errorf("enable %s in model settings before starting a turn", providerID)
 	}
@@ -34,16 +39,28 @@ func (r *ProviderRuntime) resolveLLMuxDriverForAccount(ctx context.Context, prov
 	if err != nil {
 		return auth.Account{}, "", 0, nil, err
 	}
-	account, apiKey, err := r.llmuxCredential(ctx, profile, accountID)
-	if err != nil {
-		return auth.Account{}, "", 0, nil, err
+	var account auth.Account
+	var apiKey string
+	if provider.RuntimeAPIKey != "" {
+		account = auth.Account{ID: "extension", Provider: providerID, DisplayName: profile.DisplayName, Status: "active"}
+		apiKey = provider.RuntimeAPIKey
+	} else {
+		account, apiKey, err = r.llmuxCredential(ctx, profile, accountID)
+		if err != nil {
+			return auth.Account{}, "", 0, nil, err
+		}
 	}
 	baseURL := strings.TrimSpace(provider.BaseURL)
 	if baseURL == "" {
 		baseURL = profile.BaseURL
 	}
+	headers := make(http.Header, len(provider.RuntimeHeaders))
+	for key, value := range provider.RuntimeHeaders {
+		headers.Set(key, value)
+	}
 	driver, err := llmuxdriver.New(llmuxdriver.Config{
-		ProviderID: providerID, APIKey: apiKey, BaseURL: baseURL,
+		ProviderID: providerID, Backend: profile.Backend, APIKey: apiKey, BaseURL: baseURL, Headers: headers,
+		AllowEmptyKey: profile.AllowEmptyKey, APIKeyHeader: profile.APIKeyHeader, APIKeyPrefix: profile.APIKeyPrefix,
 		Models: []string{selected.ID}, ReasoningEffort: reasoning, MaxOutputTokens: selected.MaxOutputTokens,
 		DisableImages: len(selected.InputModalities) > 0 && !slices.Contains(selected.InputModalities, "image"),
 	})
@@ -120,7 +137,7 @@ func configuredModel(providerID string, models []config.LLMuxModelConfig, modelI
 // their transports omit or reject max_output_tokens on the main path.
 func (r *ProviderRuntime) modelMaxOutputTokens(providerID, modelID string) int {
 	providerID = llmuxdriver.CanonicalProviderID(providerID)
-	if providerID == "" || providerID == "chatgpt" || providerID == "grok" {
+	if providerID == "" || config.IsSubscriptionProvider(providerID) {
 		return 0
 	}
 	r.mu.RLock()

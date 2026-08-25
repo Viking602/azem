@@ -52,6 +52,10 @@ type ArchiveContextManifestV1 struct {
 }
 
 func newArchiveContextManifest(c turnContext, reason string, source, result, omitted []message.Message, archive contextarchive.Manifest, target int) ArchiveContextManifestV1 {
+	canonicalHighWater := canonicalMessageHighWater(source)
+	if c.canonicalHighWater != nil {
+		canonicalHighWater = *c.canonicalHighWater
+	}
 	manifest := ArchiveContextManifestV1{
 		Version:            1,
 		SessionID:          c.sessionID,
@@ -60,7 +64,7 @@ func newArchiveContextManifest(c turnContext, reason string, source, result, omi
 		PolicyVersion:      contextRebuildPolicyVersion,
 		StaticIdentity:     c.staticIdentity,
 		ModelRouteHash:     hashText(c.providerID + "\x00" + c.modelID),
-		CanonicalHighWater: canonicalMessageHighWater(source),
+		CanonicalHighWater: canonicalHighWater,
 		TodoRevision:       c.todo.Revision,
 		TargetTokens:       target,
 		EstimatedTokens:    estimateContextTokens(result),

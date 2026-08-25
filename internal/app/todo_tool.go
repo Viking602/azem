@@ -28,24 +28,30 @@ type todoInput struct {
 func (d *todoDriver) Definition() tool.Definition {
 	additional := false
 	itemSchema := tool.Schema{Type: "object", Properties: map[string]tool.Schema{
-		"id": {Type: "string"}, "content": {Type: "string"},
-		"status": {Type: "string", Enum: []string{"pending", "in_progress", "completed", "cancelled"}},
+		"content": {Type: "string"},
 	}, Required: []string{"content"}, AdditionalProperties: &additional}
 	phaseSchema := tool.Schema{Type: "object", Properties: map[string]tool.Schema{
-		"id": {Type: "string"}, "title": {Type: "string"},
+		"title": {Type: "string"},
 		"items": {Type: "array", Items: &itemSchema},
 	}, Required: []string{"title", "items"}, AdditionalProperties: &additional}
-	return tool.Definition{Name: "todo", Description: "Maintain the durable session plan. After completing one item, immediately call done by itself and wait for the returned snapshot before continuing; never batch mutating todo calls. done automatically advances the next pending item, so do not follow it with start. init may omit expected_revision and safely replaces the latest stored plan; later mutations require expected_revision from the latest snapshot. Read with view when the latest revision is unknown.", InputSchema: tool.Schema{
+	return tool.Definition{Name: "todo", Description: "Maintain the durable session plan. init accepts a goal, phase titles, and item content; IDs and status are host-assigned and must be omitted. A complete init payload may omit op; every other operation requires it. After completing one item, immediately call done by itself and wait for the returned snapshot before continuing; never batch mutating todo calls. done automatically advances the next pending item, so do not follow it with start. init may omit expected_revision and safely replaces the latest stored plan; later mutations require expected_revision from the latest snapshot. Read with view when the latest revision is unknown.", InputSchema: tool.Schema{
 		Type: "object", Properties: map[string]tool.Schema{
 			"op": {Type: "string", Enum: []string{"init", "view", "start", "done", "append", "cancel", "remove"}}, "expected_revision": {Type: "integer"},
 			"goal": {Type: "string"}, "phases": {Type: "array", Items: &phaseSchema}, "item_id": {Type: "string"}, "phase_id": {Type: "string"}, "content": {Type: "string"},
-		}, Required: []string{"op"}, AdditionalProperties: &additional}, EffectType: tool.EffectWrite, RequiresApproval: false, RequiresActionTask: false, RiskLevel: "low", Metadata: map[string]string{"approval": "allow"}, PolicyTags: []string{"session", "todo"}}
+		}, AdditionalProperties: &additional,
+	}, EffectType: tool.EffectWrite, RequiresApproval: false, RequiresActionTask: false, RiskLevel: "low", Metadata: map[string]string{"approval": "allow"}, PolicyTags: []string{"session", "todo"}}
 }
 
 func (d *todoDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
 	var in todoInput
 	if err := json.Unmarshal(call.Arguments, &in); err != nil {
 		return todoResult(call, session.TodoList{}, fmt.Errorf("decode arguments: %w", err)), nil
+	}
+	if strings.TrimSpace(in.Op) == "" && strings.TrimSpace(in.Goal) != "" && len(in.Phases) > 0 {
+		in.Op = "init"
+	}
+	if strings.TrimSpace(in.Op) == "" {
+		return todoResult(call, session.TodoList{}, fmt.Errorf("op is required unless goal and phases define init")), nil
 	}
 	if in.Op == "view" {
 		todo, err := d.store.LoadTodo(ctx, d.sessionID)
@@ -102,7 +108,16 @@ func applyTodoOp(todo *session.TodoList, in todoInput) error {
 			return fmt.Errorf("at least one todo phase is required")
 		}
 		for _, phase := range in.Phases {
+			if phase.ID != "" {
+				return fmt.Errorf("todo phase IDs are host-assigned")
+			}
 			for _, item := range phase.Items {
+				if item.ID != "" {
+					return fmt.Errorf("todo item IDs are host-assigned")
+				}
+				if item.Status != "" {
+					return fmt.Errorf("todo item status is host-assigned")
+				}
 				if item.SubagentRunID != "" {
 					return fmt.Errorf("subagentRunId is owned by subagent.spawn")
 				}
@@ -110,19 +125,12 @@ func applyTodoOp(todo *session.TodoList, in todoInput) error {
 		}
 		todo.Goal = in.Goal
 		todo.Phases = in.Phases
-		hasCurrent := false
 		for pi := range todo.Phases {
 			for ii := range todo.Phases[pi].Items {
-				item := &todo.Phases[pi].Items[ii]
-				if item.Status == "" {
-					item.Status = session.TodoPending
-				}
-				hasCurrent = hasCurrent || item.Status == session.TodoInProgress
+				todo.Phases[pi].Items[ii].Status = session.TodoPending
 			}
 		}
-		if !hasCurrent {
-			advanceNext(todo)
-		}
+		advanceNext(todo)
 	case "start":
 		item, err := find(in.ItemID)
 		if err != nil {

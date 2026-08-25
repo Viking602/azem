@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type monitorRunner struct {
@@ -322,5 +323,23 @@ func TestMonitorDisablesPersistedConsentWhenRepositoryChanges(t *testing.T) {
 	}
 	if repairs != 0 {
 		t.Fatalf("repository mismatch started %d repairs", repairs)
+	}
+}
+
+func TestMonitorTriggerWakesOnlyEnabledPullRequests(t *testing.T) {
+	monitor := NewMonitor(context.Background(), nil, "", nil, nil)
+	monitor.mu.Lock()
+	monitor.states[7] = MonitorState{Number: 7, Enabled: true, Status: MonitorWatching}
+	monitor.mu.Unlock()
+	if err := monitor.Trigger(7); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-monitor.wake:
+	case <-time.After(time.Second):
+		t.Fatal("monitor trigger did not wake poller")
+	}
+	if err := monitor.Trigger(8); err == nil {
+		t.Fatal("triggered disabled pull request")
 	}
 }

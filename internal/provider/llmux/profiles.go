@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Viking602/azem/internal/config"
 	llmuxcatalog "github.com/Viking602/llmux/provider/catalog"
 	"github.com/Viking602/llmux/provider/openai/compat"
 )
@@ -30,7 +31,7 @@ var nativeProfiles = []Profile{
 
 func Profiles() []Profile {
 	profiles := append([]Profile(nil), nativeProfiles...)
-	seen := map[string]bool{"chatgpt": true, "grok": true}
+	seen := map[string]bool{"chatgpt": true, "grok": true, "cursor": true}
 	for _, profile := range nativeProfiles {
 		seen[profile.ID] = true
 	}
@@ -58,6 +59,62 @@ func Profiles() []Profile {
 	}
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].ID < profiles[j].ID })
 	return profiles
+}
+
+func ProfilesWithConfig(configured map[string]config.LLMuxProviderConfig) []Profile {
+	profiles := Profiles()
+	byID := make(map[string]int, len(profiles))
+	for index, profile := range profiles {
+		byID[profile.ID] = index
+	}
+	for rawID, value := range configured {
+		id := CanonicalProviderID(rawID)
+		index, exists := byID[id]
+		profile := Profile{ID: id}
+		if exists {
+			profile = profiles[index]
+		}
+		if value.DisplayName != "" {
+			profile.DisplayName = value.DisplayName
+		}
+		if profile.DisplayName == "" {
+			profile.DisplayName = id
+		}
+		if value.Backend != "" {
+			profile.Backend = value.Backend
+		}
+		if value.BaseURL != "" {
+			profile.BaseURL = value.BaseURL
+		}
+		if value.EnvKey != "" {
+			profile.EnvKey = value.EnvKey
+		}
+		profile.AllowEmptyKey = value.AllowEmptyKey || profile.AllowEmptyKey
+		if value.APIKeyHeader != "" {
+			profile.APIKeyHeader = value.APIKeyHeader
+		}
+		if value.APIKeyPrefix != "" {
+			profile.APIKeyPrefix = value.APIKeyPrefix
+		}
+		if exists {
+			profiles[index] = profile
+		} else if profile.Backend != "" {
+			byID[id] = len(profiles)
+			profiles = append(profiles, profile)
+		}
+	}
+	sort.Slice(profiles, func(i, j int) bool { return profiles[i].ID < profiles[j].ID })
+	return profiles
+}
+
+func LookupProfileWithConfig(id string, configured map[string]config.LLMuxProviderConfig) (Profile, bool) {
+	id = CanonicalProviderID(id)
+	for _, profile := range ProfilesWithConfig(configured) {
+		if profile.ID == id {
+			return profile, true
+		}
+	}
+	return Profile{}, false
 }
 
 func LookupProfile(id string) (Profile, bool) {

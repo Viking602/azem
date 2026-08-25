@@ -66,7 +66,9 @@ func TestManagerCallsStdioMCPWithoutInheritingParentEnvironment(t *testing.T) {
 	}
 	result, err := drivers[0].Execute(context.Background(), tool.Call{ID: "stdio-call", Name: drivers[0].Definition().Name}, nil)
 	if err != nil || result.Content != "configured|" {
-		t.Fatalf("result=%#v error=%v", result, err)
+		_ = manager.Close()
+		closed, _ := os.ReadFile(closedFile)
+		t.Fatalf("result=%#v error=%v helper=%q", result, err, closed)
 	}
 	if err := manager.Close(); err != nil {
 		t.Fatal(err)
@@ -194,9 +196,14 @@ func TestMCPDefaultDriverRequiresRunnerApprovalBeforeRemoteCall(t *testing.T) {
 }
 
 func runStdioHelper() {
+	var runErr error
 	defer func() {
 		if path := os.Getenv(mcpHelperClosed); path != "" {
-			_ = os.WriteFile(path, []byte("closed"), 0o600)
+			content := "closed"
+			if runErr != nil {
+				content = runErr.Error()
+			}
+			_ = os.WriteFile(path, []byte(content), 0o600)
 		}
 	}()
 	server := sdkmcp.NewServer(&sdkmcp.Implementation{Name: "stdio-server", Version: "1"}, nil)
@@ -206,5 +213,5 @@ func runStdioHelper() {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_ = server.Run(ctx, &sdkmcp.StdioTransport{})
+	runErr = server.Run(ctx, &sdkmcp.StdioTransport{})
 }

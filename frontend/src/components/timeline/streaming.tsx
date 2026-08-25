@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { stabilizeStreamingMarkdown } from "../../streamMarkdown";
-import { sameRevealRanges, StreamingMarkdown, type StreamingRevealRange } from "../Markdown";
-import { StreamingText as BeautifulStreamingText } from "../beautiful-ui/Primitives";
+import { MAX_LIVE_REVEAL_RANGES, sameRevealRanges, StreamingMarkdown, type StreamingRevealRange } from "../Markdown";
+import { StreamingText as AssistantStreamingText } from "../assistant-ui/Elements";
 
 function revealGlyphs(text: string) {
   if (typeof Intl.Segmenter === "function") {
@@ -28,7 +28,6 @@ type StreamingPresentation = {
   nextID: number;
 };
 
-const MAX_LIVE_REVEAL_CHUNKS = 1;
 const MAX_REVEAL_CHUNK_GLYPHS = 96;
 
 function revealTailOffset(text: string) {
@@ -42,26 +41,27 @@ function emptyStreamingPresentation(text: string): StreamingPresentation {
   return { rendered: text, ranges: [], nextID: 0 };
 }
 
-function initialStreamingPresentation(text: string): StreamingPresentation {
+function initialStreamingPresentation(text: string, now = Date.now()): StreamingPresentation {
   if (!text) return emptyStreamingPresentation("");
   return {
     rendered: text,
-    ranges: [{ id: 0, start: revealTailOffset(text), end: text.length }],
+    ranges: [{ id: 0, start: revealTailOffset(text), end: text.length, bornAt: now }],
     nextID: 1,
   };
 }
 
-function appendStreamingPresentation(current: StreamingPresentation, text: string): StreamingPresentation {
+function appendStreamingPresentation(current: StreamingPresentation, text: string, now = Date.now()): StreamingPresentation {
   if (current.rendered === text) return current;
-  if (!text.startsWith(current.rendered)) return initialStreamingPresentation(text);
+  if (!text.startsWith(current.rendered)) return initialStreamingPresentation(text, now);
   const appended = text.slice(current.rendered.length);
   if (!appended) return { ...current, rendered: text };
   const range = {
     id: current.nextID,
     start: current.rendered.length + revealTailOffset(appended),
     end: text.length,
+    bornAt: now,
   };
-  const ranges = [...current.ranges, range].slice(-MAX_LIVE_REVEAL_CHUNKS);
+  const ranges = [...current.ranges, range].slice(-MAX_LIVE_REVEAL_RANGES);
   return {
     rendered: text,
     ranges: sameRevealRanges(current.ranges, ranges) ? current.ranges : ranges,
@@ -124,9 +124,9 @@ export function StreamingText({ content, active = true, debugReplay = false }: {
   const stableContent = active ? stabilizeStreamingMarkdown(visibleContent) : visibleContent;
   const ranges = active ? presentation.ranges : [];
 
-  return <BeautifulStreamingText active={active}>
+  return <AssistantStreamingText active={active}>
     <StreamingMarkdown ranges={ranges}>{stableContent}</StreamingMarkdown>
-  </BeautifulStreamingText>;
+  </AssistantStreamingText>;
 }
 
 /** One Markdown tree for live and settled prose. Completion only stops reveal CSS. */

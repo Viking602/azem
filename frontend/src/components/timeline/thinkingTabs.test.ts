@@ -86,15 +86,14 @@ describe("process activity bar", () => {
 
     expect(activityBarLabel([], "zh-CN", { waiting: true })).toBe("正在思考");
     expect(activityBarLabel([thinking], "zh-CN", { live: true })).toBe("正在思考");
-    // Live, the thinking row names the executing tool and rolls to the latest one.
-    expect(activityBarLabel([thinking, search], "zh-CN", { live: true })).toBe("搜索代码");
-    expect(activityBarLabel([thinking, web], "zh-CN", { live: true })).toBe("搜索了网页");
-    expect(activityBarLabel([thinking, write], "zh-CN", { live: true })).toBe("写入文件");
+    expect(activityBarLabel([thinking, search], "zh-CN", { live: true })).toBe("正在运行 搜索代码 \"churn\"");
+    expect(activityBarLabel([thinking, web], "zh-CN", { live: true })).toBe("正在运行 web_search \"azem\"");
+    expect(activityBarLabel([thinking, write], "zh-CN", { live: true })).toBe("正在运行 写入文件 \"a.tsx\"");
     expect(activityBarLabel(
       [thinking, write, tool("s2", "coding.shell", "", "running"), tool("done", "coding.read_file")],
       "zh-CN",
       { live: true },
-    )).toBe("运行命令");
+    )).toBe("正在运行 运行命令");
     // Settled, it summarizes the whole step.
     expect(activityBarLabel(
       [thinking, tool("done", "coding.read_file"), tool("done2", "coding.shell")],

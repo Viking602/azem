@@ -250,8 +250,8 @@ describe("tool timeline grouping", () => {
   });
 
   it("recognizes only the explicit model progress contract", () => {
-    expect(parseModelProgress("**读取当前前端结构**\nApp、Sidebar、Timeline 与 Inspector"))
-      .toEqual({ title: "读取当前前端结构", detail: "App、Sidebar、Timeline 与 Inspector" });
+    expect(parseModelProgress("**读取当前前端结构**\nApp、Sidebar、Timeline 与顶部任务计划"))
+      .toEqual({ title: "读取当前前端结构", detail: "App、Sidebar、Timeline 与顶部任务计划" });
     expect(parseModelProgress("**构建高保真交互原"))
       .toEqual({ title: "构建高保真交互原", detail: "" });
     expect(parseModelProgress("我先读取当前结构，然后再修改。"))
@@ -417,6 +417,12 @@ describe("tool timeline grouping", () => {
 
   it("classifies azem tool titles", () => {
     expect(classifyToolCategory("coding.search")).toBe("search");
+    expect(classifyToolCategory("ast_grep")).toBe("search");
+    expect(classifyToolCategory("debug")).toBe("shell");
+    expect(classifyToolCategory("eval")).toBe("shell");
+    expect(classifyToolCategory("browser")).toBe("shell");
+    expect(classifyToolCategory("computer")).toBe("shell");
+    expect(classifyToolCategory("hub")).toBe("agent");
     expect(classifyToolCategory("coding.read_file")).toBe("read");
     expect(classifyToolCategory("coding.edit_hashline")).toBe("edit");
     expect(classifyToolCategory("coding.git_diff")).toBe("diff");
@@ -435,6 +441,19 @@ describe("tool timeline grouping", () => {
       tool("1", "coding.git_diff"),
       tool("2", "coding.git_diff"),
     ], "en")).toBe("Viewed 2 diffs");
+  });
+
+  it("does not count an unchanged gofmt result as an edited file", () => {
+    const formatter: Block = {
+      ...tool("format", "coding.gofmt"),
+      data: {
+        name: "coding.gofmt",
+        structured: JSON.stringify({ path: "internal/app/work_evidence.go", changed: false, diff: "" }),
+      },
+    };
+    const summary = summarizeToolGroup([formatter, tool("build", "coding.shell")], "zh-CN");
+    expect(summary).not.toContain("编辑");
+    expect(summary).toContain("运行了 1 条命令");
   });
 
   it("collapses consecutive settled tools into a summary", () => {

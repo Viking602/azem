@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Viking602/azem/internal/commands"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/plugins"
@@ -19,10 +20,12 @@ func pluginCatalogEntries(integration plugins.Integration) []PluginCatalogEntry 
 	for index, entry := range integration.Entries {
 		entries[index] = PluginCatalogEntry{
 			ID: entry.ID, Name: entry.Name, DisplayName: entry.DisplayName, Version: entry.Version,
-			Marketplace: entry.Marketplace, Origin: entry.Origin, Description: entry.Description, DeveloperName: entry.DeveloperName,
+			Marketplace: entry.Marketplace, Origin: entry.Origin, Scope: entry.Scope, Description: entry.Description, DeveloperName: entry.DeveloperName,
 			Category: entry.Category, BrandColor: entry.BrandColor, LogoPath: entry.LogoPath,
 			Enabled: entry.Enabled, SkillCount: entry.SkillCount, MCPServerCount: entry.MCPServerCount,
 			IntegratedMCPCount: entry.IntegratedMCPCount, HookCount: entry.HookCount,
+			ToolCount: entry.ToolCount, CommandCount: entry.CommandCount,
+			AgentCount: entry.AgentCount, ThemeCount: entry.ThemeCount, ExtensionCount: entry.ExtensionCount,
 			HooksTrusted: entry.HooksTrusted, HasApp: entry.HasApp,
 			Capabilities: append([]string(nil), entry.Capabilities...), Status: entry.Status, Warning: entry.Warning,
 			Imported: entry.Imported,
@@ -116,6 +119,21 @@ func (s *Service) reloadPluginRuntime(ctx context.Context) error {
 	}
 	s.applyPluginHooks(integration.HookSources)
 	s.rememberPluginRuntime(integration)
+	if s.cfg.Extensions.Enabled {
+		disabledProviders := make(map[string]bool, len(s.cfg.Discovery.DisabledProviders))
+		for _, provider := range s.cfg.Discovery.DisabledProviders {
+			disabledProviders[strings.ToLower(strings.TrimSpace(provider))] = true
+		}
+		commandDirs := append(append([]string(nil), s.cfg.Extensions.AdditionalCommandDirs...), integration.CommandDirs...)
+		catalog, diagnostics, commandErr := commands.Discover(commands.Options{
+			Workspace: options.WorkspaceDir, HomeDir: options.HomeDir,
+			DisabledProviders: disabledProviders, AdditionalDirs: commandDirs,
+		})
+		if commandErr != nil {
+			return commandErr
+		}
+		s.AttachCommands(catalog, diagnostics)
+	}
 	s.pluginCatalog = pluginCatalogEntries(integration)
 	s.pluginDiagnostics = pluginDiagnostics(integration)
 	s.emit(ctx, Event{Kind: EventPluginCatalog, State: "updated", PluginCatalog: s.pluginCatalog, PluginDiagnostics: s.pluginDiagnostics})

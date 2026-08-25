@@ -154,8 +154,8 @@ func toolArgumentSummary(block Block) string {
 
 	name := strings.ReplaceAll(block.Title, "_", ".")
 	switch name {
-	case "coding.search":
-		query := value("query", "pattern")
+	case "coding.search", "ast.grep":
+		query := value("query", "pattern", "pat")
 		scope := value("glob", "path")
 		switch {
 		case query != "" && scope != "":
@@ -231,15 +231,15 @@ func (m AppModel) blockKindStyles(block Block, rendersDiff bool) (lipgloss.Style
 func (m AppModel) toolStyles(name string) (lipgloss.Style, lipgloss.Style) {
 	normalized := strings.ReplaceAll(name, "_", ".")
 	switch normalized {
-	case "coding.search":
+	case "coding.search", "ast.grep", "web.search":
 		return m.theme.ThinkingTag, m.theme.ToolSearch
 	case "coding.read.file", "coding.list.files", "context.read.artifact":
 		return m.theme.AgentTag, m.theme.ToolRead
 	case "coding.edit.hashline", "coding.write.file", "coding.gofmt", "coding.git.diff":
 		return m.theme.AssistantTag, m.theme.ToolWrite
-	case "coding.shell", "coding.go.test":
+	case "coding.shell", "coding.go.test", "debug", "eval", "browser", "computer":
 		return m.theme.ToolTag, m.theme.ToolExecute
-	case "todo", "hydaelyn.activate.skill", "hydaelyn.read.skill.resource", "subagent.spawn", "subagent.get.output", "subagent.kill":
+	case "hub", "todo", "hydaelyn.activate.skill", "hydaelyn.read.skill.resource", "subagent.spawn", "subagent.get.output", "subagent.kill":
 		return m.theme.HookTag, m.theme.ToolAgent
 	default:
 		if strings.Contains(normalized, "memory") || strings.Contains(normalized, "recap") {
@@ -328,7 +328,7 @@ type sourceResultLine struct {
 
 func (m AppModel) renderToolContent(block Block, width int) []string {
 	switch block.Title {
-	case "coding.search", "coding.read_file":
+	case "coding.search", "ast_grep", "coding.read_file":
 		if rows, ok := m.renderSourceToolContent(block, width); ok {
 			return rows
 		}
@@ -371,7 +371,7 @@ func (m AppModel) renderSourceToolContent(block Block, width int) ([]string, boo
 	showNumbers := available >= 18
 	rows := make([]string, 0)
 	pathStyle := m.theme.ToolRead
-	if block.Title == "coding.search" {
+	if block.Title == "coding.search" || block.Title == "ast_grep" {
 		pathStyle = m.theme.ToolSearch
 	}
 	for sectionIndex, section := range sections {
@@ -409,6 +409,13 @@ func parseSourceResult(content, fallbackPath string) []sourceResultSection {
 		return len(sections) - 1
 	}
 	for _, source := range strings.Split(strings.TrimSpace(content), "\n") {
+		if strings.HasPrefix(source, "[") && strings.HasSuffix(source, "]") {
+			inner := strings.TrimSuffix(strings.TrimPrefix(source, "["), "]")
+			if marker := strings.LastIndex(inner, "#"); marker > 0 {
+				current = ensureSection(first(inner[:marker], fallbackPath))
+			}
+			continue
+		}
 		if strings.HasPrefix(source, "¶") {
 			path := strings.TrimPrefix(strings.SplitN(source, "#", 2)[0], "¶")
 			current = ensureSection(first(path, fallbackPath))
@@ -950,7 +957,7 @@ func toolDisplayName(name string, catalogs ...i18n.Catalog) string {
 		catalog = catalogs[0]
 	}
 	keys := map[string]string{
-		"coding.read_file": "tool.read_file", "coding.write_file": "tool.write_file", "coding.edit_hashline": "tool.edit_file",
+		"coding.read_file": "tool.read_file", "coding.write_file": "tool.write_file", "coding.edit_hashline": "tool.edit_file", "ast_grep": "tool.search",
 		"coding.search": "tool.search", "coding.list_files": "tool.list_files", "coding.shell": "tool.shell",
 		"coding.go_test": "tool.go_test", "coding.gofmt": "tool.gofmt", "coding.git_diff": "tool.git_diff",
 		"hydaelyn_activate_skill": "tool.activate_skill", "subagent.spawn": "tool.spawn",

@@ -38,12 +38,23 @@ type Entry struct {
 	BrandColor         string
 	LogoPath           string
 	Root               string
+	Scope              string
 	Enabled            bool
 	SkillCount         int
 	MCPServerCount     int
 	IntegratedMCPCount int
 	HookCount          int
 	HooksTrusted       bool
+	ToolCount          int
+	CommandCount       int
+	ToolPath           string
+	CommandDir         string
+	AgentDir           string
+	ThemeDir           string
+	ExtensionPaths     []string
+	AgentCount         int
+	ThemeCount         int
+	ExtensionCount     int
 	HasApp             bool
 	Capabilities       []string
 	Status             string
@@ -63,11 +74,16 @@ type HookSource struct {
 }
 
 type Integration struct {
-	Entries     []Entry
-	Diagnostics []Diagnostic
-	SkillDirs   []string
-	MCPServers  map[string]config.MCPServerConfig
-	HookSources []HookSource
+	Entries        []Entry
+	Diagnostics    []Diagnostic
+	SkillDirs      []string
+	MCPServers     map[string]config.MCPServerConfig
+	HookSources    []HookSource
+	ToolPaths      []string
+	CommandDirs    []string
+	AgentDirs      []string
+	ThemeDirs      []string
+	ExtensionPaths []string
 }
 
 type Options struct {
@@ -76,6 +92,7 @@ type Options struct {
 	ImportCodex  bool
 	CodexImports []string
 	TrustHooks   bool
+	WorkspaceDir string
 	ListPlugins  func(context.Context) ([]byte, error)
 	// FallbackCatalog is the last known `codex plugin list --json` payload.
 	// Import uses it when a live Codex listing is unavailable so an already
@@ -96,6 +113,7 @@ type installedPlugin struct {
 	Installed   bool         `json:"installed"`
 	Enabled     bool         `json:"enabled"`
 	Origin      string       `json:"origin,omitempty"`
+	Scope       string       `json:"scope,omitempty"`
 	Source      pluginSource `json:"source"`
 }
 
@@ -112,6 +130,8 @@ type manifest struct {
 	Apps        string     `json:"apps"`
 	Hooks       string     `json:"hooks"`
 	Interface   manifestUI `json:"interface"`
+	Tools       string     `json:"tools"`
+	Commands    string     `json:"commands"`
 }
 
 type manifestUI struct {
@@ -138,12 +158,14 @@ type mcpDescriptor struct {
 }
 
 type manifestPaths struct {
-	logo   string
-	icon   string
-	skills string
-	mcp    string
-	hooks  string
-	apps   string
+	logo     string
+	icon     string
+	skills   string
+	mcp      string
+	hooks    string
+	apps     string
+	tools    string
+	commands string
 }
 
 func Discover(ctx context.Context, options Options) Integration {
@@ -159,17 +181,45 @@ func Discover(ctx context.Context, options Options) Integration {
 		codexCatalog, diagnostics = syncSelectedCodexPlugins(ctx, options, packageDir)
 		result.Diagnostics = append(result.Diagnostics, diagnostics...)
 	}
-	installed, diagnostics := installedPackages(packageDir)
+	userInstalled, diagnostics := installedPackages(packageDir)
 	result.Diagnostics = append(result.Diagnostics, diagnostics...)
+	for index := range userInstalled {
+		if userInstalled[index].Scope == "" {
+			userInstalled[index].Scope = string(MarketplaceScopeUser)
+		}
+	}
+	var projectInstalled []installedPlugin
+	if strings.TrimSpace(options.WorkspaceDir) != "" {
+		projectPackageDir := filepath.Join(options.WorkspaceDir, ".azem", "plugin-packages")
+		if _, statErr := os.Stat(projectPackageDir); statErr == nil {
+			projectInstalled, diagnostics = installedPackages(projectPackageDir)
+			result.Diagnostics = append(result.Diagnostics, diagnostics...)
+			for index := range projectInstalled {
+				projectInstalled[index].Scope = string(MarketplaceScopeProject)
+			}
+		}
+	}
+	installed := append(append([]installedPlugin(nil), userInstalled...), projectInstalled...)
 	selected := stringSet(options.CodexImports)
 	loaded := make(map[string]struct{}, len(installed))
+	activePath := make(map[string]string, len(installed))
+	for _, current := range userInstalled {
+		if current.Enabled {
+			activePath[current.PluginID] = current.Source.Path
+		}
+	}
+	for _, current := range projectInstalled {
+		if current.Enabled {
+			activePath[current.PluginID] = current.Source.Path
+		}
+	}
 	for _, installed := range installed {
 		if installed.Origin == "codex" {
 			if _, chosen := selected[installed.PluginID]; !chosen {
 				continue
 			}
 		}
-		mergeInstalledPlugin(&result, options, installed)
+		mergeInstalledPlugin(&result, options, installed, installed.Enabled && activePath[installed.PluginID] == installed.Source.Path)
 		loaded[installed.PluginID] = struct{}{}
 	}
 	for _, available := range codexCatalog {
@@ -190,14 +240,14 @@ func Discover(ctx context.Context, options Options) Integration {
 	return result
 }
 
-func mergeInstalledPlugin(result *Integration, options Options, installed installedPlugin) {
+func mergeInstalledPlugin(result *Integration, options Options, installed installedPlugin, active bool) {
 	if !installed.Installed {
 		return
 	}
 	entry, skillDir, servers, hookSource, diagnostics := inspectPlugin(options, installed)
 	result.Entries = append(result.Entries, entry)
 	result.Diagnostics = append(result.Diagnostics, diagnostics...)
-	if !installed.Enabled || entry.Status == "invalid" {
+	if !active || entry.Status == "invalid" {
 		return
 	}
 	if skillDir != "" {
@@ -207,6 +257,19 @@ func mergeInstalledPlugin(result *Integration, options Options, installed instal
 	if hookSource.Path != "" {
 		result.HookSources = append(result.HookSources, hookSource)
 	}
+	if entry.ToolPath != "" {
+		result.ToolPaths = append(result.ToolPaths, entry.ToolPath)
+	}
+	if entry.CommandDir != "" {
+		result.CommandDirs = append(result.CommandDirs, entry.CommandDir)
+	}
+	if entry.AgentDir != "" {
+		result.AgentDirs = append(result.AgentDirs, entry.AgentDir)
+	}
+	if entry.ThemeDir != "" {
+		result.ThemeDirs = append(result.ThemeDirs, entry.ThemeDir)
+	}
+	result.ExtensionPaths = append(result.ExtensionPaths, entry.ExtensionPaths...)
 }
 
 func mergeMCPServers(target, source map[string]config.MCPServerConfig) {
@@ -238,8 +301,11 @@ func listWithCodex(parent context.Context) ([]byte, error) {
 }
 
 func inspectPlugin(options Options, installed installedPlugin) (Entry, string, map[string]config.MCPServerConfig, HookSource, []Diagnostic) {
-	entry := Entry{ID: installed.PluginID, Name: installed.Name, DisplayName: installed.Name, Version: installed.Version,
-		Marketplace: installed.Marketplace, Origin: installed.Origin, Enabled: installed.Enabled, Status: "ready", Imported: true}
+	entry := Entry{
+		ID: installed.PluginID, Name: installed.Name, DisplayName: installed.Name, Version: installed.Version,
+		Marketplace: installed.Marketplace, Origin: installed.Origin, Scope: installed.Scope,
+		Enabled: installed.Enabled, Status: "ready", Imported: true,
+	}
 	servers := map[string]config.MCPServerConfig{}
 	root, err := pluginRoot(options.HomeDir, installed)
 	if err != nil {
@@ -263,6 +329,18 @@ func inspectPlugin(options Options, installed installedPlugin) (Entry, string, m
 	entry.DeveloperName, entry.Category = value.Interface.DeveloperName, value.Interface.Category
 	entry.BrandColor, entry.Capabilities = value.Interface.BrandColor, append([]string(nil), value.Interface.Capabilities...)
 	paths, diagnostics := resolveManifestPaths(root, entry.ID, value)
+	if paths.tools == "" {
+		paths.tools = existingPluginDirectory(root, "tools")
+	}
+	if paths.commands == "" {
+		paths.commands = existingPluginDirectory(root, "commands")
+	}
+	entry.AgentDir = existingPluginDirectory(root, "agents")
+	entry.ThemeDir = existingPluginDirectory(root, "themes")
+	entry.ExtensionPaths = existingPluginModules(root, "extensions")
+	entry.AgentCount, entry.ThemeCount, entry.ExtensionCount = countRegularFiles(entry.AgentDir), countRegularFiles(entry.ThemeDir), len(entry.ExtensionPaths)
+	entry.ToolPath, entry.CommandDir = paths.tools, paths.commands
+	entry.ToolCount, entry.CommandCount = countRegularFiles(paths.tools), countRegularFiles(paths.commands)
 	entry.LogoPath, diagnostics = pluginLogoDataURL(firstNonEmpty(paths.icon, paths.logo), diagnostics, entry.ID)
 	skillDir := paths.skills
 	entry.SkillCount = countSkillDirectories(skillDir)
@@ -303,6 +381,8 @@ func resolveManifestPaths(root, pluginID string, value manifest) (manifestPaths,
 	}{
 		{field: "interface.logo", reference: value.Interface.Logo, target: &paths.logo},
 		{field: "interface.composerIcon", reference: value.Interface.ComposerIcon, target: &paths.icon},
+		{field: "tools", reference: value.Tools, target: &paths.tools},
+		{field: "commands", reference: value.Commands, target: &paths.commands},
 		{field: "skills", reference: value.Skills, target: &paths.skills},
 		{field: "mcpServers", reference: value.MCPServers, target: &paths.mcp},
 		{field: "hooks", reference: value.Hooks, target: &paths.hooks},
@@ -481,9 +561,11 @@ func decodeMCPDescriptors(path string) (map[string]mcpDescriptor, error) {
 }
 
 func buildMCPServer(root, dataRoot string, descriptor mcpDescriptor) (config.MCPServerConfig, string, error) {
-	server := config.MCPServerConfig{Enabled: true, InheritEnv: true, ConnectTimeout: "30s", CallTimeout: "60s",
+	server := config.MCPServerConfig{
+		Enabled: true, InheritEnv: true, ConnectTimeout: "30s", CallTimeout: "60s",
 		ConnectDuration: 30 * time.Second, CallDuration: 60 * time.Second, MaxConcurrency: 2, Approval: "always",
-		RuntimeEnv: map[string]string{"PLUGIN_ROOT": root, "PLUGIN_DATA": dataRoot}}
+		RuntimeEnv: map[string]string{"PLUGIN_ROOT": root, "PLUGIN_DATA": dataRoot},
+	}
 	if descriptor.StartupTimeoutSec > 0 {
 		server.ConnectDuration = time.Duration(descriptor.StartupTimeoutSec * float64(time.Second))
 		server.ConnectTimeout = server.ConnectDuration.String()
@@ -571,7 +653,63 @@ func countSkillDirectories(root string) int {
 		if !entry.IsDir() {
 			continue
 		}
+
 		if info, err := os.Stat(filepath.Join(root, entry.Name(), "SKILL.md")); err == nil && info.Mode().IsRegular() {
+			count++
+		}
+	}
+	return count
+}
+
+func existingPluginDirectory(root, name string) string {
+	path := filepath.Join(root, name)
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return path
+	}
+	return ""
+}
+
+func existingPluginModules(root, name string) []string {
+	directory := existingPluginDirectory(root, name)
+	if directory == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(entry.Name())) {
+		case ".ts", ".js", ".mjs", ".cjs":
+			paths = append(paths, filepath.Join(directory, entry.Name()))
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func countRegularFiles(root string) int {
+	if root == "" {
+		return 0
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return 0
+	}
+	if info.Mode().IsRegular() {
+		return 1
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
 			count++
 		}
 	}

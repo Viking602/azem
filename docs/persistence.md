@@ -1,11 +1,11 @@
 # Persistence and Recovery
 
-Last verified: 2026-08-17
+Last verified: 2026-08-24
 
 Azem stores configuration and durable runtime state locally. SQLite is the
 authoritative catalog, search index, and Venat control plane. Large opaque
 payloads live in a content-addressed file store so one `azem.db` does not grow
-without bound. Current schema version: **21**.
+without bound. Current schema version: **26**.
 
 ## Paths and permissions
 
@@ -162,11 +162,56 @@ No new SQLite migration is required; the existing checkpoint transaction
 commits archive manifest and replaceable model history together with
 `semantic_revision=0`.
 
+Schema 22 stores llmux provider model catalogs in SQLite:
+
+- `llmux_provider_models` holds each provider's discovered or imported model
+  rows (`id`, enabled flag, display metadata, modalities) as JSON payloads.
+- `config.yaml` keeps `providers.llmux.<id>.enabled` and `base_url` only.
+  A launch that still has YAML `models` copies them into SQLite once and
+  rewrites that provider without the catalog.
+- Discover, enable/disable, and later list/load paths use the SQLite catalog.
+  Subscription ChatGPT/Grok/Cursor rows stay in `model_catalog`.
+Schema 23 adds the native security-scan catalog:
+
+- `security_scans`, `security_scan_progress`, and `security_scan_workers`
+  retain target binding, model route, phase, cost, and durable Standard/Deep
+  coordination.
+- `security_scan_artifacts` stores scan-relative paths, media types, sizes, and
+  SHA-256 seals; private canonical bytes live below the Azem data directory.
+- `security_findings`, occurrences, locations, triage, matches, remediation
+  attempts, and publications provide stable cross-scan indexing. Publication
+  claims are exclusive; indeterminate or failed external effects are retained
+  for reconciliation and never replayed automatically.
+- Security model transcripts remain Venat run artifacts and are not hidden
+  sessions.
+
+Schema 24 adds the durable conversation graph:
+
+- `session_graphs` stores root/parent session identity, source provenance,
+  active branch, and active leaf.
+- `session_graph_entries` links every canonical block to one parent entry.
+- `session_branches` and `session_labels` keep named heads and user labels.
+  Navigation changes the active projection without deleting sibling history.
+
+Schema 25 adds auth-broker control state:
+
+- `auth_broker_tokens` stores only hashed bearer-token identities and
+  revocation metadata.
+- Disabled credentials, temporary account blocks, and usage observations are
+  durable and account-scoped. Client snapshot caches remain encrypted files,
+  not plaintext SQLite payloads.
+
+Schema 26 adds `github_webhook_deliveries`. The signed delivery ID and payload
+digest are inserted before a repair trigger, making webhook redelivery
+idempotent across restart.
+
+
 ### Revision, evidence, and learning records
 
-The adaptive coding pipeline does not add schema 22. Session-scoped control
-records reuse `context_artifacts`, whose payloads already live in the schema-21
-blob store. Artifact kinds are versioned and purpose-specific:
+The adaptive coding records continue to reuse `context_artifacts`; native
+security scanning is the schema-23 domain above, session graphs are schema 24,
+auth-broker control state is schema 25, and webhook receipts are schema 26.
+Adaptive artifact kinds remain versioned and purpose-specific:
 
 - `work_revision_v1:*`, `action_intent_v1:*`,
   `observation_envelope_v1:*`, `work_disposition_v1:*`, and
@@ -179,13 +224,19 @@ blob store. Artifact kinds are versioned and purpose-specific:
 - `coding_memory_catalog_v1` and `coding_memory_policy_v1:*` retain typed
   memories, tombstones, provenance, and the explicit per-user opt-in policy.
 
-These records are strict JSON inside the existing session/run ownership and
-SHA-256 boundaries. Large payload behavior, deletion, fork behavior, and blob
-verification therefore remain schema-21 behavior; runtime migration files and
-`dbgen/schema.sql` are unchanged. The trajectory exporter opens the database
-read-only at the service boundary and writes a detached JSON export. Replay,
-noise, routing, training, tool-lab, and adapter artifacts are offline files or
-in-process control-plane inputs; they do not create hidden SQLite tables.
+Adaptive records remain strict JSON inside the existing session/run ownership
+and SHA-256 boundaries. Large payload behavior, deletion, fork behavior, and
+blob verification remain schema-21 behavior. Schemas 22–26 add provider-model
+catalogs, security scans, session graphs, auth-broker state, and webhook
+delivery receipts. The trajectory
+exporter opens the database read-only at the service boundary and writes a
+detached JSON export. Replay, noise, routing, training, tool-lab, and adapter
+artifacts remain offline files or in-process control-plane inputs.
+Schema-21 JSON offload leaves `{}` in the inline column; text/byte payloads
+leave an empty sentinel. Trajectory export recognizes only those sentinels,
+loads the referenced blob, and verifies its SHA-256. A non-sentinel inline
+value whose bytes disagree with the stored digest remains corruption and makes
+the export fail closed.
 
 
 `history_fts` is also the durable conversation-content index used by desktop
@@ -207,6 +258,9 @@ matching and ranking remain on FTS5.
 | Context | archive manifests, memories, recaps, history FTS, context artifacts, work revisions, verification records, evidence ledgers, coding-memory catalogs; retained legacy semantic tables | `internal/app`, `internal/contextarchive`, `internal/memory`, `internal/recap`, `internal/session`, `internal/workrevision`, `internal/evidence`, `internal/codingmemory` |
 | Product state | authentication metadata, model catalog cache, usage | corresponding internal services |
 | Desktop navigation | project catalog, session-to-project ownership, last workspace session | `internal/session`, `internal/app`, `internal/desktop` |
+| Session graph | graph metadata, entries, branches, labels, import provenance | `internal/session`, `internal/sessionimport` |
+| Auth broker | hashed access tokens, disabled credentials, temporary blocks, usage observations | `internal/authbroker` |
+| GitHub delivery | signed webhook delivery ID and digest receipts | `internal/githubwebhook` |
 
 Generated `dbgen` code is an implementation detail of the SQLite adapters;
 application and UI packages should depend on focused services instead of raw
@@ -273,5 +327,8 @@ Required coverage includes runtime-fence ownership and failed-owner takeover,
 previous-schema upgrade, schema 18 control-plane
 tables and indexes, schema 19 project ownership backfill, schema 20 compaction-state
 invalidation with canonical data retention, schema 21 blob extraction with
-payload-column removal, current-version reopen, automatic backup, and rejection of a future schema. Run
+payload-column removal, schema 22 `llmux_provider_models`, schema 23 native
+security scans, schema 24 graph backfill/branch retention, schema 25 auth-broker
+state, schema 26 webhook receipt deduplication, current-version reopen,
+automatic backup, and rejection of a future schema. Run
 `GOWORK=off go test ./...` before release.

@@ -49,7 +49,7 @@ func TestGovernedReadApprovalEditAndStaleAnchor(t *testing.T) {
 	}
 
 	read := executeRead(t, ctx, service, run, "read-1", "note.txt")
-	patch := read.Header + "\nreplace 2:\n+BETA\n"
+	patch := ompTestPatch(read.Header, "PUT 2.=2:\n+BETA")
 	arguments, _ := json.Marshal(map[string]string{"input": patch})
 	call := tool.Call{ID: "edit-1", Name: coding.ToolEditHashline, Arguments: arguments}
 	first, err := service.ExecuteTool(ctx, run, call, nil)
@@ -76,7 +76,7 @@ func TestGovernedReadApprovalEditAndStaleAnchor(t *testing.T) {
 	}
 	assertFile(t, path, "alpha\nBETA\ngamma\n")
 
-	staleArgs, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 2:\n+STALE\n"})
+	staleArgs, _ := json.Marshal(map[string]string{"input": ompTestPatch(read.Header, "PUT 2.=2:\n+STALE")})
 	staleCall := tool.Call{ID: "edit-stale", Name: coding.ToolEditHashline, Arguments: staleArgs}
 	pending, err := service.ExecuteTool(ctx, run, staleCall, nil)
 	if err != nil || pending.Approval == nil {
@@ -93,6 +93,14 @@ func TestGovernedReadApprovalEditAndStaleAnchor(t *testing.T) {
 		t.Fatalf("stale result = %+v", stale)
 	}
 	assertFile(t, path, "alpha\nBETA\ngamma\n")
+	blockedArgs, _ := json.Marshal(map[string]string{"input": ompTestPatch(read.Header, "PUT 3.=3:\n+GAMMA")})
+	blocked, err := service.ExecuteTool(ctx, run, tool.Call{ID: "edit-after-stale-without-read", Name: coding.ToolEditHashline, Arguments: blockedArgs}, nil)
+	if err != nil || !blocked.Executed || !blocked.Result.IsError || blocked.Approval != nil {
+		t.Fatalf("edit after stale without read = %+v, error=%v", blocked, err)
+	}
+	if !strings.Contains(blocked.Result.Content, coding.ToolReadFile) {
+		t.Fatalf("stale recovery did not require %s: %q", coding.ToolReadFile, blocked.Result.Content)
+	}
 }
 
 func TestRecoveredApprovalResumesExactOperationAndPreservesDenial(t *testing.T) {
@@ -117,7 +125,7 @@ func TestRecoveredApprovalResumesExactOperationAndPreservesDenial(t *testing.T) 
 	}
 
 	read := executeRead(t, ctx, service, run, "read-recovery", "note.txt")
-	arguments, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 1:\n+approved\n"})
+	arguments, _ := json.Marshal(map[string]string{"input": ompTestPatch(read.Header, "PUT 1.=1:\n+approved")})
 	call := tool.Call{
 		ID: "provider-before-crash", OperationID: "turn:1:call:0",
 		Name: coding.ToolEditHashline, Arguments: arguments,
@@ -146,7 +154,7 @@ func TestRecoveredApprovalResumesExactOperationAndPreservesDenial(t *testing.T) 
 	assertFile(t, path, "approved\n")
 
 	read = executeRead(t, ctx, service, recoveredRun, "read-denial", "note.txt")
-	arguments, _ = json.Marshal(map[string]string{"input": read.Header + "\nreplace 1:\n+denied-write\n"})
+	arguments, _ = json.Marshal(map[string]string{"input": ompTestPatch(read.Header, "PUT 1.=1:\n+denied-write")})
 	deniedCall := tool.Call{
 		ID: "provider-denied-before-crash", OperationID: "turn:3:call:0",
 		Name: coding.ToolEditHashline, Arguments: arguments,
@@ -170,7 +178,7 @@ func TestRecoveredApprovalResumesExactOperationAndPreservesDenial(t *testing.T) 
 	assertFile(t, path, "approved\n")
 
 	read = executeRead(t, ctx, service, secondRecovery, "read-expired", "note.txt")
-	arguments, _ = json.Marshal(map[string]string{"input": read.Header + "\nreplace 1:\n+expired-write\n"})
+	arguments, _ = json.Marshal(map[string]string{"input": ompTestPatch(read.Header, "PUT 1.=1:\n+expired-write")})
 	expiredCall := tool.Call{
 		ID: "provider-expired-before-crash", OperationID: "turn:5:call:0",
 		Name: coding.ToolEditHashline, Arguments: arguments,
@@ -230,7 +238,7 @@ func newRecoveredApprovalRun(run *Run) *Run {
 	}
 }
 
-func TestFailedEditRequiresReadBeforeNextEdit(t *testing.T) {
+func TestSyntaxFailureReusesCurrentHashlineSnapshot(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "note.txt")
@@ -265,36 +273,81 @@ func TestFailedEditRequiresReadBeforeNextEdit(t *testing.T) {
 	if err != nil || !failed.Executed || !failed.Result.IsError {
 		t.Fatalf("malformed edit result = %+v, error=%v", failed, err)
 	}
-	for _, required := range []string{"Required hashline retry format:", "replace N..M:", "Never use @@", "-old rows"} {
+	for _, required := range []string{"Required OMP Hashline retry format:", "PUT N.=M:", "never use @@ hunks", "-old rows"} {
 		if !strings.Contains(failed.Result.Content, required) {
 			t.Fatalf("malformed edit result omitted %q: %q", required, failed.Result.Content)
 		}
 	}
 
-	validArgs, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 2:\n+BETA\n"})
-	blocked, err := service.ExecuteTool(ctx, run, tool.Call{ID: "edit-without-reread", Name: coding.ToolEditHashline, Arguments: validArgs}, nil)
-	if err != nil || !blocked.Executed || !blocked.Result.IsError || blocked.Approval != nil {
-		t.Fatalf("edit without re-read = %+v, error=%v", blocked, err)
-	}
-	if !strings.Contains(blocked.Result.Content, coding.ToolReadFile) {
-		t.Fatalf("blocked edit did not require %s: %q", coding.ToolReadFile, blocked.Result.Content)
-	}
-
-	refreshed := executeRead(t, ctx, service, run, "read-after-failure", "note.txt")
-	retryArgs, _ := json.Marshal(map[string]string{"input": refreshed.Header + "\nreplace 2:\n+BETA\n"})
-	retryCall := tool.Call{ID: "edit-after-reread", Name: coding.ToolEditHashline, Arguments: retryArgs}
+	retryArgs, _ := json.Marshal(map[string]string{"input": ompTestPatch(read.Header, "PUT 2.=2:\n+BETA")})
+	retryCall := tool.Call{ID: "edit-after-syntax-error", Name: coding.ToolEditHashline, Arguments: retryArgs}
 	retry, err := service.ExecuteTool(ctx, run, retryCall, nil)
 	if err != nil || retry.Approval == nil {
-		t.Fatalf("edit after re-read = %+v, error=%v", retry, err)
+		t.Fatalf("syntax retry approval = %+v, error=%v", retry, err)
 	}
 	if err := service.ResolveApproval(ctx, run, retryCall.ID, ApprovalOnce, "user"); err != nil {
 		t.Fatal(err)
 	}
 	applied, err := service.ExecuteTool(ctx, run, retryCall, nil)
 	if err != nil || !applied.Executed || applied.Result.IsError {
-		t.Fatalf("edit after re-read apply = %+v, error=%v", applied, err)
+		t.Fatalf("syntax retry apply = %+v, error=%v", applied, err)
 	}
 	assertFile(t, path, "alpha\nBETA\ngamma\n")
+}
+
+func TestDuplicateToolArgumentKeysFailBeforeApprovalOrExecution(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close(ctx) })
+	run, err := service.StartRun(ctx, "reject ambiguous tool arguments")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	call := tool.Call{
+		ID:        "duplicate-path",
+		Name:      coding.ToolWriteFile,
+		Arguments: json.RawMessage(`{"path":"first.txt","content":"unsafe\n","path":"second.txt"}`),
+	}
+	execution, err := service.ExecuteTool(ctx, run, call, nil)
+	if err != nil || !execution.Executed || execution.Approval != nil || !execution.Result.IsError {
+		t.Fatalf("duplicate-key execution = %+v, error=%v", execution, err)
+	}
+	if execution.Result.ToolCallID != call.ID || execution.Result.Name != call.Name ||
+		!strings.Contains(execution.Result.Content, `duplicate object key "path"`) {
+		t.Fatalf("duplicate-key result = %+v", execution.Result)
+	}
+	for _, name := range []string{"first.txt", "second.txt"} {
+		if _, err := os.Lstat(filepath.Join(workspace, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s was created after ambiguous arguments: %v", name, err)
+		}
+	}
+}
+
+func TestToolArgumentValidationRejectsNestedDuplicateKeys(t *testing.T) {
+	for _, arguments := range []json.RawMessage{nil, json.RawMessage(`{}`), json.RawMessage(`{"edits":[{"old_text":"a","new_text":"b"}]}`)} {
+		if err := validateToolArguments(arguments); err != nil {
+			t.Fatalf("valid arguments %s rejected: %v", arguments, err)
+		}
+	}
+	for _, arguments := range []json.RawMessage{
+		json.RawMessage(`{"edits":[{"old_text":"a","old_text":"b"}]}`),
+		json.RawMessage(`{"path":"a","\u0070ath":"b"}`),
+		json.RawMessage(`[]`),
+		json.RawMessage(`{"path":"a"} {"path":"b"}`),
+	} {
+		if err := validateToolArguments(arguments); err == nil {
+			t.Fatalf("ambiguous arguments accepted: %s", arguments)
+		}
+	}
 }
 
 func TestGofmtCanFormatSamePathAgainAfterAnotherEdit(t *testing.T) {
@@ -389,7 +442,7 @@ func TestConcurrentRunsKeepTasksLeasesAndApprovalsIsolated(t *testing.T) {
 	calls := make([]tool.Call, 2)
 	for index, name := range []string{"one.txt", "two.txt"} {
 		read := executeRead(t, ctx, service, runs[index], "read-"+name, name)
-		arguments, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 2:\n+UPDATED\n"})
+		arguments, _ := json.Marshal(map[string]string{"input": ompTestPatch(read.Header, "PUT 2.=2:\n+UPDATED")})
 		calls[index] = tool.Call{ID: "shared-call-id", Name: coding.ToolEditHashline, Arguments: arguments}
 	}
 	type executeOutcome struct {
@@ -521,7 +574,7 @@ func TestDeniedEditAndSymlinkEscape(t *testing.T) {
 	}
 
 	read := executeRead(t, ctx, service, run, "read-safe", "safe.txt")
-	editArgs, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 1:\n+changed\n"})
+	editArgs, _ := json.Marshal(map[string]string{"input": ompTestPatch(read.Header, "PUT 1.=1:\n+changed")})
 	call := tool.Call{ID: "edit-denied", Name: coding.ToolEditHashline, Arguments: editArgs}
 	pending, err := service.ExecuteTool(ctx, run, call, nil)
 	if err != nil || pending.Approval == nil {
@@ -592,7 +645,7 @@ func TestResumeRunReacquiresRecoveredTaskWithoutChangingRunID(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := executeRead(t, ctx, first, run, "read-before-resume", "note.txt")
-	editArguments, _ := json.Marshal(map[string]string{"input": read.Header + "\nreplace 1:\n+after\n"})
+	editArguments, _ := json.Marshal(map[string]string{"input": ompTestPatch(read.Header, "PUT 1.=1:\n+after")})
 	editCall := tool.Call{ID: "edit-before-resume", Name: coding.ToolEditHashline, Arguments: editArguments}
 	pending, err := first.ExecuteTool(ctx, run, editCall, nil)
 	if err != nil || pending.Approval == nil {
@@ -700,6 +753,34 @@ func TestCompleteRunPersistsTerminalState(t *testing.T) {
 	}
 	if projection.Run.Status != api.RunStatusCompleted {
 		t.Fatalf("run status = %q", projection.Run.Status)
+	}
+}
+
+func TestStartRunPersistsOutputSchema(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(ctx)
+	schema := json.RawMessage(`{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}}`)
+	run, err := service.StartRunWithMetadata(ctx, "structured child", nil, RunExecutionPolicy{OutputSchema: schema})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.Runner().Task(ctx, run.RunID, run.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(task.OutputSchema) != string(schema) {
+		t.Fatalf("task output schema = %s", task.OutputSchema)
+	}
+	if err := service.CompleteRun(ctx, run, "not executed", errors.New("not executed")); err != nil {
+		t.Fatal(err)
 	}
 }
 

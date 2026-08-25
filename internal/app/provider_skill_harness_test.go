@@ -27,6 +27,8 @@ type skillRuntimeHarness struct {
 	calls          *atomic.Int32
 	workspace      string
 	catalog        *skills.Catalog
+	store          *sqlitestore.Provider
+	coding         *agentservice.Service
 	definitionPath string
 }
 
@@ -125,7 +127,7 @@ func newSkillRuntimeHarness(t *testing.T, definition string, resources map[strin
 		}
 	})
 	return skillRuntimeHarness{
-		service: service, calls: &responseCalls, workspace: workspace,
+		service: service, calls: &responseCalls, workspace: workspace, store: store, coding: coding,
 		catalog: skillCatalog, definitionPath: filepath.Join(skillDir, "SKILL.md"),
 	}
 }
