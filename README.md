@@ -66,6 +66,16 @@ restarting the window disconnects only the renderer; active runs continue and
 the next window restores a durable snapshot plus bounded event and terminal
 replay. The Wails app remains available through `make gui`.
 
+The native client mirrors the established React desktop's visual and
+interaction structure: integrated macOS titlebar, conversation/workspace
+sidebar, durable project/session history, centered new-task composer, full
+provider/model picker, virtualized messages, foldable reasoning/tool/diff
+trails, the floating Environment panel, editor/files, changes, structured PR
+views, security, usage, and a rounded native Settings modal. The Settings model
+catalog uses the complete MIT-licensed models.dev provider-logo set, quota
+state, provider/model enable controls, capability metadata, and independently
+scrollable provider and compact model lists.
+
 For Windows, build the native executable with:
 
 ```powershell

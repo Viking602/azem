@@ -80,9 +80,12 @@ client queue have byte budgets. Incremental text and thinking remain lossless;
 replaceable snapshots coalesce only while pending. Eviction or client
 backpressure sends `resync_required` instead of silently dropping lifecycle
 state. The GPUI client then requests `ReconnectSnapshot`, which restores the
-durable session projection, session tree, catalogs, PR dashboard, and terminal
-roster. Per-terminal raw replay is separately bounded to 4 MiB and is parsed by
-Alacritty's VTE state machine rather than painted as ANSI text.
+durable session projection, session tree, session/project catalogs, active-run
+identity, and terminal roster. Optional provider, Skill, Hook, plugin,
+marketplace, MCP, and pull-request catalogs stream after first paint through
+`RefreshProjection`; remote model refresh can no longer delay the durable
+snapshot. Per-terminal raw replay is separately bounded to 4 MiB and is parsed
+by Alacritty's VTE state machine rather than painted as ANSI text.
 
 Closing a GPUI window sends `client_detach` and drops only that IPC connection.
 The daemon, provider stream, tools, subagents, leases, SQLite state, and PTYs
@@ -95,11 +98,31 @@ The GPUI state model is split by connection, navigation, transcript, runtime
 controls, catalogs, workspace, pull requests, security, terminals, and
 settings. The transcript uses GPUI `ListState` bottom virtualization. The
 native surfaces cover conversations and attachments, approvals/plans/Todo and
-agents, files and changes, projects, PRs, security scans, settings/extensions,
+agents, files and changes, projects, structured PRs, security scans,
 usage/context/archive state, and an embedded terminal. GPUI follows the system
 light/dark appearance, exposes AccessKit roles and labels, supports keyboard
 focus and IME text input, and contains no animation when reduced motion is
 preferred.
+
+The native presentation follows the React desktop's component and spacing
+contracts rather than exposing raw runtime JSON. It keeps one integrated macOS
+titlebar with a reserved traffic-light region, the same conversation/workspace
+switcher and project/session tree, single-line ellipsized PR rows, the centered
+empty composer, compact active composer controls, task/project/branch header,
+and matching light/dark tokens. The packaged assets include Lucide controls and
+the complete models.dev provider-logo catalog with license notices; missing
+third-party logos fall back to the neutral bot mark instead of rendering blank.
+Thinking, tools, and diffs are grouped by run into the same expandable process
+trail: live work stays open, settled work folds under its summary, per-row
+status marks remain visible, and file-edit totals retain additions/deletions.
+The 288 px floating Environment panel exposes changes, local files, branch,
+services, Plan/Todo, session history, recap, sources, editor view, and terminal
+navigation without creating another runtime. Settings opens as a rounded,
+backdrop-dimmed modal that mirrors the React model catalog: provider inventory,
+subscription quota, account plan, complete model grid, enable controls,
+reasoning/context metadata, capability icons, and model routes. Provider and
+model inventories own independent bounded scroll regions; compact model cards
+remain readable without expanding the complete dialog.
 
 Native event flow:
 

@@ -125,6 +125,8 @@ type ReconnectSnapshot struct {
 	PullRequests    *githubpr.Dashboard                `json:"pullRequests,omitempty"`
 	Terminals       []TerminalSession                  `json:"terminals"`
 	ActiveSessionID string                             `json:"activeSessionId,omitempty"`
+	Sessions        []session.Session                  `json:"sessions"`
+	Projects        []session.Project                  `json:"projects"`
 	ActiveRunID     string                             `json:"activeRunId,omitempty"`
 }
 
@@ -182,7 +184,8 @@ type Bridge struct {
 	rawTerminal  func(TerminalEvent, []byte)
 	ctx          context.Context
 	cancel       context.CancelFunc
-	start        sync.Once
+	startOnce    sync.Once
+	primeOnce    sync.Once
 	sequence     atomic.Uint64
 	terminalSeq  atomic.Uint64
 	pullRequests *githubpr.Client
@@ -225,15 +228,35 @@ func pullRequestMonitorStatePath(stateDir, workspace string) string {
 	return filepath.Join(stateDir, fmt.Sprintf("pr-monitors-%x.json", digest[:16]))
 }
 
-func (b *Bridge) Initialise() Snapshot {
-	b.start.Do(func() {
+// StartRuntime starts lossless event projection and PR monitoring without
+// eagerly building optional catalogs. The daemon uses this so its endpoint can
+// serve the durable reconnect snapshot before heavier settings data is loaded.
+func (b *Bridge) StartRuntime() {
+	if b == nil {
+		return
+	}
+	b.startOnce.Do(func() {
 		go b.pump()
-		go b.prime()
-		b.prMonitor.Start()
+		if b.prMonitor != nil {
+			b.prMonitor.Start()
+		}
 	})
+}
+
+func (b *Bridge) Initialise() Snapshot {
+	b.StartRuntime()
+	b.primeOnce.Do(func() { go b.prime() })
+	return b.baseSnapshot()
+}
+
+func (b *Bridge) baseSnapshot() Snapshot {
 	branchContext, cancel := context.WithTimeout(b.ctx, 250*time.Millisecond)
 	currentBranch := currentGitBranch(branchContext, b.workspace)
 	cancel()
+	var monitors []githubpr.MonitorState
+	if b.prMonitor != nil {
+		monitors = b.prMonitor.States()
+	}
 	return Snapshot{
 		Workspace: b.workspace, CurrentBranch: currentBranch, SessionID: b.sessionID,
 		Provider: b.cfg.Defaults.Provider, Model: b.cfg.Defaults.Model,
@@ -248,7 +271,7 @@ func (b *Bridge) Initialise() Snapshot {
 		SubagentIdleSeconds:      int(b.cfg.Agents.Subagents.IdleDuration.Seconds()),
 		ChatGPTFastMode:          b.cfg.Providers.ChatGPT.FastMode,
 		Sequence:                 b.sequence.Load(),
-		PullRequestMonitors:      b.prMonitor.States(),
+		PullRequestMonitors:      monitors,
 	}
 }
 
@@ -293,7 +316,8 @@ func (b *Bridge) ReconnectSnapshot(sessionID string) (ReconnectSnapshot, error) 
 	if b.runtime == nil || b.runtime.Sessions() == nil {
 		return ReconnectSnapshot{}, fmt.Errorf("runtime is unavailable")
 	}
-	base := b.Initialise()
+	b.StartRuntime()
+	base := b.baseSnapshot()
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		sessionID = base.SessionID
@@ -302,6 +326,15 @@ func (b *Bridge) ReconnectSnapshot(sessionID string) (ReconnectSnapshot, error) 
 	defer cancel()
 	snapshot := ReconnectSnapshot{Base: base, Terminals: b.ListTerminals()}
 	snapshot.ActiveSessionID, snapshot.ActiveRunID = b.runtime.ActiveRun()
+	var err error
+	snapshot.Sessions, err = b.runtime.Sessions().List(ctx, 100)
+	if err != nil {
+		return ReconnectSnapshot{}, fmt.Errorf("list reconnect sessions: %w", err)
+	}
+	snapshot.Projects, err = b.runtime.Sessions().Projects(ctx)
+	if err != nil {
+		return ReconnectSnapshot{}, fmt.Errorf("list reconnect projects: %w", err)
+	}
 	projection, err := b.runtime.SessionProjection(ctx, sessionID)
 	if err == nil {
 		sessionEvent := eventDTO(projection)
@@ -312,16 +345,10 @@ func (b *Bridge) ReconnectSnapshot(sessionID string) (ReconnectSnapshot, error) 
 	} else if sessionID != base.SessionID || !errors.Is(err, session.ErrSessionNotFound) {
 		return ReconnectSnapshot{}, err
 	}
-	if skills, skillsErr := b.SkillCatalog(); skillsErr == nil {
-		snapshot.Skills = skills
-	}
-	snapshot.Hooks = b.runtime.HookCatalogSnapshot()
-	if marketplace, marketplaceErr := b.MarketplaceCatalog(); marketplaceErr == nil {
-		snapshot.Marketplace = marketplace
-	}
-	if dashboard, dashboardErr := b.PullRequestDashboard(); dashboardErr == nil {
-		snapshot.PullRequests = &dashboard
-	}
+	// Optional catalogs are deliberately excluded from the first reconnect
+	// response. Dispatcher starts RefreshProjection after this durable snapshot
+	// is complete, so providers, Skills, Hooks, plugins, marketplace data, MCP,
+	// and pull requests arrive asynchronously without delaying first paint.
 	return snapshot, nil
 }
 
@@ -610,10 +637,13 @@ func (b *Bridge) Close() {
 func (b *Bridge) prime() {
 	actions := []azemapp.Action{
 		{Kind: azemapp.ActionListSessions},
-		{Kind: azemapp.ActionListGitBranches},
-		{Kind: azemapp.ActionListModels, SessionID: b.sessionID},
+		// Provider and route catalogs are cache/local-store reads. Emit them
+		// before ActionListModels, which may refresh a remote subscription and
+		// must never hold the Settings modal in its loading state.
 		{Kind: azemapp.ActionListModelProviders, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListModelRoutes},
+		{Kind: azemapp.ActionListGitBranches},
+		{Kind: azemapp.ActionListModels, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListAgentTypes, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListPersonas, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListSkills, SessionID: b.sessionID},

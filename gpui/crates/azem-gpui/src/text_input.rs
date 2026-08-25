@@ -5,7 +5,7 @@ use gpui::{
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Role, ShapedLine,
     SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, actions, div, fill, hsla,
-    point, prelude::*, px, relative, rgb, rgba, size, white,
+    point, prelude::*, px, relative, rgba, size,
 };
 use unicode_segmentation::*;
 
@@ -58,6 +58,32 @@ pub struct TextInput {
     is_selecting: bool,
 }
 
+fn utf8_offset_from_utf16(text: &str, offset: usize) -> usize {
+    let mut utf8_offset = 0;
+    let mut utf16_count = 0;
+    for character in text.chars() {
+        if utf16_count >= offset {
+            break;
+        }
+        utf16_count += character.len_utf16();
+        utf8_offset += character.len_utf8();
+    }
+    utf8_offset
+}
+
+fn clamp_byte_range(text: &str, range: Range<usize>) -> Range<usize> {
+    fn floor_boundary(text: &str, offset: usize) -> usize {
+        let mut offset = offset.min(text.len());
+        while offset > 0 && !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset
+    }
+    let start = floor_boundary(text, range.start);
+    let end = floor_boundary(text, range.end).max(start);
+    start..end
+}
+
 impl TextInput {
     pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
         Self {
@@ -75,6 +101,15 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        self.placeholder = placeholder.into();
+        cx.notify();
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -148,9 +183,10 @@ impl TextInput {
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.focus_handle.focus(window, cx);
         self.is_selecting = true;
 
         if event.modifiers.shift {
@@ -246,18 +282,7 @@ impl TextInput {
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-
-        utf8_offset
+        utf8_offset_from_utf16(&self.content, offset)
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
@@ -280,7 +305,10 @@ impl TextInput {
     }
 
     fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
+        clamp_byte_range(
+            &self.content,
+            self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end),
+        )
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -350,6 +378,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = clamp_byte_range(&self.content, range);
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -372,6 +401,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = clamp_byte_range(&self.content, range);
 
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
@@ -381,11 +411,18 @@ impl EntityInputHandler for TextInput {
         } else {
             self.marked_range = None;
         }
-        self.selected_range = new_selected_range_utf16
+        let selection = new_selected_range_utf16
             .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|selected| {
+                let relative = clamp_byte_range(
+                    new_text,
+                    utf8_offset_from_utf16(new_text, selected.start)
+                        ..utf8_offset_from_utf16(new_text, selected.end),
+                );
+                range.start + relative.start..range.start + relative.end
+            })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selected_range = clamp_byte_range(&self.content, selection);
 
         cx.notify();
     }
@@ -637,15 +674,16 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(0xffffff))
-            .line_height(px(22.))
+            .size_full()
+            .bg(rgba(0x00000000))
+            .line_height(px(24.))
             .text_size(px(15.))
             .child(
                 div()
-                    .h(px(34.))
-                    .w_full()
-                    .p(px(6.))
-                    .bg(white())
+                    .size_full()
+                    .px(px(8.))
+                    .py(px(10.))
+                    .bg(rgba(0x00000000))
                     .child(TextElement { input: cx.entity() }),
             )
     }
@@ -654,5 +692,25 @@ impl Render for TextInput {
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_byte_range, utf8_offset_from_utf16};
+
+    #[test]
+    fn stale_platform_ranges_clamp_to_empty_input() {
+        assert_eq!(clamp_byte_range("", 1..1), 0..0);
+        assert_eq!(clamp_byte_range("", 4..9), 0..0);
+    }
+
+    #[test]
+    fn utf16_ranges_preserve_unicode_boundaries() {
+        let text = "a🦀文";
+        assert_eq!(utf8_offset_from_utf16(text, 0), 0);
+        assert_eq!(utf8_offset_from_utf16(text, 1), 1);
+        assert_eq!(utf8_offset_from_utf16(text, 3), 5);
+        assert_eq!(clamp_byte_range(text, 2..6), 1..5);
     }
 }

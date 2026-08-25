@@ -140,7 +140,7 @@ func New(parent context.Context, options Options) (*Runtime, error) {
 		runtime.Close()
 		return nil, err
 	}
-	bridge.Initialise()
+	bridge.StartRuntime()
 	_, _ = hub.Publish(desktopipc.ChannelDaemon, map[string]any{"state": "ready", "pid": os.Getpid(), "workspaceId": workspaceID}, "daemon_state", true)
 	return runtime, nil
 }

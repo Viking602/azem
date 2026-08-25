@@ -8,13 +8,13 @@ use serde_json::Value;
 pub enum Surface {
     #[default]
     Thread,
+    Search,
     Projects,
     Files,
     Changes,
     PullRequests,
     Work,
     Security,
-    Settings,
     Usage,
     Terminal,
 }
@@ -50,7 +50,8 @@ pub struct NavigationModel {
     pub sessions: Vec<SessionSummary>,
     pub projects: Vec<ProjectSummary>,
     pub session_tree: Value,
-    pub unread: HashMap<Arc<str>, bool>,
+    pub search_results: Vec<Value>,
+    pub search_error: Arc<str>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -289,6 +290,13 @@ struct DesktopEvent {
     security_patch: Value,
 }
 
+fn decode_desktop_event(mut value: Value) -> serde_json::Result<DesktopEvent> {
+    if let Some(fields) = value.as_object_mut() {
+        fields.retain(|_, value| !value.is_null());
+    }
+    serde_json::from_value(value)
+}
+
 impl AppState {
     pub fn apply_reconnect_snapshot(&mut self, snapshot: Value) {
         if let Some(base) = snapshot.get("base") {
@@ -303,25 +311,37 @@ impl AppState {
             self.settings.approval_mode = value_str(base, "approvalMode");
             self.settings.queue_mode = value_str(base, "queueMode");
         }
+        self.navigation.sessions = snapshot
+            .get("sessions")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        self.navigation.projects = snapshot
+            .get("projects")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
         let active_session_id = value_str(&snapshot, "activeSessionId");
         let active_run_id = value_str(&snapshot, "activeRunId");
         self.runtime.active_session_id = active_session_id.clone();
         if !active_run_id.is_empty() {
             self.runtime.running = active_session_id == self.navigation.current_session_id;
             self.runtime.run_id = active_run_id;
+            for session in &mut self.navigation.sessions {
+                session.running = session.id == active_session_id;
+            }
         }
         if let Some(session) = snapshot.get("session")
-            && let Ok(event) = serde_json::from_value::<DesktopEvent>(session.clone())
+            && let Ok(event) = decode_desktop_event(session.clone())
         {
             self.apply_desktop_event(event);
         }
         self.navigation.session_tree = snapshot.get("tree").cloned().unwrap_or(Value::Null);
-        if let Some(skills) = snapshot
+        self.catalogs.skills = snapshot
             .pointer("/skills/entries")
             .and_then(Value::as_array)
-        {
-            self.catalogs.skills = skills.clone();
-        }
+            .cloned()
+            .unwrap_or_default();
         self.catalogs.hooks = snapshot.get("hooks").cloned().unwrap_or(Value::Null);
         self.catalogs.marketplace = snapshot.get("marketplace").cloned().unwrap_or(Value::Null);
         self.pull_requests.dashboard = snapshot.get("pullRequests").cloned().unwrap_or(Value::Null);
@@ -338,11 +358,10 @@ impl AppState {
     pub fn apply_envelope(&mut self, envelope: Envelope) {
         self.sequence = self.sequence.max(envelope.sequence);
         match envelope.channel.as_str() {
-            "runtime" => {
-                if let Ok(event) = serde_json::from_value::<DesktopEvent>(envelope.payload) {
-                    self.apply_desktop_event(event);
-                }
-            }
+            "runtime" => match decode_desktop_event(envelope.payload) {
+                Ok(event) => self.apply_desktop_event(event),
+                Err(error) => tracing::warn!(%error, "GPUI runtime event decode failed"),
+            },
             "pull_request" => self.apply_pull_request_event(envelope.payload),
             "terminal" => self.apply_terminal_event(envelope.payload),
             "daemon" => self.connection.message = value_str(&envelope.payload, "state"),
@@ -351,7 +370,7 @@ impl AppState {
     }
 
     pub fn apply_direct_event(&mut self, value: Value) {
-        if let Ok(event) = serde_json::from_value::<DesktopEvent>(value) {
+        if let Ok(event) = decode_desktop_event(value) {
             self.apply_desktop_event(event);
         }
     }
@@ -734,6 +753,16 @@ mod tests {
                     "blocks": r#"[{"id":"block-1","kind":"user","content":"hello"}]"#
                 }
             },
+            "sessions": [{
+                "id": "session-1",
+                "title": "Session",
+                "workspace": "/workspace",
+                "updatedAt": "2026-08-25T00:00:00Z"
+            }],
+            "projects": [{
+                "workspace": "/workspace",
+                "updatedAt": "2026-08-25T00:00:00Z"
+            }],
             "skills": {"entries": [{"name": "check"}]},
             "terminals": [{"id": "terminal-1"}]
         }));
@@ -744,8 +773,34 @@ mod tests {
         assert_eq!(state.transcript.blocks.borrow().len(), 1);
         assert_eq!(state.catalogs.skills.len(), 1);
         assert_eq!(state.terminals.sessions.len(), 1);
+        assert_eq!(state.navigation.sessions.len(), 1);
+        assert_eq!(state.navigation.sessions[0].title.as_ref(), "Session");
+        assert_eq!(state.navigation.projects.len(), 1);
+        assert_eq!(state.navigation.projects[0].path.as_ref(), "/workspace");
     }
 
+    #[test]
+    fn nullable_bridge_collections_do_not_drop_model_provider_events() {
+        let mut state = AppState::default();
+        state.apply_direct_event(json!({
+            "kind": "model_providers",
+            "agentSnapshots": null,
+            "skillCatalog": null,
+            "modelProviders": [{
+                "id": "openrouter",
+                "displayName": "OpenRouter",
+                "enabled": true,
+                "models": [{"id": "openai/gpt-test"}]
+            }]
+        }));
+        assert_eq!(state.catalogs.providers.len(), 1);
+        assert_eq!(
+            state.catalogs.providers[0]
+                .get("id")
+                .and_then(serde_json::Value::as_str),
+            Some("openrouter")
+        );
+    }
     #[test]
     fn incremental_text_keeps_phase_boundaries_and_terminal_identity() {
         let mut state = AppState::default();

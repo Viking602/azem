@@ -7,6 +7,23 @@
   streaming, and native surfaces for conversations, run controls, workspace
   review, pull requests, security, extensions/settings, usage, and terminals.
 
+- Reworked the GPUI presentation to mirror the complete React desktop instead
+  of showing a generic shell: integrated macOS traffic lights/titlebar,
+  conversation/workspace sidebar, single-line PR/project/session rows, empty
+  and active composers, models.dev provider logos, foldable
+  thinking/tool/diff trails, structured file-edit and PR views, and the
+  floating Environment panel with Plan, history, recap, sources, files,
+  services, editor, and terminal access. Settings is now a rounded native modal
+  with the complete provider/model catalog, quota state, enable controls,
+  capability metadata, independently scrollable provider/model inventories,
+  and compact model cards. Mouse-down explicitly focuses native text inputs;
+  stale IME ranges are clamped safely after a field is cleared or refocused.
+
+- Reduced cold GPUI readiness from the reproduced 5.419 seconds to
+  1.196-1.606 seconds by returning durable reconnect state before optional
+  provider/Skill/plugin/MCP/PR catalogs and emitting cache-backed provider
+  inventory before remote subscription refresh.
+
 - Added one workspace-scoped `azem-daemon` and a versioned authenticated local
   IPC protocol shared with the existing desktop Bridge. Closing or restarting
   GPUI no longer terminates active runs: the daemon retains the Go runtime,

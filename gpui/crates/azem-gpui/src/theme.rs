@@ -2,15 +2,22 @@ use gpui::{Rgba, Window, WindowAppearance, rgb};
 
 #[derive(Clone, Copy)]
 pub struct ThemePalette {
+    pub canvas: Rgba,
+    pub sidebar: Rgba,
     pub paper: Rgba,
-    pub raised: Rgba,
+    pub paper_muted: Rgba,
+    pub hover: Rgba,
     pub ink: Rgba,
+    pub ink_soft: Rgba,
     pub muted: Rgba,
+    pub faint: Rgba,
     pub border: Rgba,
-    pub selected: Rgba,
-    pub unread: Rgba,
+    pub border_strong: Rgba,
+    pub accent: Rgba,
+    pub accent_soft: Rgba,
     pub positive: Rgba,
     pub warning: Rgba,
+    pub danger: Rgba,
 }
 
 impl ThemePalette {
@@ -21,26 +28,40 @@ impl ThemePalette {
     fn for_appearance(appearance: WindowAppearance) -> Self {
         match appearance {
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Self {
-                paper: rgb(0x171817),
-                raised: rgb(0x202220),
-                ink: rgb(0xf1f1ee),
-                muted: rgb(0xa6aaa6),
-                border: rgb(0x353735),
-                selected: rgb(0x313431),
-                unread: rgb(0x20342d),
-                positive: rgb(0x65c69b),
-                warning: rgb(0xe0aa6a),
+                canvas: rgb(0x1c1d1f),
+                sidebar: rgb(0x1f2022),
+                paper: rgb(0x232427),
+                paper_muted: rgb(0x2a2b2e),
+                hover: rgb(0x313236),
+                ink: rgb(0xf2f3f4),
+                ink_soft: rgb(0xc7c9cd),
+                muted: rgb(0xa5a8ad),
+                faint: rgb(0x6c6f75),
+                border: rgb(0x2e3033),
+                border_strong: rgb(0x3a3c40),
+                accent: rgb(0x3d9aff),
+                accent_soft: rgb(0x26384b),
+                positive: rgb(0x3dbb72),
+                warning: rgb(0xf68f3c),
+                danger: rgb(0xee5c61),
             },
             WindowAppearance::Light | WindowAppearance::VibrantLight => Self {
-                paper: rgb(0xf5f5f3),
-                raised: rgb(0xffffff),
+                canvas: rgb(0xf1f2f3),
+                sidebar: rgb(0xf7f8f9),
+                paper: rgb(0xffffff),
+                paper_muted: rgb(0xf4f5f6),
+                hover: rgb(0xe7e9eb),
                 ink: rgb(0x1f2124),
-                muted: rgb(0x6f7278),
-                border: rgb(0xdeddd7),
-                selected: rgb(0xe5e4de),
-                unread: rgb(0xebf2ef),
-                positive: rgb(0x2f8f6b),
-                warning: rgb(0x9a6b35),
+                ink_soft: rgb(0x45484d),
+                muted: rgb(0x62656b),
+                faint: rgb(0x9a9da3),
+                border: rgb(0xecedef),
+                border_strong: rgb(0xe0e2e5),
+                accent: rgb(0x0285ff),
+                accent_soft: rgb(0xe9f3ff),
+                positive: rgb(0x189a4d),
+                warning: rgb(0xef720c),
+                danger: rgb(0xe3474c),
             },
         }
     }
@@ -58,6 +79,6 @@ mod tests {
         let dark = ThemePalette::for_appearance(WindowAppearance::Dark);
         assert_ne!(light.paper, dark.paper);
         assert_ne!(light.ink, dark.ink);
-        assert_ne!(light.selected, dark.selected);
+        assert_ne!(light.accent, dark.accent);
     }
 }

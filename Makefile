@@ -27,6 +27,11 @@ ifeq ($(shell uname -s),Darwin)
 	mkdir -p dist/Azem-GPUI.app/Contents/MacOS dist/Azem-GPUI.app/Contents/Resources
 	cp gpui/macos/Info.plist dist/Azem-GPUI.app/Contents/Info.plist
 	cp cmd/azem-gui/AppIcon.icns dist/Azem-GPUI.app/Contents/Resources/AppIcon.icns
+	mkdir -p dist/Azem-GPUI.app/Contents/Resources/icons
+	cp gpui/assets/icons/*.svg dist/Azem-GPUI.app/Contents/Resources/icons/
+	mkdir -p dist/Azem-GPUI.app/Contents/Resources/logos
+	cp gpui/assets/logos/*.svg dist/Azem-GPUI.app/Contents/Resources/logos/
+	cp gpui/THIRD_PARTY_NOTICES dist/Azem-GPUI.app/Contents/Resources/THIRD_PARTY_NOTICES
 	cp gpui/target/release/azem-gpui dist/Azem-GPUI.app/Contents/MacOS/Azem
 	cp dist/bin/azem-daemon dist/Azem-GPUI.app/Contents/MacOS/azem-daemon
 	codesign --force --sign - --timestamp=none dist/Azem-GPUI.app/Contents/MacOS/azem-daemon
@@ -37,6 +42,11 @@ else
 	mkdir -p dist/gpui
 	cp gpui/target/release/azem-gpui dist/gpui/azem-gpui
 	cp dist/bin/azem-daemon dist/gpui/azem-daemon
+	mkdir -p dist/gpui/icons
+	cp gpui/assets/icons/*.svg dist/gpui/icons/
+	cp gpui/THIRD_PARTY_NOTICES dist/gpui/THIRD_PARTY_NOTICES
+	mkdir -p dist/gpui/logos
+	cp gpui/assets/logos/*.svg dist/gpui/logos/
 endif
 
 frontend:
